@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -111,6 +112,116 @@ def resolve_effective_duration(
     if duration_seconds is not None:
         return duration_seconds
     return float(config.max_duration_seconds or 3600.0)
+
+
+# ---------------------------------------------------------------------------
+# VIB-3164 — atomic token-flow decimal resolution (Empty != Zero)
+# ---------------------------------------------------------------------------
+
+
+async def resolve_token_flows(
+    flows_in: dict[str, int],
+    flows_out: dict[str, int],
+    *,
+    backtest_id: str | None,
+    flow_kind: str,
+    decimals_resolver: Callable[[str], Awaitable[int | None]],
+    symbol_resolver: Callable[[str], Awaitable[str]],
+) -> tuple[dict[str, Decimal], dict[str, Decimal]] | None:
+    """Atomically resolve address-keyed raw token flows into symbol-keyed Decimals.
+
+    Shared core of ``PaperTrader._extract_token_flows`` (receipt path) and
+    ``PaperTrader._compute_balance_deltas`` (balance-snapshot path). Both callers
+    iterate token legs, resolve each leg's decimals, and — per the Empty != Zero
+    discipline (blueprint 27 §10.10) — refuse to half-record a trade: if ANY leg's
+    decimals are unresolved (``None``, i.e. unmeasured), the WHOLE flow is aborted
+    so ``record_trade`` never applies a one-sided swap and corrupts balances/PnL.
+
+    Each leg's decimals are resolved via ``decimals_resolver`` (returns ``None``
+    when the token's decimals cannot be measured — never a guessed 18). Each leg's
+    output key is mapped via ``symbol_resolver`` so the resulting dicts are keyed by
+    human-readable portfolio symbols (US-065c).
+
+    Args:
+        flows_in: Address-keyed inflow legs (address -> raw smallest-unit amount).
+        flows_out: Address-keyed outflow legs (address -> raw smallest-unit amount).
+        backtest_id: Correlation id for the warning log line.
+        flow_kind: Human label for the abort warning ("receipt-based" / "balance-delta").
+        decimals_resolver: ``addr -> decimals | None`` (None == unmeasured leg).
+        symbol_resolver: ``addr -> symbol`` for output keys.
+
+    Returns:
+        ``(tokens_in, tokens_out)`` symbol-keyed Decimal dicts when EVERY leg
+        resolves, or ``None`` when any leg is unmeasured (caller records nothing
+        and falls back to its next estimation source).
+    """
+    tokens_in: dict[str, Decimal] = {}
+    tokens_out: dict[str, Decimal] = {}
+    unresolved_tokens: list[str] = []
+
+    for address, raw_amount in flows_in.items():
+        decimals = await decimals_resolver(address)
+        if decimals is None:
+            unresolved_tokens.append(address)
+            continue
+        symbol = await symbol_resolver(address)
+        tokens_in[symbol] = Decimal(str(raw_amount)) / Decimal(10**decimals)
+
+    for address, raw_amount in flows_out.items():
+        decimals = await decimals_resolver(address)
+        if decimals is None:
+            unresolved_tokens.append(address)
+            continue
+        symbol = await symbol_resolver(address)
+        tokens_out[symbol] = Decimal(str(raw_amount)) / Decimal(10**decimals)
+
+    if unresolved_tokens:
+        logger.warning(
+            f"[{backtest_id}] Skipping ENTIRE {flow_kind} trade flow: "
+            f"token decimals unresolved for {unresolved_tokens} "
+            "(refusing to assume 18). Recording a partial one-sided flow "
+            "would corrupt balances/PnL; falling back to the next estimation source."
+        )
+        return None
+
+    return tokens_in, tokens_out
+
+
+async def discover_intent_token_balances(
+    trader: PaperTrader,
+    intent: Any,
+    before: dict[str, int],
+    after: dict[str, int],
+    all_symbols: set[str],
+) -> None:
+    """Augment balance snapshots with intent tokens not yet tracked.
+
+    Mirrors the intent-token discovery block of ``_compute_balance_deltas``:
+    for each token-bearing intent attribute, if the (uppercased) symbol is not
+    already tracked and is not native ETH, query its post-execution balance and
+    seed ``before``/``after``/``all_symbols`` so the delta loop can measure it.
+    Mutates ``before``, ``after``, and ``all_symbols`` in place; balance-query
+    failures are swallowed exactly as before (best-effort discovery).
+    """
+    for attr in ("from_token", "to_token", "token", "asset", "token0", "token1", "token_a", "token_b"):
+        token_val = getattr(intent, attr, None)
+        if not token_val:
+            continue
+        sym = str(token_val).upper()
+        if sym in all_symbols or sym == "ETH":
+            continue
+        token_address = trader._resolve_token_address(sym)
+        if not token_address:
+            continue
+        try:
+            after[sym] = await trader.fork_manager._get_token_balance(
+                token_address,
+                trader._orchestrator.signer.address if trader._orchestrator else "",
+            )
+            before.setdefault(sym, 0)
+            all_symbols.add(sym)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

@@ -251,8 +251,14 @@ class TestExtractTokenFlowsDecimals:
         assert tokens_in["WETH"] == Decimal("0.25")
 
     @pytest.mark.asyncio
-    async def test_unknown_token_defaults_to_18_decimals(self):
-        """Test that unknown tokens fall back to 18 decimals with warning."""
+    async def test_unknown_token_skipped_not_defaulted_to_18(self):
+        """VIB-3164: an unknown token with unresolved decimals is SKIPPED, not 18.
+
+        Previously the flow was emitted assuming 18 decimals, silently
+        miscounting any non-18-decimal token (a 10^12x error for USDC).
+        Empty != Zero: with no RPC and no registry entry the decimals are
+        unmeasured, so the receipt path must not emit a fabricated amount.
+        """
         wallet = "0x1234567890123456789012345678901234567890"
         unknown_token = "0x1111111111111111111111111111111111111111"
 
@@ -276,23 +282,114 @@ class TestExtractTokenFlowsDecimals:
 
         method = RealPaperTrader._extract_token_flows.__get__(trader, type(trader))
 
-        tokens_in, _ = await method(
+        tokens_in, _tokens_out = await method(
             intent=MagicMock(),
             receipt=receipt,
             wallet_address=wallet,
         )
 
-        # Unknown token should default to 18 decimals
-        # US-065c: For unknown tokens, the checksummed address is used as the symbol fallback
-        # The fallback will use the checksummed address format
-        # Look for any key that contains the address or is the address
-        found_key = None
+        # The receipt path cannot resolve decimals -> the unknown token must not
+        # be emitted with a silently-defaulted (wrong) amount.
         for key in tokens_in:
-            if unknown_token.lower() in key.lower():
-                found_key = key
-                break
-        assert found_key is not None, f"Expected unknown token address in tokens_in, got: {tokens_in}"
-        assert tokens_in[found_key] == Decimal("1")
+            assert unknown_token.lower() not in key.lower(), (
+                f"unresolved-decimal token must be skipped, not emitted: {tokens_in}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_one_unresolved_leg_aborts_whole_trade(self):
+        """VIB-3164 (CodeRabbit critical): one unresolved leg => ATOMIC skip.
+
+        A swap with one resolvable leg (WETH=18) and one unresolvable-decimal
+        leg must NOT emit a one-sided flow. Recording only the WETH leg would
+        let record_trade apply half the swap and corrupt balances/PnL. The
+        whole receipt-based extraction is aborted and ({}, {}) returned, so the
+        caller falls back to intent-based estimation (Empty != Zero: an
+        unmeasurable trade is omitted, never half-recorded).
+        """
+        wallet = "0x1234567890123456789012345678901234567890"
+        unknown_token = "0x1111111111111111111111111111111111111111"
+
+        # Resolvable leg: 0.5 WETH out (18 decimals)
+        weth_amount_raw = 500_000_000_000_000_000
+        # Unresolvable leg: unknown token in (decimals cannot be resolved)
+        unknown_amount_raw = 1_000_000_000_000_000_000
+
+        logs = [
+            make_transfer_log(
+                WETH_ETHEREUM,
+                from_addr=wallet,
+                to_addr="0xDEXADDRESS000000000000000000000000000001",
+                value=weth_amount_raw,
+            ),
+            make_transfer_log(
+                unknown_token,
+                from_addr="0xDEXADDRESS000000000000000000000000000001",
+                to_addr=wallet,
+                value=unknown_amount_raw,
+            ),
+        ]
+
+        receipt = create_mock_receipt(logs)
+        # Fork not running = no RPC, so the unknown token's decimals are unresolved.
+        trader = create_mock_paper_trader(CHAIN_ID_ETHEREUM, is_running=False)
+
+        from almanak.framework.backtesting.paper.engine import PaperTrader as RealPaperTrader
+
+        method = RealPaperTrader._extract_token_flows.__get__(trader, type(trader))
+
+        tokens_in, tokens_out = await method(
+            intent=MagicMock(),
+            receipt=receipt,
+            wallet_address=wallet,
+        )
+
+        # Atomic skip: NOTHING is recorded from the receipt path -- not even the
+        # resolvable WETH leg -- to avoid a one-sided trade.
+        assert tokens_in == {}, f"Expected empty tokens_in (atomic skip), got: {tokens_in}"
+        assert tokens_out == {}, f"Expected empty tokens_out (atomic skip), got: {tokens_out}"
+
+    @pytest.mark.asyncio
+    async def test_both_legs_resolvable_records_full_trade(self):
+        """VIB-3164: both legs resolvable => full two-sided trade (no regression).
+
+        Companion to test_one_unresolved_leg_aborts_whole_trade: when every leg
+        resolves, the happy path is unchanged and both sides are recorded.
+        """
+        wallet = "0x1234567890123456789012345678901234567890"
+
+        usdc_amount_raw = 1_000_000_000  # 1000 USDC out (6 decimals)
+        weth_amount_raw = 500_000_000_000_000_000  # 0.5 WETH in (18 decimals)
+
+        logs = [
+            make_transfer_log(
+                USDC_ETHEREUM,
+                from_addr=wallet,
+                to_addr="0xDEXADDRESS000000000000000000000000000001",
+                value=usdc_amount_raw,
+            ),
+            make_transfer_log(
+                WETH_ETHEREUM,
+                from_addr="0xDEXADDRESS000000000000000000000000000001",
+                to_addr=wallet,
+                value=weth_amount_raw,
+            ),
+        ]
+
+        receipt = create_mock_receipt(logs)
+        trader = create_mock_paper_trader(CHAIN_ID_ETHEREUM)
+
+        from almanak.framework.backtesting.paper.engine import PaperTrader as RealPaperTrader
+
+        method = RealPaperTrader._extract_token_flows.__get__(trader, type(trader))
+
+        tokens_in, tokens_out = await method(
+            intent=MagicMock(),
+            receipt=receipt,
+            wallet_address=wallet,
+        )
+
+        assert tokens_out["USDC"] == Decimal("1000")
+        assert tokens_in["WETH"] == Decimal("0.5")
 
     @pytest.mark.asyncio
     async def test_failed_transaction_returns_empty_flows(self):
@@ -431,3 +528,229 @@ class TestDecimalPrecision:
         # US-065c: Keys are now symbols, not addresses
         expected = Decimal("1") / Decimal(10**18)
         assert tokens_in["WETH"] == expected
+
+
+# Registry symbol -> address map used to drive _resolve_token_address in the
+# balance-delta tests. USDC/WETH resolve from the registry without RPC.
+_SYMBOL_TO_ADDRESS = {
+    "USDC": USDC_ETHEREUM,
+    "WETH": WETH_ETHEREUM,
+}
+
+
+def _make_balance_delta_trader(
+    chain_id: int = CHAIN_ID_ETHEREUM,
+    *,
+    address_map: dict[str, str] | None = None,
+) -> MagicMock:
+    """Mock PaperTrader configured for _compute_balance_deltas / discovery tests.
+
+    ``_resolve_token_address`` maps known symbols to registry addresses (so
+    decimals resolve without RPC); unknown symbols return ``None`` (unmeasurable).
+    """
+    trader = create_mock_paper_trader(chain_id)
+    trader.config = MagicMock()
+    trader.config.chain = "ethereum"
+    amap = _SYMBOL_TO_ADDRESS if address_map is None else address_map
+
+    def _resolve(symbol: str) -> str | None:
+        if symbol.upper() == "ETH":
+            return None
+        return amap.get(symbol.upper())
+
+    trader._resolve_token_address = _resolve
+    return trader
+
+
+class TestComputeBalanceDeltas:
+    """Direct tests for PaperTrader._compute_balance_deltas (VIB-3164).
+
+    Pins the Empty != Zero atomic-skip contract on the balance-snapshot path:
+    sign-routed inflows/outflows, native-ETH 18-decimal invariant, and the
+    atomic abort (return empty flows) when any token's address/decimals are
+    unresolved. Reached in production only via _build_and_record_paper_trade,
+    so direct coverage here keeps its CRAP score down.
+    """
+
+    @staticmethod
+    def _method(trader: MagicMock):
+        from almanak.framework.backtesting.paper.engine import PaperTrader as RealPaperTrader
+
+        return RealPaperTrader._compute_balance_deltas.__get__(trader, type(trader))
+
+    @pytest.mark.asyncio
+    async def test_two_sided_swap_sign_routing_and_decimals(self):
+        """USDC down / WETH up -> outflow USDC (6 dec), inflow WETH (18 dec)."""
+        trader = _make_balance_delta_trader()
+        before = {"USDC": 1_000_000_000, "WETH": 0}  # 1000 USDC
+        after = {"USDC": 0, "WETH": 500_000_000_000_000_000}  # 0.5 WETH
+        intent = MagicMock(spec=[])  # no token attributes -> no discovery
+
+        tokens_in, tokens_out = await self._method(trader)(before, after, intent)
+
+        assert tokens_out == {"USDC": Decimal("1000")}
+        assert tokens_in == {"WETH": Decimal("0.5")}
+
+    @pytest.mark.asyncio
+    async def test_native_eth_uses_18_decimals_no_lookup(self):
+        """Native ETH delta converts at 18 decimals by chain invariant."""
+        trader = _make_balance_delta_trader()
+        before = {"ETH": 0}
+        after = {"ETH": 2_000_000_000_000_000_000}  # +2 ETH
+        intent = MagicMock(spec=[])
+
+        tokens_in, tokens_out = await self._method(trader)(before, after, intent)
+
+        assert tokens_in == {"ETH": Decimal("2")}
+        assert tokens_out == {}
+
+    @pytest.mark.asyncio
+    async def test_zero_delta_token_dropped(self):
+        """A token whose balance did not change is not recorded."""
+        trader = _make_balance_delta_trader()
+        before = {"USDC": 1_000_000_000, "WETH": 500_000_000_000_000_000}
+        after = {"USDC": 0, "WETH": 500_000_000_000_000_000}  # WETH unchanged
+        intent = MagicMock(spec=[])
+
+        tokens_in, tokens_out = await self._method(trader)(before, after, intent)
+
+        assert tokens_out == {"USDC": Decimal("1000")}
+        assert "WETH" not in tokens_in and "WETH" not in tokens_out
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_address_aborts_whole_flow(self):
+        """One token with no resolvable address -> atomic skip (empty flows)."""
+        trader = _make_balance_delta_trader()  # only USDC/WETH known
+        before = {"WETH": 500_000_000_000_000_000, "MYSTERY": 0}
+        after = {"WETH": 0, "MYSTERY": 1_000_000}  # MYSTERY address unresolvable
+        intent = MagicMock(spec=[])
+
+        tokens_in, tokens_out = await self._method(trader)(before, after, intent)
+
+        # Atomic skip: NOT even the resolvable WETH leg is recorded.
+        assert tokens_in == {}
+        assert tokens_out == {}
+
+    @pytest.mark.asyncio
+    async def test_unresolved_decimals_aborts_whole_flow(self):
+        """Address resolves but decimals are None (no RPC) -> atomic skip."""
+        # UNKNOWN maps to an address absent from the registry; fork not running
+        # so there is no RPC fallback -> decimals None.
+        amap = {"WETH": WETH_ETHEREUM, "UNKNOWN": "0x1111111111111111111111111111111111111111"}
+        trader = _make_balance_delta_trader(address_map=amap)
+        trader.fork_manager.is_running = False
+        before = {"WETH": 500_000_000_000_000_000, "UNKNOWN": 0}
+        after = {"WETH": 0, "UNKNOWN": 1_000_000_000_000_000_000}
+        intent = MagicMock(spec=[])
+
+        tokens_in, tokens_out = await self._method(trader)(before, after, intent)
+
+        assert tokens_in == {}
+        assert tokens_out == {}
+
+    @pytest.mark.asyncio
+    async def test_intent_token_discovery_seeds_balance(self):
+        """An intent token not in the snapshots is discovered and measured."""
+        trader = _make_balance_delta_trader()
+        trader._orchestrator = MagicMock()
+        trader._orchestrator.signer.address = "0xWALLET"
+
+        async def _fake_balance(address: str, holder: str) -> int:
+            return 1_000_000_000  # 1000 USDC discovered post-trade
+
+        trader.fork_manager._get_token_balance = _fake_balance
+
+        before: dict[str, int] = {}
+        after: dict[str, int] = {}
+        intent = MagicMock(spec=["from_token"])
+        intent.from_token = "USDC"
+
+        tokens_in, tokens_out = await self._method(trader)(before, after, intent)
+
+        # Discovery seeded after["USDC"]=1e9, before=0 -> inflow 1000 USDC.
+        assert tokens_in == {"USDC": Decimal("1000")}
+
+
+class TestDiscoverIntentTokenBalances:
+    """Direct tests for the discover_intent_token_balances helper (VIB-3164)."""
+
+    @pytest.mark.asyncio
+    async def test_seeds_untracked_intent_token(self):
+        from almanak.framework.backtesting.paper import _engine_helpers
+
+        trader = _make_balance_delta_trader()
+        trader._orchestrator = MagicMock()
+        trader._orchestrator.signer.address = "0xWALLET"
+
+        async def _fake_balance(address: str, holder: str) -> int:
+            return 42
+
+        trader.fork_manager._get_token_balance = _fake_balance
+
+        before: dict[str, int] = {}
+        after: dict[str, int] = {}
+        all_symbols: set[str] = set()
+        intent = MagicMock(spec=["to_token"])
+        intent.to_token = "WETH"
+
+        await _engine_helpers.discover_intent_token_balances(trader, intent, before, after, all_symbols)
+
+        assert after["WETH"] == 42
+        assert before["WETH"] == 0
+        assert "WETH" in all_symbols
+
+    @pytest.mark.asyncio
+    async def test_skips_eth_and_already_tracked_and_unresolvable(self):
+        from almanak.framework.backtesting.paper import _engine_helpers
+
+        trader = _make_balance_delta_trader()
+        trader._orchestrator = MagicMock()
+        trader._orchestrator.signer.address = "0xWALLET"
+        called = False
+
+        async def _fake_balance(address: str, holder: str) -> int:
+            nonlocal called
+            called = True
+            return 1
+
+        trader.fork_manager._get_token_balance = _fake_balance
+
+        before = {"USDC": 5}
+        after = {"USDC": 5}
+        all_symbols = {"USDC"}
+        # ETH (skipped), USDC (already tracked), MYSTERY (unresolvable address).
+        intent = MagicMock(spec=["token", "asset", "from_token"])
+        intent.token = "ETH"
+        intent.asset = "USDC"
+        intent.from_token = "MYSTERY"
+
+        await _engine_helpers.discover_intent_token_balances(trader, intent, before, after, all_symbols)
+
+        # No new symbols seeded; balance query never fired (all three skipped).
+        assert all_symbols == {"USDC"}
+        assert called is False
+
+    @pytest.mark.asyncio
+    async def test_balance_query_failure_is_swallowed(self):
+        from almanak.framework.backtesting.paper import _engine_helpers
+
+        trader = _make_balance_delta_trader()
+        trader._orchestrator = MagicMock()
+        trader._orchestrator.signer.address = "0xWALLET"
+
+        async def _boom(address: str, holder: str) -> int:
+            raise RuntimeError("rpc down")
+
+        trader.fork_manager._get_token_balance = _boom
+
+        before: dict[str, int] = {}
+        after: dict[str, int] = {}
+        all_symbols: set[str] = set()
+        intent = MagicMock(spec=["from_token"])
+        intent.from_token = "WETH"
+
+        # Must not raise; failed discovery leaves snapshots untouched.
+        await _engine_helpers.discover_intent_token_balances(trader, intent, before, after, all_symbols)
+
+        assert "WETH" not in after
+        assert all_symbols == set()

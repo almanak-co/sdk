@@ -328,6 +328,11 @@ def get_token_decimals(chain_id: int, token_address: str) -> int | None:
 # Native ETH sentinel address (used in ERC-4626, Uniswap, etc.)
 NATIVE_ETH_ADDRESS = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
+# Native gas token decimals. ETH (and EVM native tokens generally) are 18
+# decimals by chain invariant — this is a known protocol fact, not a silent
+# fallback for an arbitrary unmeasured token (VIB-3164).
+NATIVE_TOKEN_DECIMALS = 18  # decimal-policy-exempt: native gas token is 18 by chain invariant (VIB-3164)
+
 # ERC20 decimals() function selector: keccak256("decimals()")[0:4]
 ERC20_DECIMALS_SELECTOR = "0x313ce567"
 
@@ -397,16 +402,21 @@ async def get_token_decimals_with_fallback(
     chain_id: int,
     token_address: str,
     rpc_url: str | None = None,
-) -> int:
-    """Get token decimals with TokenResolver and ERC20 fallback for unknown tokens.
+) -> int | None:
+    """Get token decimals via TokenResolver / registry / ERC20 on-chain query.
 
     Resolution order:
-    1. TokenResolver (unified cache/registry/gateway resolution)
-    2. Local TOKEN_DECIMALS registry (fallback)
-    3. ERC20 decimals() on-chain query (requires RPC URL)
-    4. Default to 18 with warning (last resort)
+    1. Native ETH sentinel (0xeee...eee) -> 18 (native-token invariant)
+    2. TokenResolver (unified cache/registry/gateway resolution)
+    3. Local TOKEN_DECIMALS registry
+    4. ERC20 decimals() on-chain query (requires RPC URL)
+    5. ``None`` -- decimals could not be measured
 
-    Handles native ETH (sentinel address 0xeee...eee) which always has 18 decimals.
+    VIB-3164 (Empty != Zero): when decimals cannot be resolved this returns
+    ``None`` (unmeasured), NOT a silent ``18``. Defaulting an arbitrary token
+    to 18 corrupts every USD figure for non-18-decimal tokens (USDC=6, WBTC=8,
+    USDT=6 -- a 10^12x error). Callers MUST treat ``None`` as "skip / cannot
+    measure", never substitute their own default.
 
     Args:
         chain_id: EIP-155 chain ID (e.g., 1 for Ethereum, 42161 for Arbitrum)
@@ -414,10 +424,7 @@ async def get_token_decimals_with_fallback(
         rpc_url: RPC endpoint for ERC20 fallback queries (e.g., Anvil fork URL)
 
     Returns:
-        Number of decimals for the token. Returns 18 as default if:
-        - Token is native ETH
-        - RPC URL not provided and token not in registry
-        - ERC20 call fails
+        Number of decimals for the token, or ``None`` if it cannot be resolved.
 
     Example:
         >>> await get_token_decimals_with_fallback(42161, "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "http://localhost:8545")
@@ -425,10 +432,14 @@ async def get_token_decimals_with_fallback(
 
         >>> await get_token_decimals_with_fallback(42161, "0xNEWTOKEN...", "http://localhost:8545")
         8  # Fetched via ERC20 call and cached
+
+        >>> await get_token_decimals_with_fallback(42161, "0xUNKNOWN...", None)
+        None  # Unresolvable -- caller must skip, NOT assume 18
     """
     normalized_address = token_address.lower()
 
-    # 1. Check if it's native ETH (sentinel address)
+    # 1. Check if it's native ETH (sentinel address). Native tokens are 18
+    #    decimals by chain invariant -- not an arbitrary-token guess.
     if normalized_address == NATIVE_ETH_ADDRESS:
         return 18
 
@@ -447,12 +458,13 @@ async def get_token_decimals_with_fallback(
     if registry_result is not None:
         return registry_result
 
-    # 4. If no RPC URL provided, default to 18 with warning
+    # 4. If no RPC URL provided, decimals are unmeasured -- return None.
     if rpc_url is None:
         logger.warning(
-            f"Token {token_address[:10]}... not in registry and no RPC URL provided. Defaulting to 18 decimals."
+            f"Token {token_address[:10]}... not in registry and no RPC URL provided; "
+            "decimals unresolved (returning None, NOT defaulting to 18)."
         )
-        return 18
+        return None
 
     # 5. Query ERC20 decimals() with timeout
     logger.debug(f"Querying ERC20 decimals() for unknown token {token_address[:10]}...")
@@ -464,9 +476,9 @@ async def get_token_decimals_with_fallback(
         logger.info(f"Cached decimals for {token_address[:10]}... on chain {chain_id}: {decimals}")
         return decimals
 
-    # 6. Fallback: default to 18 with warning
-    logger.warning(f"Could not fetch decimals for {token_address[:10]}... Defaulting to 18 decimals.")
-    return 18
+    # 6. Unresolvable -- return None (Empty != Zero). Callers skip the token.
+    logger.warning(f"Could not resolve decimals for {token_address[:10]}...; returning None (NOT defaulting to 18).")
+    return None
 
 
 # =============================================================================
@@ -2545,66 +2557,58 @@ class PaperTrader:
         Returns:
             Tuple of (tokens_in, tokens_out) with human-readable Decimal amounts
         """
-        tokens_in: dict[str, Decimal] = {}
-        tokens_out: dict[str, Decimal] = {}
-
         # Collect all tokens that appear in either snapshot
         all_symbols = set(before.keys()) | set(after.keys())
 
-        # Also check intent tokens in case they weren't tracked before
-        for attr in ("from_token", "to_token", "token", "asset", "token0", "token1", "token_a", "token_b"):
-            token_val = getattr(intent, attr, None)
-            if token_val:
-                sym = str(token_val).upper()
-                if sym not in all_symbols and sym != "ETH":
-                    # Try to query this token's balance in after snapshot
-                    token_address = self._resolve_token_address(sym)
-                    if token_address:
-                        try:
-                            after[sym] = await self.fork_manager._get_token_balance(
-                                token_address,
-                                self._orchestrator.signer.address if self._orchestrator else "",
-                            )
-                            before.setdefault(sym, 0)
-                            all_symbols.add(sym)
-                        except Exception:
-                            pass
+        # Augment with intent tokens that weren't tracked before (best-effort).
+        await _engine_helpers.discover_intent_token_balances(self, intent, before, after, all_symbols)
 
         chain_id = self.fork_manager.chain_id
         rpc_url = self.fork_manager.get_rpc_url() if self.fork_manager.is_running else None
 
+        # Split symbol-keyed balance deltas into raw inflow/outflow legs by sign.
+        # Zero deltas don't move and are dropped.
+        raw_in: dict[str, int] = {}
+        raw_out: dict[str, int] = {}
         for symbol in all_symbols:
-            before_raw = before.get(symbol, 0)
-            after_raw = after.get(symbol, 0)
-            delta = after_raw - before_raw
-
-            if delta == 0:
-                continue
-
-            # Get decimals for this token
-            if symbol.upper() == "ETH":
-                decimals = 18
-            else:
-                token_address = self._resolve_token_address(symbol)
-                if token_address:
-                    decimals = await get_token_decimals_with_fallback(chain_id, token_address, rpc_url)
-                else:
-                    # Cannot resolve address — skip this token to avoid silent miscount.
-                    # NEVER default to 18 decimals (USDC=6, USDT=6, WBTC=8).
-                    logger.warning(
-                        f"[{self._backtest_id}] Skipping balance delta for {symbol}: "
-                        f"could not resolve token address on chain={self.config.chain}"
-                    )
-                    continue
-
-            amount = Decimal(str(abs(delta))) / Decimal(10**decimals)
-
+            delta = after.get(symbol, 0) - before.get(symbol, 0)
             if delta > 0:
-                tokens_in[symbol] = amount
-            else:
-                tokens_out[symbol] = amount
+                raw_in[symbol] = abs(delta)
+            elif delta < 0:
+                raw_out[symbol] = abs(delta)
 
-        return tokens_in, tokens_out
+        async def _symbol_decimals(symbol: str) -> int | None:
+            # Native ETH is 18 decimals by chain invariant (not a guess).
+            if symbol.upper() == "ETH":
+                return NATIVE_TOKEN_DECIMALS
+            token_address = self._resolve_token_address(symbol)
+            if not token_address:
+                # Cannot resolve address — token is unmeasurable (Empty != Zero).
+                return None
+            return await get_token_decimals_with_fallback(chain_id, token_address, rpc_url)
+
+        async def _identity_symbol(symbol: str) -> str:
+            return symbol
+
+        # VIB-3164 (Empty != Zero, blueprint 27 §10.10): if ANY moving token has
+        # unresolved decimals or an unresolvable address, the trade is unmeasurable.
+        # _resolve_token_flows performs the atomic skip — recording only the
+        # resolvable legs would yield a ONE-SIDED flow (CodeRabbit critical) and
+        # record_trade would apply half the swap, corrupting balances/PnL. None ==
+        # abort the whole balance-delta extraction; the caller falls back to
+        # receipt/intent-based estimation. Never half-record, never assume a silent
+        # 18-decimal default (USDC=6, USDT=6, WBTC=8).
+        resolved = await _engine_helpers.resolve_token_flows(
+            raw_in,
+            raw_out,
+            backtest_id=self._backtest_id,
+            flow_kind=f"balance-delta (chain={self.config.chain})",
+            decimals_resolver=_symbol_decimals,
+            symbol_resolver=_identity_symbol,
+        )
+        if resolved is None:
+            return {}, {}
+        return resolved
 
     async def _extract_token_flows(
         self,
@@ -2643,17 +2647,26 @@ class PaperTrader:
                 chain_id = self.fork_manager.chain_id
                 rpc_url = self.fork_manager.get_rpc_url() if self.fork_manager.is_running else None
 
-                # Convert from smallest unit to Decimal with correct token decimals
-                # Use symbol mapping for human-readable portfolio keys (US-065c)
-                for token_addr, amount in flows.tokens_in.items():
-                    decimals = await get_token_decimals_with_fallback(chain_id, token_addr, rpc_url)
-                    symbol = await get_token_symbol_with_fallback(chain_id, token_addr, rpc_url)
-                    tokens_in[symbol] = Decimal(str(amount)) / Decimal(10**decimals)
-
-                for token_addr, amount in flows.tokens_out.items():
-                    decimals = await get_token_decimals_with_fallback(chain_id, token_addr, rpc_url)
-                    symbol = await get_token_symbol_with_fallback(chain_id, token_addr, rpc_url)
-                    tokens_out[symbol] = Decimal(str(amount)) / Decimal(10**decimals)
+                # Convert from smallest unit to Decimal with correct token decimals.
+                # Use symbol mapping for human-readable portfolio keys (US-065c).
+                # VIB-3164 (Empty != Zero, blueprint 27 §10.10): if any leg's decimals
+                # are unresolved, the trade is unmeasurable. _resolve_token_flows
+                # performs the atomic skip — recording only the resolvable legs would
+                # yield a ONE-SIDED flow (CodeRabbit critical) and record_trade would
+                # apply half the swap, corrupting balances/PnL. None == abort the whole
+                # receipt-flow extraction; the caller falls back to intent-based
+                # estimation. Never half-record, never assume a silent 18-decimal default.
+                resolved = await _engine_helpers.resolve_token_flows(
+                    dict(flows.tokens_in),
+                    dict(flows.tokens_out),
+                    backtest_id=self._backtest_id,
+                    flow_kind="receipt-based",
+                    decimals_resolver=lambda addr: get_token_decimals_with_fallback(chain_id, addr, rpc_url),
+                    symbol_resolver=lambda addr: get_token_symbol_with_fallback(chain_id, addr, rpc_url),
+                )
+                if resolved is None:
+                    return {}, {}
+                tokens_in, tokens_out = resolved
 
                 # If we got flows from receipt, return them
                 if tokens_in or tokens_out:

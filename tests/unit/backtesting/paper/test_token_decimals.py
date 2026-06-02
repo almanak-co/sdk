@@ -327,8 +327,8 @@ class TestGetTokenDecimalsWithFallback:
         del TOKEN_DECIMALS[(chain_id, unknown_token.lower())]
 
     @pytest.mark.asyncio
-    async def test_no_rpc_url_defaults_to_18(self, caplog):
-        """Test that missing RPC URL defaults to 18 with warning."""
+    async def test_no_rpc_url_returns_none_not_18(self, caplog):
+        """VIB-3164: missing RPC URL -> None (unmeasured), NOT a silent 18."""
         # Use unique address to avoid cache pollution from other tests
         unknown_token = "0xDDDDEEEEFFFF00001111222233334444DDDDEEEE"
         chain_id = 77777  # Unlikely to exist
@@ -345,12 +345,12 @@ class TestGetTokenDecimalsWithFallback:
                 rpc_url=None,
             )
 
-        assert result == 18
+        assert result is None
         assert "no RPC URL provided" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_failed_fetch_defaults_to_18(self, caplog):
-        """Test that failed fetch defaults to 18 with warning."""
+    async def test_failed_fetch_returns_none_not_18(self, caplog):
+        """VIB-3164: failed ERC20 fetch -> None (unmeasured), NOT a silent 18."""
         # Use unique address to avoid cache pollution from other tests
         unknown_token = "0xCCCCDDDDEEEEFFFF000011112222333344445555"
         chain_id = 66666  # Unlikely to exist
@@ -372,8 +372,8 @@ class TestGetTokenDecimalsWithFallback:
                     rpc_url="http://localhost:8545",
                 )
 
-        assert result == 18
-        assert "Could not fetch decimals" in caplog.text
+        assert result is None
+        assert "Could not resolve decimals" in caplog.text
 
     @pytest.mark.asyncio
     async def test_second_lookup_uses_cache(self):

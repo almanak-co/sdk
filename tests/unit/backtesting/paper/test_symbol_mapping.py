@@ -283,8 +283,14 @@ class TestUnknownTokenAddressFallback:
         assert "42161" in caplog.text or "chain" in caplog.text.lower()
 
     @pytest.mark.asyncio
-    async def test_fallback_in_extract_token_flows(self):
-        """Test unknown token in swap uses address fallback in _extract_token_flows."""
+    async def test_unknown_token_decimals_unresolved_skipped(self):
+        """VIB-3164: an unknown token with unresolved decimals is SKIPPED, not 18.
+
+        Without an RPC or registry entry the decimals are unmeasured. The
+        receipt path must not emit the token with a silently-defaulted amount
+        (Empty != Zero). The symbol/address-identity fallback is owned by a
+        separate lane (VIB-4487); this test pins only the decimal behaviour.
+        """
         from almanak.framework.backtesting.paper.engine import PaperTrader as RealPaperTrader
 
         wallet = "0x1234567890123456789012345678901234567890"
@@ -327,17 +333,11 @@ class TestUnknownTokenAddressFallback:
             wallet_address=wallet,
         )
 
-        # The key should be the checksummed address (not the symbol)
-        # Look for any key containing the unknown token address
-        found_key = None
+        # The unresolved-decimal token must not be emitted with a fabricated amount.
         for key in tokens_out:
-            if unknown_token.lower() in key.lower():
-                found_key = key
-                break
-
-        assert found_key is not None, f"Expected unknown token address as key, got: {list(tokens_out.keys())}"
-        # Amount should be 1 (with 18 decimal default)
-        assert tokens_out[found_key] == Decimal("1")
+            assert unknown_token.lower() not in key.lower(), (
+                f"unresolved-decimal token must be skipped, not emitted: {tokens_out}"
+            )
 
 
 class TestTokenRegistryStructure:

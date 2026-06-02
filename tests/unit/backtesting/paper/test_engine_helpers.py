@@ -1324,3 +1324,85 @@ class TestExtractReceiptTxDetails:
         assert tx_hash == "0xfirst"
         assert block_number == 42
         assert gas_used == 0
+
+
+# ---------------------------------------------------------------------------
+# resolve_token_flows — VIB-3164 atomic decimal resolution (Empty != Zero)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveTokenFlows:
+    """Direct tests for the shared ``resolve_token_flows`` helper.
+
+    Pins the Empty != Zero atomic-skip contract (blueprint 27 §10.10): all legs
+    resolvable -> symbol-keyed Decimal dicts; ANY leg unmeasured -> None.
+    """
+
+    @staticmethod
+    def _decimals_map(table: dict[str, int | None]):
+        async def _resolver(addr: str) -> int | None:
+            return table.get(addr)
+
+        return _resolver
+
+    @staticmethod
+    def _symbol_map(table: dict[str, str]):
+        async def _resolver(addr: str) -> str:
+            return table.get(addr, addr)
+
+        return _resolver
+
+    @pytest.mark.asyncio
+    async def test_all_resolvable_returns_symbol_keyed_decimals(self):
+        """Every leg resolvable -> full two-sided symbol-keyed flows."""
+        result = await _engine_helpers.resolve_token_flows(
+            {"0xWETH": 500_000_000_000_000_000},  # 0.5 WETH in (18 dec)
+            {"0xUSDC": 1_000_000_000},  # 1000 USDC out (6 dec)
+            backtest_id="bt-1",
+            flow_kind="receipt-based",
+            decimals_resolver=self._decimals_map({"0xWETH": 18, "0xUSDC": 6}),
+            symbol_resolver=self._symbol_map({"0xWETH": "WETH", "0xUSDC": "USDC"}),
+        )
+        assert result is not None
+        tokens_in, tokens_out = result
+        assert tokens_in == {"WETH": Decimal("0.5")}
+        assert tokens_out == {"USDC": Decimal("1000")}
+
+    @pytest.mark.asyncio
+    async def test_one_unresolved_leg_returns_none(self):
+        """One unmeasured leg -> atomic abort (None), never one-sided."""
+        result = await _engine_helpers.resolve_token_flows(
+            {"0xWETH": 500_000_000_000_000_000},  # resolvable in-leg
+            {"0xUNKNOWN": 1_000_000_000_000_000_000},  # decimals None
+            backtest_id="bt-2",
+            flow_kind="receipt-based",
+            decimals_resolver=self._decimals_map({"0xWETH": 18, "0xUNKNOWN": None}),
+            symbol_resolver=self._symbol_map({"0xWETH": "WETH"}),
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_both_legs_unresolved_returns_none(self):
+        """All legs unmeasured -> None (records nothing)."""
+        result = await _engine_helpers.resolve_token_flows(
+            {"0xA": 1},
+            {"0xB": 2},
+            backtest_id="bt-3",
+            flow_kind="balance-delta",
+            decimals_resolver=self._decimals_map({"0xA": None, "0xB": None}),
+            symbol_resolver=self._symbol_map({}),
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_empty_flows_return_empty_dicts(self):
+        """No legs -> empty (not None): nothing moved, nothing to abort."""
+        result = await _engine_helpers.resolve_token_flows(
+            {},
+            {},
+            backtest_id="bt-4",
+            flow_kind="balance-delta",
+            decimals_resolver=self._decimals_map({}),
+            symbol_resolver=self._symbol_map({}),
+        )
+        assert result == ({}, {})

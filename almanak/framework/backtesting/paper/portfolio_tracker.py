@@ -22,8 +22,23 @@ from almanak.framework.backtesting.paper.models import (
 
 logger = logging.getLogger(__name__)
 
-# Common stablecoins for USD value estimation
-STABLECOINS = frozenset({"USDC", "USDT", "DAI", "FRAX", "LUSD", "BUSD"})
+
+class MissingPriceError(ValueError):
+    """Raised when a held (non-zero) token has no supplied USD price.
+
+    VIB-3164: portfolio valuation must not silently substitute a price
+    (e.g. force a "stablecoin" to $1) or silently drop an unpriced holding.
+    Either path corrupts the reported portfolio value / PnL. The caller must
+    supply the missing prices.
+    """
+
+    def __init__(self, tokens: list[str]) -> None:
+        self.tokens = list(tokens)
+        super().__init__(
+            "Cannot value portfolio: no USD price supplied for held token(s) "
+            f"{sorted(self.tokens)}. Provide prices for every non-zero holding "
+            "(stablecoins included -- do not assume $1)."
+        )
 
 
 @dataclass
@@ -326,28 +341,55 @@ class PaperPortfolioTracker:
     ) -> Decimal:
         """Calculate total portfolio value in USD.
 
+        VIB-3164 (Empty != Zero): a held token with no supplied price is
+        *unmeasured*, not worth $0 and not worth $1. Silently dropping it
+        understates portfolio value and PnL; silently force-pricing a
+        "stablecoin" at $1 hides depegs. This method therefore raises
+        ``MissingPriceError`` listing the unpriced held tokens so the caller
+        supplies the missing prices instead of receiving a wrong number.
+
+        A token with a *zero balance* needs no price (it contributes nothing
+        regardless), so it is exempt.
+
         Args:
             balances: Token balances to value
             prices: Token prices in USD
 
         Returns:
             Total value in USD
+
+        Raises:
+            MissingPriceError: If any token with a non-zero balance has no price.
         """
         total = Decimal("0")
+        missing: list[str] = []
 
         for token, amount in balances.items():
             if token in prices:
                 total += amount * prices[token]
-            elif token.upper() in STABLECOINS:
-                # Stablecoins valued at $1 if no price provided
-                total += amount
-            # Skip tokens with no price (could also log warning)
+            elif amount == Decimal("0"):
+                # Zero balance contributes nothing; no price needed.
+                continue
+            else:
+                # No price for a non-zero holding -> unmeasured. Do NOT force $1
+                # (even for stablecoins -- depegs are real) and do NOT silently
+                # drop it (that understates the portfolio).
+                missing.append(token)
+
+        if missing:
+            raise MissingPriceError(missing)
 
         return total
 
     def _cleanup_zero_balances(self) -> None:
-        """Remove tokens with zero or negative balance."""
-        tokens_to_remove = [token for token, amount in self.current_balances.items() if amount <= Decimal("0")]
+        """Remove tokens with an *exactly zero* balance.
+
+        VIB-3164 (Empty != Zero): a negative balance is a *measured* value
+        (e.g. a short / borrow position or an accounting discrepancy worth
+        surfacing), not nothing. Only exact zeros are pruned; negatives are
+        retained so they remain visible to PnL and debugging.
+        """
+        tokens_to_remove = [token for token, amount in self.current_balances.items() if amount == Decimal("0")]
         for token in tokens_to_remove:
             del self.current_balances[token]
 

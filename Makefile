@@ -1,4 +1,4 @@
-.PHONY: all clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-accounting-ratchet scan-coupling scan-coupling-report scan-coupling-baseline
+.PHONY: all clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline check-accounting-ratchet scan-coupling scan-coupling-report scan-coupling-baseline
 
 # Load .env file if it exists
 -include .env
@@ -85,6 +85,20 @@ check-deployment-id-proto-surface:
 # scripts/ci/connector-chain-allowlist.yml.
 check-connector-chains:
 	uv run python scripts/ci/check_connector_chains.py
+
+# Decimal-policy ratchet gate (VIB-3164). Fails on any NET-NEW silent
+# token-decimal fallback (``decimals = 18`` / ``... or 18`` / ``.get(...,18)``)
+# in almanak/framework + almanak/connectors production code. Empty != Zero:
+# an unresolved decimal must stay None and the caller skips / fails loud, never
+# defaults to 18 (wrong for USDC=6, WBTC=8, USDT=6). Pre-existing debt is
+# tracked in scripts/ci/decimal-policy-baseline.json and must shrink, not grow.
+#   make check-decimal-policy            # check against baseline (CI mode)
+#   make check-decimal-policy-baseline   # refresh baseline (after a cleanup)
+check-decimal-policy:
+	uv run python scripts/ci/check_decimal_policy.py
+
+check-decimal-policy-baseline:
+	uv run python scripts/ci/check_decimal_policy.py --baseline
 
 # Accountant-Test ratchet gate (VIB-3836). Runs the 21-cell Accountant Test
 # against the committed frozen fixtures (tests/fixtures/accounting/{lp,looping,

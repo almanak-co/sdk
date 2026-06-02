@@ -427,14 +427,63 @@ class TestPaperPortfolioTrackerGetPnlUsd:
         # Wait - the formula uses same prices for both
         assert pnl == Decimal("0")
 
-    def test_get_pnl_usd_stablecoin_default(self, tracker_with_session: PaperPortfolioTracker) -> None:
-        """Test that stablecoins default to $1 when no price provided."""
-        # Only provide ETH price
-        prices = {"ETH": Decimal("3000")}
-        pnl = tracker_with_session.get_pnl_usd(prices)
+    def test_missing_stablecoin_price_raises_not_force_one(
+        self, tracker_with_session: PaperPortfolioTracker
+    ) -> None:
+        """VIB-3164: a held stablecoin with no price must NOT be force-valued at $1.
 
-        # USDC should be valued at $1
+        The portfolio holds USDC; supplying only the ETH price must raise
+        MissingPriceError rather than silently assuming USDC == $1 (which would
+        hide a depeg and produce a wrong PnL of 0).
+        """
+        from almanak.framework.backtesting.paper.portfolio_tracker import MissingPriceError
+
+        prices = {"ETH": Decimal("3000")}  # USDC price intentionally omitted
+        with pytest.raises(MissingPriceError) as exc_info:
+            tracker_with_session.get_pnl_usd(prices)
+        assert "USDC" in exc_info.value.tokens
+
+    def test_missing_nonzero_token_price_raises(
+        self, tracker_with_session: PaperPortfolioTracker
+    ) -> None:
+        """VIB-3164: any non-zero held token with no price raises (not silently skipped)."""
+        from almanak.framework.backtesting.paper.portfolio_tracker import MissingPriceError
+
+        # Supply USDC but omit ETH; ETH is a non-zero holding -> must raise.
+        with pytest.raises(MissingPriceError) as exc_info:
+            tracker_with_session.get_pnl_usd({"USDC": Decimal("1")})
+        assert "ETH" in exc_info.value.tokens
+
+    def test_zero_balance_token_needs_no_price(
+        self, tracker: PaperPortfolioTracker
+    ) -> None:
+        """VIB-3164: a zero-balance token is exempt -- it contributes nothing regardless."""
+        tracker.start_session(
+            initial_balances={"ETH": Decimal("1"), "USDC": Decimal("0")},
+            chain="arbitrum",
+        )
+        # USDC balance is zero, so its missing price is harmless.
+        pnl = tracker.get_pnl_usd({"ETH": Decimal("3000")})
         assert pnl == Decimal("0")
+
+    def test_negative_balance_not_silently_deleted(
+        self, tracker: PaperPortfolioTracker
+    ) -> None:
+        """VIB-3164 (Empty != Zero): a negative balance is measured, not nothing.
+
+        Cleanup must prune only exact zeros, leaving negatives visible.
+        """
+        tracker.start_session(
+            initial_balances={"ETH": Decimal("1"), "USDC": Decimal("100")},
+            chain="arbitrum",
+        )
+        # Force a negative balance and an exact-zero balance, then clean up.
+        tracker.current_balances["ETH"] = Decimal("-0.5")
+        tracker.current_balances["USDC"] = Decimal("0")
+        tracker._cleanup_zero_balances()
+
+        assert tracker.current_balances["ETH"] == Decimal("-0.5")  # retained
+        assert "USDC" not in tracker.current_balances  # exact zero pruned
 
 
 # =============================================================================

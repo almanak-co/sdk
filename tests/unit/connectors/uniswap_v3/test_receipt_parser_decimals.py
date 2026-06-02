@@ -184,7 +184,12 @@ class TestDecimalResolutionFromTransfers:
         assert result2.amount_out_decimal == Decimal("50")
 
     def test_handles_empty_transfers_gracefully(self, caplog):
-        """When no Transfer events, warns about default 18 decimals (VIB-592)."""
+        """When no Transfer events, warns about unresolved decimals (VIB-592).
+
+        VIB-3164 deferred: this path still falls back to the 18-decimal default
+        rather than failing loud, because hard-failing on the live enricher
+        path would halt accounting. The warning is the visible signal.
+        """
         parser = _make_parser_no_tokens()
 
         swap_event = _make_swap_event(amount0=100_000_000, amount1=-1_079_340_000_000_000_000_000)

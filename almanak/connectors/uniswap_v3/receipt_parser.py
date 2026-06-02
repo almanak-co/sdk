@@ -435,7 +435,19 @@ class UniswapV3ReceiptParser:
             if decimals is not None:
                 self.token1_decimals = decimals
 
-        # Track whether decimals are resolved or defaulted (18 is unreliable for non-ETH tokens)
+        # Track whether decimals are resolved (18 is unreliable for non-ETH tokens).
+        #
+        # VIB-3164 DEFERRED: ideally an unresolved decimal would stay ``None``
+        # (Empty != Zero) and ``_build_swap_result`` would fail loud rather than
+        # coerce to 18. That change is held back because this parser runs on the
+        # live ResultEnricher path with chain-only context: when a swap's
+        # Transfer events cannot be classified against the pool address the
+        # decimals stay unresolved, and hard-failing there would convert a silent
+        # miscount into a pipeline-halting CriticalAccountingError on live money.
+        # Closing this safely needs the compiler to thread token decimals into
+        # the parser (or better Transfer classification) first; tracked as a
+        # follow-up. Until then the historical 18-default below is retained and
+        # the unresolved case is flagged in ``_build_swap_result``.
         self._token0_decimals_resolved = self.token0_decimals is not None
         self._token1_decimals_resolved = self.token1_decimals is not None
         if self.token0_decimals is None:
@@ -935,11 +947,22 @@ class UniswapV3ReceiptParser:
         t0_unresolved = not self._token0_decimals_resolved and "token0_decimals" not in overrides
         t1_unresolved = not self._token1_decimals_resolved and "token1_decimals" not in overrides
         if t0_unresolved or t1_unresolved:
+            # VIB-3164 / DEFERRED: ideally an unresolved decimal would fail loud
+            # here (Empty != Zero). But this parser is constructed by the live
+            # ResultEnricher with chain-only context, and when a swap's Transfer
+            # events cannot be classified against the pool address the decimals
+            # stay unresolved. Hard-failing here turns a silent miscount into a
+            # pipeline-halting CriticalAccountingError on the live money path —
+            # unsafe to ship without first making decimals resolvable in this
+            # shape (thread compiler token context, or improve Transfer
+            # classification). Tracked for a follow-up; for now we warn and fall
+            # through to the 18-decimal default below (the historical behaviour).
             logger.warning(
-                f"Token decimals unresolved after Transfer analysis "
+                "Token decimals unresolved after Transfer analysis "
                 f"(token0={'unresolved' if t0_unresolved else 'ok'}, "
                 f"token1={'unresolved' if t1_unresolved else 'ok'}). "
-                f"Decimal amounts may be incorrect for non-18-decimal tokens."
+                "Decimal amounts may be incorrect for non-18-decimal tokens "
+                "(VIB-3164 deferred: see receipt_parser __init__ note)."
             )
 
         # Determine which token is in/out

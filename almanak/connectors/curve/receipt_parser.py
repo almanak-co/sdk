@@ -66,6 +66,13 @@ TOPIC_TO_EVENT: dict[str, str] = {v: k for k, v in EVENT_TOPICS.items()}
 TOKEN_EXCHANGE_TOPIC = EVENT_TOPICS["TokenExchange"]
 TOKEN_EXCHANGE_UNDERLYING_TOPIC = EVENT_TOPICS["TokenExchangeUnderlying"]
 
+# Curve LP (pool) tokens are minted by the Curve pool/factory contracts and are
+# fixed at 18 decimals by protocol design — this is a known protocol invariant,
+# not an arbitrary token whose decimals are unknown. When the resolver cannot
+# confirm the LP token's decimals, this invariant is the correct value (vs the
+# VIB-3164 anti-pattern of silently defaulting an *arbitrary* token to 18).
+CURVE_LP_TOKEN_DECIMALS = 18  # decimal-policy-exempt: Curve LP tokens are 18 by protocol invariant (VIB-3164)
+
 
 # =============================================================================
 # Enums
@@ -971,10 +978,14 @@ class CurveReceiptParser:
                         lp_token_address = "0x" + lp_token_address.hex()
                     decimals = self._resolve_decimals(str(lp_token_address).lower())
                     if decimals is None:
+                        # Protocol invariant: Curve LP tokens are always 18 decimals.
+                        # This is NOT a silent arbitrary-token fallback (VIB-3164) —
+                        # see CURVE_LP_TOKEN_DECIMALS for the rationale.
                         logger.warning(
-                            f"Cannot resolve decimals for Curve LP token {lp_token_address}; falling back to 18"
+                            f"Cannot resolve decimals for Curve LP token {lp_token_address}; "
+                            f"using Curve protocol invariant ({CURVE_LP_TOKEN_DECIMALS})"
                         )
-                        decimals = 18
+                        decimals = CURVE_LP_TOKEN_DECIMALS
 
                     return Decimal(lp_amount_raw) / Decimal(10**decimals)
 
