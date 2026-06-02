@@ -6,7 +6,25 @@ All symbols remain importable from ``almanak.framework.intents.compiler``.
 
 from __future__ import annotations
 
-from typing import Any
+import functools
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # PEP 562 + mypy: the six address tables below are resolved at runtime
+    # through ``__getattr__`` (lazy — see the note above the accessor map), so
+    # they are absent from the module namespace at static-analysis time. Declare
+    # their precise types here so consumers that index them
+    # (``PROTOCOL_ROUTERS.get(chain, {})`` etc.) keep their exact pre-PR-3a
+    # inferred types instead of collapsing to ``dict[str, Any]``. These are
+    # type-only declarations — no runtime value is bound (that would shadow
+    # ``__getattr__``).
+    PROTOCOL_ROUTERS: dict[str, dict[str, str]]
+    LP_POSITION_MANAGERS: dict[str, dict[str, str]]
+    SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]]
+    LENDING_POOL_ADDRESSES: dict[str, dict[str, str]]
+    LENDING_POOL_DATA_PROVIDERS: dict[str, dict[str, str]]
+    BALANCER_VAULT_ADDRESSES: dict[str, str]
 
 # =============================================================================
 # Constants
@@ -204,35 +222,34 @@ CHAIN_GAS_OVERRIDES: dict[str, dict[str, int]] = _build_chain_gas_overrides()
 # canonical, on-chain-verified PositionManager addresses.
 
 
-# (protocol, connector-addresses-dict-import-path, kind-in-connector-dict)
-# tuples for the address dicts derived directly from connector data. The
-# kind name is the connector's internal vocabulary (W1 / VIB-4853); the
-# central dict re-keys by protocol so the legacy lookup shape stays
-# unchanged.
+# VIB-4928 (PR-3a): the six address tables below now fan out over the
+# connector-self-registering ``CONTRACT_ROLE_REGISTRY`` instead of
+# hand-importing each connector's ``addresses.py``. Each builder asks the
+# registry for the protocols that declare a given semantic
+# :class:`ContractRole` (in load-bearing registration order) and resolves the
+# per-chain address through ``AddressRegistry`` using the connector's ordered
+# contract-kinds for that role. The exclusions / alias post-steps below stay
+# byte-equivalent. The boot-file import lives INSIDE each builder (local
+# import) so ``_register_all()`` runs before resolution — the same idiom
+# ``_build_default_gas_estimates`` uses for its registry.
 def _build_protocol_routers() -> dict[str, dict[str, str]]:
-    """Materialize the legacy ``PROTOCOL_ROUTERS`` shape from connector data."""
-    from almanak.connectors.aerodrome.addresses import AERODROME
-    from almanak.connectors.camelot.addresses import CAMELOT
-    from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
-    from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
-    from almanak.connectors.uniswap_v3.addresses import AGNI_FINANCE, UNISWAP_V3
+    """Materialize the legacy ``PROTOCOL_ROUTERS`` shape from the role registry."""
+    from almanak.connectors._strategy_base.address_registry import AddressRegistry
+    from almanak.connectors._strategy_contract_role_registry import (
+        CONTRACT_ROLE_REGISTRY,
+        ContractRole,
+    )
 
     routers: dict[str, dict[str, str]] = {}
-
-    # (protocol, connector-dict, kind)
-    sources: tuple[tuple[str, dict[str, dict[str, str]], str], ...] = (
-        ("uniswap_v3", UNISWAP_V3, "swap_router"),
-        ("sushiswap_v3", SUSHISWAP_V3, "swap_router"),
-        ("pancakeswap_v3", PANCAKESWAP_V3, "swap_router"),
-        ("agni_finance", AGNI_FINANCE, "swap_router"),
-        ("aerodrome", AERODROME, "router"),
-        ("camelot", CAMELOT, "swap_router"),
-    )
-    for protocol, table, kind in sources:
-        for chain, kinds in table.items():
+    for protocol in CONTRACT_ROLE_REGISTRY.protocols_with_role(ContractRole.ROUTER):
+        addr_proto = CONTRACT_ROLE_REGISTRY.address_protocol(protocol)
+        kinds = CONTRACT_ROLE_REGISTRY.kinds_for(protocol, ContractRole.ROUTER)
+        if kinds is None:
+            continue
+        for chain in AddressRegistry.address_chains_ordered(addr_proto):
             if (protocol, chain) in _PROTOCOL_ROUTER_EXCLUSIONS:
                 continue
-            address = kinds.get(kind)
+            address = AddressRegistry.resolve_contract_address(addr_proto, chain, kinds)
             if address is None:
                 continue
             routers.setdefault(chain, {})[protocol] = address
@@ -249,47 +266,37 @@ def _build_protocol_routers() -> dict[str, dict[str, str]]:
 
 
 def _build_lp_position_managers() -> dict[str, dict[str, str]]:
-    """Materialize the legacy ``LP_POSITION_MANAGERS`` shape from connector data + overlay."""
-    from almanak.connectors.aerodrome.addresses import AERODROME
-    from almanak.connectors.camelot.addresses import CAMELOT
-    from almanak.connectors.fluid.addresses import FLUID
-    from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
-    from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
-    from almanak.connectors.traderjoe_v2.addresses import TRADERJOE_V2
-    from almanak.connectors.uniswap_v3.addresses import AGNI_FINANCE, UNISWAP_V3
-    from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
+    """Materialize the legacy ``LP_POSITION_MANAGERS`` shape from the role registry.
+
+    Draws from two roles, in registration order: ``LP_POSITION_MANAGER`` (the
+    fungible / V3-style position manager — TraderJoe V2 and Aerodrome fill this
+    slot from their ``router`` address; PancakeSwap V3 from ``nft``) and
+    ``CL_POSITION_MANAGER`` (Aerodrome's separate Slipstream ``cl_nft``, surfaced
+    under the ``aerodrome_slipstream`` pseudo-slug). The legacy
+    ``_build_lp_position_managers`` interleaved ``aerodrome_slipstream`` right
+    after ``aerodrome`` in its source list; the boot file registers the two
+    Aerodrome slugs adjacently, so iterating ``registered_protocols()`` and
+    selecting whichever of the two roles each slug declares reproduces that
+    exact order.
+    """
+    from almanak.connectors._strategy_base.address_registry import AddressRegistry
+    from almanak.connectors._strategy_contract_role_registry import (
+        CONTRACT_ROLE_REGISTRY,
+        ContractRole,
+    )
 
     managers: dict[str, dict[str, str]] = {}
-
-    # (protocol, connector-dict, kind). traderjoe_v2 surfaces its
-    # LBRouter under ``router`` (Liquidity Book uses the router for LP);
-    # the legacy ``LP_POSITION_MANAGERS`` slot historically held that
-    # address because synthetic intents look up the LBRouter from
-    # ``LP_POSITION_MANAGERS[chain][protocol]``. PancakeSwap V3 uses
-    # ``nft`` (its kind name in pancakeswap_v3/addresses.py); Aerodrome
-    # exposes ``router`` for the fungible-LP path on base/optimism.
-    # uniswap_v4 derives its PositionManager from the connector's own
-    # per-chain ``position_manager`` kind (VIB-4874) — the central dict
-    # previously carried a single garbled CREATE2-style value across all
-    # chains, which is not a deployed contract on any chain. See the
-    # anti-drift test in tests/unit/connectors/uniswap_v4/.
-    sources: tuple[tuple[str, dict[str, dict[str, str]], str], ...] = (
-        ("uniswap_v3", UNISWAP_V3, "position_manager"),
-        ("uniswap_v4", UNISWAP_V4, "position_manager"),
-        ("sushiswap_v3", SUSHISWAP_V3, "position_manager"),
-        ("pancakeswap_v3", PANCAKESWAP_V3, "nft"),
-        ("agni_finance", AGNI_FINANCE, "position_manager"),
-        ("aerodrome", AERODROME, "router"),
-        ("aerodrome_slipstream", AERODROME, "cl_nft"),
-        ("traderjoe_v2", TRADERJOE_V2, "router"),
-        ("camelot", CAMELOT, "position_manager"),
-        ("fluid", FLUID, "dex_factory"),
-    )
-    for protocol, table, kind in sources:
-        for chain, kinds in table.items():
+    for protocol in CONTRACT_ROLE_REGISTRY.registered_protocols():
+        kinds = CONTRACT_ROLE_REGISTRY.kinds_for(
+            protocol, ContractRole.LP_POSITION_MANAGER
+        ) or CONTRACT_ROLE_REGISTRY.kinds_for(protocol, ContractRole.CL_POSITION_MANAGER)
+        if kinds is None:
+            continue
+        addr_proto = CONTRACT_ROLE_REGISTRY.address_protocol(protocol)
+        for chain in AddressRegistry.address_chains_ordered(addr_proto):
             if (protocol, chain) in _PROTOCOL_ROUTER_EXCLUSIONS:
                 continue
-            address = kinds.get(kind)
+            address = AddressRegistry.resolve_contract_address(addr_proto, chain, kinds)
             if address is None:
                 continue
             managers.setdefault(chain, {})[protocol] = address
@@ -313,8 +320,16 @@ _PROTOCOL_ROUTER_EXCLUSIONS: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-PROTOCOL_ROUTERS: dict[str, dict[str, str]] = _build_protocol_routers()
-LP_POSITION_MANAGERS: dict[str, dict[str, str]] = _build_lp_position_managers()
+@functools.cache
+def _protocol_routers() -> dict[str, dict[str, str]]:
+    """Cached ``PROTOCOL_ROUTERS`` (lazy — see the ``__getattr__`` note below)."""
+    return _build_protocol_routers()
+
+
+@functools.cache
+def _lp_position_managers() -> dict[str, dict[str, str]]:
+    """Cached ``LP_POSITION_MANAGERS`` (lazy — see the ``__getattr__`` note below)."""
+    return _build_lp_position_managers()
 
 
 # =============================================================================
@@ -628,26 +643,23 @@ _SWAP_QUOTER_EXCLUSIONS: frozenset[tuple[str, str]] = frozenset(
 
 
 def _build_swap_quoter_addresses() -> dict[str, dict[str, str]]:
-    """Materialize the legacy ``SWAP_QUOTER_ADDRESSES`` shape from connector data."""
-    from almanak.connectors.camelot.addresses import CAMELOT
-    from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
-    from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
-    from almanak.connectors.uniswap_v3.addresses import AGNI_FINANCE, UNISWAP_V3
+    """Materialize the legacy ``SWAP_QUOTER_ADDRESSES`` shape from the role registry."""
+    from almanak.connectors._strategy_base.address_registry import AddressRegistry
+    from almanak.connectors._strategy_contract_role_registry import (
+        CONTRACT_ROLE_REGISTRY,
+        ContractRole,
+    )
 
     quoters: dict[str, dict[str, str]] = {}
-
-    sources: tuple[tuple[str, dict[str, dict[str, str]], str], ...] = (
-        ("uniswap_v3", UNISWAP_V3, "quoter_v2"),
-        ("sushiswap_v3", SUSHISWAP_V3, "quoter_v2"),
-        ("pancakeswap_v3", PANCAKESWAP_V3, "quoter"),
-        ("agni_finance", AGNI_FINANCE, "quoter_v2"),
-        ("camelot", CAMELOT, "quoter"),
-    )
-    for protocol, table, kind in sources:
-        for chain, kinds in table.items():
+    for protocol in CONTRACT_ROLE_REGISTRY.protocols_with_role(ContractRole.QUOTER):
+        addr_proto = CONTRACT_ROLE_REGISTRY.address_protocol(protocol)
+        kinds = CONTRACT_ROLE_REGISTRY.kinds_for(protocol, ContractRole.QUOTER)
+        if kinds is None:
+            continue
+        for chain in AddressRegistry.address_chains_ordered(addr_proto):
             if (protocol, chain) in _SWAP_QUOTER_EXCLUSIONS:
                 continue
-            address = kinds.get(kind)
+            address = AddressRegistry.resolve_contract_address(addr_proto, chain, kinds)
             if address is None:
                 continue
             quoters.setdefault(chain, {})[protocol] = address
@@ -663,7 +675,11 @@ def _build_swap_quoter_addresses() -> dict[str, dict[str, str]]:
     return quoters
 
 
-SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = _build_swap_quoter_addresses()
+@functools.cache
+def _swap_quoter_addresses() -> dict[str, dict[str, str]]:
+    """Cached ``SWAP_QUOTER_ADDRESSES`` (lazy — see the ``__getattr__`` note below)."""
+    return _build_swap_quoter_addresses()
+
 
 # Lending pool + data-provider addresses per chain/protocol.
 #
@@ -681,19 +697,21 @@ SWAP_QUOTER_ADDRESSES: dict[str, dict[str, str]] = _build_swap_quoter_addresses(
 
 
 def _build_lending_pool_addresses() -> dict[str, dict[str, str]]:
-    """Materialize the legacy ``LENDING_POOL_ADDRESSES`` shape from connector data."""
-    from almanak.connectors.aave_v3.addresses import AAVE_V3
-    from almanak.connectors.spark.addresses import SPARK
-
-    sources: tuple[tuple[str, dict[str, dict[str, str]]], ...] = (
-        ("aave_v3", AAVE_V3),
-        ("spark", SPARK),
+    """Materialize the legacy ``LENDING_POOL_ADDRESSES`` shape from the role registry."""
+    from almanak.connectors._strategy_base.address_registry import AddressRegistry
+    from almanak.connectors._strategy_contract_role_registry import (
+        CONTRACT_ROLE_REGISTRY,
+        ContractRole,
     )
 
     pools: dict[str, dict[str, str]] = {}
-    for protocol, table in sources:
-        for chain, kinds in table.items():
-            pool = kinds.get("pool")
+    for protocol in CONTRACT_ROLE_REGISTRY.protocols_with_role(ContractRole.LENDING_POOL):
+        addr_proto = CONTRACT_ROLE_REGISTRY.address_protocol(protocol)
+        kinds = CONTRACT_ROLE_REGISTRY.kinds_for(protocol, ContractRole.LENDING_POOL)
+        if kinds is None:
+            continue
+        for chain in AddressRegistry.address_chains_ordered(addr_proto):
+            pool = AddressRegistry.resolve_contract_address(addr_proto, chain, kinds)
             if pool is None:
                 continue
             pools.setdefault(chain, {})[protocol] = pool
@@ -701,31 +719,49 @@ def _build_lending_pool_addresses() -> dict[str, dict[str, str]]:
 
 
 def _build_lending_pool_data_providers() -> dict[str, dict[str, str]]:
-    """Materialize the legacy ``LENDING_POOL_DATA_PROVIDERS`` shape from connector data.
+    """Materialize the legacy ``LENDING_POOL_DATA_PROVIDERS`` shape from the role registry.
 
     Spark intentionally omitted — the legacy central dict only carried
     aave_v3 entries for the lending pre-flight; preserving that exact
     shape avoids accidentally widening the surface as part of a
     pure-data-move refactor. Adding Spark to the pre-flight surface is
     tracked as a separate decision (the Spark adapter already owns its
-    own ``pool_data_provider`` address via ``addresses.SPARK``).
+    own ``pool_data_provider`` address via ``addresses.SPARK``). The
+    omission is encoded at the connector: Spark's ``contract_roles``
+    declares ``LENDING_POOL`` only, never ``LENDING_DATA_PROVIDER``, so it
+    never appears in ``protocols_with_role(LENDING_DATA_PROVIDER)`` here.
     """
-    from almanak.connectors.aave_v3.addresses import AAVE_V3
-
-    sources: tuple[tuple[str, dict[str, dict[str, str]]], ...] = (("aave_v3", AAVE_V3),)
+    from almanak.connectors._strategy_base.address_registry import AddressRegistry
+    from almanak.connectors._strategy_contract_role_registry import (
+        CONTRACT_ROLE_REGISTRY,
+        ContractRole,
+    )
 
     providers: dict[str, dict[str, str]] = {}
-    for protocol, table in sources:
-        for chain, kinds in table.items():
-            provider = kinds.get("pool_data_provider")
+    for protocol in CONTRACT_ROLE_REGISTRY.protocols_with_role(ContractRole.LENDING_DATA_PROVIDER):
+        addr_proto = CONTRACT_ROLE_REGISTRY.address_protocol(protocol)
+        kinds = CONTRACT_ROLE_REGISTRY.kinds_for(protocol, ContractRole.LENDING_DATA_PROVIDER)
+        if kinds is None:
+            continue
+        for chain in AddressRegistry.address_chains_ordered(addr_proto):
+            provider = AddressRegistry.resolve_contract_address(addr_proto, chain, kinds)
             if provider is None:
                 continue
             providers.setdefault(chain, {})[protocol] = provider
     return providers
 
 
-LENDING_POOL_ADDRESSES: dict[str, dict[str, str]] = _build_lending_pool_addresses()
-LENDING_POOL_DATA_PROVIDERS: dict[str, dict[str, str]] = _build_lending_pool_data_providers()
+@functools.cache
+def _lending_pool_addresses() -> dict[str, dict[str, str]]:
+    """Cached ``LENDING_POOL_ADDRESSES`` (lazy — see the ``__getattr__`` note below)."""
+    return _build_lending_pool_addresses()
+
+
+@functools.cache
+def _lending_pool_data_providers() -> dict[str, dict[str, str]]:
+    """Cached ``LENDING_POOL_DATA_PROVIDERS`` (lazy — see the ``__getattr__`` note below)."""
+    return _build_lending_pool_data_providers()
+
 
 # Standard ERC20 function selectors
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"  # approve(address,uint256)
@@ -821,15 +857,74 @@ BALANCER_FLASH_LOAN_SELECTOR = "0x5c38449e"
 
 
 def _build_balancer_vault_addresses() -> dict[str, str]:
-    """Materialize the legacy ``BALANCER_VAULT_ADDRESSES`` shape from connector data."""
-    from almanak.connectors.balancer_v2.addresses import BALANCER_V2
+    """Materialize the legacy ``BALANCER_VAULT_ADDRESSES`` shape from the role registry.
 
-    return {chain: kinds["vault"] for chain, kinds in BALANCER_V2.items() if "vault" in kinds}
+    Flat ``{chain: address}`` (single protocol — the Balancer V2 ``Vault`` is a
+    CREATE2 deterministic deployment, one address per chain), so the registry
+    fan-out collapses to the lone ``FLASH_LOAN_VAULT`` protocol and keys by
+    chain directly rather than ``{chain: {protocol: addr}}``.
+    """
+    from almanak.connectors._strategy_base.address_registry import AddressRegistry
+    from almanak.connectors._strategy_contract_role_registry import (
+        CONTRACT_ROLE_REGISTRY,
+        ContractRole,
+    )
+
+    vaults: dict[str, str] = {}
+    for protocol in CONTRACT_ROLE_REGISTRY.protocols_with_role(ContractRole.FLASH_LOAN_VAULT):
+        addr_proto = CONTRACT_ROLE_REGISTRY.address_protocol(protocol)
+        kinds = CONTRACT_ROLE_REGISTRY.kinds_for(protocol, ContractRole.FLASH_LOAN_VAULT)
+        if kinds is None:
+            continue
+        for chain in AddressRegistry.address_chains_ordered(addr_proto):
+            address = AddressRegistry.resolve_contract_address(addr_proto, chain, kinds)
+            if address is None:
+                continue
+            vaults[chain] = address
+    return vaults
 
 
-BALANCER_VAULT_ADDRESSES: dict[str, str] = _build_balancer_vault_addresses()
+@functools.cache
+def _balancer_vault_addresses() -> dict[str, str]:
+    """Cached ``BALANCER_VAULT_ADDRESSES`` (lazy — see the ``__getattr__`` note below)."""
+    return _build_balancer_vault_addresses()
+
 
 # Max uint256 for unlimited approvals
 MAX_UINT256 = 2**256 - 1
 # Max uint128 for collecting all fees/tokens
 MAX_UINT128 = 2**128 - 1
+
+
+# Lazy module-level access for the six connector-role-derived address tables
+# (VIB-4928 PR-3a). They were eager module-level dicts; deriving them at import
+# time forced ``compiler_constants`` to import the contract-role boot file (and
+# transitively every address-owning connector) the instant *anything* imported
+# this module — and under pytest-xdist that import could interleave with a
+# connector still mid-import, the same hazard that poisoned the eager
+# membership sets in ``permissions/synthetic_intents`` (VIB-4928 PR-1).
+# Resolving them through PEP 562 ``__getattr__`` defers each table's
+# construction (and the boot-file import inside each ``_build_*``) to first
+# *use*, by which point all connector imports have settled. ``functools.cache``
+# keeps the resolved dict's identity stable across calls (callers treat it as
+# read-only, same as before).
+#
+# A module-level ``from .compiler_constants import PROTOCOL_ROUTERS`` still
+# resolves: ``from X import NAME`` triggers ``X.__getattr__('NAME')`` when the
+# name is absent from the module namespace (Python 3.7+), so the compiler's
+# existing star-style imports are unaffected (covered by the compiler tests).
+_LAZY_TABLE_ACCESSORS: dict[str, Callable[[], dict[str, Any]]] = {
+    "PROTOCOL_ROUTERS": _protocol_routers,
+    "LP_POSITION_MANAGERS": _lp_position_managers,
+    "SWAP_QUOTER_ADDRESSES": _swap_quoter_addresses,
+    "LENDING_POOL_ADDRESSES": _lending_pool_addresses,
+    "LENDING_POOL_DATA_PROVIDERS": _lending_pool_data_providers,
+    "BALANCER_VAULT_ADDRESSES": _balancer_vault_addresses,
+}
+
+
+def __getattr__(name: str) -> dict[str, Any]:
+    accessor = _LAZY_TABLE_ACCESSORS.get(name)
+    if accessor is not None:
+        return accessor()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

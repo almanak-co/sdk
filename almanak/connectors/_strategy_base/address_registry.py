@@ -232,11 +232,33 @@ class AddressRegistry:
         :meth:`GatewayAddressCapability.address_supported_chains`. Returns
         an empty frozenset for an unknown protocol or one that ships no
         addresses.
+
+        This is a set-membership view; iteration order is unspecified. When the
+        order the connector declares its chains in matters (the intent
+        compiler's per-chain address tables key on it for byte-equivalence),
+        use :meth:`address_chains_ordered` instead.
         """
         table = cls._load_table(protocol.lower())
         if table is None:
             return frozenset()
         return frozenset(chain for chain, contracts in table.items() if contracts)
+
+    @classmethod
+    def address_chains_ordered(cls, protocol: str) -> tuple[str, ...]:
+        """Return ``protocol``'s non-empty chains in connector-declaration order.
+
+        Same membership as :meth:`address_supported_chains` but preserves the
+        connector ``addresses.py`` table's insertion order. The intent
+        compiler (VIB-4928 PR-3a) iterates this as the inner loop when
+        materialising ``PROTOCOL_ROUTERS`` / ``LP_POSITION_MANAGERS`` / … so the
+        derived tables' outer chain-key order stays byte-equivalent to the
+        pre-inversion hand-rolled builders (which iterated ``table.items()``
+        directly). Returns an empty tuple for an unknown protocol.
+        """
+        table = cls._load_table(protocol.lower())
+        if table is None:
+            return ()
+        return tuple(chain for chain, contracts in table.items() if contracts)
 
     @classmethod
     def resolve_contract_address(

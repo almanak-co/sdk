@@ -100,3 +100,48 @@ def test_module_level_wrappers_delegate():
     assert resolve_contract_address("aave_v3", chain, kind) == AddressRegistry.resolve_contract_address(
         "aave_v3", chain, kind
     )
+
+
+def test_address_chains_ordered_contract(monkeypatch):
+    """Pin ``address_chains_ordered``'s own contract (VIB-4928 PR-3a).
+
+    It is load-bearing for the intent compiler's per-chain address-table order,
+    so test it directly rather than only via downstream consumers. Patch
+    ``_load_table`` to return controlled tables covering the three contract
+    cases: unknown protocol, empty-entry chains dropped, and declaration order
+    preserved exactly.
+    """
+
+    def fake_load(table):
+        # _load_table is a classmethod; the patched replacement ignores the
+        # protocol arg and returns a fixed table so the ordering/filtering logic
+        # is exercised in isolation from real connector data.
+        return classmethod(lambda cls, protocol: table)
+
+    # Unknown protocol -> _load_table returns None -> ().
+    monkeypatch.setattr(AddressRegistry, "_load_table", fake_load(None))
+    assert AddressRegistry.address_chains_ordered("anything") == ()
+
+    # Chains whose contract entry is empty are omitted; non-empty chains kept.
+    mixed = {
+        "ethereum": {"router": "0xabc"},
+        "arbitrum": {},  # empty entry -> dropped
+        "base": {"router": "0xdef"},
+    }
+    monkeypatch.setattr(AddressRegistry, "_load_table", fake_load(mixed))
+    assert AddressRegistry.address_chains_ordered("anything") == ("ethereum", "base")
+
+    # Multiple non-empty chains: declaration/insertion order preserved exactly.
+    ordered = {
+        "optimism": {"router": "0x1"},
+        "polygon": {"router": "0x2"},
+        "avalanche": {"router": "0x3"},
+        "bsc": {"router": "0x4"},
+    }
+    monkeypatch.setattr(AddressRegistry, "_load_table", fake_load(ordered))
+    assert AddressRegistry.address_chains_ordered("anything") == (
+        "optimism",
+        "polygon",
+        "avalanche",
+        "bsc",
+    )
