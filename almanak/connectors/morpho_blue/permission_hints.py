@@ -63,6 +63,11 @@ _MORPHO_SELECTOR_LABELS: dict[str, str] = {
 PERMISSION_HINTS = PermissionHints(
     synthetic_market_id=_SYNTHETIC_MARKET_ID,
     selector_labels=dict(_MORPHO_SELECTOR_LABELS),
+    # Synthetic-discovery participation (VIB-4928): the four core lending
+    # primitives. Resolved only for the canonical ``morpho_blue`` slug — the
+    # bare ``morpho`` compiler-loader alias has no permission_hints module and
+    # so never enters the derived lending set.
+    synthetic_discovery_intents=frozenset({"SUPPLY", "WITHDRAW", "BORROW", "REPAY"}),
 )
 
 

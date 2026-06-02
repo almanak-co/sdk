@@ -64,11 +64,22 @@ class FlashLoanProviderRegistration:
         build: The connector's ``build_<x>_flash_loan`` callable. Invoked as
             ``build(compiler, token_info=…, amount_wei=…, callback_params=…,
             callback_gas_total=…)`` and returns the build-result dict.
+        synthetic_discovery: Whether this provider participates in synthetic
+            permission discovery (the offline Zodiac manifest-generation pass
+            in ``almanak.framework.permissions.synthetic_intents``). **Opt-OUT
+            default** (False) — a provider that does not opt in appears in none
+            of the synthetic flash-loan vectors and therefore in none of the
+            generated manifests. This is the per-provider source of truth that
+            replaced the hardcoded ``_FLASH_LOAN_PROVIDERS`` frozenset
+            (VIB-4928). The registry knows ``aave``/``balancer``/``morpho`` but
+            only ``aave`` and ``balancer`` historically emitted synthetic
+            vectors, so only those two set this True.
     """
 
     name: str
     make_provider: Callable[[], FlashLoanProvider]
     build: Callable[..., dict[str, Any]]
+    synthetic_discovery: bool = False
 
 
 class FlashLoanProviderRegistry:
@@ -94,6 +105,15 @@ class FlashLoanProviderRegistry:
     def names(self) -> tuple[str, ...]:
         """Registered provider identifiers, in registration order."""
         return tuple(self._registrations)
+
+    def synthetic_discovery_names(self) -> tuple[str, ...]:
+        """Provider identifiers that opt into synthetic permission discovery.
+
+        Backs the connector-declared derivation of ``_FLASH_LOAN_PROVIDERS`` in
+        ``almanak.framework.permissions.synthetic_intents`` (VIB-4928).
+        Registration order is preserved so the derived membership stays stable.
+        """
+        return tuple(name for name, reg in self._registrations.items() if reg.synthetic_discovery)
 
     def has(self, name: str) -> bool:
         """Whether ``name`` is a registered flash-loan provider."""

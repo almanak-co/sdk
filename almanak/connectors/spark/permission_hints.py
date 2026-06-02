@@ -9,4 +9,8 @@ found. See ``.claude/skills/sdk-integrator/SKILL.md`` Phase 6 for patterns.
 
 from almanak.framework.permissions.hints import PermissionHints
 
-PERMISSION_HINTS = PermissionHints()
+# Synthetic-discovery participation (VIB-4928): the four core lending
+# primitives (Spark is an Aave V3 fork).
+PERMISSION_HINTS = PermissionHints(
+    synthetic_discovery_intents=frozenset({"SUPPLY", "WITHDRAW", "BORROW", "REPAY"}),
+)

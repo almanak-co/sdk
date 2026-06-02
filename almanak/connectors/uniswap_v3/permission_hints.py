@@ -21,4 +21,9 @@ PERMISSION_HINTS = PermissionHints(
             "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
         ),
     },
+    # Synthetic-discovery participation (VIB-4928): SWAP + LP. V3-style
+    # SwapRouter02 auto-wraps native via msg.value, so emit the native-in
+    # SWAP synthetic too (flips send_allowed on the router target for Zodiac).
+    synthetic_discovery_intents=frozenset({"SWAP", "LP_OPEN", "LP_CLOSE"}),
+    supports_native_in_swap=True,
 )

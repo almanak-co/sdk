@@ -50,6 +50,10 @@ def _register_all() -> None:
             name="aave",
             make_provider=AaveFlashLoanProvider,
             build=build_aave_flash_loan,
+            # Aave + Balancer emit synthetic flash-loan vectors for offline
+            # Zodiac manifest generation (the historical _FLASH_LOAN_PROVIDERS
+            # membership, VIB-4928). Morpho stays opt-out below.
+            synthetic_discovery=True,
         )
     )
     FLASH_LOAN_PROVIDER_REGISTRY.register(
@@ -57,6 +61,7 @@ def _register_all() -> None:
             name="balancer",
             make_provider=BalancerFlashLoanProvider,
             build=build_balancer_flash_loan,
+            synthetic_discovery=True,
         )
     )
     FLASH_LOAN_PROVIDER_REGISTRY.register(

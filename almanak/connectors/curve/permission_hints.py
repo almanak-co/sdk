@@ -8,6 +8,11 @@ unauthorised on the Safe (#1903).
 Curve owns its discovery vectors via ``build_discovery_vectors`` below —
 see :func:`almanak.framework.permissions.hints.get_discovery_vectors_override`
 for the dispatcher contract.
+
+Synthetic-discovery participation (VIB-4928): ``SWAP`` only. Curve's compiler
+can also build fungible LP, but synthetic Zodiac discovery deliberately omits
+curve LP (its intent tests carry ``@pytest.mark.no_zodiac``), matching the
+``build_discovery_vectors`` override below which returns ``None`` for non-SWAP.
 """
 
 from __future__ import annotations
@@ -23,7 +28,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-PERMISSION_HINTS = PermissionHints()
+PERMISSION_HINTS = PermissionHints(
+    synthetic_discovery_intents=frozenset({"SWAP"}),
+)
 
 
 def build_discovery_vectors(

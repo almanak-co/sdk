@@ -8,8 +8,10 @@ any RPC calls.
 
 from __future__ import annotations
 
+import functools
 import logging
 from collections import defaultdict
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Literal, cast
 
@@ -41,6 +43,7 @@ from ..intents.vocabulary import (
 )
 from .constants import VAULT_PROTOCOL_REPRESENTATIVE
 from .hints import (
+    _PROTOCOL_CONNECTOR_MAP,
     DiscoveryContext,
     PermissionHints,
     get_discovery_vectors_override,
@@ -49,47 +52,171 @@ from .hints import (
 
 logger = logging.getLogger(__name__)
 
-# Protocols that support each intent type
-_SWAP_PROTOCOLS = {
-    "uniswap_v3",
-    "pancakeswap_v3",
-    "sushiswap_v3",
-    "camelot",
-    "aerodrome",
-    "traderjoe_v2",
-    "pendle",
-    "curve",
-    # Note: Enso is excluded - its Router address is per-chain and added
-    # statically by the generator (not via synthetic intent compilation).
-    # Note: Camelot (Algebra V3 on Arbitrum) is included for SWAP only —
-    # CamelotCompiler ships SWAP-only with fail-closed LP / collect stubs
-    # per docs/internal/plans/camelot-compiler-connector-folding-plan.md.
-    # Not in _NATIVE_IN_SWAP_PROTOCOLS: no native-in SWAP intent test today.
+# ---------------------------------------------------------------------------
+# Synthetic-discovery membership — DERIVED from connector declarations (VIB-4928)
+#
+# Each connector slug declares the intent types it participates in for synthetic
+# permission discovery on its ``PermissionHints.synthetic_discovery_intents``
+# (and ``supports_native_in_swap`` for the native-in SWAP subset). The flash-loan
+# providers declare opt-in via the flash-loan registry's per-provider
+# ``synthetic_discovery`` flag. The six membership sets below are folded from
+# those declarations instead of being hand-maintained here — one source of
+# truth, per-slug, so a shared compiler (e.g. ``AerodromeCompiler`` backing both
+# ``aerodrome`` and ``aerodrome_slipstream``) can express divergent participation.
+#
+# The exact pre-fold memberships are pinned verbatim by
+# ``tests/unit/permissions/test_synthetic_membership_equivalence.py`` — any
+# change to a connector declaration that shifts a derived set is caught there.
+# ---------------------------------------------------------------------------
+
+# Intent-type string groupings used to bucket each slug's declared participation
+# into the legacy membership sets. SWAP is its own bucket; LP / lending / perp
+# each fold their constituent intent-type strings. ``LP_COLLECT_FEES`` is
+# deliberately absent — it stays gated by ``supports_standalone_fee_collection``
+# (see ``get_protocol_intent_matrix`` / ``_build_lp_collect_fees_intents``).
+_LP_INTENT_TYPES = frozenset({"LP_OPEN", "LP_CLOSE"})
+_LENDING_INTENT_TYPES = frozenset({"SUPPLY", "WITHDRAW", "BORROW", "REPAY"})
+_PERP_INTENT_TYPES = frozenset({"PERP_OPEN", "PERP_CLOSE"})
+# Every intent-type string a connector may legally declare in
+# ``synthetic_discovery_intents`` — derived from the per-category sets above so it
+# cannot drift. A value outside this set is a typo (e.g. ``"L_OPEN"``) that would
+# otherwise be silently ignored, dropping the connector from a membership set;
+# ``_derive_membership_sets`` raises on it instead (VIB-4928).
+_VALID_SYNTHETIC_INTENTS: frozenset[str] = (
+    frozenset({"SWAP"}) | _LP_INTENT_TYPES | _LENDING_INTENT_TYPES | _PERP_INTENT_TYPES
+)
+
+
+def _all_connector_slugs() -> frozenset[str]:
+    """Enumerate every connector slug whose ``PermissionHints`` can opt into
+    synthetic discovery.
+
+    The universe is the compiler-registry loader keys (every protocol slug with
+    a connector-owned compiler) UNION the ``_PROTOCOL_CONNECTOR_MAP`` aliases.
+    The alias map matters because a single connector directory can expose
+    several protocol surfaces through distinct ``PermissionHints`` exports —
+    e.g. ``aerodrome_slipstream`` resolves to ``aerodrome``'s
+    ``PERMISSION_HINTS_SLIPSTREAM`` (it is also a loader key, so the union is
+    defensive) and ``metamorpho`` resolves to ``morpho_vault``. A slug that
+    declares no ``synthetic_discovery_intents`` simply contributes to none of
+    the derived sets, so over-enumerating is harmless.
+    """
+    from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
+
+    return frozenset(CompilerRegistry.supported_protocols()) | frozenset(_PROTOCOL_CONNECTOR_MAP)
+
+
+def _derive_membership_sets() -> tuple[frozenset[str], frozenset[str], frozenset[str], frozenset[str], frozenset[str]]:
+    """Fold the per-slug ``PermissionHints`` declarations into the five
+    connector-membership frozensets (SWAP / native-in SWAP / LP / lending / perp).
+
+    Returns them in a fixed order so the module-level unpack stays readable.
+    """
+    swap: set[str] = set()
+    native_in_swap: set[str] = set()
+    lp: set[str] = set()
+    lending: set[str] = set()
+    perp: set[str] = set()
+    for slug in _all_connector_slugs():
+        hints = get_permission_hints(slug)
+        declared = hints.synthetic_discovery_intents
+        if not declared:
+            continue
+        unknown = declared - _VALID_SYNTHETIC_INTENTS
+        if unknown:
+            raise ValueError(
+                f"Connector {slug!r} declared unknown synthetic_discovery_intents "
+                f"{sorted(unknown)}; valid intent types are "
+                f"{sorted(_VALID_SYNTHETIC_INTENTS)}"
+            )
+        if "SWAP" in declared:
+            swap.add(slug)
+            if hints.supports_native_in_swap:
+                native_in_swap.add(slug)
+        if declared & _LP_INTENT_TYPES:
+            lp.add(slug)
+        if declared & _LENDING_INTENT_TYPES:
+            lending.add(slug)
+        if declared & _PERP_INTENT_TYPES:
+            perp.add(slug)
+    return frozenset(swap), frozenset(native_in_swap), frozenset(lp), frozenset(lending), frozenset(perp)
+
+
+def _derive_flash_loan_providers() -> frozenset[str]:
+    """Fold the flash-loan registry's per-provider ``synthetic_discovery`` flag
+    into the ``_FLASH_LOAN_PROVIDERS`` membership set.
+
+    Importing the registration boot module ensures the in-process registry is
+    populated before we read it (it registers concrete connectors at import).
+    """
+    # Boot the registry (registers aave / balancer / morpho on import).
+    import almanak.connectors._strategy_flash_loan_registry  # noqa: F401
+    from almanak.connectors._strategy_base.flash_loan_registry import FLASH_LOAN_PROVIDER_REGISTRY
+
+    return frozenset(FLASH_LOAN_PROVIDER_REGISTRY.synthetic_discovery_names())
+
+
+@functools.cache
+def _membership_sets() -> tuple[frozenset[str], frozenset[str], frozenset[str], frozenset[str], frozenset[str]]:
+    """Lazily derive + cache the five connector-membership frozensets.
+
+    Deferred out of module import (it was eager) because the derivation calls
+    ``get_permission_hints`` for every connector; at *import* time a connector's
+    ``permission_hints`` module can still be mid-import (circular), and
+    ``get_permission_hints`` then silently falls back to default (empty) hints,
+    dropping that connector from the derived sets. Under xdist worker import
+    ordering that surfaced as ``morpho_blue`` missing from
+    ``_LENDING_PROTOCOLS`` (VIB-4928). Computing on first *use* runs after all
+    connector imports have settled, making the membership deterministic.
+    """
+    return _derive_membership_sets()
+
+
+@functools.cache
+def _flash_loan_providers() -> frozenset[str]:
+    """Lazily derive + cache ``_FLASH_LOAN_PROVIDERS`` (see :func:`_membership_sets`)."""
+    return _derive_flash_loan_providers()
+
+
+def _swap_protocols() -> frozenset[str]:
+    return _membership_sets()[0]
+
+
+def _native_in_swap_protocols() -> frozenset[str]:
+    return _membership_sets()[1]
+
+
+def _lp_protocols() -> frozenset[str]:
+    return _membership_sets()[2]
+
+
+def _lending_protocols() -> frozenset[str]:
+    return _membership_sets()[3]
+
+
+def _perp_protocols() -> frozenset[str]:
+    return _membership_sets()[4]
+
+
+# Backwards-compatible module-level names (PEP 562). External consumers and tests
+# read ``synthetic_intents._SWAP_PROTOCOLS`` etc.; resolving them via __getattr__
+# keeps the derivation lazy so import-time access never triggers it (which is what
+# poisoned the eager version under circular imports, VIB-4928).
+_LAZY_MEMBERSHIP_ACCESSORS: dict[str, Callable[[], frozenset[str]]] = {
+    "_SWAP_PROTOCOLS": _swap_protocols,
+    "_NATIVE_IN_SWAP_PROTOCOLS": _native_in_swap_protocols,
+    "_LP_PROTOCOLS": _lp_protocols,
+    "_LENDING_PROTOCOLS": _lending_protocols,
+    "_PERP_PROTOCOLS": _perp_protocols,
+    "_FLASH_LOAN_PROVIDERS": _flash_loan_providers,
 }
-# Protocols whose SwapRouter wraps the chain's native gas token via msg.value
-# (no ERC-20 approve, single value-bearing tx). Emitting an additional
-# native-input synthetic intent for these flips ``send_allowed=True`` on the
-# router target, which Zodiac Roles requires for a value-bearing call to
-# pass authorisation. Without this, native-in tests (e.g. native MATIC →
-# USDC on polygon) compile fine but fail authz at execTransactionWithRole
-# because the manifest target was discovered via a value-less synthetic.
-_NATIVE_IN_SWAP_PROTOCOLS = {
-    "uniswap_v3",
-    "pancakeswap_v3",
-    "sushiswap_v3",
-}
-_LP_PROTOCOLS = {
-    "uniswap_v3",
-    "pancakeswap_v3",
-    "sushiswap_v3",
-    "aerodrome",
-    "aerodrome_slipstream",
-    "traderjoe_v2",
-    "pendle",
-}
-_LENDING_PROTOCOLS = {"aave_v3", "morpho_blue", "spark", "compound_v3"}
-_PERP_PROTOCOLS = {"gmx_v2", "aster_perps", "pancakeswap_perps"}
-_FLASH_LOAN_PROVIDERS = {"aave", "balancer"}
+
+
+def __getattr__(name: str) -> frozenset[str]:
+    accessor = _LAZY_MEMBERSHIP_ACCESSORS.get(name)
+    if accessor is not None:
+        return accessor()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def get_protocol_intent_matrix() -> dict[str, frozenset[IntentType]]:
@@ -108,13 +235,13 @@ def get_protocol_intent_matrix() -> dict[str, frozenset[IntentType]]:
       connector-directory names, so they need separate handling)
     """
     matrix: dict[str, set[IntentType]] = defaultdict(set)
-    for proto in _SWAP_PROTOCOLS:
+    for proto in _swap_protocols():
         matrix[proto].add(IntentType.SWAP)
-    for proto in _LP_PROTOCOLS:
+    for proto in _lp_protocols():
         matrix[proto].update({IntentType.LP_OPEN, IntentType.LP_CLOSE})
         if get_permission_hints(proto).supports_standalone_fee_collection:
             matrix[proto].add(IntentType.LP_COLLECT_FEES)
-    for proto in _LENDING_PROTOCOLS:
+    for proto in _lending_protocols():
         matrix[proto].update(
             {
                 IntentType.SUPPLY,
@@ -123,7 +250,7 @@ def get_protocol_intent_matrix() -> dict[str, frozenset[IntentType]]:
                 IntentType.REPAY,
             }
         )
-    for proto in _PERP_PROTOCOLS:
+    for proto in _perp_protocols():
         matrix[proto].update({IntentType.PERP_OPEN, IntentType.PERP_CLOSE})
     for proto, chains in VAULT_PROTOCOL_REPRESENTATIVE.items():
         if chains:
@@ -227,7 +354,7 @@ def build_synthetic_intents(
 
 
 def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list[AnyIntent]:
-    if protocol not in _SWAP_PROTOCOLS:
+    if protocol not in _swap_protocols():
         return []
     override = get_discovery_vectors_override(protocol)
     if override is not None:
@@ -278,7 +405,7 @@ def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list
     # Without this, the manifest authorises the selector but rejects every
     # value-bearing call at execTransactionWithRole.
     native_symbols = _CHAIN_NATIVE_SYMBOLS.get(chain, frozenset())
-    if protocol in _NATIVE_IN_SWAP_PROTOCOLS and native_symbols:
+    if protocol in _native_in_swap_protocols() and native_symbols:
         # ``frozenset`` iteration order is process-stable but
         # implementation-defined. On chains with multiple aliases (polygon
         # exposes ``{"MATIC", "POL"}``), ``next(iter(...))`` could pick
@@ -302,7 +429,7 @@ def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list
 
 
 def _build_lp_open_intents(protocol: str, chain: str) -> list[AnyIntent]:
-    if protocol not in _LP_PROTOCOLS:
+    if protocol not in _lp_protocols():
         return []
     # Override hook runs BEFORE the LP_POSITION_MANAGERS gate so a connector
     # that owns its discovery via ``build_discovery_vectors`` is never blocked
@@ -352,7 +479,7 @@ def _build_lp_open_intents(protocol: str, chain: str) -> list[AnyIntent]:
 
 
 def _build_lp_close_intents(protocol: str, chain: str) -> list[AnyIntent]:
-    if protocol not in _LP_PROTOCOLS:
+    if protocol not in _lp_protocols():
         return []
     # Override hook runs BEFORE the LP_POSITION_MANAGERS gate — see
     # ``_build_lp_open_intents`` for the canonical placement rationale.
@@ -407,7 +534,7 @@ def _build_lp_collect_fees_intents(protocol: str, chain: str) -> list[AnyIntent]
 
 
 def _build_supply_intents(protocol: str, chain: str, usdc: str, weth: str) -> list[AnyIntent]:
-    if protocol not in _LENDING_PROTOCOLS:
+    if protocol not in _lending_protocols():
         return []
     # Override hook runs BEFORE the chain/pool gate below so a connector that
     # owns its discovery via ``build_discovery_vectors`` is never blocked by
@@ -437,7 +564,7 @@ def _build_supply_intents(protocol: str, chain: str, usdc: str, weth: str) -> li
 
 
 def _build_withdraw_intents(protocol: str, chain: str, usdc: str, weth: str) -> list[AnyIntent]:
-    if protocol not in _LENDING_PROTOCOLS:
+    if protocol not in _lending_protocols():
         return []
     override = get_discovery_vectors_override(protocol)
     if override is not None:
@@ -462,7 +589,7 @@ def _build_withdraw_intents(protocol: str, chain: str, usdc: str, weth: str) -> 
 
 
 def _build_borrow_intents(protocol: str, chain: str, usdc: str, weth: str) -> list[AnyIntent]:
-    if protocol not in _LENDING_PROTOCOLS:
+    if protocol not in _lending_protocols():
         return []
     override = get_discovery_vectors_override(protocol)
     if override is not None:
@@ -489,7 +616,7 @@ def _build_borrow_intents(protocol: str, chain: str, usdc: str, weth: str) -> li
 
 
 def _build_repay_intents(protocol: str, chain: str, usdc: str, weth: str) -> list[AnyIntent]:
-    if protocol not in _LENDING_PROTOCOLS:
+    if protocol not in _lending_protocols():
         return []
     override = get_discovery_vectors_override(protocol)
     if override is not None:
@@ -514,7 +641,7 @@ def _build_repay_intents(protocol: str, chain: str, usdc: str, weth: str) -> lis
 
 
 def _build_perp_open_intents(protocol: str, chain: str, usdc: str) -> list[AnyIntent]:
-    if protocol not in _PERP_PROTOCOLS:
+    if protocol not in _perp_protocols():
         return []
     # Override hook runs BEFORE the protocol/chain dispatch so a connector that
     # owns its discovery via ``build_discovery_vectors`` is never blocked by
@@ -542,7 +669,7 @@ def _build_perp_open_intents(protocol: str, chain: str, usdc: str) -> list[AnyIn
 
 
 def _build_perp_close_intents(protocol: str, chain: str, usdc: str) -> list[AnyIntent]:
-    if protocol not in _PERP_PROTOCOLS:
+    if protocol not in _perp_protocols():
         return []
     # Override hook runs BEFORE the protocol/chain dispatch so a connector that
     # owns its discovery via ``build_discovery_vectors`` is never blocked by
@@ -568,7 +695,7 @@ def _build_perp_close_intents(protocol: str, chain: str, usdc: str) -> list[AnyI
 
 
 def _build_flash_loan_intents(protocol: str, chain: str, usdc: str) -> list[AnyIntent]:
-    if protocol not in _FLASH_LOAN_PROVIDERS:
+    if protocol not in _flash_loan_providers():
         return []
     _, weth = _get_token_pair(chain)
     # Flash loans require at least one callback intent

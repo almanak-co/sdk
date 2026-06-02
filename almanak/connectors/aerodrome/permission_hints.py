@@ -67,6 +67,11 @@ PERMISSION_HINTS = PermissionHints(
         "0xcac88ea9": "swapExactTokensForTokens(uint256,uint256,Route[],address,uint256)",
     },
     static_permissions=_static_permissions,
+    # Synthetic-discovery participation (VIB-4928): classic Solidly-fork
+    # ``aerodrome`` does SWAP + LP. As a Solidly router it has no native-in
+    # msg.value auto-wrap path, so ``supports_native_in_swap`` stays False
+    # (historically absent from ``_NATIVE_IN_SWAP_PROTOCOLS``).
+    synthetic_discovery_intents=frozenset({"SWAP", "LP_OPEN", "LP_CLOSE"}),
 )
 
 
@@ -183,4 +188,11 @@ PERMISSION_HINTS_SLIPSTREAM = PermissionHints(
         _SLIPSTREAM_DECREASE_SELECTOR: _SLIPSTREAM_DECREASE_SIG,
         _SLIPSTREAM_COLLECT_SELECTOR: _SLIPSTREAM_COLLECT_SIG,
     },
+    # Synthetic-discovery participation (VIB-4928): Slipstream is a CL
+    # NonfungiblePositionManager surface — LP only, NOT SWAP (classic
+    # ``aerodrome`` owns the Solidly SWAP route). This is the asymmetry that a
+    # compiler-class-level declaration could not express, since both slugs
+    # share ``AerodromeCompiler``. LP_COLLECT_FEES stays gated by
+    # ``supports_standalone_fee_collection=True`` above.
+    synthetic_discovery_intents=frozenset({"LP_OPEN", "LP_CLOSE"}),
 )

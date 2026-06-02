@@ -70,6 +70,11 @@ PERMISSION_HINTS = PermissionHints(
             "PT-sUSDe",
         ),
     },
+    # Synthetic-discovery participation (VIB-4928): SWAP + LP into the Pendle
+    # market contract. Discovery vectors are produced by
+    # ``build_discovery_vectors`` below (Pendle has no NFT position manager, so
+    # it is absent from LP_POSITION_MANAGERS and relies on the override).
+    synthetic_discovery_intents=frozenset({"SWAP", "LP_OPEN", "LP_CLOSE"}),
 )
 
 

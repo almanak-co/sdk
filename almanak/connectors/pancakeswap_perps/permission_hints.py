@@ -35,7 +35,11 @@ from almanak.framework.permissions.hints import DiscoveryContext, PermissionHint
 if TYPE_CHECKING:
     from almanak.framework.intents.vocabulary import AnyIntent
 
-PERMISSION_HINTS = PermissionHints()
+PERMISSION_HINTS = PermissionHints(
+    # Synthetic-discovery participation (VIB-4928): perp open + close. The BSC
+    # native-collateral synthetic is emitted by ``build_discovery_vectors``.
+    synthetic_discovery_intents=frozenset({"PERP_OPEN", "PERP_CLOSE"}),
+)
 
 
 def build_discovery_vectors(

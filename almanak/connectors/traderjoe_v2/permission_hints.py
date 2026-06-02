@@ -222,6 +222,11 @@ PERMISSION_HINTS = PermissionHints(
         _TRADERJOE_APPROVE_FOR_ALL_SELECTOR: _TRADERJOE_APPROVE_FOR_ALL_SIG,
         _TRADERJOE_COLLECT_FEES_SELECTOR: _TRADERJOE_COLLECT_FEES_SIG,
     },
+    # Synthetic-discovery participation (VIB-4928): SWAP + LP via the LBRouter.
+    # The SWAP synthetic is produced by ``build_discovery_vectors`` below (the
+    # LBRouter address lives in LP_POSITION_MANAGERS, not PROTOCOL_ROUTERS).
+    # LP_COLLECT_FEES stays gated by ``supports_standalone_fee_collection``.
+    synthetic_discovery_intents=frozenset({"SWAP", "LP_OPEN", "LP_CLOSE"}),
 )
 
 

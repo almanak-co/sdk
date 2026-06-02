@@ -95,6 +95,34 @@ class PermissionHints:
             RPC URL.  Protocols that only use static contract addresses (e.g.
             Uniswap V3, Aave V3) should leave this False to avoid unnecessary
             RPC calls during offline discovery.
+        synthetic_discovery_intents: The set of intent-type *strings* (e.g.
+            ``"SWAP"``, ``"LP_OPEN"``, ``"SUPPLY"``) this protocol slug
+            participates in for synthetic permission discovery. **Opt-OUT
+            default** (empty) — a protocol with no declaration emits no
+            synthetic intents and therefore appears in none of the derived
+            membership sets in ``synthetic_intents.py``. This is the per-slug
+            source of truth that replaced the hardcoded ``_SWAP_PROTOCOLS`` /
+            ``_LP_PROTOCOLS`` / ``_LENDING_PROTOCOLS`` / ``_PERP_PROTOCOLS``
+            frozensets (VIB-4928). It is declared per-*slug* (not per-compiler)
+            because several distinct protocol slugs share one compiler class
+            with different discovery participation — e.g. ``aerodrome`` and
+            ``aerodrome_slipstream`` share ``AerodromeCompiler`` but slipstream
+            participates in LP only, not SWAP; ``agni_finance`` shares
+            ``UniswapV3Compiler`` but participates in neither. ``LP_COLLECT_FEES``
+            stays gated by ``supports_standalone_fee_collection`` and need not be
+            listed here. Each listed value must be an intent the protocol's
+            compiler can actually build (a subset of the compiler's ``intents``).
+        supports_native_in_swap: Whether this protocol's SwapRouter wraps the
+            chain's native gas token via ``msg.value`` (no ERC-20 approve,
+            single value-bearing tx). When True, synthetic SWAP discovery emits
+            an extra native-input intent so ``tx.value > 0`` flips
+            ``send_allowed=True`` on the router target — Zodiac Roles requires
+            this for a value-bearing call to pass authorisation at
+            ``execTransactionWithRole``. V3-style SwapRouter02 routers
+            (Uniswap V3 / PancakeSwap V3 / Sushiswap V3) set this True; Solidly
+            forks and others leave it False (the historical
+            ``_NATIVE_IN_SWAP_PROTOCOLS`` membership). Only meaningful when
+            ``"SWAP"`` is in ``synthetic_discovery_intents``.
     """
 
     synthetic_position_id: str = "1"
@@ -106,6 +134,8 @@ class PermissionHints:
     synthetic_fee_tier: dict[str, int] = field(default_factory=dict)
     static_permissions: dict[str, list[StaticPermissionEntry]] = field(default_factory=dict)
     needs_rpc_discovery: bool = False
+    synthetic_discovery_intents: frozenset[str] = frozenset()
+    supports_native_in_swap: bool = False
 
 
 _DEFAULT = PermissionHints()

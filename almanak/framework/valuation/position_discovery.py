@@ -360,12 +360,21 @@ def _has_lp_protocol(protocols: list[str]) -> bool:
 def _has_perps_protocol(protocols: list[str]) -> bool:
     """Check if any protocol in the list is a perpetuals protocol.
 
-    Kept consistent with ``_PERP_PROTOCOLS`` in
-    ``almanak/framework/permissions/synthetic_intents.py`` so that every perp
-    venue whose synthetic intents are generated for permission discovery is
-    also discovered/valued by the position-discovery flow.
+    Reads the same connector-declared perp membership as the synthetic
+    permission-discovery path (``_PERP_PROTOCOLS`` in
+    ``almanak/framework/permissions/synthetic_intents.py``, itself derived from
+    each connector's ``PermissionHints.synthetic_discovery_intents``), so that
+    every perp venue whose synthetic intents are generated for permission
+    discovery is also discovered/valued by the position-discovery flow.
+
+    The ``"gmx"`` alias is added on top of the derived set: position-discovery
+    callers may pass the historical short protocol name, but ``gmx_v2`` is the
+    canonical connector slug that declares perp participation (so the derived
+    set carries ``gmx_v2``, not ``gmx``).
     """
-    perps_protocols = {"gmx_v2", "gmx", "aster_perps", "pancakeswap_perps"}
+    from almanak.framework.permissions.synthetic_intents import _PERP_PROTOCOLS
+
+    perps_protocols = _PERP_PROTOCOLS | {"gmx"}
     return bool({p.lower() for p in protocols} & perps_protocols)
 
 

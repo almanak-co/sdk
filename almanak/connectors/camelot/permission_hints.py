@@ -9,13 +9,17 @@ swap-router permission is generated generically by synthetic-intent
 discovery from the SWAP intent type — no static permissions or market IDs
 required.
 
-The minimal default ``PermissionHints()`` is therefore the correct hint
-for this connector. Revisit only if Camelot ever grows LP / collect-fees /
-lending support, or if synthetic LP discovery routes through Arbitrum's
-default ``(USDC, WETH)`` pair and that pair lacks Camelot liquidity (today
-it does — VIB-1636 Algebra V3 SwapRouter on Arbitrum).
+The only non-default hint is ``synthetic_discovery_intents={"SWAP"}`` (VIB-4928)
+— Camelot participates in synthetic SWAP discovery only. It is a Solidly-style
+Algebra router (no native-in msg.value auto-wrap path tested today), so
+``supports_native_in_swap`` stays False. Revisit only if Camelot ever grows
+LP / collect-fees / lending support, or if synthetic LP discovery routes
+through Arbitrum's default ``(USDC, WETH)`` pair and that pair lacks Camelot
+liquidity (today it does — VIB-1636 Algebra V3 SwapRouter on Arbitrum).
 """
 
 from almanak.framework.permissions.hints import PermissionHints
 
-PERMISSION_HINTS = PermissionHints()
+PERMISSION_HINTS = PermissionHints(
+    synthetic_discovery_intents=frozenset({"SWAP"}),
+)

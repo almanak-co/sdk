@@ -32,7 +32,12 @@ if TYPE_CHECKING:
     from almanak.framework.intents.vocabulary import AnyIntent
 
 
-PERMISSION_HINTS = PermissionHints()
+# Synthetic-discovery participation (VIB-4928): the four core lending
+# primitives. Compound III discovery vectors are produced by
+# ``build_discovery_vectors`` below.
+PERMISSION_HINTS = PermissionHints(
+    synthetic_discovery_intents=frozenset({"SUPPLY", "WITHDRAW", "BORROW", "REPAY"}),
+)
 
 
 def _synthetic_tokens(chain: str, fallback_usdc: str, hint_market_id: str | None) -> tuple[str, str | None, str | None]:
