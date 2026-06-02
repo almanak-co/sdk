@@ -38,6 +38,10 @@ from almanak.framework.accounting.reporting import (
     build_pendle_report,
     load_accounting_data,
 )
+from almanak.framework.accounting.reporting.leveraged_lending import (
+    LeveragedLendingVerdict,
+    detect_leveraged_lending,
+)
 from almanak.framework.accounting.reporting.render_json import (
     data_quality_to_dict,
     lending_section_to_dict,
@@ -512,6 +516,23 @@ class PnLBreakdown:
     headline_suppressed: bool = False
     headline_suppression_reason: str | None = None
 
+    # VIB-4975 (B-open): leveraged-lending headline override.  When the strategy
+    # holds a LIVE leveraged-lending position (SUPPLY + BORROW legs in the
+    # latest snapshot), the gross/net headline taken verbatim from
+    # ``PortfolioMetrics`` over-reports because ``total_value_usd`` is
+    # positive-position-scoped (VIB-3614): it counts the re-supplied *borrowed*
+    # collateral but never nets the borrowed-principal liability.  When this
+    # flag is set, ``gross_pnl_usd`` / ``net_pnl_usd`` have been re-derived from
+    # the debt-netted lending NAV (``net_strategy_nav_usd`` − initial − flows)
+    # instead, so leverage is not booked as profit.  The closed-state artifact
+    # (collateral back in the wallet → NAV $0) is NOT solved here — that needs a
+    # scoped wallet/cash baseline (VIB-4976) and falls under
+    # ``headline_suppressed`` above.  ``headline_leverage_note`` is the
+    # single-line operator-facing explanation; ``None`` when no override ran
+    # (Empty≠Zero).
+    headline_leverage_adjusted: bool = False
+    headline_leverage_note: str | None = None
+
     def to_json_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-friendly dict (Decimal -> str, None preserved)."""
 
@@ -550,6 +571,8 @@ class PnLBreakdown:
             "warnings": list(self.warnings),
             "headline_suppressed": self.headline_suppressed,
             "headline_suppression_reason": self.headline_suppression_reason,
+            "headline_leverage_adjusted": self.headline_leverage_adjusted,
+            "headline_leverage_note": self.headline_leverage_note,
         }
 
 
@@ -623,6 +646,94 @@ def _populate_gross_net_pnl(breakdown: PnLBreakdown, metrics: Any) -> None:
             "No PortfolioMetrics row found — gross/net PnL unavailable. "
             "Run the strategy at least once so metrics are persisted."
         )
+
+
+def _apply_open_leveraged_headline(breakdown: PnLBreakdown, metrics: Any, verdict: LeveragedLendingVerdict) -> None:
+    """Re-derive the gross/net headline from the debt-netted lending NAV (B-open).
+
+    For a LIVE leveraged-lending position the headline taken verbatim from
+    ``PortfolioMetrics`` over-reports: ``pnl_before_gas`` uses
+    ``total_value_usd``, which under VIB-3614 is positive-position-scoped — it
+    counts the re-supplied *borrowed* collateral but never nets the
+    borrowed-principal liability, so taking on leverage manufactures a phantom
+    gain.  We swap ``total_value_usd`` for the **debt-netted lending NAV**
+    (``net_lending_nav_usd`` = Σ SUPPLY − Σ |BORROW|) while keeping the SAME
+    initial/flow baseline ``PortfolioMetrics`` uses:
+
+        gross = net_lending_nav − initial_value_usd − deposits + withdrawals
+        net   = gross − gas_spent_usd
+
+    NB (Codex): the headline is PnL carried through the baseline, NOT the NAV
+    itself.  On the ``insp4`` shape NAV $3.63 is the position *value*; the PnL
+    is that value minus the $4 initial (≈ −$0.37 before gas), not +$1.19.
+
+    No-ops (leaving the verbatim ``PortfolioMetrics`` headline) when metrics or
+    the netted NAV are unmeasured — Empty≠Zero, never substitute a guess.
+    Likewise when ``initial_value_usd`` is ``None`` (unmeasured baseline):
+    deriving ``NAV − 0 − flows`` off a zero-defaulted baseline would emit a
+    confident wrong PnL, so we skip the derivation rather than guess (Gemini
+    review).  ``deposits`` / ``withdrawals`` / ``gas`` keep the measured-zero
+    default — an absent flow legitimately means "no capital moved", and the
+    verbatim ``PortfolioMetrics.pnl_before_gas`` it mirrors treats them the
+    same way.
+    """
+    if metrics is None or verdict.net_lending_nav_usd is None:
+        return
+    # Empty≠Zero: an unmeasured initial baseline must NOT default to 0 — that
+    # would book the entire NAV as PnL.  Leave the verbatim headline untouched.
+    initial_raw = getattr(metrics, "initial_value_usd", None)
+    if initial_raw is None:
+        return
+    net_nav = _dec(verdict.net_lending_nav_usd)
+    initial = _dec(initial_raw)
+    deposits = _dec(getattr(metrics, "deposits_usd", None))
+    withdrawals = _dec(getattr(metrics, "withdrawals_usd", None))
+    gas_spent = _dec(getattr(metrics, "gas_spent_usd", None))
+    gross = net_nav - initial - deposits + withdrawals
+    breakdown.gross_pnl_usd = gross
+    breakdown.net_pnl_usd = gross - gas_spent
+    breakdown.headline_leverage_adjusted = True
+    breakdown.headline_leverage_note = (
+        "leveraged-lending: gross/net derived from debt-netted lending NAV "
+        f"({_fmt_money(net_nav)} = SUPPLY − BORROW) instead of the "
+        "positive-position-scoped total_value_usd (VIB-3614), so re-supplied "
+        "borrowed collateral is not booked as profit (VIB-4975). NB: this "
+        "headline is lending-NAV-scoped (Σ SUPPLY − Σ BORROW); the 'Net "
+        "strategy NAV' line is total-position-scoped (total_value_usd − "
+        "BORROW) and the two diverge if the loop also holds a non-lending "
+        "leg (e.g. LP)."
+    )
+
+
+def _apply_leveraged_lending_headline(
+    breakdown: PnLBreakdown,
+    metrics: Any,
+    snapshot: Any,
+    ledger_entries: list,
+) -> None:
+    """Apply the VIB-4975 leveraged-lending headline verdict.
+
+    Non-leveraged strategies (no live BORROW position, no historical BORROW
+    ledger entry) are left untouched — the verbatim ``PortfolioMetrics``
+    headline stands (regression guard).
+
+    * **open** — re-derive the headline from the debt-netted lending NAV
+      (B-open) so leverage is not booked as profit.
+    * **closed** — suppress the headline (B3): the collateral has returned to
+      the wallet, the positive-position-scoped ``total_value_usd`` collapses to
+      ~0, and the verbatim headline would read ≈ −initial (a false −100%).
+      Recognising wallet-held value needs a scoped wallet/cash baseline
+      (VIB-4976, design); until then an honest "unavailable" beats a confident
+      wrong number.
+    """
+    verdict = detect_leveraged_lending(snapshot, ledger_entries)
+    if not verdict.is_leveraged_lending:
+        return
+    if verdict.state == "open":
+        _apply_open_leveraged_headline(breakdown, metrics, verdict)
+    elif verdict.state == "closed":
+        breakdown.headline_suppressed = True
+        breakdown.headline_suppression_reason = verdict.reason
 
 
 def _compute_gas(breakdown: PnLBreakdown, metrics: Any, ledger_entries: list) -> int:
@@ -844,6 +955,10 @@ def compute_pnl_breakdown(
     _populate_identity(breakdown, deployment_id, snapshot, ledger_entries)
     _populate_strategy_nav(breakdown, snapshot)
     _populate_gross_net_pnl(breakdown, metrics)
+    # VIB-4975: leveraged-lending strategies need the headline scoped to the
+    # debt-netted NAV (open) or suppressed (closed) — runs AFTER the verbatim
+    # PortfolioMetrics headline so it can override / suppress it in place.
+    _apply_leveraged_lending_headline(breakdown, metrics, snapshot, ledger_entries)
     measured_gas_count = _compute_gas(breakdown, metrics, ledger_entries)
     _compute_slippage(breakdown, ledger_entries)
     _compute_trade_stats(breakdown, ledger_entries)
@@ -909,6 +1024,11 @@ def _append_headline_pnl(lines: list[str], breakdown: PnLBreakdown) -> None:
             lines.append(f"  Reason: {breakdown.headline_suppression_reason}")
         return
     lines.append(f"Gross PnL:        {_fmt_money(breakdown.gross_pnl_usd)}")
+    # VIB-4975 (B-open): when the headline was re-derived from the debt-netted
+    # lending NAV, say so loudly so the operator knows the number is NOT the
+    # verbatim PortfolioMetrics figure.
+    if breakdown.headline_leverage_adjusted and breakdown.headline_leverage_note:
+        lines.append(f"  Note: {breakdown.headline_leverage_note}")
 
 
 def _append_net_pnl_and_nav(lines: list[str], breakdown: PnLBreakdown) -> None:
