@@ -49,6 +49,17 @@ from ..tokens import get_coingecko_id
 logger = logging.getLogger(__name__)
 
 
+# Extra candles fetched beyond ``period`` so Wilder's smoothing has a warm-up
+# buffer before the most-recent (decision) candle. ``calculate_rsi`` requests
+# ``period + RSI_DECISION_BUFFER`` candles per iteration, so the strategy's
+# per-decision RSI is computed from a *sliding* window of exactly this many
+# closes (the EMA seed is reset ``RSI_DECISION_BUFFER`` candles before the
+# decision point). The TA dashboard mirrors this window size when reconstructing
+# the decision-faithful RSI line (VIB-4969) — keep them tied to this constant so
+# the two cannot drift.
+RSI_DECISION_BUFFER = 20
+
+
 @dataclass
 class OHLCVData:
     """OHLCV candlestick data point.
@@ -611,9 +622,10 @@ class RSICalculator:
             # Daily candles for longer-term analysis
             rsi_1d = await calculator.calculate_rsi("WETH", period=14, timeframe="1d")
         """
-        # Need at least period + 1 data points for RSI calculation
-        # Request extra for buffer
-        limit = period + 20
+        # Need at least period + 1 data points for RSI calculation.
+        # Request ``RSI_DECISION_BUFFER`` extra for Wilder warm-up; this is the
+        # per-decision sliding window the dashboard mirrors (VIB-4969).
+        limit = period + RSI_DECISION_BUFFER
 
         logger.debug(
             "Calculating RSI for %s with period=%d, timeframe=%s (fetching %d candles)",

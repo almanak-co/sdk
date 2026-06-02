@@ -218,3 +218,40 @@ def test_no_positions_means_no_ohlcv_fetch(api_client_mock: MagicMock) -> None:
     config = LPDashboardConfig(token0="WETH")
     prepare_lp_session_state(api_client_mock, state, config)
     api_client_mock.get_ohlcv.assert_not_called()
+
+
+# =============================================================================
+# VIB-4969 — LP price-history chart honours the configured timeframe
+# =============================================================================
+
+
+def test_lp_ohlcv_fetch_uses_configured_timeframe(api_client_mock: MagicMock) -> None:
+    """A 5m LP config must fetch 5m candles with a scaled limit, not 1h/168."""
+    from almanak.framework.dashboard.templates._ohlcv_window import ohlcv_limit_for_timeframe
+
+    api_client_mock.get_position_events.return_value = []
+    api_client_mock.get_ohlcv.return_value = [_candle()]
+    state = {"positions": [{"pool_address": "0xpool", "chain": "arbitrum"}]}
+    config = LPDashboardConfig(token0="WETH", timeframe="5m")
+
+    prepare_lp_session_state(api_client_mock, state, config)
+
+    api_client_mock.get_ohlcv.assert_called_once()
+    kwargs = api_client_mock.get_ohlcv.call_args.kwargs
+    assert kwargs["timeframe"] == "5m"
+    assert kwargs["limit"] == ohlcv_limit_for_timeframe("5m") == 720
+
+
+def test_lp_ohlcv_fetch_defaults_to_1h(api_client_mock: MagicMock) -> None:
+    """Back-compat: an LP config without an explicit timeframe still uses 1h/168."""
+    api_client_mock.get_position_events.return_value = []
+    api_client_mock.get_ohlcv.return_value = [_candle()]
+    state = {"positions": [{"pool_address": "0xpool", "chain": "arbitrum"}]}
+    config = LPDashboardConfig(token0="WETH")  # no timeframe
+
+    prepare_lp_session_state(api_client_mock, state, config)
+
+    api_client_mock.get_ohlcv.assert_called_once()
+    kwargs = api_client_mock.get_ohlcv.call_args.kwargs
+    assert kwargs["timeframe"] == "1h"
+    assert kwargs["limit"] == 168

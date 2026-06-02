@@ -54,6 +54,10 @@ from almanak.framework.dashboard.sections import (
     render_pnl_section,
     render_trade_tape_section,
 )
+from almanak.framework.dashboard.templates._ohlcv_window import (
+    normalize_timeframe,
+    ohlcv_limit_for_timeframe,
+)
 
 
 @dataclass
@@ -72,6 +76,11 @@ class LPDashboardConfig:
         show_fee_accumulation: Whether to show fee accumulation chart
         invert_prices: Whether to invert price display
         position_bounds_ratio: Ratio for position bounds lines (None to disable)
+        timeframe: OHLCV candle interval for the price-history chart — one of
+            ``1m``/``5m``/``15m``/``1h``/``4h``/``1d``. Defaults to ``"1h"`` for
+            back-compat. Set it to the strategy's ``data_granularity`` so the
+            price chart matches the cadence the strategy actually trades on
+            (VIB-4969); the recent-window candle count scales per timeframe.
     """
 
     protocol: str = "uniswap_v3"
@@ -88,6 +97,7 @@ class LPDashboardConfig:
     pool_address: str | None = None
     token0_address: str | None = None
     token1_address: str | None = None
+    timeframe: str = "1h"
 
 
 class LPSessionState(TypedDict, total=False):
@@ -443,14 +453,20 @@ def _fetch_pool_candles(
     chain: str,
     pool_address: str | None,
     token0: str,
+    timeframe: str = "1h",
 ) -> list[Any]:
-    """Best-effort OHLCV fetch for a single pool. Empty list on any failure."""
+    """Best-effort OHLCV fetch for a single pool. Empty list on any failure.
+
+    ``timeframe`` defaults to ``"1h"`` for back-compat; the recent-window candle
+    count scales per timeframe via :func:`ohlcv_limit_for_timeframe` (VIB-4969).
+    """
+    timeframe = normalize_timeframe(timeframe)
     try:
         return api_client.get_ohlcv(
             token=token0,
             quote="USD",
-            timeframe="1h",
-            limit=168,
+            timeframe=timeframe,
+            limit=ohlcv_limit_for_timeframe(timeframe),
             chain=chain,
             pool_address=pool_address,
         )
@@ -490,10 +506,11 @@ def _populate_price_history_by_pool(
         by_pool = {}
 
     token0 = config.token0 if config else "WETH"
+    timeframe = config.timeframe if config else "1h"
     for chain, pool_address in candidates:
         if (chain, pool_address) in by_pool:
             continue
-        candles = _fetch_pool_candles(api_client, chain, pool_address, token0)
+        candles = _fetch_pool_candles(api_client, chain, pool_address, token0, timeframe)
         if candles:
             by_pool[(chain, pool_address)] = candles
 
@@ -507,7 +524,7 @@ def _populate_price_history_by_pool(
         ((_chain, _pool), candles) = next(iter(by_pool.items()))
         result["price_history"] = candles
     elif "price_history" not in result and not by_pool and config is not None and _has_position_history(result):
-        candles = _fetch_pool_candles(api_client, config.chain, None, token0)
+        candles = _fetch_pool_candles(api_client, config.chain, None, token0, config.timeframe)
         if candles:
             result["price_history"] = candles
 
@@ -1045,14 +1062,19 @@ def get_uniswap_v3_config(
     token1: str = "USDC",
     fee_tier: str = "0.30%",
     chain: str = "arbitrum",
+    timeframe: str = "1h",
 ) -> LPDashboardConfig:
-    """Get pre-configured Uniswap V3 LP dashboard config."""
+    """Get pre-configured Uniswap V3 LP dashboard config.
+
+    ``timeframe`` sets the price-chart candle interval (VIB-4969); defaults to ``"1h"``.
+    """
     return LPDashboardConfig(
         protocol="uniswap_v3",
         token0=token0,
         token1=token1,
         fee_tier=fee_tier,
         chain=chain,
+        timeframe=timeframe,
     )
 
 
@@ -1061,14 +1083,19 @@ def get_aerodrome_config(
     token1: str = "USDC",
     pool_type: str = "volatile",
     chain: str = "base",
+    timeframe: str = "1h",
 ) -> LPDashboardConfig:
-    """Get pre-configured Aerodrome LP dashboard config."""
+    """Get pre-configured Aerodrome LP dashboard config.
+
+    ``timeframe`` sets the price-chart candle interval (VIB-4969); defaults to ``"1h"``.
+    """
     return LPDashboardConfig(
         protocol="aerodrome",
         token0=token0,
         token1=token1,
         fee_tier=pool_type,
         chain=chain,
+        timeframe=timeframe,
     )
 
 
@@ -1077,14 +1104,19 @@ def get_traderjoe_v2_config(
     token1: str = "USDC",
     bin_step: str = "20",
     chain: str = "avalanche",
+    timeframe: str = "1h",
 ) -> LPDashboardConfig:
-    """Get pre-configured TraderJoe V2 LP dashboard config."""
+    """Get pre-configured TraderJoe V2 LP dashboard config.
+
+    ``timeframe`` sets the price-chart candle interval (VIB-4969); defaults to ``"1h"``.
+    """
     return LPDashboardConfig(
         protocol="traderjoe_v2",
         token0=token0,
         token1=token1,
         fee_tier=f"Bin Step {bin_step}",
         chain=chain,
+        timeframe=timeframe,
     )
 
 
@@ -1093,12 +1125,17 @@ def get_pancakeswap_v3_config(
     token1: str = "USDT",
     fee_tier: str = "0.25%",
     chain: str = "bsc",
+    timeframe: str = "1h",
 ) -> LPDashboardConfig:
-    """Get pre-configured PancakeSwap V3 LP dashboard config."""
+    """Get pre-configured PancakeSwap V3 LP dashboard config.
+
+    ``timeframe`` sets the price-chart candle interval (VIB-4969); defaults to ``"1h"``.
+    """
     return LPDashboardConfig(
         protocol="pancakeswap_v3",
         token0=token0,
         token1=token1,
         fee_tier=fee_tier,
         chain=chain,
+        timeframe=timeframe,
     )

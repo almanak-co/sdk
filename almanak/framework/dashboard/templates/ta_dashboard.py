@@ -74,6 +74,10 @@ from almanak.framework.dashboard.sections import (
     render_pnl_section,
     render_trade_tape_section,
 )
+from almanak.framework.dashboard.templates._ohlcv_window import (
+    normalize_timeframe,
+    ohlcv_limit_for_timeframe,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,12 +100,21 @@ class TADashboardConfig:
         protocol: Default protocol name
         base_token: Default base token
         quote_token: Default quote token
+        timeframe: OHLCV candle interval the dashboard fetches and computes the
+            indicator series from — one of ``1m``/``5m``/``15m``/``1h``/``4h``/``1d``.
+            Defaults to ``"1h"`` for back-compat. **Must match the strategy's own
+            ``data_granularity``**: otherwise the dashboard RSI/MACD/etc. line is a
+            *different* series from the one the strategy decides on, so buy/sell
+            markers won't align with the indicator band (VIB-4969). For the
+            multi-signal layout the primary config's ``timeframe`` is authoritative
+            (one shared OHLCV fetch); extras' timeframes are ignored, mirroring how
+            their pair/chain are ignored.
         extra_indicators: Additional indicator configs to render as stacked
             panels (multi-signal layout, VIB-4897). Empty by default — the
             single-indicator path is unchanged. Compose via
             :func:`multi_ta_config`. Each extra contributes one more panel
-            beneath the price chart; the extras' pair/chain are ignored (the
-            primary config drives the shared OHLCV fetch).
+            beneath the price chart; the extras' pair/chain/timeframe are ignored
+            (the primary config drives the shared OHLCV fetch).
     """
 
     indicator_name: str
@@ -117,6 +130,7 @@ class TADashboardConfig:
     protocol: str = "Uniswap V3"
     base_token: str = "WETH"
     quote_token: str = "USDC"
+    timeframe: str = "1h"
     extra_indicators: list["TADashboardConfig"] = field(default_factory=list)
 
 
@@ -146,26 +160,81 @@ def multi_ta_config(primary: TADashboardConfig, *extras: TADashboardConfig) -> T
     return replace(primary, extra_indicators=list(extras))
 
 
-def _rsi_series_from_closes(closes: pd.Series, period: int) -> pd.Series:
-    """Compute the rolling RSI series using Wilder's smoothing.
+# Mirror of ``almanak.framework.data.indicators.rsi.RSI_DECISION_BUFFER`` (=20).
+# The strategy's RSI service fetches ``period + RSI_DECISION_BUFFER`` candles per
+# iteration and computes RSI from that *sliding* window (the Wilder seed is reset
+# this many candles before each decision). We re-declare the value here rather
+# than importing ``rsi`` so the dashboard import stays lean (see
+# ``tests/framework/dashboard/test_imports_lean.py`` — importing the indicator
+# stack would pull ``aiohttp`` + the OHLCV providers). A drift guard in
+# ``tests/unit/framework/dashboard/test_prepare_ta_session_state.py`` asserts
+# this equals the canonical constant so the two can never silently diverge.
+_RSI_DECISION_BUFFER = 20
 
-    Matches the scalar implementation in
-    ``almanak.framework.data.indicators.rsi.RSIIndicatorService.calculate_rsi_from_prices``
-    but returns the rolling series (NaN for the first ``period`` rows).
+
+def _rsi_series_from_closes(closes: pd.Series, period: int) -> pd.Series:
+    """Reconstruct the **decision-faithful** RSI series the strategy acted on.
+
+    VIB-4969 finding #3: the strategy computes RSI from a *sliding*
+    ``period + _RSI_DECISION_BUFFER`` window per iteration (see
+    ``rsi.RSICalculator.calculate_rsi`` → ``calculate_rsi_from_prices``). A naive
+    single continuous Wilder EMA over the whole dashboard pull (720 candles)
+    seeds its smoothing once at the very start, so its value at any given
+    timestamp drifts a point or two from the value the strategy *actually*
+    computed at that candle from its own short window — markers then sit just
+    off the band crossing the strategy saw.
+
+    To make the displayed RSI equal the decision RSI at every candle (and thus
+    at every trade timestamp), we recompute RSI exactly as the strategy does:
+    for each candle ``i`` we run :func:`_wilder_rsi_window` over the trailing
+    ``period + _RSI_DECISION_BUFFER`` closes ending at ``i`` (capped by available
+    history, mirroring the runner when the provider returns fewer candles than
+    requested). NaN until the first candle with at least ``period + 1`` closes —
+    the same warm-up the strategy itself has.
+
+    Returns a Series named ``rsi`` aligned to ``closes``' index.
+    """
+    n = len(closes)
+    out = [float("nan")] * n
+    if n < period + 1:
+        return pd.Series(out, index=closes.index, name="rsi")
+    values = closes.astype(float).to_numpy()
+    window = period + _RSI_DECISION_BUFFER
+    for i in range(period, n):
+        start = max(0, i - window + 1)
+        out[i] = _wilder_rsi_window(values[start : i + 1], period)
+    return pd.Series(out, index=closes.index, name="rsi")
+
+
+def _wilder_rsi_window(closes: "Any", period: int) -> float:
+    """Scalar Wilder RSI over one window — byte-for-byte mirror of the strategy.
+
+    Mirrors ``rsi.RSICalculator.calculate_rsi_from_prices``: SMA seed of the
+    first ``period`` gains/losses, Wilder smoothing thereafter, RSI=100 when the
+    average loss is zero. ``closes`` is oldest-first (numpy array or list of
+    floats). Returns NaN when there are fewer than ``period + 1`` closes.
     """
     if len(closes) < period + 1:
-        return pd.Series([float("nan")] * len(closes), index=closes.index, name="rsi")
-    delta = closes.astype(float).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    # Wilder's smoothing == EMA with alpha=1/period, adjust=False, min_periods=period
-    avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / avg_loss.replace(0, pd.NA)
-    rsi = 100 - (100 / (1 + rs))
-    # avg_loss == 0 (no losses in window) collapses to RSI=100
-    rsi = rsi.where(avg_loss != 0, other=100.0)
-    return rsi.rename("rsi")
+        return float("nan")
+    gains: list[float] = []
+    losses: list[float] = []
+    for j in range(1, len(closes)):
+        change = float(closes[j] - closes[j - 1])
+        if change > 0:
+            gains.append(change)
+            losses.append(0.0)
+        else:
+            gains.append(0.0)
+            losses.append(abs(change))
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for j in range(period, len(gains)):
+        avg_gain = ((avg_gain * (period - 1)) + gains[j]) / period
+        avg_loss = ((avg_loss * (period - 1)) + losses[j]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
 
 
 def _ema_sma_seeded(values: pd.Series, period: int) -> pd.Series:
@@ -796,11 +865,12 @@ def prepare_ta_session_state(
     price_df: pd.DataFrame | None = None
     if "price_history" not in result and api_client is not None:
         try:
+            timeframe = normalize_timeframe(config.timeframe)
             ohlcv = api_client.get_ohlcv(
                 token=base_token,
                 quote=quote_token,
-                timeframe="1h",
-                limit=168,
+                timeframe=timeframe,
+                limit=ohlcv_limit_for_timeframe(timeframe),
                 chain=chain,
             )
             price_df = _ohlcv_to_price_history(ohlcv or [])
@@ -1614,8 +1684,15 @@ def _render_performance(session_state: dict[str, Any]) -> None:
 # Pre-configured templates for common indicators
 
 
-def get_rsi_config(period: int = 14, overbought: float = 70, oversold: float = 30) -> TADashboardConfig:
-    """Get pre-configured RSI dashboard config."""
+def get_rsi_config(
+    period: int = 14, overbought: float = 70, oversold: float = 30, timeframe: str = "1h"
+) -> TADashboardConfig:
+    """Get pre-configured RSI dashboard config.
+
+    ``timeframe`` must match the strategy's ``data_granularity`` so the
+    dashboard RSI is computed from the same candles the strategy decides on
+    (VIB-4969). Defaults to ``"1h"`` for back-compat.
+    """
     return TADashboardConfig(
         indicator_name="RSI",
         indicator_period=period,
@@ -1623,6 +1700,7 @@ def get_rsi_config(period: int = 14, overbought: float = 70, oversold: float = 3
         lower_threshold=oversold,
         signal_type="reversion",
         value_suffix="",
+        timeframe=timeframe,
     )
 
 
@@ -1638,8 +1716,11 @@ def _macd_signal_fn(session_state: dict[str, Any]) -> str:
     return "NEUTRAL: MACD at Signal line"
 
 
-def get_macd_config(fast: int = 12, slow: int = 26, signal: int = 9) -> TADashboardConfig:
-    """Get pre-configured MACD dashboard config."""
+def get_macd_config(fast: int = 12, slow: int = 26, signal: int = 9, timeframe: str = "1h") -> TADashboardConfig:
+    """Get pre-configured MACD dashboard config.
+
+    ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).
+    """
     return TADashboardConfig(
         indicator_name="MACD",
         indicator_period=fast,
@@ -1647,11 +1728,17 @@ def get_macd_config(fast: int = 12, slow: int = 26, signal: int = 9) -> TADashbo
         custom_signal_fn=_macd_signal_fn,
         signal_type="momentum",
         value_format="{:+.2f}",
+        timeframe=timeframe,
     )
 
 
-def get_cci_config(period: int = 20, overbought: float = 100, oversold: float = -100) -> TADashboardConfig:
-    """Get pre-configured CCI dashboard config."""
+def get_cci_config(
+    period: int = 20, overbought: float = 100, oversold: float = -100, timeframe: str = "1h"
+) -> TADashboardConfig:
+    """Get pre-configured CCI dashboard config.
+
+    ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).
+    """
     return TADashboardConfig(
         indicator_name="CCI",
         indicator_period=period,
@@ -1659,13 +1746,22 @@ def get_cci_config(period: int = 20, overbought: float = 100, oversold: float = 
         lower_threshold=oversold,
         signal_type="reversion",
         value_format="{:+.1f}",
+        timeframe=timeframe,
     )
 
 
 def get_stochastic_config(
-    fast_k: int = 14, slow_k: int = 3, slow_d: int = 3, overbought: float = 80, oversold: float = 20
+    fast_k: int = 14,
+    slow_k: int = 3,
+    slow_d: int = 3,
+    overbought: float = 80,
+    oversold: float = 20,
+    timeframe: str = "1h",
 ) -> TADashboardConfig:
-    """Get pre-configured Stochastic dashboard config."""
+    """Get pre-configured Stochastic dashboard config.
+
+    ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).
+    """
     return TADashboardConfig(
         indicator_name="Stochastic",
         indicator_period=fast_k,
@@ -1674,35 +1770,48 @@ def get_stochastic_config(
         lower_threshold=oversold,
         signal_type="reversion",
         value_suffix="%",
+        timeframe=timeframe,
     )
 
 
-def get_atr_config(period: int = 14) -> TADashboardConfig:
-    """Get pre-configured ATR dashboard config."""
+def get_atr_config(period: int = 14, timeframe: str = "1h") -> TADashboardConfig:
+    """Get pre-configured ATR dashboard config.
+
+    ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).
+    """
     return TADashboardConfig(
         indicator_name="ATR",
         indicator_period=period,
         signal_type="momentum",
         value_format="${:.2f}",
+        timeframe=timeframe,
     )
 
 
-def get_adx_config(period: int = 14, trend_threshold: float = 25) -> TADashboardConfig:
-    """Get pre-configured ADX dashboard config."""
+def get_adx_config(period: int = 14, trend_threshold: float = 25, timeframe: str = "1h") -> TADashboardConfig:
+    """Get pre-configured ADX dashboard config.
+
+    ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).
+    """
     return TADashboardConfig(
         indicator_name="ADX",
         indicator_period=period,
         lower_threshold=trend_threshold,
         signal_type="momentum",
+        timeframe=timeframe,
     )
 
 
-def get_bollinger_config(period: int = 20, std_dev: float = 2.0) -> TADashboardConfig:
-    """Get pre-configured Bollinger Bands dashboard config."""
+def get_bollinger_config(period: int = 20, std_dev: float = 2.0, timeframe: str = "1h") -> TADashboardConfig:
+    """Get pre-configured Bollinger Bands dashboard config.
+
+    ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).
+    """
     return TADashboardConfig(
         indicator_name="Bollinger",
         indicator_period=period,
         secondary_periods=[int(std_dev * 10)],  # Encode std_dev
         signal_type="reversion",
         value_format="${:.2f}",
+        timeframe=timeframe,
     )

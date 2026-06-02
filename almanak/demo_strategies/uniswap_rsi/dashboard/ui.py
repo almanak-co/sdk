@@ -33,6 +33,12 @@ def render_custom_dashboard(
         period=int(strategy_config.get("rsi_period", 14)),
         overbought=float(strategy_config.get("rsi_overbought", 70)),
         oversold=float(strategy_config.get("rsi_oversold", 30)),
+        # Compute the dashboard RSI from the SAME candle granularity the
+        # strategy decides on, so the RSI line and the buy/sell markers share
+        # one series (VIB-4969). ``... or "1h"`` (not a .get default) so an
+        # explicit ``data_granularity: null`` / "" also falls back rather than
+        # stringifying to "None"; prepare_ta_session_state normalizes too.
+        timeframe=str(strategy_config.get("data_granularity") or "1h"),
     )
     config.base_token = str(strategy_config.get("base_token", config.base_token))
     config.quote_token = str(strategy_config.get("quote_token", config.quote_token))

@@ -18,13 +18,20 @@ from almanak.framework.dashboard.templates import (
     get_rsi_config,
     prepare_ta_session_state,
 )
+from almanak.framework.dashboard.templates._ohlcv_window import (
+    DEFAULT_CANDLE_LIMIT,
+    normalize_timeframe,
+    ohlcv_limit_for_timeframe,
+)
 from almanak.framework.dashboard.templates.ta_dashboard import (
+    _RSI_DECISION_BUFFER,
     _ema_sma_seeded,
     _macd_series_from_closes,
     _macd_signal_fn,
     _ohlcv_to_price_history,
     _rsi_series_from_closes,
     _trade_rows_to_signals,
+    _wilder_rsi_window,
 )
 
 
@@ -625,3 +632,265 @@ def test_prepare_accepts_dataclass_like_tape_rows():
 
     out = prepare_ta_session_state(TapeClient(), session_state={}, config=_config())
     assert len(out["buy_signals"]) == 1
+
+
+# ----------------------------------------------------------------------
+# VIB-4969: dashboard timeframe must match the strategy candle granularity.
+# ----------------------------------------------------------------------
+
+
+class _RecordingClient:
+    """api_client stand-in that records the get_ohlcv() call kwargs."""
+
+    def __init__(self, ohlcv: list[dict[str, Any]] | None = None) -> None:
+        self._ohlcv = ohlcv or []
+        self.ohlcv_kwargs: dict[str, Any] | None = None
+
+    def get_ohlcv(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.ohlcv_kwargs = kwargs
+        return self._ohlcv
+
+    def get_trade_tape(self) -> dict[str, Any]:
+        return {"rows": [], "has_more": False}
+
+    def get_timeline(self, **_: Any) -> list[dict[str, Any]]:
+        return []
+
+
+def test_ohlcv_limit_policy_scales_per_timeframe():
+    # 1h preserves the legacy default exactly (back-compat anchor).
+    assert ohlcv_limit_for_timeframe("1h") == DEFAULT_CANDLE_LIMIT == 168
+    # Fine granularities are capped (NOT a fixed 7-day window = 2016 @ 5m).
+    assert ohlcv_limit_for_timeframe("5m") == 720
+    assert ohlcv_limit_for_timeframe("1m") == 720
+    assert ohlcv_limit_for_timeframe("15m") == 720
+    # Coarse granularities get a longer recent span.
+    assert ohlcv_limit_for_timeframe("4h") == 180
+    assert ohlcv_limit_for_timeframe("1d") == 120
+    # Case / whitespace tolerant.
+    assert ohlcv_limit_for_timeframe(" 5M ") == 720
+    # Unknown timeframe → fail-safe to the legacy default, never unbounded.
+    assert ohlcv_limit_for_timeframe("3h") == DEFAULT_CANDLE_LIMIT
+    assert ohlcv_limit_for_timeframe("") == DEFAULT_CANDLE_LIMIT
+
+
+def test_prepare_requests_ohlcv_with_configured_timeframe_and_scaled_limit():
+    """VIB-4969: a 5m strategy must fetch 5m candles, not the hardcoded 1h.
+
+    This is the core bug: the dashboard used to fetch ``timeframe="1h"`` no
+    matter what granularity the strategy decided on, so the RSI line was a
+    different series from the one the strategy traded.
+    """
+    client = _RecordingClient(ohlcv=_ohlcv_payload_hourly([2300.0 + i for i in range(60)]))
+    config = get_rsi_config(period=14, overbought=70, oversold=30, timeframe="5m")
+    config.base_token = "WETH"
+    config.quote_token = "USDC"
+    config.chain = "arbitrum"
+
+    prepare_ta_session_state(client, session_state={}, config=config)
+
+    assert client.ohlcv_kwargs is not None
+    assert client.ohlcv_kwargs["timeframe"] == "5m"
+    assert client.ohlcv_kwargs["limit"] == ohlcv_limit_for_timeframe("5m") == 720
+    assert client.ohlcv_kwargs["token"] == "WETH"
+    assert client.ohlcv_kwargs["quote"] == "USDC"
+
+
+def test_prepare_defaults_to_1h_when_timeframe_unset():
+    """Back-compat: callers that never set a timeframe still request 1h/168."""
+    client = _RecordingClient(ohlcv=_ohlcv_payload_hourly([2300.0 + i for i in range(60)]))
+    config = get_rsi_config(period=14)  # no timeframe kwarg
+    config.base_token = "WETH"
+    config.quote_token = "USDC"
+    config.chain = "arbitrum"
+
+    prepare_ta_session_state(client, session_state={}, config=config)
+
+    assert client.ohlcv_kwargs is not None
+    assert client.ohlcv_kwargs["timeframe"] == "1h"
+    assert client.ohlcv_kwargs["limit"] == 168
+
+
+def test_normalize_timeframe_coerces_falsy_to_default():
+    """VIB-4969 (Gemini): None / empty / whitespace must not reach get_ohlcv.
+
+    A strategy may carry ``data_granularity: null``; passing that straight
+    through would error at the data layer. Non-empty values pass unchanged.
+    """
+    assert normalize_timeframe(None) == "1h"
+    assert normalize_timeframe("") == "1h"
+    assert normalize_timeframe("   ") == "1h"
+    assert normalize_timeframe("5m") == "5m"
+    assert normalize_timeframe(" 1h ") == "1h"
+
+
+def test_prepare_requests_1h_when_config_timeframe_is_none():
+    """A falsy config.timeframe must be normalized to 1h, not passed as None."""
+    client = _RecordingClient(ohlcv=_ohlcv_payload_hourly([2300.0 + i for i in range(60)]))
+    config = get_rsi_config(period=14)
+    config.base_token = "WETH"
+    config.quote_token = "USDC"
+    config.chain = "arbitrum"
+    config.timeframe = None  # e.g. data_granularity: null reached the config
+
+    prepare_ta_session_state(client, session_state={}, config=config)
+
+    assert client.ohlcv_kwargs is not None
+    assert client.ohlcv_kwargs["timeframe"] == "1h"
+    assert client.ohlcv_kwargs["limit"] == 168
+
+
+def test_rsi_series_is_computed_from_the_returned_frame():
+    """The RSI series and the chart price share one frame/timeframe.
+
+    Guards the bug's other half: the displayed RSI must be derived from the
+    SAME candles the dashboard fetched (so markers and the RSI band align).
+    Recompute RSI independently from the returned closes and assert the
+    enriched ``rsi_history`` matches it point-for-point on the same index.
+    """
+    prices = [2300.0 + (15 if i % 6 < 3 else -12) for i in range(60)]
+    payload = _ohlcv_payload_hourly(prices)
+    client = _RecordingClient(ohlcv=payload)
+    config = get_rsi_config(period=14, timeframe="5m")
+    config.base_token = "WETH"
+    config.quote_token = "USDC"
+    config.chain = "arbitrum"
+
+    out = prepare_ta_session_state(client, session_state={}, config=config)
+
+    price_df = out["price_history"]
+    rsi_history = out["rsi_history"]
+    assert isinstance(rsi_history, pd.Series)
+    # Independent recompute from the same returned frame.
+    expected = _rsi_series_from_closes(price_df["price"], 14)
+    expected.index = pd.DatetimeIndex(price_df["time"])
+    expected = expected.dropna()
+    assert not rsi_history.empty
+    assert rsi_history.index.equals(expected.index)
+    pd.testing.assert_series_equal(
+        rsi_history.astype(float), expected.astype(float), check_names=False
+    )
+
+
+def test_multi_signal_extras_inherit_primary_timeframe():
+    """Multi-signal: the primary's timeframe drives the single shared fetch.
+
+    The extras' own timeframes are ignored — only one OHLCV request is made,
+    at the primary timeframe.
+    """
+    from almanak.framework.dashboard.templates import multi_ta_config
+
+    client = _RecordingClient(ohlcv=_ohlcv_payload_hourly([2300.0 + i for i in range(80)]))
+    primary = get_rsi_config(period=14, timeframe="15m")
+    extra = get_macd_config()  # default 1h timeframe — must be ignored
+    config = multi_ta_config(primary, extra)
+    config.base_token = "WETH"
+    config.quote_token = "USDC"
+    config.chain = "arbitrum"
+
+    prepare_ta_session_state(client, session_state={}, config=config)
+
+    assert client.ohlcv_kwargs is not None
+    assert client.ohlcv_kwargs["timeframe"] == "15m"
+    assert client.ohlcv_kwargs["limit"] == ohlcv_limit_for_timeframe("15m")
+
+
+# ----------------------------------------------------------------------
+# VIB-4969 finding #3: displayed RSI must equal the strategy's DECISION RSI.
+#
+# The strategy computes RSI from a sliding ``period + RSI_DECISION_BUFFER``
+# window per iteration (rsi.RSICalculator.calculate_rsi). A single continuous
+# Wilder EMA over the whole dashboard pull drifts from that. The dashboard now
+# reconstructs the decision-faithful series so markers sit on the crossings the
+# strategy actually saw.
+# ----------------------------------------------------------------------
+
+
+def test_dashboard_decision_buffer_matches_strategy_constant():
+    """Drift guard: the dashboard's local buffer must equal the canonical one.
+
+    The dashboard re-declares the value (it can't import the indicator stack —
+    that would break the lean-import contract), so this test ties the two
+    together: if someone changes ``rsi.RSI_DECISION_BUFFER`` the dashboard
+    reconstruction would silently diverge unless this fails first.
+    """
+    from almanak.framework.data.indicators.rsi import RSI_DECISION_BUFFER
+
+    assert _RSI_DECISION_BUFFER == RSI_DECISION_BUFFER
+
+
+def test_wilder_rsi_window_matches_strategy_scalar():
+    """``_wilder_rsi_window`` is byte-for-byte the strategy's scalar RSI."""
+    from decimal import Decimal
+
+    from almanak.framework.data.indicators.rsi import RSICalculator
+
+    closes = [2300.0 + (12 if i % 5 < 2 else -9) for i in range(34)]
+    dash = _wilder_rsi_window(closes, 14)
+    strat = RSICalculator.calculate_rsi_from_prices([Decimal(str(c)) for c in closes], 14)
+    assert dash == pytest.approx(strat, abs=1e-9)
+
+
+def test_displayed_rsi_at_trade_timestamp_equals_decision_rsi():
+    """The reconstructed RSI at a trade candle == the strategy's decision RSI.
+
+    Build a 5m price series; pick a candle as the "trade" timestamp; compute the
+    strategy's decision RSI the way the runner does (sliding ``period + buffer``
+    window ending at that candle) and assert the dashboard's ``rsi_history`` at
+    that timestamp matches — NOT a continuous-EMA recompute.
+    """
+    from decimal import Decimal
+
+    from almanak.framework.data.indicators.rsi import RSICalculator
+
+    period = 14
+    window = period + _RSI_DECISION_BUFFER
+    prices = [2300.0 + (15 if i % 6 < 3 else -12) for i in range(80)]
+    payload = _ohlcv_payload_hourly(prices)
+    client = _RecordingClient(ohlcv=payload)
+    config = get_rsi_config(period=period, timeframe="5m")
+    config.base_token, config.quote_token, config.chain = "WETH", "USDC", "arbitrum"
+
+    out = prepare_ta_session_state(client, session_state={}, config=config)
+    rsi_history = out["rsi_history"]
+    price_df = out["price_history"]
+
+    # Pick a trade candle well past warm-up.
+    trade_idx = 70
+    trade_time = price_df["time"].iloc[trade_idx]
+
+    # Strategy's decision RSI: sliding window of `window` closes ending at trade.
+    start = max(0, trade_idx - window + 1)
+    decision_window = [Decimal(str(p)) for p in price_df["price"].iloc[start : trade_idx + 1]]
+    decision_rsi = RSICalculator.calculate_rsi_from_prices(decision_window, period)
+
+    displayed = float(rsi_history.loc[trade_time])
+    assert displayed == pytest.approx(decision_rsi, abs=1e-9)
+
+
+def test_decision_faithful_series_differs_from_continuous_ema():
+    """Regression: the fix must NOT collapse back to a continuous Wilder EMA.
+
+    A continuous EMA over the full pull (the old behaviour) and the sliding
+    decision-window reconstruction give *different* mid-series values once the
+    smoothing has diverged. Assert they differ on a realistic series, so a
+    future refactor that silently reverts to ``ewm`` over the whole frame fails
+    here instead of in production.
+    """
+    prices = pd.Series([2300.0 + (18 if i % 7 < 3 else -14) for i in range(120)])
+    decision = _rsi_series_from_closes(prices, 14).dropna()
+
+    # Old continuous-EMA reconstruction (what the dashboard used to do).
+    delta = prices.astype(float).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    continuous = (100 - (100 / (1 + rs))).where(avg_loss != 0, other=100.0).dropna()
+
+    common = decision.index.intersection(continuous.index)
+    assert len(common) > 10
+    # At least somewhere in the middle the two series disagree by > 0.5 RSI pt.
+    max_gap = (decision.loc[common].astype(float) - continuous.loc[common].astype(float)).abs().max()
+    assert max_gap > 0.5
