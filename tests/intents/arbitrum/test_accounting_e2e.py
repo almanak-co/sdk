@@ -1764,7 +1764,7 @@ class TestLendingAccountingVIB3418:
           - health_factor = capped max (no debt → infinite)
           - liquidation_threshold_bps in [6000, 9500] (Aave V3 range for stablecoins)
         """
-        from almanak.framework.accounting.lending_accounting import read_aave_account_state
+        from almanak.framework.accounting.lending_accounting import read_lending_account_state
         from almanak.framework.intents import IntentCompiler, SupplyIntent
 
         USDC = CHAIN_CONFIG["tokens"]["USDC"]
@@ -1797,12 +1797,19 @@ class TestLendingAccountingVIB3418:
             f"USDC spent must exactly equal supply amount. Expected: {expected_usdc_spent}, Got: {usdc_spent}"
         )
 
-        # Read Aave account state through our reader (via mock gateway wrapping Anvil web3)
+        # Read Aave account state through the generic reader (via mock gateway wrapping Anvil web3)
         mock_gateway = _MockGatewayClient(web3)
-        state = read_aave_account_state(mock_gateway, CHAIN_NAME, funded_wallet)
+        state = read_lending_account_state(
+            protocol="aave_v3",
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            market_id=None,
+            gateway_client=mock_gateway,
+            price_oracle=None,
+        )
 
         assert state is not None, (
-            "read_aave_account_state must return a non-None AaveAccountState after USDC supply. "
+            "read_lending_account_state must return a non-None LendingAccountState after USDC supply. "
             "If None, the gateway eth_call or ABI decoding failed."
         )
 
@@ -1861,7 +1868,7 @@ class TestLendingAccountingVIB3418:
         from almanak.framework.accounting.basis import FIFOBasisStore
         from almanak.framework.accounting.lending_accounting import (
             build_lending_accounting_event,
-            read_aave_account_state,
+            read_lending_account_state,
         )
         from almanak.framework.accounting.models import LendingEventType
         from almanak.framework.accounting.writer import AccountingWriter
@@ -1887,7 +1894,14 @@ class TestLendingAccountingVIB3418:
 
         # ── GAP-1: Read Aave HF via mock gateway against real chain state ──────
         mock_gateway = _MockGatewayClient(web3)
-        state = read_aave_account_state(mock_gateway, CHAIN_NAME, funded_wallet)
+        state = read_lending_account_state(
+            protocol="aave_v3",
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            market_id=None,
+            gateway_client=mock_gateway,
+            price_oracle=None,
+        )
         assert state is not None, "Aave V3 account state read must succeed after USDC supply"
         assert state.collateral_usd >= Decimal("400"), (
             f"collateral_usd must be ≥$400 after 500 USDC supply. Got: {state.collateral_usd}"

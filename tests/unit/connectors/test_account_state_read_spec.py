@@ -1,19 +1,20 @@
 """Byte-equivalence + contract tests for the aggregate account-state read seam.
 
-PR-1 of VIB-4929 adds the strategy-side **aggregate account-state** read
+PR-1 of VIB-4929 added the strategy-side **aggregate account-state** read
 capability (total collateral / total debt / health factor / liquidation
 threshold / e-mode) mirroring the existing single-reserve
 :class:`~almanak.connectors._strategy_base.lending_read_base.LendingReadSpec`
-seam. This PR ships the FOUNDATION + the Aave implementation, with **no consumer
-migration** — ``lending_accounting.read_aave_account_state`` is unchanged and is
-the **oracle** the new spec must reproduce byte-for-byte.
+seam. VIB-4929 PR-3a then delivered the generic framework reader
+(:func:`~almanak.framework.accounting.lending_accounting.read_lending_account_state`)
+that drives this spec — it is the **oracle** the spec must reproduce
+byte-for-byte for the Aave family.
 
-The gate for PR-1: ``ACCOUNT_STATE_READ_SPEC.reduce_calls(query, recorded)`` must
-produce a :class:`LendingAccountState` whose fields equal the
-``AaveAccountState`` that ``read_aave_account_state`` decodes from the *same*
+The gate: ``ACCOUNT_STATE_READ_SPEC.reduce_calls(query, recorded)`` must produce
+a :class:`LendingAccountState` whose fields equal the state that
+``read_lending_account_state(protocol="aave_v3", ...)`` decodes from the *same*
 recorded ``getUserAccountData`` / ``getUserEMode`` return blobs. If those two
 decoders ever diverge, an accounting auditor would see different valuation
-inputs the day a consumer migrates onto the spec — so we pin them here.
+inputs — so we pin them here.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ from almanak.connectors._strategy_base.lending_read_registry import (
     LendingReadRegistry,
 )
 from almanak.connectors.aave_v3.lending_read import ACCOUNT_STATE_READ_SPEC
-from almanak.framework.accounting.lending_accounting import read_aave_account_state
+from almanak.framework.accounting.lending_accounting import read_lending_account_state
 
 _WALLET = "0xABCDEF0123456789abcdef0123456789ABCDEF01"
 _ARBITRUM_AAVE_POOL = "0x794a61358D6845594F94dc1DB02A252b5b4814aD"
@@ -78,7 +79,7 @@ def _emode_hex(category: int) -> str:
 def _mock_gateway(account_hex: str | None, emode_hex: str | None) -> Any:
     """Gateway whose ``eth_call`` routes by selector to a recorded blob.
 
-    ``read_aave_account_state`` issues two calls against the pool — first
+    The generic reader (Aave) issues two calls against the pool — first
     ``getUserAccountData``, then ``getUserEMode`` — through
     ``gateway_client.eth_call(chain, to, data, block=...)``. This mock returns
     the matching recorded blob so the oracle decodes the *same* bytes the spec's
@@ -97,9 +98,19 @@ def _mock_gateway(account_hex: str | None, emode_hex: str | None) -> Any:
 
 
 def _oracle_state(account_hex: str | None, emode_hex: str | None) -> Any:
-    """Run the unmodified ``read_aave_account_state`` oracle over recorded blobs."""
-    return read_aave_account_state(
-        _mock_gateway(account_hex, emode_hex), "arbitrum", _WALLET
+    """Run the generic reader (Aave family, whole-account) over recorded blobs.
+
+    ``market_id=None`` for the Aave family (whole-account); the reader declares
+    no valuation roles, so no oracle is touched — the Aave on-chain reads are
+    USD-denominated already.
+    """
+    return read_lending_account_state(
+        protocol="aave_v3",
+        chain="arbitrum",
+        wallet_address=_WALLET,
+        market_id=None,
+        gateway_client=_mock_gateway(account_hex, emode_hex),
+        price_oracle=None,
     )
 
 
@@ -286,14 +297,15 @@ def test_build_calls_emits_account_data_then_emode_against_pool() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("protocol", ["aave_v3", "spark", "aave", "AAVE_V3"])
-def test_supports_account_state_for_aave_family(protocol: str) -> None:
+@pytest.mark.parametrize("protocol", ["aave_v3", "spark", "aave", "AAVE_V3", "morpho_blue", "MORPHO_BLUE"])
+def test_supports_account_state_for_supported_protocols(protocol: str) -> None:
+    # Morpho Blue joined in VIB-4929 PR-3a (via the injected-price seam).
     assert LendingReadRegistry.supports_account_state(protocol)
 
 
-@pytest.mark.parametrize("protocol", ["morpho_blue", "compound_v3", "uniswap_v3", "unknown"])
-def test_account_state_unsupported_for_non_aave_family(protocol: str) -> None:
-    # Morpho/Compound are deferred to a later PR (need price-oracle injection).
+@pytest.mark.parametrize("protocol", ["compound_v3", "uniswap_v3", "unknown"])
+def test_account_state_unsupported_for_non_supported_protocols(protocol: str) -> None:
+    # Compound V3 is still deferred (routes through the registry in PR-3b).
     assert not LendingReadRegistry.supports_account_state(protocol)
 
 

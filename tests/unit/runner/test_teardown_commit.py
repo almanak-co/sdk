@@ -628,7 +628,10 @@ async def test_vib3934_lending_pre_state_threaded_into_pre_state_json(
 
     runner._write_ledger_entry = AsyncMock(side_effect=_capture_ledger)
 
-    # A duck-typed AaveAccountState — just needs the fields lending_state_to_dict reads.
+    # A duck-typed lending state — just needs the common fields
+    # lending_state_to_dict reads off any state (collateral/debt/HF). The
+    # protocol-specific keys are gated on the concrete LendingAccountState type
+    # in the serializer; this test only asserts the common three are merged.
     from decimal import Decimal
 
     lending_pre_state = SimpleNamespace(

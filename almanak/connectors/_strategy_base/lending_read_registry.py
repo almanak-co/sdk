@@ -28,8 +28,12 @@ module-level :data:`ACCOUNT_STATE_READ_SPEC` (an
 in the same ``lending_read`` module; the registry maps it through the parallel
 ``_ACCOUNT_STATE_LOADERS`` table and exposes
 :meth:`LendingReadRegistry.supports_account_state`,
-:meth:`LendingReadRegistry.position_manager_address`, and
-:meth:`LendingReadRegistry.resolve_account_state_plan`. (Naming note: this
+:meth:`LendingReadRegistry.position_manager_address`,
+:meth:`LendingReadRegistry.resolve_account_state_plan`, and — for per-market
+protocols (Morpho Blue, VIB-4929 PR-3a) — :meth:`LendingReadRegistry.market_params`,
+which lazily resolves the connector's ``market_id -> params`` catalogue so the
+framework consumer can inject ``lltv`` (and other market params) into the query
+without importing the connector. (Naming note: this
 capability extends ``LendingReadRegistry`` rather than introducing a
 ``LendingProtocolAdapter`` — that name is already taken by the compile-side
 ``class LendingProtocolAdapter(Protocol)`` in
@@ -46,7 +50,7 @@ import importlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from almanak.connectors._strategy_base.address_registry import AddressRegistry
 from almanak.connectors._strategy_base.lending_read_base import (
@@ -59,6 +63,11 @@ from almanak.connectors._strategy_base.lending_read_base import (
 )
 
 logger = logging.getLogger(__name__)
+
+# A connector's per-chain market catalogue: chain -> market_id -> params.
+# (e.g. Morpho's ``MORPHO_MARKETS``.) Params values are heterogeneous (str
+# addresses, the int ``lltv``, bool flags), hence ``object``.
+_MarketTable = dict[str, dict[str, dict[str, object]]]
 
 # ``LendingPositionOnChain`` / ``LendingAccountState`` are re-exported so callers
 # can name the result types without reaching into ``lending_read_base``.
@@ -139,11 +148,27 @@ class LendingReadRegistry:
     # The Aave V3 forks (Aave V3, Spark) each publish their own attribute; the
     # specs happen to be the shared ``AAVE_FORK_ACCOUNT_STATE_READ`` instance, but
     # the opt-in lives in each connector so adding a fork needs one row here.
-    # Morpho/Compound are intentionally absent in PR-1 — they need the
-    # price-oracle injection seam, deferred to a later PR.
+    # Morpho Blue joined in PR-3a — its spec consumes the price/decimals/market-
+    # params injection seam on ``AccountStateQuery`` (Morpho is not USD-native).
+    # Compound V3 is intentionally still absent — it routes through the registry
+    # in PR-3b (when the ``is_aave``/``is_morpho``/``is_compound_v3`` dispatch in
+    # the framework consumer collapses).
     _ACCOUNT_STATE_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
         "aave_v3": ("almanak.connectors.aave_v3.lending_read", "ACCOUNT_STATE_READ_SPEC"),
         "spark": ("almanak.connectors.spark.lending_read", "ACCOUNT_STATE_READ_SPEC"),
+        "morpho_blue": ("almanak.connectors.morpho_blue.lending_read", "ACCOUNT_STATE_READ_SPEC"),
+    }
+
+    # Lazy per-market parameter tables for protocols whose account state is scoped
+    # to a single market (VIB-4929 PR-3a). Maps a protocol identifier to the
+    # ``(module path, attribute)`` naming the connector's per-chain
+    # ``market_id -> params`` catalogue. Imported on first ``market_params`` call
+    # via ``importlib`` and cached — NEVER derived eagerly at module level (eager
+    # registry derivation caused non-deterministic xdist member-drops in VIB-4928
+    # PR-1). The Aave family has no entry: its account state is whole-wallet, not
+    # per-market.
+    _MARKET_TABLE_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
+        "morpho_blue": ("almanak.connectors.morpho_blue.addresses", "MORPHO_MARKETS"),
     }
 
     # Protocol aliases that map onto a canonical key in ``_SPEC_LOADERS``.
@@ -158,6 +183,10 @@ class LendingReadRegistry:
 
     _spec_cache: ClassVar[dict[str, LendingReadSpec]] = {}
     _account_state_cache: ClassVar[dict[str, AccountStateReadSpec]] = {}
+    # Per-protocol resolved market table (VIB-4929 PR-3a). Lazily populated by
+    # ``market_params`` on first access so the connector ``addresses`` module is
+    # imported once, on demand, never eagerly at registry import.
+    _market_cache: ClassVar[dict[str, _MarketTable]] = {}
 
     @classmethod
     def _normalize(cls, protocol: str) -> str:
@@ -327,6 +356,136 @@ class LendingReadRegistry:
         return AddressRegistry.resolve_contract_address(key, chain, spec.contract_kinds)
 
     @classmethod
+    def _load_market_table(cls, protocol: str) -> _MarketTable | None:
+        """Resolve and cache one protocol's per-chain market table.
+
+        Imports ONLY the connector module that owns ``protocol`` (per
+        ``_MARKET_TABLE_LOADERS``), lazily on first access — a broken sibling
+        connector cannot block this lookup, and the table is never derived
+        eagerly at registry import (the VIB-4928 PR-1 xdist member-drop hazard).
+        Returns ``None`` when the protocol publishes no market table.
+        """
+        cached = cls._market_cache.get(protocol)
+        if cached is not None:
+            return cached
+        entry = cls._MARKET_TABLE_LOADERS.get(protocol)
+        if entry is None:
+            return None
+        module_path, attribute = entry
+        module = importlib.import_module(module_path)
+        table = getattr(module, attribute, None)
+        if not isinstance(table, dict):
+            raise TypeError(
+                f"Registry maps {protocol!r} market table to {module_path}.{attribute}, "
+                f"but that attribute is {type(table).__name__}, not a dict."
+            )
+        cls._market_cache[protocol] = table
+        return table
+
+    @classmethod
+    def market_params(cls, protocol: str, chain: str, market_id: str) -> dict[str, object] | None:
+        """Resolve the per-market parameters for ``(protocol, chain, market_id)``.
+
+        For protocols whose account state is scoped to a single market (Morpho
+        Blue), the reducer needs market parameters it cannot read on-chain cheaply
+        (e.g. ``lltv``). The owning connector publishes the
+        ``market_id -> params`` catalogue; the registry resolves it through the
+        lazy ``_MARKET_TABLE_LOADERS`` table so the framework consumer can inject
+        the params into an :class:`AccountStateQuery` without importing the
+        connector itself.
+
+        Returns ``None`` when the protocol publishes no market table, the chain
+        has no markets, or the ``market_id`` is unknown — callers fail closed.
+
+        Args:
+            protocol: Protocol identifier (e.g. ``"morpho_blue"``).
+            chain: Chain identifier (e.g. ``"ethereum"``).
+            market_id: The market id (bytes32 hex, with or without ``0x``); matched
+                case-insensitively against the published catalogue's keys.
+        """
+        key = cls._normalize(protocol)
+        table = cls._load_market_table(key)
+        if table is None:
+            return None
+        markets_for_chain = table.get(chain.lower())
+        if not markets_for_chain:
+            return None
+        # Normalise to the catalogue's key shape: 0x-prefixed, lowercase, 32-byte.
+        normalized = "0x" + market_id.lower().replace("0x", "").zfill(64)
+        return markets_for_chain.get(normalized)
+
+    @classmethod
+    def valuation_roles(
+        cls,
+        protocol: str,
+        chain: str,
+        market_id: str | None,
+    ) -> tuple[tuple[str, str], ...]:
+        """Resolve the ``(query_field, token_symbol)`` pairs to price + inject.
+
+        For a non-USD-native protocol (Morpho Blue), the framework consumer must
+        resolve a USD price + decimals for each valued token and inject them onto
+        the :class:`AccountStateQuery`. *Which* tokens those are is connector
+        knowledge: the spec declares ``valuation_role_keys`` as
+        ``(query_field, market_params_key)`` pairs, and this method resolves each
+        ``market_params_key`` against :meth:`market_params` to get the token
+        symbol — returning ``(query_field, token_symbol)`` pairs the framework
+        reader then prices.
+
+        Returns an empty tuple when the protocol declares no valuation roles
+        (the Aave family — USD-denominated on-chain), the protocol is unknown, or
+        the market params / a declared role symbol cannot be resolved (so the
+        consumer fails closed rather than pricing a wrong/empty set).
+
+        Args:
+            protocol: Protocol identifier (e.g. ``"morpho_blue"``, ``"aave_v3"``).
+            chain: Chain identifier (e.g. ``"ethereum"``).
+            market_id: The per-market id whose params name the valued tokens;
+                ``None`` for whole-account protocols (which declare no roles).
+        """
+        key = cls._normalize(protocol)
+        spec = cls._load_account_state_spec(key)
+        if spec is None or not spec.valuation_role_keys:
+            return ()
+        if market_id is None:
+            # A protocol that declares valuation roles is per-market by
+            # construction; without a market id we cannot name its tokens.
+            return ()
+        params = cls.market_params(key, chain, market_id)
+        if not params:
+            return ()
+        roles: list[tuple[str, str]] = []
+        for query_field, params_key in spec.valuation_role_keys:
+            symbol = params.get(params_key)
+            if not isinstance(symbol, str) or not symbol:
+                # A declared role with no resolvable symbol ⇒ fail closed (the
+                # consumer must price every declared leg or read nothing).
+                return ()
+            roles.append((query_field, symbol))
+        return tuple(roles)
+
+    @classmethod
+    def query_inputs(cls, protocol: str, intent: object) -> dict[str, Any] | None:
+        """Derive the per-protocol query inputs for ``read_lending_account_state``.
+
+        Delegates to the connector spec's
+        :meth:`~almanak.connectors._strategy_base.lending_read_base.AccountStateReadSpec.query_inputs_from_intent`
+        so the framework consumer does not hardcode which intent attributes a
+        protocol's read needs (e.g. ``market_id`` for Morpho; possibly more for
+        Compound V3 in PR-3b). The returned dict is splatted as keyword arguments
+        into the generic reader.
+
+        Returns ``None`` when ``protocol`` has no account-state read spec — i.e.
+        it is not a (supported) lending protocol on the read path — so the
+        consumer can fall through without fabricating inputs.
+        """
+        key = cls._normalize(protocol)
+        spec = cls._load_account_state_spec(key)
+        if spec is None:
+            return None
+        return spec.query_inputs_from_intent(intent)
+
+    @classmethod
     def resolve_account_state_plan(
         cls,
         protocol: str,
@@ -391,3 +550,4 @@ class LendingReadRegistry:
         """
         cls._spec_cache.clear()
         cls._account_state_cache.clear()
+        cls._market_cache.clear()

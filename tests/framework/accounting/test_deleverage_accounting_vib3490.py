@@ -203,16 +203,19 @@ class TestDeleverageProtocolValidation:
         )
         result = _make_result()
 
-        # Simulate a successful after-state read by patching read_aave_account_state
-        # to return a non-None AaveAccountState.
+        # Simulate a successful after-state read by patching the generic
+        # read_lending_account_state to return a non-None Aave-family
+        # LendingAccountState (VIB-4929 PR-3a — the per-protocol reader is gone).
         mock_aave_state = MagicMock()
         mock_aave_state.collateral_usd = Decimal("10000")
         mock_aave_state.debt_usd = Decimal("5000")
         mock_aave_state.health_factor = Decimal("1.5")
         mock_aave_state.liquidation_threshold_bps = 8000
+        mock_aave_state.lltv = None  # Aave carries the threshold as bps, not lltv
+        mock_aave_state.family = "aave"  # structural discriminator the unify/dict path reads
 
         with patch(
-            "almanak.framework.accounting.lending_accounting.read_aave_account_state",
+            "almanak.framework.accounting.lending_accounting.read_lending_account_state",
             return_value=mock_aave_state,
         ):
             event = build_lending_accounting_event(

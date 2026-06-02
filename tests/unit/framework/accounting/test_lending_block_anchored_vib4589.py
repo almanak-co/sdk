@@ -25,20 +25,13 @@ from unittest.mock import MagicMock
 from almanak.framework.accounting.lending_accounting import (
     _gateway_eth_call,
     capture_lending_post_state,
-    read_aave_account_state,
+    read_lending_account_state,
 )
 
-
-def _patch_chain_pool_address(chain: str, address: str):
-    """Inject a fake pool address into AAVE_V3_POOL_ADDRESSES.
-
-    The reader looks up the pool from the adapter; tests don't care
-    about the real address, only that the lookup succeeds and the
-    calldata is sent to ``address``.
-    """
-    from almanak.connectors.aave_v3 import adapter as aave_adapter
-
-    aave_adapter.AAVE_V3_POOL_ADDRESSES[chain] = address
+# VIB-4929 PR-3a: the generic reader resolves the Aave pool through
+# ``AddressRegistry`` (not the legacy ``AAVE_V3_POOL_ADDRESSES`` map), so these
+# tests use ``arbitrum`` — a chain with a real registered Aave pool — and assert
+# only on the block forwarded into each gateway eth_call (the F7 contract).
 
 
 class TestGatewayEthCallBlockParameter:
@@ -98,16 +91,14 @@ class TestGatewayEthCallBlockParameter:
 
 
 class TestReadAaveAccountStateForwardsBlock:
-    """Layer 2 — ``read_aave_account_state`` threads ``block`` through to
-    every underlying eth_call, including the secondary ``getUserEMode``
-    read (so the (collateral, debt, HF, e-mode) tuple is internally
-    consistent — no inter-call drift).
+    """Layer 2 — the generic ``read_lending_account_state`` (Aave) threads
+    ``block`` through to every underlying eth_call, including the secondary
+    ``getUserEMode`` read (so the (collateral, debt, HF, e-mode) tuple is
+    internally consistent — no inter-call drift).
     """
 
     def test_account_data_and_emode_pin_to_same_block(self) -> None:
         chain = "arbitrum"
-        pool = "0xPool"
-        _patch_chain_pool_address(chain, pool)
 
         # Build a stub gateway whose eth_call records the block arg.
         eth_call_calls: list[dict] = []
@@ -123,7 +114,15 @@ class TestReadAaveAccountStateForwardsBlock:
 
         gateway.eth_call.side_effect = _fake_eth_call
 
-        result = read_aave_account_state(gateway, chain, "0xwallet", block=12345)
+        result = read_lending_account_state(
+            protocol="aave_v3",
+            chain=chain,
+            wallet_address="0xwallet",
+            market_id=None,
+            gateway_client=gateway,
+            price_oracle=None,
+            block=12345,
+        )
 
         # Both eth_calls fired with the same explicit block — getUserAccountData + getUserEMode.
         assert result is not None
@@ -143,7 +142,6 @@ class TestCaptureLendingPostStateForwardsBlock:
 
     def test_post_state_pins_to_block_for_aave_v3(self) -> None:
         chain = "arbitrum"
-        _patch_chain_pool_address(chain, "0xPool")
         recorded_block: list[int | str | None] = []
 
         gateway = MagicMock()

@@ -33,20 +33,79 @@ from __future__ import annotations
 
 from decimal import Decimal
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.connectors._strategy_base.lending_read_base import _AAVE_GET_USER_EMODE_SELECTOR
+from almanak.connectors._strategy_base.lending_read_base import (
+    _AAVE_GET_USER_EMODE_SELECTOR,
+    LendingAccountState,
+)
 from almanak.framework.accounting.lending_accounting import (
-    AaveAccountState,
-    MorphoBlueAccountState,
-    _capture_aave_v3_pre_state,
+    _GENERIC_PRE_STATE_PROTOCOLS,
     capture_lending_pre_state,
     lending_state_to_dict,
-    read_aave_account_state,
     read_aave_user_emode,
+    read_lending_account_state,
 )
+
+# VIB-4929 PR-3a: the per-protocol AaveAccountState / MorphoBlueAccountState are
+# gone — Aave + Morpho share the unified LendingAccountState, read through the
+# generic read_lending_account_state, and the Aave intent-metadata overlay
+# (interest_rate_mode) is applied by capture_lending_pre_state. These helpers
+# build the unified state with the correct family discriminator so the existing
+# VIB-4213 assertions (which pin the persisted e_mode/interest_rate_mode shape)
+# stay valid.
+
+
+def _aave_state(
+    *,
+    collateral_usd: Decimal,
+    debt_usd: Decimal,
+    health_factor: Decimal,
+    liquidation_threshold_bps: int,
+    e_mode_category: int | None = None,
+    interest_rate_mode: str | None = None,
+) -> LendingAccountState:
+    return LendingAccountState(
+        collateral_usd=collateral_usd,
+        debt_usd=debt_usd,
+        health_factor=health_factor,
+        liquidation_threshold_bps=liquidation_threshold_bps,
+        e_mode_category=e_mode_category,
+        interest_rate_mode=interest_rate_mode,
+        family="aave",
+    )
+
+
+def _morpho_state(
+    *,
+    collateral_usd: Decimal,
+    debt_usd: Decimal,
+    health_factor: Decimal,
+    lltv: Decimal,
+) -> LendingAccountState:
+    return LendingAccountState(
+        collateral_usd=collateral_usd,
+        debt_usd=debt_usd,
+        health_factor=health_factor,
+        liquidation_threshold_bps=None,
+        e_mode_category=None,
+        lltv=lltv,
+    )
+
+
+def _read_aave(gateway: Any, chain: str, wallet: str) -> LendingAccountState | None:
+    """Drive the generic reader for the Aave family (whole-account)."""
+    return read_lending_account_state(
+        protocol="aave_v3",
+        chain=chain,
+        wallet_address=wallet,
+        market_id=None,
+        gateway_client=gateway,
+        price_oracle=None,
+    )
+
 
 # ─── Shared helpers (parity with VIB-3489 test file) ──────────────────────────
 
@@ -96,8 +155,10 @@ def _make_aave_intent(
     omit_irm_attribute=True simulates a SUPPLY/WITHDRAW intent that NEVER has
     an ``interest_rate_mode`` attribute at all (F5 — defensive ``getattr`` path).
     """
-    intent = MagicMock(spec=["intent_type", "protocol", "token", "borrow_token", "collateral_token", "market_id"]
-                       + ([] if omit_irm_attribute else ["interest_rate_mode"]))
+    intent = MagicMock(
+        spec=["intent_type", "protocol", "token", "borrow_token", "collateral_token", "market_id"]
+        + ([] if omit_irm_attribute else ["interest_rate_mode"])
+    )
     intent.intent_type.value = intent_type
     intent.protocol = "aave_v3"
     intent.token = "USDC"
@@ -107,6 +168,79 @@ def _make_aave_intent(
     if not omit_irm_attribute:
         intent.interest_rate_mode = interest_rate_mode
     return intent
+
+
+def _make_lending_intent(protocol: str, intent_type: str = "SUPPLY") -> MagicMock:
+    """A minimal lending intent (any protocol) for the generic-path gate tests."""
+    intent = MagicMock(
+        spec=["intent_type", "protocol", "token", "borrow_token", "collateral_token", "market_id", "interest_rate_mode"]
+    )
+    intent.intent_type.value = intent_type
+    intent.protocol = protocol
+    intent.token = "USDC"
+    intent.borrow_token = None
+    intent.collateral_token = None
+    intent.market_id = None
+    intent.interest_rate_mode = None
+    return intent
+
+
+# =====================================================================
+# VIB-4929 PR-3a — generic read-path is opt-in per verified protocol
+# =====================================================================
+
+
+class TestGenericPreStateProtocolGate:
+    """The generic ``read_lending_account_state`` path is enabled per-protocol.
+
+    Regression guard (VIB-4963): Spark opted into ``_ACCOUNT_STATE_LOADERS`` (it is
+    spec-*capable*) but its generic read is not yet framework-verified, so it must
+    NOT reach the generic reader — it stays unread and degrades to ESTIMATED. Before
+    the ``_GENERIC_PRE_STATE_PROTOCOLS`` gate, Spark silently read HIGH (caught only
+    by the ethereum Spark intent suite, after the fact). These Anvil-free tests pin
+    the gate so the regression cannot recur.
+    """
+
+    def test_enabled_set_excludes_unverified_spark(self) -> None:
+        # Spark IS spec-capable (registered in _ACCOUNT_STATE_LOADERS) yet must be
+        # absent here until its read is fork-verified (VIB-4963).
+        assert "spark" not in _GENERIC_PRE_STATE_PROTOCOLS
+        assert {"aave_v3", "aave", "morpho_blue"} <= _GENERIC_PRE_STATE_PROTOCOLS
+
+    def test_spark_intent_not_read_on_generic_path(self) -> None:
+        """Spark must NOT hit the generic reader — gated BEFORE any read (→ ESTIMATED)."""
+        intent = _make_lending_intent("spark")
+        with patch(
+            "almanak.framework.accounting.lending_accounting.read_lending_account_state"
+        ) as mock_read:
+            result = capture_lending_pre_state(
+                intent=intent,
+                chain=_CHAIN,
+                wallet_address=_WALLET,
+                gateway_client=MagicMock(),  # a working gateway would let a read succeed
+                price_oracle=None,
+            )
+        assert result is None, "Spark pre-state must be unread (degrades to ESTIMATED), not on the generic path"
+        mock_read.assert_not_called()  # the gate short-circuits before any read attempt
+
+    def test_enabled_protocol_reaches_generic_reader(self) -> None:
+        """A migrated+enabled protocol (Aave V3) is NOT over-blocked by the gate."""
+        intent = _make_lending_intent("aave_v3")
+        sentinel = MagicMock()
+        sentinel.family = None  # skip the Aave interest_rate_mode overlay branch (tested elsewhere)
+        with patch(
+            "almanak.framework.accounting.lending_accounting.read_lending_account_state",
+            return_value=sentinel,
+        ) as mock_read:
+            result = capture_lending_pre_state(
+                intent=intent,
+                chain=_CHAIN,
+                wallet_address=_WALLET,
+                gateway_client=MagicMock(),
+                price_oracle=None,
+            )
+        mock_read.assert_called_once()
+        assert result is sentinel
 
 
 # =====================================================================
@@ -139,9 +273,9 @@ class TestAaveAccountStateIncludesEmode:
             _mock_emode_response(1),
         ]
 
-        state = read_aave_account_state(gateway, _CHAIN, _WALLET)
+        state = _read_aave(gateway, _CHAIN, _WALLET)
         assert state is not None
-        assert isinstance(state, AaveAccountState)
+        assert isinstance(state, LendingAccountState)
         assert state.collateral_usd == Decimal("10000")
         assert state.debt_usd == Decimal("2000")
         assert state.e_mode_category == 1
@@ -172,14 +306,14 @@ class TestEmodeZeroVsNone:
     """
 
     def test_aave_account_state_emode_zero_is_distinguishable_from_none(self) -> None:
-        state_with_emode_zero = AaveAccountState(
+        state_with_emode_zero = _aave_state(
             collateral_usd=Decimal("10000"),
             debt_usd=Decimal("0"),
             health_factor=Decimal("999999"),
             liquidation_threshold_bps=8500,
             e_mode_category=0,
         )
-        state_with_emode_failed = AaveAccountState(
+        state_with_emode_failed = _aave_state(
             collateral_usd=Decimal("10000"),
             debt_usd=Decimal("0"),
             health_factor=Decimal("999999"),
@@ -208,7 +342,7 @@ class TestEmodeZeroVsNone:
             _mock_aave_account_response(collateral_e8=10_000 * 10**8),
             _mock_emode_response(0),
         ]
-        state = read_aave_account_state(gateway, _CHAIN, _WALLET)
+        state = _read_aave(gateway, _CHAIN, _WALLET)
         assert state is not None
         assert state.e_mode_category == 0
         assert state.e_mode_category is not None
@@ -234,7 +368,7 @@ class TestEmodeReadFailures:
             _mock_aave_account_response(collateral_e8=10_000 * 10**8),
             None,  # getUserEMode returns no data
         ]
-        state = read_aave_account_state(gateway, _CHAIN, _WALLET)
+        state = _read_aave(gateway, _CHAIN, _WALLET)
         assert state is not None  # the primary read succeeded
         assert state.collateral_usd == Decimal("10000")
         assert state.e_mode_category is None
@@ -246,7 +380,7 @@ class TestEmodeReadFailures:
             _mock_aave_account_response(collateral_e8=10_000 * 10**8),
             "0x",  # empty payload — < 64 hex chars
         ]
-        state = read_aave_account_state(gateway, _CHAIN, _WALLET)
+        state = _read_aave(gateway, _CHAIN, _WALLET)
         assert state is not None
         assert state.e_mode_category is None
 
@@ -255,7 +389,7 @@ class TestEmodeReadFailures:
         gateway = MagicMock()
         # Only one response provided — the e-mode call raises StopIteration.
         gateway.eth_call.side_effect = [_mock_aave_account_response(collateral_e8=10_000 * 10**8)]
-        state = read_aave_account_state(gateway, _CHAIN, _WALLET)
+        state = _read_aave(gateway, _CHAIN, _WALLET)
         assert state is not None
         assert state.e_mode_category is None
 
@@ -266,7 +400,7 @@ class TestEmodeReadFailures:
         # word 0 is collateral_e8 = 10_000 * 10**8 = 1e12, way above uint8.
         big_response = _mock_aave_account_response(collateral_e8=10_000 * 10**8)
         gateway.eth_call.return_value = big_response
-        state = read_aave_account_state(gateway, _CHAIN, _WALLET)
+        state = _read_aave(gateway, _CHAIN, _WALLET)
         assert state is not None
         assert state.e_mode_category is None  # NOT 1_000_000_000_000
 
@@ -287,9 +421,12 @@ class TestInterestRateModePassThrough:
     def test_capture_aave_pre_state_threads_intent_interest_rate_mode_for_borrow(self) -> None:
         gateway = self._gateway_returning(_mock_aave_account_response(debt_e8=5_000 * 10**8))
         intent = _make_aave_intent("BORROW", interest_rate_mode="variable")
-        state = _capture_aave_v3_pre_state(
-            intent=intent, chain=_CHAIN, wallet_address=_WALLET,
-            gateway_client=gateway, price_oracle=None,
+        state = capture_lending_pre_state(
+            intent=intent,
+            chain=_CHAIN,
+            wallet_address=_WALLET,
+            gateway_client=gateway,
+            price_oracle=None,
         )
         assert state is not None
         assert state.interest_rate_mode == "variable"
@@ -297,9 +434,12 @@ class TestInterestRateModePassThrough:
     def test_capture_aave_pre_state_threads_intent_interest_rate_mode_for_repay(self) -> None:
         gateway = self._gateway_returning(_mock_aave_account_response(debt_e8=5_000 * 10**8))
         intent = _make_aave_intent("REPAY", interest_rate_mode="variable")
-        state = _capture_aave_v3_pre_state(
-            intent=intent, chain=_CHAIN, wallet_address=_WALLET,
-            gateway_client=gateway, price_oracle=None,
+        state = capture_lending_pre_state(
+            intent=intent,
+            chain=_CHAIN,
+            wallet_address=_WALLET,
+            gateway_client=gateway,
+            price_oracle=None,
         )
         assert state is not None
         assert state.interest_rate_mode == "variable"
@@ -307,9 +447,12 @@ class TestInterestRateModePassThrough:
     def test_capture_aave_pre_state_interest_rate_mode_none_for_supply(self) -> None:
         gateway = self._gateway_returning(_mock_aave_account_response())
         intent = _make_aave_intent("SUPPLY")
-        state = _capture_aave_v3_pre_state(
-            intent=intent, chain=_CHAIN, wallet_address=_WALLET,
-            gateway_client=gateway, price_oracle=None,
+        state = capture_lending_pre_state(
+            intent=intent,
+            chain=_CHAIN,
+            wallet_address=_WALLET,
+            gateway_client=gateway,
+            price_oracle=None,
         )
         assert state is not None
         assert state.interest_rate_mode is None
@@ -317,9 +460,12 @@ class TestInterestRateModePassThrough:
     def test_capture_aave_pre_state_interest_rate_mode_none_for_withdraw(self) -> None:
         gateway = self._gateway_returning(_mock_aave_account_response())
         intent = _make_aave_intent("WITHDRAW")
-        state = _capture_aave_v3_pre_state(
-            intent=intent, chain=_CHAIN, wallet_address=_WALLET,
-            gateway_client=gateway, price_oracle=None,
+        state = capture_lending_pre_state(
+            intent=intent,
+            chain=_CHAIN,
+            wallet_address=_WALLET,
+            gateway_client=gateway,
+            price_oracle=None,
         )
         assert state is not None
         assert state.interest_rate_mode is None
@@ -333,9 +479,12 @@ class TestInterestRateModePassThrough:
         """
         gateway = self._gateway_returning(_mock_aave_account_response())
         intent = _make_aave_intent("BORROW", omit_irm_attribute=True)
-        state = _capture_aave_v3_pre_state(
-            intent=intent, chain=_CHAIN, wallet_address=_WALLET,
-            gateway_client=gateway, price_oracle=None,
+        state = capture_lending_pre_state(
+            intent=intent,
+            chain=_CHAIN,
+            wallet_address=_WALLET,
+            gateway_client=gateway,
+            price_oracle=None,
         )
         assert state is not None
         # The attribute is absent → getattr returns None → BORROW path
@@ -348,9 +497,12 @@ class TestInterestRateModePassThrough:
         """
         gateway = self._gateway_returning(_mock_aave_account_response())
         intent = _make_aave_intent("BORROW", interest_rate_mode=None)
-        state = _capture_aave_v3_pre_state(
-            intent=intent, chain=_CHAIN, wallet_address=_WALLET,
-            gateway_client=gateway, price_oracle=None,
+        state = capture_lending_pre_state(
+            intent=intent,
+            chain=_CHAIN,
+            wallet_address=_WALLET,
+            gateway_client=gateway,
+            price_oracle=None,
         )
         assert state is not None
         assert state.interest_rate_mode == "variable"
@@ -359,9 +511,12 @@ class TestInterestRateModePassThrough:
         """Same normalization for REPAY: the compiler defaults to variable repay."""
         gateway = self._gateway_returning(_mock_aave_account_response())
         intent = _make_aave_intent("REPAY", interest_rate_mode=None)
-        state = _capture_aave_v3_pre_state(
-            intent=intent, chain=_CHAIN, wallet_address=_WALLET,
-            gateway_client=gateway, price_oracle=None,
+        state = capture_lending_pre_state(
+            intent=intent,
+            chain=_CHAIN,
+            wallet_address=_WALLET,
+            gateway_client=gateway,
+            price_oracle=None,
         )
         assert state is not None
         assert state.interest_rate_mode == "variable"
@@ -372,9 +527,12 @@ class TestInterestRateModePassThrough:
         gateway = MagicMock()
         gateway.eth_call.side_effect = [None]  # primary read fails
         intent = _make_aave_intent("BORROW", interest_rate_mode="variable")
-        state = _capture_aave_v3_pre_state(
-            intent=intent, chain=_CHAIN, wallet_address=_WALLET,
-            gateway_client=gateway, price_oracle=None,
+        state = capture_lending_pre_state(
+            intent=intent,
+            chain=_CHAIN,
+            wallet_address=_WALLET,
+            gateway_client=gateway,
+            price_oracle=None,
         )
         assert state is None
 
@@ -388,7 +546,7 @@ class TestLendingStateToDict:
     """lending_state_to_dict emits both new fields for AaveAccountState."""
 
     def test_lending_state_to_dict_emits_emode_when_set(self) -> None:
-        state = AaveAccountState(
+        state = _aave_state(
             collateral_usd=Decimal("10000"),
             debt_usd=Decimal("0"),
             health_factor=Decimal("999999"),
@@ -407,7 +565,7 @@ class TestLendingStateToDict:
         returns NULL; on a missing key it also returns NULL. We emit null
         explicitly so the schema is uniform across rows.
         """
-        state = AaveAccountState(
+        state = _aave_state(
             collateral_usd=Decimal("10000"),
             debt_usd=Decimal("0"),
             health_factor=Decimal("999999"),
@@ -420,7 +578,7 @@ class TestLendingStateToDict:
         assert out["e_mode_category"] is None
 
     def test_lending_state_to_dict_emits_interest_rate_mode_when_set(self) -> None:
-        state = AaveAccountState(
+        state = _aave_state(
             collateral_usd=Decimal("10000"),
             debt_usd=Decimal("5000"),
             health_factor=Decimal("1.7"),
@@ -433,7 +591,7 @@ class TestLendingStateToDict:
         assert out["interest_rate_mode"] == "variable"
 
     def test_lending_state_to_dict_omits_interest_rate_mode_when_none(self) -> None:
-        state = AaveAccountState(
+        state = _aave_state(
             collateral_usd=Decimal("10000"),
             debt_usd=Decimal("0"),
             health_factor=Decimal("999999"),
@@ -448,7 +606,7 @@ class TestLendingStateToDict:
 
     def test_lending_state_to_dict_does_not_emit_aave_fields_for_morpho(self) -> None:
         """F4: Morpho/Compound states do NOT carry e_mode_category / interest_rate_mode keys."""
-        morpho_state = MorphoBlueAccountState(
+        morpho_state = _morpho_state(
             collateral_usd=Decimal("10000"),
             debt_usd=Decimal("5000"),
             health_factor=Decimal("1.6"),
@@ -464,7 +622,7 @@ class TestLendingStateToDict:
         """Backwards-compat: a code path that builds AaveAccountState without
         the new fields (e.g., a future synthetic test or migration shim) still
         produces a valid dict with None for both new keys."""
-        state = AaveAccountState(
+        state = _aave_state(
             collateral_usd=Decimal("100"),
             debt_usd=Decimal("0"),
             health_factor=Decimal("999999"),
@@ -496,16 +654,20 @@ class TestNonAaveProtocolsUnaffected:
         We construct a Morpho state directly (the dispatch already prevents
         Aave-arm execution for Morpho intents; this test pins the JSON shape).
         """
-        morpho_state = MorphoBlueAccountState(
+        morpho_state = _morpho_state(
             collateral_usd=Decimal("10000"),
             debt_usd=Decimal("5000"),
             health_factor=Decimal("1.6"),
             lltv=Decimal("0.86"),
         )
-        # Validate the dataclass itself does not expose Aave-specific fields
-        assert not hasattr(morpho_state, "e_mode_category")
-        assert not hasattr(morpho_state, "interest_rate_mode")
-        # Serializer omits the keys for non-Aave states
+        # VIB-4929 PR-3a: Aave + Morpho share the unified LendingAccountState, so
+        # the Aave-only fields exist on the dataclass — but a Morpho state carries
+        # NO Aave family discriminator and leaves them unmeasured (None).
+        assert morpho_state.family != "aave"
+        assert morpho_state.e_mode_category is None
+        assert morpho_state.interest_rate_mode is None
+        # Serializer omits the keys for non-Aave states (gated on the family
+        # discriminator, NOT value-presence).
         out = lending_state_to_dict(morpho_state, protocol="morpho_blue")
         assert out is not None
         assert "e_mode_category" not in out
@@ -532,11 +694,14 @@ def test_vib3474_existing_path_still_works() -> None:
     ]
     intent = _make_aave_intent("SUPPLY")
     state = capture_lending_pre_state(
-        intent=intent, chain=_CHAIN, wallet_address=_WALLET,
-        gateway_client=gateway, price_oracle=None,
+        intent=intent,
+        chain=_CHAIN,
+        wallet_address=_WALLET,
+        gateway_client=gateway,
+        price_oracle=None,
     )
     assert state is not None
-    assert isinstance(state, AaveAccountState)
+    assert isinstance(state, LendingAccountState)
     # VIB-3474 fields
     assert state.collateral_usd == Decimal("15420.50")
     assert state.debt_usd == Decimal("8200")

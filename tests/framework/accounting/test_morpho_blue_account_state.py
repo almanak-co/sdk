@@ -1,4 +1,10 @@
-"""Unit tests for read_morpho_blue_account_state() (VIB-3483).
+"""Unit tests for Morpho Blue account-state reads (VIB-3483).
+
+VIB-4929 PR-3a: the per-protocol ``read_morpho_blue_account_state`` is gone;
+these tests now drive the generic
+``read_lending_account_state(protocol="morpho_blue", ...)``, which resolves the
+collateral/loan symbols + decimals + lltv from the connector market table (so
+the explicit per-protocol args these tests used to pass are no longer needed).
 
 Tests follow the same pattern as the Aave V3 equivalent tests in
 tests/intents/arbitrum/test_accounting_e2e.py but are pure unit tests
@@ -39,7 +45,7 @@ class TestMorphoBlueSelectors:
 
     def test_position_selector(self) -> None:
         """_MORPHO_POSITION_SELECTOR == first 4 bytes of keccak256('position(bytes32,address)')."""
-        from almanak.framework.accounting.lending_accounting import _MORPHO_POSITION_SELECTOR
+        from almanak.connectors._strategy_base.lending_read_base import _MORPHO_POSITION_SELECTOR
 
         expected = "0x" + Web3.keccak(text="position(bytes32,address)").hex()[:8]
         assert _MORPHO_POSITION_SELECTOR == expected, (
@@ -48,7 +54,7 @@ class TestMorphoBlueSelectors:
 
     def test_market_selector(self) -> None:
         """_MORPHO_MARKET_SELECTOR == first 4 bytes of keccak256('market(bytes32)')."""
-        from almanak.framework.accounting.lending_accounting import _MORPHO_MARKET_SELECTOR
+        from almanak.connectors._strategy_base.lending_read_base import _MORPHO_MARKET_SELECTOR
 
         expected = "0x" + Web3.keccak(text="market(bytes32)").hex()[:8]
         assert _MORPHO_MARKET_SELECTOR == expected, (
@@ -57,10 +63,8 @@ class TestMorphoBlueSelectors:
 
     def test_calldata_uses_position_selector(self) -> None:
         """read_morpho_blue_account_state() builds calldata that starts with _MORPHO_POSITION_SELECTOR."""
-        from almanak.framework.accounting.lending_accounting import (
-            _MORPHO_POSITION_SELECTOR,
-            read_morpho_blue_account_state,
-        )
+        from almanak.connectors._strategy_base.lending_read_base import _MORPHO_POSITION_SELECTOR
+        from almanak.framework.accounting.lending_accounting import read_lending_account_state
 
         pos_response = _mock_position_response(0, 100_000_000, 1 * 10**18)
         mkt_response = _mock_market_response(
@@ -71,16 +75,12 @@ class TestMorphoBlueSelectors:
         )
         gateway = _make_mock_gateway(pos_response, mkt_response)
 
-        read_morpho_blue_account_state(
+        read_lending_account_state(
+            protocol="morpho_blue",
             gateway_client=gateway,
             chain=_CHAIN,
             wallet_address=_WALLET,
             market_id=_MARKET_ID,
-            collateral_token="wstETH",
-            loan_token="USDC",
-            collateral_decimals=_COLLATERAL_DECIMALS,
-            loan_decimals=_LOAN_DECIMALS,
-            lltv_raw=_LLTV_RAW,
             price_oracle=_PRICE_ORACLE,
         )
 
@@ -99,10 +99,8 @@ class TestMorphoBlueSelectors:
 
     def test_calldata_uses_market_selector(self) -> None:
         """read_morpho_blue_account_state() builds calldata that starts with _MORPHO_MARKET_SELECTOR."""
-        from almanak.framework.accounting.lending_accounting import (
-            _MORPHO_MARKET_SELECTOR,
-            read_morpho_blue_account_state,
-        )
+        from almanak.connectors._strategy_base.lending_read_base import _MORPHO_MARKET_SELECTOR
+        from almanak.framework.accounting.lending_accounting import read_lending_account_state
 
         pos_response = _mock_position_response(0, 100_000_000, 1 * 10**18)
         mkt_response = _mock_market_response(
@@ -113,16 +111,12 @@ class TestMorphoBlueSelectors:
         )
         gateway = _make_mock_gateway(pos_response, mkt_response)
 
-        read_morpho_blue_account_state(
+        read_lending_account_state(
+            protocol="morpho_blue",
             gateway_client=gateway,
             chain=_CHAIN,
             wallet_address=_WALLET,
             market_id=_MARKET_ID,
-            collateral_token="wstETH",
-            loan_token="USDC",
-            collateral_decimals=_COLLATERAL_DECIMALS,
-            loan_decimals=_LOAN_DECIMALS,
-            lltv_raw=_LLTV_RAW,
             price_oracle=_PRICE_ORACLE,
         )
 
@@ -141,6 +135,7 @@ class TestMorphoBlueSelectors:
 
 # ─── Helpers to build mock ABI return data ────────────────────────────────────
 
+
 def _encode_word(value: int) -> str:
     """Encode a single uint256 value as 64 hex chars (no 0x)."""
     return hex(value)[2:].zfill(64)
@@ -148,12 +143,7 @@ def _encode_word(value: int) -> str:
 
 def _mock_position_response(supply_shares: int, borrow_shares: int, collateral: int) -> str:
     """Build a hex string matching position() ABI return."""
-    return (
-        "0x"
-        + _encode_word(supply_shares)
-        + _encode_word(borrow_shares)
-        + _encode_word(collateral)
-    )
+    return "0x" + _encode_word(supply_shares) + _encode_word(borrow_shares) + _encode_word(collateral)
 
 
 def _mock_market_response(
@@ -212,7 +202,7 @@ class TestMorphoBlueAccountStateReadViaMockGatewayAfterBorrow:
 
     def test_basic_borrow_populates_all_hf_fields(self) -> None:
         """Borrow 100 USDC against 1 wstETH collateral; verify HF, collateral_usd, debt_usd."""
-        from almanak.framework.accounting.lending_accounting import read_morpho_blue_account_state
+        from almanak.framework.accounting.lending_accounting import read_lending_account_state
 
         # 1 wstETH = 1e18 raw units
         collateral_raw = 1 * 10**18
@@ -236,35 +226,25 @@ class TestMorphoBlueAccountStateReadViaMockGatewayAfterBorrow:
         )
         gateway = _make_mock_gateway(pos_response, mkt_response)
 
-        state = read_morpho_blue_account_state(
+        state = read_lending_account_state(
+            protocol="morpho_blue",
             gateway_client=gateway,
             chain=_CHAIN,
             wallet_address=_WALLET,
             market_id=_MARKET_ID,
-            collateral_token="wstETH",
-            loan_token="USDC",
-            collateral_decimals=_COLLATERAL_DECIMALS,
-            loan_decimals=_LOAN_DECIMALS,
-            lltv_raw=_LLTV_RAW,
             price_oracle=_PRICE_ORACLE,
         )
 
         assert state is not None, "State must not be None when gateway returns valid data"
 
         # collateral: 1 wstETH * $3500 = $3500
-        assert state.collateral_usd == Decimal("3500"), (
-            f"collateral_usd expected $3500, got {state.collateral_usd}"
-        )
+        assert state.collateral_usd == Decimal("3500"), f"collateral_usd expected $3500, got {state.collateral_usd}"
 
         # debt: 100 USDC * $1 = $100
-        assert state.debt_usd == Decimal("100"), (
-            f"debt_usd expected $100, got {state.debt_usd}"
-        )
+        assert state.debt_usd == Decimal("100"), f"debt_usd expected $100, got {state.debt_usd}"
 
         # lltv: 86%
-        assert state.lltv == Decimal("0.86"), (
-            f"lltv expected 0.86, got {state.lltv}"
-        )
+        assert state.lltv == Decimal("0.86"), f"lltv expected 0.86, got {state.lltv}"
 
         # health_factor = (3500 * 0.86) / 100 = 30.1
         expected_hf = (Decimal("3500") * Decimal("0.86")) / Decimal("100")
@@ -323,28 +303,16 @@ class TestMorphoBlueAccountStateReadViaMockGatewayAfterBorrow:
 
         assert event is not None
 
-        assert event.health_factor_after is not None, (
-            "health_factor_after must be populated for morpho_blue BORROW"
-        )
-        assert event.collateral_value_after_usd is not None, (
-            "collateral_value_after_usd must be populated"
-        )
-        assert event.debt_value_after_usd is not None, (
-            "debt_value_after_usd must be populated"
-        )
+        assert event.health_factor_after is not None, "health_factor_after must be populated for morpho_blue BORROW"
+        assert event.collateral_value_after_usd is not None, "collateral_value_after_usd must be populated"
+        assert event.debt_value_after_usd is not None, "debt_value_after_usd must be populated"
         assert event.net_equity_after_usd is not None, (
             "net_equity_after_usd must be populated (collateral_value_after - debt_value_after)"
         )
-        assert event.liquidation_threshold is not None, (
-            "liquidation_threshold must be populated from Morpho lltv"
-        )
+        assert event.liquidation_threshold is not None, "liquidation_threshold must be populated from Morpho lltv"
         assert event.lltv is not None, "lltv must be populated for morpho_blue BORROW"
-        assert event.confidence == AccountingConfidence.HIGH, (
-            "Confidence must be HIGH when after-state read succeeds"
-        )
-        assert event.unavailable_reason == "", (
-            "unavailable_reason must be empty when after-state read succeeds"
-        )
+        assert event.confidence == AccountingConfidence.HIGH, "Confidence must be HIGH when after-state read succeeds"
+        assert event.unavailable_reason == "", "unavailable_reason must be empty when after-state read succeeds"
 
 
 class TestMorphoBlueAccountStateReadFailsGracefully:
@@ -352,21 +320,17 @@ class TestMorphoBlueAccountStateReadFailsGracefully:
 
     def test_gateway_exception_returns_none(self) -> None:
         """When gateway.eth_call raises, read_morpho_blue_account_state returns None."""
-        from almanak.framework.accounting.lending_accounting import read_morpho_blue_account_state
+        from almanak.framework.accounting.lending_accounting import read_lending_account_state
 
         gateway = MagicMock()
         gateway.eth_call.side_effect = RuntimeError("gateway connection refused")
 
-        state = read_morpho_blue_account_state(
+        state = read_lending_account_state(
+            protocol="morpho_blue",
             gateway_client=gateway,
             chain=_CHAIN,
             wallet_address=_WALLET,
             market_id=_MARKET_ID,
-            collateral_token="wstETH",
-            loan_token="USDC",
-            collateral_decimals=_COLLATERAL_DECIMALS,
-            loan_decimals=_LOAN_DECIMALS,
-            lltv_raw=_LLTV_RAW,
             price_oracle=_PRICE_ORACLE,
         )
 
@@ -374,21 +338,17 @@ class TestMorphoBlueAccountStateReadFailsGracefully:
 
     def test_gateway_returns_empty_string_returns_none(self) -> None:
         """When gateway.eth_call returns empty string, read_morpho_blue_account_state returns None."""
-        from almanak.framework.accounting.lending_accounting import read_morpho_blue_account_state
+        from almanak.framework.accounting.lending_accounting import read_lending_account_state
 
         gateway = MagicMock()
         gateway.eth_call.return_value = ""
 
-        state = read_morpho_blue_account_state(
+        state = read_lending_account_state(
+            protocol="morpho_blue",
             gateway_client=gateway,
             chain=_CHAIN,
             wallet_address=_WALLET,
             market_id=_MARKET_ID,
-            collateral_token="wstETH",
-            loan_token="USDC",
-            collateral_decimals=_COLLATERAL_DECIMALS,
-            loan_decimals=_LOAN_DECIMALS,
-            lltv_raw=_LLTV_RAW,
             price_oracle=_PRICE_ORACLE,
         )
 
@@ -396,7 +356,7 @@ class TestMorphoBlueAccountStateReadFailsGracefully:
 
     def test_gateway_returns_malformed_market_payload_returns_none(self) -> None:
         """When market() returns an undersized payload (5 words instead of 6), return None."""
-        from almanak.framework.accounting.lending_accounting import read_morpho_blue_account_state
+        from almanak.framework.accounting.lending_accounting import read_lending_account_state
 
         # Correct position() response so the first call succeeds
         pos_response = _mock_position_response(0, 100_000_000, 1 * 10**18)
@@ -406,22 +366,16 @@ class TestMorphoBlueAccountStateReadFailsGracefully:
         gateway = MagicMock()
         gateway.eth_call.side_effect = [pos_response, five_word_market]
 
-        state = read_morpho_blue_account_state(
+        state = read_lending_account_state(
+            protocol="morpho_blue",
             gateway_client=gateway,
             chain=_CHAIN,
             wallet_address=_WALLET,
             market_id=_MARKET_ID,
-            collateral_token="wstETH",
-            loan_token="USDC",
-            collateral_decimals=_COLLATERAL_DECIMALS,
-            loan_decimals=_LOAN_DECIMALS,
-            lltv_raw=_LLTV_RAW,
             price_oracle=_PRICE_ORACLE,
         )
 
-        assert state is None, (
-            "read_morpho_blue_account_state must return None when market() payload is too short"
-        )
+        assert state is None, "read_morpho_blue_account_state must return None when market() payload is too short"
 
     def test_build_event_graceful_when_gateway_fails(self) -> None:
         """build_lending_accounting_event sets ESTIMATED confidence + non-empty reason when read fails."""
@@ -460,17 +414,13 @@ class TestMorphoBlueAccountStateReadFailsGracefully:
         )
 
         assert event is not None
-        assert event.health_factor_after is None, (
-            "health_factor_after must be None when gateway raises"
-        )
+        assert event.health_factor_after is None, "health_factor_after must be None when gateway raises"
         assert event.collateral_value_after_usd is None
         assert event.debt_value_after_usd is None
         assert event.confidence == AccountingConfidence.ESTIMATED, (
             "Confidence must be ESTIMATED when after-state read fails"
         )
-        assert event.unavailable_reason != "", (
-            "unavailable_reason must be non-empty when after-state read fails"
-        )
+        assert event.unavailable_reason != "", "unavailable_reason must be non-empty when after-state read fails"
 
 
 class TestMorphoBlueAccountStateZeroBorrow:
@@ -478,7 +428,7 @@ class TestMorphoBlueAccountStateZeroBorrow:
 
     def test_zero_borrow_shares_returns_infinite_hf_sentinel(self) -> None:
         """With no borrow position, HF should be the infinite sentinel (999999)."""
-        from almanak.framework.accounting.lending_accounting import read_morpho_blue_account_state
+        from almanak.framework.accounting.lending_accounting import read_lending_account_state
 
         collateral_raw = 1 * 10**18  # 1 wstETH
 
@@ -495,25 +445,19 @@ class TestMorphoBlueAccountStateZeroBorrow:
         )
         gateway = _make_mock_gateway(pos_response, mkt_response)
 
-        state = read_morpho_blue_account_state(
+        state = read_lending_account_state(
+            protocol="morpho_blue",
             gateway_client=gateway,
             chain=_CHAIN,
             wallet_address=_WALLET,
             market_id=_MARKET_ID,
-            collateral_token="wstETH",
-            loan_token="USDC",
-            collateral_decimals=_COLLATERAL_DECIMALS,
-            loan_decimals=_LOAN_DECIMALS,
-            lltv_raw=_LLTV_RAW,
             price_oracle=_PRICE_ORACLE,
         )
 
         assert state is not None, "State must be returned even with zero borrow"
 
         # No debt
-        assert state.debt_usd == Decimal("0"), (
-            f"debt_usd must be $0 with no borrow. Got {state.debt_usd}"
-        )
+        assert state.debt_usd == Decimal("0"), f"debt_usd must be $0 with no borrow. Got {state.debt_usd}"
 
         # HF is the infinite sentinel (999999) — not None, not a real number
         assert state.health_factor == Decimal("999999"), (
@@ -527,7 +471,7 @@ class TestMorphoBlueAccountStateZeroBorrow:
 
     def test_zero_borrow_shares_no_division_by_zero_on_zero_total_shares(self) -> None:
         """Market with totalBorrowShares = 0 must not raise ZeroDivisionError."""
-        from almanak.framework.accounting.lending_accounting import read_morpho_blue_account_state
+        from almanak.framework.accounting.lending_accounting import read_lending_account_state
 
         collateral_raw = 1 * 10**18
 
@@ -546,16 +490,12 @@ class TestMorphoBlueAccountStateZeroBorrow:
         gateway = _make_mock_gateway(pos_response, mkt_response)
 
         # Should not raise
-        state = read_morpho_blue_account_state(
+        state = read_lending_account_state(
+            protocol="morpho_blue",
             gateway_client=gateway,
             chain=_CHAIN,
             wallet_address=_WALLET,
             market_id=_MARKET_ID,
-            collateral_token="wstETH",
-            loan_token="USDC",
-            collateral_decimals=_COLLATERAL_DECIMALS,
-            loan_decimals=_LOAN_DECIMALS,
-            lltv_raw=_LLTV_RAW,
             price_oracle=_PRICE_ORACLE,
         )
 
@@ -565,7 +505,7 @@ class TestMorphoBlueAccountStateZeroBorrow:
 
     def test_nonzero_borrow_shares_but_zero_total_borrow_assets_gives_zero_debt(self) -> None:
         """If borrow shares > 0 but market has no borrow assets, borrow_assets resolves to 0."""
-        from almanak.framework.accounting.lending_accounting import read_morpho_blue_account_state
+        from almanak.framework.accounting.lending_accounting import read_lending_account_state
 
         collateral_raw = 1 * 10**18
 
@@ -577,21 +517,17 @@ class TestMorphoBlueAccountStateZeroBorrow:
         mkt_response = _mock_market_response(
             total_supply_assets=10_000 * 10**6,
             total_supply_shares=10_000 * 10**18,
-            total_borrow_assets=0,     # edge case: assets are 0
+            total_borrow_assets=0,  # edge case: assets are 0
             total_borrow_shares=100 * 10**6,
         )
         gateway = _make_mock_gateway(pos_response, mkt_response)
 
-        state = read_morpho_blue_account_state(
+        state = read_lending_account_state(
+            protocol="morpho_blue",
             gateway_client=gateway,
             chain=_CHAIN,
             wallet_address=_WALLET,
             market_id=_MARKET_ID,
-            collateral_token="wstETH",
-            loan_token="USDC",
-            collateral_decimals=_COLLATERAL_DECIMALS,
-            loan_decimals=_LOAN_DECIMALS,
-            lltv_raw=_LLTV_RAW,
             price_oracle=_PRICE_ORACLE,
         )
 
@@ -606,7 +542,7 @@ class TestMorphoBlueAccountStateAdditionalCoverage:
 
     def test_missing_price_oracle_returns_none(self) -> None:
         """When price_oracle is None, read_morpho_blue_account_state returns None."""
-        from almanak.framework.accounting.lending_accounting import read_morpho_blue_account_state
+        from almanak.framework.accounting.lending_accounting import read_lending_account_state
 
         collateral_raw = 1 * 10**18
         borrow_shares = 100_000_000
@@ -621,16 +557,12 @@ class TestMorphoBlueAccountStateAdditionalCoverage:
         )
         gateway = _make_mock_gateway(pos_response, mkt_response)
 
-        state = read_morpho_blue_account_state(
+        state = read_lending_account_state(
+            protocol="morpho_blue",
             gateway_client=gateway,
             chain=_CHAIN,
             wallet_address=_WALLET,
             market_id=_MARKET_ID,
-            collateral_token="wstETH",
-            loan_token="USDC",
-            collateral_decimals=_COLLATERAL_DECIMALS,
-            loan_decimals=_LOAN_DECIMALS,
-            lltv_raw=_LLTV_RAW,
             price_oracle=None,  # no prices
         )
 
@@ -638,20 +570,16 @@ class TestMorphoBlueAccountStateAdditionalCoverage:
 
     def test_unsupported_chain_returns_none(self) -> None:
         """When chain has no Morpho Blue address, return None."""
-        from almanak.framework.accounting.lending_accounting import read_morpho_blue_account_state
+        from almanak.framework.accounting.lending_accounting import read_lending_account_state
 
         gateway = MagicMock()
 
-        state = read_morpho_blue_account_state(
+        state = read_lending_account_state(
+            protocol="morpho_blue",
             gateway_client=gateway,
             chain="fantom",  # not in MORPHO_BLUE_ADDRESSES
             wallet_address=_WALLET,
             market_id=_MARKET_ID,
-            collateral_token="wstETH",
-            loan_token="USDC",
-            collateral_decimals=_COLLATERAL_DECIMALS,
-            loan_decimals=_LOAN_DECIMALS,
-            lltv_raw=_LLTV_RAW,
             price_oracle=_PRICE_ORACLE,
         )
 
@@ -707,9 +635,7 @@ class TestMorphoBlueAccountStateAdditionalCoverage:
         )
 
         assert event is not None
-        assert event.health_factor_after is not None, (
-            "health_factor_after must be populated for morpho_blue REPAY"
-        )
+        assert event.health_factor_after is not None, "health_factor_after must be populated for morpho_blue REPAY"
         assert event.collateral_value_after_usd is not None
         assert event.debt_value_after_usd is not None
         assert event.lltv is not None
@@ -821,9 +747,7 @@ class TestMorphoBlueAccountStateAdditionalCoverage:
         )
 
         assert event is not None, "DELEVERAGE must produce an accounting event"
-        assert event.health_factor_after is not None, (
-            "health_factor_after must be populated for morpho_blue DELEVERAGE"
-        )
+        assert event.health_factor_after is not None, "health_factor_after must be populated for morpho_blue DELEVERAGE"
         assert event.collateral_value_after_usd is not None
         assert event.debt_value_after_usd is not None
         assert event.lltv is not None

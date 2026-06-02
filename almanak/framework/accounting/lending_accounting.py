@@ -25,6 +25,7 @@ FIFO interest attribution:
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
 
 from almanak.connectors._strategy_base.lending_read_base import (
     _AAVE_GET_USER_EMODE_SELECTOR,
+    LendingAccountState,
     parse_user_emode_hex,
 )
 from almanak.framework.accounting.gas_pricing import native_token_for_chain
@@ -44,20 +46,17 @@ from almanak.framework.accounting.ids import make_accounting_event_id
 
 logger = logging.getLogger(__name__)
 
-# Aave V3 read selectors + decoders live ONCE in the connector-owned spec
-# (``lending_read_base``): ``read_aave_account_state`` routes through
-# ``AAVE_FORK_ACCOUNT_STATE_READ``; ``read_aave_user_emode`` uses the imported
-# ``_AAVE_GET_USER_EMODE_SELECTOR`` + ``parse_user_emode_hex``. No selector,
-# scale, cap, or decode is duplicated here (VIB-4929 PR-2).
-
-# ─── Morpho Blue position/market selectors (VIB-3483) ─────────────────────────
-# position(bytes32 id, address user) → (uint256 supplyShares, uint128 borrowShares, uint128 collateral)
-_MORPHO_POSITION_SELECTOR = "0x93c52062"
-# market(bytes32 id) → (uint128 totalSupplyAssets, uint128 totalSupplyShares,
-#                        uint128 totalBorrowAssets, uint128 totalBorrowShares,
-#                        uint128 lastUpdate, uint128 fee)
-_MORPHO_MARKET_SELECTOR = "0x5c60e39a"
-_MORPHO_LLTV_SCALE = Decimal("1e18")  # lltv is 1e18-scaled
+# VIB-4929 PR-3a: Aave + Morpho aggregate account-state reads go through the
+# single generic ``read_lending_account_state``, which drives the connector-owned
+# specs (``AAVE_FORK_ACCOUNT_STATE_READ`` / ``MORPHO_BLUE_ACCOUNT_STATE_READ`` in
+# ``lending_read_base``) via ``LendingReadRegistry``. Adding a lending connector
+# to the read path requires ZERO framework edits here — no per-protocol
+# ``read_<protocol>_account_state`` function, no selector, scale, cap, lltv, HF
+# sentinel, or decode is duplicated in this module. ``read_aave_user_emode`` is
+# the one remaining single-call helper (used by the Tier-2 Aave registry), still
+# decoding via the imported ``_AAVE_GET_USER_EMODE_SELECTOR`` + ``parse_user_emode_hex``.
+# Compound V3 stays on its legacy ``read_compound_v3_account_state`` transitionally
+# (it has no addresses.py / AddressRegistry entry yet; folds in at PR-3b).
 
 # ─── Compound V3 selectors ────────────────────────────────────────────────────
 # userCollateral(address account, address asset) → (uint128 balance, uint128 reserved)
@@ -74,25 +73,6 @@ _LENDING_INTENT_TYPES = frozenset({"SUPPLY", "BORROW", "REPAY", "WITHDRAW", "DEL
 # a single framework source of truth shared with the EVM gas_usd writer
 # (VIB-3805). The previous local map diverged on plasma (ETH vs XPL) and
 # missed several chains in the gateway-side ``NATIVE_TOKEN_SYMBOLS``.
-
-
-@dataclass
-class AaveAccountState:
-    """Post-execution account summary from Pool.getUserAccountData + Pool.getUserEMode.
-
-    VIB-4213 (T27) added the bottom two fields. `e_mode_category` comes from a
-    second eth_call to ``Pool.getUserEMode(user)``; `interest_rate_mode` is the
-    intent-layer rate mode threaded through by ``_capture_aave_v3_pre_state``
-    for BORROW/REPAY intents. Both are ``None`` when unmeasured — never
-    fabricated zero (Empty ≠ Zero, AGENTS.md §Accounting).
-    """
-
-    collateral_usd: Decimal
-    debt_usd: Decimal
-    health_factor: Decimal  # normalised (1.0 = healthy)
-    liquidation_threshold_bps: int  # e.g. 8500 → 85 %
-    e_mode_category: int | None = None  # 0..255; 0 = no e-mode. None = read failed.
-    interest_rate_mode: str | None = None  # intent-layer Literal value; None for SUPPLY/WITHDRAW.
 
 
 def _pad_address(address: str) -> str:
@@ -174,283 +154,131 @@ def read_aave_user_emode(
     return parse_user_emode_hex(hex_data)
 
 
-def read_aave_account_state(
-    gateway_client: Any,
+def read_lending_account_state(
+    *,
+    protocol: str,
     chain: str,
     wallet_address: str,
+    market_id: str | None,
+    gateway_client: Any,
+    price_oracle: dict | None,
     block: int | str | None = None,
-) -> AaveAccountState | None:
-    """Read Aave V3 Pool.getUserAccountData (+ getUserEMode, VIB-4213) for *wallet_address*.
+) -> LendingAccountState | None:
+    """Read a wallet's aggregate lending account state for any spec-backed protocol.
 
-    ``block`` (VIB-4589 / F7) — when provided, both eth_calls
-    (``getUserAccountData`` and ``getUserEMode``) pin to the same block so
-    the snapshot is internally consistent and POST-execution captures
-    cannot race the upstream RPC's receipt indexer. Default ``None`` falls
-    back to ``"latest"`` for pre-execution captures.
+    The single generic reader VIB-4929 PR-3a uses in place of the per-protocol
+    ``read_<protocol>_account_state`` executors (Aave + Morpho). Adding a lending
+    connector to the read path now requires **zero**
+    framework edits here: the connector publishes an ``ACCOUNT_STATE_READ_SPEC``
+    (+ a ``market_params`` table and ``valuation_role_keys`` if it is not
+    USD-native), and this reader drives it through the registry.
 
-    Returns normalised USD values and a 1e18-normalised health factor, or None
-    if the primary ``getUserAccountData`` call fails. The secondary e-mode read
-    is best-effort: when it fails the rest of the state still populates, with
-    ``e_mode_category=None`` so the consumer can distinguish "no e-mode" (0)
-    from "unmeasured" (None).
+    The framework keeps exactly the two responsibilities the connector spec must
+    stay pure of (Gateway-boundary rule + purity contract):
 
-    getUserAccountData returns:
-      [0] totalCollateralBase  (uint256, 1e8 USD)
-      [1] totalDebtBase        (uint256, 1e8 USD)
-      [2] availableBorrowsBase (uint256, 1e8 USD) -- not used
-      [3] currentLiquidationThreshold (uint256, bps, e.g. 8500)
-      [4] ltv                  (uint256, bps) -- not used
-      [5] healthFactor         (uint256, 1e18)
+    1. **Price + decimals resolution** for non-USD-native protocols. The spec
+       declares *which* tokens to value via ``valuation_role_keys``; the registry
+       resolves those to ``(query_field, token_symbol)`` pairs against the
+       connector's market table; this reader resolves each token's USD price (via
+       the shape-tolerant :func:`_resolve_oracle_price`) and decimals (via the
+       token resolver) and **injects** them onto the query. USD-native protocols
+       (the Aave family) declare no roles, so this loop is empty and no oracle is
+       touched.
+    2. **The gateway round-trip + block pinning.** The spec only *describes +
+       decodes* the reads; this reader executes each planned :class:`EthCall` via
+       :func:`_gateway_eth_call` (block pinning + legacy-signature fallback
+       preserved) and hands the blobs to the spec's pure reducer.
 
-    getUserEMode returns:
-      uint256 category (0 = no e-mode; 1..255 = a configured category id).
+    Fails closed (returns ``None``, never a fabricated zero — Empty ≠ Zero) when:
+    the chain has no read-target address; a declared valuation token has no
+    resolvable price or decimals; the protocol/chain has no plan; or the spec
+    reducer rejects the blobs. ``interest_rate_mode`` is intent metadata the
+    caller overlays after this read — it is never decoded here.
 
-    VIB-4929 (PR-2): this reader now *routes through* the connector-owned
-    account-state spec
-    (:data:`~almanak.connectors._strategy_base.lending_read_base.AAVE_FORK_ACCOUNT_STATE_READ`)
-    instead of carrying its own copy of the selectors / scales / HF-cap. The
-    spec *describes + decodes* the read (pure, no egress); this framework
-    function still owns the gateway-routed ``eth_call`` per the Gateway-boundary
-    rule. The decode is therefore the single source of truth shared with the
-    strategy-side oracle↔spec equivalence test — they can no longer drift.
-    ``interest_rate_mode`` is intent-derived and stays sourced from the caller
-    (:func:`_capture_aave_v3_pre_state`); it is never decoded from the read.
+    Args:
+        protocol: Protocol identifier (e.g. ``"aave_v3"``, ``"morpho_blue"``, or
+            the ``"aave"`` alias) — resolved through the registry.
+        chain: Chain identifier (e.g. ``"ethereum"``).
+        wallet_address: Position owner address.
+        market_id: Per-market id for per-market protocols (Morpho); ``None`` for
+            whole-account protocols (the Aave family).
+        gateway_client: Gateway client exposing ``eth_call(chain, to, data, block=...)``.
+        price_oracle: ``{symbol: price}`` (or nested ``{symbol: {price_usd: ...}}``)
+            map used to value non-USD-native positions. Unused for the Aave family.
+        block: Optional block to pin every read to (VIB-4589 / F7). ``None`` →
+            ``"latest"`` (safe for pre-execution captures); post-execution
+            captures MUST pass ``receipt.block_number``.
     """
-    try:
-        from almanak.connectors._strategy_base.lending_read_base import (
-            AccountStateQuery,
-        )
-        from almanak.connectors._strategy_base.lending_read_registry import (
-            LendingReadRegistry,
-        )
+    from almanak.connectors._strategy_base.lending_read_base import AccountStateQuery
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+    from almanak.framework.data.tokens.exceptions import TokenNotFoundError
+    from almanak.framework.data.tokens.resolver import get_token_resolver
 
-        # Resolve the per-chain Aave pool through the registry (contract kind
-        # ``pool`` from the connector's own ``addresses.py``). This is the same
-        # address the pre-VIB-4929 path read from ``AAVE_V3_POOL_ADDRESSES`` —
-        # both derive from ``aave_v3.addresses.AAVE_V3[chain]["pool"]`` — so the
-        # read target is unchanged. Fail closed when the chain has no pool.
-        pool_address = LendingReadRegistry.position_manager_address("aave_v3", chain)
-        if not pool_address:
+    try:
+        # Resolve the per-chain read target (contract kind from the connector's
+        # own ``addresses.py``). Same address the pre-VIB-4929 path read from the
+        # connector's address map. Fail closed when the chain has no deployment.
+        pm = LendingReadRegistry.position_manager_address(protocol, chain)
+        if not pm:
+            logger.debug("read_lending_account_state: no read-target for protocol=%s chain=%s", protocol, chain)
             return None
+
+        # Per-market params the reducer needs but cannot read on-chain cheaply
+        # (e.g. Morpho's lltv). None for whole-account protocols.
+        market_params = LendingReadRegistry.market_params(protocol, chain, market_id) if market_id else None
+
+        # Resolve + inject the valuation inputs for non-USD-native protocols. The
+        # spec declares the roles; the registry names the tokens from the market
+        # table; the framework prices them here. Aave declares no roles ⇒ empty.
+        prices: dict[str, Decimal] = {}
+        decimals: dict[str, int] = {}
+        injected_tokens: dict[str, str] = {}  # query_field -> symbol (e.g. collateral_token, loan_token)
+        resolver = get_token_resolver()
+        for query_field, symbol in LendingReadRegistry.valuation_roles(protocol, chain, market_id):
+            price = _resolve_oracle_price(price_oracle, symbol)
+            if price is None:
+                logger.debug(
+                    "read_lending_account_state: price unavailable for %s (%s) on %s",
+                    symbol,
+                    query_field,
+                    chain,
+                )
+                return None  # Empty ≠ Zero — fail closed, never fabricate.
+            try:
+                token_info = resolver.resolve(symbol, chain=chain)
+            except TokenNotFoundError:
+                logger.debug("read_lending_account_state: cannot resolve decimals for %s on %s", symbol, chain)
+                return None
+            if token_info is None:
+                return None
+            prices[symbol] = price
+            decimals[symbol] = token_info.decimals
+            injected_tokens[query_field] = symbol
 
         query = AccountStateQuery(
             chain=chain,
             wallet_address=wallet_address,
-            position_manager_address=pool_address,
+            market_id=market_id,
             block=block,
+            prices=prices or None,
+            decimals=decimals or None,
+            market_params=market_params,
+            collateral_token=injected_tokens.get("collateral_token"),
+            loan_token=injected_tokens.get("loan_token"),
         )
-        plan = LendingReadRegistry.resolve_account_state_plan("aave_v3", query)
+
+        plan = LendingReadRegistry.resolve_account_state_plan(protocol, query)
         if plan is None:
             return None
 
         # The framework owns the gateway round-trip; the spec only describes the
-        # reads. Execute each planned call via the same gateway helper (block
-        # pinning + legacy-signature fallback preserved). ``None`` for any read
-        # that failed — the reducer fails closed on a missing primary read and
-        # decodes a missing e-mode read to ``None`` (not a fabricated 0).
+        # reads. Block pinning + legacy-signature fallback are preserved by
+        # ``_gateway_eth_call``; ``None`` for any failed read (the reducer fails
+        # closed on a missing required blob).
         results = [_gateway_eth_call(gateway_client, chain, call.to, call.data, block=block) for call in plan.calls]
-
-        state = plan.reduce(plan.query, results)
-        if state is None:
-            return None
-
-        # Map the canonical aggregate result onto the existing return shape. For
-        # the Aave family the spec always populates these fields when it returns
-        # non-None (the decode is byte-identical to the legacy inline path);
-        # guard the Optional types so we fail closed rather than fabricate.
-        if state.collateral_usd is None or state.debt_usd is None or state.health_factor is None:
-            return None
-        if state.liquidation_threshold_bps is None:
-            return None
-
-        return AaveAccountState(
-            collateral_usd=state.collateral_usd,
-            debt_usd=state.debt_usd,
-            health_factor=state.health_factor,
-            liquidation_threshold_bps=state.liquidation_threshold_bps,
-            e_mode_category=state.e_mode_category,
-            # interest_rate_mode is intent-derived; threaded in by the caller
-            # (_capture_aave_v3_pre_state), never decoded from the read.
-        )
+        return plan.reduce(plan.query, results)
     except Exception:
-        logger.debug("read_aave_account_state failed", exc_info=True)
-        return None
-
-
-@dataclass
-class MorphoBlueAccountState:
-    """Post-execution position summary from Morpho Blue position() + market() calls."""
-
-    collateral_usd: Decimal
-    debt_usd: Decimal
-    health_factor: Decimal  # normalised (1.0 = healthy); None-sentinel if no debt
-    lltv: Decimal  # liquidation LTV as a fraction (e.g. 0.86 for 86%)
-
-
-def _normalize_market_id_hex(market_id: str) -> str:
-    """Return the 32-byte market ID as 64 lowercase hex chars (no 0x prefix)."""
-    raw = market_id.lower().replace("0x", "")
-    return raw.zfill(64)
-
-
-def read_morpho_blue_account_state(
-    gateway_client: Any,
-    chain: str,
-    wallet_address: str,
-    market_id: str,
-    collateral_token: str,
-    loan_token: str,
-    collateral_decimals: int,
-    loan_decimals: int,
-    lltv_raw: int,
-    price_oracle: dict | None,
-    block: int | str | None = None,
-) -> MorphoBlueAccountState | None:
-    """Read Morpho Blue position and market state for *wallet_address* via gateway.
-
-    Makes two eth_call reads against the Morpho Blue contract:
-      1. position(bytes32 id, address user) — borrowShares, collateral (raw uint128)
-      2. market(bytes32 id)                 — totalBorrowAssets, totalBorrowShares (uint128)
-
-    Then computes:
-      borrow_assets = borrowShares * totalBorrowAssets / totalBorrowShares
-      collateral_value_usd = collateral_amount_human * collateral_price_usd
-      debt_value_usd = borrow_amount_human * loan_price_usd
-      health_factor  = (collateral_value_usd * lltv) / debt_value_usd
-
-    Returns None (with debug log) if any gateway call fails.
-    Returns None for health_factor (no-debt sentinel) when borrow_shares == 0.
-
-    Args:
-        gateway_client: Gateway client exposing eth_call(chain, to, data).
-        chain: Chain name (e.g. "ethereum", "arbitrum").
-        wallet_address: Position owner address.
-        market_id: Morpho Blue market ID (bytes32 hex, with or without 0x).
-        collateral_token: Collateral token symbol (for price lookup).
-        loan_token: Loan token symbol (for price lookup).
-        collateral_decimals: Decimals for collateral token.
-        loan_decimals: Decimals for loan token.
-        lltv_raw: Raw LLTV from market params (1e18-scaled int, e.g. 860000000000000000 = 86%).
-        price_oracle: Dict mapping token symbol → USD price (Decimal or float).
-        block: Optional block reference for both eth_calls (VIB-4589 / F7).
-            ``None`` (default) → ``"latest"``, safe for pre-execution captures.
-            Post-execution captures MUST pass ``receipt.block_number`` so the
-            (position, market) pair is read at the same block as the confirmed
-            receipt and cannot race the upstream RPC's receipt indexer.
-
-    Returns:
-        MorphoBlueAccountState or None on failure.
-    """
-    try:
-        from almanak.connectors.morpho_blue.adapter import MORPHO_BLUE_ADDRESSES
-
-        morpho_address = MORPHO_BLUE_ADDRESSES.get(chain.lower())
-        if not morpho_address:
-            logger.debug("read_morpho_blue_account_state: no Morpho Blue address for chain=%s", chain)
-            return None
-
-        market_hex = _normalize_market_id_hex(market_id)
-        user_hex = _pad_address(wallet_address)
-
-        # ── Call 1: position(bytes32 id, address user) ──────────────────────
-        # VIB-4589 / F7: pin BOTH eth_calls to the same block so position +
-        # market come from one consistent snapshot. Without this, a post-tx
-        # read where market() lands one block after position() would compute
-        # ``borrow_assets`` against the wrong shares total.
-        position_calldata = _MORPHO_POSITION_SELECTOR + market_hex + user_hex
-        position_raw = _gateway_eth_call(gateway_client, chain, morpho_address, position_calldata, block=block)
-        if not position_raw:
-            logger.debug("read_morpho_blue_account_state: position() call failed for market=%s", market_id[:18])
-            return None
-        pos_hex = position_raw.replace("0x", "")
-        if len(pos_hex) < 3 * 64:
-            logger.debug("read_morpho_blue_account_state: position() response too short (%d chars)", len(pos_hex))
-            return None
-
-        # Word layout:
-        #   [0]  supplyShares (uint256) — not used here
-        #   [1]  borrowShares (uint128 padded to 256)
-        #   [2]  collateral   (uint128 padded to 256)
-        borrow_shares = _decode_word(pos_hex, 1)
-        collateral_raw = _decode_word(pos_hex, 2)
-
-        # ── Call 2: market(bytes32 id) ───────────────────────────────────────
-        # market() returns the Market struct as 6 ABI-encoded uint128 values.
-        # Standard Solidity ABI encoding pads each uint128 to a full 32-byte word:
-        #   Word 0 (hex [0:64]):    totalSupplyAssets
-        #   Word 1 (hex [64:128]):  totalSupplyShares
-        #   Word 2 (hex [128:192]): totalBorrowAssets
-        #   Word 3 (hex [192:256]): totalBorrowShares
-        #   Word 4 (hex [256:320]): lastUpdate
-        #   Word 5 (hex [320:384]): fee
-        market_calldata = _MORPHO_MARKET_SELECTOR + market_hex
-        market_raw = _gateway_eth_call(gateway_client, chain, morpho_address, market_calldata, block=block)
-        if not market_raw:
-            logger.debug("read_morpho_blue_account_state: market() call failed for market=%s", market_id[:18])
-            return None
-        mkt_hex = market_raw.replace("0x", "")
-        if len(mkt_hex) < 6 * 64:  # 6 words × 64 hex chars each
-            logger.debug("read_morpho_blue_account_state: market() response too short (%d chars)", len(mkt_hex))
-            return None
-
-        # Each uint128 occupies the lower 16 bytes of a 32-byte slot, but ABI-encoded
-        # as a 32-byte word with leading zeros. The market() return is 6 separate
-        # uint128 values packed as 6 full 32-byte (64 hex-char) words.
-        total_borrow_assets = int(mkt_hex[128:192], 16)  # word index 2
-        total_borrow_shares = int(mkt_hex[192:256], 16)  # word index 3
-
-        # ── shares → assets ──────────────────────────────────────────────────
-        if borrow_shares == 0:
-            borrow_assets = 0
-        elif total_borrow_shares == 0:
-            borrow_assets = 0
-        else:
-            # Round up to be conservative — never under-count debt
-            borrow_assets = (borrow_shares * total_borrow_assets + total_borrow_shares - 1) // total_borrow_shares
-
-        # ── Convert raw amounts to human-decimal ─────────────────────────────
-        collateral_amount = Decimal(collateral_raw) / Decimal(10**collateral_decimals)
-        borrow_amount = Decimal(borrow_assets) / Decimal(10**loan_decimals)
-
-        # ── USD values via price oracle ───────────────────────────────────────
-        # Use the shape-tolerant resolver so the teardown lane's nested
-        # ``{symbol: {price_usd, …}}`` oracle works alongside the iteration
-        # lane's flat ``{symbol: price}`` shape (Codex 2026-05-04 review).
-        collateral_price = _resolve_oracle_price(price_oracle, collateral_token)
-        loan_price = _resolve_oracle_price(price_oracle, loan_token)
-
-        if collateral_price is None or loan_price is None:
-            logger.debug(
-                "read_morpho_blue_account_state: price not available for collateral=%s loan=%s",
-                collateral_token,
-                loan_token,
-            )
-            return None
-
-        collateral_value_usd = collateral_amount * collateral_price
-        debt_value_usd = borrow_amount * loan_price
-
-        # ── LLTV and health factor ─────────────────────────────────────────────
-        lltv = Decimal(lltv_raw) / _MORPHO_LLTV_SCALE
-
-        if borrow_shares == 0 or debt_value_usd == 0:
-            # No debt — health factor is undefined (infinite). Return a sentinel.
-            health_factor = Decimal("999999")
-        else:
-            health_factor = (collateral_value_usd * lltv) / debt_value_usd
-
-        # Cap unrealistically large HF (avoid overflow in serialisation)
-        health_factor = min(health_factor, Decimal("999999"))
-
-        return MorphoBlueAccountState(
-            collateral_usd=collateral_value_usd,
-            debt_usd=debt_value_usd,
-            health_factor=health_factor,
-            lltv=lltv,
-        )
-
-    except Exception:
-        logger.debug("read_morpho_blue_account_state failed", exc_info=True)
+        logger.debug("read_lending_account_state failed for protocol=%s chain=%s", protocol, chain, exc_info=True)
         return None
 
 
@@ -706,236 +534,6 @@ def read_compound_v3_account_state(  # noqa: C901
         return None
 
 
-def _capture_aave_v3_pre_state(
-    *,
-    intent: Any,
-    chain: str,
-    wallet_address: str,
-    gateway_client: Any,
-    price_oracle: dict | None,  # noqa: ARG001 — registry-uniform signature
-    block: int | str | None = None,
-) -> AaveAccountState | None:
-    """Aave V3 pre-state arm of capture_lending_pre_state.
-
-    VIB-4213: threads the intent's ``interest_rate_mode`` (BORROW/REPAY only)
-    onto the returned ``AaveAccountState`` so it lands in pre_state_json /
-    post_state_json. SUPPLY/WITHDRAW intents have no rate mode at the Aave
-    collateral side — the field stays ``None``.
-
-    VIB-4589 / F7: ``block`` pins the read; ``None`` → ``"latest"`` for
-    pre-state captures, ``receipt.block_number`` for post-state.
-    """
-    aave_state = read_aave_account_state(gateway_client, chain, wallet_address, block=block)
-    if aave_state is None:
-        logger.debug("capture_lending_pre_state: Aave read returned None for chain=%s", chain)
-        return None
-
-    intent_type_str = _intent_type_value(intent).upper()
-    if intent_type_str in {"BORROW", "REPAY"}:
-        rate_mode = getattr(intent, "interest_rate_mode", None)
-        if rate_mode is not None:
-            # InterestRateMode is a ``Literal["variable"]`` at the intent layer.
-            # str() handles both the Literal value and any future enum.
-            aave_state.interest_rate_mode = str(rate_mode)
-        else:
-            # codex review: when the intent leaves ``interest_rate_mode`` unset,
-            # ``connectors/base/lending/aave_helpers.py`` will dispatch the BORROW/REPAY with
-            # ``AAVE_VARIABLE_RATE_MODE`` (stable mode is deprecated on Aave V3).
-            # Surface the rate mode the on-chain tx will actually carry so
-            # registry/PnL consumers see the real rate mode, not ``null``.
-            aave_state.interest_rate_mode = "variable"
-
-    return aave_state
-
-
-# crap-allowlist: pre-state arm for Morpho Blue, exercised by integration tests
-# in tests/framework/accounting/test_lending_pre_execution_state_vib3489.py.
-# Unit-scope coverage is artificially low (3%) — see
-# docs/internal/coverage-w1-misplacement-audit.md §2 for the measurement-window
-# explanation. Combined-scope coverage is 73%.
-def _resolve_morpho_market_params(
-    *,
-    chain: str,
-    market_id: str,
-    collateral_token_sym: str | None,
-    loan_token_sym: str | None,
-) -> tuple[str | None, str | None, int | None, int | None, int | None]:
-    """Resolve Morpho Blue (collateral_sym, loan_sym, collateral_decimals, loan_decimals, lltv_raw).
-
-    Returns ``(None, None, None, None, None)``-shaped tuple components for any
-    field that could not be resolved; the caller decides whether to abort.
-    """
-    collateral_decimals: int | None = None
-    loan_decimals: int | None = None
-    lltv_raw: int | None = None
-
-    try:
-        from almanak.connectors.morpho_blue.adapter import MORPHO_MARKETS
-
-        markets_for_chain = MORPHO_MARKETS.get(chain.lower(), {})
-        # O(1) lookup using the same normalisation as _normalize_market_id_hex
-        normalized_key = "0x" + _normalize_market_id_hex(market_id)
-        market_info: dict | None = markets_for_chain.get(normalized_key)
-    except (ImportError, AttributeError, KeyError):
-        logger.debug("capture_lending_pre_state: MORPHO_MARKETS lookup failed for chain=%s", chain, exc_info=True)
-        return collateral_token_sym, loan_token_sym, collateral_decimals, loan_decimals, lltv_raw
-
-    if market_info is None:
-        return collateral_token_sym, loan_token_sym, collateral_decimals, loan_decimals, lltv_raw
-
-    if collateral_token_sym is None:
-        collateral_token_sym = market_info.get("collateral_token")
-    if loan_token_sym is None:
-        loan_token_sym = market_info.get("loan_token")
-    lltv_raw = market_info.get("lltv")
-
-    try:
-        from almanak.framework.data.tokens.exceptions import TokenNotFoundError
-        from almanak.framework.data.tokens.resolver import get_token_resolver
-
-        resolver = get_token_resolver()
-        if collateral_token_sym:
-            ct = resolver.resolve(collateral_token_sym, chain=chain)
-            if ct:
-                collateral_decimals = ct.decimals
-        if loan_token_sym:
-            lt = resolver.resolve(loan_token_sym, chain=chain)
-            if lt:
-                loan_decimals = lt.decimals
-    except (ImportError, TokenNotFoundError):
-        logger.debug("capture_lending_pre_state: token resolver failed for Morpho Blue", exc_info=True)
-
-    return collateral_token_sym, loan_token_sym, collateral_decimals, loan_decimals, lltv_raw
-
-
-def _derive_morpho_token_symbols(
-    *,
-    intent: Any,
-    intent_type_str: str,
-) -> tuple[str | None, str | None]:
-    """Derive (collateral_token_sym, loan_token_sym) for a Morpho Blue intent
-    before registry resolution.
-
-    SUPPLY: routing depends on ``SupplyIntent.use_as_collateral`` (default
-    True). True → ``morpho.supplyCollateral()`` and ``intent.token`` is the
-    collateral asset. False → ``morpho.supply()`` (loan-side deposit) and
-    ``intent.token`` is the loan asset. The compiler's two-branch routing is
-    documented in ``connectors/base/lending/aave_helpers.py:3851-3852``.
-
-    WITHDRAW: mirror of SUPPLY using ``WithdrawIntent.is_collateral``
-    (default True).
-
-    For BORROW / REPAY / DELEVERAGE: ``intent.borrow_token`` is the loan asset
-    when set; fall back to ``intent.token`` otherwise (e.g. ``RepayIntent``
-    uses ``token`` rather than ``borrow_token``).
-
-    The helper leaves ``loan_token_sym`` (collateral path) or
-    ``collateral_token_sym`` (loan-side path) as ``None`` so
-    :func:`_resolve_morpho_market_params` fills the other leg from
-    ``MORPHO_MARKETS`` (GH #2148 / VIB-4432).
-
-    Used from both pre-state (``_capture_morpho_blue_pre_state``) and
-    post-state (``build_lending_accounting_event``) Morpho branches so they
-    cannot drift again.
-    """
-    collateral_token_sym: str | None = getattr(intent, "collateral_token", None)
-    intent_type_upper = intent_type_str.upper()
-
-    if intent_type_upper == "SUPPLY":
-        # SupplyIntent.use_as_collateral default True (lending_intents.py:290).
-        # Tolerate intents without the attribute (e.g. legacy mocks) by
-        # defaulting to the collateral branch.
-        if getattr(intent, "use_as_collateral", True):
-            collateral_token_sym = collateral_token_sym or getattr(intent, "token", None)
-            return collateral_token_sym, None
-        # Loan-side supply: intent.token is the loan asset.
-        return collateral_token_sym, getattr(intent, "token", None)
-
-    if intent_type_upper == "WITHDRAW":
-        # WithdrawIntent.is_collateral default True (lending_intents.py:387).
-        if getattr(intent, "is_collateral", True):
-            collateral_token_sym = collateral_token_sym or getattr(intent, "token", None)
-            return collateral_token_sym, None
-        return collateral_token_sym, getattr(intent, "token", None)
-
-    # BORROW / REPAY / DELEVERAGE.
-    loan_token_sym = getattr(intent, "borrow_token", None) or getattr(intent, "token", None)
-    return collateral_token_sym, loan_token_sym
-
-
-# crap-allowlist: pre-state arm for Morpho Blue, exercised by integration tests
-# in tests/framework/accounting/test_lending_pre_execution_state_vib3489.py.
-# Unit-scope coverage is artificially low (7%) — see
-# docs/internal/coverage-w1-misplacement-audit.md §2 for the measurement-window
-# explanation. Combined-scope coverage is 73%.
-def _capture_morpho_blue_pre_state(
-    *,
-    intent: Any,
-    chain: str,
-    wallet_address: str,
-    gateway_client: Any,
-    price_oracle: dict | None,
-    block: int | str | None = None,
-) -> MorphoBlueAccountState | None:
-    """Morpho Blue pre-state arm — applies for all lending intent types (parity with Aave V3)."""
-    market_id = _intent_market_id(intent)
-    if not market_id:
-        logger.debug("capture_lending_pre_state: Morpho market_id missing — skipping pre-state read")
-        return None
-
-    intent_type_str = _intent_type_value(intent)
-    collateral_token_sym, loan_token_sym = _derive_morpho_token_symbols(
-        intent=intent,
-        intent_type_str=intent_type_str,
-    )
-
-    (
-        collateral_token_sym,
-        loan_token_sym,
-        collateral_decimals,
-        loan_decimals,
-        lltv_raw,
-    ) = _resolve_morpho_market_params(
-        chain=chain,
-        market_id=market_id,
-        collateral_token_sym=collateral_token_sym,
-        loan_token_sym=loan_token_sym,
-    )
-
-    if not (
-        collateral_token_sym
-        and loan_token_sym
-        and collateral_decimals is not None
-        and loan_decimals is not None
-        and lltv_raw is not None
-    ):
-        logger.debug(
-            "capture_lending_pre_state: Morpho Blue pre-state skipped (missing params) for market=%s",
-            market_id[:18] if market_id else "?",
-        )
-        return None
-
-    morpho_state = read_morpho_blue_account_state(
-        gateway_client=gateway_client,
-        chain=chain,
-        wallet_address=wallet_address,
-        market_id=market_id,
-        collateral_token=collateral_token_sym,
-        loan_token=loan_token_sym,
-        collateral_decimals=collateral_decimals,
-        loan_decimals=loan_decimals,
-        lltv_raw=lltv_raw,
-        price_oracle=price_oracle,
-        block=block,
-    )
-    if morpho_state is None:
-        logger.debug(
-            "capture_lending_pre_state: Morpho Blue read returned None for market=%s",
-            market_id[:18] if market_id else "?",
-        )
-    return morpho_state
-
-
 # crap-allowlist: pre-state arm for Compound V3, exercised by integration tests
 # in tests/framework/accounting/test_lending_pre_execution_state_vib3489.py and
 # tests/framework/accounting/test_compound_v3_account_state.py. Unit-scope
@@ -993,15 +591,54 @@ def _capture_compound_v3_pre_state(
 
 
 # Registry: protocol identifier → per-protocol pre-state reader.
-# Uniform keyword-only signature lets capture_lending_pre_state delegate without branching.
-_LendingState = AaveAccountState | MorphoBlueAccountState | CompoundV3AccountState | None
+# VIB-4929 PR-3a: Aave + Morpho route through the generic ``read_lending_account_state``
+# (no per-protocol entry here — see ``capture_lending_pre_state``). Compound V3 stays on
+# its legacy executor transitionally — it has no addresses.py / AddressRegistry entry yet,
+# so it cannot resolve through the registry's account-state path until PR-3b.
+_LendingState = LendingAccountState | CompoundV3AccountState | None
 _PreStateReader = Callable[..., _LendingState]
 _PROTOCOL_PRE_STATE_READERS: dict[str, _PreStateReader] = {
-    "aave_v3": _capture_aave_v3_pre_state,
-    "aave": _capture_aave_v3_pre_state,  # alias
-    "morpho_blue": _capture_morpho_blue_pre_state,
+    # transitional: folds into the generic reader in PR-3b
     "compound_v3": _capture_compound_v3_pre_state,
 }
+
+# Protocols the generic ``read_lending_account_state`` path is *enabled* for on the
+# live-money accounting read path. Registering an account-state spec
+# (``LendingReadRegistry._ACCOUNT_STATE_LOADERS``) makes a connector spec-*capable*,
+# but ENABLING it here is a deliberate, per-protocol opt-in: each entry was migrated
+# AND fork/byte-equivalence-verified in its PR. This gate is what stops a connector
+# that merely registered a spec — e.g. Spark, an Aave-fork that opted into
+# ``_ACCOUNT_STATE_LOADERS`` but whose generic read is not yet framework-verified
+# (VIB-4963) — from silently producing HIGH-confidence reads. Add a protocol here
+# only once its generic read is verified on a real fork.
+_GENERIC_PRE_STATE_PROTOCOLS: frozenset[str] = frozenset({"aave_v3", "aave", "morpho_blue"})
+
+
+def _overlay_aave_interest_rate_mode(state: LendingAccountState, intent: Any) -> LendingAccountState:
+    """Overlay the Aave intent-layer ``interest_rate_mode`` onto a decoded state.
+
+    Aave's ``interest_rate_mode`` is intent metadata, not an on-chain field — the
+    generic reader never decodes it. For BORROW/REPAY intents we thread it onto
+    the (frozen) :class:`LendingAccountState` via ``dataclasses.replace`` so it
+    lands in ``pre_state_json`` / ``post_state_json``, mirroring the pre-VIB-4929
+    Aave pre-state capture behaviour byte-for-byte:
+
+    * ``intent.interest_rate_mode`` set → ``str(...)`` of it.
+    * unset on a BORROW/REPAY → ``"variable"`` (the rate mode the on-chain tx
+      actually carries; stable mode is deprecated on Aave V3 —
+      ``connectors/base/lending/aave_helpers.py``).
+
+    SUPPLY/WITHDRAW (and non-BORROW/REPAY) leave it ``None``.
+    """
+    intent_type_str = _intent_type_value(intent).upper()
+    if intent_type_str not in {"BORROW", "REPAY"}:
+        return state
+    rate_mode = getattr(intent, "interest_rate_mode", None)
+    # InterestRateMode is a ``Literal["variable"]`` at the intent layer; str()
+    # handles both the Literal value and any future enum. Falls back to the
+    # rate mode the BORROW/REPAY dispatch will actually carry.
+    resolved = str(rate_mode) if rate_mode is not None else "variable"
+    return dataclasses.replace(state, interest_rate_mode=resolved)
 
 
 def capture_lending_pre_state(
@@ -1012,7 +649,7 @@ def capture_lending_pre_state(
     gateway_client: Any | None,
     price_oracle: dict | None,
     block: int | str | None = None,
-) -> AaveAccountState | MorphoBlueAccountState | CompoundV3AccountState | None:
+) -> LendingAccountState | CompoundV3AccountState | None:
     """Read on-chain lending state BEFORE the transaction is submitted (VIB-3489).
 
     Called by the strategy runner before executing the intent bundle.  The
@@ -1027,6 +664,16 @@ def capture_lending_pre_state(
 
     Never raises; never substitutes stale data on failure.
 
+    VIB-4929 PR-3a dispatch: Aave V3 + Morpho Blue route through the generic
+    :func:`read_lending_account_state`, but ONLY for protocols explicitly enabled
+    in ``_GENERIC_PRE_STATE_PROTOCOLS`` (migrated AND fork-verified in their PR). A
+    connector that merely *registers* an account-state spec is spec-capable but is
+    NOT auto-enabled on this live-money read path — e.g. Spark (an Aave-fork that
+    opted into ``_ACCOUNT_STATE_LOADERS``) stays unread → ESTIMATED until it is
+    verified and added (VIB-4963). Compound V3 stays on its legacy
+    :func:`_capture_compound_v3_pre_state` transitionally (folds into the generic
+    reader in PR-3b).
+
     VIB-4589 / F7: ``block`` pins every underlying eth_call to a single
     block reference. Pre-state captures pass ``None`` (→ ``"latest"`` — safe
     because the read precedes submission). Post-state captures pass
@@ -1034,6 +681,8 @@ def capture_lending_pre_state(
     snapshot reflects exactly the state produced by the confirmed receipt
     and cannot race the upstream RPC's receipt indexer.
     """
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
     if gateway_client is None:
         return None
 
@@ -1041,18 +690,46 @@ def capture_lending_pre_state(
         return None
 
     protocol = str(getattr(intent, "protocol", "") or "").lower()
-    reader = _PROTOCOL_PRE_STATE_READERS.get(protocol)
-    if reader is None:
+
+    # transitional: folds into the generic reader in PR-3b
+    legacy_reader = _PROTOCOL_PRE_STATE_READERS.get(protocol)
+    if legacy_reader is not None:
+        return legacy_reader(
+            intent=intent,
+            chain=chain,
+            wallet_address=wallet_address,
+            gateway_client=gateway_client,
+            price_oracle=price_oracle,
+            block=block,
+        )
+
+    # Generic path — gated to the explicitly-enabled, fork-verified protocols
+    # (``_GENERIC_PRE_STATE_PROTOCOLS``). A spec-capable-but-unverified connector
+    # (e.g. Spark — VIB-4963) is NOT read here: it stays unread (→ ESTIMATED),
+    # preserving pre-VIB-4929 behavior rather than silently upgrading to HIGH.
+    if protocol not in _GENERIC_PRE_STATE_PROTOCOLS:
+        return None
+    inputs = LendingReadRegistry.query_inputs(protocol, intent)
+    if inputs is None:
         return None
 
-    return reader(
-        intent=intent,
+    state = read_lending_account_state(
+        protocol=protocol,
         chain=chain,
         wallet_address=wallet_address,
         gateway_client=gateway_client,
         price_oracle=price_oracle,
         block=block,
+        **inputs,
     )
+    if state is None:
+        return None
+    # Aave-family intent-metadata overlay (interest_rate_mode). Gated on the
+    # structural family discriminator the reducer stamps, not a protocol-name
+    # string — keeps the framework consumer protocol-agnostic.
+    if state.family == "aave":
+        state = _overlay_aave_interest_rate_mode(state, intent)
+    return state
 
 
 def capture_lending_post_state(
@@ -1063,7 +740,7 @@ def capture_lending_post_state(
     gateway_client: Any | None,
     price_oracle: dict | None,
     block: int | str | None = None,
-) -> AaveAccountState | MorphoBlueAccountState | CompoundV3AccountState | None:
+) -> LendingAccountState | CompoundV3AccountState | None:
     """Read on-chain lending state AFTER the transaction confirms (VIB-3474).
 
     The post-state capture is the missing piece that ships
@@ -1097,7 +774,7 @@ def capture_lending_post_state(
 
 
 def lending_state_to_dict(
-    state: AaveAccountState | MorphoBlueAccountState | CompoundV3AccountState | None,
+    state: LendingAccountState | CompoundV3AccountState | None,
     *,
     protocol: str,
 ) -> dict[str, Any] | None:
@@ -1124,10 +801,23 @@ def lending_state_to_dict(
     All numeric fields are stringified Decimals — the handler parses with
     ``Decimal(str(post_state["..."]))`` so JSON round-trip is loss-free.
 
-    VIB-4213: ``e_mode_category`` (Aave V3) and ``interest_rate_mode`` (Aave V3,
-    BORROW/REPAY only) are emitted as JSON ``null`` when unmeasured. Empty ≠
-    Zero: a measured ``e_mode_category == 0`` (user not in any e-mode) is
-    distinguishable from ``null`` (read failed).
+    VIB-4929 PR-3a: Aave + Morpho now share the unified
+    :class:`LendingAccountState`. The persisted dict stays **byte-identical** to
+    the pre-PR per-protocol shapes:
+
+    * **Aave family** (``state.family == "aave"``): emits ``liquidation_threshold_bps``
+      (decoded int), ``e_mode_category``, AND ``interest_rate_mode``. CRITICAL: the
+      last two keys are emitted **even when their value is ``None``** (JSON null) —
+      the pre-PR ``isinstance(AaveAccountState)`` branch did this unconditionally,
+      so they are gated on the **structural** ``family`` discriminator, NOT on
+      value-presence. Dropping them when ``None`` would silently shrink the
+      persisted dict. Empty ≠ Zero: a measured ``e_mode_category == 0`` (user not
+      in any e-mode) stays distinguishable from ``null`` (read failed).
+    * **Morpho family** (``LendingAccountState`` with ``lltv`` set, no Aave
+      discriminator): emits ``lltv`` (str) + a derived ``liquidation_threshold_bps``
+      (``round(lltv * 10000)``, ROUND_HALF_UP) and never the Aave-only keys.
+    * **Compound V3** (transitional ``CompoundV3AccountState``): only the common
+      three keys.
     """
     if state is None:
         return None
@@ -1136,28 +826,33 @@ def lending_state_to_dict(
     out["collateral_usd"] = str(state.collateral_usd) if state.collateral_usd is not None else None
     out["debt_usd"] = str(state.debt_usd) if state.debt_usd is not None else None
     out["health_factor"] = str(state.health_factor) if state.health_factor is not None else None
-    if isinstance(state, AaveAccountState):
-        out["liquidation_threshold_bps"] = int(state.liquidation_threshold_bps)
-        # VIB-4213: e_mode_category is ``int | None`` — emit None (JSON null) when
-        # the secondary getUserEMode read failed; emit the raw int otherwise
-        # (including ``0`` which means "user is not in any e-mode category").
-        # Dataclass typing guarantees this is already int | None — no cast needed
-        # (gemini review).
-        out["e_mode_category"] = state.e_mode_category
-        # VIB-4213: interest_rate_mode is ``str | None`` — set on BORROW/REPAY
-        # intents only. SUPPLY/WITHDRAW intents (and the post-state path) leave
-        # it None. Emit JSON null in that case.
-        out["interest_rate_mode"] = state.interest_rate_mode
-    elif isinstance(state, MorphoBlueAccountState):
-        out["lltv"] = str(state.lltv)
-        # Morpho Blue: lltv IS the liquidation threshold; surface it in bps too
-        # so the handler's lltv-aware path doesn't need to branch on protocol.
-        try:
-            out["liquidation_threshold_bps"] = int(
-                (state.lltv * Decimal("10000")).to_integral_value(rounding="ROUND_HALF_UP")
-            )
-        except (InvalidOperation, TypeError, ValueError):
-            pass
+
+    if isinstance(state, LendingAccountState):
+        if state.family == "aave":
+            # Gated on the structural family discriminator, NOT value-presence —
+            # the pre-PR AaveAccountState branch emitted all three keys
+            # unconditionally. liquidation_threshold_bps is always populated for a
+            # non-None Aave read (the spec requires the primary getUserAccountData
+            # blob); int() matches the pre-PR cast.
+            if state.liquidation_threshold_bps is not None:
+                out["liquidation_threshold_bps"] = int(state.liquidation_threshold_bps)
+            # e_mode_category (int | None) — emit None (JSON null) when the
+            # secondary getUserEMode read failed; the raw int otherwise (incl. the
+            # measured ``0`` = "not in any e-mode").
+            out["e_mode_category"] = state.e_mode_category
+            # interest_rate_mode (str | None) — set on BORROW/REPAY only;
+            # SUPPLY/WITHDRAW and the post-state path leave it None ⇒ JSON null.
+            out["interest_rate_mode"] = state.interest_rate_mode
+        elif state.lltv is not None:
+            # Morpho family: lltv IS the liquidation threshold; surface it in bps
+            # too so the handler's lltv-aware path doesn't need to branch on protocol.
+            out["lltv"] = str(state.lltv)
+            try:
+                out["liquidation_threshold_bps"] = int(
+                    (state.lltv * Decimal("10000")).to_integral_value(rounding="ROUND_HALF_UP")
+                )
+            except (InvalidOperation, TypeError, ValueError):
+                pass
     return out
 
 
@@ -1332,7 +1027,7 @@ def build_lending_accounting_event(  # noqa: C901
     basis_store: FIFOBasisStore,
     price_oracle: dict | None,
     ledger_entry_id: str | None = None,
-    pre_execution_state: AaveAccountState | MorphoBlueAccountState | CompoundV3AccountState | None = None,
+    pre_execution_state: LendingAccountState | CompoundV3AccountState | None = None,
 ) -> Any | None:
     """Build a LendingAccountingEvent for a completed lending intent.
 
@@ -1563,91 +1258,53 @@ def build_lending_accounting_event(  # noqa: C901
                 principal_delta_usd = _withdraw_total_usd
                 interest_delta_usd = None
 
-    # ── After-state: protocol-specific on-chain read ─────────────────────────
-    aave_state: AaveAccountState | None = None
-    morpho_state: MorphoBlueAccountState | None = None
+    # ── After-state: on-chain read ───────────────────────────────────────────
+    # VIB-4929 PR-3a: Aave V3 + Morpho Blue share the unified ``LendingAccountState``,
+    # read through the single generic ``read_lending_account_state`` — but only for
+    # protocols explicitly enabled + fork-verified in ``_GENERIC_PRE_STATE_PROTOCOLS``.
+    # A spec-capable-but-unverified connector (e.g. Spark, which opted into
+    # ``_ACCOUNT_STATE_LOADERS``) is NOT auto-read here (→ ESTIMATED; VIB-4963).
+    # Compound V3 stays on its legacy reader transitionally (PR-3b).
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    generic_state: LendingAccountState | None = None
     morpho_unavailable_reason: str = ""
 
-    # Only query getUserAccountData for protocols whose pool address resolves via
-    # AAVE_V3_POOL_ADDRESSES. Spark uses different pool contracts;
-    # querying the Aave V3 pool for that protocol returns wrong data with HIGH
-    # confidence. Add its addresses to a separate registry when ready.
-    is_aave = protocol.lower() in ("aave_v3", "aave")
     is_morpho = protocol.lower() == "morpho_blue"
-    is_compound_v3 = protocol.lower() == "compound_v3"
+    is_compound_v3 = protocol.lower() == "compound_v3"  # transitional: folds into the generic reader in PR-3b
     compound_v3_state: CompoundV3AccountState | None = None
 
-    if is_aave and gateway_client is not None:
-        aave_state = read_aave_account_state(gateway_client, chain, wallet_address)
-
-    if (
-        is_morpho
-        and gateway_client is not None
-        and intent_type_str in ("BORROW", "REPAY", "DELEVERAGE", "SUPPLY", "WITHDRAW")
-    ):
-        # Morpho Blue post-state HF persistence: extended to SUPPLY/WITHDRAW so
-        # post-state is in parity with pre-state (VIB-4432). Required inputs:
-        # market_id + collateral/loan symbols + decimals + lltv from the market
-        # registry. Sharing ``_resolve_morpho_market_params`` with the pre-state
-        # branch is the contract that keeps the two arms from drifting again
-        # (Gemini PR #2321 finding).
-        if not market_id:
-            morpho_unavailable_reason = "market_id missing from intent — cannot read Morpho Blue position"
-            logger.debug("read_morpho_blue_account_state skipped: %s", morpho_unavailable_reason)
-        else:
-            collateral_token_sym, loan_token_sym = _derive_morpho_token_symbols(
-                intent=intent,
-                intent_type_str=intent_type_str,
-            )
-            (
-                collateral_token_sym,
-                loan_token_sym,
-                _collateral_decimals,
-                _loan_decimals,
-                _lltv_raw,
-            ) = _resolve_morpho_market_params(
-                chain=chain,
-                market_id=market_id,
-                collateral_token_sym=collateral_token_sym,
-                loan_token_sym=loan_token_sym,
-            )
-
-            if (
-                collateral_token_sym
-                and loan_token_sym
-                and _collateral_decimals is not None
-                and _loan_decimals is not None
-                and _lltv_raw is not None
-            ):
-                morpho_state = read_morpho_blue_account_state(
-                    gateway_client=gateway_client,
+    # Generic read path for every protocol with a connector-owned account-state
+    # spec (Aave, Morpho, …) — Compound is excluded (handled transitionally below).
+    # ``block=None`` here preserves the pre-VIB-4929 event-builder semantics: the
+    # event-builder post-state read was never block-pinned (the pinned post-state
+    # capture is the runner's ``capture_lending_post_state`` path).
+    if not is_compound_v3 and gateway_client is not None and protocol.lower() in _GENERIC_PRE_STATE_PROTOCOLS:
+        query_inputs = LendingReadRegistry.query_inputs(protocol, intent)
+        if query_inputs is not None and (
+            not is_morpho or intent_type_str in ("BORROW", "REPAY", "DELEVERAGE", "SUPPLY", "WITHDRAW")
+        ):
+            # Morpho post-state HF persistence covers all lending intent types so
+            # post-state is in parity with pre-state (VIB-4432). market_id is
+            # required for Morpho — surface the same diagnostic as the pre-PR path.
+            if is_morpho and not market_id:
+                morpho_unavailable_reason = "market_id missing from intent — cannot read Morpho Blue position"
+                logger.debug("read_lending_account_state skipped: %s", morpho_unavailable_reason)
+            else:
+                generic_state = read_lending_account_state(
+                    protocol=protocol,
                     chain=chain,
                     wallet_address=wallet_address,
-                    market_id=market_id,
-                    collateral_token=collateral_token_sym,
-                    loan_token=loan_token_sym,
-                    collateral_decimals=_collateral_decimals,
-                    loan_decimals=_loan_decimals,
-                    lltv_raw=_lltv_raw,
+                    gateway_client=gateway_client,
                     price_oracle=price_oracle,
+                    **query_inputs,
                 )
-                if morpho_state is None:
+                # Aave-family intent-metadata overlay (interest_rate_mode), gated on
+                # the structural family discriminator — parity with the pre-state arm.
+                if generic_state is not None and generic_state.family == "aave":
+                    generic_state = _overlay_aave_interest_rate_mode(generic_state, intent)
+                if generic_state is None and is_morpho:
                     morpho_unavailable_reason = "Morpho Blue position/market gateway read failed"
-            else:
-                morpho_unavailable_reason = "Morpho Blue HF read skipped: missing " + (
-                    ", ".join(
-                        x
-                        for x, v in [
-                            ("collateral_token", collateral_token_sym),
-                            ("loan_token", loan_token_sym),
-                            ("collateral_decimals", _collateral_decimals),
-                            ("loan_decimals", _loan_decimals),
-                            ("lltv", _lltv_raw),
-                        ]
-                        if not v
-                    )
-                )
-                logger.debug("read_morpho_blue_account_state skipped: %s", morpho_unavailable_reason)
 
     if (
         is_compound_v3
@@ -1692,25 +1349,29 @@ def build_lending_accounting_event(  # noqa: C901
                 )
 
     # ── Unify after-state fields from whichever protocol provided data ────────
-    # Priority: Aave state > Morpho state > Compound V3 state > None
-    got_after_state = aave_state is not None or morpho_state is not None or compound_v3_state is not None
+    # Priority: generic state (Aave / Morpho) > Compound V3 state > None.
+    got_after_state = generic_state is not None or compound_v3_state is not None
 
-    if aave_state is not None:
-        collateral_after: Decimal | None = aave_state.collateral_usd
-        debt_after: Decimal | None = aave_state.debt_usd
-        hf_after: Decimal | None = aave_state.health_factor
-        lt_bps: int | None = aave_state.liquidation_threshold_bps
-        liquidation_threshold: Decimal | None = Decimal(lt_bps) / Decimal("10000") if lt_bps is not None else None
-        lltv_after: Decimal | None = None
-    elif morpho_state is not None:
-        collateral_after = morpho_state.collateral_usd
-        debt_after = morpho_state.debt_usd
-        # health_factor = 999999 is the no-debt sentinel — store None for "undefined HF" only
-        # when borrow is truly zero (callers must not use HF == 999999 as a trigger).
-        hf_after = morpho_state.health_factor
-        lt_bps = None  # Morpho Blue uses lltv directly, not lt_bps
-        liquidation_threshold = morpho_state.lltv  # LLTV serves as liquidation_threshold
-        lltv_after = morpho_state.lltv
+    if generic_state is not None:
+        # Single field extraction off the unified ``LendingAccountState`` — no
+        # per-protocol ``isinstance`` priority chain (VIB-4929 PR-3a). The
+        # protocol-shape differences are carried structurally on the state:
+        #   * Aave family: ``liquidation_threshold_bps`` set, ``lltv`` None →
+        #     ``liquidation_threshold = bps / 10000``.
+        #   * Morpho: ``lltv`` set, ``liquidation_threshold_bps`` None → lltv IS
+        #     the liquidation threshold (no-debt HF stays the 999999 sentinel;
+        #     callers must not treat HF == 999999 as a trigger).
+        collateral_after: Decimal | None = generic_state.collateral_usd
+        debt_after: Decimal | None = generic_state.debt_usd
+        hf_after: Decimal | None = generic_state.health_factor
+        lt_bps: int | None = generic_state.liquidation_threshold_bps
+        lltv_after: Decimal | None = generic_state.lltv
+        if lt_bps is not None:
+            liquidation_threshold: Decimal | None = Decimal(lt_bps) / Decimal("10000")
+        elif generic_state.lltv is not None:
+            liquidation_threshold = generic_state.lltv  # LLTV serves as liquidation_threshold
+        else:
+            liquidation_threshold = None
     elif compound_v3_state is not None:
         collateral_after = compound_v3_state.collateral_usd
         debt_after = compound_v3_state.debt_usd
@@ -1742,8 +1403,9 @@ def build_lending_accounting_event(  # noqa: C901
     net_equity_before: Decimal | None = None
 
     if pre_execution_state is not None:
-        # Both AaveAccountState and MorphoBlueAccountState share the same field
-        # names for the data being extracted — no protocol-specific branching needed.
+        # The unified LendingAccountState and the transitional CompoundV3AccountState
+        # share the same field names for the data being extracted — no protocol-
+        # specific branching needed.
         collateral_before = pre_execution_state.collateral_usd
         debt_before = pre_execution_state.debt_usd
         hf_before = pre_execution_state.health_factor

@@ -18,10 +18,9 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import MagicMock
 
+from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
 from almanak.framework.accounting.basis import FIFOBasisStore
 from almanak.framework.accounting.lending_accounting import (
-    AaveAccountState,
-    MorphoBlueAccountState,
     build_lending_accounting_event,
     capture_lending_pre_state,
 )
@@ -171,7 +170,8 @@ class TestAaveBeforeStatePopulatedFromPreExecutionRead:
             price_oracle=_PRICE_ORACLE,
         )
         assert pre_state is not None, "Pre-state must not be None for Aave SUPPLY with valid gateway"
-        assert isinstance(pre_state, AaveAccountState)
+        assert isinstance(pre_state, LendingAccountState)
+        assert pre_state.family == "aave"
         assert pre_state.collateral_usd == Decimal("10000")
         assert pre_state.debt_usd == Decimal("5000")
 
@@ -327,19 +327,21 @@ class TestMorphoBeforeStatePopulatedOnBorrow:
     """Morpho Blue pre-execution state populates before fields when gateway succeeds."""
 
     def test_morpho_before_state_populated_on_borrow(self) -> None:
-        """build_lending_accounting_event populates before fields from MorphoBlueAccountState.
+        """build_lending_accounting_event populates before fields from a Morpho LendingAccountState.
 
-        Directly passes a MorphoBlueAccountState as pre_execution_state and verifies
-        that before-fields are populated correctly.  The after-state read may fail if
-        MORPHO_MARKETS registry doesn't have the test market — that's fine; we only
-        assert before-state here.
+        Directly passes a Morpho-family LendingAccountState as pre_execution_state
+        and verifies that before-fields are populated correctly.  The after-state
+        read may fail if MORPHO_MARKETS registry doesn't have the test market —
+        that's fine; we only assert before-state here.
         """
         # Pre-state: 1 wstETH collateral ($3500), 100 USDC debt ($100), HF = 30.1
         expected_hf = (Decimal("3500") * Decimal("0.86")) / Decimal("100")
-        pre_state_val = MorphoBlueAccountState(
+        pre_state_val = LendingAccountState(
             collateral_usd=Decimal("3500"),
             debt_usd=Decimal("100"),
             health_factor=expected_hf,
+            liquidation_threshold_bps=None,
+            e_mode_category=None,
             lltv=Decimal("0.86"),
         )
 

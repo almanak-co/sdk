@@ -56,15 +56,17 @@ framework reader, which owns the gateway client.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "AAVE_FORK_ACCOUNT_STATE_READ",
     "AAVE_FORK_RESERVE_READ",
+    "MORPHO_BLUE_ACCOUNT_STATE_READ",
     "AccountStateQuery",
     "AccountStateReadSpec",
     "EthCall",
@@ -72,6 +74,7 @@ __all__ = [
     "LendingPositionOnChain",
     "LendingReadSpec",
     "decode_uint_hex",
+    "normalize_market_id_hex",
     "pad_address",
     "parse_account_state_hex",
     "parse_user_emode_hex",
@@ -266,6 +269,27 @@ class LendingAccountState:
             ``1..255`` = a configured category). ``None`` when the protocol has no
             e-mode concept or the secondary read failed — distinct from a measured
             ``0``.
+        lltv: Liquidation loan-to-value as a fraction (e.g. ``Decimal("0.86")`` →
+            86 %). The Morpho-family analogue of Aave's
+            ``liquidation_threshold_bps`` — but a distinct concept (a per-market
+            constant, not the weighted-average current threshold), so it is NOT
+            overloaded onto ``liquidation_threshold_bps``. ``None`` for the Aave
+            family (which carries the threshold in bps) and whenever unmeasured.
+        interest_rate_mode: Aave intent-layer rate mode (``"variable"`` on Aave V3;
+            stable is deprecated) overlaid by the framework consumer for
+            BORROW/REPAY intents. It is **not decoded from any on-chain read** —
+            it is intent metadata threaded onto the decoded state via
+            ``dataclasses.replace`` so it lands in ``pre_state_json`` /
+            ``post_state_json``. ``None`` for SUPPLY/WITHDRAW (no rate mode at the
+            collateral side), for the post-state read, and for non-Aave families.
+            Empty ≠ Zero: ``None`` is "not applicable / unmeasured".
+        family: Explicit protocol-family discriminator the serializer gates
+            Aave-only keys on **structurally** (not by protocol-name string).
+            Set to ``"aave"`` by the Aave-fork reducer; ``None`` for every other
+            family. Lets ``lending_state_to_dict`` emit the Aave-only
+            ``e_mode_category`` / ``interest_rate_mode`` keys (even when their
+            values are ``None``) without re-deriving "is this Aave?" from a
+            protocol string. Empty ≠ Zero: ``None`` is "not the Aave family".
     """
 
     collateral_usd: Decimal | None
@@ -273,6 +297,9 @@ class LendingAccountState:
     health_factor: Decimal | None
     liquidation_threshold_bps: int | None
     e_mode_category: int | None
+    lltv: Decimal | None = None
+    interest_rate_mode: str | None = None
+    family: str | None = None
 
 
 @dataclass(frozen=True)
@@ -297,6 +324,23 @@ class AccountStateQuery:
             ``None`` for whole-account protocols like the Aave family.
         block: Optional block to pin the read to. ``None`` → ``"latest"``.
             Post-execution captures MUST pin to the receipt block.
+        prices: Injected ``{token_symbol: USD price}`` valuation inputs for
+            non-USD-native protocols (Morpho / Compound), whose on-chain reads
+            return raw token amounts rather than USD-denominated values. ``None``
+            for the Aave family (its oracle denominates collateral/debt in USD
+            on-chain, so no injection is needed). Empty ≠ Zero (AGENTS.md
+            §Accounting): a ``None`` price for a required token makes the reducer
+            fail closed (returns ``None``) rather than fabricate a zero.
+        decimals: Injected ``{token_symbol: decimals}`` map used to scale the raw
+            on-chain amounts to human units. Same non-USD-native rationale and
+            ``None``-for-Aave default as ``prices``.
+        market_params: Injected per-market parameters the reducer needs but cannot
+            read on-chain cheaply (e.g. Morpho's ``{"lltv": <1e18-scaled int>}``).
+            ``None`` for protocols that need none.
+        collateral_token: Injected collateral-token symbol the reducer looks up in
+            ``prices`` / ``decimals``. ``None`` for whole-account protocols.
+        loan_token: Injected loan/borrow-token symbol the reducer looks up in
+            ``prices`` / ``decimals``. ``None`` for whole-account protocols.
     """
 
     chain: str
@@ -304,6 +348,14 @@ class AccountStateQuery:
     position_manager_address: str = ""
     market_id: str | None = None
     block: int | str | None = None
+    # Injected valuation inputs for non-USD-native protocols (Morpho / Compound);
+    # all None for Aave (USD-denominated on-chain). Empty ≠ Zero: a None price ⇒
+    # the reducer fails closed.
+    prices: Mapping[str, Decimal] | None = None
+    decimals: Mapping[str, int] | None = None
+    market_params: Mapping[str, Any] | None = None
+    collateral_token: str | None = None
+    loan_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -327,11 +379,41 @@ class AccountStateReadSpec:
             ``build_calls`` emitted them; ``None`` for a failed read) into the
             canonical aggregate state, or ``None`` when the required reads are
             missing/malformed so the framework reader fails closed.
+        valuation_role_keys: Connector-declared ``(query_field, market_params_key)``
+            pairs naming which tokens the framework consumer must price + inject
+            (VIB-4929 PR-3a). For each pair the registry's
+            :meth:`~almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.valuation_roles`
+            looks up ``market_params()[market_params_key]`` to get the token
+            symbol, and the framework reader resolves its USD price + decimals and
+            sets ``AccountStateQuery.<query_field>``. Morpho declares
+            ``(("collateral_token","collateral_token"),("loan_token","loan_token"))``;
+            the Aave family declares ``()`` because its on-chain reads are already
+            USD-denominated (no external price injection needed). Empty tuple =
+            "this protocol needs no injected valuation".
     """
 
     contract_kinds: tuple[str, ...]
     build_calls: Callable[[AccountStateQuery], list[EthCall]]
     reduce_calls: Callable[[AccountStateQuery, list[str | None]], LendingAccountState | None]
+    valuation_role_keys: tuple[tuple[str, str], ...] = ()
+
+    def query_inputs_from_intent(self, intent: Any) -> dict[str, Any]:
+        """Extract the per-read query inputs this protocol needs from an intent.
+
+        The framework consumer calls this (via
+        :meth:`~almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.query_inputs`)
+        to derive the keyword inputs that vary per protocol — without the
+        framework hardcoding which intent attributes a protocol reads. The
+        result is splatted into
+        :func:`~almanak.framework.accounting.lending_accounting.read_lending_account_state`.
+
+        Default (covers the Aave family and Morpho Blue whole-account read):
+        ``{"market_id": intent.market_id or None}`` — ``None`` for whole-account
+        protocols (Aave) where the intent carries no ``market_id``; the market id
+        for per-market protocols (Morpho). Per-market protocols whose Comet/market
+        selection needs more than ``market_id`` (Compound V3, PR-3b) override this.
+        """
+        return {"market_id": getattr(intent, "market_id", None)}
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +535,11 @@ def _reduce_aave_account_state(
         health_factor=health_factor,
         liquidation_threshold_bps=liquidation_threshold_bps,
         e_mode_category=e_mode_category,
+        # Structural discriminator the serializer gates the Aave-only
+        # e_mode_category / interest_rate_mode keys on — NOT a protocol-name
+        # string. interest_rate_mode is intent metadata the framework consumer
+        # overlays later (it is never decoded here).
+        family="aave",
     )
 
 
@@ -465,4 +552,191 @@ AAVE_FORK_ACCOUNT_STATE_READ = AccountStateReadSpec(
     contract_kinds=("pool",),
     build_calls=_build_aave_account_state_calls,
     reduce_calls=_reduce_aave_account_state,
+    # USD-denominated on-chain by Aave's oracle ⇒ no external price injection.
+    valuation_role_keys=(),
+)
+
+
+# ---------------------------------------------------------------------------
+# Morpho Blue account-state ABI (VIB-4929 PR-3a)
+# ---------------------------------------------------------------------------
+#
+# Morpho Blue is NOT USD-native: its on-chain reads return raw token amounts and
+# share totals, never USD. So unlike the Aave spec, this reducer consumes the
+# injected price/decimals/market-params seam on :class:`AccountStateQuery` to
+# value the position. The decode below is byte-identical to
+# ``read_morpho_blue_account_state`` in
+# ``almanak/framework/accounting/lending_accounting.py`` (the consumer this PR
+# migrates onto the spec); the framework function keeps the gateway round-trip
+# + block-pinning, the spec stays pure.
+
+# position(bytes32 id, address user) → (uint256 supplyShares,
+#   uint128 borrowShares, uint128 collateral)
+_MORPHO_POSITION_SELECTOR = "0x93c52062"
+# market(bytes32 id) → (uint128 totalSupplyAssets, uint128 totalSupplyShares,
+#   uint128 totalBorrowAssets, uint128 totalBorrowShares, uint128 lastUpdate,
+#   uint128 fee)
+_MORPHO_MARKET_SELECTOR = "0x5c60e39a"
+_MORPHO_LLTV_SCALE = Decimal("1e18")  # lltv is 1e18-scaled
+# No-debt / undefined-HF sentinel, also the serialisation cap for huge HFs.
+_MORPHO_HF_SENTINEL = Decimal("999999")
+
+
+def normalize_market_id_hex(market_id: str) -> str:
+    """Return a 32-byte Morpho market id as 64 lowercase hex chars (no ``0x``).
+
+    Mirrors the framework reader's ``_normalize_market_id_hex`` byte-for-byte —
+    the Morpho ``build_calls`` planner needs it to encode the ``position`` /
+    ``market`` calldata. Public (no leading underscore) because it is a connector
+    primitive other strategy-side callers may reuse.
+    """
+    raw = market_id.lower().replace("0x", "")
+    return raw.zfill(64)
+
+
+def _build_morpho_account_state_calls(query: AccountStateQuery) -> list[EthCall]:
+    """Emit the two Morpho reads: ``position(id, user)`` then ``market(id)``.
+
+    Both target the resolved Morpho singleton (``query.position_manager_address``)
+    and are scoped to ``query.market_id``. The order is the contract
+    :func:`_reduce_morpho_account_state` decodes against (position first, market
+    second).
+
+    Fails closed (returns ``[]``) when ``query.market_id`` is missing: Morpho's
+    account state is per-market, so a missing market id has no well-defined read.
+    Normalising ``None`` to the all-zero bytes32 would otherwise issue live
+    ``position`` / ``market`` RPCs against market id ``0x00…00`` and decode a
+    fabricated empty state (CodeRabbit 2026-06). With no calls, the planner emits
+    an empty plan and the reducer (which requires a non-empty position blob) also
+    fails closed.
+    """
+    if not query.market_id:
+        return []
+    market_hex = normalize_market_id_hex(query.market_id)
+    user_hex = pad_address(query.wallet_address)
+    morpho = query.position_manager_address
+    return [
+        EthCall(to=morpho, data=_MORPHO_POSITION_SELECTOR + market_hex + user_hex),
+        EthCall(to=morpho, data=_MORPHO_MARKET_SELECTOR + market_hex),
+    ]
+
+
+def _reduce_morpho_account_state(
+    query: AccountStateQuery,
+    results: list[str | None],
+) -> LendingAccountState | None:
+    """Decode Morpho ``[position, market]`` blobs into aggregate account state.
+
+    Byte-identical to ``read_morpho_blue_account_state``'s decode. Pure: values
+    the position from the injected ``query.prices`` / ``query.decimals`` /
+    ``query.market_params`` (Morpho is not USD-native), never touching the gateway
+    or an oracle. Fails closed (returns ``None``) on a missing / short blob, a
+    missing required injected input, or a ``None`` price (Empty ≠ Zero).
+    """
+    position_hex = results[0] if results else None
+    market_hex = results[1] if len(results) > 1 else None
+
+    # Required injected inputs — fail closed (not fabricate) when any is missing.
+    collateral_token = query.collateral_token
+    loan_token = query.loan_token
+    prices = query.prices
+    decimals = query.decimals
+    market_params = query.market_params
+    if collateral_token is None or loan_token is None or prices is None or decimals is None or market_params is None:
+        return None
+    if collateral_token not in decimals or loan_token not in decimals:
+        return None
+    lltv_raw = market_params.get("lltv")
+    if lltv_raw is None:
+        return None
+
+    # ── position(id, user) → borrowShares (word 1), collateral (word 2) ──────
+    if not position_hex:
+        return None
+    pos = position_hex[2:] if position_hex[:2].lower() == "0x" else position_hex
+    if len(pos) < 3 * 64:  # 3 words minimum
+        return None
+    # ── market(id) → totalBorrowAssets (word 2), totalBorrowShares (word 3) ──
+    if not market_hex:
+        return None
+    mkt = market_hex[2:] if market_hex[:2].lower() == "0x" else market_hex
+    if len(mkt) < 6 * 64:  # 6 words minimum
+        return None
+
+    try:
+        borrow_shares = decode_uint_hex(pos, 1)
+        collateral_raw = decode_uint_hex(pos, 2)
+        total_borrow_assets = decode_uint_hex(mkt, 2)
+        total_borrow_shares = decode_uint_hex(mkt, 3)
+    except (ValueError, ArithmeticError):
+        logger.debug("Failed to decode Morpho position/market hex", exc_info=True)
+        return None
+
+    # ── shares → assets (round UP to be conservative — never under-count debt) ─
+    # Exact integer ceil-division — byte-identical to the framework reader's
+    # ``(shares * total_assets + total_shares - 1) // total_shares``. Done on ints
+    # (not Decimal) so 128-bit share totals cannot lose precision at the default
+    # 28-digit Decimal context.
+    if borrow_shares == 0 or total_borrow_shares == 0:
+        borrow_assets = 0
+    else:
+        borrow_assets = (borrow_shares * total_borrow_assets + total_borrow_shares - 1) // total_borrow_shares
+
+    # ── raw → human, then USD via the injected prices (Empty ≠ Zero) ─────────
+    collateral_amount = Decimal(collateral_raw) / Decimal(10 ** decimals[collateral_token])
+    borrow_amount = Decimal(borrow_assets) / Decimal(10 ** decimals[loan_token])
+
+    collateral_price = prices.get(collateral_token)
+    loan_price = prices.get(loan_token)
+    if collateral_price is None or loan_price is None:
+        return None
+
+    collateral_usd = collateral_amount * collateral_price
+    debt_usd = borrow_amount * loan_price
+
+    # ── lltv + health factor (no-debt sentinel, capped) ──────────────────────
+    # Fail closed on a malformed injected lltv (bad catalogue entry / upstream
+    # injection bug) rather than letting Decimal() abort the whole read with an
+    # uncaught exception — the reducer's contract is "return None on bad input"
+    # (CodeRabbit 2026-06). Empty ≠ Zero: a None/garbage lltv is unmeasured.
+    try:
+        lltv = Decimal(lltv_raw) / _MORPHO_LLTV_SCALE
+    except (TypeError, ValueError, ArithmeticError):
+        logger.debug("Invalid Morpho lltv value: %r", lltv_raw, exc_info=True)
+        return None
+    if borrow_shares == 0 or debt_usd == 0:
+        health_factor = _MORPHO_HF_SENTINEL
+    else:
+        health_factor = (collateral_usd * lltv) / debt_usd
+    health_factor = min(health_factor, _MORPHO_HF_SENTINEL)
+
+    return LendingAccountState(
+        collateral_usd=collateral_usd,
+        debt_usd=debt_usd,
+        health_factor=health_factor,
+        liquidation_threshold_bps=None,  # Morpho carries the threshold as lltv, not bps.
+        e_mode_category=None,  # Morpho has no e-mode concept.
+        lltv=lltv,
+    )
+
+
+#: Aggregate account-state read for Morpho Blue (VIB-4929 PR-3a).
+#: Morpho deploys a single per-chain singleton (contract kind ``morpho``, owned
+#: by ``morpho_blue/addresses.py``) that holds every market's per-user position
+#: and the market totals. Unlike the Aave family, Morpho is not USD-native — the
+#: reducer values the position from the injected price/decimals/market-params
+#: seam on :class:`AccountStateQuery`, staying pure (no gateway, no oracle).
+MORPHO_BLUE_ACCOUNT_STATE_READ = AccountStateReadSpec(
+    contract_kinds=("morpho",),
+    build_calls=_build_morpho_account_state_calls,
+    reduce_calls=_reduce_morpho_account_state,
+    # Morpho is not USD-native: the framework consumer must price both legs and
+    # inject them. Each pair is (AccountStateQuery field to set, MORPHO_MARKETS
+    # params key holding the token symbol). The market id fully determines the
+    # (collateral, loan) pair (it is keccak(loan, collateral, oracle, irm, lltv)),
+    # so valuation reads the symbols from the market catalogue, not the intent.
+    valuation_role_keys=(
+        ("collateral_token", "collateral_token"),
+        ("loan_token", "loan_token"),
+    ),
 )

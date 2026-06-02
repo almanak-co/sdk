@@ -103,23 +103,30 @@ def test_post_state_handles_missing_post_timestamp():
 
 
 def _aave_state(collateral_usd: str, debt_usd: str, hf: str, lt_bps: int):
-    from almanak.framework.accounting.lending_accounting import AaveAccountState
+    # VIB-4929 PR-3a: Aave + Morpho share the unified LendingAccountState; the
+    # Aave-family discriminator (family="aave") is what the serializer gates the
+    # Aave-only keys on.
+    from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
 
-    return AaveAccountState(
+    return LendingAccountState(
         collateral_usd=Decimal(collateral_usd),
         debt_usd=Decimal(debt_usd),
         health_factor=Decimal(hf),
         liquidation_threshold_bps=lt_bps,
+        e_mode_category=None,
+        family="aave",
     )
 
 
 def _morpho_state(collateral_usd: str, debt_usd: str, hf: str, lltv: str):
-    from almanak.framework.accounting.lending_accounting import MorphoBlueAccountState
+    from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
 
-    return MorphoBlueAccountState(
+    return LendingAccountState(
         collateral_usd=Decimal(collateral_usd),
         debt_usd=Decimal(debt_usd),
         health_factor=Decimal(hf),
+        liquidation_threshold_bps=None,
+        e_mode_category=None,
         lltv=Decimal(lltv),
     )
 
@@ -218,15 +225,18 @@ def test_capture_lending_state_safe_skips_non_lending_intents():
 
 
 def test_capture_lending_state_safe_aave_calls_gateway():
-    """SUPPLY on Aave V3 with a working gateway returns AaveAccountState.
+    """SUPPLY on Aave V3 with a working gateway returns a LendingAccountState.
 
     Anti-regression contract for VIB-3474 / iter-176 VIB-2986 shape: the
     gateway-backed flow MUST exercise the populate path. The previous bug
     let the legacy validation skip silently when ``rpc_url=None`` was passed
     alongside a gateway_client. This test asserts the ``capture_lending_*``
     helpers still reach the gateway when the runner threads it through.
+
+    VIB-4929 PR-3a: the Aave read returns the unified LendingAccountState (the
+    per-protocol AaveAccountState is gone) — fields are unchanged.
     """
-    from almanak.framework.accounting.lending_accounting import AaveAccountState
+    from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
     from almanak.framework.runner.strategy_runner import StrategyRunner
 
     # Build a synthetic getUserAccountData response: 6 words, 32 bytes each.
@@ -263,7 +273,8 @@ def test_capture_lending_state_safe_aave_calls_gateway():
         price_oracle={"USDC": "1.0"},
         phase="pre",
     )
-    assert isinstance(out, AaveAccountState)
+    assert isinstance(out, LendingAccountState)
+    assert out.family == "aave"  # structural discriminator the serializer gates Aave keys on
     assert out.collateral_usd == Decimal("15420.50")
     assert out.debt_usd == Decimal("8200.00")
     assert out.liquidation_threshold_bps == 8500
