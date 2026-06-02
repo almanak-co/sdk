@@ -27,8 +27,6 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
@@ -46,25 +44,18 @@ from almanak.framework.accounting.ids import make_accounting_event_id
 
 logger = logging.getLogger(__name__)
 
-# VIB-4929 PR-3a: Aave + Morpho aggregate account-state reads go through the
-# single generic ``read_lending_account_state``, which drives the connector-owned
-# specs (``AAVE_FORK_ACCOUNT_STATE_READ`` / ``MORPHO_BLUE_ACCOUNT_STATE_READ`` in
+# VIB-4929 PR-3a/3b: Aave + Morpho + Compound V3 aggregate account-state reads go
+# through the single generic ``read_lending_account_state``, which drives the
+# connector-owned specs (``AAVE_FORK_ACCOUNT_STATE_READ`` /
+# ``MORPHO_BLUE_ACCOUNT_STATE_READ`` / ``COMPOUND_V3_ACCOUNT_STATE_READ`` in
 # ``lending_read_base``) via ``LendingReadRegistry``. Adding a lending connector
 # to the read path requires ZERO framework edits here — no per-protocol
 # ``read_<protocol>_account_state`` function, no selector, scale, cap, lltv, HF
 # sentinel, or decode is duplicated in this module. ``read_aave_user_emode`` is
 # the one remaining single-call helper (used by the Tier-2 Aave registry), still
 # decoding via the imported ``_AAVE_GET_USER_EMODE_SELECTOR`` + ``parse_user_emode_hex``.
-# Compound V3 stays on its legacy ``read_compound_v3_account_state`` transitionally
-# (it has no addresses.py / AddressRegistry entry yet; folds in at PR-3b).
-
-# ─── Compound V3 selectors ────────────────────────────────────────────────────
-# userCollateral(address account, address asset) → (uint128 balance, uint128 reserved)
-_COMPOUND_V3_USER_COLLATERAL_SELECTOR = "0x2b92a07d"
-# borrowBalanceOf(address account) → uint256
-_COMPOUND_V3_BORROW_BALANCE_SELECTOR = "0x374c49b4"
-# balanceOf(address account) → uint256  (base-asset supplied balance on the Comet)
-_COMPOUND_V3_BALANCE_OF_SELECTOR = "0x70a08231"
+# Compound V3's selectors + decode now live in ``lending_read_base`` alongside the
+# other specs (folded in at PR-3b — it gained addresses.py + a derived market table).
 
 # ─── Lending intent types ──────────────────────────────────────────────────────
 _LENDING_INTENT_TYPES = frozenset({"SUPPLY", "BORROW", "REPAY", "WITHDRAW", "DELEVERAGE"})
@@ -163,6 +154,7 @@ def read_lending_account_state(
     gateway_client: Any,
     price_oracle: dict | None,
     block: int | str | None = None,
+    collateral_token: str | None = None,
 ) -> LendingAccountState | None:
     """Read a wallet's aggregate lending account state for any spec-backed protocol.
 
@@ -208,6 +200,10 @@ def read_lending_account_state(
         block: Optional block to pin every read to (VIB-4589 / F7). ``None`` →
             ``"latest"`` (safe for pre-execution captures); post-execution
             captures MUST pass ``receipt.block_number``.
+        collateral_token: Intent-derived collateral symbol for protocols whose
+            collateral leg the market catalogue does not name (Compound V3 — its
+            spec ``query_inputs_fn`` supplies it). Priced + address-resolved here and
+            injected onto the query. ``None`` for the Aave family and Morpho.
     """
     from almanak.connectors._strategy_base.lending_read_base import AccountStateQuery
     from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
@@ -255,6 +251,37 @@ def read_lending_account_state(
             decimals[symbol] = token_info.decimals
             injected_tokens[query_field] = symbol
 
+        # Intent-derived collateral leg (VIB-4929 PR-3b, e.g. Compound V3): the spec's
+        # ``query_inputs_fn`` names a collateral token the market catalogue does not
+        # (any approved collateral can back a Comet). The framework owns price /
+        # decimals / address resolution so the spec stays pure. Address resolution is
+        # decoupled from pricing (Gemini review): resolve the collateral *address*
+        # whenever a collateral token is named — the non-base ``userCollateral`` path
+        # needs it even if a valuation role already priced the token — and price it
+        # only when it was not already injected (e.g. base-asset supply, where
+        # collateral == the role-priced base token).
+        collateral_address: str | None = None
+        if collateral_token:
+            try:
+                col_info = resolver.resolve(collateral_token, chain=chain)
+            except TokenNotFoundError:
+                logger.debug("read_lending_account_state: cannot resolve collateral %s on %s", collateral_token, chain)
+                return None
+            if col_info is None:
+                return None
+            collateral_address = col_info.address
+            if collateral_token not in prices:
+                price = _resolve_oracle_price(price_oracle, collateral_token)
+                if price is None:
+                    logger.debug(
+                        "read_lending_account_state: price unavailable for collateral %s on %s",
+                        collateral_token,
+                        chain,
+                    )
+                    return None  # Empty ≠ Zero — fail closed, never fabricate.
+                prices[collateral_token] = price
+                decimals[collateral_token] = col_info.decimals
+
         query = AccountStateQuery(
             chain=chain,
             wallet_address=wallet_address,
@@ -263,8 +290,9 @@ def read_lending_account_state(
             prices=prices or None,
             decimals=decimals or None,
             market_params=market_params,
-            collateral_token=injected_tokens.get("collateral_token"),
+            collateral_token=collateral_token or injected_tokens.get("collateral_token"),
             loan_token=injected_tokens.get("loan_token"),
+            collateral_address=collateral_address,
         )
 
         plan = LendingReadRegistry.resolve_account_state_plan(protocol, query)
@@ -282,326 +310,6 @@ def read_lending_account_state(
         return None
 
 
-@dataclass
-class CompoundV3AccountState:
-    """Post-execution account summary from Compound V3 Comet userCollateral + borrowBalanceOf."""
-
-    collateral_usd: Decimal
-    debt_usd: Decimal
-    health_factor: Decimal | None
-
-
-# crap-allowlist: VIB-4638 — read_compound_v3_account_state is cc=27 / CRAP=35
-# pre-existing (already noqa: C901). VIB-4589 / F7 only added passthrough
-# plumbing (block= kwarg + docstring + 4 forwarded kwargs) — zero cc delta.
-# A proper 3-helper refactor is filed as VIB-4638 and follows the CRAP
-# refactor protocol separately from this accounting correctness fix.
-def read_compound_v3_account_state(  # noqa: C901
-    gateway_client: Any,
-    chain: str,
-    wallet_address: str,
-    collateral_token: str,
-    borrow_token: str,
-    price_oracle: dict | None,
-    market_id: str | None = None,
-    block: int | str | None = None,
-) -> CompoundV3AccountState | None:
-    """Read Compound V3 account state via gateway eth_call.
-
-    Resolves the Comet address and makes two reads.  The first call differs
-    depending on whether collateral_token is the market's base asset:
-
-    - Base-asset SUPPLY/WITHDRAW (collateral_token == market base_token, e.g.
-      supplying USDC to the USDC Comet):
-        balanceOf(wallet) → uint256  (supplied base balance)
-        borrowBalanceOf(wallet) → uint256  (net borrow; usually 0 for pure supply)
-      health_factor is set to the no-risk sentinel (999999) because base-asset
-      supply positions have no liquidation threshold.
-
-    - Collateral SUPPLY/WITHDRAW and BORROW/REPAY (collateral_token ≠ base_token):
-        userCollateral(wallet, collateralTokenAddress) → (uint128 balance, uint128 reserved)
-        borrowBalanceOf(wallet) → uint256
-      health_factor is computed as (collateral_usd × LCF) / debt_usd.
-
-    market_id (e.g. "usdc", "weth") is the preferred way to select the Comet.
-    When provided it is used directly for the COMPOUND_V3_COMET_ADDRESSES lookup
-    and the actual base asset is derived from COMPOUND_V3_MARKETS so that
-    SUPPLY/WITHDRAW callers (which pass the collateral as borrow_token) still read
-    the correct market's debt balance.  When omitted, borrow_token is used as the
-    market key (original BORROW/REPAY behaviour).
-
-    ``block`` (VIB-4589 / F7) — optional block reference threaded into every
-    underlying eth_call so the read pins to a single block. ``None`` (default)
-    falls back to ``"latest"`` (safe for pre-execution captures, where the
-    read precedes the submitted tx by definition). Post-execution captures
-    MUST pass ``receipt.block_number`` to avoid racing the upstream RPC's
-    receipt indexer — see the rationale in :func:`capture_lending_post_state`.
-
-    Returns None on any failure (missing prices, gateway unavailable, etc.).
-    """
-    try:
-        from almanak.connectors.compound_v3.adapter import (
-            COMPOUND_V3_COMET_ADDRESSES,
-            COMPOUND_V3_MARKETS,
-        )
-        from almanak.framework.data.tokens.exceptions import TokenNotFoundError
-        from almanak.framework.data.tokens.resolver import get_token_resolver
-
-        # ── Comet address ─────────────────────────────────────────────────────
-        # Prefer market_id (exact market key like "usdc", "weth") over borrow_token.
-        # For SUPPLY/WITHDRAW intents borrow_token is the collateral asset being
-        # supplied — not the market base asset — so it would select the wrong Comet.
-        chain_lower = chain.lower()
-        chain_markets = COMPOUND_V3_COMET_ADDRESSES.get(chain_lower, {})
-        resolved_market_key = (market_id or borrow_token).lower()
-        comet_address = chain_markets.get(resolved_market_key)
-        if not comet_address:
-            logger.debug(
-                "read_compound_v3_account_state: no Comet for chain=%s market=%s",
-                chain,
-                resolved_market_key,
-            )
-            return None
-
-        # ── Derive effective borrow token from registry ───────────────────────
-        # When market_id is known, look up the market's base_token so the debt
-        # balance and price are decoded against the correct asset regardless of
-        # what the caller passed as borrow_token.
-        effective_borrow_token = borrow_token
-        market_registry = COMPOUND_V3_MARKETS.get(chain_lower, {}).get(resolved_market_key)
-        if market_id:
-            registry_base = market_registry.get("base_token") if market_registry else None
-            if not registry_base:
-                logger.debug(
-                    "read_compound_v3_account_state: missing market registry/base_token for chain=%s market=%s",
-                    chain,
-                    resolved_market_key,
-                )
-                return None
-            effective_borrow_token = registry_base
-
-        resolver = get_token_resolver()
-
-        # ── Collateral token address ────────────────────────────────────────
-        try:
-            collateral_info = resolver.resolve(collateral_token, chain=chain)
-        except TokenNotFoundError:
-            logger.debug("read_compound_v3_account_state: can't resolve collateral=%s", collateral_token)
-            return None
-        collateral_address = collateral_info.address
-        collateral_decimals = collateral_info.decimals
-
-        # ── Borrow token decimals ───────────────────────────────────────────
-        try:
-            borrow_info = resolver.resolve(effective_borrow_token, chain=chain)
-        except TokenNotFoundError:
-            logger.debug("read_compound_v3_account_state: can't resolve borrow=%s", effective_borrow_token)
-            return None
-        borrow_decimals = borrow_info.decimals
-
-        # ── Prices ─────────────────────────────────────────────────────────
-        # Use the shape-tolerant resolver so the teardown lane's nested
-        # ``{symbol: {price_usd, …}}`` oracle works alongside the iteration
-        # lane's flat ``{symbol: price}`` shape (Codex 2026-05-04 review).
-        collateral_price = _resolve_oracle_price(price_oracle, collateral_token)
-        borrow_price = _resolve_oracle_price(price_oracle, effective_borrow_token)
-        if collateral_price is None or borrow_price is None:
-            logger.debug(
-                "read_compound_v3_account_state: price missing for collateral=%s borrow=%s",
-                collateral_token,
-                effective_borrow_token,
-            )
-            return None
-
-        # ── Detect base-asset SUPPLY/WITHDRAW ──────────────────────────────
-        # In Compound V3, supplying the market's base asset (e.g. USDC in the
-        # USDC Comet) is tracked via balanceOf(wallet), NOT userCollateral().
-        # userCollateral() always returns zero for the base asset because Comet
-        # stores supplied base amounts in its internal accounting, not the
-        # collateral mapping.  We detect this by comparing collateral_token
-        # against the registry base_token.
-        registry_base_token = market_registry.get("base_token", "") if market_registry else ""
-        is_base_asset_supply = collateral_token.upper() == registry_base_token.upper()
-
-        account_hex = _pad_address(wallet_address)
-
-        if is_base_asset_supply:
-            # ── Call 1 (base): balanceOf(wallet) → uint256 ──────────────────
-            # Returns the supplied base-asset balance.  Expressed in base-token
-            # decimals (same as borrow_decimals since base==collateral here).
-            balance_of_calldata = _COMPOUND_V3_BALANCE_OF_SELECTOR + account_hex
-            balance_of_raw = _gateway_eth_call(gateway_client, chain, comet_address, balance_of_calldata, block=block)
-            if not balance_of_raw:
-                logger.debug("read_compound_v3_account_state: balanceOf() call failed for base asset")
-                return None
-            balance_of_hex = balance_of_raw.replace("0x", "")
-            if len(balance_of_hex) < 64:
-                return None
-            collateral_balance_raw = int(balance_of_hex[:64], 16)
-
-            # ── Call 2 (base): borrowBalanceOf(wallet) → always zero ─────────
-            # Base-asset suppliers cannot have borrow debt at the same time in
-            # Compound V3 — a non-zero borrow would net against the supply.
-            # We still call borrowBalanceOf() for correctness (net position).
-            borrow_calldata = _COMPOUND_V3_BORROW_BALANCE_SELECTOR + account_hex
-            borrow_raw = _gateway_eth_call(gateway_client, chain, comet_address, borrow_calldata, block=block)
-            if not borrow_raw:
-                logger.debug("read_compound_v3_account_state: borrowBalanceOf() call failed")
-                return None
-            borrow_hex_data = borrow_raw.replace("0x", "")
-            if len(borrow_hex_data) < 64:
-                return None
-            borrow_balance_raw = int(borrow_hex_data[:64], 16)
-
-            # ── USD values (base asset) ─────────────────────────────────────
-            # collateral == base asset, so both use borrow_decimals / borrow_price
-            supplied_amount = Decimal(collateral_balance_raw) / Decimal(10**borrow_decimals)
-            borrow_amount = Decimal(borrow_balance_raw) / Decimal(10**borrow_decimals)
-            collateral_usd = supplied_amount * borrow_price
-            debt_usd = borrow_amount * borrow_price
-
-            # Pure base-asset supply has no liquidation risk — sentinel HF.
-            health_factor: Decimal | None = Decimal("999999")
-        else:
-            # ── Call 1: userCollateral(wallet, collateralTokenAddress) ──────
-            collateral_hex = _pad_address(collateral_address)
-            collateral_calldata = _COMPOUND_V3_USER_COLLATERAL_SELECTOR + account_hex + collateral_hex
-            collateral_raw = _gateway_eth_call(gateway_client, chain, comet_address, collateral_calldata, block=block)
-            if not collateral_raw:
-                logger.debug("read_compound_v3_account_state: userCollateral() call failed")
-                return None
-            collateral_hex_data = collateral_raw.replace("0x", "")
-            if len(collateral_hex_data) < 128:  # (uint128 balance, uint128 reserved) = 2 words
-                logger.debug(
-                    "read_compound_v3_account_state: userCollateral() response too short (%d chars)",
-                    len(collateral_hex_data),
-                )
-                return None
-            collateral_balance_raw = int(collateral_hex_data[:64], 16)
-
-            # ── Call 2: borrowBalanceOf(wallet) ─────────────────────────────
-            borrow_calldata = _COMPOUND_V3_BORROW_BALANCE_SELECTOR + account_hex
-            borrow_raw = _gateway_eth_call(gateway_client, chain, comet_address, borrow_calldata, block=block)
-            if not borrow_raw:
-                logger.debug("read_compound_v3_account_state: borrowBalanceOf() call failed")
-                return None
-            borrow_hex_data = borrow_raw.replace("0x", "")
-            if len(borrow_hex_data) < 64:
-                return None
-            borrow_balance_raw = int(borrow_hex_data[:64], 16)
-
-            # ── USD values ──────────────────────────────────────────────────
-            collateral_amount = Decimal(collateral_balance_raw) / Decimal(10**collateral_decimals)
-            borrow_amount = Decimal(borrow_balance_raw) / Decimal(10**borrow_decimals)
-            collateral_usd = collateral_amount * collateral_price
-            debt_usd = borrow_amount * borrow_price
-
-            # ── Health factor via per-asset liquidation_collateral_factor ────
-            # HF = (collateral_usd * LCF) / debt_usd where LCF < 1.
-            # Raw collateral_usd / debt_usd overstates safety; we use the static
-            # registry value rather than a live on-chain read to avoid extra calls.
-            if debt_usd == 0:
-                health_factor = Decimal("999999")
-            else:
-                market_data = COMPOUND_V3_MARKETS.get(chain_lower, {}).get(resolved_market_key, {})
-                collateral_upper = collateral_token.upper()
-                col_entry = market_data.get("collaterals", {}).get(collateral_upper)
-                if col_entry is None:
-                    # Case-insensitive fallback for mixed-case symbols like wstETH
-                    for k, v in market_data.get("collaterals", {}).items():
-                        if k.upper() == collateral_upper:
-                            col_entry = v
-                            break
-                lcf: Decimal | None = col_entry.get("liquidation_collateral_factor") if col_entry else None
-                if lcf is None:
-                    logger.debug(
-                        "read_compound_v3_account_state: LCF not found for collateral=%s market=%s",
-                        collateral_token,
-                        resolved_market_key,
-                    )
-                    health_factor = None
-                else:
-                    health_factor = min((collateral_usd * lcf) / debt_usd, Decimal("999999"))
-
-        return CompoundV3AccountState(
-            collateral_usd=collateral_usd,
-            debt_usd=debt_usd,
-            health_factor=health_factor,
-        )
-
-    except Exception:
-        logger.debug("read_compound_v3_account_state failed", exc_info=True)
-        return None
-
-
-# crap-allowlist: pre-state arm for Compound V3, exercised by integration tests
-# in tests/framework/accounting/test_lending_pre_execution_state_vib3489.py and
-# tests/framework/accounting/test_compound_v3_account_state.py. Unit-scope
-# coverage is artificially low (6%) — see
-# docs/internal/coverage-w1-misplacement-audit.md §2 for the measurement-window
-# explanation. Combined-scope coverage is 73%.
-def _capture_compound_v3_pre_state(
-    *,
-    intent: Any,
-    chain: str,
-    wallet_address: str,
-    gateway_client: Any,
-    price_oracle: dict | None,
-    block: int | str | None = None,
-) -> CompoundV3AccountState | None:
-    """Compound V3 pre-state arm — SUPPLY/WITHDRAW require ``intent.market_id``."""
-    intent_type_str = _intent_type_value(intent)
-    intent_market_id: str | None = getattr(intent, "market_id", None)
-
-    if intent_type_str in ("SUPPLY", "WITHDRAW"):
-        # market_id is required for SUPPLY/WITHDRAW: without it we cannot
-        # determine which Comet to query — falling back to the collateral token
-        # symbol would select the wrong market on chains with multiple Comets.
-        if not intent_market_id:
-            logger.debug(
-                "capture_lending_pre_state: Compound V3 pre-state skipped"
-                " (market_id required for SUPPLY/WITHDRAW but not set)"
-            )
-            return None
-        # intent.token is the collateral asset; market_id identifies the Comet and
-        # its base asset (used for borrowBalanceOf and debt pricing).
-        collateral_token_sym: str | None = getattr(intent, "token", None)
-        borrow_token_sym: str | None = getattr(intent, "token", None)  # overridden by market_id
-    else:
-        collateral_token_sym = getattr(intent, "collateral_token", None)
-        borrow_token_sym = getattr(intent, "borrow_token", None) or getattr(intent, "token", None)
-
-    if not collateral_token_sym:
-        logger.debug("capture_lending_pre_state: Compound V3 pre-state skipped (missing collateral token)")
-        return None
-
-    compound_pre_state = read_compound_v3_account_state(
-        gateway_client=gateway_client,
-        chain=chain,
-        wallet_address=wallet_address,
-        collateral_token=collateral_token_sym,
-        borrow_token=borrow_token_sym or "",
-        price_oracle=price_oracle,
-        market_id=intent_market_id,
-        block=block,
-    )
-    if compound_pre_state is None:
-        logger.debug("capture_lending_pre_state: Compound V3 read returned None for chain=%s", chain)
-    return compound_pre_state
-
-
-# Registry: protocol identifier → per-protocol pre-state reader.
-# VIB-4929 PR-3a: Aave + Morpho route through the generic ``read_lending_account_state``
-# (no per-protocol entry here — see ``capture_lending_pre_state``). Compound V3 stays on
-# its legacy executor transitionally — it has no addresses.py / AddressRegistry entry yet,
-# so it cannot resolve through the registry's account-state path until PR-3b.
-_LendingState = LendingAccountState | CompoundV3AccountState | None
-_PreStateReader = Callable[..., _LendingState]
-_PROTOCOL_PRE_STATE_READERS: dict[str, _PreStateReader] = {
-    # transitional: folds into the generic reader in PR-3b
-    "compound_v3": _capture_compound_v3_pre_state,
-}
-
 # Protocols the generic ``read_lending_account_state`` path is *enabled* for on the
 # live-money accounting read path. Registering an account-state spec
 # (``LendingReadRegistry._ACCOUNT_STATE_LOADERS``) makes a connector spec-*capable*,
@@ -611,7 +319,10 @@ _PROTOCOL_PRE_STATE_READERS: dict[str, _PreStateReader] = {
 # ``_ACCOUNT_STATE_LOADERS`` but whose generic read is not yet framework-verified
 # (VIB-4963) — from silently producing HIGH-confidence reads. Add a protocol here
 # only once its generic read is verified on a real fork.
-_GENERIC_PRE_STATE_PROTOCOLS: frozenset[str] = frozenset({"aave_v3", "aave", "morpho_blue"})
+# VIB-4929 PR-3b: ``compound_v3`` joined — its byte-equivalence to the retired
+# ``read_compound_v3_account_state`` was proven (collateral+borrow HF via LCF,
+# base-asset supply HF=999999, missing-price → None) before enabling it here.
+_GENERIC_PRE_STATE_PROTOCOLS: frozenset[str] = frozenset({"aave_v3", "aave", "morpho_blue", "compound_v3"})
 
 
 def _overlay_aave_interest_rate_mode(state: LendingAccountState, intent: Any) -> LendingAccountState:
@@ -649,7 +360,7 @@ def capture_lending_pre_state(
     gateway_client: Any | None,
     price_oracle: dict | None,
     block: int | str | None = None,
-) -> LendingAccountState | CompoundV3AccountState | None:
+) -> LendingAccountState | None:
     """Read on-chain lending state BEFORE the transaction is submitted (VIB-3489).
 
     Called by the strategy runner before executing the intent bundle.  The
@@ -664,15 +375,14 @@ def capture_lending_pre_state(
 
     Never raises; never substitutes stale data on failure.
 
-    VIB-4929 PR-3a dispatch: Aave V3 + Morpho Blue route through the generic
-    :func:`read_lending_account_state`, but ONLY for protocols explicitly enabled
-    in ``_GENERIC_PRE_STATE_PROTOCOLS`` (migrated AND fork-verified in their PR). A
-    connector that merely *registers* an account-state spec is spec-capable but is
-    NOT auto-enabled on this live-money read path — e.g. Spark (an Aave-fork that
-    opted into ``_ACCOUNT_STATE_LOADERS``) stays unread → ESTIMATED until it is
-    verified and added (VIB-4963). Compound V3 stays on its legacy
-    :func:`_capture_compound_v3_pre_state` transitionally (folds into the generic
-    reader in PR-3b).
+    VIB-4929 PR-3a/3b dispatch: Aave V3 + Morpho Blue + Compound V3 route through
+    the single generic :func:`read_lending_account_state`, but ONLY for protocols
+    explicitly enabled in ``_GENERIC_PRE_STATE_PROTOCOLS`` (migrated AND
+    fork/byte-equivalence-verified in their PR). A connector that merely *registers*
+    an account-state spec is spec-capable but is NOT auto-enabled on this
+    live-money read path — e.g. Spark (an Aave-fork that opted into
+    ``_ACCOUNT_STATE_LOADERS``) stays unread → ESTIMATED until it is verified and
+    added (VIB-4963).
 
     VIB-4589 / F7: ``block`` pins every underlying eth_call to a single
     block reference. Pre-state captures pass ``None`` (→ ``"latest"`` — safe
@@ -690,18 +400,6 @@ def capture_lending_pre_state(
         return None
 
     protocol = str(getattr(intent, "protocol", "") or "").lower()
-
-    # transitional: folds into the generic reader in PR-3b
-    legacy_reader = _PROTOCOL_PRE_STATE_READERS.get(protocol)
-    if legacy_reader is not None:
-        return legacy_reader(
-            intent=intent,
-            chain=chain,
-            wallet_address=wallet_address,
-            gateway_client=gateway_client,
-            price_oracle=price_oracle,
-            block=block,
-        )
 
     # Generic path — gated to the explicitly-enabled, fork-verified protocols
     # (``_GENERIC_PRE_STATE_PROTOCOLS``). A spec-capable-but-unverified connector
@@ -740,7 +438,7 @@ def capture_lending_post_state(
     gateway_client: Any | None,
     price_oracle: dict | None,
     block: int | str | None = None,
-) -> LendingAccountState | CompoundV3AccountState | None:
+) -> LendingAccountState | None:
     """Read on-chain lending state AFTER the transaction confirms (VIB-3474).
 
     The post-state capture is the missing piece that ships
@@ -774,7 +472,7 @@ def capture_lending_post_state(
 
 
 def lending_state_to_dict(
-    state: LendingAccountState | CompoundV3AccountState | None,
+    state: LendingAccountState | None,
     *,
     protocol: str,
 ) -> dict[str, Any] | None:
@@ -801,7 +499,7 @@ def lending_state_to_dict(
     All numeric fields are stringified Decimals — the handler parses with
     ``Decimal(str(post_state["..."]))`` so JSON round-trip is loss-free.
 
-    VIB-4929 PR-3a: Aave + Morpho now share the unified
+    VIB-4929 PR-3a/3b: Aave + Morpho + Compound V3 now share the unified
     :class:`LendingAccountState`. The persisted dict stays **byte-identical** to
     the pre-PR per-protocol shapes:
 
@@ -816,8 +514,8 @@ def lending_state_to_dict(
     * **Morpho family** (``LendingAccountState`` with ``lltv`` set, no Aave
       discriminator): emits ``lltv`` (str) + a derived ``liquidation_threshold_bps``
       (``round(lltv * 10000)``, ROUND_HALF_UP) and never the Aave-only keys.
-    * **Compound V3** (transitional ``CompoundV3AccountState``): only the common
-      three keys.
+    * **Compound V3** (``LendingAccountState`` with ``family=None`` and ``lltv=None``):
+      only the common three keys — neither the Aave nor the Morpho branch fires.
     """
     if state is None:
         return None
@@ -1027,7 +725,7 @@ def build_lending_accounting_event(  # noqa: C901
     basis_store: FIFOBasisStore,
     price_oracle: dict | None,
     ledger_entry_id: str | None = None,
-    pre_execution_state: LendingAccountState | CompoundV3AccountState | None = None,
+    pre_execution_state: LendingAccountState | None = None,
 ) -> Any | None:
     """Build a LendingAccountingEvent for a completed lending intent.
 
@@ -1259,27 +957,25 @@ def build_lending_accounting_event(  # noqa: C901
                 interest_delta_usd = None
 
     # ── After-state: on-chain read ───────────────────────────────────────────
-    # VIB-4929 PR-3a: Aave V3 + Morpho Blue share the unified ``LendingAccountState``,
-    # read through the single generic ``read_lending_account_state`` — but only for
-    # protocols explicitly enabled + fork-verified in ``_GENERIC_PRE_STATE_PROTOCOLS``.
-    # A spec-capable-but-unverified connector (e.g. Spark, which opted into
+    # VIB-4929 PR-3a/3b: Aave V3 + Morpho Blue + Compound V3 share the unified
+    # ``LendingAccountState``, read through the single generic
+    # ``read_lending_account_state`` — but only for protocols explicitly enabled +
+    # fork/byte-equivalence-verified in ``_GENERIC_PRE_STATE_PROTOCOLS``. A
+    # spec-capable-but-unverified connector (e.g. Spark, which opted into
     # ``_ACCOUNT_STATE_LOADERS``) is NOT auto-read here (→ ESTIMATED; VIB-4963).
-    # Compound V3 stays on its legacy reader transitionally (PR-3b).
     from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
 
     generic_state: LendingAccountState | None = None
     morpho_unavailable_reason: str = ""
 
     is_morpho = protocol.lower() == "morpho_blue"
-    is_compound_v3 = protocol.lower() == "compound_v3"  # transitional: folds into the generic reader in PR-3b
-    compound_v3_state: CompoundV3AccountState | None = None
 
     # Generic read path for every protocol with a connector-owned account-state
-    # spec (Aave, Morpho, …) — Compound is excluded (handled transitionally below).
-    # ``block=None`` here preserves the pre-VIB-4929 event-builder semantics: the
-    # event-builder post-state read was never block-pinned (the pinned post-state
-    # capture is the runner's ``capture_lending_post_state`` path).
-    if not is_compound_v3 and gateway_client is not None and protocol.lower() in _GENERIC_PRE_STATE_PROTOCOLS:
+    # spec (Aave, Morpho, Compound V3, …). ``block=None`` here preserves the
+    # pre-VIB-4929 event-builder semantics: the event-builder post-state read was
+    # never block-pinned (the pinned post-state capture is the runner's
+    # ``capture_lending_post_state`` path).
+    if gateway_client is not None and protocol.lower() in _GENERIC_PRE_STATE_PROTOCOLS:
         query_inputs = LendingReadRegistry.query_inputs(protocol, intent)
         if query_inputs is not None and (
             not is_morpho or intent_type_str in ("BORROW", "REPAY", "DELEVERAGE", "SUPPLY", "WITHDRAW")
@@ -1306,61 +1002,22 @@ def build_lending_accounting_event(  # noqa: C901
                 if generic_state is None and is_morpho:
                     morpho_unavailable_reason = "Morpho Blue position/market gateway read failed"
 
-    if (
-        is_compound_v3
-        and gateway_client is not None
-        and intent_type_str in ("BORROW", "REPAY", "DELEVERAGE", "SUPPLY", "WITHDRAW")
-    ):
-        intent_market_id_c3 = getattr(intent, "market_id", None)
-        if intent_type_str in ("SUPPLY", "WITHDRAW"):
-            # market_id is required for SUPPLY/WITHDRAW: without it we cannot
-            # determine which Comet to query — falling back to the collateral token
-            # symbol would select the wrong market on chains with multiple Comets.
-            if not intent_market_id_c3:
-                logger.debug(
-                    "capture_lending_post_state: Compound V3 post-state skipped"
-                    " (market_id required for SUPPLY/WITHDRAW but not set)"
-                )
-            else:
-                collateral_token_sym_c3 = getattr(intent, "token", None)
-                borrow_token_sym_c3 = getattr(intent, "token", None)  # overridden by market_id
-                if collateral_token_sym_c3:
-                    compound_v3_state = read_compound_v3_account_state(
-                        gateway_client=gateway_client,
-                        chain=chain,
-                        wallet_address=wallet_address,
-                        collateral_token=collateral_token_sym_c3,
-                        borrow_token=borrow_token_sym_c3 or "",
-                        price_oracle=price_oracle,
-                        market_id=intent_market_id_c3,
-                    )
-        else:
-            collateral_token_sym_c3 = getattr(intent, "collateral_token", None)
-            borrow_token_sym_c3 = getattr(intent, "borrow_token", None) or getattr(intent, "token", None)
-            if collateral_token_sym_c3:
-                compound_v3_state = read_compound_v3_account_state(
-                    gateway_client=gateway_client,
-                    chain=chain,
-                    wallet_address=wallet_address,
-                    collateral_token=collateral_token_sym_c3,
-                    borrow_token=borrow_token_sym_c3 or "",
-                    price_oracle=price_oracle,
-                    market_id=intent_market_id_c3,
-                )
-
     # ── Unify after-state fields from whichever protocol provided data ────────
-    # Priority: generic state (Aave / Morpho) > Compound V3 state > None.
-    got_after_state = generic_state is not None or compound_v3_state is not None
+    # Single generic arm now (VIB-4929 PR-3b retired the per-protocol Compound V3
+    # branch): Aave / Morpho / Compound V3 all surface as ``LendingAccountState``.
+    got_after_state = generic_state is not None
 
     if generic_state is not None:
         # Single field extraction off the unified ``LendingAccountState`` — no
-        # per-protocol ``isinstance`` priority chain (VIB-4929 PR-3a). The
+        # per-protocol ``isinstance`` priority chain (VIB-4929 PR-3a/3b). The
         # protocol-shape differences are carried structurally on the state:
         #   * Aave family: ``liquidation_threshold_bps`` set, ``lltv`` None →
         #     ``liquidation_threshold = bps / 10000``.
         #   * Morpho: ``lltv`` set, ``liquidation_threshold_bps`` None → lltv IS
         #     the liquidation threshold (no-debt HF stays the 999999 sentinel;
         #     callers must not treat HF == 999999 as a trigger).
+        #   * Compound V3: ``family=None`` and ``lltv=None`` → no single threshold
+        #     (per-asset collateral factors folded into HF by the spec reducer).
         collateral_after: Decimal | None = generic_state.collateral_usd
         debt_after: Decimal | None = generic_state.debt_usd
         hf_after: Decimal | None = generic_state.health_factor
@@ -1372,13 +1029,6 @@ def build_lending_accounting_event(  # noqa: C901
             liquidation_threshold = generic_state.lltv  # LLTV serves as liquidation_threshold
         else:
             liquidation_threshold = None
-    elif compound_v3_state is not None:
-        collateral_after = compound_v3_state.collateral_usd
-        debt_after = compound_v3_state.debt_usd
-        hf_after = compound_v3_state.health_factor
-        lt_bps = None  # Compound V3 uses per-asset collateral factors, not a single threshold
-        liquidation_threshold = None
-        lltv_after = None
     else:
         collateral_after = None
         debt_after = None
@@ -1403,9 +1053,9 @@ def build_lending_accounting_event(  # noqa: C901
     net_equity_before: Decimal | None = None
 
     if pre_execution_state is not None:
-        # The unified LendingAccountState and the transitional CompoundV3AccountState
-        # share the same field names for the data being extracted — no protocol-
-        # specific branching needed.
+        # Every protocol surfaces as the unified ``LendingAccountState`` (VIB-4929
+        # PR-3a/3b), so the common fields read off directly — no protocol-specific
+        # branching needed.
         collateral_before = pre_execution_state.collateral_usd
         debt_before = pre_execution_state.debt_usd
         hf_before = pre_execution_state.health_factor

@@ -1,4 +1,5 @@
-"""Unit tests for read_compound_v3_account_state() (VIB-3586).
+"""Unit tests for Compound V3 account-state reads — now validating the generic
+``read_lending_account_state`` via a thin shim (VIB-3586; reader retired VIB-4929 PR-3b).
 
 Tests mirror the pattern in test_morpho_blue_account_state.py:
 pure unit tests that mock the gateway eth_call — no Anvil fork required.
@@ -24,6 +25,29 @@ from decimal import Decimal
 from unittest.mock import MagicMock
 
 from web3 import Web3
+
+from almanak.framework.accounting.lending_accounting import read_lending_account_state
+
+
+def read_compound_v3_account_state(
+    gateway_client, chain, wallet_address, collateral_token, borrow_token, price_oracle, market_id=None, block=None
+):
+    """Test shim (VIB-4929 PR-3b): drive the generic reader the way the consumer's
+    query_inputs does, so the legacy byte-equivalence assertions now validate
+    read_lending_account_state for compound_v3. The Comet key falls back to the
+    borrow token when market_id is absent (the legacy (market_id or borrow_token)
+    behaviour); the base/borrow leg comes from the market catalogue."""
+    return read_lending_account_state(
+        protocol="compound_v3",
+        chain=chain,
+        wallet_address=wallet_address,
+        market_id=(market_id or borrow_token),
+        gateway_client=gateway_client,
+        price_oracle=price_oracle,
+        collateral_token=collateral_token,
+        block=block,
+    )
+
 
 # ─── ABI encoding helpers ─────────────────────────────────────────────────────
 
@@ -72,7 +96,7 @@ class TestCompoundV3Selectors:
     """Verify ABI function selector constants match keccak256 of their signatures."""
 
     def test_user_collateral_selector(self) -> None:
-        from almanak.framework.accounting.lending_accounting import _COMPOUND_V3_USER_COLLATERAL_SELECTOR
+        from almanak.connectors._strategy_base.lending_read_base import _COMPOUND_V3_USER_COLLATERAL_SELECTOR
 
         expected = "0x" + Web3.keccak(text="userCollateral(address,address)").hex()[:8]
         assert _COMPOUND_V3_USER_COLLATERAL_SELECTOR == expected, (
@@ -80,7 +104,7 @@ class TestCompoundV3Selectors:
         )
 
     def test_borrow_balance_selector(self) -> None:
-        from almanak.framework.accounting.lending_accounting import _COMPOUND_V3_BORROW_BALANCE_SELECTOR
+        from almanak.connectors._strategy_base.lending_read_base import _COMPOUND_V3_BORROW_BALANCE_SELECTOR
 
         expected = "0x" + Web3.keccak(text="borrowBalanceOf(address)").hex()[:8]
         assert _COMPOUND_V3_BORROW_BALANCE_SELECTOR == expected, (
@@ -89,9 +113,8 @@ class TestCompoundV3Selectors:
 
     def test_user_collateral_calldata_format(self) -> None:
         """First eth_call calldata must start with the userCollateral selector."""
-        from almanak.framework.accounting.lending_accounting import (
+        from almanak.connectors._strategy_base.lending_read_base import (
             _COMPOUND_V3_USER_COLLATERAL_SELECTOR,
-            read_compound_v3_account_state,
         )
 
         gateway = _make_mock_gateway(
@@ -116,9 +139,8 @@ class TestCompoundV3Selectors:
 
     def test_borrow_balance_calldata_format(self) -> None:
         """Second eth_call calldata must start with the borrowBalanceOf selector."""
-        from almanak.framework.accounting.lending_accounting import (
+        from almanak.connectors._strategy_base.lending_read_base import (
             _COMPOUND_V3_BORROW_BALANCE_SELECTOR,
-            read_compound_v3_account_state,
         )
 
         gateway = _make_mock_gateway(
@@ -150,8 +172,6 @@ class TestCompoundV3AccountStateHappyPath:
 
     def test_basic_borrow_populates_all_fields(self) -> None:
         """1 WETH collateral, 100 USDC debt — verify collateral_usd, debt_usd, health_factor."""
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-
         collateral_raw = 1 * 10**18  # 1 WETH (18 dec)
         borrow_raw = 100 * 10**6  # 100 USDC (6 dec)
 
@@ -182,8 +202,6 @@ class TestCompoundV3AccountStateHappyPath:
 
     def test_no_debt_yields_sentinel_hf(self) -> None:
         """Zero debt → health_factor sentinel 999999 (no liquidation risk)."""
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-
         gateway = _make_mock_gateway(
             _mock_user_collateral_response(1 * 10**18),
             _mock_borrow_balance_response(0),
@@ -203,8 +221,6 @@ class TestCompoundV3AccountStateHappyPath:
 
     def test_health_factor_uses_lcf_not_raw_ratio(self) -> None:
         """HF must be (collateral * LCF) / debt — raw ratio would overstate safety."""
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-
         # 1 WETH @ $3000 collateral, 1000 USDC debt
         # Raw ratio: 3000 / 1000 = 3.0 (overstates)
         # LCF-adjusted (WETH LCF=0.895): (3000 * 0.895) / 1000 = 2.685
@@ -232,8 +248,6 @@ class TestCompoundV3AccountStateHappyPath:
 
     def test_gateway_called_exactly_twice(self) -> None:
         """Two eth_calls must be made: userCollateral() then borrowBalanceOf()."""
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-
         gateway = _make_mock_gateway(
             _mock_user_collateral_response(1 * 10**18),
             _mock_borrow_balance_response(100 * 10**6),
@@ -257,8 +271,6 @@ class TestCompoundV3AccountStateFailureCases:
 
     def test_returns_none_for_unknown_chain(self) -> None:
         """No Comet on unknown chain → return None without calling gateway."""
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-
         gateway = MagicMock()
         state = read_compound_v3_account_state(
             gateway_client=gateway,
@@ -274,8 +286,6 @@ class TestCompoundV3AccountStateFailureCases:
 
     def test_returns_none_for_unknown_borrow_token(self) -> None:
         """No exact Comet match for unknown token — no fuzzy fallback."""
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-
         gateway = MagicMock()
         state = read_compound_v3_account_state(
             gateway_client=gateway,
@@ -297,7 +307,6 @@ class TestCompoundV3AccountStateFailureCases:
         check first — which on Python dict iteration order was 'usdc_bridged'.
         Now only an exact match is accepted, so 'usdc' → USDC Comet.
         """
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
         from almanak.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
 
         # Assert test preconditions against the live registry
@@ -336,8 +345,6 @@ class TestCompoundV3AccountStateFailureCases:
 
     def test_returns_none_when_price_oracle_empty(self) -> None:
         """Missing prices → return None without calling gateway."""
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-
         gateway = MagicMock()
         state = read_compound_v3_account_state(
             gateway_client=gateway,
@@ -352,8 +359,6 @@ class TestCompoundV3AccountStateFailureCases:
         gateway.eth_call.assert_not_called()
 
     def test_returns_none_when_price_oracle_none(self) -> None:
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-
         gateway = MagicMock()
         state = read_compound_v3_account_state(
             gateway_client=gateway,
@@ -368,8 +373,6 @@ class TestCompoundV3AccountStateFailureCases:
         gateway.eth_call.assert_not_called()
 
     def test_returns_none_when_collateral_price_missing(self) -> None:
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-
         gateway = MagicMock()
         state = read_compound_v3_account_state(
             gateway_client=gateway,
@@ -385,8 +388,6 @@ class TestCompoundV3AccountStateFailureCases:
 
     def test_returns_none_when_user_collateral_call_fails(self) -> None:
         """Gateway returns None for userCollateral() → return None."""
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-
         gateway = MagicMock()
         gateway.eth_call.return_value = None
 
@@ -403,8 +404,6 @@ class TestCompoundV3AccountStateFailureCases:
 
     def test_returns_none_when_gateway_raises(self) -> None:
         """Exception in gateway → return None without propagating."""
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-
         gateway = MagicMock()
         gateway.eth_call.side_effect = RuntimeError("RPC unavailable")
 
@@ -426,7 +425,6 @@ class TestCompoundV3AccountStateFailureCases:
         USDC-market collateral on Ethereum.  The LCF lookup returns None, so
         health_factor must be None rather than the misleadingly optimistic raw ratio.
         """
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
         from almanak.connectors.compound_v3.adapter import COMPOUND_V3_MARKETS
 
         # Assert test precondition: DAI must NOT be in the Ethereum USDC market collateral list
@@ -467,7 +465,6 @@ class TestCompoundV3MarketIdRouting:
 
         Without market_id, borrow_token fallback would use 'weth' → wrong Comet.
         """
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
         from almanak.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
 
         arb_comets = COMPOUND_V3_COMET_ADDRESSES.get("arbitrum", {})
@@ -508,7 +505,6 @@ class TestCompoundV3MarketIdRouting:
 
     def test_explicit_market_id_overrides_borrow_token_for_comet_lookup(self) -> None:
         """When market_id='weth' is passed, the WETH Comet is used even if borrow_token='USDC'."""
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
         from almanak.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
 
         weth_comet = COMPOUND_V3_COMET_ADDRESSES.get("ethereum", {}).get("weth", "")
@@ -616,7 +612,7 @@ class TestCompoundV3BaseAssetSupply:
 
     def test_balance_of_selector_is_correct(self) -> None:
         """_COMPOUND_V3_BALANCE_OF_SELECTOR must match keccak256('balanceOf(address)')."""
-        from almanak.framework.accounting.lending_accounting import _COMPOUND_V3_BALANCE_OF_SELECTOR
+        from almanak.connectors._strategy_base.lending_read_base import _COMPOUND_V3_BALANCE_OF_SELECTOR
 
         expected = "0x" + Web3.keccak(text="balanceOf(address)").hex()[:8]
         assert _COMPOUND_V3_BALANCE_OF_SELECTOR == expected, (
@@ -630,10 +626,9 @@ class TestCompoundV3BaseAssetSupply:
         collateral_token='USDC' == base_token='USDC' → first eth_call must use
         the balanceOf selector, not the userCollateral selector.
         """
-        from almanak.framework.accounting.lending_accounting import (
+        from almanak.connectors._strategy_base.lending_read_base import (
             _COMPOUND_V3_BALANCE_OF_SELECTOR,
             _COMPOUND_V3_USER_COLLATERAL_SELECTOR,
-            read_compound_v3_account_state,
         )
 
         supplied_raw = 1000 * 10**6  # 1000 USDC (6 dec)
@@ -671,8 +666,6 @@ class TestCompoundV3BaseAssetSupply:
         The old code path called userCollateral(wallet, USDC) which always returns
         zero for the base asset, producing collateral_usd=0 with HIGH confidence.
         """
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-
         supplied_raw = 500 * 10**6  # 500 USDC
         gateway = MagicMock()
         gateway.eth_call.side_effect = [
@@ -702,9 +695,8 @@ class TestCompoundV3BaseAssetSupply:
 
     def test_base_asset_supply_weth_market(self) -> None:
         """Supplying WETH to the WETH Comet uses balanceOf() (WETH is base_token of the weth market)."""
-        from almanak.framework.accounting.lending_accounting import (
+        from almanak.connectors._strategy_base.lending_read_base import (
             _COMPOUND_V3_BALANCE_OF_SELECTOR,
-            read_compound_v3_account_state,
         )
 
         supplied_raw = 2 * 10**18  # 2 WETH (18 dec)
@@ -739,9 +731,8 @@ class TestCompoundV3BaseAssetSupply:
 
         WETH != base_token ('USDC') of the usdc market → collateral path unchanged.
         """
-        from almanak.framework.accounting.lending_accounting import (
+        from almanak.connectors._strategy_base.lending_read_base import (
             _COMPOUND_V3_USER_COLLATERAL_SELECTOR,
-            read_compound_v3_account_state,
         )
 
         collateral_raw = 1 * 10**18  # 1 WETH
@@ -770,8 +761,6 @@ class TestCompoundV3BaseAssetSupply:
 
     def test_base_asset_supply_gateway_called_exactly_twice(self) -> None:
         """Two eth_calls for base-asset path: balanceOf() then borrowBalanceOf()."""
-        from almanak.framework.accounting.lending_accounting import read_compound_v3_account_state
-
         gateway = MagicMock()
         gateway.eth_call.side_effect = [
             _mock_balance_of_response(100 * 10**6),

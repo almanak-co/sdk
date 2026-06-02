@@ -150,13 +150,15 @@ class LendingReadRegistry:
     # the opt-in lives in each connector so adding a fork needs one row here.
     # Morpho Blue joined in PR-3a — its spec consumes the price/decimals/market-
     # params injection seam on ``AccountStateQuery`` (Morpho is not USD-native).
-    # Compound V3 is intentionally still absent — it routes through the registry
-    # in PR-3b (when the ``is_aave``/``is_morpho``/``is_compound_v3`` dispatch in
-    # the framework consumer collapses).
+    # Compound V3 joined in PR-3b — its spec declares a market-scoped read target
+    # (the per-market Comet, bound from the market table), symbol market-id
+    # normalisation, and an intent-derived collateral leg (the three connector hooks
+    # that let the framework stay generic).
     _ACCOUNT_STATE_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
         "aave_v3": ("almanak.connectors.aave_v3.lending_read", "ACCOUNT_STATE_READ_SPEC"),
         "spark": ("almanak.connectors.spark.lending_read", "ACCOUNT_STATE_READ_SPEC"),
         "morpho_blue": ("almanak.connectors.morpho_blue.lending_read", "ACCOUNT_STATE_READ_SPEC"),
+        "compound_v3": ("almanak.connectors.compound_v3.lending_read", "ACCOUNT_STATE_READ_SPEC"),
     }
 
     # Lazy per-market parameter tables for protocols whose account state is scoped
@@ -169,7 +171,18 @@ class LendingReadRegistry:
     # per-market.
     _MARKET_TABLE_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
         "morpho_blue": ("almanak.connectors.morpho_blue.addresses", "MORPHO_MARKETS"),
+        # Compound V3's derived per-market table (params + the per-market Comet
+        # address folded in), so ``market_params`` returns everything the pure spec
+        # needs — keeping this registry generic (no Compound-specific merge here).
+        "compound_v3": ("almanak.connectors.compound_v3.addresses", "COMPOUND_V3_ACCOUNT_STATE_MARKETS"),
     }
+
+    # Sentinel ``position_manager_address`` returns for a market-scoped protocol
+    # (empty ``contract_kinds``): a truthy "this chain has a deployment" signal for
+    # the framework reader's existence gate. It is NEVER used as an EthCall target —
+    # the real per-market target is bound in ``resolve_account_state_plan`` from the
+    # market table's ``comet_address``.
+    _MARKET_SCOPED_TARGET: ClassVar[str] = "<market-scoped>"
 
     # Protocol aliases that map onto a canonical key in ``_SPEC_LOADERS``.
     _ALIASES: ClassVar[dict[str, str]] = {
@@ -353,6 +366,14 @@ class LendingReadRegistry:
         spec = cls._load_account_state_spec(key)
         if spec is None:
             return None
+        if not spec.contract_kinds:
+            # Market-scoped read target (VIB-4929 PR-3b, e.g. Compound V3): there is
+            # no single per-chain address — the per-market Comet is bound later, in
+            # ``resolve_account_state_plan``, from the market table's ``comet_address``.
+            # Report chain-level existence (any published market on this chain) so the
+            # framework reader's gate passes; the real target is resolved per-market.
+            table = cls._load_market_table(key)
+            return cls._MARKET_SCOPED_TARGET if (table and table.get(chain.lower())) else None
         return AddressRegistry.resolve_contract_address(key, chain, spec.contract_kinds)
 
     @classmethod
@@ -410,8 +431,15 @@ class LendingReadRegistry:
         markets_for_chain = table.get(chain.lower())
         if not markets_for_chain:
             return None
-        # Normalise to the catalogue's key shape: 0x-prefixed, lowercase, 32-byte.
-        normalized = "0x" + market_id.lower().replace("0x", "").zfill(64)
+        # Market-id normalisation is connector-declared (VIB-4929 PR-3b): a spec may
+        # publish ``normalize_market_id`` (Compound V3 → ``str.lower`` for symbol ids
+        # like "usdc"/"weth"). Default (``None``) keeps the Morpho-style 0x-prefixed,
+        # lowercase, 32-byte ``zfill(64)`` shape.
+        spec = cls._load_account_state_spec(key)
+        normalizer = spec.normalize_market_id if spec is not None else None
+        normalized = (
+            normalizer(market_id) if normalizer is not None else "0x" + market_id.lower().replace("0x", "").zfill(64)
+        )
         return markets_for_chain.get(normalized)
 
     @classmethod
@@ -521,11 +549,18 @@ class LendingReadRegistry:
             logger.debug("No account-state spec for protocol %s", protocol)
             return None
 
-        target = AddressRegistry.resolve_contract_address(key, query.chain, spec.contract_kinds)
+        if spec.contract_kinds:
+            target = AddressRegistry.resolve_contract_address(key, query.chain, spec.contract_kinds)
+        else:
+            # Market-scoped target (VIB-4929 PR-3b): the per-market read target (the
+            # Compound Comet) rides on the injected market params, not the per-chain
+            # AddressRegistry. ``market_params`` is resolved + injected by the
+            # framework reader before planning.
+            target = (query.market_params or {}).get("comet_address")
         if not target:
             logger.debug(
                 "No %s account-state target for protocol %s on chain %s",
-                spec.contract_kinds,
+                spec.contract_kinds or "market-scoped",
                 key,
                 query.chain,
             )

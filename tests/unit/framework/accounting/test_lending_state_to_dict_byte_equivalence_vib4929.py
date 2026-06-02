@@ -30,10 +30,7 @@ from decimal import Decimal
 import pytest
 
 from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
-from almanak.framework.accounting.lending_accounting import (
-    CompoundV3AccountState,
-    lending_state_to_dict,
-)
+from almanak.framework.accounting.lending_accounting import lending_state_to_dict
 
 
 def _aave(
@@ -135,14 +132,20 @@ _MORPHO_CASE = (
     },
 )
 
-# Compound V3 (transitional): only the common three + protocol; no lltv, no
+# Compound V3 (VIB-4929 PR-3b — now the unified LendingAccountState with
+# family=None and lltv=None): only the common three + protocol; no lltv, no
 # Aave-only keys, no derived bps.
 _COMPOUND_CASE = (
     "compound_v3",
-    CompoundV3AccountState(
+    LendingAccountState(
         collateral_usd=Decimal("500.0"),
         debt_usd=Decimal("250.0"),
         health_factor=Decimal("1.7"),
+        liquidation_threshold_bps=None,
+        e_mode_category=None,
+        lltv=None,
+        interest_rate_mode=None,
+        family=None,
     ),
     {
         "protocol": "compound_v3",

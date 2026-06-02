@@ -297,15 +297,19 @@ def test_build_calls_emits_account_data_then_emode_against_pool() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("protocol", ["aave_v3", "spark", "aave", "AAVE_V3", "morpho_blue", "MORPHO_BLUE"])
+@pytest.mark.parametrize(
+    "protocol",
+    ["aave_v3", "spark", "aave", "AAVE_V3", "morpho_blue", "MORPHO_BLUE", "compound_v3", "COMPOUND_V3"],
+)
 def test_supports_account_state_for_supported_protocols(protocol: str) -> None:
-    # Morpho Blue joined in VIB-4929 PR-3a (via the injected-price seam).
+    # Morpho Blue joined in VIB-4929 PR-3a (injected-price seam); Compound V3 in
+    # PR-3b (market-scoped target + symbol market-ids + intent-derived collateral).
     assert LendingReadRegistry.supports_account_state(protocol)
 
 
-@pytest.mark.parametrize("protocol", ["compound_v3", "uniswap_v3", "unknown"])
+@pytest.mark.parametrize("protocol", ["uniswap_v3", "unknown"])
 def test_account_state_unsupported_for_non_supported_protocols(protocol: str) -> None:
-    # Compound V3 is still deferred (routes through the registry in PR-3b).
+    # Compound V3 joined the supported set in PR-3b (above); these remain non-lending.
     assert not LendingReadRegistry.supports_account_state(protocol)
 
 
@@ -330,7 +334,18 @@ def test_position_manager_address_resolves_via_alias() -> None:
 
 
 def test_position_manager_address_none_for_unsupported_protocol() -> None:
-    assert LendingReadRegistry.position_manager_address("compound_v3", "arbitrum") is None
+    assert LendingReadRegistry.position_manager_address("uniswap_v3", "arbitrum") is None
+
+
+def test_position_manager_address_market_scoped_sentinel_for_compound() -> None:
+    # Compound V3 is market-scoped (empty contract_kinds): position_manager_address
+    # reports chain-level existence via a sentinel (NEVER an EthCall target — the
+    # per-market Comet is bound in resolve_account_state_plan), and None off-chain.
+    assert (
+        LendingReadRegistry.position_manager_address("compound_v3", "ethereum")
+        == LendingReadRegistry._MARKET_SCOPED_TARGET
+    )
+    assert LendingReadRegistry.position_manager_address("compound_v3", "solana") is None
 
 
 def test_position_manager_address_none_for_unsupported_chain() -> None:
@@ -355,9 +370,7 @@ def test_resolve_account_state_plan_binds_resolved_pool_and_calls() -> None:
 
 
 def test_resolve_account_state_plan_alias_matches_canonical() -> None:
-    base = AccountStateQuery(
-        chain="ethereum", wallet_address=_WALLET, position_manager_address="0x0"
-    )
+    base = AccountStateQuery(chain="ethereum", wallet_address=_WALLET, position_manager_address="0x0")
     plan_alias = LendingReadRegistry.resolve_account_state_plan("aave", base)
     plan_canon = LendingReadRegistry.resolve_account_state_plan("aave_v3", base)
     assert plan_alias is not None and plan_canon is not None
@@ -365,17 +378,56 @@ def test_resolve_account_state_plan_alias_matches_canonical() -> None:
 
 
 def test_resolve_account_state_plan_none_for_unsupported_chain() -> None:
-    query = AccountStateQuery(
-        chain="solana", wallet_address=_WALLET, position_manager_address="0x0"
-    )
+    query = AccountStateQuery(chain="solana", wallet_address=_WALLET, position_manager_address="0x0")
     assert LendingReadRegistry.resolve_account_state_plan("aave_v3", query) is None
 
 
 def test_resolve_account_state_plan_none_for_unsupported_protocol() -> None:
-    query = AccountStateQuery(
-        chain="arbitrum", wallet_address=_WALLET, position_manager_address="0x0"
-    )
+    query = AccountStateQuery(chain="arbitrum", wallet_address=_WALLET, position_manager_address="0x0")
+    assert LendingReadRegistry.resolve_account_state_plan("uniswap_v3", query) is None
+
+
+def test_resolve_account_state_plan_none_for_market_scoped_without_comet() -> None:
+    # Compound V3 is supported but market-scoped: with no injected market_params
+    # (hence no comet_address target), the plan fails closed.
+    query = AccountStateQuery(chain="arbitrum", wallet_address=_WALLET, position_manager_address="0x0")
     assert LendingReadRegistry.resolve_account_state_plan("compound_v3", query) is None
+
+
+def test_market_params_compound_symbol_normalization() -> None:
+    # VIB-4929 PR-3b: Compound market ids are base-asset SYMBOLS normalized with the
+    # connector-declared ``str.lower`` hook (NOT the Morpho-style bytes32 zfill). The
+    # resolved per-market entry carries the folded-in ``comet_address``.
+    params = LendingReadRegistry.market_params("compound_v3", "ethereum", "USDC")  # mixed-case input
+    assert params is not None
+    assert params["base_token"] == "USDC"
+    assert params["comet_address"], "the per-market Comet must be folded into the derived table"
+    # A bytes32-shaped id must NOT resolve — Compound uses symbol normalization, not zfill(64).
+    assert LendingReadRegistry.market_params("compound_v3", "ethereum", "0x" + "0" * 64) is None
+    # A Comet-only market (no COMPOUND_V3_MARKETS entry, e.g. ethereum wstETH) has no
+    # account-state entry → None (fails closed; byte-equivalent to the legacy reader).
+    assert LendingReadRegistry.market_params("compound_v3", "ethereum", "wsteth") is None
+
+
+def test_resolve_account_state_plan_compound_binds_per_market_comet() -> None:
+    # Market-scoped target resolution: the registry binds position_manager_address
+    # from the injected market_params' ``comet_address`` (NOT AddressRegistry), and the
+    # pure build_calls targets it — mirroring what read_lending_account_state injects.
+    params = LendingReadRegistry.market_params("compound_v3", "ethereum", "weth")
+    assert params is not None
+    query = AccountStateQuery(
+        chain="ethereum",
+        wallet_address=_WALLET,
+        market_id="weth",
+        market_params=params,
+        collateral_token="WETH",  # collateral == base (WETH market) → balanceOf shape
+        prices={"WETH": Decimal("3000")},
+        decimals={"WETH": 18},
+    )
+    plan = LendingReadRegistry.resolve_account_state_plan("compound_v3", query)
+    assert plan is not None
+    assert plan.query.position_manager_address == params["comet_address"]
+    assert plan.calls and all(c.to == params["comet_address"] for c in plan.calls)
 
 
 def test_plan_round_trip_decodes_via_reducer() -> None:
@@ -387,9 +439,7 @@ def test_plan_round_trip_decodes_via_reducer() -> None:
         liquidation_threshold_bps=8500,
         health_factor_raw=3_400_000_000_000_000_000,
     )
-    query = AccountStateQuery(
-        chain="arbitrum", wallet_address=_WALLET, position_manager_address="0x0"
-    )
+    query = AccountStateQuery(chain="arbitrum", wallet_address=_WALLET, position_manager_address="0x0")
     plan = LendingReadRegistry.resolve_account_state_plan("aave_v3", query)
     assert plan is not None
     results: list[str | None] = [account_hex, _emode_hex(1)]

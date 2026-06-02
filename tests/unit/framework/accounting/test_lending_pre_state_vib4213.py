@@ -206,6 +206,9 @@ class TestGenericPreStateProtocolGate:
         # absent here until its read is fork-verified (VIB-4963).
         assert "spark" not in _GENERIC_PRE_STATE_PROTOCOLS
         assert {"aave_v3", "aave", "morpho_blue"} <= _GENERIC_PRE_STATE_PROTOCOLS
+        # compound_v3 was migrated onto the generic reader AND byte-equivalence-
+        # verified in VIB-4929 PR-3b, so it is enabled on the live-money read path.
+        assert "compound_v3" in _GENERIC_PRE_STATE_PROTOCOLS
 
     def test_spark_intent_not_read_on_generic_path(self) -> None:
         """Spark must NOT hit the generic reader — gated BEFORE any read (→ ESTIMATED)."""

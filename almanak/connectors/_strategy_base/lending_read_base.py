@@ -356,6 +356,11 @@ class AccountStateQuery:
     market_params: Mapping[str, Any] | None = None
     collateral_token: str | None = None
     loan_token: str | None = None
+    # Injected collateral-token *address* for protocols whose read targets a
+    # collateral position by address (Compound V3 ``userCollateral(user, asset)``).
+    # ``None`` for whole-account / market-id-only protocols. Resolved + injected by
+    # the framework reader alongside the collateral price/decimals.
+    collateral_address: str | None = None
 
 
 @dataclass(frozen=True)
@@ -396,6 +401,16 @@ class AccountStateReadSpec:
     build_calls: Callable[[AccountStateQuery], list[EthCall]]
     reduce_calls: Callable[[AccountStateQuery, list[str | None]], LendingAccountState | None]
     valuation_role_keys: tuple[tuple[str, str], ...] = ()
+    # Connector-declared market-id normaliser (VIB-4929 PR-3b). ``None`` → the
+    # registry's default Morpho-style 32-byte ``zfill(64)`` normalisation. Compound
+    # V3 sets ``str.lower`` because its market ids are base-asset symbols, not hashes.
+    normalize_market_id: Callable[[str], str] | None = None
+    # Connector-declared per-read intent-input extractor (VIB-4929 PR-3b). ``None`` →
+    # the default :meth:`query_inputs_from_intent` (``market_id`` only). Compound V3
+    # sets one that also names the intent-derived collateral token. An empty
+    # ``contract_kinds`` (above) signals a *market-scoped* read target (the per-market
+    # Comet), which the registry binds from the market table rather than AddressRegistry.
+    query_inputs_fn: Callable[[Any], dict[str, Any]] | None = None
 
     def query_inputs_from_intent(self, intent: Any) -> dict[str, Any]:
         """Extract the per-read query inputs this protocol needs from an intent.
@@ -413,6 +428,8 @@ class AccountStateReadSpec:
         for per-market protocols (Morpho). Per-market protocols whose Comet/market
         selection needs more than ``market_id`` (Compound V3, PR-3b) override this.
         """
+        if self.query_inputs_fn is not None:
+            return self.query_inputs_fn(intent)
         return {"market_id": getattr(intent, "market_id", None)}
 
 
@@ -739,4 +756,239 @@ MORPHO_BLUE_ACCOUNT_STATE_READ = AccountStateReadSpec(
         ("collateral_token", "collateral_token"),
         ("loan_token", "loan_token"),
     ),
+)
+
+
+# ---------------------------------------------------------------------------
+# Compound V3 (Comet) account-state ABI (VIB-4929 PR-3b)
+# ---------------------------------------------------------------------------
+#
+# Compound V3 differs from the Aave family and Morpho on three axes the
+# connector-declared spec hooks resolve (so the framework stays generic):
+#
+#   * Per-market target. The read target is a per-market Comet, not a single
+#     per-chain contract — so this spec declares EMPTY ``contract_kinds`` (the
+#     "target is market-scoped" signal) and the registry binds
+#     ``query.position_manager_address`` from the market table's ``comet_address``
+#     instead of via ``AddressRegistry``.
+#   * Symbol market ids. ``market_id`` is a base-asset symbol ("usdc"/"weth"),
+#     not a 32-byte hash — so this spec declares ``normalize_market_id=str.lower``.
+#   * Intent-derived collateral. The base/borrow leg is market-derived (priced via
+#     ``valuation_role_keys``); the collateral leg is intent-derived (any approved
+#     collateral can back a Comet) — so this spec declares a ``query_inputs_fn``
+#     that names the collateral symbol, and the framework reader prices + resolves
+#     the address of ``query.collateral_token``.
+#
+# The decode below is byte-identical to ``read_compound_v3_account_state`` in
+# ``almanak/framework/accounting/lending_accounting.py`` (the consumer this PR
+# migrates onto the spec). The spec stays pure (no gateway, oracle, resolver); the
+# framework reader owns the gateway round-trip + price/decimals/address resolution.
+
+# userCollateral(address user, address asset) → (uint128 balance, uint128 reserved)
+_COMPOUND_V3_USER_COLLATERAL_SELECTOR = "0x2b92a07d"
+# borrowBalanceOf(address user) → uint256
+_COMPOUND_V3_BORROW_BALANCE_SELECTOR = "0x374c49b4"
+# balanceOf(address user) → uint256 (supplied base-asset balance)
+_COMPOUND_V3_BALANCE_OF_SELECTOR = "0x70a08231"
+# No-debt / base-asset-supply HF sentinel, also the serialisation cap.
+_COMPOUND_HF_SENTINEL = Decimal("999999")
+
+
+def _compound_query_inputs_from_intent(intent: Any) -> dict[str, Any]:
+    """Derive Compound V3's per-read inputs from an intent.
+
+    Byte-identical to the selection ``_capture_compound_v3_pre_state`` and the
+    Compound arm of ``build_lending_accounting_event`` performed:
+
+    * SUPPLY / WITHDRAW: the collateral being supplied is ``intent.token``; the
+      Comet is selected by ``intent.market_id`` (required — a missing market id
+      stays ``None`` and the read fails closed downstream, never guessing a Comet
+      from the collateral symbol).
+    * BORROW / REPAY / DELEVERAGE: the collateral is ``intent.collateral_token``;
+      the Comet key falls back to the borrow token (``intent.borrow_token`` or
+      ``intent.token``) when ``intent.market_id`` is absent — the legacy
+      ``(market_id or borrow_token)`` Comet-key behaviour.
+    """
+    it = getattr(intent, "intent_type", None)
+    if it is None:
+        intent_type = ""
+    else:
+        intent_type = it.value if hasattr(it, "value") else str(it)
+    market_id = getattr(intent, "market_id", None)
+    if intent_type in ("SUPPLY", "WITHDRAW"):
+        collateral_token = getattr(intent, "token", None)
+    else:
+        collateral_token = getattr(intent, "collateral_token", None)
+        if not market_id:
+            market_id = getattr(intent, "borrow_token", None) or getattr(intent, "token", None)
+    return {"market_id": market_id, "collateral_token": collateral_token}
+
+
+def _compound_health_factor(
+    collateral_usd: Decimal,
+    debt_usd: Decimal,
+    collateral_token: str,
+    params: Mapping[str, Any],
+) -> Decimal | None:
+    """HF = min((collateral_usd * LCF) / debt_usd, sentinel); sentinel when no debt.
+
+    LCF (``liquidation_collateral_factor``) is read from the injected market
+    params' ``collaterals`` map, case-insensitively (so mixed-case symbols like
+    ``wstETH`` resolve). Returns ``None`` (unmeasured, Empty ≠ Zero) when the LCF
+    is absent — byte-identical to ``read_compound_v3_account_state``.
+    """
+    if debt_usd == 0:
+        return _COMPOUND_HF_SENTINEL
+    collaterals = params.get("collaterals") or {}
+    col_upper = collateral_token.upper()
+    entry = collaterals.get(col_upper)
+    if entry is None:
+        for k, v in collaterals.items():
+            if k.upper() == col_upper:
+                entry = v
+                break
+    lcf = entry.get("liquidation_collateral_factor") if entry else None
+    if lcf is None:
+        return None
+    return min((collateral_usd * lcf) / debt_usd, _COMPOUND_HF_SENTINEL)
+
+
+def _build_compound_account_state_calls(query: AccountStateQuery) -> list[EthCall]:
+    """Emit the Compound V3 reads against the per-market Comet.
+
+    Two shapes (byte-identical to ``read_compound_v3_account_state``):
+
+    * Base-asset supply (collateral == the market's base token): ``balanceOf(user)``
+      then ``borrowBalanceOf(user)``.
+    * Collateral / borrow (collateral != base): ``userCollateral(user, collateral)``
+      then ``borrowBalanceOf(user)``.
+
+    Fails closed (returns ``[]``) when the per-market Comet target was not bound
+    (``query.position_manager_address`` empty — no Comet for this market) or, on
+    the collateral path, when the collateral address was not injected. The order
+    is the contract the reducer decodes against (primary read, then borrowBalanceOf).
+    """
+    comet = query.position_manager_address
+    if not comet:
+        return []
+    params = query.market_params or {}
+    base_token = params.get("base_token")
+    collateral_token = query.collateral_token
+    user_hex = pad_address(query.wallet_address)
+    borrow_call = EthCall(to=comet, data=_COMPOUND_V3_BORROW_BALANCE_SELECTOR + user_hex)
+
+    is_base_asset_supply = bool(collateral_token and base_token and collateral_token.upper() == str(base_token).upper())
+    if is_base_asset_supply:
+        return [EthCall(to=comet, data=_COMPOUND_V3_BALANCE_OF_SELECTOR + user_hex), borrow_call]
+
+    # Collateral path needs the collateral token *address* (framework-injected).
+    if not query.collateral_address:
+        return []
+    collateral_hex = pad_address(query.collateral_address)
+    return [
+        EthCall(to=comet, data=_COMPOUND_V3_USER_COLLATERAL_SELECTOR + user_hex + collateral_hex),
+        borrow_call,
+    ]
+
+
+def _decode_compound_word(blob: str, min_hex_len: int) -> int | None:
+    """Decode word 0 of a Comet read blob, or ``None`` on a short / malformed blob.
+
+    ``min_hex_len`` is the minimum hex length required: 64 for a single uint256
+    (``balanceOf`` / ``borrowBalanceOf``), 128 for ``userCollateral``'s
+    ``(uint128 balance, uint128 reserved)`` two-word return. Fail-closed (``None``),
+    never a fabricated ``0`` (Empty ≠ Zero).
+    """
+    if len(blob) < min_hex_len:
+        return None
+    try:
+        return decode_uint_hex(blob, 0)
+    except (ValueError, ArithmeticError):
+        return None
+
+
+def _reduce_compound_account_state(
+    query: AccountStateQuery,
+    results: list[str | None],
+) -> LendingAccountState | None:
+    """Decode Compound V3 ``[balanceOf|userCollateral, borrowBalanceOf]`` blobs.
+
+    Byte-identical to ``read_compound_v3_account_state``'s decode + HF math. Pure:
+    values the position from the injected ``query.prices`` / ``query.decimals`` /
+    ``query.market_params``. Fails closed (returns ``None``) on a missing/short
+    blob, a missing required injected input, or a ``None`` price (Empty ≠ Zero).
+    """
+    params = query.market_params or {}
+    base_token = params.get("base_token")
+    collateral_token = query.collateral_token
+    prices = query.prices
+    decimals = query.decimals
+    if not base_token or not collateral_token or prices is None or decimals is None:
+        return None
+    if base_token not in prices or base_token not in decimals:
+        return None
+
+    primary_hex = results[0] if results else None
+    borrow_hex = results[1] if len(results) > 1 else None
+    if not primary_hex or not borrow_hex:
+        return None
+    primary = primary_hex[2:] if primary_hex[:2].lower() == "0x" else primary_hex
+    borrow = borrow_hex[2:] if borrow_hex[:2].lower() == "0x" else borrow_hex
+    borrow_balance_raw = _decode_compound_word(borrow, 64)
+    if borrow_balance_raw is None:
+        return None
+
+    base_decimals = decimals[base_token]
+    base_price = prices[base_token]
+    if base_price is None:
+        return None
+    debt_usd = (Decimal(borrow_balance_raw) / Decimal(10**base_decimals)) * base_price
+
+    is_base_asset_supply = collateral_token.upper() == str(base_token).upper()
+    if is_base_asset_supply:
+        # balanceOf(user) → supplied base balance; base decimals/price for both legs.
+        supplied_raw = _decode_compound_word(primary, 64)
+        if supplied_raw is None:
+            return None
+        collateral_usd = (Decimal(supplied_raw) / Decimal(10**base_decimals)) * base_price
+        health_factor: Decimal | None = _COMPOUND_HF_SENTINEL
+    else:
+        # userCollateral(user, collateral) → (uint128 balance, uint128 reserved):
+        # two words, so require ≥128 hex chars (the legacy guard).
+        if collateral_token not in prices or collateral_token not in decimals:
+            return None
+        collateral_price = prices[collateral_token]
+        if collateral_price is None:
+            return None
+        # userCollateral → (uint128 balance, uint128 reserved): two words, ≥128 hex.
+        collateral_raw = _decode_compound_word(primary, 128)
+        if collateral_raw is None:
+            return None
+        collateral_usd = (Decimal(collateral_raw) / Decimal(10 ** decimals[collateral_token])) * collateral_price
+        health_factor = _compound_health_factor(collateral_usd, debt_usd, collateral_token, params)
+
+    return LendingAccountState(
+        collateral_usd=collateral_usd,
+        debt_usd=debt_usd,
+        health_factor=health_factor,
+        liquidation_threshold_bps=None,  # Compound uses per-asset LCFs, not a single threshold.
+        e_mode_category=None,  # No e-mode concept.
+        lltv=None,  # Not a Morpho-style per-market lltv.
+    )
+
+
+#: Aggregate account-state read for Compound V3 (VIB-4929 PR-3b). The read target
+#: is the per-market Comet (empty ``contract_kinds`` → market-scoped, bound by the
+#: registry from the market table's ``comet_address``). Compound is not USD-native:
+#: the base/borrow leg is priced via ``valuation_role_keys`` (market-derived), the
+#: collateral leg by the framework reader from the ``query_inputs_fn``-named intent
+#: token. ``normalize_market_id=str.lower`` because Compound market ids are
+#: base-asset symbols, not 32-byte hashes.
+COMPOUND_V3_ACCOUNT_STATE_READ = AccountStateReadSpec(
+    contract_kinds=(),
+    build_calls=_build_compound_account_state_calls,
+    reduce_calls=_reduce_compound_account_state,
+    valuation_role_keys=(("loan_token", "base_token"),),
+    normalize_market_id=str.lower,
+    query_inputs_fn=_compound_query_inputs_from_intent,
 )
