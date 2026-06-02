@@ -37,7 +37,6 @@ from typing import Any
 from unittest.mock import patch
 
 from almanak.framework.accounting.gas_pricing import (
-    _CHAIN_NATIVE_TOKEN,
     compute_gas_usd,
     native_token_for_chain,
 )
@@ -348,12 +347,18 @@ class TestSolanaLamportsHandling:
 
 
 class TestChainNativeTokenCoverage:
-    """The map must cover every chain the gateway currently supports.
+    """Every chain the gateway currently supports must resolve a native token.
 
-    If a chain ships in the gateway's NATIVE_TOKEN_SYMBOLS without a matching
-    entry here, gas_usd silently falls back to ETH — which is wrong for AVAX,
-    MATIC, BNB, MNT, SOL etc. Pin the coverage so a divergence trips this
-    test instead of producing wrong USD figures in production.
+    If a chain ships in the gateway's NATIVE_TOKEN_SYMBOLS but ``native_token_for_chain``
+    silently falls back to ETH, gas_usd is wrong for AVAX, MATIC, BNB, MNT, SOL etc.
+    Pin the coverage so a divergence trips this test instead of producing wrong USD
+    figures in production.
+
+    VIB-4933: both ``native_token_for_chain`` and the gateway's
+    ``NATIVE_TOKEN_SYMBOLS`` now read ``ChainDescriptor.native.symbol`` from
+    ``ChainRegistry`` — there is no longer a framework-side ``_CHAIN_NATIVE_TOKEN``
+    literal to drift. This test pins the public accessor (not an internal dict)
+    against the gateway surface so the contract is still enforced end-to-end.
     """
 
     def test_all_evm_chains_in_runner_chain_map_have_native_token(self):
@@ -362,20 +367,16 @@ class TestChainNativeTokenCoverage:
         # every chain there is also supported in framework code paths.
         from almanak.gateway.data.balance.web3_provider import NATIVE_TOKEN_SYMBOLS
 
-        for chain in NATIVE_TOKEN_SYMBOLS:
-            assert chain in _CHAIN_NATIVE_TOKEN, (
-                f"chain {chain!r} is in gateway NATIVE_TOKEN_SYMBOLS but missing from "
-                "accounting.gas_pricing._CHAIN_NATIVE_TOKEN — gas_usd will silently "
-                "default to ETH for that chain"
-            )
-            assert _CHAIN_NATIVE_TOKEN[chain] == NATIVE_TOKEN_SYMBOLS[chain], (
-                f"chain {chain!r} has divergent native tokens: framework="
-                f"{_CHAIN_NATIVE_TOKEN[chain]!r}, gateway={NATIVE_TOKEN_SYMBOLS[chain]!r}"
+        for chain, gateway_symbol in NATIVE_TOKEN_SYMBOLS.items():
+            resolved = native_token_for_chain(chain)
+            assert resolved == gateway_symbol, (
+                f"chain {chain!r} has divergent native tokens: "
+                f"native_token_for_chain={resolved!r}, gateway={gateway_symbol!r}"
             )
 
     def test_solana_is_covered(self):
         """Solana is non-EVM but still produces a gas figure in SOL."""
-        assert _CHAIN_NATIVE_TOKEN.get("solana") == "SOL"
+        assert native_token_for_chain("solana") == "SOL"
 
     def test_plasma_resolves_to_xpl_through_lending_writer(self):
         """VIB-3805 regression pin: prior to the consolidation,

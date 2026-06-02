@@ -60,74 +60,46 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # ─── Chain native gas token ───────────────────────────────────────────────────
-# This map is the framework-side companion to
-# ``almanak.gateway.data.balance.web3_provider.NATIVE_TOKEN_SYMBOLS``.
-# Framework code cannot import from gateway at module-load time (the gateway is
-# the egress layer; framework is the strategy container), so we keep a parallel
-# map here. The framework map is intentionally a SUPERSET of the gateway map:
-# the gateway's ``NATIVE_TOKEN_SYMBOLS`` covers EVM balance lookups only,
-# whereas this map also covers non-EVM chains (Solana) for the gas-USD path.
-# Rule: every chain in the gateway's ``NATIVE_TOKEN_SYMBOLS`` MUST appear here
-# with the same symbol (the coverage test below pins that direction); the
-# reverse is not required (Solana / future non-EVM chains are framework-only).
-# Tests: ``tests/framework/accounting/test_gas_pricing.py`` covers this side;
+# Native-gas-token symbols are owned by :class:`ChainRegistry`
+# (``ChainDescriptor.native.symbol``). VIB-4933 deleted the framework-side
+# ``_CHAIN_NATIVE_TOKEN`` literal that previously duplicated those symbols and
+# drifted from the registry (e.g. plasma="ETH" in the old lending map vs "XPL"
+# here — VIB-3805). ``native_token_for_chain`` now reads the registry directly,
+# mirroring ``almanak.core.chains._helpers.receipt_timeout_for`` and the gateway
+# precedent ``web3_provider.NATIVE_TOKEN_SYMBOLS`` (also a registry-derived view).
+#
+# The registry covers both EVM and non-EVM chains (Solana), so the historical
+# "framework map is a superset of the gateway map" relationship is automatic:
+# both views are now projections of the same ``ChainRegistry.all()``.
+# Tests: ``tests/unit/framework/accounting/test_gas_pricing.py`` covers this side;
 # ``tests/gateway`` covers the gateway side.
-_CHAIN_NATIVE_TOKEN: dict[str, str] = {
-    # EVM L1
-    "ethereum": "ETH",
-    # EVM L2 / sidechains paying ETH
-    "arbitrum": "ETH",
-    "optimism": "ETH",
-    "base": "ETH",
-    "blast": "ETH",
-    "linea": "ETH",
-    # EVM chains with bespoke gas tokens
-    "polygon": "MATIC",
-    "avalanche": "AVAX",
-    "bsc": "BNB",
-    "sonic": "S",
-    "plasma": "XPL",
-    "mantle": "MNT",
-    "berachain": "BERA",
-    "monad": "MON",
-    "xlayer": "OKB",
-    "zerog": "A0GI",
-    # Non-EVM
-    "solana": "SOL",
-}
 
 
 def native_token_for_chain(chain: str) -> str:
     """Return the native gas token symbol for *chain*.
 
-    Defaults to ``"ETH"`` for unknown chains — matches the gateway-side
-    fallback in ``GatewayBalanceProvider`` and the lending event builder.
-    Logs at DEBUG (not WARN) so unknown-chain noise doesn't drown out
-    real misconfigurations; the missing-price WARN at the call site is
-    the place an operator would notice.
+    Reads ``ChainDescriptor.native.symbol`` from :class:`ChainRegistry`
+    (single source of truth). Defaults to ``"ETH"`` for unknown / empty
+    chains — matches the gateway-side fallback in ``GatewayBalanceProvider``
+    and the lending event builder. Logs at DEBUG (not WARN) so unknown-chain
+    noise doesn't drown out real misconfigurations; the missing-price WARN at
+    the call site is the place an operator would notice.
 
     Aliases (``bnb`` -> ``bsc``, ``avax`` -> ``avalanche``, ``eth`` -> ``ethereum``,
-    etc.) are resolved via ``almanak.core.constants.resolve_chain_name`` so
-    callers that pass a non-canonical name still pick up the correct native
-    token.  Without this normalization, BSC strategies that pass
-    ``chain='bnb'`` would silently fall back to ETH and misprice gas.
+    etc.) are resolved by ``ChainRegistry.try_resolve``, which lowercases and
+    strips its input and matches both canonical names and aliases. Without this
+    normalization, BSC strategies that pass ``chain='bnb'`` would silently fall
+    back to ETH and misprice gas.
     """
     if not chain:
         return "ETH"
-    canonical = chain.lower()
-    try:
-        from almanak.core.constants import resolve_chain_name
+    from almanak.core.chains import ChainRegistry
 
-        canonical = resolve_chain_name(chain)
-    except Exception:  # noqa: BLE001
-        # resolve_chain_name raises on unknown names; we still want a stable
-        # ETH fallback rather than a hard failure on the gas-USD path.
-        pass
-    symbol = _CHAIN_NATIVE_TOKEN.get(canonical)
-    if symbol is None:
-        logger.debug("gas_pricing: chain=%s not in _CHAIN_NATIVE_TOKEN; defaulting to ETH", chain)
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None:
+        logger.debug("gas_pricing: chain=%s not in ChainRegistry; defaulting to ETH", chain)
         return "ETH"
-    return symbol
+    return descriptor.native.symbol
 
 
 def _lookup_price(price_oracle: dict[str, Any] | None, symbol: str) -> Decimal | None:
@@ -193,7 +165,8 @@ def compute_gas_usd(
         semantics — see Returns.
     chain:
         Chain name (case-insensitive).  Resolved against
-        ``_CHAIN_NATIVE_TOKEN`` after alias normalization.
+        :class:`ChainRegistry` (``ChainDescriptor.native.symbol``) after
+        alias normalization.
     price_oracle:
         ``MarketSnapshot.get_price_oracle_dict()`` output — a flat
         ``{symbol: price}`` dict.

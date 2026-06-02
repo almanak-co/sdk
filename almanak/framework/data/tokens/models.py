@@ -14,6 +14,7 @@ Key Components:
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from types import MappingProxyType
 from typing import Any
 
 from almanak.core.enums import Chain
@@ -194,24 +195,31 @@ class ResolvedToken:
         )
 
 
-# Chain ID mapping for validation - keeps chain and chain_id in sync
-# Must stay in sync with Chain enum in almanak/core/enums.py
-CHAIN_ID_MAP: dict[Chain, int] = {
-    Chain.ETHEREUM: 1,
-    Chain.ARBITRUM: 42161,
-    Chain.OPTIMISM: 10,
-    Chain.BASE: 8453,
-    Chain.AVALANCHE: 43114,
-    Chain.POLYGON: 137,
-    Chain.BSC: 56,
-    Chain.SONIC: 146,
-    Chain.PLASMA: 9745,
-    Chain.BLAST: 81457,
-    Chain.MANTLE: 5000,
-    Chain.BERACHAIN: 80094,
-    Chain.MONAD: 143,
-    Chain.LINEA: 59144,
-}
+# Chain ID mapping for validation — keeps ``chain`` and ``chain_id`` in sync.
+#
+# Derived view over :class:`ChainRegistry` (VIB-4933). The registry's
+# ``ChainDescriptor.chain_id`` is the single source of truth (EIP-155 id owned by
+# the ``metrics-database`` repo); this mapping was previously a hand-maintained
+# literal that drifted whenever a chain was added without a matching entry here.
+# Adding a chain now requires editing only the chain's descriptor file under
+# ``almanak/core/chains/`` — never this map.
+#
+# Membership rule: every EVM chain (``chain_id != 0``). Non-EVM chains use
+# ``0`` as the EIP-155 sentinel (Solana) and are deliberately excluded so that
+# ``CHAIN_ID_MAP.get(chain, 0)`` keeps returning ``0`` for them — preserving the
+# pre-fold behaviour where Solana skipped ``ResolvedToken`` chain-id validation
+# and ``GatewayBalanceProvider`` raised "no chain_id mapping" for non-EVM chains.
+#
+# Read-only ``MappingProxyType`` so the registry stays the only mutation surface;
+# accidental ``CHAIN_ID_MAP[...] = ...`` raises ``TypeError``. The ``dict[Chain,
+# int]`` shape is preserved for the many ``CHAIN_ID_MAP.get(enum, 0)`` callers.
+def _build_chain_id_map() -> "MappingProxyType[Chain, int]":
+    from almanak.core.chains import ChainRegistry
+
+    return MappingProxyType({d.enum: d.chain_id for d in ChainRegistry.all() if d.chain_id != 0})
+
+
+CHAIN_ID_MAP: "MappingProxyType[Chain, int]" = _build_chain_id_map()
 
 
 @dataclass
