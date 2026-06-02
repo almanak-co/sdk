@@ -143,14 +143,26 @@ class TestTokenPositionDoubleCountRegression:
 
         snapshot = PortfolioValuer().value(strategy, market)
 
-        # total_value_usd is strategy-scoped (positive position values only,
-        # per VIB-3614) — unaffected by this fix.
-        assert snapshot.total_value_usd == weth_position_value
+        # total_value_usd is strategy-scoped, *deployed-only* (positive position
+        # values, per VIB-3614). The WETH TOKEN here is a wallet pseudo-position
+        # — its value already lives in available_cash_usd — so it is excluded.
+        # (VIB-4909 originally left it in, which made the dashboard NAV tile
+        # below double-count; excluding it completes VIB-4909's AC "no silent
+        # double-count for any PnL-consuming path".)
+        assert snapshot.total_value_usd == Decimal("0")
 
         # available_cash_usd is the wallet-only sum — unaffected.
         # WETH 0.001847 * 3500 + USDC 13.18 + ETH 0.001760 * 3500 = 25.8245
         expected_wallet = Decimal("0.001847") * Decimal("3500") + Decimal("13.18") + Decimal("0.001760") * Decimal("3500")
         assert snapshot.available_cash_usd == expected_wallet
+
+        # The dashboard "Wallet NAV now" tile, the drawdown series and the
+        # lifetime-PnL/net-APR paths all read total_value_usd + available_cash_usd
+        # (see quant_aggregations.compute_pnl_summary / _wallet_nav_series). With
+        # the pseudo-position excluded from total_value_usd, NAV == the true
+        # wallet value — no WETH double-count. This is the user-visible bug.
+        nav = snapshot.total_value_usd + snapshot.available_cash_usd
+        assert nav == expected_wallet
 
         # VIB-4909 — the bug: wallet_total_value_usd MUST equal wallet_value
         # (no double-count). It is NOT wallet_value + WETH-as-TOKEN.

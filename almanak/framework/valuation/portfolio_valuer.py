@@ -458,28 +458,42 @@ class PortfolioValuer:
             # Step 6: Build audit-safe token price map (chain:address keyed)
             token_price_records = self._build_token_price_records(chain, prices, tracked_tokens)
 
-            # VIB-3614: total_value_usd is now strategy-scoped (positive position
-            # values only).  Undeployed wallet balance is tracked separately via
-            # available_cash_usd and wallet_total_value_usd.
+            # VIB-4909: ``PositionType.TOKEN`` is sometimes a wallet
+            # pseudo-position (SWAP-class strategies surface a tracked wallet
+            # token as a TOKEN "position" for teardown enumeration + operator
+            # visibility — its value already lives in ``wallet_balances``) and
+            # sometimes a deployed holding NOT represented in wallet_balances
+            # (e.g. ``metamorpho_eth_yield`` surfacing vault shares while the
+            # wallet tracks the deposit token). The matcher classifies by wallet
+            # overlap; the position stays in ``positions`` either way (operator
+            # visibility) and only the value aggregations below exclude wallet
+            # pseudo-positions. See PositionType.TOKEN docstring for the rules.
+            wallet_index = _build_wallet_match_index(wallet_balances)
+
+            # VIB-3614: total_value_usd is strategy-scoped (positive *deployed*
+            # position values). VIB-4909 fixed wallet_total_value_usd but a
+            # wallet pseudo-position still leaked into this sum, so the dashboard
+            # "Wallet NAV now" tile (compute_pnl_summary:
+            # ``total_value_usd + available_cash_usd``) plus the drawdown and
+            # lifetime-PnL paths double-counted the wallet token — the same
+            # defect VIB-4909 cured for wallet_total_value_usd, in a sibling
+            # field its consumer audit did not cover. Exclude wallet
+            # pseudo-positions here too so total_value_usd is truly deployed-only
+            # and those PnL paths stop double-counting (VIB-4909 AC: "no silent
+            # double-count for any PnL-consuming path").
             position_value_positive = sum(
-                (p.value_usd for p in positions if p.value_usd > 0),
+                (
+                    p.value_usd
+                    for p in positions
+                    if p.value_usd > 0
+                    and not (p.position_type == PositionType.TOKEN and _token_overlaps_wallet_index(p, wallet_index))
+                ),
                 Decimal("0"),
             )
 
             # VIB-4909: ``wallet_total_value_usd`` is the operator-facing
-            # full-portfolio value (wallet + real protocol positions).
-            # ``PositionType.TOKEN`` is sometimes a wallet pseudo-position
-            # (SWAP-class strategies surfacing a tracked wallet token) and
-            # sometimes a deployed holding NOT represented in
-            # wallet_balances (e.g. ``metamorpho_eth_yield`` surfacing vault
-            # shares while the wallet tracks the deposit token). Distinguish
-            # the two by overlap: if the TOKEN position's asset symbol or
-            # address matches a wallet_balances entry, it is a wallet
-            # pseudo-position and is excluded here to avoid a double-count.
-            # Otherwise it is a deployed holding and contributes like any
-            # other protocol position. See PositionType.TOKEN docstring for
-            # the convention and the matcher rules.
-            wallet_index = _build_wallet_match_index(wallet_balances)
+            # full-portfolio value (wallet + real protocol positions); wallet
+            # pseudo-positions are already counted once in ``wallet_value``.
             non_wallet_position_value = sum(
                 (
                     p.value_usd
