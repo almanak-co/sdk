@@ -193,38 +193,41 @@ def _make_lending_intent(protocol: str, intent_type: str = "SUPPLY") -> MagicMoc
 class TestGenericPreStateProtocolGate:
     """The generic ``read_lending_account_state`` path is enabled per-protocol.
 
-    Regression guard (VIB-4963): Spark opted into ``_ACCOUNT_STATE_LOADERS`` (it is
-    spec-*capable*) but its generic read is not yet framework-verified, so it must
-    NOT reach the generic reader — it stays unread and degrades to ESTIMATED. Before
-    the ``_GENERIC_PRE_STATE_PROTOCOLS`` gate, Spark silently read HIGH (caught only
-    by the ethereum Spark intent suite, after the fact). These Anvil-free tests pin
-    the gate so the regression cannot recur.
+    ``_GENERIC_PRE_STATE_PROTOCOLS`` is the explicit enablement allowlist: registering
+    an account-state spec (``_ACCOUNT_STATE_LOADERS``) makes a connector spec-*capable*,
+    but it reaches the live-money read path only once added here, after its generic read
+    is fork-verified. Spark predated its verification — it opted into
+    ``_ACCOUNT_STATE_LOADERS`` while gated OUT here (VIB-4963; before the gate it
+    silently read HIGH) — and joined in VIB-4929 PR-3c once fork-verified on ethereum.
+    These Anvil-free tests pin the membership so a future spec-capable-but-unverified
+    connector cannot silently read HIGH.
     """
 
-    def test_enabled_set_excludes_unverified_spark(self) -> None:
-        # Spark IS spec-capable (registered in _ACCOUNT_STATE_LOADERS) yet must be
-        # absent here until its read is fork-verified (VIB-4963).
-        assert "spark" not in _GENERIC_PRE_STATE_PROTOCOLS
-        assert {"aave_v3", "aave", "morpho_blue"} <= _GENERIC_PRE_STATE_PROTOCOLS
-        # compound_v3 was migrated onto the generic reader AND byte-equivalence-
-        # verified in VIB-4929 PR-3b, so it is enabled on the live-money read path.
-        assert "compound_v3" in _GENERIC_PRE_STATE_PROTOCOLS
+    def test_enabled_set_matches_verified_protocols(self) -> None:
+        # Every lending connector enabled on the live-money read path, each verified in
+        # its PR: Aave family (+ alias), Morpho (PR-3a), Compound (PR-3b), Spark (PR-3c).
+        assert {"aave_v3", "aave", "morpho_blue", "compound_v3", "spark"} <= _GENERIC_PRE_STATE_PROTOCOLS
+        # A non-lending protocol is never enabled here (the gate is not a free-for-all).
+        assert "uniswap_v3" not in _GENERIC_PRE_STATE_PROTOCOLS
 
-    def test_spark_intent_not_read_on_generic_path(self) -> None:
-        """Spark must NOT hit the generic reader — gated BEFORE any read (→ ESTIMATED)."""
+    def test_spark_intent_reaches_generic_reader(self) -> None:
+        """Spark joined the enabled set (VIB-4929 PR-3c) → it now reaches the generic reader."""
         intent = _make_lending_intent("spark")
+        sentinel = MagicMock()
+        sentinel.family = None  # skip the Aave interest_rate_mode overlay branch (tested elsewhere)
         with patch(
-            "almanak.framework.accounting.lending_accounting.read_lending_account_state"
+            "almanak.framework.accounting.lending_accounting.read_lending_account_state",
+            return_value=sentinel,
         ) as mock_read:
             result = capture_lending_pre_state(
                 intent=intent,
                 chain=_CHAIN,
                 wallet_address=_WALLET,
-                gateway_client=MagicMock(),  # a working gateway would let a read succeed
+                gateway_client=MagicMock(),
                 price_oracle=None,
             )
-        assert result is None, "Spark pre-state must be unread (degrades to ESTIMATED), not on the generic path"
-        mock_read.assert_not_called()  # the gate short-circuits before any read attempt
+        mock_read.assert_called_once()
+        assert result is sentinel
 
     def test_enabled_protocol_reaches_generic_reader(self) -> None:
         """A migrated+enabled protocol (Aave V3) is NOT over-blocked by the gate."""

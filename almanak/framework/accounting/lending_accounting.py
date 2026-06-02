@@ -315,14 +315,16 @@ def read_lending_account_state(
 # (``LendingReadRegistry._ACCOUNT_STATE_LOADERS``) makes a connector spec-*capable*,
 # but ENABLING it here is a deliberate, per-protocol opt-in: each entry was migrated
 # AND fork/byte-equivalence-verified in its PR. This gate is what stops a connector
-# that merely registered a spec — e.g. Spark, an Aave-fork that opted into
-# ``_ACCOUNT_STATE_LOADERS`` but whose generic read is not yet framework-verified
-# (VIB-4963) — from silently producing HIGH-confidence reads. Add a protocol here
-# only once its generic read is verified on a real fork.
+# that merely registered a spec — from silently producing HIGH-confidence reads.
+# Add a protocol here only once its generic read is verified on a real fork.
 # VIB-4929 PR-3b: ``compound_v3`` joined — its byte-equivalence to the retired
 # ``read_compound_v3_account_state`` was proven (collateral+borrow HF via LCF,
 # base-asset supply HF=999999, missing-price → None) before enabling it here.
-_GENERIC_PRE_STATE_PROTOCOLS: frozenset[str] = frozenset({"aave_v3", "aave", "morpho_blue", "compound_v3"})
+# VIB-4929 PR-3c / VIB-4963: ``spark`` joined — it reuses the already-verified
+# ``AAVE_FORK_ACCOUNT_STATE_READ`` spec (identical ``getUserAccountData`` ABI to
+# Aave V3, USD-denominated on-chain), fork-verified on ethereum (HIGH-confidence
+# before/after collateral / debt / HF on a real Spark position).
+_GENERIC_PRE_STATE_PROTOCOLS: frozenset[str] = frozenset({"aave_v3", "aave", "morpho_blue", "compound_v3", "spark"})
 
 
 def _overlay_aave_interest_rate_mode(state: LendingAccountState, intent: Any) -> LendingAccountState:

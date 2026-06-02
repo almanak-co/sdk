@@ -15,28 +15,21 @@ Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow for lending 
    throwaway SQLite and assert the typed LendingAccountingEvent is correct.
 
 Layer 5 (epic VIB-4591 / ticket VIB-4608): mirrors the merged Compound V3 and
-Aave V3 goldens, with one Spark-specific divergence. The lending category
-handler is protocol-agnostic — it keys on ``intent_type`` and the FIFO basis
-store, not on the protocol — so the FIFO principal / interest split assertions
-are identical to the Aave V3 golden.
+Aave V3 goldens. The lending category handler is protocol-agnostic — it keys on
+``intent_type`` and the FIFO basis store, not on the protocol — so the FIFO
+principal / interest split assertions are identical to the Aave V3 golden.
 
-THE SPARK DIVERGENCE (genuine production gap, tracked by VIB-4963): Spark has
-NO pre/post-state reader. ``_PROTOCOL_PRE_STATE_READERS`` in
-``almanak/framework/accounting/lending_accounting.py`` has entries for
-``aave_v3`` / ``aave`` / ``morpho_blue`` / ``compound_v3`` but NOT ``spark``,
-so ``capture_lending_pre_state`` / ``capture_lending_post_state`` return
-``None`` for a Spark intent and ``lending_state_to_dict`` serializes ``None``.
-With no ``post_state_json`` the lending handler sets ``confidence=ESTIMATED``
-and leaves every before/after collateral / debt / health-factor field
-``None`` with a populated ``unavailable_reason`` (Empty≠Zero≠None — nothing is
-fabricated). So Spark Layer 5 asserts the DEGRADATION contract for chain state
-(``_assert_state_degraded_no_reader_vib4608``), NOT the HIGH-confidence
-contract the Aave / Compound goldens use. The FIFO principal / interest split
-is derived from the basis store and is unaffected by the missing reader, so
-those assertions match the goldens exactly. The HIGH-confidence + before/after
-fidelity is the gap tracked by VIB-4963 (add a Spark pre/post-state reader,
-or route Spark through the shared Aave V3 reader since it is an Aave V3 fork
-with an identical ``getUserAccountData`` ABI).
+SPARK CHAIN-STATE (VIB-4929 PR-3c — closes VIB-4963): Spark is an Aave V3 fork
+with an identical ``getUserAccountData`` / ``getUserEMode`` ABI (USD-denominated
+on-chain), so it routes through the shared ``AAVE_FORK_ACCOUNT_STATE_READ`` spec.
+Adding ``spark`` to ``_GENERIC_PRE_STATE_PROTOCOLS`` in
+``almanak/framework/accounting/lending_accounting.py`` enables a HIGH-confidence
+read: ``capture_lending_pre_state`` / ``capture_lending_post_state`` populate
+before/after collateral / debt / health-factor from real eth_calls against the
+Spark pool. So Spark Layer 5 now asserts the HIGH-confidence contract
+(``_assert_high_confidence_state``) like the Aave / Compound goldens. (Earlier
+this file asserted ESTIMATED degradation while the read was gated out pending
+fork verification — VIB-4963; that gate is now lifted.)
 
 NO MOCKING. All tests execute real on-chain transactions and verify state changes.
 
@@ -234,43 +227,28 @@ def _assert_no_lot_id(row: dict, payload: dict) -> None:
     assert "lot_id" not in payload
 
 
-def _assert_state_degraded_no_reader_vib4608(payload: dict) -> None:
-    """Spark genuine production degradation contract (VIB-4963).
+def _assert_high_confidence_state(payload: dict) -> None:
+    """Spark HIGH-confidence chain-state contract (VIB-4929 PR-3c — closes VIB-4963).
 
-    Spark is absent from ``_PROTOCOL_PRE_STATE_READERS`` in
-    ``almanak/framework/accounting/lending_accounting.py`` (only ``aave_v3`` /
-    ``aave`` / ``morpho_blue`` / ``compound_v3`` are wired), so
-    ``capture_lending_pre_state`` / ``capture_lending_post_state`` return
-    ``None`` for a Spark intent. With no ``post_state_json`` the lending
-    handler sets ``confidence=ESTIMATED`` and leaves every before/after
-    collateral / debt / health-factor field ``None`` with a populated
-    ``unavailable_reason``. This is the TRUE current production behavior
-    (deterministic across the ethereum Anvil-fork CI), NOT a flake. We assert
-    the genuine degradation contract here rather than HIGH; the
-    HIGH-confidence expectation (and before/after collateral / debt / HF
-    fidelity) is the gap tracked by VIB-4963 — wire Spark into the reader
-    registry (it is an Aave V3 fork with an identical ``getUserAccountData``
-    ABI, so the existing ``read_aave_account_state`` path applies once the
-    Spark pool address is registered). Empty≠Zero≠None: ``unavailable_reason``
-    is set, nothing is fabricated.
+    Spark now routes through the shared ``AAVE_FORK_ACCOUNT_STATE_READ`` spec: it is an
+    Aave V3 fork with an identical ``getUserAccountData`` / ``getUserEMode`` ABI and is
+    USD-denominated on-chain, so adding ``spark`` to ``_GENERIC_PRE_STATE_PROTOCOLS``
+    enables a HIGH-confidence read with before/after collateral / debt / health-factor
+    populated from real eth_calls against the Spark pool. Mirrors the Aave V3 golden's
+    ``_assert_high_confidence_state``. Empty≠Zero≠None: a measured ``0`` is a real value,
+    distinct from ``None``.
     """
-    assert payload["confidence"] == "ESTIMATED", (
-        f"Spark lending genuinely degrades to confidence=ESTIMATED today "
-        f"(VIB-4963: no Spark entry in _PROTOCOL_PRE_STATE_READERS); "
-        f"got {payload['confidence']!r}"
+    assert payload["confidence"] == "HIGH", (
+        f"Spark lending must persist confidence=HIGH (shared Aave V3 reader + Anvil "
+        f"eth_call adapter), got {payload['confidence']!r} "
+        f"(unavailable_reason={payload.get('unavailable_reason')!r})"
     )
-    assert payload.get("unavailable_reason"), (
-        "degraded Spark lending must carry a non-empty unavailable_reason (never fabricated)"
-    )
-    # Degradation must not fabricate before/after chain state.
-    assert payload["collateral_value_before_usd"] is None, (
-        "VIB-4963: degraded Spark must not fabricate before-collateral"
-    )
-    assert payload["collateral_value_after_usd"] is None, "VIB-4963: degraded Spark must not fabricate after-collateral"
-    assert payload["debt_value_before_usd"] is None, "VIB-4963: degraded Spark must not fabricate before-debt"
-    assert payload["debt_value_after_usd"] is None, "VIB-4963: degraded Spark must not fabricate after-debt"
-    assert payload["health_factor_before"] is None, "VIB-4963: degraded Spark must not fabricate before-health-factor"
-    assert payload["health_factor_after"] is None, "VIB-4963: degraded Spark must not fabricate after-health-factor"
+    assert payload["collateral_value_before_usd"] is not None, "before-collateral must be populated"
+    assert payload["collateral_value_after_usd"] is not None, "after-collateral must be populated"
+    assert payload["debt_value_before_usd"] is not None, "before-debt must be populated"
+    assert payload["debt_value_after_usd"] is not None, "after-debt must be populated"
+    assert payload["health_factor_before"] is not None, "before-health-factor must be populated"
+    assert payload["health_factor_after"] is not None, "after-health-factor must be populated"
 
 
 # =============================================================================
@@ -451,9 +429,14 @@ class TestSparkSupplyIntent:
         _assert_identity(row, event_type="SUPPLY", wallet=funded_wallet)
         payload = _payload(row)
         _assert_no_lot_id(row, payload)
-        # VIB-4963: Spark has no pre/post-state reader → confidence=ESTIMATED,
-        # before/after chain state degraded to None (not fabricated).
-        _assert_state_degraded_no_reader_vib4608(payload)
+        # VIB-4929 PR-3c: Spark routes through the shared Aave V3 reader → HIGH
+        # confidence with before/after chain state populated (closes VIB-4963).
+        _assert_high_confidence_state(payload)
+        # A plain USDC supply on Spark is NOT auto-enabled as collateral (USDC reserve
+        # LTV config) → totalCollateralBase stays a measured 0 (verified on-fork); the
+        # HIGH read reports it faithfully — confidence=HIGH proves the read ran, and
+        # Empty≠Zero (a measured 0, not None). Collateral deltas are asserted on the
+        # WETH-collateralised borrow/repay tests, where the asset IS collateral.
         assert payload["asset"] == "USDC"
         assert payload["amount_token"] is not None
         assert Decimal(payload["amount_token"]) == supply_amount
@@ -616,7 +599,9 @@ class TestSparkSupplyIntent:
         _assert_identity(row, event_type="WITHDRAW", wallet=funded_wallet)
         payload = _payload(row)
         _assert_no_lot_id(row, payload)
-        _assert_state_degraded_no_reader_vib4608(payload)
+        _assert_high_confidence_state(payload)
+        # USDC is not collateral on this Spark market (see the SUPPLY test) → collateral
+        # stays a measured 0 across the withdraw; the HIGH read reports it faithfully.
         assert payload["asset"] == "USDC"
         assert Decimal(payload["amount_token"]) == withdraw_amount
         assert payload["principal_delta_usd"] is not None, "WITHDRAW must measure a principal leg"
@@ -943,7 +928,9 @@ class TestSparkBorrowIntent:
         _assert_identity(row, event_type="BORROW", wallet=funded_wallet)
         payload = _payload(row)
         _assert_no_lot_id(row, payload)
-        _assert_state_degraded_no_reader_vib4608(payload)
+        _assert_high_confidence_state(payload)
+        # BORROW increases debt on the Spark pool.
+        assert Decimal(payload["debt_value_after_usd"]) > Decimal(payload["debt_value_before_usd"])
         assert payload["asset"] == "USDC"
         assert Decimal(payload["amount_token"]) == borrow_amount
         # BORROW records the FIFO principal lot: principal measured, interest
@@ -1131,7 +1118,9 @@ class TestSparkBorrowIntent:
         _assert_identity(row, event_type="REPAY", wallet=funded_wallet)
         payload = _payload(row)
         _assert_no_lot_id(row, payload)
-        _assert_state_degraded_no_reader_vib4608(payload)
+        _assert_high_confidence_state(payload)
+        # REPAY reduces debt on the Spark pool.
+        assert Decimal(payload["debt_value_after_usd"]) < Decimal(payload["debt_value_before_usd"])
         assert payload["asset"] == "USDC"
         assert Decimal(payload["amount_token"]) == repay_amount
 
@@ -1283,7 +1272,9 @@ class TestSparkBorrowIntent:
         _assert_identity(row, event_type="REPAY", wallet=funded_wallet)
         payload = _payload(row)
         _assert_no_lot_id(row, payload)
-        _assert_state_degraded_no_reader_vib4608(payload)
+        _assert_high_confidence_state(payload)
+        # REPAY reduces debt on the Spark pool.
+        assert Decimal(payload["debt_value_after_usd"]) < Decimal(payload["debt_value_before_usd"])
         assert payload["asset"] == "USDC"
         assert Decimal(payload["amount_token"]) == repay_amount
         # FIFO basis-store contract — independent of the chain-state read. No
