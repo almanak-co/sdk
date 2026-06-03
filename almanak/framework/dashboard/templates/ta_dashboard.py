@@ -904,17 +904,17 @@ def prepare_ta_session_state(
                 for k, v in tmp.items():
                     result[k.replace(base, slot, 1)] = v
 
-    # Buy / sell signals from the trade tape (SWAP rows for this pair).
-    if "buy_signals" not in result or "sell_signals" not in result:
-        rows = _trade_tape_rows(api_client)
-        buys, sells = _trade_rows_to_signals(rows, base_token, quote_token)
-        result.setdefault("buy_signals", buys)
-        result.setdefault("sell_signals", sells)
+    # Chart markers (buy/sell signals) + Performance "Trades" count, both
+    # derived from the trade tape (fetched once).
+    _populate_trade_tape_derived(api_client, result, base_token, quote_token)
 
     if "strategy_start_time" not in result:
         start_time = _strategy_start_time(api_client)
         if start_time is not None:
             result["strategy_start_time"] = start_time
+
+    # Performance "PnL" tile.
+    _populate_performance_pnl(api_client, result)
 
     # Current Position section: balances + base price. Without this the
     # section silently shows 0.0000 / $0.00 / $0.00 even when the wallet
@@ -922,6 +922,55 @@ def prepare_ta_session_state(
     _populate_position_balances(api_client, result, base_token, quote_token, chain)
 
     return result
+
+
+def _populate_trade_tape_derived(
+    api_client: Any,
+    result: dict[str, Any],
+    base_token: str,
+    quote_token: str,
+) -> None:
+    """Populate buy/sell chart markers and the Performance ``total_trades``
+    count from the trade tape, fetching it once and reusing it for both.
+
+    Caller-supplied keys are preserved (``setdefault``). ``total_trades`` is
+    the number of trade-tape rows — capped by the tape page size (a floor for
+    very high-frequency strategies), but far better than the previous
+    hardcoded ``0`` shown while a strategy was actively trading.
+    """
+    if "buy_signals" in result and "sell_signals" in result and "total_trades" in result:
+        return
+    rows = _trade_tape_rows(api_client)
+    if "buy_signals" not in result or "sell_signals" not in result:
+        buys, sells = _trade_rows_to_signals(rows, base_token, quote_token)
+        result.setdefault("buy_signals", buys)
+        result.setdefault("sell_signals", sells)
+    result.setdefault("total_trades", len(rows))
+
+
+def _populate_performance_pnl(api_client: Any, result: dict[str, Any]) -> None:
+    """Populate the Performance ``total_pnl`` tile from the authoritative
+    summary (24h NAV-based PnL, robust to the swap cost-basis gap).
+
+    ``win_rate`` is intentionally NOT populated — a realized per-trade win
+    rate requires accounting lot-matching the dashboard must not reimplement
+    (and is unreliable while swap cost basis is measured-zero). When it's
+    absent, ``_render_performance`` shows "N/A" rather than a fabricated 50%.
+    """
+    if "total_pnl" in result or api_client is None:
+        return
+    try:
+        summary = api_client.get_summary()
+        if summary is not None:
+            # get_summary may return a typed object or a dict (cf. _trade_tape_rows);
+            # support both so an object-shaped client doesn't silently degrade to $0.
+            pnl_24h = getattr(summary, "pnl_24h_usd", None)
+            if pnl_24h is None and isinstance(summary, dict):
+                pnl_24h = summary.get("pnl_24h_usd")
+            if pnl_24h is not None:
+                result["total_pnl"] = pnl_24h
+    except Exception:  # noqa: BLE001
+        logger.debug("api_client.get_summary() failed for TA performance PnL", exc_info=True)
 
 
 def _populate_position_balances(
@@ -1795,7 +1844,10 @@ def _render_performance(session_state: dict[str, Any]) -> None:
     """Render the performance metrics section."""
     pnl = Decimal(str(session_state.get("total_pnl", "0")))
     trades = session_state.get("total_trades", 0)
-    win_rate = Decimal(str(session_state.get("win_rate", "50")))
+    # win_rate is None/absent unless a caller computed a real realized win rate.
+    # Previously this defaulted to "50", which rendered a fabricated 50% for
+    # every strategy. Show "N/A" instead of inventing a coin-flip stat.
+    win_rate_raw = session_state.get("win_rate")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -1803,7 +1855,14 @@ def _render_performance(session_state: dict[str, Any]) -> None:
     with col2:
         st.metric("Trades", str(trades))
     with col3:
-        st.metric("Win Rate", f"{float(win_rate):.0f}%")
+        if win_rate_raw is None:
+            st.metric(
+                "Win Rate",
+                "N/A",
+                help="Realized win rate needs per-trade cost basis from accounting; not yet surfaced here.",
+            )
+        else:
+            st.metric("Win Rate", f"{float(Decimal(str(win_rate_raw))):.0f}%")
 
 
 # Pre-configured templates for common indicators

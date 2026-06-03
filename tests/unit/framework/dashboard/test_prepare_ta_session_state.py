@@ -60,14 +60,19 @@ class _FakeClient:
         timeline: list[dict[str, Any]] | None = None,
         token_balances: list[dict[str, Any]] | None = None,
         price: float | None = None,
+        summary: dict[str, Any] | None = None,
     ) -> None:
         self._ohlcv = ohlcv or []
         self._tape_rows = tape_rows or []
         self._timeline = timeline or []
         self._token_balances = token_balances or []
         self._price = price
+        self._summary = summary or {}
         self.ohlcv_call_count = 0
         self.get_price_call_count = 0
+
+    def get_summary(self) -> dict[str, Any]:
+        return self._summary
 
     def get_ohlcv(self, **_: Any) -> list[dict[str, Any]]:
         self.ohlcv_call_count += 1
@@ -349,6 +354,69 @@ def test_prepare_position_balances_tolerate_non_dict_entries():
     )
     out = prepare_ta_session_state(client, session_state={}, config=_config())
     assert out["base_balance"] == "2.0"
+
+
+def test_prepare_populates_total_trades_from_tape():
+    # Performance "Trades" tile: count executed trades from the tape instead of
+    # defaulting to 0 while the strategy is actively trading.
+    client = _FakeClient(
+        tape_rows=[
+            {"timestamp": "2026-06-03T01:00:00Z", "intent_type": "SWAP", "token_in": "USDC", "token_out": "WETH"},
+            {"timestamp": "2026-06-03T02:00:00Z", "intent_type": "SWAP", "token_in": "USDC", "token_out": "WETH"},
+        ],
+    )
+    out = prepare_ta_session_state(client, session_state={}, config=_config())
+    assert out["total_trades"] == 2
+
+
+def test_prepare_populates_total_pnl_from_summary():
+    # Performance "PnL" tile: headline PnL from the authoritative summary
+    # (24h NAV-based), not a hardcoded 0.
+    client = _FakeClient(summary={"pnl_24h_usd": "1.23"})
+    out = prepare_ta_session_state(client, session_state={}, config=_config())
+    assert out["total_pnl"] == "1.23"
+
+
+def test_prepare_populates_total_pnl_from_object_summary():
+    # get_summary may return a typed object (not a dict) — attribute access must
+    # work so the PnL tile doesn't silently degrade to $0.00.
+    from types import SimpleNamespace
+
+    client = _FakeClient(summary=SimpleNamespace(pnl_24h_usd="2.50"))
+    out = prepare_ta_session_state(client, session_state={}, config=_config())
+    assert out["total_pnl"] == "2.50"
+
+
+def test_prepare_leaves_win_rate_unset():
+    # win_rate must NOT be fabricated — _render_performance renders "N/A" when
+    # absent rather than the old hardcoded 50%.
+    client = _FakeClient(summary={"pnl_24h_usd": "0"}, tape_rows=[])
+    out = prepare_ta_session_state(client, session_state={}, config=_config())
+    assert "win_rate" not in out
+
+
+def test_prepare_preserves_caller_supplied_performance_keys():
+    client = _FakeClient(
+        summary={"pnl_24h_usd": "9.99"},
+        tape_rows=[{"timestamp": "2026-06-03T01:00:00Z", "intent_type": "SWAP"}],
+    )
+    out = prepare_ta_session_state(
+        client,
+        session_state={"total_trades": 7, "total_pnl": "3.50", "win_rate": "62"},
+        config=_config(),
+    )
+    assert out["total_trades"] == 7
+    assert out["total_pnl"] == "3.50"
+    assert out["win_rate"] == "62"
+
+
+def test_render_performance_shows_na_without_win_rate():
+    # No streamlit script context → calls are no-ops; the point is the N/A
+    # branch (win_rate absent) and the populated branch both render without raising.
+    from almanak.framework.dashboard.templates.ta_dashboard import _render_performance
+
+    _render_performance({"total_pnl": "1.23", "total_trades": 2})  # win_rate absent → N/A
+    _render_performance({"total_pnl": "1.23", "total_trades": 2, "win_rate": "60"})  # explicit → rendered
 
 
 def test_prepare_preserves_caller_supplied_balances():
