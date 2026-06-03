@@ -26,6 +26,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+from almanak.connectors._strategy_base.perps_read_base import PerpsPositionQuery
+from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
 from almanak.framework.teardown.models import PositionInfo, PositionType
 from almanak.framework.valuation.lending_position_reader import (
     LendingPositionOnChain,
@@ -257,21 +259,82 @@ class PositionDiscoveryService:
                 result.errors.append(error_msg)
 
     def _discover_perps(self, config: DiscoveryConfig, result: DiscoveryResult) -> None:
-        """Scan for GMX V2 perpetual positions."""
+        """Scan for perpetual positions across every connector-owned perp venue.
+
+        Iterates :meth:`PerpsReadRegistry.supported_protocols` so discovery names
+        no venue of its own — adding a perp connector extends discovery with no
+        framework edit. Each venue's read is routed with its OWN ``protocol`` so
+        the emitted positions carry the venue that produced them (and the
+        valuation repricing path re-queries the same venue).
+
+        Distinguishes "not deployed on this chain" from "deployed but the read
+        failed" via a :meth:`PerpsReadRegistry.resolve_plan` probe, so a genuine
+        gateway/RPC/decode failure on a DEPLOYED venue is surfaced instead of
+        being swallowed:
+
+        - ``resolve_plan is None`` — the venue's reader/data-store address is not
+          in ``AddressRegistry`` for ``config.chain`` (e.g. a BSC-only venue
+          while scanning Arbitrum). It is provably not deployed here, so it has
+          no positions: skip SILENTLY (no error), exactly as lending does for an
+          unresolved reserve.
+        - plan resolved, read raises — recorded as an error (the per-protocol
+          ``except`` below), exactly as lending does.
+        - plan resolved, ``ok=False`` — the venue IS deployed but the read
+          failed (a real gateway/RPC/decode failure); recorded as an error
+          rather than skipped silently.
+        - plan resolved, ``ok=True`` with no active positions — a measured empty
+          book (nothing emitted, no error).
+
+        A probe that itself raises is treated as "venue resolves — proceed to
+        the real read": ``discover()`` must never raise, and we must never
+        silently drop a potentially-deployed venue on a probe quirk; the real
+        ``read_positions`` call below then surfaces any genuine failure.
+        """
         result.perps_scanned = True
-        try:
-            positions = self._perps_reader.read_positions(
-                chain=config.chain,
-                wallet_address=config.wallet_address,
-            )
-            for pos in positions:
+        for protocol in PerpsReadRegistry.supported_protocols():
+            probe = PerpsPositionQuery(chain=config.chain, wallet_address=config.wallet_address)
+            try:
+                is_deployed = PerpsReadRegistry.resolve_plan(protocol, probe) is not None
+            except Exception:
+                # Probe could not be built (e.g. an ABI-encode quirk on this
+                # wallet). The venue's address resolved past the not-deployed
+                # gate, so treat it as deployed and fall through to the real
+                # read rather than silently dropping it.
+                is_deployed = True
+            if not is_deployed:
+                # Venue not deployed on this chain (no address) — provably no
+                # positions; skip silently. Distinguishes not-deployed from a
+                # genuine read failure.
+                continue
+            try:
+                read_result = self._perps_reader.read_positions(
+                    chain=config.chain,
+                    wallet_address=config.wallet_address,
+                    protocol=protocol,
+                )
+            except Exception as e:
+                error_msg = f"Perps discovery failed for {protocol} on {config.chain}: {e}"
+                logger.debug(error_msg, exc_info=True)
+                result.errors.append(error_msg)
+                continue
+
+            if not read_result.ok:
+                # Plan resolved (venue IS deployed) but the read failed — a real
+                # gateway/RPC/decode failure; surface it instead of skipping
+                # silently.
+                error_msg = f"Perps read failed for {protocol} on {config.chain}"
+                logger.debug(error_msg)
+                result.errors.append(error_msg)
+                continue
+
+            for pos in read_result.positions:
                 side = "long" if pos.is_long else "short"
                 result.positions.append(
                     PositionInfo(
                         position_type=PositionType.PERP,
                         position_id=pos.position_key,
                         chain=config.chain,
-                        protocol="gmx_v2",
+                        protocol=protocol,
                         value_usd=Decimal("0"),  # Repriced by portfolio_valuer
                         details={
                             "market": pos.market,
@@ -285,10 +348,6 @@ class PositionDiscoveryService:
                         },
                     )
                 )
-        except Exception as e:
-            error_msg = f"Perps discovery failed on {config.chain}: {e}"
-            logger.debug(error_msg, exc_info=True)
-            result.errors.append(error_msg)
 
     @staticmethod
     def _resolve_token_addresses(symbols: list[str], chain: str) -> dict[str, str]:

@@ -1,234 +1,139 @@
-"""On-chain GMX V2 perpetual position reader.
+"""On-chain perp-position reader via gateway RPC.
 
-Queries open GMX V2 positions for a wallet using the GMXV2SDK
-(on-chain Reader contract with REST API fallback).
+Queries a wallet's open perpetual positions for a venue so valuation and
+position discovery can reprice them. *How* the read is performed — which
+contract holds the position book, the function selector, the calldata layout,
+and the return decoding — is **connector knowledge** resolved through the
+strategy-side
+:class:`~almanak.connectors._strategy_base.perps_read_registry.PerpsReadRegistry`.
+This module names no connector and no protocol-specific contract kind: it owns
+only the gateway-routed ``eth_call`` that executes a read plan and the dispatch
+to the registry.
 
-Unlike LP/lending readers which use the gateway's generic RPC call,
-GMX V2 queries need the full SDK (contract ABIs, multicall decoding).
-This reader wraps GMXV2SDK and returns typed dataclasses.
+Uses the gateway's generic Call RPC — no proto changes needed. Same pattern as
+``lending_position_reader.py``.
+
+VIB-4930 (epic VIB-4851).
 """
 
+import json
 import logging
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from almanak.framework.gateway_client import GatewayClient
+from almanak.connectors._strategy_base.perps_read_base import (
+    PerpsPositionOnChain,
+    PerpsPositionQuery,
+    PerpsReadResult,
+)
+from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass(frozen=True)
-class PerpsPositionOnChain:
-    """On-chain state of a GMX V2 perpetual position.
-
-    Values are raw (not human-readable) to preserve precision.
-    The perps_valuer converts to human-readable.
-    """
-
-    account: str
-    market: str  # Market contract address
-    collateral_token: str  # Collateral token address
-    size_in_usd: int  # 30 decimals
-    size_in_tokens: int  # Index token decimals
-    collateral_amount: int  # Collateral token decimals
-    is_long: bool
-    borrowing_factor: int
-    funding_fee_amount_per_size: int
-    increased_at_time: int  # Unix timestamp
-    decreased_at_time: int  # Unix timestamp
-
-    @property
-    def is_active(self) -> bool:
-        """Position has non-zero size."""
-        return self.size_in_usd > 0
-
-    @property
-    def position_key(self) -> str:
-        """Unique identifier matching strategy-reported position IDs."""
-        side = "long" if self.is_long else "short"
-        return f"gmx-{self.market.lower()}-{self.collateral_token.lower()}-{side}"
+# Backward-compatibility re-exports of the strategy-side foundation symbols.
+# ``PerpsPositionOnChain`` is the canonical decoded position and ``PerpsReadResult``
+# the read outcome; both relocated into ``_strategy_base`` with the read seam, so
+# they stay importable here for call sites and tests that depend on the surface.
+__all__ = [
+    "PerpsPositionOnChain",
+    "PerpsPositionReader",
+    "PerpsReadResult",
+]
 
 
 class PerpsPositionReader:
-    """Reads GMX V2 positions via GMXV2SDK.
+    """Reads open perpetual positions for a venue via gateway RPC.
 
-    Currently supports Arbitrum only (GMXV2SDK limitation).
-    Uses on-chain Reader contract with REST API fallback (PR #1086).
+    Resolves the read (target contract(s) + calldata + reducer) for a protocol
+    through :class:`PerpsReadRegistry`, executes the gateway-routed ``eth_call``
+    per planned call, and reduces the responses with the connector's pure
+    reducer. The reader holds no protocol-specific knowledge of its own.
     """
 
-    # Chains where the GMXV2SDK Reader contract is deployed and tested.
-    # Avalanche has GMX V2 markets but the SDK only supports arbitrum currently.
-    SUPPORTED_CHAINS = {"arbitrum"}
-
-    def __init__(
-        self,
-        rpc_url: str | None = None,
-        gateway_client: "GatewayClient | None" = None,
-    ) -> None:
-        """Initialize with an optional RPC URL or gateway client.
-
-        Args:
-            rpc_url: DEPRECATED — direct JSON-RPC endpoint. Prefer gateway_client.
-                If both are None, queries return empty (graceful degradation).
-            gateway_client: Gateway client for routing eth_call through the
-                gateway. Preferred over rpc_url.
-        """
-        self._rpc_url = rpc_url
-        self._gateway_client = gateway_client
+    def __init__(self, gateway_client: object | None = None) -> None:
+        self._gateway = gateway_client
 
     def read_positions(
         self,
         chain: str,
         wallet_address: str,
-    ) -> list[PerpsPositionOnChain]:
-        """Query all open GMX V2 positions for a wallet.
+        protocol: str,
+    ) -> PerpsReadResult:
+        """Query all open perpetual positions for a wallet on ``protocol``.
+
+        ``protocol`` is required (no default): the reader names no venue of its
+        own — the caller always knows which venue it is reading (the valuation
+        path passes ``position.protocol``; discovery iterates
+        :meth:`PerpsReadRegistry.supported_protocols`). This keeps the framework
+        perp read path free of any hardcoded venue slug.
 
         Args:
-            chain: Chain identifier (must be "arbitrum" or "avalanche").
+            chain: Chain identifier (e.g. "arbitrum").
             wallet_address: Wallet address to query.
+            protocol: Perp protocol identifier (e.g. "gmx_v2"). Resolved through
+                :class:`PerpsReadRegistry`; an unregistered venue / undeployed
+                chain yields an ``ok=False`` (unmeasured) result.
 
         Returns:
-            List of active positions, empty on failure.
+            PerpsReadResult: ``ok=True`` with the active positions on a
+            successful read; ``ok=False`` (no positions) when the gateway is
+            absent, the venue/chain is unresolved, or the read failed. The
+            Empty≠Zero seam — callers keep the strategy-reported value rather
+            than fabricating a zero on ``ok=False``.
         """
-        if not self._rpc_url and self._gateway_client is None:
-            return []
+        if self._gateway is None:
+            return PerpsReadResult(positions=(), ok=False)
 
-        if chain not in self.SUPPORTED_CHAINS:
-            logger.debug("GMX V2 not supported on %s", chain)
-            return []
+        query = PerpsPositionQuery(chain=chain, wallet_address=wallet_address)
+        plan = PerpsReadRegistry.resolve_plan(protocol, query)
+        if plan is None:
+            logger.debug(
+                "No perps read available for protocol %s on chain %s",
+                protocol,
+                chain,
+            )
+            return PerpsReadResult(positions=(), ok=False)
 
-        try:
-            from almanak.connectors.gmx_v2.sdk import GMXV2SDK
-
-            sdk = GMXV2SDK(rpc_url=self._rpc_url, chain=chain, gateway_client=self._gateway_client)
-            raw_positions = sdk.get_account_positions(wallet_address)
-
-            positions = []
-            for raw in raw_positions:
-                pos = _parse_position_dict(raw, wallet_address)
-                if pos and pos.is_active:
-                    positions.append(pos)
-
-            if positions:
-                logger.debug(
-                    "Found %d active GMX V2 positions for %s on %s",
-                    len(positions),
-                    wallet_address[:10],
-                    chain,
-                )
-
-            return positions
-
-        except ImportError:
-            logger.debug("GMXV2SDK not available (missing web3 dependency)")
-            return []
-        except Exception as e:
-            logger.warning("GMX V2 position query failed for %s on %s: %s", wallet_address[:10], chain, e)
-            return []
+        results = [self._eth_call(chain, call.to, call.data) for call in plan.calls]
+        return plan.reduce(plan.query, results)
 
     @staticmethod
-    def from_gateway_client(gateway_client: object | None, chain: str = "") -> "PerpsPositionReader":
+    def from_gateway_client(gateway_client: object | None) -> "PerpsPositionReader":
         """Create a reader from a gateway client or DirectRpcAdapter.
 
-        Extraction order:
-        1. DirectRpcAdapter: reads URL from _rpc_stub._rpc_url (paper trading)
-        2. Real GatewayClient (``.rpc`` attribute): forward the client so the
-           reader routes eth_call through the gateway
-        3. Environment: builds URL from ALCHEMY_API_KEY (legacy live path)
-
-        Args:
-            gateway_client: Gateway client or DirectRpcAdapter instance.
-            chain: Chain hint for RPC URL construction (e.g. "arbitrum").
-
-        Returns:
-            PerpsPositionReader (possibly with no URL if extraction fails).
+        Thin wrapper kept for call-site compatibility: the reader stores whatever
+        is passed (a real ``GatewayClient`` or a ``DirectRpcAdapter`` — both
+        expose ``_rpc_stub.Call``), mirroring the lending reader.
         """
-        if gateway_client is None:
-            return PerpsPositionReader()
+        return PerpsPositionReader(gateway_client)
 
-        # DirectRpcAdapter: has _rpc_stub._rpc_url (paper trading path)
-        rpc_stub = getattr(gateway_client, "_rpc_stub", None)
-        if rpc_stub is not None:
-            rpc_url = getattr(rpc_stub, "_rpc_url", None)
-            if rpc_url:
-                return PerpsPositionReader(rpc_url=rpc_url)
-
-        # Real GatewayClient — forward through for gateway-routed eth_call.
-        # The constructor keeps gateway_client alongside rpc_url so both
-        # transports stay available to GMXV2SDK. Use isinstance (and fall
-        # back to duck-typing on the private ``_rpc_stub`` attribute so we
-        # don't trigger ``GatewayClient.rpc`` property, which raises on a
-        # disconnected client).
-        gateway_client_cls: type | None
+    def _eth_call(self, chain: str, to: str, data: str) -> str | None:
+        """Make an eth_call via gateway generic RPC."""
         try:
-            from almanak.framework.gateway_client import GatewayClient as _GatewayClient
+            from almanak.gateway.proto import gateway_pb2
 
-            gateway_client_cls = _GatewayClient
-        except ImportError:
-            gateway_client_cls = None
-        is_gateway_client = (
-            gateway_client_cls is not None and isinstance(gateway_client, gateway_client_cls)
-        ) or getattr(gateway_client, "_rpc_stub", None) is not None
-        if is_gateway_client:
-            return PerpsPositionReader(gateway_client=gateway_client)  # type: ignore[arg-type]
+            rpc_stub = getattr(self._gateway, "_rpc_stub", None)
+            if rpc_stub is None:
+                logger.debug("Gateway client not connected for perps position query")
+                return None
 
-        # Legacy fallback: try to build RPC URL from environment.
-        rpc_url = _get_rpc_url_from_env(chain or "arbitrum")
-        if rpc_url:
-            return PerpsPositionReader(rpc_url=rpc_url)
+            timeout = getattr(getattr(self._gateway, "config", None), "timeout", 10)
 
-        return PerpsPositionReader()
+            params_json = json.dumps([{"to": to, "data": data}, "latest"])
+            response = rpc_stub.Call(
+                gateway_pb2.RpcRequest(
+                    chain=chain,
+                    method="eth_call",
+                    params=params_json,
+                ),
+                timeout=timeout,
+            )
 
+            if not response.success:
+                logger.debug("eth_call failed for perps position: %s", response.error)
+                return None
 
-def _get_rpc_url_from_env(chain: str) -> str | None:
-    """Build an RPC URL from the typed backtest config.
-
-    Uses the same ALCHEMY_API_KEY that the gateway uses for RPC access,
-    sourced via :attr:`BacktestConfig.alchemy_api_key`. The legacy
-    fallback path is preserved bit-for-bit; the env read moves to the
-    config service boundary.
-    """
-    from almanak.config.backtest import backtest_config_from_env
-
-    api_key = backtest_config_from_env().alchemy_api_key
-    if not api_key:
-        return None
-
-    alchemy_chain_slugs = {
-        "arbitrum": "arb-mainnet",
-    }
-    slug = alchemy_chain_slugs.get(chain)
-    if not slug:
-        return None
-
-    return f"https://{slug}.g.alchemy.com/v2/{api_key}"
-
-
-def _parse_position_dict(raw: dict, account: str) -> PerpsPositionOnChain | None:
-    """Convert SDK position dict to typed dataclass.
-
-    Args:
-        raw: Position dict from GMXV2SDK.get_account_positions().
-        account: Wallet address (fallback if not in raw).
-
-    Returns:
-        PerpsPositionOnChain or None if missing required fields.
-    """
-    try:
-        return PerpsPositionOnChain(
-            account=raw.get("account", account),
-            market=raw.get("market", ""),
-            collateral_token=raw.get("collateral_token", ""),
-            size_in_usd=int(raw.get("size_in_usd", 0)),
-            size_in_tokens=int(raw.get("size_in_tokens", 0)),
-            collateral_amount=int(raw.get("collateral_amount", 0)),
-            is_long=bool(raw.get("is_long", False)),
-            borrowing_factor=int(raw.get("borrowing_factor", 0)),
-            funding_fee_amount_per_size=int(raw.get("funding_fee_amount_per_size", 0)),
-            increased_at_time=int(raw.get("increased_at_time", 0)),
-            decreased_at_time=int(raw.get("decreased_at_time", 0)),
-        )
-    except (ValueError, TypeError) as e:
-        logger.debug("Failed to parse GMX V2 position: %s", e)
-        return None
+            if response.result:
+                return json.loads(response.result)
+            return None
+        except Exception:
+            logger.debug("Failed to make eth_call for perps position", exc_info=True)
+            return None

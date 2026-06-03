@@ -11,7 +11,6 @@ from almanak.framework.valuation.lending_valuer import value_lending_position
 from almanak.framework.valuation.lp_position_reader import LPPositionReader
 from almanak.framework.valuation.lp_valuer import value_lp_position
 from almanak.framework.valuation.perps_position_reader import PerpsPositionReader
-from almanak.framework.valuation.perps_valuer import value_perps_position
 from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 from almanak.framework.valuation.position_discovery import (
     DiscoveryConfig,
@@ -32,6 +31,5 @@ __all__ = [
     "PositionDiscoveryService",
     "value_lending_position",
     "value_lp_position",
-    "value_perps_position",
     "value_tokens",
 ]
