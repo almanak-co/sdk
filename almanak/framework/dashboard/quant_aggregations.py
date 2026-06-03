@@ -888,11 +888,89 @@ def _strategy_age_days(portfolio_metrics: Any) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Debt-netting for leveraged-lending NAV (VIB-4983)
+#
+# ``portfolio_snapshots.total_value_usd`` is positive-position-scoped
+# (VIB-3614 / portfolio_valuer.py:484-492): it sums only positions whose
+# ``value_usd > 0``. Aave SUPPLY collateral is counted; the BORROW debt leg
+# — carried in the SAME ``positions_json`` with a *negative* ``value_usd``
+# (the on-chain liability sign, portfolio_valuer.py:1443-1446) — is dropped.
+# So ``nav_usd = total_value_usd + cash`` overstates an open leverage loop by
+# the un-netted debt, manufacturing a phantom loss against deployed capital.
+#
+# VIB-4975 fixed the same root cause for ``strat pnl`` via the debt-netted
+# ``compute_lending_nav`` (which reads typed ``PositionValue`` objects off a
+# ``PortfolioSnapshot``). The dashboard aggregator instead reads the raw
+# ``positions_json`` dicts already parsed below, so we net the debt from those
+# dicts directly here — confined to the dashboard layer, mutating nothing the
+# snapshot writer persisted (HARD SCOPE CONSTRAINT, VIB-4975).
+# ---------------------------------------------------------------------------
+
+
+def _open_positions_and_net_debt(positions_json: Any) -> tuple[int, Decimal]:
+    """Parse a snapshot's ``positions_json`` → ``(open_count, debt_to_net)``.
+
+    The payload is either the legacy bare list or the VIB-3923 envelope
+    ``{schema_version, positions, metadata, reconciliation}`` — both are
+    unwrapped so the BORROW debt leg is netted on enveloped writes too, not
+    only on the legacy shape.
+
+    ``debt_to_net`` is Σ|negative value_usd| across the positions. A negative
+    ``value_usd`` is the on-chain debt/liability sign convention (BORROW legs;
+    portfolio_valuer.py:1443-1446) that ``total_value_usd``
+    (positive-position-scoped, VIB-3614) drops; the caller subtracts it from the
+    deployed value so an open leverage loop's NAV reads ``collateral − debt``
+    instead of ``collateral`` alone.
+
+    Empty≠Zero: a position whose ``value_usd`` is absent or unparsable is
+    skipped (unmeasured), never coerced to a measured zero. A malformed / empty
+    payload — or any position set with no negative leg — yields a zero
+    ``debt_to_net`` so non-leveraged strategies (LP, swap, single-supply) are
+    byte-identical to before.
+    """
+    if not positions_json:
+        return 0, Decimal("0")
+    if isinstance(positions_json, list | dict):
+        # Hosted Postgres JSON/JSONB columns (and some test mocks) hand back an
+        # already-deserialized payload. Calling json.loads on it would raise
+        # TypeError and silently drop into the (0, 0) bypass below — resurrecting
+        # the un-netted-debt phantom on the hosted path. Accept the parsed shape
+        # directly. (VIB-4983, Gemini review)
+        parsed = positions_json
+    else:
+        try:
+            parsed = json.loads(positions_json)
+        except (json.JSONDecodeError, TypeError):
+            return 0, Decimal("0")
+    if isinstance(parsed, list):
+        positions = parsed
+    elif isinstance(parsed, dict) and isinstance(parsed.get("positions"), list):
+        positions = parsed["positions"]
+    else:
+        return 0, Decimal("0")
+
+    debt = Decimal("0")
+    for pos in positions:
+        if not isinstance(pos, dict):
+            continue
+        raw = pos.get("value_usd")
+        if raw is None or raw == "":
+            continue
+        try:
+            value = Decimal(str(raw))
+        except (InvalidOperation, ValueError, TypeError):
+            continue
+        if value < 0:
+            debt += -value
+    return len(positions), debt
+
+
+# ---------------------------------------------------------------------------
 # Top-level builder
 # ---------------------------------------------------------------------------
 
 
-def compute_pnl_summary(  # noqa: C901
+def compute_pnl_summary(
     *,
     portfolio_metrics: Any,
     snapshots: list[Any],
@@ -926,15 +1004,16 @@ def compute_pnl_summary(  # noqa: C901
             pnl.value_confidence = confidence
         pnl.deployed_capital_usd = _to_decimal(getattr(latest, "deployed_capital_usd", "0"))
         deployed_value_usd = _to_decimal(getattr(latest, "total_value_usd", "0"))
-        # Open position count from positions_json on snapshot
+        # Open position count + leverage debt-netting from positions_json.
+        # VIB-4983: net the BORROW debt leg (negative value_usd) that
+        # total_value_usd (positive-position-scoped, VIB-3614) dropped, so an
+        # open leverage loop's NAV reads collateral − debt + cash instead of
+        # collateral + cash (which manufactures a phantom −debt loss). A
+        # position set with no negative leg subtracts Decimal("0") — non-
+        # leveraged strategies are byte-identical to before.
         positions_json = getattr(latest, "positions_json", None)
-        if positions_json:
-            try:
-                positions = json.loads(positions_json)
-                if isinstance(positions, list):
-                    pnl.open_position_count = len(positions)
-            except (json.JSONDecodeError, TypeError):
-                pass
+        pnl.open_position_count, _debt_to_net = _open_positions_and_net_debt(positions_json)
+        deployed_value_usd -= _debt_to_net
 
     # VIB-3914: Anchor "Deployed" to the wallet snapshot the strategy
     # itself captured at first intent, not the ``portfolio_metrics``
@@ -983,11 +1062,28 @@ def compute_pnl_summary(  # noqa: C901
 
     pnl.max_drawdown_pct, pnl.current_drawdown_pct = _drawdowns(snapshots)
 
-    # Primary risk gauge — pull from PositionSummary if provided.
-    # Contract: never paper over a missing field (Senior-Quant audit). When
-    # the underlying value is None we surface "unknown" with a neutral
-    # colour rather than defaulting to a red/green that misleads the
-    # operator into a money decision based on a bool() coercion.
+    _apply_primary_risk_gauge(pnl, position_summary, accounting_events)
+
+    return pnl
+
+
+def _apply_primary_risk_gauge(
+    pnl: PnLSummary,
+    position_summary: Any | None,
+    accounting_events: list[dict[str, Any]],
+) -> None:
+    """Populate the ``primary_risk_*`` tile on ``pnl`` in place.
+
+    Extracted from :func:`compute_pnl_summary` (VIB-4983) — behaviour is
+    byte-identical; the block writes only the ``primary_risk_*`` fields and the
+    extraction keeps the top-level builder's complexity within the CRAP budget.
+
+    Primary risk gauge — pull from PositionSummary if provided. Contract: never
+    paper over a missing field (Senior-Quant audit). When the underlying value
+    is None we surface "unknown" with a neutral colour rather than defaulting to
+    a red/green that misleads the operator into a money decision based on a
+    bool() coercion.
+    """
     if position_summary is not None:
         if getattr(position_summary, "lp_positions", None) and len(position_summary.lp_positions) > 0:
             in_range = position_summary.lp_positions[0].in_range
@@ -1052,8 +1148,6 @@ def compute_pnl_summary(  # noqa: C901
             pnl.primary_risk_label = "Leverage"
             pnl.primary_risk_value = "unknown"
             pnl.primary_risk_color = "neutral"
-
-    return pnl
 
 
 def build_quant_header(

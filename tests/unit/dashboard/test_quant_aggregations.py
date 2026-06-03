@@ -18,8 +18,11 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from almanak.framework.dashboard.quant_aggregations import (
+    PnLSummary,
+    _apply_primary_risk_gauge,
     _detect_primitive,
     _open_position_cost_basis,
+    _open_positions_and_net_debt,
     _wallet_value_at_first_action,
     build_quant_header,
     compute_audit_trail,
@@ -474,14 +477,19 @@ def test_wallet_value_at_first_action_missing_price_for_token_skips_token():
 # ─── VIB-4979: native-gas symmetry between Deployed and NAV ────────────────
 
 
-def _snapshot(*, total_value_usd: str, available_cash_usd: str) -> SimpleNamespace:
+def _snapshot(
+    *,
+    total_value_usd: str,
+    available_cash_usd: str,
+    positions_json: str = "[]",
+) -> SimpleNamespace:
     """Minimal portfolio_snapshot stand-in for compute_pnl_summary."""
     return SimpleNamespace(
         total_value_usd=total_value_usd,
         available_cash_usd=available_cash_usd,
         value_confidence="HIGH",
         deployed_capital_usd="0",
-        positions_json="[]",
+        positions_json=positions_json,
         timestamp=datetime.now(tz=UTC),
     )
 
@@ -548,6 +556,297 @@ def test_lifetime_pnl_phantom_gas_when_deployed_excludes_native_gas():
     assert pnl.deployed_usd == Decimal("0")
     assert pnl.nav_usd == eth_value
     assert pnl.lifetime_pnl_usd == eth_value  # phantom — the defect
+
+
+# ─── VIB-4983: debt-netted NAV for open leveraged-lending positions ───────
+
+
+def test_open_positions_and_net_debt_sums_negative_legs():
+    """The helper returns (count, Σ|negative value_usd|) — the BORROW debt —
+    and ignores positive legs (collateral) for the debt total."""
+    raw = json.dumps(
+        [
+            {"position_type": "SUPPLY", "value_usd": "6.75"},
+            {"position_type": "BORROW", "value_usd": "-1.56"},
+        ]
+    )
+    count, debt = _open_positions_and_net_debt(raw)
+    assert count == 2
+    assert debt == Decimal("1.56")
+
+
+def test_open_positions_and_net_debt_no_debt_is_zero():
+    """A position set with no negative leg (LP / swap / single-supply) nets
+    zero debt — the byte-identical guard for non-leveraged strategies."""
+    raw = json.dumps(
+        [
+            {"position_type": "LP", "value_usd": "12.34"},
+            {"position_type": "SUPPLY", "value_usd": "5.00"},
+        ]
+    )
+    count, debt = _open_positions_and_net_debt(raw)
+    assert count == 2
+    assert debt == Decimal("0")
+
+
+def test_open_positions_and_net_debt_unmeasured_is_skipped():
+    """Empty≠Zero: an absent/unparsable value_usd is unmeasured and skipped,
+    never coerced to a measured zero (and never crashes the helper)."""
+    raw = json.dumps(
+        [
+            {"position_type": "BORROW", "value_usd": "-2.00"},
+            {"position_type": "BORROW", "value_usd": None},
+            {"position_type": "BORROW", "value_usd": ""},
+            {"position_type": "BORROW"},  # missing key
+            {"position_type": "BORROW", "value_usd": "not-a-number"},
+            "malformed-non-dict",
+        ]
+    )
+    count, debt = _open_positions_and_net_debt(raw)
+    assert count == 6
+    assert debt == Decimal("2.00")
+
+
+def test_open_positions_and_net_debt_malformed_payload_is_zero():
+    """A malformed / empty / non-list-non-dict payload yields (0, 0) without
+    raising."""
+    assert _open_positions_and_net_debt(None) == (0, Decimal("0"))
+    assert _open_positions_and_net_debt("") == (0, Decimal("0"))
+    assert _open_positions_and_net_debt("not json") == (0, Decimal("0"))
+
+
+def test_open_positions_and_net_debt_accepts_preparsed_payload():
+    """VIB-4983 (Gemini review): hosted Postgres JSON/JSONB columns (and some
+    test mocks) hand back an ALREADY-deserialized list/dict. json.loads on it
+    would TypeError → the (0, 0) bypass → debt-netting silently skipped and the
+    phantom loss resurrected on the hosted path. The helper must net the debt
+    from a pre-parsed payload identically to the JSON-string path."""
+    positions = [
+        {"position_type": "SUPPLY", "value_usd": "6.75"},
+        {"position_type": "BORROW", "value_usd": "-1.56"},
+    ]
+    # Pre-parsed bare list (not json.dumps'd).
+    assert _open_positions_and_net_debt(positions) == (2, Decimal("1.56"))
+    # Pre-parsed VIB-3923 envelope dict.
+    assert _open_positions_and_net_debt({"schema_version": 1, "positions": positions}) == (
+        2,
+        Decimal("1.56"),
+    )
+    assert _open_positions_and_net_debt(json.dumps({"no": "positions"})) == (0, Decimal("0"))
+
+
+# ─── VIB-4983: _apply_primary_risk_gauge extraction — branch coverage ──────
+# Direct tests for the helper extracted out of compute_pnl_summary so the
+# primary-risk tile branches are covered at the unit level (behaviour is
+# byte-identical to the inline block it replaced).
+
+
+def _lp_position_summary(in_range):
+    from almanak.framework.dashboard.models import LPPosition, PositionSummary
+
+    return PositionSummary(
+        lp_positions=[
+            LPPosition(
+                pool="WETH/USDC",
+                token0="WETH",
+                token1="USDC",
+                liquidity_usd=Decimal("100"),
+                range_lower=Decimal("1800"),
+                range_upper=Decimal("2200"),
+                current_price=Decimal("2000"),
+                in_range=in_range,
+            )
+        ]
+    )
+
+
+def test_primary_risk_gauge_lp_in_range_yes():
+    pnl = PnLSummary()
+    _apply_primary_risk_gauge(pnl, _lp_position_summary(True), [])
+    assert pnl.primary_risk_kind == "lp"
+    assert pnl.primary_risk_value == "in-range YES"
+    assert pnl.primary_risk_color == "green"
+
+
+def test_primary_risk_gauge_lp_in_range_no():
+    pnl = PnLSummary()
+    _apply_primary_risk_gauge(pnl, _lp_position_summary(False), [])
+    assert pnl.primary_risk_value == "in-range NO"
+    assert pnl.primary_risk_color == "red"
+
+
+def test_primary_risk_gauge_lp_in_range_pending():
+    pnl = PnLSummary()
+    _apply_primary_risk_gauge(pnl, _lp_position_summary(None), [])
+    assert pnl.primary_risk_value == "in-range pending"
+    assert pnl.primary_risk_color == "neutral"
+
+
+def test_primary_risk_gauge_perp_leverage():
+    from almanak.framework.dashboard.models import PositionSummary
+
+    pnl = PnLSummary()
+    _apply_primary_risk_gauge(pnl, PositionSummary(leverage=Decimal("2.5")), [])
+    assert pnl.primary_risk_kind == "perp"
+    assert pnl.primary_risk_label == "Leverage"
+    assert pnl.primary_risk_value == "2.50×"
+    assert pnl.primary_risk_color == "neutral"
+
+
+def test_primary_risk_gauge_none_position_summary_no_change():
+    pnl = PnLSummary()
+    _apply_primary_risk_gauge(pnl, None, [])
+    assert pnl.primary_risk_kind == "none"
+
+
+def test_primary_risk_gauge_fallback_lending_from_events():
+    pnl = PnLSummary()
+    pnl.deployed_capital_usd = Decimal("5")
+    _apply_primary_risk_gauge(pnl, None, [_event("SUPPLY"), _event("BORROW")])
+    assert pnl.primary_risk_kind == "lending"
+    assert pnl.primary_risk_value == "unknown"
+    assert pnl.primary_risk_color == "neutral"
+
+
+def test_primary_risk_gauge_fallback_perp_from_events():
+    pnl = PnLSummary()
+    pnl.deployed_capital_usd = Decimal("5")
+    _apply_primary_risk_gauge(pnl, None, [_event("PERP_OPEN")])
+    assert pnl.primary_risk_kind == "perp"
+    assert pnl.primary_risk_value == "unknown"
+
+
+def test_primary_risk_gauge_fallback_skipped_when_no_deployed_capital():
+    pnl = PnLSummary()
+    # deployed_capital_usd defaults to 0 → fallback must not fire.
+    _apply_primary_risk_gauge(pnl, None, [_event("LP_OPEN")])
+    assert pnl.primary_risk_kind == "none"
+
+
+def test_pnl_summary_open_leverage_loop_nets_debt():
+    """VIB-4983 regression: an OPEN USDC/USDT Aave leverage loop must read a
+    debt-netted NAV (collateral − debt + cash), so Strategy PnL is ~flat and
+    not −debt.
+
+    Models the live looping-mainnet failure: collateral SUPPLY +$6.75 and
+    BORROW −$1.56 both ride in positions_json, but total_value_usd is
+    positive-position-scoped (VIB-3614) so it equals only the collateral
+    ($6.75) and drops the debt. Pre-fix nav_usd = 6.75 + cash overstated by
+    $1.56 → Strategy PnL read ≈ −$1.56 (the phantom leverage loss). Post-fix
+    nav_usd nets the debt: 6.75 − 1.56 + cash.
+    """
+    positions_json = json.dumps(
+        [
+            {"position_type": "SUPPLY", "value_usd": "6.75"},
+            {"position_type": "BORROW", "value_usd": "-1.56"},
+        ]
+    )
+    # total_value_usd is positive-scoped → collateral only; cash is the small
+    # residual equity sitting in the wallet.
+    snap = _snapshot(
+        total_value_usd="6.75",
+        available_cash_usd="0.40",
+        positions_json=positions_json,
+    )
+    # Deployed baseline = the equity the operator actually put in (≈ $5.19 of
+    # net collateral − debt at open). Model via portfolio_metrics initial.
+    metrics = SimpleNamespace(
+        deposits_usd="0",
+        withdrawals_usd="0",
+        initial_value_usd="5.19",
+        initial_timestamp=datetime.now(tz=UTC).isoformat(),
+    )
+
+    pnl = compute_pnl_summary(
+        portfolio_metrics=metrics,
+        snapshots=[snap],
+        ledger_entries=[],
+        accounting_events=[],
+    )
+
+    # NAV is debt-netted: 6.75 − 1.56 + 0.40 = 5.59 (NOT 6.75 + 0.40 = 7.15).
+    assert pnl.nav_usd == Decimal("5.59")
+    # Strategy PnL ≈ flat against the $5.19 deployed equity (+$0.40 of measured
+    # cash residual), NOT −$1.56. The un-netted phantom loss is gone.
+    assert pnl.deployed_usd == Decimal("5.19")
+    assert pnl.lifetime_pnl_usd == Decimal("0.40")
+    assert pnl.open_position_count == 2
+
+
+def test_pnl_summary_non_leveraged_unchanged_by_debt_netting():
+    """A non-leveraged strategy (single-supply / LP / swap — no negative leg)
+    produces output IDENTICAL to a snapshot with no positions_json debt: the
+    debt-netting subtracts Decimal('0') and nav_usd is unchanged."""
+    no_debt_positions = json.dumps(
+        [
+            {"position_type": "LP", "value_usd": "12.00"},
+            {"position_type": "SUPPLY", "value_usd": "5.00"},
+        ]
+    )
+    snap_with_positions = _snapshot(
+        total_value_usd="17.00",
+        available_cash_usd="3.00",
+        positions_json=no_debt_positions,
+    )
+    snap_baseline = _snapshot(total_value_usd="17.00", available_cash_usd="3.00")
+
+    metrics = SimpleNamespace(
+        deposits_usd="0",
+        withdrawals_usd="0",
+        initial_value_usd="20.00",
+        initial_timestamp=datetime.now(tz=UTC).isoformat(),
+    )
+
+    pnl_positions = compute_pnl_summary(
+        portfolio_metrics=metrics,
+        snapshots=[snap_with_positions],
+        ledger_entries=[],
+        accounting_events=[],
+    )
+    pnl_baseline = compute_pnl_summary(
+        portfolio_metrics=metrics,
+        snapshots=[snap_baseline],
+        ledger_entries=[],
+        accounting_events=[],
+    )
+
+    # NAV = 17.00 + 3.00 = 20.00 either way; debt-netting changed nothing.
+    assert pnl_positions.nav_usd == Decimal("20.00")
+    assert pnl_positions.nav_usd == pnl_baseline.nav_usd
+    assert pnl_positions.lifetime_pnl_usd == pnl_baseline.lifetime_pnl_usd
+    assert pnl_positions.deployed_usd == pnl_baseline.deployed_usd
+
+
+def test_pnl_summary_debt_netting_handles_envelope_shape():
+    """The VIB-3923 envelope ({schema_version, positions, metadata, ...}) must
+    be unwrapped so the BORROW leg is netted on enveloped writes, not only on
+    the legacy bare-list shape."""
+    enveloped = json.dumps(
+        {
+            "schema_version": 1,
+            "positions": [
+                {"position_type": "SUPPLY", "value_usd": "6.75"},
+                {"position_type": "BORROW", "value_usd": "-1.56"},
+            ],
+            "metadata": {},
+            "reconciliation": {},
+        }
+    )
+    snap = _snapshot(
+        total_value_usd="6.75",
+        available_cash_usd="0.40",
+        positions_json=enveloped,
+    )
+
+    pnl = compute_pnl_summary(
+        portfolio_metrics=None,
+        snapshots=[snap],
+        ledger_entries=[],
+        accounting_events=[],
+    )
+
+    assert pnl.nav_usd == Decimal("5.59")
+    assert pnl.open_position_count == 2
 
 
 def test_open_position_cost_basis_empty_returns_zero():
