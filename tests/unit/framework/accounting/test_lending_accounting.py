@@ -743,6 +743,67 @@ class TestHandleLendingPostState:
         assert event is not None
         assert event.confidence == AccountingConfidence.ESTIMATED
 
+    def test_present_post_state_yields_high_confidence_and_no_warning(self) -> None:
+        """VIB-4985 / ALM-2777 — the user-visible outcome.
+
+        A SUPPLY whose after-state read succeeded (post_state_json present — the
+        end state after the gateway's lag retry recovers the read) produces a
+        ``confidence=HIGH`` row with NO ``unavailable_reason``. This is the row
+        the field report saw stuck at ESTIMATED; with the read populated it must
+        be HIGH and carry no warning. Paired with the gateway-retry tests
+        (``test_rpc_service_retry.py::TestRpcServiceIndexerLagRetry``) this closes
+        the full lag→recover→HIGH chain.
+        """
+        from almanak.framework.accounting.models import AccountingConfidence
+
+        led_id = str(uuid.uuid4())
+        extracted = json.dumps({"supply_amount": 100_000_000})
+        post_state = json.dumps({
+            "collateral_usd": "5000.0",
+            "debt_usd": "2000.0",
+            "health_factor": "2.5",
+            "liquidation_threshold_bps": 8000,
+        })
+        outbox = _make_outbox_row(led_id, intent_type="SUPPLY")
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="SUPPLY",
+            extracted_data_json=extracted,
+            price_inputs_json=_usdc_price_json(),
+            post_state_json=post_state,
+        )
+        basis = FIFOBasisStore()
+
+        with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=_mock_resolver(6)):
+            event = handle_lending(outbox, ledger, basis)
+
+        assert event is not None
+        assert event.confidence == AccountingConfidence.HIGH
+        assert event.unavailable_reason == ""
+
+    def test_missing_post_state_emits_exact_field_report_warning(self) -> None:
+        """The ESTIMATED row carries the exact warning string from the field report.
+
+        Pins the user-visible message so the symptom (and its disappearance once
+        the read recovers — see the test above) is unambiguous.
+        """
+        led_id = str(uuid.uuid4())
+        extracted = json.dumps({"supply_amount": 100_000_000})
+        outbox = _make_outbox_row(led_id, intent_type="SUPPLY")
+        ledger = _make_ledger_row(
+            led_id,
+            intent_type="SUPPLY",
+            extracted_data_json=extracted,
+            price_inputs_json=_usdc_price_json(),
+        )
+        basis = FIFOBasisStore()
+
+        with patch("almanak.framework.data.tokens.resolver.get_token_resolver", return_value=_mock_resolver(6)):
+            event = handle_lending(outbox, ledger, basis)
+
+        assert event is not None
+        assert event.unavailable_reason == "post_state_json missing or invalid (gateway read unavailable for this row)"
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # VIB-4257 — Pre-state lane symmetry (regression guard)

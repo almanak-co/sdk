@@ -109,7 +109,9 @@ class TestReadAaveAccountStateForwardsBlock:
             # getUserAccountData returns 6 uint256 words; getUserEMode 1 uint256.
             if len(data_arg) > 10 and data_arg.startswith("0xbf92857c"):
                 # totalCollateralBase=10^8 (1 USD), totalDebt=0, HF=10^18, threshold/ltv=0
-                return "0x" + ("0" * 63 + "1") + "0" * 64 + "0" * 64 + "0" * 64 + "0" * 64 + ("0" * 63 + "1") + "0" * 192
+                return (
+                    "0x" + ("0" * 63 + "1") + "0" * 64 + "0" * 64 + "0" * 64 + "0" * 64 + ("0" * 63 + "1") + "0" * 192
+                )
             return "0x" + ("0" * 64)  # e-mode = 0
 
         gateway.eth_call.side_effect = _fake_eth_call
@@ -215,9 +217,7 @@ class TestGatewayEthCallLegacyClientFallback:
         assert call_args == [("ethereum", "0xpool", "0xdata")]
 
         client, call_args = self._legacy_client()
-        result = _gateway_eth_call(
-            client, "ethereum", "0xpool", "0xdata", block="latest"
-        )
+        result = _gateway_eth_call(client, "ethereum", "0xpool", "0xdata", block="latest")
         assert result == "0xresult"
         assert call_args == [("ethereum", "0xpool", "0xdata")]
 
@@ -227,9 +227,7 @@ class TestGatewayEthCallLegacyClientFallback:
         """
         client, call_args = self._legacy_client()
         with caplog.at_level("WARNING", logger="almanak.framework.accounting.lending_accounting"):
-            result = _gateway_eth_call(
-                client, "ethereum", "0xpool", "0xdata", block=12345
-            )
+            result = _gateway_eth_call(client, "ethereum", "0xpool", "0xdata", block=12345)
         assert result is None
         # Legacy 3-arg form must NOT have been invoked — we refused the read.
         assert call_args == []
@@ -315,9 +313,7 @@ class TestLastReceiptBlockHelper:
 
         result = SimpleNamespace(
             transaction_results=[
-                SimpleNamespace(
-                    success=True, receipt={"block_number": "0x12d4abc"}
-                ),
+                SimpleNamespace(success=True, receipt={"block_number": "0x12d4abc"}),
             ],
         )
         assert _last_receipt_block(result) == 0x12D4ABC
@@ -333,6 +329,112 @@ class TestLastReceiptBlockHelper:
             ],
         )
         assert _last_receipt_block(result) is None
+
+
+class TestBuildLendingAccountingEventPinsBlock:
+    """VIB-4964 — the (replay-path) event builder pins its after-state read to
+    the confirmed receipt block, instead of the legacy unpinned ``"latest"``.
+
+    Unpinned, a replay reprocessing would read *present-day* state for a
+    *historical* event, and a live read would race the receipt indexer. The
+    pin reuses the same ``_last_receipt_block`` extractor the runner's
+    ``capture_lending_post_state`` path uses.
+    """
+
+    def test_after_state_read_pins_to_receipt_block(self) -> None:
+        from almanak.framework.accounting.basis import FIFOBasisStore
+        from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
+
+        recorded_block: list[int | str | None] = []
+        gateway = MagicMock()
+
+        def _fake_eth_call(chain_arg, to_arg, data_arg, *, block=None):  # noqa: ARG001
+            recorded_block.append(block)
+            # Empty Aave position — valid response shape, near-zero values.
+            return "0x" + "0" * (6 * 64)
+
+        gateway.eth_call.side_effect = _fake_eth_call
+
+        intent = SimpleNamespace(
+            intent_type=SimpleNamespace(value="SUPPLY"),
+            protocol="aave_v3",
+            pool="0xabc000",
+            token="USDC",
+            borrow_token=None,
+            market_id=None,
+        )
+        # A confirmed receipt at a specific block — the pin target.
+        result = SimpleNamespace(
+            tx_hash="0xfeed",
+            extracted_data={},
+            total_gas_cost_wei=None,
+            transaction_results=[
+                SimpleNamespace(success=True, receipt=SimpleNamespace(block_number=99_000_000)),
+            ],
+        )
+
+        build_lending_accounting_event(
+            intent=intent,
+            result=result,
+            deployment_id="strat-1",
+            cycle_id="cycle-001",
+            execution_mode="paper",
+            chain="arbitrum",
+            wallet_address="0xwallet",
+            gateway_client=gateway,
+            basis_store=FIFOBasisStore(),
+            price_oracle=None,
+            ledger_entry_id="led-001",
+        )
+
+        # Every after-state eth_call pinned to the receipt block — not "latest".
+        assert recorded_block, "expected the builder to issue at least one after-state eth_call"
+        assert all(b == 99_000_000 for b in recorded_block), (
+            f"expected every after-state read to pin to block=99_000_000 but got {recorded_block}"
+        )
+
+    def test_after_state_read_falls_back_to_latest_without_receipt(self) -> None:
+        """No receipt block available → block=None ("latest"), preserving prior behaviour."""
+        from almanak.framework.accounting.basis import FIFOBasisStore
+        from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
+
+        recorded_block: list[int | str | None] = []
+        gateway = MagicMock()
+
+        def _fake_eth_call(chain_arg, to_arg, data_arg, *, block=None):  # noqa: ARG001
+            recorded_block.append(block)
+            return "0x" + "0" * (6 * 64)
+
+        gateway.eth_call.side_effect = _fake_eth_call
+
+        intent = SimpleNamespace(
+            intent_type=SimpleNamespace(value="SUPPLY"),
+            protocol="aave_v3",
+            pool="0xabc000",
+            token="USDC",
+            borrow_token=None,
+            market_id=None,
+        )
+        result = SimpleNamespace(tx_hash="0xfeed", extracted_data={}, total_gas_cost_wei=None, transaction_results=[])
+
+        build_lending_accounting_event(
+            intent=intent,
+            result=result,
+            deployment_id="strat-1",
+            cycle_id="cycle-001",
+            execution_mode="paper",
+            chain="arbitrum",
+            wallet_address="0xwallet",
+            gateway_client=gateway,
+            basis_store=FIFOBasisStore(),
+            price_oracle=None,
+            ledger_entry_id="led-001",
+        )
+
+        assert recorded_block, "expected the builder to issue at least one after-state eth_call"
+        assert all(b is None for b in recorded_block), (
+            f"expected fallback to block=None ('latest') but got {recorded_block}"
+        )
 
 
 # Decimal import to keep the suite usable as a standalone module

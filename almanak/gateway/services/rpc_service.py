@@ -119,6 +119,11 @@ class RpcMetrics:
     failed_requests: int = 0
     rate_limited_requests: int = 0
     total_latency_ms: float = 0.0
+    # VIB-4985 / ALM-2777: bounded retries spent absorbing upstream
+    # receipt-indexer lag (e.g. "Unknown block" on a pinned post-execution
+    # read of a just-confirmed block). Lets us quantify provider lag per
+    # deployment without parsing logs.
+    indexer_lag_retries: int = 0
 
 
 class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
@@ -265,6 +270,32 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
     _RETRY_BASE_DELAY: float = 0.5
     _RETRY_MAX_AFTER: float = 5.0  # cap honored Retry-After header to avoid stalling decide loop
 
+    # VIB-4985 / ALM-2777: receipt-indexer-lag retry.
+    # A *pinned* post-execution read (block=receipt.block_number, VIB-4589/F7)
+    # can race the upstream RPC's receipt indexer: the block is confirmed but
+    # the node serving the eth_call has not ingested it yet, so it answers
+    # "Unknown block" (as HTTP 400 OR a JSON-RPC error body). Without a retry
+    # the read fails closed → empty post_state_json → the lending row drops to
+    # confidence=ESTIMATED ("gateway read unavailable for this row").
+    #
+    # These markers describe exactly one condition — "the block/state you asked
+    # for is not available on this node right now" — which for a just-confirmed
+    # block means transient lag and is SAFE to retry. They deliberately do NOT
+    # overlap with execution reverts ("execution reverted", "out of gas"), auth
+    # ("unauthorized", "invalid api key"), or malformed params ("invalid
+    # argument") — those must keep failing fast. Matched case-insensitively as
+    # substrings against the upstream error message. JSON-RPC error CODE is not
+    # used: providers reuse -32000 for reverts too, so code alone is too broad.
+    _INDEXER_LAG_ERROR_MARKERS: frozenset[str] = frozenset(
+        {
+            "unknown block",  # geth / erigon / alchemy — block not yet on this node
+            "header not found",  # geth — block header not yet available
+            "missing trie node",  # geth archival — state for the block not yet available
+            "block not found",  # erigon / nethermind / various providers
+            "no state available for block",  # alchemy / erigon — state not yet indexed
+        }
+    )
+
     # Transaction-submission methods are NOT idempotent at the upstream layer.
     # Even if we get a 5xx back, the node may have already accepted and propagated
     # the signed tx. On EVM the nonce prevents replay cost (other than a wasted
@@ -285,25 +316,35 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         method: str,
         params: list | dict,
         request_id: str,
+        chain: str | None = None,
     ) -> tuple[Any, dict | None]:
         """Make a single JSON-RPC call with bounded retries on transients.
 
         Retries HTTP 429 / 5xx responses and network errors (client disconnect,
         connection reset, timeout) with 0.5s base exponential backoff + jitter.
         Honors upstream ``Retry-After`` headers (capped to ``_RETRY_MAX_AFTER``).
-        Does NOT retry on JSON-RPC-level errors (the call reached the upstream
-        and got a meaningful response) — those propagate back as typed errors.
+
+        Also retries **receipt-indexer lag** (VIB-4985 / ALM-2777): a node that
+        answers "Unknown block" / "header not found" / … for a *just-confirmed*
+        block it has not ingested yet, delivered either as a non-2xx HTTP status
+        OR as a JSON-RPC error body. Only the narrow lag-marker set
+        (:attr:`_INDEXER_LAG_ERROR_MARKERS`) is retried — every other JSON-RPC
+        error (reverts, auth, malformed params) still propagates immediately as
+        a typed error, so a real failure is never masked by retries.
 
         Transaction-submission methods (``eth_sendRawTransaction``,
         ``eth_sendTransaction``, Solana ``sendTransaction``) are never retried:
         they are not idempotent at the upstream layer and a retry after a 5xx
-        may double-broadcast the same signed transaction.
+        may double-broadcast the same signed transaction. (Their ``max_attempts``
+        is 1, so the lag-retry guards below are also inert for them.)
 
         Args:
             rpc_url: RPC endpoint URL
             method: JSON-RPC method
             params: JSON-RPC params
             request_id: Request ID for correlation
+            chain: Originating chain, for per-chain lag observability only
+                (does not affect routing — ``rpc_url`` is already resolved).
 
         Returns:
             Tuple of (result, error)
@@ -342,6 +383,13 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
 
                     if response.status != 200:
                         error_text = await response.text()
+                        # VIB-4985: some providers wrap "Unknown block" indexer
+                        # lag in a non-2xx (e.g. HTTP 400). Retry that family;
+                        # any other non-2xx still fails fast.
+                        if self._is_indexer_lag_error(error_text) and attempt < max_attempts:
+                            self._record_indexer_lag_retry(method, chain, attempt, max_attempts, error_text)
+                            await self._retry_sleep(attempt)
+                            continue
                         return None, {"code": -32603, "message": f"HTTP {response.status}: {error_text}"}
 
                     try:
@@ -350,7 +398,17 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                         return None, {"code": -32700, "message": f"Invalid JSON response: {e!s}"}
 
                     if "error" in data:
-                        return None, data["error"]
+                        rpc_error = data["error"]
+                        # VIB-4985: a JSON-RPC-level "Unknown block" on a pinned
+                        # post-execution read is transient indexer lag — retry it.
+                        # All other JSON-RPC errors (reverts, auth, bad params)
+                        # propagate immediately as before.
+                        error_message = rpc_error.get("message", "") if isinstance(rpc_error, dict) else ""
+                        if self._is_indexer_lag_error(error_message) and attempt < max_attempts:
+                            self._record_indexer_lag_retry(method, chain, attempt, max_attempts, error_message)
+                            await self._retry_sleep(attempt)
+                            continue
+                        return None, rpc_error
 
                     return data.get("result"), None
 
@@ -384,6 +442,37 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
                 return None, last_error
 
         return None, last_error or {"code": -32603, "message": "RPC call failed after retries"}
+
+    @classmethod
+    def _is_indexer_lag_error(cls, message: str | None) -> bool:
+        """True if ``message`` is an upstream "block not available yet" error.
+
+        VIB-4985 / ALM-2777. Matches the narrow lag-marker set case-insensitively
+        as substrings. Deliberately conservative: a non-string / empty / None
+        message is NOT lag (returns False → fail fast), and the markers do not
+        overlap with execution reverts, auth failures, or malformed-param errors.
+        The ``isinstance`` guard tolerates a non-compliant provider that returns
+        a non-string ``message`` field in its JSON-RPC error object — never crash
+        the proxy on a malformed upstream response.
+        """
+        if not isinstance(message, str) or not message:
+            return False
+        lowered = message.lower()
+        return any(marker in lowered for marker in cls._INDEXER_LAG_ERROR_MARKERS)
+
+    def _record_indexer_lag_retry(
+        self, method: str, chain: str | None, attempt: int, max_attempts: int, message: str
+    ) -> None:
+        """Count + log one receipt-indexer-lag retry (VIB-4985 / ALM-2777)."""
+        self._metrics.indexer_lag_retries += 1
+        logger.info(
+            "RPC %s (chain=%s): upstream receipt-indexer lag, retrying %d/%d (%s)",
+            method,
+            chain or "unknown",
+            attempt,
+            max_attempts - 1,
+            message.strip()[:160],
+        )
 
     @staticmethod
     def _parse_retry_after(header: str | None) -> float | None:
@@ -521,7 +610,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         import time
 
         start_time = time.time()
-        result, error = await self._make_rpc_call(rpc_url, request.method, params, request.id)
+        result, error = await self._make_rpc_call(rpc_url, request.method, params, request.id, chain=request.chain)
         latency_s = time.time() - start_time
         latency_ms = latency_s * 1000
 
@@ -888,7 +977,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         import time
 
         start_time = time.time()
-        result, error = await self._make_rpc_call(rpc_url, "eth_call", params, "balance")
+        result, error = await self._make_rpc_call(rpc_url, "eth_call", params, "balance", chain=request.chain)
         latency_s = time.time() - start_time
 
         # Record Prometheus metrics
@@ -1177,6 +1266,10 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             "successful_requests": self._metrics.successful_requests,
             "failed_requests": self._metrics.failed_requests,
             "rate_limited_requests": self._metrics.rate_limited_requests,
+            # VIB-4985 / ALM-2777: exposed so deployment metrics callers can
+            # quantify upstream receipt-indexer lag per deployment without
+            # parsing logs.
+            "indexer_lag_retries": self._metrics.indexer_lag_retries,
             "average_latency_ms": (
                 self._metrics.total_latency_ms / self._metrics.successful_requests
                 if self._metrics.successful_requests > 0

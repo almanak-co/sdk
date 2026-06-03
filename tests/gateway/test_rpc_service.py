@@ -384,6 +384,8 @@ class TestRpcServiceMetrics:
         assert metrics["successful_requests"] == 0
         assert metrics["failed_requests"] == 0
         assert metrics["rate_limited_requests"] == 0
+        # VIB-4985 / ALM-2777: indexer-lag retry counter is exposed for callers.
+        assert metrics["indexer_lag_retries"] == 0
 
 
 class TestMakeRpcCallErrorMessages:
@@ -410,9 +412,7 @@ class TestMakeRpcCallErrorMessages:
         )
 
         with patch.object(rpc_service, "_get_session", new=AsyncMock(return_value=mock_session)):
-            result, error = await rpc_service._make_rpc_call(
-                "http://127.0.0.1:8546", "eth_blockNumber", [], "test"
-            )
+            result, error = await rpc_service._make_rpc_call("http://127.0.0.1:8546", "eth_blockNumber", [], "test")
 
         assert result is None
         assert error is not None

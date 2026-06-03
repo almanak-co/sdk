@@ -317,3 +317,168 @@ class TestRpcServiceRetry:
             await svc._make_rpc_call("https://rpc.example", "eth_blockNumber", [], "1")
 
         assert sleep_mock.await_args_list[0].args[0] == svc._RETRY_MAX_AFTER
+
+
+class TestRpcServiceIndexerLagRetry:
+    """Receipt-indexer-lag retry (VIB-4985 / ALM-2777).
+
+    A pinned post-execution read (block=receipt.block_number) can race the
+    upstream RPC's receipt indexer: the block is confirmed but the node serving
+    the eth_call has not ingested it yet → "Unknown block". Without a retry the
+    lending row drops to confidence=ESTIMATED. These prove the narrow lag-marker
+    set is retried while every other error still fails fast.
+    """
+
+    @pytest.mark.parametrize(
+        "marker",
+        [
+            "Unknown block",
+            "header not found",
+            "missing trie node",
+            "block not found",
+            "no state available for block 0x1234",
+            "UNKNOWN BLOCK",  # case-insensitive
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_retry_on_jsonrpc_lag_then_success(self, marker):
+        """JSON-RPC-level lag error is retried and recovers to a real result."""
+        svc = _make_service()
+        session = MagicMock()
+        session.post = MagicMock(
+            side_effect=[
+                _FakeResponse(200, json_body={"error": {"code": -32000, "message": marker}, "id": "1"}),
+                _FakeResponse(200, json_body={"result": "0xcafe", "id": "1"}),
+            ]
+        )
+
+        with (
+            patch.object(svc, "_get_session", AsyncMock(return_value=session)),
+            patch("asyncio.sleep", AsyncMock()) as mock_sleep,
+        ):
+            result, error = await svc._make_rpc_call("https://rpc.example", "eth_call", [], "1", chain="base")
+
+        assert error is None
+        assert result == "0xcafe"
+        assert session.post.call_count == 2
+        assert mock_sleep.await_count == 1
+        assert svc._metrics.indexer_lag_retries == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_on_http400_unknown_block_then_success(self):
+        """Some providers wrap lag in a non-2xx (HTTP 400) — retry that too."""
+        svc = _make_service()
+        session = MagicMock()
+        session.post = MagicMock(
+            side_effect=[
+                _FakeResponse(400, text_body='{"error":"Unknown block"}'),
+                _FakeResponse(200, json_body={"result": "0xbeef", "id": "1"}),
+            ]
+        )
+
+        with (
+            patch.object(svc, "_get_session", AsyncMock(return_value=session)),
+            patch("asyncio.sleep", AsyncMock()) as mock_sleep,
+        ):
+            result, error = await svc._make_rpc_call("https://rpc.example", "eth_call", [], "1", chain="base")
+
+        assert error is None
+        assert result == "0xbeef"
+        assert session.post.call_count == 2
+        assert mock_sleep.await_count == 1
+        assert svc._metrics.indexer_lag_retries == 1
+
+    @pytest.mark.asyncio
+    async def test_lag_retry_exhausted_fails_closed(self):
+        """Persistent lag exhausts attempts and surfaces the error (Empty ≠ Zero).
+
+        The read returns None → the lending handler keeps confidence=ESTIMATED
+        rather than fabricating after-state.
+        """
+        svc = _make_service()
+        session = MagicMock()
+        session.post = MagicMock(
+            return_value=_FakeResponse(
+                200, json_body={"error": {"code": -32000, "message": "Unknown block"}, "id": "1"}
+            )
+        )
+
+        with (
+            patch.object(svc, "_get_session", AsyncMock(return_value=session)),
+            patch("asyncio.sleep", AsyncMock()) as mock_sleep,
+        ):
+            result, error = await svc._make_rpc_call("https://rpc.example", "eth_call", [], "1", chain="base")
+
+        assert result is None
+        assert error == {"code": -32000, "message": "Unknown block"}
+        assert session.post.call_count == svc._RETRY_MAX_ATTEMPTS
+        # 2 backoffs between 3 attempts.
+        assert mock_sleep.await_count == svc._RETRY_MAX_ATTEMPTS - 1
+        assert svc._metrics.indexer_lag_retries == svc._RETRY_MAX_ATTEMPTS - 1
+
+    @pytest.mark.asyncio
+    async def test_no_lag_retry_on_revert(self):
+        """A revert is not lag — must fail fast even though it shares code -32000."""
+        svc = _make_service()
+        session = MagicMock()
+        session.post = MagicMock(
+            return_value=_FakeResponse(
+                200, json_body={"error": {"code": -32000, "message": "execution reverted"}, "id": "1"}
+            )
+        )
+
+        with (
+            patch.object(svc, "_get_session", AsyncMock(return_value=session)),
+            patch("asyncio.sleep", AsyncMock()) as mock_sleep,
+        ):
+            result, error = await svc._make_rpc_call("https://rpc.example", "eth_call", [], "1", chain="base")
+
+        assert result is None
+        assert error == {"code": -32000, "message": "execution reverted"}
+        assert session.post.call_count == 1
+        mock_sleep.assert_not_called()
+        assert svc._metrics.indexer_lag_retries == 0
+
+    @pytest.mark.asyncio
+    async def test_no_lag_retry_on_write_method(self):
+        """A write method capped at 1 attempt never lag-retries (no double-broadcast)."""
+        svc = _make_service()
+        session = MagicMock()
+        session.post = MagicMock(
+            return_value=_FakeResponse(400, text_body='{"error":"Unknown block"}'),
+        )
+
+        with (
+            patch.object(svc, "_get_session", AsyncMock(return_value=session)),
+            patch("asyncio.sleep", AsyncMock()) as mock_sleep,
+        ):
+            result, error = await svc._make_rpc_call(
+                "https://rpc.example", "eth_sendRawTransaction", ["0xdeadbeef"], "1", chain="base"
+            )
+
+        assert result is None
+        assert error is not None
+        assert session.post.call_count == 1
+        mock_sleep.assert_not_called()
+        assert svc._metrics.indexer_lag_retries == 0
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("Unknown block", True),
+            ("missing trie node 0xabc", True),
+            ("no state available for block", True),
+            ("execution reverted", False),
+            ("invalid api key", False),
+            ("invalid argument 0: hex string too short", False),
+            ("", False),
+            (None, False),
+            # Non-compliant providers may return a non-string message field —
+            # the classifier must not crash, it returns False (fail fast).
+            (123, False),
+            ({"error": "Unknown block"}, False),
+            (["Unknown block"], False),
+        ],
+    )
+    def test_is_indexer_lag_error_classifier(self, message, expected):
+        assert RpcServiceServicer._is_indexer_lag_error(message) is expected

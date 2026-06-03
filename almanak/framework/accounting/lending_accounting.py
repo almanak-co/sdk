@@ -701,11 +701,22 @@ def build_lending_accounting_event(  # noqa: C901
 
     is_morpho = protocol.lower() == "morpho_blue"
 
-    # Generic read path for every protocol with a connector-owned account-state
-    # spec (Aave, Morpho, Compound V3, …). ``block=None`` here preserves the
-    # pre-VIB-4929 event-builder semantics: the event-builder post-state read was
-    # never block-pinned (the pinned post-state capture is the runner's
-    # ``capture_lending_post_state`` path).
+    # VIB-4964: pin the after-state read to the confirmed receipt's block,
+    # mirroring the runner's ``capture_lending_post_state`` path (VIB-4589/F7).
+    # The legacy ``block=None`` → ``"latest"`` read is wrong in two ways: in a
+    # replay reprocessing it reads *present-day* state for a *historical* event,
+    # and live it races the upstream RPC's receipt indexer. Reuses the canonical
+    # receipt-block extractor (single source of truth; same lazy cross-module
+    # reuse the runner's ``teardown_commit`` already relies on — VIB-4987 tracks
+    # relocating both helpers to a shared module to retire the accounting→runner
+    # edge). ``None`` (no receipt available) falls back to ``"latest"``,
+    # preserving prior behaviour.
+    # Indexer lag at the pinned block is absorbed by the gateway RPC retry
+    # (VIB-4985 / ALM-2777), so the pin no longer trades stale-data for a
+    # missing read.
+    from almanak.framework.runner.strategy_runner import _last_receipt_block
+
+    post_block = _last_receipt_block(result)
     if gateway_client is not None and protocol.lower() in _GENERIC_PRE_STATE_PROTOCOLS:
         query_inputs = LendingReadRegistry.query_inputs(protocol, intent)
         if query_inputs is not None and (
@@ -724,6 +735,7 @@ def build_lending_accounting_event(  # noqa: C901
                     wallet_address=wallet_address,
                     gateway_client=gateway_client,
                     price_oracle=price_oracle,
+                    block=post_block,
                     **query_inputs,
                 )
                 # Aave-family intent-metadata overlay (interest_rate_mode), gated on
