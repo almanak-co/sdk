@@ -11,6 +11,19 @@ This module provides visualization components for TA-based strategies including:
 These plots are designed for any strategy using technical indicators
 for trade signal generation.
 
+Subplot targeting (VIB-4982)
+----------------------------
+Every per-indicator helper (``plot_price_with_signals``, ``plot_rsi_indicator``,
+``plot_macd_indicator``, ``plot_stochastic_indicator``, ``plot_bollinger_bands``,
+``plot_cci_indicator``, ``plot_atr_indicator``, ``plot_adx_indicator``) accepts
+an optional ``target=(fig, row, col)``. When a target is supplied the helper ADDS
+its traces + per-row axis styling to that existing :class:`~plotly.subplots`
+figure (and returns it) instead of building a standalone figure. This lets the
+multi-indicator TA dashboard compose ONE ``make_subplots`` figure — price on row
+1, each indicator on its own row, all sharing/linking one time axis — while the
+single-indicator path (``target=None``) is unchanged. Both paths share one
+trace-builder per indicator, so they can never drift.
+
 Example:
     from almanak.framework.dashboard.plots.ta_plots import (
         plot_price_with_signals,
@@ -51,6 +64,33 @@ from almanak.framework.dashboard.plots.base import (
     get_default_config,
 )
 
+# A subplot target: ``(figure, row, col)``. When a TA plot helper receives one it
+# ADDS its traces + per-row axis styling to that subplot instead of building its
+# own standalone figure. This is the mechanism the multi-indicator TA dashboard
+# uses to stack price + every indicator under a single ``make_subplots`` figure
+# with one shared/linked time axis (VIB-4982). When ``target`` is ``None`` the
+# helper builds and returns a standalone ``go.Figure`` exactly as before — the
+# single-indicator path is byte-for-byte unchanged.
+SubplotTarget = tuple[go.Figure, int, int]
+
+
+def _resolve_target(
+    target: SubplotTarget | None,
+) -> tuple[go.Figure, int | None, int | None, bool]:
+    """Resolve a plot helper's drawing surface.
+
+    Returns ``(fig, row, col, standalone)``. With a target the helper draws into
+    the supplied figure at ``(row, col)`` and ``standalone`` is False (skip the
+    standalone ``update_layout`` / ``apply_theme`` — the composite figure owns
+    layout). Without a target a fresh ``go.Figure`` is created, ``row``/``col``
+    are ``None`` (Plotly ignores them for a single-axis figure), and
+    ``standalone`` is True.
+    """
+    if target is not None:
+        fig, row, col = target
+        return fig, row, col, False
+    return go.Figure(), None, None, True
+
 
 @dataclass
 class TAMetrics:
@@ -81,6 +121,37 @@ class TAMetrics:
     worst_trade: float = 0.0
 
 
+def _resolve_price_columns(
+    price_data: pd.DataFrame,
+    time_column: str,
+    price_column: str,
+) -> tuple[str | None, str | None]:
+    """Resolve the time / price column names in a price DataFrame.
+
+    Prefers the configured ``time_column`` / ``price_column`` and falls back to a
+    list of common aliases (``timestamp``/``Time``/``date`` for time,
+    ``close``/``Price`` for price). Returns ``(None, None)`` when either column
+    cannot be resolved so the caller can surface an "invalid format" figure.
+    """
+    time_col = time_column if time_column in price_data.columns else "time"
+    price_col = price_column if price_column in price_data.columns else "price"
+
+    if time_col not in price_data.columns:
+        for alt in ["timestamp", "Timestamp", "Time", "date", "Date"]:
+            if alt in price_data.columns:
+                time_col = alt
+                break
+    if price_col not in price_data.columns:
+        for alt in ["close", "Close", "Price"]:
+            if alt in price_data.columns:
+                price_col = alt
+                break
+
+    if time_col not in price_data.columns or price_col not in price_data.columns:
+        return None, None
+    return time_col, price_col
+
+
 def plot_price_with_signals(
     price_data: pd.DataFrame,
     buy_signals: pd.DataFrame | None = None,
@@ -90,6 +161,7 @@ def plot_price_with_signals(
     price_column: str = "price",
     title: str = "Price Chart with Signals",
     config: PlotConfig | None = None,
+    target: SubplotTarget | None = None,
 ) -> go.Figure:
     """Plot price data with buy/sell signals and optional indicators.
 
@@ -105,36 +177,29 @@ def plot_price_with_signals(
         price_column: Name of price column in price_data
         title: Chart title
         config: Plot configuration
+        target: Optional ``(fig, row, col)`` subplot target. When supplied the
+            price line + signals are added to that subplot row instead of a new
+            standalone figure (see module docstring).
 
     Returns:
-        Plotly figure with price and signals
+        Plotly figure with price and signals (the ``target`` figure when one is
+        supplied, otherwise a new standalone figure).
     """
     config = config or get_default_config()
     colors = config.colors
 
     if price_data.empty:
+        if target is not None:
+            return target[0]
         return create_empty_figure("No price data available", config)
 
-    # Normalize column names
-    time_col = time_column if time_column in price_data.columns else "time"
-    price_col = price_column if price_column in price_data.columns else "price"
-
-    # Handle alternative column names
-    if time_col not in price_data.columns:
-        for alt in ["timestamp", "Timestamp", "Time", "date", "Date"]:
-            if alt in price_data.columns:
-                time_col = alt
-                break
-    if price_col not in price_data.columns:
-        for alt in ["close", "Close", "Price"]:
-            if alt in price_data.columns:
-                price_col = alt
-                break
-
-    if time_col not in price_data.columns or price_col not in price_data.columns:
+    time_col, price_col = _resolve_price_columns(price_data, time_column, price_column)
+    if time_col is None or price_col is None:
+        if target is not None:
+            return target[0]
         return create_empty_figure("Invalid price data format", config)
 
-    fig = go.Figure()
+    fig, row, col, standalone = _resolve_target(target)
 
     # Add price line
     fig.add_trace(
@@ -144,7 +209,9 @@ def plot_price_with_signals(
             mode="lines",
             name="Price",
             line={"color": colors.primary, "width": config.line_width},
-        )
+        ),
+        row=row,
+        col=col,
     )
 
     # Add indicators if provided
@@ -159,7 +226,9 @@ def plot_price_with_signals(
                     mode="lines",
                     name=name,
                     line={"color": color, "width": config.line_width},
-                )
+                ),
+                row=row,
+                col=col,
             )
 
     # Add buy signals
@@ -179,7 +248,9 @@ def plot_price_with_signals(
                         "color": colors.buy,
                         "line": {"width": 2, "color": "#1E8449"},
                     },
-                )
+                ),
+                row=row,
+                col=col,
             )
 
     # Add sell signals
@@ -199,8 +270,14 @@ def plot_price_with_signals(
                         "color": colors.sell,
                         "line": {"width": 2, "color": "#C0392B"},
                     },
-                )
+                ),
+                row=row,
+                col=col,
             )
+
+    if not standalone:
+        fig.update_yaxes(title_text="Price", row=row, col=col)
+        return fig
 
     fig.update_layout(
         title={"text": title, "font": {"size": config.title_font_size}},
@@ -220,6 +297,7 @@ def plot_rsi_indicator(
     current_value: float | None = None,
     title: str = "RSI Indicator",
     config: PlotConfig | None = None,
+    target: SubplotTarget | None = None,
 ) -> go.Figure:
     """Plot RSI indicator with overbought/oversold zones.
 
@@ -231,6 +309,7 @@ def plot_rsi_indicator(
         current_value: Current RSI value to highlight
         title: Chart title
         config: Plot configuration
+        target: Optional ``(fig, row, col)`` subplot target (see module docstring).
 
     Returns:
         Plotly figure with RSI indicator
@@ -242,9 +321,11 @@ def plot_rsi_indicator(
         rsi_data = pd.Series(rsi_data)
 
     if len(rsi_data) == 0:
+        if target is not None:
+            return target[0]
         return create_empty_figure("No RSI data available", config)
 
-    fig = go.Figure()
+    fig, row, col, standalone = _resolve_target(target)
 
     # Add RSI line
     fig.add_trace(
@@ -254,7 +335,9 @@ def plot_rsi_indicator(
             mode="lines",
             name="RSI",
             line={"color": colors.secondary, "width": config.line_width},
-        )
+        ),
+        row=row,
+        col=col,
     )
 
     # Add overbought/oversold lines
@@ -264,6 +347,8 @@ def plot_rsi_indicator(
         line_color=colors.danger,
         annotation_text=f"Overbought ({overbought})",
         annotation_position="bottom right",
+        row=row,
+        col=col,
     )
     fig.add_hline(
         y=oversold,
@@ -271,17 +356,20 @@ def plot_rsi_indicator(
         line_color=colors.success,
         annotation_text=f"Oversold ({oversold})",
         annotation_position="top right",
+        row=row,
+        col=col,
     )
 
     # Add neutral line
-    fig.add_hline(y=50, line_dash="dot", line_color=colors.neutral, line_width=1)
+    fig.add_hline(y=50, line_dash="dot", line_color=colors.neutral, line_width=1, row=row, col=col)
 
     # Add shaded zones
-    fig.add_hrect(y0=overbought, y1=100, fillcolor=colors.danger, opacity=0.1)
-    fig.add_hrect(y0=0, y1=oversold, fillcolor=colors.success, opacity=0.1)
+    fig.add_hrect(y0=overbought, y1=100, fillcolor=colors.danger, opacity=0.1, row=row, col=col)
+    fig.add_hrect(y0=0, y1=oversold, fillcolor=colors.success, opacity=0.1, row=row, col=col)
 
-    # Highlight current value if provided
-    if current_value is not None:
+    # Highlight current value if provided (paper-anchored annotation — only
+    # meaningful for a standalone single-axis figure).
+    if current_value is not None and standalone:
         # Determine color based on zone
         if current_value >= overbought:
             current_color = colors.danger
@@ -303,6 +391,10 @@ def plot_rsi_indicator(
             xanchor="left",
         )
 
+    if not standalone:
+        fig.update_yaxes(title_text="RSI", range=[0, 100], row=row, col=col)
+        return fig
+
     fig.update_layout(
         title={"text": title, "font": {"size": config.title_font_size}},
         xaxis_title="Time",
@@ -320,6 +412,7 @@ def plot_macd_indicator(
     time_index: pd.DatetimeIndex | pd.Series | list,
     title: str = "MACD Indicator",
     config: PlotConfig | None = None,
+    target: SubplotTarget | None = None,
 ) -> go.Figure:
     """Plot MACD indicator with signal line and histogram.
 
@@ -330,6 +423,11 @@ def plot_macd_indicator(
         time_index: DateTime index for x-axis
         title: Chart title
         config: Plot configuration
+        target: Optional ``(fig, row, col)`` subplot target (see module docstring).
+            In standalone mode MACD/signal and the histogram occupy two stacked
+            internal rows; when targeting a composite figure all three series
+            (MACD, signal, histogram) are drawn into the single target row so the
+            indicator fits one stacked panel.
 
     Returns:
         Plotly figure with MACD indicator
@@ -345,9 +443,53 @@ def plot_macd_indicator(
         macd_hist = pd.Series(macd_hist)
 
     if len(macd) == 0:
+        if target is not None:
+            return target[0]
         return create_empty_figure("No MACD data available", config)
 
-    # Create subplots
+    hist_colors = [colors.success if val >= 0 else colors.danger for val in macd_hist]
+
+    if target is not None:
+        # Composite mode: MACD + signal + histogram all share the single target
+        # row (no nested 2-row subplot inside one panel).
+        fig, row, col = target
+        fig.add_trace(
+            go.Scatter(
+                x=time_index,
+                y=macd,
+                mode="lines",
+                name="MACD",
+                line={"color": colors.primary, "width": config.line_width},
+            ),
+            row=row,
+            col=col,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=time_index,
+                y=macd_signal,
+                mode="lines",
+                name="Signal",
+                line={"color": colors.danger, "width": config.line_width},
+            ),
+            row=row,
+            col=col,
+        )
+        fig.add_trace(
+            go.Bar(
+                x=time_index,
+                y=macd_hist,
+                name="Histogram",
+                marker_color=hist_colors,
+            ),
+            row=row,
+            col=col,
+        )
+        fig.add_hline(y=0, line_color=colors.neutral, row=row, col=col)
+        fig.update_yaxes(title_text="MACD", row=row, col=col)
+        return fig
+
+    # Standalone: dedicated 2-row subplot (MACD/Signal over histogram).
     fig = make_subplots(
         rows=2,
         cols=1,
@@ -382,7 +524,6 @@ def plot_macd_indicator(
     )
 
     # Histogram with color based on sign
-    hist_colors = [colors.success if val >= 0 else colors.danger for val in macd_hist]
     fig.add_trace(
         go.Bar(
             x=time_index,
@@ -421,6 +562,7 @@ def plot_stochastic_indicator(
     signal_low: float = 30,
     title: str = "Stochastic Oscillator",
     config: PlotConfig | None = None,
+    target: SubplotTarget | None = None,
 ) -> go.Figure:
     """Plot Stochastic Oscillator with %K and %D lines.
 
@@ -434,6 +576,7 @@ def plot_stochastic_indicator(
         signal_low: Lower signal threshold (default 30)
         title: Chart title
         config: Plot configuration
+        target: Optional ``(fig, row, col)`` subplot target (see module docstring).
 
     Returns:
         Plotly figure with Stochastic Oscillator
@@ -447,9 +590,11 @@ def plot_stochastic_indicator(
         stoch_d = pd.Series(stoch_d)
 
     if len(stoch_k) == 0:
+        if target is not None:
+            return target[0]
         return create_empty_figure("No Stochastic data available", config)
 
-    fig = go.Figure()
+    fig, row, col, standalone = _resolve_target(target)
 
     # Add %K and %D lines
     fig.add_trace(
@@ -459,7 +604,9 @@ def plot_stochastic_indicator(
             mode="lines",
             name="%K",
             line={"color": colors.primary, "width": config.line_width},
-        )
+        ),
+        row=row,
+        col=col,
     )
     fig.add_trace(
         go.Scatter(
@@ -468,7 +615,9 @@ def plot_stochastic_indicator(
             mode="lines",
             name="%D",
             line={"color": colors.warning, "width": config.line_width},
-        )
+        ),
+        row=row,
+        col=col,
     )
 
     # Add overbought/oversold zones
@@ -477,21 +626,29 @@ def plot_stochastic_indicator(
         line_dash="dash",
         line_color=colors.danger,
         annotation_text=f"Overbought ({overbought})",
+        row=row,
+        col=col,
     )
     fig.add_hline(
         y=oversold,
         line_dash="dash",
         line_color=colors.success,
         annotation_text=f"Oversold ({oversold})",
+        row=row,
+        col=col,
     )
 
     # Add signal thresholds
-    fig.add_hline(y=signal_high, line_dash="dot", line_color=colors.danger, line_width=1)
-    fig.add_hline(y=signal_low, line_dash="dot", line_color=colors.success, line_width=1)
+    fig.add_hline(y=signal_high, line_dash="dot", line_color=colors.danger, line_width=1, row=row, col=col)
+    fig.add_hline(y=signal_low, line_dash="dot", line_color=colors.success, line_width=1, row=row, col=col)
 
     # Add shaded zones
-    fig.add_hrect(y0=overbought, y1=100, fillcolor=colors.danger, opacity=0.1)
-    fig.add_hrect(y0=0, y1=oversold, fillcolor=colors.success, opacity=0.1)
+    fig.add_hrect(y0=overbought, y1=100, fillcolor=colors.danger, opacity=0.1, row=row, col=col)
+    fig.add_hrect(y0=0, y1=oversold, fillcolor=colors.success, opacity=0.1, row=row, col=col)
+
+    if not standalone:
+        fig.update_yaxes(title_text="Stochastic", range=[0, 100], row=row, col=col)
+        return fig
 
     fig.update_layout(
         title={"text": title, "font": {"size": config.title_font_size}},
@@ -511,6 +668,7 @@ def plot_bollinger_bands(
     time_index: pd.DatetimeIndex | pd.Series | list,
     title: str = "Bollinger Bands",
     config: PlotConfig | None = None,
+    target: SubplotTarget | None = None,
 ) -> go.Figure:
     """Plot price with Bollinger Bands.
 
@@ -522,6 +680,7 @@ def plot_bollinger_bands(
         time_index: DateTime index for x-axis
         title: Chart title
         config: Plot configuration
+        target: Optional ``(fig, row, col)`` subplot target (see module docstring).
 
     Returns:
         Plotly figure with Bollinger Bands
@@ -533,9 +692,11 @@ def plot_bollinger_bands(
         price_data = pd.Series(price_data)
 
     if len(price_data) == 0:
+        if target is not None:
+            return target[0]
         return create_empty_figure("No price data available", config)
 
-    fig = go.Figure()
+    fig, row, col, standalone = _resolve_target(target)
 
     # Add upper band first (for fill)
     fig.add_trace(
@@ -545,7 +706,9 @@ def plot_bollinger_bands(
             mode="lines",
             name="Upper Band",
             line={"color": colors.neutral, "width": 1, "dash": "dash"},
-        )
+        ),
+        row=row,
+        col=col,
     )
 
     # Add lower band with fill to upper
@@ -558,7 +721,9 @@ def plot_bollinger_bands(
             line={"color": colors.neutral, "width": 1, "dash": "dash"},
             fill="tonexty",
             fillcolor="rgba(128, 128, 128, 0.2)",
-        )
+        ),
+        row=row,
+        col=col,
     )
 
     # Add middle band (SMA)
@@ -569,7 +734,9 @@ def plot_bollinger_bands(
             mode="lines",
             name="Middle Band (SMA)",
             line={"color": colors.warning, "width": 1},
-        )
+        ),
+        row=row,
+        col=col,
     )
 
     # Add price line on top
@@ -580,8 +747,14 @@ def plot_bollinger_bands(
             mode="lines",
             name="Price",
             line={"color": colors.primary, "width": config.line_width},
-        )
+        ),
+        row=row,
+        col=col,
     )
+
+    if not standalone:
+        fig.update_yaxes(title_text="Price", row=row, col=col)
+        return fig
 
     fig.update_layout(
         title={"text": title, "font": {"size": config.title_font_size}},
@@ -762,6 +935,7 @@ def plot_cci_indicator(
     oversold: float = -100,
     title: str = "CCI Indicator",
     config: PlotConfig | None = None,
+    target: SubplotTarget | None = None,
 ) -> go.Figure:
     """Plot Commodity Channel Index (CCI) indicator.
 
@@ -772,6 +946,7 @@ def plot_cci_indicator(
         oversold: Oversold threshold (default -100)
         title: Chart title
         config: Plot configuration
+        target: Optional ``(fig, row, col)`` subplot target (see module docstring).
 
     Returns:
         Plotly figure with CCI indicator
@@ -783,9 +958,11 @@ def plot_cci_indicator(
         cci_data = pd.Series(cci_data)
 
     if len(cci_data) == 0:
+        if target is not None:
+            return target[0]
         return create_empty_figure("No CCI data available", config)
 
-    fig = go.Figure()
+    fig, row, col, standalone = _resolve_target(target)
 
     # Add CCI line
     fig.add_trace(
@@ -795,19 +972,37 @@ def plot_cci_indicator(
             mode="lines",
             name="CCI",
             line={"color": colors.secondary, "width": config.line_width},
-        )
+        ),
+        row=row,
+        col=col,
     )
 
     # Add threshold lines
     fig.add_hline(
-        y=overbought, line_dash="dash", line_color=colors.danger, annotation_text=f"Overbought ({overbought})"
+        y=overbought,
+        line_dash="dash",
+        line_color=colors.danger,
+        annotation_text=f"Overbought ({overbought})",
+        row=row,
+        col=col,
     )
-    fig.add_hline(y=oversold, line_dash="dash", line_color=colors.success, annotation_text=f"Oversold ({oversold})")
-    fig.add_hline(y=0, line_dash="dot", line_color=colors.neutral)
+    fig.add_hline(
+        y=oversold,
+        line_dash="dash",
+        line_color=colors.success,
+        annotation_text=f"Oversold ({oversold})",
+        row=row,
+        col=col,
+    )
+    fig.add_hline(y=0, line_dash="dot", line_color=colors.neutral, row=row, col=col)
 
     # Add shaded zones
-    fig.add_hrect(y0=overbought, y1=cci_data.max() + 50, fillcolor=colors.danger, opacity=0.1)
-    fig.add_hrect(y0=cci_data.min() - 50, y1=oversold, fillcolor=colors.success, opacity=0.1)
+    fig.add_hrect(y0=overbought, y1=cci_data.max() + 50, fillcolor=colors.danger, opacity=0.1, row=row, col=col)
+    fig.add_hrect(y0=cci_data.min() - 50, y1=oversold, fillcolor=colors.success, opacity=0.1, row=row, col=col)
+
+    if not standalone:
+        fig.update_yaxes(title_text="CCI", row=row, col=col)
+        return fig
 
     fig.update_layout(
         title={"text": title, "font": {"size": config.title_font_size}},
@@ -823,6 +1018,7 @@ def plot_atr_indicator(
     time_index: pd.DatetimeIndex | pd.Series | list,
     title: str = "ATR (Average True Range)",
     config: PlotConfig | None = None,
+    target: SubplotTarget | None = None,
 ) -> go.Figure:
     """Plot Average True Range (ATR) indicator.
 
@@ -831,6 +1027,7 @@ def plot_atr_indicator(
         time_index: DateTime index for x-axis
         title: Chart title
         config: Plot configuration
+        target: Optional ``(fig, row, col)`` subplot target (see module docstring).
 
     Returns:
         Plotly figure with ATR indicator
@@ -842,9 +1039,11 @@ def plot_atr_indicator(
         atr_data = pd.Series(atr_data)
 
     if len(atr_data) == 0:
+        if target is not None:
+            return target[0]
         return create_empty_figure("No ATR data available", config)
 
-    fig = go.Figure()
+    fig, row, col, standalone = _resolve_target(target)
 
     # Add ATR line with fill
     fig.add_trace(
@@ -856,12 +1055,25 @@ def plot_atr_indicator(
             line={"color": colors.warning, "width": config.line_width},
             fill="tozeroy",
             fillcolor=f"rgba({int(colors.warning[1:3], 16)}, {int(colors.warning[3:5], 16)}, {int(colors.warning[5:7], 16)}, 0.1)",
-        )
+        ),
+        row=row,
+        col=col,
     )
 
     # Add average line
     avg_atr = atr_data.mean()
-    fig.add_hline(y=avg_atr, line_dash="dash", line_color=colors.neutral, annotation_text=f"Avg: {avg_atr:.4f}")
+    fig.add_hline(
+        y=avg_atr,
+        line_dash="dash",
+        line_color=colors.neutral,
+        annotation_text=f"Avg: {avg_atr:.4f}",
+        row=row,
+        col=col,
+    )
+
+    if not standalone:
+        fig.update_yaxes(title_text="ATR", row=row, col=col)
+        return fig
 
     fig.update_layout(
         title={"text": title, "font": {"size": config.title_font_size}},
@@ -880,6 +1092,7 @@ def plot_adx_indicator(
     trend_threshold: float = 25,
     title: str = "ADX (Average Directional Index)",
     config: PlotConfig | None = None,
+    target: SubplotTarget | None = None,
 ) -> go.Figure:
     """Plot Average Directional Index (ADX) with +DI / -DI lines.
 
@@ -892,6 +1105,7 @@ def plot_adx_indicator(
             (default 25)
         title: Chart title
         config: Plot configuration
+        target: Optional ``(fig, row, col)`` subplot target (see module docstring).
 
     Returns:
         Plotly figure with ADX and the directional indicators
@@ -907,9 +1121,11 @@ def plot_adx_indicator(
         minus_di = pd.Series(minus_di)
 
     if len(adx_data) == 0:
+        if target is not None:
+            return target[0]
         return create_empty_figure("No ADX data available", config)
 
-    fig = go.Figure()
+    fig, row, col, standalone = _resolve_target(target)
 
     # ADX trend-strength line
     fig.add_trace(
@@ -919,7 +1135,9 @@ def plot_adx_indicator(
             mode="lines",
             name="ADX",
             line={"color": colors.primary, "width": config.line_width},
-        )
+        ),
+        row=row,
+        col=col,
     )
     # +DI / -DI directional lines
     fig.add_trace(
@@ -929,7 +1147,9 @@ def plot_adx_indicator(
             mode="lines",
             name="+DI",
             line={"color": colors.success, "width": 1},
-        )
+        ),
+        row=row,
+        col=col,
     )
     fig.add_trace(
         go.Scatter(
@@ -938,7 +1158,9 @@ def plot_adx_indicator(
             mode="lines",
             name="-DI",
             line={"color": colors.danger, "width": 1},
-        )
+        ),
+        row=row,
+        col=col,
     )
 
     # Trend-strength threshold
@@ -947,7 +1169,13 @@ def plot_adx_indicator(
         line_dash="dash",
         line_color=colors.neutral,
         annotation_text=f"Trend ({trend_threshold})",
+        row=row,
+        col=col,
     )
+
+    if not standalone:
+        fig.update_yaxes(title_text="ADX / DI", row=row, col=col)
+        return fig
 
     fig.update_layout(
         title={"text": title, "font": {"size": config.title_font_size}},

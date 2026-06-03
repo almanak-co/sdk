@@ -68,7 +68,8 @@ from almanak.framework.dashboard.plots import (
     plot_rsi_indicator,
     plot_stochastic_indicator,
 )
-from almanak.framework.dashboard.plots.base import get_default_config
+from almanak.framework.dashboard.plots.base import apply_theme, get_default_config
+from almanak.framework.dashboard.plots.ta_plots import SubplotTarget
 from almanak.framework.dashboard.sections import (
     render_cost_stack_section,
     render_pnl_section,
@@ -1395,12 +1396,19 @@ def _indicator_present(data: Any) -> bool:
     return bool(data)
 
 
-# --- Standalone indicator panels (the indicator chart only, no price line) ---
-# Shared by the single-indicator dedicated renderers (price + panel) and the
-# multi-signal layout (price once, then one panel per indicator).
+# --- Indicator panels (the indicator chart only, no price line) ---
+# Shared by the single-indicator dedicated renderers and the multi-signal layout.
+# Each panel threads an optional ``target=(fig, row, col)`` to its plot helper:
+#   * ``target is None`` → the panel builds a standalone figure and renders it via
+#     ``st.plotly_chart`` (single-indicator path, unchanged).
+#   * ``target`` supplied → the panel ADDS its traces to that subplot row and does
+#     NOT call ``st.plotly_chart`` (the multi-indicator composite renders the one
+#     shared figure itself). See ``_render_multi_indicator_charts`` (VIB-4982).
 
 
-def _panel_rsi(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> None:
+def _panel_rsi(
+    price_df: pd.DataFrame, data: Any, config: TADashboardConfig, target: SubplotTarget | None = None
+) -> None:
     series = _as_indicator_series(data)
     if series is None:
         return
@@ -1409,20 +1417,27 @@ def _panel_rsi(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> 
         time_index=series.index,
         overbought=config.upper_threshold if config.upper_threshold is not None else 70,
         oversold=config.lower_threshold if config.lower_threshold is not None else 30,
+        target=target,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    if target is None:
+        st.plotly_chart(fig, use_container_width=True)
 
 
-def _panel_macd(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> None:
+def _panel_macd(
+    price_df: pd.DataFrame, data: Any, config: TADashboardConfig, target: SubplotTarget | None = None
+) -> None:
     if not (isinstance(data, pd.DataFrame) and not data.empty):
         return
     fig = plot_macd_indicator(
-        macd=data["macd"], macd_signal=data["signal"], macd_hist=data["histogram"], time_index=data.index
+        macd=data["macd"], macd_signal=data["signal"], macd_hist=data["histogram"], time_index=data.index, target=target
     )
-    st.plotly_chart(fig, use_container_width=True)
+    if target is None:
+        st.plotly_chart(fig, use_container_width=True)
 
 
-def _panel_bollinger(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> None:
+def _panel_bollinger(
+    price_df: pd.DataFrame, data: Any, config: TADashboardConfig, target: SubplotTarget | None = None
+) -> None:
     if not (isinstance(data, pd.DataFrame) and not data.empty):
         return
     price_aligned = price_df.set_index("time")["price"].reindex(data.index)
@@ -1432,11 +1447,15 @@ def _panel_bollinger(price_df: pd.DataFrame, data: Any, config: TADashboardConfi
         middle_band=data["middle"],
         lower_band=data["lower"],
         time_index=data.index,
+        target=target,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    if target is None:
+        st.plotly_chart(fig, use_container_width=True)
 
 
-def _panel_cci(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> None:
+def _panel_cci(
+    price_df: pd.DataFrame, data: Any, config: TADashboardConfig, target: SubplotTarget | None = None
+) -> None:
     series = _as_indicator_series(data)
     if series is None:
         return
@@ -1445,11 +1464,15 @@ def _panel_cci(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> 
         time_index=series.index,
         overbought=config.upper_threshold if config.upper_threshold is not None else 100,
         oversold=config.lower_threshold if config.lower_threshold is not None else -100,
+        target=target,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    if target is None:
+        st.plotly_chart(fig, use_container_width=True)
 
 
-def _panel_stochastic(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> None:
+def _panel_stochastic(
+    price_df: pd.DataFrame, data: Any, config: TADashboardConfig, target: SubplotTarget | None = None
+) -> None:
     if not (isinstance(data, pd.DataFrame) and not data.empty):
         return
     fig = plot_stochastic_indicator(
@@ -1458,19 +1481,26 @@ def _panel_stochastic(price_df: pd.DataFrame, data: Any, config: TADashboardConf
         time_index=data.index,
         overbought=config.upper_threshold if config.upper_threshold is not None else 80,
         oversold=config.lower_threshold if config.lower_threshold is not None else 20,
+        target=target,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    if target is None:
+        st.plotly_chart(fig, use_container_width=True)
 
 
-def _panel_atr(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> None:
+def _panel_atr(
+    price_df: pd.DataFrame, data: Any, config: TADashboardConfig, target: SubplotTarget | None = None
+) -> None:
     series = _as_indicator_series(data)
     if series is None:
         return
-    fig = plot_atr_indicator(atr_data=series, time_index=series.index)
-    st.plotly_chart(fig, use_container_width=True)
+    fig = plot_atr_indicator(atr_data=series, time_index=series.index, target=target)
+    if target is None:
+        st.plotly_chart(fig, use_container_width=True)
 
 
-def _panel_adx(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> None:
+def _panel_adx(
+    price_df: pd.DataFrame, data: Any, config: TADashboardConfig, target: SubplotTarget | None = None
+) -> None:
     if not (isinstance(data, pd.DataFrame) and not data.empty):
         return
     fig = plot_adx_indicator(
@@ -1479,25 +1509,33 @@ def _panel_adx(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> 
         minus_di=data["minus_di"],
         time_index=data.index,
         trend_threshold=config.lower_threshold if config.lower_threshold is not None else 25,
+        target=target,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    if target is None:
+        st.plotly_chart(fig, use_container_width=True)
 
 
-def _panel_generic(price_df: pd.DataFrame, data: Any, config: TADashboardConfig) -> None:
+def _panel_generic(
+    price_df: pd.DataFrame, data: Any, config: TADashboardConfig, target: SubplotTarget | None = None
+) -> None:
     """Fallback single-line panel for an indicator with no dedicated chart."""
     series = _as_indicator_series(data)
     if series is None:
         return
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=series.index,
-            y=series.values,
-            mode="lines",
-            name=config.indicator_name,
-            line={"color": "#1f77b4", "width": 2},
-        )
+    trace = go.Scatter(
+        x=series.index,
+        y=series.values,
+        mode="lines",
+        name=config.indicator_name,
+        line={"color": "#1f77b4", "width": 2},
     )
+    if target is not None:
+        fig, row, col = target
+        fig.add_trace(trace, row=row, col=col)
+        fig.update_yaxes(title_text=config.indicator_name, row=row, col=col)
+        return
+    fig = go.Figure()
+    fig.add_trace(trace)
     fig.update_layout(
         title=f"{config.indicator_name} Indicator",
         xaxis_title="Time",
@@ -1507,8 +1545,8 @@ def _panel_generic(price_df: pd.DataFrame, data: Any, config: TADashboardConfig)
     st.plotly_chart(fig, use_container_width=True)
 
 
-# Uppercased ``config.indicator_name`` → standalone panel builder.
-_INDICATOR_PANELS: dict[str, Callable[[pd.DataFrame, Any, TADashboardConfig], None]] = {
+# Uppercased ``config.indicator_name`` → panel builder.
+_INDICATOR_PANELS: dict[str, Callable[..., None]] = {
     "RSI": _panel_rsi,
     "MACD": _panel_macd,
     "BOLLINGER": _panel_bollinger,
@@ -1536,6 +1574,43 @@ def _multi_indicator_slots(config: TADashboardConfig) -> list[tuple[str, TADashb
     return slots
 
 
+def _multi_indicator_panel_data(
+    session_state: dict[str, Any],
+    slot: str,
+) -> Any:
+    """Read a slot's computed indicator series from session state.
+
+    Mirrors the single-indicator key resolution: prefer ``{slot}_data`` (the
+    multi-series DataFrame payloads — MACD/Bollinger/Stochastic/ADX) and fall
+    back to ``{slot}_history`` (the single-line Series payloads — RSI/CCI/ATR).
+    """
+    data = session_state.get(f"{slot}_data")
+    if data is None:
+        data = session_state.get(f"{slot}_history")
+    return data
+
+
+def _annotate_empty_row(fig: Any, row: int, text: str) -> None:
+    """Place a centered "no data" annotation in a composite subplot row.
+
+    Used so a price/indicator row with no data keeps its slot in the shared-axis
+    figure (stable ``1 + N`` layout) and announces the gap in-place instead of
+    rendering blank. ``xref/yref="x/y domain"`` + ``row``/``col`` lets Plotly
+    resolve the annotation to that row's domain.
+    """
+    fig.add_annotation(
+        text=text,
+        xref="x domain",
+        yref="y domain",
+        x=0.5,
+        y=0.5,
+        showarrow=False,
+        font={"color": "#7F8C8D", "size": 12},
+        row=row,
+        col=1,
+    )
+
+
 def _render_multi_indicator_charts(
     session_state: dict[str, Any],
     config: TADashboardConfig,
@@ -1543,26 +1618,76 @@ def _render_multi_indicator_charts(
     buy_df: pd.DataFrame | None,
     sell_df: pd.DataFrame | None,
 ) -> None:
-    """Stacked multi-signal layout: price+signals once, then one panel per indicator.
+    """Stacked multi-signal layout: ONE shared-axis ``make_subplots`` figure.
 
-    Iterates the primary config plus ``config.extra_indicators``; each panel
-    reuses the same ``almanak.framework.dashboard.plots`` primitive as the
-    single-indicator path, so all panels share one time axis. An indicator with
-    no computed series is announced (not silently dropped).
+    VIB-4982: the multi-indicator dashboard composes a single
+    ``make_subplots(rows=1+N, cols=1, shared_xaxes=True)`` figure — price +
+    buy/sell signals on row 1, then one indicator per row beneath it — and
+    renders it with a single ``st.plotly_chart`` call. Every panel draws into its
+    target row via the SAME ``almanak.framework.dashboard.plots`` primitive the
+    single-indicator path uses (the ``target=(fig, row, col)`` parameter), so the
+    two paths can never drift in how a given indicator is drawn, and all rows
+    share/link one time axis (zoom/pan/hover move together).
+
+    An indicator with no computed series keeps its row (so the 1+N row mapping is
+    stable) and is announced with an in-row annotation rather than being silently
+    dropped.
     """
-    _render_price_signals(price_df, buy_df, sell_df)
-    for slot, cfg in _multi_indicator_slots(config):
+    slots = _multi_indicator_slots(config)
+    n_indicators = len(slots)
+    total_rows = 1 + n_indicators
+
+    # Price row gets ~2x the height of each indicator row.
+    row_heights = [2.0, *([1.0] * n_indicators)]
+    subplot_titles = ["Price with Buy/Sell Signals", *[cfg.indicator_name for _, cfg in slots]]
+
+    fig = make_subplots(
+        rows=total_rows,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=min(0.05, 0.5 / total_rows),
+        row_heights=row_heights,
+        subplot_titles=subplot_titles,
+    )
+
+    # Row 1: price + buy/sell signals (shares the trace-builder with the
+    # single-indicator path via the ``target`` parameter). If the price frame is
+    # empty/malformed the helper adds no traces, so announce the gap in-row rather
+    # than leaving a blank price panel (mirrors the missing-indicator handling).
+    if price_df.empty:
+        _annotate_empty_row(fig, 1, "Price: no price data available")
+    else:
+        plot_price_with_signals(
+            price_data=price_df,
+            buy_signals=buy_df,
+            sell_signals=sell_df,
+            title="Price with Buy/Sell Signals",
+            target=(fig, 1, 1),
+        )
+
+    for offset, (slot, cfg) in enumerate(slots):
+        row = 2 + offset
         # ``slot`` matches the disambiguated key prepare_ta_session_state wrote,
         # so a second same-type indicator (rsi_2) reads its own series.
-        data = session_state.get(f"{slot}_data")
-        if data is None:
-            data = session_state.get(f"{slot}_history")
-        st.markdown(f"**{cfg.indicator_name}**")
+        data = _multi_indicator_panel_data(session_state, slot)
         if not _indicator_present(data):
-            st.caption(f"{cfg.indicator_name}: no indicator data available")
+            # Keep the row (stable 1+N layout) and announce the gap in-place.
+            _annotate_empty_row(fig, row, f"{cfg.indicator_name}: no indicator data available")
             continue
         panel = _INDICATOR_PANELS.get(cfg.indicator_name.upper(), _panel_generic)
-        panel(price_df, data, cfg)
+        panel(price_df, data, cfg, (fig, row, 1))
+
+    # Apply the dashboard theme (dark template + grid/bg) so the composite figure
+    # matches every standalone plot, THEN set the dynamic per-row height (apply
+    # theme would otherwise stamp the single-figure default height).
+    apply_theme(fig, get_default_config())
+    fig.update_xaxes(title_text="Time", row=total_rows, col=1)
+    fig.update_layout(
+        height=300 + 250 * n_indicators,
+        hovermode="x unified",
+        showlegend=True,
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def _render_indicator_with_price(
