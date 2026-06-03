@@ -29,6 +29,7 @@ both in production.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -36,6 +37,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # pragma: no cover
     from ..runner._run_loop_helpers import TeardownSnapshotOutcome
     from ..runner.teardown_commit import TeardownCommitOutcome
+
+logger = logging.getLogger(__name__)
 
 
 CommitTeardownIntent = Callable[..., Awaitable["TeardownCommitOutcome"]]
@@ -164,6 +167,28 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
             balance_value=balance_value,
         )
 
+    async def _commit_with_heartbeat(strategy: Any, intent: Any, **kwargs: Any) -> Any:
+        # VIB-3951 — refresh the teardown crash-watchdog heartbeat once per
+        # committed teardown intent so the staleness window reflects REAL
+        # liveness (not just time-since-mark_started). A long multi-intent
+        # unwind (REPAY → WITHDRAW → SWAP, each ~100s on a slow fork) keeps the
+        # owning runner out of the watchdog's stale-by-time bucket. Local-only:
+        # the hosted gateway teardown manager has no ``heartbeat`` method (the
+        # platform owns hosted liveness), so this is guarded and a no-op there.
+        # Best-effort — a heartbeat failure must NEVER interrupt the
+        # risk-reducing commit (teardown loud-but-non-blocking contract).
+        outcome = await commit_teardown_intent(runner, strategy, intent, **kwargs)
+        try:
+            from . import get_teardown_state_manager_for_runtime
+
+            manager = get_teardown_state_manager_for_runtime(gateway_client=runner._get_gateway_client())
+            beat = getattr(manager, "heartbeat", None)
+            if beat is not None:
+                beat(strategy.deployment_id)
+        except Exception as exc:  # noqa: BLE001 — heartbeat is best-effort
+            logger.debug("Teardown heartbeat refresh failed (non-fatal): %s", exc)
+        return outcome
+
     async def _snapshot_intent_lending_state(strategy: Any, intent: Any) -> Any | None:
         # VIB-3934 — capture lending pre-state via the runner's safe wrapper
         # so REPAY/WITHDRAW/DELEVERAGE teardown rows carry collateral/debt/HF
@@ -181,7 +206,7 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
         )
 
     return TeardownRunnerHelpers(
-        commit=partial(commit_teardown_intent, runner),
+        commit=_commit_with_heartbeat,
         capture_snapshot=partial(capture_teardown_snapshot_with_accounting, runner),
         snapshot_intent_balances=_snapshot_intent_balances,
         reconcile_post_balances=partial(reconcile_post_execution_balances, runner),

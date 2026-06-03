@@ -346,6 +346,14 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                     "position_manager": position_manager,
                     "deadline": deadline,
                     "chain": ctx.chain,
+                    # VIB-4614: surface the intent's registry_handle so the
+                    # pre-execution registry-collision preflight can tell an
+                    # auto-mode open (handle is None) — which the
+                    # ix_registry_auto_mode partial unique index guards — from a
+                    # handle-supplied open (which the index excludes, so it must
+                    # NOT be preflight-blocked). None for the common auto-mode
+                    # case; a string when the author disambiguated explicitly.
+                    "registry_handle": intent.registry_handle,
                 },
             )
             result.transactions = transactions

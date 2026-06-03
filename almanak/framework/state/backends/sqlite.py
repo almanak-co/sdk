@@ -2960,6 +2960,91 @@ class SQLiteStore:
         await loop.run_in_executor(None, _sync_save)
 
     # =========================================================================
+    # Auto-mode collision preflight (VIB-4614)
+    # =========================================================================
+
+    async def find_open_auto_mode_registry_row(
+        self,
+        *,
+        deployment_id: str,
+        chain: str,
+        accounting_category: str,
+        semantic_grouping_key: str,
+    ) -> dict[str, str] | None:
+        """Return the open auto-mode ``position_registry`` row that would
+        collide with a handle-less open for this semantic group, or ``None``.
+
+        This is the single-source predicate behind both the pre-execution
+        LP registry-collision preflight (VIB-4614 — reject BEFORE minting an
+        orphan NFT) and the post-mint commit-path collision classifier in
+        :meth:`save_ledger_and_registry_atomic`. Both MUST mirror the partial
+        unique index ``ix_registry_auto_mode`` predicate exactly:
+
+            WHERE status = 'open' AND handle IS NULL
+
+        (defined in ``SCHEMA_SQL`` on
+        ``(deployment_id, chain, accounting_category, semantic_grouping_key)``).
+        The ``status = 'open' AND handle IS NULL`` clauses are inlined into
+        the SQL — NOT bound as parameters — because they MUST stay byte-for-byte
+        identical to the index's ``WHERE`` clause; a parameterised variant could
+        drift from the index predicate during a future edit and silently stop
+        matching.
+
+        Returns a dict with ``physical_identity_hash`` and ``opened_tx`` (the
+        winning row's identity, so the caller can raise an actionable
+        :class:`RegistryAutoCollisionError`), or ``None`` when the group is
+        free (no orphan risk; the open may proceed).
+        """
+        # Init guard — mirror the sibling registry read
+        # ``get_position_registry_open_rows``: ensure the store is initialized
+        # so ``self._conn`` is established before the worker thread touches it.
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_find() -> dict[str, str] | None:
+            # Controlled failure (matches ``get_position_registry_open_rows``'s
+            # ``if not self._conn: return []``): an unestablished connection
+            # means there is no registry to consult, so there is no collision —
+            # return ``None`` (allow the open) rather than dereferencing None.
+            # Fail-open is safe here: the commit-path unique-index INSERT is the
+            # authoritative backstop.
+            if self._conn is None:
+                return None
+            with self._db_lock:
+                cursor = self._conn.execute(
+                    """
+                    SELECT physical_identity_hash, opened_tx
+                    FROM position_registry
+                    WHERE deployment_id = ?
+                      AND chain = ?
+                      AND accounting_category = ?
+                      AND semantic_grouping_key = ?
+                      AND status = 'open'
+                      AND handle IS NULL
+                    LIMIT 1
+                    """,
+                    (
+                        deployment_id,
+                        chain,
+                        accounting_category,
+                        semantic_grouping_key,
+                        # status='open' AND handle IS NULL are inlined above
+                        # because they MUST exactly mirror the partial unique
+                        # index ix_registry_auto_mode WHERE clause (SCHEMA_SQL).
+                    ),
+                )
+                row = cursor.fetchone()
+            if row is None:
+                return None
+            return {
+                "physical_identity_hash": row["physical_identity_hash"],
+                "opened_tx": row["opened_tx"] or "",
+            }
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_find)
+
+    # =========================================================================
     # Atomic ledger + registry + handle commit (VIB-4197 / T11)
     # =========================================================================
 

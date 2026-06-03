@@ -83,8 +83,7 @@ def _read_row_raw(db_path: str, deployment_id: str) -> dict | None:
         # strategy_state keys on the canonical deployment_id column
         # (blueprint 29 §3). The StateData.deployment_id Python field maps to it.
         row = conn.execute(
-            "SELECT deployment_id, version, state_data, checksum "
-            "FROM strategy_state WHERE deployment_id = ?",
+            "SELECT deployment_id, version, state_data, checksum FROM strategy_state WHERE deployment_id = ?",
             (deployment_id,),
         ).fetchone()
         return dict(row) if row else None
@@ -729,3 +728,99 @@ class TestClobOrderAtomicWrites:
             assert loaded.filled_size == Decimal("0")
         finally:
             await recovered.close()
+
+
+# =============================================================================
+# VIB-4614 — find_open_auto_mode_registry_row init guard (CodeRabbit Critical)
+# =============================================================================
+
+
+async def test_find_open_auto_mode_registry_row_uninitialized_is_controlled(temp_db_path):
+    """Calling the preflight read on a NEVER-initialized store must fail in the
+    same controlled way the sibling registry read does (return the 'nothing
+    found' answer = None) — NOT crash with an AttributeError on a None
+    ``self._conn``. The method auto-initializes via the ``if not
+    self._initialized`` guard, then returns None because the fresh DB has no
+    matching open row. Fail-open is safe: the commit-path unique index is the
+    authoritative backstop.
+    """
+    s = SQLiteStore(SQLiteConfig(db_path=temp_db_path, wal_mode=True))
+    # Deliberately NOT calling s.initialize() — exercise the guard.
+    assert s._initialized is False
+
+    result = await s.find_open_auto_mode_registry_row(
+        deployment_id="S:1",
+        chain="arbitrum",
+        accounting_category="lp",
+        semantic_grouping_key="arbitrum:0xpool",
+    )
+
+    assert result is None  # no crash, controlled "no collision" answer
+    assert s._initialized is True  # auto-initialized via the guard
+    await s.close()
+
+
+async def test_find_open_auto_mode_registry_row_finds_existing_open(store):
+    """Smoke: with one open handle-less row in the group, the method returns
+    its identity (so the preflight can raise an actionable collision)."""
+    store._conn.execute(
+        """
+        INSERT INTO position_registry (
+            deployment_id, chain, primitive, accounting_category,
+            physical_identity_hash, semantic_grouping_key, grouping_policy_version,
+            handle, status, payload, matching_policy_version
+        ) VALUES (?, 'arbitrum', 'lp', 'lp', '0xpih', 'arbitrum:0xpool', 'v1', NULL, 'open', '{}', 1)
+        """,
+        ("S:1",),
+    )
+    store._conn.commit()
+
+    hit = await store.find_open_auto_mode_registry_row(
+        deployment_id="S:1",
+        chain="arbitrum",
+        accounting_category="lp",
+        semantic_grouping_key="arbitrum:0xpool",
+    )
+    assert hit is not None
+    assert hit["physical_identity_hash"] == "0xpih"
+
+    # A different group key returns None.
+    miss = await store.find_open_auto_mode_registry_row(
+        deployment_id="S:1",
+        chain="arbitrum",
+        accounting_category="lp",
+        semantic_grouping_key="arbitrum:0xOTHERPOOL",
+    )
+    assert miss is None
+
+
+async def test_find_open_auto_mode_registry_row_excludes_handle_rows(store):
+    """Directly guard the ``handle IS NULL`` predicate (CodeRabbit Minor).
+
+    A row in the SAME (deployment, chain, category, semantic_grouping_key) group
+    but with a NON-NULL handle is excluded by ix_registry_auto_mode's
+    ``WHERE handle IS NULL`` — it does NOT block an auto-mode open. If the query
+    ever dropped the ``handle IS NULL`` clause, this row would (wrongly) be
+    returned and the assertion below would fail.
+    """
+    # Only a handle-supplied open exists in this group — no handle-less row.
+    store._conn.execute(
+        """
+        INSERT INTO position_registry (
+            deployment_id, chain, primitive, accounting_category,
+            physical_identity_hash, semantic_grouping_key, grouping_policy_version,
+            handle, status, payload, matching_policy_version
+        ) VALUES (?, 'arbitrum', 'lp', 'lp', '0xpih_handled', 'arbitrum:0xhpool', 'v1', 'leg_a', 'open', '{}', 1)
+        """,
+        ("S:handle",),
+    )
+    store._conn.commit()
+
+    result = await store.find_open_auto_mode_registry_row(
+        deployment_id="S:handle",
+        chain="arbitrum",
+        accounting_category="lp",
+        semantic_grouping_key="arbitrum:0xhpool",
+    )
+    # Handle-supplied row is excluded → no auto-mode collision → None.
+    assert result is None

@@ -2924,6 +2924,46 @@ class StateManager:
             accounting_category=accounting_category,
         )
 
+    async def find_open_auto_mode_registry_row(
+        self,
+        *,
+        deployment_id: str,
+        chain: str,
+        accounting_category: str,
+        semantic_grouping_key: str,
+    ) -> dict[str, str] | None:
+        """Return the open auto-mode ``position_registry`` row colliding with a
+        handle-less open for this semantic group, or ``None``.
+
+        VIB-4614 single-source predicate: mirrors the ``ix_registry_auto_mode``
+        partial-unique-index ``WHERE status = 'open' AND handle IS NULL``. Drives
+        the pre-execution LP registry-collision preflight (reject BEFORE minting
+        an orphan NFT) and shares the predicate with the post-mint commit-path
+        classifier. Delegates to the WARM backend's typed read.
+
+        Raises :class:`CutoverStorageNotSupported` on backends that don't
+        implement the typed read (e.g. ``GatewayStateManager``) — see
+        :meth:`get_position_registry_open_rows` for the silent-``[]`` rationale.
+        The preflight phase treats that exception as "cannot check, proceed"
+        so a non-SQLite backend never blocks an open; the post-mint
+        commit-path classifier remains the backstop there.
+        """
+        if not self._initialized:
+            await self.initialize()
+        if not self._warm or not hasattr(self._warm, "find_open_auto_mode_registry_row"):
+            from almanak.framework.migration import CutoverStorageNotSupported
+
+            raise CutoverStorageNotSupported(
+                f"WARM backend {type(self._warm).__name__ if self._warm else 'None'} "
+                "does not implement find_open_auto_mode_registry_row."
+            )
+        return await self._warm.find_open_auto_mode_registry_row(
+            deployment_id=deployment_id,
+            chain=chain,
+            accounting_category=accounting_category,
+            semantic_grouping_key=semantic_grouping_key,
+        )
+
     async def insert_position_registry_row_if_absent(self, *, row: Any) -> bool:
         """Backfill insert (``INSERT … ON CONFLICT DO NOTHING``).
 

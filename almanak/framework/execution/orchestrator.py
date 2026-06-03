@@ -34,7 +34,7 @@ Example:
 
 import asyncio
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -501,6 +501,13 @@ class TransactionRiskConfig:
 
 
 EventCallback = Callable[[ExecutionEventType, dict[str, Any]], None]
+
+# VIB-4614: async pre-execution registry-collision check injected by the runner.
+# Receives the ActionBundle about to be submitted; returns a human-readable
+# rejection reason when an open auto-mode position-registry row would collide
+# (orphan-NFT risk), or ``None`` to allow. Defined as a structural alias so the
+# orchestrator never imports the StateManager (layering boundary — see __init__).
+RegistryPreflightCheck = Callable[["ActionBundle"], Awaitable[str | None]]
 
 
 # =============================================================================
@@ -1144,6 +1151,7 @@ class ExecutionOrchestrator:
         tx_timeout_seconds: float | None = None,
         session_store: ExecutionSessionStore | None = None,
         tx_risk_config: TransactionRiskConfig | None = None,
+        registry_preflight: "RegistryPreflightCheck | None" = None,
     ) -> None:
         """Initialize the orchestrator.
 
@@ -1160,7 +1168,17 @@ class ExecutionOrchestrator:
                 chain-specific default (300s for Ethereum L1, 120s for L2s).
             session_store: Optional ExecutionSessionStore for crash recovery checkpoints
             tx_risk_config: Transaction risk configuration (uses default if not provided)
+            registry_preflight: Optional async callback (VIB-4614) that inspects an
+                ActionBundle BEFORE on-chain submission and returns a rejection
+                reason string when an open auto-mode position-registry row would
+                collide with this open (preventing an orphan NFT mint), or ``None``
+                to allow. The orchestrator holds no StateManager / DB handle; the
+                runner injects this callback closed over the StateManager so the
+                ``_phase_registry_preflight`` phase stays layering-clean. ``None``
+                disables the phase (no-op) — paper/backtest orchestrators and any
+                caller without a registry-backed StateManager pass ``None``.
         """
+        self.registry_preflight = registry_preflight
         self.signer = signer
         self.submitter = submitter
         self.simulator = simulator
@@ -1464,6 +1482,7 @@ class ExecutionOrchestrator:
             state = self._init_pipeline_state(action_bundle, context)
             phases: tuple[Callable[[ExecutionPipelineState], Any], ...] = (
                 self._phase_build,
+                self._phase_registry_preflight,
                 self._phase_validate,
                 self._phase_simulate,
                 self._phase_gas,
@@ -1653,6 +1672,61 @@ class ExecutionOrchestrator:
             ExecutionEventType.EXECUTION_FAILED,
             context,
             {"error": error_msg, "message": error_msg, "intent_type": intent_type},
+        )
+        return result
+
+    async def _phase_registry_preflight(self, state: ExecutionPipelineState) -> ExecutionResult | None:
+        """Step 1.7 (VIB-4614): reject an auto-mode LP open that would orphan an NFT.
+
+        Runs BETWEEN build and validate — after the bundle compiled to ≥1 tx
+        (so we know it is a real open) but BEFORE any on-chain submission. The
+        bug this closes (incident S2, ``UniV3ClLpAuditStrategy``): a second
+        handle-less ``LP_OPEN`` into a pool that already has an open auto-mode
+        registry row mints a real NFT on-chain and only fails afterward at
+        registry persistence with :class:`RegistryAutoCollisionError`, leaving
+        an orphan NFT that no accounting/registry row tracks.
+
+        The orchestrator holds no StateManager; the actual DB lookup lives in
+        the runner-injected ``self.registry_preflight`` callback. When the
+        callback is absent (paper/backtest, or a caller without a
+        registry-backed StateManager) this phase is a no-op. When the callback
+        returns a rejection reason, the bundle is failed at the VALIDATION
+        phase exactly like a RiskGuard block — no signing, no submission, no
+        mint. The post-mint commit-path classifier remains the backstop for
+        the concurrent-writer race the preflight cannot close (the SELECT and
+        the eventual INSERT are not in one transaction).
+        """
+        if self.registry_preflight is None:
+            return None
+
+        context = state.context
+        result = state.result
+        session = state.session
+
+        try:
+            rejection = await self.registry_preflight(state.action_bundle)
+        except Exception as exc:
+            # A failing preflight check must NOT block execution: the
+            # commit-path collision classifier is the authoritative backstop,
+            # and a transient StateManager read error must not strand a
+            # legitimate open. Log loudly and continue (fail-open here is
+            # safe — the post-mint INSERT still enforces the unique index).
+            logger.warning(
+                "Registry preflight check raised; continuing (commit-path classifier remains the backstop): %s",
+                exc,
+            )
+            return None
+
+        if not rejection:
+            return None
+
+        result.error = f"Registry preflight blocked: {rejection}"
+        result.error_phase = ExecutionPhase.VALIDATION
+        self._complete_session(session, success=False, error=result.error)
+        self._emit_event(
+            ExecutionEventType.RISK_BLOCKED,
+            context,
+            {"violations": [rejection]},
         )
         return result
 

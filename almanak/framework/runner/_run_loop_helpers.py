@@ -352,6 +352,22 @@ async def initialize_run_loop(  # noqa: C901
     if state_manager_ready:
         await _run_cutover_boot_guard(runner, strategy, deployment_id)
 
+    # VIB-4614 — install the pre-execution LP registry-collision preflight on
+    # the (direct-mode) ExecutionOrchestrator. Wired from here because the
+    # orchestrator holds no StateManager (layering boundary); the runner does.
+    # No-op when the orchestrator is gateway-routed or lacks the hook.
+    if state_manager_ready:
+        _install_registry_preflight(runner, deployment_id)
+
+    # VIB-3951 — local-only crash watchdog: re-queue any teardown_requests row
+    # left at status='executing' by a dead/stale runner process back to
+    # 'pending' so the runner auto-re-enters teardown on boot and finishes the
+    # unwind (a stuck 'executing' row otherwise sits with residual on-chain
+    # risk and only an operator could re-trigger it). Local SQLite mechanism
+    # only — hosted Postgres teardown state is owned by the metrics-database
+    # repo and is NOT touched here.
+    _sweep_stale_executing_teardowns(runner, deployment_id)
+
     # VIB-3467: drain pending/failed outbox rows from the previous run.
     if runner.config.enable_state_persistence and state_manager_ready:
         try:
@@ -1754,3 +1770,91 @@ async def _refresh_lp_registry_id_cache(runner: StrategyRunner, deployment_id: s
     for row in rows:
         _index_lp_registry_row_into_cache(row=row, cache=cache)
     runner._lp_registry_id_cache = cache
+
+
+def _install_registry_preflight(runner: StrategyRunner, deployment_id: str) -> None:
+    """Attach the VIB-4614 LP registry-collision preflight to the orchestrator.
+
+    The orchestrator's ``_phase_registry_preflight`` (between build and
+    validate) calls ``self.registry_preflight`` before any signing/submission.
+    The orchestrator holds no StateManager (layering boundary), so the runner
+    injects the callback closed over its StateManager + deployment_id.
+
+    Only the direct ``ExecutionOrchestrator`` exposes the
+    ``registry_preflight`` attribute — gateway-routed and multi-chain
+    orchestrators do not, so this is a no-op for them (``hasattr`` guard). The
+    commit-path unique-index INSERT remains the authoritative backstop on every
+    path; this is a defensive early reject that prevents the orphan NFT on the
+    direct path the incident strategy uses.
+
+    Always REBINDS the callback to the current ``deployment_id`` rather than
+    keeping a previously-installed one. ``build_registry_preflight_check``
+    closes over ``deployment_id``; if the same orchestrator instance is reused
+    for a different strategy/deployment (rare under 1 gateway : 1 strategy, but
+    a latent money-path footgun), a stale closure would query the OLD
+    deployment's registry rows and wrongly block / miss LP_OPENs. The callback
+    is stateless (it reads ``state_manager`` fresh on every call), so
+    always-rebinding is idempotent-equivalent for the same deployment and
+    correct for a changed one. (VIB-4614 CodeRabbit Major.)
+    """
+    orchestrator = getattr(runner, "execution_orchestrator", None)
+    if orchestrator is None or not hasattr(orchestrator, "registry_preflight"):
+        return
+    from almanak.framework.accounting.registry_preflight import (
+        build_registry_preflight_check,
+    )
+
+    orchestrator.registry_preflight = build_registry_preflight_check(
+        runner.state_manager,
+        deployment_id,
+    )
+    logger.debug("Installed LP registry-collision preflight for %s", deployment_id)
+
+
+def _sweep_stale_executing_teardowns(runner: StrategyRunner, deployment_id: str) -> None:
+    """VIB-3951 crash watchdog: re-queue stuck ``executing`` teardown rows at boot.
+
+    When a runner dies mid-teardown (OOM / SIGKILL / unhandled exception)
+    AFTER ``mark_started`` flipped ``teardown_requests.status`` to
+    ``'executing'`` but BEFORE a terminal ``mark_completed`` / ``mark_failed``,
+    the row is stuck at ``'executing'`` forever. A fresh runner process then
+    sees a "started but unfinished" teardown. This boot sweep re-queues any
+    such row whose owning process is gone (PID liveness) or whose heartbeat is
+    stale back to ``'pending'``.
+
+    Why ``'pending'`` and not ``'failed'`` (teardown risk contract): the row
+    stays ``is_active=True``, so the runner's ``should_teardown()`` re-enters
+    teardown on boot, regenerates intents from current on-chain state, and
+    finishes the unwind — no operator action needed. A crash mid-unwind leaves
+    residual on-chain risk; per CLAUDE.md §Teardown the watchdog must keep the
+    next risk-reducing intent flowing, not require a manual re-trigger. The
+    crash is still recorded loudly (WARNING + crash note on the request reason).
+
+    LOCAL-ONLY (CLAUDE.md §Database schema ownership): the mechanism uses the
+    SDK-owned local SQLite ``teardown_requests`` table (a new ``owner_pid`` /
+    ``heartbeat_at`` column pair). Hosted teardown state lives in Postgres
+    owned by the ``metrics-database`` repo and is NOT touched — the sweep is
+    skipped entirely when ``is_hosted()``.
+    """
+    from almanak.framework.deployment import is_hosted
+
+    if is_hosted():
+        return
+
+    try:
+        from almanak.framework.teardown import get_teardown_state_manager_for_runtime
+
+        manager = get_teardown_state_manager_for_runtime()
+        sweep = getattr(manager, "sweep_stale_executing", None)
+        if sweep is None:
+            return
+        requeued = sweep()
+        if requeued:
+            logger.warning(
+                "Teardown crash watchdog: re-queued %d stale 'executing' teardown "
+                "request(s) left by a dead/stale runner process to 'pending' for "
+                "auto-recovery on boot",
+                requeued,
+            )
+    except Exception as exc:  # noqa: BLE001 — watchdog must never block boot
+        logger.warning("Teardown crash watchdog sweep failed (non-fatal): %s", exc)

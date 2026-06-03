@@ -36,11 +36,12 @@ working; new code should depend on the Protocols.
 import asyncio
 import json
 import logging
+import os
 import random
 import sqlite3
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -334,7 +335,14 @@ class SQLiteTeardownStateManager:
                         cancel_deadline TEXT,
                         error_message TEXT,
                         result_json TEXT,
-                        updated_at TEXT NOT NULL
+                        updated_at TEXT NOT NULL,
+                        -- VIB-3951 crash-watchdog columns (local SQLite only).
+                        -- owner_pid: OS pid of the runner process that flipped
+                        -- this row to 'executing' (NULL until mark_started).
+                        -- heartbeat_at: last liveness stamp the owning process
+                        -- writes while actively executing the teardown.
+                        owner_pid INTEGER,
+                        heartbeat_at TEXT
                     )
                 """)
                 # Migration (VIB-4722): rename strategy_id -> deployment_id on
@@ -343,6 +351,14 @@ class SQLiteTeardownStateManager:
                     conn.execute("ALTER TABLE teardown_requests RENAME COLUMN strategy_id TO deployment_id")
                 except sqlite3.OperationalError:
                     pass  # Already renamed (or fresh DB created with deployment_id)
+                # Migration (VIB-3951): add crash-watchdog columns to existing
+                # local DBs. Idempotent — ALTER raises OperationalError when the
+                # column already exists; swallow per-column.
+                for _col, _decl in (("owner_pid", "INTEGER"), ("heartbeat_at", "TEXT")):
+                    try:
+                        conn.execute(f"ALTER TABLE teardown_requests ADD COLUMN {_col} {_decl}")
+                    except sqlite3.OperationalError:
+                        pass  # Already present
                 conn.commit()
                 logger.debug(f"Initialized teardown state database at {self.db_path}")
 
@@ -559,8 +575,58 @@ class SQLiteTeardownStateManager:
         request.positions_total = total_positions
         self.update_request(request)
 
+        # VIB-3951: stamp the owning process pid + an initial heartbeat so the
+        # crash watchdog can later distinguish "still being executed by a live
+        # process" from "abandoned by a dead/stale process". Written directly
+        # (the TeardownRequest dataclass intentionally has no pid/heartbeat
+        # fields — these columns are a local-SQLite crash-recovery concern, not
+        # part of the cross-process request schema).
+        self._stamp_owner(deployment_id, os.getpid(), datetime.now(UTC))
+
         logger.info(f"Started teardown for {deployment_id}: {total_positions} positions")
         return request
+
+    def _stamp_owner(self, deployment_id: str, owner_pid: int | None, heartbeat_at: datetime | None) -> None:
+        """Write the VIB-3951 crash-watchdog columns for a request (local SQLite)."""
+
+        def _op() -> None:
+            with _open_connection(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE teardown_requests SET owner_pid = ?, heartbeat_at = ? WHERE deployment_id = ?",
+                    (
+                        owner_pid,
+                        heartbeat_at.isoformat() if heartbeat_at else None,
+                        deployment_id,
+                    ),
+                )
+                conn.commit()
+
+        _with_retry(_op, description="stamp_teardown_owner")
+
+    def heartbeat(self, deployment_id: str) -> None:
+        """Refresh the owning process's liveness stamp for an executing teardown.
+
+        Called periodically by the runner while it actively executes teardown
+        intents (VIB-3951). A fresh heartbeat keeps the row out of the
+        watchdog's stale-by-time bucket; the pid is left untouched so a PID
+        liveness check still works.
+
+        **Best-effort at this level.** Per the teardown loud-but-non-blocking
+        contract, a heartbeat failure must never interrupt the risk-reducing
+        teardown — so the underlying DB write (which can raise on lock
+        contention / transient SQLite errors even through ``_with_retry``) is
+        caught HERE and logged, not propagated. The contract therefore holds
+        regardless of call site; the ``_commit_with_heartbeat`` wrapper keeps
+        its own swallow as defense in depth.
+        """
+        try:
+            self._stamp_owner(deployment_id, os.getpid(), datetime.now(UTC))
+        except Exception as exc:  # noqa: BLE001 — heartbeat is best-effort
+            logger.warning(
+                "Teardown heartbeat stamp failed for %s (non-fatal): %s",
+                deployment_id,
+                exc,
+            )
 
     def update_progress(
         self,
@@ -704,6 +770,225 @@ class SQLiteTeardownStateManager:
             error,
         )
         return request
+
+    # VIB-3951 — default heartbeat staleness window. A teardown intent can take
+    # ~100s+ to estimate gas + confirm on a slow fork; the window is generous so
+    # the watchdog never races a live-but-busy runner. The PID-liveness check is
+    # the fast path (a dead process is failed immediately); the time window only
+    # catches a stale row whose pid was recycled to an unrelated live process.
+    _DEFAULT_STALE_HEARTBEAT_SECONDS = 900  # 15 minutes
+
+    def sweep_stale_executing(
+        self,
+        *,
+        stale_after_seconds: int | None = None,
+        now: datetime | None = None,
+    ) -> int:
+        """Re-queue ``executing`` teardown rows abandoned by a dead/stale process.
+
+        VIB-3951 crash watchdog (local SQLite only). A row is considered
+        abandoned when EITHER:
+
+        * its ``owner_pid`` names a process that is no longer alive
+          (``os.kill(pid, 0)`` raises :class:`ProcessLookupError`), OR
+        * its ``heartbeat_at`` is older than ``stale_after_seconds`` (covers
+          the pid-recycled-to-an-unrelated-live-process case, and rows written
+          before the owner_pid column existed where ``owner_pid IS NULL``).
+
+        Rows whose owning pid is alive AND whose heartbeat is fresh are left
+        untouched. A row stamped with the CURRENT process's pid is NOT
+        unconditionally exempt: that exemption would only ever fire via PID
+        *recycling* (a crashed runner's pid reassigned to this new process) —
+        which is exactly the stuck-row case the heartbeat exists to catch. So
+        a current-pid row is still run through the abandonment check; only a
+        current-pid row with a FRESH heartbeat (the genuine "this very process
+        is mid-teardown" case) is exempt. (VIB-3951 CodeRabbit Major 1.)
+
+        **Recovery semantics (teardown risk contract).** An abandoned row is
+        re-queued to ``status='pending'``, NOT marked terminal ``failed``. A
+        crash mid-unwind leaves residual on-chain risk; the runner's boot-time
+        ``should_teardown()`` check re-enters teardown for any *active*
+        (non-terminal) request, regenerates intents from current on-chain
+        state, and finishes the unwind. Marking ``failed`` (``is_active=False``)
+        would defeat that auto-recovery and force a manual re-trigger —
+        violating CLAUDE.md §Teardown ("teardown's first job is to remove
+        on-chain risk; never block the next risk-reducing intent"). The crash
+        is still recorded loudly: a WARNING per row, the crash note stamped onto
+        the request ``reason``, and the dead ``owner_pid``/``heartbeat_at``
+        cleared so the re-queued row starts clean. The in-flight progress
+        counters are reset to 0 (positions are re-counted from on-chain state on
+        re-entry; carrying a stale count forward would mislead the dashboard).
+
+        Returns the number of rows re-queued to ``pending``.
+        """
+        window = self._DEFAULT_STALE_HEARTBEAT_SECONDS if stale_after_seconds is None else stale_after_seconds
+        ref_now = now or datetime.now(UTC)
+
+        with _open_connection(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT deployment_id, owner_pid, heartbeat_at FROM teardown_requests WHERE status = ?",
+                (TeardownStatus.EXECUTING.value,),
+            ).fetchall()
+
+        requeued = 0
+        for row in rows:
+            deployment_id = row["deployment_id"]
+            owner_pid = row["owner_pid"]
+            heartbeat_at = row["heartbeat_at"]
+
+            # No current-pid shortcut (Major 1): a current-pid row is only the
+            # genuine "this process owns it" case when its heartbeat is fresh,
+            # which _is_executing_row_abandoned already returns False for. A
+            # current-pid row with a STALE heartbeat is a recycled-pid orphan
+            # and must be requeued like any other.
+            if not self._is_executing_row_abandoned(
+                owner_pid=owner_pid,
+                heartbeat_at=heartbeat_at,
+                ref_now=ref_now,
+                window_seconds=window,
+            ):
+                continue
+
+            # Compare-and-swap (Major 2): only count + log a row we actually
+            # transitioned. If the row changed since the snapshot (another
+            # process committed a heartbeat / status flip), the CAS no-ops and
+            # we leave it alone rather than clobbering live state.
+            if self._requeue_abandoned_executing(
+                deployment_id,
+                owner_pid=owner_pid,
+                heartbeat_at=heartbeat_at,
+            ):
+                requeued += 1
+
+        return requeued
+
+    def _requeue_abandoned_executing(
+        self,
+        deployment_id: str,
+        *,
+        owner_pid: int | None,
+        heartbeat_at: str | None,
+    ) -> bool:
+        """Compare-and-swap re-queue of one abandoned ``executing`` row (VIB-3951).
+
+        Resets the row to a clean re-triggerable state: ``status='pending'``,
+        ``started_at`` / ``acknowledged_at`` / ``current_phase`` cleared,
+        progress counters zeroed, crash-watchdog stamps cleared, and the crash
+        recorded in ``reason`` for postmortem. Stays ``is_active=True`` so the
+        runner's ``should_teardown()`` re-enters teardown on boot and finishes
+        the unwind.
+
+        **Compare-and-swap (Major 2):** the caller decided from a snapshot
+        ``(owner_pid, heartbeat_at)`` read in a separate connection. Between
+        that read and this UPDATE another process may have committed a fresh
+        heartbeat or a terminal status flip. The UPDATE therefore guards on
+        ``status='executing' AND owner_pid IS ? AND heartbeat_at IS ?`` (the
+        observed snapshot) so a row that changed since is NOT clobbered. SQLite
+        ``IS`` is used (not ``=``) so a snapshot ``NULL`` matches a stored
+        ``NULL`` (``= NULL`` is never true). Returns ``True`` only when a row
+        was actually transitioned; the WARNING is emitted only on a real
+        requeue. Values are passed as bound parameters — no f-string SQL
+        interpolation of row values.
+        """
+        crash_note = (
+            f"Teardown crash watchdog: runner process (pid={owner_pid}) is gone or "
+            "stale while status='executing'. Re-queued to 'pending' so the runner "
+            "auto-re-enters teardown on boot and finishes unwinding any residual "
+            "on-chain positions."
+        )
+
+        result = {"rowcount": 0}
+
+        def _op() -> None:
+            with _open_connection(self.db_path) as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE teardown_requests SET
+                        status = ?,
+                        reason = ?,
+                        acknowledged_at = NULL,
+                        started_at = NULL,
+                        completed_at = NULL,
+                        current_phase = NULL,
+                        positions_closed = 0,
+                        positions_failed = 0,
+                        cancel_requested = 0,
+                        cancel_deadline = NULL,
+                        owner_pid = NULL,
+                        heartbeat_at = NULL,
+                        updated_at = ?
+                    WHERE deployment_id = ?
+                      AND status = ?
+                      AND owner_pid IS ?
+                      AND heartbeat_at IS ?
+                    """,
+                    (
+                        TeardownStatus.PENDING.value,
+                        crash_note,
+                        datetime.now(UTC).isoformat(),
+                        deployment_id,
+                        TeardownStatus.EXECUTING.value,
+                        owner_pid,
+                        heartbeat_at,
+                    ),
+                )
+                result["rowcount"] = cursor.rowcount
+                conn.commit()
+
+        _with_retry(_op, description="requeue_abandoned_teardown")
+        if result["rowcount"] > 0:
+            logger.warning(
+                "Teardown crash watchdog: re-queued abandoned teardown for %s "
+                "(pid=%s gone/stale) to 'pending' for auto-recovery on boot",
+                deployment_id,
+                owner_pid,
+            )
+            return True
+        # CAS no-op: the row changed since the snapshot — leave it untouched.
+        logger.debug(
+            "Teardown crash watchdog: requeue CAS no-op for %s (row changed since snapshot; pid=%s, heartbeat=%s)",
+            deployment_id,
+            owner_pid,
+            heartbeat_at,
+        )
+        return False
+
+    @staticmethod
+    def _is_executing_row_abandoned(
+        *,
+        owner_pid: int | None,
+        heartbeat_at: str | None,
+        ref_now: datetime,
+        window_seconds: int,
+    ) -> bool:
+        """True when an ``executing`` row's owner is dead or its heartbeat stale."""
+        # Dead-process fast path: a named pid that no longer exists is abandoned.
+        if owner_pid is not None:
+            try:
+                os.kill(int(owner_pid), 0)
+            except ProcessLookupError:
+                return True  # process is gone
+            except PermissionError:
+                # Process exists but is owned by another user — treat as alive,
+                # fall through to the heartbeat-staleness check.
+                pass
+            except (OverflowError, ValueError):
+                # Malformed pid — fall through to the time-based check.
+                pass
+
+        # Time-based staleness: a missing/old heartbeat means abandoned. Rows
+        # written before the owner_pid column existed (owner_pid IS NULL,
+        # heartbeat_at IS NULL) are abandoned by definition once stuck.
+        if not heartbeat_at:
+            return True
+        try:
+            hb = datetime.fromisoformat(heartbeat_at)
+        except ValueError:
+            return True  # unparseable stamp — treat as stale
+        if hb.tzinfo is None:
+            hb = hb.replace(tzinfo=UTC)
+        return ref_now - hb > timedelta(seconds=window_seconds)
 
     def request_cancel(self, deployment_id: str) -> bool:
         """Request cancellation of a teardown.
