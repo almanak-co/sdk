@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
     from almanak.framework.gateway_client import GatewayClient
 
 
@@ -167,11 +168,16 @@ class _CachedHealth:
 class PositionHealthProvider:
     """Reads on-chain position data and computes health factors.
 
-    Supports Morpho Blue and Aave V3 protocols. For Morpho positions
+    Supports Aave V3 / Spark, Morpho Blue, and Compound V3. For Morpho positions
     with PT collateral, can also compute PT-specific risk metrics.
 
+    Aave/Spark and Morpho reads route through the connector-owned lending-read
+    seam (``read_lending_account_state``) and therefore REQUIRE a connected
+    ``gateway_client`` (VIB-4851 removed the in-strategy ``Web3(HTTPProvider)``
+    path for them). Compound V3 still accepts an explicit ``rpc_url`` (PR-2).
+
     Usage:
-        provider = PositionHealthProvider(rpc_url="https://...", chain="ethereum")
+        provider = PositionHealthProvider(chain="ethereum", gateway_client=gw)
         health = provider.get_health("morpho_blue", market_id, wallet_address)
         print(f"Health factor: {health.health_factor}")
     """
@@ -229,12 +235,24 @@ class PositionHealthProvider:
             ValueError: If protocol is unsupported
         """
         protocol_lower = _normalize_protocol(protocol)
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
         if protocol_lower == "morpho_blue":
-            return self._get_morpho_health(market_id, user_address, collateral_price_usd, debt_price_usd)
-        elif protocol_lower == "aave_v3":
-            return self._get_aave_health(market_id, user_address)
+            # VIB-4851: Morpho health reads route through the seam. The legacy
+            # collateral/debt price overrides are translated into the seam's
+            # ``{symbol: price}`` oracle dict via ``_build_price_oracle_dict``.
+            price_oracle = self._build_price_oracle_dict(market_id, collateral_price_usd, debt_price_usd)
+            state = self._read_account_state(protocol_lower, market_id, user_address, price_oracle=price_oracle)
+            return self._to_position_health(state, protocol="morpho_blue", market_id=market_id)
         elif protocol_lower == "compound_v3":
             return self._get_compound_health(market_id, user_address)
+        elif LendingReadRegistry.supports_account_state(protocol_lower):
+            # VIB-4851: the Aave V3 family (Aave V3, Spark, and any future fork) is
+            # USD-native + whole-account. Route every account-state-capable protocol
+            # that is NOT Morpho/Compound through the shared seam, resolved from the
+            # registry so adding an Aave fork needs no new protocol name here.
+            state = self._read_account_state(protocol_lower, market_id, user_address)
+            return self._to_position_health(state, protocol=protocol_lower, market_id=market_id)
         else:
             raise ValueError(f"Unsupported protocol for health monitoring: {protocol}")
 
@@ -261,8 +279,17 @@ class PositionHealthProvider:
         Returns:
             PTPositionHealth with Morpho + Pendle risk metrics
         """
-        # Get base Morpho health
-        base_health = self._get_morpho_health(morpho_market_id, user_address, collateral_price_usd, debt_price_usd)
+        # Get base Morpho health via the shared seam-backed Morpho path
+        # (VIB-4851). ``get_health`` owns the price-override translation +
+        # ``read_lending_account_state`` round-trip; the Pendle on-chain
+        # enrichment below (VIB-4931's territory) is layered on top.
+        base_health = self.get_health(
+            "morpho_blue",
+            morpho_market_id,
+            user_address,
+            collateral_price_usd=collateral_price_usd,
+            debt_price_usd=debt_price_usd,
+        )
 
         # Get Pendle-specific data
         implied_apy = Decimal("0")
@@ -309,170 +336,201 @@ class PositionHealthProvider:
             pendle_market=pendle_market_address,
         )
 
-    def _get_morpho_health(
+    def _read_account_state(
         self,
+        protocol: str,
         market_id: str,
         user_address: str,
-        collateral_price_usd: Decimal | None = None,
-        debt_price_usd: Decimal | None = None,
-    ) -> PositionHealth:
-        """Compute health factor from Morpho Blue on-chain data."""
-        try:
-            from almanak.connectors.morpho_blue.sdk import MorphoBlueSDK
+        price_oracle: dict | None = None,
+    ) -> "LendingAccountState":
+        """Read aggregate account state via the connector-owned lending-read seam.
 
-            if self._gateway_client is not None and not self._gateway_client.is_connected:
-                raise ValueError(
-                    f"GatewayClient is not connected; cannot fetch Morpho Blue health for market {market_id[:10]}..."
-                )
-            sdk = MorphoBlueSDK(
-                rpc_url=self._rpc_url,
-                chain=self._chain,
-                gateway_client=self._gateway_client,
-            )
-            position = sdk.get_position(market_id, user_address)
-            market_params = sdk.get_market_params(market_id)
+        Routes Aave/Spark and Morpho health reads through
+        :func:`~almanak.framework.accounting.lending_reads.read_lending_account_state`,
+        the single generic reader that resolves the read target from the same
+        ``addresses.py`` / ``AddressRegistry`` the intent path uses, owns the one
+        gateway round-trip, and fails closed (returns ``None``) on any missing
+        input.
 
-            # Extract position values
-            collateral = Decimal(str(position.collateral))
-            borrow_shares = Decimal(str(position.borrow_shares))
-
-            # Get market state for share-to-amount conversion
-            market_state = sdk.get_market_state(market_id)
-            if market_state.total_borrow_shares > 0:
-                debt_amount = (
-                    borrow_shares
-                    * Decimal(str(market_state.total_borrow_assets))
-                    / Decimal(str(market_state.total_borrow_shares))
-                )
-            else:
-                debt_amount = Decimal("0")
-
-            lltv = Decimal(str(market_params.lltv)) / Decimal("1e18")
-
-            # For cross-asset markets, prices are required to avoid silent miscalculation
-            collateral_token = market_params.collateral_token.lower()
-            loan_token = market_params.loan_token.lower()
-
-            if collateral_token != loan_token:
-                if collateral_price_usd is None or debt_price_usd is None:
-                    raise ValueError(
-                        f"Price overrides required for cross-asset Morpho market {market_id}. "
-                        f"Collateral and debt tokens differ -- cannot default to 1:1."
-                    )
-                col_price = collateral_price_usd
-                d_price = debt_price_usd
-            else:
-                # Same-asset market: 1:1 is safe
-                col_price = collateral_price_usd if collateral_price_usd is not None else Decimal("1")
-                d_price = debt_price_usd if debt_price_usd is not None else Decimal("1")
-
-            collateral_value = collateral * col_price
-            debt_value = debt_amount * d_price
-
-            if debt_value == 0:
-                health_factor = Decimal("Infinity")
-            elif collateral_value == 0:
-                health_factor = Decimal("0")
-            else:
-                health_factor = (collateral_value * lltv) / debt_value
-
-            max_borrow = collateral_value * lltv - debt_value
-            if max_borrow < 0:
-                max_borrow = Decimal("0")
-
-            return PositionHealth(
-                health_factor=health_factor,
-                collateral_value_usd=collateral_value,
-                debt_value_usd=debt_value,
-                lltv=lltv,
-                max_borrow_usd=max_borrow,
-                protocol="morpho_blue",
-                market_id=market_id,
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to get Morpho health for market {market_id[:10]}...: {e}")
-            raise
-
-    def _get_aave_health(
-        self,
-        market_id: str,
-        user_address: str,
-    ) -> PositionHealth:
-        """Compute health factor from Aave V3 on-chain data.
-
-        Aave V3's LendingPool.getUserAccountData() returns healthFactor directly.
+        VIB-4851: the legacy ``Web3(HTTPProvider(rpc_url))`` fallback -- a
+        gateway-boundary violation -- is gone for Aave/Morpho. A gateway client is
+        now required; a missing or disconnected one raises a clear ``ValueError``
+        (mirroring the pre-refactor connected-check) so the failure surfaces
+        instead of fabricating a false-safe health factor.
         """
-        try:
-            from web3 import Web3
+        from almanak.framework.accounting.lending_reads import read_lending_account_state
 
-            if self._gateway_client is not None:
-                from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
+        if self._gateway_client is None:
+            raise ValueError(
+                f"GatewayClient is required to read {protocol} health on {self._chain}; none was provided."
+            )
+        if not self._gateway_client.is_connected:
+            raise ValueError(f"GatewayClient is not connected; cannot fetch {protocol} health on {self._chain}.")
 
-                if not self._gateway_client.is_connected:
-                    raise ValueError(f"GatewayClient is not connected; cannot fetch Aave V3 health on {self._chain}.")
-                w3 = Web3(GatewayWeb3Provider(self._gateway_client, chain=self._chain))
-            else:
-                w3 = Web3(Web3.HTTPProvider(self._rpc_url))
+        # Whole-account protocols (the Aave family) carry no market id; per-market
+        # protocols (Morpho) pass the bytes32 market id straight through.
+        seam_market_id = market_id if protocol == "morpho_blue" else None
 
-            # Aave V3 Pool address by chain. Source the connector's canonical
-            # ``AAVE_V3_POOL_ADDRESSES`` (derived from the ``AAVE_V3`` address
-            # book) rather than a local copy, so health support never drifts
-            # behind execution support. A hardcoded subset here previously
-            # listed only 4 chains and omitted bsc + 7 others the connector
-            # executes on, raising "not configured" at runtime and tripping
-            # HF-based safety logic into false emergency behaviour. Mirrors the
-            # Compound V3 path below, which imports its canonical table for the
-            # same single-source-of-truth reason.
-            from almanak.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
+        state = read_lending_account_state(
+            protocol=protocol,
+            chain=self._chain,
+            wallet_address=user_address,
+            market_id=seam_market_id,
+            gateway_client=self._gateway_client,
+            price_oracle=price_oracle,
+        )
+        if state is None:
+            # Empty != Zero: a failed read must surface, never become a fabricated
+            # healthy/zero HF that would mask a liquidation-risk position.
+            raise ValueError(
+                f"Failed to read {protocol} account state for market "
+                f"{(market_id or '')[:10]}... on {self._chain} (read returned no data)."
+            )
+        return state
 
-            pool_address = AAVE_V3_POOL_ADDRESSES.get(self._chain)
-            if not pool_address:
-                raise ValueError(f"Aave V3 not configured for chain: {self._chain}")
+    def _to_position_health(
+        self,
+        state: "LendingAccountState",
+        protocol: str,
+        market_id: str,
+    ) -> PositionHealth:
+        """Adapt a seam :class:`LendingAccountState` to a :class:`PositionHealth`.
 
-            # Minimal ABI for getUserAccountData
-            abi = [
-                {
-                    "name": "getUserAccountData",
-                    "type": "function",
-                    "inputs": [{"name": "user", "type": "address"}],
-                    "outputs": [
-                        {"name": "totalCollateralBase", "type": "uint256"},
-                        {"name": "totalDebtBase", "type": "uint256"},
-                        {"name": "availableBorrowsBase", "type": "uint256"},
-                        {"name": "currentLiquidationThreshold", "type": "uint256"},
-                        {"name": "ltv", "type": "uint256"},
-                        {"name": "healthFactor", "type": "uint256"},
-                    ],
-                }
-            ]
+        Bridges the connector reducer's field shape onto the public health
+        contract, preserving two behaviours of the pre-refactor path:
 
-            pool = w3.eth.contract(address=w3.to_checksum_address(pool_address), abi=abi)
-            result = pool.functions.getUserAccountData(w3.to_checksum_address(user_address)).call()
-
-            # Aave returns values in base currency units (USD with 8 decimals)
-            collateral_value = Decimal(str(result[0])) / Decimal("1e8")
-            debt_value = Decimal(str(result[1])) / Decimal("1e8")
-            available_borrow = Decimal(str(result[2])) / Decimal("1e8")
-            liq_threshold = Decimal(str(result[3])) / Decimal("10000")  # basis points
-            health_factor_raw = Decimal(str(result[5])) / Decimal("1e18")
-
-            if debt_value == 0:
-                health_factor_raw = Decimal("Infinity")
-
-            return PositionHealth(
-                health_factor=health_factor_raw,
-                collateral_value_usd=collateral_value,
-                debt_value_usd=debt_value,
-                lltv=liq_threshold,
-                max_borrow_usd=available_borrow,
-                protocol="aave_v3",
-                market_id=market_id,
+        * **No-debt -> Infinity.** The public contract documents ``Infinity`` for
+          a position with no debt. Surface it ONLY when ``debt_usd == 0`` -- a
+          *positive* debt whose HF the reducer capped at its 999999 sentinel (a
+          tiny borrow against large collateral) stays finite so risk handling is
+          not skipped.
+        * **Empty != Zero / raise-on-failure.** A ``None`` state, or a ``None`` HF
+          with positive debt, RAISES rather than fabricating a healthy/zero HF --
+          matching the old "raise on failure" contract so a failed read cannot
+          read as false-safe.
+        """
+        if state is None:
+            raise ValueError(
+                f"Cannot compute {protocol} health for market {(market_id or '')[:10]}...: account state is unavailable."
             )
 
-        except Exception as e:
-            logger.error(f"Failed to get Aave health: {e}")
-            raise
+        collateral_value = state.collateral_usd if state.collateral_usd is not None else Decimal("0")
+        debt_value = state.debt_usd if state.debt_usd is not None else Decimal("0")
+
+        # Map to Infinity ONLY for a genuine no-debt position. ``debt_value == 0``
+        # is the authoritative signal: the reducers also emit the 999999 sentinel
+        # for no debt, but a *positive* debt whose HF was merely capped at that
+        # sentinel (a tiny dust borrow against large collateral) MUST stay finite,
+        # or strategies would skip risk/deleverage handling on a still-open debt.
+        no_debt = debt_value == 0
+        hf = state.health_factor
+        if no_debt:
+            health_factor: Decimal = Decimal("Infinity")
+        elif hf is None:
+            # Positive debt but no measured HF => unmeasured, not infinite.
+            # Fail closed rather than report a false-safe Infinity.
+            raise ValueError(
+                f"{protocol} health factor unavailable for market {(market_id or '')[:10]}... "
+                f"with non-zero debt; refusing to fabricate a healthy value."
+            )
+        else:
+            # Positive debt: pass the measured HF through unchanged (including a
+            # value capped at the reducer's 999999 sentinel).
+            health_factor = hf
+
+        # lltv: the Aave family reports a weighted current liquidation threshold in
+        # bps (USD-native); Morpho/Compound report an lltv fraction directly. Branch
+        # on the measured field, not a protocol name (self-containment).
+        if state.liquidation_threshold_bps is not None:
+            lltv = Decimal(state.liquidation_threshold_bps) / Decimal("10000")
+        else:
+            lltv = state.lltv if state.lltv is not None else Decimal("0")
+
+        max_borrow = max(collateral_value * lltv - debt_value, Decimal("0"))
+
+        return PositionHealth(
+            health_factor=health_factor,
+            collateral_value_usd=collateral_value,
+            debt_value_usd=debt_value,
+            lltv=lltv,
+            max_borrow_usd=max_borrow,
+            protocol=protocol,
+            market_id=market_id,
+        )
+
+    def _build_price_oracle_dict(
+        self,
+        market_id: str,
+        collateral_price_usd: Decimal | None,
+        debt_price_usd: Decimal | None,
+    ) -> dict[str, Decimal] | None:
+        """Translate legacy Morpho price overrides into the seam's oracle dict.
+
+        The seam values Morpho positions from a ``{token_symbol: USD price}`` map
+        (Morpho is not USD-native). This method maps the legacy
+        ``collateral_price_usd`` / ``debt_price_usd`` Decimal overrides onto that
+        shape, keyed by the market's collateral/loan token *symbols* from
+        :meth:`LendingReadRegistry.market_params`, preserving the pre-refactor
+        semantics exactly:
+
+        * **Same-asset market** (collateral symbol == loan symbol): one symbol, one
+          price -- use whichever override is supplied (else ``Decimal("1")``). The
+          HF is price-independent here (the price cancels), so a single consistent
+          key is correct and avoids a duplicate-key override drop.
+        * **Cross-asset market** with a missing override: RAISE ``ValueError``
+          (message contains ``"Price overrides required"``) -- never default to
+          1:1 across differing assets.
+        * **Off-catalogue market** (``market_params`` is ``None``): fail closed
+          consistently with a ``ValueError`` -- we cannot name the legs to value.
+        """
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        if not market_id:
+            raise ValueError(
+                f"market_id is required to value a Morpho Blue position on {self._chain}; none was provided."
+            )
+
+        params = LendingReadRegistry.market_params("morpho_blue", self._chain, market_id)
+        if not params:
+            raise ValueError(
+                f"Morpho market {market_id} not found on {self._chain}; cannot resolve "
+                f"its collateral/loan tokens to value the position."
+            )
+
+        collateral_symbol = params.get("collateral_token")
+        loan_symbol = params.get("loan_token")
+        if not isinstance(collateral_symbol, str) or not isinstance(loan_symbol, str):
+            raise ValueError(
+                f"Morpho market {market_id} on {self._chain} has no collateral/loan "
+                f"token symbols; cannot value the position."
+            )
+
+        same_asset = collateral_symbol.lower() == loan_symbol.lower()
+
+        # Key by symbol; the seam's ``_resolve_oracle_price`` is case-insensitive.
+        if same_asset:
+            # Collateral and loan are the same token: one symbol, one price. The HF
+            # is price-independent here (the price cancels), so build a single-key
+            # dict -- a two-key ``{loan, collateral}`` literal would collapse to one
+            # entry and silently drop a lone ``debt_price_usd`` override.
+            price = (
+                collateral_price_usd
+                if collateral_price_usd is not None
+                else debt_price_usd
+                if debt_price_usd is not None
+                else Decimal("1")
+            )
+            return {collateral_symbol: price}
+
+        # Cross-asset: distinct tokens require distinct, explicit prices -- never
+        # default to 1:1 across differing assets. Checked here (after the same-asset
+        # branch) so both values narrow to non-None for the return.
+        if collateral_price_usd is None or debt_price_usd is None:
+            raise ValueError(
+                f"Price overrides required for cross-asset Morpho market {market_id}. "
+                f"Collateral and debt tokens differ -- cannot default to 1:1."
+            )
+        return {collateral_symbol: collateral_price_usd, loan_symbol: debt_price_usd}
 
     # Base tokens that are USD-pegged stablecoins. These are the *only* symbols
     # for which it is safe to assume price == $1 when no external price oracle

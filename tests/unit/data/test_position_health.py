@@ -357,30 +357,94 @@ class TestHealthFactorProviderProtocol:
 
 
 class TestAaveHealthFactorProvider:
-    """Aave V3: mock Pool.getUserAccountData() and assert HF returned correctly."""
+    """Aave V3: drive the lending-read seam by mocking ``gateway_client.eth_call``.
+
+    VIB-4851 migrated the Aave health read off the in-strategy
+    ``Web3(HTTPProvider)`` path onto
+    ``read_lending_account_state`` -> the connector-owned
+    ``AAVE_FORK_ACCOUNT_STATE_READ`` spec. The reads now resolve the pool address
+    through the same ``AddressRegistry`` the intent path uses, and the gateway
+    owns the single ``eth_call`` round-trip. These tests mock that round-trip,
+    returning the ABI-encoded ``getUserAccountData`` (6 uint256 words) +
+    ``getUserEMode`` (1 word) blobs the Aave reducer decodes, in the order the
+    spec's ``build_calls`` emits them.
+    """
+
+    # Selectors emitted by ``_build_aave_account_state_calls`` (see
+    # ``lending_read_base``): getUserAccountData, then getUserEMode.
+    _ACCOUNT_DATA_SELECTOR = "0xbf92857c"
+    _USER_EMODE_SELECTOR = "0xeddf1b79"
+
+    @staticmethod
+    def _encode_account_data(
+        collateral_usd: str,
+        debt_usd: str,
+        liquidation_threshold_bps: int,
+        health_factor: str,
+    ) -> str:
+        """ABI-encode an Aave ``getUserAccountData`` return blob (6 uint256 words).
+
+        Word layout the reducer decodes (``parse_account_state_hex``):
+        [0] totalCollateralBase (1e8 USD)
+        [1] totalDebtBase (1e8 USD)
+        [2] availableBorrowsBase (1e8 USD) -- not decoded
+        [3] currentLiquidationThreshold (bps)
+        [4] ltv (bps) -- not decoded
+        [5] healthFactor (1e18)
+        """
+        words = [
+            int(Decimal(collateral_usd) * Decimal("1e8")),
+            int(Decimal(debt_usd) * Decimal("1e8")),
+            int(Decimal("2000") * Decimal("1e8")),  # availableBorrowsBase (unused)
+            liquidation_threshold_bps,
+            8000,  # ltv (unused)
+            int(Decimal(health_factor) * Decimal("1e18")),
+        ]
+        return "0x" + "".join(f"{w:064x}" for w in words)
+
+    @staticmethod
+    def _encode_emode(category: int) -> str:
+        """ABI-encode an Aave ``getUserEMode`` return blob (1 uint256 word)."""
+        return "0x" + f"{category:064x}"
+
+    @classmethod
+    def _make_gateway(
+        cls,
+        *,
+        collateral_usd: str,
+        debt_usd: str,
+        liquidation_threshold_bps: int,
+        health_factor: str,
+        e_mode_category: int = 0,
+    ) -> MagicMock:
+        """Build a connected mock gateway whose ``eth_call`` returns the Aave blobs."""
+        account_blob = cls._encode_account_data(collateral_usd, debt_usd, liquidation_threshold_bps, health_factor)
+        emode_blob = cls._encode_emode(e_mode_category)
+
+        def _eth_call(chain, to, data, block=None):
+            selector = data[:10].lower()
+            if selector == cls._ACCOUNT_DATA_SELECTOR:
+                return account_blob
+            if selector == cls._USER_EMODE_SELECTOR:
+                return emode_blob
+            raise AssertionError(f"unexpected Aave selector {selector}")
+
+        gw = MagicMock()
+        gw.is_connected = True
+        gw.eth_call.side_effect = _eth_call
+        return gw
 
     def test_aave_hf_returned_from_getuseraccountdata(self):
-        # Aave V3 returns healthFactor in ray (1e18). 1.75e18 -> HF=1.75.
-        fake_pool = MagicMock()
-        fake_pool.functions.getUserAccountData.return_value.call.return_value = (
-            10_000 * 10**8,  # totalCollateralBase (8 decimals)
-            5_000 * 10**8,  # totalDebtBase
-            2_000 * 10**8,  # availableBorrowsBase
-            8500,  # currentLiquidationThreshold (bps)
-            8000,  # ltv
-            int(Decimal("1.75") * Decimal("1e18")),  # healthFactor
+        # Aave returns healthFactor in 1e18. 1.75e18 -> HF=1.75; collateral 10000,
+        # debt 5000 (8-decimal USD base on-chain).
+        gw = self._make_gateway(
+            collateral_usd="10000",
+            debt_usd="5000",
+            liquidation_threshold_bps=8500,
+            health_factor="1.75",
         )
-
-        fake_w3 = MagicMock()
-        fake_w3.to_checksum_address.side_effect = lambda a: a
-        fake_w3.eth.contract.return_value = fake_pool
-
-        with patch("web3.Web3.HTTPProvider"), patch("web3.Web3", return_value=fake_w3):
-            with patch(
-                "almanak.framework.data.position_health.Web3", return_value=fake_w3
-            ) if False else _fake_web3_patch(fake_w3):
-                provider = PositionHealthProvider(rpc_url="http://localhost:8545", chain="ethereum")
-                health = provider.get_health("aave_v3", "ethereum_pool", "0xabc")
+        provider = PositionHealthProvider(chain="ethereum", gateway_client=gw)
+        health = provider.get_health("aave_v3", "ethereum_pool", "0xabc")
 
         assert health.health_factor == Decimal("1.75")
         assert health.protocol == "aave_v3"
@@ -388,61 +452,60 @@ class TestAaveHealthFactorProvider:
         assert health.debt_value_usd == Decimal("5000")
 
     def test_aave_hf_dispatch_via_get_health_factor(self):
-        fake_pool = MagicMock()
-        fake_pool.functions.getUserAccountData.return_value.call.return_value = (
-            10_000 * 10**8,
-            5_000 * 10**8,
-            2_000 * 10**8,
-            8500,
-            8000,
-            int(Decimal("1.42") * Decimal("1e18")),
+        gw = self._make_gateway(
+            collateral_usd="10000",
+            debt_usd="5000",
+            liquidation_threshold_bps=8500,
+            health_factor="1.42",
         )
-
-        fake_w3 = MagicMock()
-        fake_w3.to_checksum_address.side_effect = lambda a: a
-        fake_w3.eth.contract.return_value = fake_pool
-
-        with _fake_web3_patch(fake_w3):
-            hf = get_health_factor(
-                chain="ethereum",
-                protocol="aave_v3",
-                wallet="0xabc",
-                market="ethereum_pool",
-                rpc_url="http://localhost:8545",
-            )
+        hf = get_health_factor(
+            chain="ethereum",
+            protocol="aave_v3",
+            wallet="0xabc",
+            market="ethereum_pool",
+            gateway_client=gw,
+        )
         assert hf == Decimal("1.42")
 
     def test_aave_unsupported_chain_raises(self):
-        provider = PositionHealthProvider(rpc_url="http://localhost:8545", chain="unknown_chain_x")
-        with pytest.raises(ValueError, match="Aave V3 not configured"):
+        # An unknown chain has no registry-resolved pool, so the read fails closed
+        # (returns None) and the provider raises rather than fabricating a HF.
+        gw = self._make_gateway(
+            collateral_usd="10000",
+            debt_usd="5000",
+            liquidation_threshold_bps=8500,
+            health_factor="1.75",
+        )
+        provider = PositionHealthProvider(chain="unknown_chain_x", gateway_client=gw)
+        with pytest.raises(ValueError, match="Failed to read aave_v3 account state"):
+            provider.get_health("aave_v3", "m", "0xabc")
+
+    def test_aave_missing_gateway_raises(self):
+        # VIB-4851: the rpc_url-only Web3(HTTPProvider) path (a gateway-boundary
+        # violation) is gone. A missing gateway client must fail closed.
+        provider = PositionHealthProvider(chain="ethereum", gateway_client=None)
+        with pytest.raises(ValueError, match="GatewayClient is required"):
             provider.get_health("aave_v3", "m", "0xabc")
 
     def test_aave_hf_supported_on_bsc(self):
         """Regression (ALM-2794): bsc health used to raise "not configured".
 
-        The health path hardcoded a 4-chain subset that omitted bsc, so a live
-        ``aave_v3`` strategy on bsc got "not configured for chain: bsc" while its
-        SUPPLY/BORROW intents executed fine — tripping HF-safety logic into false
-        emergency unwinds. Health now sources the connector's canonical pool table,
-        so bsc resolves and returns the on-chain HF.
+        The pre-seam health path hardcoded a 4-chain subset that omitted bsc, so a
+        live ``aave_v3`` strategy on bsc got "not configured for chain: bsc" while
+        its SUPPLY/BORROW intents executed fine -- tripping HF-safety logic into
+        false emergency unwinds. Health now resolves the pool through the same
+        ``AddressRegistry`` the intent path uses, so bsc resolves and returns the
+        on-chain HF. The stronger invariant is pinned in
+        ``test_aave_registry_resolves_pool_for_every_execution_chain``.
         """
-        fake_pool = MagicMock()
-        fake_pool.functions.getUserAccountData.return_value.call.return_value = (
-            10_000 * 10**8,
-            5_000 * 10**8,
-            2_000 * 10**8,
-            8500,
-            8000,
-            int(Decimal("1.6") * Decimal("1e18")),
+        gw = self._make_gateway(
+            collateral_usd="10000",
+            debt_usd="5000",
+            liquidation_threshold_bps=8500,
+            health_factor="1.6",
         )
-
-        fake_w3 = MagicMock()
-        fake_w3.to_checksum_address.side_effect = lambda a: a
-        fake_w3.eth.contract.return_value = fake_pool
-
-        with _fake_web3_patch(fake_w3):
-            provider = PositionHealthProvider(rpc_url="http://localhost:8545", chain="bsc")
-            health = provider.get_health("aave_v3", "bsc_pool", "0xabc")
+        provider = PositionHealthProvider(chain="bsc", gateway_client=gw)
+        health = provider.get_health("aave_v3", "bsc_pool", "0xabc")
 
         assert health.health_factor == Decimal("1.6")
         assert health.protocol == "aave_v3"
@@ -450,69 +513,57 @@ class TestAaveHealthFactorProvider:
     def test_aave_hf_resolves_bnb_alias_to_bsc(self):
         """Chain aliases must canonicalize before the pool lookup.
 
-        Connector address tables are keyed on the canonical name ("bsc"). A
-        caller passing the "bnb" alias (as the execution path tolerates) must
-        still resolve, not raise "not configured" — the provider canonicalizes
-        ``self._chain`` at construction.
+        The ``AddressRegistry`` resolves on the canonical name ("bsc"). A caller
+        passing the "bnb" alias (as the execution path tolerates) must still
+        resolve, not fail closed -- the provider canonicalizes ``self._chain`` at
+        construction.
         """
-        fake_pool = MagicMock()
-        fake_pool.functions.getUserAccountData.return_value.call.return_value = (
-            10_000 * 10**8,
-            5_000 * 10**8,
-            2_000 * 10**8,
-            8500,
-            8000,
-            int(Decimal("1.6") * Decimal("1e18")),
+        gw = self._make_gateway(
+            collateral_usd="10000",
+            debt_usd="5000",
+            liquidation_threshold_bps=8500,
+            health_factor="1.6",
         )
-        fake_w3 = MagicMock()
-        fake_w3.to_checksum_address.side_effect = lambda a: a
-        fake_w3.eth.contract.return_value = fake_pool
-
-        with _fake_web3_patch(fake_w3):
-            provider = PositionHealthProvider(rpc_url="http://localhost:8545", chain="bnb")
-            assert provider._chain == "bsc"  # canonicalized at construction
-            health = provider.get_health("aave_v3", "bsc_pool", "0xabc")
+        provider = PositionHealthProvider(chain="bnb", gateway_client=gw)
+        assert provider._chain == "bsc"  # canonicalized at construction
+        health = provider.get_health("aave_v3", "bsc_pool", "0xabc")
 
         assert health.protocol == "aave_v3"
 
-    def test_aave_health_chains_match_execution_chains(self):
-        """Drift guard: health support must never fall behind execution support.
+    def test_aave_registry_resolves_pool_for_every_execution_chain(self):
+        """Drift guard (stronger than ALM-2794's original): health support must
+        never fall behind execution support.
 
-        The bug was a private copy of the pool-address table that drifted behind
-        the connector's. Pin the invariant: every chain the connector can execute
-        Aave V3 on must also resolve in the health path (i.e. must not raise
-        "not configured"). If someone re-introduces a hardcoded subset, this fails.
+        The original bug was a private copy of the pool-address table that drifted
+        behind the connector's. The seam removes the copy entirely: the health read
+        resolves the pool via ``LendingReadRegistry.position_manager_address``, the
+        same address book the intent path uses. Pin the invariant directly -- every
+        chain the connector can execute Aave V3 on (incl. bsc) must resolve a pool
+        through the registry. If someone re-introduces a hardcoded subset or breaks
+        an address-book entry, this fails closed here.
         """
+        from almanak.connectors._strategy_base.lending_read_registry import (
+            LendingReadRegistry,
+        )
         from almanak.connectors.aave_v3.adapter import AAVE_V3_POOL_ADDRESSES
 
-        fake_pool = MagicMock()
-        fake_pool.functions.getUserAccountData.return_value.call.return_value = (
-            10_000 * 10**8,
-            5_000 * 10**8,
-            2_000 * 10**8,
-            8500,
-            8000,
-            int(Decimal("2.0") * Decimal("1e18")),
-        )
-        fake_w3 = MagicMock()
-        fake_w3.to_checksum_address.side_effect = lambda a: a
-        fake_w3.eth.contract.return_value = fake_pool
-
         assert "bsc" in AAVE_V3_POOL_ADDRESSES  # the chain that surfaced ALM-2794
-        with _fake_web3_patch(fake_w3):
-            for chain in AAVE_V3_POOL_ADDRESSES:
-                provider = PositionHealthProvider(rpc_url="http://localhost:8545", chain=chain)
-                # Must not raise "Aave V3 not configured for chain: <chain>".
-                health = provider.get_health("aave_v3", f"{chain}_pool", "0xabc")
-                assert health.protocol == "aave_v3"
+        # Assert the EXACT address (not just truthy): the seam contract is "health
+        # resolves through the same address book as execution", so a registry that
+        # pointed at a different non-empty pool for a chain would still be a drift.
+        for chain, expected_pool in AAVE_V3_POOL_ADDRESSES.items():
+            assert (
+                LendingReadRegistry.position_manager_address("aave_v3", chain) == expected_pool
+            ), f"registry resolved the wrong Aave V3 pool for execution chain {chain!r}"
 
 
 def _fake_web3_patch(fake_w3):
     """Patch ``web3.Web3`` so local imports inside ``position_health`` pick up our mock.
 
-    Returns a context manager. ``Web3(...)`` in ``position_health._get_aave_health`` /
-    ``_get_compound_health`` will return ``fake_w3``, and ``Web3.HTTPProvider(...)`` is
-    also safely mocked (return value is irrelevant since ``fake_w3`` ignores it).
+    Returns a context manager. ``Web3(...)`` in ``position_health._get_compound_health``
+    will return ``fake_w3``, and ``Web3.HTTPProvider(...)`` is also safely mocked
+    (return value is irrelevant since ``fake_w3`` ignores it). Still used by the
+    Compound V3 tests (PR-2 scope); the Aave/Morpho tests no longer need it.
     """
     import web3
 
@@ -520,99 +571,293 @@ def _fake_web3_patch(fake_w3):
 
 
 class TestMorphoHealthFactorProvider:
-    """Morpho Blue: mock the SDK and assert HF math is correct."""
+    """Morpho Blue: assert the seam mapping + the price-override translation.
+
+    VIB-4851 migrated Morpho health onto ``read_lending_account_state`` ->
+    ``MORPHO_BLUE_ACCOUNT_STATE_READ``. Because Morpho's catalogue / price
+    injection is fiddly to encode at the eth_call level, these tests use strategy
+    (B): mock ``read_lending_account_state`` to return a crafted
+    ``LendingAccountState`` and assert ``_to_position_health`` maps it to the exact
+    expected ``PositionHealth``, and unit-test ``_build_price_oracle_dict``'s
+    same-asset / cross-asset semantics directly.
+    """
+
+    # ``read_lending_account_state`` is imported function-locally inside
+    # ``_read_account_state`` from ``lending_reads`` (VIB-4851 PR-2 moved the
+    # light reader there; ``lending_accounting`` re-exports it). Patch it at
+    # that definition module so the function-local import binds to the mock.
+    _SEAM_TARGET = "almanak.framework.accounting.lending_reads.read_lending_account_state"
+    _MARKET_PARAMS_TARGET = "almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.market_params"
 
     def test_morpho_hf_same_asset_market(self):
-        from almanak.framework.data import position_health as ph_module
+        from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
 
-        fake_sdk = MagicMock()
-        fake_sdk.get_position.return_value = MagicMock(
-            collateral=Decimal("10"),
-            borrow_shares=Decimal("100"),
+        # Same-asset market: prices default to 1. The reducer would value
+        # collateral=10, debt=5, lltv=0.915 -> HF=(10*0.915)/5=1.83. We feed that
+        # already-reduced state through the seam mock and assert the mapping.
+        crafted = LendingAccountState(
+            collateral_usd=Decimal("10"),
+            debt_usd=Decimal("5"),
+            health_factor=Decimal("1.83"),
+            liquidation_threshold_bps=None,
+            e_mode_category=None,
+            lltv=Decimal("0.915"),
         )
-        fake_sdk.get_market_params.return_value = MagicMock(
-            lltv=int(Decimal("0.915") * Decimal("1e18")),
-            collateral_token="0xweth",
-            loan_token="0xweth",  # same-asset market
-        )
-        fake_sdk.get_market_state.return_value = MagicMock(
-            total_borrow_assets=Decimal("5"),
-            total_borrow_shares=Decimal("100"),
-        )
-
-        with patch.object(
-            ph_module,
-            "_get_morpho_health",
-            new=None,  # no-op; we're patching the SDK import inside the method
-        ) if False else patch(
-            "almanak.connectors.morpho_blue.sdk.MorphoBlueSDK",
-            return_value=fake_sdk,
+        same_asset_params = {
+            "collateral_token": "WETH",
+            "loan_token": "WETH",
+            "lltv": int(Decimal("0.915") * Decimal("1e18")),
+        }
+        with (
+            patch(self._SEAM_TARGET, return_value=crafted) as mock_seam,
+            patch(self._MARKET_PARAMS_TARGET, return_value=same_asset_params),
         ):
-            provider = PositionHealthProvider(rpc_url="http://x", chain="ethereum")
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
             health = provider.get_health("morpho_blue", "0xmarket", "0xabc")
 
-        # Same-asset market: prices default to 1.
-        # Collateral=10, debt_amount = 100 * 5/100 = 5, lltv=0.915
-        # HF = (10 * 0.915) / 5 = 1.83
         assert health.health_factor == Decimal("1.83")
         assert health.protocol == "morpho_blue"
         assert health.collateral_value_usd == Decimal("10")
         assert health.debt_value_usd == Decimal("5")
+        # Same-asset market with no overrides -> {symbol: 1} injected into the seam.
+        seam_kwargs = mock_seam.call_args.kwargs
+        assert seam_kwargs["price_oracle"] == {"WETH": Decimal("1")}
+        assert seam_kwargs["market_id"] == "0xmarket"
 
     def test_morpho_cross_asset_requires_prices(self):
-        fake_sdk = MagicMock()
-        fake_sdk.get_position.return_value = MagicMock(
-            collateral=Decimal("10"),
-            borrow_shares=Decimal("100"),
-        )
-        fake_sdk.get_market_params.return_value = MagicMock(
-            lltv=int(Decimal("0.86") * Decimal("1e18")),
-            collateral_token="0xweth",
-            loan_token="0xusdc",  # cross-asset
-        )
-        fake_sdk.get_market_state.return_value = MagicMock(
-            total_borrow_assets=Decimal("1000"),
-            total_borrow_shares=Decimal("100"),
-        )
-
-        with patch(
-            "almanak.connectors.morpho_blue.sdk.MorphoBlueSDK",
-            return_value=fake_sdk,
-        ):
-            provider = PositionHealthProvider(rpc_url="http://x", chain="ethereum")
+        cross_asset_params = {
+            "collateral_token": "wstETH",
+            "loan_token": "USDC",  # cross-asset
+            "lltv": int(Decimal("0.86") * Decimal("1e18")),
+        }
+        with patch(self._MARKET_PARAMS_TARGET, return_value=cross_asset_params):
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
             # No price override -> must raise to avoid silent miscalculation.
             with pytest.raises(ValueError, match="Price overrides required"):
                 provider.get_health("morpho_blue", "0xmarket", "0xabc")
 
     def test_morpho_dispatch_via_get_health_factor(self):
-        fake_sdk = MagicMock()
-        fake_sdk.get_position.return_value = MagicMock(
-            collateral=Decimal("10"),
-            borrow_shares=Decimal("100"),
-        )
-        fake_sdk.get_market_params.return_value = MagicMock(
-            lltv=int(Decimal("0.90") * Decimal("1e18")),
-            collateral_token="0xweth",
-            loan_token="0xweth",
-        )
-        fake_sdk.get_market_state.return_value = MagicMock(
-            total_borrow_assets=Decimal("5"),
-            total_borrow_shares=Decimal("100"),
-        )
+        from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
 
-        with patch(
-            "almanak.connectors.morpho_blue.sdk.MorphoBlueSDK",
-            return_value=fake_sdk,
+        # (10 * 0.90) / 5 = 1.80 via the "morpho" alias through get_health_factor.
+        crafted = LendingAccountState(
+            collateral_usd=Decimal("10"),
+            debt_usd=Decimal("5"),
+            health_factor=Decimal("1.80"),
+            liquidation_threshold_bps=None,
+            e_mode_category=None,
+            lltv=Decimal("0.90"),
+        )
+        same_asset_params = {
+            "collateral_token": "WETH",
+            "loan_token": "WETH",
+            "lltv": int(Decimal("0.90") * Decimal("1e18")),
+        }
+        with (
+            patch(self._SEAM_TARGET, return_value=crafted),
+            patch(self._MARKET_PARAMS_TARGET, return_value=same_asset_params),
         ):
             hf = get_health_factor(
                 chain="ethereum",
                 protocol="morpho",  # alias
                 wallet="0xabc",
                 market="0xmarket",
-                rpc_url="http://x",
+                gateway_client=MagicMock(),
             )
-        # (10 * 0.90) / 5 = 1.80
         assert hf == Decimal("1.80")
+
+    def test_build_price_oracle_dict_same_asset_defaults_to_one(self):
+        """Same-asset market with no overrides defaults the single token to $1."""
+        provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+        with patch(
+            self._MARKET_PARAMS_TARGET,
+            return_value={"collateral_token": "WETH", "loan_token": "WETH"},
+        ):
+            oracle = provider._build_price_oracle_dict("0xmarket", None, None)
+        assert oracle == {"WETH": Decimal("1")}
+
+    def test_build_price_oracle_dict_cross_asset_with_overrides(self):
+        """Cross-asset market keys each leg's symbol to its override price."""
+        provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+        with patch(
+            self._MARKET_PARAMS_TARGET,
+            return_value={"collateral_token": "wstETH", "loan_token": "USDC"},
+        ):
+            oracle = provider._build_price_oracle_dict("0xmarket", Decimal("2500"), Decimal("1"))
+        assert oracle == {"USDC": Decimal("1"), "wstETH": Decimal("2500")}
+
+    def test_build_price_oracle_dict_off_catalogue_fails_closed(self):
+        """An off-catalogue market (no params) fails closed rather than guessing."""
+        provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+        with patch(self._MARKET_PARAMS_TARGET, return_value=None):
+            with pytest.raises(ValueError, match="not found"):
+                provider._build_price_oracle_dict("0xnope", None, None)
+
+    def test_build_price_oracle_dict_missing_symbols_fails_closed(self):
+        """Market params present but without collateral/loan symbols fails closed.
+
+        A catalogue entry that resolves but omits the token symbols cannot be
+        valued -- the seam needs both symbols to price the legs. Empty != Zero:
+        raise rather than guess.
+        """
+        provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+        with patch(
+            self._MARKET_PARAMS_TARGET,
+            return_value={"lltv": 860000000000000000},  # no collateral/loan token
+        ):
+            with pytest.raises(ValueError, match="no collateral/loan"):
+                provider._build_price_oracle_dict("0xmarket", None, None)
+
+    def test_to_position_health_none_state_raises(self):
+        """``_to_position_health`` fails closed on a ``None`` state.
+
+        A failed seam read must surface as an error, never a fabricated
+        healthy/zero ``PositionHealth`` (Empty != Zero).
+        """
+        provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+        with pytest.raises(ValueError, match="account state is unavailable"):
+            provider._to_position_health(None, protocol="morpho_blue", market_id="0xmarket")
+
+    def test_to_position_health_none_hf_with_debt_raises(self):
+        """Positive debt but no measured HF must raise, not report Infinity.
+
+        Reporting ``Infinity`` (the no-debt sentinel) for a position that DOES
+        carry debt but whose HF could not be measured would mask liquidation
+        risk. The adapter fails closed instead (Empty != Zero / raise-on-failure).
+        """
+        from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
+
+        provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+        state = LendingAccountState(
+            collateral_usd=Decimal("100"),
+            debt_usd=Decimal("50"),  # positive debt
+            health_factor=None,  # unmeasured
+            liquidation_threshold_bps=8500,
+            e_mode_category=0,
+            family="aave",
+        )
+        with pytest.raises(ValueError, match="refusing to fabricate"):
+            provider._to_position_health(state, protocol="aave_v3", market_id="m")
+
+
+class TestPTPositionHealthSeam:
+    """``get_pt_position_health`` over the VIB-4851 seam-backed Morpho base.
+
+    The base Morpho health now flows through ``get_health("morpho_blue", ...)``
+    (-> ``read_lending_account_state``); the Pendle on-chain enrichment
+    (``PendleOnChainReader``, VIB-4931's territory) is layered on top unchanged.
+    These tests mock BOTH the seam and the Pendle reader so the full method body
+    executes -- proving the repoint preserves the base health fields and the
+    Pendle metrics are still composed onto the ``PTPositionHealth``.
+    """
+
+    _SEAM_TARGET = "almanak.framework.accounting.lending_reads.read_lending_account_state"
+    _MARKET_PARAMS_TARGET = "almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.market_params"
+    _PENDLE_READER_TARGET = "almanak.framework.data.pendle.on_chain_reader.PendleOnChainReader"
+
+    @staticmethod
+    def _morpho_state():
+        from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
+
+        # collateral 10, debt 5, lltv 0.915 -> HF 1.83 (same-asset, prices=1).
+        return LendingAccountState(
+            collateral_usd=Decimal("10"),
+            debt_usd=Decimal("5"),
+            health_factor=Decimal("1.83"),
+            liquidation_threshold_bps=None,
+            e_mode_category=None,
+            lltv=Decimal("0.915"),
+        )
+
+    def test_pt_health_not_expired_composes_pendle_metrics(self):
+        reader = MagicMock()
+        reader.get_implied_apy.return_value = Decimal("0.10")  # 10% APY
+        reader.is_market_expired.return_value = False
+        reader.get_pt_to_asset_rate.return_value = Decimal("0.98")  # 2% discount
+
+        same_asset_params = {
+            "collateral_token": "WETH",
+            "loan_token": "WETH",
+            "lltv": int(Decimal("0.915") * Decimal("1e18")),
+        }
+        with (
+            patch(self._SEAM_TARGET, return_value=self._morpho_state()),
+            patch(self._MARKET_PARAMS_TARGET, return_value=same_asset_params),
+            patch(self._PENDLE_READER_TARGET, return_value=reader),
+        ):
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+            pt = provider.get_pt_position_health(
+                morpho_market_id="0xmarket",
+                pendle_market_address="0xpendle",
+                user_address="0xabc",
+            )
+
+        # Base (seam-derived) health fields preserved.
+        assert pt.health_factor == Decimal("1.83")
+        assert pt.collateral_value_usd == Decimal("10")
+        assert pt.debt_value_usd == Decimal("5")
+        assert pt.protocol == "morpho_blue"
+        # Pendle enrichment composed on top.
+        assert pt.implied_apy == Decimal("0.10")
+        assert pt.pt_discount_pct == (Decimal("1") - Decimal("0.98")) * Decimal("100")
+        assert pt.days_to_maturity > 0
+        assert pt.pendle_market == "0xpendle"
+
+    def test_pt_health_expired_market_zero_days(self):
+        reader = MagicMock()
+        reader.get_implied_apy.return_value = Decimal("0.05")
+        reader.is_market_expired.return_value = True  # expired branch
+
+        same_asset_params = {
+            "collateral_token": "WETH",
+            "loan_token": "WETH",
+            "lltv": int(Decimal("0.915") * Decimal("1e18")),
+        }
+        with (
+            patch(self._SEAM_TARGET, return_value=self._morpho_state()),
+            patch(self._MARKET_PARAMS_TARGET, return_value=same_asset_params),
+            patch(self._PENDLE_READER_TARGET, return_value=reader),
+        ):
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+            pt = provider.get_pt_position_health(
+                morpho_market_id="0xmarket",
+                pendle_market_address="0xpendle",
+                user_address="0xabc",
+            )
+
+        assert pt.days_to_maturity == 0
+        assert pt.maturity_risk == "expired"
+        # Base health still flows through from the seam.
+        assert pt.health_factor == Decimal("1.83")
+
+    def test_pt_health_pendle_failure_is_swallowed(self):
+        # A Pendle read failure must NOT void the base Morpho health: the
+        # enrichment is best-effort (try/except logs a warning), the base HF
+        # still surfaces. Guards the "PT health still works" contract.
+        reader = MagicMock()
+        reader.get_implied_apy.side_effect = RuntimeError("pendle rpc down")
+
+        same_asset_params = {
+            "collateral_token": "WETH",
+            "loan_token": "WETH",
+            "lltv": int(Decimal("0.915") * Decimal("1e18")),
+        }
+        with (
+            patch(self._SEAM_TARGET, return_value=self._morpho_state()),
+            patch(self._MARKET_PARAMS_TARGET, return_value=same_asset_params),
+            patch(self._PENDLE_READER_TARGET, return_value=reader),
+        ):
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+            pt = provider.get_pt_position_health(
+                morpho_market_id="0xmarket",
+                pendle_market_address="0xpendle",
+                user_address="0xabc",
+            )
+
+        # Base health preserved; Pendle metrics fall back to their defaults.
+        assert pt.health_factor == Decimal("1.83")
+        assert pt.implied_apy == Decimal("0")
+        assert pt.days_to_maturity == 0
 
 
 class TestCompoundHealthFactorProvider:
@@ -770,9 +1015,7 @@ class TestUnsupportedProtocol:
 
     def test_unsupported_via_dispatch(self):
         with pytest.raises(ValueError, match="Unsupported protocol"):
-            get_health_factor(
-                chain="ethereum", protocol="unknown_proto", wallet="0xabc", market="m"
-            )
+            get_health_factor(chain="ethereum", protocol="unknown_proto", wallet="0xabc", market="m")
 
 
 class TestProviderRegistry:
@@ -815,6 +1058,94 @@ class TestProviderRegistry:
         adapter = _PositionHealthProviderAdapter(inner, "aave_v3")
         hf = adapter.get_health_factor("0xabc", "m")
         assert hf == Decimal("2.5")
-        inner.get_health.assert_called_once_with(
-            protocol="aave_v3", market_id="m", user_address="0xabc"
+        inner.get_health.assert_called_once_with(protocol="aave_v3", market_id="m", user_address="0xabc")
+
+
+class TestVIB4851ReviewFixes:
+    """Regression tests for the PR #2597 review findings (Codex / Gemini / CodeRabbit)."""
+
+    _SEAM_TARGET = "almanak.framework.accounting.lending_reads.read_lending_account_state"
+    _MARKET_PARAMS_TARGET = (
+        "almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.market_params"
+    )
+
+    @staticmethod
+    def _aave_state(*, debt, hf, bps=8500):
+        from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
+
+        return LendingAccountState(
+            collateral_usd=Decimal("10000"),
+            debt_usd=debt,
+            health_factor=hf,
+            liquidation_threshold_bps=bps,
+            e_mode_category=0,
+            lltv=None,
         )
+
+    def test_spark_routes_through_seam_not_unsupported(self):
+        # CodeRabbit (major): get_health("spark", ...) used to fall into the
+        # unsupported-protocol branch even though Spark is an Aave V3 fork.
+        crafted = self._aave_state(debt=Decimal("5000"), hf=Decimal("1.6"))
+        with patch(self._SEAM_TARGET, return_value=crafted) as mock_seam:
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+            health = provider.get_health("spark", "spark", "0xabc")
+        assert health.protocol == "spark"
+        assert health.health_factor == Decimal("1.6")
+        # Spark is Aave-family: lltv derived from bps (8500 -> 0.85), not state.lltv.
+        assert health.lltv == Decimal("0.85")
+        assert mock_seam.call_args.kwargs["protocol"] == "spark"
+
+    def test_capped_hf_with_dust_debt_stays_finite(self):
+        # Codex (P2) / CodeRabbit (major): a positive (dust) debt whose HF the
+        # reducer capped at the 999999 sentinel must NOT be remapped to Infinity --
+        # that would make a strategy skip risk/deleverage handling on an open debt.
+        crafted = self._aave_state(debt=Decimal("0.01"), hf=Decimal("999999"))
+        with patch(self._SEAM_TARGET, return_value=crafted):
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+            health = provider.get_health("aave_v3", "aave_v3", "0xabc")
+        assert health.health_factor == Decimal("999999")
+        assert health.health_factor.is_finite()
+        assert health.debt_value_usd == Decimal("0.01")
+
+    def test_no_debt_still_maps_to_infinity(self):
+        # The genuine no-debt path (debt == 0) must still surface Infinity.
+        crafted = self._aave_state(debt=Decimal("0"), hf=Decimal("999999"))
+        with patch(self._SEAM_TARGET, return_value=crafted):
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+            health = provider.get_health("aave_v3", "aave_v3", "0xabc")
+        assert health.health_factor == Decimal("Infinity")
+
+    def test_same_asset_lone_debt_override_not_dropped(self):
+        # Gemini (high): a lone debt_price_usd override on a same-asset market used
+        # to be silently overwritten by the collateral default via a duplicate key.
+        from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
+
+        crafted = LendingAccountState(
+            collateral_usd=Decimal("10"),
+            debt_usd=Decimal("5"),
+            health_factor=Decimal("1.83"),
+            liquidation_threshold_bps=None,
+            e_mode_category=None,
+            lltv=Decimal("0.915"),
+        )
+        same_asset_params = {
+            "collateral_token": "WETH",
+            "loan_token": "WETH",
+            "lltv": int(Decimal("0.915") * Decimal("1e18")),
+        }
+        with (
+            patch(self._SEAM_TARGET, return_value=crafted) as mock_seam,
+            patch(self._MARKET_PARAMS_TARGET, return_value=same_asset_params),
+        ):
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+            provider.get_health("morpho_blue", "0xmarket", "0xabc", debt_price_usd=Decimal("2000"))
+        # The lone override survives as the single consistent key (not reset to 1).
+        assert mock_seam.call_args.kwargs["price_oracle"] == {"WETH": Decimal("2000")}
+
+    def test_aave_none_market_id_read_failure_raises_clean(self):
+        # Gemini (medium): market_id=None (Aave whole-account) must not raise a
+        # TypeError in the error-message slice when the read returns None.
+        with patch(self._SEAM_TARGET, return_value=None):
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+            with pytest.raises(ValueError, match="Failed to read"):
+                provider.get_health("aave_v3", None, "0xabc")

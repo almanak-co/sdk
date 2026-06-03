@@ -126,9 +126,14 @@ class TestPositionHealthProviderInvocation:
         disconnected = MagicMock(spec=["is_connected"])
         disconnected.is_connected = False
 
+        # VIB-4851: the disconnected-fails-fast guard now lives in the public
+        # ``get_health`` (the Aave arm routes through the lending-read seam, which
+        # requires a connected gateway) -- ``_get_aave_health`` was deleted. The
+        # behaviour is identical: a present-but-disconnected client raises
+        # "not connected" before any RPC attempt.
         provider = PositionHealthProvider(chain="arbitrum", gateway_client=disconnected)
         with pytest.raises(ValueError, match="not connected"):
-            provider._get_aave_health(market_id="aave_v3", user_address="0x" + "1" * 40)
+            provider.get_health("aave_v3", "aave_v3", "0x" + "1" * 40)
 
         market = MarketSnapshot(chain="arbitrum", wallet_address="0xabc", gateway_client=disconnected)
         with pytest.raises(HealthUnavailableError):
