@@ -2639,11 +2639,21 @@ class PortfolioValuer:
         if not wallet or not asset or not chain:
             return
 
+        # VIB-4981 — market_id scopes isolated-lending (Morpho Blue) positions.
+        # The L3 OPEN row keyed by lending_position_id now carries market_id, so
+        # this same-iteration cost-basis lookup MUST pass it too or it would
+        # re-introduce the L3/L5 asymmetry on the valuer path and miss the OPEN
+        # event for Morpho positions. ``details["market_id"]`` is the canonical
+        # source — the sibling _try_derive_lending_position_key reads the same
+        # field. Absent (Aave-style) ⇒ None ⇒ no extra segment ⇒ key unchanged.
+        market_id = position_info.details.get("market_id")
+
         position_id = lending_position_id(
             chain=chain,
             protocol=position_info.protocol or "",
             wallet=wallet,
             asset=asset,
+            market_id=market_id,
         )
         is_debt = position_info.position_type == PositionType.BORROW
         position_type_str = "LENDING_DEBT" if is_debt else "LENDING_COLLATERAL"

@@ -95,6 +95,79 @@ def test_lending_position_id_handles_missing_segments():
     assert pid == "lending:unknown:unknown:unknown:unknown"
 
 
+def test_lending_position_id_aave_style_no_market_id_unchanged():
+    """VIB-4981 regression guard — passing ``market_id=None`` (Aave-style) must
+    produce the SAME key as before the market_id parameter existed (Empty ≠
+    Zero: a falsy market_id inserts no segment). Defaulting ``market_id`` is
+    likewise unchanged."""
+    explicit_none = lending_position_id(
+        chain="ARBITRUM",
+        protocol="Aave_V3",
+        wallet="0xABCDEF1234567890abcdef1234567890abcdef12",
+        asset="USDC",
+        market_id=None,
+    )
+    defaulted = lending_position_id(
+        chain="ARBITRUM",
+        protocol="Aave_V3",
+        wallet="0xABCDEF1234567890abcdef1234567890abcdef12",
+        asset="USDC",
+    )
+    expected = "lending:arbitrum:aave_v3:0xabcdef1234567890abcdef1234567890abcdef12:usdc"
+    assert explicit_none == defaulted == expected
+    # An empty-string market_id is also falsy ⇒ no segment.
+    assert (
+        lending_position_id(
+            chain="ARBITRUM",
+            protocol="Aave_V3",
+            wallet="0xABCDEF1234567890abcdef1234567890abcdef12",
+            asset="USDC",
+            market_id="",
+        )
+        == expected
+    )
+
+
+def test_lending_position_id_market_scoped_matches_layer5_byte_identical():
+    """VIB-4981 — for an isolated-lending (Morpho Blue) position the Layer-3
+    ``lending_position_id`` must equal the Layer-5 ``_derive_position_key``
+    byte-for-byte, so the (position_key == position_id) join in
+    AccountingProcessor._backfill_lending_position_pnl finds the L3 row and the
+    win-rate back-fill stamps net_pnl_usd. Derive both from the production
+    helpers — not hand-typed literals — and compare directly."""
+    from almanak.framework.accounting.lending_accounting import _derive_position_key
+
+    chain = "BASE"
+    protocol = "Morpho_Blue"
+    wallet = "0xABCDEF1234567890abcdef1234567890abcdef12"
+    asset = "USDC"
+    market_id = "0xMARKET00000000000000000000000000000000000000000000000000000000ID"
+
+    l3 = lending_position_id(chain=chain, protocol=protocol, wallet=wallet, asset=asset, market_id=market_id)
+    l5 = _derive_position_key(protocol, chain, wallet, market_id, asset)
+
+    assert l3 == l5
+    # market_id sits BETWEEN wallet and asset (canonical blueprint shape).
+    assert l3 == (
+        "lending:base:morpho_blue:"
+        "0xabcdef1234567890abcdef1234567890abcdef12:"
+        "0xmarket00000000000000000000000000000000000000000000000000000000id:"
+        "usdc"
+    )
+
+    # VIB-4981 defensive coercion: a non-str market_id (e.g. an int sourced from
+    # a future details payload) must coerce via ``str(market_id).lower()`` rather
+    # than raise AttributeError inside the key helper, and must STILL match L5
+    # byte-for-byte (L5 receives the str-coerced value the valuer-sibling passes).
+    non_str_market_id = 12345
+    l3_int = lending_position_id(
+        chain=chain, protocol=protocol, wallet=wallet, asset=asset, market_id=non_str_market_id
+    )
+    l5_int = _derive_position_key(protocol, chain, wallet, str(non_str_market_id), asset)
+    assert l3_int == l5_int
+    assert ":12345:" in l3_int  # the coerced, lower-cased segment is present
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # OPEN vs INCREASE — cache-driven
 # ──────────────────────────────────────────────────────────────────────────
@@ -150,6 +223,32 @@ def test_first_supply_emits_open():
     assert event.token0 == "USDC"
     assert event.amount0 == "2000000"
     assert event.value_usd == "2.0"
+
+
+def test_market_scoped_supply_threads_market_id_into_position_id():
+    """VIB-4981 — a Morpho Blue SUPPLY intent carries ``market_id``; the L3
+    writer must thread it into ``position_id`` so the key matches Layer 5.
+    Aave-style intents (no market_id) are covered by the other tests."""
+    intent = _make_lending_intent("SUPPLY", protocol="morpho_blue")
+    intent.market_id = "0xMARKET00000000000000000000000000000000000000000000000000000000ID"
+    result = _make_result("SUPPLY", amount=2_000_000)
+
+    event = build_position_event_from_intent(
+        deployment_id="dep-1",
+        intent=intent,
+        result=result,
+        ledger_entry_id="le-1",
+        chain="base",
+        recent_open_events={},
+        post_state={"collateral_value_usd": "2.0", "debt_value_usd": "0", "health_factor": "999999"},
+        wallet_address="0x1234567890123456789012345678901234567890",
+    )
+
+    assert event is not None
+    assert event.position_id == (
+        "lending:base:morpho_blue:0x1234567890123456789012345678901234567890:"
+        "0xmarket00000000000000000000000000000000000000000000000000000000id:usdc"
+    )
 
 
 def test_second_supply_emits_increase():

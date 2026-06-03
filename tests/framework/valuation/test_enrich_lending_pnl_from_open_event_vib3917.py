@@ -247,3 +247,71 @@ def test_empty_ledger_entry_id_in_cache_does_not_overwrite(valuer):
 
     assert pv.cost_basis_usd == Decimal("100")
     assert pv.ledger_entry_id == "preserved"
+
+
+def test_market_scoped_morpho_open_event_fallback(valuer):
+    """VIB-4981 — for isolated lending (Morpho Blue) the valuer must derive the
+    SAME market-scoped position_id the L3 writer used, so the same-iteration
+    cost-basis fallback finds the cached OPEN event. The cache key is built from
+    ``lending_position_id(..., market_id=...)`` and the position's
+    ``details["market_id"]`` feeds the valuer's derivation — they must agree, or
+    the Morpho cost basis silently drops (the asymmetry this PR fixes).
+    """
+    from almanak.framework.observability.position_events import lending_position_id
+
+    market_id = "0xMARKET00000000000000000000000000000000000000000000000000000000ID"
+    key = lending_position_id(chain="base", protocol="morpho_blue", wallet="0xABC", asset="USDC", market_id=market_id)
+    valuer._recent_open_events = {
+        (key, "LENDING_COLLATERAL"): {
+            "value_usd": "200.0",
+            "ledger_entry_id": "led-morpho-supply",
+            "timestamp": "2026-06-03T00:00:00Z",
+        }
+    }
+    pv = _position_value(Decimal("203"))
+    pi = PositionInfo(
+        position_type=PositionType.SUPPLY,
+        position_id=key,
+        chain="base",
+        protocol="morpho_blue",
+        value_usd=Decimal("0"),
+        details={"wallet": "0xABC", "asset": "USDC", "market_id": market_id},
+    )
+
+    valuer._enrich_lending_pnl_from_open_event(pv, pi, "base")
+
+    # Market-scoped key matched → cost basis + open metadata populated.
+    assert pv.cost_basis_usd == Decimal("200.0")
+    assert pv.unrealized_pnl_usd == Decimal("3")
+    assert pv.ledger_entry_id == "led-morpho-supply"
+
+
+def test_market_scoped_key_mismatch_without_market_id_is_noop(valuer):
+    """Guard: the same Morpho OPEN event keyed WITH market_id must NOT be found
+    by a position whose details omit market_id — proving the market segment is
+    load-bearing in the valuer derivation (no accidental Aave-style fallback).
+    """
+    from almanak.framework.observability.position_events import lending_position_id
+
+    market_id = "0xMARKETZZ"
+    key = lending_position_id(chain="base", protocol="morpho_blue", wallet="0xABC", asset="USDC", market_id=market_id)
+    valuer._recent_open_events = {
+        (key, "LENDING_COLLATERAL"): {
+            "value_usd": "200.0",
+            "ledger_entry_id": "led-morpho-supply",
+            "timestamp": "2026-06-03T00:00:00Z",
+        }
+    }
+    pv = _position_value(Decimal("203"))
+    pi = PositionInfo(
+        position_type=PositionType.SUPPLY,
+        position_id="lending:base:morpho_blue:0xabc:usdc",
+        chain="base",
+        protocol="morpho_blue",
+        value_usd=Decimal("0"),
+        details={"wallet": "0xABC", "asset": "USDC"},  # no market_id
+    )
+
+    valuer._enrich_lending_pnl_from_open_event(pv, pi, "base")
+
+    assert pv.cost_basis_usd == Decimal("0")

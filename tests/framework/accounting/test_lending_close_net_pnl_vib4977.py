@@ -424,10 +424,14 @@ async def test_backfill_unattributed_interest_leaves_payload_untouched() -> None
 
 @pytest.mark.asyncio
 async def test_backfill_no_matching_position_event_warns_not_silent(caplog: pytest.LogCaptureFixture) -> None:
-    """When the L5 position_key finds no L3 position event (the prime cause
-    is the market-scoped lending L3/L5 key divergence, VIB-4981), the
-    back-fill must emit a WARNING — not a silent debug skip — so the gap is
-    visible in prod log pipelines (matches run_attribution_on_close's level)."""
+    """When the L5 position_key finds no L3 position event at all (e.g. the L3
+    OPEN/CLOSE row genuinely isn't on disk yet, or the ledger_entry_id didn't
+    propagate), the back-fill must emit a WARNING — not a silent debug skip —
+    so the gap is visible in prod log pipelines (matches
+    run_attribution_on_close's level).
+
+    VIB-4981 aligned the L3/L5 lending keys, so a market_id mismatch is no
+    longer the cause; the warning text no longer cites that ticket."""
     store = _backfill_store(history=[])
     proc = AccountingProcessor(state_manager=store, basis_store=FIFOBasisStore(), deployment_id=_DEPLOYMENT)
 
@@ -442,20 +446,36 @@ async def test_backfill_no_matching_position_event_warns_not_silent(caplog: pyte
     assert "no Layer-3 position event" in msg
     assert _POSITION_KEY in msg  # the mismatched position_key is included
     assert "led-close" in msg  # the ledger_entry_id is included
-    assert "VIB-4981" in msg
 
 
 @pytest.mark.asyncio
-async def test_backfill_market_scoped_key_divergence_warns(caplog: pytest.LogCaptureFixture) -> None:
-    """Concrete Morpho-style reproduction of the L3/L5 divergence (VIB-4981).
+async def test_backfill_market_scoped_key_alignment_stamps_pnl() -> None:
+    """VIB-4981 — market-scoped (Morpho Blue) lending now back-fills.
 
-    The L5 accounting event's ``position_key`` carries ``market_id``
-    (``lending:...:<market_id>:<asset>``) while the L3 position event was
-    seeded under the market-id-free ``lending:...:<asset>`` id, so the join
-    cannot find the row. The fix must WARN (not silently skip) and never
-    fabricate a stamp under the wrong key."""
-    # L3 row keyed WITHOUT market_id (lending_position_id shape).
-    l3_position_id = "lending:base:morpho_blue:0xwallet:usdc"
+    Pre-fix the L5 ``position_key`` carried ``market_id``
+    (``lending:...:<market_id>:<asset>``) while the L3 ``position_id`` did
+    not (``lending:...:<asset>``), so the join silently missed every Morpho
+    close (win rate stuck 0/0). Post-fix ``lending_position_id`` inserts
+    ``market_id`` in the SAME slot, so the L3 row keyed by the real
+    derivation joins to the L5 ``position_key`` and the close gets its
+    ``net_pnl_usd`` stamp.
+
+    This test derives BOTH keys from the production helpers (not hand-typed
+    literals) and asserts byte-identity, then proves the stamp lands."""
+    from almanak.framework.accounting.lending_accounting import _derive_position_key
+    from almanak.framework.observability.position_events import lending_position_id
+
+    chain, protocol, wallet, asset = "base", "morpho_blue", "0xWALLET", "USDC"
+    market_id = "0xMARKETID"
+
+    l3_position_id = lending_position_id(
+        chain=chain, protocol=protocol, wallet=wallet, asset=asset, market_id=market_id
+    )
+    l5_position_key = _derive_position_key(protocol, chain, wallet, market_id, asset)
+    # The whole point of VIB-4981: the two derivations are byte-identical now.
+    assert l3_position_id == l5_position_key
+    assert l3_position_id == "lending:base:morpho_blue:0xwallet:0xmarketid:usdc"
+
     history = [
         {
             "id": "pe-close",
@@ -469,22 +489,21 @@ async def test_backfill_market_scoped_key_divergence_warns(caplog: pytest.LogCap
     store = _backfill_store(history)
     proc = AccountingProcessor(state_manager=store, basis_store=FIFOBasisStore(), deployment_id=_DEPLOYMENT)
 
-    # L5 event keyed WITH market_id (_derive_position_key shape) — diverges.
-    l5_position_key = "lending:base:morpho_blue:0xwallet:0xmarketid:usdc"
     event = _make_lending_event(
         "WITHDRAW",
         interest=Decimal("0.0006340"),
         ledger_entry_id="led-close",
         position_key=l5_position_key,
     )
-    # get_position_history is keyed on the L5 position_key, which has no L3 row.
-    store.get_position_history = AsyncMock(return_value=[])
 
-    with caplog.at_level("WARNING", logger="almanak.framework.accounting.processor"):
-        await proc._backfill_lending_position_pnl(event)
+    await proc._backfill_lending_position_pnl(event)
 
-    store.update_position_attribution.assert_not_awaited()
-    assert any("VIB-4981" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+    # The keys align ⇒ get_position_history(L5 key) finds the L3 row ⇒ stamp lands.
+    store.update_position_attribution.assert_awaited_once()
+    call_args = store.update_position_attribution.await_args
+    event_id, merged_json = call_args.args[0], call_args.args[1]
+    assert event_id == "pe-close"
+    assert json.loads(merged_json)["net_pnl_usd"] == "0.0006340"
 
 
 @pytest.mark.asyncio

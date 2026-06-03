@@ -772,19 +772,41 @@ def _apply_protocol_fees(event: PositionEvent, ctx: IntentEventContext) -> None:
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def lending_position_id(*, chain: str, protocol: str, wallet: str, asset: str) -> str:
+def lending_position_id(*, chain: str, protocol: str, wallet: str, asset: str, market_id: str | None = None) -> str:
     """Canonical lending position_id shape — must match
     ``LendingAccountingEvent.position_key`` so Layer 3 (position_events)
     and Layer 5 (accounting_events) are joinable on a single column.
 
+    Shape (VIB-4981): ``lending:{chain}:{protocol}:{wallet}[:{market_id}]:{asset}``.
+    ``market_id`` is inserted BETWEEN wallet and asset, and ONLY when truthy —
+    matching ``lending_accounting._derive_position_key`` byte-for-byte for both
+    the market-scoped (isolated lending, e.g. Morpho Blue) and the
+    non-market-scoped (Aave-style) cases. Without it the
+    ``AccountingProcessor._backfill_lending_position_pnl`` join on
+    ``position_key == position_id`` silently missed every Morpho close (win
+    rate stuck 0/0). The blueprint canonical form is
+    ``lending:{chain}:{protocol}:{wallet}:{market}:{asset}``
+    (docs/internal/blueprints/27-accounting.md §10).
+
     All segments are lower-cased; an empty wallet (e.g. dry_run with no
     signer) becomes ``unknown`` rather than producing a malformed key
     like ``lending:arbitrum:aave_v3::usdc``.
+
+    ``market_id`` is normalised with ``str(market_id).lower()`` (no strip / no
+    ``unknown`` default) so it stays byte-identical to L5
+    ``_derive_position_key`` for every ``str`` market id (the only shape any
+    Morpho producer emits today) while defensively coercing a future non-``str``
+    ``details``-sourced value rather than raising — matching the house style of
+    the sibling deriver ``portfolio_valuer._try_derive_lending_position_key``.
+    A falsy ``market_id`` (``None`` / ``""``) inserts NO segment — Empty ≠ Zero —
+    so Aave-style keys are unchanged (zero regression).
     """
     chain_n = (chain or "unknown").strip().lower() or "unknown"
     proto_n = (protocol or "unknown").strip().lower() or "unknown"
     wallet_n = (wallet or "unknown").strip().lower() or "unknown"
     asset_n = (asset or "unknown").strip().lower() or "unknown"
+    if market_id:
+        return f"lending:{chain_n}:{proto_n}:{wallet_n}:{str(market_id).lower()}:{asset_n}"
     return f"lending:{chain_n}:{proto_n}:{wallet_n}:{asset_n}"
 
 
@@ -1085,11 +1107,22 @@ def _apply_lending(event: PositionEvent, ctx: IntentEventContext) -> None:
         )
     asset = str(asset or "").upper()
 
+    # VIB-4981 — isolated lending (Morpho Blue & friends) scopes positions by
+    # market_id. L5 (_derive_position_key) inserts it between wallet and asset;
+    # the L3 key must do the same or the (position_key == position_id) join in
+    # AccountingProcessor._backfill_lending_position_pnl silently misses every
+    # market-scoped close. ``market_id`` is the canonical intent field on every
+    # lending intent (BorrowIntent/SupplyIntent/RepayIntent/WithdrawIntent —
+    # lending_intents.py); it is the SAME source L5 reads via _intent_market_id.
+    # Absent (Aave-style) ⇒ None ⇒ no extra segment ⇒ key unchanged.
+    market_id = getattr(intent, "market_id", None)
+
     event.position_id = lending_position_id(
         chain=ctx.chain,
         protocol=event.protocol or getattr(intent, "protocol", "") or "",
         wallet=ctx.wallet_address,
         asset=asset,
+        market_id=market_id,
     )
     if asset and not event.token0:
         event.token0 = asset

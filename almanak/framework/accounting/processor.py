@@ -525,21 +525,20 @@ class AccountingProcessor:
         Join is on ``(position_key, ledger_entry_id)``:
 
         * ``position_key`` (Layer 5, ``_derive_position_key``) equals
-          ``position_id`` (Layer 3, ``lending_position_id``) ONLY for
-          NON-market-scoped (Aave-style) lending. The two derivations
-          DIVERGE for market-scoped (isolated) lending — Morpho Blue and
-          friends — because ``_derive_position_key`` appends ``market_id``
-          when present (``lending:chain:protocol:wallet:market_id:asset``)
-          while ``lending_position_id`` never includes it
-          (``lending:chain:protocol:wallet:asset``). When they diverge,
-          ``get_position_history(...)`` keyed on the L5 ``position_key``
-          returns no L3 row and the back-fill cannot find its target. This
-          PR's win-rate fix therefore covers Aave-style lending; the
-          isolated-lending class is tracked by VIB-4981 (Morpho/market-scoped
-          lending Layer-3/Layer-5 position-key alignment — align the two key
-          derivations, coordinated because ``position_id`` is a stored join
-          column). The mismatch is logged at WARNING (not a silent skip) so
-          the gap is visible in prod log pipelines until VIB-4981 lands.
+          ``position_id`` (Layer 3, ``lending_position_id``) for BOTH
+          NON-market-scoped (Aave-style) AND market-scoped (isolated)
+          lending — Morpho Blue and friends. VIB-4981 aligned the two
+          derivations: ``lending_position_id`` now inserts ``market_id``
+          between wallet and asset when present, byte-identical to
+          ``_derive_position_key`` (canonical form
+          ``lending:chain:protocol:wallet:market_id:asset``; the segment is
+          omitted, key unchanged, when ``market_id`` is falsy). The
+          ``get_position_history(...)`` lookup keyed on the L5
+          ``position_key`` therefore now finds the L3 row for Morpho closes
+          too, so this back-fill stamps ``net_pnl_usd`` for the
+          isolated-lending class as well (win rate no longer stuck 0/0). A
+          remaining miss is logged at WARNING (not a silent skip) so any new
+          divergence stays visible in prod log pipelines.
         * ``ledger_entry_id`` is 1:1 between the accounting event and the
           position event for the same on-chain action — so a partial DECREASE
           and the final CLOSE each get ONLY their own action's realized PnL.
@@ -575,16 +574,15 @@ class AccountingProcessor:
             if target is None:
                 # WARNING (not debug) so the gap is visible in prod log
                 # pipelines — mirrors run_attribution_on_close's warning level.
-                # The common cause is the Layer-3/Layer-5 key divergence for
-                # market-scoped (Morpho) lending (VIB-4981): the L5
-                # ``position_key`` carries ``market_id`` but the L3
-                # ``position_id`` does not, so no L3 row matches and the
-                # lending close stays unattributed (win rate 0/0) with no
-                # other operator-visible signal.
+                # VIB-4981 aligned the L3/L5 lending keys (market_id is now in
+                # both), so the historical market-scoped (Morpho) divergence no
+                # longer causes this miss. A remaining miss here means the L3
+                # OPEN/INCREASE row genuinely isn't on disk yet (timing) or the
+                # ledger_entry_id didn't propagate — left visible rather than
+                # silently swallowed.
                 logger.warning(
                     "_backfill_lending_position_pnl: no Layer-3 position event for "
-                    "position_key=%s ledger_entry_id=%s — net_pnl_usd not stamped "
-                    "(likely market-scoped lending L3/L5 key divergence, VIB-4981)",
+                    "position_key=%s ledger_entry_id=%s — net_pnl_usd not stamped",
                     position_key,
                     ledger_entry_id,
                 )
