@@ -24,6 +24,7 @@ from almanak.framework.dashboard.quant_aggregations import (
     build_quant_header,
     compute_audit_trail,
     compute_cost_stack,
+    compute_pnl_summary,
     compute_reconciliation,
 )
 
@@ -468,6 +469,85 @@ def test_wallet_value_at_first_action_missing_price_for_token_skips_token():
     )
     total = _wallet_value_at_first_action([le])
     assert total == Decimal("10")
+
+
+# ─── VIB-4979: native-gas symmetry between Deployed and NAV ────────────────
+
+
+def _snapshot(*, total_value_usd: str, available_cash_usd: str) -> SimpleNamespace:
+    """Minimal portfolio_snapshot stand-in for compute_pnl_summary."""
+    return SimpleNamespace(
+        total_value_usd=total_value_usd,
+        available_cash_usd=available_cash_usd,
+        value_confidence="HIGH",
+        deployed_capital_usd="0",
+        positions_json="[]",
+        timestamp=datetime.now(tz=UTC),
+    )
+
+
+def test_lifetime_pnl_zero_when_wallet_is_only_native_gas():
+    """VIB-4979 regression: a wallet holding ONLY the chain's native gas
+    token, with no positions and no trades beyond capturing it, must read
+    ~$0 lifetime PnL — not +gas.
+
+    Before the fix the Deployed anchor (pre_state_json.wallet_balances)
+    excluded native gas while NAV (available_cash_usd) included it, so
+    lifetime_pnl = NAV − Deployed inherited the entire gas balance as
+    phantom profit (~+26% observed live on lp_triple Arbitrum). Now that
+    snapshot_balances_for_intent captures native gas into the pre-state,
+    the two bases share the same token universe and the phantom collapses.
+    """
+    # Pre-state now carries ETH (native) — the symmetric universe.
+    deployed_ledger = _ledger_with_pre_state(
+        wallet_balances={"USDC": "0", "ETH": "0.002"},
+        prices={"USDC": "1", "ETH": "2440"},
+    )
+    # NAV: no open positions, available cash == the native-gas value.
+    eth_value = Decimal("0.002") * Decimal("2440")  # $4.88
+    snap = _snapshot(total_value_usd="0", available_cash_usd=str(eth_value))
+
+    pnl = compute_pnl_summary(
+        portfolio_metrics=None,
+        snapshots=[snap],
+        ledger_entries=[deployed_ledger],
+        accounting_events=[],
+    )
+
+    # Deployed and NAV are both ~$4.88 → lifetime PnL is ~$0, NOT +$4.88.
+    assert pnl.deployed_usd == eth_value
+    assert pnl.nav_usd == eth_value
+    assert pnl.lifetime_pnl_usd == Decimal("0")
+    assert pnl.net_apr_pct == Decimal("0")
+
+
+def test_lifetime_pnl_phantom_gas_when_deployed_excludes_native_gas():
+    """Pin the OLD-broken shape as the failure it was: when the pre-state
+    omits native gas but NAV includes it, lifetime PnL equals the gas
+    balance. This is the asymmetry the fix removes — kept as a contrast
+    guard so a future regression that drops native gas from the pre-state
+    is caught by the symmetric test above flipping while this one stays
+    consistent with its (intentionally asymmetric) inputs."""
+    deployed_ledger = _ledger_with_pre_state(
+        wallet_balances={"USDC": "0"},  # native gas MISSING (pre-fix bug)
+        prices={"USDC": "1", "ETH": "2440"},
+    )
+    eth_value = Decimal("0.002") * Decimal("2440")
+    snap = _snapshot(total_value_usd="0", available_cash_usd=str(eth_value))
+
+    pnl = compute_pnl_summary(
+        portfolio_metrics=None,
+        snapshots=[snap],
+        ledger_entries=[deployed_ledger],
+        accounting_events=[],
+    )
+
+    # Deployed sees $0 (all-zero balances → helper returns None → falls back
+    # to portfolio_metrics, which is None → deployed stays 0), NAV sees
+    # $4.88 → the entire gas balance shows as phantom PnL.
+    assert pnl.deployed_usd == Decimal("0")
+    assert pnl.nav_usd == eth_value
+    assert pnl.lifetime_pnl_usd == eth_value  # phantom — the defect
 
 
 def test_open_position_cost_basis_empty_returns_zero():

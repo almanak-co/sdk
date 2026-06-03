@@ -460,9 +460,12 @@ def render_cost_stack(cost: CostStackInfo) -> None:
         f"<div style='color:#888;font-size:0.85rem;'>Cost stack (LTD)</div>"
         f"<div style='font-size:0.95rem;line-height:1.5;'>"
         f"<span style='color:#f44336;'>Gas −{format_usd(cost.cost_gas_usd)}</span><br>"
-        f"<span style='color:#f44336;'>Fees −{format_usd(cost.cost_protocol_fees_usd)}</span><br>"
-        f"<span style='color:#f44336;'>Slip −{format_usd(cost.cost_slippage_usd)}</span><br>"
-        f"<span style='color:#00c853;'>Earn +{format_usd(cost.fees_earned_usd + cost.interest_earned_usd)}</span>"
+        # VIB-4980: Fees / Slip / Earn are captured to full Decimal precision
+        # and can legitimately be sub-cent; render them with adaptive
+        # precision so a real $0.0023 fee no longer reads as "+$0.00".
+        f"<span style='color:#f44336;'>Fees −{format_usd(cost.cost_protocol_fees_usd, precise_small=True)}</span><br>"
+        f"<span style='color:#f44336;'>Slip −{format_usd(cost.cost_slippage_usd, precise_small=True)}</span><br>"
+        f"<span style='color:#00c853;'>Earn +{format_usd(cost.fees_earned_usd + cost.interest_earned_usd, precise_small=True)}</span>"
         f"</div>"
     )
     # VIB-3926 — life-to-date cost decomposition. Gas is on every tx;

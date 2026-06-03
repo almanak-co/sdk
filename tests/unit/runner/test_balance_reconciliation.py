@@ -394,3 +394,88 @@ class TestReconciliationInRunIteration:
 
         assert result.status == IterationStatus.STRATEGY_ERROR
         assert result.balance_reconciliation is None
+
+
+# =============================================================================
+# Tests: snapshot_balances_for_intent native-gas symmetry (VIB-4979)
+# =============================================================================
+
+
+class TestSnapshotNativeGasSymmetry:
+    """The pre-state snapshot (transaction_ledger.pre_state_json, the data
+    source for the dashboard 'Wallet deployed' anchor) must cover the SAME
+    token universe as NAV — including the chain's native gas token. Without
+    this, lifetime_pnl = NAV − Deployed inherits the native-gas balance as
+    phantom profit (VIB-4979)."""
+
+    @pytest.mark.asyncio
+    async def test_native_gas_captured_for_non_native_swap(self):
+        """USDC->WETH on Arbitrum: pre-state must also carry ETH (native)."""
+        balances = {"USDC": Decimal("100"), "WETH": Decimal("0.05"), "ETH": Decimal("0.002")}
+
+        async def get_bal(token):
+            bal = MagicMock()
+            bal.balance = balances.get(token, Decimal("0"))
+            return bal
+
+        bp = MagicMock()
+        bp.get_balance = AsyncMock(side_effect=get_bal)
+        runner = _make_runner(balance_provider=bp)
+
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"), chain="arbitrum")
+        snap = await runner._snapshot_balances_for_intent(intent)
+
+        assert snap is not None
+        # Native ETH appears alongside the intent tokens.
+        assert "ETH" in snap.balances
+        assert snap.balances["ETH"] == Decimal("0.002")
+        assert "USDC" in snap.balances
+        assert "WETH" in snap.balances
+
+    @pytest.mark.asyncio
+    async def test_native_not_added_when_intent_has_no_chain(self):
+        """Pre-fix behaviour preserved: no chain → native symbol unresolved →
+        snapshot stays intent-token-only (the existing reconciliation tests
+        rely on this)."""
+        balances = {"USDC": Decimal("100"), "ETH": Decimal("0.5")}
+
+        async def get_bal(token):
+            bal = MagicMock()
+            bal.balance = balances.get(token, Decimal("0"))
+            return bal
+
+        bp = MagicMock()
+        bp.get_balance = AsyncMock(side_effect=get_bal)
+        runner = _make_runner(balance_provider=bp)
+
+        # SwapIntent.chain defaults to None.
+        intent = SwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"))
+        assert getattr(intent, "chain", None) is None
+        snap = await runner._snapshot_balances_for_intent(intent)
+
+        assert snap is not None
+        assert set(snap.balances.keys()) == {"USDC", "WETH"}
+
+    @pytest.mark.asyncio
+    async def test_native_from_swap_does_not_double_fetch_native(self):
+        """ETH->USDC on Arbitrum: native is already an intent token, so it is
+        not added a second time (case-insensitive dedupe)."""
+        seen: list[str] = []
+
+        async def get_bal(token):
+            seen.append(token)
+            bal = MagicMock()
+            bal.balance = Decimal("1")
+            return bal
+
+        bp = MagicMock()
+        bp.get_balance = AsyncMock(side_effect=get_bal)
+        runner = _make_runner(balance_provider=bp)
+
+        intent = SwapIntent(from_token="ETH", to_token="USDC", amount=Decimal("1"), chain="arbitrum")
+        snap = await runner._snapshot_balances_for_intent(intent)
+
+        assert snap is not None
+        # ETH fetched exactly once (intent token), never duplicated.
+        assert seen.count("ETH") == 1
+        assert set(snap.balances.keys()) == {"ETH", "USDC"}

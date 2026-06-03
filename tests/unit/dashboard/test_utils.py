@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from almanak.framework.dashboard.utils import format_pnl_display, pnl_color
+from almanak.framework.dashboard.utils import format_pnl_display, format_usd, pnl_color
 
 # ---------------------------------------------------------------------------
 # pnl_color
@@ -56,3 +56,49 @@ class TestFormatPnlDisplay:
 
     def test_large_value_formatted_with_commas(self) -> None:
         assert format_pnl_display(Decimal("1234567.89")) == "+$1,234,567.89"
+
+
+# ---------------------------------------------------------------------------
+# format_usd — adaptive sub-cent precision (VIB-4980)
+# ---------------------------------------------------------------------------
+
+
+class TestFormatUsd:
+    def test_default_two_dp_unchanged_positive(self) -> None:
+        assert format_usd(Decimal("1234.5")) == "$1,234.50"
+
+    def test_default_two_dp_unchanged_negative(self) -> None:
+        assert format_usd(Decimal("-1234.5")) == "-$1,234.50"
+
+    def test_default_subcent_rounds_to_zero(self) -> None:
+        """Default path is unchanged: sub-cent collapses to $0.00."""
+        assert format_usd(Decimal("0.0023")) == "$0.00"
+
+    def test_zero_is_always_two_dp(self) -> None:
+        assert format_usd(Decimal("0")) == "$0.00"
+        assert format_usd(Decimal("0"), precise_small=True) == "$0.00"
+
+    def test_precise_small_subcent_shows_real_value(self) -> None:
+        """The VIB-4980 fix: a real $0.0023 fee no longer reads as $0.00."""
+        assert format_usd(Decimal("0.0023"), precise_small=True) == "$0.0023"
+
+    def test_precise_small_negative_subcent(self) -> None:
+        assert format_usd(Decimal("-0.0023"), precise_small=True) == "-$0.0023"
+
+    def test_precise_small_trims_trailing_zeros(self) -> None:
+        assert format_usd(Decimal("0.0050"), precise_small=True) == "$0.005"
+
+    def test_precise_small_at_one_cent_stays_two_dp(self) -> None:
+        """>= $0.01 keeps the 2-dp form even with precise_small."""
+        assert format_usd(Decimal("0.01"), precise_small=True) == "$0.01"
+
+    def test_precise_small_just_under_one_cent(self) -> None:
+        assert format_usd(Decimal("0.009999"), precise_small=True) == "$0.009999"
+
+    def test_precise_small_below_six_dp_uses_scientific(self) -> None:
+        """Magnitudes 6 dp cannot express fall back to scientific notation
+        rather than rounding a real cost to $0."""
+        assert format_usd(Decimal("0.00000034"), precise_small=True) == "$3.40e-7"
+
+    def test_precise_small_large_value_unaffected(self) -> None:
+        assert format_usd(Decimal("1234.5"), precise_small=True) == "$1,234.50"

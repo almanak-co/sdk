@@ -24,12 +24,32 @@ from almanak.framework.dashboard.models import (
 )
 
 
-def format_usd(value: Decimal) -> str:
-    """Format a decimal value as USD."""
-    if value >= 0:
-        return f"${value:,.2f}"
-    else:
-        return f"-${abs(value):,.2f}"
+def format_usd(value: Decimal, *, precise_small: bool = False) -> str:
+    """Format a decimal value as USD.
+
+    Default rendering is 2-dp (``$1,234.56`` / ``-$0.99``) and is unchanged
+    for every existing caller.
+
+    VIB-4980: when ``precise_small=True`` and the value is sub-cent but
+    non-zero (``0 < |value| < 0.01``), render with adaptive precision so a
+    real-but-tiny amount no longer collapses to ``$0.00``. Sub-cent values
+    show up to 6 significant fractional digits (trailing zeros trimmed); if
+    the magnitude is still below what 6 dp can express, fall back to
+    scientific notation. ``>= $0.01`` keeps the 2-dp form, and exact zero is
+    always ``$0.00``. Presentation only — stored Decimal values are never
+    mutated.
+    """
+    sign = "-" if value < 0 else ""
+    magnitude = abs(value)
+
+    if precise_small and magnitude > 0 and magnitude < Decimal("0.01"):
+        fixed = f"{magnitude:,.6f}".rstrip("0").rstrip(".")
+        # 6 dp cannot express a value smaller than 0.000001 — surface it in
+        # scientific notation rather than rounding a real cost to "$0".
+        rendered = fixed if Decimal(fixed.replace(",", "") or "0") > 0 else f"{magnitude:.2e}"
+        return f"{sign}${rendered}"
+
+    return f"{sign}${magnitude:,.2f}"
 
 
 def _should_scale_raw_amount(

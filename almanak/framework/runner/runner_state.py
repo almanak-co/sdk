@@ -1102,6 +1102,28 @@ async def is_strategy_paused(runner: Any, deployment_id: str) -> tuple[bool, str
 # -------------------------------------------------------------------------
 
 
+def _native_gas_symbol_for_intent(intent: AnyIntent) -> str | None:
+    """Resolve the chain's native gas-token symbol for *intent*, or ``None``.
+
+    VIB-4979. Returns ``None`` when the intent carries no chain (the symbol
+    is then un-resolvable and the pre-state stays intent-token-only, matching
+    pre-fix behaviour). Uses the same ``ChainRegistry``-backed source of truth
+    as ``native_token_for_chain`` / ``_resolve_gas_context`` so the captured
+    symbol matches the NAV-side native-gas row exactly.
+    """
+    chain = getattr(intent, "chain", None)
+    if not chain:
+        return None
+    try:
+        from almanak.framework.accounting.gas_pricing import native_token_for_chain
+
+        symbol = native_token_for_chain(str(chain))
+    except Exception as exc:  # noqa: BLE001 — best-effort; never block the snapshot
+        logger.debug("Balance snapshot: native gas-token resolve failed: %s", exc)
+        return None
+    return symbol or None
+
+
 async def snapshot_balances_for_intent(
     runner: Any,
     intent: AnyIntent,
@@ -1117,6 +1139,27 @@ async def snapshot_balances_for_intent(
     tokens = extract_intent_tokens(intent)
     if not tokens:
         return None
+
+    # VIB-4979: capture the chain's native gas token alongside the intent
+    # tokens so the pre-state (transaction_ledger.pre_state_json) — the data
+    # source for the dashboard "Wallet deployed" anchor — covers the SAME
+    # token universe as the NAV snapshot (intent_strategy._append_native_gas_to_wallet
+    # adds native gas to available_cash). Without this, Deployed excludes
+    # native gas while NAV includes it, so lifetime_pnl = NAV - Deployed
+    # inherited the entire gas reserve as phantom profit. The native key is
+    # additive to the pre-snapshot only; reconciliation's delta math
+    # (compute_actual_deltas) intersects pre∩post, and the post snapshot is
+    # rebuilt from extract_intent_tokens, so a native-only pre key is inert
+    # for non-native swaps and the native-from swap already lists native as
+    # an intent token (deduped below).
+    native_symbol = _native_gas_symbol_for_intent(intent)
+    if native_symbol is not None:
+        # Case-insensitive dedupe against the intent tokens, tolerating
+        # non-string entries (defensive: extract_intent_tokens can yield
+        # ``None`` for malformed intents — those simply can't shadow native).
+        tokens_canon = {t.upper() for t in tokens if isinstance(t, str)}
+        if native_symbol.upper() not in tokens_canon:
+            tokens = [*tokens, native_symbol]
 
     balances: dict[str, Decimal] = {}
     for token_symbol in tokens:
