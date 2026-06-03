@@ -31,6 +31,7 @@ from almanak.gateway.services._dashboard_helpers import (
     build_chain_health,
     build_position_proto,
     build_registry_strategy_info,
+    build_state_only_strategy_info,
     build_strategy_summary_kwargs,
     enrich_strategy_info,
     lookup_strategy_source,
@@ -1188,13 +1189,32 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             discover_paper_sessions=self._discover_paper_sessions,
         )
 
+        # State + latest snapshot from shared Postgres. Fetched up front
+        # because they feed both the hosted decoupled-dashboard fallback
+        # below and the enrichment / position build that follow.
+        state = await self._get_strategy_state_data(deployment_id)
+        try:
+            latest_snap = await self._get_latest_snapshot(deployment_id)
+        except Exception:
+            logger.debug("Failed to get snapshot balances for %s", deployment_id, exc_info=True)
+            latest_snap = None
+
+        if strategy_info is None:
+            # Decoupled hosted dashboard (ALM-2732): the dashboard pod's
+            # gateway has no local registry entry or on-disk source for this
+            # strategy — those live on the strategy pod — so the cascade above
+            # misses. Reconstruct from shared Postgres state/snapshots written
+            # by the strategy pod's gateway under the one canonical
+            # deployment_id (blueprint 29 §4), so the position/PnL panels still
+            # render instead of 404ing. Genuinely-unknown ids still 404.
+            strategy_info = build_state_only_strategy_info(deployment_id, state, latest_snap)
+
         if strategy_info is None:
             context.set_code(grpc.StatusCode.NOT_FOUND)
             context.set_details(f"Strategy not found: {deployment_id}")
             return gateway_pb2.StrategyDetails()
 
         # Enrich with state data
-        state = await self._get_strategy_state_data(deployment_id)
         total_value, pnl = await self._get_portfolio_value_and_pnl(deployment_id)
         pnl_metrics = await self._get_portfolio_metrics(deployment_id)
         enrich_strategy_info(
@@ -1210,11 +1230,6 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         summary = gateway_pb2.StrategySummary(**build_strategy_summary_kwargs(strategy_info))
 
         # Build position info — snapshot wins over state dict fallback
-        try:
-            latest_snap = await self._get_latest_snapshot(deployment_id)
-        except Exception:
-            logger.debug("Failed to get snapshot balances for %s", deployment_id, exc_info=True)
-            latest_snap = None
         position = build_position_proto(
             state=state,
             cached_positions=self._cached_positions.get(deployment_id),

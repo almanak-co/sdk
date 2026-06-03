@@ -23,7 +23,7 @@ from uuid import uuid4
 import grpc
 import pytest
 
-from almanak.framework.portfolio.models import PortfolioSnapshot, ValueConfidence
+from almanak.framework.portfolio.models import PortfolioSnapshot, TokenBalance, ValueConfidence
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.dashboard_service import DashboardServiceServicer
@@ -382,6 +382,79 @@ class TestGetStrategyDetails:
         await dashboard_service.GetStrategyDetails(request, mock_context)
 
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
+
+    @pytest.mark.asyncio
+    async def test_get_details_postgres_fallback_when_source_missing(self, dashboard_service, mock_context):
+        """Decoupled hosted dashboard (ALM-2732): the registry → filesystem →
+        paper cascade misses (the strategy runs in a separate pod), but the
+        shared Postgres has a snapshot. GetStrategyDetails must NOT 404 — it
+        returns position balances from the snapshot so the Current Position
+        panel renders instead of showing zeros.
+        """
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")  # filesystem discovery misses
+
+        deployment_id = str(uuid4())  # not registered in the local instance registry
+        snapshot = PortfolioSnapshot(
+            timestamp=datetime.now(UTC),
+            deployment_id=deployment_id,
+            total_value_usd=Decimal("5.99"),
+            available_cash_usd=Decimal("0.77"),
+            value_confidence=ValueConfidence.HIGH,
+            wallet_balances=[
+                TokenBalance(symbol="WETH", balance=Decimal("0.0017"), value_usd=Decimal("5.22")),
+                TokenBalance(symbol="USDC", balance=Decimal("0.77"), value_usd=Decimal("0.77")),
+            ],
+        )
+        dashboard_service._get_strategy_state_data = AsyncMock(return_value=None)
+        dashboard_service._get_latest_snapshot = AsyncMock(return_value=snapshot)
+        dashboard_service._get_portfolio_value_and_pnl = AsyncMock(return_value=("5.99", "0"))
+        dashboard_service._get_portfolio_metrics = AsyncMock(return_value=None)
+
+        # Force the local discovery cascade to miss deterministically (empty
+        # registry + no paper sessions), so the test exercises the Postgres
+        # fallback rather than passing on ambient local data.
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = None
+        with (
+            patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry),
+            patch.object(dashboard_service, "_discover_paper_sessions", return_value=[]),
+        ):
+            request = gateway_pb2.GetStrategyDetailsRequest(deployment_id=deployment_id, include_timeline=False)
+            response = await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        # Did NOT 404 (regression: this used to return NOT_FOUND on the dashboard pod).
+        mock_context.set_code.assert_not_called()
+        assert response.summary.deployment_id == deployment_id
+        assert response.summary.total_value_usd == "5.99"
+        # Position balances populated from the Postgres snapshot.
+        balances = {b.symbol: b for b in response.position.token_balances}
+        assert balances["WETH"].balance == "0.0017"
+        assert balances["WETH"].value_usd == "5.22"
+        assert balances["USDC"].value_usd == "0.77"
+
+    @pytest.mark.asyncio
+    async def test_get_details_still_404_when_no_postgres_trace(self, dashboard_service, mock_context):
+        """No registry entry, no filesystem source, AND no Postgres state or
+        snapshot → genuinely unknown deployment → still NOT_FOUND.
+        """
+        dashboard_service._initialized = True
+        dashboard_service._strategies_root = Path("/nonexistent")
+
+        deployment_id = str(uuid4())
+        dashboard_service._get_strategy_state_data = AsyncMock(return_value=None)
+        dashboard_service._get_latest_snapshot = AsyncMock(return_value=None)
+
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = None
+        with (
+            patch("almanak.gateway.services.dashboard_service.get_instance_registry", return_value=mock_registry),
+            patch.object(dashboard_service, "_discover_paper_sessions", return_value=[]),
+        ):
+            request = gateway_pb2.GetStrategyDetailsRequest(deployment_id=deployment_id)
+            await dashboard_service.GetStrategyDetails(request, mock_context)
+
+        mock_context.set_code.assert_called_with(grpc.StatusCode.NOT_FOUND)
 
 
 class TestPortfolioFallback:

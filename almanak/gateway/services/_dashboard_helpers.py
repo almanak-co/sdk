@@ -101,6 +101,83 @@ def build_registry_strategy_info(
     }
 
 
+def build_state_only_strategy_info(
+    deployment_id: str,
+    state: dict | None,
+    snapshot: PortfolioSnapshot | None,
+) -> dict | None:
+    """Synthesize a minimal ``strategy_info`` from shared Postgres state.
+
+    Used by ``GetStrategyDetails`` as a fallback when the
+    registry → filesystem → paper cascade (``lookup_strategy_source``)
+    misses. That cascade is **per-pod**: the instance registry is a local
+    SQLite DB and ``_discover_strategies_from_filesystem`` scans local disk.
+    On a decoupled hosted dashboard pod (ALM-2732) the strategy runs in a
+    *separate* strategy pod, so neither source exists there — yet that
+    strategy pod's gateway has been writing authoritative state and
+    portfolio snapshots to the **shared** Postgres under the one canonical
+    ``deployment_id`` (blueprint 29 §4). This lets ``GetStrategyDetails``
+    return position / PnL from that shared state instead of ``NOT_FOUND``,
+    which would otherwise blank the dashboard's Current Position section.
+
+    Returns ``None`` when Postgres has no trace of the deployment (neither
+    state nor a snapshot), so genuinely-unknown ids still surface
+    ``NOT_FOUND``.
+
+    Summary metadata that is *not* recoverable from Postgres (``name``,
+    ``chain``, ``protocol``, ``wallet_address``) is left empty/neutral — the
+    ``PortfolioSnapshot`` model carries none of it. The caller's
+    ``enrich_strategy_info`` then fills ``status`` / ``total_value_usd`` /
+    ``pnl`` from the same state, and ``build_position_proto`` fills
+    ``token_balances`` from the snapshot — the fields the dashboard's
+    position panel actually consumes.
+    """
+    if state is None and snapshot is None:
+        return None
+
+    # Best-effort last-action timestamp from the snapshot (state-derived
+    # timestamps are layered on top of this by enrich_strategy_info).
+    last_action_ts = 0
+    snap_ts = getattr(snapshot, "timestamp", None)
+    if snap_ts is not None:
+        try:
+            if snap_ts.tzinfo is None:
+                snap_ts = snap_ts.replace(tzinfo=UTC)
+            last_action_ts = int(snap_ts.timestamp())
+        except (ValueError, OSError, AttributeError):
+            pass
+
+    # Chain from the snapshot when present. PortfolioSnapshot carries ``chain``,
+    # so the summary + chain-health reflect the real chain instead of being
+    # blank. (The hosted Postgres snapshot reader does not hydrate ``chain``
+    # yet — VIB-4986 follow-up — so this is "" on that path today; this keeps
+    # the shape correct and auto-fills once the reader is extended.)
+    snapshot_chain = ""
+    raw_chain = getattr(snapshot, "chain", "")
+    if isinstance(raw_chain, str):
+        snapshot_chain = raw_chain
+
+    return {
+        "deployment_id": deployment_id,
+        "name": "",
+        "status": "UNKNOWN",
+        "chain": snapshot_chain,
+        "protocol": "",
+        "total_value_usd": "0",
+        "pnl_24h_usd": "0",
+        "last_action_at": last_action_ts,
+        "attention_required": False,
+        "attention_reason": "",
+        "is_multi_chain": "," in snapshot_chain,
+        "chains": [c.strip() for c in snapshot_chain.split(",")] if snapshot_chain else [],
+        "consecutive_errors": 0,
+        "last_iteration_at": 0,
+        "pnl_since_deploy_usd": "",
+        "wallet_address": "",
+        "chain_wallets": {},
+    }
+
+
 def enrich_strategy_info(
     info: dict,
     *,

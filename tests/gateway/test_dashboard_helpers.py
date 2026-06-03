@@ -48,6 +48,7 @@ from almanak.gateway.services._dashboard_helpers import (
     build_chain_health,
     build_position_proto,
     build_registry_strategy_info,
+    build_state_only_strategy_info,
     build_strategy_summary_kwargs,
     enrich_strategy_info,
     lookup_strategy_source,
@@ -259,6 +260,70 @@ class TestBuildRegistryStrategyInfo:
 # ---------------------------------------------------------------------------
 # enrich_strategy_info
 # ---------------------------------------------------------------------------
+
+
+class TestBuildStateOnlyStrategyInfo:
+    """Covers the hosted decoupled-dashboard fallback ``build_state_only_strategy_info``.
+
+    On a standalone dashboard pod the registry/filesystem cascade misses, so
+    ``GetStrategyDetails`` reconstructs a minimal ``strategy_info`` from the
+    shared Postgres state/snapshot. These tests pin that contract (ALM-2732).
+    """
+
+    def _snapshot(self, *, naive: bool = False, chain: str = "base") -> PortfolioSnapshot:
+        ts = datetime(2026, 6, 3, 6, 32, 0, tzinfo=None if naive else UTC)
+        return PortfolioSnapshot(
+            timestamp=ts,
+            deployment_id="dep-1",
+            total_value_usd=Decimal("5.99"),
+            available_cash_usd=Decimal("0.77"),
+            value_confidence=ValueConfidence.HIGH,
+            chain=chain,
+            wallet_balances=[TokenBalance(symbol="WETH", balance=Decimal("0.0017"), value_usd=Decimal("5.22"))],
+        )
+
+    def test_returns_none_when_no_postgres_trace(self):
+        # Neither state nor snapshot → genuinely unknown → caller should 404.
+        assert build_state_only_strategy_info("dep-1", None, None) is None
+
+    def test_snapshot_only_builds_info(self):
+        info = build_state_only_strategy_info("dep-1", None, self._snapshot())
+        assert info is not None
+        assert info["deployment_id"] == "dep-1"
+        # Timestamp threads through to last_action_at.
+        assert info["last_action_at"] == int(datetime(2026, 6, 3, 6, 32, 0, tzinfo=UTC).timestamp())
+        # Chain is taken from the snapshot (not hardcoded blank).
+        assert info["chain"] == "base"
+        assert info["chains"] == ["base"]
+        assert info["is_multi_chain"] is False
+
+    def test_chain_blank_when_snapshot_has_no_chain(self):
+        info = build_state_only_strategy_info("dep-1", None, self._snapshot(chain=""))
+        assert info["chain"] == ""
+        assert info["chains"] == []
+
+    def test_state_only_builds_info(self):
+        # State present but no snapshot is still a valid trace.
+        info = build_state_only_strategy_info("dep-1", {"is_running": True}, None)
+        assert info is not None
+        assert info["deployment_id"] == "dep-1"
+
+    def test_naive_snapshot_timestamp_is_tz_normalized(self):
+        # A tz-naive snapshot timestamp must not raise; it's treated as UTC.
+        info = build_state_only_strategy_info("dep-1", None, self._snapshot(naive=True))
+        assert info["last_action_at"] == int(datetime(2026, 6, 3, 6, 32, 0, tzinfo=UTC).timestamp())
+
+    def test_output_is_accepted_by_summary_builder(self):
+        # The synthesized dict must satisfy build_strategy_summary_kwargs'
+        # exact keyset — otherwise GetStrategyDetails would KeyError downstream.
+        info = build_state_only_strategy_info("dep-1", None, self._snapshot())
+        kwargs = build_strategy_summary_kwargs(info)
+        summary = gateway_pb2.StrategySummary(**kwargs)
+        assert summary.deployment_id == "dep-1"
+        # Metadata not recoverable from Postgres is left neutral; chain is
+        # populated from the snapshot when present.
+        assert summary.name == ""
+        assert summary.chain == "base"
 
 
 class TestEnrichStrategyInfo:
