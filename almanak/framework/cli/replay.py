@@ -20,23 +20,15 @@ from typing import Any
 
 import click
 
-from ..testing.protocol_harness import AnvilFork, ForkConfig
+from almanak.core.chains._helpers import blocks_per_day_map
 
-# Approximate block times per chain (in seconds)
-CHAIN_BLOCK_TIMES: dict[str, float] = {
-    "ethereum": 12.0,
-    "arbitrum": 0.25,
-    "optimism": 2.0,
-    "polygon": 2.0,
-    "base": 2.0,
-    "avalanche": 2.0,
-}
 from ..models.reproduction_bundle import (
     ActionBundle,
     MarketData,
     ReproductionBundle,
     TimelineEventSnapshot,
 )
+from ..testing.protocol_harness import AnvilFork, ForkConfig
 
 # =============================================================================
 # Configuration
@@ -734,7 +726,7 @@ class ReplayEngine:
 @click.option(
     "--chain",
     "-c",
-    type=click.Choice(list(CHAIN_BLOCK_TIMES.keys())),
+    type=click.Choice(sorted(blocks_per_day_map().keys())),
     default=None,
     help="Override chain (uses bundle's chain by default)",
 )

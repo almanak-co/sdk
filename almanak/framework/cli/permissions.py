@@ -19,22 +19,11 @@ from pathlib import Path
 import click
 
 from almanak.config import load_config
+from almanak.core.chains._helpers import alchemy_rpc_url_template_for
 
 from .intent_debug import load_strategy_from_file
 
 logger = logging.getLogger(__name__)
-
-# RPC URL templates for auto-resolution from ALCHEMY_API_KEY env var.
-_CHAIN_RPC_TEMPLATES: dict[str, str] = {
-    "base": "https://base-mainnet.g.alchemy.com/v2/{key}",
-    "arbitrum": "https://arb-mainnet.g.alchemy.com/v2/{key}",
-    "ethereum": "https://eth-mainnet.g.alchemy.com/v2/{key}",
-    "avalanche": "https://avax-mainnet.g.alchemy.com/v2/{key}",
-    "mantle": "https://mantle-mainnet.g.alchemy.com/v2/{key}",
-    "bsc": "https://bnb-mainnet.g.alchemy.com/v2/{key}",
-    "optimism": "https://opt-mainnet.g.alchemy.com/v2/{key}",
-    "polygon": "https://polygon-mainnet.g.alchemy.com/v2/{key}",
-}
 
 
 def _load_dotenv(working_path: Path) -> None:
@@ -65,7 +54,7 @@ def _resolve_rpc_url(explicit_url: str | None, chain: str) -> str | None:
     alchemy_key = load_config().gateway.alchemy_api_key
     if not alchemy_key:
         return None
-    template = _CHAIN_RPC_TEMPLATES.get(chain.lower())
+    template = alchemy_rpc_url_template_for(chain)
     if not template:
         return None
     return template.replace("{key}", alchemy_key)

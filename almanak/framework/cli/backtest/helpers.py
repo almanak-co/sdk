@@ -8,6 +8,7 @@ and paper trading session management.
 import json
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 import click
+
+from almanak.core.chains._helpers import blocks_per_day_map
 
 from ...backtesting import (
     BacktestResult,
@@ -26,19 +29,16 @@ from ...strategies import list_strategies
 # Configuration
 # =============================================================================
 
-# Approximate blocks per day for each chain
-# Calculated as: 86400 seconds/day / block_time
-BLOCKS_PER_DAY: dict[str, int] = {
-    "ethereum": 7200,  # ~12s blocks
-    "arbitrum": 345600,  # ~0.25s blocks
-    "optimism": 43200,  # ~2s blocks
-    "polygon": 43200,  # ~2s blocks
-    "base": 43200,  # ~2s blocks
-    "avalanche": 43200,  # ~2s blocks
-}
+# Approximate blocks per day per chain, derived from
+# ``ChainDescriptor.rpc.block_time_seconds`` (round(86400 / block_time)).
+# Read-only back-compat view: re-exported via ``backtest/__init__.py``, so the
+# module-level name is preserved (VIB-4851).
+BLOCKS_PER_DAY: Mapping[str, int] = blocks_per_day_map()
 
 # Default recent block numbers for testing (when --end-block not specified)
-# These are placeholder values - in production, would query chain for current block
+# These are placeholder values - in production, would query chain for current block.
+# Intentionally NOT descriptor-derived: there is no ChainDescriptor field for a
+# representative recent block, so these literals stay here (VIB-4851 defers this).
 DEFAULT_END_BLOCKS: dict[str, int] = {
     "ethereum": 19000000,
     "arbitrum": 170000000,

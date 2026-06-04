@@ -12,7 +12,11 @@ VIB-4857 (W5).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
+
 from almanak.core.chains._registry import ChainRegistry
+from almanak.core.enums import ChainFamily
 
 # Default receipt-confirmation timeout (seconds) used when the per-chain
 # descriptor has no entry. Mirrors the legacy
@@ -131,3 +135,72 @@ def chain_name_for_id(chain_id: int) -> str | None:
     """
     descriptor = ChainRegistry.try_resolve_id(chain_id)
     return descriptor.name if descriptor is not None else None
+
+
+def block_time_for(chain: str) -> float | None:
+    """Average block time (seconds) for ``chain``, or ``None`` if unknown.
+
+    Derived from ``ChainDescriptor.rpc.block_time_seconds`` (the W5 field;
+    ``None`` == "no archive-RPC support in backtesting"). Alias-normalises via
+    ``ChainRegistry.try_resolve``. Returns ``None`` (not a default) on a miss so
+    CLI callers can apply their own literal fallback at the call site.
+    """
+    if not chain:
+        return None
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None:
+        return None
+    return descriptor.rpc.block_time_seconds
+
+
+def blocks_per_day_for(chain: str) -> int | None:
+    """Approximate blocks/day for ``chain`` (``round(86400 / block_time)``), or ``None``.
+
+    ``None`` when the chain has no ``block_time_seconds`` — preserving the legacy
+    ``BLOCKS_PER_DAY`` membership (only chains with a block time appear). ``round``
+    reproduces all six legacy values exactly (7200 / 345600 / 43200). A
+    non-positive block time (invalid descriptor data) also yields ``None``
+    rather than dividing by zero.
+    """
+    bt = block_time_for(chain)
+    if bt is None or bt <= 0:
+        return None
+    return round(86400 / bt)
+
+
+def alchemy_rpc_url_template_for(chain: str) -> str | None:
+    """Alchemy RPC URL *template* for ``chain`` with a literal ``{key}`` placeholder.
+
+    Returns ``f"https://{prefix}-mainnet.g.alchemy.com/v2/{{key}}"`` when the chain
+    is EVM and declares ``rpc.alchemy_prefix``; ``None`` otherwise. The EVM gate is
+    load-bearing: the permissions CLI is EVM/Zodiac-only, so a non-EVM prefix
+    (solana) must NOT yield a template (preserves the
+    ``_resolve_rpc_url(None, "solana") is None`` contract). The doubled ``{{key}}``
+    keeps a literal ``{key}`` in the returned string for the caller's
+    ``.replace("{key}", api_key)``.
+    """
+    if not chain:
+        return None
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None or descriptor.family is not ChainFamily.EVM:
+        return None
+    prefix = descriptor.rpc.alchemy_prefix
+    if prefix is None:
+        return None
+    return f"https://{prefix}-mainnet.g.alchemy.com/v2/{{key}}"
+
+
+def blocks_per_day_map() -> Mapping[str, int]:
+    """Read-only ``{chain: blocks_per_day}`` for every chain with a block time.
+
+    Registry-derived back-compat view for the re-exported ``BLOCKS_PER_DAY`` and
+    the replay ``--chain`` choice keys. Membership == chains with
+    ``block_time_seconds`` set (the legacy 6).
+    """
+    return MappingProxyType(
+        {
+            d.name: round(86400 / d.rpc.block_time_seconds)
+            for d in ChainRegistry.all()
+            if d.rpc.block_time_seconds is not None and d.rpc.block_time_seconds > 0
+        }
+    )
