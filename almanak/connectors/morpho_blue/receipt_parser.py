@@ -1149,6 +1149,16 @@ class MorphoBlueReceiptParser:
         """Fail-closed variant of :meth:`extract_repay_amount` — see VIB-3159."""
         return self._wrap_amount(self.extract_repay_amount, receipt, "no Repay event in receipt")
 
+    def extract_supply_collateral_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_supply_collateral_amount` — see VIB-3159."""
+        return self._wrap_amount(self.extract_supply_collateral_amount, receipt, "no SupplyCollateral event in receipt")
+
+    def extract_withdraw_collateral_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_withdraw_collateral_amount` — see VIB-3159."""
+        return self._wrap_amount(
+            self.extract_withdraw_collateral_amount, receipt, "no WithdrawCollateral event in receipt"
+        )
+
     def extract_supply_amount(self, receipt: dict[str, Any]) -> int | None:
         """Extract supply amount (assets) from transaction receipt.
 
@@ -1322,6 +1332,37 @@ class MorphoBlueReceiptParser:
             return None
         except Exception as e:
             logger.warning(f"Failed to extract supply collateral amount: {e}")
+            return None
+
+    def extract_withdraw_collateral_amount(self, receipt: dict[str, Any]) -> int | None:
+        """Extract collateral withdraw amount from WITHDRAW_COLLATERAL event.
+
+        Morpho Blue isolated-market collateral withdrawals route through
+        ``withdrawCollateral(...)`` and emit ``WithdrawCollateral`` — NOT the
+        loan-side ``Withdraw`` event. The amount is the ``assets`` field of
+        that event, known exactly on-chain. This is the WITHDRAW-side mirror
+        of :meth:`extract_supply_collateral_amount` (VIB-4635).
+
+        Returns ``None`` (unmeasured — Empty ≠ Zero per CLAUDE.md §Accounting)
+        when no ``WithdrawCollateral`` event is present; callers must not
+        substitute 0.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            Collateral amount withdrawn in token units if found, None otherwise
+        """
+        try:
+            result = self.parse_receipt(receipt)
+            for event in result.events:
+                if event.event_type == MorphoBlueEventType.WITHDRAW_COLLATERAL:
+                    assets = event.data.get("assets")
+                    if assets is not None:
+                        return int(Decimal(assets))
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to extract withdraw collateral amount: {e}")
             return None
 
     # =========================================================================

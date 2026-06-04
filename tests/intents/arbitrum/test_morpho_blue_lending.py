@@ -937,27 +937,26 @@ class TestMorphoBlueWithdrawCollateralIntent:
         )
         # Withdraw reduces collateral on-chain (full collateral removed).
         assert Decimal(payload["collateral_value_after_usd"]) < Decimal(payload["collateral_value_before_usd"])
-        # VIB-4635: Morpho Blue collateral WITHDRAW does NOT populate
-        # amount_token — the lending handler's _extract_amount_human has the
-        # morpho_blue SUPPLY collateral fallback wired
-        # (supply_collateral_amount) but the symmetric
-        # withdraw_collateral_amount slot is deliberately unwired (the source
-        # comment says so), and withdrawCollateral emits WithdrawCollateral
-        # (not Withdraw) so the loan-side withdraw_amount key is absent. The
-        # on-chain withdrawal is correct (asserted above: exact balance delta +
-        # event assets agree); only the books amount leg is unmeasured. This is
-        # a genuine production gap, NOT acceptable degradation (Empty≠Zero≠None:
-        # amount is known on-chain). xfail until VIB-4635 wires the morpho_blue
-        # withdraw collateral amount. WITHDRAW-side mirror of VIB-4633's
-        # Compound V3 Finding A.
-        if payload["amount_token"] is None:
-            pytest.xfail(
-                "VIB-4635: Morpho Blue collateral WITHDRAW does not populate "
-                "amount_token (handler lacks the morpho_blue withdraw "
-                "collateral fallback) — on-chain withdrawal verified correct above"
-            )
-        # If a future fix lands, these become live again automatically.
-        assert Decimal(payload["amount_token"]) == collateral_amount
+        # VIB-4635 (FIXED): Morpho Blue collateral WITHDRAW now populates
+        # amount_token. Collateral withdrawals route through
+        # withdrawCollateral(...) and emit WithdrawCollateral (not the
+        # loan-side Withdraw), so the generic withdraw_amount key is absent.
+        # The Morpho parser's extract_withdraw_collateral_amount surfaces the
+        # amount as withdraw_collateral_amount via the morpho_blue enricher
+        # overlay, and the lending handler's _extract_amount_human falls back
+        # to it (mirror of the SUPPLY collateral path). The on-chain
+        # withdrawal is verified correct above (exact balance delta + event
+        # assets agree); the books now record the exact measured amount
+        # (Empty≠Zero≠None). WITHDRAW-side mirror of VIB-4633's Compound V3
+        # Finding A.
+        assert Decimal(payload["amount_token"]) == collateral_amount, (
+            "VIB-4635: Morpho Blue collateral WITHDRAW must record the exact "
+            f"on-chain amount. Got amount_token={payload['amount_token']!r}, "
+            f"expected {collateral_amount!r}."
+        )
+        # Unmatched WITHDRAW (no Layer-5 SUPPLY lot) degrades principal to the
+        # total measured withdrawal — still a measured, positive leg (never a
+        # fabricated 0). interest stays None (asserted above).
         assert payload["principal_delta_usd"] is not None, "WITHDRAW must measure a principal leg"
         assert Decimal(payload["principal_delta_usd"]) > 0
 

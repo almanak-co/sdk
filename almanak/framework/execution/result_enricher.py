@@ -277,11 +277,16 @@ class ResultEnricher:
         # ``supply_amount`` (loan-side); collateral receipts return ``None``.
         # This overlay surfaces the collateral amount so downstream
         # lending-accounting can book the typed event with the true on-chain
-        # assets value. See MorphoMay15 §6.2 (F2). The symmetric
-        # ``WITHDRAW`` overlay is deferred until the Morpho parser exposes
-        # ``extract_withdraw_collateral_amount`` — that block ships next.
+        # assets value. See MorphoMay15 §6.2 (F2). VIB-4635 wires the symmetric
+        # ``WITHDRAW`` leg: collateral withdrawals route through
+        # ``withdrawCollateral(...)`` and emit ``WithdrawCollateral`` (not the
+        # loan-side ``Withdraw``), so the generic ``withdraw_amount`` key is
+        # absent. The Morpho parser now exposes
+        # ``extract_withdraw_collateral_amount``, surfaced here as
+        # ``withdraw_collateral_amount`` so the lending handler can scale it.
         "morpho_blue": {
             "SUPPLY": ["supply_collateral_amount"],
+            "WITHDRAW": ["withdraw_collateral_amount"],
         },
     }
 

@@ -5,10 +5,13 @@ Tests cover:
 - extract_a_token_received: Returns shares from Supply event (Morpho equivalent of aTokens)
 - extract_supply_rate: Returns None (Morpho events don't include rate info)
 - extract_supply_collateral_amount: Extracts assets from SupplyCollateral event
+- extract_withdraw_collateral_amount: Extracts assets from WithdrawCollateral event
 - extract_shares_received: Extracts shares from Supply event
 - Edge cases: empty receipts, no matching events, malformed data
 
 Addresses VIB-515: Add SUPPLY result enrichment to Morpho Blue receipt parser.
+Addresses VIB-4635: Add WITHDRAW collateral enrichment (WITHDRAW-side mirror of
+the SUPPLY collateral path).
 """
 
 from __future__ import annotations
@@ -100,6 +103,38 @@ def _make_supply_collateral_receipt(
     }
 
 
+def _make_withdraw_collateral_receipt(
+    assets: int = 200_000_000_000_000_000,  # 0.2 wstETH (18 decimals)
+) -> dict[str, Any]:
+    """Build a Morpho Blue WithdrawCollateral transaction receipt.
+
+    WithdrawCollateral(Id indexed id, address caller, address indexed onBehalfOf,
+    address indexed receiver, uint256 assets)
+
+    ``caller`` is the first (non-indexed) data word; ``assets`` is the second
+    word — mirrors ``_parse_withdraw_collateral`` in the parser.
+    """
+    data = "0x" + _pad_address(CALLER_ADDRESS).replace("0x", "") + _encode_uint256(assets)
+    return {
+        "status": 1,
+        "transactionHash": "0x" + "dd" * 32,
+        "gasUsed": 180000,
+        "logs": [
+            {
+                "address": MORPHO_BLUE_ADDRESS,
+                "topics": [
+                    EVENT_TOPICS["WithdrawCollateral"],
+                    MARKET_ID,
+                    _pad_address(USER_ADDRESS),  # onBehalfOf (indexed)
+                    _pad_address(USER_ADDRESS),  # receiver (indexed)
+                ],
+                "data": data,
+                "logIndex": 0,
+            }
+        ],
+    }
+
+
 def _make_empty_receipt() -> dict[str, Any]:
     """Build a receipt with no relevant events."""
     return {
@@ -175,6 +210,38 @@ class TestExtractSupplyCollateralAmount:
 
     def test_returns_none_for_supply_only_receipt(self, parser):
         result = parser.extract_supply_collateral_amount(_make_supply_receipt())
+        assert result is None
+
+
+class TestExtractWithdrawCollateralAmount:
+    """VIB-4635: WITHDRAW-side mirror of ``extract_supply_collateral_amount``.
+
+    Morpho collateral withdrawals emit ``WithdrawCollateral`` (not the
+    loan-side ``Withdraw``); the extractor must read the ``assets`` field of
+    that event so downstream accounting can record ``amount_token``.
+    """
+
+    def test_extracts_assets_from_withdraw_collateral_event(self, parser):
+        assets = 200_000_000_000_000_000  # 0.2 wstETH
+        receipt = _make_withdraw_collateral_receipt(assets=assets)
+        result = parser.extract_withdraw_collateral_amount(receipt)
+        assert result == assets
+
+    def test_returns_none_for_empty_receipt(self, parser):
+        # Empty ≠ Zero ≠ None: no WithdrawCollateral event means unmeasured.
+        result = parser.extract_withdraw_collateral_amount(_make_empty_receipt())
+        assert result is None
+
+    def test_returns_none_for_supply_collateral_only_receipt(self, parser):
+        # A SupplyCollateral-only receipt must not satisfy the WITHDRAW
+        # extractor — the legs are directionally distinct.
+        result = parser.extract_withdraw_collateral_amount(_make_supply_collateral_receipt())
+        assert result is None
+
+    def test_supply_collateral_extractor_ignores_withdraw_collateral(self, parser):
+        # Symmetric guard: the SUPPLY extractor must return None for a
+        # WithdrawCollateral-only receipt.
+        result = parser.extract_supply_collateral_amount(_make_withdraw_collateral_receipt())
         assert result is None
 
 

@@ -465,11 +465,17 @@ def _extract_amount_human(
     # SUPPLY intents emit ``SupplyCollateral`` (not ``Supply``); the enricher
     # surfaces the amount as ``supply_collateral_amount`` via the morpho_blue
     # overlay in ``ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL``. Without this
-    # fallback the live writer silently produces ``amount_token=None``. The
-    # symmetric ``withdraw_collateral_amount`` slot is reserved for the
-    # WITHDRAW leg once the Morpho parser exposes that extractor.
+    # fallback the live writer silently produces ``amount_token=None``.
+    # VIB-4635 wires the symmetric WITHDRAW leg: collateral withdrawals emit
+    # ``WithdrawCollateral`` (not the loan-side ``Withdraw``), so the
+    # ``withdraw_amount`` key is absent; the enricher now surfaces the amount
+    # as ``withdraw_collateral_amount`` (via the parser's
+    # ``extract_withdraw_collateral_amount``). Without this fallback a Morpho
+    # collateral WITHDRAW recorded ``amount_token=None`` even though the amount
+    # is known exactly on-chain (Empty ≠ Zero ≠ None).
     _COLLATERAL_FALLBACK_BY_INTENT: dict[str, str] = {
         "SUPPLY": "supply_collateral_amount",
+        "WITHDRAW": "withdraw_collateral_amount",
     }
     raw_amount: int | None = None
     primary_key = _AMOUNT_KEY_BY_INTENT.get(intent_type_str)

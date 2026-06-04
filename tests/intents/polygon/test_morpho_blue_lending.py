@@ -25,9 +25,9 @@ adapter populates before/after collateral / debt / health-factor at
 ``confidence=HIGH``. The borrow-then-repay happy path asserts the exact
 ``principal_delta_usd`` / ``interest_delta_usd`` FIFO split; an unmatched
 withdraw asserts the degradation contract (``interest_delta_usd is None``).
-Collateral WITHDRAW ``amount_token`` is a known production gap (VIB-4635) —
-xfailed, with the HIGH-confidence + before/after fidelity kept as hard
-asserts. The failure path asserts zero ``accounting_events`` rows.
+Collateral WITHDRAW ``amount_token`` is now measured (VIB-4635 FIXED) — the
+amount is asserted exactly, alongside the HIGH-confidence + before/after
+fidelity hard asserts. The failure path asserts zero ``accounting_events`` rows.
 
 NO MOCKING. All tests execute real on-chain transactions and verify state changes.
 
@@ -879,7 +879,7 @@ class TestMorphoBlueWithdrawCollateralIntent:
             f"Expected borrow_shares=0 after full repay+withdraw, got {position.borrow_shares}"
         )
 
-        # ── Layer 5: unmatched-withdraw degradation + VIB-4635 gap ───────────
+        # ── Layer 5: unmatched-withdraw degradation + VIB-4635 amount_token ───
         enriched = _enrich_for_accounting(
             execution_result, intent, funded_wallet, compilation_result.action_bundle.metadata
         )
@@ -912,24 +912,26 @@ class TestMorphoBlueWithdrawCollateralIntent:
             "None — never a fabricated 0"
         )
         assert Decimal(payload["collateral_value_after_usd"]) < Decimal(payload["collateral_value_before_usd"])
-        # VIB-4635: Morpho Blue collateral WITHDRAW does NOT populate
-        # amount_token — the lending handler has the morpho_blue SUPPLY
-        # collateral fallback wired (supply_collateral_amount) but the symmetric
-        # withdraw_collateral_amount slot is deliberately unwired, and
-        # withdrawCollateral emits WithdrawCollateral (not Withdraw) so the
-        # loan-side withdraw_amount key is absent. The on-chain withdrawal is
-        # correct (asserted above: exact balance delta + event assets agree);
-        # only the books amount leg is unmeasured. Genuine production gap, NOT
-        # acceptable degradation (Empty≠Zero≠None: amount is known on-chain).
-        # WITHDRAW-side mirror of VIB-4633's Compound V3 Finding A.
-        if payload["amount_token"] is None:
-            pytest.xfail(
-                "VIB-4635: Morpho Blue collateral WITHDRAW does not populate "
-                "amount_token (handler lacks the morpho_blue withdraw "
-                "collateral fallback) — on-chain withdrawal verified correct above"
-            )
-        # If a future fix lands, these become live again automatically.
-        assert Decimal(payload["amount_token"]) == collateral_amount
+        # VIB-4635 (FIXED): Morpho Blue collateral WITHDRAW now populates
+        # amount_token. Collateral withdrawals route through
+        # withdrawCollateral(...) and emit WithdrawCollateral (not the
+        # loan-side Withdraw), so the generic withdraw_amount key is absent.
+        # The Morpho parser's extract_withdraw_collateral_amount surfaces the
+        # amount as withdraw_collateral_amount via the morpho_blue enricher
+        # overlay, and the lending handler's _extract_amount_human falls back
+        # to it (mirror of the SUPPLY collateral path). The on-chain
+        # withdrawal is verified correct above (exact balance delta + event
+        # assets agree); the books now record the exact measured amount
+        # (Empty≠Zero≠None). WITHDRAW-side mirror of VIB-4633's Compound V3
+        # Finding A.
+        assert Decimal(payload["amount_token"]) == collateral_amount, (
+            "VIB-4635: Morpho Blue collateral WITHDRAW must record the exact "
+            f"on-chain amount. Got amount_token={payload['amount_token']!r}, "
+            f"expected {collateral_amount!r}."
+        )
+        # Unmatched WITHDRAW (no Layer-5 SUPPLY lot) degrades principal to the
+        # total measured withdrawal — still a measured, positive leg (never a
+        # fabricated 0). interest stays None (asserted above).
         assert payload["principal_delta_usd"] is not None, "WITHDRAW must measure a principal leg"
         assert Decimal(payload["principal_delta_usd"]) > 0
 
