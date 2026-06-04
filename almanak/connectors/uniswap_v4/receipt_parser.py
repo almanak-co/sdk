@@ -883,7 +883,22 @@ class UniswapV4ReceiptParser:
                 burn_event = event
                 break
         if burn_event is None:
-            return None
+            # VIB-4637 — fees-only LP_COLLECT_FEES path. A V4 fee harvest
+            # compiles to ``DECREASE_LIQUIDITY(liquidity=0) + TAKE_PAIR``
+            # (see sdk.build_collect_fees_tx), so the PoolManager emits a
+            # ``ModifyLiquidity`` with ``liquidity_delta == 0`` — NO
+            # principal-removing burn. The negative-delta branch above never
+            # fires, so before VIB-4637 this returned ``None`` → no typed
+            # ``pool_address`` → the LP handler dropped the LP_COLLECT_FEES
+            # event entirely (the ``weth/usdc/3000`` V4 position-key tail is
+            # rejected by ``_clean_pool_address_candidate`` as a V3 fee-tier
+            # descriptor). The canonical 32-byte V4 PoolId is right there in
+            # ``ModifyLiquidity.topics[1]`` (chain truth — no PoolKey lookup
+            # or extra RPC needed), so stamp it on a principal-zero
+            # ``LPCloseData``. The handler's resolver accept-branch
+            # (``^0x[0-9a-f]{64}$``) then books the event. Mirrors the merged
+            # TraderJoe V2 collect path (VIB-4634).
+            return self._extract_fees_only_collect_data(parsed)
 
         liquidity_removed = abs(burn_event.liquidity_delta)
         pool_id_hex = burn_event.pool_id.lower()
@@ -991,6 +1006,72 @@ class UniswapV4ReceiptParser:
             # intent's token0 (in user-supplied order).
             currency0=currency0,
             currency1=currency1,
+        )
+
+    def _extract_fees_only_collect_data(self, parsed: ParseResult) -> LPCloseData | None:
+        """Build ``LPCloseData`` for a fees-only V4 LP_COLLECT_FEES receipt.
+
+        VIB-4637. A V4 fee harvest compiles to
+        ``DECREASE_LIQUIDITY(liquidity=0) + TAKE_PAIR``, so the PoolManager
+        emits a ``ModifyLiquidity`` with ``liquidity_delta == 0`` and no
+        principal-removing burn. The only thing this path needs from the
+        receipt is the canonical 32-byte V4 ``pool_id`` (``topics[1]`` of the
+        zero-delta ``ModifyLiquidity``) so the LP accounting handler can
+        resolve a ``pool_address`` and book the LP_COLLECT_FEES event. The
+        PoolId is chain truth carried in the event itself — NO PoolKey lookup
+        or extra RPC is required (unlike the burn path, which needs the
+        lookup to attribute withdrawn principal across currency0/currency1).
+
+        Directional null-contract (Empty ≠ Zero ≠ None — blueprint 27 §10.10):
+
+        * ``amount0_collected`` / ``amount1_collected`` = ``0`` — a fees-only
+          collect withdraws NO principal; that is a measured zero, not
+          unmeasured. (The fields are typed ``int``, so ``0`` is the only
+          honest value for "no principal moved".)
+        * ``liquidity_removed`` = ``0`` — no liquidity was removed; measured
+          zero, symmetric with the principal legs.
+        * ``fees0`` / ``fees1`` = ``None`` — V4 bundles fees into the
+          withdrawal Transfer in V0 and does not surface them separately
+          here; explicit ``None`` is the honest "unmeasured" signal. Fee
+          separation is V1 P-V1-A (VIB-4482); the dedicated
+          ``extract_fees0`` / ``extract_fees1`` path carries any measured
+          fees independently.
+        * ``currency0`` / ``currency1`` = ``None`` — left unmeasured rather
+          than guessed. This path deliberately avoids the PoolKey lookup, so
+          the canonical sorted currency addresses are not resolved here; the
+          handler resolves token symbols/decimals from the position key /
+          prior OPEN payload, and never from a fabricated pairing.
+
+        Returns ``None`` when no zero-delta ``ModifyLiquidity`` is present
+        (i.e. the receipt is not a recognisable V4 fees-only collect) so the
+        enricher treats it as "no event" rather than a parse error.
+        """
+        from almanak.framework.execution.extracted_data import LPCloseData
+
+        collect_event: ModifyLiquidityEventData | None = None
+        for event in parsed.modify_liquidity_events:
+            if event.liquidity_delta == 0:
+                collect_event = event
+                break
+        if collect_event is None:
+            return None
+
+        return LPCloseData(
+            # Fees-only collect: no principal withdrawn — measured zero.
+            amount0_collected=0,
+            amount1_collected=0,
+            # V4 bundles fees into the withdrawal Transfer in V0 — unmeasured
+            # here (Empty ≠ Zero); separate fee measurement is VIB-4482.
+            fees0=None,
+            fees1=None,
+            # No liquidity removed on a fees-only collect — measured zero.
+            liquidity_removed=0,
+            pool_address=collect_event.pool_id.lower(),
+            source="modify_liquidity",
+            # Currencies are NOT resolved on this lookup-free path — leave
+            # them unmeasured rather than fabricate a pairing.
+            currency0=None,
+            currency1=None,
         )
 
     # -- Decoding helpers -----------------------------------------------------

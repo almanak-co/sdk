@@ -83,7 +83,7 @@ from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType, LPOpenIntent
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
-    assert_accounting_persisted_or_gap,
+    assert_accounting_persisted,
     assert_no_accounting_on_failure,
     format_token_amount,
     get_token_balance,
@@ -812,19 +812,13 @@ class TestUniswapV4CollectFeesIntent:
         # runtime xfail that fires ONLY on the exact zero-rows drop and
         # auto-reactivates (full hard asserts below run) when VIB-4637
         # lands. Pattern mirrors merged VIB-4633/4634/4635.
-        collect_accounting_row = await assert_accounting_persisted_or_gap(
+        collect_accounting_row = await assert_accounting_persisted(
             layer5_accounting_harness,
             intent=collect_intent,
             result=execution_result,
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             expected_event_type="LP_COLLECT_FEES",
-            gap_xfail_reason=(
-                "VIB-4637: V4 LP_COLLECT_FEES accounting event dropped — "
-                "fees-only collect (ModifyLiquidity delta=0) yields no typed "
-                "pool_address and _resolve_pool_address rejects the V3-style "
-                "V4 position_key. On-chain collect verified correct above."
-            ),
             price_oracle=prices_with_native,
             eth_call_reader=anvil_eth_call_adapter,
         )

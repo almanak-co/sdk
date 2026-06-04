@@ -253,6 +253,24 @@ class ResultEnricher:
             "LP_OPEN": ["bin_ids"],
             "LP_COLLECT_FEES": ["bin_ids", "lp_close_data"],
         },
+        # VIB-4637 — a Uniswap V4 fees-only ``LP_COLLECT_FEES`` compiles to
+        # ``DECREASE_LIQUIDITY(liquidity=0) + TAKE_PAIR``, so the PoolManager
+        # emits a zero-delta ``ModifyLiquidity`` and NO principal-removing
+        # burn. The base ``LP_COLLECT_FEES`` spec (``fees0`` / ``fees1`` /
+        # ``protocol_fees``) carries no ``pool_address``, so the LP accounting
+        # handler had nothing to resolve and dropped the event entirely (the
+        # ``tokenX/tokenY/<fee>`` V4 position-key tail is rejected as a V3
+        # fee-tier descriptor). Adding ``lp_close_data`` routes the receipt
+        # through ``UniswapV4ReceiptParser.extract_lp_close_data``, whose
+        # fees-only branch stamps the canonical 32-byte V4 PoolId on a
+        # principal-zero ``LPCloseData`` so the handler books the event.
+        # Mirrors the TraderJoe V2 collect overlay (VIB-4634).
+        # The overlay is additive (``_merge_spec_with_overlay``): the base
+        # ``LP_COLLECT_FEES`` fields (``fees0`` / ``fees1`` / ``protocol_fees``)
+        # are kept; only ``lp_close_data`` is appended.
+        "uniswap_v4": {
+            "LP_COLLECT_FEES": ["lp_close_data"],
+        },
         # Morpho Blue isolated markets emit ``SupplyCollateral`` for the
         # collateral leg of a market — a distinct on-chain event from the
         # loan-side ``Supply``. The generic spec only asks for

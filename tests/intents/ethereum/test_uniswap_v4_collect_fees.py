@@ -33,7 +33,7 @@ from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType, LPOpenIntent
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
-    assert_accounting_persisted_or_gap,
+    assert_accounting_persisted,
     assert_no_accounting_on_failure,
     format_token_amount,
     get_token_balance,
@@ -379,30 +379,24 @@ class TestUniswapV4CollectFeesIntent:
         assert weth_delta >= 0, "WETH should not decrease from fee collection"
         assert usdc_delta >= 0, "USDC should not decrease from fee collection"
 
-        # Layer 5: assert the real accounting pipeline persisted
-        # LP_COLLECT_FEES. VIB-4637 (genuine production gap, surfaced by
-        # this rollout): a V4 fees-only collect emits ModifyLiquidity
-        # delta=0, so extract_lp_close_data yields no typed pool_address
-        # and _resolve_pool_address rejects the V3-style V4 position_key
-        # (`weth/usdc/3000`) — the LP_COLLECT_FEES event is dropped
-        # entirely (zero rows). On-chain collect is verified correct above
-        # (Layers 1–4 hard-asserted). Encode the TRUE behavior via a
-        # runtime xfail that fires ONLY on the exact zero-rows drop and
-        # auto-reactivates (full hard asserts below run) when VIB-4637
-        # lands. Pattern mirrors merged VIB-4633/4634/4635.
-        collect_accounting_row = await assert_accounting_persisted_or_gap(
+        # Layer 5: assert the real accounting pipeline persisted exactly one
+        # typed LP_COLLECT_FEES accounting_event (idempotent re-drain,
+        # directional null-contract, canonical PoolId pool_address, identity
+        # sextuple). VIB-4637 fix: a V4 fees-only collect emits
+        # ModifyLiquidity delta=0, so extract_lp_close_data's fees-only branch
+        # now stamps the canonical 32-byte V4 PoolId (topics[1]) on a
+        # principal-zero LPCloseData; the LP handler's _resolve_lp_pool_address
+        # accept-branch (^0x[0-9a-f]{64}$) books the event instead of dropping
+        # it (the V3-style `weth/usdc/3000` position-key tail is still
+        # rejected by _clean_pool_address_candidate — that shared seam is
+        # untouched). On-chain collect verified correct above (Layers 1–4).
+        collect_accounting_row = await assert_accounting_persisted(
             layer5_accounting_harness,
             intent=collect_intent,
             result=execution_result,
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             expected_event_type="LP_COLLECT_FEES",
-            gap_xfail_reason=(
-                "VIB-4637: V4 LP_COLLECT_FEES accounting event dropped — "
-                "fees-only collect (ModifyLiquidity delta=0) yields no typed "
-                "pool_address and _resolve_pool_address rejects the V3-style "
-                "V4 position_key. On-chain collect verified correct above."
-            ),
             price_oracle=price_oracle,
             eth_call_reader=anvil_eth_call_adapter,
         )
