@@ -118,8 +118,9 @@ def test_connector_parser_registered(connector_parts: tuple[str, ...]):
         f"STRATEGY_RECEIPT_PARSER_REGISTRY (looked for module "
         f"'{expected_provider_module}'). Either add the sibling provider:\n"
         f"  almanak/connectors/{connector_id}/receipt_parser_provider.py\n"
-        f"and register it in almanak/connectors/_strategy_receipt_registry.py, "
-        f"or — if the parser module is intentionally unused — delete it."
+        f"and publish it from almanak/connectors/{connector_id}/connector.py "
+        f"as CONNECTOR.receipt_parser_connector. If the parser module is "
+        f"intentionally unused, delete it."
     )
 
 

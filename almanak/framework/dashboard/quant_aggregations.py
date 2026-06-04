@@ -641,7 +641,7 @@ def _detect_primitive(accounting_events: list[dict[str, Any]]) -> str:
 # crap-allowlist: this PR's diff against ``evaluate_posture`` is pure
 # docstring-content cleanup (Track C wording refinement); zero branches added,
 # function was already over the CRAP threshold on main (cc=55, cov=86%) and
-# carries an existing ``# noqa: C901`` for the same reason. Mirror of PR #2163's
+# carries an existing C901 exemption for the same reason. Mirror of PR #2163's
 # treatment of ``runner_state.emit_iteration_summary``. Refactor of
 # ``evaluate_posture`` should be tracked under its own ticket and is out of
 # scope for this misc cleanup PR.

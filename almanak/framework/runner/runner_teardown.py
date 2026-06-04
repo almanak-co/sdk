@@ -359,8 +359,8 @@ def _safe_mark(state_manager: Any, method_name: str, deployment_id: str, **kwarg
 # crap-allowlist: VIB-4049 — pre-existing cc=21 teardown coordinator; PR touches a single line (``_lifecycle_write_state("TEARING_DOWN")``), zero new branches.
 # Function is the canonical sequencer (market snapshot → intents → routing → manager/inline/fallback);
 # decomposing it requires the four-step SDK crap-refactor protocol (blueprint 14 + Plan agent +
-# test baseline) and is out of scope for a regression fix. ``# noqa: C901`` already in place for
-# the same complexity. Refactor tracked separately.
+# test baseline) and is out of scope for a regression fix. The C901 exemption is already
+# in place for the same complexity. Refactor tracked separately.
 async def execute_teardown(  # noqa: C901
     runner: Any,
     strategy: StrategyProtocol,

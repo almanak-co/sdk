@@ -1,0 +1,26 @@
+"""Morpho vault connector manifest."""
+
+from __future__ import annotations
+
+from almanak.connectors._base.types import ProtocolKind
+from almanak.connectors._connector import (
+    Connector,
+    ImportRef,
+)
+
+CONNECTOR = Connector(
+    name="morpho_vault",
+    kind=ProtocolKind.VAULT,
+    gateway_connector=ImportRef(
+        module="almanak.connectors.morpho_vault.gateway.provider",
+        attribute="MorphoVaultGatewayConnector",
+        order=5,
+    ),
+    receipt_parser_protocols=("metamorpho",),
+    receipt_parser_connector=ImportRef(
+        module="almanak.connectors.morpho_vault.receipt_parser_provider",
+        attribute="MetaMorphoReceiptParserConnector",
+    ),
+)
+
+__all__ = ["CONNECTOR"]
