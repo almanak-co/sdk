@@ -98,7 +98,15 @@ def _decode_word(hex_data: str, word_index: int) -> int:
 # ``AAVE_FORK_ACCOUNT_STATE_READ`` spec (identical ``getUserAccountData`` ABI to
 # Aave V3, USD-denominated on-chain), fork-verified on ethereum (HIGH-confidence
 # before/after collateral / debt / HF on a real Spark position).
-_GENERIC_PRE_STATE_PROTOCOLS: frozenset[str] = frozenset({"aave_v3", "aave", "morpho_blue", "compound_v3", "spark"})
+# VIB-4965: ``silo_v2`` joined — a BESPOKE per-silo reader (Silo V2 has no
+# Aave-style ``getUserAccountData``; its isolated ERC-4626 silos are read via
+# ``maxWithdraw`` on the deposit silo + ``maxRepay`` on the paired debt silo, both
+# protocol-computed single eth_calls). Not USD-native (priced via the injected
+# valuation seam, like Compound/Morpho). Fork-verified on avalanche by the Layer-5
+# Silo intent tests (HIGH-confidence before/after collateral / debt / HF).
+_GENERIC_PRE_STATE_PROTOCOLS: frozenset[str] = frozenset(
+    {"aave_v3", "aave", "morpho_blue", "compound_v3", "spark", "silo_v2"}
+)
 
 
 def _overlay_aave_interest_rate_mode(state: LendingAccountState, intent: Any) -> LendingAccountState:

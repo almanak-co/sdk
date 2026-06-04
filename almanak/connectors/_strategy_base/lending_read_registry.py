@@ -159,6 +159,12 @@ class LendingReadRegistry:
         "spark": ("almanak.connectors.spark.lending_read", "ACCOUNT_STATE_READ_SPEC"),
         "morpho_blue": ("almanak.connectors.morpho_blue.lending_read", "ACCOUNT_STATE_READ_SPEC"),
         "compound_v3": ("almanak.connectors.compound_v3.lending_read", "ACCOUNT_STATE_READ_SPEC"),
+        # Silo V2 joined in VIB-4965 — a bespoke per-silo reader (Silo has no
+        # Aave-style getUserAccountData; its isolated ERC-4626 silos are read via
+        # maxWithdraw on the deposit silo + maxRepay on the paired debt silo).
+        # Market-scoped target + synthetic "<col>/<loan>" market ids (Silo intents
+        # carry no market_id). See silo_v2/lending_read.py.
+        "silo_v2": ("almanak.connectors.silo_v2.lending_read", "ACCOUNT_STATE_READ_SPEC"),
     }
 
     # Multi-collateral account-HEALTH read dispatch (VIB-4851 PR-2). Distinct from the
@@ -187,6 +193,13 @@ class LendingReadRegistry:
         # address folded in), so ``market_params`` returns everything the pure spec
         # needs — keeping this registry generic (no Compound-specific merge here).
         "compound_v3": ("almanak.connectors.compound_v3.addresses", "COMPOUND_V3_ACCOUNT_STATE_MARKETS"),
+        # Silo V2's synthetic per-silo account-state table (VIB-4965): each entry
+        # folds in the collateral silo (``comet_address``), the paired debt silo,
+        # and the collateral/loan token symbols, keyed by a synthetic
+        # ``"<col>/<loan>"`` market id. Lives in the connector's lending_read module
+        # (derived from SILO_V2_MARKETS), not addresses.py, since Silo has no
+        # separate addresses module.
+        "silo_v2": ("almanak.connectors.silo_v2.lending_read", "SILO_V2_ACCOUNT_STATE_MARKETS"),
     }
 
     # Sentinel ``position_manager_address`` returns for a market-scoped protocol

@@ -23,23 +23,22 @@ handler is protocol-agnostic — it keys on ``intent_type`` and the FIFO basis
 store, not on the protocol — so the FIFO principal / interest split assertions
 are identical to the Aave V3 / Spark goldens.
 
-THE SILO V2 DIVERGENCE (genuine production gap, tracked by VIB-4965):
-Silo V2 has NO pre/post-state reader. ``_PROTOCOL_PRE_STATE_READERS`` in
-``almanak/framework/accounting/lending_accounting.py`` has entries for
-``aave_v3`` / ``aave`` / ``morpho_blue`` / ``compound_v3`` but NOT ``silo_v2``,
-so ``capture_lending_pre_state`` / ``capture_lending_post_state`` return
-``None`` for a Silo V2 intent and ``lending_state_to_dict`` serializes ``None``.
-With no ``post_state_json`` the lending handler sets ``confidence=ESTIMATED``
-and leaves every before/after collateral / debt / health-factor field ``None``
-with a populated ``unavailable_reason`` (Empty≠Zero≠None — nothing is
-fabricated). So Silo V2 Layer 5 asserts the DEGRADATION contract for chain
-state (``_assert_state_degraded_no_reader``), NOT the HIGH-confidence contract
-the Aave / Compound goldens use. The FIFO principal / interest split is derived
-from the basis store and is unaffected by the missing reader, so those
-assertions match the goldens exactly. The HIGH-confidence + before/after
-fidelity is the gap tracked by VIB-4965 (add a Silo V2 pre/post-state
-reader — Silo V2's isolated ERC-4626 silos have no Aave-style
-``getUserAccountData``, so the reader is bespoke per-silo).
+THE SILO V2 BESPOKE READER (VIB-4965, landed):
+Silo V2 now has a BESPOKE per-silo pre/post-state reader
+(``almanak/connectors/silo_v2/lending_read.py``, enabled in
+``_GENERIC_PRE_STATE_PROTOCOLS``). Unlike Aave's single ``getUserAccountData``,
+Silo V2's isolated ERC-4626 silos have no whole-account aggregate, so the reader
+assembles state from per-silo reads: ``maxWithdraw(user)`` on the deposit silo
+(collateral) + ``maxRepay(user)`` on the paired debt silo (full outstanding debt).
+Silo is NOT USD-native, so both legs are valued from the price/decimals seam the
+framework reader injects (like Compound / Morpho). Silo V2 intents carry no
+``market_id``, so the spec synthesises a ``"<collateral>/<loan>"`` market id from
+the intent's tokens. So Silo V2 Layer 5 asserts the HIGH-confidence chain-state
+contract (``_assert_high_confidence_state``) the Aave / Compound goldens use —
+this INVERTS the prior degradation contract (``_assert_state_degraded_no_reader``)
+that held while the reader was missing. The FIFO principal / interest split is
+derived from the basis store and is unaffected by the chain-state reader, so those
+assertions match the goldens exactly.
 
 NO MOCKING. All tests execute real on-chain transactions and verify state changes.
 
@@ -119,12 +118,11 @@ def _silo_borrowable_liquidity(web3: Web3, silo_address: str) -> int:
 #
 # Mirror the merged Spark / Aave V3 goldens. ``enrich_result`` makes the ledger
 # entry carry extracted_data; ``capture_lending_pre_state`` /
-# ``capture_lending_post_state`` dispatch on ``intent.protocol``. Silo V2 has
-# NO entry in ``_PROTOCOL_PRE_STATE_READERS`` (VIB-4965), so both
-# captures return ``None`` and ``lending_state_to_dict`` serializes ``None`` —
-# the persisted event therefore degrades to ``confidence=ESTIMATED`` with no
-# before/after chain state. The conftest Layer-5 helper threads the serialized
-# state dicts (here ``None``) into ``build_ledger_entry``.
+# ``capture_lending_post_state`` dispatch on ``intent.protocol``. Silo V2 now has a
+# bespoke per-silo reader (VIB-4965), so both captures return POPULATED state via the
+# Anvil eth_call adapter and ``lending_state_to_dict`` serializes the real before/after
+# collateral / debt / HF — the persisted event reaches ``confidence=HIGH``. The
+# conftest Layer-5 helper threads the serialized state dicts into ``build_ledger_entry``.
 
 
 def _execution_context(wallet: str) -> ExecutionContext:
@@ -166,10 +164,10 @@ def _capture_lending_state(
     """Capture and serialize Silo V2 pre/post state via the Anvil eth_call adapter.
 
     Returns the runner-shaped state dict (``lending_state_to_dict`` output) or
-    ``None`` — never a fabricated zero. For Silo V2 this currently ALWAYS
-    returns ``None`` because Silo V2 has no pre/post-state reader
-    (VIB-4965); the call is kept to mirror the runner's wiring exactly so
-    a future reader fix lights up the HIGH-confidence path with no test change.
+    ``None`` — never a fabricated zero. For Silo V2 the bespoke per-silo reader
+    (VIB-4965) returns populated state via the Anvil eth_call adapter, so this
+    yields a real before/after collateral / debt / HF dict (a measured-zero leg is
+    ``"0"``, never ``None``), lighting up the HIGH-confidence path.
     """
     capture = capture_lending_post_state if post else capture_lending_pre_state
     state = capture(
@@ -203,44 +201,31 @@ def _assert_no_lot_id(row: dict, payload: dict) -> None:
     assert "lot_id" not in payload
 
 
-def _assert_state_degraded_no_reader(payload: dict) -> None:
-    """Silo V2 genuine production degradation contract (VIB-4965).
+def _assert_high_confidence_state(payload: dict) -> None:
+    """Silo V2 HIGH-confidence chain-state contract (VIB-4965 reader landed).
 
-    Silo V2 is absent from ``_PROTOCOL_PRE_STATE_READERS`` in
-    ``almanak/framework/accounting/lending_accounting.py`` (only ``aave_v3`` /
-    ``aave`` / ``morpho_blue`` / ``compound_v3`` are wired), so
-    ``capture_lending_pre_state`` / ``capture_lending_post_state`` return
-    ``None`` for a Silo V2 intent. With no ``post_state_json`` the lending
-    handler sets ``confidence=ESTIMATED`` and leaves every before/after
-    collateral / debt / health-factor field ``None`` with a populated
-    ``unavailable_reason``. This is the TRUE current production behavior, NOT a
-    flake; the HIGH-confidence expectation is the gap tracked by
-    VIB-4965. Empty≠Zero≠None: ``unavailable_reason`` is set, nothing is
-    fabricated.
+    Silo V2 now has a BESPOKE per-silo pre/post-state reader
+    (``almanak/connectors/silo_v2/lending_read.py``, enabled in
+    ``_GENERIC_PRE_STATE_PROTOCOLS``): unlike Aave's single ``getUserAccountData``,
+    its isolated ERC-4626 silos are read via ``maxWithdraw`` on the deposit silo +
+    ``maxRepay`` on the paired debt silo, valued from the injected price/decimals
+    seam (Silo is not USD-native). So ``capture_lending_pre_state`` /
+    ``capture_lending_post_state`` return populated state through the Anvil eth_call
+    adapter and the lending handler emits ``confidence=HIGH`` with every before/after
+    collateral / debt / health-factor field populated (Empty ≠ Zero — a measured zero
+    is ``"0"``, never ``None``). This is the inverted contract VIB-4965 ships,
+    replacing the prior ``_assert_state_degraded_no_reader`` degradation contract.
     """
-    assert payload["confidence"] == "ESTIMATED", (
-        f"Silo V2 lending genuinely degrades to confidence=ESTIMATED today "
-        f"(VIB-4965: no silo_v2 entry in _PROTOCOL_PRE_STATE_READERS); "
-        f"got {payload['confidence']!r}"
+    assert payload["confidence"] == "HIGH", (
+        f"Silo V2 lending must persist confidence=HIGH (bespoke reader + Anvil eth_call adapter), "
+        f"got {payload['confidence']!r} (unavailable_reason={payload.get('unavailable_reason')!r})"
     )
-    assert payload.get("unavailable_reason"), (
-        "degraded Silo V2 lending must carry a non-empty unavailable_reason (never fabricated)"
-    )
-    # Degradation must not fabricate before/after chain state.
-    assert payload["collateral_value_before_usd"] is None, (
-        "VIB-4965: degraded Silo V2 must not fabricate before-collateral"
-    )
-    assert payload["collateral_value_after_usd"] is None, (
-        "VIB-4965: degraded Silo V2 must not fabricate after-collateral"
-    )
-    assert payload["debt_value_before_usd"] is None, "VIB-4965: degraded Silo V2 must not fabricate before-debt"
-    assert payload["debt_value_after_usd"] is None, "VIB-4965: degraded Silo V2 must not fabricate after-debt"
-    assert payload["health_factor_before"] is None, (
-        "VIB-4965: degraded Silo V2 must not fabricate before-health-factor"
-    )
-    assert payload["health_factor_after"] is None, (
-        "VIB-4965: degraded Silo V2 must not fabricate after-health-factor"
-    )
+    assert payload["collateral_value_before_usd"] is not None, "before-collateral must be populated"
+    assert payload["collateral_value_after_usd"] is not None, "after-collateral must be populated"
+    assert payload["debt_value_before_usd"] is not None, "before-debt must be populated"
+    assert payload["debt_value_after_usd"] is not None, "after-debt must be populated"
+    assert payload["health_factor_before"] is not None, "before-health-factor must be populated"
+    assert payload["health_factor_after"] is not None, "after-health-factor must be populated"
 
 
 # =============================================================================
@@ -425,7 +410,11 @@ class TestSiloV2BorrowIntent:
         _assert_identity(row, event_type="BORROW", wallet=funded_wallet)
         payload = _payload(row)
         _assert_no_lot_id(row, payload)
-        _assert_state_degraded_no_reader(payload)
+        # VIB-4965: bespoke reader → confidence=HIGH. Borrow increases on-chain debt.
+        _assert_high_confidence_state(payload)
+        assert Decimal(payload["debt_value_after_usd"]) > Decimal(payload["debt_value_before_usd"]), (
+            "BORROW must increase on-chain debt value"
+        )
         assert payload["asset"] == "USDC"
         assert Decimal(payload["amount_token"]) == borrow_amount
         # BORROW records the FIFO principal lot: principal measured, interest
@@ -614,7 +603,12 @@ class TestSiloV2BorrowIntent:
         _assert_identity(row, event_type="REPAY", wallet=funded_wallet)
         payload = _payload(row)
         _assert_no_lot_id(row, payload)
-        _assert_state_degraded_no_reader(payload)
+        # VIB-4965: bespoke reader → confidence=HIGH. Repay decreases on-chain debt
+        # (we borrowed 1 USDC then repaid 0.5, so after < before).
+        _assert_high_confidence_state(payload)
+        assert Decimal(payload["debt_value_after_usd"]) < Decimal(payload["debt_value_before_usd"]), (
+            "REPAY must decrease on-chain debt value"
+        )
         assert payload["asset"] == "USDC"
         assert Decimal(payload["amount_token"]) == repay_amount
 
