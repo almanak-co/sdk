@@ -238,8 +238,20 @@ class ResultEnricher:
     # them (not move them into per-protocol overlays). Out of scope for VIB-4320.
     EXTRACTION_SPECS_BY_PROTOCOL: dict[str, dict[str, list[str]]] = {
         "traderjoe_v2": {
+            # VIB-4634 — ``lp_open_data`` / ``lp_close_data`` carry the
+            # canonical LBPair ``pool_address`` (stamped by the receipt parser
+            # from the DepositedToBins / WithdrawnFromBins / ClaimedFees
+            # emitter — the LBPair itself emits those events). Without it the
+            # LP accounting handler drops every TraderJoe V2 LP event because
+            # the ``tokenX/tokenY/<binStep>`` position-key descriptor is
+            # rejected as a Uniswap-V3 fee tier. ``lp_open_data`` is already in
+            # the base LP_OPEN spec; LP_CLOSE already carries ``lp_close_data``.
+            # LP_COLLECT_FEES has neither in the base spec, so the LBPair
+            # address must be added here for the fee-harvest path (the parser's
+            # ``extract_lp_close_data`` emits a principal-zero LPCloseData
+            # carrying only the pool_address for a ClaimedFees-only receipt).
             "LP_OPEN": ["bin_ids"],
-            "LP_COLLECT_FEES": ["bin_ids"],
+            "LP_COLLECT_FEES": ["bin_ids", "lp_close_data"],
         },
         # Morpho Blue isolated markets emit ``SupplyCollateral`` for the
         # collateral leg of a market — a distinct on-chain event from the

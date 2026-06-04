@@ -15,7 +15,7 @@ from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
 from almanak.framework.data.tokens import get_token_resolver
 
 if TYPE_CHECKING:
-    from almanak.framework.execution.extracted_data import LPCloseData, ProtocolFees, SwapAmounts
+    from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData, ProtocolFees, SwapAmounts
 from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_hash
 
 logger = logging.getLogger(__name__)
@@ -521,6 +521,41 @@ class TraderJoeV2ReceiptParser:
 
         return None
 
+    @staticmethod
+    def _lbpair_transfers(
+        events: list[TraderJoeV2Event],
+        pool_address: str,
+        *,
+        to_pool: bool,
+    ) -> list[TraderJoeV2Event]:
+        """Return ERC-20 ``Transfer`` events to/from the LBPair, in emission order.
+
+        VIB-4634 / gemini HIGH on PR #2607. The receipt of a TraderJoe V2 LP
+        op can contain Transfer events unrelated to the deposit/withdrawal
+        (native-token wrap/unwrap, router hops, refunds). Blindly taking the
+        first two Transfers can mis-attribute amounts. Filtering to transfers
+        whose counterparty is the LBPair isolates the principal legs:
+
+          * ``to_pool=True`` (LP_OPEN): wallet → LBPair deposits — match ``to``.
+          * ``to_pool=False`` (LP_CLOSE): LBPair → wallet withdrawals — match ``from``.
+
+        Emission order is preserved (NOT sorted by token address) so leg 0
+        stays tokenX / amount0 and leg 1 stays tokenY / amount1, matching the
+        bin-pair convention the accounting handler resolves. When the pool
+        address is unknown the events are returned unfiltered so callers keep
+        the legacy first-two-Transfers behaviour rather than dropping amounts.
+        """
+        transfers = [e for e in events if e.event_type == TraderJoeV2EventType.TRANSFER]
+        pool = (pool_address or "").lower()
+        if not pool:
+            return transfers
+        key = "to" if to_pool else "from"
+        filtered = [e for e in transfers if str(e.data.get(key, "")).lower() == pool]
+        # Fall back to the unfiltered list if filtering finds nothing — a
+        # connector variant that routes principal through an intermediary
+        # would otherwise silently drop the amounts (Empty ≠ Zero).
+        return filtered or transfers
+
     def parse_swap_events(self, receipt: dict[str, Any]) -> list[SwapEventData]:
         """Parse swap events from a receipt.
 
@@ -884,10 +919,104 @@ class TraderJoeV2ReceiptParser:
             return result.fees_y
         return None
 
+    def extract_lp_open_data(self, receipt: dict[str, Any]) -> "LPOpenData | None":
+        """Extract LP open data from a TraderJoe V2 (Liquidity Book) receipt.
+
+        VIB-4634 — chain-data-first pool-address stamping. The Liquidity Book
+        ``DepositedToBins(address sender, address to, uint256[] ids,
+        bytes32[] amounts)`` event is emitted BY the LBPair contract itself,
+        so ``event.contract_address`` IS the canonical LBPair (pool) address
+        — no factory lookup or extra RPC needed. Stamping it on
+        ``LPOpenData.pool_address`` lets the LP accounting handler's resolver
+        accept-branch (``^0x[0-9a-f]{40}$``) book the LP_OPEN event, instead
+        of dropping it because the position-key tail
+        (``tokenX/tokenY/<binStep>``) is rejected by
+        ``_clean_pool_address_candidate`` as a Uniswap-V3 fee-tier descriptor.
+        Mirrors the Uniswap V3 Mint/IncreaseLiquidity ``pool_address`` path
+        (VIB-3893).
+
+        Bin-model directional null-contract (Empty ≠ Zero ≠ None, blueprint
+        27 §10.10): the Liquidity Book has NO NFT token id and NO tick
+        bracket, so ``position_id`` is ``0`` (the fungible-LP "no
+        discriminator" sentinel the accounting handler maps to ``None``) and
+        ``tick_lower`` / ``tick_upper`` / ``liquidity`` / ``current_tick``
+        stay ``None`` — never fabricated. ``amount0`` / ``amount1`` are the
+        raw token-X / token-Y deposit amounts decoded from the ERC-20
+        ``Transfer`` legs (wallet → LBPair); the handler scales them by token
+        decimals. Returns ``None`` when no ``DepositedToBins`` event is in the
+        receipt (e.g. a failed mid-bundle open).
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field.
+
+        Returns:
+            ``LPOpenData`` if a ``DepositedToBins`` event is present,
+            ``None`` otherwise.
+        """
+        from almanak.framework.execution.extracted_data import LPOpenData
+
+        try:
+            result = self.parse_receipt(receipt)
+
+            if not result.liquidity_result or not result.liquidity_result.is_add:
+                return None
+
+            # The DepositedToBins emitter is the LBPair — chain-truth pool addr.
+            # Lowercase it: a real RPC returns a checksummed (mixed-case)
+            # log address, but the LP handler's _clean_pool_address_candidate
+            # only accepts lowercase 0x-hex (matches the Uniswap V3 path).
+            pool_address = (result.liquidity_result.pool_address or "").lower()
+
+            # Token-X / token-Y deposit amounts come from the ERC-20 Transfer
+            # legs into the LBPair (wallet → LBPair). Filter to transfers whose
+            # destination IS the LBPair so unrelated legs (native-token wrap,
+            # router hops, refunds) can't corrupt the amounts (gemini HIGH on
+            # PR #2607). Emission order is preserved — the LBRouter transfers
+            # tokenX then tokenY, matching the bin-pair (amount0=X, amount1=Y)
+            # convention the accounting handler resolves; do NOT sort by
+            # address (canonical lower-address-first ordering would swap the
+            # legs whenever tokenX's address > tokenY's, mis-scaling amounts).
+            deposit_transfers = self._lbpair_transfers(result.events, pool_address, to_pool=True)
+            amount_x = 0
+            amount_y = 0
+            if len(deposit_transfers) >= 1:
+                amount_x = deposit_transfers[0].data.get("value", 0)
+            if len(deposit_transfers) >= 2:
+                amount_y = deposit_transfers[1].data.get("value", 0)
+
+            return LPOpenData(
+                # Liquidity Book is fungible (ERC-1155), not an NFT — there is
+                # no per-position token id. ``0`` is the documented
+                # "no discriminator" sentinel (LPOpenData.position_id is typed
+                # ``int``); the accounting handler's
+                # ``_resolve_lp_open_discriminator`` maps ``0`` → ``None``.
+                position_id=0,
+                amount0=amount_x,
+                amount1=amount_y,
+                # Bin model has no tick bracket — leave None, do NOT fabricate.
+                tick_lower=None,
+                tick_upper=None,
+                liquidity=None,
+                current_tick=None,
+                pool_address=pool_address,
+            )
+
+        except Exception as e:  # noqa: BLE001  # Defensive: graceful degradation for extraction
+            logger.warning(f"Failed to extract lp_open_data: {e}")
+            return None
+
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> "LPCloseData | None":
         """Extract LP close data from transaction receipt.
 
         Looks for WithdrawnFromBins events and Transfer events.
+
+        VIB-4634 — stamp the canonical LBPair (pool) address on the close
+        leg. The ``WithdrawnFromBins`` event is emitted BY the LBPair, so
+        ``event.contract_address`` IS the pool address (chain-truth, no
+        factory lookup). Mirrors the Uniswap V3 Burn ``pool_address`` path
+        (VIB-3940). Without it the LP accounting handler drops every
+        TraderJoe V2 LP_CLOSE / LP_COLLECT_FEES because the position-key tail
+        ``tokenX/tokenY/<binStep>`` is rejected as a V3 fee-tier descriptor.
 
         Args:
             receipt: Transaction receipt dict with 'logs' field
@@ -901,17 +1030,53 @@ class TraderJoeV2ReceiptParser:
             result = self.parse_receipt(receipt)
 
             if not result.liquidity_result or result.liquidity_result.is_add:
+                # VIB-4634 — LP_COLLECT_FEES path. A fee harvest emits
+                # ``ClaimedFees`` (no WithdrawnFromBins), so the principal
+                # withdrawal branch above does not fire. The Liquidity Book
+                # keeps principal on-chain on a collect, so the collected
+                # principal is a measured zero; the fee amounts live on the
+                # separate ``fees0`` / ``fees1`` extraction. We still emit an
+                # ``LPCloseData`` here solely to carry the canonical LBPair
+                # ``pool_address`` (the ``ClaimedFees`` emitter) so the LP
+                # accounting handler can book the LP_COLLECT_FEES event
+                # instead of dropping it (the ``tokenX/tokenY/<binStep>``
+                # position-key descriptor is rejected as a V3 fee tier).
+                fees = self.extract_collected_fees(receipt)
+                if fees is not None and fees.success and fees.pool_address:
+                    return LPCloseData(
+                        # Principal stays on-chain on a collect — measured zero,
+                        # NOT unmeasured. Fees ship via fees0/fees1 separately.
+                        amount0_collected=0,
+                        amount1_collected=0,
+                        # VIB-4470 — TraderJoe doesn't separate fees in the
+                        # withdrawal events; fees are unmeasured here (Empty ≠
+                        # Zero). The dedicated extract_fees0/1 path carries them.
+                        fees0=None,
+                        fees1=None,
+                        liquidity_removed=None,
+                        # Lowercase — a real RPC log address is checksummed and
+                        # the LP handler only accepts lowercase 0x-hex.
+                        pool_address=fees.pool_address.lower(),  # VIB-4634 — LBPair
+                    )
                 return None
 
-            # Get amounts from Transfer events (token withdrawals)
+            # The WithdrawnFromBins emitter is the LBPair — chain-truth pool addr.
+            # Lowercase it (real RPC log addresses are checksummed; the LP
+            # handler only accepts lowercase 0x-hex).
+            pool_address = (result.liquidity_result.pool_address or "").lower()
+
+            # Get amounts from the LBPair → wallet withdrawal Transfer legs.
+            # Filter to transfers FROM the LBPair so unrelated legs (unwrap,
+            # router hops) can't corrupt the amounts (gemini HIGH on PR #2607).
+            # Emission order preserved (tokenX then tokenY); not sorted by
+            # address — see _lbpair_transfers / extract_lp_open_data.
             amount_x = 0
             amount_y = 0
-
-            transfers = [e for e in result.events if e.event_type == TraderJoeV2EventType.TRANSFER]
-            if len(transfers) >= 2:
-                # Usually first two transfers are the token amounts
-                amount_x = transfers[0].data.get("value", 0)
-                amount_y = transfers[1].data.get("value", 0) if len(transfers) > 1 else 0
+            withdraw_transfers = self._lbpair_transfers(result.events, pool_address, to_pool=False)
+            if len(withdraw_transfers) >= 1:
+                amount_x = withdraw_transfers[0].data.get("value", 0)
+            if len(withdraw_transfers) >= 2:
+                amount_y = withdraw_transfers[1].data.get("value", 0)
 
             if amount_x > 0 or amount_y > 0:
                 return LPCloseData(
@@ -922,6 +1087,7 @@ class TraderJoeV2ReceiptParser:
                     fees0=None,
                     fees1=None,
                     liquidity_removed=None,
+                    pool_address=pool_address,  # VIB-4634 — LBPair address
                 )
 
             return None

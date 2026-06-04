@@ -105,7 +105,7 @@ _payload = _l5.payload
 _to_human = _l5.to_human
 _assert_identity = _l5.assert_identity
 _assert_no_lot_id = _l5.assert_no_lot_id
-_assert_accounting_persisted_or_xfail = _l5.assert_accounting_persisted_or_xfail
+_assert_accounting_persisted = _l5.assert_accounting_persisted
 _assert_bin_model_null_contract = _l5.assert_bin_model_null_contract
 _assert_close_parser_event_equality = _l5.assert_close_parser_event_equality
 
@@ -371,7 +371,7 @@ class TestTraderJoeV2LPOpenIntent:
             funded_wallet,
             compilation_result.action_bundle.metadata,
         )
-        accounting_row = await _assert_accounting_persisted_or_xfail(
+        accounting_row = await _assert_accounting_persisted(
             layer5_accounting_harness,
             intent=intent,
             result=accounting_result,
@@ -447,12 +447,12 @@ class TestTraderJoeV2LPCloseIntent:
 
         # 1. Open position. Capture the RAW OPEN result + intent + bundle
         # metadata now, but DEFER both enrichment and Layer-5 persistence to
-        # the end of the test: the VIB-4634 gap makes the persistence helper
-        # raise pytest.xfail, and enrichment itself could regress — either
-        # firing here would skip the LP_CLOSE compile/execute/parse/balance
-        # hard asserts below (gemini + CodeRabbit PR #2366). Layers 1–4 for
-        # the close run first; all enrichment + Layer-5 persistence (OPEN
-        # then CLOSE) happens at step 8.
+        # the end of the test so the LP_CLOSE compile/execute/parse/balance
+        # hard asserts below run first and an enrichment/persistence
+        # regression cannot mask them (gemini + CodeRabbit PR #2366). All
+        # enrichment + Layer-5 persistence (OPEN then CLOSE) happens at step 8
+        # as live assertions (VIB-4634 fixed — pool_address is now the
+        # canonical LBPair address stamped by the receipt parser).
         open_intent, open_result, open_meta = await _open_position_for_accounting(
             funded_wallet, orchestrator, price_oracle, anvil_rpc_url
         )
@@ -607,7 +607,7 @@ class TestTraderJoeV2LPCloseIntent:
 
         # 8. Layer 5 — assert the real accounting pipeline persisted both
         # legs. Runs ONLY after every LP_CLOSE Layer-1–4 hard assert above,
-        # so neither the VIB-4634 xfail nor an enricher regression can mask
+        # so an enricher/persistence regression cannot mask
         # core close logic. Enrichment also happens HERE, not at execute
         # time (CodeRabbit PR #2366). Persist the prior OPEN first
         # (linkage + cost basis), then CLOSE.
@@ -617,7 +617,7 @@ class TestTraderJoeV2LPCloseIntent:
         close_accounting_result = _enrich_for_accounting(
             execution_result, close_intent, funded_wallet, close_meta
         )
-        open_accounting_row = await _assert_accounting_persisted_or_xfail(
+        open_accounting_row = await _assert_accounting_persisted(
             layer5_accounting_harness,
             intent=open_intent,
             result=open_accounting_result,
@@ -627,7 +627,7 @@ class TestTraderJoeV2LPCloseIntent:
             price_oracle=price_oracle,
             eth_call_reader=anvil_eth_call_adapter,
         )
-        close_accounting_row = await _assert_accounting_persisted_or_xfail(
+        close_accounting_row = await _assert_accounting_persisted(
             layer5_accounting_harness,
             intent=close_intent,
             result=close_accounting_result,

@@ -559,6 +559,46 @@ class TestExtractLPCloseData:
         # unmeasured (None), not a fabricated zero (Empty ≠ Zero).
         assert result.fees0 is None
         assert result.fees1 is None
+        # VIB-4634 — the WithdrawnFromBins emitter IS the LBPair (pool)
+        # address; stamping it lets the LP accounting handler book the
+        # LP_CLOSE event instead of dropping it.
+        assert result.pool_address == POOL
+
+    def test_single_sided_close_books_one_leg(self, parser: TraderJoeV2ReceiptParser) -> None:
+        """CodeRabbit major on PR #2607 — a single-leg close (one LBPair →
+        wallet Transfer) must still persist. The old ``len(transfers) >= 2``
+        guard silently dropped these. The returned leg lands on amount0; the
+        absent leg stays measured-zero (TJv2's amount0/amount1 are bin-pair
+        ordered and the parser has no token-address map at this layer to
+        disambiguate which side a lone transfer is — the two-sided active-bin
+        close is the dominant case and keeps X-then-Y order)."""
+        bin_ids = [8388608]
+        receipt = {
+            "status": 1,
+            "transactionHash": "0x" + "0a" * 32,
+            "blockNumber": 14,
+            "gasUsed": 500,
+            "logs": [
+                _make_log(
+                    EVENT_TOPICS["WithdrawnFromBins"],
+                    POOL,
+                    topics=[_topic_addr(WALLET), _topic_addr(WALLET)],
+                    data=_bins_data(bin_ids),
+                ),
+                # Single LBPair → wallet withdrawal leg.
+                _make_log(
+                    EVENT_TOPICS["Transfer"],
+                    TOKEN_X,
+                    topics=[_topic_addr(POOL), _topic_addr(WALLET)],
+                    data="0x" + _uint256_hex(7 * 10**17),
+                ),
+            ],
+        }
+        result = parser.extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.amount0_collected == 7 * 10**17
+        assert result.amount1_collected == 0
+        assert result.pool_address == POOL
 
     def test_returns_none_when_event_is_add(self, parser: TraderJoeV2ReceiptParser) -> None:
         bin_ids = [8388608]
@@ -589,6 +629,225 @@ class TestExtractLPCloseData:
         }
         result = parser.extract_lp_close_data(receipt)
         assert result is None
+
+    def test_collect_fees_receipt_stamps_lbpair_with_zero_principal(self, parser: TraderJoeV2ReceiptParser) -> None:
+        """VIB-4634 — a ClaimedFees-only (fee harvest) receipt has no
+        WithdrawnFromBins, so the principal-withdrawal branch does not fire.
+        ``extract_lp_close_data`` still emits an LPCloseData carrying the
+        canonical LBPair ``pool_address`` (the ClaimedFees emitter) with
+        measured-zero principal so the LP accounting handler can book the
+        LP_COLLECT_FEES event instead of dropping it. Fees ship via the
+        separate extract_fees0/1 path (None here, Empty ≠ Zero)."""
+        receipt = {
+            "status": 1,
+            "transactionHash": "0x" + "0c" * 32,
+            "blockNumber": 18,
+            "gasUsed": 500,
+            "logs": [
+                # Fee Transfers (LBPair → wallet).
+                _make_log(
+                    EVENT_TOPICS["Transfer"],
+                    TOKEN_X,
+                    topics=[_topic_addr(POOL), _topic_addr(WALLET)],
+                    data="0x" + _uint256_hex(100),
+                ),
+                _make_log(
+                    EVENT_TOPICS["Transfer"],
+                    TOKEN_Y,
+                    topics=[_topic_addr(POOL), _topic_addr(WALLET)],
+                    data="0x" + _uint256_hex(200),
+                ),
+                # ClaimedFees emitted by the LBPair → no WithdrawnFromBins.
+                _make_log(
+                    EVENT_TOPICS["ClaimedFees"],
+                    POOL,
+                    topics=[_topic_addr(WALLET), _topic_addr(WALLET)],
+                    data="0x" + _uint256_hex(0x40) + _uint256_hex(0x60) + _uint256_hex(0) + _uint256_hex(0),
+                ),
+            ],
+        }
+        result = parser.extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.pool_address == POOL
+        # Principal stays on-chain on a collect — measured zero (not unmeasured).
+        assert result.amount0_collected == 0
+        assert result.amount1_collected == 0
+        # Fees ship via extract_fees0/1; lp_close_data leaves them unmeasured.
+        assert result.fees0 is None
+        assert result.fees1 is None
+
+
+class TestExtractLPOpenData:
+    """VIB-4634 — open-leg extractor stamps the canonical LBPair address.
+
+    The Liquidity Book ``DepositedToBins`` event is emitted BY the LBPair
+    contract, so its log ``address`` IS the pool address (chain-truth, no
+    factory lookup). Stamping it on ``LPOpenData.pool_address`` lets the LP
+    accounting handler's resolver accept-branch book the LP_OPEN event
+    instead of dropping it because the ``tokenX/tokenY/<binStep>``
+    position-key descriptor is rejected as a V3 fee tier.
+    """
+
+    @pytest.fixture
+    def parser(self) -> TraderJoeV2ReceiptParser:
+        return TraderJoeV2ReceiptParser()
+
+    def test_stamps_lbpair_address_and_amounts(self, parser: TraderJoeV2ReceiptParser) -> None:
+        bin_ids = [8388608]
+        receipt = {
+            "status": 1,
+            "transactionHash": "0x" + "1a" * 32,
+            "blockNumber": 20,
+            "gasUsed": 500,
+            "logs": [
+                # DepositedToBins emitted by the LBPair → is_add=True.
+                _make_log(
+                    EVENT_TOPICS["DepositedToBins"],
+                    POOL,
+                    topics=[_topic_addr(WALLET), _topic_addr(WALLET)],
+                    data=_bins_data(bin_ids),
+                ),
+                # Two ERC-20 Transfer legs (wallet → LBPair) for the deposits.
+                _make_log(
+                    EVENT_TOPICS["Transfer"],
+                    TOKEN_X,
+                    topics=[_topic_addr(WALLET), _topic_addr(POOL)],
+                    data="0x" + _uint256_hex(5 * 10**16),
+                ),
+                _make_log(
+                    EVENT_TOPICS["Transfer"],
+                    TOKEN_Y,
+                    topics=[_topic_addr(WALLET), _topic_addr(POOL)],
+                    data="0x" + _uint256_hex(150 * 10**6),
+                ),
+            ],
+        }
+        result = parser.extract_lp_open_data(receipt)
+        assert result is not None
+        # Canonical LBPair address from the DepositedToBins emitter.
+        assert result.pool_address == POOL
+        assert result.amount0 == 5 * 10**16
+        assert result.amount1 == 150 * 10**6
+        # Liquidity Book is fungible (ERC-1155): no NFT id, no tick bracket.
+        # position_id=0 is the "no discriminator" sentinel; tick fields stay
+        # None — never fabricated (Empty ≠ Zero ≠ None).
+        assert result.position_id == 0
+        assert result.tick_lower is None
+        assert result.tick_upper is None
+        assert result.liquidity is None
+        assert result.current_tick is None
+
+    def test_lowercases_checksummed_lbpair_address(self, parser: TraderJoeV2ReceiptParser) -> None:
+        """VIB-4634 regression — a real RPC returns a checksummed (mixed-case)
+        log address, but the LP handler's _clean_pool_address_candidate only
+        accepts lowercase 0x-hex. The parser must lowercase the stamped
+        pool_address or the accounting event is dropped (the original CI
+        failure on all 4 TJv2 chains)."""
+        from web3 import Web3
+
+        checksummed = Web3.to_checksum_address("0x1234567890abcdef1234567890abcdef12345678")
+        assert checksummed != checksummed.lower(), "fixture must be mixed-case to exercise the bug"
+        bin_ids = [8388608]
+        receipt = {
+            "status": 1,
+            "transactionHash": "0x" + "1d" * 32,
+            "blockNumber": 23,
+            "gasUsed": 500,
+            "logs": [
+                _make_log(
+                    EVENT_TOPICS["DepositedToBins"],
+                    checksummed,
+                    topics=[_topic_addr(WALLET), _topic_addr(WALLET)],
+                    data=_bins_data(bin_ids),
+                ),
+                _make_log(
+                    EVENT_TOPICS["Transfer"],
+                    TOKEN_X,
+                    topics=[_topic_addr(WALLET), _topic_addr(checksummed)],
+                    data="0x" + _uint256_hex(5 * 10**16),
+                ),
+            ],
+        }
+        result = parser.extract_lp_open_data(receipt)
+        assert result is not None
+        assert result.pool_address == checksummed.lower()
+        assert result.pool_address.islower()
+
+    def test_filters_unrelated_transfers_to_lbpair(self, parser: TraderJoeV2ReceiptParser) -> None:
+        """gemini HIGH on PR #2607 — only Transfers INTO the LBPair are the
+        deposit legs. An unrelated leading Transfer (e.g. a native-token wrap
+        or router hop that does not target the LBPair) must NOT be picked up
+        as amount0."""
+        bin_ids = [8388608]
+        unrelated = "0x" + "ee" * 20
+        receipt = {
+            "status": 1,
+            "transactionHash": "0x" + "1e" * 32,
+            "blockNumber": 24,
+            "gasUsed": 500,
+            "logs": [
+                # Unrelated Transfer (wallet → some other contract, NOT the LBPair).
+                _make_log(
+                    EVENT_TOPICS["Transfer"],
+                    TOKEN_X,
+                    topics=[_topic_addr(WALLET), _topic_addr(unrelated)],
+                    data="0x" + _uint256_hex(999),
+                ),
+                _make_log(
+                    EVENT_TOPICS["DepositedToBins"],
+                    POOL,
+                    topics=[_topic_addr(WALLET), _topic_addr(WALLET)],
+                    data=_bins_data(bin_ids),
+                ),
+                # Real deposit legs (wallet → LBPair).
+                _make_log(
+                    EVENT_TOPICS["Transfer"],
+                    TOKEN_X,
+                    topics=[_topic_addr(WALLET), _topic_addr(POOL)],
+                    data="0x" + _uint256_hex(5 * 10**16),
+                ),
+                _make_log(
+                    EVENT_TOPICS["Transfer"],
+                    TOKEN_Y,
+                    topics=[_topic_addr(WALLET), _topic_addr(POOL)],
+                    data="0x" + _uint256_hex(150 * 10**6),
+                ),
+            ],
+        }
+        result = parser.extract_lp_open_data(receipt)
+        assert result is not None
+        # The unrelated 999 transfer must be filtered out — amount0 is the
+        # real deposit, not the leading noise transfer.
+        assert result.amount0 == 5 * 10**16
+        assert result.amount1 == 150 * 10**6
+
+    def test_returns_none_when_event_is_withdraw(self, parser: TraderJoeV2ReceiptParser) -> None:
+        bin_ids = [8388608]
+        receipt = {
+            "status": 1,
+            "transactionHash": "0x" + "1b" * 32,
+            "blockNumber": 21,
+            "gasUsed": 500,
+            "logs": [
+                _make_log(
+                    EVENT_TOPICS["WithdrawnFromBins"],
+                    POOL,
+                    topics=[_topic_addr(WALLET), _topic_addr(WALLET)],
+                    data=_bins_data(bin_ids),
+                ),
+            ],
+        }
+        assert parser.extract_lp_open_data(receipt) is None
+
+    def test_returns_none_when_no_liquidity_event(self, parser: TraderJoeV2ReceiptParser) -> None:
+        receipt = {
+            "status": 1,
+            "transactionHash": "0x" + "1c" * 32,
+            "blockNumber": 22,
+            "gasUsed": 50,
+            "logs": [],
+        }
+        assert parser.extract_lp_open_data(receipt) is None
 
 
 class TestExtractBinIds:

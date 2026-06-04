@@ -148,7 +148,7 @@ _payload = _l5.payload
 _to_human = _l5.to_human
 _assert_identity = _l5.assert_identity
 _assert_no_lot_id = _l5.assert_no_lot_id
-_assert_accounting_persisted_or_xfail = _l5.assert_accounting_persisted_or_xfail
+_assert_accounting_persisted = _l5.assert_accounting_persisted
 _assert_bin_model_null_contract = _l5.assert_bin_model_null_contract
 
 
@@ -540,7 +540,7 @@ class TestTraderJoeV2CollectFeesIntent:
         accounting_result = _enrich_for_accounting(
             execution_result, collect_intent, funded_wallet, bundle.metadata
         )
-        collect_accounting_row = await _assert_accounting_persisted_or_xfail(
+        collect_accounting_row = await _assert_accounting_persisted(
             layer5_accounting_harness,
             intent=collect_intent,
             result=accounting_result,
