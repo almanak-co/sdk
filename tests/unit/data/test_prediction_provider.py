@@ -31,11 +31,14 @@ from almanak.connectors.polymarket.models import (
 from almanak.connectors.polymarket.models import (
     PriceHistory as ClobPriceHistory,
 )
+# VIB-4989: the provider class lives in the connector now; the neutral result
+# dataclasses stay in the framework. Importing the class here gives the relocated
+# connector copy real execution coverage (CRAP gate).
+from almanak.connectors.polymarket.prediction_provider import PredictionMarketDataProvider
 from almanak.framework.data.prediction_provider import (
     HistoricalPrice,
     HistoricalTrade,
     PredictionMarket,
-    PredictionMarketDataProvider,
     PredictionOrder,
     PredictionPosition,
     PriceHistory,
@@ -535,7 +538,7 @@ class TestProviderCaching:
         """Test cache entry expiration."""
         import time
 
-        from almanak.framework.data.prediction_provider import CacheEntry
+        from almanak.connectors.polymarket.prediction_provider import CacheEntry
 
         # Create expired entry
         entry = CacheEntry(value="test", expires_at=time.time() - 1)
@@ -549,7 +552,7 @@ class TestProviderCaching:
         """Test that expired cache entries return None."""
         import time
 
-        from almanak.framework.data.prediction_provider import CacheEntry
+        from almanak.connectors.polymarket.prediction_provider import CacheEntry
 
         # Set an expired entry
         provider._cache["test"] = CacheEntry(

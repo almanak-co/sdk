@@ -11,8 +11,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from almanak.connectors.polymarket.models import PolymarketConfig
-
     from ..models.reproduction_bundle import ActionBundle
 
 
@@ -52,7 +50,7 @@ class IntentCompilerConfig:
     """
 
     allow_placeholder_prices: bool = False
-    polymarket_config: "PolymarketConfig | None" = None
+    polymarket_config: Any = None  # PolymarketConfig (typed Any to avoid a framework->connector import, VIB-4989)
     swap_pool_selection_mode: Literal["auto", "fixed"] = "auto"
     fixed_swap_fee_tier: int | None = None
     max_price_impact_pct: Decimal = Decimal("0.30")

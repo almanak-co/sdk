@@ -17,5 +17,11 @@ PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {
         "order_types": ["market", "limit"],
         "time_in_force": ["GTC", "IOC", "FOK"],
         "collateral_token": "USDC",
+        # Per-chain settlement-token symbol variant (VIB-4989): on Polygon a
+        # Polymarket "USDC" balance is the bridged PoS USDC the connector tracks as
+        # "PUSD". Relocated from the framework ``PROTOCOL_TOKEN_VARIANTS`` dispatch
+        # dict so ``MarketSnapshot.balance`` reads it via ``CapabilitiesRegistry``
+        # instead of naming the protocol. Shape: ``{chain: {symbol: variant}}``.
+        "settlement_token_variants": {"polygon": {"USDC": "PUSD"}},
     },
 }

@@ -531,11 +531,13 @@ def _prediction_outbox_position_key(intent: Any, protocol: str, chain: str, wall
     :func:`_bridge_outbox_position_key` to keep the parent method under
     the CRAP threshold; semantics are unchanged from the inline form.
     """
+    from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
+
     market_id = str(getattr(intent, "market_id", "") or "")
     outcome_raw = getattr(intent, "outcome", None)
     outcome = str(outcome_raw) if outcome_raw is not None else ""
-    proto_norm = protocol or "polymarket"
-    if market_id and outcome and chain and wallet_address:
+    proto_norm = protocol or CompilerRegistry.default_protocol("PREDICTION") or ""
+    if proto_norm and market_id and outcome and chain and wallet_address:
         position_key = f"prediction:{proto_norm}:{chain.lower()}:{wallet_address.lower()}:{market_id}:{outcome}"
     else:
         position_key = ""
@@ -4012,14 +4014,30 @@ class StrategyRunner:
         # min_output calculations to be wrong (e.g., ETH at $2000 vs real $3117)
         state.price_oracle = self._build_single_chain_price_oracle(state.market, intent)
 
-        # Build gateway-backed Polymarket execution handles for Polygon.
-        if strategy.chain.lower() == "polygon" and state.gateway_client is not None:
-            from almanak.connectors.polymarket.gateway_client import GatewayPolymarketClient
+        # Build the gateway-backed prediction-market (CLOB) execution handler for
+        # whatever connector claims this chain (VIB-4989: registry-driven; replaces
+        # the hardcoded chain=="polygon" gate + the direct connector imports). The
+        # handler owns its gateway-routed client; state.clob_client stays unset (its
+        # only use is a no-op close() on teardown).
+        if state.gateway_client is not None:
+            from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
+            from almanak.connectors._strategy_base.prediction_execute_registry import (
+                PredictionExecuteRegistry,
+            )
 
-            from ..execution.clob_handler import ClobActionHandler
-
-            state.clob_client = GatewayPolymarketClient(state.gateway_client)
-            state.clob_handler = ClobActionHandler(clob_client=state.clob_client)
+            # Resolve the CLOB handler by the intent's protocol (falling back to the
+            # compiler's default prediction protocol), not the first buildable handler
+            # for the chain: on a chain with >1 prediction connector, compile/outbox
+            # could target one protocol while execution binds another.
+            resolved_protocol = (
+                (getattr(intent, "protocol", "") or "") or CompilerRegistry.default_protocol("PREDICTION") or ""
+            )
+            if resolved_protocol:
+                handler = PredictionExecuteRegistry.build_handler(
+                    resolved_protocol, gateway_client=state.gateway_client
+                )
+                if handler is not None:
+                    state.clob_handler = handler
 
         # Build compiler config
         # Allow placeholder prices when no real prices are available (empty oracle).

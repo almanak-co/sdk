@@ -9,8 +9,6 @@ What still lives here:
 * ``StablecoinConfig`` / ``StablecoinMode`` / ``DEFAULT_STABLECOINS`` —
   stablecoin pricing-mode configuration consumed by ``MarketSnapshot``.
 * ``FreshnessConfig`` — data-staleness thresholds (warn / error).
-* ``PROTOCOL_TOKEN_VARIANTS`` — per-protocol token-variant registry
-  (e.g. Polymarket's pUSD on Polygon).
 * ``RSICalculator`` Protocol.
 * Re-exports of every typed error from ``almanak.framework.market.errors``
   so legacy ``from almanak.framework.data.market_snapshot import <Error>``
@@ -49,36 +47,15 @@ DEFAULT_STABLECOINS: frozenset[str] = frozenset({"USDC", "USDT", "DAI"})
 
 
 # =============================================================================
-# Per-protocol token variant registry (VIB-3138)
+# Per-protocol token variant registry (VIB-3138 → VIB-4989)
 # =============================================================================
 #
-# Some protocols only accept a specific token variant. Polymarket V2 (April
-# 2026 cutover) settles in pUSD on Polygon — a strategy calling
-# ``market.balance("USDC")`` without protocol context returns native USDC and
-# the CLOB later rejects the order with "insufficient balance". This registry
-# lets callers disambiguate: ``market.balance("USDC", protocol="polymarket")``
-# returns the pUSD balance on Polygon (the actually-spendable collateral,
-# wrapped from USDC.e or native USDC at the on-chain CollateralOnramp).
-#
-# Shape: ``{chain: {protocol: {generic_symbol: preferred_variant_symbol}}}``
-# Extend this when a protocol has a non-default settlement-token variant.
-# Keep the keys lowercase; inputs are normalized before lookup.
-PROTOCOL_TOKEN_VARIANTS: dict[str, dict[str, dict[str, str]]] = {
-    "polygon": {
-        "polymarket": {
-            # V2 (April 2026 cutover): the spendable trading collateral on
-            # Polymarket is pUSD, minted from USDC.e (or native USDC) via the
-            # CollateralOnramp. ``balance("USDC", protocol="polymarket")``
-            # returns the pUSD balance — the amount actually usable for orders.
-            #
-            # Polymarket's pUSD is registered as ``PUSD`` on polygon in
-            # ``framework/data/tokens/data/tokens.json``. Three other tokens
-            # share the symbol on other chains (Pleasing/Palm/Plume USD) but
-            # the resolver is chain-scoped so the lookup is unambiguous here.
-            "USDC": "PUSD",
-        },
-    },
-}
+# The former ``PROTOCOL_TOKEN_VARIANTS`` dict was removed in VIB-4989:
+# settlement-token variants (e.g. Polymarket's USDC -> PUSD on Polygon) are now
+# connector capabilities, declared in each connector's ``capabilities.py`` under
+# ``settlement_token_variants`` and read by ``MarketSnapshot.balance`` via
+# ``CapabilitiesRegistry`` (see ``framework/market/snapshot.py``
+# ``_resolve_protocol_variant``). Framework code no longer names protocols here.
 
 
 @dataclass

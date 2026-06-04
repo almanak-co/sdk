@@ -1522,7 +1522,8 @@ class MarketSnapshot:
             token: Token symbol
             protocol: Optional protocol name for variant disambiguation (VIB-3138).
                 When set, resolves generic symbols to the protocol's preferred
-                variant via ``PROTOCOL_TOKEN_VARIANTS`` (e.g.,
+                variant via the connector's ``settlement_token_variants``
+                capability (read through ``CapabilitiesRegistry``; e.g.,
                 ``balance("USDC", protocol="polymarket")`` on Polygon returns
                 the pUSD balance — the V2 spendable trading collateral
                 wrapped from USDC.e or native USDC at the on-chain Onramp.
@@ -1945,20 +1946,25 @@ class MarketSnapshot:
 
         VIB-3138: Polymarket on Polygon settles in USDC.e (not native USDC),
         so strategies calling ``market.balance("USDC", protocol="polymarket")``
-        must get the USDC.e balance. Uses ``PROTOCOL_TOKEN_VARIANTS`` keyed by
-        (chain, protocol) for the lookup; unknown mappings pass through.
+        must get the USDC.e balance. Reads the connector's
+        ``settlement_token_variants`` capability (via ``CapabilitiesRegistry``)
+        keyed by chain for the lookup; unknown mappings pass through.
         """
         if protocol is None:
             return token
-        from almanak.framework.data.market_snapshot import PROTOCOL_TOKEN_VARIANTS
+        # VIB-4989: settlement-token variants are connector capabilities now, read
+        # via CapabilitiesRegistry instead of a framework PROTOCOL_TOKEN_VARIANTS dict.
+        from almanak.connectors._strategy_base.capabilities_registry import get_protocol_capabilities
 
         chain_key = (self._chain or "").lower()
         protocol_key = protocol.lower()
-        chain_map = PROTOCOL_TOKEN_VARIANTS.get(chain_key)
-        if chain_map is None:
+        variants = get_protocol_capabilities(protocol_key).get("settlement_token_variants", {})
+        if not isinstance(variants, dict):
             return token
-        protocol_map = chain_map.get(protocol_key)
-        if protocol_map is None:
+        protocol_map = variants.get(chain_key)
+        if protocol_map is not None and not isinstance(protocol_map, dict):
+            return token
+        if not protocol_map:
             return token
         # Registry keys are canonical uppercase; normalize for lookup but keep
         # the caller-supplied symbol on passthrough.

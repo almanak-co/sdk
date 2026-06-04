@@ -279,11 +279,8 @@ async def test_clob_bundle_routes_to_clob_handler() -> None:
             FakeGatewayExecutionOrchestrator,
         ),
         patch(
-            "almanak.connectors.polymarket.gateway_client.GatewayPolymarketClient",
-            return_value=object(),
-        ),
-        patch(
-            "almanak.framework.execution.clob_handler.ClobActionHandler",
+            "almanak.connectors._strategy_base.prediction_execute_registry."
+            "PredictionExecuteRegistry.build_handler",
             return_value=mock_clob_handler,
         ),
     ])
@@ -347,11 +344,8 @@ async def test_order_request_bundle_routes_to_clob_handler() -> None:
             FakeGatewayExecutionOrchestrator,
         ),
         patch(
-            "almanak.connectors.polymarket.gateway_client.GatewayPolymarketClient",
-            return_value=object(),
-        ),
-        patch(
-            "almanak.framework.execution.clob_handler.ClobActionHandler",
+            "almanak.connectors._strategy_base.prediction_execute_registry."
+            "PredictionExecuteRegistry.build_handler",
             return_value=mock_clob_handler,
         ),
     ])
@@ -429,11 +423,8 @@ async def test_clob_failure_propagates() -> None:
             FakeGatewayExecutionOrchestrator,
         ),
         patch(
-            "almanak.connectors.polymarket.gateway_client.GatewayPolymarketClient",
-            return_value=object(),
-        ),
-        patch(
-            "almanak.framework.execution.clob_handler.ClobActionHandler",
+            "almanak.connectors._strategy_base.prediction_execute_registry."
+            "PredictionExecuteRegistry.build_handler",
             return_value=mock_clob_handler,
         ),
     ])

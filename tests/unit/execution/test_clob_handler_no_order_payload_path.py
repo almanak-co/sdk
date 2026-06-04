@@ -23,8 +23,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.connectors.polymarket.clob_handler import ClobActionHandler  # VIB-4989: connector copy (CRAP coverage)
 from almanak.framework.execution.clob_handler import (
-    ClobActionHandler,
     ClobOrderStatus,
 )
 from almanak.framework.models.reproduction_bundle import ActionBundle

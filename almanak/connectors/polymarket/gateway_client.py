@@ -102,7 +102,7 @@ class GatewayPolymarketClient:
 
     def get_market(self, market_id: str) -> GammaMarket:
         try:
-            response = self._gateway_client.polymarket.GetMarket(
+            response = self._gateway_client.connector_stub("polymarket").GetMarket(
                 polymarket_pb2.PolymarketGetMarketRequest(condition_id=market_id),
                 timeout=self._rpc_timeout(),
             )
@@ -114,7 +114,7 @@ class GatewayPolymarketClient:
 
     def get_market_by_slug(self, slug: str) -> GammaMarket | None:
         try:
-            response = self._gateway_client.polymarket.GetMarket(
+            response = self._gateway_client.connector_stub("polymarket").GetMarket(
                 polymarket_pb2.PolymarketGetMarketRequest(slug=slug),
                 timeout=self._rpc_timeout(),
             )
@@ -129,7 +129,7 @@ class GatewayPolymarketClient:
     def get_markets(self, filters: MarketFilters | None = None) -> list[GammaMarket]:
         filters_json = filters.model_dump_json(exclude_none=True) if filters else ""
         try:
-            response = self._gateway_client.polymarket.GetMarkets(
+            response = self._gateway_client.connector_stub("polymarket").GetMarkets(
                 polymarket_pb2.PolymarketGetMarketsRequest(filters_json=filters_json),
                 timeout=self._rpc_timeout(),
             )
@@ -141,7 +141,7 @@ class GatewayPolymarketClient:
 
     def get_orderbook(self, token_id: str) -> OrderBook:
         try:
-            response = self._gateway_client.polymarket.GetOrderBook(
+            response = self._gateway_client.connector_stub("polymarket").GetOrderBook(
                 polymarket_pb2.PolymarketOrderBookRequest(token_id=token_id),
                 timeout=self._rpc_timeout(),
             )
@@ -178,7 +178,7 @@ class GatewayPolymarketClient:
         # and are not part of the signed order. ``expiration`` is now an
         # API-level GTD timestamp (Unix seconds), not the signed-struct field.
         try:
-            response = self._gateway_client.polymarket.CreateAndPostOrder(
+            response = self._gateway_client.connector_stub("polymarket").CreateAndPostOrder(
                 polymarket_pb2.PolymarketCreateOrderRequest(
                     token_id=token_id,
                     price=str(price),
@@ -240,7 +240,7 @@ class GatewayPolymarketClient:
         the wallet from its own configuration.
         """
         try:
-            response = self._gateway_client.polymarket.GetPositions(
+            response = self._gateway_client.connector_stub("polymarket").GetPositions(
                 polymarket_pb2.PolymarketGetPositionsRequest(),
                 timeout=self._rpc_timeout(),
             )
@@ -277,7 +277,9 @@ class GatewayPolymarketClient:
             market_id=filters.market if filters and filters.market else "",
         )
         try:
-            response = self._gateway_client.polymarket.GetOpenOrders(request, timeout=self._rpc_timeout())
+            response = self._gateway_client.connector_stub("polymarket").GetOpenOrders(
+                request, timeout=self._rpc_timeout()
+            )
         except grpc.RpcError as exc:
             self._raise_rpc_error("GetOpenOrders RPC failed", exc.details(), status_code=None)
         if not response.success:
@@ -309,7 +311,7 @@ class GatewayPolymarketClient:
     # file, not this function body. Pre-existing complexity tracked separately.
     def get_order(self, order_id: str) -> OpenOrder | None:
         try:
-            response = self._gateway_client.polymarket.GetOrder(
+            response = self._gateway_client.connector_stub("polymarket").GetOrder(
                 polymarket_pb2.PolymarketGetOrderRequest(order_id=order_id),
                 timeout=self._rpc_timeout(),
             )
@@ -365,7 +367,9 @@ class GatewayPolymarketClient:
             fidelity=int(fidelity) if fidelity else 0,
         )
         try:
-            response = self._gateway_client.polymarket.GetPriceHistory(request, timeout=self._rpc_timeout())
+            response = self._gateway_client.connector_stub("polymarket").GetPriceHistory(
+                request, timeout=self._rpc_timeout()
+            )
         except grpc.RpcError as exc:
             self._raise_rpc_error("GetPriceHistory RPC failed", exc.details(), status_code=None)
         if not response.success:
@@ -401,7 +405,9 @@ class GatewayPolymarketClient:
             limit=int(limit),
         )
         try:
-            response = self._gateway_client.polymarket.GetTradeTape(request, timeout=self._rpc_timeout())
+            response = self._gateway_client.connector_stub("polymarket").GetTradeTape(
+                request, timeout=self._rpc_timeout()
+            )
         except grpc.RpcError as exc:
             self._raise_rpc_error("GetTradeTape RPC failed", exc.details(), status_code=None)
         if not response.success:
@@ -433,7 +439,7 @@ class GatewayPolymarketClient:
 
     def cancel_order(self, order_id: str) -> bool:
         try:
-            response = self._gateway_client.polymarket.CancelOrder(
+            response = self._gateway_client.connector_stub("polymarket").CancelOrder(
                 polymarket_pb2.PolymarketCancelOrderRequest(order_id=order_id),
                 timeout=self._rpc_timeout(),
             )
@@ -453,7 +459,7 @@ class GatewayPolymarketClient:
         signals the final page.
         """
         try:
-            response = self._gateway_client.polymarket.GetSimplifiedMarkets(
+            response = self._gateway_client.connector_stub("polymarket").GetSimplifiedMarkets(
                 polymarket_pb2.PolymarketGetSimplifiedMarketsRequest(next_cursor=next_cursor),
                 timeout=self._rpc_timeout(),
             )
@@ -477,7 +483,7 @@ class GatewayPolymarketClient:
     def get_midpoint(self, token_id: str) -> Decimal:
         """Return the midpoint price for ``token_id`` as a Decimal probability."""
         try:
-            response = self._gateway_client.polymarket.GetMidpoint(
+            response = self._gateway_client.connector_stub("polymarket").GetMidpoint(
                 polymarket_pb2.PolymarketMidpointRequest(token_id=token_id),
                 timeout=self._rpc_timeout(),
             )
@@ -500,7 +506,7 @@ class GatewayPolymarketClient:
         if normalized not in ("BUY", "SELL"):
             raise ValueError(f"Invalid side {side!r}: must be 'BUY' or 'SELL'")
         try:
-            response = self._gateway_client.polymarket.GetPrice(
+            response = self._gateway_client.connector_stub("polymarket").GetPrice(
                 polymarket_pb2.PolymarketPriceRequest(token_id=token_id, side=normalized),
                 timeout=self._rpc_timeout(),
             )
@@ -513,7 +519,7 @@ class GatewayPolymarketClient:
     def get_spread(self, token_id: str) -> Decimal:
         """Return the bid-ask spread for ``token_id`` as a Decimal."""
         try:
-            response = self._gateway_client.polymarket.GetSpread(
+            response = self._gateway_client.connector_stub("polymarket").GetSpread(
                 polymarket_pb2.PolymarketSpreadRequest(token_id=token_id),
                 timeout=self._rpc_timeout(),
             )
@@ -526,7 +532,7 @@ class GatewayPolymarketClient:
     def get_tick_size(self, token_id: str) -> Decimal:
         """Return the minimum tick size for ``token_id`` as a Decimal."""
         try:
-            response = self._gateway_client.polymarket.GetTickSize(
+            response = self._gateway_client.connector_stub("polymarket").GetTickSize(
                 polymarket_pb2.PolymarketTickSizeRequest(token_id=token_id),
                 timeout=self._rpc_timeout(),
             )
@@ -549,7 +555,7 @@ class GatewayPolymarketClient:
         from its own configuration.
         """
         try:
-            response = self._gateway_client.polymarket.GetBalanceAllowance(
+            response = self._gateway_client.connector_stub("polymarket").GetBalanceAllowance(
                 polymarket_pb2.PolymarketBalanceAllowanceRequest(
                     asset_type=asset_type,
                     token_id=token_id or "",
@@ -579,7 +585,7 @@ class GatewayPolymarketClient:
             limit=filters.limit if filters else 0,
         )
         try:
-            response = self._gateway_client.polymarket.GetTradesHistory(
+            response = self._gateway_client.connector_stub("polymarket").GetTradesHistory(
                 request,
                 timeout=self._rpc_timeout(),
             )
@@ -656,7 +662,7 @@ class GatewayPolymarketClient:
         can retry the failures without re-attempting the successes.
         """
         try:
-            response = self._gateway_client.polymarket.CancelOrders(
+            response = self._gateway_client.connector_stub("polymarket").CancelOrders(
                 polymarket_pb2.PolymarketCancelOrdersRequest(order_ids=list(order_ids)),
                 timeout=self._rpc_timeout(),
             )
@@ -688,7 +694,7 @@ class GatewayPolymarketClient:
         of canceled order ids.
         """
         try:
-            response = self._gateway_client.polymarket.CancelAll(
+            response = self._gateway_client.connector_stub("polymarket").CancelAll(
                 polymarket_pb2.PolymarketCancelAllRequest(
                     market_id=market_id or "",
                     asset_id=asset_id or "",
@@ -734,7 +740,7 @@ class GatewayPolymarketClient:
                 gateway re-fetches the market server-side from ``token_id``.
         """
         try:
-            response = self._gateway_client.polymarket.CreateAndPostMarketOrder(
+            response = self._gateway_client.connector_stub("polymarket").CreateAndPostMarketOrder(
                 polymarket_pb2.PolymarketMarketOrderRequest(
                     token_id=token_id,
                     amount=str(amount),

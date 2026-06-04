@@ -802,32 +802,31 @@ def _init_prediction_provider(
     # set by the @almanak_strategy decorator, but custom subclasses or partial
     # mocks may construct the metadata directly without that field (Gemini).
     supported_protocols = getattr(strategy_metadata, "supported_protocols", None) or []
-    requires_polymarket = "polymarket" in supported_protocols
+    # VIB-4989: registry-driven opt-in -- any connector publishing a prediction read
+    # claims the strategy, so a second venue participates with no framework edit.
+    from almanak.connectors._strategy_base.prediction_read_registry import PredictionReadRegistry
 
-    # Strict opt-in: only strategies declaring polymarket attempt provider init.
-    if not requires_polymarket:
+    claimed = [p for p in supported_protocols if PredictionReadRegistry.has(p)]
+    if not claimed:
         return
+    protocol = claimed[0]
 
     try:
-        from almanak.connectors.polymarket.gateway_client import GatewayPolymarketClient
-
-        from ..data.prediction_provider import PredictionMarketDataProvider
-
         if gateway_client is None or not gateway_client.is_connected:
             raise RuntimeError("gateway client not connected")
 
-        clob_client = GatewayPolymarketClient(gateway_client)
-        strategy_instance._prediction_provider = PredictionMarketDataProvider(clob_client)  # type: ignore[arg-type]
+        provider = PredictionReadRegistry.build_provider(protocol, gateway_client=gateway_client, wallet=None)
+        if provider is None:
+            raise RuntimeError(f"no prediction provider for protocol {protocol!r}")
+        strategy_instance._prediction_provider = provider
         click.echo("  Prediction market provider initialized")
     except Exception as e:
         err_kind = type(e).__name__
-        if requires_polymarket:
-            strategy_name = strategy_metadata.name if strategy_metadata else "<unknown>"
-            raise RuntimeError(
-                f"Polymarket strategy '{strategy_name}' requires the prediction "
-                f"market provider but initialization failed ({err_kind})."
-            ) from e
-        logger.warning("Prediction market provider not available (%s).", err_kind)
+        strategy_name = strategy_metadata.name if strategy_metadata else "<unknown>"
+        raise RuntimeError(
+            f"Prediction strategy '{strategy_name}' requires the prediction "
+            f"market provider but initialization failed ({err_kind})."
+        ) from e
 
 
 def create_balance_provider(

@@ -47,7 +47,8 @@ class PredictionBuyIntent(BaseIntent):
         order_type: Order type ("market" or "limit")
         time_in_force: How long order remains active ("GTC", "IOC", "FOK")
         expiration_hours: Hours until order expires (None = no expiry)
-        protocol: Protocol to use (defaults to "polymarket")
+        protocol: Protocol to use (None resolves to the connector default,
+            currently "polymarket", at compile time)
         chain: Target chain (defaults to "polygon" for Polymarket)
         exit_conditions: Optional exit conditions for automatic position monitoring
             (stop-loss, take-profit, trailing stop, pre-resolution exit)
@@ -88,7 +89,9 @@ class PredictionBuyIntent(BaseIntent):
     order_type: PredictionOrderType = "market"
     time_in_force: PredictionTimeInForce = "GTC"
     expiration_hours: int | None = None
-    protocol: str = "polymarket"
+    # None resolves to the connector default ("polymarket") at compile time via
+    # CompilerRegistry.default_protocol("PREDICTION"); see intents/compiler.py.
+    protocol: str | None = None
     chain: str | None = None
     exit_conditions: PredictionExitConditions | None = None
     intent_id: str = Field(default_factory=default_intent_id)
@@ -172,7 +175,8 @@ class PredictionSellIntent(BaseIntent):
         min_price: Minimum price per share (0.01-0.99) for limit orders
         order_type: Order type ("market" or "limit")
         time_in_force: How long order remains active ("GTC", "IOC", "FOK")
-        protocol: Protocol to use (defaults to "polymarket")
+        protocol: Protocol to use (None resolves to the connector default,
+            currently "polymarket", at compile time)
         chain: Target chain (defaults to "polygon" for Polymarket)
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
@@ -206,7 +210,9 @@ class PredictionSellIntent(BaseIntent):
     min_price: OptionalSafeDecimal = None
     order_type: PredictionOrderType = "market"
     time_in_force: PredictionTimeInForce = "GTC"
-    protocol: str = "polymarket"
+    # None resolves to the connector default ("polymarket") at compile time via
+    # CompilerRegistry.default_protocol("PREDICTION"); see intents/compiler.py.
+    protocol: str | None = None
     chain: str | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
@@ -269,7 +275,8 @@ class PredictionRedeemIntent(BaseIntent):
         market_id: Polymarket market ID or slug
         outcome: Which outcome to redeem ("YES", "NO", or None for both)
         shares: Number of shares to redeem, or "all" (default)
-        protocol: Protocol to use (defaults to "polymarket")
+        protocol: Protocol to use (None resolves to the connector default,
+            currently "polymarket", at compile time)
         chain: Target chain (defaults to "polygon" for Polymarket)
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
@@ -297,7 +304,9 @@ class PredictionRedeemIntent(BaseIntent):
     market_id: str
     outcome: PredictionOutcome | None = None
     shares: PredictionShareAmount = "all"
-    protocol: str = "polymarket"
+    # None resolves to the connector default ("polymarket") at compile time via
+    # CompilerRegistry.default_protocol("PREDICTION"); see intents/compiler.py.
+    protocol: str | None = None
     chain: str | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)

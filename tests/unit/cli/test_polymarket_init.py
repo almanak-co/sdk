@@ -129,15 +129,13 @@ class TestInitPredictionProviderHappyPath:
 
         sentinel_provider = object()
 
-        with (
-            patch("almanak.connectors.polymarket.gateway_client.GatewayPolymarketClient") as mock_clob,
-            patch(
-                "almanak.framework.data.prediction_provider.PredictionMarketDataProvider"
-            ) as mock_pmdp,
+        # VIB-4989: the provider is built via the registry now (the connector copy),
+        # so patch at the registry boundary rather than the framework class.
+        with patch(
+            "almanak.connectors._strategy_base.prediction_read_registry."
+            "PredictionReadRegistry.build_provider",
+            return_value=sentinel_provider,
         ):
-            mock_clob.return_value = object()
-            mock_pmdp.return_value = sentinel_provider
-
             _init_prediction_provider(strategy, chain="polygon", gateway_client=gateway_client)
 
         assert strategy._prediction_provider is sentinel_provider

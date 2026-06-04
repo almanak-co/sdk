@@ -7,15 +7,17 @@ protocol context gets native USDC and the CLOB later rejects the order with
 "insufficient balance".
 
 Fix: ``market.balance("USDC", protocol="polymarket")`` returns the PUSD
-balance — the spendable trading collateral — via the
-``PROTOCOL_TOKEN_VARIANTS`` registry.
+balance — the spendable trading collateral. As of VIB-4989 the variant
+mapping lives on the connector as a ``settlement_token_variants`` capability
+(read via ``CapabilitiesRegistry``), not the former framework
+``PROTOCOL_TOKEN_VARIANTS`` dict.
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
 
-from almanak.framework.data.market_snapshot import PROTOCOL_TOKEN_VARIANTS
+from almanak.connectors._strategy_base.capabilities_registry import get_protocol_capabilities
 from almanak.framework.market import MarketSnapshot, TokenBalance
 
 
@@ -103,12 +105,17 @@ class TestUnknownProtocolPassthrough:
 
 
 class TestRegistryShape:
-    """Pin the registry entry the ticket requires so it doesn't regress."""
+    """Pin the capability entry the ticket requires so it doesn't regress.
+
+    VIB-4989: the mapping moved from the framework ``PROTOCOL_TOKEN_VARIANTS``
+    dict onto the polymarket connector's ``settlement_token_variants``
+    capability; assert the connector source of truth.
+    """
 
     def test_registry_has_polygon_polymarket_usdc_mapping(self):
-        assert "polygon" in PROTOCOL_TOKEN_VARIANTS
-        assert "polymarket" in PROTOCOL_TOKEN_VARIANTS["polygon"]
-        assert PROTOCOL_TOKEN_VARIANTS["polygon"]["polymarket"]["USDC"] == "PUSD"
+        variants = get_protocol_capabilities("polymarket").get("settlement_token_variants", {})
+        assert "polygon" in variants
+        assert variants["polygon"]["USDC"] == "PUSD"
 
 
 class TestCaseInsensitiveChainAndProtocol:

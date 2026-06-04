@@ -49,7 +49,10 @@ class TestPredictionBuyIntent:
         assert intent.shares is None
         assert intent.order_type == "market"
         assert intent.time_in_force == "GTC"
-        assert intent.protocol == "polymarket"
+        # VIB-4989: protocol defaults to None on a freshly-constructed intent;
+        # it resolves to the connector default ("polymarket") at compile time
+        # via CompilerRegistry.default_protocol("PREDICTION").
+        assert intent.protocol is None
         assert intent.intent_type == IntentType.PREDICTION_BUY
 
     def test_create_with_shares(self):

@@ -644,9 +644,16 @@ def _build_position_key(
         return pk
     if not market_id or not outcome or not wallet_address:
         return ""
+    from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
+
     chain_norm = (chain or "").lower().strip()
     wallet_norm = wallet_address.lower().strip()
-    proto_norm = (protocol or "polymarket").lower().strip()
+    proto_norm = (protocol or CompilerRegistry.default_protocol("PREDICTION") or "").lower().strip()
+    if not proto_norm:
+        # Fail closed: never emit a malformed ``prediction::...`` key with an empty
+        # protocol segment (mirrors the runner-side guard) so outbox/accounting
+        # grouping stays consistent.
+        return ""
     return f"prediction:{proto_norm}:{chain_norm}:{wallet_norm}:{market_id}:{outcome}"
 
 

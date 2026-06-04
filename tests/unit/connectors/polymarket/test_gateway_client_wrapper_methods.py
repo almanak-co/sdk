@@ -55,7 +55,7 @@ def _make_gateway_client(stub: MagicMock) -> GatewayClient:
     client = GatewayClient(config=GatewayClientConfig(host="localhost", port=50051, timeout=5.0))
     client._connected = True
     client._channel = MagicMock()
-    client._polymarket_stub = stub
+    client._connector_stubs = {"polymarket": stub}
     return client
 
 

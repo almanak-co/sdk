@@ -149,7 +149,7 @@ class _StubRegistry:
     def __init__(self, parser: object | None = None) -> None:
         self._parser = parser
 
-    def get(self, protocol: str, chain: str):  # noqa: ARG002
+    def get(self, protocol: str, **kwargs: object):  # noqa: ARG002
         if self._parser is None:
             raise ValueError(f"no parser for {protocol}")
         return self._parser
@@ -222,7 +222,7 @@ class TestBuyRoutesThroughParser:
             "parse_order_response",
             return_value=spy_trade_result,
         ) as mocked:
-            enricher = ResultEnricher(parser_registry=_StubRegistry(parser=None))
+            enricher = ResultEnricher(parser_registry=_StubRegistry(parser=PolymarketReceiptParser()))
             enricher.enrich(
                 result, intent, context, bundle_metadata=_bundle_meta()
             )
@@ -263,7 +263,7 @@ class TestConstructedOrderDictShape:
             )
 
         with patch.object(PolymarketReceiptParser, "parse_order_response", _capture):
-            enricher = ResultEnricher(parser_registry=_StubRegistry(parser=None))
+            enricher = ResultEnricher(parser_registry=_StubRegistry(parser=PolymarketReceiptParser()))
             enricher.enrich(
                 result, intent, context, bundle_metadata=_bundle_meta()
             )
@@ -316,7 +316,7 @@ class TestConstructedOrderDictShape:
             )
 
         with patch.object(PolymarketReceiptParser, "parse_order_response", _capture):
-            enricher = ResultEnricher(parser_registry=_StubRegistry(parser=None))
+            enricher = ResultEnricher(parser_registry=_StubRegistry(parser=PolymarketReceiptParser()))
             enricher.enrich(
                 result, intent, context, bundle_metadata=_bundle_meta()
             )
@@ -357,7 +357,7 @@ class TestExtractedDataFromTradeResult:
             "parse_order_response",
             return_value=spy_trade_result,
         ):
-            enricher = ResultEnricher(parser_registry=_StubRegistry(parser=None))
+            enricher = ResultEnricher(parser_registry=_StubRegistry(parser=PolymarketReceiptParser()))
             enriched = enricher.enrich(
                 result, intent, context, bundle_metadata=_bundle_meta()
             )
@@ -397,7 +397,7 @@ class TestParserExceptionFallback:
             "parse_order_response",
             side_effect=RuntimeError("simulated parser bug"),
         ):
-            enricher = ResultEnricher(parser_registry=_StubRegistry(parser=None))
+            enricher = ResultEnricher(parser_registry=_StubRegistry(parser=PolymarketReceiptParser()))
             enriched = enricher.enrich(
                 result, intent, context, bundle_metadata=_bundle_meta()
             )
@@ -427,7 +427,7 @@ class TestParserExceptionFallback:
             "parse_order_response",
             return_value=TradeResult(success=False, error="unparseable response"),
         ):
-            enricher = ResultEnricher(parser_registry=_StubRegistry(parser=None))
+            enricher = ResultEnricher(parser_registry=_StubRegistry(parser=PolymarketReceiptParser()))
             enriched = enricher.enrich(
                 result, intent, context, bundle_metadata=_bundle_meta()
             )
@@ -470,7 +470,7 @@ class TestSellRoutesThroughParser:
             )
 
         with patch.object(PolymarketReceiptParser, "parse_order_response", _capture):
-            enricher = ResultEnricher(parser_registry=_StubRegistry(parser=None))
+            enricher = ResultEnricher(parser_registry=_StubRegistry(parser=PolymarketReceiptParser()))
             enriched = enricher.enrich(
                 result, intent, context, bundle_metadata=_bundle_meta()
             )

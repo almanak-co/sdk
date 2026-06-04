@@ -21,15 +21,15 @@ directly. See the dashboard blueprints for the recommended composition.
 Usage:
     from almanak.framework.dashboard.templates import PredictionDashboardConfig, render_prediction_dashboard
 
-    config = PredictionDashboardConfig(
-        protocol="polymarket",
-    )
+    # protocol defaults to the connector default ("polymarket"); pass
+    # protocol="<name>" to override for another prediction venue.
+    config = PredictionDashboardConfig()
 
     def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):
         render_prediction_dashboard(deployment_id, strategy_config, session_state, config)
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
@@ -51,6 +51,18 @@ from almanak.framework.dashboard.sections import (
 )
 
 
+def _default_prediction_protocol() -> str | None:
+    """Connector default protocol for prediction dashboards (currently "polymarket").
+
+    Resolved from the connector-default registry so the dashboard does not
+    hardcode a protocol name. Lazy import keeps the connector import off the
+    dashboard module's load path.
+    """
+    from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
+
+    return CompilerRegistry.default_protocol("PREDICTION")
+
+
 @dataclass
 class PredictionDashboardConfig:
     """Configuration for a prediction market dashboard.
@@ -65,7 +77,10 @@ class PredictionDashboardConfig:
         show_pnl_breakdown: Whether to show PnL breakdown
     """
 
-    protocol: str = "polymarket"
+    # Presentation default: resolve the connector default ("polymarket") so the
+    # dashboard label stays connector-agnostic; the literal is a render-safe
+    # fallback only if the registry ever lacks a PREDICTION default.
+    protocol: str = field(default_factory=lambda: _default_prediction_protocol() or "polymarket")
     chain: str = "polygon"
     show_position_overview: bool = True
     show_probability_chart: bool = True
@@ -312,16 +327,18 @@ def _render_performance_summary(session_state: dict[str, Any]) -> None:
 
 def get_polymarket_config() -> PredictionDashboardConfig:
     """Get pre-configured Polymarket dashboard config."""
+    # protocol inherits the connector default ("polymarket") from the config
+    # field default_factory; chain is the Polymarket settlement chain.
     return PredictionDashboardConfig(
-        protocol="polymarket",
         chain="polygon",
     )
 
 
 def get_polymarket_arbitrage_config() -> PredictionDashboardConfig:
     """Get pre-configured Polymarket arbitrage dashboard config."""
+    # protocol inherits the connector default ("polymarket") from the config
+    # field default_factory; chain is the Polymarket settlement chain.
     return PredictionDashboardConfig(
-        protocol="polymarket",
         chain="polygon",
         show_arbitrage_analysis=True,
         show_market_outcomes=True,

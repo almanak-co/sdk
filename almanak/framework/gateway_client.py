@@ -7,11 +7,12 @@ execution) goes through this client.
 
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import grpc
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
-from almanak.connectors.polymarket.proto import polymarket_pb2_grpc
+from almanak.connectors._strategy_base.gateway_stub_registry import GatewayStubRegistry
 from almanak.gateway.proto import gateway_pb2_grpc
 
 logger = logging.getLogger(__name__)
@@ -286,7 +287,7 @@ class GatewayClient:
         # ``RateHistoryReader`` / backtesting rate providers after W7.
         self._rate_history_stub: gateway_pb2_grpc.RateHistoryServiceStub | None = None
         self._simulation_stub: gateway_pb2_grpc.SimulationServiceStub | None = None
-        self._polymarket_stub: polymarket_pb2_grpc.PolymarketServiceStub | None = None
+        self._connector_stubs: dict[str, Any] = {}
         self._enso_stub: gateway_pb2_grpc.EnsoServiceStub | None = None
         self._lifecycle_stub: gateway_pb2_grpc.LifecycleServiceStub | None = None
         self._teardown_stub: gateway_pb2_grpc.TeardownServiceStub | None = None
@@ -413,12 +414,16 @@ class GatewayClient:
             raise RuntimeError("Gateway client not connected")
         return self._simulation_stub
 
-    @property
-    def polymarket(self) -> polymarket_pb2_grpc.PolymarketServiceStub:
-        """Get PolymarketService stub. Raises if not connected."""
-        if self._polymarket_stub is None:
-            raise RuntimeError("Gateway client not connected")
-        return self._polymarket_stub
+    def connector_stub(self, name: str) -> Any:
+        """Get a connector-published gRPC service stub by name. Raises if not connected.
+
+        VIB-4989: replaces per-connector stub properties (e.g. ``.polymarket``). A
+        connector ships its stub via ``GatewayStubRegistry`` (built at connect time).
+        """
+        stub = self._connector_stubs.get(name)
+        if stub is None:
+            raise RuntimeError(f"Gateway client not connected (or no {name!r} connector stub)")
+        return stub
 
     @property
     def enso(self) -> gateway_pb2_grpc.EnsoServiceStub:
@@ -506,9 +511,16 @@ class GatewayClient:
         # Initialize Simulation service stub
         self._simulation_stub = gateway_pb2_grpc.SimulationServiceStub(self._channel)
 
-        # Initialize Polymarket service stub (VIB-4813: proto relocated to
-        # the connector-owned module, wire path unchanged).
-        self._polymarket_stub = polymarket_pb2_grpc.PolymarketServiceStub(self._channel)
+        # Initialize connector-published gRPC service stubs (VIB-4989: each
+        # connector ships its stub via GatewayStubRegistry; no per-connector import).
+        # Roll back the half-open connection if stub construction raises (e.g. a
+        # service_name collision) so connect() never leaves an open channel +
+        # populated core stubs behind.
+        try:
+            self._connector_stubs = GatewayStubRegistry.build_stubs(self._channel)
+        except Exception:
+            self.disconnect()
+            raise
 
         # Initialize Enso service stub
         self._enso_stub = gateway_pb2_grpc.EnsoServiceStub(self._channel)
@@ -548,7 +560,7 @@ class GatewayClient:
             self._pool_history_stub = None
             self._rate_history_stub = None
             self._simulation_stub = None
-            self._polymarket_stub = None
+            self._connector_stubs = {}
             self._enso_stub = None
             self._lifecycle_stub = None
             self._teardown_stub = None

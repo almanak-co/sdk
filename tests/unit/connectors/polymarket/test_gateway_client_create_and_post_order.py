@@ -69,7 +69,7 @@ def _make_gateway_client(stub: MagicMock) -> GatewayClient:
     # gating ``if not gateway_client.is_connected`` check passes.
     client._connected = True
     client._channel = MagicMock()
-    client._polymarket_stub = stub
+    client._connector_stubs = {"polymarket": stub}
     return client
 
 

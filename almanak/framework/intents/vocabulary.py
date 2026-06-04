@@ -1846,7 +1846,7 @@ class Intent:
         order_type: Literal["market", "limit"] = "market",
         time_in_force: Literal["GTC", "IOC", "FOK"] = "GTC",
         expiration_hours: int | None = None,
-        protocol: str = "polymarket",
+        protocol: str | None = None,
         chain: str | None = None,
         exit_conditions: PredictionExitConditions | None = None,
         registry_handle: str | None = None,
@@ -1865,7 +1865,8 @@ class Intent:
             order_type: Order type ("market" or "limit", default "market")
             time_in_force: How long order remains active ("GTC", "IOC", "FOK")
             expiration_hours: Hours until order expires (None = no expiry)
-            protocol: Protocol to use (defaults to "polymarket")
+            protocol: Protocol to use (None resolves to the connector default,
+                currently "polymarket", at compile time)
             chain: Target chain (defaults to "polygon" for Polymarket)
             exit_conditions: Optional exit conditions for automatic position monitoring
                 (stop-loss, take-profit, trailing stop, pre-resolution exit)
@@ -1921,7 +1922,7 @@ class Intent:
         min_price: Decimal | None = None,
         order_type: Literal["market", "limit"] = "market",
         time_in_force: Literal["GTC", "IOC", "FOK"] = "GTC",
-        protocol: str = "polymarket",
+        protocol: str | None = None,
         chain: str | None = None,
         registry_handle: str | None = None,
     ) -> PredictionSellIntent:
@@ -1937,7 +1938,8 @@ class Intent:
             min_price: Minimum price per share (0.01-0.99) for limit orders
             order_type: Order type ("market" or "limit", default "market")
             time_in_force: How long order remains active ("GTC", "IOC", "FOK")
-            protocol: Protocol to use (defaults to "polymarket")
+            protocol: Protocol to use (None resolves to the connector default,
+                currently "polymarket", at compile time)
             chain: Target chain (defaults to "polygon" for Polymarket)
 
         Returns:
@@ -1977,7 +1979,7 @@ class Intent:
         market_id: str,
         outcome: Literal["YES", "NO"] | None = None,
         shares: Decimal | Literal["all"] = "all",
-        protocol: str = "polymarket",
+        protocol: str | None = None,
         chain: str | None = None,
         registry_handle: str | None = None,
     ) -> PredictionRedeemIntent:
@@ -1990,7 +1992,8 @@ class Intent:
             market_id: Polymarket market ID or slug
             outcome: Which outcome to redeem ("YES", "NO", or None for both)
             shares: Number of shares to redeem, or "all" (default)
-            protocol: Protocol to use (defaults to "polymarket")
+            protocol: Protocol to use (None resolves to the connector default,
+                currently "polymarket", at compile time)
             chain: Target chain (defaults to "polygon" for Polymarket)
 
         Returns:

@@ -795,12 +795,12 @@ class ResultEnricher:
         # survive a parser bug.
         trade_result = None
         try:
-            from almanak.connectors.polymarket.receipt_parser import (
-                PolymarketReceiptParser,
-            )
-
-            parser = PolymarketReceiptParser()
-            trade_result = parser.parse_order_response(order_dict)
+            # VIB-4989: route through the receipt-parser registry, keyed on the
+            # bundle's resolved protocol (the main path already does this) -- no
+            # direct connector import and no hardcoded venue name.
+            offchain_protocol = (bundle_metadata or {}).get("protocol") or self._get_protocol(intent) or ""
+            parser = self.parser_registry.get(offchain_protocol)
+            trade_result = parser.parse_order_response(order_dict)  # type: ignore[attr-defined]
         except Exception as exc:
             warning = (
                 f"Enrichment fallback: {intent_type} parser.parse_order_response "

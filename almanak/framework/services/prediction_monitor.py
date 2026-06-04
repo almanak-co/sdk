@@ -1147,7 +1147,11 @@ class PredictionPositionMonitor:
                     )
                     return None
 
-        # Create the sell intent
+        # Create the sell intent. MonitoredPosition carries no protocol, so the
+        # protocol resolves from the connector default registry (currently
+        # "polymarket"); the compiler applies the same fallback when None.
+        from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
+
         sell_intent = PredictionSellIntent(
             market_id=position.market_id,
             outcome=position.outcome,  # type: ignore[arg-type]
@@ -1155,7 +1159,7 @@ class PredictionPositionMonitor:
             min_price=min_price,
             order_type=order_type,
             time_in_force="IOC",  # Immediate or cancel for quick exit
-            protocol="polymarket",
+            protocol=CompilerRegistry.default_protocol("PREDICTION"),
         )
 
         if is_partial:

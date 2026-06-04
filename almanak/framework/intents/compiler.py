@@ -2013,15 +2013,24 @@ class IntentCompiler:
         )
 
     def _compile_prediction_via_registry(self, intent: Any) -> CompilationResult:
-        """Compile a prediction-market intent through the Polymarket connector compiler."""
-        connector_compiler = get_connector_compiler("polymarket")
+        """Compile a prediction-market intent through its connector compiler."""
+        from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
+
+        # VIB-4989: resolve the protocol from the intent (falling back to the
+        # registered PREDICTION default) instead of hardcoding "polymarket".
+        protocol = intent.protocol or CompilerRegistry.default_protocol("PREDICTION") or ""
+        connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is None:
+            supported = CompilerRegistry.protocols_for_intent(intent.intent_type)
             return CompilationResult(
                 status=CompilationStatus.FAILED,
-                error="Connector compiler for protocol 'polymarket' is not registered.",
+                error=(
+                    f"Connector compiler for prediction protocol {protocol!r} is not "
+                    f"registered. Supported: {', '.join(supported)}"
+                ),
                 intent_id=intent.intent_id,
             )
-        return connector_compiler.compile(self._build_compiler_context("polymarket", connector_compiler), intent)
+        return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
 
     def _compile_vault_via_registry(self, intent: Any) -> CompilationResult:
         """Compile a vault intent through a connector-owned compiler."""

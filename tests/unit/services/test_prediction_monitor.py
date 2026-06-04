@@ -916,6 +916,55 @@ class TestGenerateSellIntent:
         # multiplier -- ceiling-rounding would tighten the margin.
         assert sell_intent.min_price == Decimal("0.47")
 
+    def test_generate_sell_intent_resolves_protocol_from_registry_default(
+        self,
+        monitor: PredictionPositionMonitor,
+        position_with_conditions: MonitoredPosition,
+    ) -> None:
+        """sell_intent.protocol resolves from the connector default registry
+        (MonitoredPosition carries no protocol); the compiler applies the same
+        fallback when None (VIB-4989 / CodeRabbit)."""
+        from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
+
+        result = MonitoringResult(
+            position=position_with_conditions,
+            event=PredictionEvent.STOP_LOSS_TRIGGERED,
+            triggered=True,
+            details={"current_price": "0.45", "stop_loss_price": "0.50"},
+            suggested_action="SELL",
+        )
+
+        sell_intent = monitor.generate_sell_intent(result)
+
+        assert sell_intent is not None
+        assert sell_intent.protocol == CompilerRegistry.default_protocol("PREDICTION")
+
+    def test_generate_sell_intent_protocol_none_when_registry_has_no_default(
+        self,
+        monitor: PredictionPositionMonitor,
+        position_with_conditions: MonitoredPosition,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When no default prediction protocol is registered, protocol falls
+        through as None for the compiler to resolve downstream -- no crash, no
+        fabricated venue."""
+        from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
+
+        monkeypatch.setattr(CompilerRegistry, "default_protocol", classmethod(lambda cls, key: None))
+
+        result = MonitoringResult(
+            position=position_with_conditions,
+            event=PredictionEvent.STOP_LOSS_TRIGGERED,
+            triggered=True,
+            details={"current_price": "0.45", "stop_loss_price": "0.50"},
+            suggested_action="SELL",
+        )
+
+        sell_intent = monitor.generate_sell_intent(result)
+
+        assert sell_intent is not None
+        assert sell_intent.protocol is None
+
     def test_generate_sell_intent_for_take_profit(
         self,
         monitor: PredictionPositionMonitor,
@@ -1695,9 +1744,7 @@ class TestExitBeforeResolutionSeconds:
         market is within 60s of close.
         """
         monitor = PredictionPositionMonitor(deployment_id="t", emit_events=False)
-        position = self._make_position(
-            PredictionExitConditions(exit_before_resolution_seconds=60)
-        )
+        position = self._make_position(PredictionExitConditions(exit_before_resolution_seconds=60))
 
         # 5 minutes from close -- should NOT trigger (5min > 60s).
         snapshot = PositionSnapshot(
@@ -1722,9 +1769,7 @@ class TestExitBeforeResolutionSeconds:
     def test_legacy_hours_path_still_works(self) -> None:
         """Backward compat: pure-hours strategies behave unchanged."""
         monitor = PredictionPositionMonitor(deployment_id="t", emit_events=False)
-        position = self._make_position(
-            PredictionExitConditions(exit_before_resolution_hours=24)
-        )
+        position = self._make_position(PredictionExitConditions(exit_before_resolution_hours=24))
 
         # 12 hours away -> trigger.
         snapshot = PositionSnapshot(
@@ -1746,9 +1791,7 @@ class TestExitBeforeResolutionSeconds:
     def test_sub_hour_exit_before_hours_is_float(self) -> None:
         """Sub-hour thresholds surface as float on the legacy hours key."""
         monitor = PredictionPositionMonitor(deployment_id="t", emit_events=False)
-        position = self._make_position(
-            PredictionExitConditions(exit_before_resolution_seconds=300)
-        )
+        position = self._make_position(PredictionExitConditions(exit_before_resolution_seconds=300))
         snapshot = PositionSnapshot(
             market_id="test-market",
             current_price=Decimal("0.70"),
@@ -1768,9 +1811,7 @@ class TestExitBeforeResolutionSeconds:
             emit_events=False,
             default_exit_before_resolution_hours=24,
         )
-        position = self._make_position(
-            PredictionExitConditions(exit_before_resolution_seconds=60)
-        )
+        position = self._make_position(PredictionExitConditions(exit_before_resolution_seconds=60))
 
         # 1 hour from close -- with strategy default of 24h this would
         # trigger; with the position's 60s override it must NOT.
@@ -1826,9 +1867,7 @@ class TestExitBeforeResolutionSeconds:
         """Negative strategy-level defaults are rejected at construction."""
         with pytest.raises(ValueError, match="default_exit_before_resolution_hours"):
             PredictionPositionMonitor(default_exit_before_resolution_hours=-1)
-        with pytest.raises(
-            ValueError, match="default_exit_before_resolution_seconds"
-        ):
+        with pytest.raises(ValueError, match="default_exit_before_resolution_seconds"):
             PredictionPositionMonitor(default_exit_before_resolution_seconds=-1)
 
     def test_intent_serialization_round_trip_with_seconds(self) -> None:
@@ -1850,7 +1889,4 @@ class TestExitBeforeResolutionSeconds:
         assert restored.exit_conditions is not None
         assert restored.exit_conditions.exit_before_resolution_seconds == 60
         assert restored.exit_conditions.exit_before_resolution_hours == 24
-        assert (
-            restored.exit_conditions.effective_exit_before_resolution_seconds()
-            == 60
-        )
+        assert restored.exit_conditions.effective_exit_before_resolution_seconds() == 60

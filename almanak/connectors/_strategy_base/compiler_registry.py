@@ -21,6 +21,9 @@ class CompilerRegistry:
         "BRIDGE": "across",
         # SwapIntent.protocol=None on a cross-chain swap falls back to this.
         "SWAP_CROSS_CHAIN": "enso",
+        # Prediction intents (PredictionBuy/Sell/Redeem) with protocol=None fall
+        # back to this (VIB-4989: relocated from the intent-vocabulary defaults).
+        "PREDICTION": "polymarket",
     }
 
     _BUILTIN_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {

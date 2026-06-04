@@ -363,9 +363,7 @@ class TestAveragingUp:
 
 
 class TestSellWithoutPriorBasis:
-    def test_sell_with_no_basis_logs_warning_and_returns_event(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_sell_with_no_basis_logs_warning_and_returns_event(self, caplog: pytest.LogCaptureFixture) -> None:
         basis = FIFOBasisStore()
         sell_outbox, sell_ledger = _sell_event(shares="3", proceeds="1.65")
 
@@ -379,9 +377,7 @@ class TestSellWithoutPriorBasis:
         # WARNING was emitted
         assert any("no recorded basis" in rec.message.lower() for rec in caplog.records)
 
-    def test_redeem_with_no_basis_does_not_crash(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_redeem_with_no_basis_does_not_crash(self, caplog: pytest.LogCaptureFixture) -> None:
         basis = FIFOBasisStore()
         red_outbox, red_ledger = _redeem_event(shares="10", payout="10.00")
 
@@ -782,3 +778,47 @@ class TestNegativeProceedsRejected:
         # Basis was 5.00, gross proceeds 0 -> realized = -5.00.
         assert ev.realized_pnl_usd == Decimal("-5.00")
         assert ev.confidence == AccountingConfidence.HIGH
+
+
+class TestBuildPositionKeyProtocolFallback:
+    """``_build_position_key`` resolves the protocol from the connector default
+    registry when the outbox row carries none, and fails closed (empty key) when
+    no default is registered (VIB-4989 / CodeRabbit)."""
+
+    def test_falls_back_to_registry_default_protocol(self) -> None:
+        from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
+        from almanak.framework.accounting.category_handlers.prediction_handler import (
+            _build_position_key,
+        )
+
+        default = CompilerRegistry.default_protocol("PREDICTION")
+        assert default, "a default PREDICTION protocol must be registered"
+
+        for protocol in ("", None):
+            key = _build_position_key(
+                outbox_row={},
+                protocol=protocol,  # type: ignore[arg-type]
+                chain="Polygon",
+                wallet_address="0xABC",
+                market_id="mkt-1",
+                outcome="YES",
+            )
+            assert key == f"prediction:{default.lower().strip()}:polygon:0xabc:mkt-1:YES"
+            assert key  # non-empty -> not the fail-closed sentinel
+
+    def test_fails_closed_when_no_default_protocol(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
+        from almanak.framework.accounting.category_handlers.prediction_handler import (
+            _build_position_key,
+        )
+
+        monkeypatch.setattr(CompilerRegistry, "default_protocol", classmethod(lambda cls, key: None))
+        key = _build_position_key(
+            outbox_row={},
+            protocol="",
+            chain="polygon",
+            wallet_address="0xabc",
+            market_id="mkt-1",
+            outcome="YES",
+        )
+        assert key == ""  # no malformed "prediction::..." prefix
