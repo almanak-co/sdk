@@ -74,6 +74,19 @@ DESCRIPTOR = register_chain(
             "weth": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
         },
         simulation=SimulationProfile(tenderly_supported=True),
+        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
+        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
+        external_ids={
+            "coingecko": "polygon-pos",
+            "dexscreener": "polygon",
+            "geckoterminal": "polygon_pos",
+            "defillama": "polygon",
+            "defillama_display": "Polygon",
+            "zerion": "polygon",
+            "moralis": "polygon",
+            "okx": "137",
+        },
         aliases=("matic",),
     )
 )

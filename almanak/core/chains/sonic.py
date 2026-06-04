@@ -58,6 +58,19 @@ DESCRIPTOR = register_chain(
             "ws": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",
         },
         simulation=SimulationProfile(tenderly_supported=True),
+        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
+        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
+        external_ids={
+            "coingecko": "sonic",
+            "dexscreener": "sonic",
+            "geckoterminal": "sonic",
+            "defillama": "sonic",
+            "defillama_display": "Sonic",
+            "zerion": "sonic",
+            "moralis": "sonic",
+            "okx": "146",
+        },
         aliases=(),
     )
 )

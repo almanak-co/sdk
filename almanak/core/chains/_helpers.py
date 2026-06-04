@@ -59,3 +59,63 @@ def native_symbols_for(chain: str) -> frozenset[str]:
     # if a descriptor ever defines a symbol in mixed case (defensive — all current
     # descriptors are already upper).
     return frozenset({native.symbol.upper(), *(s.upper() for s in native.accepted_symbols)})
+
+
+def external_id_for(chain: str, vendor: str) -> str | None:
+    """Return ``chain``'s identifier for third-party ``vendor``, or ``None``.
+
+    Derived from the single source of truth ``ChainDescriptor.external_ids``
+    (a sparse, vendor-keyed mapping; see
+    :data:`almanak.core.chains._descriptor.KNOWN_VENDORS`). This is the
+    registry-derived replacement for the standalone per-vendor maps
+    (``COINGECKO_PLATFORM_IDS``, ``CHAIN_TO_DEXSCREENER_PLATFORM``,
+    ``_CHAIN_TO_NETWORK``, ``_CHAIN_TO_LLAMA``, Zerion / Moralis / OKX
+    ``_CHAIN_IDS`` …) folded onto the descriptor in VIB-4851 (B1).
+
+    Fail-closed and sparse, mirroring the legacy ``map.get(chain)`` → ``None``
+    miss: an unregistered chain, a chain whose descriptor declares no
+    ``external_ids`` at all, or a chain whose ``external_ids`` simply lacks
+    ``vendor`` all return ``None``. The value is returned **verbatim** —
+    e.g. ``external_id_for("arbitrum", "coingecko") == "arbitrum-one"`` and
+    ``external_id_for("ethereum", "geckoterminal") == "eth"`` — case included.
+
+    Alias-normalises the chain via ``ChainRegistry.try_resolve`` so an alias
+    resolves to its canonical descriptor (e.g.
+    ``external_id_for("bnb", "okx") == "56"`` because ``bnb`` resolves to
+    ``bsc``). The ``vendor`` key is matched case-insensitively, consistent
+    with the lower-cased storage in ``ChainDescriptor.__post_init__``.
+    """
+    if not chain or not vendor:
+        return None
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None or descriptor.external_ids is None:
+        return None
+    return descriptor.external_ids.get(vendor.lower())
+
+
+def vendor_chain_map(vendor: str) -> dict[str, str]:
+    """Return ``{canonical_chain_name: vendor_id}`` for ``vendor``.
+
+    Inverts ``ChainDescriptor.external_ids`` back into the per-vendor shape the
+    legacy standalone maps had, but built **only** from the chains whose
+    descriptor actually declares ``vendor``. It is never widened to every
+    registered chain — a chain absent from the result is genuinely unsupported
+    by that vendor (the anti-widening invariant the B1 equivalence test pins).
+
+    Keys are canonical chain names only; aliases are excluded (each descriptor
+    contributes its canonical ``name`` exactly once, never its aliases). The
+    ``vendor`` key is matched case-insensitively. An unknown / never-declared
+    vendor yields an empty dict.
+    """
+    if not vendor:
+        return {}
+    vendor_key = vendor.lower()
+    result: dict[str, str] = {}
+    for descriptor in ChainRegistry.all():
+        external_ids = descriptor.external_ids
+        if external_ids is None:
+            continue
+        vendor_id = external_ids.get(vendor_key)
+        if vendor_id is not None:
+            result[descriptor.name] = vendor_id
+    return result

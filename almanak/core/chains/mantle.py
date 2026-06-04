@@ -75,6 +75,14 @@ DESCRIPTOR = register_chain(
             "wmnt": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
         },
         simulation=SimulationProfile(tenderly_supported=True),
+        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
+        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
+        external_ids={
+            "coingecko": "mantle",
+            "dexscreener": "mantle",
+            "geckoterminal": "mantle",
+        },
         aliases=(),
     )
 )

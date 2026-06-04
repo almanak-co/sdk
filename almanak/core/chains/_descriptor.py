@@ -28,6 +28,32 @@ from types import MappingProxyType
 
 from almanak.core.enums import Chain, ChainFamily
 
+# Recognised vendor keys for ``ChainDescriptor.external_ids`` (VIB-4851 B1).
+# Each key is a third-party data/integration vendor whose per-chain
+# identifier the SDK previously kept in a standalone vendor-side map; the
+# descriptor now owns the value. ``ChainDescriptor.__post_init__`` rejects any
+# external_ids key not in this set so a typo'd vendor (e.g. ``"gecko"``) fails
+# loudly at registration rather than silently producing an unreachable id.
+#
+# ``dexscreener`` and ``geckoterminal`` each collapse two legacy maps that were
+# verified value-identical on every shared chain (DexScreener:
+# ``CHAIN_TO_DEXSCREENER_PLATFORM`` + ``CHAIN_SLUG_MAP``; GeckoTerminal:
+# ``_CHAIN_TO_NETWORK`` + ``_CHAIN_TO_GT_NETWORK``). ``defillama`` (lowercase
+# slug) and ``defillama_display`` (Capitalised display name) cover the same
+# chains but carry distinct value formats, so they remain separate keys.
+KNOWN_VENDORS: frozenset[str] = frozenset(
+    {
+        "coingecko",
+        "dexscreener",
+        "geckoterminal",
+        "defillama",
+        "defillama_display",
+        "zerion",
+        "moralis",
+        "okx",
+    }
+)
+
 
 @dataclass(frozen=True)
 class NativeToken:
@@ -274,6 +300,22 @@ class ChainDescriptor:
             semantics — consumers must handle empty / missing lookups).
             Frozen at construction; mutating after returns has no effect.
             VIB-4872 (W6-followup).
+        external_ids: Sparse, vendor-keyed mapping from a third-party data /
+            integration vendor (see :data:`KNOWN_VENDORS`) to that vendor's
+            per-chain identifier — e.g. ``{"coingecko": "arbitrum-one",
+            "okx": "42161"}``. Mirrors the chain half of the legacy
+            vendor-side maps (CoinGecko ``COINGECKO_PLATFORM_IDS``,
+            DexScreener, GeckoTerminal, DeFiLlama, Zerion, Moralis, OKX) so a
+            vendor identifier derives from the registry instead of a
+            standalone dict. **Sparse**: a chain declares only the vendors it
+            is actually supported on; ``None`` means "no vendor identifiers
+            today" (matches the legacy ``map.get(chain)`` → ``None`` miss
+            semantics). Values are stored **verbatim, including case** — the
+            distinction between ``"ethereum"`` (DeFiLlama slug) and
+            ``"Ethereum"`` (DeFiLlama display) is load-bearing, so only the
+            vendor *key* is lowercased, never the value. An unknown vendor key
+            raises ``ValueError`` at construction. Frozen at construction;
+            mutating after returns has no effect. VIB-4851 (B1).
         aliases: Extra alternative names that resolve to this chain
             (e.g. ``("bnb", "binance")`` for BSC). The canonical ``name``
             is always implicit and need not be repeated here.
@@ -290,6 +332,7 @@ class ChainDescriptor:
     explorer: Explorer = field(default_factory=Explorer)
     simulation: SimulationProfile = field(default_factory=SimulationProfile)
     tokens: Mapping[str, str] | None = None
+    external_ids: Mapping[str, str] | None = None
     aliases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -308,5 +351,24 @@ class ChainDescriptor:
             object.__setattr__(
                 self,
                 "tokens",
-                MappingProxyType({k.lower(): v for k, v in dict(self.tokens).items()}),
+                MappingProxyType({k.lower(): v for k, v in self.tokens.items()}),
+            )
+        # Freeze the optional vendor-keyed external_ids the same way, lowercasing
+        # only the vendor KEY (values are verbatim — "ethereum" vs "Ethereum" is
+        # meaningful). Reject any key outside KNOWN_VENDORS so a typo'd vendor
+        # fails loudly at registration rather than silently producing an id that
+        # no lookup will ever find. VIB-4851 (B1).
+        if self.external_ids is not None:
+            frozen_external_ids = {k.lower(): v for k, v in self.external_ids.items()}
+            unknown = sorted(frozen_external_ids.keys() - KNOWN_VENDORS)
+            if unknown:
+                raise ValueError(
+                    f"ChainDescriptor {self.name!r} declares unknown external_ids "
+                    f"vendor key(s) {unknown}; known vendors are "
+                    f"{sorted(KNOWN_VENDORS)}"
+                )
+            object.__setattr__(
+                self,
+                "external_ids",
+                MappingProxyType(frozen_external_ids),
             )

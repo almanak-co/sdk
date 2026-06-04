@@ -28,6 +28,13 @@ DESCRIPTOR = register_chain(
             grpc_execute=None,  # legacy: not in CHAIN_GRPC_EXECUTE_TIMEOUTS
         ),
         simulation=SimulationProfile(tenderly_supported=True),
+        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
+        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
+        external_ids={
+            "coingecko": "blast",
+            "dexscreener": "blast",
+        },
         aliases=(),
     )
 )

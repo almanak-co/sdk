@@ -32,6 +32,13 @@ DESCRIPTOR = register_chain(
             public_rpc="https://rpc.ankr.com/0g_mainnet_evm",
             anvil_port=8558,
         ),
+        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
+        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
+        external_ids={
+            "coingecko": "zerog",
+            "dexscreener": "zerog",
+        },
         aliases=("0g",),
     )
 )

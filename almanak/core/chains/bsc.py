@@ -72,6 +72,19 @@ DESCRIPTOR = register_chain(
             "weth": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
         },
         simulation=SimulationProfile(tenderly_supported=True),
+        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
+        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
+        external_ids={
+            "coingecko": "binance-smart-chain",
+            "dexscreener": "bsc",
+            "geckoterminal": "bsc",
+            "defillama": "bsc",
+            "defillama_display": "BSC",
+            "zerion": "binance-smart-chain",
+            "moralis": "bsc",
+            "okx": "56",
+        },
         aliases=("bnb", "binance"),
     )
 )

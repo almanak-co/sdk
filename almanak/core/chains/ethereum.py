@@ -70,6 +70,19 @@ DESCRIPTOR = register_chain(
             "dai": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
         },
         simulation=SimulationProfile(tenderly_supported=True, alchemy_network="eth-mainnet"),
+        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
+        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
+        external_ids={
+            "coingecko": "ethereum",
+            "dexscreener": "ethereum",
+            "geckoterminal": "eth",
+            "defillama": "ethereum",
+            "defillama_display": "Ethereum",
+            "zerion": "ethereum",
+            "moralis": "eth",
+            "okx": "1",
+        },
         aliases=("eth", "mainnet"),
     )
 )

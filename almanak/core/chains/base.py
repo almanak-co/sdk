@@ -54,6 +54,19 @@ DESCRIPTOR = register_chain(
             "weth": "0x4200000000000000000000000000000000000006",
         },
         simulation=SimulationProfile(tenderly_supported=True, alchemy_network="base-mainnet"),
+        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
+        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
+        external_ids={
+            "coingecko": "base",
+            "dexscreener": "base",
+            "geckoterminal": "base",
+            "defillama": "base",
+            "defillama_display": "Base",
+            "zerion": "base",
+            "moralis": "base",
+            "okx": "8453",
+        },
         aliases=(),
     )
 )

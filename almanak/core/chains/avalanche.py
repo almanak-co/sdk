@@ -64,6 +64,19 @@ DESCRIPTOR = register_chain(
             "wavax": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
         },
         simulation=SimulationProfile(tenderly_supported=True),
+        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
+        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
+        external_ids={
+            "coingecko": "avalanche",
+            "dexscreener": "avalanche",
+            "geckoterminal": "avax",
+            "defillama": "avax",
+            "defillama_display": "Avalanche",
+            "zerion": "avalanche",
+            "moralis": "avalanche",
+            "okx": "43114",
+        },
         aliases=("avax",),
     )
 )

@@ -46,6 +46,13 @@ DESCRIPTOR = register_chain(
             "weth": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",
         },
         simulation=SimulationProfile(tenderly_supported=True),
+        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
+        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
+        external_ids={
+            "coingecko": "linea",
+            "dexscreener": "linea",
+        },
         aliases=(),
     )
 )

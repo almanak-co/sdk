@@ -52,6 +52,16 @@ DESCRIPTOR = register_chain(
             alchemy_prefix="solana",
             anvil_port=8899,
         ),
+        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
+        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
+        external_ids={
+            "dexscreener": "solana",
+            "geckoterminal": "solana",
+            "defillama_display": "Solana",
+            "zerion": "solana",
+            "okx": "501",
+        },
         aliases=("sol",),
     )
 )

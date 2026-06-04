@@ -54,6 +54,19 @@ DESCRIPTOR = register_chain(
             "weth": "0x4200000000000000000000000000000000000006",
         },
         simulation=SimulationProfile(tenderly_supported=True, alchemy_network="opt-mainnet"),
+        # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
+        # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
+        # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
+        external_ids={
+            "coingecko": "optimistic-ethereum",
+            "dexscreener": "optimism",
+            "geckoterminal": "optimism",
+            "defillama": "optimism",
+            "defillama_display": "Optimism",
+            "zerion": "optimism",
+            "moralis": "optimism",
+            "okx": "10",
+        },
         aliases=("op",),
     )
 )
