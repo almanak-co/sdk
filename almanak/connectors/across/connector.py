@@ -19,6 +19,11 @@ CONNECTOR = Connector(
         module="almanak.connectors.across.receipt_parser_provider",
         attribute="AcrossReceiptParserConnector",
     ),
+    bridge_adapter=ImportRef(
+        module="almanak.connectors.across.adapter",
+        attribute="AcrossBridgeAdapter",
+        order=1,
+    ),
 )
 
 __all__ = ["CONNECTOR"]

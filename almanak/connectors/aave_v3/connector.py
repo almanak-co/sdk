@@ -29,6 +29,26 @@ CONNECTOR = Connector(
         module="almanak.connectors.aave_v3.receipt_parser_provider",
         attribute="AaveV3ReceiptParserConnector",
     ),
+    contract_roles=ImportRef(
+        module="almanak.connectors.aave_v3.contract_roles",
+        attribute="CONTRACT_ROLES",
+        order=9,
+    ),
+    protocol_family=ImportRef(
+        module="almanak.connectors.aave_v3.protocol_family",
+        attribute="PROTOCOL_FAMILY",
+    ),
+    flash_loan_provider_name="aave",
+    flash_loan_provider=ImportRef(
+        module="almanak.connectors.aave_v3.flash_loan_provider",
+        attribute="AaveFlashLoanProvider",
+        order=1,
+    ),
+    flash_loan_builder=ImportRef(
+        module="almanak.connectors.aave_v3.flash_loan",
+        attribute="build_aave_flash_loan",
+    ),
+    flash_loan_synthetic_discovery=True,
 )
 
 __all__ = ["CONNECTOR"]

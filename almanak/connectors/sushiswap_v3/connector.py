@@ -25,6 +25,20 @@ CONNECTOR = Connector(
         module="almanak.connectors.sushiswap_v3.receipt_parser_provider",
         attribute="SushiSwapV3ReceiptParserConnector",
     ),
+    contract_roles=ImportRef(
+        module="almanak.connectors.sushiswap_v3.contract_roles",
+        attribute="CONTRACT_ROLES",
+        order=3,
+    ),
+    swap_classification=ImportRef(
+        module="almanak.connectors.sushiswap_v3.swap_classification",
+        attribute="SWAP_CLASSIFICATION",
+        order=2,
+    ),
+    protocol_family=ImportRef(
+        module="almanak.connectors.sushiswap_v3.protocol_family",
+        attribute="PROTOCOL_FAMILY",
+    ),
 )
 
 __all__ = ["CONNECTOR"]

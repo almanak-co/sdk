@@ -44,6 +44,20 @@ CONNECTOR = Connector(
         module="almanak.connectors.uniswap_v3.receipt_parser_provider",
         attribute="UniswapV3ReceiptParserConnector",
     ),
+    contract_roles=ImportRef(
+        module="almanak.connectors.uniswap_v3.contract_roles",
+        attribute="CONTRACT_ROLES",
+        order=1,
+    ),
+    swap_classification=ImportRef(
+        module="almanak.connectors.uniswap_v3.swap_classification",
+        attribute="SWAP_CLASSIFICATION",
+        order=1,
+    ),
+    protocol_family=ImportRef(
+        module="almanak.connectors.uniswap_v3.protocol_family",
+        attribute="PROTOCOL_FAMILY",
+    ),
 )
 
 __all__ = ["CONNECTOR"]

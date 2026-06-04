@@ -3,24 +3,30 @@
 Sibling of :mod:`almanak.connectors._strategy_receipt_registry`, scoped to the
 flash-loan-provider concern.
 
-Lives one level up from ``_strategy_base/`` because it imports every
-flash-loan connector's ``flash_loan`` + ``flash_loan_provider`` modules — and
-``_strategy_base/`` must stay protocol-clean (no concrete connector imports).
-Adding a new connector that provides flash loans means one import block + one
-``FLASH_LOAN_PROVIDER_REGISTRY.register`` line below — no edit anywhere in the
-framework.
+Lives one level up from ``_strategy_base/`` because it owns strategy-side
+registry bootstrap; ``_strategy_base/`` must stay protocol-clean (no concrete
+connector imports). Adding a new connector that provides flash loans means
+``CONNECTOR.flash_loan_provider`` / ``CONNECTOR.flash_loan_builder`` import
+references in the connector's own manifest.
 
-The completeness invariant — every connector that ships a
-``flash_loan_provider.py`` MUST register here — is enforced statically by
+The completeness invariant: every connector that ships a
+``flash_loan_provider.py`` MUST publish it from its manifest. This is enforced
+statically by
 ``tests/unit/connectors/test_flash_loan_registry_completeness.py``.
 
 Registration order (aave, balancer, morpho) is load-bearing: it fixes the
-selector's candidate order and the compiler's ``"Supported providers: …"``
-error string. Keep it stable unless intentionally changing that surface.
+selector's candidate order and the compiler's ``"Supported providers: ..."``
+error string. The manifest ``flash_loan_provider.order`` values preserve this
+order.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
+from almanak.connectors._connector import CONNECTOR_REGISTRY, Connector, ConnectorDiscoveryError, ImportRef
+from almanak.connectors._strategy_base.flash_loan_base import FlashLoanProvider
 from almanak.connectors._strategy_base.flash_loan_registry import (
     FLASH_LOAN_PROVIDER_REGISTRY,
     FlashLoanProviderRegistration,
@@ -29,48 +35,64 @@ from almanak.connectors._strategy_base.flash_loan_registry import (
 __all__ = ["FLASH_LOAN_PROVIDER_REGISTRY"]
 
 
+def _ordered_connectors(connectors: list[Connector]) -> list[Connector]:
+    """Return flash-loan connector manifests in explicit order."""
+
+    def order_key(connector: Connector) -> tuple[bool, int]:
+        flash_loan_provider = connector.flash_loan_provider
+        if flash_loan_provider is None:
+            raise ConnectorDiscoveryError(
+                f"{connector.name} was passed to flash-loan ordering without CONNECTOR.flash_loan_provider"
+            )
+        return (flash_loan_provider.order is None, flash_loan_provider.order or 0)
+
+    return sorted(connectors, key=order_key)
+
+
+def _load_provider(import_ref: ImportRef) -> Callable[[], FlashLoanProvider]:
+    """Load and validate one connector-owned flash-loan provider class."""
+    provider_cls = import_ref.load()
+    if not isinstance(provider_cls, type) or not issubclass(provider_cls, FlashLoanProvider):
+        got_name = provider_cls.__qualname__ if isinstance(provider_cls, type) else type(provider_cls).__qualname__
+        raise ConnectorDiscoveryError(
+            f"{import_ref.module}.{import_ref.attribute} must be a FlashLoanProvider subclass, got {got_name}"
+        )
+    return provider_cls
+
+
+def _load_builder(import_ref: ImportRef) -> Callable[..., dict[str, Any]]:
+    """Load and validate one connector-owned flash-loan build callable."""
+    builder = import_ref.load()
+    if not callable(builder):
+        raise ConnectorDiscoveryError(
+            f"{import_ref.module}.{import_ref.attribute} must be callable, got {type(builder).__qualname__}"
+        )
+    return builder
+
+
 def _register_all() -> None:
     """Register every strategy-side flash-loan provider.
 
-    Imports are local to the function so that loading this module does not
-    transitively import each connector's transaction builders until the
-    registry is actually constructed (they pull in connector-side address
-    tables and ABI helpers we don't want loaded just to know "this connector
-    exists").
+    Descriptor-backed connectors are discovered here. Import targets are stored
+    as strings on each connector descriptor so loading this module does not
+    transitively import every flash-loan provider until registry bootstrap.
     """
-    from almanak.connectors.aave_v3.flash_loan import build_aave_flash_loan
-    from almanak.connectors.aave_v3.flash_loan_provider import AaveFlashLoanProvider
-    from almanak.connectors.balancer_v2.flash_loan import build_balancer_flash_loan
-    from almanak.connectors.balancer_v2.flash_loan_provider import BalancerFlashLoanProvider
-    from almanak.connectors.morpho_blue.flash_loan import build_morpho_flash_loan
-    from almanak.connectors.morpho_blue.flash_loan_provider import MorphoFlashLoanProvider
-
-    FLASH_LOAN_PROVIDER_REGISTRY.register(
-        FlashLoanProviderRegistration(
-            name="aave",
-            make_provider=AaveFlashLoanProvider,
-            build=build_aave_flash_loan,
-            # Aave + Balancer emit synthetic flash-loan vectors for offline
-            # Zodiac manifest generation (the historical _FLASH_LOAN_PROVIDERS
-            # membership, VIB-4928). Morpho stays opt-out below.
-            synthetic_discovery=True,
+    connector_manifests = list(CONNECTOR_REGISTRY.with_flash_loan())
+    for connector_manifest in _ordered_connectors(connector_manifests):
+        if (
+            connector_manifest.flash_loan_provider_name is None
+            or connector_manifest.flash_loan_provider is None
+            or connector_manifest.flash_loan_builder is None
+        ):
+            continue
+        FLASH_LOAN_PROVIDER_REGISTRY.register(
+            FlashLoanProviderRegistration(
+                name=connector_manifest.flash_loan_provider_name,
+                make_provider=_load_provider(connector_manifest.flash_loan_provider),
+                build=_load_builder(connector_manifest.flash_loan_builder),
+                synthetic_discovery=connector_manifest.flash_loan_synthetic_discovery,
+            )
         )
-    )
-    FLASH_LOAN_PROVIDER_REGISTRY.register(
-        FlashLoanProviderRegistration(
-            name="balancer",
-            make_provider=BalancerFlashLoanProvider,
-            build=build_balancer_flash_loan,
-            synthetic_discovery=True,
-        )
-    )
-    FLASH_LOAN_PROVIDER_REGISTRY.register(
-        FlashLoanProviderRegistration(
-            name="morpho",
-            make_provider=MorphoFlashLoanProvider,
-            build=build_morpho_flash_loan,
-        )
-    )
 
 
 _register_all()

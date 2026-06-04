@@ -20,6 +20,11 @@ CONNECTOR = Connector(
         module="almanak.connectors.traderjoe_v2.receipt_parser_provider",
         attribute="TraderJoeV2ReceiptParserConnector",
     ),
+    contract_roles=ImportRef(
+        module="almanak.connectors.traderjoe_v2.contract_roles",
+        attribute="CONTRACT_ROLES",
+        order=6,
+    ),
 )
 
 __all__ = ["CONNECTOR"]

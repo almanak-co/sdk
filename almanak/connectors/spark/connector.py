@@ -15,6 +15,11 @@ CONNECTOR = Connector(
         module="almanak.connectors.spark.receipt_parser_provider",
         attribute="SparkReceiptParserConnector",
     ),
+    contract_roles=ImportRef(
+        module="almanak.connectors.spark.contract_roles",
+        attribute="CONTRACT_ROLES",
+        order=10,
+    ),
 )
 
 __all__ = ["CONNECTOR"]

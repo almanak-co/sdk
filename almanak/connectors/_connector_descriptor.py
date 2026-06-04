@@ -95,6 +95,14 @@ class Connector:
     vault_tool_connectors: tuple[ImportRef, ...] = field(default_factory=tuple)
     gateway_connector: ImportRef | None = None
     gateway_connectors: tuple[ImportRef, ...] = field(default_factory=tuple)
+    protocol_family: ImportRef | None = None
+    swap_classification: ImportRef | None = None
+    contract_roles: ImportRef | None = None
+    bridge_adapter: ImportRef | None = None
+    flash_loan_provider_name: str | None = None
+    flash_loan_provider: ImportRef | None = None
+    flash_loan_builder: ImportRef | None = None
+    flash_loan_synthetic_discovery: bool = False
 
     def __post_init__(self) -> None:
         """Validate connector-owned manifest metadata."""
@@ -116,6 +124,11 @@ class Connector:
         self._validate_gas_estimate_connector()
         self._validate_agent_read_connectors()
         self._validate_vault_tool_connectors()
+        self._validate_protocol_family()
+        self._validate_swap_classification()
+        self._validate_contract_roles()
+        self._validate_bridge_adapter()
+        self._validate_flash_loan()
 
     def _validate_gateway_connectors(self) -> None:
         """Validate gateway provider import references and ordering keys."""
@@ -206,6 +219,59 @@ class Connector:
         ref_keys = [(ref.module, ref.attribute) for ref in self.vault_tool_connector_refs]
         if len(set(ref_keys)) != len(ref_keys):
             raise ValueError(f"Connector vault-tool connector refs contain duplicates: {ref_keys!r}")
+
+    def _validate_protocol_family(self) -> None:
+        """Validate the protocol-family spec import reference."""
+        if self.protocol_family is not None and not isinstance(self.protocol_family, ImportRef):
+            raise ValueError(f"Connector.protocol_family must be None or an ImportRef, got {self.protocol_family!r}")
+
+    def _validate_swap_classification(self) -> None:
+        """Validate the swap-classification spec import reference."""
+        if self.swap_classification is not None and not isinstance(self.swap_classification, ImportRef):
+            raise ValueError(
+                f"Connector.swap_classification must be None or an ImportRef, got {self.swap_classification!r}"
+            )
+
+    def _validate_contract_roles(self) -> None:
+        """Validate the contract-role spec import reference."""
+        if self.contract_roles is not None and not isinstance(self.contract_roles, ImportRef):
+            raise ValueError(f"Connector.contract_roles must be None or an ImportRef, got {self.contract_roles!r}")
+
+    def _validate_bridge_adapter(self) -> None:
+        """Validate the bridge-adapter factory import reference."""
+        if self.bridge_adapter is not None and not isinstance(self.bridge_adapter, ImportRef):
+            raise ValueError(f"Connector.bridge_adapter must be None or an ImportRef, got {self.bridge_adapter!r}")
+
+    def _validate_flash_loan(self) -> None:
+        """Validate flash-loan provider import references and metadata."""
+        if self.flash_loan_provider is not None and not isinstance(self.flash_loan_provider, ImportRef):
+            raise ValueError(
+                f"Connector.flash_loan_provider must be None or an ImportRef, got {self.flash_loan_provider!r}"
+            )
+        if self.flash_loan_builder is not None and not isinstance(self.flash_loan_builder, ImportRef):
+            raise ValueError(
+                f"Connector.flash_loan_builder must be None or an ImportRef, got {self.flash_loan_builder!r}"
+            )
+        if not isinstance(self.flash_loan_synthetic_discovery, bool):
+            raise ValueError(
+                f"Connector.flash_loan_synthetic_discovery must be a bool, got {self.flash_loan_synthetic_discovery!r}"
+            )
+        has_flash_loan = (
+            self.flash_loan_provider_name is not None
+            or self.flash_loan_provider is not None
+            or self.flash_loan_builder is not None
+            or self.flash_loan_synthetic_discovery
+        )
+        if has_flash_loan:
+            if not isinstance(self.flash_loan_provider_name, str) or not self.flash_loan_provider_name.strip():
+                raise ValueError(
+                    "Connector.flash_loan_provider_name must be a non-empty string when flash-loan refs are set, "
+                    f"got {self.flash_loan_provider_name!r}"
+                )
+            if self.flash_loan_provider is None:
+                raise ValueError("Connector.flash_loan_provider is required when flash-loan metadata is set")
+            if self.flash_loan_builder is None:
+                raise ValueError("Connector.flash_loan_builder is required when flash-loan metadata is set")
 
     @property
     def protocol(self) -> ProtocolName:
@@ -317,6 +383,26 @@ class ConnectorRegistry:
         """Return connectors that publish vault-tool connectors."""
         return tuple(d for d in self.all() if d.vault_tool_connector_refs)
 
+    def with_protocol_family(self) -> tuple[Connector, ...]:
+        """Return connectors that publish protocol-family specs."""
+        return tuple(d for d in self.all() if d.protocol_family is not None)
+
+    def with_swap_classification(self) -> tuple[Connector, ...]:
+        """Return connectors that publish swap-classification specs."""
+        return tuple(d for d in self.all() if d.swap_classification is not None)
+
+    def with_contract_roles(self) -> tuple[Connector, ...]:
+        """Return connectors that publish contract-role specs."""
+        return tuple(d for d in self.all() if d.contract_roles is not None)
+
+    def with_bridge_adapter(self) -> tuple[Connector, ...]:
+        """Return connectors that publish bridge-adapter factories."""
+        return tuple(d for d in self.all() if d.bridge_adapter is not None)
+
+    def with_flash_loan(self) -> tuple[Connector, ...]:
+        """Return connectors that publish flash-loan providers."""
+        return tuple(d for d in self.all() if d.flash_loan_provider is not None)
+
     def clear(self) -> None:
         """Test helper: clear the discovery cache."""
         self._connectors = None
@@ -329,6 +415,10 @@ class ConnectorRegistry:
         seen_names: set[str] = set()
         seen_keys: dict[str, str] = {}
         seen_gateway_orders: dict[int, str] = {}
+        seen_contract_role_orders: dict[int, str] = {}
+        seen_swap_classification_orders: dict[int, str] = {}
+        seen_bridge_adapter_orders: dict[int, str] = {}
+        seen_flash_loan_provider_orders: dict[int, str] = {}
 
         for info in pkgutil.iter_modules(package.__path__):
             if not info.ispkg or info.name.startswith("_"):
@@ -347,19 +437,58 @@ class ConnectorRegistry:
                         f"Connector key {key!r} is claimed by both {owner!r} and {connector.name!r}"
                     )
                 seen_keys[key] = connector.name
-            for gateway_ref in connector.gateway_connector_refs:
-                if gateway_ref.order is None:
-                    continue
-                owner = seen_gateway_orders.get(gateway_ref.order)
-                if owner is not None:
-                    raise ConnectorDiscoveryError(
-                        f"Gateway connector order {gateway_ref.order} is claimed by both "
-                        f"{owner!r} and {connector.name!r}"
-                    )
-                seen_gateway_orders[gateway_ref.order] = connector.name
+            self._validate_unique_ref_order(
+                connector_name=connector.name,
+                capability="Gateway connector",
+                refs=connector.gateway_connector_refs,
+                seen_orders=seen_gateway_orders,
+            )
+            self._validate_unique_ref_order(
+                connector_name=connector.name,
+                capability="Contract-role",
+                refs=() if connector.contract_roles is None else (connector.contract_roles,),
+                seen_orders=seen_contract_role_orders,
+            )
+            self._validate_unique_ref_order(
+                connector_name=connector.name,
+                capability="Swap-classification",
+                refs=() if connector.swap_classification is None else (connector.swap_classification,),
+                seen_orders=seen_swap_classification_orders,
+            )
+            self._validate_unique_ref_order(
+                connector_name=connector.name,
+                capability="Bridge adapter",
+                refs=() if connector.bridge_adapter is None else (connector.bridge_adapter,),
+                seen_orders=seen_bridge_adapter_orders,
+            )
+            self._validate_unique_ref_order(
+                connector_name=connector.name,
+                capability="Flash-loan provider",
+                refs=() if connector.flash_loan_provider is None else (connector.flash_loan_provider,),
+                seen_orders=seen_flash_loan_provider_orders,
+            )
             connectors.append(connector)
 
         return tuple(sorted(connectors, key=lambda d: d.name))
+
+    @staticmethod
+    def _validate_unique_ref_order(
+        *,
+        connector_name: str,
+        capability: str,
+        refs: tuple[ImportRef, ...],
+        seen_orders: dict[int, str],
+    ) -> None:
+        """Reject duplicate explicit order keys for one order-bearing capability."""
+        for import_ref in refs:
+            if import_ref.order is None:
+                continue
+            owner = seen_orders.get(import_ref.order)
+            if owner is not None:
+                raise ConnectorDiscoveryError(
+                    f"{capability} order {import_ref.order} is claimed by both {owner!r} and {connector_name!r}"
+                )
+            seen_orders[import_ref.order] = connector_name
 
     def _load_connector(self, connector_name: str) -> Connector | None:
         """Load ``CONNECTOR`` from one connector package if its manifest exists."""

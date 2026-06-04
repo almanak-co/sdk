@@ -1,15 +1,16 @@
-"""Guard test: every connector ``protocol_family.py`` must be registered.
+"""Guard test: every connector ``protocol_family.py`` must be manifest-published.
 
 VIB-4928 PR-3b moved ``AAVE_COMPATIBLE_PROTOCOLS`` + ``UNIV3_LP_GROUPING_PROTOCOLS``
 in ``almanak/framework/intents/compiler_constants.py`` off hand-imported connector
 ``lending_constants.py`` / ``lp_constants.py`` modules and onto a
 connector-self-registering ``PROTOCOL_FAMILY_REGISTRY``, aggregated by
-``almanak/connectors/_strategy_protocol_family_registry.py``. Self-containment only
-holds if a connector that ships a ``protocol_family.py`` ALSO registers it in the
-boot file: otherwise its slugs silently vanish from the family membership sets.
+``almanak/connectors/_strategy_protocol_family_registry.py``. Self-containment
+only holds if a connector that ships a ``protocol_family.py`` also publishes it
+from ``CONNECTOR.protocol_family``: otherwise its slugs silently vanish from the
+family membership sets.
 
 This test turns "forgot to register the new connector's protocol family" into a
-CI failure — the structural sibling of
+CI failure: the structural sibling of
 ``test_contract_role_registry_completeness.py``.
 """
 
@@ -20,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-# Importing the boot file populates the registry.
-import almanak.connectors._strategy_protocol_family_registry  # noqa: F401
+import almanak.connectors._strategy_protocol_family_registry as _boot
+from almanak.connectors._connector import CONNECTOR_REGISTRY
 from almanak.connectors._strategy_base.protocol_family_registry import (
     PROTOCOL_FAMILY_REGISTRY,
     ProtocolFamilySpec,
@@ -31,6 +32,14 @@ CONNECTORS_DIR = Path(__file__).resolve().parents[3] / "almanak" / "connectors"
 
 # Infrastructure dirs hold shared base classes, not a concrete connector.
 EXCLUDED_DIRS = {"_base", "_strategy_base", "__pycache__"}
+
+
+@pytest.fixture(autouse=True)
+def _bootstrapped_protocol_family_registry() -> None:
+    """Repopulate the mutable singleton from connector manifests for each test."""
+    CONNECTOR_REGISTRY.clear()
+    PROTOCOL_FAMILY_REGISTRY.reset()
+    _boot._register_all()
 
 
 def _discover_modules() -> list[str]:
@@ -51,6 +60,11 @@ def _declared_spec(module_name: str) -> ProtocolFamilySpec:
     return spec
 
 
+def _connector_name(module_name: str) -> str:
+    """Return the connector folder name from a dotted protocol-family module."""
+    return module_name.split(".")[2]
+
+
 def test_discovery_finds_known_modules() -> None:
     # Sanity-check discovery so a silently-empty walk can't make the
     # completeness assertions vacuously pass.
@@ -64,6 +78,28 @@ def test_discovery_finds_known_modules() -> None:
 
 
 @pytest.mark.parametrize("module_name", _discover_modules())
+def test_every_protocol_family_module_is_manifest_published(module_name: str) -> None:
+    """Every protocol-family data module must be owned by its connector manifest."""
+    connector_manifest = CONNECTOR_REGISTRY.get(_connector_name(module_name))
+
+    assert connector_manifest is not None
+    assert connector_manifest.protocol_family is not None, (
+        f"{module_name} is not published from CONNECTOR.protocol_family. Add an "
+        f"ImportRef to almanak/connectors/{_connector_name(module_name)}/connector.py."
+    )
+    assert connector_manifest.protocol_family.module == module_name
+    assert connector_manifest.protocol_family.attribute == "PROTOCOL_FAMILY"
+
+
+def test_protocol_family_boot_file_has_no_concrete_connector_imports() -> None:
+    """The protocol-family boot file discovers manifests instead of naming connectors."""
+    source = (CONNECTORS_DIR / "_strategy_protocol_family_registry.py").read_text()
+
+    for module_name in _discover_modules():
+        assert module_name not in source
+
+
+@pytest.mark.parametrize("module_name", _discover_modules())
 def test_every_declared_member_is_registered(module_name: str) -> None:
     """Every slug a ``protocol_family.py`` declares must be in the family union."""
     spec = _declared_spec(module_name)
@@ -73,6 +109,6 @@ def test_every_declared_member_is_registered(module_name: str) -> None:
         missing = set(slugs) - set(registered)
         assert not missing, (
             f"{module_name} declares {sorted(missing)} in family {family!r} but they "
-            f"are not registered in PROTOCOL_FAMILY_REGISTRY. Add it to "
-            f"almanak/connectors/_strategy_protocol_family_registry.py."
+            "are not registered in PROTOCOL_FAMILY_REGISTRY. Publish it from "
+            f"almanak/connectors/{_connector_name(module_name)}/connector.py."
         )

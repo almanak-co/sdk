@@ -1,19 +1,19 @@
-"""Guard test: every connector ``contract_roles.py`` must be registered.
+"""Guard test: every connector ``contract_roles.py`` must be manifest-published.
 
 VIB-4928 PR-3a moved the six per-protocol address tables in
 ``almanak/framework/intents/compiler_constants.py`` off hand-imported connector
 ``addresses.py`` modules and onto a connector-self-registering
 ``CONTRACT_ROLE_REGISTRY``, aggregated by
 ``almanak/connectors/_strategy_contract_role_registry.py``. Self-containment
-only holds if a connector that ships a ``contract_roles.py`` ALSO registers it
-in the boot file: otherwise its addresses silently vanish from
+only holds if a connector that ships a ``contract_roles.py`` also publishes it
+from ``CONNECTOR.contract_roles``: otherwise its addresses silently vanish from
 ``PROTOCOL_ROUTERS`` / ``LP_POSITION_MANAGERS`` / ``SWAP_QUOTER_ADDRESSES`` /
 ``LENDING_POOL_ADDRESSES`` / ``LENDING_POOL_DATA_PROVIDERS`` /
-``BALANCER_VAULT_ADDRESSES`` — a silent address-table drop on a live-money
-hot path.
+``BALANCER_VAULT_ADDRESSES``. That is a silent address-table drop on a
+live-money hot path.
 
 This test turns "forgot to register the new connector's contract roles" into a
-CI failure — the structural sibling of
+CI failure: the structural sibling of
 ``test_flash_loan_registry_completeness.py``.
 """
 
@@ -24,9 +24,8 @@ from pathlib import Path
 
 import pytest
 
-# Importing the boot file populates the registry (registers every connector's
-# contract roles on import).
-import almanak.connectors._strategy_contract_role_registry  # noqa: F401
+import almanak.connectors._strategy_contract_role_registry as _boot
+from almanak.connectors._connector import CONNECTOR_REGISTRY
 from almanak.connectors._strategy_base.address_registry import AddressRegistry
 from almanak.connectors._strategy_base.contract_role_registry import (
     CONTRACT_ROLE_REGISTRY,
@@ -38,6 +37,14 @@ CONNECTORS_DIR = Path(__file__).resolve().parents[3] / "almanak" / "connectors"
 
 # Infrastructure dirs hold shared base classes, not a concrete connector.
 EXCLUDED_DIRS = {"_base", "_strategy_base", "__pycache__"}
+
+
+@pytest.fixture(autouse=True)
+def _bootstrapped_contract_role_registry() -> None:
+    """Repopulate the mutable singleton from connector manifests for each test."""
+    CONNECTOR_REGISTRY.clear()
+    CONTRACT_ROLE_REGISTRY.reset()
+    _boot._register_all()
 
 
 def _discover_contract_role_modules() -> list[str]:
@@ -58,6 +65,11 @@ def _declared_specs(module_name: str) -> tuple[ContractRoleSpec, ...]:
     return specs
 
 
+def _connector_name(module_name: str) -> str:
+    """Return the connector folder name from a dotted contract-role module."""
+    return module_name.split(".")[2]
+
+
 def test_discovery_finds_the_known_modules() -> None:
     # Sanity-check the discovery so a silently-empty walk can't make the
     # completeness assertions vacuously pass.
@@ -72,6 +84,28 @@ def test_discovery_finds_the_known_modules() -> None:
 
 
 @pytest.mark.parametrize("module_name", _discover_contract_role_modules())
+def test_every_contract_role_module_is_manifest_published(module_name: str) -> None:
+    """Every contract-role data module must be owned by its connector manifest."""
+    connector_manifest = CONNECTOR_REGISTRY.get(_connector_name(module_name))
+
+    assert connector_manifest is not None
+    assert connector_manifest.contract_roles is not None, (
+        f"{module_name} is not published from CONNECTOR.contract_roles. Add an "
+        f"ImportRef to almanak/connectors/{_connector_name(module_name)}/connector.py."
+    )
+    assert connector_manifest.contract_roles.module == module_name
+    assert connector_manifest.contract_roles.attribute == "CONTRACT_ROLES"
+
+
+def test_contract_role_boot_file_has_no_concrete_connector_imports() -> None:
+    """The contract-role boot file discovers manifests instead of naming connectors."""
+    source = (CONNECTORS_DIR / "_strategy_contract_role_registry.py").read_text()
+
+    for module_name in _discover_contract_role_modules():
+        assert module_name not in source
+
+
+@pytest.mark.parametrize("module_name", _discover_contract_role_modules())
 def test_every_declared_protocol_is_registered(module_name: str) -> None:
     """Every protocol slug a ``contract_roles.py`` declares must be registered."""
     specs = _declared_specs(module_name)
@@ -79,14 +113,14 @@ def test_every_declared_protocol_is_registered(module_name: str) -> None:
     for spec in specs:
         assert CONTRACT_ROLE_REGISTRY.has(spec.protocol), (
             f"{module_name} declares protocol {spec.protocol!r} but it is not "
-            f"registered in CONTRACT_ROLE_REGISTRY. Add it to "
-            f"almanak/connectors/_strategy_contract_role_registry.py."
+            "registered in CONTRACT_ROLE_REGISTRY. Publish it from "
+            f"almanak/connectors/{_connector_name(module_name)}/connector.py."
         )
 
 
 def test_registered_set_equals_declared_union() -> None:
     """The boot file registers exactly the union of every discovered module's
-    declared slugs — no slug declared-but-unregistered, none registered from
+    declared slugs: no slug declared-but-unregistered, none registered from
     thin air."""
     declared: set[str] = set()
     for module_name in _discover_contract_role_modules():
@@ -94,7 +128,7 @@ def test_registered_set_equals_declared_union() -> None:
             declared.add(spec.protocol)
     registered = set(CONTRACT_ROLE_REGISTRY.registered_protocols())
     assert registered == declared, (
-        f"registry / connector contract_roles drift — "
+        "registry / connector contract_roles drift: "
         f"registered-only: {sorted(registered - declared)}; "
         f"declared-only: {sorted(declared - registered)}"
     )
@@ -103,7 +137,7 @@ def test_registered_set_equals_declared_union() -> None:
 def test_every_role_protocol_owns_an_address_table() -> None:
     """Every protocol with a role must resolve to an ``AddressRegistry`` table.
 
-    A role declaration is useless if the backing address table is missing —
+    A role declaration is useless if the backing address table is missing:
     the derived compiler tables would silently drop the slug. ``address_protocol``
     resolves the pseudo-slug alias (``aerodrome_slipstream`` → ``aerodrome``).
     """
@@ -123,7 +157,7 @@ def test_spark_declares_lending_pool_only() -> None:
 
     This is the connector-side source of the intentional Spark omission from
     ``LENDING_POOL_DATA_PROVIDERS`` (VIB-4928 PR-3a). If Spark ever gains a
-    LENDING_DATA_PROVIDER role, that surface widens — make it a deliberate
+    LENDING_DATA_PROVIDER role, that surface widens. Make it a deliberate
     decision, not an accident.
     """
     assert CONTRACT_ROLE_REGISTRY.kinds_for("spark", ContractRole.LENDING_POOL) == ("pool",)
@@ -135,9 +169,7 @@ def test_traderjoe_v2_has_no_router_role() -> None:
     Book is not a V3-style swap router). Guards against re-introducing a ROUTER
     role that would leak traderjoe_v2 into ``PROTOCOL_ROUTERS``.
     """
-    assert CONTRACT_ROLE_REGISTRY.kinds_for("traderjoe_v2", ContractRole.LP_POSITION_MANAGER) == (
-        "router",
-    )
+    assert CONTRACT_ROLE_REGISTRY.kinds_for("traderjoe_v2", ContractRole.LP_POSITION_MANAGER) == ("router",)
     assert CONTRACT_ROLE_REGISTRY.kinds_for("traderjoe_v2", ContractRole.ROUTER) is None
 
 
@@ -148,7 +180,7 @@ def test_reregister_without_alias_clears_stale_alias() -> None:
     VIB-4928 PR-3a fix it only ever *wrote* ``_aliases`` (when an alias was
     given) and never cleared one, so a slug first registered with
     ``address_protocol="X"`` and later re-registered without it kept resolving
-    ``address_protocol`` to the stale ``"X"`` table key — a wrong-table address
+    ``address_protocol`` to the stale ``"X"`` table key: a wrong-table address
     resolution on a live-money path. Snapshot/restore the shared class state so
     this test cannot leak into the boot-populated registry other tests read.
     """

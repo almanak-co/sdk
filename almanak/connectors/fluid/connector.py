@@ -20,6 +20,11 @@ CONNECTOR = Connector(
         module="almanak.connectors.fluid.receipt_parser_provider",
         attribute="FluidReceiptParserConnector",
     ),
+    contract_roles=ImportRef(
+        module="almanak.connectors.fluid.contract_roles",
+        attribute="CONTRACT_ROLES",
+        order=8,
+    ),
 )
 
 __all__ = ["CONNECTOR"]

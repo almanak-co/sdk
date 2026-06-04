@@ -20,6 +20,11 @@ CONNECTOR = Connector(
         module="almanak.connectors.uniswap_v4.receipt_parser_provider",
         attribute="UniswapV4ReceiptParserConnector",
     ),
+    contract_roles=ImportRef(
+        module="almanak.connectors.uniswap_v4.contract_roles",
+        attribute="CONTRACT_ROLES",
+        order=2,
+    ),
 )
 
 __all__ = ["CONNECTOR"]

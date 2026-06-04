@@ -20,6 +20,22 @@ CONNECTOR = Connector(
         module="almanak.connectors.balancer_v2.gas_estimate_provider",
         attribute="BalancerV2GasEstimateConnector",
     ),
+    contract_roles=ImportRef(
+        module="almanak.connectors.balancer_v2.contract_roles",
+        attribute="CONTRACT_ROLES",
+        order=11,
+    ),
+    flash_loan_provider_name="balancer",
+    flash_loan_provider=ImportRef(
+        module="almanak.connectors.balancer_v2.flash_loan_provider",
+        attribute="BalancerFlashLoanProvider",
+        order=2,
+    ),
+    flash_loan_builder=ImportRef(
+        module="almanak.connectors.balancer_v2.flash_loan",
+        attribute="build_balancer_flash_loan",
+    ),
+    flash_loan_synthetic_discovery=True,
 )
 
 __all__ = ["CONNECTOR"]

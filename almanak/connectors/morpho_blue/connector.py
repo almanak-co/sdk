@@ -21,6 +21,16 @@ CONNECTOR = Connector(
         module="almanak.connectors.morpho_blue.receipt_parser_provider",
         attribute="MorphoBlueReceiptParserConnector",
     ),
+    flash_loan_provider_name="morpho",
+    flash_loan_provider=ImportRef(
+        module="almanak.connectors.morpho_blue.flash_loan_provider",
+        attribute="MorphoFlashLoanProvider",
+        order=3,
+    ),
+    flash_loan_builder=ImportRef(
+        module="almanak.connectors.morpho_blue.flash_loan",
+        attribute="build_morpho_flash_loan",
+    ),
 )
 
 __all__ = ["CONNECTOR"]

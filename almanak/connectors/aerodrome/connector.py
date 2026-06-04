@@ -26,6 +26,15 @@ CONNECTOR = Connector(
         module="almanak.connectors.aerodrome.receipt_parser_provider",
         attribute="AerodromeReceiptParserConnector",
     ),
+    contract_roles=ImportRef(
+        module="almanak.connectors.aerodrome.contract_roles",
+        attribute="CONTRACT_ROLES",
+        order=5,
+    ),
+    protocol_family=ImportRef(
+        module="almanak.connectors.aerodrome.protocol_family",
+        attribute="PROTOCOL_FAMILY",
+    ),
 )
 
 __all__ = ["CONNECTOR"]

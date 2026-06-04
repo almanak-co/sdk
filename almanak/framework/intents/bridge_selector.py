@@ -676,8 +676,8 @@ def build_default_bridge_selector(token_resolver: Any) -> "BridgeSelector":
     Each bridge adapter is self-contained inside its protocol connector and opts
     in via ``BRIDGE_PROVIDER_REGISTRY`` (populated in
     ``almanak/connectors/_strategy_bridge_registry.py``). This function names no
-    connector — adding one is a registration line in that boot file, with no
-    edit here. (VIB-4837 — the cross-protocol-selector analogue of
+    connector. Adding one is a manifest opt-in inside the connector folder,
+    with no edit here. (VIB-4837, the cross-protocol-selector analogue of
     ``compiler_flash_loan._build_flash_loan_selector``.)
 
     The boot-file import is deferred to call time on purpose: ``bridge_selector``
@@ -697,12 +697,12 @@ def build_default_bridge_selector(token_resolver: Any) -> "BridgeSelector":
 
     bridges = BRIDGE_PROVIDER_REGISTRY.build_all(token_resolver)
     if not bridges:
-        # The boot file always registers Across + Stargate at import, so an empty
-        # registry means it failed to populate (import error / misconfiguration).
+        # The manifest-backed boot file should register Across + Stargate at
+        # import, so an empty registry means it failed to populate.
         # Surface that here rather than as a downstream generic "no bridge
         # available for <route>" error that hides the real cause.
         logger.warning(
-            "build_default_bridge_selector: BRIDGE_PROVIDER_REGISTRY is empty — no bridge providers "
+            "build_default_bridge_selector: BRIDGE_PROVIDER_REGISTRY is empty - no bridge providers "
             "registered (check almanak/connectors/_strategy_bridge_registry.py); bridge intents will fail."
         )
     return BridgeSelector(bridges=bridges)

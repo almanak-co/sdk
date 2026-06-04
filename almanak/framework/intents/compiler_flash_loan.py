@@ -33,8 +33,8 @@ def _build_flash_loan_selector(chain: str) -> FlashLoanSelector:
     Each provider is self-contained inside its protocol connector and opts
     in via ``FLASH_LOAN_PROVIDER_REGISTRY`` (populated in
     ``almanak/connectors/_strategy_flash_loan_registry.py``). This function
-    names no connector — adding one is a registration line in that boot file,
-    with no edit here. (VIB-4837.)
+    names no connector. Adding one is a manifest opt-in inside the connector
+    folder, with no edit here. (VIB-4837.)
     """
     return FlashLoanSelector(
         chain=chain,
@@ -71,7 +71,7 @@ def _check_wallet_for_flash_loan(
                 # classifies this as COMPILATION_PERMANENT (state_machine.py:1007)
                 # and skips pointless retries. EOA-ness will not change between
                 # attempts; retrying always produces the same revert.
-                "Flash loans not supported for EOA wallets — flash-loan providers call back "
+                "Flash loans not supported for EOA wallets: flash-loan providers call back "
                 "into the recipient during the same transaction (Balancer's receiveFlashLoan, "
                 f"Aave's executeOperation), which EOAs cannot handle. Wallet {compiler.wallet_address} "
                 "is an EOA (no bytecode); deploy a compatible flash-loan receiver contract."

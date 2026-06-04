@@ -15,6 +15,11 @@ CONNECTOR = Connector(
         module="almanak.connectors.stargate.receipt_parser_provider",
         attribute="StargateReceiptParserConnector",
     ),
+    bridge_adapter=ImportRef(
+        module="almanak.connectors.stargate.adapter",
+        attribute="StargateBridgeAdapter",
+        order=2,
+    ),
 )
 
 __all__ = ["CONNECTOR"]

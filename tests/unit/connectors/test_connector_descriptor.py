@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import almanak.connectors._connector_descriptor as connector_descriptor_module
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from almanak.connectors._connector import (
@@ -13,6 +15,7 @@ from almanak.connectors._connector import (
     Connector,
     ConnectorDiscoveryError,
     ConnectorRegistry,
+    ImportRef,
 )
 from almanak.connectors._connector_descriptor import (
     CONNECTOR_DESCRIPTOR_REGISTRY,
@@ -22,11 +25,22 @@ from almanak.connectors._connector_descriptor import (
 from almanak.connectors._strategy_base.agent_read_registry import (
     AgentReadConnector,
 )
+from almanak.connectors._strategy_base.bridge_base import BridgeAdapter
+from almanak.connectors._strategy_base.contract_role_registry import (
+    ContractRoleSpec,
+)
+from almanak.connectors._strategy_base.flash_loan_base import FlashLoanProvider
 from almanak.connectors._strategy_base.gas_estimate_registry import (
     GasEstimateConnector,
 )
+from almanak.connectors._strategy_base.protocol_family_registry import (
+    ProtocolFamilySpec,
+)
 from almanak.connectors._strategy_base.receipt_parser_registry import (
     ReceiptParserConnector,
+)
+from almanak.connectors._strategy_base.swap_classification_registry import (
+    SwapClassificationSpec,
 )
 from almanak.connectors._strategy_base.vault_tool_registry import (
     VaultToolConnector,
@@ -40,6 +54,7 @@ EXPECTED_CONNECTOR_KINDS = {
     "balancer_v2": ProtocolKind.LP,
     "beefy": ProtocolKind.VAULT,
     "benqi": ProtocolKind.LENDING,
+    "camelot": ProtocolKind.SWAP,
     "compound_v3": ProtocolKind.LENDING,
     "curvance": ProtocolKind.LENDING,
     "curve": ProtocolKind.LP,
@@ -198,6 +213,86 @@ EXPECTED_GAS_ESTIMATE_PROVIDER_MODULES = {
     "uniswap_v3": "almanak.connectors.uniswap_v3.gas_estimate_provider",
 }
 
+EXPECTED_CONTRACT_ROLE_MODULES = {
+    "aave_v3": "almanak.connectors.aave_v3.contract_roles",
+    "aerodrome": "almanak.connectors.aerodrome.contract_roles",
+    "balancer_v2": "almanak.connectors.balancer_v2.contract_roles",
+    "camelot": "almanak.connectors.camelot.contract_roles",
+    "fluid": "almanak.connectors.fluid.contract_roles",
+    "pancakeswap_v3": "almanak.connectors.pancakeswap_v3.contract_roles",
+    "spark": "almanak.connectors.spark.contract_roles",
+    "sushiswap_v3": "almanak.connectors.sushiswap_v3.contract_roles",
+    "traderjoe_v2": "almanak.connectors.traderjoe_v2.contract_roles",
+    "uniswap_v3": "almanak.connectors.uniswap_v3.contract_roles",
+    "uniswap_v4": "almanak.connectors.uniswap_v4.contract_roles",
+}
+
+EXPECTED_CONTRACT_ROLE_ORDER = (
+    "uniswap_v3",
+    "uniswap_v4",
+    "sushiswap_v3",
+    "pancakeswap_v3",
+    "aerodrome",
+    "traderjoe_v2",
+    "camelot",
+    "fluid",
+    "aave_v3",
+    "spark",
+    "balancer_v2",
+)
+
+EXPECTED_BRIDGE_ADAPTER_MODULES = {
+    "across": "almanak.connectors.across.adapter",
+    "stargate": "almanak.connectors.stargate.adapter",
+}
+
+EXPECTED_BRIDGE_ADAPTER_ORDER = ("across", "stargate")
+
+EXPECTED_FLASH_LOAN_MODULES = {
+    "aave_v3": (
+        "aave",
+        "almanak.connectors.aave_v3.flash_loan_provider",
+        "almanak.connectors.aave_v3.flash_loan",
+        True,
+    ),
+    "balancer_v2": (
+        "balancer",
+        "almanak.connectors.balancer_v2.flash_loan_provider",
+        "almanak.connectors.balancer_v2.flash_loan",
+        True,
+    ),
+    "morpho_blue": (
+        "morpho",
+        "almanak.connectors.morpho_blue.flash_loan_provider",
+        "almanak.connectors.morpho_blue.flash_loan",
+        False,
+    ),
+}
+
+EXPECTED_FLASH_LOAN_ORDER = ("aave_v3", "balancer_v2", "morpho_blue")
+
+EXPECTED_PROTOCOL_FAMILY_MODULES = {
+    "aave_v3": "almanak.connectors.aave_v3.protocol_family",
+    "aerodrome": "almanak.connectors.aerodrome.protocol_family",
+    "pancakeswap_v3": "almanak.connectors.pancakeswap_v3.protocol_family",
+    "sushiswap_v3": "almanak.connectors.sushiswap_v3.protocol_family",
+    "uniswap_v3": "almanak.connectors.uniswap_v3.protocol_family",
+}
+
+EXPECTED_SWAP_CLASSIFICATION_MODULES = {
+    "camelot": "almanak.connectors.camelot.swap_classification",
+    "pancakeswap_v3": "almanak.connectors.pancakeswap_v3.swap_classification",
+    "sushiswap_v3": "almanak.connectors.sushiswap_v3.swap_classification",
+    "uniswap_v3": "almanak.connectors.uniswap_v3.swap_classification",
+}
+
+EXPECTED_SWAP_CLASSIFICATION_ORDER = (
+    "uniswap_v3",
+    "sushiswap_v3",
+    "pancakeswap_v3",
+    "camelot",
+)
+
 EXPECTED_AGENT_READ_PROVIDER_MODULES = {
     "aave_v3": "almanak.connectors.aave_v3.agent_read_provider",
     "aerodrome_slipstream": "almanak.connectors.aerodrome.agent_read_provider",
@@ -278,6 +373,80 @@ def test_connector_registry_rejects_reentrant_discovery(monkeypatch: pytest.Monk
     assert registry.all() == ()
 
 
+@pytest.mark.parametrize(
+    ("capability", "connector_kwargs"),
+    (
+        (
+            "Gateway connector",
+            lambda name: {
+                "kind": ProtocolKind.LP,
+                "gateway_connector": ImportRef(module=f"tests.fake_{name}", attribute="Gateway", order=7),
+            },
+        ),
+        (
+            "Contract-role",
+            lambda name: {
+                "kind": ProtocolKind.LP,
+                "contract_roles": ImportRef(module=f"tests.fake_{name}", attribute="CONTRACT_ROLES", order=7),
+            },
+        ),
+        (
+            "Swap-classification",
+            lambda name: {
+                "kind": ProtocolKind.SWAP,
+                "swap_classification": ImportRef(
+                    module=f"tests.fake_{name}",
+                    attribute="SWAP_CLASSIFICATION",
+                    order=7,
+                ),
+            },
+        ),
+        (
+            "Bridge adapter",
+            lambda name: {
+                "kind": ProtocolKind.BRIDGE,
+                "bridge_adapter": ImportRef(module=f"tests.fake_{name}", attribute="BridgeAdapter", order=7),
+            },
+        ),
+        (
+            "Flash-loan provider",
+            lambda name: {
+                "kind": ProtocolKind.LENDING,
+                "flash_loan_provider_name": name,
+                "flash_loan_provider": ImportRef(module=f"tests.fake_{name}", attribute="FlashLoanProvider", order=7),
+                "flash_loan_builder": ImportRef(module=f"tests.fake_{name}", attribute="build_flash_loan"),
+            },
+        ),
+    ),
+)
+def test_connector_registry_rejects_duplicate_order_bearing_refs(
+    monkeypatch: pytest.MonkeyPatch,
+    capability: str,
+    connector_kwargs: object,
+) -> None:
+    """Discovery rejects duplicate explicit order keys before stable-sort tie breaking."""
+    registry = ConnectorRegistry()
+    kwargs_for_name = connector_kwargs
+    assert callable(kwargs_for_name)
+    connectors = {
+        name: Connector(name=name, **kwargs_for_name(name))
+        for name in ("alpha", "beta")
+    }
+
+    monkeypatch.setattr(
+        connector_descriptor_module.pkgutil,
+        "iter_modules",
+        lambda _paths: iter(SimpleNamespace(ispkg=True, name=name) for name in connectors),
+    )
+    monkeypatch.setattr(registry, "_load_connector", lambda name: connectors[name])
+
+    with pytest.raises(
+        ConnectorDiscoveryError,
+        match=rf"{capability} order 7 is claimed by both 'alpha' and 'beta'",
+    ):
+        registry.all()
+
+
 def test_connector_rejects_invalid_gateway_connector_ref() -> None:
     """Invalid singular gateway refs fail during manifest validation."""
     with pytest.raises(ValueError, match="Connector.gateway_connector"):
@@ -328,6 +497,134 @@ def test_connector_rejects_invalid_vault_tool_connector_ref() -> None:
         )
 
 
+def test_connector_rejects_invalid_protocol_family_ref() -> None:
+    """Invalid protocol-family refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.protocol_family"):
+        Connector(
+            name="bad_protocol_family_ref",
+            kind=ProtocolKind.LP,
+            protocol_family=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_invalid_swap_classification_ref() -> None:
+    """Invalid swap-classification refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.swap_classification"):
+        Connector(
+            name="bad_swap_classification_ref",
+            kind=ProtocolKind.SWAP,
+            swap_classification=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_invalid_contract_roles_ref() -> None:
+    """Invalid contract-role refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.contract_roles"):
+        Connector(
+            name="bad_contract_roles_ref",
+            kind=ProtocolKind.LP,
+            contract_roles=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_invalid_bridge_adapter_ref() -> None:
+    """Invalid bridge-adapter refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.bridge_adapter"):
+        Connector(
+            name="bad_bridge_adapter_ref",
+            kind=ProtocolKind.BRIDGE,
+            bridge_adapter=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_invalid_flash_loan_provider_ref() -> None:
+    """Invalid flash-loan provider refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.flash_loan_provider"):
+        Connector(
+            name="bad_flash_loan_provider_ref",
+            kind=ProtocolKind.LENDING,
+            flash_loan_provider_name="bad",
+            flash_loan_provider=object(),  # type: ignore[arg-type]
+            flash_loan_builder=ImportRef(module="tests.fake_flash_loan", attribute="build_fake_flash_loan"),
+        )
+
+
+def test_connector_rejects_invalid_flash_loan_builder_ref() -> None:
+    """Invalid flash-loan builder refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.flash_loan_builder"):
+        Connector(
+            name="bad_flash_loan_builder_ref",
+            kind=ProtocolKind.LENDING,
+            flash_loan_provider_name="bad",
+            flash_loan_provider=ImportRef(module="tests.fake_flash_loan_provider", attribute="FakeProvider"),
+            flash_loan_builder=object(),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    (
+        (
+            {
+                "flash_loan_provider": ImportRef(
+                    module="tests.fake_flash_loan_provider",
+                    attribute="FakeProvider",
+                ),
+                "flash_loan_builder": ImportRef(
+                    module="tests.fake_flash_loan",
+                    attribute="build_fake_flash_loan",
+                ),
+            },
+            "Connector.flash_loan_provider_name",
+        ),
+        (
+            {
+                "flash_loan_synthetic_discovery": True,
+            },
+            "Connector.flash_loan_provider_name",
+        ),
+        (
+            {
+                "flash_loan_provider_name": "fake",
+                "flash_loan_builder": ImportRef(
+                    module="tests.fake_flash_loan",
+                    attribute="build_fake_flash_loan",
+                ),
+            },
+            "Connector.flash_loan_provider is required",
+        ),
+        (
+            {
+                "flash_loan_provider_name": "fake",
+                "flash_loan_provider": ImportRef(
+                    module="tests.fake_flash_loan_provider",
+                    attribute="FakeProvider",
+                ),
+            },
+            "Connector.flash_loan_builder is required",
+        ),
+    ),
+)
+def test_connector_rejects_partial_flash_loan_metadata(kwargs: dict[str, object], match: str) -> None:
+    """Flash-loan manifest fields must be published as a complete set."""
+    with pytest.raises(ValueError, match=match):
+        Connector(
+            name="partial_flash_loan",
+            kind=ProtocolKind.LENDING,
+            **kwargs,
+        )
+
+
+def test_connector_rejects_invalid_flash_loan_synthetic_discovery_flag() -> None:
+    """Flash-loan synthetic-discovery opt-in must be boolean."""
+    with pytest.raises(ValueError, match="Connector.flash_loan_synthetic_discovery"):
+        Connector(
+            name="bad_flash_loan_synthetic_discovery",
+            kind=ProtocolKind.LENDING,
+            flash_loan_synthetic_discovery="yes",  # type: ignore[arg-type]
+        )
+
+
 def test_receipt_parser_connectors_instantiate_from_descriptors() -> None:
     """Migrated receipt-parser providers are published through connectors."""
     CONNECTOR_REGISTRY.clear()
@@ -358,6 +655,173 @@ def test_gas_estimate_connectors_instantiate_from_descriptors() -> None:
 
         assert isinstance(connector, GasEstimateConnector)
         assert type(connector).__module__ == module
+
+
+def test_contract_role_specs_load_from_descriptors() -> None:
+    """Migrated contract-role specs are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, tuple[tuple[ContractRoleSpec, ...], str]] = {}
+    orders: dict[str, int | None] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_contract_roles():
+        assert connector_manifest.contract_roles is not None
+        specs = connector_manifest.contract_roles.load()
+        assert isinstance(specs, tuple)
+        assert specs
+        assert all(isinstance(spec, ContractRoleSpec) for spec in specs)
+        connectors[connector_manifest.name] = (specs, connector_manifest.contract_roles.module)
+        orders[connector_manifest.name] = connector_manifest.contract_roles.order
+
+    assert set(EXPECTED_CONTRACT_ROLE_MODULES) == connectors.keys()
+    for name, module in EXPECTED_CONTRACT_ROLE_MODULES.items():
+        _specs, actual_module = connectors[name]
+
+        assert actual_module == module
+    assert (
+        tuple(
+            name
+            for name, _order in sorted(
+                orders.items(),
+                key=lambda item: (item[1] is None, item[1] if item[1] is not None else 0),
+            )
+        )
+        == EXPECTED_CONTRACT_ROLE_ORDER
+    )
+
+
+def test_bridge_adapters_load_from_descriptors() -> None:
+    """Migrated bridge adapters are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    adapters: dict[str, tuple[type[BridgeAdapter], str]] = {}
+    orders: dict[str, int | None] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_bridge_adapter():
+        assert connector_manifest.bridge_adapter is not None
+        adapter_cls = connector_manifest.bridge_adapter.load()
+        assert isinstance(adapter_cls, type)
+        assert issubclass(adapter_cls, BridgeAdapter)
+        adapters[connector_manifest.name] = (adapter_cls, connector_manifest.bridge_adapter.module)
+        orders[connector_manifest.name] = connector_manifest.bridge_adapter.order
+
+    assert set(EXPECTED_BRIDGE_ADAPTER_MODULES) == adapters.keys()
+    for name, module in EXPECTED_BRIDGE_ADAPTER_MODULES.items():
+        adapter_cls, actual_module = adapters[name]
+
+        assert actual_module == module
+        assert adapter_cls.__module__ == module
+    assert (
+        tuple(
+            name
+            for name, _order in sorted(
+                orders.items(),
+                key=lambda item: (item[1] is None, item[1] if item[1] is not None else 0),
+            )
+        )
+        == EXPECTED_BRIDGE_ADAPTER_ORDER
+    )
+
+
+def test_flash_loan_providers_load_from_descriptors() -> None:
+    """Migrated flash-loan providers are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    providers: dict[str, tuple[str, type[FlashLoanProvider], str, str, bool]] = {}
+    orders: dict[str, int | None] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_flash_loan():
+        assert connector_manifest.flash_loan_provider_name is not None
+        assert connector_manifest.flash_loan_provider is not None
+        assert connector_manifest.flash_loan_builder is not None
+
+        provider_cls = connector_manifest.flash_loan_provider.load()
+        builder = connector_manifest.flash_loan_builder.load()
+
+        assert isinstance(provider_cls, type)
+        assert issubclass(provider_cls, FlashLoanProvider)
+        assert callable(builder)
+
+        provider = provider_cls()
+        assert provider.name == connector_manifest.flash_loan_provider_name
+        providers[connector_manifest.name] = (
+            connector_manifest.flash_loan_provider_name,
+            provider_cls,
+            connector_manifest.flash_loan_provider.module,
+            connector_manifest.flash_loan_builder.module,
+            connector_manifest.flash_loan_synthetic_discovery,
+        )
+        orders[connector_manifest.name] = connector_manifest.flash_loan_provider.order
+
+    assert set(EXPECTED_FLASH_LOAN_MODULES) == providers.keys()
+    for name, (
+        expected_provider_name,
+        expected_provider_module,
+        expected_builder_module,
+        expected_synthetic,
+    ) in EXPECTED_FLASH_LOAN_MODULES.items():
+        provider_name, provider_cls, actual_provider_module, actual_builder_module, actual_synthetic = providers[name]
+
+        assert provider_name == expected_provider_name
+        assert actual_provider_module == expected_provider_module
+        assert actual_builder_module == expected_builder_module
+        assert actual_synthetic is expected_synthetic
+        assert provider_cls.__module__ == expected_provider_module
+    assert (
+        tuple(
+            name
+            for name, _order in sorted(
+                orders.items(),
+                key=lambda item: (item[1] is None, item[1] if item[1] is not None else 0),
+            )
+        )
+        == EXPECTED_FLASH_LOAN_ORDER
+    )
+
+
+def test_protocol_family_specs_load_from_descriptors() -> None:
+    """Migrated protocol-family specs are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    for name, module in EXPECTED_PROTOCOL_FAMILY_MODULES.items():
+        connector_manifest = CONNECTOR_REGISTRY.get(name)
+
+        assert connector_manifest is not None
+        assert connector_manifest.protocol_family is not None
+        spec = connector_manifest.protocol_family.load()
+
+        assert isinstance(spec, ProtocolFamilySpec)
+        assert spec.families
+        assert connector_manifest.protocol_family.module == module
+
+
+def test_swap_classification_specs_load_from_descriptors() -> None:
+    """Migrated swap-classification specs are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, tuple[tuple[SwapClassificationSpec, ...], str]] = {}
+    orders: dict[str, int | None] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_swap_classification():
+        assert connector_manifest.swap_classification is not None
+        specs = connector_manifest.swap_classification.load()
+        assert isinstance(specs, tuple)
+        assert specs
+        assert all(isinstance(spec, SwapClassificationSpec) for spec in specs)
+        connectors[connector_manifest.name] = (specs, connector_manifest.swap_classification.module)
+        orders[connector_manifest.name] = connector_manifest.swap_classification.order
+
+    assert set(EXPECTED_SWAP_CLASSIFICATION_MODULES) == connectors.keys()
+    for name, module in EXPECTED_SWAP_CLASSIFICATION_MODULES.items():
+        _specs, actual_module = connectors[name]
+
+        assert actual_module == module
+    assert (
+        tuple(
+            name
+            for name, _order in sorted(
+                orders.items(),
+                key=lambda item: (item[1] is None, item[1] if item[1] is not None else 0),
+            )
+        )
+        == EXPECTED_SWAP_CLASSIFICATION_ORDER
+    )
 
 
 def test_agent_read_connectors_instantiate_from_descriptors() -> None:
@@ -474,6 +938,70 @@ def test_connector_gas_estimates_are_not_in_legacy_boot_file() -> None:
         import_ref = connector_manifest.gas_estimate_connector
         assert import_ref.module not in source
         assert import_ref.attribute not in source
+
+
+def test_connector_contract_roles_are_not_in_legacy_boot_file() -> None:
+    """Connector-backed contract-role specs must not also be hardcoded."""
+    CONNECTOR_REGISTRY.clear()
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/connectors/_strategy_contract_role_registry.py").read_text()
+
+    for connector_manifest in CONNECTOR_REGISTRY.with_contract_roles():
+        assert connector_manifest.contract_roles is not None
+        import_ref = connector_manifest.contract_roles
+        assert import_ref.module not in source
+
+
+def test_connector_bridge_adapters_are_not_in_legacy_boot_file() -> None:
+    """Connector-backed bridge adapters must not also be hardcoded."""
+    CONNECTOR_REGISTRY.clear()
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/connectors/_strategy_bridge_registry.py").read_text()
+
+    for connector_manifest in CONNECTOR_REGISTRY.with_bridge_adapter():
+        assert connector_manifest.bridge_adapter is not None
+        import_ref = connector_manifest.bridge_adapter
+        assert import_ref.module not in source
+        assert import_ref.attribute not in source
+
+
+def test_connector_flash_loans_are_not_in_legacy_boot_file() -> None:
+    """Connector-backed flash-loan providers must not also be hardcoded."""
+    CONNECTOR_REGISTRY.clear()
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/connectors/_strategy_flash_loan_registry.py").read_text()
+
+    for connector_manifest in CONNECTOR_REGISTRY.with_flash_loan():
+        assert connector_manifest.flash_loan_provider is not None
+        assert connector_manifest.flash_loan_builder is not None
+        assert connector_manifest.flash_loan_provider.module not in source
+        assert connector_manifest.flash_loan_provider.attribute not in source
+        assert connector_manifest.flash_loan_builder.module not in source
+        assert connector_manifest.flash_loan_builder.attribute not in source
+
+
+def test_connector_protocol_families_are_not_in_legacy_boot_file() -> None:
+    """Connector-backed protocol-family specs must not also be hardcoded."""
+    CONNECTOR_REGISTRY.clear()
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/connectors/_strategy_protocol_family_registry.py").read_text()
+
+    for connector_manifest in CONNECTOR_REGISTRY.with_protocol_family():
+        assert connector_manifest.protocol_family is not None
+        import_ref = connector_manifest.protocol_family
+        assert import_ref.module not in source
+
+
+def test_connector_swap_classifications_are_not_in_legacy_boot_file() -> None:
+    """Connector-backed swap-classification specs must not also be hardcoded."""
+    CONNECTOR_REGISTRY.clear()
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/connectors/_strategy_swap_classification_registry.py").read_text()
+
+    for connector_manifest in CONNECTOR_REGISTRY.with_swap_classification():
+        assert connector_manifest.swap_classification is not None
+        import_ref = connector_manifest.swap_classification
+        assert import_ref.module not in source
 
 
 def test_connector_agent_tools_are_not_in_legacy_boot_file() -> None:

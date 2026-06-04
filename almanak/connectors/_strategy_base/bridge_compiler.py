@@ -192,10 +192,8 @@ class BridgeCompiler(BaseBridgeCompiler):
         return Decimal(balance_wei) / Decimal(10**token_info.decimals)
 
     def _build_selector(self, ctx: BaseCompilerContext) -> BridgeSelector:
-        # Names no connector — bridge adapters self-register via
-        # BRIDGE_PROVIDER_REGISTRY (populated in
-        # almanak/connectors/_strategy_bridge_registry.py). Adding a bridge is
-        # one registration line in that boot file, with no edit here. (VIB-4837.)
+        # Names no connector. Bridge adapters opt in via CONNECTOR.bridge_adapter,
+        # and the boot registry consumes those manifest refs. (VIB-4837.)
         from almanak.framework.intents.bridge_selector import build_default_bridge_selector
 
         return build_default_bridge_selector(ctx.token_resolver)
