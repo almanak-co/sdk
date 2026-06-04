@@ -107,8 +107,6 @@ from almanak.framework.execution.handler_registry import (
     ExecutionHandlerRegistry,
 )
 from almanak.framework.execution.interfaces import (
-    # Enums
-    Chain,
     # Exceptions
     ExecutionError,
     GasEstimationError,
@@ -262,7 +260,6 @@ from almanak.framework.execution.submitter import PublicMempoolSubmitter
 
 __all__ = [
     # Enums
-    "Chain",
     "TransactionType",
     # Data classes
     "UnsignedTransaction",

@@ -1,20 +1,13 @@
 """Tests for Monad chain configuration across the SDK."""
 
-import pytest
-
 
 class TestMonadChainEnum:
-    """Monad is registered in both Chain enums."""
+    """Monad is registered in the canonical Chain enum."""
 
     def test_core_chain_enum(self):
         from almanak.core.enums import Chain
 
         assert Chain.MONAD.value == "MONAD"
-
-    def test_execution_chain_enum(self):
-        from almanak.framework.execution.interfaces import Chain
-
-        assert Chain.MONAD.value == "monad"
 
 
 class TestMonadChainConfig:

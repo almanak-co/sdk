@@ -766,17 +766,6 @@ class TestDerivedProperties:
         )
         assert config.max_tx_value_wei == 10 * 10**18
 
-    def test_get_chain_enum(self):
-        """Test get_chain_enum method."""
-        config = LocalRuntimeConfig(
-            chain="arbitrum",
-            rpc_url="https://arb1.arbitrum.io/rpc",
-            private_key=TEST_PRIVATE_KEY,
-        )
-        from almanak.framework.execution.interfaces import Chain
-
-        assert config.get_chain_enum() == Chain.ARBITRUM
-
     def test_chain_id_derived_correctly(self):
         """Test that chain_id is derived from chain name (EVM chains only)."""
         for chain_name, expected_id in CHAIN_IDS.items():

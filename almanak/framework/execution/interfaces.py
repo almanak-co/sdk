@@ -57,27 +57,6 @@ class TransactionType(StrEnum):
     EIP_1559 = "eip1559"  # Type 2: EIP-1559 with maxFeePerGas
 
 
-class Chain(StrEnum):
-    """Supported blockchain networks."""
-
-    ETHEREUM = "ethereum"
-    ARBITRUM = "arbitrum"
-    OPTIMISM = "optimism"
-    POLYGON = "polygon"
-    BASE = "base"
-    AVALANCHE = "avalanche"
-    BNB = "bsc"
-    LINEA = "linea"
-    PLASMA = "plasma"
-    SONIC = "sonic"
-    BLAST = "blast"
-    MANTLE = "mantle"
-    BERACHAIN = "berachain"
-    MONAD = "monad"
-    XLAYER = "xlayer"
-    ZEROG = "zerog"
-
-
 # =============================================================================
 # Exceptions
 # =============================================================================
@@ -1053,7 +1032,6 @@ class Simulator(ABC):
 __all__ = [
     # Enums
     "TransactionType",
-    "Chain",
     # Data classes
     "UnsignedTransaction",
     "SignedTransaction",

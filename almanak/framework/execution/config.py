@@ -63,7 +63,6 @@ from almanak.config.runtime import (
     multi_chain_rpc_urls_from_env,
 )
 from almanak.core.chains import ChainRegistry
-from almanak.framework.execution.interfaces import Chain
 
 
 # Imported here so callers can reference without touching chain_executor directly.
@@ -559,18 +558,6 @@ class LocalRuntimeConfig:
             max_retry_delay=data.get("max_retry_delay", 32.0),
             max_retries=data.get("max_retries", 3),
         )
-
-    def get_chain_enum(self) -> Chain:
-        """Get the Chain enum value for this configuration.
-
-        Returns:
-            Chain enum value
-
-        Example:
-            config = LocalRuntimeConfig(chain="arbitrum", ...)
-            chain_enum = config.get_chain_enum()  # Chain.ARBITRUM
-        """
-        return Chain(self.chain)
 
     @property
     def max_gas_price_wei(self) -> int:
