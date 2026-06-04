@@ -4490,7 +4490,7 @@ class StrategyRunner:
             if await self._single_chain_pre_retry_confirmed(state, single_chain_orch):
                 return None  # Treated as success; continue state-machine loop
 
-            # Route CLOB bundles to ClobActionHandler (off-chain orders),
+            # Route CLOB bundles to the connector-built CLOB handler (off-chain orders),
             # all other bundles to the on-chain ExecutionOrchestrator.
             if state.clob_handler and state.clob_handler.can_handle(step_result.action_bundle):
                 execution_result = await self._single_chain_execute_clob(state, step_result)
@@ -4662,7 +4662,7 @@ class StrategyRunner:
         return True
 
     async def _single_chain_execute_clob(self, state: SingleChainExecutionState, step_result: Any) -> ExecutionResult:
-        """Execute a Polymarket CLOB bundle via the ClobActionHandler."""
+        """Execute a Polymarket CLOB bundle via the connector-built CLOB handler."""
         clob_result = await state.clob_handler.execute(step_result.action_bundle)
         execution_result = ExecutionResult(
             success=clob_result.success,

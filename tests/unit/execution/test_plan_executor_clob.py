@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from almanak.connectors.polymarket.clob_handler import ClobActionHandler
 from almanak.framework.execution.clob_handler import (
-    ClobActionHandler,
     ClobExecutionResult,
     ClobOrderStatus,
 )

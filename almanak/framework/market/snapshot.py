@@ -392,7 +392,7 @@ class MarketSnapshot:
             balance_provider: Function to fetch balances (token) -> TokenBalance
             timestamp: Snapshot timestamp (defaults to now)
             wallet_activity_provider: Provider for leader wallet activity signals
-            prediction_provider: PredictionMarketDataProvider for prediction market data
+            prediction_provider: PredictionProvider for prediction market data
             indicator_provider: IndicatorProvider for calculator-backed TA indicators
             multi_dex_service: MultiDexService for cross-DEX price comparison
             rate_monitor: RateMonitor instance for lending rate queries

@@ -50,8 +50,7 @@ from almanak.framework.execution.plan import (
 )
 
 if TYPE_CHECKING:
-    from almanak.framework.execution.clob_handler import ClobActionHandler
-    from almanak.framework.execution.handler_registry import ExecutionHandlerRegistry
+    from almanak.framework.execution.handler_registry import ExecutionHandler, ExecutionHandlerRegistry
     from almanak.framework.models.reproduction_bundle import ActionBundle
 
 logger = logging.getLogger(__name__)
@@ -471,7 +470,7 @@ class PlanExecutor:
         config: PlanExecutorConfig | None = None,
         quote_provider: BridgeQuoteProvider | None = None,
         state_provider: OnChainStateProvider | None = None,
-        clob_handler: "ClobActionHandler | None" = None,
+        clob_handler: "ExecutionHandler | None" = None,
         handler_registry: "ExecutionHandlerRegistry | None" = None,
     ) -> None:
         """Initialize the plan executor.
@@ -1420,7 +1419,7 @@ class PlanExecutor:
         bundle: "ActionBundle",
         result: StepExecutionResult,
     ) -> StepExecutionResult:
-        """Execute a CLOB order bundle via ClobActionHandler.
+        """Execute a CLOB order bundle via the registered CLOB handler.
 
         Args:
             bundle: ActionBundle with CLOB order payload

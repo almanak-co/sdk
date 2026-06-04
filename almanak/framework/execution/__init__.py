@@ -51,9 +51,8 @@ from almanak.framework.execution.chain_executor import (
 )
 from almanak.framework.execution.chain_strategy import ChainExecutionStrategy
 
-# CLOB Handler for off-chain order execution (Polymarket)
+# CLOB execution dataclasses (the handler lives in the polymarket connector, VIB-4989)
 from almanak.framework.execution.clob_handler import (
-    ClobActionHandler,
     ClobExecutionResult,
     ClobFill,
     ClobOrderState,
@@ -386,7 +385,6 @@ __all__ = [
     "ReceiptParserError",
     "ParserNotFoundError",
     # CLOB Handler (off-chain order execution)
-    "ClobActionHandler",
     "ClobExecutionResult",
     "ClobFill",
     "ClobOrderState",

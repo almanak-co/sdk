@@ -31,16 +31,22 @@ from almanak.connectors.polymarket.models import (
 from almanak.connectors.polymarket.models import (
     PriceHistory as ClobPriceHistory,
 )
+
 # VIB-4989: the provider class lives in the connector now; the neutral result
 # dataclasses stay in the framework. Importing the class here gives the relocated
 # connector copy real execution coverage (CRAP gate).
-from almanak.connectors.polymarket.prediction_provider import PredictionMarketDataProvider
+from almanak.connectors.polymarket.prediction_provider import (
+    PredictionMarketDataProvider,
+    to_historical_price,
+    to_historical_trade,
+    to_prediction_market,
+    to_prediction_position,
+    to_price_history,
+)
 from almanak.framework.data.prediction_provider import (
     HistoricalPrice,
     HistoricalTrade,
-    PredictionMarket,
     PredictionOrder,
-    PredictionPosition,
     PriceHistory,
 )
 
@@ -160,9 +166,9 @@ def provider(mock_clob_client) -> PredictionMarketDataProvider:
 class TestPredictionMarket:
     """Tests for PredictionMarket model."""
 
-    def test_from_gamma_market(self, mock_gamma_market):
+    def test_to_prediction_market(self, mock_gamma_market):
         """Test creating PredictionMarket from GammaMarket."""
-        market = PredictionMarket.from_gamma_market(mock_gamma_market)
+        market = to_prediction_market(mock_gamma_market)
 
         assert market.market_id == "12345"
         assert market.condition_id == "0x9915bea232fa12b20058f9cea1187ea51366352bf833393676cd0db557a58249"
@@ -178,7 +184,7 @@ class TestPredictionMarket:
         assert market.is_active is True
         assert market.is_resolved is False
 
-    def test_from_gamma_market_no_spread(self):
+    def test_to_prediction_market_no_spread(self):
         """Test creating PredictionMarket when best_bid/ask are None."""
         gamma = GammaMarket(
             id="123",
@@ -197,12 +203,12 @@ class TestPredictionMarket:
             best_ask=None,
         )
 
-        market = PredictionMarket.from_gamma_market(gamma)
+        market = to_prediction_market(gamma)
         assert market.spread == Decimal("0")
 
     def test_to_dict(self, mock_gamma_market):
         """Test converting PredictionMarket to dictionary."""
-        market = PredictionMarket.from_gamma_market(mock_gamma_market)
+        market = to_prediction_market(mock_gamma_market)
         data = market.to_dict()
 
         assert data["market_id"] == "12345"
@@ -221,9 +227,9 @@ class TestPredictionMarket:
 class TestPredictionPosition:
     """Tests for PredictionPosition model."""
 
-    def test_from_position(self, mock_position):
+    def test_to_prediction_position(self, mock_position):
         """Test creating PredictionPosition from Position."""
-        pos = PredictionPosition.from_position(mock_position)
+        pos = to_prediction_position(mock_position)
 
         assert pos.market_id == "12345"
         assert pos.outcome == "YES"
@@ -234,12 +240,12 @@ class TestPredictionPosition:
 
     def test_value_property(self, mock_position):
         """Test position value calculation."""
-        pos = PredictionPosition.from_position(mock_position)
+        pos = to_prediction_position(mock_position)
         assert pos.value == Decimal("65")  # 100 * 0.65
 
     def test_to_dict(self, mock_position):
         """Test converting PredictionPosition to dictionary."""
-        pos = PredictionPosition.from_position(mock_position)
+        pos = to_prediction_position(mock_position)
         data = pos.to_dict()
 
         assert data["market_id"] == "12345"
@@ -819,14 +825,14 @@ class TestProviderWorkflows:
 class TestHistoricalPrice:
     """Tests for HistoricalPrice model."""
 
-    def test_from_clob_price(self):
+    def test_to_historical_price(self):
         """Test creating HistoricalPrice from CLOB price."""
         clob_price = ClobHistoricalPrice(
             timestamp=datetime(2025, 1, 15, 10, 30, tzinfo=UTC),
             price=Decimal("0.65"),
         )
 
-        price = HistoricalPrice.from_clob_price(clob_price)
+        price = to_historical_price(clob_price)
         assert price.timestamp == datetime(2025, 1, 15, 10, 30, tzinfo=UTC)
         assert price.price == Decimal("0.65")
 
@@ -909,7 +915,7 @@ class TestPriceHistory:
         assert history.price_change is None
         assert history.price_change_pct is None
 
-    def test_from_clob_history(self):
+    def test_to_price_history(self):
         """Test creating PriceHistory from CLOB history."""
         clob_history = ClobPriceHistory(
             token_id="token123",
@@ -924,7 +930,7 @@ class TestPriceHistory:
             end_time=datetime(2025, 1, 15, 11, 0, tzinfo=UTC),
         )
 
-        history = PriceHistory.from_clob_history(
+        history = to_price_history(
             clob_history,
             market_id="12345",
             outcome="YES",
@@ -964,7 +970,7 @@ class TestPriceHistory:
 class TestHistoricalTrade:
     """Tests for HistoricalTrade model."""
 
-    def test_from_clob_trade(self):
+    def test_to_historical_trade(self):
         """Test creating HistoricalTrade from CLOB trade."""
         clob_trade = ClobHistoricalTrade(
             id="trade123",
@@ -975,7 +981,7 @@ class TestHistoricalTrade:
             timestamp=datetime(2025, 1, 15, 10, 30, tzinfo=UTC),
         )
 
-        trade = HistoricalTrade.from_clob_trade(
+        trade = to_historical_trade(
             clob_trade,
             outcome="YES",
             market_id="12345",
@@ -1696,7 +1702,7 @@ class TestPredictionMarketEventFields:
             tags=["crypto", "defi"],
         )
 
-        pred_market = PredictionMarket.from_gamma_market(market)
+        pred_market = to_prediction_market(market)
 
         assert pred_market.event_id == "event123"
         assert pred_market.event_slug == "test-event"
@@ -1722,7 +1728,7 @@ class TestPredictionMarketEventFields:
             tags=["crypto"],
         )
 
-        pred_market = PredictionMarket.from_gamma_market(market)
+        pred_market = to_prediction_market(market)
         data = pred_market.to_dict()
 
         assert data["event_id"] == "event123"

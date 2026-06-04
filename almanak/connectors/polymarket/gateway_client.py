@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 import grpc
 
 if TYPE_CHECKING:
-    from almanak.framework.data.prediction_provider import PositionFilters
+    from almanak.connectors.polymarket.models import PositionFilters
 
 from almanak.connectors.polymarket.proto import polymarket_pb2
 from almanak.framework.gateway_client import GatewayClient

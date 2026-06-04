@@ -23,13 +23,25 @@ from typing import Any, Literal
 
 from almanak.connectors.polymarket.clob_client import ClobClient
 from almanak.connectors.polymarket.models import (
+    GammaMarket,
     MarketFilters,
     OrderBook,
+    Position,
     PositionFilters,
+)
+from almanak.connectors.polymarket.models import (
+    HistoricalPrice as ClobHistoricalPrice,
+)
+from almanak.connectors.polymarket.models import (
+    HistoricalTrade as ClobHistoricalTrade,
+)
+from almanak.connectors.polymarket.models import (
+    PriceHistory as ClobPriceHistory,
 )
 from almanak.framework.data.prediction_provider import (
     ArbitrageOpportunity,
     CorrelationResult,
+    HistoricalPrice,
     HistoricalTrade,
     PredictionMarket,
     PredictionOrder,
@@ -38,6 +50,99 @@ from almanak.framework.data.prediction_provider import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Polymarket SDK -> neutral dataclass converters (VIB-4989)
+# =============================================================================
+# These build the framework's venue-neutral prediction dataclasses from
+# Polymarket's CLOB SDK types. They live in the connector (not as ``from_*``
+# classmethods on the framework dataclasses) so the framework data layer carries
+# no polymarket import — connector knowledge stays in the connector folder.
+
+
+def to_prediction_market(market: GammaMarket) -> PredictionMarket:
+    """Build a neutral PredictionMarket from a Polymarket GammaMarket."""
+    # Calculate spread from best bid/ask if available
+    spread = Decimal("0")
+    if market.best_bid is not None and market.best_ask is not None:
+        spread = market.best_ask - market.best_bid
+
+    return PredictionMarket(
+        market_id=market.id,
+        condition_id=market.condition_id,
+        question=market.question,
+        slug=market.slug,
+        yes_price=market.yes_price,
+        no_price=market.no_price,
+        yes_token_id=market.yes_token_id,
+        no_token_id=market.no_token_id,
+        spread=spread,
+        volume_24h=market.volume_24hr,
+        liquidity=market.liquidity,
+        end_date=market.end_date,
+        is_active=market.active,
+        is_resolved=market.closed,
+        event_id=market.event_id,
+        event_slug=market.event_slug,
+        tags=market.tags,
+    )
+
+
+def to_prediction_position(pos: Position) -> PredictionPosition:
+    """Build a neutral PredictionPosition from a Polymarket Position."""
+    return PredictionPosition(
+        market_id=pos.market_id,
+        condition_id=pos.condition_id,
+        token_id=pos.token_id,
+        outcome=pos.outcome,
+        size=pos.size,
+        avg_price=pos.avg_price,
+        current_price=pos.current_price,
+        unrealized_pnl=pos.unrealized_pnl,
+        realized_pnl=pos.realized_pnl,
+    )
+
+
+def to_historical_price(price: ClobHistoricalPrice) -> HistoricalPrice:
+    """Build a neutral HistoricalPrice from a Polymarket CLOB historical price."""
+    return HistoricalPrice(
+        timestamp=price.timestamp,
+        price=price.price,
+    )
+
+
+def to_price_history(
+    history: ClobPriceHistory,
+    market_id: str,
+    outcome: Literal["YES", "NO"],
+) -> PriceHistory:
+    """Build a neutral PriceHistory from a Polymarket CLOB price history."""
+    return PriceHistory(
+        market_id=market_id,
+        outcome=outcome,
+        interval=history.interval,
+        prices=[to_historical_price(p) for p in history.prices],
+        start_time=history.start_time,
+        end_time=history.end_time,
+    )
+
+
+def to_historical_trade(
+    trade: ClobHistoricalTrade,
+    outcome: Literal["YES", "NO"],
+    market_id: str,
+) -> HistoricalTrade:
+    """Build a neutral HistoricalTrade from a Polymarket CLOB historical trade."""
+    return HistoricalTrade(
+        id=trade.id,
+        market_id=market_id,
+        outcome=outcome,
+        side=trade.side,
+        price=trade.price,
+        size=trade.size,
+        timestamp=trade.timestamp,
+    )
 
 
 @dataclass
@@ -185,7 +290,7 @@ class PredictionMarketDataProvider:
         else:
             gamma_market = self.client.get_market(market_id_or_slug)
 
-        market = PredictionMarket.from_gamma_market(gamma_market)
+        market = to_prediction_market(gamma_market)
         self._set_cached(cache_key, market)
 
         # Also cache by ID and slug for faster lookups
@@ -238,7 +343,7 @@ class PredictionMarketDataProvider:
             return None
 
         gamma_market = markets[0]
-        market = PredictionMarket.from_gamma_market(gamma_market)
+        market = to_prediction_market(gamma_market)
 
         # Cache by token_id, market_id, and slug for future lookups
         self._set_cached(cache_key, market)
@@ -450,7 +555,7 @@ class PredictionMarketDataProvider:
         # Use client's get_positions which handles wallet default
         raw_positions = self.client.get_positions(wallet=wallet, filters=filters)
 
-        positions = [PredictionPosition.from_position(p) for p in raw_positions]
+        positions = [to_prediction_position(p) for p in raw_positions]
 
         logger.debug(
             "Fetched positions",
@@ -688,7 +793,7 @@ class PredictionMarketDataProvider:
         )
 
         # Convert to provider model
-        result = PriceHistory.from_clob_history(
+        result = to_price_history(
             history=clob_history,
             market_id=market.market_id,
             outcome=outcome,
@@ -773,7 +878,7 @@ class PredictionMarketDataProvider:
             # Convert to provider models
             for trade in clob_trades:
                 all_trades.append(
-                    HistoricalTrade.from_clob_trade(
+                    to_historical_trade(
                         trade=trade,
                         outcome=token_outcome,
                         market_id=market.market_id,
@@ -843,7 +948,7 @@ class PredictionMarketDataProvider:
             for gamma_market in event_markets:
                 if gamma_market.id not in seen_ids:
                     seen_ids.add(gamma_market.id)
-                    related_markets.append(PredictionMarket.from_gamma_market(gamma_market))
+                    related_markets.append(to_prediction_market(gamma_market))
 
         # Get markets with the same tags
         if include_same_tags and source_market.tags:
@@ -852,7 +957,7 @@ class PredictionMarketDataProvider:
                 for gamma_market in tag_markets:
                     if gamma_market.id not in seen_ids:
                         seen_ids.add(gamma_market.id)
-                        related_markets.append(PredictionMarket.from_gamma_market(gamma_market))
+                        related_markets.append(to_prediction_market(gamma_market))
 
         logger.debug(
             "Found related markets",
@@ -902,7 +1007,7 @@ class PredictionMarketDataProvider:
         )
 
         gamma_markets = self.client.get_markets(filters)
-        markets = [PredictionMarket.from_gamma_market(m) for m in gamma_markets]
+        markets = [to_prediction_market(m) for m in gamma_markets]
 
         logger.debug(
             "Fetched markets by category",

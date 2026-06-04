@@ -12,16 +12,16 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.connectors.polymarket.prediction_provider import PredictionMarketDataProvider
 from almanak.framework.data.market_snapshot import (
     PredictionUnavailableError,
 )
-from almanak.framework.market import MarketSnapshot
 from almanak.framework.data.prediction_provider import (
     PredictionMarket,
-    PredictionMarketDataProvider,
     PredictionOrder,
     PredictionPosition,
 )
+from almanak.framework.market import MarketSnapshot
 
 # =============================================================================
 # Fixtures

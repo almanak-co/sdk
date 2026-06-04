@@ -199,7 +199,7 @@ class ClobActionHandler:
                 size=req_size,
                 side=str(order_request.get("side", "")),
                 market=markets[0],
-                time_in_force=str(order_request.get("time_in_force", bundle.metadata.get("order_type", "GTC"))),
+                time_in_force=(order_type_hint or "GTC"),
                 expiration=int(order_request.get("expiration", 0) or 0),
             )
 
