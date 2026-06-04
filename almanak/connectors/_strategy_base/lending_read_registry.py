@@ -165,6 +165,12 @@ class LendingReadRegistry:
         # Market-scoped target + synthetic "<col>/<loan>" market ids (Silo intents
         # carry no market_id). See silo_v2/lending_read.py.
         "silo_v2": ("almanak.connectors.silo_v2.lending_read", "ACCOUNT_STATE_READ_SPEC"),
+        # Euler V2 joined in VIB-4966 — a bespoke vault/EVC reader (Euler has no
+        # Aave-style getUserAccountData; its independent ERC-4626 vaults are read via
+        # maxWithdraw on the deposit vault + debtOf on the borrow/controller vault).
+        # Market-scoped target + synthetic "<col>" / "<col>/<loan>" market ids (Euler
+        # intents carry no market_id). See euler_v2/lending_read.py.
+        "euler_v2": ("almanak.connectors.euler_v2.lending_read", "ACCOUNT_STATE_READ_SPEC"),
     }
 
     # Multi-collateral account-HEALTH read dispatch (VIB-4851 PR-2). Distinct from the
@@ -200,6 +206,14 @@ class LendingReadRegistry:
         # (derived from SILO_V2_MARKETS), not addresses.py, since Silo has no
         # separate addresses module.
         "silo_v2": ("almanak.connectors.silo_v2.lending_read", "SILO_V2_ACCOUNT_STATE_MARKETS"),
+        # Euler V2's synthetic per-vault account-state table (VIB-4966): each entry
+        # folds in the collateral vault (``comet_address``), the optional paired
+        # borrow/controller vault (``debt_vault_address``), and the collateral/loan
+        # token symbols, keyed by a synthetic ``"<col>"`` (collateral-only) or
+        # ``"<col>/<loan>"`` (borrow) market id. Lives in the connector's
+        # lending_read module (derived from EULER_V2_VAULTS_BY_CHAIN), since Euler
+        # has no separate addresses module.
+        "euler_v2": ("almanak.connectors.euler_v2.lending_read", "EULER_V2_ACCOUNT_STATE_MARKETS"),
     }
 
     # Sentinel ``position_manager_address`` returns for a market-scoped protocol

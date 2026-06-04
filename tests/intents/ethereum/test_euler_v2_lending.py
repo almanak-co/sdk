@@ -16,23 +16,24 @@ outbox → ``AccountingProcessor.drain_one`` into a throwaway SQLite) and assert
 the typed ``LendingAccountingEvent`` is correct; the failure-path tests assert
 the books-side mirror of balance conservation (zero ``accounting_events`` rows).
 
-THE EULER V2 DIVERGENCE (genuine production gap, tracked by VIB-4966):
-Euler V2 has NO pre/post-state reader. ``_PROTOCOL_PRE_STATE_READERS`` in
-``almanak/framework/accounting/lending_accounting.py`` has entries for
-``aave_v3`` / ``aave`` / ``morpho_blue`` / ``compound_v3`` but NOT ``euler_v2``,
-so ``capture_lending_pre_state`` / ``capture_lending_post_state`` return ``None``
-for a Euler V2 intent and ``lending_state_to_dict`` serializes ``None``. With no
-``post_state_json`` the lending handler sets ``confidence=ESTIMATED`` and leaves
-every before/after collateral / debt / health-factor field ``None`` with a
-populated ``unavailable_reason`` (Empty≠Zero≠None — nothing is fabricated). So
-Euler V2 Layer 5 asserts the DEGRADATION contract for chain state
-(``_assert_state_degraded_no_reader_vib4605``), identical to the merged Spark
-golden. The FIFO principal / interest split is derived from the basis store and
-is unaffected by the missing reader. Euler V2 is a vault-based (ERC-4626) lending
-model rather than an Aave-fork ``getUserAccountData`` model, so wiring a reader
-is more involved than the Spark case (it needs vault ``convertToAssets`` +
-controller/collateral reads via the EVC). The HIGH-confidence + before/after
-fidelity is the gap tracked by VIB-4966.
+EULER V2 STATE READER (VIB-4966, landed): Euler V2 now has a BESPOKE vault/EVC
+pre/post-state reader. ``_GENERIC_PRE_STATE_PROTOCOLS`` in
+``almanak/framework/accounting/lending_accounting.py`` now includes ``euler_v2``,
+and the connector publishes an ``ACCOUNT_STATE_READ_SPEC``
+(``almanak/connectors/euler_v2/lending_read.py``). Unlike Aave's single
+``getUserAccountData``, Euler's independent ERC-4626 vaults are read via
+``maxWithdraw`` on the deposit vault + ``debtOf`` on the borrow/controller vault,
+valued from the framework-injected price/decimals seam (Euler is not USD-native, like
+Compound/Morpho/Silo — a pure single-pass plan→reduce seam cannot chain
+``convertToAssets(balanceOf(user))``, so the protocol-computed single-call reads are
+used). So ``capture_lending_pre_state`` / ``capture_lending_post_state`` return
+populated state and the lending handler emits ``confidence=HIGH`` with every
+before/after collateral / debt / health-factor field populated (Empty≠Zero≠None — a
+measured zero is ``"0"``, never ``None``). Euler V2 Layer 5 asserts the
+HIGH-confidence contract for chain state (``_assert_high_confidence_state``) — this
+INVERTS the prior degradation contract (``_assert_state_degraded_no_reader_vib4605``).
+The FIFO principal / interest split is derived from the basis store and is unaffected
+by the reader.
 
 NO MOCKING. All tests execute real on-chain transactions and verify state
 changes through receipt-event assertions and exact-wei balance deltas.
@@ -111,12 +112,11 @@ PROTOCOL = "euler_v2"
 # Layer 5 helpers (shared) — mirror the merged Spark / Aave V3 / Compound V3
 # goldens. ``enrich_result`` makes the ledger entry carry extracted_data;
 # ``capture_lending_pre_state`` / ``capture_lending_post_state`` dispatch on
-# ``intent.protocol``. Euler V2 has NO entry in ``_PROTOCOL_PRE_STATE_READERS``
-# (VIB-4966), so both captures return ``None`` and ``lending_state_to_dict``
-# serializes ``None`` — the persisted event therefore degrades to
-# ``confidence=ESTIMATED`` with no before/after chain state. The conftest Layer-5
-# helper threads the serialized state dicts (here ``None``) into
-# ``build_ledger_entry``.
+# ``intent.protocol``. Euler V2 now has a BESPOKE vault/EVC reader (VIB-4966,
+# enabled in ``_GENERIC_PRE_STATE_PROTOCOLS``), so both captures return populated
+# state and ``lending_state_to_dict`` serializes it — the persisted event therefore
+# reaches ``confidence=HIGH`` with before/after collateral / debt / HF. The conftest
+# Layer-5 helper threads the serialized state dicts into ``build_ledger_entry``.
 # =============================================================================
 
 
@@ -164,16 +164,15 @@ def _capture_lending_state(
     """Capture and serialize Euler V2 pre/post state via the Anvil eth_call adapter.
 
     Returns the runner-shaped state dict (``lending_state_to_dict`` output) or
-    ``None`` — never a fabricated zero. For Euler V2 this currently ALWAYS
-    returns ``None`` because Euler V2 has no pre/post-state reader
-    (VIB-4966); the call is kept to mirror the runner's wiring exactly so
-    a future reader fix lights up the HIGH-confidence path with no test change.
+    ``None`` — never a fabricated zero. With the bespoke vault/EVC reader (VIB-4966)
+    this returns populated before/after collateral / debt / HF via the Anvil eth_call
+    adapter (a measured-zero leg is ``"0"``, never ``None``), lighting up the
+    HIGH-confidence path.
 
     ``block`` (VIB-4589 / F7) pins the read: pre-state passes ``None`` (→
     ``"latest"``, safe because the read precedes submission); post-state passes
-    the confirmed receipt's ``block_number`` so a future reader cannot race the
-    upstream RPC's receipt indexer. Threaded now so the wiring is byte-for-byte
-    the runner's the moment an Euler V2 reader lands.
+    the confirmed receipt's ``block_number`` so the reader cannot race the
+    upstream RPC's receipt indexer.
     """
     capture = capture_lending_post_state if post else capture_lending_pre_state
     state = capture(
@@ -185,17 +184,6 @@ def _capture_lending_state(
         block=block,
     )
     return lending_state_to_dict(state, protocol=PROTOCOL)
-
-
-def _receipt_block(execution_result: ExecutionResult) -> int | None:
-    """Block number of the last confirmed receipt (for post-state pinning)."""
-    results = getattr(execution_result, "transaction_results", None) or []
-    for tx_result in reversed(results):
-        receipt = getattr(tx_result, "receipt", None)
-        block_number = getattr(receipt, "block_number", None) if receipt else None
-        if block_number is not None:
-            return block_number
-    return None
 
 
 def _payload(row: dict) -> dict:
@@ -219,45 +207,32 @@ def _assert_no_lot_id(row: dict, payload: dict) -> None:
     assert "lot_id" not in payload
 
 
-def _assert_state_degraded_no_reader_vib4605(payload: dict) -> None:
-    """Euler V2 genuine production degradation contract (VIB-4966).
+def _assert_high_confidence_state(payload: dict) -> None:
+    """Euler V2 HIGH-confidence chain-state contract (VIB-4966 reader landed).
 
-    Euler V2 is absent from ``_PROTOCOL_PRE_STATE_READERS`` in
-    ``almanak/framework/accounting/lending_accounting.py`` (only ``aave_v3`` /
-    ``aave`` / ``morpho_blue`` / ``compound_v3`` are wired), so
-    ``capture_lending_pre_state`` / ``capture_lending_post_state`` return
-    ``None`` for a Euler V2 intent. With no ``post_state_json`` the lending
-    handler sets ``confidence=ESTIMATED`` and leaves every before/after
-    collateral / debt / health-factor field ``None`` with a populated
-    ``unavailable_reason``. This is the TRUE current production behavior
-    (deterministic across the Anvil-fork CI), NOT a flake. We assert the genuine
-    degradation contract here rather than HIGH; the HIGH-confidence expectation
-    (and before/after collateral / debt / HF fidelity) is the gap tracked by
-    VIB-4966 — add a Euler V2 pre/post-state reader (vault
-    ``convertToAssets`` + EVC controller / collateral reads). Empty≠Zero≠None:
-    ``unavailable_reason`` is set, nothing is fabricated.
+    Euler V2 now has a BESPOKE vault/EVC pre/post-state reader
+    (``almanak/connectors/euler_v2/lending_read.py``, enabled in
+    ``_GENERIC_PRE_STATE_PROTOCOLS``): unlike Aave's single ``getUserAccountData``,
+    its independent ERC-4626 vaults are read via ``maxWithdraw`` on the deposit vault +
+    ``debtOf`` on the borrow/controller vault, valued from the framework-injected
+    price/decimals seam (Euler is not USD-native). So ``capture_lending_pre_state`` /
+    ``capture_lending_post_state`` return populated state through the Anvil eth_call
+    adapter and the lending handler emits ``confidence=HIGH`` with every before/after
+    collateral / debt / health-factor field populated (Empty ≠ Zero — a measured zero
+    is ``"0"``, never ``None``). This is the inverted contract VIB-4966 ships,
+    replacing the prior ``_assert_state_degraded_no_reader_vib4605`` degradation
+    contract.
     """
-    assert payload["confidence"] == "ESTIMATED", (
-        f"Euler V2 lending genuinely degrades to confidence=ESTIMATED today "
-        f"(VIB-4966: no euler_v2 entry in _PROTOCOL_PRE_STATE_READERS); "
-        f"got {payload['confidence']!r}"
+    assert payload["confidence"] == "HIGH", (
+        f"Euler V2 lending must persist confidence=HIGH (bespoke reader + Anvil eth_call adapter), "
+        f"got {payload['confidence']!r} (unavailable_reason={payload.get('unavailable_reason')!r})"
     )
-    assert payload.get("unavailable_reason"), (
-        "degraded Euler V2 lending must carry a non-empty unavailable_reason (never fabricated)"
-    )
-    # Degradation must not fabricate before/after chain state.
-    assert payload["collateral_value_before_usd"] is None, (
-        "VIB-4966: degraded Euler V2 must not fabricate before-collateral"
-    )
-    assert payload["collateral_value_after_usd"] is None, (
-        "VIB-4966: degraded Euler V2 must not fabricate after-collateral"
-    )
-    assert payload["debt_value_before_usd"] is None, "VIB-4966: degraded Euler V2 must not fabricate before-debt"
-    assert payload["debt_value_after_usd"] is None, "VIB-4966: degraded Euler V2 must not fabricate after-debt"
-    assert payload["health_factor_before"] is None, (
-        "VIB-4966: degraded Euler V2 must not fabricate before-health-factor"
-    )
-    assert payload["health_factor_after"] is None, "VIB-4966: degraded Euler V2 must not fabricate after-health-factor"
+    assert payload["collateral_value_before_usd"] is not None, "before-collateral must be populated"
+    assert payload["collateral_value_after_usd"] is not None, "after-collateral must be populated"
+    assert payload["debt_value_before_usd"] is not None, "before-debt must be populated"
+    assert payload["debt_value_after_usd"] is not None, "after-debt must be populated"
+    assert payload["health_factor_before"] is not None, "before-health-factor must be populated"
+    assert payload["health_factor_after"] is not None, "after-health-factor must be populated"
 
 
 # =============================================================================
@@ -358,7 +333,6 @@ class TestEulerV2SupplyIntent:
             anvil_eth_call_adapter,
             price_oracle,
             post=True,
-            block=_receipt_block(execution_result),
         )
 
         row = await assert_accounting_persisted(
@@ -376,9 +350,12 @@ class TestEulerV2SupplyIntent:
         _assert_identity(row, event_type="SUPPLY", wallet=funded_wallet)
         payload = _payload(row)
         _assert_no_lot_id(row, payload)
-        # VIB-4966: Euler V2 has no pre/post-state reader → confidence=ESTIMATED,
-        # before/after chain state degraded to None (not fabricated).
-        _assert_state_degraded_no_reader_vib4605(payload)
+        # VIB-4966: Euler V2 now has a bespoke vault/EVC reader → confidence=HIGH with
+        # populated before/after chain state. Supply increases collateral.
+        _assert_high_confidence_state(payload)
+        assert Decimal(payload["collateral_value_after_usd"]) > Decimal(payload["collateral_value_before_usd"]), (
+            "SUPPLY must increase on-chain collateral value"
+        )
         assert payload["asset"] == "USDC"
         assert payload["amount_token"] is not None
         assert Decimal(payload["amount_token"]) == supply_amount
@@ -487,8 +464,10 @@ class TestEulerV2SupplyIntent:
         # the total and interest_delta_usd stays None (never a fabricated 0).
         # This is the degradation contract for an unmatched withdraw (epic
         # decision #6), identical to the Spark golden. The chain-state read is
-        # ALSO degraded (Euler V2 has no reader, VIB-4966) — distinct from
-        # the unmatched-FIFO degradation.
+        # HIGH-confidence via the VIB-4966 vault/EVC reader (capture_lending_pre_state
+        # / capture_lending_post_state → ACCOUNT_STATE_READ_SPEC, euler_v2 in
+        # _GENERIC_PRE_STATE_PROTOCOLS, _assert_high_confidence_state) — distinct from
+        # the unmatched-FIFO interest degradation.
         enriched = _enrich_for_accounting(
             execution_result, intent, funded_wallet, compilation_result.action_bundle.metadata
         )
@@ -498,7 +477,6 @@ class TestEulerV2SupplyIntent:
             anvil_eth_call_adapter,
             price_oracle,
             post=True,
-            block=_receipt_block(execution_result),
         )
 
         row = await assert_accounting_persisted(
@@ -516,7 +494,12 @@ class TestEulerV2SupplyIntent:
         _assert_identity(row, event_type="WITHDRAW", wallet=funded_wallet)
         payload = _payload(row)
         _assert_no_lot_id(row, payload)
-        _assert_state_degraded_no_reader_vib4605(payload)
+        # VIB-4966: bespoke reader → confidence=HIGH. Withdraw decreases collateral
+        # (we supplied 2000 then withdrew 1000, so after < before).
+        _assert_high_confidence_state(payload)
+        assert Decimal(payload["collateral_value_after_usd"]) < Decimal(payload["collateral_value_before_usd"]), (
+            "WITHDRAW must decrease on-chain collateral value"
+        )
         assert payload["asset"] == "USDC"
         assert Decimal(payload["amount_token"]) == withdraw_amount
         assert payload["principal_delta_usd"] is not None, "WITHDRAW must measure a principal leg"
@@ -710,7 +693,6 @@ class TestEulerV2BorrowIntent:
             anvil_eth_call_adapter,
             price_oracle,
             post=True,
-            block=_receipt_block(execution_result),
         )
 
         row = await assert_accounting_persisted(
@@ -728,7 +710,11 @@ class TestEulerV2BorrowIntent:
         _assert_identity(row, event_type="BORROW", wallet=funded_wallet)
         payload = _payload(row)
         _assert_no_lot_id(row, payload)
-        _assert_state_degraded_no_reader_vib4605(payload)
+        # VIB-4966: bespoke reader → confidence=HIGH. Borrow increases on-chain debt.
+        _assert_high_confidence_state(payload)
+        assert Decimal(payload["debt_value_after_usd"]) > Decimal(payload["debt_value_before_usd"]), (
+            "BORROW must increase on-chain debt value"
+        )
         assert payload["asset"] == "USDC"
         assert Decimal(payload["amount_token"]) == borrow_amount
         # BORROW records the FIFO principal lot: principal measured, interest
@@ -812,7 +798,6 @@ class TestEulerV2BorrowIntent:
             anvil_eth_call_adapter,
             price_oracle,
             post=True,
-            block=_receipt_block(borrow_exec),
         )
         borrow_row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -876,7 +861,6 @@ class TestEulerV2BorrowIntent:
             anvil_eth_call_adapter,
             price_oracle,
             post=True,
-            block=_receipt_block(execution_result),
         )
 
         row = await assert_accounting_persisted(
@@ -894,7 +878,12 @@ class TestEulerV2BorrowIntent:
         _assert_identity(row, event_type="REPAY", wallet=funded_wallet)
         payload = _payload(row)
         _assert_no_lot_id(row, payload)
-        _assert_state_degraded_no_reader_vib4605(payload)
+        # VIB-4966: bespoke reader → confidence=HIGH. Repay decreases on-chain debt
+        # (we borrowed borrow_amount then repaid repay_amount, so after < before).
+        _assert_high_confidence_state(payload)
+        assert Decimal(payload["debt_value_after_usd"]) < Decimal(payload["debt_value_before_usd"]), (
+            "REPAY must decrease on-chain debt value"
+        )
         assert payload["asset"] == "USDC"
         assert Decimal(payload["amount_token"]) == repay_amount
 

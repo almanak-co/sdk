@@ -104,8 +104,15 @@ def _decode_word(hex_data: str, word_index: int) -> int:
 # protocol-computed single eth_calls). Not USD-native (priced via the injected
 # valuation seam, like Compound/Morpho). Fork-verified on avalanche by the Layer-5
 # Silo intent tests (HIGH-confidence before/after collateral / debt / HF).
+# VIB-4966: ``euler_v2`` joined — a BESPOKE vault/EVC reader (Euler V2 has no
+# Aave-style ``getUserAccountData``; its independent ERC-4626 vaults are read via
+# ``maxWithdraw`` on the deposit vault + ``debtOf`` on the borrow/controller vault,
+# both protocol-computed single eth_calls). Not USD-native (priced via the injected
+# valuation seam, like Compound/Morpho/Silo). Fork-verified on ethereum + avalanche
+# by the Layer-5 Euler intent tests (HIGH-confidence before/after collateral / debt /
+# HF on the SUPPLY/WITHDRAW path).
 _GENERIC_PRE_STATE_PROTOCOLS: frozenset[str] = frozenset(
-    {"aave_v3", "aave", "morpho_blue", "compound_v3", "spark", "silo_v2"}
+    {"aave_v3", "aave", "morpho_blue", "compound_v3", "spark", "silo_v2", "euler_v2"}
 )
 
 
