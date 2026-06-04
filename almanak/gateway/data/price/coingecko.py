@@ -25,13 +25,16 @@ Example:
 import asyncio
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any
 
 import aiohttp
 
+from almanak.core.chains._helpers import vendor_chain_map
 from almanak.core.constants import STABLECOINS
 from almanak.framework.data.interfaces import (
     BasePriceSource,
@@ -50,24 +53,8 @@ logger = logging.getLogger(__name__)
 # which prices a token by its on-chain address — no CoinGecko ID needed.
 # This lets us resolve tokens that aren't in our static symbol registry
 # (e.g. cbBTC, niche LSTs) as long as the caller supplies chain + address.
-COINGECKO_PLATFORM_IDS: dict[str, str] = {
-    "ethereum": "ethereum",
-    "arbitrum": "arbitrum-one",
-    "optimism": "optimistic-ethereum",
-    "base": "base",
-    "polygon": "polygon-pos",
-    "avalanche": "avalanche",
-    "bsc": "binance-smart-chain",
-    "sonic": "sonic",
-    "mantle": "mantle",
-    "berachain": "berachain",
-    "monad": "monad",
-    "xlayer": "xlayer",
-    "zerog": "zerog",
-    "linea": "linea",
-    "blast": "blast",
-    "plasma": "plasma",
-}
+# Derived from ``ChainDescriptor.external_ids`` per VIB-4851 B1 (canonical-only).
+COINGECKO_PLATFORM_IDS: Mapping[str, str] = MappingProxyType(vendor_chain_map("coingecko"))
 
 
 # Token ID mappings for Arbitrum tokens

@@ -39,13 +39,16 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from types import MappingProxyType
 from typing import Any
 
 import aiohttp
 
+from almanak.core.chains._helpers import vendor_chain_map
 from almanak.framework.data.interfaces import DataSourceUnavailable, OHLCVCandle
 from almanak.framework.data.models import (
     DataClassification,
@@ -61,16 +64,8 @@ _YIELDS_API = "https://yields.llama.fi"
 _TVL_API = "https://api.llama.fi"
 
 # Chain name -> DeFi Llama chain prefix mapping
-_CHAIN_TO_LLAMA: dict[str, str] = {
-    "ethereum": "ethereum",
-    "arbitrum": "arbitrum",
-    "base": "base",
-    "optimism": "optimism",
-    "polygon": "polygon",
-    "avalanche": "avax",
-    "bsc": "bsc",
-    "sonic": "sonic",
-}
+# Derived from ``ChainDescriptor.external_ids`` per VIB-4851 B1 (canonical-only).
+_CHAIN_TO_LLAMA: Mapping[str, str] = MappingProxyType(vendor_chain_map("defillama"))
 
 
 @dataclass

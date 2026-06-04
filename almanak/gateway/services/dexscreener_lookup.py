@@ -40,9 +40,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
+from almanak.core.chains._helpers import external_id_for, vendor_chain_map
 from almanak.framework.data.tokens.exceptions import AmbiguousTokenError
 
 logger = logging.getLogger(__name__)
@@ -99,25 +102,8 @@ DEFAULT_GATE_CONFIG = DexScreenerGateConfig()
 # IMPORTANT: keep this map as a subset of ``almanak.gateway.validation.ALLOWED_CHAINS``
 # (plus ``"solana"``, which routes through Jupiter instead). Listing a chain here
 # that the gateway rejects upstream is dead code and misleading.
-CHAIN_SLUG_MAP: dict[str, str] = {
-    "ethereum": "ethereum",
-    "arbitrum": "arbitrum",
-    "optimism": "optimism",
-    "base": "base",
-    "polygon": "polygon",
-    "avalanche": "avalanche",
-    "bsc": "bsc",
-    "sonic": "sonic",
-    "mantle": "mantle",
-    "berachain": "berachain",
-    "monad": "monad",
-    "xlayer": "xlayer",
-    "zerog": "zerog",
-    "blast": "blast",
-    "linea": "linea",
-    "plasma": "plasma",
-    "solana": "solana",  # Informational; Solana path goes through Jupiter.
-}
+# Derived from ``ChainDescriptor.external_ids`` per VIB-4851 B1 (canonical-only).
+CHAIN_SLUG_MAP: Mapping[str, str] = MappingProxyType(vendor_chain_map("dexscreener"))
 
 
 # =============================================================================
@@ -179,9 +165,13 @@ class _Candidate:
 def chain_slug_for(chain: str) -> str | None:
     """Translate an SDK chain name to a DexScreener chainId.
 
-    Returns None if DexScreener does not index the chain.
+    Resolved from the registry via ``ChainDescriptor.external_ids["dexscreener"]``
+    (VIB-4851 B1), so chain aliases normalise through the registry — e.g.
+    ``chain_slug_for("bnb") == "bsc"``. Returns None if DexScreener does not
+    index the chain. ``CHAIN_SLUG_MAP`` remains the derived (canonical-only)
+    membership view for callers that enumerate supported chains.
     """
-    return CHAIN_SLUG_MAP.get(chain.lower())
+    return external_id_for(chain, "dexscreener")
 
 
 async def find_token_address(

@@ -118,6 +118,7 @@ class TestChainSlug:
     def test_maps_known_chains_case_insensitively(self) -> None:
         assert chain_slug_for("Arbitrum") == "arbitrum"
         assert chain_slug_for("BASE") == "base"
+        assert chain_slug_for("bnb") == "bsc"  # alias resolves via the registry (VIB-4851 B1)
 
     def test_returns_none_for_unknown_chain(self) -> None:
         assert chain_slug_for("fantom_opera") is None

@@ -27,13 +27,16 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any
 
 import aiohttp
 
+from almanak.core.chains._helpers import vendor_chain_map
 from almanak.framework.data.interfaces import (
     DataSourceUnavailable,
     OHLCVCandle,
@@ -51,18 +54,8 @@ logger = logging.getLogger(__name__)
 _API_BASE = "https://api.geckoterminal.com/api/v2"
 
 # Chain name -> GeckoTerminal network ID mapping
-_CHAIN_TO_NETWORK: dict[str, str] = {
-    "ethereum": "eth",
-    "arbitrum": "arbitrum",
-    "base": "base",
-    "optimism": "optimism",
-    "polygon": "polygon_pos",
-    "avalanche": "avax",
-    "bsc": "bsc",
-    "sonic": "sonic",
-    "solana": "solana",
-    "mantle": "mantle",
-}
+# Derived from ``ChainDescriptor.external_ids`` per VIB-4851 B1 (canonical-only).
+_CHAIN_TO_NETWORK: Mapping[str, str] = MappingProxyType(vendor_chain_map("geckoterminal"))
 
 # GeckoTerminal timeframe -> API parameter mapping
 # GeckoTerminal uses: day, hour, minute as aggregate param

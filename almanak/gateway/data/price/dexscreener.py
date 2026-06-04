@@ -13,14 +13,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import aiohttp
 
 from almanak.core.chains import ChainRegistry
+from almanak.core.chains._helpers import vendor_chain_map
 from almanak.core.enums import ChainFamily
 from almanak.framework.data.interfaces import (
     BasePriceSource,
@@ -40,28 +43,10 @@ BASE_URL = "https://api.dexscreener.com"
 
 # Chain name mapping to DexScreener platform slugs.
 # DexScreener uses specific platform identifiers in its API URLs.
-CHAIN_TO_DEXSCREENER_PLATFORM: dict[str, str] = {
-    # EVM chains
-    "ethereum": "ethereum",
-    "arbitrum": "arbitrum",
-    "base": "base",
-    "optimism": "optimism",
-    "polygon": "polygon",
-    "bsc": "bsc",
-    "bnb": "bsc",
-    "avalanche": "avalanche",
-    "sonic": "sonic",
-    "blast": "blast",
-    "linea": "linea",
-    "mantle": "mantle",
-    "berachain": "berachain",
-    "monad": "monad",
-    "plasma": "plasma",
-    "xlayer": "xlayer",
-    "zerog": "zerog",
-    # Non-EVM
-    "solana": "solana",
-}
+# Derived from ``ChainDescriptor.external_ids`` per VIB-4851 B1 (canonical-only;
+# the "bnb" alias resolves through the registry, not as a map key — see
+# ``_CHAIN_ALIASES`` and ``external_id_for``).
+CHAIN_TO_DEXSCREENER_PLATFORM: Mapping[str, str] = MappingProxyType(vendor_chain_map("dexscreener"))
 
 # Canonicalize accepted aliases to the internal chain name used by
 # _KNOWN_TOKEN_ADDRESSES and TokenResolver. Without this, passing
