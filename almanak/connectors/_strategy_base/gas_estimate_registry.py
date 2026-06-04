@@ -62,9 +62,10 @@ What lives here
 
 * :data:`STRATEGY_GAS_ESTIMATE_REGISTRY` — the single in-process
   instance. Concrete strategy-side connectors are registered into it by
-  :func:`_register_all` in
+  descriptor-backed discovery in
   :mod:`almanak.connectors._strategy_gas_estimate_registry` (sibling of
-  ``_strategy_receipt_registry.py``).
+  ``_strategy_receipt_registry.py``). Each owning connector publishes its
+  provider through ``CONNECTOR.gas_estimate_connector``.
 
 Byte-equivalence (VIB-4858 requirement)
 =======================================

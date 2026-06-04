@@ -56,7 +56,10 @@ What lives here
   :class:`AgentReadToolRegistry`.
 
 * :data:`STRATEGY_VAULT_TOOL_REGISTRY` — the single in-process instance.
-  Registered by :mod:`almanak.connectors._strategy_agent_tool_registry`.
+  Registered by descriptor-backed discovery in
+  :mod:`almanak.connectors._strategy_agent_tool_registry`. Each owning vault
+  connector publishes providers through ``CONNECTOR.vault_tool_connector`` /
+  ``CONNECTOR.vault_tool_connectors``.
 
 Gateway-boundary note
 =====================

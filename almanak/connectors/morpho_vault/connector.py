@@ -16,6 +16,10 @@ CONNECTOR = Connector(
         attribute="MorphoVaultGatewayConnector",
         order=5,
     ),
+    gas_estimate_connector=ImportRef(
+        module="almanak.connectors.morpho_vault.gas_estimate_provider",
+        attribute="MetaMorphoGasEstimateConnector",
+    ),
     receipt_parser_protocols=("metamorpho",),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.morpho_vault.receipt_parser_provider",

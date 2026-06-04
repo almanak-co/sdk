@@ -17,6 +17,11 @@ CONNECTOR = Connector(
         attribute="AerodromeGatewayConnector",
         order=13,
     ),
+    agent_read_connector=ImportRef(
+        module="almanak.connectors.aerodrome.agent_read_provider",
+        attribute="AerodromeSlipstreamAgentReadConnector",
+        order=3,
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.aerodrome.receipt_parser_provider",
         attribute="AerodromeReceiptParserConnector",

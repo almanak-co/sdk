@@ -11,6 +11,11 @@ from almanak.connectors._connector import (
 CONNECTOR = Connector(
     name="lagoon",
     kind=ProtocolKind.VAULT,
+    vault_tool_connector=ImportRef(
+        module="almanak.connectors.lagoon.vault_tool_provider",
+        attribute="LagoonVaultToolConnector",
+        order=1,
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.lagoon.receipt_parser_provider",
         attribute="LagoonReceiptParserConnector",

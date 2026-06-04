@@ -16,6 +16,11 @@ CONNECTOR = Connector(
         attribute="SushiSwapV3GatewayConnector",
         order=25,
     ),
+    agent_read_connector=ImportRef(
+        module="almanak.connectors.sushiswap_v3.agent_read_provider",
+        attribute="SushiswapV3AgentReadConnector",
+        order=5,
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.sushiswap_v3.receipt_parser_provider",
         attribute="SushiSwapV3ReceiptParserConnector",

@@ -16,6 +16,11 @@ CONNECTOR = Connector(
         attribute="PancakeSwapV3GatewayConnector",
         order=20,
     ),
+    agent_read_connector=ImportRef(
+        module="almanak.connectors.pancakeswap_v3.agent_read_provider",
+        attribute="PancakeswapV3AgentReadConnector",
+        order=4,
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.pancakeswap_v3.receipt_parser_provider",
         attribute="PancakeSwapV3ReceiptParserConnector",

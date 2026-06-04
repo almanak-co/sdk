@@ -74,8 +74,10 @@ What lives here
   ``get`` / ``all`` / ``with_capability`` / ``lookup``.
 
 * :data:`STRATEGY_AGENT_READ_REGISTRY` — the single in-process instance.
-  Concrete connectors are registered into it by
-  :mod:`almanak.connectors._strategy_agent_tool_registry`.
+  Concrete connectors are registered into it by descriptor-backed discovery in
+  :mod:`almanak.connectors._strategy_agent_tool_registry`. Each owning
+  connector publishes providers through ``CONNECTOR.agent_read_connector`` /
+  ``CONNECTOR.agent_read_connectors``.
 
 Gateway-boundary note
 =====================

@@ -11,6 +11,7 @@ from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from almanak.connectors._connector import (
     CONNECTOR_REGISTRY,
     Connector,
+    ConnectorDiscoveryError,
     ConnectorRegistry,
 )
 from almanak.connectors._connector_descriptor import (
@@ -18,8 +19,17 @@ from almanak.connectors._connector_descriptor import (
     ConnectorDescriptor,
     ConnectorDescriptorRegistry,
 )
+from almanak.connectors._strategy_base.agent_read_registry import (
+    AgentReadConnector,
+)
+from almanak.connectors._strategy_base.gas_estimate_registry import (
+    GasEstimateConnector,
+)
 from almanak.connectors._strategy_base.receipt_parser_registry import (
     ReceiptParserConnector,
+)
+from almanak.connectors._strategy_base.vault_tool_registry import (
+    VaultToolConnector,
 )
 
 EXPECTED_CONNECTOR_KINDS = {
@@ -180,6 +190,36 @@ EXPECTED_GATEWAY_PROVIDER_ORDER = (
     "aster_perps",
 )
 
+EXPECTED_GAS_ESTIMATE_PROVIDER_MODULES = {
+    "aave_v3": "almanak.connectors.aave_v3.gas_estimate_provider",
+    "across": "almanak.connectors.across.gas_estimate_provider",
+    "balancer_v2": "almanak.connectors.balancer_v2.gas_estimate_provider",
+    "morpho_vault": "almanak.connectors.morpho_vault.gas_estimate_provider",
+    "uniswap_v3": "almanak.connectors.uniswap_v3.gas_estimate_provider",
+}
+
+EXPECTED_AGENT_READ_PROVIDER_MODULES = {
+    "aave_v3": "almanak.connectors.aave_v3.agent_read_provider",
+    "aerodrome_slipstream": "almanak.connectors.aerodrome.agent_read_provider",
+    "agni_finance": "almanak.connectors.uniswap_v3.agent_read_provider",
+    "pancakeswap_v3": "almanak.connectors.pancakeswap_v3.agent_read_provider",
+    "sushiswap_v3": "almanak.connectors.sushiswap_v3.agent_read_provider",
+    "uniswap_v3": "almanak.connectors.uniswap_v3.agent_read_provider",
+}
+
+EXPECTED_AGENT_READ_PROVIDER_ORDER = (
+    "uniswap_v3",
+    "agni_finance",
+    "aerodrome_slipstream",
+    "pancakeswap_v3",
+    "sushiswap_v3",
+    "aave_v3",
+)
+
+EXPECTED_VAULT_TOOL_PROVIDER_MODULES = {
+    "lagoon": "almanak.connectors.lagoon.vault_tool_provider",
+}
+
 
 def test_descriptor_names_alias_connector_interface() -> None:
     """Legacy descriptor names remain aliases for the canonical Connector API."""
@@ -204,6 +244,40 @@ def test_discovers_migrated_connectors() -> None:
     assert connectors["morpho_vault"].receipt_parser_keys == frozenset({"metamorpho"})
 
 
+def test_manifest_discovery_does_not_import_connector_package(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Manifest discovery avoids connector package side effects."""
+    import sys
+
+    import almanak.connectors as connectors_package
+
+    CONNECTOR_REGISTRY.clear()
+    sys.modules.pop("almanak.connectors.pancakeswap_perps", None)
+    sys.modules.pop("almanak.connectors.pancakeswap_perps.connector", None)
+    monkeypatch.delattr(connectors_package, "pancakeswap_perps", raising=False)
+
+    connector_manifest = CONNECTOR_REGISTRY.get("pancakeswap_perps")
+
+    assert connector_manifest is not None
+    assert connector_manifest.name == "pancakeswap_perps"
+    assert "almanak.connectors.pancakeswap_perps" not in sys.modules
+
+
+def test_connector_registry_rejects_reentrant_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recursive manifest discovery fails with an actionable registry error."""
+    registry = ConnectorRegistry()
+
+    def reenter_discovery() -> tuple[Connector, ...]:
+        return registry.all()
+
+    monkeypatch.setattr(registry, "_discover", reenter_discovery)
+
+    with pytest.raises(ConnectorDiscoveryError, match="recursive connector discovery"):
+        registry.all()
+
+    monkeypatch.setattr(registry, "_discover", lambda: ())
+    assert registry.all() == ()
+
+
 def test_connector_rejects_invalid_gateway_connector_ref() -> None:
     """Invalid singular gateway refs fail during manifest validation."""
     with pytest.raises(ValueError, match="Connector.gateway_connector"):
@@ -224,6 +298,36 @@ def test_connector_rejects_invalid_receipt_parser_connector_ref() -> None:
         )
 
 
+def test_connector_rejects_invalid_gas_estimate_connector_ref() -> None:
+    """Invalid gas-estimate refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.gas_estimate_connector"):
+        Connector(
+            name="bad_gas_ref",
+            kind=ProtocolKind.LP,
+            gas_estimate_connector=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_invalid_agent_read_connector_ref() -> None:
+    """Invalid agent-read refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.agent_read_connector"):
+        Connector(
+            name="bad_agent_read_ref",
+            kind=ProtocolKind.LP,
+            agent_read_connector=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_invalid_vault_tool_connector_ref() -> None:
+    """Invalid vault-tool refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.vault_tool_connector"):
+        Connector(
+            name="bad_vault_tool_ref",
+            kind=ProtocolKind.VAULT,
+            vault_tool_connector=object(),  # type: ignore[arg-type]
+        )
+
+
 def test_receipt_parser_connectors_instantiate_from_descriptors() -> None:
     """Migrated receipt-parser providers are published through connectors."""
     CONNECTOR_REGISTRY.clear()
@@ -238,6 +342,73 @@ def test_receipt_parser_connectors_instantiate_from_descriptors() -> None:
         assert isinstance(connector, ReceiptParserConnector)
         assert str(connector.protocol) in connector_manifest.receipt_parser_keys
         assert connector.receipt_parser_keys() == connector_manifest.receipt_parser_keys
+        assert type(connector).__module__ == module
+
+
+def test_gas_estimate_connectors_instantiate_from_descriptors() -> None:
+    """Migrated gas-estimate providers are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    for name, module in EXPECTED_GAS_ESTIMATE_PROVIDER_MODULES.items():
+        connector_manifest = CONNECTOR_REGISTRY.get(name)
+
+        assert connector_manifest is not None
+        assert connector_manifest.gas_estimate_connector is not None
+        connector = connector_manifest.gas_estimate_connector.instantiate()
+
+        assert isinstance(connector, GasEstimateConnector)
+        assert type(connector).__module__ == module
+
+
+def test_agent_read_connectors_instantiate_from_descriptors() -> None:
+    """Migrated agent-read providers are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, tuple[AgentReadConnector, str]] = {}
+    orders: dict[str, int | None] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.all():
+        for import_ref in connector_manifest.agent_read_connector_refs:
+            connector = import_ref.instantiate()
+            connectors[str(connector.protocol)] = (connector, import_ref.module)
+            orders[str(connector.protocol)] = import_ref.order
+
+    assert set(EXPECTED_AGENT_READ_PROVIDER_MODULES) == connectors.keys()
+    for name, module in EXPECTED_AGENT_READ_PROVIDER_MODULES.items():
+        connector, actual_module = connectors[name]
+
+        assert isinstance(connector, AgentReadConnector)
+        assert connector.protocol == ProtocolName(name)
+        assert actual_module == module
+        assert type(connector).__module__ == module
+    assert (
+        tuple(
+            name
+            for name, _order in sorted(
+                orders.items(),
+                key=lambda item: (item[1] is None, item[1] if item[1] is not None else 0),
+            )
+        )
+        == EXPECTED_AGENT_READ_PROVIDER_ORDER
+    )
+
+
+def test_vault_tool_connectors_instantiate_from_descriptors() -> None:
+    """Migrated vault-tool providers are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, tuple[VaultToolConnector, str]] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.all():
+        for import_ref in connector_manifest.vault_tool_connector_refs:
+            connector = import_ref.instantiate()
+            connectors[str(connector.protocol)] = (connector, import_ref.module)
+
+    assert set(EXPECTED_VAULT_TOOL_PROVIDER_MODULES) == connectors.keys()
+    for name, module in EXPECTED_VAULT_TOOL_PROVIDER_MODULES.items():
+        connector, actual_module = connectors[name]
+
+        assert isinstance(connector, VaultToolConnector)
+        assert connector.protocol == ProtocolName(name)
+        assert actual_module == module
         assert type(connector).__module__ == module
 
 
@@ -288,6 +459,35 @@ def test_connector_gateway_connectors_are_not_in_legacy_boot_file() -> None:
 
     for connector_manifest in CONNECTOR_REGISTRY.all():
         for import_ref in connector_manifest.gateway_connector_refs:
+            assert import_ref.module not in source
+            assert import_ref.attribute not in source
+
+
+def test_connector_gas_estimates_are_not_in_legacy_boot_file() -> None:
+    """Connector-backed gas-estimate providers must not also be hardcoded."""
+    CONNECTOR_REGISTRY.clear()
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/connectors/_strategy_gas_estimate_registry.py").read_text()
+
+    for connector_manifest in CONNECTOR_REGISTRY.with_gas_estimate():
+        assert connector_manifest.gas_estimate_connector is not None
+        import_ref = connector_manifest.gas_estimate_connector
+        assert import_ref.module not in source
+        assert import_ref.attribute not in source
+
+
+def test_connector_agent_tools_are_not_in_legacy_boot_file() -> None:
+    """Connector-backed agent-tool providers must not also be hardcoded."""
+    CONNECTOR_REGISTRY.clear()
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/connectors/_strategy_agent_tool_registry.py").read_text()
+
+    for connector_manifest in CONNECTOR_REGISTRY.with_agent_read():
+        for import_ref in connector_manifest.agent_read_connector_refs:
+            assert import_ref.module not in source
+            assert import_ref.attribute not in source
+    for connector_manifest in CONNECTOR_REGISTRY.with_vault_tool():
+        for import_ref in connector_manifest.vault_tool_connector_refs:
             assert import_ref.module not in source
             assert import_ref.attribute not in source
 

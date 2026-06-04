@@ -13,8 +13,10 @@ module never imports those targets unless a caller explicitly asks it to.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import pkgutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
@@ -86,6 +88,11 @@ class Connector:
     aliases: tuple[str, ...] = field(default_factory=tuple)
     receipt_parser_protocols: tuple[str, ...] | None = None
     receipt_parser_connector: ImportRef | None = None
+    gas_estimate_connector: ImportRef | None = None
+    agent_read_connector: ImportRef | None = None
+    agent_read_connectors: tuple[ImportRef, ...] = field(default_factory=tuple)
+    vault_tool_connector: ImportRef | None = None
+    vault_tool_connectors: tuple[ImportRef, ...] = field(default_factory=tuple)
     gateway_connector: ImportRef | None = None
     gateway_connectors: tuple[ImportRef, ...] = field(default_factory=tuple)
 
@@ -106,6 +113,9 @@ class Connector:
             raise ValueError(f"Connector.aliases must not include canonical name {self.name!r}")
         self._validate_gateway_connectors()
         self._validate_receipt_parser_protocols()
+        self._validate_gas_estimate_connector()
+        self._validate_agent_read_connectors()
+        self._validate_vault_tool_connectors()
 
     def _validate_gateway_connectors(self) -> None:
         """Validate gateway provider import references and ordering keys."""
@@ -156,6 +166,47 @@ class Connector:
                 f"Connector.receipt_parser_protocols contains duplicates: {self.receipt_parser_protocols!r}"
             )
 
+    def _validate_gas_estimate_connector(self) -> None:
+        """Validate the strategy-side gas-estimate provider import reference."""
+        if self.gas_estimate_connector is not None and not isinstance(self.gas_estimate_connector, ImportRef):
+            raise ValueError(
+                f"Connector.gas_estimate_connector must be None or an ImportRef, got {self.gas_estimate_connector!r}"
+            )
+
+    def _validate_agent_read_connectors(self) -> None:
+        """Validate agent-read provider import references."""
+        if self.agent_read_connector is not None and not isinstance(self.agent_read_connector, ImportRef):
+            raise ValueError(
+                f"Connector.agent_read_connector must be None or an ImportRef, got {self.agent_read_connector!r}"
+            )
+        if not isinstance(self.agent_read_connectors, tuple):
+            raise ValueError(
+                f"Connector.agent_read_connectors must be a tuple[ImportRef, ...], got {self.agent_read_connectors!r}"
+            )
+        bad_refs = [ref for ref in self.agent_read_connectors if not isinstance(ref, ImportRef)]
+        if bad_refs:
+            raise ValueError(f"Connector.agent_read_connectors must contain only ImportRef values, got {bad_refs!r}")
+        ref_keys = [(ref.module, ref.attribute) for ref in self.agent_read_connector_refs]
+        if len(set(ref_keys)) != len(ref_keys):
+            raise ValueError(f"Connector agent-read connector refs contain duplicates: {ref_keys!r}")
+
+    def _validate_vault_tool_connectors(self) -> None:
+        """Validate vault-tool provider import references."""
+        if self.vault_tool_connector is not None and not isinstance(self.vault_tool_connector, ImportRef):
+            raise ValueError(
+                f"Connector.vault_tool_connector must be None or an ImportRef, got {self.vault_tool_connector!r}"
+            )
+        if not isinstance(self.vault_tool_connectors, tuple):
+            raise ValueError(
+                f"Connector.vault_tool_connectors must be a tuple[ImportRef, ...], got {self.vault_tool_connectors!r}"
+            )
+        bad_refs = [ref for ref in self.vault_tool_connectors if not isinstance(ref, ImportRef)]
+        if bad_refs:
+            raise ValueError(f"Connector.vault_tool_connectors must contain only ImportRef values, got {bad_refs!r}")
+        ref_keys = [(ref.module, ref.attribute) for ref in self.vault_tool_connector_refs]
+        if len(set(ref_keys)) != len(ref_keys):
+            raise ValueError(f"Connector vault-tool connector refs contain duplicates: {ref_keys!r}")
+
     @property
     def protocol(self) -> ProtocolName:
         """Canonical protocol name as the registry key type."""
@@ -192,6 +243,20 @@ class Connector:
         return (self.gateway_connector, *self.gateway_connectors)
 
     @property
+    def agent_read_connector_refs(self) -> tuple[ImportRef, ...]:
+        """Agent-tool read-descriptor provider import refs owned by this connector."""
+        if self.agent_read_connector is None:
+            return self.agent_read_connectors
+        return (self.agent_read_connector, *self.agent_read_connectors)
+
+    @property
+    def vault_tool_connector_refs(self) -> tuple[ImportRef, ...]:
+        """Vault-tool provider import refs owned by this connector."""
+        if self.vault_tool_connector is None:
+            return self.vault_tool_connectors
+        return (self.vault_tool_connector, *self.vault_tool_connectors)
+
+    @property
     def discovery_keys(self) -> frozenset[str]:
         """All keys that should resolve to this connector."""
         keys = set(self.protocol_keys)
@@ -204,19 +269,29 @@ class ConnectorRegistry:
     """Discover connector-owned ``CONNECTOR`` objects.
 
     Discovery scans only first-level connector packages and imports
-    ``almanak.connectors.<name>.connector`` when it exists. Missing connector
-    modules are ignored so the migration can proceed one connector at a time.
+    ``almanak/connectors/<name>/connector.py`` when it exists. Missing connector
+    manifests are ignored so the migration can proceed one connector at a time.
     """
 
     def __init__(self, package_name: str = "almanak.connectors") -> None:
         """Create a registry for connector manifests under ``package_name``."""
         self._package_name = package_name
         self._connectors: tuple[Connector, ...] | None = None
+        self._discovering = False
 
     def all(self) -> tuple[Connector, ...]:
         """Return every discovered connector sorted by connector name."""
         if self._connectors is None:
-            self._connectors = self._discover()
+            if self._discovering:
+                raise ConnectorDiscoveryError(
+                    "ConnectorRegistry.all() detected recursive connector discovery; "
+                    "calling connector registry discovery during manifest import is disallowed."
+                )
+            self._discovering = True
+            try:
+                self._connectors = self._discover()
+            finally:
+                self._discovering = False
         return self._connectors
 
     def get(self, name: str) -> Connector | None:
@@ -230,9 +305,22 @@ class ConnectorRegistry:
         """Return connectors that publish a receipt-parser connector."""
         return tuple(d for d in self.all() if d.receipt_parser_connector is not None)
 
+    def with_gas_estimate(self) -> tuple[Connector, ...]:
+        """Return connectors that publish a gas-estimate connector."""
+        return tuple(d for d in self.all() if d.gas_estimate_connector is not None)
+
+    def with_agent_read(self) -> tuple[Connector, ...]:
+        """Return connectors that publish agent-read connectors."""
+        return tuple(d for d in self.all() if d.agent_read_connector_refs)
+
+    def with_vault_tool(self) -> tuple[Connector, ...]:
+        """Return connectors that publish vault-tool connectors."""
+        return tuple(d for d in self.all() if d.vault_tool_connector_refs)
+
     def clear(self) -> None:
         """Test helper: clear the discovery cache."""
         self._connectors = None
+        self._discovering = False
 
     def _discover(self) -> tuple[Connector, ...]:
         """Scan connector packages and validate discovered manifest ownership."""
@@ -275,13 +363,15 @@ class ConnectorRegistry:
 
     def _load_connector(self, connector_name: str) -> Connector | None:
         """Load ``CONNECTOR`` from one connector package if its manifest exists."""
+        connector_path = self._connector_file(connector_name)
+        if connector_path is None:
+            return None
         module_name = f"{self._package_name}.{connector_name}.connector"
-        try:
-            module = importlib.import_module(module_name)
-        except ModuleNotFoundError as exc:
-            if exc.name == module_name:
-                return None
-            raise
+        spec = importlib.util.spec_from_file_location(module_name, connector_path)
+        if spec is None or spec.loader is None:
+            raise ConnectorDiscoveryError(f"Could not load connector manifest {connector_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
 
         connector = getattr(module, "CONNECTOR", None)
         if connector is None:
@@ -291,6 +381,15 @@ class ConnectorRegistry:
                 f"{module_name}.CONNECTOR must be a Connector, got {type(connector).__qualname__}"
             )
         return connector
+
+    def _connector_file(self, connector_name: str) -> Path | None:
+        """Return a connector manifest path without importing the connector package."""
+        package = importlib.import_module(self._package_name)
+        for package_path in package.__path__:
+            connector_path = Path(package_path) / connector_name / "connector.py"
+            if connector_path.is_file():
+                return connector_path
+        return None
 
     @staticmethod
     def _validate_connector_owner(connector_name: str, connector: Connector) -> None:

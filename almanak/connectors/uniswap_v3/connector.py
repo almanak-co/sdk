@@ -24,6 +24,22 @@ CONNECTOR = Connector(
             order=26,
         ),
     ),
+    gas_estimate_connector=ImportRef(
+        module="almanak.connectors.uniswap_v3.gas_estimate_provider",
+        attribute="UniswapV3GasEstimateConnector",
+    ),
+    agent_read_connector=ImportRef(
+        module="almanak.connectors.uniswap_v3.agent_read_provider",
+        attribute="UniswapV3AgentReadConnector",
+        order=1,
+    ),
+    agent_read_connectors=(
+        ImportRef(
+            module="almanak.connectors.uniswap_v3.agent_read_provider",
+            attribute="AgniFinanceAgentReadConnector",
+            order=2,
+        ),
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.uniswap_v3.receipt_parser_provider",
         attribute="UniswapV3ReceiptParserConnector",

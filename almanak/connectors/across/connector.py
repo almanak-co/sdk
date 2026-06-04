@@ -11,6 +11,10 @@ from almanak.connectors._connector import (
 CONNECTOR = Connector(
     name="across",
     kind=ProtocolKind.BRIDGE,
+    gas_estimate_connector=ImportRef(
+        module="almanak.connectors.across.gas_estimate_provider",
+        attribute="AcrossGasEstimateConnector",
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.across.receipt_parser_provider",
         attribute="AcrossReceiptParserConnector",

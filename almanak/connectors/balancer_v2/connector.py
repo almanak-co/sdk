@@ -16,6 +16,10 @@ CONNECTOR = Connector(
         attribute="BalancerV2GatewayConnector",
         order=16,
     ),
+    gas_estimate_connector=ImportRef(
+        module="almanak.connectors.balancer_v2.gas_estimate_provider",
+        attribute="BalancerV2GasEstimateConnector",
+    ),
 )
 
 __all__ = ["CONNECTOR"]

@@ -3,23 +3,29 @@
 Sibling of :mod:`almanak.connectors._strategy_receipt_registry`, scoped
 to the gas-estimate concern.
 
-Lives one level up from ``_strategy_base/`` because it imports every
-connector's ``gas_estimate_provider`` module — and ``_strategy_base/``
-must stay protocol-clean (no concrete connector imports). Adding a new
-strategy-side connector with gas estimates means one import + one
-``STRATEGY_GAS_ESTIMATE_REGISTRY.register`` line below.
+Lives one level up from ``_strategy_base/`` because it owns gas-estimate
+registry bootstrap, and ``_strategy_base/`` must stay protocol-clean
+(no concrete connector imports). It imports only connector descriptors;
+provider classes are loaded from connector-owned lazy import references.
 
-Each provider is imported from
-``almanak.connectors.<protocol>.gas_estimate_provider``::
+Connectors that publish ``almanak/connectors/<protocol>/connector.py`` with
+a ``CONNECTOR.gas_estimate_connector`` import reference are registered from
+that connector object::
 
-    from almanak.connectors.<protocol>.gas_estimate_provider import (
-        <Protocol>GasEstimateConnector,
+    CONNECTOR = Connector(
+        name="<protocol>",
+        kind=ProtocolKind.<KIND>,
+        gas_estimate_connector=ImportRef(
+            module="almanak.connectors.<protocol>.gas_estimate_provider",
+            attribute="<Protocol>GasEstimateConnector",
+        ),
     )
-    STRATEGY_GAS_ESTIMATE_REGISTRY.register(<Protocol>GasEstimateConnector())
 
 The completeness invariant — every connector whose actions appeared in
-the central ``DEFAULT_GAS_ESTIMATES`` table MUST register here — is
-enforced statically by the byte-equivalence pin in
+the central ``DEFAULT_GAS_ESTIMATES`` table MUST publish a descriptor
+reference — is enforced by
+``tests/unit/connectors/test_gas_estimate_registry_completeness.py`` and
+the byte-equivalence pin in
 ``tests/unit/intents/test_w6_gas_estimate_byte_equivalence.py``.
 
 Why a strategy-side registry (vs. reading from ``GATEWAY_REGISTRY``)
@@ -38,11 +44,12 @@ This file is allow-listed in the strategy-side import boundary scan
 (``_STRATEGY_SCAN_SKIP_PARTS`` in
 ``tests/static/test_strategy_import_boundary.py``) the same way
 ``_strategy_receipt_registry.py`` is allow-listed: it is the boot-time
-discovery entry point that legitimately knows every connector by name.
+discovery entry point. It no longer knows connector names.
 """
 
 from __future__ import annotations
 
+from almanak.connectors._connector import CONNECTOR_REGISTRY
 from almanak.connectors._strategy_base.gas_estimate_registry import (
     STRATEGY_GAS_ESTIMATE_REGISTRY,
 )
@@ -50,47 +57,24 @@ from almanak.connectors._strategy_base.gas_estimate_registry import (
 __all__ = ["STRATEGY_GAS_ESTIMATE_REGISTRY"]
 
 
+def _register_discovered_gas_estimates() -> None:
+    """Register gas-estimate connectors published by connector manifests."""
+    for connector_manifest in CONNECTOR_REGISTRY.with_gas_estimate():
+        if connector_manifest.gas_estimate_connector is None:
+            continue
+        connector = connector_manifest.gas_estimate_connector.instantiate()
+        STRATEGY_GAS_ESTIMATE_REGISTRY.register(connector)
+
+
 def _register_all() -> None:
     """Register every strategy-side gas-estimate connector.
 
-    Imports are local to the function so loading this module does not
-    transitively import every provider module's class until the
-    registry resolves an action key. Provider modules are lightweight
-    (just the integer table) but keeping the local-import shape matches
-    the W2 ``_strategy_receipt_registry`` convention and isolates any
-    future heavyweight provider.
+    Descriptor-backed connectors are discovered here. Import targets are
+    stored as strings on each connector descriptor so loading this module
+    does not transitively import every provider module's class until the
+    registry bootstraps.
     """
-    # Lending — Aave V3 owns the lending_* and flash_loan* action keys.
-    from almanak.connectors.aave_v3.gas_estimate_provider import (
-        AaveV3GasEstimateConnector,
-    )
-
-    # Bridges — Across owns bridge_deposit.
-    from almanak.connectors.across.gas_estimate_provider import (
-        AcrossGasEstimateConnector,
-    )
-
-    # Flash loans — Balancer V2 owns balancer_flash_loan*.
-    from almanak.connectors.balancer_v2.gas_estimate_provider import (
-        BalancerV2GasEstimateConnector,
-    )
-
-    # Vaults — MetaMorpho owns vault_deposit / vault_redeem.
-    from almanak.connectors.morpho_vault.gas_estimate_provider import (
-        MetaMorphoGasEstimateConnector,
-    )
-
-    # DEX / AMM — Uniswap V3 owns the lp_* family (canonical CL DEX
-    # estimates; UniV3 forks reuse the same numbers).
-    from almanak.connectors.uniswap_v3.gas_estimate_provider import (
-        UniswapV3GasEstimateConnector,
-    )
-
-    STRATEGY_GAS_ESTIMATE_REGISTRY.register(UniswapV3GasEstimateConnector())
-    STRATEGY_GAS_ESTIMATE_REGISTRY.register(AaveV3GasEstimateConnector())
-    STRATEGY_GAS_ESTIMATE_REGISTRY.register(BalancerV2GasEstimateConnector())
-    STRATEGY_GAS_ESTIMATE_REGISTRY.register(AcrossGasEstimateConnector())
-    STRATEGY_GAS_ESTIMATE_REGISTRY.register(MetaMorphoGasEstimateConnector())
+    _register_discovered_gas_estimates()
 
 
 _register_all()
