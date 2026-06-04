@@ -14,6 +14,7 @@ import time
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from almanak.framework.accounting.gas_pricing import native_token_for_chain
 from almanak.framework.data.interfaces import BalanceProvider, BalanceResult
 from almanak.framework.gateway_client import GatewayClient
 from almanak.gateway.proto import gateway_pb2
@@ -211,17 +212,11 @@ class GatewayBalanceProvider(BalanceProvider):
         Returns:
             BalanceResult with native token balance
         """
-        # Map chain to native token
-        native_tokens = {
-            "ethereum": "ETH",
-            "arbitrum": "ETH",
-            "optimism": "ETH",
-            "base": "ETH",
-            "avalanche": "AVAX",
-            "polygon": "MATIC",
-        }
-
-        native_token = native_tokens.get(self._chain.lower(), "ETH")
+        # Native symbol is owned per-chain on ChainDescriptor.native (single source
+        # of truth, "ETH" fallback for an unknown chain). Deriving here also closes
+        # the old 6-chain hole: chains absent from the legacy map (e.g. bsc) no
+        # longer fall back to "ETH" but request their real native (VIB-4851 A1).
+        native_token = native_token_for_chain(self._chain)
         return await self.get_balance(native_token)
 
     def _get_cached(self, token: str) -> BalanceResult | None:

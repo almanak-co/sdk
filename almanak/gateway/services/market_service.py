@@ -9,6 +9,7 @@ import asyncio
 import logging
 import re
 import time
+from types import MappingProxyType
 from typing import Any
 
 import grpc
@@ -19,6 +20,8 @@ from almanak.connectors._base.gateway_capabilities import (
     PoolKeyCacheProtocol,
 )
 from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+from almanak.core.chains import ChainRegistry
+from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.data.tokens.exceptions import AmbiguousTokenError
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
@@ -80,49 +83,32 @@ NATIVE_PRICE_ALIASES: dict[str, str] = {
     "S": "WS",  # Sonic
 }
 
-# Chain-scoped native gas tokens. A symbol is treated as the chain's native
-# coin (and routed through `provider.get_native_balance()`) ONLY if it appears
-# in this chain's set. This prevents `GetBalance(token="POL", chain="ethereum")`
-# from returning ETH balance, etc. Both MATIC and POL are accepted on Polygon
-# because POL is the Sep-2024 1:1 rename of MATIC and many wallets still use
-# the old symbol.
-NATIVE_SYMBOLS_BY_CHAIN: dict[str, frozenset[str]] = {
-    "ethereum": frozenset({"ETH"}),
-    "arbitrum": frozenset({"ETH"}),
-    "optimism": frozenset({"ETH"}),
-    "base": frozenset({"ETH"}),
-    "linea": frozenset({"ETH"}),
-    "blast": frozenset({"ETH"}),
-    "scroll": frozenset({"ETH"}),
-    "zksync": frozenset({"ETH"}),
-    "polygon": frozenset({"MATIC", "POL"}),
-    "avalanche": frozenset({"AVAX"}),
-    "bsc": frozenset({"BNB"}),
-    "sonic": frozenset({"S"}),
-    "fantom": frozenset({"FTM"}),
-    "mantle": frozenset({"MNT"}),
-    "berachain": frozenset({"BERA"}),
-    "monad": frozenset({"MON"}),
-    "plasma": frozenset({"XPL"}),
-    "x-layer": frozenset({"OKB"}),
-    "solana": frozenset({"SOL"}),
-}
+# Chain-scoped native gas tokens, derived from the chain registry (VIB-4851 A1).
+# A symbol routes through `provider.get_native_balance()` ONLY if it is native to
+# THIS chain — the set is `{descriptor.native.symbol, *accepted_symbols}` (e.g.
+# Polygon accepts both MATIC and POL, the Sep-2024 1:1 rename). This prevents
+# `GetBalance(token="POL", chain="ethereum")` from returning ETH balance, etc.
+# Kept under the legacy name as a read-only view for the shape-lock test snapshots.
+# Deriving from `descriptor.name` also (a) drops the dead unregistered keys this
+# map used to carry (`scroll`/`zksync`/`fantom` — unreachable past `validate_chain`,
+# which both call sites run first) and (b) corrects the legacy `"x-layer"` typo to
+# the canonical `"xlayer"`, which previously left `GetBalance(token="OKB",
+# chain="xlayer")` mis-routed down the ERC-20 path. Adding a chain needs no edit here.
+NATIVE_SYMBOLS_BY_CHAIN: MappingProxyType[str, frozenset[str]] = MappingProxyType(
+    {d.name: native_symbols_for(d.name) for d in ChainRegistry.all()}
+)
 
 
 def _is_native_symbol(token: str, chain: str) -> bool:
     """Return True iff `token` is the native gas symbol for `chain`.
 
-    Fails CLOSED for chains not in NATIVE_SYMBOLS_BY_CHAIN: an unmapped
-    chain returns False for every symbol so the request falls through to
-    `provider.get_balance(token)` (the safe ERC-20 path) instead of
-    silently routing to `get_native_balance()` and returning the wrong
-    asset. New chains MUST be added to the map in the same change that
-    adds chain support — see VIB-3137 follow-up.
+    Fails CLOSED for unregistered chains: an unknown chain yields an empty set, so
+    the request falls through to `provider.get_balance(token)` (the safe ERC-20
+    path) instead of silently routing to `get_native_balance()` and returning the
+    wrong asset (the VIB-3137 contract). Native symbols are owned per-chain on
+    `ChainDescriptor.native`; adding a chain needs no edit here (VIB-4851 A1).
     """
-    natives = NATIVE_SYMBOLS_BY_CHAIN.get(chain.lower())
-    if natives is None:
-        return False
-    return token.upper() in natives
+    return token.upper() in native_symbols_for(chain)
 
 
 class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):

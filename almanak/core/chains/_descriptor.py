@@ -40,12 +40,21 @@ class NativeToken:
         wrapped_address: Address of the wrapped ERC-20 (or SPL mint for Solana).
             ``None`` is reserved for chains with no canonical wrapper — every
             chain currently registered has one.
+        accepted_symbols: Extra symbols that ALSO denote this chain's native coin
+            for balance-routing / native-detection (NOT for gas pricing or funding,
+            which stay pinned to :attr:`symbol`). Empty for every chain except a
+            rename-dual like Polygon, where ``symbol="MATIC"`` and
+            ``accepted_symbols=("POL",)`` so both the legacy and post-rename symbol
+            route to the native-balance path. The accepted set is derived as
+            ``{symbol, *accepted_symbols}`` — see
+            ``almanak.core.chains._helpers.native_symbols_for`` (VIB-4851 A1).
     """
 
     symbol: str
     name: str
     decimals: int
     wrapped_address: str | None = None
+    accepted_symbols: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

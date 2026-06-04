@@ -35,3 +35,27 @@ def receipt_timeout_for(chain: str) -> int:
     if descriptor is None or descriptor.timeouts.receipt_polling is None:
         return DEFAULT_RECEIPT_TIMEOUT
     return descriptor.timeouts.receipt_polling
+
+
+def native_symbols_for(chain: str) -> frozenset[str]:
+    """Return the set of symbols that denote ``chain``'s native gas coin.
+
+    Derived from the single source of truth ``ChainDescriptor.native`` as
+    ``{symbol, *accepted_symbols}`` (e.g. ``polygon -> {"MATIC", "POL"}``).
+    An unknown / unregistered chain returns an **empty** frozenset — the lookup
+    fails CLOSED so callers fall through to the ERC-20 / non-native path rather
+    than mis-routing to a native-balance read (the VIB-3137 contract). This is
+    the registry-derived replacement for the per-chain ``NATIVE_SYMBOLS_BY_CHAIN``
+    / ``_CHAIN_NATIVE_SYMBOLS`` matrices (VIB-4851 A1). Alias-normalises via
+    ``ChainRegistry.try_resolve`` so ``native_symbols_for("bnb") == {"BNB"}``.
+    """
+    if not chain:
+        return frozenset()
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None:
+        return frozenset()
+    native = descriptor.native
+    # Upper-case so membership holds against the `token.upper()` consumers even
+    # if a descriptor ever defines a symbol in mixed case (defensive — all current
+    # descriptors are already upper).
+    return frozenset({native.symbol.upper(), *(s.upper() for s in native.accepted_symbols)})

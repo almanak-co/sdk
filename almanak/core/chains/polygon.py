@@ -24,14 +24,18 @@ DESCRIPTOR = register_chain(
         # sentinel to POL for token identity — but the gas/price/funding stack is
         # pinned to MATIC (the Chainlink MATIC/USD feed key, the gateway native
         # symbol derived from this descriptor, and every shipped Polygon config's
-        # anvil_funding key). The two views are bridged by aliases: both symbols
-        # resolve, price, and fund. Do NOT flip this to POL in isolation — see
+        # anvil_funding key). The two views are bridged: ``symbol`` stays MATIC
+        # (gas/price/funding canonical) while ``accepted_symbols=("POL",)`` makes
+        # both symbols route to the native-balance path (VIB-4851 A1, the
+        # registry-derived replacement for NATIVE_SYMBOLS_BY_CHAIN["polygon"]).
+        # Do NOT flip ``symbol`` to POL in isolation — see
         # tests/unit/core/test_polygon_native_symbol_parity.py for the contract.
         native=NativeToken(
             symbol="MATIC",
             name="Polygon",
             decimals=18,
             wrapped_address="0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+            accepted_symbols=("POL",),
         ),
         gas=GasProfile(
             buffer=1.2,

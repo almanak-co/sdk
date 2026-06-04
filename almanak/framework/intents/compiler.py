@@ -25,6 +25,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import grpc
@@ -40,6 +41,8 @@ from almanak.connectors._strategy_base.base.compiler import (
 from almanak.connectors._strategy_base.base.swap_adapter import DefaultSwapAdapter
 from almanak.connectors._strategy_base.compiler_registry import get_compiler as get_connector_compiler
 from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason
+from almanak.core.chains import ChainRegistry
+from almanak.core.chains._helpers import native_symbols_for
 
 from ..chain_family import ChainFamilyAdapter, all_families, family_for
 
@@ -307,25 +310,14 @@ def _normalize_wallet_address(addr: str) -> str:
     return addr
 
 
-_CHAIN_NATIVE_SYMBOLS: dict[str, frozenset[str]] = {
-    "ethereum": frozenset({"ETH"}),
-    "arbitrum": frozenset({"ETH"}),
-    "optimism": frozenset({"ETH"}),
-    "base": frozenset({"ETH"}),
-    "blast": frozenset({"ETH"}),
-    "linea": frozenset({"ETH"}),
-    "polygon": frozenset({"MATIC", "POL"}),
-    "avalanche": frozenset({"AVAX"}),
-    "bsc": frozenset({"BNB"}),
-    "sonic": frozenset({"S"}),
-    "plasma": frozenset({"XPL"}),
-    "mantle": frozenset({"MNT"}),
-    "berachain": frozenset({"BERA"}),
-    "monad": frozenset({"MON"}),
-    "xlayer": frozenset({"OKB"}),
-    "zerog": frozenset({"A0GI"}),
-    "solana": frozenset({"SOL"}),
-}
+# Per-chain native-gas symbols, derived from the chain registry (VIB-4851 A1):
+# each chain owns its native symbol(s) on ``ChainDescriptor.native`` and the set
+# is ``{symbol, *accepted_symbols}`` (e.g. polygon -> {"MATIC", "POL"}). Kept under
+# the legacy name as a read-only view so the external importers
+# (permissions.synthetic_intents, teardown.oracle_warmup) read it unchanged.
+_CHAIN_NATIVE_SYMBOLS: MappingProxyType[str, frozenset[str]] = MappingProxyType(
+    {d.name: native_symbols_for(d.name) for d in ChainRegistry.all()}
+)
 
 
 # =============================================================================
