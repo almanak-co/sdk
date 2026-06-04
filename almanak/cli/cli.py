@@ -19,6 +19,7 @@ from almanak.core.redaction import install_redaction
 from almanak.framework.cli import backtest as framework_backtest_group
 from almanak.framework.cli import new_strategy as framework_new_strategy_cmd
 from almanak.framework.cli.ax import ax as framework_ax_group
+from almanak.framework.cli.chain_resolution import cli_chain_choices
 from almanak.framework.cli.check import check as framework_check_cmd
 from almanak.framework.cli.demo import demo as framework_demo_cmd
 from almanak.framework.cli.export import export as framework_export_cmd
@@ -1147,24 +1148,7 @@ def dashboard(port, gateway_host, gateway_port, no_browser):
 @click.option(
     "--chain",
     "-c",
-    type=click.Choice(
-        [
-            "ethereum",
-            "arbitrum",
-            "optimism",
-            "polygon",
-            "base",
-            "avalanche",
-            "bsc",
-            "sonic",
-            "plasma",
-            "blast",
-            "mantle",
-            "berachain",
-            "solana",
-            "monad",
-        ]
-    ),
+    type=click.Choice(cli_chain_choices()),
     default="arbitrum",
     help="Target blockchain network (default: arbitrum)",
 )

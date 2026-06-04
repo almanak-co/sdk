@@ -59,7 +59,7 @@ Usage: almanak strat new [OPTIONS]
 
 
 * `chain`:
-    * Type: Choice(['ethereum', 'arbitrum', 'optimism', 'polygon', 'base', 'avalanche', 'bsc', 'sonic', 'plasma', 'blast', 'mantle', 'berachain', 'solana', 'monad'])
+    * Type: Choice(['arbitrum', 'avalanche', 'base', 'berachain', 'blast', 'bsc', 'ethereum', 'linea', 'mantle', 'monad', 'optimism', 'plasma', 'polygon', 'solana', 'sonic', 'xlayer', 'zerog'])
     * Default: `arbitrum`
     * Usage: `--chain
 -c`
@@ -104,7 +104,7 @@ Options:
                                   Defaults to current directory.
   -t, --template [blank|ta_swap|dynamic_lp|lending_loop|basis_trade|vault_yield|copy_trader|perps|multi_step|staking]
                                   Strategy template to use (default: blank)
-  -c, --chain [ethereum|arbitrum|optimism|polygon|base|avalanche|bsc|sonic|plasma|blast|mantle|berachain|solana|monad]
+  -c, --chain [arbitrum|avalanche|base|berachain|blast|bsc|ethereum|linea|mantle|monad|optimism|plasma|polygon|solana|sonic|xlayer|zerog]
                                   Target blockchain network (default:
                                   arbitrum)
   --help                          Show this message and exit.

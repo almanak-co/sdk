@@ -16,6 +16,8 @@ from pathlib import Path
 
 import click
 
+from almanak.framework.cli.chain_resolution import cli_chain_choices
+
 
 class ProtocolType(StrEnum):
     """Types of DeFi protocols."""
@@ -24,17 +26,6 @@ class ProtocolType(StrEnum):
     PERPS = "perps"
     LENDING = "lending"
     YIELD = "yield"
-
-
-class SupportedChain(StrEnum):
-    """Supported blockchain networks."""
-
-    ETHEREUM = "ethereum"
-    ARBITRUM = "arbitrum"
-    OPTIMISM = "optimism"
-    POLYGON = "polygon"
-    BASE = "base"
-    AVALANCHE = "avalanche"
 
 
 @dataclass
@@ -198,7 +189,7 @@ def to_upper_snake_case(name: str) -> str:
 def generate_adapter_file(
     name: str,
     protocol_type: ProtocolType,
-    chains: list[SupportedChain],
+    chains: list[str],
 ) -> str:
     """Generate the main adapter.py file content."""
     pascal_name = to_pascal_case(name)
@@ -207,7 +198,7 @@ def generate_adapter_file(
 
     # Generate chain addresses dict
     chain_addresses = ",\n".join(
-        f'    "{chain.value}": {{\n'
+        f'    "{chain}": {{\n'
         f'        "router": "0x0000000000000000000000000000000000000000",  # TODO: Add real address\n'
         f'        "factory": "0x0000000000000000000000000000000000000000",  # TODO: Add real address\n'
         f"    }}"
@@ -334,7 +325,7 @@ This module provides the {pascal_name}Adapter class for interacting with
 {config.description}
 
 Supported chains:
-{chr(10).join(f"- {chain.value.title()}" for chain in chains)}
+{chr(10).join(f"- {chain.title()}" for chain in chains)}
 
 Example:
     from almanak.connectors.{to_snake_case(name)} import {pascal_name}Adapter, {pascal_name}Config
@@ -1224,7 +1215,7 @@ class {pascal_name}SDK:
 def generate_test_file(
     name: str,
     protocol_type: ProtocolType,
-    chains: list[SupportedChain],
+    chains: list[str],
 ) -> str:
     """Generate the test_adapter.py file content."""
     pascal_name = to_pascal_case(name)
@@ -1276,7 +1267,7 @@ from ..adapter import (
 def config() -> {pascal_name}Config:
     """Create test configuration."""
     return {pascal_name}Config(
-        chain="{chains[0].value}",
+        chain="{chains[0]}",
         wallet_address="0x" + "1" * 40,
     )
 
@@ -1298,10 +1289,10 @@ class Test{pascal_name}Config:
     def test_valid_config(self) -> None:
         """Test valid configuration creation."""
         config = {pascal_name}Config(
-            chain="{chains[0].value}",
+            chain="{chains[0]}",
             wallet_address="0x" + "a" * 40,
         )
-        assert config.chain == "{chains[0].value}"
+        assert config.chain == "{chains[0]}"
         assert config.wallet_address == "0x" + "a" * 40
 
     def test_invalid_chain(self) -> None:
@@ -1316,14 +1307,14 @@ class Test{pascal_name}Config:
         """Test invalid wallet address raises error."""
         with pytest.raises(ValueError, match="Invalid wallet address"):
             {pascal_name}Config(
-                chain="{chains[0].value}",
+                chain="{chains[0]}",
                 wallet_address="invalid_address",
             )
 
     def test_to_dict(self, config: {pascal_name}Config) -> None:
         """Test configuration serialization."""
         data = config.to_dict()
-        assert data["chain"] == "{chains[0].value}"
+        assert data["chain"] == "{chains[0]}"
         assert "wallet_address" in data
 
 
@@ -1337,18 +1328,18 @@ class Test{pascal_name}Adapter:
 
     def test_initialization(self, adapter: {pascal_name}Adapter) -> None:
         """Test adapter initialization."""
-        assert adapter.chain == "{chains[0].value}"
+        assert adapter.chain == "{chains[0]}"
         assert adapter.router_address is not None
 
     def test_repr(self, adapter: {pascal_name}Adapter) -> None:
         """Test string representation."""
         repr_str = repr(adapter)
         assert "{pascal_name}Adapter" in repr_str
-        assert "{chains[0].value}" in repr_str
+        assert "{chains[0]}" in repr_str
 
     def test_properties(self, adapter: {pascal_name}Adapter) -> None:
         """Test adapter properties."""
-        assert adapter.router_address in {upper_name}_ADDRESSES["{chains[0].value}"].values()
+        assert adapter.router_address in {upper_name}_ADDRESSES["{chains[0]}"].values()
 {test_methods_code}
 
 
@@ -1449,8 +1440,8 @@ class TestConstants:
 
     def test_addresses_exist(self) -> None:
         """Test address constants exist for all chains."""
-        assert "{chains[0].value}" in {upper_name}_ADDRESSES
-        assert "router" in {upper_name}_ADDRESSES["{chains[0].value}"]
+        assert "{chains[0]}" in {upper_name}_ADDRESSES
+        assert "router" in {upper_name}_ADDRESSES["{chains[0]}"]
 
     def test_gas_estimates_exist(self) -> None:
         """Test gas estimate constants exist."""
@@ -1847,7 +1838,7 @@ __all__ = [
 def generate_readme_file(
     name: str,
     protocol_type: ProtocolType,
-    chains: list[SupportedChain],
+    chains: list[str],
 ) -> str:
     """Generate the README.md file content."""
     pascal_name = to_pascal_case(name)
@@ -1865,7 +1856,7 @@ a {config.name.lower()}.
 
 ## Supported Chains
 
-{chr(10).join(f"- {chain.value.title()}" for chain in chains)}
+{chr(10).join(f"- {chain.title()}" for chain in chains)}
 
 ## Operations
 
@@ -2025,7 +2016,7 @@ Generated: {datetime.now().isoformat()}
     "--chain",
     "-c",
     "chains",
-    type=click.Choice([c.value for c in SupportedChain]),
+    type=click.Choice(cli_chain_choices(evm_only=True)),
     multiple=True,
     default=["arbitrum"],
     help="Target chain(s) (can specify multiple)",
@@ -2064,7 +2055,9 @@ def new_protocol(
         almanak new-protocol --name curve --type dex --chain ethereum --chain polygon
     """
     protocol_type_enum = ProtocolType(protocol_type)
-    chain_enums = [SupportedChain(c) for c in chains]
+    # Dedupe while preserving insertion order: duplicate --chain flags must not
+    # produce duplicate dict keys in the generated adapter (VIB-4851 C2 review).
+    unique_chains = list(dict.fromkeys(chains))
     snake_name = to_snake_case(name)
     pascal_name = to_pascal_case(name)
 
@@ -2085,7 +2078,7 @@ def new_protocol(
     # Print header
     click.echo(f"Creating protocol connector: {snake_name}")
     click.echo(f"Type: {protocol_type_enum.value} ({PROTOCOL_TYPE_CONFIGS[protocol_type_enum].name})")
-    click.echo(f"Chains: {', '.join(c.value for c in chain_enums)}")
+    click.echo(f"Chains: {', '.join(unique_chains)}")
     click.echo(f"Output: {protocol_dir}")
     click.echo()
 
@@ -2099,7 +2092,7 @@ def new_protocol(
 
         # Generate adapter.py
         adapter_file = protocol_dir / "adapter.py"
-        adapter_content = generate_adapter_file(name, protocol_type_enum, chain_enums)
+        adapter_content = generate_adapter_file(name, protocol_type_enum, unique_chains)
         with open(adapter_file, "w") as f:
             f.write(adapter_content)
         files_created.append("adapter.py")
@@ -2133,7 +2126,7 @@ def new_protocol(
 
         # Generate tests/test_adapter.py
         test_adapter_file = tests_dir / "test_adapter.py"
-        test_adapter_content = generate_test_file(name, protocol_type_enum, chain_enums)
+        test_adapter_content = generate_test_file(name, protocol_type_enum, unique_chains)
         with open(test_adapter_file, "w") as f:
             f.write(test_adapter_content)
         files_created.append("tests/test_adapter.py")
@@ -2147,7 +2140,7 @@ def new_protocol(
 
         # Generate README.md
         readme_file = protocol_dir / "README.md"
-        readme_content = generate_readme_file(name, protocol_type_enum, chain_enums)
+        readme_content = generate_readme_file(name, protocol_type_enum, unique_chains)
         with open(readme_file, "w") as f:
             f.write(readme_content)
         files_created.append("README.md")

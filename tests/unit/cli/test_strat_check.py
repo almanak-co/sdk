@@ -30,7 +30,6 @@ from almanak.framework.cli.check import (
 )
 from almanak.framework.cli.new_strategy import (
     StrategyTemplate,
-    SupportedChain,
     new_strategy,
 )
 
@@ -42,7 +41,7 @@ from almanak.framework.cli.new_strategy import (
 def _scaffold(
     tmp_path: Path,
     template: StrategyTemplate,
-    chain: SupportedChain = SupportedChain.ARBITRUM,
+    chain: str = "arbitrum",
     name: str = "check_fixture",
 ) -> Path:
     """Scaffold a fresh strategy into ``tmp_path`` and return the path."""
@@ -58,7 +57,7 @@ def _scaffold(
             "--template",
             template.value,
             "--chain",
-            chain.value,
+            chain,
             "--output-dir",
             str(target),
         ],

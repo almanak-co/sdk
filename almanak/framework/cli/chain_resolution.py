@@ -12,9 +12,10 @@ Worse, the ``from`` inside a worker function means any import failure (e.g.
 a missing indicator at install time) turns into a per-task exception
 rather than a single fail-fast at CLI launch.
 
-This module hosts the minimal functions that sweep workers need. It has
-*no* heavy deps — just stdlib — so sweep.py can import it at module level
-and workers pay a near-zero import cost.
+This module hosts the minimal functions that sweep workers need. Its only
+non-stdlib dependency is ``almanak.core.chains`` (a registry of frozen
+dataclasses with no gateway / web3 / indicator imports), so sweep.py can
+import it at module level and workers pay a near-zero import cost.
 
 ``run.py`` continues to re-export ``get_default_chain`` for back-compat;
 there is a single source of truth here.
@@ -23,6 +24,23 @@ there is a single source of truth here.
 from __future__ import annotations
 
 from typing import Any
+
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
+
+
+def cli_chain_choices(*, evm_only: bool = False) -> list[str]:
+    """Canonical chain names for click.Choice / argparse choices, registry-derived.
+
+    Single source of truth so adding a chain in core/chains/ auto-extends every
+    CLI surface (VIB-4851 C2). ``evm_only`` filters out non-EVM chains (e.g. solana)
+    for commands that only operate on EVM chains. Names are returned in the
+    registry's canonical alphabetical order.
+    """
+    descriptors = ChainRegistry.all()
+    if evm_only:
+        descriptors = tuple(d for d in descriptors if d.family is ChainFamily.EVM)
+    return sorted(d.name for d in descriptors)
 
 
 def get_default_chain(strategy_class: type[Any]) -> str:
@@ -51,4 +69,4 @@ def get_default_chain(strategy_class: type[Any]) -> str:
     return "arbitrum"
 
 
-__all__ = ["get_default_chain"]
+__all__ = ["cli_chain_choices", "get_default_chain"]

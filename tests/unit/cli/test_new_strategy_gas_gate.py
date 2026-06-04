@@ -12,13 +12,12 @@ from pathlib import Path
 
 from almanak.framework.cli.new_strategy import (
     StrategyTemplate,
-    SupportedChain,
     generate_config_json,
     generate_strategy_file,
 )
 
 
-def _generate(chain: SupportedChain = SupportedChain.ARBITRUM) -> str:
+def _generate(chain: str = "arbitrum") -> str:
     with tempfile.TemporaryDirectory() as tmpdir:
         return generate_strategy_file(
             name="Gas Gate Test",
@@ -118,7 +117,7 @@ class TestConfigJsonEmitsGateFields:
         raw = generate_config_json(
             name="Gas Gate Test",
             template=StrategyTemplate.TA_SWAP,
-            chain=SupportedChain.ARBITRUM,
+            chain="arbitrum",
         )
         cfg = json.loads(raw)
         assert cfg.get("min_trade_value_usd") == "10"
@@ -127,7 +126,7 @@ class TestConfigJsonEmitsGateFields:
         raw = generate_config_json(
             name="Gas Gate Test",
             template=StrategyTemplate.TA_SWAP,
-            chain=SupportedChain.ARBITRUM,
+            chain="arbitrum",
         )
         cfg = json.loads(raw)
         assert cfg.get("max_gas_ratio") == "0.05"

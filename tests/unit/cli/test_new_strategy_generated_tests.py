@@ -28,18 +28,16 @@ import pytest
 from click.testing import CliRunner
 
 from almanak.framework.cli.new_strategy import (
-    StrategyTemplate,
-    SupportedChain,
     _TEMPLATE_TEST_SPECS,
+    StrategyTemplate,
     generate_strategy_file,
     generate_test_file,
     new_strategy,
 )
 
-
 # Staking template only supports Ethereum; every other template works on Arbitrum.
-_TEMPLATE_CHAINS: dict[StrategyTemplate, SupportedChain] = {
-    t: SupportedChain.ETHEREUM if t == StrategyTemplate.STAKING else SupportedChain.ARBITRUM
+_TEMPLATE_CHAINS: dict[StrategyTemplate, str] = {
+    t: "ethereum" if t == StrategyTemplate.STAKING else "arbitrum"
     for t in StrategyTemplate
 }
 
@@ -148,7 +146,7 @@ def test_blank_template_skips_state_machine_class() -> None:
     code = generate_test_file(
         name="Gen Probe",
         template=StrategyTemplate.BLANK,
-        chain=SupportedChain.ARBITRUM,
+        chain="arbitrum",
     )
     tree = ast.parse(code)
     class_names = [n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
@@ -225,7 +223,7 @@ def test_generated_test_file_tests_teardown_soft_and_hard(
 # ---------------------------------------------------------------------------
 
 
-def _scaffold_and_run_pytest(template: StrategyTemplate, chain: SupportedChain) -> subprocess.CompletedProcess:
+def _scaffold_and_run_pytest(template: StrategyTemplate, chain: str) -> subprocess.CompletedProcess:
     """Scaffold a strategy via the CLI and return the pytest result object.
 
     This is the highest-level confidence check: the whole flow that a real
@@ -239,7 +237,7 @@ def _scaffold_and_run_pytest(template: StrategyTemplate, chain: SupportedChain) 
             [
                 "--template", template.value,
                 "--name", "emitted_strat",
-                "--chain", chain.value,
+                "--chain", chain,
                 "--output-dir", str(target),
             ],
             env={"CI": ""},
@@ -473,7 +471,7 @@ def test_templates_with_teardown_intents_have_position_setup() -> None:
 
 def test_generate_test_file_signature_is_stable() -> None:
     """generate_test_file(name, template, chain) -> str -- caller contract is stable."""
-    out = generate_test_file("My Strat", StrategyTemplate.BLANK, SupportedChain.ARBITRUM)
+    out = generate_test_file("My Strat", StrategyTemplate.BLANK, "arbitrum")
     assert isinstance(out, str)
     assert "class TestMyStratStrategyBasics" in out
     assert "class TestMyStratStrategyEdgeCases" in out
@@ -486,13 +484,13 @@ def test_strategy_class_name_matches_between_test_file_and_strategy_file() -> No
     strategy_code = generate_strategy_file(
         name=name,
         template=StrategyTemplate.TA_SWAP,
-        chain=SupportedChain.ARBITRUM,
+        chain="arbitrum",
         output_dir=Path("/tmp"),
     )
     test_code = generate_test_file(
         name=name,
         template=StrategyTemplate.TA_SWAP,
-        chain=SupportedChain.ARBITRUM,
+        chain="arbitrum",
     )
     # Derive expected class name from the strategy file's class definition
     strategy_tree = ast.parse(strategy_code)

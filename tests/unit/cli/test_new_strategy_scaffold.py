@@ -9,7 +9,6 @@ import pytest
 from almanak._version import __version__
 from almanak.framework.cli.new_strategy import (
     StrategyTemplate,
-    SupportedChain,
     generate_config_json,
     generate_dashboard_metadata,
     generate_dashboard_ui,
@@ -312,7 +311,7 @@ def test_strategy_file_is_valid_python(template: StrategyTemplate) -> None:
         code = generate_strategy_file(
             name="Smoke Test",
             template=template,
-            chain=SupportedChain.ARBITRUM,
+            chain="arbitrum",
             output_dir=Path(tmpdir),
         )
         # ast.parse will raise SyntaxError if code is invalid
@@ -326,7 +325,7 @@ def test_strategy_file_passes_ruff(template: StrategyTemplate) -> None:
         code = generate_strategy_file(
             name="Smoke Test",
             template=template,
-            chain=SupportedChain.ARBITRUM,
+            chain="arbitrum",
             output_dir=Path(tmpdir),
         )
         strategy_path = Path(tmpdir) / "strategy.py"
@@ -347,7 +346,7 @@ def test_strategy_file_has_decide_method(template: StrategyTemplate) -> None:
         code = generate_strategy_file(
             name="Smoke Test",
             template=template,
-            chain=SupportedChain.ARBITRUM,
+            chain="arbitrum",
             output_dir=Path(tmpdir),
         )
         tree = ast.parse(code)
@@ -363,7 +362,7 @@ def test_strategy_file_has_teardown_methods(template: StrategyTemplate) -> None:
         code = generate_strategy_file(
             name="Smoke Test",
             template=template,
-            chain=SupportedChain.ARBITRUM,
+            chain="arbitrum",
             output_dir=Path(tmpdir),
         )
         tree = ast.parse(code)
@@ -381,7 +380,7 @@ def test_config_json_is_valid(template: StrategyTemplate) -> None:
     config_str = generate_config_json(
         name="Smoke Test",
         template=template,
-        chain=SupportedChain.ARBITRUM,
+        chain="arbitrum",
     )
     config = json.loads(config_str)
     assert isinstance(config, dict)
@@ -389,10 +388,10 @@ def test_config_json_is_valid(template: StrategyTemplate) -> None:
 
 @pytest.mark.parametrize(
     "chain",
-    [SupportedChain.ARBITRUM, SupportedChain.BASE, SupportedChain.MANTLE, SupportedChain.SOLANA],
-    ids=lambda c: c.value,
+    ["arbitrum", "base", "mantle", "solana"],
+    ids=lambda c: c,
 )
-def test_config_json_emits_chain_as_first_key(chain: SupportedChain) -> None:
+def test_config_json_emits_chain_as_first_key(chain: str) -> None:
     """Generated config.json must emit the chain as the first top-level key.
 
     sdk-planner and other tooling read chain from config.json rather than
@@ -408,7 +407,7 @@ def test_config_json_emits_chain_as_first_key(chain: SupportedChain) -> None:
     )
     config = json.loads(config_str)
     assert list(config.keys())[0] == "chain", "chain must be the first top-level key"
-    assert config["chain"] == chain.value
+    assert config["chain"] == chain
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +422,7 @@ def test_generate_config_json_mantle_includes_anvil_funding() -> None:
     config_str = generate_config_json(
         name="Mantle Test",
         template=StrategyTemplate.TA_SWAP,
-        chain=SupportedChain.MANTLE,
+        chain="mantle",
     )
     config = json.loads(config_str)
     assert "anvil_funding" in config, "Mantle config must include anvil_funding"
@@ -438,7 +437,7 @@ def test_generate_config_json_all_chains_include_anvil_funding() -> None:
     """generate_config_json for all chains includes anvil_funding with chain-appropriate tokens."""
     import json
 
-    for chain in (SupportedChain.ARBITRUM, SupportedChain.BASE, SupportedChain.OPTIMISM):
+    for chain in ("arbitrum", "base", "optimism"):
         config_str = generate_config_json(
             name="Anvil Funding Test",
             template=StrategyTemplate.TA_SWAP,
@@ -459,7 +458,7 @@ def test_generate_config_json_bsc_uses_native_tokens() -> None:
     config_str = generate_config_json(
         name="BSC Test",
         template=StrategyTemplate.BLANK,
-        chain=SupportedChain.BSC,
+        chain="bsc",
     )
     config = json.loads(config_str)
     funding = config["anvil_funding"]
@@ -476,7 +475,7 @@ def test_generate_config_json_sonic_uses_native_tokens() -> None:
     config_str = generate_config_json(
         name="Sonic Test",
         template=StrategyTemplate.BLANK,
-        chain=SupportedChain.SONIC,
+        chain="sonic",
     )
     config = json.loads(config_str)
     funding = config["anvil_funding"]
@@ -492,7 +491,7 @@ def test_generate_config_json_avalanche_uses_native_tokens() -> None:
     config_str = generate_config_json(
         name="Avalanche Test",
         template=StrategyTemplate.BLANK,
-        chain=SupportedChain.AVALANCHE,
+        chain="avalanche",
     )
     config = json.loads(config_str)
     funding = config["anvil_funding"]
@@ -524,7 +523,7 @@ def test_stateful_templates_have_callbacks(template: StrategyTemplate) -> None:
         code = generate_strategy_file(
             name="Smoke Test",
             template=template,
-            chain=SupportedChain.ARBITRUM,
+            chain="arbitrum",
             output_dir=Path(tmpdir),
         )
         tree = ast.parse(code)
@@ -569,7 +568,7 @@ def _scaffold_lending_loop(preserve_decide: bool = False):
         code = generate_strategy_file(
             name="Test Loop",
             template=StrategyTemplate.LENDING_LOOP,
-            chain=SupportedChain.ARBITRUM,
+            chain="arbitrum",
             output_dir=Path(tmpdir),
         )
     # Execute the scaffolded code; capture the class object.
@@ -1177,7 +1176,7 @@ def _scaffold_basis_trade():
         code = generate_strategy_file(
             name="Test Basis",
             template=StrategyTemplate.BASIS_TRADE,
-            chain=SupportedChain.ARBITRUM,
+            chain="arbitrum",
             output_dir=Path(tmpdir),
         )
     ns: dict = {}
@@ -1323,7 +1322,7 @@ def _scaffold_perps_code() -> str:
         return generate_strategy_file(
             name="Test Perps",
             template=StrategyTemplate.PERPS,
-            chain=SupportedChain.ARBITRUM,
+            chain="arbitrum",
             output_dir=Path(tmpdir),
         )
 
@@ -1427,7 +1426,7 @@ def test_perps_scaffold_config_default_is_long() -> None:
     """config.json emitted by the PERPS template must default direction='LONG'."""
     import json
 
-    config_str = generate_config_json("Test Perps", StrategyTemplate.PERPS, SupportedChain.ARBITRUM)
+    config_str = generate_config_json("Test Perps", StrategyTemplate.PERPS, "arbitrum")
     config = json.loads(config_str)
     assert config.get("direction") == "LONG", "PERPS config.json must include direction='LONG' by default"
 
@@ -1647,7 +1646,7 @@ def test_dynamic_lp_config_uses_symbolic_pool() -> None:
     """dynamic_lp config.json must use symbolic pool format, not raw hex."""
     import json
 
-    config_str = generate_config_json("Test LP", StrategyTemplate.DYNAMIC_LP, SupportedChain.ARBITRUM)
+    config_str = generate_config_json("Test LP", StrategyTemplate.DYNAMIC_LP, "arbitrum")
     config = json.loads(config_str)
     assert "pool" in config, "dynamic_lp config must have 'pool' key"
     assert "pool_address" not in config, "dynamic_lp config must NOT have 'pool_address'"
@@ -1658,7 +1657,7 @@ def test_multi_step_config_uses_symbolic_pool() -> None:
     """multi_step config.json must use symbolic pool format, not raw hex."""
     import json
 
-    config_str = generate_config_json("Test MS", StrategyTemplate.MULTI_STEP, SupportedChain.ARBITRUM)
+    config_str = generate_config_json("Test MS", StrategyTemplate.MULTI_STEP, "arbitrum")
     config = json.loads(config_str)
     assert "pool" in config, "multi_step config must have 'pool' key"
     assert "pool_address" not in config, "multi_step config must NOT have 'pool_address'"
@@ -1669,7 +1668,7 @@ def test_multi_step_config_uses_rebalance_drift_pct() -> None:
     """multi_step config must use rebalance_drift_pct, not rebalance_threshold_pct."""
     import json
 
-    config_str = generate_config_json("Test MS", StrategyTemplate.MULTI_STEP, SupportedChain.ARBITRUM)
+    config_str = generate_config_json("Test MS", StrategyTemplate.MULTI_STEP, "arbitrum")
     config = json.loads(config_str)
     assert "rebalance_drift_pct" in config, "multi_step config must have 'rebalance_drift_pct'"
     assert "rebalance_threshold_pct" not in config, "multi_step config must NOT have 'rebalance_threshold_pct'"
@@ -1682,7 +1681,7 @@ def test_dynamic_lp_strategy_provides_both_lp_amounts() -> None:
         code = generate_strategy_file(
             "Test LP",
             StrategyTemplate.DYNAMIC_LP,
-            SupportedChain.ARBITRUM,
+            "arbitrum",
             output_dir=Path(tmpdir),
         )
     # Must NOT hardcode amount1=0 (single-sided)
@@ -2007,7 +2006,7 @@ def test_stateful_templates_emit_strenum_class(
         code = generate_strategy_file(
             name="StrEnum Test",
             template=template,
-            chain=SupportedChain.ARBITRUM,
+            chain="arbitrum",
             output_dir=Path(tmpdir),
         )
     # Grep: StrEnum must be imported (alone or alongside Enum). VIB-3207 v2
@@ -2039,7 +2038,7 @@ def test_stateless_templates_do_not_emit_strenum_import(template: StrategyTempla
         code = generate_strategy_file(
             name="Stateless Test",
             template=template,
-            chain=SupportedChain.ARBITRUM,
+            chain="arbitrum",
             output_dir=Path(tmpdir),
         )
     # Stateless templates still import ``Enum`` (used by ``_safe``) but must
@@ -2066,7 +2065,7 @@ def test_stateful_templates_do_not_use_bare_state_strings(template: StrategyTemp
         code = generate_strategy_file(
             name="StrEnum Hygiene",
             template=template,
-            chain=SupportedChain.ARBITRUM,
+            chain="arbitrum",
             output_dir=Path(tmpdir),
         )
     enum_name, members = STATEFUL_STRENUM_TEMPLATES[template]
@@ -2214,7 +2213,7 @@ def test_lending_loop_scaffolded_init_uses_strenum() -> None:
         code = generate_strategy_file(
             name="Init Check",
             template=StrategyTemplate.LENDING_LOOP,
-            chain=SupportedChain.ARBITRUM,
+            chain="arbitrum",
             output_dir=Path(tmpdir),
         )
     assert "self._loop_state = LendingLoopState.IDLE" in code, (
@@ -2230,7 +2229,7 @@ def test_basis_trade_scaffolded_init_uses_strenum() -> None:
         code = generate_strategy_file(
             name="Init Check",
             template=StrategyTemplate.BASIS_TRADE,
-            chain=SupportedChain.ARBITRUM,
+            chain="arbitrum",
             output_dir=Path(tmpdir),
         )
     assert "self._trade_state = BasisTradeState.IDLE" in code
@@ -2253,7 +2252,7 @@ def test_basis_trade_scaffolded_init_uses_strenum() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _scaffold_and_get_class(template: StrategyTemplate, chain: SupportedChain = SupportedChain.ARBITRUM):
+def _scaffold_and_get_class(template: StrategyTemplate, chain: str = "arbitrum"):
     """Scaffold a template and return a concrete subclass suitable for `get_status()` tests.
 
     Stubs out ``decide()`` / ``get_open_positions()`` / ``generate_teardown_intents()``
@@ -2533,7 +2532,7 @@ def test_get_status_perps_idle_state_has_none_entry_price() -> None:
 def test_get_status_staking_exposes_staked_amount_and_rewards() -> None:
     from decimal import Decimal
 
-    cls, ns = _scaffold_and_get_class(StrategyTemplate.STAKING, chain=SupportedChain.ETHEREUM)
+    cls, ns = _scaffold_and_get_class(StrategyTemplate.STAKING, chain="ethereum")
     StakingState = ns["StakingState"]
 
     inst = _bare_instance(cls)
@@ -2707,7 +2706,7 @@ _ALL_TEMPLATES_FOR_STATUS = list(StrategyTemplate)
 def test_get_status_always_returns_canonical_trio(template: StrategyTemplate) -> None:
     """Every template must keep the canonical ``{strategy, chain, wallet}`` trio."""
     # Staking template only supports Ethereum; every other template works on Arbitrum.
-    chain = SupportedChain.ETHEREUM if template == StrategyTemplate.STAKING else SupportedChain.ARBITRUM
+    chain = "ethereum" if template == StrategyTemplate.STAKING else "arbitrum"
     expected_chain = "ethereum" if template == StrategyTemplate.STAKING else "arbitrum"
     cls, _ = _scaffold_and_get_class(template, chain=chain)
     inst = _bare_instance(cls)
@@ -2727,7 +2726,7 @@ def test_get_status_is_json_serializable(template: StrategyTemplate) -> None:
     """Every template's get_status() output must round-trip through json.dumps."""
     import json
 
-    chain = SupportedChain.ETHEREUM if template == StrategyTemplate.STAKING else SupportedChain.ARBITRUM
+    chain = "ethereum" if template == StrategyTemplate.STAKING else "arbitrum"
     cls, _ = _scaffold_and_get_class(template, chain=chain)
     inst = _bare_instance(cls)
     _seed_minimum_status_attrs(inst, template)

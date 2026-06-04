@@ -44,6 +44,7 @@ from ..strategies.intent_strategy import (
     StrategyMetadata,
     TokenBalance,
 )
+from .chain_resolution import cli_chain_choices
 
 # =============================================================================
 # Constants
@@ -1150,7 +1151,7 @@ def intent_group() -> None:
 @click.option(
     "--chain",
     "-c",
-    type=click.Choice(["ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche"]),
+    type=click.Choice(cli_chain_choices(evm_only=True)),
     default="arbitrum",
     help="Chain for ActionBundle compilation (default: arbitrum)",
 )
@@ -1237,7 +1238,7 @@ def inspect(
 @click.option(
     "--chain",
     "-c",
-    type=click.Choice(["ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche"]),
+    type=click.Choice(cli_chain_choices(evm_only=True)),
     default="arbitrum",
     help="Chain for execution (default: arbitrum)",
 )
