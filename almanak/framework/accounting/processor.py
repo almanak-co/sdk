@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors._strategy_base.accounting_treatment_registry import AccountingTreatmentRegistry
 from almanak.framework.accounting.category_handlers import HANDLERS, HandlerContext
 from almanak.framework.accounting.classifier import AccountingCategory, classify
 from almanak.framework.accounting.models import LendingAccountingEvent
@@ -272,6 +273,14 @@ class AccountingProcessor:
         at package import time; ``HANDLERS`` is then a dense
         ``dict[AccountingCategory, HandlerFn]``.
 
+        VIB-4931: a connector-owned *treatment* stage runs first. A connector may
+        publish (via ``AccountingTreatmentRegistry``) how to categorize and treat
+        its own events; when it claims an event its treatment runs in place of the
+        generic category handler and dispatch returns before ``classify`` /
+        ``HANDLERS`` are consulted — keeping protocol-specific accounting (e.g.
+        Pendle's LP / PT mechanics) in the connector rather than as protocol-named
+        ``AccountingCategory`` members in the framework.
+
         Behaviour for ``NO_ACCOUNTING`` and for any (future) category whose
         handler is missing from the registry: return ``None`` (no event
         written). Missing-handler-for-classified-category emits an ERROR log
@@ -281,6 +290,39 @@ class AccountingProcessor:
         protocol = ledger_row.get("protocol") or ""
         token_out = ledger_row.get("token_out") or ""
 
+        ctx = HandlerContext(
+            outbox_row=outbox_row,
+            ledger_row=ledger_row,
+            basis_store=self._basis_store,
+            prior_open_lookup=self._lookup_prior_lp_open,
+        )
+
+        # Stage 1 — connector-owned accounting treatment (VIB-4931). A connector
+        # publishes how to categorize + treat its own events (e.g. Pendle's LP / PT
+        # mechanics) via the strategy-side registry, so the framework routes them
+        # without naming the protocol or carrying a protocol-named AccountingCategory.
+        # The first connector that claims the event wins; its treatment runs in place
+        # of the generic category handler. If a connector claims an event but has no
+        # treatment for the key it returned (a stale/typoed ``treatment_key`` — a
+        # connector wiring bug), we log loudly and FALL THROUGH to the generic stage-2
+        # path so the event is still accounted (generically) rather than silently
+        # dropped (CodeRabbit review on #2598).
+        decision = AccountingTreatmentRegistry.categorize(intent_type, protocol, token_out)
+        if decision is not None:
+            treatment = AccountingTreatmentRegistry.treatment_for(decision.treatment_key)
+            if treatment is not None:
+                return treatment(ctx)
+            logger.error(
+                "_dispatch: a connector claimed intent_type=%s protocol=%s as "
+                "treatment=%s but no treatment is registered (ledger_entry_id=%s) — "
+                "falling back to generic accounting dispatch",
+                intent_type,
+                protocol,
+                decision.treatment_key,
+                ledger_row.get("id") or "",
+            )
+
+        # Stage 2 — generic taxonomy dispatch via the category-handler registry.
         category = classify(intent_type, protocol, token_out)
         logger.debug(
             "drain_one: intent_type=%s protocol=%s → category=%s",
@@ -303,12 +345,6 @@ class AccountingProcessor:
             )
             return None
 
-        ctx = HandlerContext(
-            outbox_row=outbox_row,
-            ledger_row=ledger_row,
-            basis_store=self._basis_store,
-            prior_open_lookup=self._lookup_prior_lp_open,
-        )
         return handler(ctx)
 
     def _lookup_prior_lp_open(self, position_key: str, discriminator: str | None = None) -> dict[str, Any] | None:

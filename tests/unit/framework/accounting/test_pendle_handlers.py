@@ -6,15 +6,12 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from unittest.mock import MagicMock
 
-import pytest
-
-from almanak.framework.accounting.basis import FIFOBasisStore
-from almanak.framework.accounting.category_handlers.pendle_handler import (
+from almanak.connectors.pendle.accounting_spec import (
     handle_pendle_lp,
     handle_pendle_pt,
 )
+from almanak.framework.accounting.basis import FIFOBasisStore
 from almanak.framework.accounting.models import AccountingConfidence, PendleEventType
 
 _SCALE_18 = Decimal(10**18)

@@ -3714,23 +3714,19 @@ class StrategyRunner:
                 position_key = _derive_position_key(protocol, chain, wallet_address, market_id or None, asset)
                 return position_key, market_id
 
-            # Pendle LP (LP_OPEN / LP_CLOSE for pendle protocol)
-            if t in {"LP_OPEN", "LP_CLOSE"} and "pendle" in protocol:
-                from ..accounting.pendle_accounting import _derive_pendle_position_key, _get_market_address
+            # Pendle (and any future connector with custom accounting) publishes its
+            # outbox position-key derivation via the strategy-side registry (VIB-4931),
+            # so the runner routes it without naming the protocol. Returns
+            # (position_key, market_id) when the connector owns the event, else None.
+            from almanak.connectors._strategy_base.accounting_treatment_registry import (
+                AccountingTreatmentRegistry,
+            )
 
-                market_address = _get_market_address(intent)
-                position_key = (
-                    _derive_pendle_position_key(chain, wallet_address, market_address) if market_address else ""
-                )
-                return position_key, market_address
-
-            # Pendle PT (SWAP for pendle protocol)
-            if t == "SWAP" and "pendle" in protocol:
-                market_address = (getattr(intent, "pool", None) or "").lower()
-                position_key = (
-                    f"pendle_pt:{chain.lower()}:{wallet_address.lower()}:{market_address}" if market_address else ""
-                )
-                return position_key, market_address
+            registry_key = AccountingTreatmentRegistry.position_key_for(
+                protocol, intent_type=t, chain=chain, wallet=wallet_address, intent=intent
+            )
+            if registry_key is not None:
+                return registry_key
 
             # Non-Pendle SWAP — position key groups by chain+wallet for FIFO lot tracking.
             if t == "SWAP":
