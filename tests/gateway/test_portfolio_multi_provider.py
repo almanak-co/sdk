@@ -483,10 +483,12 @@ class TestMoralisNormalization:
         assert MoralisIntegration._CHAIN_SLUGS["ethereum"] == "eth"
         assert MoralisIntegration._CHAIN_SLUGS["arbitrum"] == "arbitrum"
         assert MoralisIntegration._CHAIN_SLUGS["base"] == "base"
-        # Solana is NOT in _CHAIN_SLUGS (uses legacy path)
+        # Solana is NOT in _CHAIN_SLUGS; detection routes through the registry
+        # (_is_solana), not the removed dead _CHAIN_IDS map (VIB-4851 A2).
         assert "solana" not in MoralisIntegration._CHAIN_SLUGS
-        # Solana is still in _CHAIN_IDS for detection
-        assert MoralisIntegration._CHAIN_IDS["solana"] == "solana"
+        _m = MoralisIntegration.__new__(MoralisIntegration)
+        assert _m._is_solana("solana") is True
+        assert _m._is_solana("ethereum") is False
 
     def test_normalize_net_worth_response(self):
         moralis = MoralisIntegration.__new__(MoralisIntegration)

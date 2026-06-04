@@ -50,11 +50,6 @@ class MoralisIntegration(BaseIntegration):
         "sonic": "sonic",
     }
 
-    # Legacy hex chain IDs — only used for Solana path detection.
-    _CHAIN_IDS: dict[str, str] = {
-        "solana": "solana",
-    }
-
     def __init__(
         self,
         api_key: str | None = None,

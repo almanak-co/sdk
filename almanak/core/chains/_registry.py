@@ -156,6 +156,16 @@ class ChainRegistry:
         return descriptor
 
     @classmethod
+    def try_resolve_id(cls, chain_id: int) -> ChainDescriptor | None:
+        """Look up by EIP-155 chain ID, or ``None`` if no EVM chain has this id.
+
+        Non-raising sibling of :meth:`by_id` (mirrors :meth:`try_resolve` vs
+        :meth:`resolve`). Solana's ``chain_id`` is 0 and is not registered in
+        ``_by_id``, so ``try_resolve_id(0)`` returns ``None``.
+        """
+        return cls._by_id.get(chain_id)
+
+    @classmethod
     def all(cls) -> tuple[ChainDescriptor, ...]:
         """Return every registered descriptor, sorted by enum name.
 

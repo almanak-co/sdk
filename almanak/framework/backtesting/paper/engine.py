@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
 from almanak.core.chains import ChainRegistry
+from almanak.core.chains._helpers import chain_name_for_id as _chain_name_for_id
 from almanak.framework.anvil.fork_manager import TOKEN_ADDRESSES, RollingForkManager
 from almanak.framework.backtesting.models import (
     BacktestMetrics,
@@ -132,19 +133,9 @@ CHAIN_ID_ARBITRUM = 42161
 CHAIN_ID_BASE = 8453
 
 
-def _chain_name_for_id(chain_id: int) -> str | None:
-    """Resolve an EIP-155 chain id to its canonical chain name for TokenResolver.
-
-    Sources the id->name mapping from ``ChainRegistry`` (the single source of
-    truth, VIB-4801) rather than a local hand-maintained dict. Preserves the
-    previous ``dict.get(chain_id)`` contract exactly: an unknown id returns
-    ``None`` so callers fall through to the local ``TOKEN_DECIMALS`` registry
-    instead of raising.
-    """
-    try:
-        return ChainRegistry.by_id(chain_id).name
-    except ValueError:
-        return None
+# ``_chain_name_for_id`` is imported above from ``core.chains._helpers`` (VIB-4851
+# A2): the W9-era local copy was collapsed onto the shared registry-derived helper
+# (id -> name, None on an unregistered id) so there is one source of truth.
 
 
 # Paper-engine price-source allowlist: the chains for which the engine wires up

@@ -35,26 +35,12 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from almanak.core.chains._helpers import chain_name_for_id
+
 if TYPE_CHECKING:
     from web3 import AsyncWeb3
 
 logger = logging.getLogger(__name__)
-
-# Reverse mapping from chain_id (int) -> chain name (str) for TokenResolver calls
-_CHAIN_ID_TO_NAME: dict[int, str] = {
-    1: "ethereum",
-    42161: "arbitrum",
-    10: "optimism",
-    8453: "base",
-    43114: "avalanche",
-    137: "polygon",
-    56: "bsc",
-    146: "sonic",
-    9745: "plasma",
-    81457: "blast",
-    5000: "mantle",
-    80094: "berachain",
-}
 
 
 def _get_resolver():
@@ -699,8 +685,8 @@ def get_token_info(chain_id: int, address: str) -> TokenInfo | None:
     """
     normalized_address = address.lower()
 
-    # Try TokenResolver first
-    chain_name = _CHAIN_ID_TO_NAME.get(chain_id)
+    # Try TokenResolver first (chain_id -> name derived from the registry, VIB-4851 A2)
+    chain_name = chain_name_for_id(chain_id)
     if chain_name:
         resolver = _get_resolver()
         if resolver:

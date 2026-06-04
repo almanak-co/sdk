@@ -119,3 +119,15 @@ def vendor_chain_map(vendor: str) -> dict[str, str]:
         if vendor_id is not None:
             result[descriptor.name] = vendor_id
     return result
+
+
+def chain_name_for_id(chain_id: int) -> str | None:
+    """EIP-155 chain id -> canonical chain name, or ``None`` for an unregistered id.
+
+    Mirrors the legacy ``_CHAIN_ID_TO_NAME.get(chain_id)`` contract: an unknown id
+    (including Solana, whose registry ``chain_id`` is 0 and is not in ``_by_id``)
+    returns ``None`` so callers fall through, never raising. Registry-derived
+    replacement for hardcoded ``{chain_id: name}`` matrices (VIB-4851 A2).
+    """
+    descriptor = ChainRegistry.try_resolve_id(chain_id)
+    return descriptor.name if descriptor is not None else None
