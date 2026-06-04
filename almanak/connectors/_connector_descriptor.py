@@ -93,6 +93,7 @@ class Connector:
     agent_read_connectors: tuple[ImportRef, ...] = field(default_factory=tuple)
     vault_tool_connector: ImportRef | None = None
     vault_tool_connectors: tuple[ImportRef, ...] = field(default_factory=tuple)
+    runner_hook_connector: ImportRef | None = None
     gateway_connector: ImportRef | None = None
     gateway_connectors: tuple[ImportRef, ...] = field(default_factory=tuple)
     protocol_family: ImportRef | None = None
@@ -125,6 +126,7 @@ class Connector:
         self._validate_gas_estimate_connector()
         self._validate_agent_read_connectors()
         self._validate_vault_tool_connectors()
+        self._validate_runner_hook_connector()
         self._validate_protocol_family()
         self._validate_swap_classification()
         self._validate_contract_roles()
@@ -221,6 +223,13 @@ class Connector:
         ref_keys = [(ref.module, ref.attribute) for ref in self.vault_tool_connector_refs]
         if len(set(ref_keys)) != len(ref_keys):
             raise ValueError(f"Connector vault-tool connector refs contain duplicates: {ref_keys!r}")
+
+    def _validate_runner_hook_connector(self) -> None:
+        """Validate the strategy-runner hook provider import reference."""
+        if self.runner_hook_connector is not None and not isinstance(self.runner_hook_connector, ImportRef):
+            raise ValueError(
+                f"Connector.runner_hook_connector must be None or an ImportRef, got {self.runner_hook_connector!r}"
+            )
 
     def _validate_protocol_family(self) -> None:
         """Validate the protocol-family spec import reference."""
@@ -392,6 +401,10 @@ class ConnectorRegistry:
     def with_vault_tool(self) -> tuple[Connector, ...]:
         """Return connectors that publish vault-tool connectors."""
         return tuple(d for d in self.all() if d.vault_tool_connector_refs)
+
+    def with_runner_hooks(self) -> tuple[Connector, ...]:
+        """Return connectors that publish strategy-runner hook connectors."""
+        return tuple(d for d in self.all() if d.runner_hook_connector is not None)
 
     def with_protocol_family(self) -> tuple[Connector, ...]:
         """Return connectors that publish protocol-family specs."""

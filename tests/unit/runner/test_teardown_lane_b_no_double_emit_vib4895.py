@@ -47,7 +47,7 @@ class _Strategy:
 class _Runner(StrategyRunner):
     """Bypass ``StrategyRunner.__init__`` — drive the real ``_write_ledger_entry``.
 
-    Only the unrelated heavy leaf deps (slot0 enrichment, atomic registry save)
+    Only the unrelated heavy leaf deps (runner-hook enrichment, atomic registry save)
     are neutralised; the ``emit_position_event`` guard under test stays real.
     ``_emit_position_event_for_intent`` is replaced with a counter so we observe
     exactly whether the transitive emit fired, without dragging in
@@ -60,11 +60,8 @@ class _Runner(StrategyRunner):
         self._iteration_had_trade = False
         self.emit_calls = 0
 
-    # --- neutralise unrelated deps so build → save → emit-guard runs clean ---
-    def _maybe_enrich_lp_open_with_slot0(self, result: Any, chain: str) -> None:  # noqa: ARG002
-        return None
-
-    def _maybe_enrich_lp_close_with_slot0(self, result: Any, chain: str) -> None:  # noqa: ARG002
+    # --- neutralise unrelated deps so build -> save -> emit-guard runs clean ---
+    def _maybe_enrich_result_with_runner_hooks(self, result: Any, chain: str) -> None:  # noqa: ARG002
         return None
 
     async def _maybe_save_ledger_with_registry(self, **_kwargs: Any) -> bool:

@@ -41,6 +41,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.connectors._strategy_base.runner_hook_registry import RunnerHookRegistryError
 from almanak.framework.runner.strategy_runner import StrategyRunner
 
 # Take unbound methods off the class so we can drive them without
@@ -240,6 +241,22 @@ class TestReceiptHasLpTopic:
 
     def test_no_logs_key(self) -> None:
         assert _receipt_has_lp_topic({}) is False
+
+    def test_empty_registry_topics_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from almanak.connectors import _strategy_runner_hook_registry as runner_hook_registry
+
+        class _EmptyRunnerHookRegistry:
+            def lp_receipt_topics(self) -> frozenset[str]:
+                return frozenset()
+
+        monkeypatch.setattr(
+            runner_hook_registry,
+            "STRATEGY_RUNNER_HOOK_REGISTRY",
+            _EmptyRunnerHookRegistry(),
+        )
+
+        with pytest.raises(RunnerHookRegistryError, match="No LP receipt topics"):
+            _receipt_has_lp_topic({"logs": []})
 
     def test_log_with_empty_topics_skipped(self) -> None:
         rec = {"logs": [{"topics": []}]}

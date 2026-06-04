@@ -743,38 +743,43 @@ class StrategyRunner:
 
         return get_gateway_client(self)
 
-    def _build_v4_pool_key_lookup(self) -> Any | None:
+    def _build_pool_key_lookup(self) -> Any | None:
         """Build a sync ``(pool_id_hex, chain) -> PoolKey | None`` callable.
 
-        VIB-4477 (T08). Wraps the async ``lookup_v4_pool_key`` gateway RPC so
-        the sync ResultEnricher pipeline can call it from the Uniswap V4
-        receipt parser without blocking on its own event-loop management.
+        Wraps connector-owned gateway lookup bridges so the sync
+        ``ResultEnricher`` pipeline can inject them into receipt parsers.
 
         Returns ``None`` when no gateway client is configured (paper / dry-run
-        / unit-test modes). The V4 parser then drops LP_CLOSE events with a
-        structured ``missing_pool_key_lookup`` log (Empty != Zero — fail loud
-        rather than misattribute amounts).
+        / unit-test modes). Parsers that require a lookup callback then emit
+        their own structured missing-lookup diagnostics.
         """
         client = self._get_gateway_client()
         if client is None:
             return None
         try:
-            from almanak.connectors.uniswap_v4.gateway_pool_key_client import (
-                make_sync_pool_key_lookup,
+            from almanak.connectors._strategy_runner_hook_registry import (
+                STRATEGY_RUNNER_HOOK_REGISTRY,
             )
         except Exception as exc:
-            # Bridge import / wiring failure: a configured gateway client exists but
-            # we cannot construct the V4 PoolKey bridge. V4 LP closes that need
-            # PoolKey-driven attribution will drop with MISSING_POOL_KEY_LOOKUP
-            # rather than misattribute amounts. Surface loudly so operators can
-            # distinguish "no gateway configured" from "gateway misconfigured".
             logger.error(
-                "V4 pool_key_lookup bridge unavailable: %s: %s",
+                "pool_key_lookup registry unavailable: %s: %s",
                 type(exc).__name__,
                 exc,
             )
             return None
-        return make_sync_pool_key_lookup(client)
+
+        try:
+            return STRATEGY_RUNNER_HOOK_REGISTRY.build_pool_key_lookup(client)
+        except Exception as exc:
+            # A configured gateway client exists but a connector-owned lookup
+            # bridge could not be constructed. Surface loudly so operators can
+            # distinguish "no gateway configured" from "gateway misconfigured".
+            logger.error(
+                "pool_key_lookup bridge unavailable: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return None
 
     def _register_with_gateway(self, strategy: StrategyProtocol) -> None:
         from .runner_gateway import register_with_gateway
@@ -2341,70 +2346,20 @@ class StrategyRunner:
             "token1": str(latest_open.get("token1") or ""),
         }
 
-    def _maybe_enrich_lp_open_with_slot0(self, result: Any, chain: str) -> None:
-        """VIB-3893 — fill ``LPOpenData.current_tick`` from a slot0 RPC.
-
-        The receipt parser populates ``current_tick`` from a Swap event
-        in the same receipt (atomic swap-then-mint). When the strategy
-        splits the swap and the mint into separate cycles (the canonical
-        AccountingQuant-LP path), the LP_OPEN receipt is a pure NPM.mint
-        and ``current_tick`` stays None — making ``position_events.in_range``
-        unrecoverable. This fallback issues one extra ``slot0()`` eth_call
-        through the gateway and patches the field in place.
-
-        No-ops when ``extracted_data`` lacks an ``LPOpenData``, when
-        ``current_tick`` is already populated, or when the gateway client
-        / pool address are missing. Never raises.
-        """
+    def _maybe_enrich_result_with_runner_hooks(self, result: Any, chain: str) -> None:
+        """Run connector-owned best-effort result enrichment before ledger writes."""
         try:
-            extracted = getattr(result, "extracted_data", None)
-            if not isinstance(extracted, dict):
-                return
-            lp_open = extracted.get("lp_open_data")
-            if lp_open is None:
-                return
-            from almanak.connectors.uniswap_v3.slot0_fallback import enrich_lp_open_with_slot0
-
             gateway = self._get_gateway_client()
             if gateway is None:
                 return
-            enriched = enrich_lp_open_with_slot0(lp_open, gateway_client=gateway, chain=chain)
-            if enriched is not lp_open:
-                extracted["lp_open_data"] = enriched
+
+            from almanak.connectors._strategy_runner_hook_registry import (
+                STRATEGY_RUNNER_HOOK_REGISTRY,
+            )
+
+            STRATEGY_RUNNER_HOOK_REGISTRY.enrich_result(result, gateway_client=gateway, chain=chain)
         except Exception:  # noqa: BLE001 — fail-open
-            logger.debug("slot0 enrichment failed", exc_info=True)
-
-    def _maybe_enrich_lp_close_with_slot0(self, result: Any, chain: str) -> None:
-        """VIB-3940 — fill ``LPCloseData.current_tick`` from a slot0 RPC.
-
-        Mirror of :meth:`_maybe_enrich_lp_open_with_slot0`. The canonical
-        pure-burn close has no Swap event in the receipt, so the receipt
-        parser leaves ``current_tick=None``. Without this fallback the
-        LP_CLOSE accounting event inherits null and ``in_range`` cannot be
-        derived at close-time — breaking lane symmetry vs. LP_OPEN
-        (VIB-3893).
-
-        No-ops when ``extracted_data`` lacks an ``LPCloseData``, when
-        ``current_tick`` is already populated, or when the gateway client
-        / pool address are missing. Never raises.
-        """
-        try:
-            extracted = getattr(result, "extracted_data", None)
-            if not isinstance(extracted, dict):
-                return
-            lp_close = extracted.get("lp_close_data")
-            if lp_close is None:
-                return
-            from almanak.connectors.uniswap_v3.slot0_fallback import enrich_lp_close_with_slot0
-
-            gateway = self._get_gateway_client()
-            if gateway is None:
-                return
-            enriched = enrich_lp_close_with_slot0(lp_close, gateway_client=gateway, chain=chain)
-            if enriched is not lp_close:
-                extracted["lp_close_data"] = enriched
-        except Exception:  # noqa: BLE001 — fail-open
-            logger.debug("slot0 close-enrichment failed", exc_info=True)
+            logger.debug("runner hook enrichment failed", exc_info=True)
 
     async def _write_ledger_entry(  # noqa: C901
         self,
@@ -2453,20 +2408,15 @@ class StrategyRunner:
             cycle_id = get_cycle_id() or ""
             chain = getattr(strategy, "chain", "") or getattr(self.config, "chain", "")
 
-            # VIB-3893 v2 — slot0 enrichment must run BEFORE
+            # VIB-3893 / VIB-3940: connector-owned enrichment must run BEFORE
             # ``build_ledger_entry`` serializes ``result.extracted_data``
             # into ``transaction_ledger.extracted_data_json``. Pre-fix the
-            # enrichment ran post-save (further down this method) and the
             # ledger row carried ``current_tick=None`` even though the
-            # post-save position_event captured the slot0-derived value.
+            # post-save position_event captured the enriched value.
             # Net effect: the LP accounting payload (built later from the
             # ledger row) showed ``in_range=None`` on every production
             # swap-then-mint-across-cycles run.
-            self._maybe_enrich_lp_open_with_slot0(result, chain)
-            # VIB-3940 — same enrichment for LP_CLOSE so the LP_CLOSE
-            # accounting event can derive ``in_range`` at close-time. Same
-            # pre-serialize ordering rationale as the LP_OPEN sibling.
-            self._maybe_enrich_lp_close_with_slot0(result, chain)
+            self._maybe_enrich_result_with_runner_hooks(result, chain)
 
             entry = build_ledger_entry(
                 deployment_id=strategy.deployment_id,
@@ -3162,14 +3112,12 @@ class StrategyRunner:
         Pulled out so :meth:`_extract_receipt_from_result` can ask the
         question without inlining the topic-extraction loop.
         """
-        from almanak.connectors.uniswap_v3.receipt_parser import (
-            EVENT_TOPICS,
-        )
+        from almanak.connectors._strategy_base.runner_hook_registry import RunnerHookRegistryError
+        from almanak.connectors._strategy_runner_hook_registry import STRATEGY_RUNNER_HOOK_REGISTRY
 
-        lp_topics_lower = {
-            EVENT_TOPICS["IncreaseLiquidity"].lower(),
-            EVENT_TOPICS["DecreaseLiquidity"].lower(),
-        }
+        lp_topics_lower = STRATEGY_RUNNER_HOOK_REGISTRY.lp_receipt_topics()
+        if not lp_topics_lower:
+            raise RunnerHookRegistryError("No LP receipt topics are registered; refusing to guess the LP receipt")
         for log in rec.get("logs") or []:
             topics = log.get("topics") if isinstance(log, dict) else getattr(log, "topics", None)
             if not topics:
@@ -4756,15 +4704,13 @@ class StrategyRunner:
         # Enrich result with intent-specific extracted data
         if state.last_execution_result and state.last_execution_context:
             try:
-                # VIB-4477 (T08): thread a sync ``pool_key_lookup`` bridge so
-                # the V4 receipt parser can resolve ``ModifyLiquidity.pool_id``
-                # back to its canonical PoolKey via the gateway during
-                # enrichment. The bridge is bound to this runner's
-                # ``GatewayClient``; ``None`` when no gateway client is
-                # configured (paper / dry-run modes), in which case V4
-                # LP_CLOSE events drop with a structured warning and the
-                # rest of the pipeline degrades cleanly.
-                pool_key_lookup = self._build_v4_pool_key_lookup()
+                # VIB-4477 (T08): thread connector-owned pool-key lookup
+                # bridges into receipt parsing. The callback is bound to
+                # this runner's ``GatewayClient``; ``None`` when no gateway
+                # client is configured (paper / dry-run modes), in which case
+                # parsers that need it emit structured warnings and the rest
+                # of the pipeline degrades cleanly.
+                pool_key_lookup = self._build_pool_key_lookup()
                 enricher = ResultEnricher(
                     live_mode=self._is_live_mode(),
                     pool_key_lookup=pool_key_lookup,

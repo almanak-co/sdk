@@ -20,6 +20,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.uniswap_v4.receipt_parser_provider",
         attribute="UniswapV4ReceiptParserConnector",
     ),
+    runner_hook_connector=ImportRef(
+        module="almanak.connectors.uniswap_v4.runner_hooks",
+        attribute="UniswapV4RunnerHookConnector",
+    ),
     contract_roles=ImportRef(
         module="almanak.connectors.uniswap_v4.contract_roles",
         attribute="CONTRACT_ROLES",

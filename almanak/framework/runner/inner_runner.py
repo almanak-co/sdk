@@ -505,22 +505,23 @@ class IntentExecutionService:
             # VIB-3203: extract compiler bundle metadata for realized slippage math.
             bundle_metadata = self._decode_bundle_metadata(compile_resp)
 
-            # Run enrichment. VIB-4477 (T08): pass a sync V4 pool_key_lookup
-            # bridge bound to this runner's GatewayClient so V4 LP_CLOSE
-            # receipts can resolve their canonical PoolKey via gateway RPC.
+            # Run enrichment. VIB-4477 (T08): pass connector-owned pool-key
+            # lookup bridges bound to this runner's GatewayClient so receipt
+            # parsers can resolve canonical PoolKeys via gateway RPC.
             try:
-                from almanak.connectors.uniswap_v4.gateway_pool_key_client import (
-                    make_sync_pool_key_lookup,
+                from almanak.connectors._strategy_runner_hook_registry import (
+                    STRATEGY_RUNNER_HOOK_REGISTRY,
                 )
 
-                pool_key_lookup = make_sync_pool_key_lookup(self._client)
+                pool_key_lookup = STRATEGY_RUNNER_HOOK_REGISTRY.build_pool_key_lookup(self._client)
             except Exception as exc:
                 # Bridge import / wiring failure: surface loudly so operators can
                 # distinguish "no gateway configured" from "gateway misconfigured".
-                # V4 LP closes that need PoolKey-driven attribution will drop with
-                # MISSING_POOL_KEY_LOOKUP rather than misattribute amounts.
+                # Parsers that need PoolKey-driven attribution will drop with
+                # structured missing-lookup diagnostics rather than misattribute
+                # amounts.
                 logger.error(
-                    "V4 pool_key_lookup bridge unavailable: %s: %s",
+                    "pool_key_lookup bridge unavailable: %s: %s",
                     type(exc).__name__,
                     exc,
                 )

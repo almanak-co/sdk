@@ -453,9 +453,8 @@ class ResultEnricher:
                 LP_CLOSE events then drop with a structured
                 ``missing_pool_key_lookup`` warning (Empty != Zero per
                 blueprint 27, the parser fails loud rather than misattribute).
-                The strategy runner builds this from its
-                ``GatewayClient`` via
-                :func:`almanak.connectors.uniswap_v4.gateway_pool_key_client.make_sync_pool_key_lookup`.
+                The strategy runner builds this from connector-owned runner
+                hooks bound to its ``GatewayClient``.
         """
         self.parser_registry = parser_registry or ReceiptParserRegistry()
         self.live_mode = live_mode

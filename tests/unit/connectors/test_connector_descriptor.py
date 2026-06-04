@@ -42,6 +42,9 @@ from almanak.connectors._strategy_base.receipt_parser_registry import (
     ReceiptParserConnector,
 )
 from almanak.connectors._strategy_base.registry import ConnectorRegistry as StrategyConnectorRegistry
+from almanak.connectors._strategy_base.runner_hook_registry import (
+    RunnerHookConnector,
+)
 from almanak.connectors._strategy_base.swap_classification_registry import (
     SwapClassificationSpec,
 )
@@ -323,6 +326,11 @@ EXPECTED_VAULT_TOOL_PROVIDER_MODULES = {
     "lagoon": "almanak.connectors.lagoon.vault_tool_provider",
 }
 
+EXPECTED_RUNNER_HOOK_PROVIDER_MODULES = {
+    "uniswap_v3": "almanak.connectors.uniswap_v3.runner_hooks",
+    "uniswap_v4": "almanak.connectors.uniswap_v4.runner_hooks",
+}
+
 
 @pytest.fixture(autouse=True)
 def _isolate_strategy_connector_registry() -> Iterator[None]:
@@ -510,6 +518,16 @@ def test_connector_rejects_invalid_vault_tool_connector_ref() -> None:
             name="bad_vault_tool_ref",
             kind=ProtocolKind.VAULT,
             vault_tool_connector=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_invalid_runner_hook_connector_ref() -> None:
+    """Invalid runner-hook refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.runner_hook_connector"):
+        Connector(
+            name="bad_runner_hook_ref",
+            kind=ProtocolKind.LP,
+            runner_hook_connector=object(),  # type: ignore[arg-type]
         )
 
 
@@ -920,6 +938,26 @@ def test_vault_tool_connectors_instantiate_from_descriptors() -> None:
         assert type(connector).__module__ == module
 
 
+def test_runner_hook_connectors_instantiate_from_descriptors() -> None:
+    """Migrated runner-hook providers are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, tuple[RunnerHookConnector, str]] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_runner_hooks():
+        assert connector_manifest.runner_hook_connector is not None
+        connector = connector_manifest.runner_hook_connector.instantiate()
+        connectors[str(connector.protocol)] = (connector, connector_manifest.runner_hook_connector.module)
+
+    assert set(EXPECTED_RUNNER_HOOK_PROVIDER_MODULES) == connectors.keys()
+    for name, module in EXPECTED_RUNNER_HOOK_PROVIDER_MODULES.items():
+        connector, actual_module = connectors[name]
+
+        assert isinstance(connector, RunnerHookConnector)
+        assert connector.protocol == ProtocolName(name)
+        assert actual_module == module
+        assert type(connector).__module__ == module
+
+
 def test_gateway_connectors_instantiate_from_descriptors() -> None:
     """Migrated gateway providers are published through connectors."""
     CONNECTOR_REGISTRY.clear()
@@ -1106,6 +1144,26 @@ def test_connector_vault_lifecycle_is_not_hardcoded_in_framework() -> None:
     assert "LagoonVaultDeployer" not in source
     assert "VaultDeployParams" not in source
     assert "LagoonReceiptParser" not in source
+
+
+def test_connector_runner_hooks_are_not_hardcoded_in_framework_runner() -> None:
+    """Framework runner paths must not import concrete connector hook modules."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = "\n".join(
+        (repo_root / path).read_text()
+        for path in (
+            "almanak/framework/runner/strategy_runner.py",
+            "almanak/framework/runner/inner_runner.py",
+            "almanak/framework/runner/teardown_commit.py",
+        )
+    )
+
+    assert "almanak.connectors.uniswap_v3.slot0_fallback" not in source
+    assert "almanak.connectors.uniswap_v3.receipt_parser" not in source
+    assert "UniswapV3ReceiptParser" not in source
+    assert "almanak.connectors.uniswap_v4.gateway_pool_key_client" not in source
+    assert "make_sync_pool_key_lookup" not in source
+    assert "_build_v4_pool_key_lookup" not in source
 
 
 def test_connector_modules_use_canonical_connector_name() -> None:
