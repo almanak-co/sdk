@@ -27,6 +27,7 @@ working unchanged).
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -320,3 +321,80 @@ def _resolve_oracle_price(price_oracle: dict | None, asset: str) -> Decimal | No
         return Decimal(str(candidate))
     except (InvalidOperation, ValueError, TypeError):
         return None
+
+
+def read_lending_market_health(
+    *,
+    protocol: str,
+    chain: str,
+    wallet_address: str,
+    market_id: str,
+    gateway_client: Any,
+    resolve_base_price: Callable[[str], Decimal],
+    resolve_base_decimals: Callable[[str, str], int],
+) -> LendingAccountState | None:
+    """Read a wallet's multi-collateral lending account *health* for a spec-backed protocol.
+
+    The position-health counterpart of :func:`read_lending_account_state`. VIB-4851
+    PR-2 keeps the product-owner-chosen *summed* Compound V3 health factor
+    ``HF = Σ_over_held_collaterals(value_usd × LCF) / borrow_value_usd``, which the
+    single-leg ``read_lending_account_state`` cannot express (it reads one collateral).
+
+    The framework keeps exactly the two responsibilities the connector reader must stay
+    pure of (Gateway-boundary rule + purity contract):
+
+    1. **The gateway round-trip.** This function binds :func:`_gateway_eth_call` to
+       ``(gateway_client, chain)`` and hands the connector reader a chain-bound
+       ``(to, data) -> hex | None`` closure. The connector NEVER imports a gateway client.
+    2. **Base-token price/decimals resolution.** The collateral price / scale /
+       liquidation factor are read ON-CHAIN by the connector reader; only the
+       base/borrow token price + decimals are resolved here (via the injected
+       ``resolve_base_price`` / ``resolve_base_decimals`` callables) and threaded through.
+
+    Stays protocol-agnostic — it names no protocol literal beyond the registry dispatch
+    (``market_health_inputs`` for the read inputs, ``market_health_reader`` for the
+    connector callable), mirroring how ``read_lending_account_state`` resolves specs
+    through the registry.
+
+    Fails closed (returns ``None``, never a fabricated zero — Empty ≠ Zero) when: the
+    gateway is missing/disconnected; the protocol/chain/market has no health-read inputs
+    (unknown market or chain); the protocol publishes no market-health reader; or the
+    connector reader rejects the blobs.
+
+    Args:
+        protocol: Protocol identifier (e.g. ``"compound_v3"``) — resolved through the registry.
+        chain: Chain identifier (e.g. ``"ethereum"``).
+        wallet_address: Position owner address.
+        market_id: Per-market id (a base-asset symbol for Compound, e.g. ``"usdc"``).
+        gateway_client: Gateway client exposing ``eth_call(chain, to, data, block=...)``.
+        resolve_base_price: ``symbol -> Decimal`` USD price for the base/borrow token.
+        resolve_base_decimals: ``(symbol, address) -> int`` base/borrow-token decimals.
+    """
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    if gateway_client is None:
+        return None
+    if not getattr(gateway_client, "is_connected", False):
+        return None
+
+    inputs = LendingReadRegistry.market_health_inputs(protocol, chain, market_id)
+    if inputs is None:
+        return None
+    reader = LendingReadRegistry.market_health_reader(protocol)
+    if reader is None:
+        return None
+
+    def _eth_call(to: str, data: str) -> str | None:
+        return _gateway_eth_call(gateway_client, chain, to, data)
+
+    return reader(
+        eth_call=_eth_call,
+        chain=chain,
+        comet_address=inputs.get("comet_address"),
+        user_address=wallet_address,
+        collaterals=inputs.get("collaterals") or {},
+        base_token=inputs.get("base_token"),
+        base_token_address=inputs.get("base_token_address"),
+        resolve_base_price=resolve_base_price,
+        resolve_base_decimals=resolve_base_decimals,
+    )

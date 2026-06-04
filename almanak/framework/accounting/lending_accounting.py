@@ -52,6 +52,7 @@ from almanak.framework.accounting.lending_reads import (  # noqa: F401  (back-co
     _resolve_oracle_price,
     read_aave_user_emode,
     read_lending_account_state,
+    read_lending_market_health,
 )
 
 logger = logging.getLogger(__name__)

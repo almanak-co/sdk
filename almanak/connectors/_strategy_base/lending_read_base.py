@@ -73,6 +73,10 @@ __all__ = [
     "LendingAccountState",
     "LendingPositionOnChain",
     "LendingReadSpec",
+    "build_compound_asset_info_calldata",
+    "build_compound_borrow_balance_calldata",
+    "build_compound_collateral_balance_calldata",
+    "build_compound_get_price_calldata",
     "decode_uint_hex",
     "normalize_market_id_hex",
     "pad_address",
@@ -792,6 +796,97 @@ _COMPOUND_V3_BORROW_BALANCE_SELECTOR = "0x374c49b4"
 _COMPOUND_V3_BALANCE_OF_SELECTOR = "0x70a08231"
 # No-debt / base-asset-supply HF sentinel, also the serialisation cap.
 _COMPOUND_HF_SENTINEL = Decimal("999999")
+
+
+# ---------------------------------------------------------------------------
+# Compound V3 (Comet) MULTI-COLLATERAL account-health ABI (VIB-4851 PR-2)
+# ---------------------------------------------------------------------------
+#
+# The VIB-4929 single-leg seam above answers "supply/debt for ONE collateral leg"
+# (``userCollateral(user, asset)`` — selector ``0x2b92a07d``). The product-owner
+# choice for the position-HEALTH gate keeps the multi-collateral summed health
+# factor ``HF = Σ_over_held_collaterals(value_usd × LCF) / borrow_value_usd``,
+# which needs a DIFFERENT set of Comet reads that iterate every approved
+# collateral and read its on-chain price + scale + liquidation factor:
+#
+#   * ``collateralBalanceOf(user, asset)`` — the 2-arg balance form (uint128),
+#     DISTINCT from the seam's ``userCollateral`` (which also returns a reserved
+#     word). Selector ``0x5c2549ee``.
+#   * ``getAssetInfoByAddress(asset)`` — the 8-field AssetInfo struct carrying the
+#     per-collateral price feed, scale, and liquidation factor (read ON-CHAIN, never
+#     from a catalogue — see ``read_compound_v3_market_health``). Selector ``0x3b3bec2e``.
+#   * ``getPrice(priceFeed)`` — the Comet-oracle USD price (8-decimal). Selector ``0x41976e09``.
+#
+# ``borrowBalanceOf`` is shared with the seam (``_COMPOUND_V3_BORROW_BALANCE_SELECTOR``).
+# These primitives are pure ABI data + a pure struct decoder; the gateway-routed
+# ``eth_call`` that executes them lives in the framework reader (Gateway-boundary rule).
+
+# collateralBalanceOf(address user, address asset) → uint128 (the 2-arg balance form;
+# NOT ``userCollateral``, which additionally returns a reserved word).
+_COMPOUND_V3_COLLATERAL_BALANCE_OF_SELECTOR = "0x5c2549ee"
+# getAssetInfoByAddress(address asset) → AssetInfo (8-field struct, see _parse_asset_info_hex).
+_COMPOUND_V3_GET_ASSET_INFO_SELECTOR = "0x3b3bec2e"
+# getPrice(address priceFeed) → uint256 (USD price, 8 decimals).
+_COMPOUND_V3_GET_PRICE_SELECTOR = "0x41976e09"
+
+
+def build_compound_collateral_balance_calldata(user_address: str, asset_address: str) -> str:
+    """Build calldata for ``collateralBalanceOf(address user, address asset)``."""
+    return _COMPOUND_V3_COLLATERAL_BALANCE_OF_SELECTOR + pad_address(user_address) + pad_address(asset_address)
+
+
+def build_compound_asset_info_calldata(asset_address: str) -> str:
+    """Build calldata for ``getAssetInfoByAddress(address asset)``."""
+    return _COMPOUND_V3_GET_ASSET_INFO_SELECTOR + pad_address(asset_address)
+
+
+def build_compound_get_price_calldata(price_feed: str) -> str:
+    """Build calldata for ``getPrice(address priceFeed)``."""
+    return _COMPOUND_V3_GET_PRICE_SELECTOR + pad_address(price_feed)
+
+
+def build_compound_borrow_balance_calldata(user_address: str) -> str:
+    """Build calldata for ``borrowBalanceOf(address user)`` (shared with the seam)."""
+    return _COMPOUND_V3_BORROW_BALANCE_SELECTOR + pad_address(user_address)
+
+
+def _parse_asset_info_hex(hex_data: str | None) -> tuple[str, int, int] | None:
+    """Decode an ``getAssetInfoByAddress`` AssetInfo struct return blob.
+
+    Returns ``(price_feed, scale, liquidate_cf)`` — the three fields the
+    multi-collateral health read needs — or ``None`` when the blob is
+    missing/short/malformed (fail-closed, Empty ≠ Zero).
+
+    The 8-field struct layout (matches the legacy inline Comet ABI in
+    ``position_health._get_compound_health``):
+      [0] offset            (uint8 padded)
+      [1] asset             (address padded)
+      [2] priceFeed         (address padded)  ← returned (checksum-agnostic hex)
+      [3] scale             (uint64 padded)   ← returned
+      [4] borrowCollateralFactor    (uint64 padded) — not used
+      [5] liquidateCollateralFactor (uint64 padded) ← returned
+      [6] liquidationFactor (uint64 padded)   — not used
+      [7] supplyCap         (uint128 padded)  — not used
+    """
+    if not hex_data:
+        return None
+    raw = hex_data[2:] if hex_data[:2].lower() == "0x" else hex_data
+    if len(raw) < 8 * 64:  # 8 words minimum
+        return None
+    try:
+        # priceFeed is an address packed in word 2: take the trailing 40 hex chars
+        # and re-prefix with 0x so it is a valid address literal for the price read.
+        price_feed = "0x" + raw[2 * 64 + 24 : 3 * 64]
+        if int(price_feed, 16) == 0:
+            # Zero price-feed address => uninitialised / invalid asset. Fail closed
+            # (Empty != Zero) rather than read getPrice against the zero address.
+            return None
+        scale = decode_uint_hex(raw, 3)
+        liquidate_cf = decode_uint_hex(raw, 5)
+    except (ValueError, ArithmeticError):
+        logger.debug("Failed to parse Compound getAssetInfoByAddress hex", exc_info=True)
+        return None
+    return price_feed, scale, liquidate_cf
 
 
 def _compound_query_inputs_from_intent(intent: Any) -> dict[str, Any]:

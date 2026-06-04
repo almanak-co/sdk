@@ -172,9 +172,12 @@ class PositionHealthProvider:
     with PT collateral, can also compute PT-specific risk metrics.
 
     Aave/Spark and Morpho reads route through the connector-owned lending-read
-    seam (``read_lending_account_state``) and therefore REQUIRE a connected
-    ``gateway_client`` (VIB-4851 removed the in-strategy ``Web3(HTTPProvider)``
-    path for them). Compound V3 still accepts an explicit ``rpc_url`` (PR-2).
+    seam (``read_lending_account_state``); Compound V3 routes through the
+    connector-owned multi-collateral health read (``read_lending_market_health``,
+    VIB-4851 PR-2). All three therefore REQUIRE a connected ``gateway_client`` —
+    VIB-4851 removed the in-strategy ``Web3(HTTPProvider)`` path for every lending
+    protocol. (``rpc_url`` survives only for the Pendle PT-enrichment reader,
+    VIB-4931's territory.)
 
     Usage:
         provider = PositionHealthProvider(chain="ethereum", gateway_client=gw)
@@ -632,182 +635,65 @@ class PositionHealthProvider:
         market_id: str,
         user_address: str,
     ) -> PositionHealth:
-        """Compute health factor from Compound V3 (Comet) on-chain data.
+        """Compute the multi-collateral Compound V3 (Comet) health factor.
 
-        Compound V3 exposes ``isLiquidatable(account)`` and
-        ``getBorrowCollateralFactor(asset)`` / ``getLiquidateCollateralFactor(asset)``
-        on the Comet contract. We use the adapter's canonical calculation
-        (liquidation_threshold_usd / borrow_value_usd) rather than reinventing
-        the formula so single-source-of-truth is preserved.
+        VIB-4851 PR-2: routes the read through the connector-owned, gateway-routed
+        :func:`~almanak.framework.accounting.lending_reads.read_lending_market_health`
+        -> :func:`~almanak.connectors.compound_v3.lending_read.read_compound_v3_market_health`.
+        That reader preserves the product-owner-chosen *summed* health factor
+        ``HF = Σ_over_held_collaterals(value_usd × LCF) / borrow_value_usd`` exactly —
+        the per-collateral price / scale / liquidation factor are read ON-CHAIN
+        (``getAssetInfoByAddress`` / ``getPrice``), and only the base/borrow token
+        price + decimals are resolved here (via ``_resolve_base_price`` /
+        ``_resolve_base_decimals``, injected into the connector read). No private
+        Comet-address copy, no inline Comet ABI, no in-strategy ``Web3(HTTPProvider)``.
+
+        A connected ``gateway_client`` is REQUIRED (mirroring ``_read_account_state``);
+        a missing / disconnected one, an unknown chain/market, or a failed read RAISES
+        rather than fabricating a false-safe health factor (Empty ≠ Zero).
 
         Args:
-            market_id: Comet market key (e.g. "usdc", "weth"). Must be a key
-                in ``COMPOUND_V3_COMET_ADDRESSES[chain]``.
+            market_id: Comet market key (e.g. "usdc", "weth").
             user_address: Wallet to inspect.
         """
-        try:
-            from web3 import Web3
+        from almanak.framework.accounting.lending_reads import read_lending_market_health
 
-            from almanak.connectors.compound_v3.adapter import (
-                COMPOUND_V3_COMET_ADDRESSES,
-                COMPOUND_V3_MARKETS,
+        if self._gateway_client is None:
+            raise ValueError(
+                f"GatewayClient is required to read compound_v3 health on {self._chain}; none was provided."
             )
+        if not self._gateway_client.is_connected:
+            raise ValueError(f"GatewayClient is not connected; cannot fetch Compound V3 health on {self._chain}.")
 
-            chain_markets = COMPOUND_V3_COMET_ADDRESSES.get(self._chain, {})
-            if not chain_markets:
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        # Disambiguate the two fail-closed cases the legacy path raised distinctly
+        # (preserved for the byte-equivalence contract): unknown chain vs unknown
+        # market. Both lookups are owned by the registry's connector-backed market
+        # table now — no private Compound address copy is imported here. The
+        # market-scoped ``position_manager_address`` is the chain-level existence
+        # signal (truthy when the chain has ANY published Compound market).
+        if LendingReadRegistry.market_health_inputs("compound_v3", self._chain, market_id) is None:
+            if not LendingReadRegistry.position_manager_address("compound_v3", self._chain):
                 raise ValueError(f"Compound V3 not configured for chain: {self._chain}")
+            raise ValueError(f"Compound V3 market '{market_id}' not found on {self._chain}.")
 
-            market_key = market_id.lower() if market_id else ""
-            comet_address = chain_markets.get(market_key)
-            if comet_address is None:
-                raise ValueError(
-                    f"Compound V3 market '{market_id}' not found on {self._chain}. "
-                    f"Available: {sorted(chain_markets.keys())}"
-                )
-
-            if self._gateway_client is not None:
-                from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
-
-                if not self._gateway_client.is_connected:
-                    raise ValueError(
-                        f"GatewayClient is not connected; cannot fetch Compound V3 health on {self._chain}."
-                    )
-                w3 = Web3(GatewayWeb3Provider(self._gateway_client, chain=self._chain))
-            else:
-                w3 = Web3(Web3.HTTPProvider(self._rpc_url))
-
-            # Minimal Comet ABI for HF computation.
-            abi = [
-                {
-                    "name": "isLiquidatable",
-                    "type": "function",
-                    "stateMutability": "view",
-                    "inputs": [{"name": "account", "type": "address"}],
-                    "outputs": [{"name": "", "type": "bool"}],
-                },
-                {
-                    "name": "borrowBalanceOf",
-                    "type": "function",
-                    "stateMutability": "view",
-                    "inputs": [{"name": "account", "type": "address"}],
-                    "outputs": [{"name": "", "type": "uint256"}],
-                },
-                {
-                    "name": "collateralBalanceOf",
-                    "type": "function",
-                    "stateMutability": "view",
-                    "inputs": [
-                        {"name": "account", "type": "address"},
-                        {"name": "asset", "type": "address"},
-                    ],
-                    "outputs": [{"name": "", "type": "uint128"}],
-                },
-                {
-                    "name": "getAssetInfoByAddress",
-                    "type": "function",
-                    "stateMutability": "view",
-                    "inputs": [{"name": "asset", "type": "address"}],
-                    "outputs": [
-                        {
-                            "components": [
-                                {"name": "offset", "type": "uint8"},
-                                {"name": "asset", "type": "address"},
-                                {"name": "priceFeed", "type": "address"},
-                                {"name": "scale", "type": "uint64"},
-                                {"name": "borrowCollateralFactor", "type": "uint64"},
-                                {"name": "liquidateCollateralFactor", "type": "uint64"},
-                                {"name": "liquidationFactor", "type": "uint64"},
-                                {"name": "supplyCap", "type": "uint128"},
-                            ],
-                            "name": "",
-                            "type": "tuple",
-                        }
-                    ],
-                },
-                {
-                    "name": "getPrice",
-                    "type": "function",
-                    "stateMutability": "view",
-                    "inputs": [{"name": "priceFeed", "type": "address"}],
-                    "outputs": [{"name": "", "type": "uint256"}],
-                },
-            ]
-
-            comet = w3.eth.contract(address=w3.to_checksum_address(comet_address), abi=abi)
-            user = w3.to_checksum_address(user_address)
-
-            market_config = COMPOUND_V3_MARKETS.get(self._chain, {}).get(market_key, {})
-            collaterals = market_config.get("collaterals", {})
-            base_token_address = market_config.get("base_token_address")
-
-            # 1e18 scale per Comet's priceScale; values are USD-denominated with 8 decimals
-            PRICE_SCALE = Decimal("1e8")
-
-            collateral_value_usd = Decimal("0")
-            liquidation_threshold_usd = Decimal("0")
-
-            for _sym, cinfo in collaterals.items():
-                addr = cinfo.get("address")
-                if not addr:
-                    continue
-                bal_raw = comet.functions.collateralBalanceOf(user, w3.to_checksum_address(addr)).call()
-                if bal_raw == 0:
-                    continue
-                asset_info = comet.functions.getAssetInfoByAddress(w3.to_checksum_address(addr)).call()
-                # Tuple layout follows the ABI above.
-                _, _, price_feed, scale, _borrow_cf, liquidate_cf, _liq_factor, _supply_cap = asset_info
-                price_raw = comet.functions.getPrice(price_feed).call()
-
-                # Convert balance to human units using scale (token decimals) and price to USD.
-                bal = Decimal(str(bal_raw)) / Decimal(str(scale))
-                price = Decimal(str(price_raw)) / PRICE_SCALE
-                value = bal * price
-                # Compound V3 collateral factors are uint64 1e18-scaled.
-                liq_cf = Decimal(str(liquidate_cf)) / Decimal("1e18")
-
-                collateral_value_usd += value
-                liquidation_threshold_usd += value * liq_cf
-
-            borrow_raw = comet.functions.borrowBalanceOf(user).call()
-            # Base-token price for borrow value. Compound V3 exposes the base-token price
-            # through ``getPrice(baseTokenPriceFeed)`` but that feed address is not part of
-            # the minimal ABI here. USD stablecoin bases (USDC / USDT / USDS / USDC.e / DAI)
-            # fall back to 1:1 safely; non-stable bases (WETH, AERO) MUST be priced via
-            # ``price_oracle`` -- we refuse to silently assume $1 and inflate HF.
-            if base_token_address is not None and borrow_raw > 0:
-                base_symbol = market_config.get("base_token", "USDC")
-                base_price = self._resolve_base_price(base_symbol)
-                base_decimals = self._resolve_base_decimals(base_symbol, base_token_address)
-                borrow_amount = Decimal(str(borrow_raw)) / (Decimal("10") ** base_decimals)
-                borrow_value_usd = borrow_amount * base_price
-            else:
-                borrow_value_usd = Decimal("0")
-
-            if borrow_value_usd > 0:
-                health_factor = liquidation_threshold_usd / borrow_value_usd
-            else:
-                health_factor = Decimal("Infinity")
-
-            max_borrow_usd = liquidation_threshold_usd - borrow_value_usd
-            if max_borrow_usd < 0:
-                max_borrow_usd = Decimal("0")
-
-            # Compound V3 doesn't expose a single LLTV -- use the weighted liq-threshold share.
-            lltv = liquidation_threshold_usd / collateral_value_usd if collateral_value_usd > 0 else Decimal("0")
-
-            return PositionHealth(
-                health_factor=health_factor,
-                collateral_value_usd=collateral_value_usd,
-                debt_value_usd=borrow_value_usd,
-                lltv=lltv,
-                max_borrow_usd=max_borrow_usd,
-                protocol="compound_v3",
-                market_id=market_id,
+        state = read_lending_market_health(
+            protocol="compound_v3",
+            chain=self._chain,
+            wallet_address=user_address,
+            market_id=market_id,
+            gateway_client=self._gateway_client,
+            resolve_base_price=self._resolve_base_price,
+            resolve_base_decimals=self._resolve_base_decimals,
+        )
+        if state is None:
+            # Empty != Zero: a failed read must surface, never become a fabricated
+            # healthy/zero HF that would mask a liquidation-risk position.
+            raise ValueError(
+                f"Failed to read Compound V3 health for market '{market_id}' on {self._chain} (read returned no data)."
             )
-
-        except Exception as e:
-            logger.error(f"Failed to get Compound V3 health for market {market_id}: {e}")
-            raise
+        return self._to_position_health(state, protocol="compound_v3", market_id=market_id)
 
 
 # =============================================================================

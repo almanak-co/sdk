@@ -557,19 +557,6 @@ class TestAaveHealthFactorProvider:
             ), f"registry resolved the wrong Aave V3 pool for execution chain {chain!r}"
 
 
-def _fake_web3_patch(fake_w3):
-    """Patch ``web3.Web3`` so local imports inside ``position_health`` pick up our mock.
-
-    Returns a context manager. ``Web3(...)`` in ``position_health._get_compound_health``
-    will return ``fake_w3``, and ``Web3.HTTPProvider(...)`` is also safely mocked
-    (return value is irrelevant since ``fake_w3`` ignores it). Still used by the
-    Compound V3 tests (PR-2 scope); the Aave/Morpho tests no longer need it.
-    """
-    import web3
-
-    return patch.object(web3, "Web3", return_value=fake_w3)
-
-
 class TestMorphoHealthFactorProvider:
     """Morpho Blue: assert the seam mapping + the price-override translation.
 
@@ -860,49 +847,106 @@ class TestPTPositionHealthSeam:
         assert pt.days_to_maturity == 0
 
 
+def _pad32(value: int) -> str:
+    """Right-pad a uint to a 32-byte (64 hex char) ABI word."""
+    return f"{value:064x}"
+
+
+def _compound_asset_info_blob(*, price_feed: str, scale: int, liquidate_cf: int) -> str:
+    """ABI-encode an ``getAssetInfoByAddress`` AssetInfo return blob (8 words).
+
+    Layout the connector decoder (``_parse_asset_info_hex``) reads:
+      [0] offset · [1] asset · [2] priceFeed · [3] scale · [4] borrowCF
+      [5] liquidateCF · [6] liquidationFactor · [7] supplyCap
+    Only priceFeed (word 2), scale (word 3), liquidateCF (word 5) are decoded.
+    """
+    pf_int = int(price_feed.lower().replace("0x", ""), 16)
+    words = [
+        _pad32(0),  # offset
+        _pad32(int("11" * 20, 16)),  # asset (address)
+        _pad32(pf_int),  # priceFeed
+        _pad32(scale),  # scale
+        _pad32(int(Decimal("0.825") * Decimal("1e18"))),  # borrow_cf (unused)
+        _pad32(liquidate_cf),  # liquidate_cf
+        _pad32(int(Decimal("0.95") * Decimal("1e18"))),  # liquidation_factor (unused)
+        _pad32(0),  # supplyCap (unused)
+    ]
+    return "0x" + "".join(words)
+
+
 class TestCompoundHealthFactorProvider:
-    """Compound V3: mock Comet calls and assert HF math."""
+    """Compound V3: drive the multi-collateral health read by mocking ``gateway_client.eth_call``.
+
+    VIB-4851 PR-2 migrated the Compound health read off the in-strategy
+    ``Web3(HTTPProvider)`` path onto the connector-owned, gateway-routed
+    ``read_lending_market_health`` ->
+    ``read_compound_v3_market_health``. It preserves the product-owner-chosen SUMMED
+    health factor ``HF = Σ_held(value × LCF) / debt`` exactly, reading each held
+    collateral's price/scale/liquidation-factor ON-CHAIN. These tests mock the single
+    gateway ``eth_call`` round-trip, dispatching on the 4-byte selector to return the
+    ABI-encoded Comet blobs the connector decodes — mirroring the Aave rewrite above.
+    """
+
+    # Selectors the connector read emits (see ``lending_read_base`` PR-2 primitives).
+    _COLLATERAL_BALANCE_SELECTOR = "0x5c2549ee"  # collateralBalanceOf(user, asset)
+    _ASSET_INFO_SELECTOR = "0x3b3bec2e"  # getAssetInfoByAddress(asset)
+    _GET_PRICE_SELECTOR = "0x41976e09"  # getPrice(priceFeed)
+    _BORROW_BALANCE_SELECTOR = "0x374c49b4"  # borrowBalanceOf(user)
+
+    # WETH on Ethereum — the only collateral the basic test gives a non-zero balance.
+    _WETH_ETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+    _PRICE_FEED = "0x" + "fe" * 20  # 0x…feed-style sentinel feed address
+
+    @classmethod
+    def _make_gateway(
+        cls,
+        *,
+        borrow_raw: int,
+        weth_balance_raw: int = 0,
+        weth_price_8dec: int = 2000 * 10**8,
+        scale: int = int(Decimal("1e18")),
+        liquidate_cf: int = int(Decimal("0.895") * Decimal("1e18")),
+    ) -> MagicMock:
+        """Build a connected mock gateway whose ``eth_call`` returns the Comet blobs.
+
+        ``collateralBalanceOf`` returns ``weth_balance_raw`` only when the asset arg
+        matches WETH's padded address (every other collateral → 0, i.e. skipped).
+        """
+        asset_info_blob = _compound_asset_info_blob(
+            price_feed=cls._PRICE_FEED, scale=scale, liquidate_cf=liquidate_cf
+        )
+
+        def _eth_call(chain, to, data, block=None):
+            selector = data[:10].lower()
+            if selector == cls._COLLATERAL_BALANCE_SELECTOR:
+                # calldata = selector + pad(user) + pad(asset); asset is word 2.
+                asset_word = data[10 + 64 : 10 + 128]
+                asset = "0x" + asset_word[24:]
+                if asset.lower() == cls._WETH_ETH.lower():
+                    return "0x" + _pad32(weth_balance_raw)
+                return "0x" + _pad32(0)
+            if selector == cls._ASSET_INFO_SELECTOR:
+                return asset_info_blob
+            if selector == cls._GET_PRICE_SELECTOR:
+                return "0x" + _pad32(weth_price_8dec)
+            if selector == cls._BORROW_BALANCE_SELECTOR:
+                return "0x" + _pad32(borrow_raw)
+            raise AssertionError(f"unexpected Compound selector {selector}")
+
+        gw = MagicMock()
+        gw.is_connected = True
+        gw.eth_call.side_effect = _eth_call
+        return gw
 
     def test_compound_hf_basic(self):
         # Single collateral (WETH 1 token, price $2000, liq_cf=0.895) +
         # borrow 1000 USDC at $1 -> HF = 1*2000*0.895 / 1000 = 1.79
-        fake_comet = MagicMock()
-        fake_comet.functions.borrowBalanceOf.return_value.call.return_value = 1_000 * 10**6
-
-        def _collateral_balance_of(user, asset):
-            m = MagicMock()
-            if asset.lower() == "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2":
-                m.call.return_value = int(Decimal("1") * Decimal("1e18"))
-            else:
-                m.call.return_value = 0
-            return m
-
-        fake_comet.functions.collateralBalanceOf.side_effect = _collateral_balance_of
-
-        def _get_asset_info(addr):
-            m = MagicMock()
-            m.call.return_value = (
-                0,  # offset
-                addr,  # asset
-                "0xpricefeed",  # priceFeed
-                int(Decimal("1e18")),  # scale (WETH)
-                int(Decimal("0.825") * Decimal("1e18")),  # borrow_cf
-                int(Decimal("0.895") * Decimal("1e18")),  # liquidate_cf
-                int(Decimal("0.95") * Decimal("1e18")),  # liquidation_factor
-                0,  # supplyCap
-            )
-            return m
-
-        fake_comet.functions.getAssetInfoByAddress.side_effect = _get_asset_info
-        fake_comet.functions.getPrice.return_value.call.return_value = 2000 * 10**8
-
-        fake_w3 = MagicMock()
-        fake_w3.to_checksum_address.side_effect = lambda a: a
-        fake_w3.eth.contract.return_value = fake_comet
-
-        with _fake_web3_patch(fake_w3):
-            provider = PositionHealthProvider(rpc_url="http://x", chain="ethereum")
-            health = provider.get_health("compound_v3", "usdc", "0xabc")
+        gw = self._make_gateway(
+            borrow_raw=1_000 * 10**6,
+            weth_balance_raw=int(Decimal("1") * Decimal("1e18")),
+        )
+        provider = PositionHealthProvider(chain="ethereum", gateway_client=gw)
+        health = provider.get_health("compound_v3", "usdc", "0xabc")
 
         assert health.protocol == "compound_v3"
         # HF = liquidation_threshold / debt = (1 * 2000 * 0.895) / 1000 = 1.79
@@ -911,27 +955,25 @@ class TestCompoundHealthFactorProvider:
         assert health.debt_value_usd == Decimal("1000")
 
     def test_compound_no_debt_is_infinity(self):
-        fake_comet = MagicMock()
-        fake_comet.functions.borrowBalanceOf.return_value.call.return_value = 0
-        fake_comet.functions.collateralBalanceOf.return_value.call.return_value = 0
-
-        fake_w3 = MagicMock()
-        fake_w3.to_checksum_address.side_effect = lambda a: a
-        fake_w3.eth.contract.return_value = fake_comet
-
-        with _fake_web3_patch(fake_w3):
-            provider = PositionHealthProvider(rpc_url="http://x", chain="ethereum")
-            health = provider.get_health("compound_v3", "usdc", "0xabc")
+        # Borrow 0, no collateral balances (all skipped) -> HF Infinity, collateral 0.
+        gw = self._make_gateway(borrow_raw=0, weth_balance_raw=0)
+        provider = PositionHealthProvider(chain="ethereum", gateway_client=gw)
+        health = provider.get_health("compound_v3", "usdc", "0xabc")
 
         assert health.health_factor == Decimal("Infinity")
+        assert health.collateral_value_usd == Decimal("0")
 
     def test_compound_unknown_market_raises(self):
-        provider = PositionHealthProvider(rpc_url="http://x", chain="ethereum")
+        # Connected gateway, but the market id is not in the catalogue -> the registry's
+        # market_health_inputs returns None and the provider raises "not found".
+        gw = self._make_gateway(borrow_raw=0)
+        provider = PositionHealthProvider(chain="ethereum", gateway_client=gw)
         with pytest.raises(ValueError, match="not found"):
             provider.get_health("compound_v3", "nonexistent_market_xyz", "0xabc")
 
     def test_compound_unknown_chain_raises(self):
-        provider = PositionHealthProvider(rpc_url="http://x", chain="chain_that_does_not_exist")
+        gw = self._make_gateway(borrow_raw=0)
+        provider = PositionHealthProvider(chain="chain_that_does_not_exist", gateway_client=gw)
         with pytest.raises(ValueError, match="not configured"):
             provider.get_health("compound_v3", "usdc", "0xabc")
 
@@ -939,19 +981,12 @@ class TestCompoundHealthFactorProvider:
         """WETH/AERO (non-stable) Compound base markets MUST fail closed when no
         price_oracle is provided -- silently assuming $1 inflates HF by 1000x+.
         """
-        fake_comet = MagicMock()
-        fake_comet.functions.borrowBalanceOf.return_value.call.return_value = 10 * 10**18
-        fake_comet.functions.collateralBalanceOf.return_value.call.return_value = 0
-
-        fake_w3 = MagicMock()
-        fake_w3.to_checksum_address.side_effect = lambda a: a
-        fake_w3.eth.contract.return_value = fake_comet
-
-        with _fake_web3_patch(fake_w3):
-            # WETH Comet on Ethereum: base_token='WETH' (not a stablecoin).
-            provider = PositionHealthProvider(rpc_url="http://x", chain="ethereum")
-            with pytest.raises(ValueError, match=r"not a recognized USD stablecoin"):
-                provider.get_health("compound_v3", "weth", "0xabc")
+        # WETH Comet on Ethereum: base_token='WETH' (not a stablecoin). Borrow > 0 with
+        # no oracle -> _resolve_base_price raises. Collaterals all 0 (skipped).
+        gw = self._make_gateway(borrow_raw=10 * 10**18, weth_balance_raw=0)
+        provider = PositionHealthProvider(chain="ethereum", gateway_client=gw)
+        with pytest.raises(ValueError, match=r"not a recognized USD stablecoin"):
+            provider.get_health("compound_v3", "weth", "0xabc")
 
     def test_compound_async_price_oracle_path(self):
         """Compound V3 supports the async PriceOracle Protocol for non-stable bases."""
@@ -963,44 +998,29 @@ class TestCompoundHealthFactorProvider:
 
                 return _R()
 
-        fake_comet = MagicMock()
-        fake_comet.functions.borrowBalanceOf.return_value.call.return_value = 1 * 10**18
-        fake_comet.functions.collateralBalanceOf.return_value.call.return_value = 0
-
-        fake_w3 = MagicMock()
-        fake_w3.to_checksum_address.side_effect = lambda a: a
-        fake_w3.eth.contract.return_value = fake_comet
-
-        with _fake_web3_patch(fake_w3):
-            provider = PositionHealthProvider(
-                rpc_url="http://x",
-                chain="ethereum",
-                price_oracle=_AsyncOracle(),
-            )
-            health = provider.get_health("compound_v3", "weth", "0xabc")
+        gw = self._make_gateway(borrow_raw=1 * 10**18, weth_balance_raw=0)
+        provider = PositionHealthProvider(
+            chain="ethereum",
+            gateway_client=gw,
+            price_oracle=_AsyncOracle(),
+        )
+        health = provider.get_health("compound_v3", "weth", "0xabc")
         # 1 WETH debt * $2500 = $2500 debt value; no collateral -> HF=0.
         assert health.debt_value_usd == Decimal("2500")
 
     def test_compound_callable_price_oracle_path(self):
         """Compound V3 still accepts a simple callable price_oracle for convenience."""
-        fake_comet = MagicMock()
-        fake_comet.functions.borrowBalanceOf.return_value.call.return_value = 2 * 10**18
-        fake_comet.functions.collateralBalanceOf.return_value.call.return_value = 0
-
-        fake_w3 = MagicMock()
-        fake_w3.to_checksum_address.side_effect = lambda a: a
-        fake_w3.eth.contract.return_value = fake_comet
 
         def _oracle(symbol):
             return Decimal("1800") if symbol.upper() == "WETH" else Decimal("1")
 
-        with _fake_web3_patch(fake_w3):
-            provider = PositionHealthProvider(
-                rpc_url="http://x",
-                chain="ethereum",
-                price_oracle=_oracle,
-            )
-            health = provider.get_health("compound_v3", "weth", "0xabc")
+        gw = self._make_gateway(borrow_raw=2 * 10**18, weth_balance_raw=0)
+        provider = PositionHealthProvider(
+            chain="ethereum",
+            gateway_client=gw,
+            price_oracle=_oracle,
+        )
+        health = provider.get_health("compound_v3", "weth", "0xabc")
         # 2 WETH debt * $1800 = $3600 debt value.
         assert health.debt_value_usd == Decimal("3600")
 

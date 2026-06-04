@@ -680,7 +680,14 @@ _LEGACY_VIOLATING_MODULES: set[str] = {
     "almanak.framework.data.defi.gas",  # Web3(HTTPProvider(...))
     "almanak.framework.data.defi.pools",  # Web3(HTTPProvider(...))
     "almanak.framework.data.dexscreener.client",  # legacy aiohttp egress
-    "almanak.framework.data.position_health",  # Web3(HTTPProvider(...))
+    # VIB-4851 retired position_health's live ``Web3(HTTPProvider(...))`` boundary
+    # (Aave/Morpho via the lending-read seam, Compound V3 via the connector-owned
+    # gateway market-health read). No forbidden *code* edge remains; the entry stays
+    # only because the FORBIDDEN_USAGE_SUBSTRINGS scan is text-based and the
+    # ``_read_account_state`` docstring still cites ``Web3(HTTPProvider(rpc_url))`` as
+    # the removed pattern. Removing the entry RED-fails Scan B/C on that prose, not on
+    # live egress. Drop this once the substring scan is AST-aware (ignores docstrings).
+    "almanak.framework.data.position_health",  # docstring-prose substring only (VIB-4851)
     "almanak.framework.data.price.dex_twap",  # Web3(HTTPProvider(...))
 }
 assert len(_LEGACY_VIOLATING_MODULES) <= 20, (

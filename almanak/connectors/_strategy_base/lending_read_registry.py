@@ -161,6 +161,18 @@ class LendingReadRegistry:
         "compound_v3": ("almanak.connectors.compound_v3.lending_read", "ACCOUNT_STATE_READ_SPEC"),
     }
 
+    # Multi-collateral account-HEALTH read dispatch (VIB-4851 PR-2). Distinct from the
+    # single-leg ``_ACCOUNT_STATE_LOADERS`` above: the position-health gate keeps the
+    # product-owner-chosen SUMMED health factor over every held collateral, which the
+    # single-leg read cannot express. Maps a protocol identifier to the
+    # ``(module path, attribute)`` naming the connector's published market-health
+    # reader callable (a function, not an ``AccountStateReadSpec``). Only Compound V3
+    # needs this today — the Aave family / Morpho compute HF inside the single-leg
+    # reducer. Imported lazily on first ``market_health_reader`` call and cached.
+    _MARKET_HEALTH_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
+        "compound_v3": ("almanak.connectors.compound_v3.lending_read", "read_compound_v3_market_health"),
+    }
+
     # Lazy per-market parameter tables for protocols whose account state is scoped
     # to a single market (VIB-4929 PR-3a). Maps a protocol identifier to the
     # ``(module path, attribute)`` naming the connector's per-chain
@@ -196,6 +208,9 @@ class LendingReadRegistry:
 
     _spec_cache: ClassVar[dict[str, LendingReadSpec]] = {}
     _account_state_cache: ClassVar[dict[str, AccountStateReadSpec]] = {}
+    # Per-protocol resolved market-health reader callable (VIB-4851 PR-2). Lazily
+    # populated by ``market_health_reader`` on first access.
+    _market_health_cache: ClassVar[dict[str, Callable[..., Any]]] = {}
     # Per-protocol resolved market table (VIB-4929 PR-3a). Lazily populated by
     # ``market_params`` on first access so the connector ``addresses`` module is
     # imported once, on demand, never eagerly at registry import.
@@ -443,6 +458,76 @@ class LendingReadRegistry:
         return markets_for_chain.get(normalized)
 
     @classmethod
+    def market_health_reader(cls, protocol: str) -> Callable[..., LendingAccountState | None] | None:
+        """Resolve the connector's multi-collateral market-health reader callable.
+
+        VIB-4851 PR-2: dispatches ``(protocol) -> read_<protocol>_market_health`` via
+        the lazy ``_MARKET_HEALTH_LOADERS`` table, importing ONLY the owning connector
+        module (a broken sibling cannot block this lookup) and caching the result. The
+        framework consumer (:func:`~almanak.framework.accounting.lending_accounting.read_lending_market_health`)
+        calls this instead of naming a connector function, so it stays protocol-agnostic
+        — mirroring how ``read_lending_account_state`` resolves specs through the registry.
+
+        Returns ``None`` when the protocol publishes no market-health reader, so the
+        consumer falls through (→ no read) without fabricating a value.
+        """
+        key = cls._normalize(protocol)
+        cached = cls._market_health_cache.get(key)
+        if cached is not None:
+            return cached
+        entry = cls._MARKET_HEALTH_LOADERS.get(key)
+        if entry is None:
+            return None
+        module_path, attribute = entry
+        module = importlib.import_module(module_path)
+        reader = getattr(module, attribute, None)
+        if not callable(reader):
+            raise TypeError(
+                f"Registry maps {protocol!r} market-health reader to {module_path}.{attribute}, "
+                f"but that attribute is {type(reader).__name__}, not callable."
+            )
+        cls._market_health_cache[key] = reader
+        return reader
+
+    @classmethod
+    def market_health_inputs(cls, protocol: str, chain: str, market_id: str) -> dict[str, object] | None:
+        """Resolve the multi-collateral health-read inputs for ``(protocol, chain, market_id)``.
+
+        VIB-4851 PR-2: the position-health gate keeps the product-owner-chosen
+        *summed* Compound V3 health factor
+        ``HF = Σ_over_held_collaterals(value_usd × LCF) / borrow_value_usd``, which the
+        single-leg account-state read (``resolve_account_state_plan``) cannot express
+        (it reads one collateral). This accessor resolves the connector-owned market
+        catalogue the parallel
+        :func:`~almanak.connectors.compound_v3.lending_read.read_compound_v3_market_health`
+        read needs, reusing the SAME lazy ``_MARKET_TABLE_LOADERS`` table
+        (``COMPOUND_V3_ACCOUNT_STATE_MARKETS``) and connector-declared
+        ``normalize_market_id`` (Compound → ``str.lower``) that :meth:`market_params`
+        uses — so the registry stays generic (no Compound literal here beyond the
+        shared market-table dispatch).
+
+        Returns ``{comet_address, base_token, base_token_address, collaterals}``, or
+        ``None`` when the protocol publishes no market table, the chain has no markets,
+        or the ``market_id`` is unknown — callers fail closed (unknown chain/market →
+        no read).
+
+        Args:
+            protocol: Protocol identifier (e.g. ``"compound_v3"``).
+            chain: Chain identifier (e.g. ``"ethereum"``).
+            market_id: The market id (a base-asset symbol for Compound, e.g. ``"usdc"``);
+                normalized via the connector-declared normaliser before lookup.
+        """
+        params = cls.market_params(protocol, chain, market_id)
+        if not params:
+            return None
+        return {
+            "comet_address": params.get("comet_address"),
+            "base_token": params.get("base_token"),
+            "base_token_address": params.get("base_token_address"),
+            "collaterals": params.get("collaterals"),
+        }
+
+    @classmethod
     def valuation_roles(
         cls,
         protocol: str,
@@ -586,3 +671,4 @@ class LendingReadRegistry:
         cls._spec_cache.clear()
         cls._account_state_cache.clear()
         cls._market_cache.clear()
+        cls._market_health_cache.clear()
