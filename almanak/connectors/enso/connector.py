@@ -20,6 +20,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.enso.receipt_parser_provider",
         attribute="EnsoReceiptParserConnector",
     ),
+    permission_infrastructure=ImportRef(
+        module="almanak.connectors.enso.permission_hints",
+        attribute="build_enso_infrastructure_permissions",
+    ),
 )
 
 __all__ = ["CONNECTOR"]

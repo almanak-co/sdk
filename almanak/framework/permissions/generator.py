@@ -10,12 +10,12 @@ from __future__ import annotations
 import copy
 import json
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from almanak.connectors.enso.adapter import ENSO_FUNCTION_SELECTORS
-from almanak.connectors.enso.client import CHAIN_MAPPING, ROUTER_ADDRESSES
+from almanak.connectors._connector import CONNECTOR_REGISTRY, ConnectorDiscoveryError, ImportRef
 
 from ..execution.signer.safe.constants import (
     MULTISEND_ADDRESSES,
@@ -27,6 +27,8 @@ from .discovery import discover_permissions
 from .models import ContractPermission, FunctionPermission, PermissionManifest
 
 logger = logging.getLogger(__name__)
+
+InfrastructurePermissionBuilder = Callable[[str], list[ContractPermission]]
 
 # Config field names that contain token symbols or addresses
 _TOKEN_CONFIG_FIELDS = frozenset(
@@ -135,7 +137,7 @@ def generate_manifest(
     Combines three permission sources:
     1. Protocol permissions - discovered by compiling synthetic intents
     2. Token approvals - ERC-20 approve for tokens referenced in config
-    3. Infrastructure - MultiSend (always), Enso Router (if enso protocol)
+    3. Infrastructure - MultiSend (always), connector-declared hooks
 
     Intent types are automatically expanded to include teardown complements
     (e.g. SUPPLY -> WITHDRAW) so that teardown permissions are always
@@ -263,7 +265,7 @@ def _build_infrastructure_permissions(
     """Build always-needed infrastructure permissions.
 
     - MultiSend: always included (needed for any multi-action intent)
-    - Enso Router: included only when "enso" is in protocols (scoped CALL)
+    - Connector infrastructure: protocol-specific hooks declared in connector manifests
     """
     permissions: list[ContractPermission] = []
 
@@ -285,32 +287,66 @@ def _build_infrastructure_permissions(
             )
         )
 
-    # Enso Router (CALL) - only when enso protocol is used
-    # Swaps go through the Router via CALL with specific function selectors.
-    # send_allowed=True because native-token swaps (ETH, MNT, etc.) send
-    # value with the router call — see adapter.py:346 and adapter.py:632.
-    # Delegates (DELEGATECALL) are only for lending operations which are not
-    # implemented in the SDK — see connectors/enso/client.py for details.
-    if any(p.lower() == "enso" for p in protocols):
-        chain_id = CHAIN_MAPPING.get(chain.lower())
-        router_addr = ROUTER_ADDRESSES.get(chain_id) if chain_id else None
-        if router_addr:
-            permissions.append(
-                ContractPermission(
-                    target=router_addr.lower(),
-                    label="Enso Router",
-                    operation=SafeOperation.CALL,
-                    send_allowed=True,
-                    function_selectors=[
-                        FunctionPermission(selector=sel, label=name)
-                        for name, sel in sorted(ENSO_FUNCTION_SELECTORS.items())
-                    ],
-                )
-            )
-        else:
-            logger.warning(f"No Enso Router address for chain '{chain}' — skipping Enso permissions")
+    permissions.extend(_build_connector_infrastructure_permissions(chain, protocols))
 
     return permissions
+
+
+def _build_connector_infrastructure_permissions(chain: str, protocols: list[str]) -> list[ContractPermission]:
+    """Build infrastructure permissions from connector-declared hooks."""
+    permissions: list[ContractPermission] = []
+    seen_connectors: set[str] = set()
+
+    for protocol in protocols:
+        connector_manifest = CONNECTOR_REGISTRY.get(protocol.lower())
+        if connector_manifest is None or connector_manifest.permission_infrastructure is None:
+            continue
+        if connector_manifest.name in seen_connectors:
+            continue
+        seen_connectors.add(connector_manifest.name)
+
+        builder = _load_infrastructure_permission_builder(connector_manifest.permission_infrastructure)
+        connector_permissions = builder(chain)
+        _validate_connector_infrastructure_permissions(
+            connector_name=connector_manifest.name,
+            import_ref=connector_manifest.permission_infrastructure,
+            permissions=connector_permissions,
+        )
+        permissions.extend(connector_permissions)
+
+    return permissions
+
+
+def _load_infrastructure_permission_builder(import_ref: ImportRef) -> InfrastructurePermissionBuilder:
+    """Load and validate a connector infrastructure-permission builder."""
+    builder = import_ref.load()
+    if not callable(builder):
+        raise ConnectorDiscoveryError(
+            f"{import_ref.module}.{import_ref.attribute} must be callable, got {type(builder).__qualname__}"
+        )
+    return builder
+
+
+def _validate_connector_infrastructure_permissions(
+    *,
+    connector_name: str,
+    import_ref: ImportRef,
+    permissions: list[ContractPermission],
+) -> None:
+    """Validate a connector infrastructure hook result."""
+    if not isinstance(permissions, list):
+        raise ConnectorDiscoveryError(
+            f"{connector_name} permission infrastructure hook "
+            f"{import_ref.module}.{import_ref.attribute} must return list[ContractPermission], "
+            f"got {type(permissions).__qualname__}"
+        )
+    bad_permissions = [permission for permission in permissions if not isinstance(permission, ContractPermission)]
+    if bad_permissions:
+        raise ConnectorDiscoveryError(
+            f"{connector_name} permission infrastructure hook "
+            f"{import_ref.module}.{import_ref.attribute} returned non-ContractPermission values: "
+            f"{bad_permissions!r}"
+        )
 
 
 def _merge_permissions(

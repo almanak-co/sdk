@@ -98,6 +98,7 @@ class Connector:
     protocol_family: ImportRef | None = None
     swap_classification: ImportRef | None = None
     contract_roles: ImportRef | None = None
+    permission_infrastructure: ImportRef | None = None
     bridge_adapter: ImportRef | None = None
     flash_loan_provider_name: str | None = None
     flash_loan_provider: ImportRef | None = None
@@ -127,6 +128,7 @@ class Connector:
         self._validate_protocol_family()
         self._validate_swap_classification()
         self._validate_contract_roles()
+        self._validate_permission_infrastructure()
         self._validate_bridge_adapter()
         self._validate_flash_loan()
 
@@ -236,6 +238,14 @@ class Connector:
         """Validate the contract-role spec import reference."""
         if self.contract_roles is not None and not isinstance(self.contract_roles, ImportRef):
             raise ValueError(f"Connector.contract_roles must be None or an ImportRef, got {self.contract_roles!r}")
+
+    def _validate_permission_infrastructure(self) -> None:
+        """Validate the infrastructure-permission builder import reference."""
+        if self.permission_infrastructure is not None and not isinstance(self.permission_infrastructure, ImportRef):
+            raise ValueError(
+                "Connector.permission_infrastructure must be None or an ImportRef, "
+                f"got {self.permission_infrastructure!r}"
+            )
 
     def _validate_bridge_adapter(self) -> None:
         """Validate the bridge-adapter factory import reference."""
@@ -394,6 +404,10 @@ class ConnectorRegistry:
     def with_contract_roles(self) -> tuple[Connector, ...]:
         """Return connectors that publish contract-role specs."""
         return tuple(d for d in self.all() if d.contract_roles is not None)
+
+    def with_permission_infrastructure(self) -> tuple[Connector, ...]:
+        """Return connectors that publish infrastructure-permission builders."""
+        return tuple(d for d in self.all() if d.permission_infrastructure is not None)
 
     def with_bridge_adapter(self) -> tuple[Connector, ...]:
         """Return connectors that publish bridge-adapter factories."""

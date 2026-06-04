@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,12 +40,14 @@ from almanak.connectors._strategy_base.protocol_family_registry import (
 from almanak.connectors._strategy_base.receipt_parser_registry import (
     ReceiptParserConnector,
 )
+from almanak.connectors._strategy_base.registry import ConnectorRegistry as StrategyConnectorRegistry
 from almanak.connectors._strategy_base.swap_classification_registry import (
     SwapClassificationSpec,
 )
 from almanak.connectors._strategy_base.vault_tool_registry import (
     VaultToolConnector,
 )
+from almanak.framework.permissions.models import ContractPermission
 
 EXPECTED_CONNECTOR_KINDS = {
     "aave_v3": ProtocolKind.LENDING,
@@ -241,6 +244,10 @@ EXPECTED_CONTRACT_ROLE_ORDER = (
     "balancer_v2",
 )
 
+EXPECTED_PERMISSION_INFRASTRUCTURE_MODULES = {
+    "enso": "almanak.connectors.enso.permission_hints",
+}
+
 EXPECTED_BRIDGE_ADAPTER_MODULES = {
     "across": "almanak.connectors.across.adapter",
     "stargate": "almanak.connectors.stargate.adapter",
@@ -314,6 +321,14 @@ EXPECTED_AGENT_READ_PROVIDER_ORDER = (
 EXPECTED_VAULT_TOOL_PROVIDER_MODULES = {
     "lagoon": "almanak.connectors.lagoon.vault_tool_provider",
 }
+
+
+@pytest.fixture(autouse=True)
+def _isolate_strategy_connector_registry() -> Iterator[None]:
+    """Keep descriptor provider imports from leaking strategy registry state."""
+    StrategyConnectorRegistry._clear()
+    yield
+    StrategyConnectorRegistry._clear()
 
 
 def test_descriptor_names_alias_connector_interface() -> None:
@@ -527,6 +542,16 @@ def test_connector_rejects_invalid_contract_roles_ref() -> None:
         )
 
 
+def test_connector_rejects_invalid_permission_infrastructure_ref() -> None:
+    """Invalid infrastructure-permission refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.permission_infrastructure"):
+        Connector(
+            name="bad_permission_infrastructure",
+            kind=ProtocolKind.SWAP,
+            permission_infrastructure=object(),  # type: ignore[arg-type]
+        )
+
+
 def test_connector_rejects_invalid_bridge_adapter_ref() -> None:
     """Invalid bridge-adapter refs fail during manifest validation."""
     with pytest.raises(ValueError, match="Connector.bridge_adapter"):
@@ -687,6 +712,24 @@ def test_contract_role_specs_load_from_descriptors() -> None:
         )
         == EXPECTED_CONTRACT_ROLE_ORDER
     )
+
+
+def test_permission_infrastructure_builders_load_from_descriptors() -> None:
+    """Migrated infrastructure-permission hooks are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, str] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_permission_infrastructure():
+        assert connector_manifest.permission_infrastructure is not None
+        builder = connector_manifest.permission_infrastructure.load()
+        assert callable(builder)
+        permissions = builder("arbitrum")
+        assert isinstance(permissions, list)
+        assert permissions
+        assert all(isinstance(permission, ContractPermission) for permission in permissions)
+        connectors[connector_manifest.name] = connector_manifest.permission_infrastructure.module
+
+    assert EXPECTED_PERMISSION_INFRASTRUCTURE_MODULES == connectors
 
 
 def test_bridge_adapters_load_from_descriptors() -> None:
@@ -950,6 +993,20 @@ def test_connector_contract_roles_are_not_in_legacy_boot_file() -> None:
         assert connector_manifest.contract_roles is not None
         import_ref = connector_manifest.contract_roles
         assert import_ref.module not in source
+
+
+def test_connector_permission_infrastructure_is_not_hardcoded_in_framework() -> None:
+    """Connector-backed infrastructure-permission hooks must not also be hardcoded."""
+    CONNECTOR_REGISTRY.clear()
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/framework/permissions/generator.py").read_text()
+
+    for connector_manifest in CONNECTOR_REGISTRY.with_permission_infrastructure():
+        assert connector_manifest.permission_infrastructure is not None
+        import_ref = connector_manifest.permission_infrastructure
+        assert import_ref.module not in source
+        assert import_ref.attribute not in source
+        assert f"almanak.connectors.{connector_manifest.name}." not in source
 
 
 def test_connector_bridge_adapters_are_not_in_legacy_boot_file() -> None:
