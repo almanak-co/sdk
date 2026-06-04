@@ -780,3 +780,151 @@ class TestCompoundV3BaseAssetSupply:
         assert gateway.eth_call.call_count == 2, (
             f"Expected exactly 2 eth_calls for base-asset path, got {gateway.eth_call.call_count}"
         )
+
+
+# ─── Whole-account (bare REPAY) read — VIB-4633 Finding B ──────────────────────
+
+
+def _read_compound_v3_whole_account(gateway_client, chain, wallet_address, market_id, price_oracle, block=None):
+    """Drive the generic reader the way a bare Compound REPAY does: a ``market_id``
+    (base-asset symbol) but NO ``collateral_token`` — so ``read_lending_account_state``
+    takes the whole-account path that reads every approved collateral + the base debt.
+    """
+    return read_lending_account_state(
+        protocol="compound_v3",
+        chain=chain,
+        wallet_address=wallet_address,
+        market_id=market_id,
+        gateway_client=gateway_client,
+        price_oracle=price_oracle,
+        collateral_token=None,
+        block=block,
+    )
+
+
+# Ethereum USDC Comet approved collaterals (market table ``collaterals`` keys):
+# WETH, WBTC, COMP, UNI, LINK. The whole-account build reads ONE
+# ``userCollateral`` per *priced* collateral (those present in the price oracle),
+# in market-table order, then ``borrowBalanceOf`` last. Unpriced approved
+# collaterals are not read (VIB-4633 — see _compound_whole_account_collateral_symbols).
+
+
+class TestCompoundV3WholeAccountRepay:
+    """VIB-4633 Finding B: a bare REPAY (no collateral_token) must read whole-account
+    state — each priced approved collateral balance + base debt — and reach
+    HIGH-confidence before/after collateral / debt / health-factor instead of
+    degrading to ESTIMATED.
+    """
+
+    def test_repay_reads_priced_collaterals_then_borrow(self) -> None:
+        """One eth_call per PRICED collateral (WETH only here) + borrow."""
+        gateway = MagicMock()
+        gateway.eth_call.side_effect = [
+            _mock_user_collateral_response(1 * 10**18),  # WETH (priced) — 1 held
+            _mock_borrow_balance_response(100 * 10**6),  # 100 USDC debt
+        ]
+
+        state = _read_compound_v3_whole_account(
+            gateway_client=gateway,
+            chain="ethereum",
+            wallet_address=_WALLET,
+            market_id="usdc",
+            price_oracle={"WETH": Decimal("3000"), "USDC": Decimal("1")},
+        )
+
+        assert state is not None, "whole-account REPAY read must populate state (HIGH-confidence)"
+        # collateral_usd = 1 WETH * $3000
+        assert state.collateral_usd == Decimal("3000")
+        # debt_usd = 100 USDC * $1
+        assert state.debt_usd == Decimal("100")
+        # HF = (3000 * 0.895) / 100 (WETH LCF on the ETH USDC market)
+        expected_hf = (Decimal("3000") * Decimal("0.895")) / Decimal("100")
+        assert state.health_factor is not None
+        assert abs(state.health_factor - expected_hf) < Decimal("0.001")
+        # Only the priced WETH leg is read (+ borrow) — unpriced WBTC/COMP/UNI/LINK
+        # are not fanned out (robustness + valuation parity with the oracle).
+        assert gateway.eth_call.call_count == 2
+
+    def test_repay_sums_multiple_priced_collaterals(self) -> None:
+        """Two priced collaterals (WETH + WBTC) sum into collateral_usd and the
+        value-weighted summed health factor."""
+        gateway = MagicMock()
+        # Market-table order is WETH then WBTC; both priced ⇒ both read, then borrow.
+        gateway.eth_call.side_effect = [
+            _mock_user_collateral_response(1 * 10**18),  # 1 WETH
+            _mock_user_collateral_response(1 * 10**8),  # 1 WBTC (8 dec)
+            _mock_borrow_balance_response(1000 * 10**6),  # 1000 USDC debt
+        ]
+        state = _read_compound_v3_whole_account(
+            gateway_client=gateway,
+            chain="ethereum",
+            wallet_address=_WALLET,
+            market_id="usdc",
+            price_oracle={"WETH": Decimal("3000"), "WBTC": Decimal("60000"), "USDC": Decimal("1")},
+        )
+        assert state is not None
+        # collateral_usd = 1*3000 + 1*60000
+        assert state.collateral_usd == Decimal("63000")
+        assert state.debt_usd == Decimal("1000")
+        # HF = (3000*0.895 + 60000*0.77) / 1000 (WETH LCF 0.895, WBTC LCF 0.77)
+        expected_hf = (Decimal("3000") * Decimal("0.895") + Decimal("60000") * Decimal("0.77")) / Decimal("1000")
+        assert state.health_factor is not None
+        assert abs(state.health_factor - expected_hf) < Decimal("0.001")
+        assert gateway.eth_call.call_count == 3
+
+    def test_repay_no_debt_yields_sentinel_hf(self) -> None:
+        """A REPAY-shaped read with zero remaining debt → sentinel HF (no risk)."""
+        gateway = MagicMock()
+        gateway.eth_call.side_effect = [
+            _mock_user_collateral_response(1 * 10**18),  # WETH
+            _mock_borrow_balance_response(0),
+        ]
+        state = _read_compound_v3_whole_account(
+            gateway_client=gateway,
+            chain="ethereum",
+            wallet_address=_WALLET,
+            market_id="usdc",
+            price_oracle={"WETH": Decimal("3000"), "USDC": Decimal("1")},
+        )
+        assert state is not None
+        assert state.debt_usd == Decimal("0")
+        assert state.health_factor == Decimal("999999")
+
+    def test_repay_fails_closed_on_failed_leg_read(self) -> None:
+        """A priced collateral leg whose eth_call returns None (read failed) fails
+        the whole read closed — Empty != Zero, never a fabricated/under-counted leg."""
+        gateway = MagicMock()
+        gateway.eth_call.side_effect = [
+            None,  # WETH leg read failed (transient / revert)
+            _mock_borrow_balance_response(100 * 10**6),
+        ]
+        state = _read_compound_v3_whole_account(
+            gateway_client=gateway,
+            chain="ethereum",
+            wallet_address=_WALLET,
+            market_id="usdc",
+            price_oracle={"WETH": Decimal("3000"), "USDC": Decimal("1")},
+        )
+        assert state is None, "a failed priced-collateral leg read must fail the whole read closed"
+
+    def test_repay_unpriced_collateral_not_read(self) -> None:
+        """An approved collateral with no injected price is NOT fanned out — the read
+        succeeds off the priced legs only (valuation parity with the oracle)."""
+        gateway = MagicMock()
+        # Only WETH is priced ⇒ only WETH userCollateral is read, then borrow.
+        # If unpriced legs were read, side_effect would be exhausted (StopIteration).
+        gateway.eth_call.side_effect = [
+            _mock_user_collateral_response(1 * 10**18),  # WETH
+            _mock_borrow_balance_response(50 * 10**6),
+        ]
+        state = _read_compound_v3_whole_account(
+            gateway_client=gateway,
+            chain="ethereum",
+            wallet_address=_WALLET,
+            market_id="usdc",
+            price_oracle={"WETH": Decimal("3000"), "USDC": Decimal("1")},  # WBTC/COMP/UNI/LINK unpriced
+        )
+        assert state is not None, "unpriced approved collaterals must be skipped, read succeeds off priced legs"
+        assert state.collateral_usd == Decimal("3000")
+        assert state.debt_usd == Decimal("50")
+        assert gateway.eth_call.call_count == 2

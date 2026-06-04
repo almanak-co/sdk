@@ -114,6 +114,49 @@ def read_aave_user_emode(
     return parse_user_emode_hex(hex_data)
 
 
+def _inject_whole_account_collateral_prices(
+    *,
+    market_params: dict,
+    chain: str,
+    price_oracle: dict | None,
+    resolver: Any,
+    prices: dict[str, Decimal],
+    decimals: dict[str, int],
+) -> None:
+    """Best-effort inject USD price + decimals for EVERY approved collateral.
+
+    Whole-account collateral injection (VIB-4633 Finding B). When an intent
+    names NO single collateral leg — a bare Compound V3 REPAY has no
+    ``collateral_token`` (only ``token``/``amount``/``market_id``) — the spec's
+    ``build_calls`` reads every approved-collateral balance so the reducer can
+    value the borrower's held collateral and compute a real before/after debt +
+    summed health factor (mirroring how Aave V3 REPAY reads whole-account
+    ``getUserAccountData`` with no per-token symbol).
+
+    Mutates ``prices`` / ``decimals`` in place. An approved collateral that is
+    unpriced or unresolvable is simply LEFT OUT of the maps — it is only fatal
+    if the wallet actually HOLDS it, which the reducer fails closed on (Empty ≠
+    Zero — never fabricating, never under-counting). Generic: keyed off the
+    shared market-table ``collaterals`` convention, no protocol literal.
+    """
+    from almanak.framework.data.tokens.exceptions import TokenNotFoundError
+
+    for sym in market_params.get("collaterals") or {}:
+        if sym in prices:
+            continue
+        price = _resolve_oracle_price(price_oracle, sym)
+        if price is None:
+            continue  # Unpriced approved collateral — only fatal if HELD (reducer decides).
+        try:
+            sym_info = resolver.resolve(sym, chain=chain)
+        except TokenNotFoundError:
+            continue
+        if sym_info is None:
+            continue
+        prices[sym] = price
+        decimals[sym] = sym_info.decimals
+
+
 def read_lending_account_state(
     *,
     protocol: str,
@@ -250,6 +293,15 @@ def read_lending_account_state(
                     return None  # Empty ≠ Zero — fail closed, never fabricate.
                 prices[collateral_token] = price
                 decimals[collateral_token] = col_info.decimals
+        elif market_params:
+            _inject_whole_account_collateral_prices(
+                market_params=market_params,
+                chain=chain,
+                price_oracle=price_oracle,
+                resolver=resolver,
+                prices=prices,
+                decimals=decimals,
+            )
 
         query = AccountStateQuery(
             chain=chain,

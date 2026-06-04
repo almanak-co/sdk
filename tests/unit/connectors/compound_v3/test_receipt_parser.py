@@ -710,3 +710,48 @@ class TestMultipleCollaterals:
         weth_addr = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
         # Should be 2 ETH total
         assert result.collateral_supplied[weth_addr] == Decimal("2000000000000000000")
+
+
+class TestSupplyCollateralAmountExtraction:
+    """VIB-4633 Finding A: the enricher-facing collateral-supply amount extractor.
+
+    Compound V3 collateral supplies emit ``SupplyCollateral`` (not the base-asset
+    ``Supply``), so ``extract_supply_amount`` returns ``None``; the new
+    ``extract_supply_collateral_amount`` surfaces the on-chain amount the lending
+    handler scales into ``amount_token``.
+    """
+
+    def test_extract_supply_collateral_amount(self, parser, supply_collateral_log):
+        """Returns the SupplyCollateral assets amount in raw token units."""
+        receipt = {"transactionHash": "0x1234", "blockNumber": 12345, "logs": [supply_collateral_log]}
+        # 1 WETH (18 dec) per the fixture data field.
+        assert parser.extract_supply_collateral_amount(receipt) == 1 * 10**18
+
+    def test_extract_supply_collateral_amount_sums_multiple(self, parser, supply_collateral_log):
+        """Multiple SupplyCollateral events on the same collateral sum together."""
+        log2 = dict(supply_collateral_log)
+        log2["logIndex"] = 1
+        receipt = {"transactionHash": "0x1234", "blockNumber": 12345, "logs": [supply_collateral_log, log2]}
+        assert parser.extract_supply_collateral_amount(receipt) == 2 * 10**18
+
+    def test_extract_supply_collateral_amount_none_when_absent(self, parser, supply_log):
+        """A base-asset Supply receipt has no SupplyCollateral → None (Empty != Zero)."""
+        receipt = {"transactionHash": "0x1234", "blockNumber": 12345, "logs": [supply_log]}
+        assert parser.extract_supply_collateral_amount(receipt) is None
+
+    def test_extract_supply_collateral_amount_result_ok(self, parser, supply_collateral_log):
+        """Fail-closed variant returns ExtractOk with the amount when present (VIB-3159)."""
+        from almanak.framework.execution.extract_result import ExtractOk
+
+        receipt = {"transactionHash": "0x1234", "blockNumber": 12345, "logs": [supply_collateral_log]}
+        variant = parser.extract_supply_collateral_amount_result(receipt)
+        assert isinstance(variant, ExtractOk)
+        assert variant.value == 1 * 10**18
+
+    def test_extract_supply_collateral_amount_result_missing(self, parser, supply_log):
+        """Fail-closed variant returns ExtractMissing (benign) when no event present."""
+        from almanak.framework.execution.extract_result import ExtractMissing
+
+        receipt = {"transactionHash": "0x1234", "blockNumber": 12345, "logs": [supply_log]}
+        variant = parser.extract_supply_collateral_amount_result(receipt)
+        assert isinstance(variant, ExtractMissing)

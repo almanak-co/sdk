@@ -288,6 +288,22 @@ class ResultEnricher:
             "SUPPLY": ["supply_collateral_amount"],
             "WITHDRAW": ["withdraw_collateral_amount"],
         },
+        # Compound V3 collateral supplies route through
+        # ``Comet.supplyCollateral(asset, amount)`` and emit ``SupplyCollateral``
+        # — a distinct on-chain event from the base-asset ``Supply``. The generic
+        # spec only asks for ``supply_amount`` (base-asset leg); a collateral
+        # receipt has no ``Supply`` event, so that extractor returns ``None`` and
+        # the persisted ``LendingAccountingEvent.amount_token`` came back ``None``
+        # even though the supplied amount is known exactly on-chain (VIB-4633
+        # Finding A). This overlay surfaces the collateral amount as
+        # ``supply_collateral_amount`` (via the Compound parser's
+        # ``extract_supply_collateral_amount``); the lending handler's existing
+        # ``_COLLATERAL_FALLBACK_BY_INTENT["SUPPLY"]`` then scales it. Mirrors the
+        # morpho_blue collateral overlay above. Base-asset ``Comet.supply()`` is
+        # unaffected — it still populates ``supply_amount``.
+        "compound_v3": {
+            "SUPPLY": ["supply_collateral_amount"],
+        },
     }
 
     # VIB-4434 W2 — Per-protocol REMOVE table; companion to

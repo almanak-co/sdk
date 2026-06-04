@@ -60,6 +60,14 @@ _GLOBAL_ALIASES: dict[str, str] = {
     # ``supply_collateral_amount`` is never requested. Canonical key is
     # "morpho_blue".
     "morpho": "morpho_blue",
+    # VIB-4633 (Finding A): same gap for Compound V3. The lending compiler and
+    # ReceiptParserRegistry accept "compound" / "comet" as aliases for the
+    # canonical "compound_v3"; without these the ResultEnricher overlay
+    # (``EXTRACTION_SPECS_BY_PROTOCOL["compound_v3"]``) silently misses any
+    # intent compiled with ``protocol="compound"`` and the
+    # ``supply_collateral_amount`` collateral leg is never surfaced.
+    "compound": "compound_v3",
+    "comet": "compound_v3",
 }
 
 # =============================================================================

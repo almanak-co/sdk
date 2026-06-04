@@ -343,35 +343,42 @@ def _assert_asset(payload: dict, expected: str) -> None:
     )
 
 
-def _assert_repay_state_degraded_vib4633(payload: dict) -> None:
-    """Compound V3 REPAY genuine production degradation contract (VIB-4633).
+def _assert_repay_state_high_vib4633(payload: dict) -> None:
+    """Compound V3 REPAY whole-account read contract (VIB-4633 Finding B — FIXED).
 
-    Compound V3's ``_capture_compound_v3_pre_state`` takes the
-    non-SUPPLY/WITHDRAW branch for a ``RepayIntent`` and requires
-    ``intent.collateral_token`` — which ``RepayIntent`` does not have — so
-    the account-state read is always skipped for REPAY. The persisted event
-    therefore degrades to ``confidence=ESTIMATED`` with ``post_state_json``
-    unavailable. This is the TRUE current production behavior (deterministic
-    across all 5 chains on real Anvil-fork CI), NOT a flake. We assert the
-    genuine degradation contract here rather than HIGH; the HIGH-confidence
-    expectation (and the before/after collateral/debt/HF fidelity) is the
-    gap tracked by VIB-4633. Empty≠Zero≠None: ``unavailable_reason`` is set,
-    nothing is fabricated.
+    A bare ``RepayIntent`` carries no ``collateral_token`` (only
+    ``token``/``amount``/``market_id``). VIB-4633 makes the generic Compound
+    account-state read take a WHOLE-ACCOUNT path in that case: it reads every
+    approved-collateral balance plus the base ``borrowBalanceOf`` and computes a
+    real before/after collateral / debt / summed health factor (mirroring how
+    Aave V3 REPAY reads whole-account ``getUserAccountData`` with no per-token
+    symbol). So the persisted REPAY event now reaches ``confidence=HIGH`` with
+    populated before/after chain state instead of degrading to ESTIMATED.
+
+    This is the INVERTED assertion (per VIB-4633): before the fix this helper
+    asserted the ESTIMATED degradation contract; the fix flips it to the
+    HIGH-confidence + populated before/after debt/HF contract. Empty≠Zero≠None
+    is preserved end-to-end — the read fails closed (None) on a held-but-unpriced
+    collateral rather than fabricating a value.
     """
-    assert payload["confidence"] == "ESTIMATED", (
-        f"Compound V3 REPAY genuinely degrades to confidence=ESTIMATED today "
-        f"(VIB-4633: _capture_compound_v3_pre_state requires collateral_token, "
-        f"absent on RepayIntent); got {payload['confidence']!r}"
+    assert payload["confidence"] == "HIGH", (
+        f"VIB-4633 Finding B (fixed): Compound V3 REPAY must reach confidence=HIGH "
+        f"via the whole-account read; got {payload['confidence']!r} "
+        f"(unavailable_reason={payload.get('unavailable_reason')!r})"
     )
-    assert payload.get("unavailable_reason"), (
-        "degraded REPAY must carry a non-empty unavailable_reason (never fabricated)"
+    assert not payload.get("unavailable_reason"), (
+        "HIGH-confidence REPAY must not carry an unavailable_reason"
     )
-    # Degradation must not fabricate before/after chain state.
-    assert payload["collateral_value_after_usd"] is None, (
-        "VIB-4633: degraded REPAY must not fabricate after-collateral"
-    )
-    assert payload["debt_value_after_usd"] is None, (
-        "VIB-4633: degraded REPAY must not fabricate after-debt"
+    # Whole-account read populates before/after debt + collateral + HF.
+    assert payload["debt_value_before_usd"] is not None, "before-debt must be populated"
+    assert payload["debt_value_after_usd"] is not None, "after-debt must be populated"
+    assert payload["collateral_value_before_usd"] is not None, "before-collateral must be populated"
+    assert payload["collateral_value_after_usd"] is not None, "after-collateral must be populated"
+    assert payload["health_factor_before"] is not None, "before-health-factor must be populated"
+    assert payload["health_factor_after"] is not None, "after-health-factor must be populated"
+    # A successful partial repay reduces on-chain debt: after-debt < before-debt.
+    assert Decimal(payload["debt_value_after_usd"]) < Decimal(payload["debt_value_before_usd"]), (
+        "REPAY must lower measured on-chain debt (before/after debt fidelity)"
     )
 
 
@@ -665,22 +672,17 @@ class TestCompoundV3SupplyIntent:
         assert payload["interest_delta_usd"] is None, "SUPPLY has no interest leg — must be None, not 0"
         # supplyCollateral raises the Comet collateral position on-chain.
         assert Decimal(payload["collateral_value_after_usd"]) > Decimal(payload["collateral_value_before_usd"])
-        # VIB-4633 (Finding A): Compound V3 supplyCollateral does NOT populate
-        # amount_token / principal_delta_usd — the lending handler's
-        # _extract_amount_human only has the morpho_blue collateral fallback
-        # key wired, so the compound_v3 overlay's collateral amount is never
-        # surfaced. The on-chain transfer is correct (asserted above:
-        # collateral position increased); only the books leg is unmeasured.
-        # This is a genuine production gap, NOT acceptable degradation
-        # (Empty≠Zero≠None: amount is known on-chain). xfail until VIB-4633
-        # wires the compound_v3 collateral amount.
-        if payload["amount_token"] is None:
-            pytest.xfail(
-                "VIB-4633: Compound V3 supplyCollateral does not populate "
-                "amount_token (handler lacks the compound_v3 collateral "
-                "fallback) — on-chain transfer verified correct above"
-            )
-        # If a future fix lands, these become live again automatically.
+        # VIB-4633 (Finding A — FIXED): Compound V3 supplyCollateral now populates
+        # amount_token / principal_delta_usd. The Compound parser exposes
+        # extract_supply_collateral_amount, the enricher's compound_v3 overlay
+        # surfaces it as supply_collateral_amount, and the lending handler's
+        # _COLLATERAL_FALLBACK_BY_INTENT["SUPPLY"] scales it by the collateral
+        # token decimals. Hard-assert the measured amount (inverted from the old
+        # xfail-on-None). Empty≠Zero≠None: the amount is known exactly on-chain.
+        assert payload["amount_token"] is not None, (
+            "VIB-4633 Finding A (fixed): Compound V3 supplyCollateral must measure "
+            "amount_token via the compound_v3 enricher collateral overlay"
+        )
         assert Decimal(payload["amount_token"]) == collateral_amount
         assert payload["principal_delta_usd"] is not None, "SUPPLY must measure principal_delta_usd"
         assert Decimal(payload["principal_delta_usd"]) > 0
@@ -1246,14 +1248,12 @@ class TestCompoundV3BorrowIntent:
         _assert_identity(row, event_type="REPAY", wallet=funded_wallet)
         payload = _payload(row)
         _assert_no_lot_id(row, payload)
-        # VIB-4633 (Finding B): Compound V3 REPAY post-state is never read
-        # (_capture_compound_v3_pre_state requires intent.collateral_token,
-        # absent on RepayIntent), so the row genuinely degrades to
-        # confidence=ESTIMATED with no after-chain-state. Assert the TRUE
-        # production contract here (deterministic across all 5 chains) rather
-        # than HIGH; the HIGH-confidence + before/after debt fidelity is the
-        # gap tracked by VIB-4633.
-        _assert_repay_state_degraded_vib4633(payload)
+        # VIB-4633 (Finding B — FIXED): Compound V3 REPAY now reads whole-account
+        # state (every approved collateral + base borrowBalanceOf) even though a
+        # bare RepayIntent names no collateral_token, so the row reaches
+        # confidence=HIGH with populated before/after collateral/debt/HF. This
+        # assertion is the INVERSION of the old ESTIMATED degradation contract.
+        _assert_repay_state_high_vib4633(payload)
         _assert_asset(payload, BASE_TOKEN_SYMBOL)
         assert Decimal(payload["amount_token"]) == repay_amount
 
@@ -1265,9 +1265,9 @@ class TestCompoundV3BorrowIntent:
         # match succeeded). principal + interest must reconcile to the repaid
         # cash flow. (Compound V3 routes repay through Comet.supply(), but the
         # intent type is REPAY so the handler runs match_repay — same FIFO
-        # contract as the Aave V3 golden. This part is unaffected by the
-        # VIB-4633 post-state gap because it derives from the basis store,
-        # not from post_state_json.)
+        # contract as the Aave V3 golden. This part derives from the basis
+        # store, not from post_state_json, so it is independent of the
+        # VIB-4633 whole-account state read entirely.)
         assert payload["principal_delta_usd"] is not None, "matched REPAY must measure principal"
         assert payload["interest_delta_usd"] is not None, (
             "matched REPAY (BORROW lot present in harness) must produce a "
@@ -1415,10 +1415,10 @@ class TestCompoundV3BorrowIntent:
         _assert_identity(row, event_type="REPAY", wallet=funded_wallet)
         payload = _payload(row)
         _assert_no_lot_id(row, payload)
-        # VIB-4633 (Finding B): same Compound V3 REPAY post-state gap — the
-        # row genuinely degrades to confidence=ESTIMATED. Assert the true
-        # contract; the chain-state fidelity is the tracked gap.
-        _assert_repay_state_degraded_vib4633(payload)
+        # VIB-4633 (Finding B — FIXED): same Compound V3 REPAY whole-account read
+        # — confidence=HIGH with populated before/after collateral/debt/HF
+        # (inverted from the old ESTIMATED degradation contract).
+        _assert_repay_state_high_vib4633(payload)
         _assert_asset(payload, BASE_TOKEN_SYMBOL)
         assert Decimal(payload["amount_token"]) == repay_amount
         # FIFO basis-store contract — independent of the chain-state read.
@@ -1427,8 +1427,8 @@ class TestCompoundV3BorrowIntent:
         # attributable zero (a real Decimal('0'), NOT None and NOT the full
         # repaid amount — the REPAY handler does not fall back to total).
         # interest_delta_usd degrades to None (never a fabricated 0). This is
-        # the epic's standalone-repay degradation contract and is unaffected
-        # by the VIB-4633 post-state gap (it derives from the basis store).
+        # the epic's standalone-repay degradation contract and derives from the
+        # basis store — independent of the VIB-4633 whole-account state read.
         assert payload["principal_delta_usd"] is not None, (
             "unmatched REPAY must report a measured principal (Decimal('0'), not None)"
         )

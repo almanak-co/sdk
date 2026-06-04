@@ -948,20 +948,57 @@ def _compound_health_factor(
     return min((collateral_usd * lcf) / debt_usd, _COMPOUND_HF_SENTINEL)
 
 
+def _compound_whole_account_collateral_symbols(query: AccountStateQuery) -> list[str]:
+    """Ordered list of collateral symbols for the whole-account read.
+
+    The deterministic order ``_build_compound_account_state_calls`` emits the
+    per-collateral ``userCollateral`` reads in, and the SAME order
+    ``_reduce_compound_account_state`` decodes them back. Sourced from the
+    market table's ``collaterals`` map (dict insertion order is stable),
+    **restricted to collaterals the framework reader could PRICE** (i.e. present
+    in ``query.prices``).
+
+    Restricting to priced collaterals (VIB-4633) is both a correctness and a
+    robustness choice:
+
+    * **Correctness** — an unpriced collateral cannot be valued anywhere in
+      accounting (it shares the one oracle the rest of the books use), so it
+      could not contribute a USD value to collateral_usd / HF regardless. In
+      production the gateway oracle prices every token a position can hold, so
+      "priced" == "every relevant collateral".
+    * **Robustness** — it keeps the read fan-out to the collaterals that
+      actually matter instead of issuing an ``eth_call`` for every approved
+      collateral on the market (some illiquid, e.g. polygon MaticX). A single
+      failed leg ``eth_call`` fails the whole read closed (Empty ≠ Zero — we
+      cannot tell 0 from unmeasured); fanning out to unpriced/irrelevant
+      collaterals only widened that failure surface for no valuation gain.
+    """
+    params = query.market_params or {}
+    priced = query.prices or {}
+    return [sym for sym in (params.get("collaterals") or {}) if sym in priced]
+
+
 def _build_compound_account_state_calls(query: AccountStateQuery) -> list[EthCall]:
     """Emit the Compound V3 reads against the per-market Comet.
 
-    Two shapes (byte-identical to ``read_compound_v3_account_state``):
+    Three shapes:
 
     * Base-asset supply (collateral == the market's base token): ``balanceOf(user)``
-      then ``borrowBalanceOf(user)``.
-    * Collateral / borrow (collateral != base): ``userCollateral(user, collateral)``
-      then ``borrowBalanceOf(user)``.
+      then ``borrowBalanceOf(user)`` (byte-identical to ``read_compound_v3_account_state``).
+    * Single collateral / borrow (collateral != base): ``userCollateral(user, collateral)``
+      then ``borrowBalanceOf(user)`` (byte-identical to the legacy single-leg read).
+    * Whole-account (VIB-4633 Finding B — a bare REPAY names no ``collateral_token``):
+      one ``userCollateral(user, addr)`` per approved collateral in the market table
+      (deterministic order), then ``borrowBalanceOf(user)`` LAST. Mirrors how Aave V3
+      REPAY reads whole-account state without a per-token symbol; lets a Compound
+      REPAY measure real before/after collateral + debt + summed health factor
+      instead of degrading to ``confidence=ESTIMATED``.
 
     Fails closed (returns ``[]``) when the per-market Comet target was not bound
     (``query.position_manager_address`` empty — no Comet for this market) or, on
-    the collateral path, when the collateral address was not injected. The order
-    is the contract the reducer decodes against (primary read, then borrowBalanceOf).
+    the single-collateral path, when the collateral address was not injected. The
+    order is the contract the reducer decodes against (primary read(s), then
+    ``borrowBalanceOf`` last).
     """
     comet = query.position_manager_address
     if not comet:
@@ -976,14 +1013,30 @@ def _build_compound_account_state_calls(query: AccountStateQuery) -> list[EthCal
     if is_base_asset_supply:
         return [EthCall(to=comet, data=_COMPOUND_V3_BALANCE_OF_SELECTOR + user_hex), borrow_call]
 
-    # Collateral path needs the collateral token *address* (framework-injected).
-    if not query.collateral_address:
-        return []
-    collateral_hex = pad_address(query.collateral_address)
-    return [
-        EthCall(to=comet, data=_COMPOUND_V3_USER_COLLATERAL_SELECTOR + user_hex + collateral_hex),
-        borrow_call,
-    ]
+    if collateral_token:
+        # Single-collateral path needs the collateral token *address* (framework-injected).
+        if not query.collateral_address:
+            return []
+        collateral_hex = pad_address(query.collateral_address)
+        return [
+            EthCall(to=comet, data=_COMPOUND_V3_USER_COLLATERAL_SELECTOR + user_hex + collateral_hex),
+            borrow_call,
+        ]
+
+    # Whole-account path (no single collateral named): read each PRICED approved
+    # collateral's balance, then the base debt. The collateral *addresses* come
+    # from the market table (no framework address resolution needed); the reducer
+    # values held legs from the injected prices/decimals. Only priced collaterals
+    # are read (see ``_compound_whole_account_collateral_symbols``).
+    collateral_calls: list[EthCall] = []
+    for sym in _compound_whole_account_collateral_symbols(query):
+        addr = (params.get("collaterals") or {}).get(sym, {}).get("address")
+        if not addr:
+            return []  # Malformed market table — fail closed, never read a partial set.
+        collateral_calls.append(
+            EthCall(to=comet, data=_COMPOUND_V3_USER_COLLATERAL_SELECTOR + user_hex + pad_address(addr))
+        )
+    return [*collateral_calls, borrow_call]
 
 
 def _decode_compound_word(blob: str, min_hex_len: int) -> int | None:
@@ -1002,6 +1055,84 @@ def _decode_compound_word(blob: str, min_hex_len: int) -> int | None:
         return None
 
 
+def _reduce_compound_whole_account(
+    query: AccountStateQuery,
+    collateral_results: list[str | None],
+    debt_usd: Decimal,
+) -> LendingAccountState | None:
+    """Sum every approved-collateral leg into a whole-account Compound state.
+
+    VIB-4633 Finding B. ``collateral_results`` are the per-collateral
+    ``userCollateral`` blobs in the SAME order
+    :func:`_build_compound_account_state_calls` emitted them (the market table's
+    ``collaterals`` key order). For each leg:
+
+    * Decode the ``(uint128 balance, uint128 reserved)`` two-word return.
+    * A zero balance contributes nothing and needs no price (skipped).
+    * A held (>0) balance MUST be priced from the injected ``prices`` /
+      ``decimals`` — a held-but-unpriced leg fails the whole read closed
+      (returns ``None``), never under-counting collateral (Empty ≠ Zero, which
+      would otherwise inflate the reported health factor).
+
+    Computes the product-owner summed health factor
+    ``HF = Σ(value_usd × LCF) / debt_usd`` (``_COMPOUND_HF_SENTINEL`` when there
+    is no debt) — mirroring
+    :func:`~almanak.connectors.compound_v3.lending_read.read_compound_v3_market_health`'s
+    formula, but pricing collateral from the injected oracle (the accounting
+    read's purity contract) rather than on-chain ``getPrice``. ``lltv`` stays
+    ``None`` (as on the single-leg Compound path) so the row serializes on the
+    common-three-keys shape, not the Morpho-family shape.
+    """
+    params = query.market_params or {}
+    prices = query.prices or {}
+    decimals = query.decimals or {}
+    collaterals = params.get("collaterals") or {}
+    symbols = _compound_whole_account_collateral_symbols(query)
+    if len(collateral_results) != len(symbols):
+        return None
+
+    collateral_value_usd = Decimal("0")
+    liquidation_threshold_usd = Decimal("0")
+    for sym, blob_hex in zip(symbols, collateral_results, strict=True):
+        if not blob_hex:
+            return None  # A missing leg blob is unmeasured — fail closed.
+        blob = blob_hex[2:] if blob_hex[:2].lower() == "0x" else blob_hex
+        bal_raw = _decode_compound_word(blob, 128)
+        if bal_raw is None:
+            return None
+        if bal_raw == 0:
+            continue  # Unheld collateral contributes nothing; no price needed.
+        if sym not in prices or sym not in decimals or prices[sym] is None:
+            # Held collateral we cannot value ⇒ fail closed (Empty ≠ Zero):
+            # under-counting it would inflate HF and mask liquidation risk.
+            return None
+        value = (Decimal(bal_raw) / Decimal(10 ** decimals[sym])) * prices[sym]
+        lcf = (collaterals.get(sym) or {}).get("liquidation_collateral_factor")
+        if lcf is None:
+            return None  # Missing LCF for a held collateral ⇒ cannot compute HF honestly.
+        collateral_value_usd += value
+        liquidation_threshold_usd += value * Decimal(lcf)
+
+    if debt_usd == 0:
+        health_factor: Decimal | None = _COMPOUND_HF_SENTINEL
+    else:
+        health_factor = min(liquidation_threshold_usd / debt_usd, _COMPOUND_HF_SENTINEL)
+
+    return LendingAccountState(
+        collateral_usd=collateral_value_usd,
+        debt_usd=debt_usd,
+        health_factor=health_factor,
+        liquidation_threshold_bps=None,  # Compound uses per-asset LCFs, not a single threshold.
+        e_mode_category=None,  # No e-mode concept.
+        # ``lltv=None`` keeps Compound on the common-three-keys serialization
+        # (``lending_state_to_dict``): a non-None ``lltv`` would mis-tag the row
+        # as the Morpho family and emit a ``lltv`` / derived
+        # ``liquidation_threshold_bps`` the single-leg Compound path never emits.
+        # The summed liquidation threshold is already folded into ``health_factor``.
+        lltv=None,
+    )
+
+
 def _reduce_compound_account_state(
     query: AccountStateQuery,
     results: list[str | None],
@@ -1018,16 +1149,16 @@ def _reduce_compound_account_state(
     collateral_token = query.collateral_token
     prices = query.prices
     decimals = query.decimals
-    if not base_token or not collateral_token or prices is None or decimals is None:
+    if not base_token or prices is None or decimals is None:
         return None
     if base_token not in prices or base_token not in decimals:
         return None
 
-    primary_hex = results[0] if results else None
-    borrow_hex = results[1] if len(results) > 1 else None
-    if not primary_hex or not borrow_hex:
+    # ``borrowBalanceOf`` is always the LAST emitted read (single- and
+    # whole-account shapes agree on this); the primary read(s) precede it.
+    borrow_hex = results[-1] if results else None
+    if not borrow_hex:
         return None
-    primary = primary_hex[2:] if primary_hex[:2].lower() == "0x" else primary_hex
     borrow = borrow_hex[2:] if borrow_hex[:2].lower() == "0x" else borrow_hex
     borrow_balance_raw = _decode_compound_word(borrow, 64)
     if borrow_balance_raw is None:
@@ -1039,7 +1170,22 @@ def _reduce_compound_account_state(
         return None
     debt_usd = (Decimal(borrow_balance_raw) / Decimal(10**base_decimals)) * base_price
 
+    if not collateral_token:
+        # Whole-account path (VIB-4633 Finding B): no single collateral named (a
+        # bare REPAY). Sum every approved collateral's value from the per-leg
+        # ``userCollateral`` reads and compute the summed health factor
+        # ``HF = Σ(value_usd × LCF) / debt_usd``. Fails closed (returns ``None``)
+        # if the wallet HOLDS a collateral whose price/decimals were not injected
+        # — never under-counts a held leg (Empty ≠ Zero). Zero-balance legs need
+        # no price (skipped), so a market with unpriced-but-unheld collaterals
+        # still reads cleanly.
+        return _reduce_compound_whole_account(query, results[:-1], debt_usd)
+
     is_base_asset_supply = collateral_token.upper() == str(base_token).upper()
+    primary_hex = results[0] if results else None
+    if not primary_hex:
+        return None
+    primary = primary_hex[2:] if primary_hex[:2].lower() == "0x" else primary_hex
     if is_base_asset_supply:
         # balanceOf(user) → supplied base balance; base decimals/price for both legs.
         supplied_raw = _decode_compound_word(primary, 64)
