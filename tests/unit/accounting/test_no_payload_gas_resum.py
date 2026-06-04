@@ -34,10 +34,8 @@ SCOPED_MODULES = [
     "almanak/framework/accounting/vault_accounting.py",
     "almanak/framework/accounting/perp_accounting.py",
     "almanak/framework/accounting/lp_accounting.py",
-    "almanak/framework/accounting/pendle_accounting.py",
-    "almanak/framework/accounting/pendle_pt_accounting.py",
-    "almanak/framework/accounting/pendle_pt_sell_accounting.py",
-    "almanak/framework/accounting/pendle_redeem_accounting.py",
+    # VIB-4931: the pendle_*_accounting.py builders were removed (Pendle accounting
+    # lives in the connector's accounting_spec.py now).
 ]
 
 # Tokens that signal a forbidden payload-side gas read inside a

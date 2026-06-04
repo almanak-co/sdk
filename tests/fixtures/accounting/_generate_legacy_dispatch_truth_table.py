@@ -142,15 +142,18 @@ _FIXTURE_MATRIX: list[tuple[AccountingCategory, str, dict[str, Any], dict[str, A
         "LPAccountingEvent",
     ),
     (
-        AccountingCategory.PENDLE_LP,
-        "open",
+        # VIB-4931: Pendle LP now resolves to the generic LP category; the connector
+        # treatment (registry stage-1) still produces the PendleAccountingEvent.
+        AccountingCategory.LP,
+        "pendle_open",
         _base_outbox(position_key="pendle_lp:arbitrum:WETH-PT"),
         _base_ledger(intent_type="LP_OPEN", protocol="pendle_v2", token_in="WETH", token_out="PT-WETH"),
         "PendleAccountingEvent",
     ),
     (
-        AccountingCategory.PENDLE_PT,
-        "buy",
+        # VIB-4931: Pendle PT now resolves to the generic SWAP category.
+        AccountingCategory.SWAP,
+        "pendle_buy",
         _base_outbox(position_key="pendle_pt:arbitrum:PT-WETH"),
         _base_ledger(intent_type="SWAP", protocol="pendle_v2", token_in="WETH", token_out="PT-WETH"),
         "PendleAccountingEvent",

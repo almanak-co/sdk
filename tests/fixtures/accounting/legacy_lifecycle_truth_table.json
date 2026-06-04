@@ -18,6 +18,12 @@
   },
   {
     "expected": {
+      "lifecycle": []
+    },
+    "intent": "CLOSE_CDP"
+  },
+  {
+    "expected": {
       "lifecycle": [
         "SUPPLY",
         "BORROW",
@@ -47,6 +53,12 @@
   },
   {
     "expected": {
+      "lifecycle": []
+    },
+    "intent": "LIQUIDATE"
+  },
+  {
+    "expected": {
       "lifecycle": [
         "LP_OPEN",
         "LP_CLOSE"
@@ -72,6 +84,18 @@
       ]
     },
     "intent": "LP_OPEN"
+  },
+  {
+    "expected": {
+      "lifecycle": []
+    },
+    "intent": "MINT_STABLE"
+  },
+  {
+    "expected": {
+      "lifecycle": []
+    },
+    "intent": "OPEN_CDP"
   },
   {
     "expected": {
@@ -131,6 +155,12 @@
       ]
     },
     "intent": "REPAY"
+  },
+  {
+    "expected": {
+      "lifecycle": []
+    },
+    "intent": "REPAY_STABLE"
   },
   {
     "expected": {

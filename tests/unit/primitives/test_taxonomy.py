@@ -91,14 +91,21 @@ def test_classify_lp_open_returns_lp() -> None:
     assert classify("LP_OPEN") == AccountingCategory.LP
 
 
-def test_classify_lp_open_pendle_returns_pendle_lp() -> None:
-    assert classify("LP_OPEN", protocol="pendle_v2") == AccountingCategory.PENDLE_LP
+def test_classify_lp_open_pendle_returns_lp() -> None:
+    # VIB-4931: the generic taxonomy no longer special-cases Pendle. A Pendle
+    # LP_OPEN classifies as the generic LP category here; the Pendle-specific
+    # accounting treatment (PENDLE_LP_OPEN event) is selected by the connector's
+    # AccountingTreatmentRegistry in processor._dispatch stage-1, not by classify().
+    assert classify("LP_OPEN", protocol="pendle_v2") == AccountingCategory.LP
 
 
-def test_classify_swap_pendle_pt_token_returns_pendle_pt() -> None:
+def test_classify_swap_pendle_pt_token_returns_swap() -> None:
+    # VIB-4931: a PT- swap on Pendle is generically a SWAP now; the PT-specific
+    # accounting treatment (PT_BUY event) is selected by the connector registry,
+    # not by classify(). See tests/unit/connectors/pendle/test_accounting_spec.py.
     assert (
         classify("SWAP", protocol="pendle_v2", token_out="PT-stETH-26DEC2024")
-        == AccountingCategory.PENDLE_PT
+        == AccountingCategory.SWAP
     )
 
 

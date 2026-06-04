@@ -131,11 +131,16 @@ def test_build_legacy_perp_open() -> None:
     assert ref.accounting_category == "perp"
 
 
-def test_build_legacy_pendle_lp_carries_distinct_accounting_category() -> None:
-    """PENDLE_LP_OPEN: primitive=lp, accounting_category=pendle_lp."""
+def test_build_legacy_pendle_lp_carries_generic_accounting_category() -> None:
+    """VIB-4931: PENDLE_LP_OPEN now carries the GENERIC ``lp`` accounting_category.
+
+    Pendle is no longer a distinct ``AccountingCategory`` member; its events route to
+    the connector treatment via the dispatcher, and the persisted accounting_category
+    is the generic ``lp``. ``primitive`` stays ``lp`` so lot-matching is unaffected.
+    """
     ref = build_legacy_position_reference(record_for("PENDLE_LP_OPEN"))
     assert ref.primitive == "lp"
-    assert ref.accounting_category == "pendle_lp"
+    assert ref.accounting_category == "lp"
 
 
 def test_build_legacy_rejects_swap() -> None:

@@ -112,8 +112,8 @@
       }
     },
     {
-      "category": "pendle_lp",
-      "label": "open",
+      "category": "lp",
+      "label": "pendle_open",
       "intent_type": "LP_OPEN",
       "protocol": "pendle_v2",
       "expected_event_class": "PendleAccountingEvent",
@@ -139,8 +139,8 @@
       }
     },
     {
-      "category": "pendle_pt",
-      "label": "buy",
+      "category": "swap",
+      "label": "pendle_buy",
       "intent_type": "SWAP",
       "protocol": "pendle_v2",
       "expected_event_class": "PendleAccountingEvent",

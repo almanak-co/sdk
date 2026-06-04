@@ -54,6 +54,18 @@ _ALMANAK_DIR = _REPO_ROOT / "almanak"
 # prefixes. A sibling function at any other path or with a different
 # enclosing method is rejected.
 _ALLOWLIST_WRITERS_QUALNAMED: frozenset[tuple[str, str]] = frozenset({
+    # VIB-4931 — one-time boot migration (`_run_migrations`) relabelling legacy
+    # pendle_lp/pendle_pt registry categories to the generic lp/swap after the
+    # protocol-named AccountingCategory members were removed. It is NOT a runtime
+    # writer: it never creates a position or couples to a ledger row — it only
+    # rewrites an existing row's accounting_category string — so it does not strand
+    # the ledger+registry atomicity contract (blueprint 28 §4). The Pendle partition
+    # is empty by construction (only UniV3-LP protocols write position_registry), so
+    # in practice it updates 0 rows; it is an armed safety net behind that proof.
+    (
+        "almanak/framework/state/backends/sqlite.py",
+        "_backfill_pendle_registry_category",
+    ),
     (
         "almanak/framework/state/backends/sqlite.py",
         "SQLiteStore.save_ledger_and_registry_atomic",

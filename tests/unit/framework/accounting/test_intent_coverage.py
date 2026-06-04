@@ -94,21 +94,22 @@ def test_lp_intents_route_to_lp_for_non_pendle() -> None:
             )
 
 
-def test_lp_intents_route_to_pendle_lp_for_pendle() -> None:
-    """LP_OPEN, LP_CLOSE, LP_COLLECT_FEES all route to PENDLE_LP for Pendle protocol."""
+def test_lp_intents_route_to_generic_lp_for_pendle() -> None:
+    """VIB-4931: Pendle LP intents classify to the GENERIC LP category (the dispatcher
+    routes them to the connector treatment); Pendle is no longer a distinct category."""
     lp_intents = {IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES}
     for intent_type in lp_intents:
         category = classify(intent_type.value, protocol="pendle")
-        assert category == AccountingCategory.PENDLE_LP, (
+        assert category == AccountingCategory.LP, (
             f"IntentType.{intent_type.name} with protocol=pendle "
-            f"should be PENDLE_LP but got {category!r}"
+            f"should be the generic LP but got {category!r}"
         )
 
 
-def test_swap_with_pendle_and_pt_token_routes_to_pendle_pt() -> None:
-    """SWAP with pendle protocol and PT- token_out routes to PENDLE_PT."""
+def test_swap_with_pendle_and_pt_token_routes_to_generic_swap() -> None:
+    """VIB-4931: a Pendle PT-buy SWAP classifies to the generic SWAP category."""
     category = classify(IntentType.SWAP.value, protocol="pendle", token_out="PT-wstETH-25JUN2026")
-    assert category == AccountingCategory.PENDLE_PT
+    assert category == AccountingCategory.SWAP
 
 
 def test_swap_without_pt_token_routes_to_swap() -> None:

@@ -169,14 +169,17 @@ def _build_ledger(
 
 def _outbox_for_label(label: str, category: str) -> dict[str, Any]:
     """Mirror the truth-table generator's outbox shape per (category, label)."""
+    # VIB-4931: Pendle rows now carry the generic lp/swap category, so key them off
+    # their distinct label to reproduce the pendle position_key shape (not the
+    # uniswap-lp / generic-swap shape).
+    if label == "pendle_open":
+        return _build_outbox(position_key="pendle_lp:arbitrum:WETH-PT")
+    if label == "pendle_buy":
+        return _build_outbox(position_key="pendle_pt:arbitrum:PT-WETH")
     if category == "lending":
         return _build_outbox(position_key="lending:aave_v3:arbitrum:USDC")
     if category == "lp":
         return _build_outbox(position_key="lp:arbitrum:0xabcd…:0x1111111111111111111111111111111111111111")
-    if category == "pendle_lp":
-        return _build_outbox(position_key="pendle_lp:arbitrum:WETH-PT")
-    if category == "pendle_pt":
-        return _build_outbox(position_key="pendle_pt:arbitrum:PT-WETH")
     if category == "perp":
         return _build_outbox(position_key="perp:gmx_v2:arbitrum:WETH")
     if category == "vault":
@@ -191,14 +194,13 @@ def _outbox_for_label(label: str, category: str) -> dict[str, Any]:
 def _ledger_for_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
     intent = fixture["intent_type"]
     protocol = fixture["protocol"]
+    # VIB-4931: Pendle rows (now generic lp/swap category) keyed off their distinct label.
+    if fixture["label"] in ("pendle_open", "pendle_buy"):
+        return _build_ledger(intent_type=intent, protocol=protocol, token_in="WETH", token_out="PT-WETH")
     if fixture["category"] == "lending":
         return _build_ledger(intent_type=intent, protocol=protocol, token_in="USDC")
     if fixture["category"] == "lp":
         return _build_ledger(intent_type=intent, protocol=protocol, token_in="USDC", token_out="WETH")
-    if fixture["category"] == "pendle_lp":
-        return _build_ledger(intent_type=intent, protocol=protocol, token_in="WETH", token_out="PT-WETH")
-    if fixture["category"] == "pendle_pt":
-        return _build_ledger(intent_type=intent, protocol=protocol, token_in="WETH", token_out="PT-WETH")
     if fixture["category"] == "perp":
         return _build_ledger(intent_type=intent, protocol=protocol, token_in="USDC")
     if fixture["category"] == "vault":
@@ -309,8 +311,6 @@ def test_all_reachable_categories_dispatch_through_registry() -> None:
     expected_module_suffix = {
         AccountingCategory.LENDING: "lending_handler",
         AccountingCategory.LP: "lp_handler",
-        AccountingCategory.PENDLE_LP: "pendle_handler",
-        AccountingCategory.PENDLE_PT: "pendle_handler",
         AccountingCategory.PERP: "perp_handler",
         AccountingCategory.PREDICTION: "prediction_handler",
         AccountingCategory.SWAP: "swap_handler",
@@ -337,7 +337,8 @@ def test_registry_imports_in_clean_subprocess() -> None:
     - Exit code 0.
     - stdout contains ``OK``.
     - stderr is empty (no partial-module diagnostics, ImportError, RecursionError).
-    - The registered handler count is at least 9 (8 legacy + transfer).
+    - The registered handler count is at least 7 (the generic categories +
+      transfer; VIB-4931 removed the two protocol-named PENDLE_* members).
 
     Running inside the parent interpreter is insufficient because ``sys.modules``
     is already warmed — a real cycle would not surface. Hard Ratification
@@ -346,7 +347,7 @@ def test_registry_imports_in_clean_subprocess() -> None:
     snippet = (
         "import almanak.framework.accounting.category_handlers as ch;"
         "assert isinstance(ch.HANDLERS, dict), type(ch.HANDLERS);"
-        "assert len(ch.HANDLERS) >= 9, len(ch.HANDLERS);"
+        "assert len(ch.HANDLERS) >= 7, len(ch.HANDLERS);"
         "print('OK', len(ch.HANDLERS))"
     )
     result = subprocess.run(

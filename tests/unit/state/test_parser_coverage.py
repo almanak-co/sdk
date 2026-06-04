@@ -58,15 +58,16 @@ EXPECTED_RECORDS: dict[str, tuple[Primitive, AccountingCategory]] = {
     "LP_CLOSE": (Primitive.LP, AccountingCategory.LP),
     "PERP_OPEN": (Primitive.PERP, AccountingCategory.PERP),
     "PERP_CLOSE": (Primitive.PERP, AccountingCategory.PERP),
-    "PENDLE_LP_OPEN": (Primitive.LP, AccountingCategory.PENDLE_LP),
-    "PENDLE_LP_CLOSE": (Primitive.LP, AccountingCategory.PENDLE_LP),
+    "PENDLE_LP_OPEN": (Primitive.LP, AccountingCategory.LP),
+    "PENDLE_LP_CLOSE": (Primitive.LP, AccountingCategory.LP),
 }
 
 
 # D2.S4: each Tier-1 intent gets its OWN per-string assertion against the
 # EXACT (Primitive, AccountingCategory) tuple — not a global "any Primitive.X"
-# regex. A buggy taxonomy entry (e.g. PENDLE_LP_OPEN routed to AccountingCategory.LP
-# instead of PENDLE_LP) is caught here, not silently registered as a UniV3 LP.
+# regex. VIB-4931: PENDLE_LP_OPEN/CLOSE now carry the generic AccountingCategory.LP
+# (Pendle is no longer a distinct category — the connector treatment handles it via
+# the dispatcher); a buggy entry that dropped the LP primitive is caught here.
 def test_record_for_lp_open():
     expected = EXPECTED_RECORDS["LP_OPEN"]
     assert record_for("LP_OPEN").primitive == Primitive.LP
@@ -98,14 +99,14 @@ def test_record_for_perp_close():
 def test_record_for_pendle_lp_open():
     expected = EXPECTED_RECORDS["PENDLE_LP_OPEN"]
     assert record_for("PENDLE_LP_OPEN").primitive == Primitive.LP
-    assert record_for("PENDLE_LP_OPEN").accounting_category == AccountingCategory.PENDLE_LP
+    assert record_for("PENDLE_LP_OPEN").accounting_category == AccountingCategory.LP
     assert (record_for("PENDLE_LP_OPEN").primitive, record_for("PENDLE_LP_OPEN").accounting_category) == expected
 
 
 def test_record_for_pendle_lp_close():
     expected = EXPECTED_RECORDS["PENDLE_LP_CLOSE"]
     assert record_for("PENDLE_LP_CLOSE").primitive == Primitive.LP
-    assert record_for("PENDLE_LP_CLOSE").accounting_category == AccountingCategory.PENDLE_LP
+    assert record_for("PENDLE_LP_CLOSE").accounting_category == AccountingCategory.LP
     assert (record_for("PENDLE_LP_CLOSE").primitive, record_for("PENDLE_LP_CLOSE").accounting_category) == expected
 
 

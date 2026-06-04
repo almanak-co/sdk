@@ -109,7 +109,6 @@ def register(category: AccountingCategory) -> Callable[[HandlerFn], HandlerFn]:
 from almanak.framework.accounting.category_handlers import (  # noqa: E402, F401
     lending_handler,
     lp_handler,
-    pendle_handler,
     perp_handler,
     prediction_handler,
     swap_handler,

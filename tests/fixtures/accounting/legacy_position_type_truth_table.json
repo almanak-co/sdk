@@ -13,6 +13,12 @@
   },
   {
     "expected": {
+      "position_type": null
+    },
+    "intent": "CLOSE_CDP"
+  },
+  {
+    "expected": {
       "position_type": "LENDING_DEBT"
     },
     "intent": "DELEVERAGE"
@@ -37,6 +43,12 @@
   },
   {
     "expected": {
+      "position_type": null
+    },
+    "intent": "LIQUIDATE"
+  },
+  {
+    "expected": {
       "position_type": "LP"
     },
     "intent": "LP_CLOSE"
@@ -52,6 +64,18 @@
       "position_type": "LP"
     },
     "intent": "LP_OPEN"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "MINT_STABLE"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "OPEN_CDP"
   },
   {
     "expected": {
@@ -88,6 +112,12 @@
       "position_type": "LENDING_DEBT"
     },
     "intent": "REPAY"
+  },
+  {
+    "expected": {
+      "position_type": null
+    },
+    "intent": "REPAY_STABLE"
   },
   {
     "expected": {

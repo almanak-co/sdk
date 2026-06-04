@@ -290,13 +290,17 @@ async def test_mode_x_primitive_matrix(state_manager, temp_db_path):
         mode="registry",
     )
 
-    # 4: registry, LP / pendle_lp (same primitive, different category)
+    # 4: registry, Pendle LP — categorised as the generic LP category. VIB-4931
+    # removed the dedicated PENDLE_LP category; a Pendle LP position now lands on
+    # AccountingCategory.LP, distinct from the UniV3 LP row (m2) by identity hash
+    # and semantic grouping key. This proves the registry scopes identity on
+    # hash / grouping, not on a Pendle-specific category.
     await save_ledger_and_registry(
         state_manager,
         ledger=_make_ledger_entry(id_="m4", intent_type="PENDLE_LP_DEPOSIT", protocol="pendle"),
         registry=_make_registry_row(
             primitive=Primitive.LP,
-            accounting_category=AccountingCategory.PENDLE_LP,
+            accounting_category=AccountingCategory.LP,
             physical_identity_hash="HASH_PENDLE",
             semantic_grouping_key="arbitrum:pendle:0xmkt:1735689600",
         ),
@@ -308,14 +312,14 @@ async def test_mode_x_primitive_matrix(state_manager, temp_db_path):
         assert _row_count(conn, "transaction_ledger") == 4
         assert _row_count(conn, "position_registry") == 3
         # Per-category counts confirm the rows belong to distinct identities.
+        # Two LP-category rows (UniV3 m2 + Pendle m4) coexist — distinct by
+        # identity hash / semantic grouping key (VIB-4931: Pendle LP folds into
+        # the generic LP category rather than a dedicated PENDLE_LP one).
         assert _row_count(
             conn, "position_registry", "accounting_category = ?", ("lp",),
-        ) == 1
+        ) == 2
         assert _row_count(
             conn, "position_registry", "accounting_category = ?", ("perp",),
-        ) == 1
-        assert _row_count(
-            conn, "position_registry", "accounting_category = ?", ("pendle_lp",),
         ) == 1
     finally:
         conn.close()

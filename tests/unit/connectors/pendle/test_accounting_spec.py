@@ -23,7 +23,6 @@ from almanak.connectors.pendle.accounting_spec import (
     handle_pendle_lp,
     handle_pendle_pt,
 )
-from almanak.framework.accounting import pendle_accounting as legacy
 from almanak.framework.accounting.basis import FIFOBasisStore
 from almanak.framework.accounting.category_handlers import HandlerContext
 from almanak.framework.primitives.types import AccountingCategory
@@ -150,15 +149,13 @@ def test_registry_treatment_pt_equals_direct_handler():
 # --- position-key relocation byte-equivalence vs the legacy runner helpers ---
 
 
-def test_position_key_lp_matches_legacy_helpers():
-    # The relocated _derive_pendle_position_key / _get_market_address must produce
-    # the same (position_key, market_id) the runner's pendle LP branch did.
+def test_position_key_lp():
+    # pool "TOKEN/0xMarket" → market parsed + lowercased; key = pendle_lp:chain:wallet:market.
     intent = SimpleNamespace(protocol="pendle_v2", pool="WETH/0xMarketAddr")
     result = ACCOUNTING_TREATMENT_SPEC.position_key(
         protocol="pendle_v2", intent_type="LP_OPEN", chain="Arbitrum", wallet="0xWallet", intent=intent
     )
-    market = legacy._get_market_address(intent)
-    assert result == (legacy._derive_pendle_position_key("Arbitrum", "0xWallet", market), market)
+    assert result == ("pendle_lp:arbitrum:0xwallet:0xmarketaddr", "0xmarketaddr")
 
 
 def test_position_key_pt_matches_legacy_runner_logic():

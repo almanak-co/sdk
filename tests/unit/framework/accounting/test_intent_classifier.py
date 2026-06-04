@@ -30,10 +30,12 @@ def test_lending_category(intent_type: str) -> None:
 
 
 @pytest.mark.parametrize("intent_type", ["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"])
-def test_pendle_lp_category(intent_type: str) -> None:
-    assert classify(intent_type, protocol="pendle") == AccountingCategory.PENDLE_LP
-    assert classify(intent_type, protocol="Pendle") == AccountingCategory.PENDLE_LP
-    assert classify(intent_type, protocol="pendle_v2") == AccountingCategory.PENDLE_LP
+def test_pendle_lp_routes_to_generic_lp(intent_type: str) -> None:
+    # VIB-4931: classify no longer special-cases Pendle — it returns the generic LP
+    # category; the dispatcher (stage-1) routes Pendle LP to the connector treatment.
+    assert classify(intent_type, protocol="pendle") == AccountingCategory.LP
+    assert classify(intent_type, protocol="Pendle") == AccountingCategory.LP
+    assert classify(intent_type, protocol="pendle_v2") == AccountingCategory.LP
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -53,8 +55,10 @@ def test_lp_non_pendle(intent_type: str) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_pendle_pt_buy() -> None:
-    assert classify("SWAP", protocol="pendle", token_out="PT-wstETH-25JUN2026") == AccountingCategory.PENDLE_PT
+def test_pendle_pt_buy_routes_to_generic_swap() -> None:
+    # VIB-4931: classify returns generic SWAP; the dispatcher routes the Pendle PT
+    # buy to the connector treatment (which keys on the PT- token_out).
+    assert classify("SWAP", protocol="pendle", token_out="PT-wstETH-25JUN2026") == AccountingCategory.SWAP
 
 
 def test_pendle_pt_requires_pt_prefix() -> None:
@@ -63,8 +67,9 @@ def test_pendle_pt_requires_pt_prefix() -> None:
     assert classify("SWAP", protocol="pendle", token_out="YT-wstETH-25JUN2026") == AccountingCategory.SWAP
 
 
-def test_pendle_pt_prefix_case_insensitive() -> None:
-    assert classify("SWAP", protocol="pendle", token_out="pt-wstETH-25JUN2026") == AccountingCategory.PENDLE_PT
+def test_pendle_pt_swap_is_generic_regardless_of_pt_case() -> None:
+    # classify no longer inspects token_out for Pendle; every Pendle SWAP is generic SWAP.
+    assert classify("SWAP", protocol="pendle", token_out="pt-wstETH-25JUN2026") == AccountingCategory.SWAP
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -148,8 +153,8 @@ def test_unknown_intent_type() -> None:
 def test_case_normalisation() -> None:
     assert classify("supply") == AccountingCategory.LENDING
     assert classify("lp_open", protocol="uniswap") == AccountingCategory.LP
-    assert classify("lp_open", protocol="PENDLE") == AccountingCategory.PENDLE_LP
-    assert classify("swap", protocol="PENDLE", token_out="PT-stETH-26DEC2025") == AccountingCategory.PENDLE_PT
+    assert classify("lp_open", protocol="PENDLE") == AccountingCategory.LP
+    assert classify("swap", protocol="PENDLE", token_out="PT-stETH-26DEC2025") == AccountingCategory.SWAP
 
 
 def test_token_out_empty_pendle_swap() -> None:

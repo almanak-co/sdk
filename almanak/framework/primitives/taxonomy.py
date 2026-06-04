@@ -333,28 +333,28 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
         _record(
             "PT_BUY",
             Primitive.SWAP,
-            AccountingCategory.PENDLE_PT,
+            AccountingCategory.SWAP,
             position_type=None,
             event_kind=EventKind.OPEN,
         ),
         _record(
             "PT_SELL",
             Primitive.SWAP,
-            AccountingCategory.PENDLE_PT,
+            AccountingCategory.SWAP,
             position_type=None,
             event_kind=EventKind.CLOSE,
         ),
         _record(
             "PT_REDEEM",
             Primitive.SWAP,
-            AccountingCategory.PENDLE_PT,
+            AccountingCategory.SWAP,
             position_type=None,
             event_kind=EventKind.CLOSE,
         ),
         _record(
             "PENDLE_LP_OPEN",
             Primitive.LP,
-            AccountingCategory.PENDLE_LP,
+            AccountingCategory.LP,
             position_type=PositionKind.LP,
             event_kind=EventKind.OPEN,
             required_lifecycle=_LP_LIFECYCLE,
@@ -362,7 +362,7 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
         _record(
             "PENDLE_LP_CLOSE",
             Primitive.LP,
-            AccountingCategory.PENDLE_LP,
+            AccountingCategory.LP,
             position_type=PositionKind.LP,
             event_kind=EventKind.CLOSE,
             required_lifecycle=_LP_LIFECYCLE,
@@ -634,21 +634,20 @@ def classify(
     """Map an intent string to its :class:`AccountingCategory`.
 
     Mirrors the routing rules in :mod:`almanak.framework.accounting.classifier`
-    so the two stay observationally identical until T2 deletes the local
-    classifier and re-points all consumers here. The two protocol-aware
-    special cases preserved are:
-
-    1. ``LP_OPEN`` / ``LP_CLOSE`` / ``LP_COLLECT_FEES`` on a Pendle protocol
-       resolve to ``PENDLE_LP`` rather than ``LP``.
-    2. ``SWAP`` on a Pendle protocol with a ``PT-`` token-out resolves to
-       ``PENDLE_PT`` rather than ``SWAP``.
+    so the two stay observationally identical. Returns the generic category for
+    every protocol; connector-specific accounting (e.g. Pendle's LP / PT
+    mechanics) is routed to the owning connector's treatment by
+    ``AccountingProcessor._dispatch`` (stage-1, via ``AccountingTreatmentRegistry``)
+    BEFORE ``classify`` is consulted (VIB-4931), so this function no longer
+    special-cases any protocol.
 
     Args:
         intent_type: Canonical intent string (e.g. ``"LP_OPEN"``). Aliases
             are resolved.
-        protocol: Optional protocol string (e.g. ``"pendle_v2"``). Lower-cased
-            before comparison.
-        token_out: Optional output token symbol (e.g. ``"PT-stETH"``).
+        protocol: Optional protocol string. Retained for signature stability and
+            forward compatibility; no longer used for routing.
+        token_out: Optional output token symbol. Retained for signature
+            stability; no longer used for routing.
 
     Returns:
         The accounting category for the intent. Unknown intents resolve to
@@ -660,11 +659,10 @@ def classify(
     if record is None:
         return AccountingCategory.NO_ACCOUNTING
 
-    p = protocol.lower()
-    if record.primitive is Primitive.LP and "pendle" in p:
-        return AccountingCategory.PENDLE_LP
-    if record.primitive is Primitive.SWAP and "pendle" in p and token_out.upper().startswith("PT-"):
-        return AccountingCategory.PENDLE_PT
+    # VIB-4931: Pendle's LP/PT events are routed to the connector treatment by
+    # ``AccountingProcessor._dispatch`` (stage-1, via ``AccountingTreatmentRegistry``)
+    # BEFORE ``classify`` is consulted, so the generic taxonomy no longer special-cases
+    # Pendle here — it returns the generic category like every other protocol.
     return record.accounting_category
 
 

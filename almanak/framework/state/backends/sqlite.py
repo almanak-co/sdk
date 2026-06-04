@@ -213,6 +213,65 @@ def _backfill_position_reference_legacy(conn: sqlite3.Connection) -> None:
     )
 
 
+def _backfill_pendle_registry_category(conn: sqlite3.Connection) -> None:
+    """Migrate legacy ``pendle_lp`` / ``pendle_pt`` ``position_registry`` categories (VIB-4931).
+
+    Pendle's accounting_category de-leaked to the generic ``lp`` / ``swap`` when the
+    protocol-named ``PENDLE_LP`` / ``PENDLE_PT`` enum members were removed. Any pre-existing
+    registry rows under the removed categories are migrated to the generic value so an
+    open-before/close-after round-trip still matches the
+    ``(deployment_id, accounting_category, …)`` uniqueness index. The Pendle partition is
+    empty by construction (only UniV3-LP protocols write ``position_registry``), so this is a
+    0-row safety net; the cheap guard SELECT keeps it overhead-free on every boot and
+    idempotent on re-run.
+
+    Collision-safe: both registry unique indexes (``ix_registry_handle``,
+    ``ix_registry_auto_mode``) are scoped by ``accounting_category``, so a legacy
+    ``pendle_lp`` / ``pendle_pt`` row that shares an identity with an existing generic
+    ``lp`` / ``swap`` row would clash on relabel. ``UPDATE OR IGNORE`` skips only the
+    offending row (preserving the existing generic row — no data loss) instead of raising
+    ``IntegrityError`` and stranding the strategy at boot; any skipped row is surfaced at
+    ERROR for an operator to reconcile.
+    """
+    if not conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='position_registry'").fetchone():
+        return
+    has_legacy_pendle = conn.execute(
+        "SELECT 1 FROM position_registry WHERE accounting_category IN ('pendle_lp', 'pendle_pt') LIMIT 1"
+    ).fetchone()
+    if has_legacy_pendle is None:
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(
+            "UPDATE OR IGNORE position_registry SET accounting_category = 'lp' WHERE accounting_category = 'pendle_lp'"
+        )
+        conn.execute(
+            "UPDATE OR IGNORE position_registry SET accounting_category = 'swap' WHERE accounting_category = 'pendle_pt'"
+        )
+        leftover = conn.execute(
+            "SELECT COUNT(*) FROM position_registry WHERE accounting_category IN ('pendle_lp', 'pendle_pt')"
+        ).fetchone()[0]
+        conn.execute("COMMIT")
+        if leftover:
+            # A skipped row means a Pendle position collides with a generic lp/swap
+            # identity on a category-scoped unique index — an anomaly, since the Pendle
+            # partition is empty by construction. Boot is not stranded; surface it loudly
+            # so an operator can reconcile the duplicate identity.
+            logger.error(
+                "Migration: VIB-4931 — %d legacy pendle_lp/pendle_pt position_registry row(s) "
+                "could not be relabeled (would collide with an existing lp/swap identity on a "
+                "category-scoped unique index); left unchanged. Investigate the duplicate identity.",
+                leftover,
+            )
+        else:
+            logger.info(
+                "Migration: VIB-4931 — migrated legacy pendle_lp/pendle_pt position_registry categories to lp/swap"
+            )
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
 def _convert_dual_identity_tables_to_deployment_id(conn: sqlite3.Connection) -> None:  # noqa: C901
     """Collapse the remaining dual-identity tables to a single ``deployment_id``.
 
@@ -1151,6 +1210,10 @@ class SQLiteStore:
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
+
+        # VIB-4931: migrate any legacy pendle_lp/pendle_pt position_registry categories
+        # to the generic lp/swap (see the function for the empty-partition rationale).
+        _backfill_pendle_registry_category(conn)
 
     # -------------------------------------------------------------------------
     # State Operations

@@ -641,6 +641,326 @@
   },
   {
     "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "CLOSE_CDP",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
       "category": "lending"
     },
     "intent": "DELEVERAGE",
@@ -1921,6 +2241,326 @@
   },
   {
     "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "LIQUIDATE",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
       "category": "lp"
     },
     "intent": "LP_CLOSE",
@@ -2177,7 +2817,7 @@
   },
   {
     "expected": {
-      "category": "pendle_lp"
+      "category": "lp"
     },
     "intent": "LP_CLOSE",
     "protocol": "pendle_v2",
@@ -2185,7 +2825,7 @@
   },
   {
     "expected": {
-      "category": "pendle_lp"
+      "category": "lp"
     },
     "intent": "LP_CLOSE",
     "protocol": "pendle_v2",
@@ -2193,7 +2833,7 @@
   },
   {
     "expected": {
-      "category": "pendle_lp"
+      "category": "lp"
     },
     "intent": "LP_CLOSE",
     "protocol": "pendle_v2",
@@ -2201,7 +2841,7 @@
   },
   {
     "expected": {
-      "category": "pendle_lp"
+      "category": "lp"
     },
     "intent": "LP_CLOSE",
     "protocol": "pendle_v2",
@@ -2497,7 +3137,7 @@
   },
   {
     "expected": {
-      "category": "pendle_lp"
+      "category": "lp"
     },
     "intent": "LP_COLLECT_FEES",
     "protocol": "pendle_v2",
@@ -2505,7 +3145,7 @@
   },
   {
     "expected": {
-      "category": "pendle_lp"
+      "category": "lp"
     },
     "intent": "LP_COLLECT_FEES",
     "protocol": "pendle_v2",
@@ -2513,7 +3153,7 @@
   },
   {
     "expected": {
-      "category": "pendle_lp"
+      "category": "lp"
     },
     "intent": "LP_COLLECT_FEES",
     "protocol": "pendle_v2",
@@ -2521,7 +3161,7 @@
   },
   {
     "expected": {
-      "category": "pendle_lp"
+      "category": "lp"
     },
     "intent": "LP_COLLECT_FEES",
     "protocol": "pendle_v2",
@@ -2817,7 +3457,7 @@
   },
   {
     "expected": {
-      "category": "pendle_lp"
+      "category": "lp"
     },
     "intent": "LP_OPEN",
     "protocol": "pendle_v2",
@@ -2825,7 +3465,7 @@
   },
   {
     "expected": {
-      "category": "pendle_lp"
+      "category": "lp"
     },
     "intent": "LP_OPEN",
     "protocol": "pendle_v2",
@@ -2833,7 +3473,7 @@
   },
   {
     "expected": {
-      "category": "pendle_lp"
+      "category": "lp"
     },
     "intent": "LP_OPEN",
     "protocol": "pendle_v2",
@@ -2841,7 +3481,7 @@
   },
   {
     "expected": {
-      "category": "pendle_lp"
+      "category": "lp"
     },
     "intent": "LP_OPEN",
     "protocol": "pendle_v2",
@@ -2876,6 +3516,646 @@
       "category": "lp"
     },
     "intent": "LP_OPEN",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "MINT_STABLE",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "OPEN_CDP",
     "protocol": "uniswap_v3",
     "token_out": "WETH"
   },
@@ -4796,6 +6076,326 @@
       "category": "lending"
     },
     "intent": "REPAY",
+    "protocol": "uniswap_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "aave_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "aave_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "aave_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "aave_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "aerodrome",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "aerodrome",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "aerodrome",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "aerodrome",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "compound_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "compound_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "compound_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "compound_v3",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "gmx_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "gmx_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "gmx_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "gmx_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "jupiter",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "jupiter",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "jupiter",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "jupiter",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "kamino",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "kamino",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "kamino",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "kamino",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "morpho_blue",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "morpho_blue",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "morpho_blue",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "morpho_blue",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "pendle_v2",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "pendle_v2",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "pendle_v2",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "pendle_v2",
+    "token_out": "WETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "uniswap_v3",
+    "token_out": ""
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "uniswap_v3",
+    "token_out": "PT-stETH"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
+    "protocol": "uniswap_v3",
+    "token_out": "USDC"
+  },
+  {
+    "expected": {
+      "category": "no_accounting"
+    },
+    "intent": "REPAY_STABLE",
     "protocol": "uniswap_v3",
     "token_out": "WETH"
   },
@@ -5705,7 +7305,7 @@
   },
   {
     "expected": {
-      "category": "pendle_pt"
+      "category": "swap"
     },
     "intent": "SWAP",
     "protocol": "pendle_v2",

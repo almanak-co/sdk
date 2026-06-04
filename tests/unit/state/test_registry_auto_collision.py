@@ -296,12 +296,16 @@ async def test_d2_m1_collision_lp(state_manager, temp_db_path):
 
 
 @pytest.mark.asyncio
-async def test_d2_m2_collision_pendle_lp(state_manager, temp_db_path):
-    """D2.M2 — accounting_category=PENDLE_LP collision; pins category-scoping."""
+async def test_d2_m2_collision_same_category(state_manager, temp_db_path):
+    """D2.M2 — same accounting_category + grouping key collides; pins category-scoping.
+
+    (Originally used the PENDLE_LP category, removed by VIB-4931; VAULT stands in as an
+    arbitrary category — the collision index is keyed on accounting_category generically.)
+    """
     ledger_a = _make_ledger_entry(id_="m2-A", protocol="pendle")
     row_a = _make_registry_row(
         primitive=Primitive.LP,
-        accounting_category=AccountingCategory.PENDLE_LP,
+        accounting_category=AccountingCategory.VAULT,
         physical_identity_hash="HASH_PLP_A",
         semantic_grouping_key="arbitrum:0xMARKET_X:1234567890",
     )
@@ -310,13 +314,13 @@ async def test_d2_m2_collision_pendle_lp(state_manager, temp_db_path):
     ledger_b = _make_ledger_entry(id_="m2-B", protocol="pendle")
     row_b = _make_registry_row(
         primitive=Primitive.LP,
-        accounting_category=AccountingCategory.PENDLE_LP,
+        accounting_category=AccountingCategory.VAULT,
         physical_identity_hash="HASH_PLP_B",
         semantic_grouping_key="arbitrum:0xMARKET_X:1234567890",
     )
     with pytest.raises(RegistryAutoCollisionError) as excinfo:
         await save_ledger_and_registry(state_manager, ledger=ledger_b, registry=row_b, mode="registry")
-    assert excinfo.value.accounting_category == "pendle_lp"
+    assert excinfo.value.accounting_category == "vault"
 
     conn = sqlite3.connect(temp_db_path)
     try:
@@ -372,7 +376,7 @@ async def test_d2_m4_distinct_accounting_category_does_not_collide(state_manager
     ledger_b = _make_ledger_entry(id_="m4-B", protocol="pendle")
     row_b = _make_registry_row(
         primitive=Primitive.LP,
-        accounting_category=AccountingCategory.PENDLE_LP,
+        accounting_category=AccountingCategory.VAULT,
         physical_identity_hash="HASH_M4_PLP",
         semantic_grouping_key="arbitrum:0xSAME",
     )
@@ -385,7 +389,7 @@ async def test_d2_m4_distinct_accounting_category_does_not_collide(state_manager
             "SELECT accounting_category FROM position_registry ORDER BY accounting_category",
         )
         cats = [r[0] for r in cursor.fetchall()]
-        assert cats == ["lp", "pendle_lp"]
+        assert cats == ["lp", "vault"]
     finally:
         conn.close()
 

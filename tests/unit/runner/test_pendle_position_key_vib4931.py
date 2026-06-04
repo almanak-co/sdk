@@ -12,7 +12,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from almanak.framework.accounting import pendle_accounting as legacy
 from almanak.framework.runner.strategy_runner import StrategyRunner
 
 
@@ -28,12 +27,12 @@ def _call(intent: Any, intent_type: str, chain: str = "arbitrum", wallet: str = 
     )
 
 
-def test_pendle_lp_open_position_key_matches_legacy():
+def test_pendle_lp_open_position_key():
+    # pool "TOKEN/0xMarket" → market parsed + lowercased; key = pendle_lp:chain:wallet:market.
     intent = SimpleNamespace(protocol="pendle_v2", pool="WETH/0xMarketAddr")
     position_key, market_id = _call(intent, "LP_OPEN")
-    market = legacy._get_market_address(intent)
-    assert position_key == legacy._derive_pendle_position_key("arbitrum", "0xWallet", market)
-    assert market_id == market
+    assert position_key == "pendle_lp:arbitrum:0xwallet:0xmarketaddr"
+    assert market_id == "0xmarketaddr"
 
 
 def test_pendle_lp_close_position_key_bare_address():

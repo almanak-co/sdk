@@ -72,14 +72,13 @@ class AccountingCategory(StrEnum):
     accounting event for a given intent. This enum is consumed by both the
     accounting processor and the gateway whitelist.
 
-    The values are kept stable (the string form is persisted in
-    ``accounting_events.category``) — never rename a value without a
-    coordinated migration.
+    The values are kept stable (the string form is persisted inside
+    ``accounting_events.payload_json`` and the ``position_registry``
+    ``accounting_category`` column — there is no ``accounting_events.category``
+    column) — never rename a value without a coordinated migration.
     """
 
     LENDING = "lending"
-    PENDLE_LP = "pendle_lp"
-    PENDLE_PT = "pendle_pt"
     LP = "lp"
     PERP = "perp"
     VAULT = "vault"
