@@ -5,46 +5,42 @@ Single home for the DefiLlama / GeckoTerminal chain-spelling tables so the
 ``PoolAnalyticsService`` handler (``almanak/gateway/services/pool_analytics_service.py``)
 and the ``PoolHistoryDispatcher`` providers (``almanak/gateway/data/pool_history/``)
 agree on chain spelling without duplicating the literals. Previously each
-service owned its own copy of these maps; the chain-string literals now live
-**only here** (the canonical-home rule of the coupling ratchet — see
-``docs/internal/blueprints/22-connector-self-containment.md``).
+service owned its own copy of these maps.
 
-Leaf module: imports only ``almanak.core`` (the chain registry / enums), so
-both gateway services can depend on it without an import cycle.
+The canonical home for these chain-string spellings is now the per-chain
+``ChainDescriptor.external_ids`` mapping on the registry — these module-level
+names are **derived compat views** (read-only ``MappingProxyType`` snapshots of
+``vendor_chain_map(...)``) kept so existing consumers can keep importing the same
+symbols. They are no longer the source of truth (VIB-4851 B1). The import of
+``almanak.core.chains`` eagerly registers all chains, so the module-level
+snapshot captures the complete registry.
+
+Leaf module: imports only ``almanak.core`` (the chain registry / enums + the
+derive helper), so both gateway services can depend on it without an import cycle.
 
 No HTTP egress happens here — this is pure data + a registry lookup helper.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
+
 from almanak.core.chains import ChainRegistry
+from almanak.core.chains._helpers import vendor_chain_map
 from almanak.core.enums import ChainFamily
 
-#: Chain -> GeckoTerminal network slug.
-_CHAIN_TO_GT_NETWORK: dict[str, str] = {
-    "ethereum": "eth",
-    "arbitrum": "arbitrum",
-    "base": "base",
-    "optimism": "optimism",
-    "polygon": "polygon_pos",
-    "avalanche": "avax",
-    "bsc": "bsc",
-    "sonic": "sonic",
-    "solana": "solana",
-}
+#: Chain -> GeckoTerminal network slug. Derived compat view (VIB-4851 B1);
+#: canonical home is ``ChainDescriptor.external_ids["geckoterminal"]``.
+#: INTENTIONALLY the union of this service's historical 9-entry map with the
+#: price-layer geckoterminal map — it gains ``mantle`` (9 -> 10 keys). Pinned by
+#: ``tests/unit/core/test_external_ids_inversion.py::test_geckoterminal_collapse_is_union_with_mantle``.
+_CHAIN_TO_GT_NETWORK: Mapping[str, str] = MappingProxyType(vendor_chain_map("geckoterminal"))
 
 #: Chain -> DefiLlama display name (DefiLlama uses capitalized chain names).
-_CHAIN_TO_LLAMA_DISPLAY: dict[str, str] = {
-    "ethereum": "Ethereum",
-    "arbitrum": "Arbitrum",
-    "base": "Base",
-    "optimism": "Optimism",
-    "polygon": "Polygon",
-    "avalanche": "Avalanche",
-    "bsc": "BSC",
-    "sonic": "Sonic",
-    "solana": "Solana",
-}
+#: Derived compat view (VIB-4851 B1); canonical home is
+#: ``ChainDescriptor.external_ids["defillama_display"]`` (byte-identical, 9 keys).
+_CHAIN_TO_LLAMA_DISPLAY: Mapping[str, str] = MappingProxyType(vendor_chain_map("defillama_display"))
 
 
 def is_solana_family(chain: str) -> bool:

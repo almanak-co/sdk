@@ -91,13 +91,15 @@ class TestOkxIntegration:
         assert sig1 != sig2
 
     def test_chain_id_mapping(self, okx):
-        """Chain names map to correct numeric chain IDs."""
-        assert okx._CHAIN_IDS["ethereum"] == "1"
-        assert okx._CHAIN_IDS["arbitrum"] == "42161"
-        assert okx._CHAIN_IDS["base"] == "8453"
-        assert okx._CHAIN_IDS["polygon"] == "137"
-        assert okx._CHAIN_IDS["avalanche"] == "43114"
-        assert okx._CHAIN_IDS["solana"] == "501"
+        """Chain names map to OKX numeric chain IDs via the registry (VIB-4851 B1)."""
+        from almanak.core.chains._helpers import external_id_for
+
+        assert external_id_for("ethereum", "okx") == "1"
+        assert external_id_for("arbitrum", "okx") == "42161"
+        assert external_id_for("base", "okx") == "8453"
+        assert external_id_for("polygon", "okx") == "137"
+        assert external_id_for("avalanche", "okx") == "43114"
+        assert external_id_for("solana", "okx") == "501"  # synthetic OKX literal
 
     # -------------------------------------------------------------------------
     # Response normalization tests

@@ -20,6 +20,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from almanak.core.chains import ChainRegistry
+from almanak.core.chains._helpers import external_id_for
 from almanak.core.enums import ChainFamily
 from almanak.gateway.integrations.base import BaseIntegration, IntegrationError
 from almanak.gateway.integrations.models import WalletPortfolioSnapshot, WalletPosition
@@ -35,20 +36,6 @@ class MoralisIntegration(BaseIntegration):
     rate_limit_requests = 120
     default_cache_ttl = 60
     _API_BASE = "https://deep-index.moralis.io/api/v2.2"
-
-    # Moralis v2.2 Wallet API uses slug-based chain identifiers for EVM.
-    # https://docs.moralis.io/supported-chains
-    _CHAIN_SLUGS: dict[str, str] = {
-        "ethereum": "eth",
-        "polygon": "polygon",
-        "bsc": "bsc",
-        "bnb": "bsc",
-        "avalanche": "avalanche",
-        "arbitrum": "arbitrum",
-        "optimism": "optimism",
-        "base": "base",
-        "sonic": "sonic",
-    }
 
     def __init__(
         self,
@@ -89,8 +76,14 @@ class MoralisIntegration(BaseIntegration):
         return descriptor is not None and descriptor.family is ChainFamily.SOLANA
 
     def _get_chain_slug(self, chain: str) -> str | None:
-        """Get the Moralis slug for an EVM chain. Returns None if unsupported."""
-        return self._CHAIN_SLUGS.get(chain.lower())
+        """Get the Moralis slug for an EVM chain. Returns None if unsupported.
+
+        Moralis v2.2 Wallet API uses slug-based chain identifiers for EVM
+        (https://docs.moralis.io/supported-chains). Resolved from the registry
+        via ``ChainDescriptor.external_ids["moralis"]`` (VIB-4851 B1); alias-
+        normalised so ``bnb`` -> ``bsc``, and Solana (no Moralis slug) -> None.
+        """
+        return external_id_for(chain, "moralis")
 
     # -------------------------------------------------------------------------
     # Portfolio API — net-worth endpoint

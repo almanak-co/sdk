@@ -479,14 +479,15 @@ class TestMoralisNormalization:
         assert moralis.supports_portfolio() is True
 
     def test_chain_slug_mapping(self):
-        """New v2.2 endpoints use slug-based chain identifiers."""
-        assert MoralisIntegration._CHAIN_SLUGS["ethereum"] == "eth"
-        assert MoralisIntegration._CHAIN_SLUGS["arbitrum"] == "arbitrum"
-        assert MoralisIntegration._CHAIN_SLUGS["base"] == "base"
-        # Solana is NOT in _CHAIN_SLUGS; detection routes through the registry
-        # (_is_solana), not the removed dead _CHAIN_IDS map (VIB-4851 A2).
-        assert "solana" not in MoralisIntegration._CHAIN_SLUGS
+        """EVM chains map to Moralis slugs via the registry (VIB-4851 B1)."""
         _m = MoralisIntegration.__new__(MoralisIntegration)
+        assert _m._get_chain_slug("ethereum") == "eth"
+        assert _m._get_chain_slug("arbitrum") == "arbitrum"
+        assert _m._get_chain_slug("base") == "base"
+        assert _m._get_chain_slug("bnb") == "bsc"  # alias resolves via the registry
+        assert _m._get_chain_slug("binance") == "bsc"  # bsc declares both bnb + binance aliases
+        # Solana has no Moralis slug; detection routes through the registry (_is_solana).
+        assert _m._get_chain_slug("solana") is None
         assert _m._is_solana("solana") is True
         assert _m._is_solana("ethereum") is False
 

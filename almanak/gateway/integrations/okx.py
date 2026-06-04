@@ -32,6 +32,7 @@ from urllib.parse import urlencode
 
 import aiohttp
 
+from almanak.core.chains._helpers import external_id_for
 from almanak.gateway.integrations.base import BaseIntegration, IntegrationError, IntegrationRateLimitError
 from almanak.gateway.integrations.models import WalletPortfolioSnapshot, WalletPosition
 from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
@@ -407,21 +408,11 @@ class OkxIntegration(BaseIntegration):
     default_cache_ttl = 60
     _API_BASE = "https://web3.okx.com"
 
-    # OKX uses standard EVM numeric chain IDs as strings.
-    # Non-EVM chains use OKX-specific synthetic IDs (e.g. Solana = "501").
+    # OKX uses standard EVM numeric chain IDs as strings; non-EVM chains use
+    # OKX-specific synthetic IDs (e.g. Solana = "501"). These now live on the
+    # registry as ``ChainDescriptor.external_ids["okx"]`` and are resolved via
+    # ``external_id_for(chain, "okx")`` (VIB-4851 B1).
     # https://web3.okx.com/onchainos/dev-docs/home/supported-chain
-    _CHAIN_IDS: dict[str, str] = {
-        "ethereum": "1",
-        "optimism": "10",
-        "bsc": "56",
-        "bnb": "56",
-        "polygon": "137",
-        "base": "8453",
-        "arbitrum": "42161",
-        "avalanche": "43114",
-        "sonic": "146",
-        "solana": "501",
-    }
 
     def __init__(
         self,
@@ -672,7 +663,7 @@ class OkxIntegration(BaseIntegration):
         if cached is not None:
             return dataclasses.replace(cached, cache_hit=True)
 
-        chain_id = self._CHAIN_IDS.get(chain.lower())
+        chain_id = external_id_for(chain, "okx")
         if not chain_id:
             logger.warning("OKX: unsupported chain %s", chain)
             chain_id = chain
@@ -699,7 +690,7 @@ class OkxIntegration(BaseIntegration):
         if cached is not None:
             return dataclasses.replace(cached, cache_hit=True)
 
-        chain_id = self._CHAIN_IDS.get(chain.lower())
+        chain_id = external_id_for(chain, "okx")
         if not chain_id:
             logger.warning("OKX: unsupported chain %s", chain)
             chain_id = chain
@@ -740,7 +731,7 @@ class OkxIntegration(BaseIntegration):
     async def get_token_balances(self, wallet_address: str, chain: str) -> WalletPortfolioSnapshot:
         """Get only bare token balances (no DeFi positions)."""
         wallet_address, chain = self._validate_inputs(wallet_address, chain)
-        chain_id = self._CHAIN_IDS.get(chain.lower(), chain)
+        chain_id = external_id_for(chain, "okx") or chain
         data = await self._fetch(
             "/api/v6/dex/balance/all-token-balances-by-address",
             params={"address": wallet_address, "chains": chain_id},
@@ -759,7 +750,7 @@ class OkxIntegration(BaseIntegration):
         if cached is not None:
             return dataclasses.replace(cached, cache_hit=True)
 
-        chain_id = self._CHAIN_IDS.get(chain.lower(), chain)
+        chain_id = external_id_for(chain, "okx") or chain
         positions = await self._fetch_defi_positions(wallet_address, chain_id)
         total = sum((self._safe_decimal(p.value_usd) for p in positions), Decimal("0"))
 

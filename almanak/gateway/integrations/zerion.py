@@ -16,6 +16,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from almanak.core.chains import ChainRegistry
+from almanak.core.chains._helpers import external_id_for
 from almanak.core.enums import ChainFamily
 from almanak.gateway.integrations.base import BaseIntegration
 from almanak.gateway.integrations.models import WalletPortfolioSnapshot, WalletPosition
@@ -35,20 +36,6 @@ class ZerionIntegration(BaseIntegration):
     rate_limit_requests = 120
     default_cache_ttl = 300
     _API_BASE = "https://api.zerion.io"
-
-    _CHAIN_IDS = {
-        "ethereum": "ethereum",
-        "arbitrum": "arbitrum",
-        "optimism": "optimism",
-        "base": "base",
-        "avalanche": "avalanche",
-        "polygon": "polygon",
-        "bsc": "binance-smart-chain",
-        "bnb": "binance-smart-chain",
-        "solana": "solana",
-        "sonic": "sonic",
-        "plasma": "plasma",
-    }
 
     def __init__(self, api_key: str | None = None, request_timeout: float = 30.0, cache_ttl: int | None = None) -> None:
         if api_key is None:
@@ -104,7 +91,7 @@ class ZerionIntegration(BaseIntegration):
             cached.cache_hit = True
             return cached
 
-        chain_id = self._CHAIN_IDS.get(chain.lower(), chain.lower())
+        chain_id = external_id_for(chain, "zerion") or chain.lower()
         data = await self._fetch(
             f"/v1/wallets/{wallet_address}/positions",
             params={"filter[chain_ids]": chain_id, "filter[positions]": "no_filter"},
@@ -122,7 +109,7 @@ class ZerionIntegration(BaseIntegration):
             cached.cache_hit = True
             return cached
 
-        chain_id = self._CHAIN_IDS.get(chain.lower(), chain.lower())
+        chain_id = external_id_for(chain, "zerion") or chain.lower()
         data = await self._fetch(
             f"/v1/wallets/{wallet_address}/portfolio",
             params={"filter[chain_ids]": chain_id},

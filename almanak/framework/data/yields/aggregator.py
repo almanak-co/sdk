@@ -20,13 +20,16 @@ import logging
 import math
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from types import MappingProxyType
 from typing import Any
 
 import aiohttp
 
+from almanak.core.chains._helpers import vendor_chain_map
 from almanak.framework.data.interfaces import DataSourceUnavailable
 from almanak.framework.data.models import (
     DataClassification,
@@ -39,18 +42,10 @@ logger = logging.getLogger(__name__)
 # DeFi Llama yields API
 _YIELDS_API = "https://yields.llama.fi"
 
-# Chain -> DeFi Llama display name (capitalized as returned by API)
-_CHAIN_TO_LLAMA_DISPLAY: dict[str, str] = {
-    "ethereum": "Ethereum",
-    "arbitrum": "Arbitrum",
-    "base": "Base",
-    "optimism": "Optimism",
-    "polygon": "Polygon",
-    "avalanche": "Avalanche",
-    "bsc": "BSC",
-    "sonic": "Sonic",
-    "solana": "Solana",
-}
+# Chain -> DeFi Llama display name (capitalized as returned by API).
+# Derived compat view (VIB-4851 B1); canonical home is
+# ``ChainDescriptor.external_ids["defillama_display"]`` (byte-identical, 9 keys).
+_CHAIN_TO_LLAMA_DISPLAY: Mapping[str, str] = MappingProxyType(vendor_chain_map("defillama_display"))
 
 # Protocol -> DeFi Llama project slug
 _PROTOCOL_TO_LLAMA: dict[str, str] = {
