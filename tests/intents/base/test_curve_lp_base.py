@@ -31,7 +31,6 @@ from almanak.framework.intents.vocabulary import IntentType
 from tests.intents._curve_lp_layer5_helpers import (
     assert_curve_lp_layer5,
     enrich_for_accounting,
-    finalize_curve_lp_layer5,
 )
 from tests.intents.conftest import (
     _wrap_native_token,
@@ -244,11 +243,11 @@ class TestCurveWethCbethLPOpen:
             f"LP received={lp_received}"
         )
 
-        # --- Layer 5: real accounting pipeline (documented full-drop gap) ---
-        # Curve LP currently writes ZERO typed accounting_events: lp_handler
-        # rejects the bare "weth_cbeth" label, so this xfails on the documented
-        # gap (VIB-4968). When fixed it asserts the null-contract.
-        open_row = await assert_curve_lp_layer5(
+        # --- Layer 5: real accounting pipeline (VIB-4968) ---
+        # The Curve receipt parser stamps the canonical 0x pool address on the
+        # LP_OPEN leg, so lp_handler books a typed LP_OPEN accounting_event and
+        # this asserts the fungible-LP null-contract.
+        await assert_curve_lp_layer5(
             layer5_accounting_harness,
             intent=intent,
             result=execution_result,
@@ -257,9 +256,8 @@ class TestCurveWethCbethLPOpen:
             event_type="LP_OPEN",
             price_oracle=price_oracle,
             eth_call_reader=anvil_eth_call_adapter,
-            expected_pool_label=POOL,
+            expected_pool_address=POOL_ADDRESS,
         )
-        finalize_curve_lp_layer5(open_row)
 
 
 # =============================================================================
@@ -340,7 +338,7 @@ class TestCurveWethCbethLPClose:
         lp_balance = _get_lp_token_balance(web3, funded_wallet)
         assert lp_balance > 0, "Must have LP tokens before LP_CLOSE test"
 
-        # Layer 5: persist LP_OPEN setup (documented full-drop gap — xfails today).
+        # Layer 5: persist LP_OPEN setup — VIB-4968 books a typed LP_OPEN event.
         open_accounting_row = await assert_curve_lp_layer5(
             layer5_accounting_harness,
             intent=open_intent,
@@ -350,7 +348,7 @@ class TestCurveWethCbethLPClose:
             event_type="LP_OPEN",
             price_oracle=price_oracle,
             eth_call_reader=anvil_eth_call_adapter,
-            expected_pool_label=POOL,
+            expected_pool_address=POOL_ADDRESS,
         )
 
         # --- Layer 4 BEFORE ---
@@ -444,8 +442,8 @@ class TestCurveWethCbethLPClose:
             f"LP burned={lp_burned}"
         )
 
-        # --- Layer 5: real accounting pipeline LP_CLOSE (documented gap) ---
-        close_row = await assert_curve_lp_layer5(
+        # --- Layer 5: real accounting pipeline LP_CLOSE (VIB-4968) ---
+        await assert_curve_lp_layer5(
             layer5_accounting_harness,
             intent=close_intent,
             result=close_execution,
@@ -456,4 +454,3 @@ class TestCurveWethCbethLPClose:
             eth_call_reader=anvil_eth_call_adapter,
             prior_open_row=open_accounting_row,
         )
-        finalize_curve_lp_layer5(open_accounting_row, close_row)

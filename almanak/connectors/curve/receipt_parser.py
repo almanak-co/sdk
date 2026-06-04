@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
 
 if TYPE_CHECKING:
-    from almanak.framework.execution.extracted_data import LPCloseData, ProtocolFees, SwapAmounts
+    from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData, ProtocolFees, SwapAmounts
 from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_hash
 
 logger = logging.getLogger(__name__)
@@ -238,6 +238,27 @@ class ParseResult:
             "block_number": self.block_number,
             "transaction_success": self.transaction_success,
         }
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+
+def _canonical_pool_address(event: CurveEvent) -> str:
+    """Return the canonical Curve pool address for an Add/RemoveLiquidity event.
+
+    The Curve pool contract is the contract that EMITS the
+    AddLiquidity / RemoveLiquidity event — exactly the chain-data-first
+    identity the LP accounting handler's ``_resolve_lp_pool_address`` accepts
+    (a lowercased ``0x``-prefixed 20-byte address). The fixed-array decoders
+    stamp ``pool_address`` into ``event.data``; the dynamic-array and the
+    ``RemoveLiquidityOne`` / ``RemoveLiquidityImbalance`` paths do not, so fall
+    back to ``event.contract_address`` (the same emitter). Returns ``""`` when
+    no address is available rather than fabricating one (Empty ≠ Zero).
+    """
+    addr = event.data.get("pool_address") or event.contract_address or ""
+    return str(addr).lower()
 
 
 # =============================================================================
@@ -995,6 +1016,80 @@ class CurveReceiptParser:
             logger.warning(f"Failed to extract LP tokens received: {e}")
             return None
 
+    def extract_lp_open_data(self, receipt: dict[str, Any]) -> "LPOpenData | None":
+        """Extract LP open data from an AddLiquidity transaction receipt (VIB-4968).
+
+        Curve is a **fungible-LP (ERC20 LP-token) venue** — there is no NFT
+        position, no tick bracket, and no per-position id. The single field
+        the LP accounting handler genuinely needs from the open receipt is the
+        canonical ``pool_address`` so ``handle_lp`` can book the LP_OPEN event
+        (``_resolve_lp_pool_address`` step 1). Pre-VIB-4968 the parser had no
+        ``extract_lp_open_data`` at all, so the receipt-extraction priority
+        yielded nothing and — combined with the bare-label position-key tail —
+        the handler dropped the event entirely (zero ``accounting_events`` rows
+        for every Curve LP_OPEN).
+
+        Directional null-contract (Empty ≠ Zero ≠ None, blueprint 27):
+
+        - ``pool_address`` = the AddLiquidity event emitter (the Curve pool
+          contract). Real ``0x`` address — chain data, most reliable.
+        - ``position_id = 0`` — fungible LP has no NFT id. The handler's
+          ``_resolve_lp_open_discriminator`` treats ``0`` as "no discriminator"
+          and persists ``position_id = None`` (the faithful fungible-LP value).
+        - ``tick_lower`` / ``tick_upper`` / ``liquidity`` / ``current_tick`` /
+          ``position_hash`` stay ``None`` — Curve has no tick model and
+          fabricating a bracket would be a correctness regression.
+        - ``amount0`` / ``amount1`` carry the raw measured ``token_amounts``
+          for the first two coins so the handler can scale them by token
+          decimals. ``None`` (not ``0``) when the leg is genuinely absent.
+
+        Args:
+            receipt: Transaction receipt dict with 'logs' field
+
+        Returns:
+            LPOpenData if an AddLiquidity event is found, None otherwise.
+        """
+        from almanak.framework.execution.extracted_data import LPOpenData
+
+        try:
+            result = self.parse_receipt(receipt)
+
+            for event in result.events:
+                if event.event_type != CurveEventType.ADD_LIQUIDITY:
+                    continue
+
+                # ``or []`` guards the decode ``else`` branch which carries no
+                # ``token_amounts`` key (and a defensive None) — avoids len(None).
+                token_amounts = event.data.get("token_amounts") or []
+                # Empty ≠ Zero: a leg the AddLiquidity event simply did not
+                # carry is ``None`` (unmeasured), never a fabricated ``0``.
+                amount0 = token_amounts[0] if len(token_amounts) > 0 else None
+                amount1 = token_amounts[1] if len(token_amounts) > 1 else None
+
+                return LPOpenData(
+                    # Fungible LP: no NFT id. ``0`` is the canonical
+                    # "no per-position discriminator" sentinel the handler
+                    # collapses back to ``position_id=None``.
+                    position_id=0,
+                    amount0=amount0,
+                    amount1=amount1,
+                    tick_lower=None,
+                    tick_upper=None,
+                    liquidity=None,
+                    current_tick=None,
+                    # VIB-4968 — canonical Curve pool address (the AddLiquidity
+                    # event emitter IS the pool contract). Lets the LP
+                    # accounting handler resolve a pool and book the event.
+                    pool_address=_canonical_pool_address(event),
+                    position_hash=None,  # Curve has no V4 position-key hash.
+                )
+
+            return None
+
+        except Exception as e:
+            logger.warning(f"Failed to extract lp_open_data: {e}")
+            return None
+
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> "LPCloseData | None":
         """Extract LP close data from transaction receipt.
 
@@ -1018,7 +1113,9 @@ class CurveReceiptParser:
                     CurveEventType.REMOVE_LIQUIDITY_ONE,
                     CurveEventType.REMOVE_LIQUIDITY_IMBALANCE,
                 ):
-                    token_amounts = event.data.get("token_amounts", [])
+                    # ``or []`` guards the decode ``else`` branch which carries
+                    # no ``token_amounts`` key (and a defensive None).
+                    token_amounts = event.data.get("token_amounts") or []
 
                     # Get amounts for token0 and token1
                     amount0 = token_amounts[0] if len(token_amounts) > 0 else 0
@@ -1027,7 +1124,7 @@ class CurveReceiptParser:
                     # Get fees if available. VIB-4470 — Empty ≠ Zero: emit
                     # ``None`` when the Curve event did not carry a fee for
                     # the leg (an unmeasured field is not a measured zero).
-                    fees = event.data.get("fees", [])
+                    fees = event.data.get("fees") or []
                     fees0: int | None = fees[0] if len(fees) > 0 else None
                     fees1: int | None = fees[1] if len(fees) > 1 else None
 
@@ -1047,6 +1144,16 @@ class CurveReceiptParser:
                         liquidity_removed=None,  # LP tokens burned
                         additional_amounts=additional_amounts,
                         additional_fees=additional_fees,
+                        # VIB-4968 — stamp the canonical Curve pool address (the
+                        # RemoveLiquidity* event emitter IS the pool contract).
+                        # This is the chain-data-first source the LP accounting
+                        # handler (`_resolve_lp_pool_address` step 1) needs to
+                        # book the LP_CLOSE event; without it `handle_lp` could
+                        # not resolve a pool and dropped the event entirely.
+                        # ``RemoveLiquidityOne`` / ``RemoveLiquidityImbalance``
+                        # take the decode ``else`` branch (no ``pool_address``
+                        # key), so fall back to the event's contract address.
+                        pool_address=_canonical_pool_address(event),
                     )
 
             return None

@@ -331,11 +331,17 @@ async def assert_accounting_persisted(
     eth_call_reader: Any | None = None,
     pre_state: dict[str, Any] | None = None,
     post_state: dict[str, Any] | None = None,
+    resolved_pool: str | None = None,
 ) -> dict[str, Any]:
     """Persist a real execution result through Layer 5 and return the event row.
 
     ``pre_state`` / ``post_state`` are the runner-shaped lending-state dicts
     (see ``_persist_and_drain_for_intent_test``); LP callers omit them.
+
+    ``resolved_pool`` (VIB-3946) is the compiler-resolved canonical pool label
+    (``action_bundle.metadata["pool_name"]``); when set it threads into the
+    position-key derivation so e.g. a Curve asset-set intent keys off the
+    canonical ``"3pool"`` label instead of the raw ``"USDT/USDC/DAI"`` string.
     """
     persisted = await _persist_and_drain_for_intent_test(
         state_manager=harness.store,
@@ -352,6 +358,7 @@ async def assert_accounting_persisted(
         eth_call_reader=eth_call_reader,
         pre_state=pre_state,
         post_state=post_state,
+        resolved_pool=resolved_pool,
     )
     assert persisted.outbox_id is not None, "Layer-5 helper must write accounting_outbox"
     assert persisted.drained is True, "AccountingProcessor.drain_one must process the row"

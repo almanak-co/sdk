@@ -29,7 +29,6 @@ from almanak.framework.intents.vocabulary import IntentType
 from tests.intents._curve_lp_layer5_helpers import (
     assert_curve_lp_layer5,
     enrich_for_accounting,
-    finalize_curve_lp_layer5,
 )
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
@@ -231,12 +230,11 @@ class TestCurve3poolLPOpen:
             f"received {lp_received_decimal} 3Crv LP tokens"
         )
 
-        # --- Layer 5: real accounting pipeline (documented full-drop gap) ---
-        # Curve LP currently writes ZERO typed accounting_events: lp_handler
-        # rejects the bare "3pool" label, so the helper returns a non-terminal
-        # gap sentinel (VIB-4968). finalize_curve_lp_layer5 then marks the test
-        # xfail. When fixed it asserts the fungible-LP null-contract.
-        open_row = await assert_curve_lp_layer5(
+        # --- Layer 5: real accounting pipeline (VIB-4968) ---
+        # The Curve receipt parser stamps the canonical 0x pool address on the
+        # LP_OPEN leg, so lp_handler books a typed LP_OPEN accounting_event and
+        # this asserts the fungible-LP null-contract.
+        await assert_curve_lp_layer5(
             layer5_accounting_harness,
             intent=intent,
             result=execution_result,
@@ -245,9 +243,8 @@ class TestCurve3poolLPOpen:
             event_type="LP_OPEN",
             price_oracle=price_oracle,
             eth_call_reader=anvil_eth_call_adapter,
-            expected_pool_label=POOL,
+            expected_pool_address=POOL_ADDRESS,
         )
-        finalize_curve_lp_layer5(open_row)
 
     @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
@@ -387,12 +384,12 @@ class TestCurve3poolLPOpen:
             f"{LP_AMOUNT_USDC} USDC, received {lp_received_decimal} 3Crv LP tokens"
         )
 
-        # --- Layer 5: real accounting pipeline (documented full-drop gap, VIB-4968) ---
+        # --- Layer 5: real accounting pipeline (VIB-4968) ---
         # VIB-3946: thread the compiler-resolved canonical pool label
         # (metadata["pool_name"]="3pool") into the accounting derivation, exactly
         # as the runner does, so accounting keys off "3pool" and NOT the raw
         # "USDT/USDC/DAI" asset-set string. token0/token1 stay empty (no "/").
-        open_row = await assert_curve_lp_layer5(
+        await assert_curve_lp_layer5(
             layer5_accounting_harness,
             intent=intent,
             result=execution_result,
@@ -401,10 +398,9 @@ class TestCurve3poolLPOpen:
             event_type="LP_OPEN",
             price_oracle=price_oracle,
             eth_call_reader=anvil_eth_call_adapter,
-            expected_pool_label=POOL,
+            expected_pool_address=POOL_ADDRESS,
             resolved_pool=compilation_result.action_bundle.metadata.get("pool_name"),
         )
-        finalize_curve_lp_layer5(open_row)
 
 
 # =============================================================================
@@ -522,7 +518,7 @@ class TestCurve3poolLPLifecycle:
             f"LP token delta ({lp_delta_open_decimal}) must match receipt extraction ({lp_tokens_received})"
         )
 
-        # Layer 5: persist LP_OPEN (documented full-drop gap — xfails today).
+        # Layer 5: persist LP_OPEN — VIB-4968 books a typed LP_OPEN event.
         open_accounting_row = await assert_curve_lp_layer5(
             layer5_accounting_harness,
             intent=open_intent,
@@ -532,7 +528,7 @@ class TestCurve3poolLPLifecycle:
             event_type="LP_OPEN",
             price_oracle=price_oracle,
             eth_call_reader=anvil_eth_call_adapter,
-            expected_pool_label=POOL,
+            expected_pool_address=POOL_ADDRESS,
         )
 
         # ==================== CLOSE ====================
@@ -614,14 +610,11 @@ class TestCurve3poolLPLifecycle:
             f"received {dai_returned / 1e18:.4f} DAI + {usdc_returned / 1e6:.4f} USDC"
         )
 
-        # --- Layer 5: real accounting pipeline LP_CLOSE (documented gap) ---
-        # The OPEN-leg helper returned a non-terminal gap sentinel, so the
-        # full LP_OPEN -> LP_CLOSE lifecycle (execute + receipt + balance
-        # deltas for BOTH legs) runs to completion above. The xfail for the
-        # documented VIB-4968 gap is raised ONCE at the very end via
-        # finalize_curve_lp_layer5 — never mid-lifecycle.
+        # --- Layer 5: real accounting pipeline LP_CLOSE (VIB-4968) ---
+        # Both LP_OPEN and LP_CLOSE now book typed accounting_events; the close
+        # row links back to its prior open via the shared position_key.
         assert lp_close_data is not None, "Layer-5 assertion needs parsed LPCloseData"
-        close_row = await assert_curve_lp_layer5(
+        await assert_curve_lp_layer5(
             layer5_accounting_harness,
             intent=close_intent,
             result=close_exec,
@@ -632,4 +625,3 @@ class TestCurve3poolLPLifecycle:
             eth_call_reader=anvil_eth_call_adapter,
             prior_open_row=open_accounting_row,
         )
-        finalize_curve_lp_layer5(open_accounting_row, close_row)

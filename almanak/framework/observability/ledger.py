@@ -702,7 +702,16 @@ def _build_extracted_data_json(result: Any) -> str:
         return extracted_data_json
 
 
-def _stamp_lp_close_discriminator(intent: Any, result: Any, intent_type: str) -> None:
+# Fungible-LP (ERC20 LP-token) venues where ``LPCloseIntent.position_id`` is
+# NOT an NFT token id. On Curve the close intent's ``position_id`` is overloaded
+# as the LP-token *amount* to burn (a human-decimal string), so stamping it as a
+# per-position discriminator (VIB-4275) would write a bogus amount-shaped
+# ``position_id`` onto the fungible-LP close event — which has no co-leg to
+# disambiguate (one balance per pool). VIB-4968.
+_FUNGIBLE_LP_NO_DISCRIMINATOR_PROTOCOLS = frozenset({"curve"})
+
+
+def _stamp_lp_close_discriminator(intent: Any, result: Any, intent_type: str, protocol: str = "") -> None:
     """Stamp the close intent's ``position_id`` onto ``result.extracted_data["lp_close_data"]`` (VIB-4275).
 
     The close RECEIPT does not re-emit the closing NFT's token id (a Burn /
@@ -719,8 +728,14 @@ def _stamp_lp_close_discriminator(intent: Any, result: Any, intent_type: str) ->
     result. ``LPCloseData`` is frozen, so the stamped copy is written back via
     :func:`dataclasses.replace`. Idempotent: a discriminator already present on
     the close data (e.g. a future parser that learns to emit it) is preserved.
+
+    Skipped entirely for fungible-LP venues
+    (:data:`_FUNGIBLE_LP_NO_DISCRIMINATOR_PROTOCOLS`) where the close intent's
+    ``position_id`` is overloaded as a burn *amount*, not an NFT id (VIB-4968).
     """
     if intent_type not in ("LP_CLOSE", "LP_COLLECT_FEES"):
+        return
+    if (protocol or "").lower() in _FUNGIBLE_LP_NO_DISCRIMINATOR_PROTOCOLS:
         return
     raw = getattr(intent, "position_id", None)
     # Uniformly ignore the degenerate 0 / "0" id across stamp + both resolvers:
@@ -841,9 +856,9 @@ def build_ledger_entry(
     # (``LPCloseIntent.position_id``) knows exactly which NFT is being closed.
     # The close-side accounting resolver reads this back off ``extracted_data_json``
     # to attribute a co-pool close to its OWN prior open.
-    _stamp_lp_close_discriminator(intent, result, intent_type)
-    extracted_data_json = _build_extracted_data_json(result)
     protocol = getattr(intent, "protocol", "") or ""
+    _stamp_lp_close_discriminator(intent, result, intent_type, protocol)
+    extracted_data_json = _build_extracted_data_json(result)
 
     # ─── VIB-3480 columns finally populated (Accounting-AttemptNo17 §3 D3) ──
     # Until this PR, pre_state_json / post_state_json / price_inputs_json

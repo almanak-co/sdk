@@ -1570,6 +1570,24 @@ class TestStampLpCloseDiscriminator:
         _stamp_lp_close_discriminator(intent, result, "SWAP")
         assert result.extracted_data["lp_close_data"].position_id is None
 
+    @pytest.mark.parametrize("intent_type", ["LP_CLOSE", "LP_COLLECT_FEES"])
+    def test_fungible_lp_protocol_skips_stamp(self, intent_type):
+        # VIB-4968: on Curve the close intent's position_id is the LP-token
+        # *amount* to burn (a human-decimal string), NOT an NFT id. It must NOT
+        # be stamped as a per-position discriminator — fungible LP has no co-leg
+        # to disambiguate, so the close event must carry position_id=None.
+        intent = _make_intent(intent_type, position_id="99.0")
+        result = _lp_close_result(position_id=None)
+        _stamp_lp_close_discriminator(intent, result, intent_type, protocol="curve")
+        assert result.extracted_data["lp_close_data"].position_id is None
+
+    def test_nft_lp_protocol_still_stamps(self):
+        # Non-fungible venues (e.g. uniswap_v3) keep the VIB-4275 discriminator.
+        intent = _make_intent("LP_CLOSE", position_id="5467895")
+        result = _lp_close_result(position_id=None)
+        _stamp_lp_close_discriminator(intent, result, "LP_CLOSE", protocol="uniswap_v3")
+        assert result.extracted_data["lp_close_data"].position_id == "5467895"
+
     @pytest.mark.parametrize("degenerate", [None, "", 0, "0", "  0  "])
     def test_degenerate_intent_position_id_is_noop(self, degenerate):
         # None/""/0/"0" (and whitespace-padded "0") are never stamped — they are

@@ -10,8 +10,6 @@ extract_lp_close_data).
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from almanak.connectors.curve.receipt_parser import (
     EVENT_TOPICS,
     CurveEventType,
@@ -480,6 +478,19 @@ class TestExtractLPCloseData:
         assert result.amount0_collected == amounts[0]
         assert result.amount1_collected == amounts[1]
 
+    def test_stamps_canonical_pool_address(self):
+        """VIB-4968: pool_address must be the canonical 0x pool contract.
+
+        The RemoveLiquidity event emitter IS the Curve pool contract. Without
+        this the LP accounting handler could not resolve a pool address and
+        dropped the LP_CLOSE event entirely.
+        """
+        receipt = _build_remove_liquidity_receipt(pool=POOL_3POOL)
+        parser = CurveReceiptParser(chain="ethereum")
+        result = parser.extract_lp_close_data(receipt)
+        assert result is not None
+        assert result.pool_address == POOL_3POOL
+
     def test_3coin_pool_includes_all_amounts(self):
         """3-coin pool should include amount2 in additional_amounts."""
         amounts = [33_000_000_000_000_000_000, 33_000_000, 33_000_000]
@@ -517,6 +528,56 @@ class TestExtractLPCloseData:
         receipt = _build_swap_receipt()
         parser = CurveReceiptParser(chain="ethereum")
         result = parser.extract_lp_close_data(receipt)
+        assert result is None
+
+
+class TestExtractLPOpenData:
+    """Test extract_lp_open_data for AddLiquidity events (VIB-4968)."""
+
+    def test_stamps_canonical_pool_address(self):
+        """pool_address must be the canonical 0x pool contract (event emitter).
+
+        This is the chain-data identity the LP accounting handler needs to
+        book an LP_OPEN event; without it the event was dropped entirely.
+        """
+        receipt = _build_add_liquidity_receipt(pool=POOL_3POOL)
+        parser = CurveReceiptParser(chain="ethereum")
+        result = parser.extract_lp_open_data(receipt)
+        assert result is not None
+        assert result.pool_address == POOL_3POOL
+
+    def test_carries_measured_amounts(self):
+        """amount0 / amount1 carry the raw measured token_amounts."""
+        amounts = [50_000_000_000_000_000_000, 50_000_000, 0]
+        receipt = _build_add_liquidity_receipt(token_amounts=amounts)
+        parser = CurveReceiptParser(chain="ethereum")
+        result = parser.extract_lp_open_data(receipt)
+        assert result is not None
+        assert result.amount0 == amounts[0]
+        assert result.amount1 == amounts[1]
+
+    def test_fungible_lp_null_contract(self):
+        """Curve is fungible LP: no NFT id, no tick bracket, no V4 hash.
+
+        ``position_id == 0`` is the canonical "no per-position discriminator"
+        sentinel the accounting handler collapses to ``position_id=None``.
+        """
+        receipt = _build_add_liquidity_receipt()
+        parser = CurveReceiptParser(chain="ethereum")
+        result = parser.extract_lp_open_data(receipt)
+        assert result is not None
+        assert result.position_id == 0
+        assert result.tick_lower is None
+        assert result.tick_upper is None
+        assert result.liquidity is None
+        assert result.current_tick is None
+        assert result.position_hash is None
+
+    def test_returns_none_for_swap_receipt(self):
+        """Swap receipt (no AddLiquidity) should return None."""
+        receipt = _build_swap_receipt()
+        parser = CurveReceiptParser(chain="ethereum")
+        result = parser.extract_lp_open_data(receipt)
         assert result is None
 
 

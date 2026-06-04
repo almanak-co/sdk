@@ -32,7 +32,6 @@ from almanak.framework.intents.vocabulary import IntentType
 from tests.intents._curve_lp_layer5_helpers import (
     assert_curve_lp_layer5,
     enrich_for_accounting,
-    finalize_curve_lp_layer5,
 )
 from tests.intents.conftest import (
     fund_erc20_token,
@@ -252,11 +251,11 @@ class TestCurve2poolLPOpenArbitrum:
             f"LP received={lp_received}"
         )
 
-        # --- Layer 5: real accounting pipeline (documented full-drop gap) ---
-        # Curve LP currently writes ZERO typed accounting_events: lp_handler
-        # rejects the bare "2pool" label, so this xfails on the documented gap
-        # (VIB-4968). When fixed it asserts the fungible-LP null-contract.
-        open_row = await assert_curve_lp_layer5(
+        # --- Layer 5: real accounting pipeline (VIB-4968) ---
+        # The Curve receipt parser stamps the canonical 0x pool address on the
+        # LP_OPEN leg, so lp_handler books a typed LP_OPEN accounting_event and
+        # this asserts the fungible-LP null-contract.
+        await assert_curve_lp_layer5(
             layer5_accounting_harness,
             intent=intent,
             result=execution_result,
@@ -265,9 +264,8 @@ class TestCurve2poolLPOpenArbitrum:
             event_type="LP_OPEN",
             price_oracle=price_oracle,
             eth_call_reader=anvil_eth_call_adapter,
-            expected_pool_label=POOL,
+            expected_pool_address=POOL_ADDRESS,
         )
-        finalize_curve_lp_layer5(open_row)
 
 
 # =============================================================================
@@ -378,7 +376,7 @@ class TestCurve2poolLPLifecycleArbitrum:
         )
         assert lp_tokens_received > 0, "Must extract LP tokens from LP_OPEN receipt"
 
-        # Layer 5: persist LP_OPEN (documented full-drop gap — xfails today).
+        # Layer 5: persist LP_OPEN — VIB-4968 books a typed LP_OPEN event.
         open_accounting_row = await assert_curve_lp_layer5(
             layer5_accounting_harness,
             intent=open_intent,
@@ -388,7 +386,7 @@ class TestCurve2poolLPLifecycleArbitrum:
             event_type="LP_OPEN",
             price_oracle=price_oracle,
             eth_call_reader=anvil_eth_call_adapter,
-            expected_pool_label=POOL,
+            expected_pool_address=POOL_ADDRESS,
         )
 
         # ==================== CLOSE ====================
@@ -475,9 +473,9 @@ class TestCurve2poolLPLifecycleArbitrum:
             f"{usdt_returned / 10**6:.4f} USDT"
         )
 
-        # --- Layer 5: real accounting pipeline LP_CLOSE (documented gap) ---
+        # --- Layer 5: real accounting pipeline LP_CLOSE (VIB-4968) ---
         assert lp_close_data is not None, "Layer-5 assertion needs parsed LPCloseData"
-        close_row = await assert_curve_lp_layer5(
+        await assert_curve_lp_layer5(
             layer5_accounting_harness,
             intent=close_intent,
             result=close_exec,
@@ -488,4 +486,3 @@ class TestCurve2poolLPLifecycleArbitrum:
             eth_call_reader=anvil_eth_call_adapter,
             prior_open_row=open_accounting_row,
         )
-        finalize_curve_lp_layer5(open_accounting_row, close_row)

@@ -35,7 +35,6 @@ from almanak.framework.intents.vocabulary import IntentType
 from tests.intents._curve_lp_layer5_helpers import (
     assert_curve_lp_layer5,
     enrich_for_accounting,
-    finalize_curve_lp_layer5,
 )
 from tests.intents.conftest import (
     fund_erc20_token,
@@ -280,11 +279,13 @@ class TestCurveAm3poolLPOpenPolygon:
             f"LP received={lp_received}"
         )
 
-        # --- Layer 5: real accounting pipeline (documented full-drop gap) ---
-        # Curve LP currently writes ZERO typed accounting_events: lp_handler
-        # rejects the bare "3pool" label (VIB-4968). NOTE: this test is
-        # also am3pool-xfail-marked (parser gap), which fires first today.
-        open_row = await assert_curve_lp_layer5(
+        # --- Layer 5: real accounting pipeline (VIB-4968) ---
+        # Post-VIB-4968 the parser stamps a canonical 0x pool address so
+        # lp_handler books a typed LP_OPEN event. NOTE: this test is still
+        # xfail-marked for the SEPARATE VIB-4307 am3pool (aave-type) parser
+        # gap — Polygon's AddLiquidity/TokenExchange signatures are not yet
+        # decoded, so the Layer-3 receipt parse fails before this runs.
+        await assert_curve_lp_layer5(
             layer5_accounting_harness,
             intent=intent,
             result=execution_result,
@@ -293,9 +294,8 @@ class TestCurveAm3poolLPOpenPolygon:
             event_type="LP_OPEN",
             price_oracle=price_oracle,
             eth_call_reader=anvil_eth_call_adapter,
-            expected_pool_label=POOL,
+            expected_pool_address=POOL_ADDRESS,
         )
-        finalize_curve_lp_layer5(open_row)
 
 
 # =============================================================================
@@ -416,7 +416,7 @@ class TestCurveAm3poolLPLifecyclePolygon:
         assert add_liquidity_found, "AddLiquidity event must be found in LP_OPEN receipt"
         assert lp_tokens_received > 0, "Must extract LP tokens from LP_OPEN receipt"
 
-        # Layer 5: persist LP_OPEN (documented full-drop gap — xfails today).
+        # Layer 5: persist LP_OPEN — VIB-4968 books a typed LP_OPEN event.
         open_accounting_row = await assert_curve_lp_layer5(
             layer5_accounting_harness,
             intent=open_intent,
@@ -426,7 +426,7 @@ class TestCurveAm3poolLPLifecyclePolygon:
             event_type="LP_OPEN",
             price_oracle=price_oracle,
             eth_call_reader=anvil_eth_call_adapter,
-            expected_pool_label=POOL,
+            expected_pool_address=POOL_ADDRESS,
         )
 
         # ==================== CLOSE ====================
@@ -536,9 +536,9 @@ class TestCurveAm3poolLPLifecyclePolygon:
             f"{usdt_returned / 10**6:.4f} USDT"
         )
 
-        # --- Layer 5: real accounting pipeline LP_CLOSE (documented gap) ---
+        # --- Layer 5: real accounting pipeline LP_CLOSE (VIB-4968) ---
         assert lp_close_data is not None, "Layer-5 assertion needs parsed LPCloseData"
-        close_row = await assert_curve_lp_layer5(
+        await assert_curve_lp_layer5(
             layer5_accounting_harness,
             intent=close_intent,
             result=close_exec,
@@ -549,4 +549,3 @@ class TestCurveAm3poolLPLifecyclePolygon:
             eth_call_reader=anvil_eth_call_adapter,
             prior_open_row=open_accounting_row,
         )
-        finalize_curve_lp_layer5(open_accounting_row, close_row)
