@@ -2713,6 +2713,41 @@ class MarketSnapshot:
         # ``position_health`` call without overrides ALSO hits this entry.
         self._position_health_cache[(protocol, market_id, "", "", "")] = health
 
+    def aave_health_factor(self, *, chain: str | None = None) -> Decimal | None:
+        """Aave V3 account health factor for ``chain`` via the wired provider.
+
+        Returns ``None`` when no ``aave_health_factor_provider`` was wired into
+        this snapshot (the default multi-chain CLI path wires only a balance
+        provider) OR when the provider reports no live Aave position. Callers
+        treat ``None`` as "no confirmed live position" and must not infer a
+        healthy or unhealthy position from it. This mirrors the
+        None-on-no-provider convention of :meth:`prediction_price` /
+        :meth:`wallet_activity` so ``decide()`` can branch with ``if hf is
+        None`` (see ``docs/internal/blueprints/01-data-layer.md``
+        §MarketSnapshot — provider-driven methods).
+
+        The provider (an ``AaveHealthFactorProvider`` — a
+        ``(chain) -> Decimal | None`` callable) owns any gateway-routed read;
+        this accessor is pure delegation and opens no network connection
+        itself, so it does not cross the gateway boundary. Exceptions raised by
+        the provider propagate unchanged: a gateway failure must surface, never
+        be silently coerced to ``None`` and mistaken for "no position" — the
+        leverage-stacking guard in cross-chain strategies depends on that
+        distinction.
+
+        Args:
+            chain: Chain to query (keyword-only, PRD §4.2). Required on a
+                multi-chain snapshot; on a single-chain snapshot it must match
+                ``self.chain`` or be ``None``.
+
+        Returns:
+            The Aave V3 health factor as a ``Decimal``, or ``None`` when no
+            provider is wired / no live position exists.
+        """
+        if self._aave_health_factor_provider is None:
+            return None
+        return self._aave_health_factor_provider(self._resolve_chain(chain))
+
     def funding_rate(self, venue: str, market: str) -> FundingRate:
         """Get the current funding rate for a perpetual market on a specific venue.
 

@@ -232,6 +232,121 @@ class TestPoolPriceContractALM2696:
         assert params["chain"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
 
 
+class TestAaveHealthFactorAccessor:
+    """``aave_health_factor`` is a strategy-facing accessor that multi-chain
+    leverage strategies (e.g. ``leverage_loop_cross_chain``) call as
+    ``market.aave_health_factor(chain=...)``.
+
+    Before this method existed, the call raised ``'MarketSnapshot' object has
+    no attribute 'aave_health_factor'`` — the same ALM-2696 ``AttributeError``
+    class as ``pool_price``. It was worse here because the leverage strategy's
+    ``decide()`` calls it un-guarded (so the missing method crashed the
+    decision loop) while its teardown path swallowed the error and silently
+    reported no Aave positions. These tests pin the contract: the method
+    exists, returns ``None`` (a soft signal) when no provider is wired,
+    delegates to the wired ``(chain) -> Decimal | None`` provider, and never
+    silently swallows a provider error.
+    """
+
+    def test_exists_and_is_callable(self, bare_snapshot: MarketSnapshot) -> None:
+        assert hasattr(bare_snapshot, "aave_health_factor")
+        assert callable(bare_snapshot.aave_health_factor)
+
+    def test_returns_none_when_provider_unconfigured(self, bare_snapshot: MarketSnapshot) -> None:
+        """Soft-signal contract: no provider wired -> ``None`` (NOT a raise,
+        NOT ``AttributeError``). Mirrors ``prediction_price`` so ``decide()``
+        can branch with ``if hf is None``."""
+        assert bare_snapshot.aave_health_factor(chain="arbitrum") is None
+
+    def test_delegates_to_provider_with_resolved_chain(self) -> None:
+        """When wired, delegate to the provider and return its value, passing
+        the resolved chain through (proves a real wire-up, not a stub)."""
+        seen: list[str] = []
+
+        def _provider(chain: str) -> Decimal:
+            seen.append(chain)
+            return Decimal("1.75")
+
+        snapshot = MarketSnapshot(
+            chains=("base", "arbitrum"),
+            wallet_address="0x0000000000000000000000000000000000000000",
+            aave_health_factor_provider=_provider,
+        )
+
+        assert snapshot.aave_health_factor(chain="arbitrum") == Decimal("1.75")
+        assert seen == ["arbitrum"]
+
+    def test_returns_none_when_provider_reports_no_position(self) -> None:
+        """A wired provider returning ``None`` (no live position) passes
+        through unchanged."""
+        snapshot = MarketSnapshot(
+            chain="arbitrum",
+            wallet_address="0x0000000000000000000000000000000000000000",
+            aave_health_factor_provider=lambda _chain: None,
+        )
+
+        assert snapshot.aave_health_factor(chain="arbitrum") is None
+
+    def test_provider_errors_propagate(self) -> None:
+        """A failing provider must NOT be coerced to ``None`` — a gateway
+        outage mistaken for "no position" would let a cross-chain strategy
+        stack leverage on an existing position. Fail loud."""
+
+        def _boom(_chain: str) -> Decimal:
+            raise RuntimeError("gateway unavailable")
+
+        snapshot = MarketSnapshot(
+            chain="arbitrum",
+            wallet_address="0x0000000000000000000000000000000000000000",
+            aave_health_factor_provider=_boom,
+        )
+
+        with pytest.raises(RuntimeError, match="gateway unavailable"):
+            snapshot.aave_health_factor(chain="arbitrum")
+
+    def test_signature_is_keyword_only_chain(self) -> None:
+        """Pin the documented call shape ``aave_health_factor(chain=...)``:
+        ``chain`` is keyword-only with a ``None`` default, matching
+        ``balance`` / ``price`` (PRD §4.2)."""
+        sig = inspect.signature(MarketSnapshot.aave_health_factor)
+        params = sig.parameters
+        assert list(params) == ["self", "chain"]
+        assert params["chain"].default is None
+        assert params["chain"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    def test_raises_ambiguous_chain_error_on_multichain_without_chain(self) -> None:
+        """On a multi-chain snapshot, calling ``aave_health_factor`` without an
+        explicit ``chain`` must raise ``AmbiguousChainError`` (PRD §4.2). A
+        provider is wired so resolution is reached -- the no-provider branch
+        short-circuits to ``None`` *before* ``_resolve_chain`` (see
+        ``test_returns_none_when_provider_unconfigured``)."""
+        from almanak.framework.market.errors import AmbiguousChainError
+
+        snapshot = MarketSnapshot(
+            chains=("base", "arbitrum"),
+            wallet_address="0x0000000000000000000000000000000000000000",
+            aave_health_factor_provider=lambda _chain: Decimal("1.5"),
+        )
+
+        with pytest.raises(AmbiguousChainError, match="chain=None on a multi-chain snapshot"):
+            snapshot.aave_health_factor()
+
+    def test_raises_chain_not_configured_error_on_unconfigured_chain(self) -> None:
+        """Calling ``aave_health_factor`` with a chain not in the configured set
+        must raise ``ChainNotConfiguredError`` (PRD §4.2). Provider wired for the
+        same reason as above."""
+        from almanak.framework.market.errors import ChainNotConfiguredError
+
+        snapshot = MarketSnapshot(
+            chains=("base", "arbitrum"),
+            wallet_address="0x0000000000000000000000000000000000000000",
+            aave_health_factor_provider=lambda _chain: Decimal("1.5"),
+        )
+
+        with pytest.raises(ChainNotConfiguredError, match="not in configured chains"):
+            snapshot.aave_health_factor(chain="ethereum")
+
+
 class TestProviderlessMethodsRaiseValueError:
     """Provider-driven methods must raise ``ValueError`` (not ``AttributeError``,
     not silently return) when the runner has not wired their provider.
