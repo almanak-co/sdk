@@ -20,29 +20,27 @@ goldens. The lending category handler is protocol-agnostic — it keys on
 principal / interest split assertions are identical to the Aave V3 / Spark
 goldens.
 
-THE BENQI DEGRADATION (genuine production gap, tracked by VIB-4967):
-BENQI is a Compound-V2-style market (qiTokens) and has NO pre/post-state reader.
-``_PROTOCOL_PRE_STATE_READERS`` in
-``almanak/framework/accounting/lending_accounting.py`` has entries for
-``aave_v3`` / ``aave`` / ``morpho_blue`` / ``compound_v3`` but NOT ``benqi``,
-so ``capture_lending_pre_state`` / ``capture_lending_post_state`` return
-``None`` for a BENQI intent. With no ``post_state_json`` the lending handler
-sets ``confidence=ESTIMATED`` and leaves every before/after collateral / debt /
-health-factor field ``None`` with a populated ``unavailable_reason``
-(Empty≠Zero≠None — nothing is fabricated). So BENQI Layer 5 asserts the
-DEGRADATION contract for chain state (``_assert_state_degraded_no_reader``),
-NOT the HIGH-confidence contract the Aave / Compound goldens use.
+THE BENQI FIDELITY FIX (VIB-4967 landed — both prior gaps closed):
+BENQI is a Compound-V2-style market (qiTokens). VIB-4967 shipped the two
+production pieces that previously degraded BENQI lending accounting, so this
+Layer-5 suite now asserts the SAME HIGH-confidence contract the Aave / Compound /
+Silo / Euler goldens use:
 
-TWO STACKED PRODUCTION GAPS (both VIB-4967, both encoded as degradation):
-  1. No pre/post-state reader — confidence=ESTIMATED, before/after fields None.
-  2. No lending amount extractors on ``BenqiReceiptParser`` (no
-     ``SUPPORTED_EXTRACTIONS`` / ``extract_borrow_amount`` etc., unlike Spark),
-     so ``ResultEnricher`` cannot populate ``extracted_data`` and the handler's
-     ``_extract_amount_human`` returns ``None`` → ``amount_token``,
-     ``principal_delta_usd`` and ``interest_delta_usd`` all degrade to ``None``
-     (no FIFO lot recorded; the borrow→repay split therefore cannot be exact).
-     The typed event still persists with correct identity + event_type. Closing
-     both gaps lights up the Spark/Aave HIGH contract with no test rewrite.
+  1. Pre/post-state reader — ``almanak/connectors/benqi/lending_read.py`` (enabled
+     in ``_GENERIC_PRE_STATE_PROTOCOLS``). BENQI is pooled cross-asset, so it is read
+     WHOLE-ACCOUNT: ``getAccountSnapshot`` on every listed qiToken (supply + debt) +
+     the Comptroller's ``markets(qiToken).collateralFactorMantissa`` for a TRUE
+     liquidation-aware HF (``Σ(supply_usd × CF) / Σ debt_usd`` — the on-chain
+     liquidation parameter, NOT a bare collateral/debt proxy). Being whole-account it
+     also resolves a bare REPAY (``token`` only) cleanly — no per-pair collateral
+     ambiguity. ``capture_lending_*`` now serialize populated before/after collateral
+     / debt / HF → ``confidence=HIGH``.
+  2. Lending amount extractors on ``BenqiReceiptParser`` (``SUPPORTED_EXTRACTIONS`` +
+     ``extract_borrow_amount`` / ``extract_repay_amount`` / ``extract_supply_amount``
+     / ``extract_withdraw_amount`` returning RAW token wei, mirroring Spark). The
+     enricher populates ``extracted_data`` and the handler measures ``amount_token``
+     + records the FIFO principal lot → the borrow→repay split is EXACT (matched
+     principal + measured interest), like the Spark/Aave goldens.
 
 To run:
     uv run pytest tests/intents/avalanche/test_benqi_borrow.py -v -s
@@ -144,20 +142,22 @@ def _capture_lending_state(
     price_oracle: dict[str, Decimal],
     *,
     post: bool,
-    block: int | str | None = None,
 ) -> dict | None:
     """Capture and serialize BENQI pre/post state via the Anvil eth_call adapter.
 
     Returns the runner-shaped state dict or ``None`` — never a fabricated zero.
-    For BENQI this currently ALWAYS returns ``None`` (no pre/post-state reader,
-    VIB-4967); the call mirrors the runner's wiring so a future reader
-    fix lights up the HIGH-confidence path with no test change.
+    VIB-4967 landed the bespoke Compound-V2 qiToken whole-account reader
+    (``almanak/connectors/benqi/lending_read.py``, enabled in
+    ``_GENERIC_PRE_STATE_PROTOCOLS``), so this now returns populated whole-account
+    before/after collateral / debt / HF via the Anvil eth_call adapter, lighting up
+    the HIGH-confidence path.
 
-    ``block`` (VIB-4589 / F7) pins the read: pre-state passes ``None`` (→
-    ``"latest"``, safe because the read precedes submission); post-state passes
-    the confirmed receipt's ``block_number`` so a future reader cannot race the
-    upstream RPC's receipt indexer. Threaded now so the wiring is byte-for-byte
-    the runner's the moment a BENQI reader lands.
+    The read is left at ``block=None`` (→ ``"latest"``), matching the Silo/Euler
+    Layer-5 wiring: the conftest ``AnvilEthCallAdapter.eth_call`` signature does not
+    accept a ``block`` kwarg, and ``_gateway_eth_call`` intentionally refuses to fall
+    back to the 3-arg form for a *pinned* block (VIB-4589). Pre-state precedes
+    submission and post-state runs against the per-test Anvil snapshot, so ``latest``
+    is correct here.
     """
     capture = capture_lending_post_state if post else capture_lending_pre_state
     state = capture(
@@ -166,20 +166,8 @@ def _capture_lending_state(
         wallet_address=wallet,
         gateway_client=reader,
         price_oracle=price_oracle,
-        block=block,
     )
     return lending_state_to_dict(state, protocol=PROTOCOL)
-
-
-def _receipt_block(execution_result: ExecutionResult) -> int | None:
-    """Block number of the last confirmed receipt (for post-state pinning)."""
-    results = getattr(execution_result, "transaction_results", None) or []
-    for tx_result in reversed(results):
-        receipt = getattr(tx_result, "receipt", None)
-        block_number = getattr(receipt, "block_number", None) if receipt else None
-        if block_number is not None:
-            return block_number
-    return None
 
 
 def _payload(row: dict) -> dict:
@@ -204,86 +192,33 @@ def _assert_no_lot_id(row: dict, payload: dict) -> None:
     assert "lot_id" not in payload
 
 
-def _assert_state_degraded_no_reader(payload: dict) -> None:
-    """BENQI genuine production degradation contract (VIB-4967).
+def _assert_high_confidence_state(payload: dict) -> None:
+    """BENQI HIGH-confidence chain-state contract (VIB-4967 reader landed).
 
-    BENQI is absent from ``_PROTOCOL_PRE_STATE_READERS`` in
-    ``almanak/framework/accounting/lending_accounting.py``, so the pre/post
-    captures return ``None`` for a BENQI intent and the lending handler sets
-    ``confidence=ESTIMATED`` with every before/after field ``None`` and a
-    populated ``unavailable_reason``. This is the TRUE current production
-    behavior (deterministic across the avalanche Anvil-fork CI), NOT a flake.
-    The HIGH-confidence expectation (before/after collateral / debt / HF
-    fidelity) is the gap tracked by VIB-4967 — wire a BENQI
-    Compound-V2-style qiToken pre/post-state reader into the registry.
-    Empty≠Zero≠None: ``unavailable_reason`` is set, nothing is fabricated.
+    BENQI now has a BESPOKE Compound-V2 qiToken WHOLE-ACCOUNT pre/post-state reader
+    (``almanak/connectors/benqi/lending_read.py``, enabled in
+    ``_GENERIC_PRE_STATE_PROTOCOLS``): every listed qiToken is read via
+    ``getAccountSnapshot`` (supply + debt) + the Comptroller's
+    ``markets(qiToken).collateralFactorMantissa`` for a TRUE liquidation-aware HF
+    (``Σ(supply_usd × CF) / Σ debt_usd`` — the on-chain liquidation parameter, NOT a
+    bare collateral/debt proxy), valued from the injected price/decimals seam. Being
+    whole-account, it resolves a bare REPAY (``token`` only) cleanly — no per-pair
+    collateral ambiguity. So ``capture_lending_*`` return populated before/after
+    collateral / debt / HF through the Anvil eth_call adapter and the handler emits
+    ``confidence=HIGH`` (Empty ≠ Zero — a measured zero is ``"0"``, never ``None``).
+    This is the inverted contract VIB-4967 ships, replacing the prior
+    ``_assert_state_degraded_no_reader`` degradation contract.
     """
-    assert payload["confidence"] == "ESTIMATED", (
-        f"BENQI lending genuinely degrades to confidence=ESTIMATED today "
-        f"(VIB-4967: no BENQI entry in _PROTOCOL_PRE_STATE_READERS); "
-        f"got {payload['confidence']!r}"
+    assert payload["confidence"] == "HIGH", (
+        f"BENQI lending must persist confidence=HIGH (bespoke Compound-V2 reader + Anvil eth_call adapter), "
+        f"got {payload['confidence']!r} (unavailable_reason={payload.get('unavailable_reason')!r})"
     )
-    assert payload.get("unavailable_reason"), (
-        "degraded BENQI lending must carry a non-empty unavailable_reason (never fabricated)"
-    )
-    # Degradation must not fabricate before/after chain state.
-    assert payload["collateral_value_before_usd"] is None, (
-        "VIB-4967: degraded BENQI must not fabricate before-collateral"
-    )
-    assert payload["collateral_value_after_usd"] is None, (
-        "VIB-4967: degraded BENQI must not fabricate after-collateral"
-    )
-    assert payload["debt_value_before_usd"] is None, "VIB-4967: degraded BENQI must not fabricate before-debt"
-    assert payload["debt_value_after_usd"] is None, "VIB-4967: degraded BENQI must not fabricate after-debt"
-    assert payload["health_factor_before"] is None, (
-        "VIB-4967: degraded BENQI must not fabricate before-health-factor"
-    )
-    assert payload["health_factor_after"] is None, (
-        "VIB-4967: degraded BENQI must not fabricate after-health-factor"
-    )
-
-
-def _assert_amount_and_fifo_degraded_no_extractor(payload: dict) -> None:
-    """BENQI amount/FIFO degradation contract (VIB-4967).
-
-    DISTINCT from the missing chain-state reader above. The
-    ``BenqiReceiptParser`` (a strategy-side ``ReceiptParserConnector``) exposes
-    NO standalone lending amount extractors — there is no ``SUPPORTED_EXTRACTIONS``
-    set and no ``extract_supply_amount`` / ``extract_borrow_amount`` /
-    ``extract_repay_amount`` / ``extract_withdraw_amount`` methods (contrast
-    ``almanak/connectors/spark/receipt_parser.py``, which has them and returns a
-    raw ``int``). So ``ResultEnricher`` cannot populate
-    ``extracted_data["borrow_amount" | "repay_amount" | ...]`` for a BENQI
-    intent, and ``lending_handler._extract_amount_human`` returns ``None``.
-
-    With ``amount_human is None`` the handler emits ``amount_token=None`` AND
-    skips the FIFO basis-store block entirely (gated on
-    ``amount_human is not None``). For BORROW this means NO lot is recorded, so
-    a later REPAY cannot match anything; ``principal_delta_usd`` and
-    ``interest_delta_usd`` both stay ``None`` — measured-as-unavailable, never
-    fabricated (Empty≠Zero≠None). The typed event row IS still persisted with
-    the correct ``event_type`` and identity; only the value legs degrade.
-
-    This is the TRUE current production behavior (deterministic on the avalanche
-    Anvil-fork CI), NOT a flake. Closing it (a BENQI lending extraction spec on
-    the receipt parser, mirroring Spark/Aave) is the gap tracked by
-    VIB-4967; the moment those extractors land, ``amount_token`` and the
-    FIFO legs populate (and the borrow→repay FIFO split becomes exact like the
-    Spark/Aave goldens) and these asserts must be tightened.
-    """
-    assert payload["amount_token"] is None, (
-        "VIB-4967: BENQI receipt parser exposes no lending amount extractors, "
-        "so the enricher cannot populate extracted_data and amount_token degrades to None "
-        f"(never fabricated); got {payload['amount_token']!r}"
-    )
-    assert payload["principal_delta_usd"] is None, (
-        "VIB-4967: with amount_human=None the FIFO block is skipped, "
-        "so principal_delta_usd degrades to None (measured-unavailable, never a fabricated 0)"
-    )
-    assert payload["interest_delta_usd"] is None, (
-        "VIB-4967: with amount_human=None the FIFO block is skipped, "
-        "so interest_delta_usd degrades to None (measured-unavailable, never a fabricated 0)"
-    )
+    assert payload["collateral_value_before_usd"] is not None, "before-collateral must be populated"
+    assert payload["collateral_value_after_usd"] is not None, "after-collateral must be populated"
+    assert payload["debt_value_before_usd"] is not None, "before-debt must be populated"
+    assert payload["debt_value_after_usd"] is not None, "after-debt must be populated"
+    assert payload["health_factor_before"] is not None, "before-health-factor must be populated"
+    assert payload["health_factor_after"] is not None, "after-health-factor must be populated"
 
 
 # =============================================================================
@@ -460,7 +395,6 @@ class TestBenqiBorrowIntent:
             anvil_eth_call_adapter,
             price_oracle,
             post=True,
-            block=_receipt_block(execution_result),
         )
 
         row = await assert_accounting_persisted(
@@ -478,13 +412,20 @@ class TestBenqiBorrowIntent:
         _assert_identity(row, event_type="BORROW", wallet=funded_wallet)
         payload = _payload(row)
         _assert_no_lot_id(row, payload)
-        _assert_state_degraded_no_reader(payload)
+        # VIB-4967: bespoke Compound-V2 whole-account reader → confidence=HIGH with
+        # populated before/after chain state. Borrow increases on-chain debt.
+        _assert_high_confidence_state(payload)
+        assert Decimal(payload["debt_value_after_usd"]) > Decimal(payload["debt_value_before_usd"]), (
+            "BORROW must increase on-chain debt value"
+        )
         assert payload["asset"] == "USDC"
-        # VIB-4967: BENQI receipt parser exposes no lending amount
-        # extractors, so amount_token + the FIFO principal/interest legs all
-        # degrade to None (no lot is recorded). The typed BORROW event still
-        # persists with correct identity + event_type.
-        _assert_amount_and_fifo_degraded_no_extractor(payload)
+        # VIB-4967: extractors landed → amount_token + the FIFO principal lot are
+        # MEASURED. BORROW records the principal lot (a later REPAY matches it); the
+        # interest leg has no match yet (must be None, never a fabricated 0).
+        assert Decimal(payload["amount_token"]) == borrow_amount
+        assert payload["principal_delta_usd"] is not None, "BORROW must measure principal_delta_usd"
+        assert Decimal(payload["principal_delta_usd"]) > 0
+        assert payload["interest_delta_usd"] is None, "BORROW has no interest leg yet — must be None, not 0"
 
         print("\nALL CHECKS PASSED")
 
@@ -559,7 +500,6 @@ class TestBenqiBorrowIntent:
             anvil_eth_call_adapter,
             price_oracle,
             post=True,
-            block=_receipt_block(borrow_exec),
         )
         borrow_row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -574,8 +514,14 @@ class TestBenqiBorrowIntent:
             post_state=borrow_post_state,
         )
         borrow_payload = _payload(borrow_row)
-        _assert_state_degraded_no_reader(borrow_payload)
-        _assert_amount_and_fifo_degraded_no_extractor(borrow_payload)
+        # VIB-4967: the setup BORROW now reaches HIGH confidence AND records the FIFO
+        # principal lot (extractors landed) — which is what makes the REPAY split exact
+        # below. Mirrors the Spark/Aave/Silo goldens.
+        _assert_high_confidence_state(borrow_payload)
+        assert Decimal(borrow_payload["amount_token"]) == setup_borrow
+        assert borrow_payload["principal_delta_usd"] is not None, "setup BORROW must record the FIFO principal lot"
+        assert Decimal(borrow_payload["principal_delta_usd"]) > 0
+        assert borrow_payload["interest_delta_usd"] is None, "BORROW has no interest leg yet — must be None, not 0"
 
         # Now repay partial debt
         repay_amount = Decimal("25")
@@ -651,7 +597,6 @@ class TestBenqiBorrowIntent:
             anvil_eth_call_adapter,
             price_oracle,
             post=True,
-            block=_receipt_block(execution_result),
         )
 
         row = await assert_accounting_persisted(
@@ -669,9 +614,23 @@ class TestBenqiBorrowIntent:
         _assert_identity(row, event_type="REPAY", wallet=funded_wallet)
         payload = _payload(row)
         _assert_no_lot_id(row, payload)
-        _assert_state_degraded_no_reader(payload)
+        # VIB-4967: whole-account reader resolves a bare REPAY (token only) cleanly →
+        # confidence=HIGH. Repay decreases on-chain debt (borrowed 50, repaid 25).
+        _assert_high_confidence_state(payload)
+        assert Decimal(payload["debt_value_after_usd"]) < Decimal(payload["debt_value_before_usd"]), (
+            "REPAY must decrease on-chain debt value"
+        )
         assert payload["asset"] == "USDC"
-        _assert_amount_and_fifo_degraded_no_extractor(payload)
+        assert Decimal(payload["amount_token"]) == repay_amount
+        # Exact FIFO split: independent of the chain-state read (it derives from the
+        # basis store). The REPAY matched the prior BORROW lot in the same harness;
+        # repaying within the same Anvil block accrues ~no interest, so the repaid
+        # amount is matched principal and the interest leg is a MEASURED value (NOT
+        # None — the match succeeded). Empty ≠ Zero ≠ None.
+        assert payload["principal_delta_usd"] is not None, "matched REPAY must measure principal"
+        assert payload["interest_delta_usd"] is not None, (
+            "matched REPAY (BORROW lot present in harness) must produce a measured interest leg — not None"
+        )
 
         print("\nALL CHECKS PASSED")
 
@@ -862,7 +821,6 @@ class TestBenqiBorrowIntent:
             anvil_eth_call_adapter,
             price_oracle,
             post=True,
-            block=_receipt_block(execution_result),
         )
 
         row = await assert_accounting_persisted(
@@ -880,9 +838,19 @@ class TestBenqiBorrowIntent:
         _assert_identity(row, event_type="BORROW", wallet=funded_wallet)
         payload = _payload(row)
         _assert_no_lot_id(row, payload)
-        _assert_state_degraded_no_reader(payload)
+        # VIB-4967: bespoke whole-account reader → confidence=HIGH. The borrow-only
+        # BORROW increases on-chain debt against the existing AVAX collateral, and the
+        # extractors measure amount_token + the FIFO principal lot (mirrors the main
+        # borrow test).
+        _assert_high_confidence_state(payload)
+        assert Decimal(payload["debt_value_after_usd"]) > Decimal(payload["debt_value_before_usd"]), (
+            "borrow-only BORROW must increase on-chain debt value"
+        )
         assert payload["asset"] == "USDC"
-        _assert_amount_and_fifo_degraded_no_extractor(payload)
+        assert Decimal(payload["amount_token"]) == borrow_amount
+        assert payload["principal_delta_usd"] is not None, "BORROW must measure principal_delta_usd"
+        assert Decimal(payload["principal_delta_usd"]) > 0
+        assert payload["interest_delta_usd"] is None, "BORROW has no interest leg yet — must be None, not 0"
 
         print("\nALL CHECKS PASSED — borrow-only path verified")
 

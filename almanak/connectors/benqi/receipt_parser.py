@@ -18,6 +18,12 @@ from enum import Enum
 from typing import Any
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
+from almanak.framework.execution.extract_result import (
+    ExtractError,
+    ExtractMissing,
+    ExtractOk,
+    ExtractResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +172,16 @@ class BenqiReceiptParser:
     Extracts supply, withdraw, borrow, and repay amounts from
     Compound V2-style events (Mint, Redeem, Borrow, RepayBorrow).
     """
+
+    # VIB-4967: declare the lending amount extractions the ResultEnricher may
+    # call so it can populate ``extracted_data`` for BENQI lending intents
+    # (mirrors ``SparkReceiptParser`` / ``CompoundV3ReceiptParser``). Without
+    # this set + the matching ``extract_*_amount`` methods, the enricher could
+    # not surface ``supply_amount`` / ``borrow_amount`` / ``withdraw_amount`` /
+    # ``repay_amount`` and ``lending_handler._extract_amount_human`` returned
+    # ``None`` → ``amount_token`` + the FIFO principal/interest split all
+    # degraded to ``None``.
+    SUPPORTED_EXTRACTIONS = frozenset({"supply_amount", "withdraw_amount", "borrow_amount", "repay_amount"})
 
     def __init__(self, underlying_decimals: int = 18, **kwargs: Any) -> None:
         self.underlying_decimals = underlying_decimals
@@ -447,3 +463,142 @@ class BenqiReceiptParser:
         except Exception as e:
             logger.warning("Failed to extract repay data: %s", e)
             return None
+
+    # =========================================================================
+    # Raw-amount extractors for ResultEnricher (VIB-4967)
+    # =========================================================================
+    #
+    # The ``extract_*_data`` methods above return ``parse_receipt``-scaled
+    # *human* Decimals (divided by ``self.underlying_decimals``), keyed under
+    # ``"<intent>_amount"`` strings — a shape the enricher's lending field map
+    # does not consume and which is also decimals-WRONG when the parser is
+    # constructed without the intent token's decimals (the enricher builds it
+    # from chain/protocol kwargs only, not the asset). ``lending_handler.
+    # _extract_amount_human`` instead expects the SAME contract Spark/Compound
+    # publish: ``extract_<field>(receipt) -> int | None`` returning the RAW
+    # on-chain underlying amount (token wei), which the handler scales by the
+    # resolved token decimals. The methods below read that raw uint directly
+    # from the Compound-V2 event data words (decimals-agnostic), summing every
+    # matching event in the receipt — mirroring Spark's ``extract_*_amount``.
+    #
+    # Empty ≠ Zero ≠ None (AGENTS.md §Accounting): a receipt with no matching
+    # event returns ``None`` (unmeasured), never a fabricated ``0``. A measured
+    # on-chain amount of zero (e.g. a zero-value Mint) would return ``0``.
+
+    # Word index of the raw amount within each Compound-V2 event's non-indexed
+    # data field (each word = 64 hex chars). Mint/Redeem: minter/redeemer is
+    # word 0, the amount is word 1. Borrow: borrower word 0, borrowAmount word 1.
+    # RepayBorrow: payer word 0, borrower word 1, repayAmount word 2.
+    _RAW_AMOUNT_WORD: dict[str, int] = {
+        "Mint": 1,
+        "Redeem": 1,
+        "Borrow": 1,
+        "RepayBorrow": 2,
+    }
+
+    def _sum_raw_amount(self, receipt: dict[str, Any], event_name: str) -> int | None:
+        """Sum the RAW underlying amount across every ``event_name`` log in a receipt.
+
+        Returns the summed raw uint (token wei), or ``None`` when no log of that
+        event type is present (Empty ≠ Zero — never a fabricated ``0``). Reads the
+        amount word directly from the non-indexed data field so the result is
+        independent of ``self.underlying_decimals`` (the enricher scales later).
+        """
+        # Defensive typing (a malformed receipt must not raise AttributeError/
+        # TypeError before the structured ExtractResult path can classify it).
+        if not isinstance(receipt, dict):
+            return None
+        logs = receipt.get("logs")
+        if not isinstance(logs, list) or not logs:
+            return None
+        target_topic = EVENT_TOPICS[event_name]
+        word_index = self._RAW_AMOUNT_WORD[event_name]
+        total: int | None = None
+        for log in logs:
+            if not isinstance(log, dict):
+                continue
+            topics = log.get("topics")
+            if not isinstance(topics, list) or not topics:
+                continue
+            topic0 = topics[0]
+            if isinstance(topic0, bytes):
+                topic0 = "0x" + topic0.hex()
+            if str(topic0).lower() != target_topic:
+                continue
+            raw_data = log.get("data") or "0x"
+            hex_data = HexDecoder.normalize_hex(raw_data)
+            start = word_index * 64
+            if len(hex_data) < start + 64:
+                # A log of the right topic but a malformed/short data field is a
+                # broken receipt — fail closed so the enricher surfaces it rather
+                # than under-counting (Empty ≠ Zero).
+                raise ValueError(f"{event_name} log data too short to decode amount word {word_index}")
+            amount = HexDecoder.decode_uint256(hex_data[start : start + 64])
+            total = amount if total is None else total + amount
+        return total
+
+    def extract_supply_amount(self, receipt: dict[str, Any]) -> int | None:
+        """Extract the raw SUPPLY (Mint ``mintAmount``) amount in token wei, or None."""
+        try:
+            return self._sum_raw_amount(receipt, "Mint")
+        except Exception as e:
+            logger.warning("Failed to extract supply amount: %s", e)
+            return None
+
+    def extract_supply_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_supply_amount` (VIB-4967 / VIB-3159)."""
+        return self._wrap_amount(receipt, "Mint", "no Mint (supply) event in receipt")
+
+    def extract_withdraw_amount(self, receipt: dict[str, Any]) -> int | None:
+        """Extract the raw WITHDRAW (Redeem ``redeemAmount``) amount in token wei, or None."""
+        try:
+            return self._sum_raw_amount(receipt, "Redeem")
+        except Exception as e:
+            logger.warning("Failed to extract withdraw amount: %s", e)
+            return None
+
+    def extract_withdraw_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_withdraw_amount` (VIB-4967 / VIB-3159)."""
+        return self._wrap_amount(receipt, "Redeem", "no Redeem (withdraw) event in receipt")
+
+    def extract_borrow_amount(self, receipt: dict[str, Any]) -> int | None:
+        """Extract the raw BORROW (Borrow ``borrowAmount``) amount in token wei, or None."""
+        try:
+            return self._sum_raw_amount(receipt, "Borrow")
+        except Exception as e:
+            logger.warning("Failed to extract borrow amount: %s", e)
+            return None
+
+    def extract_borrow_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_borrow_amount` (VIB-4967 / VIB-3159)."""
+        return self._wrap_amount(receipt, "Borrow", "no Borrow event in receipt")
+
+    def extract_repay_amount(self, receipt: dict[str, Any]) -> int | None:
+        """Extract the raw REPAY (RepayBorrow ``repayAmount``) amount in token wei, or None."""
+        try:
+            return self._sum_raw_amount(receipt, "RepayBorrow")
+        except Exception as e:
+            logger.warning("Failed to extract repay amount: %s", e)
+            return None
+
+    def extract_repay_amount_result(self, receipt: dict[str, Any]) -> ExtractResult[int]:
+        """Fail-closed variant of :meth:`extract_repay_amount` (VIB-4967 / VIB-3159)."""
+        return self._wrap_amount(receipt, "RepayBorrow", "no RepayBorrow event in receipt")
+
+    def _wrap_amount(self, receipt: dict[str, Any], event_name: str, missing_reason: str) -> ExtractResult[int]:
+        """Fail-closed wrapper turning ``_sum_raw_amount`` into a tagged ExtractResult.
+
+        VIB-3159 three-variant contract: a decode crash (malformed event data)
+        propagates as ``ExtractError`` (accounting-critical, never swallowed); a
+        ``None`` (no matching event in the receipt) becomes ``ExtractMissing``
+        (benign — Empty ≠ Zero); a present raw amount becomes ``ExtractOk``. The
+        enricher prefers this ``_result`` method over the raw one so the raw
+        public method keeps its legacy ``int | None`` signature.
+        """
+        try:
+            value = self._sum_raw_amount(receipt, event_name)
+        except Exception as exc:  # noqa: BLE001 — a malformed-receipt decode crash is accounting-critical
+            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
+        if value is None:
+            return ExtractMissing(reason=missing_reason)
+        return ExtractOk(value=value)

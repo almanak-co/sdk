@@ -111,8 +111,17 @@ def _decode_word(hex_data: str, word_index: int) -> int:
 # valuation seam, like Compound/Morpho/Silo). Fork-verified on ethereum + avalanche
 # by the Layer-5 Euler intent tests (HIGH-confidence before/after collateral / debt /
 # HF on the SUPPLY/WITHDRAW path).
+# VIB-4967: ``benqi`` joined — a BESPOKE Compound-V2 qiToken reader (BENQI is a
+# Compound-V2 fork, NOT an Aave fork; it has no ``getUserAccountData``). The per-asset
+# position is read via ``getAccountSnapshot`` on the collateral + debt qiTokens, and
+# the HF is a TRUE liquidation-aware ``(collateral_usd × collateralFactor) / debt_usd``
+# using the Comptroller's ``markets(qiToken).collateralFactorMantissa`` (the on-chain
+# liquidation parameter — NOT a bare collateral/debt proxy). Not USD-native (priced via
+# the injected valuation seam, like Compound/Morpho/Silo/Euler). Fork-verified on
+# avalanche by the Layer-5 BENQI intent tests (HIGH-confidence before/after collateral /
+# debt / HF). See benqi/lending_read.py.
 _GENERIC_PRE_STATE_PROTOCOLS: frozenset[str] = frozenset(
-    {"aave_v3", "aave", "morpho_blue", "compound_v3", "spark", "silo_v2", "euler_v2"}
+    {"aave_v3", "aave", "morpho_blue", "compound_v3", "spark", "silo_v2", "euler_v2", "benqi"}
 )
 
 

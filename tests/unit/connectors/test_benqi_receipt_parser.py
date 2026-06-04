@@ -259,3 +259,129 @@ class TestBenqiReceiptParserMalformedData:
         result = parser.parse_receipt(receipt)
         assert len(result.events) == 1
         assert result.events[0].data == {}  # fallback empty dict
+
+
+# =============================================================================
+# Raw-amount extractors for ResultEnricher (VIB-4967)
+# =============================================================================
+#
+# These are the lending amount extractors the ResultEnricher actually calls
+# (``extract_<field>(receipt) -> int | None``, RAW token wei). They are the Gap-2
+# fix: without them the enricher could not populate ``extracted_data`` and the
+# lending handler's ``amount_token`` + FIFO principal/interest split degraded to
+# ``None``. They return RAW underlying units, decimals-agnostic (the handler scales
+# by the resolved token decimals later), so they are INDEPENDENT of the parser's
+# ``underlying_decimals`` — proven below.
+
+_MINTER = "0000000000000000000000001234567890123456789012345678901234567890"
+_BORROWER = "0000000000000000000000009999999999999999999999999999999999999999"
+
+
+def _mint_data(mint_amount: int, mint_tokens: int = 50_000_000_000) -> str:
+    return "0x" + _MINTER + f"{mint_amount:064x}" + f"{mint_tokens:064x}"
+
+
+def _redeem_data(redeem_amount: int, redeem_tokens: int = 50_000_000_000) -> str:
+    return "0x" + _MINTER + f"{redeem_amount:064x}" + f"{redeem_tokens:064x}"
+
+
+def _borrow_data(borrow_amount: int) -> str:
+    # Borrow(address borrower, uint256 borrowAmount, uint256 accountBorrows, uint256 totalBorrows)
+    return "0x" + _BORROWER + f"{borrow_amount:064x}" + f"{borrow_amount:064x}" + f"{borrow_amount:064x}"
+
+
+def _repay_data(repay_amount: int) -> str:
+    # RepayBorrow(address payer, address borrower, uint256 repayAmount, uint256 accountBorrows, uint256 totalBorrows)
+    return "0x" + _MINTER + _BORROWER + f"{repay_amount:064x}" + f"{repay_amount:064x}" + f"{repay_amount:064x}"
+
+
+class TestBenqiRawAmountExtractors:
+    """The ``extract_*_amount`` methods the ResultEnricher calls (VIB-4967)."""
+
+    def test_supported_extractions_declared(self, parser):
+        assert parser.SUPPORTED_EXTRACTIONS == frozenset(
+            {"supply_amount", "withdraw_amount", "borrow_amount", "repay_amount"}
+        )
+
+    def test_extract_supply_amount_returns_raw_units(self, parser):
+        # 1000 USDC = 1_000_000_000 raw (6 dec). The extractor returns the RAW value.
+        receipt = _make_receipt([_make_log("Mint", _mint_data(1_000_000_000))])
+        assert parser.extract_supply_amount(receipt) == 1_000_000_000
+
+    def test_extract_supply_amount_decimals_agnostic(self, parser, parser_18):
+        # The SAME raw amount is returned regardless of the parser's underlying_decimals
+        # (the handler scales by the resolved token decimals — the extractor must NOT).
+        receipt = _make_receipt([_make_log("Mint", _mint_data(1_000_000_000))])
+        assert parser.extract_supply_amount(receipt) == parser_18.extract_supply_amount(receipt) == 1_000_000_000
+
+    def test_extract_withdraw_amount_returns_raw_units(self, parser):
+        receipt = _make_receipt([_make_log("Redeem", _redeem_data(500_000_000))])
+        assert parser.extract_withdraw_amount(receipt) == 500_000_000
+
+    def test_extract_borrow_amount_returns_raw_units(self, parser):
+        receipt = _make_receipt([_make_log("Borrow", _borrow_data(50_000_000))])
+        assert parser.extract_borrow_amount(receipt) == 50_000_000
+
+    def test_extract_repay_amount_returns_raw_units(self, parser):
+        receipt = _make_receipt([_make_log("RepayBorrow", _repay_data(25_000_000))])
+        assert parser.extract_repay_amount(receipt) == 25_000_000
+
+    def test_extract_sums_multiple_matching_events(self, parser):
+        # Two Mint events in one receipt sum (mirrors Spark/Compound aggregation).
+        receipt = _make_receipt(
+            [_make_log("Mint", _mint_data(1_000_000_000)), _make_log("Mint", _mint_data(2_000_000_000))]
+        )
+        assert parser.extract_supply_amount(receipt) == 3_000_000_000
+
+    def test_extract_absent_event_returns_none_not_zero(self, parser):
+        # Empty ≠ Zero ≠ None: a receipt with no matching event returns None
+        # (unmeasured), NEVER a fabricated 0.
+        borrow_only = _make_receipt([_make_log("Borrow", _borrow_data(50_000_000))])
+        assert parser.extract_supply_amount(borrow_only) is None
+        assert parser.extract_withdraw_amount(borrow_only) is None
+        assert parser.extract_repay_amount(borrow_only) is None
+        empty = _make_receipt([])
+        assert parser.extract_borrow_amount(empty) is None
+
+    def test_extract_measured_zero_amount_returns_zero(self, parser):
+        # A measured on-chain zero (a zero-value Mint) returns 0, not None — the event
+        # IS present (Empty ≠ Zero).
+        receipt = _make_receipt([_make_log("Mint", _mint_data(0))])
+        assert parser.extract_supply_amount(receipt) == 0
+
+    def test_extract_malformed_receipt_shapes_return_none(self, parser):
+        # Defensive typing (Gemini 2026-06): non-dict receipt, non-list logs, non-dict
+        # log entries, non-list topics, and data=None must NOT raise — they return None
+        # (no matching event) rather than crash. Empty ≠ Zero ≠ None.
+        assert parser.extract_supply_amount("not-a-dict") is None  # type: ignore[arg-type]
+        assert parser.extract_supply_amount({"logs": "nope"}) is None
+        assert parser.extract_supply_amount({"logs": ["garbage", None]}) is None
+        assert parser.extract_borrow_amount({"logs": [{"topics": "nope"}]}) is None
+        # A valid Mint log with data explicitly None → no decodable amount (skipped).
+        assert parser.extract_supply_amount({"logs": [{"topics": [EVENT_TOPICS["Mint"]], "data": None}]}) is None
+
+
+class TestBenqiExtractResultVariants:
+    """The fail-closed ``extract_*_amount_result`` variants (VIB-4967 / VIB-3159)."""
+
+    def test_ok_variant_wraps_raw_amount(self, parser):
+        from almanak.framework.execution.extract_result import ExtractOk
+
+        receipt = _make_receipt([_make_log("Mint", _mint_data(1_000_000_000))])
+        result = parser.extract_supply_amount_result(receipt)
+        assert isinstance(result, ExtractOk)
+        assert result.value == 1_000_000_000
+
+    def test_missing_variant_for_absent_event(self, parser):
+        from almanak.framework.execution.extract_result import ExtractMissing
+
+        receipt = _make_receipt([_make_log("Borrow", _borrow_data(50_000_000))])
+        assert isinstance(parser.extract_supply_amount_result(receipt), ExtractMissing)
+
+    def test_error_variant_for_malformed_event_data(self, parser):
+        from almanak.framework.execution.extract_result import ExtractError
+
+        # A log of the right topic but a short data field is a broken receipt — it must
+        # surface as ExtractError (accounting-critical), never be swallowed as missing.
+        bad = _make_receipt([_make_log("Mint", "0x" + "00" * 16)])  # too short for the amount word
+        assert isinstance(parser.extract_supply_amount_result(bad), ExtractError)
