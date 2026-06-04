@@ -17,6 +17,7 @@ Pattern matches `test_run_helpers_components.py`.
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -98,9 +99,7 @@ class TestInstantiateStrategyExtras:
         assert "ignored:" in text
         assert "unknown_param_one" in text or "bogus" in text
 
-    def test_introspection_failure_falls_back_to_base_kwargs(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_introspection_failure_falls_back_to_base_kwargs(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When inspect.signature raises, helper uses base_kwargs only (1204-1208)."""
         strategy_cls = _make_intent_strategy_stub()
         runtime_config = MagicMock()
@@ -140,9 +139,7 @@ class TestInstantiateStrategyExtras:
 
 
 class TestBuildRuntimeConfigErrors:
-    def test_sidecar_missing_chain_raises_click_exception(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_sidecar_missing_chain_raises_click_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Sidecar mode requires a chain from config or decorator (1298)."""
         _patch_runtime_config_imports(monkeypatch)
         monkeypatch.delenv("ALMANAK_PRIVATE_KEY", raising=False)
@@ -161,9 +158,7 @@ class TestBuildRuntimeConfigErrors:
                 strategy_config={},
             )
 
-    def test_sidecar_missing_wallet_and_no_registry_raises(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_sidecar_missing_wallet_and_no_registry_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Sidecar mode requires SAFE/EOA/GATEWAY_WALLETS (1305)."""
         _patch_runtime_config_imports(monkeypatch)
         monkeypatch.delenv("ALMANAK_PRIVATE_KEY", raising=False)
@@ -184,15 +179,11 @@ class TestBuildRuntimeConfigErrors:
                 strategy_config={},
             )
 
-    def test_multi_chain_anvil_fallback_to_default_private_key(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_multi_chain_anvil_fallback_to_default_private_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Multi-chain anvil falls back to default private key on MissingEnv (1330-1348)."""
         call_count: dict[str, Any] = {"n": 0, "retry_kwargs": None}
 
-        def _from_env(
-            chains: list[str], protocols: Any, network: str, private_key: str | None = None
-        ) -> Any:
+        def _from_env(chains: list[str], protocols: Any, network: str, private_key: str | None = None) -> Any:
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise _FakeMissingEnvErr("ALMANAK_PRIVATE_KEY")
@@ -232,9 +223,7 @@ class TestBuildRuntimeConfigErrors:
         assert call_count["retry_kwargs"]["private_key"] == ANVIL_DEFAULT_PRIVATE_KEY
         assert _os.environ.get("ALMANAK_PRIVATE_KEY") is None
 
-    def test_multi_chain_sidecar_no_private_key_exits_1(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_multi_chain_sidecar_no_private_key_exits_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Multi-chain sidecar mode without registry raises exit-1 guidance (1349-1358)."""
 
         def _raises(*_a: Any, **_kw: Any) -> Any:
@@ -259,9 +248,7 @@ class TestBuildRuntimeConfigErrors:
         assert exc_info.value.code == 1
         assert "Multi-chain sidecar" in err.getvalue().decode()
 
-    def test_multi_chain_mainnet_missing_private_key_exits_1(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_multi_chain_mainnet_missing_private_key_exits_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Multi-chain mainnet without private key: ALMANAK_PRIVATE_KEY guidance (1360-1361)."""
 
         def _raises(*_a: Any, **_kw: Any) -> Any:
@@ -312,9 +299,7 @@ class TestBuildRuntimeConfigErrors:
         assert "RPC" in out_text
         assert "ALMANAK_BASE_RPC_URL" in out_text
 
-    def test_multi_chain_unknown_exception_exits_1(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_multi_chain_unknown_exception_exits_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """An unexpected exception from MultiChainRuntimeConfig.from_env -> exit 1 (1375-1386)."""
 
         def _raises(*_a: Any, **_kw: Any) -> Any:
@@ -338,9 +323,7 @@ class TestBuildRuntimeConfigErrors:
         assert exc_info.value.code == 1
         assert "unexpected explosion" in err.getvalue().decode()
 
-    def test_single_chain_mainnet_missing_private_key_exits_1(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_single_chain_mainnet_missing_private_key_exits_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Single-chain mainnet without key -> exit 1 (1406-1408)."""
 
         def _raises(*_a: Any, **_kw: Any) -> Any:
@@ -364,9 +347,7 @@ class TestBuildRuntimeConfigErrors:
         assert exc_info.value.code == 1
         assert "required for mainnet" in err.getvalue().decode()
 
-    def test_single_chain_missing_other_env_exits_1(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_single_chain_missing_other_env_exits_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Non-PRIVATE_KEY env missing -> RPC guidance (1409-1424)."""
 
         def _raises(*_a: Any, **_kw: Any) -> Any:
@@ -391,9 +372,7 @@ class TestBuildRuntimeConfigErrors:
         text = err.getvalue().decode()
         assert "ALMANAK_ARBITRUM_RPC_URL" in text
 
-    def test_single_chain_unknown_exception_exits_1(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_single_chain_unknown_exception_exits_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Single-chain arbitrary exception -> exit 1 with help (1426-1442)."""
 
         def _raises(*_a: Any, **_kw: Any) -> Any:
@@ -418,9 +397,7 @@ class TestBuildRuntimeConfigErrors:
         text = err.getvalue().decode()
         assert "config explosion" in text
 
-    def test_anvil_single_chain_retry_fails_exits_1(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_anvil_single_chain_retry_fails_exits_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """If retry after default-key fallback still fails, exit 1 (1402-1404)."""
         call_count = {"n": 0}
 
@@ -451,9 +428,7 @@ class TestBuildRuntimeConfigErrors:
         assert exc_info.value.code == 1
         assert "after setting default key" in err.getvalue().decode()
 
-    def test_anvil_user_declines_default_wallet_exits_0(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_anvil_user_declines_default_wallet_exits_0(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """On TTY, `confirm(...)` False -> sys.exit(0) (1395-1396)."""
         call_count = {"n": 0}
 
@@ -489,9 +464,7 @@ class TestBuildRuntimeConfigErrors:
             )
         assert exc_info.value.code == 0
 
-    def test_register_chains_exception_logs_warning(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_register_chains_exception_logs_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When register_chains fails, helper logs warning and continues (1484-1487)."""
         _patch_runtime_config_imports(monkeypatch)
         monkeypatch.setenv("ALMANAK_PRIVATE_KEY", "0xkey")
@@ -517,9 +490,7 @@ class TestBuildRuntimeConfigErrors:
         assert "register_chains" in err_text
         assert "registry down" in err_text
 
-    def test_env_chain_override_rewrites_strategy_config_chain(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_env_chain_override_rewrites_strategy_config_chain(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """ALMANAK_CHAIN env override rewrites a pre-existing config chain (1501-1505)."""
         _patch_runtime_config_imports(monkeypatch)
         monkeypatch.setenv("ALMANAK_PRIVATE_KEY", "0xkey")
@@ -541,9 +512,7 @@ class TestBuildRuntimeConfigErrors:
             )
         assert strategy_config["chain"] == "base"
 
-    def test_non_uniform_gateway_wallets_prints_per_chain(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_non_uniform_gateway_wallets_prints_per_chain(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Non-uniform wallet map -> prints per-chain mapping (1481-1483)."""
         _patch_runtime_config_imports(monkeypatch)
         monkeypatch.setenv("ALMANAK_PRIVATE_KEY", "0xkey")
@@ -578,9 +547,7 @@ class TestBuildRuntimeConfigErrors:
 
 
 class TestBuildOrchestratorExtras:
-    def test_multi_chain_missing_wallet_raises_click_exception(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_multi_chain_missing_wallet_raises_click_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Multi-chain with empty wallet in runtime_config and no chain_wallets -> ClickException (1562-1566)."""
         _patch_component_factories(monkeypatch)
 
@@ -619,9 +586,7 @@ class TestBuildOrchestratorExtras:
                 config_chain=None,
             )
 
-    def test_multi_chain_with_set_multi_chain_providers(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_multi_chain_with_set_multi_chain_providers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Multi-chain calls set_multi_chain_providers on strategies that expose it (1592-1596)."""
         _patch_component_factories(monkeypatch)
         strategy_instance = _make_strategy_instance()
@@ -692,7 +657,7 @@ class TestBuildOrchestratorExtras:
         assert isinstance(strategy_instance._rate_monitor, _FakeRateMonitor)
 
     def test_multi_chain_rate_monitor_init_failure_is_logged(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """RateMonitor init failure is caught at DEBUG, does not abort startup (1621-1622)."""
         _patch_component_factories(monkeypatch)
@@ -708,7 +673,7 @@ class TestBuildOrchestratorExtras:
         monkeypatch.setattr(rates_mod, "RateMonitor", _boom)
 
         cli = CliRunner()
-        with cli.isolation():
+        with cli.isolation(), caplog.at_level(logging.DEBUG, logger=run_helpers.logger.name):
             run_helpers._build_components(
                 strategy_instance=strategy_instance,
                 strategy_config={"chain": "arbitrum", "wallet_address": "0xwallet"},
@@ -729,6 +694,7 @@ class TestBuildOrchestratorExtras:
             )
         # Strategy still instantiated, attribute stays None.
         assert strategy_instance._rate_monitor is None
+        assert "Rate monitor not available: rpc not reachable" in caplog.text
 
     def test_multi_chain_funding_rate_wired(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Multi-chain funding rate provider wired on strategies that declare it (1625-1632)."""
@@ -768,7 +734,7 @@ class TestBuildOrchestratorExtras:
         assert isinstance(strategy_instance._funding_rate_provider, _FakeFunding)
 
     def test_multi_chain_funding_rate_init_failure_warns(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Funding provider init failure is warned, not fatal (1633-1639)."""
         _patch_component_factories(monkeypatch)
@@ -784,7 +750,7 @@ class TestBuildOrchestratorExtras:
         monkeypatch.setattr(funding_mod, "GatewayFundingRateProvider", _boom)
 
         cli = CliRunner()
-        with cli.isolation():
+        with cli.isolation(), caplog.at_level(logging.WARNING, logger=run_helpers.logger.name):
             run_helpers._build_components(
                 strategy_instance=strategy_instance,
                 strategy_config={"chain": "arbitrum", "wallet_address": "0xwallet"},
@@ -805,10 +771,9 @@ class TestBuildOrchestratorExtras:
             )
         # stays None after failure
         assert strategy_instance._funding_rate_provider is None
+        assert "Funding rate provider init failed for chain=arbitrum: bad chain" in caplog.text
 
-    def test_single_chain_prediction_provider_wired(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_single_chain_prediction_provider_wired(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """_init_prediction_provider is called when strategy declares _prediction_provider (1732-1733)."""
         mocks = _patch_component_factories(monkeypatch)
 
@@ -877,9 +842,7 @@ class TestBuildOrchestratorExtras:
         assert rm_calls and rm_calls[0][0] == "arbitrum"
         assert rm_calls[0][2] is True  # _internal flag passed by _build_components()
 
-    def test_single_chain_funding_provider_wired(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_single_chain_funding_provider_wired(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Single-chain funding provider wired (1748-1754)."""
         _patch_component_factories(monkeypatch)
 
@@ -916,9 +879,7 @@ class TestBuildOrchestratorExtras:
             )
         assert isinstance(strategy_instance._funding_rate_provider, _Fake)
 
-    def test_single_chain_chain_wallets_override_wallet(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_single_chain_chain_wallets_override_wallet(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """sc_effective_wallet = chain_wallets.get(runtime_config.chain, default) (1652)."""
         mocks = _patch_component_factories(monkeypatch)
 
@@ -955,15 +916,13 @@ class TestBuildOrchestratorExtras:
 
 
 class TestInitCopyTradingExtras:
-    def test_non_dict_copy_trading_raises_click_exception(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_non_dict_copy_trading_raises_click_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Non-dict copy_trading raises ClickException from _build_components (1817-1818)."""
         _patch_component_factories(monkeypatch)
         strategy_instance = _make_strategy_instance()
 
         cli = CliRunner()
-        with cli.isolation(), pytest.raises((click.ClickException, SystemExit)):
+        with cli.isolation(), pytest.raises(click.ClickException) as excinfo:
             run_helpers._build_components(
                 strategy_instance=strategy_instance,
                 strategy_config={
@@ -986,10 +945,9 @@ class TestInitCopyTradingExtras:
                 copy_strict=False,
                 config_chain="arbitrum",
             )
+        assert str(excinfo.value) == "copy_trading config must be an object"
 
-    def test_copy_trading_price_fn_handles_exception(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_copy_trading_price_fn_handles_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """copy_price_fn returns None when underlying sync_price raises (1873-1876)."""
         _patch_component_factories(monkeypatch)
         strategy_instance = _make_strategy_instance()
@@ -1056,9 +1014,7 @@ class TestInitCopyTradingExtras:
         assert price_fn is not None
         assert price_fn("ETH", "arbitrum") is None
 
-    def test_copy_trading_v2_replay_loads_signals(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_copy_trading_v2_replay_loads_signals(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """copy_mode=replay loads signals via CopyReplayRunner (1919-1932)."""
         _patch_component_factories(monkeypatch)
         strategy_instance = _make_strategy_instance()
@@ -1156,9 +1112,7 @@ class TestInitCopyTradingExtras:
         text = out.getvalue().decode()
         assert "Copy replay loaded: 3 signal(s)" in text
 
-    def test_copy_trading_v2_shadow_overrides_copy_mode(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_copy_trading_v2_shadow_overrides_copy_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """copy_shadow=True sets copy_mode to 'shadow' on the strategy (1922-1923)."""
         _patch_component_factories(monkeypatch)
         strategy_instance = _make_strategy_instance()
@@ -1237,9 +1191,7 @@ class TestInitCopyTradingExtras:
 
 
 class TestVaultLifecycleExtras:
-    def test_vault_initial_state_loaded_from_persistent_state(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_vault_initial_state_loaded_from_persistent_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Vault initial_state falls back to strategy.persistent_state (2013-2018)."""
         mocks = _patch_component_factories(monkeypatch)
         mocks["_has_placeholder_vault_address"].return_value = False
@@ -1260,7 +1212,6 @@ class TestVaultLifecycleExtras:
 
         # Capture VaultLifecycleManager kwargs to assert initial_vault_state was passed.
         captured: dict[str, Any] = {}
-        from almanak.connectors import lagoon as lagoon_mod
         from almanak.framework.vault import lifecycle as vlc_mod
 
         def _capture(**kwargs: Any) -> Any:
@@ -1268,8 +1219,6 @@ class TestVaultLifecycleExtras:
             return MagicMock()
 
         monkeypatch.setattr(vlc_mod, "VaultLifecycleManager", _capture)
-        monkeypatch.setattr(lagoon_mod, "LagoonVaultSDK", MagicMock())
-        monkeypatch.setattr(lagoon_mod, "LagoonVaultAdapter", MagicMock())
 
         cli = CliRunner()
         with cli.isolation():
@@ -1302,9 +1251,7 @@ class TestVaultLifecycleExtras:
             )
         assert captured["initial_vault_state"] == {"cached": True}
 
-    def test_vault_persist_callback_writes_to_strategy_state(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_vault_persist_callback_writes_to_strategy_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Persist callback writes vault state into strategy.persistent_state + calls save_state (2022-2029)."""
         mocks = _patch_component_factories(monkeypatch)
         mocks["_has_placeholder_vault_address"].return_value = False
@@ -1320,7 +1267,6 @@ class TestVaultLifecycleExtras:
         mocks["GatewayStateManager"].return_value = _FakeStateMgr()
 
         captured_callback: list[Any] = []
-        from almanak.connectors import lagoon as lagoon_mod
         from almanak.framework.vault import lifecycle as vlc_mod
 
         def _capture(**kwargs: Any) -> Any:
@@ -1328,8 +1274,6 @@ class TestVaultLifecycleExtras:
             return MagicMock()
 
         monkeypatch.setattr(vlc_mod, "VaultLifecycleManager", _capture)
-        monkeypatch.setattr(lagoon_mod, "LagoonVaultSDK", MagicMock())
-        monkeypatch.setattr(lagoon_mod, "LagoonVaultAdapter", MagicMock())
 
         cli = CliRunner()
         with cli.isolation():
@@ -1368,9 +1312,7 @@ class TestVaultLifecycleExtras:
         assert strategy_instance.persistent_state[VAULT_STATE_KEY] == {"foo": "bar"}
         strategy_instance.save_state.assert_called_once()
 
-    def test_vault_state_load_exception_is_swallowed(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_vault_state_load_exception_is_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """State manager load_state raising is caught -> initial_vault_state=None (2009-2010)."""
         mocks = _patch_component_factories(monkeypatch)
         mocks["_has_placeholder_vault_address"].return_value = False
@@ -1384,7 +1326,6 @@ class TestVaultLifecycleExtras:
         mocks["GatewayStateManager"].return_value = _FailingStateMgr()
 
         captured: dict[str, Any] = {}
-        from almanak.connectors import lagoon as lagoon_mod
         from almanak.framework.vault import lifecycle as vlc_mod
 
         def _capture(**kwargs: Any) -> Any:
@@ -1392,8 +1333,6 @@ class TestVaultLifecycleExtras:
             return MagicMock()
 
         monkeypatch.setattr(vlc_mod, "VaultLifecycleManager", _capture)
-        monkeypatch.setattr(lagoon_mod, "LagoonVaultSDK", MagicMock())
-        monkeypatch.setattr(lagoon_mod, "LagoonVaultAdapter", MagicMock())
 
         cli = CliRunner()
         with cli.isolation():
@@ -1434,15 +1373,11 @@ class TestVaultLifecycleExtras:
 
 
 class TestBuildRuntimeConfigMultiChainAnvil:
-    def test_multi_chain_anvil_retry_failure_exits_1(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_multi_chain_anvil_retry_failure_exits_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Multi-chain anvil: first call raises MissingEnv, retry raises RuntimeError -> exit 1."""
         call_count = {"n": 0}
 
-        def _factory(
-            chains: list[str], protocols: Any, network: str, private_key: str | None = None
-        ) -> Any:
+        def _factory(chains: list[str], protocols: Any, network: str, private_key: str | None = None) -> Any:
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise _FakeMissingEnvErr("ALMANAK_PRIVATE_KEY")
@@ -1495,9 +1430,7 @@ class TestSolanaForkInit:
             loop.close()
             asyncio.set_event_loop(None)
 
-    def test_solana_anvil_starts_fork_manager_and_funds_wallet(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_solana_anvil_starts_fork_manager_and_funds_wallet(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Solana + --network anvil boots SolanaForkManager, funds wallet, attaches to bundle."""
         _patch_component_factories(monkeypatch)
 
@@ -1542,12 +1475,8 @@ class TestSolanaForkInit:
         # Monkey-patch LocalRuntimeConfig isinstance test by swapping its base.
         from almanak.framework.execution import config as exec_config
 
-        monkeypatch.setattr(
-            exec_config, "LocalRuntimeConfig", _SolanaConfig, raising=True
-        )
-        monkeypatch.setattr(
-            exec_config, "GatewayRuntimeConfig", _SolanaConfig, raising=True
-        )
+        monkeypatch.setattr(exec_config, "LocalRuntimeConfig", _SolanaConfig, raising=True)
+        monkeypatch.setattr(exec_config, "GatewayRuntimeConfig", _SolanaConfig, raising=True)
 
         cli = CliRunner()
         with cli.isolation() as (out, _err):
@@ -1586,9 +1515,7 @@ class TestSolanaForkInit:
         out_text = out.getvalue().decode()
         assert "solana-test-validator" in out_text
 
-    def test_solana_fork_start_failure_raises_click_exception(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_solana_fork_start_failure_raises_click_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """SolanaForkManager.start() returning False -> ClickException (1690-1695)."""
         _patch_component_factories(monkeypatch)
 
@@ -1628,9 +1555,7 @@ class TestSolanaForkInit:
         strategy_instance = _make_strategy_instance()
 
         cli = CliRunner()
-        # The outer _build_components catches non-ClickException -> SystemExit(1).
-        # ClickException propagates through intact.
-        with cli.isolation(), pytest.raises((click.ClickException, SystemExit)):
+        with cli.isolation(), pytest.raises(click.ClickException) as excinfo:
             run_helpers._build_components(
                 strategy_instance=strategy_instance,
                 strategy_config={"chain": "solana", "wallet_address": "Wallet111"},
@@ -1649,6 +1574,7 @@ class TestSolanaForkInit:
                 copy_strict=False,
                 config_chain="solana",
             )
+        assert "Failed to start solana-test-validator" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -1075,6 +1076,36 @@ def test_connector_agent_tools_are_not_in_legacy_boot_file() -> None:
         for import_ref in connector_manifest.vault_tool_connector_refs:
             assert import_ref.module not in source
             assert import_ref.attribute not in source
+
+
+def test_connector_vault_lifecycle_is_not_hardcoded_in_framework() -> None:
+    """Framework vault lifecycle paths must not import concrete vault connector modules."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = "\n".join(
+        (repo_root / path).read_text()
+        for path in (
+            "almanak/framework/vault/lifecycle.py",
+            "almanak/framework/cli/run_helpers.py",
+            "almanak/framework/cli/run.py",
+        )
+    )
+
+    assert re.search(r"\bget_vault_tool_capability\s*\(", source) is not None
+    assert re.search(r"\balmanak\.connectors\.(?!_)[a-zA-Z0-9_]+", source) is None
+    assert (
+        re.search(
+            r"^\s*from\s+almanak\.connectors(?:\.[A-Za-z0-9_]+)?\s+import\s+(?!_)[A-Za-z0-9_]+",
+            source,
+            re.MULTILINE,
+        )
+        is None
+    )
+    assert "almanak.connectors.lagoon" not in source
+    assert "LagoonVaultSDK" not in source
+    assert "LagoonVaultAdapter" not in source
+    assert "LagoonVaultDeployer" not in source
+    assert "VaultDeployParams" not in source
+    assert "LagoonReceiptParser" not in source
 
 
 def test_connector_modules_use_canonical_connector_name() -> None:

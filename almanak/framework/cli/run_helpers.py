@@ -2675,8 +2675,7 @@ def _maybe_auto_deploy_vault(
     if not strategy_config.get("vault"):
         return None
 
-    from almanak.connectors.lagoon import LagoonVaultAdapter, LagoonVaultSDK
-
+    from ..vault.capability import default_vault_protocol, get_vault_tool_capability
     from ..vault.config import VaultConfig
     from ..vault.lifecycle import VAULT_STATE_KEY, VaultLifecycleManager
     from .run import _auto_deploy_lagoon_vault, _has_placeholder_vault_address
@@ -2705,8 +2704,10 @@ def _maybe_auto_deploy_vault(
 
     vault_config = VaultConfig(**vault_raw)
     vault_chain = strategy_config.get("chain", "")
-    vault_sdk = LagoonVaultSDK(gateway_client, chain=vault_chain)
-    vault_adapter = LagoonVaultAdapter(vault_sdk)
+    vault_protocol = default_vault_protocol()
+    vault_capability = get_vault_tool_capability(vault_protocol)
+    vault_sdk = vault_capability.build_sdk(gateway_client, vault_chain)
+    vault_adapter = vault_capability.build_adapter(vault_sdk)
 
     # Extract initial vault state from persisted strategy state.
     # State loading is deferred to the async phase for IntentStrategy, so we
@@ -2750,6 +2751,7 @@ def _maybe_auto_deploy_vault(
         deployment_id=deployment_id,
         initial_vault_state=initial_vault_state,
         persistence_callback=_persist_vault_state,
+        receipt_parser_protocol=vault_protocol,
     )
     click.echo(
         f"  Vault lifecycle initialized: "

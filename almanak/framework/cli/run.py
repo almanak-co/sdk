@@ -1569,7 +1569,7 @@ def _has_placeholder_vault_address(vault_raw: dict) -> bool:
     return addr.startswith("0x_") or "_DEPLOY_" in addr or "_SET_TO_" in addr
 
 
-# crap-allowlist: VIB-4835 — pre-existing CLI helper (cc=12, cov=2%) touched only by ``almanak.connectors.lagoon.deployer`` import rewrite (legacy ``..connectors.lagoon`` → absolute new path). Refactor + coverage backfill tracked in VIB-4139.
+# crap-allowlist: VIB-4835 - pre-existing CLI helper (cc=12, cov=2%) touched only by the vault capability construction rewrite. Refactor + coverage backfill tracked in VIB-4139.
 def _auto_deploy_lagoon_vault(
     vault_raw: dict,
     chain: str,
@@ -1582,9 +1582,8 @@ def _auto_deploy_lagoon_vault(
     Returns the patched vault_raw dict with real vault_address and valuator_address.
     Exits with sys.exit(1) on failure.
     """
-    from almanak.connectors.lagoon.deployer import LagoonVaultDeployer, VaultDeployParams
-
     from ..data.tokens import get_token_resolver
+    from ..vault.capability import get_vault_tool_capability
 
     # Resolve underlying token symbol to address
     underlying_symbol = vault_raw.get("underlying_token", "USDC")
@@ -1595,9 +1594,15 @@ def _auto_deploy_lagoon_vault(
         sys.exit(1)
 
     wallet = runtime_config.wallet_address
-    deployer = LagoonVaultDeployer(gateway_client)
+    try:
+        vault_capability = get_vault_tool_capability()
+        deployer = vault_capability.build_deployer(gateway_client)
+        deploy_params_type = vault_capability.deploy_params_type()
+    except Exception as e:
+        click.secho(f"  ERROR: Failed to resolve vault capability/deployer: {e}", fg="red")
+        sys.exit(1)
 
-    params = VaultDeployParams(
+    params = deploy_params_type(
         chain=chain,
         underlying_token_address=underlying_address,
         name="Almanak Anvil Vault",
@@ -1639,7 +1644,7 @@ def _auto_deploy_lagoon_vault(
         click.secho("  ERROR: No receipt found for vault deploy transaction", fg="red")
         sys.exit(1)
 
-    parsed = deployer.parse_deploy_receipt(receipt)
+    parsed = vault_capability.parse_deploy_receipt(receipt)
     if not parsed.success or not parsed.vault_address:
         click.secho(f"  ERROR: Could not extract vault address: {parsed.error}", fg="red")
         sys.exit(1)

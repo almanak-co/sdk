@@ -1,10 +1,48 @@
 """Tests for VaultLifecycleManager core: pre_decide_hook and state persistence."""
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from almanak.connectors.lagoon.receipt_parser import EVENT_TOPICS
 from almanak.framework.vault.config import SettlementPhase, VaultAction, VaultConfig, VaultState
 from almanak.framework.vault.lifecycle import VAULT_STATE_KEY, VaultLifecycleManager
+
+
+def _uint256_hex(value: int) -> str:
+    return f"{value:064x}"
+
+
+def _indexed_topic(value: int) -> str:
+    return "0x" + _uint256_hex(value)
+
+
+def _encode_data(*values: int) -> str:
+    return "0x" + "".join(_uint256_hex(value) for value in values)
+
+
+def _settle_deposit_receipt() -> dict:
+    return {
+        "transactionHash": "0xdeposit123",
+        "blockNumber": 12345,
+        "status": 1,
+        "logs": [
+            {
+                "address": "0xvault",
+                "topics": [
+                    EVENT_TOPICS["SettleDeposit"],
+                    _indexed_topic(1),
+                    _indexed_topic(0),
+                ],
+                "data": _encode_data(
+                    1_000_000,
+                    500_000,
+                    200_000,
+                    100_000,
+                ),
+            }
+        ],
+    }
 
 
 def _make_config(**overrides) -> VaultConfig:
@@ -22,6 +60,8 @@ def _make_manager(
     vault_config: VaultConfig | None = None,
     deployment_id: str = "test-strategy-1",
     initial_vault_state: dict | None = None,
+    receipt_parser_protocol: str = "lagoon",
+    receipt_parser=None,
 ) -> VaultLifecycleManager:
     """Create a VaultLifecycleManager with mocked dependencies."""
     config = vault_config or _make_config()
@@ -36,6 +76,8 @@ def _make_manager(
         execution_orchestrator=orchestrator,
         deployment_id=deployment_id,
         initial_vault_state=initial_vault_state,
+        receipt_parser_protocol=receipt_parser_protocol,
+        receipt_parser=receipt_parser,
     )
     return manager
 
@@ -147,6 +189,53 @@ class TestPreDecideHookReturnsResumeSettle:
 
         result = manager.pre_decide_hook(strategy=MagicMock())
         assert result == VaultAction.RESUME_SETTLE
+
+
+class TestSettleDepositReceiptParsing:
+    """Settle-deposit receipt parsing feeds vault accounting hints."""
+
+    def test_parse_settle_deposit_receipt_uses_real_registry(self):
+        manager = _make_manager(receipt_parser_protocol="lagoon")
+        settle_result = SimpleNamespace(receipt=_settle_deposit_receipt())
+
+        assert manager._parse_settle_deposit_receipt(settle_result) == (200_000, 100_000)
+
+    def test_parse_settle_deposit_receipt_prefers_injected_parser(self):
+        parser = MagicMock()
+        parser.parse_receipt.return_value = SimpleNamespace(
+            settle_deposits=[
+                SimpleNamespace(
+                    assets_deposited=333_000,
+                    shares_minted=111_000,
+                )
+            ]
+        )
+        manager = _make_manager(
+            receipt_parser_protocol="unknown-protocol",
+            receipt_parser=parser,
+        )
+        settle_result = SimpleNamespace(receipt=_settle_deposit_receipt())
+
+        assert manager._parse_settle_deposit_receipt(settle_result) == (333_000, 111_000)
+        parser.parse_receipt.assert_called_once_with(settle_result.receipt)
+
+    def test_parse_settle_deposit_receipt_warns_when_parser_cannot_be_resolved(self, caplog):
+        manager = _make_manager(receipt_parser_protocol="unknown-protocol")
+        settle_result = SimpleNamespace(receipt=_settle_deposit_receipt())
+
+        with caplog.at_level("WARNING"):
+            assert manager._parse_settle_deposit_receipt(settle_result) == (0, 0)
+        assert "Could not resolve receipt parser" in caplog.text
+
+    def test_parse_settle_deposit_receipt_warns_on_malformed_settle_deposit(self, caplog):
+        parser = MagicMock()
+        parser.parse_receipt.return_value = SimpleNamespace(settle_deposits=[object()])
+        manager = _make_manager(receipt_parser=parser)
+        settle_result = SimpleNamespace(receipt=_settle_deposit_receipt())
+
+        with caplog.at_level("WARNING"):
+            assert manager._parse_settle_deposit_receipt(settle_result) == (0, 0)
+        assert "Could not extract settle_deposit accounting fields" in caplog.text
 
 
 class TestVaultStatePersistence:

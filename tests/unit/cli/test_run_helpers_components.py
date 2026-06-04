@@ -18,7 +18,7 @@ import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import click
 import pytest
@@ -26,7 +26,6 @@ from click.testing import CliRunner
 
 from almanak.framework.cli import run_helpers
 from almanak.framework.cli._run_context import ComponentBundle
-
 
 # ---------------------------------------------------------------------------
 # Fake config dataclasses + strategy classes for _instantiate_strategy
@@ -308,8 +307,16 @@ def _patch_runtime_config_imports(
     from almanak.config import runtime as cfg_runtime
     from almanak.framework.execution import config as execution_config
 
-    default_local = lambda chain, network, private_key=None: _make_fake_local_config(chain or "arbitrum")
-    default_multi = lambda chains, protocols, network, private_key=None: _make_fake_multichain_config(chains)
+    def default_local(chain: str | None, network: str, private_key: str | None = None) -> Any:
+        return _make_fake_local_config(chain or "arbitrum")
+
+    def default_multi(
+        chains: list[str],
+        protocols: list[str],
+        network: str,
+        private_key: str | None = None,
+    ) -> Any:
+        return _make_fake_multichain_config(chains)
 
     local_fn = local_factory or default_local
     multi_fn = multi_factory or default_multi
@@ -336,9 +343,7 @@ def _patch_runtime_config_imports(
             dc = multi_fn(chains, protocols, network, private_key)
             return _RuntimeConfigStub(single_chain=False, chains=list(chains), dataclass=dc)
         dc = local_fn(chain, network, private_key)
-        return _RuntimeConfigStub(
-            single_chain=True, chains=[chain] if chain else ["arbitrum"], dataclass=dc
-        )
+        return _RuntimeConfigStub(single_chain=True, chains=[chain] if chain else ["arbitrum"], dataclass=dc)
 
     def _fake_local_from_runtime_config(rc: Any) -> Any:
         return rc._test_dataclass
@@ -416,9 +421,7 @@ class TestBuildRuntimeConfig:
         assert chain_wallets == {}
         assert strategy_config["chain"] == "arbitrum"
 
-    def test_anvil_falls_back_to_default_key_when_private_key_missing(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_anvil_falls_back_to_default_key_when_private_key_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: dict[str, Any] = {"count": 0, "retry_kwargs": None}
 
         def from_env_with_retry(chain: str, network: str, private_key: str | None = None) -> Any:
@@ -524,9 +527,7 @@ class TestBuildRuntimeConfig:
         assert rt.execution_address == "0xeoa"
         assert chain_wallets == {}
 
-    def test_gateway_wallets_registration_updates_runtime_config(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_gateway_wallets_registration_updates_runtime_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_runtime_config_imports(monkeypatch)
         monkeypatch.setenv("ALMANAK_PRIVATE_KEY", "0xkey")
         monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", '{"arbitrum":"0xfromregistry"}')
@@ -726,6 +727,22 @@ def _patch_component_factories(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any
     monkeypatch.setattr(run_mod, "_auto_deploy_lagoon_vault", mocks["_auto_deploy_lagoon_vault"])
     monkeypatch.setattr(run_mod, "_has_placeholder_vault_address", mocks["_has_placeholder_vault_address"])
 
+    # Vault capability resolver. The helper under test should depend on the
+    # framework capability boundary, not Lagoon connector classes.
+    from almanak.framework.vault import capability as vault_capability_mod
+
+    mocks["vault_sdk"] = MagicMock(name="vault_sdk")
+    mocks["vault_adapter"] = MagicMock(name="vault_adapter")
+    mocks["vault_capability"] = MagicMock(name="vault_capability")
+    mocks["vault_capability"].build_sdk.return_value = mocks["vault_sdk"]
+    mocks["vault_capability"].build_adapter.return_value = mocks["vault_adapter"]
+    mocks["get_vault_tool_capability"] = MagicMock(return_value=mocks["vault_capability"])
+    monkeypatch.setattr(
+        vault_capability_mod,
+        "get_vault_tool_capability",
+        mocks["get_vault_tool_capability"],
+    )
+
     # State manager
     from almanak.framework.state import gateway_state_manager as state_mod
 
@@ -795,9 +812,7 @@ class TestBuildComponents:
         # Wire_indicators was called for single-chain.
         mocks["_wire_indicators"].assert_called_once()
 
-    def test_multi_chain_happy_path_uses_multichain_orchestrator(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_multi_chain_happy_path_uses_multichain_orchestrator(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mocks = _patch_component_factories(monkeypatch)
         runtime_config = _make_fake_multichain_config(["arbitrum", "base"])
         strategy_instance = _make_strategy_instance()
@@ -827,9 +842,7 @@ class TestBuildComponents:
         # Multichain balance provider was created.
         mocks["MultiChainGatewayBalanceProvider"].assert_called_once()
 
-    def test_vault_auto_deploy_precedes_runner_construction(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_vault_auto_deploy_precedes_runner_construction(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mocks = _patch_component_factories(monkeypatch)
         # Simulate a placeholder vault that must be auto-deployed.
         mocks["_has_placeholder_vault_address"].return_value = True
@@ -858,13 +871,10 @@ class TestBuildComponents:
 
         mocks["StrategyRunner"].side_effect = _record_runner
 
-        # Stub out VaultLifecycleManager + LagoonVaultSDK/Adapter so construction
-        # does not require real gateway IO.
-        from almanak.connectors import lagoon as lagoon_mod
+        # Stub out VaultLifecycleManager so construction does not require
+        # real gateway IO.
         from almanak.framework.vault import lifecycle as vlc_mod
 
-        monkeypatch.setattr(lagoon_mod, "LagoonVaultAdapter", MagicMock())
-        monkeypatch.setattr(lagoon_mod, "LagoonVaultSDK", MagicMock())
         monkeypatch.setattr(vlc_mod, "VaultLifecycleManager", MagicMock())
 
         # State manager load_state mock — the vault helper calls asyncio.run on it.
@@ -1047,11 +1057,9 @@ class TestBuildComponents:
         # v1 attrs present, v2-only attrs absent.
         assert strategy_instance._wallet_activity_provider is not None
         # `_copy_config_v2` was never set because the v2 schema parse failed.
-        assert not hasattr(strategy_instance, "_copy_config_v2") or strategy_instance._copy_config_v2 is None or isinstance(strategy_instance._copy_config_v2, MagicMock)
+        assert "_copy_config_v2" not in vars(strategy_instance)
 
-    def test_copy_trading_v2_failure_strict_raises_click_exception(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_copy_trading_v2_failure_strict_raises_click_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_component_factories(monkeypatch)
         strategy_instance = _make_strategy_instance()
 
@@ -1093,9 +1101,7 @@ class TestBuildComponents:
                 config_chain="arbitrum",
             )
 
-    def test_component_init_unexpected_exception_exits_1(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_component_init_unexpected_exception_exits_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_component_factories(monkeypatch)
         strategy_instance = _make_strategy_instance()
 
@@ -1129,9 +1135,7 @@ class TestBuildComponents:
             )
         assert exc_info.value.code == 1
 
-    def test_dry_run_vault_placeholder_raises_early_exit_with_components(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_dry_run_vault_placeholder_raises_early_exit_with_components(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Dry-run + placeholder vault raises `_DryRunVaultEarlyExit` carrying
         the partial component bundle so the `run()` driver can still run
         `cleanup_fn` before exiting 0 (see #1682)."""

@@ -1,17 +1,18 @@
-"""Strategy-side vault-tool provider for Lagoon (VIB-4860 / W8).
+"""Strategy-side vault lifecycle provider for Lagoon (VIB-4860 / W8).
 
 Publishes the construction factories the agent-tool vault handlers
 (``deploy_vault`` / ``settle_vault`` / ``get_vault_state`` /
 ``approve_vault_underlying`` / ``deposit_vault`` / ``teardown_vault``) need:
 the ``LagoonVaultSDK`` / ``LagoonVaultDeployer`` / ``LagoonVaultAdapter``
-handles and the ``VaultDeployParams`` dataclass type.
+handles and the ``VaultDeployParams`` dataclass type. The runtime vault
+settlement lifecycle uses the same capability to construct its SDK and
+adapter handles, so framework code does not import Lagoon connector modules.
 
-Prior to W8 the executor imported ``almanak.connectors.lagoon.{sdk,deployer,
-adapter}`` at 8 sites inside those handlers. W8 routes the *construction*
-through :class:`VaultToolCapability` so the executor no longer imports the
-connector — it resolves the capability once at the top of each handler (1:1
-with the previous ``LagoonVaultSDK(...)`` / ``LagoonVaultDeployer(...)`` /
-``LagoonVaultAdapter(...)`` construction site).
+Prior to W8 the executor imported the Lagoon SDK / deployer / adapter at 8
+sites inside those handlers. W8 routes the *construction* through
+:class:`VaultToolCapability` so framework consumers no longer import the
+connector - they resolve the capability once at the construction site (1:1
+with the previous SDK / deployer / adapter construction).
 
 Policy-gate + teardown-ordering boundary (AGENTS.md mandate)
 ============================================================

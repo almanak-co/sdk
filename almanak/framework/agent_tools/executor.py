@@ -4792,7 +4792,7 @@ class ToolExecutor:
         safe_address = args["safe_address"]
         dry_run = args.get("dry_run", False)
 
-        # Pre-W8 built ``LagoonVaultDeployer()`` (no gateway client) here — the
+        # Pre-W8 built the connector deployer with no gateway client here; the
         # post-deploy bundle is pure calldata. ``build_deployer(None)`` is 1:1.
         deployer = self._vault_capability().build_deployer(None)
         bundle = deployer.build_post_deploy_bundle(underlying_token, vault_address, safe_address)

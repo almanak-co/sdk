@@ -1,9 +1,10 @@
-"""Strategy-side vault-tool capability registry (VIB-4860 / W8).
+"""Strategy-side vault lifecycle capability registry (VIB-4860 / W8).
 
 Sibling of :mod:`almanak.connectors._strategy_base.agent_read_registry`,
-scoped to the genuinely *protocol-named* agent tools — the Lagoon vault
-lifecycle tools (``deploy_vault`` / ``settle_vault`` / ``get_vault_state``
-/ ``approve_vault_underlying`` / ``deposit_vault`` / ``teardown_vault``).
+scoped to protocol-owned vault construction: the Lagoon vault lifecycle
+tools (``deploy_vault`` / ``settle_vault`` / ``get_vault_state`` /
+``approve_vault_underlying`` / ``deposit_vault`` / ``teardown_vault``) and
+the runtime vault settlement lifecycle.
 
 Why a separate registry from agent-read
 =======================================
@@ -16,10 +17,10 @@ W8 the executor imported ``almanak.connectors.lagoon.{sdk,deployer,adapter}``
 at 8 sites inside those handlers.
 
 W8 routes the SDK/deployer/adapter *construction* through this registry so
-the executor no longer imports the connector. The handlers resolve the
-capability once at the top of the handler — 1:1 with the previous
-``LagoonVaultSDK(...)`` construction site — and the crash-recovery ordering
-of the teardown / settlement state machine is preserved byte-for-byte
+framework consumers no longer import the connector. The handlers resolve the
+capability once at the top of the handler - 1:1 with the previous SDK
+construction site - and the crash-recovery ordering of the teardown /
+settlement state machine is preserved byte-for-byte
 (plan §8: "Keep the SDK handle resolution at the top of each handler; do
 not restructure the state machine").
 
@@ -31,7 +32,8 @@ deployer / adapter *handles* and the ``VaultDeployParams`` type. They MUST
 NOT call the gateway, sign, or touch ``PolicyEngine``. The executor still
 owns the gateway round-trip (it passes its own ``gateway_client`` into the
 factory) and the policy gate (which runs in ``_execute_inner`` before any
-vault handler). The anti-bypass static guard
+vault handler). Runtime vault lifecycle callers also supply their own gateway
+client and execution orchestrator. The anti-bypass static guard
 (``tests/static/test_agent_tools_policy_anti_bypass.py``) enforces this.
 
 What lives here

@@ -8,19 +8,50 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
-from almanak.connectors.lagoon.adapter import LagoonVaultAdapter
-from almanak.connectors.lagoon.sdk import LagoonVaultSDK
 from almanak.core.models.config import VaultVersion
 from almanak.core.models.params import SettleDepositParams, SettleRedeemParams, UpdateTotalAssetsParams
 from almanak.framework.data.tokens import get_token_resolver
+from almanak.framework.vault.capability import default_vault_protocol
 from almanak.framework.vault.config import SettlementPhase, SettlementResult, VaultAction, VaultConfig, VaultState
 
 logger = logging.getLogger(__name__)
 
 # Key used to store vault state within the strategy state dict
 VAULT_STATE_KEY = "vault_state"
+
+
+class VaultSDKHandle(Protocol):
+    """Runtime SDK surface the vault lifecycle manager consumes."""
+
+    def verify_version(self, vault_address: str, expected_version: VaultVersion) -> None: ...
+
+    def get_valuation_manager(self, vault_address: str) -> str: ...
+
+    def get_curator(self, vault_address: str) -> str: ...
+
+    def get_total_assets(self, vault_address: str) -> int: ...
+
+    def get_proposed_total_assets(self, vault_address: str) -> int: ...
+
+    def get_pending_deposits(self, vault_address: str) -> int: ...
+
+
+class VaultAdapterHandle(Protocol):
+    """Runtime adapter surface the vault lifecycle manager consumes."""
+
+    def build_propose_valuation_bundle(self, params: UpdateTotalAssetsParams) -> Any: ...
+
+    def build_settle_deposit_bundle(self, params: SettleDepositParams) -> Any: ...
+
+    def build_settle_redeem_bundle(self, params: SettleRedeemParams) -> Any: ...
+
+
+class VaultReceiptParserHandle(Protocol):
+    """Receipt parser surface used for settlement accounting hints."""
+
+    def parse_receipt(self, receipt: dict[str, Any]) -> Any: ...
 
 
 def validate_nav_change_bps(
@@ -65,12 +96,14 @@ class VaultLifecycleManager:
     def __init__(
         self,
         vault_config: VaultConfig,
-        vault_sdk: LagoonVaultSDK,
-        vault_adapter: LagoonVaultAdapter,
+        vault_sdk: VaultSDKHandle,
+        vault_adapter: VaultAdapterHandle,
         execution_orchestrator: Any,
         deployment_id: str = "",
         initial_vault_state: dict | None = None,
         persistence_callback: Callable[[dict], None] | None = None,
+        receipt_parser_protocol: str | None = None,
+        receipt_parser: VaultReceiptParserHandle | None = None,
     ) -> None:
         self._config = vault_config
         self._vault_sdk = vault_sdk
@@ -83,6 +116,13 @@ class VaultLifecycleManager:
         self._preflight_done = False
         self._preflight_interval = 10  # Re-run every N settlements
         self._settlements_since_preflight = 0
+        if receipt_parser_protocol is not None:
+            self._receipt_parser_protocol = receipt_parser_protocol
+        elif receipt_parser is not None:
+            self._receipt_parser_protocol = "<injected>"
+        else:
+            self._receipt_parser_protocol = default_vault_protocol()
+        self._receipt_parser = receipt_parser
 
     def pre_decide_hook(self, strategy: Any) -> VaultAction:
         """Check if settlement is needed before the strategy's decide() call.
@@ -384,21 +424,7 @@ class VaultLifecycleManager:
             self.save_vault_state()
             return SettlementResult(success=False)
 
-        # Parse deposit receipt for accounting (raw on-chain units, no decimal normalization --
-        # receipt parser operates on event log integers; callers use raw values for state tracking)
-        deposits_received = 0
-        shares_minted = 0
-        try:
-            from almanak.connectors.lagoon.receipt_parser import LagoonReceiptParser
-
-            parser = LagoonReceiptParser()
-            if hasattr(settle_deposit_result, "receipt") and settle_deposit_result.receipt:
-                parsed = parser.parse_receipt(settle_deposit_result.receipt)
-                if parsed.settle_deposits:
-                    deposits_received = parsed.settle_deposits[0].assets_deposited
-                    shares_minted = parsed.settle_deposits[0].shares_minted
-        except Exception:
-            logger.debug("Could not parse settle_deposit receipt for accounting (non-fatal)")
+        deposits_received, shares_minted = self._parse_settle_deposit_receipt(settle_deposit_result)
 
         # Settle redeems (if configured)
         if self._config.auto_settle_redeems:
@@ -429,6 +455,58 @@ class VaultLifecycleManager:
             deposits_received=deposits_received,
             shares_minted=shares_minted,
         )
+
+    def _parse_settle_deposit_receipt(self, settle_deposit_result: Any) -> tuple[int, int]:
+        """Parse settle-deposit accounting hints from the connector receipt parser."""
+        receipt = getattr(settle_deposit_result, "receipt", None)
+        if not receipt:
+            return 0, 0
+
+        parser = self._receipt_parser
+        if parser is None:
+            from almanak.framework.execution.receipt_registry import ReceiptParserRegistry
+
+            try:
+                parser = ReceiptParserRegistry().get(self._receipt_parser_protocol)
+            except Exception as exc:
+                logger.warning(
+                    "Could not resolve receipt parser %r for settle_deposit accounting: %s",
+                    self._receipt_parser_protocol,
+                    exc,
+                    exc_info=True,
+                )
+                return 0, 0
+
+        if parser is None:
+            logger.warning("No receipt parser found for protocol %r", self._receipt_parser_protocol)
+            return 0, 0
+
+        try:
+            parsed = parser.parse_receipt(receipt)
+            settle_deposits = parsed.settle_deposits
+        except Exception as exc:
+            logger.warning(
+                "Could not parse settle_deposit receipt for accounting with parser %r: %s",
+                self._receipt_parser_protocol,
+                exc,
+                exc_info=True,
+            )
+            return 0, 0
+
+        if not settle_deposits:
+            return 0, 0
+
+        try:
+            settle_deposit = settle_deposits[0]
+            return settle_deposit.assets_deposited, settle_deposit.shares_minted
+        except (AttributeError, IndexError, TypeError) as exc:
+            logger.warning(
+                "Could not extract settle_deposit accounting fields with parser %r: %s",
+                self._receipt_parser_protocol,
+                exc,
+                exc_info=True,
+            )
+            return 0, 0
 
     def _finalize_settlement(
         self,
