@@ -1,8 +1,8 @@
 """Position health monitoring for lending protocols.
 
 Provides health factor calculations and deleverage trigger detection
-for Aave V3, Morpho Blue and Compound V3 positions, with special support
-for PT-collateralized positions on Pendle.
+for Aave V3, Morpho Blue and Compound V3 positions, with support for
+principal-token collateral enrichment via connector-owned market readers.
 
 Key Classes:
     PositionHealth: Health factor and risk metrics for a lending position
@@ -92,7 +92,7 @@ class PositionHealth:
 class PTPositionHealth(PositionHealth):
     """Extended health data for PT-collateral positions.
 
-    Adds Pendle-specific metrics: implied APY at liquidation point,
+    Adds principal-token metrics: implied APY at liquidation point,
     PT discount, and maturity risk indicators.
     """
 
@@ -100,6 +100,17 @@ class PTPositionHealth(PositionHealth):
     pt_discount_pct: Decimal = Decimal("0")
     days_to_maturity: int = 0
     pendle_market: str = ""
+    principal_token_market: str = ""
+
+    def __post_init__(self) -> None:
+        """Keep the legacy Pendle field and generic PT field in sync."""
+        if self.principal_token_market and self.pendle_market:
+            if self.principal_token_market != self.pendle_market:
+                raise ValueError("principal_token_market and pendle_market must match when both are provided")
+        elif self.principal_token_market and not self.pendle_market:
+            self.pendle_market = self.principal_token_market
+        elif self.pendle_market and not self.principal_token_market:
+            self.principal_token_market = self.pendle_market
 
     @property
     def maturity_risk(self) -> str:
@@ -122,6 +133,7 @@ class PTPositionHealth(PositionHealth):
                 "implied_apy": str(self.implied_apy),
                 "pt_discount_pct": str(self.pt_discount_pct),
                 "days_to_maturity": self.days_to_maturity,
+                "principal_token_market": self.principal_token_market,
                 "pendle_market": self.pendle_market,
                 "maturity_risk": self.maturity_risk,
             }
@@ -176,8 +188,8 @@ class PositionHealthProvider:
     connector-owned multi-collateral health read (``read_lending_market_health``,
     VIB-4851 PR-2). All three therefore REQUIRE a connected ``gateway_client`` —
     VIB-4851 removed the in-strategy ``Web3(HTTPProvider)`` path for every lending
-    protocol. (``rpc_url`` survives only for the Pendle PT-enrichment reader,
-    VIB-4931's territory.)
+    protocol. (``rpc_url`` survives only for connector-owned principal-token
+    enrichment readers, VIB-4931's territory.)
 
     Usage:
         provider = PositionHealthProvider(chain="ethereum", gateway_client=gw)
@@ -262,30 +274,53 @@ class PositionHealthProvider:
     def get_pt_position_health(
         self,
         morpho_market_id: str,
-        pendle_market_address: str,
-        user_address: str,
+        principal_token_market_address: str | None = None,
+        user_address: str = "",
         collateral_price_usd: Decimal | None = None,
         debt_price_usd: Decimal | None = None,
+        *,
+        principal_token_protocol: str | None = None,
+        pendle_market_address: str | None = None,
     ) -> PTPositionHealth:
         """Get extended health data for a PT-collateral position on Morpho.
 
-        Combines Morpho position data with Pendle market data for
-        comprehensive risk assessment.
+        Combines Morpho position data with connector-owned principal-token
+        market data for comprehensive risk assessment.
 
         Args:
             morpho_market_id: Morpho Blue market ID
-            pendle_market_address: Pendle market address for the PT
+            principal_token_market_address: Principal-token market address for the PT
             user_address: Wallet address
             collateral_price_usd: Override for PT collateral price
             debt_price_usd: Override for debt token price
+            principal_token_protocol: Optional connector protocol key. When
+                omitted, the sole registered principal-token reader is used for
+                backward compatibility.
+            pendle_market_address: Deprecated alias for
+                ``principal_token_market_address``.
 
         Returns:
-            PTPositionHealth with Morpho + Pendle risk metrics
+            PTPositionHealth with Morpho + principal-token risk metrics
         """
+        pt_market_address = principal_token_market_address or pendle_market_address or ""
+        if not pt_market_address:
+            raise ValueError("principal_token_market_address is required for PT position health")
+        if not user_address:
+            raise ValueError("user_address is required for PT position health")
+        principal_token_registry: Any | None = None
+        if principal_token_protocol:
+            from almanak.connectors._strategy_principal_token_market_reader_registry import (
+                PRINCIPAL_TOKEN_MARKET_READ_REGISTRY,
+            )
+
+            principal_token_registry = PRINCIPAL_TOKEN_MARKET_READ_REGISTRY
+            if principal_token_registry.lookup(principal_token_protocol) is None:
+                raise ValueError(f"unknown principal_token_protocol {principal_token_protocol!r}")
+
         # Get base Morpho health via the shared seam-backed Morpho path
         # (VIB-4851). ``get_health`` owns the price-override translation +
-        # ``read_lending_account_state`` round-trip; the Pendle on-chain
-        # enrichment below (VIB-4931's territory) is layered on top.
+        # ``read_lending_account_state`` round-trip; the connector-owned
+        # principal-token enrichment below (VIB-4931's territory) is layered on top.
         base_health = self.get_health(
             "morpho_blue",
             morpho_market_id,
@@ -294,34 +329,41 @@ class PositionHealthProvider:
             debt_price_usd=debt_price_usd,
         )
 
-        # Get Pendle-specific data
+        # Get principal-token-specific data from the connector-owned reader.
         implied_apy = Decimal("0")
         pt_discount_pct = Decimal("0")
         days_to_maturity = 0
 
         try:
-            from almanak.connectors._strategy_principal_token_market_reader_registry import (
-                PRINCIPAL_TOKEN_MARKET_READ_REGISTRY,
-            )
+            if principal_token_registry is None:
+                from almanak.connectors._strategy_principal_token_market_reader_registry import (
+                    PRINCIPAL_TOKEN_MARKET_READ_REGISTRY,
+                )
 
+                principal_token_registry = PRINCIPAL_TOKEN_MARKET_READ_REGISTRY
+
+            reader_kwargs: dict[str, Any] = {"chain": self._chain}
             if self._gateway_client is not None:
-                reader = PRINCIPAL_TOKEN_MARKET_READ_REGISTRY.build_default_reader(
-                    gateway_client=self._gateway_client,
-                    chain=self._chain,
+                reader_kwargs["gateway_client"] = self._gateway_client
+            else:
+                reader_kwargs["rpc_url"] = self._rpc_url
+
+            if principal_token_protocol:
+                reader = principal_token_registry.build_reader(
+                    principal_token_protocol,
+                    **reader_kwargs,
                 )
             else:
-                reader = PRINCIPAL_TOKEN_MARKET_READ_REGISTRY.build_default_reader(
-                    rpc_url=self._rpc_url,
-                    chain=self._chain,
-                )
-            implied_apy = reader.get_implied_apy(pendle_market_address)
+                reader = principal_token_registry.build_default_reader(**reader_kwargs)
+
+            implied_apy = reader.get_implied_apy(pt_market_address)
 
             # Check if market is expired
-            if reader.is_market_expired(pendle_market_address):
+            if reader.is_market_expired(pt_market_address):
                 days_to_maturity = 0
             else:
                 # Estimate days from PT discount (PT trades below 1:1 before maturity)
-                pt_rate = reader.get_pt_to_asset_rate(pendle_market_address)
+                pt_rate = reader.get_pt_to_asset_rate(pt_market_address)
                 if pt_rate < Decimal("1"):
                     pt_discount_pct = (Decimal("1") - pt_rate) * Decimal("100")
                     # Rough estimate: if APY is known, days ~ discount / (APY / 365)
@@ -331,7 +373,7 @@ class PositionHealthProvider:
                             days_to_maturity = int(pt_discount_pct / Decimal("100") / daily_rate)
 
         except Exception as e:
-            logger.warning(f"Failed to get Pendle data for PT health: {e}")
+            logger.warning("Failed to get principal-token data for PT health: %s", e)
 
         return PTPositionHealth(
             health_factor=base_health.health_factor,
@@ -344,7 +386,7 @@ class PositionHealthProvider:
             implied_apy=implied_apy,
             pt_discount_pct=pt_discount_pct,
             days_to_maturity=days_to_maturity,
-            pendle_market=pendle_market_address,
+            principal_token_market=pt_market_address,
         )
 
     def _read_account_state(

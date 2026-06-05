@@ -1366,19 +1366,21 @@ def test_framework_pendle_data_package_is_removed() -> None:
 
 
 def test_connector_principal_token_reader_is_not_hardcoded_in_framework_data() -> None:
-    """Framework data and valuation paths must not import concrete Pendle reader modules."""
+    """Framework PT health paths must not import concrete Pendle reader modules."""
     repo_root = Path(__file__).resolve().parents[3]
-    source = "\n".join(
-        (repo_root / path).read_text()
-        for path in (
-            "almanak/framework/data/position_health.py",
-            "almanak/framework/valuation/pendle_valuer.py",
-        )
-    )
+    source = (repo_root / "almanak/framework/data/position_health.py").read_text()
 
     assert "almanak.framework.data.pendle.on_chain_reader" not in source
     assert "almanak.connectors.pendle.on_chain_reader" not in source
     assert "PendleOnChainReader" not in source
+
+
+def test_framework_pendle_valuer_is_removed() -> None:
+    """Pendle valuation implementation must stay connector-owned."""
+    repo_root = Path(__file__).resolve().parents[3]
+
+    assert not (repo_root / "almanak/framework/valuation/pendle_valuer.py").exists()
+    assert (repo_root / "almanak/connectors/pendle/valuation.py").exists()
 
 
 def test_connector_swap_route_inference_is_not_hardcoded_in_framework_compiler() -> None:

@@ -1,5 +1,6 @@
 """Unit tests for position health monitoring."""
 
+from dataclasses import fields
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -147,6 +148,34 @@ class TestPTPositionHealth:
         assert pt_health.is_healthy is True
         assert pt_health.implied_apy == Decimal("0.05")
         assert pt_health.days_to_maturity == 90
+        assert pt_health.principal_token_market == "0xpendle_market"
+
+    def test_principal_token_market_populates_legacy_alias(self):
+        pt_health = PTPositionHealth(
+            health_factor=Decimal("2.0"),
+            collateral_value_usd=Decimal("10000"),
+            debt_value_usd=Decimal("4575"),
+            lltv=Decimal("0.915"),
+            principal_token_market="0xpt_market",
+        )
+        assert pt_health.principal_token_market == "0xpt_market"
+        assert pt_health.pendle_market == "0xpt_market"
+
+    def test_divergent_principal_token_market_aliases_fail_loudly(self):
+        with pytest.raises(ValueError, match="principal_token_market and pendle_market must match"):
+            PTPositionHealth(
+                health_factor=Decimal("2.0"),
+                collateral_value_usd=Decimal("10000"),
+                debt_value_usd=Decimal("4575"),
+                lltv=Decimal("0.915"),
+                principal_token_market="0xpt_market",
+                pendle_market="0xother_market",
+            )
+
+    def test_legacy_pendle_market_field_order_is_preserved(self):
+        names = [field.name for field in fields(PTPositionHealth)]
+        assert names[names.index("days_to_maturity") + 1] == "pendle_market"
+        assert names.index("pendle_market") < names.index("principal_token_market")
 
     def test_maturity_risk_safe(self):
         pt_health = PTPositionHealth(
@@ -208,7 +237,7 @@ class TestPTPositionHealth:
         )
         assert pt_health.maturity_risk == "near"
 
-    def test_to_dict_includes_pendle_fields(self):
+    def test_to_dict_includes_principal_token_market_and_legacy_alias(self):
         pt_health = PTPositionHealth(
             health_factor=Decimal("2.0"),
             collateral_value_usd=Decimal("10000"),
@@ -223,6 +252,7 @@ class TestPTPositionHealth:
         assert d["implied_apy"] == "0.05"
         assert d["pt_discount_pct"] == "3.0"
         assert d["days_to_maturity"] == 90
+        assert d["principal_token_market"] == "0xpendle_market"
         assert d["pendle_market"] == "0xpendle_market"
         assert d["maturity_risk"] == "safe"
         # Verify base fields are also present
@@ -552,9 +582,9 @@ class TestAaveHealthFactorProvider:
         # resolves through the same address book as execution", so a registry that
         # pointed at a different non-empty pool for a chain would still be a drift.
         for chain, expected_pool in AAVE_V3_POOL_ADDRESSES.items():
-            assert (
-                LendingReadRegistry.position_manager_address("aave_v3", chain) == expected_pool
-            ), f"registry resolved the wrong Aave V3 pool for execution chain {chain!r}"
+            assert LendingReadRegistry.position_manager_address("aave_v3", chain) == expected_pool, (
+                f"registry resolved the wrong Aave V3 pool for execution chain {chain!r}"
+            )
 
 
 class TestMorphoHealthFactorProvider:
@@ -731,18 +761,22 @@ class TestPTPositionHealthSeam:
     """``get_pt_position_health`` over the VIB-4851 seam-backed Morpho base.
 
     The base Morpho health now flows through ``get_health("morpho_blue", ...)``
-    (-> ``read_lending_account_state``); the Pendle on-chain enrichment
-    (the connector-owned Pendle reader, VIB-4931's territory) is layered on top.
-    These tests mock BOTH the seam and the reader registry so the full method body
-    executes -- proving the repoint preserves the base health fields and the
-    Pendle metrics are still composed onto the ``PTPositionHealth``.
+    (-> ``read_lending_account_state``); the principal-token on-chain enrichment
+    (currently Pendle-owned, VIB-4931's territory) is layered on top. These tests
+    mock BOTH the seam and the reader registry so the full method body executes,
+    proving the repoint preserves the base health fields and composes PT metrics
+    onto the ``PTPositionHealth``.
     """
 
     _SEAM_TARGET = "almanak.framework.accounting.lending_reads.read_lending_account_state"
     _MARKET_PARAMS_TARGET = "almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.market_params"
-    _PENDLE_READER_TARGET = (
+    _DEFAULT_PT_READER_TARGET = (
         "almanak.connectors._strategy_principal_token_market_reader_registry."
         "PRINCIPAL_TOKEN_MARKET_READ_REGISTRY.build_default_reader"
+    )
+    _PT_READER_BY_PROTOCOL_TARGET = (
+        "almanak.connectors._strategy_principal_token_market_reader_registry."
+        "PRINCIPAL_TOKEN_MARKET_READ_REGISTRY.build_reader"
     )
 
     @staticmethod
@@ -759,7 +793,7 @@ class TestPTPositionHealthSeam:
             lltv=Decimal("0.915"),
         )
 
-    def test_pt_health_not_expired_composes_pendle_metrics(self):
+    def test_pt_health_not_expired_composes_default_reader_metrics(self):
         reader = MagicMock()
         reader.get_implied_apy.return_value = Decimal("0.10")  # 10% APY
         reader.is_market_expired.return_value = False
@@ -773,7 +807,7 @@ class TestPTPositionHealthSeam:
         with (
             patch(self._SEAM_TARGET, return_value=self._morpho_state()),
             patch(self._MARKET_PARAMS_TARGET, return_value=same_asset_params),
-            patch(self._PENDLE_READER_TARGET, return_value=reader),
+            patch(self._DEFAULT_PT_READER_TARGET, return_value=reader),
         ):
             provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
             pt = provider.get_pt_position_health(
@@ -787,11 +821,47 @@ class TestPTPositionHealthSeam:
         assert pt.collateral_value_usd == Decimal("10")
         assert pt.debt_value_usd == Decimal("5")
         assert pt.protocol == "morpho_blue"
-        # Pendle enrichment composed on top.
+        # Principal-token enrichment composed on top.
         assert pt.implied_apy == Decimal("0.10")
         assert pt.pt_discount_pct == (Decimal("1") - Decimal("0.98")) * Decimal("100")
         assert pt.days_to_maturity > 0
+        assert pt.principal_token_market == "0xpendle"
         assert pt.pendle_market == "0xpendle"
+
+    def test_pt_health_explicit_protocol_uses_named_reader(self):
+        reader = MagicMock()
+        reader.get_implied_apy.return_value = Decimal("0.05")
+        reader.is_market_expired.return_value = True
+
+        same_asset_params = {
+            "collateral_token": "WETH",
+            "loan_token": "WETH",
+            "lltv": int(Decimal("0.915") * Decimal("1e18")),
+        }
+        gateway_client = MagicMock()
+        with (
+            patch(self._SEAM_TARGET, return_value=self._morpho_state()),
+            patch(self._MARKET_PARAMS_TARGET, return_value=same_asset_params),
+            patch(self._DEFAULT_PT_READER_TARGET) as default_reader,
+            patch(self._PT_READER_BY_PROTOCOL_TARGET, return_value=reader) as build_reader,
+        ):
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=gateway_client)
+            pt = provider.get_pt_position_health(
+                morpho_market_id="0xmarket",
+                principal_token_market_address="0xptmarket",
+                principal_token_protocol="pendle",
+                user_address="0xabc",
+            )
+
+        default_reader.assert_not_called()
+        build_reader.assert_called_once()
+        assert build_reader.call_args.args == ("pendle",)
+        assert build_reader.call_args.kwargs["chain"] == "ethereum"
+        assert build_reader.call_args.kwargs["gateway_client"] is gateway_client
+        reader.get_implied_apy.assert_called_once_with("0xptmarket")
+        assert pt.days_to_maturity == 0
+        assert pt.principal_token_market == "0xptmarket"
+        assert pt.pendle_market == "0xptmarket"
 
     def test_pt_health_expired_market_zero_days(self):
         reader = MagicMock()
@@ -806,7 +876,7 @@ class TestPTPositionHealthSeam:
         with (
             patch(self._SEAM_TARGET, return_value=self._morpho_state()),
             patch(self._MARKET_PARAMS_TARGET, return_value=same_asset_params),
-            patch(self._PENDLE_READER_TARGET, return_value=reader),
+            patch(self._DEFAULT_PT_READER_TARGET, return_value=reader),
         ):
             provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
             pt = provider.get_pt_position_health(
@@ -820,12 +890,12 @@ class TestPTPositionHealthSeam:
         # Base health still flows through from the seam.
         assert pt.health_factor == Decimal("1.83")
 
-    def test_pt_health_pendle_failure_is_swallowed(self):
-        # A Pendle read failure must NOT void the base Morpho health: the
+    def test_pt_health_reader_failure_is_swallowed(self):
+        # A principal-token read failure must NOT void the base Morpho health: the
         # enrichment is best-effort (try/except logs a warning), the base HF
         # still surfaces. Guards the "PT health still works" contract.
         reader = MagicMock()
-        reader.get_implied_apy.side_effect = RuntimeError("pendle rpc down")
+        reader.get_implied_apy.side_effect = RuntimeError("pt reader down")
 
         same_asset_params = {
             "collateral_token": "WETH",
@@ -835,7 +905,7 @@ class TestPTPositionHealthSeam:
         with (
             patch(self._SEAM_TARGET, return_value=self._morpho_state()),
             patch(self._MARKET_PARAMS_TARGET, return_value=same_asset_params),
-            patch(self._PENDLE_READER_TARGET, return_value=reader),
+            patch(self._DEFAULT_PT_READER_TARGET, return_value=reader),
         ):
             provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
             pt = provider.get_pt_position_health(
@@ -844,10 +914,49 @@ class TestPTPositionHealthSeam:
                 user_address="0xabc",
             )
 
-        # Base health preserved; Pendle metrics fall back to their defaults.
+        # Base health preserved; PT metrics fall back to their defaults.
         assert pt.health_factor == Decimal("1.83")
         assert pt.implied_apy == Decimal("0")
         assert pt.days_to_maturity == 0
+
+    def test_pt_health_unknown_explicit_protocol_fails_loudly(self):
+        same_asset_params = {
+            "collateral_token": "WETH",
+            "loan_token": "WETH",
+            "lltv": int(Decimal("0.915") * Decimal("1e18")),
+        }
+        with (
+            patch(self._SEAM_TARGET, return_value=self._morpho_state()) as seam,
+            patch(self._MARKET_PARAMS_TARGET, return_value=same_asset_params),
+            patch(self._PT_READER_BY_PROTOCOL_TARGET) as build_reader,
+        ):
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+            with pytest.raises(ValueError, match="unknown principal_token_protocol 'DOES_NOT_EXIST'"):
+                provider.get_pt_position_health(
+                    morpho_market_id="0xmarket",
+                    principal_token_market_address="0xptmarket",
+                    principal_token_protocol="DOES_NOT_EXIST",
+                    user_address="0xabc",
+                )
+
+        seam.assert_not_called()
+        build_reader.assert_not_called()
+
+    def test_pt_health_requires_principal_token_market_address(self):
+        provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+        with pytest.raises(ValueError, match="principal_token_market_address is required"):
+            provider.get_pt_position_health(
+                morpho_market_id="0xmarket",
+                user_address="0xabc",
+            )
+
+    def test_pt_health_requires_user_address(self):
+        provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+        with pytest.raises(ValueError, match="user_address is required"):
+            provider.get_pt_position_health(
+                morpho_market_id="0xmarket",
+                principal_token_market_address="0xptmarket",
+            )
 
 
 def _pad32(value: int) -> str:
@@ -915,9 +1024,7 @@ class TestCompoundHealthFactorProvider:
         ``collateralBalanceOf`` returns ``weth_balance_raw`` only when the asset arg
         matches WETH's padded address (every other collateral → 0, i.e. skipped).
         """
-        asset_info_blob = _compound_asset_info_blob(
-            price_feed=cls._PRICE_FEED, scale=scale, liquidate_cf=liquidate_cf
-        )
+        asset_info_blob = _compound_asset_info_blob(price_feed=cls._PRICE_FEED, scale=scale, liquidate_cf=liquidate_cf)
 
         def _eth_call(chain, to, data, block=None):
             selector = data[:10].lower()
@@ -1088,9 +1195,7 @@ class TestVIB4851ReviewFixes:
     """Regression tests for the PR #2597 review findings (Codex / Gemini / CodeRabbit)."""
 
     _SEAM_TARGET = "almanak.framework.accounting.lending_reads.read_lending_account_state"
-    _MARKET_PARAMS_TARGET = (
-        "almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.market_params"
-    )
+    _MARKET_PARAMS_TARGET = "almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.market_params"
 
     @staticmethod
     def _aave_state(*, debt, hf, bps=8500):

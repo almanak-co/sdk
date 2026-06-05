@@ -955,7 +955,7 @@ ph = market.position_health("morpho_blue", market_id="0x...")  # PositionHealth
 ph.health_factor     # Decimal
 ph.ltv               # Decimal
 
-pt = market.pt_position_health("0x...", pendle_market_address="0x...")  # PTPositionHealth
+pt = market.pt_position_health("0x...", principal_token_market_address="0x...")  # PTPositionHealth
 ```
 
 ### LST Exchange Rates (Solana)

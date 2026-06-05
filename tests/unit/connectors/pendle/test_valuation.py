@@ -30,18 +30,14 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import MagicMock
 
-import pytest
-
-from almanak.framework.valuation.pendle_valuer import (
+from almanak.connectors.pendle.valuation import (
     _APR_BPS_CAP,
-    PendlePositionValue,
     compute_pt_implied_apy_bps,
     value_pendle_lp_from_components,
     value_pendle_position,
     value_pt_position,
     value_sy_position,
 )
-
 
 # ---------------------------------------------------------------------------
 # Pure math unit tests

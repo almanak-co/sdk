@@ -4702,30 +4702,39 @@ class MarketSnapshot:
         except Exception as e:  # noqa: BLE001
             raise LSTDataUnavailableError("all", f"Failed to fetch LST rates: {e}") from e
 
-    # --- PT-collateral position health (Pendle + Morpho Blue) ----------------
+    # --- PT-collateral position health ---------------------------------------
 
     def pt_position_health(
         self,
         morpho_market_id: str,
-        pendle_market_address: str,
+        principal_token_market_address: str | None = None,
         rpc_url: str | None = None,
         collateral_price_usd: Decimal | None = None,
         debt_price_usd: Decimal | None = None,
+        *,
+        principal_token_protocol: str | None = None,
+        pendle_market_address: str | None = None,
     ) -> PTPositionHealth:
         """Get extended health data for a PT-collateral position.
 
-        Combines Morpho Blue position data with Pendle market metrics
+        Combines Morpho Blue position data with principal-token market metrics
         (implied APY, maturity risk) for comprehensive risk assessment.
 
         Args:
             morpho_market_id: Morpho Blue market ID.
-            pendle_market_address: Pendle market address for the PT.
+            principal_token_market_address: Principal-token market address for
+                the PT collateral.
             rpc_url: RPC endpoint (uses gateway-routed path when None).
             collateral_price_usd: Override for PT collateral price.
             debt_price_usd: Override for debt token price.
+            principal_token_protocol: Optional connector protocol key. When
+                omitted, the sole registered principal-token reader is used for
+                backward compatibility.
+            pendle_market_address: Deprecated alias for
+                ``principal_token_market_address``.
 
         Returns:
-            PTPositionHealth with Morpho + Pendle risk metrics.
+            PTPositionHealth with Morpho + principal-token risk metrics.
 
         Raises:
             HealthUnavailableError: If health data cannot be retrieved or
@@ -4760,10 +4769,11 @@ class MarketSnapshot:
         try:
             return provider.get_pt_position_health(
                 morpho_market_id=morpho_market_id,
-                pendle_market_address=pendle_market_address,
+                principal_token_market_address=principal_token_market_address or pendle_market_address,
                 user_address=self._wallet_address,
                 collateral_price_usd=collateral_price_usd,
                 debt_price_usd=debt_price_usd,
+                principal_token_protocol=principal_token_protocol,
             )
         except HealthUnavailableError:
             raise
