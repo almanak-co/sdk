@@ -49,7 +49,15 @@ if TYPE_CHECKING:
         PendleSwapParams,
         get_pendle_adapter,
     )
+    from .api_client import (
+        CHAIN_ID_MAP,
+        PENDLE_API_BASE,
+        PendleAPIClient,
+        PendleAPIError,
+    )
     from .compiler import PendleCompiler
+    from .models import PendleAsset, PendleMarketData, PendleSwapQuote
+    from .on_chain_reader import PendleOnChainError, PendleOnChainReader
     from .receipt_parser import (
         EVENT_TOPICS,
         BurnEventData,
@@ -63,6 +71,7 @@ if TYPE_CHECKING:
         SwapEventData,
         TransferEventData,
     )
+    from .resolver import PendleMarketResolver
     from .sdk import (
         PENDLE_ADDRESSES,
         PENDLE_GAS_ESTIMATES,
@@ -77,8 +86,10 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "CHAIN_ID_MAP",
     "EVENT_TOPICS",
     "PENDLE_ADDRESSES",
+    "PENDLE_API_BASE",
     "PENDLE_GAS_ESTIMATES",
     "BurnEventData",
     "LiquidityParams",
@@ -86,16 +97,24 @@ __all__ = [
     "MintEventData",
     "ParseResult",
     "ParsedSwapResult",
+    "PendleAPIClient",
+    "PendleAPIError",
     "PendleActionType",
     "PendleAdapter",
+    "PendleAsset",
     "PendleCompiler",
     "PendleEvent",
     "PendleEventType",
     "PendleLPParams",
+    "PendleMarketData",
+    "PendleMarketResolver",
+    "PendleOnChainError",
+    "PendleOnChainReader",
     "PendleQuote",
     "PendleReceiptParser",
     "PendleRedeemParams",
     "PendleSDK",
+    "PendleSwapQuote",
     "PendleSwapParams",
     "PendleTransactionData",
     "RedeemPYEventData",
@@ -113,8 +132,20 @@ _LAZY: dict[str, tuple[str, str]] = {
     "PendleRedeemParams": (".adapter", "PendleRedeemParams"),
     "PendleSwapParams": (".adapter", "PendleSwapParams"),
     "get_pendle_adapter": (".adapter", "get_pendle_adapter"),
+    # api client
+    "CHAIN_ID_MAP": (".api_client", "CHAIN_ID_MAP"),
+    "PENDLE_API_BASE": (".api_client", "PENDLE_API_BASE"),
+    "PendleAPIClient": (".api_client", "PendleAPIClient"),
+    "PendleAPIError": (".api_client", "PendleAPIError"),
     # compiler
     "PendleCompiler": (".compiler", "PendleCompiler"),
+    # models
+    "PendleAsset": (".models", "PendleAsset"),
+    "PendleMarketData": (".models", "PendleMarketData"),
+    "PendleSwapQuote": (".models", "PendleSwapQuote"),
+    # on-chain reader
+    "PendleOnChainError": (".on_chain_reader", "PendleOnChainError"),
+    "PendleOnChainReader": (".on_chain_reader", "PendleOnChainReader"),
     # receipt_parser
     "EVENT_TOPICS": (".receipt_parser", "EVENT_TOPICS"),
     "BurnEventData": (".receipt_parser", "BurnEventData"),
@@ -127,6 +158,8 @@ _LAZY: dict[str, tuple[str, str]] = {
     "RedeemPYEventData": (".receipt_parser", "RedeemPYEventData"),
     "SwapEventData": (".receipt_parser", "SwapEventData"),
     "TransferEventData": (".receipt_parser", "TransferEventData"),
+    # resolver
+    "PendleMarketResolver": (".resolver", "PendleMarketResolver"),
     # sdk
     "PENDLE_ADDRESSES": (".sdk", "PENDLE_ADDRESSES"),
     "PENDLE_GAS_ESTIMATES": (".sdk", "PENDLE_GAS_ESTIMATES"),

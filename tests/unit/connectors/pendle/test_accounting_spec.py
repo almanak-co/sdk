@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from almanak.connectors._strategy_base.accounting_treatment_registry import (
+from almanak.connectors._strategy_accounting_treatment_registry import (
     AccountingTreatmentRegistry,
 )
 from almanak.connectors.pendle.accounting_spec import (

@@ -3668,7 +3668,7 @@ class StrategyRunner:
             # outbox position-key derivation via the strategy-side registry (VIB-4931),
             # so the runner routes it without naming the protocol. Returns
             # (position_key, market_id) when the connector owns the event, else None.
-            from almanak.connectors._strategy_base.accounting_treatment_registry import (
+            from almanak.connectors._strategy_accounting_treatment_registry import (
                 AccountingTreatmentRegistry,
             )
 

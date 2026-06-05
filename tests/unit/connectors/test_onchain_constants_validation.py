@@ -16,7 +16,6 @@ This caught real bugs:
 import pytest
 from web3 import Web3
 
-
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -179,22 +178,22 @@ class TestPendleSelectors:
     """Validate Pendle RouterStatic function selectors."""
 
     def test_get_pt_to_asset_rate(self):
-        from almanak.framework.data.pendle.on_chain_reader import GET_PT_TO_ASSET_RATE_SELECTOR
+        from almanak.connectors.pendle.on_chain_reader import GET_PT_TO_ASSET_RATE_SELECTOR
 
         assert GET_PT_TO_ASSET_RATE_SELECTOR == _selector("getPtToAssetRate(address)")
 
     def test_get_implied_apy(self):
-        from almanak.framework.data.pendle.on_chain_reader import GET_IMPLIED_APY_SELECTOR
+        from almanak.connectors.pendle.on_chain_reader import GET_IMPLIED_APY_SELECTOR
 
         assert GET_IMPLIED_APY_SELECTOR == _selector("getImpliedApy(address)")
 
     def test_read_tokens(self):
-        from almanak.framework.data.pendle.on_chain_reader import READ_TOKENS_SELECTOR
+        from almanak.connectors.pendle.on_chain_reader import READ_TOKENS_SELECTOR
 
         assert READ_TOKENS_SELECTOR == _selector("readTokens(address)")
 
     def test_expiry(self):
-        from almanak.framework.data.pendle.on_chain_reader import EXPIRY_SELECTOR
+        from almanak.connectors.pendle.on_chain_reader import EXPIRY_SELECTOR
 
         assert EXPIRY_SELECTOR == _selector("expiry()")
 

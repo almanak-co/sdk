@@ -9,10 +9,11 @@ carrying a protocol-named ``AccountingCategory`` member.
 Each connector with custom accounting publishes a module-level
 :data:`ACCOUNTING_TREATMENT_SPEC` (an
 :class:`~almanak.connectors._strategy_base.accounting_treatment_base.AccountingTreatmentSpec`)
-in its ``accounting_spec`` module. ``_SPEC_LOADERS`` maps the connector folder
-name to that module + attribute. Adding a venue with special accounting is one
-folder (its ``accounting_spec.py``) plus one ``_SPEC_LOADERS`` row — no framework
-edit.
+from its ``CONNECTOR.accounting_treatment`` manifest reference. The boot file
+``almanak.connectors._strategy_accounting_treatment_registry`` registers those
+lazy references into this base registry. Adding a venue with special accounting is
+one connector-local ``accounting_spec.py`` plus one manifest reference — no
+framework edit and no central protocol row.
 
 Dispatch is by *spec*, not by an exact protocol key: a connector's ``categorize``
 decides whether it claims a given ``(intent_type, protocol, token_out)`` (Pendle,
@@ -62,17 +63,16 @@ __all__ = [
 class AccountingTreatmentRegistry:
     """Connector folder name → published accounting-treatment-spec dispatch.
 
-    Empty of behaviour until a connector opts in via ``_SPEC_LOADERS`` and a
-    published ``ACCOUNTING_TREATMENT_SPEC``.
+    Empty of behaviour until the strategy-side boot file registers connector
+    manifest references that publish an ``ACCOUNTING_TREATMENT_SPEC``.
     """
 
     # Connector folder name -> (module path, attribute) naming the connector's
-    # published ``AccountingTreatmentSpec``. The Pendle connector is the first
-    # opt-in (VIB-4931); adding another venue with special accounting is one folder
-    # (its ``accounting_spec.py``) plus one row here — no framework edit.
-    _SPEC_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
-        "pendle": ("almanak.connectors.pendle.accounting_spec", "ACCOUNTING_TREATMENT_SPEC"),
-    }
+    # published ``AccountingTreatmentSpec``. Populated by
+    # ``almanak.connectors._strategy_accounting_treatment_registry`` from
+    # connector manifests. Tests may still replace this table to exercise
+    # broken-connector isolation and collision handling.
+    _SPEC_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {}
 
     # Per-connector resolved-spec cache (lazy, process-lifetime — adding a loader
     # row is a code change, not a runtime operation).
@@ -85,6 +85,33 @@ class AccountingTreatmentRegistry:
     def supported_connectors(cls) -> tuple[str, ...]:
         """Return every connector folder name with a published treatment spec."""
         return tuple(sorted(cls._SPEC_LOADERS))
+
+    @classmethod
+    def register_loader(cls, connector: str, module_path: str, attribute: str) -> None:
+        """Register one lazy accounting-treatment spec reference.
+
+        Re-registering the identical reference is a no-op so repeated imports of
+        the boot file stay idempotent. A conflicting reference for the same
+        connector is a programming error: the framework cannot safely pick one.
+        """
+        if not connector or not isinstance(connector, str):
+            raise ValueError(f"connector must be a non-empty string, got {connector!r}")
+        if not module_path or not isinstance(module_path, str):
+            raise ValueError(f"module_path must be a non-empty string, got {module_path!r}")
+        if not attribute or not isinstance(attribute, str):
+            raise ValueError(f"attribute must be a non-empty string, got {attribute!r}")
+
+        existing = cls._SPEC_LOADERS.get(connector)
+        ref = (module_path, attribute)
+        if existing is not None:
+            if existing == ref:
+                return
+            raise ValueError(
+                f"accounting treatment connector {connector!r} already registered "
+                f"as {existing[0]}.{existing[1]}; refusing {module_path}.{attribute}"
+            )
+        cls._SPEC_LOADERS[connector] = ref
+        cls.reset_cache()
 
     @classmethod
     def _load_spec(cls, connector: str) -> AccountingTreatmentSpec:

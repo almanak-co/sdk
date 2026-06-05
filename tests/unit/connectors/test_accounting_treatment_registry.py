@@ -1,12 +1,11 @@
 """Contract tests for the connector accounting-treatment seam (VIB-4931 PR-A commit 1).
 
-Commit 1 ships the inert base seam: :class:`AccountingTreatmentSpec` /
-:class:`AccountingCategoryDecision` + :class:`AccountingTreatmentRegistry` with an
-**empty** ``_SPEC_LOADERS``. No connector publishes a spec and no framework
-consumer calls it yet (Pendle joins in commit 2). These tests pin the seam's
-contract — base-type validation, inert behaviour with no loaders,
-broken-connector isolation, ``treatment_key`` collision, first-claim-wins
-ordering, and cache reset — using synthetic specs injected via ``sys.modules``.
+These tests pin the accounting-treatment seam's contract: base-type validation,
+descriptor-backed real Pendle registration, broken-connector isolation,
+``treatment_key`` collision, first-claim-wins ordering, and cache reset. Synthetic
+specs still replace the private loader table for narrow isolation tests; production
+registration comes from connector manifests through
+``almanak.connectors._strategy_accounting_treatment_registry``.
 """
 
 from __future__ import annotations
@@ -16,12 +15,12 @@ import types
 
 import pytest
 
+from almanak.connectors._strategy_accounting_treatment_registry import (
+    AccountingTreatmentRegistry,
+)
 from almanak.connectors._strategy_base.accounting_treatment_base import (
     AccountingCategoryDecision,
     AccountingTreatmentSpec,
-)
-from almanak.connectors._strategy_base.accounting_treatment_registry import (
-    AccountingTreatmentRegistry,
 )
 
 # ``.category`` is opaque to the registry (it never inspects it), so a plain
@@ -52,7 +51,7 @@ def _spec(*, claims, treatments=None, categorize=None, position_key=None) -> Acc
 
 
 def _install(monkeypatch, loaders: dict[str, AccountingTreatmentSpec | None]) -> None:
-    """Point ``_SPEC_LOADERS`` at synthetic in-``sys.modules`` spec modules.
+    """Point the registry at synthetic in-``sys.modules`` spec modules.
 
     Insertion order of ``loaders`` is preserved as registration order. A ``None``
     spec models a broken connector: the module exists but its

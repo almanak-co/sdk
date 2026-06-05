@@ -732,15 +732,18 @@ class TestPTPositionHealthSeam:
 
     The base Morpho health now flows through ``get_health("morpho_blue", ...)``
     (-> ``read_lending_account_state``); the Pendle on-chain enrichment
-    (``PendleOnChainReader``, VIB-4931's territory) is layered on top unchanged.
-    These tests mock BOTH the seam and the Pendle reader so the full method body
+    (the connector-owned Pendle reader, VIB-4931's territory) is layered on top.
+    These tests mock BOTH the seam and the reader registry so the full method body
     executes -- proving the repoint preserves the base health fields and the
     Pendle metrics are still composed onto the ``PTPositionHealth``.
     """
 
     _SEAM_TARGET = "almanak.framework.accounting.lending_reads.read_lending_account_state"
     _MARKET_PARAMS_TARGET = "almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.market_params"
-    _PENDLE_READER_TARGET = "almanak.framework.data.pendle.on_chain_reader.PendleOnChainReader"
+    _PENDLE_READER_TARGET = (
+        "almanak.connectors._strategy_principal_token_market_reader_registry."
+        "PRINCIPAL_TOKEN_MARKET_READ_REGISTRY.build_default_reader"
+    )
 
     @staticmethod
     def _morpho_state():

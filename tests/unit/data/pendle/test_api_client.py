@@ -6,13 +6,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.data.pendle.api_client import (
+from almanak.connectors.pendle.api_client import (
     CHAIN_ID_MAP,
     PENDLE_API_BASE,
     PendleAPIClient,
     PendleAPIError,
 )
-from almanak.framework.data.pendle.models import PendleMarketData, PendleSwapQuote
+from almanak.connectors.pendle.models import PendleMarketData, PendleSwapQuote
 
 
 # =========================================================================

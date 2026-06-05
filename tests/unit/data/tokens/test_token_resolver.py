@@ -307,6 +307,33 @@ class TestTokenResolverBySymbol:
         assert token.chain == Chain.ARBITRUM
         assert token.address.lower() == "0x71fbf40651e9d4278a74586afc99f307f369ce9a"
 
+    def test_pendle_metadata_chain_is_normalized(self, temp_cache_file, monkeypatch):
+        """Connector metadata may emit display-cased chain names."""
+        import almanak.connectors._strategy_protocol_metadata_registry as registry_module
+        from almanak.connectors._strategy_base.protocol_metadata_registry import ProtocolTokenMetadata
+
+        class _FakeProtocolMetadataRegistry:
+            def synthetic_tokens(self):
+                return (
+                    ProtocolTokenMetadata(
+                        protocol="pendle",
+                        chain="Arbitrum",
+                        symbol="PT-MIXED",
+                        address="0x1111111111111111111111111111111111111111",
+                        decimals=18,
+                        family="PT",
+                    ),
+                )
+
+        monkeypatch.setattr(registry_module, "PROTOCOL_METADATA_REGISTRY", _FakeProtocolMetadataRegistry())
+
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        token = resolver.resolve("PT-MIXED", "arbitrum")
+
+        assert token.symbol == "PT-MIXED"
+        assert token.chain == Chain.ARBITRUM
+        assert token.address.lower() == "0x1111111111111111111111111111111111111111"
+
 
 class TestTokenResolverByAddress:
     """Tests for resolving tokens by address."""

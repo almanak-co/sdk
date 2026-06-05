@@ -5,9 +5,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.data.pendle.api_client import CHAIN_ID_MAP, PendleAPIClient, PendleAPIError
-from almanak.framework.data.pendle.models import PendleMarketData
-from almanak.framework.data.pendle.resolver import PendleMarketResolver
+from almanak.connectors.pendle.api_client import CHAIN_ID_MAP, PendleAPIClient, PendleAPIError
+from almanak.connectors.pendle.models import PendleMarketData
+from almanak.connectors.pendle.resolver import PendleMarketResolver
 
 
 # ---------------------------------------------------------------------------

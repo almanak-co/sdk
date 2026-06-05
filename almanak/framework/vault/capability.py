@@ -18,13 +18,10 @@ def default_vault_protocol() -> str:
     """
     from almanak.connectors._strategy_agent_tool_registry import STRATEGY_VAULT_TOOL_REGISTRY
 
-    protocols = sorted(str(protocol) for protocol in STRATEGY_VAULT_TOOL_REGISTRY.protocols())
-    if len(protocols) != 1:
-        raise VaultToolCapabilityError(
-            "default vault protocol is ambiguous; expected exactly one registered "
-            f"lifecycle-vault connector, found {protocols!r}"
-        )
-    return protocols[0]
+    try:
+        return str(STRATEGY_VAULT_TOOL_REGISTRY.default_protocol())
+    except Exception as exc:
+        raise VaultToolCapabilityError(f"default vault protocol could not be resolved: {exc}") from exc
 
 
 def get_vault_tool_capability(protocol: str | None = None) -> VaultToolCapability:

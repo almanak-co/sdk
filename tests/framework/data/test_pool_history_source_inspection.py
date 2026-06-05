@@ -671,8 +671,6 @@ _LEGACY_VIOLATING_MODULES: set[str] = {
     # directly (Class A usage). POOL-7 deliberately scopes to NOT block
     # on these; each needs a separate VIB ticket to migrate.
     "almanak.framework.data.indicators.rsi",  # legacy aiohttp egress
-    "almanak.framework.data.pendle.api_client",  # legacy urllib.request egress
-    "almanak.framework.data.pendle.on_chain_reader",  # Web3(HTTPProvider(...))
     "almanak.framework.data.providers.defillama_provider",  # legacy aiohttp egress
     "almanak.framework.data.staking.solana_lst_provider",  # legacy aiohttp egress
     "almanak.framework.data.token_safety.client",  # legacy aiohttp egress
@@ -2751,7 +2749,7 @@ def test_a7_l1_inherent_indirection_not_covered_pinned() -> None:
     # continue`) — once with a legacy module name in the set, once
     # without, and asserts the right behavior in each branch.
     nonlegacy_synth = "synthetic_nonlegacy_indirection_module"
-    legacy_synth = "almanak.framework.data.pendle.on_chain_reader"  # real legacy entry
+    legacy_synth = "almanak.framework.data.price.dex_twap"  # real legacy entry
     assert nonlegacy_synth not in _LEGACY_VIOLATING_MODULES, (
         "test prerequisite: nonlegacy_synth must be a non-legacy name"
     )
@@ -3097,7 +3095,7 @@ def test_l4a_attribute_target_assignment_not_covered_inherent_limit() -> None:
 
     Today no non-legacy framework module uses this shape (audit-
     data.md confirms: ``defi/gas.py:416``, ``defi/pools.py:469``,
-    ``pendle/on_chain_reader.py:160``, ``position_health.py:402+``
+    ``price/dex_twap.py``, ``position_health.py:402+``
     are all in ``_LEGACY_VIOLATING_MODULES``). This negative pin
     makes the inherent limit observable so a future PR can't
     silently claim L4a is "fully closed".

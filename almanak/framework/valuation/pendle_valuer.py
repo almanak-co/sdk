@@ -24,7 +24,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from almanak.framework.data.pendle.on_chain_reader import PendleOnChainReader
+    from almanak.connectors._strategy_base.principal_token_market_reader_registry import PrincipalTokenMarketReader
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +198,7 @@ def value_pendle_position(
     lp_pool_pt_amount: Decimal | None = None,
     lp_total_supply: Decimal | None = None,
     underlying_price_usd: Decimal | None = None,
-    on_chain_reader: PendleOnChainReader | None = None,
+    on_chain_reader: PrincipalTokenMarketReader | None = None,
 ) -> PendlePositionValue:
     """Value a Pendle LP or PT/SY position.
 
@@ -222,7 +222,7 @@ def value_pendle_position(
         lp_total_supply: Total LP token supply (human-readable).
         underlying_price_usd: USD price of the SY underlying asset.
             Resolved externally from market.price() or price_oracle.
-        on_chain_reader: PendleOnChainReader for pt_to_asset_rate and implied APY.
+        on_chain_reader: Connector-provided reader for pt_to_asset_rate and implied APY.
             If None, pt_to_asset_rate defaults to 1.0 (at-par, conservative).
 
     Returns:

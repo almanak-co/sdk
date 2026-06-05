@@ -7,12 +7,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.data.pendle.on_chain_reader import (
+from almanak.connectors.pendle.on_chain_reader import (
     ROUTER_STATIC_ADDRESSES,
     PendleOnChainError,
     PendleOnChainReader,
 )
-
 
 # =========================================================================
 # Fixtures

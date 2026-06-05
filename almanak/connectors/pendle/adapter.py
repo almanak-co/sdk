@@ -30,9 +30,10 @@ from .sdk import (
 )
 
 if TYPE_CHECKING:
-    from almanak.framework.data.pendle.api_client import PendleAPIClient
-    from almanak.framework.data.pendle.on_chain_reader import PendleOnChainReader
     from almanak.framework.gateway_client import GatewayClient
+
+    from .api_client import PendleAPIClient
+    from .on_chain_reader import PendleOnChainReader
 
 logger = logging.getLogger(__name__)
 
@@ -470,7 +471,7 @@ class PendleAdapter:
         # Tier 1: Try Pendle API
         try:
             if self._api_client is None:
-                from almanak.framework.data.pendle.api_client import PendleAPIClient
+                from .api_client import PendleAPIClient
 
                 self._api_client = PendleAPIClient(chain=self.chain)
 
@@ -489,7 +490,7 @@ class PendleAdapter:
         # Tier 2: Try on-chain RouterStatic
         try:
             if self._on_chain_reader is None:
-                from almanak.framework.data.pendle.on_chain_reader import PendleOnChainReader
+                from .on_chain_reader import PendleOnChainReader
 
                 if self._gateway_client is not None:
                     self._on_chain_reader = PendleOnChainReader(gateway_client=self._gateway_client, chain=self.chain)

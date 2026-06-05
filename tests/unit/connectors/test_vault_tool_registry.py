@@ -44,6 +44,13 @@ class _MockVault(VaultToolConnector, VaultToolCapability):
     def deploy_params_type(self) -> type:
         return _MockParams
 
+    def parse_deploy_receipt(self, receipt: dict[str, Any]) -> Any:
+        return ("receipt", receipt)
+
+
+class _SecondMockVault(_MockVault):
+    protocol: ClassVar[ProtocolName] = ProtocolName("second_mock_vault")
+
 
 def test_lookup_returns_capability_and_factories() -> None:
     registry = VaultToolRegistry()
@@ -62,6 +69,31 @@ def test_lookup_returns_none_for_unregistered_protocol() -> None:
     registry = VaultToolRegistry()
     registry.register(_MockVault())
     assert registry.lookup("__nope__") is None
+
+
+def test_default_returns_sole_capability_and_protocol() -> None:
+    registry = VaultToolRegistry()
+    vault = _MockVault()
+    registry.register(vault)
+
+    assert registry.default() is vault
+    assert registry.default_protocol() == ProtocolName("mock_vault")
+
+
+def test_default_rejects_missing_connector() -> None:
+    registry = VaultToolRegistry()
+
+    with pytest.raises(VaultToolRegistryError, match="no vault tool connector"):
+        registry.default()
+
+
+def test_default_rejects_ambiguous_connectors() -> None:
+    registry = VaultToolRegistry()
+    registry.register(_MockVault())
+    registry.register(_SecondMockVault())
+
+    with pytest.raises(VaultToolRegistryError, match="multiple vault tool connectors"):
+        registry.default()
 
 
 def test_register_rejects_class_not_instance() -> None:
@@ -110,6 +142,9 @@ def test_register_rejects_empty_keys() -> None:
 
         def deploy_params_type(self) -> type:
             return _MockParams
+
+        def parse_deploy_receipt(self, receipt: dict[str, Any]) -> Any:
+            return None
 
     registry = VaultToolRegistry()
     with pytest.raises(VaultToolRegistryError, match="non-empty frozenset"):

@@ -35,7 +35,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from almanak.connectors._strategy_base.accounting_treatment_registry import AccountingTreatmentRegistry
+from almanak.connectors._strategy_accounting_treatment_registry import AccountingTreatmentRegistry
 from almanak.framework.accounting.category_handlers import HANDLERS, HandlerContext
 from almanak.framework.accounting.classifier import AccountingCategory, classify
 from almanak.framework.accounting.models import LendingAccountingEvent

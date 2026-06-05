@@ -17,10 +17,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from almanak.connectors._strategy_base.accounting_treatment_base import AccountingCategoryDecision
-from almanak.connectors._strategy_base.accounting_treatment_registry import (
+from almanak.connectors._strategy_accounting_treatment_registry import (
     AccountingTreatmentRegistry,
 )
+from almanak.connectors._strategy_base.accounting_treatment_base import AccountingCategoryDecision
 from almanak.framework.accounting.basis import FIFOBasisStore
 from almanak.framework.accounting.models import PendleEventType
 from almanak.framework.accounting.processor import AccountingProcessor

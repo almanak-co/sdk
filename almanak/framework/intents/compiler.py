@@ -1366,27 +1366,27 @@ class IntentCompiler:
                 self._build_compiler_context(aggregator_protocol, connector_compiler), intent
             )
 
-        # Auto-detect PT-/YT- prefixed tokens before generic default-protocol dispatch.
-        # Must run before other protocol dispatches so that PT-/YT- tokens are routed to
-        # Pendle regardless of default_protocol (e.g., enso, aerodrome). VIB-2535.
-        if intent.protocol is None and self._has_pendle_token_prefix(intent):
-            connector_compiler = get_connector_compiler("pendle")
+        # Connector-owned inference runs before default-protocol dispatch.
+        # Example: a connector can claim synthetic token symbols that should not
+        # be routed to the user's default DEX.
+        if intent.protocol is None:
+            from almanak.connectors._strategy_swap_route_inference_registry import SWAP_ROUTE_INFERENCE_REGISTRY
+
+            inferred_protocol = SWAP_ROUTE_INFERENCE_REGISTRY.infer_protocol(intent)
+            if inferred_protocol is None:
+                return None
+            connector_compiler = get_connector_compiler(inferred_protocol)
             if connector_compiler is None:
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
                     intent_id=intent.intent_id,
-                    error="Pendle connector compiler is not registered for PT-/YT- token swaps.",
+                    error=f"Connector compiler for inferred protocol '{inferred_protocol}' is not registered.",
                 )
-            return connector_compiler.compile(self._build_compiler_context("pendle", connector_compiler), intent)
+            return connector_compiler.compile(
+                self._build_compiler_context(inferred_protocol, connector_compiler), intent
+            )
 
         return None
-
-    @staticmethod
-    def _has_pendle_token_prefix(intent: SwapIntent) -> bool:
-        """True iff either swap leg is a PT-/YT- token that must route to Pendle."""
-        to_upper = (intent.to_token or "").upper()
-        from_upper = (intent.from_token or "").upper()
-        return to_upper.startswith(("PT-", "YT-")) or from_upper.startswith(("PT-", "YT-"))
 
     def _compile_default_router_swap_body(self, intent: SwapIntent, protocol: str) -> CompilationResult:
         """Compile non-folded default-router swaps such as uniswap_v2/sushiswap/camelot.

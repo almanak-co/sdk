@@ -214,6 +214,23 @@ class VaultToolRegistry:
             return None
         return connector
 
+    def default(self) -> VaultToolCapability:
+        """Return the sole registered vault tool capability.
+
+        This strict fallback is only for framework call sites that have no
+        caller-provided protocol yet. Once a second vault protocol publishes
+        tooling, those callers must route by explicit protocol instead of
+        letting framework code choose.
+        """
+        connector = self._default_connector()
+        if not isinstance(connector, VaultToolCapability):
+            raise VaultToolRegistryError(f"registered vault connector {connector.protocol!r} lacks tool capability")
+        return connector
+
+    def default_protocol(self) -> ProtocolName:
+        """Return the sole registered vault tool protocol."""
+        return self._default_connector().protocol
+
     def all(self) -> tuple[VaultToolConnector, ...]:
         """Return every registered connector in registration order."""
         return tuple(self._connectors.values())
@@ -229,6 +246,16 @@ class VaultToolRegistry:
     def clear(self) -> None:
         """Test helper — clear registrations. NOT used in production paths."""
         self._connectors.clear()
+
+    def _default_connector(self) -> VaultToolConnector:
+        connectors = tuple(self._connectors.values())
+        if not connectors:
+            raise VaultToolRegistryError("no vault tool connector is registered")
+        if len(connectors) > 1:
+            raise VaultToolRegistryError(
+                "multiple vault tool connectors are registered; caller must provide a protocol"
+            )
+        return connectors[0]
 
 
 STRATEGY_VAULT_TOOL_REGISTRY: VaultToolRegistry = VaultToolRegistry()

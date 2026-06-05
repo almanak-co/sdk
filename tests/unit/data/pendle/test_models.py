@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from almanak.framework.data.pendle.models import (
+from almanak.connectors.pendle.models import (
     PendleAsset,
     PendleMarketData,
     PendleSwapQuote,

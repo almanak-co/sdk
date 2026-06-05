@@ -384,6 +384,61 @@ class TestCompileSwapErrorPaths:
 class TestCompileSwapDispatch:
     """Dispatch decisions that route away from the default router swap body."""
 
+    def test_protocol_less_swap_uses_connector_route_inference(self) -> None:
+        """Protocol-less swaps can be claimed by connector-owned route inference."""
+
+        compiler = _make_compiler()
+        sentinel = MagicMock(name="inferred-route-result")
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.compile.return_value = sentinel
+        intent = _make_swap_intent(to_token="PT-mock-25JUN2026")
+
+        with (
+            patch(
+                "almanak.connectors._strategy_swap_route_inference_registry."
+                "SWAP_ROUTE_INFERENCE_REGISTRY.infer_protocol",
+                return_value="mock_yield",
+            ) as mock_infer_protocol,
+            patch(
+                "almanak.framework.intents.compiler.get_connector_compiler",
+                return_value=connector_compiler,
+            ) as mock_get_compiler,
+        ):
+            result = compiler.compile(intent)
+
+        assert result is sentinel
+        mock_infer_protocol.assert_called_once_with(intent)
+        mock_get_compiler.assert_called_once_with("mock_yield")
+        connector_compiler.compile.assert_called_once()
+
+    def test_explicit_swap_protocol_skips_route_inference(self) -> None:
+        """Explicit protocols retain precedence over connector route inference."""
+
+        compiler = _make_compiler()
+        sentinel = MagicMock(name="explicit-route-result")
+        connector_compiler = MagicMock()
+        connector_compiler.context_type = BaseCompilerContext
+        connector_compiler.compile.return_value = sentinel
+        intent = _make_swap_intent(protocol="lifi", to_token="PT-mock-25JUN2026")
+
+        with (
+            patch(
+                "almanak.connectors._strategy_swap_route_inference_registry."
+                "SWAP_ROUTE_INFERENCE_REGISTRY.infer_protocol"
+            ) as mock_infer_protocol,
+            patch(
+                "almanak.framework.intents.compiler.get_connector_compiler",
+                return_value=connector_compiler,
+            ) as mock_get_compiler,
+        ):
+            result = compiler.compile(intent)
+
+        assert result is sentinel
+        mock_infer_protocol.assert_not_called()
+        mock_get_compiler.assert_called_once_with("lifi")
+        connector_compiler.compile.assert_called_once()
+
     def test_lifi_protocol_dispatches_to_connector_compiler(self) -> None:
         """protocol='lifi' routes through the connector compiler registry."""
 

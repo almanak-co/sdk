@@ -24,6 +24,9 @@ from almanak.connectors._connector_descriptor import (
     ConnectorDescriptor,
     ConnectorDescriptorRegistry,
 )
+from almanak.connectors._strategy_base.accounting_treatment_base import (
+    AccountingTreatmentSpec,
+)
 from almanak.connectors._strategy_base.agent_read_registry import (
     AgentReadConnector,
 )
@@ -35,8 +38,14 @@ from almanak.connectors._strategy_base.flash_loan_base import FlashLoanProvider
 from almanak.connectors._strategy_base.gas_estimate_registry import (
     GasEstimateConnector,
 )
+from almanak.connectors._strategy_base.principal_token_market_reader_registry import (
+    PrincipalTokenMarketReadConnector,
+)
 from almanak.connectors._strategy_base.protocol_family_registry import (
     ProtocolFamilySpec,
+)
+from almanak.connectors._strategy_base.protocol_metadata_registry import (
+    ProtocolMetadataConnector,
 )
 from almanak.connectors._strategy_base.receipt_parser_registry import (
     ReceiptParserConnector,
@@ -47,6 +56,9 @@ from almanak.connectors._strategy_base.runner_hook_registry import (
 )
 from almanak.connectors._strategy_base.swap_classification_registry import (
     SwapClassificationSpec,
+)
+from almanak.connectors._strategy_base.swap_route_inference_registry import (
+    SwapRouteInferenceConnector,
 )
 from almanak.connectors._strategy_base.vault_tool_registry import (
     VaultToolConnector,
@@ -331,6 +343,22 @@ EXPECTED_RUNNER_HOOK_PROVIDER_MODULES = {
     "uniswap_v4": "almanak.connectors.uniswap_v4.runner_hooks",
 }
 
+EXPECTED_PROTOCOL_METADATA_MODULES = {
+    "pendle": "almanak.connectors.pendle.metadata_provider",
+}
+
+EXPECTED_PRINCIPAL_TOKEN_MARKET_READER_MODULES = {
+    "pendle": "almanak.connectors.pendle.on_chain_reader_provider",
+}
+
+EXPECTED_SWAP_ROUTE_INFERENCE_MODULES = {
+    "pendle": "almanak.connectors.pendle.swap_route_inference",
+}
+
+EXPECTED_ACCOUNTING_TREATMENT_MODULES = {
+    "pendle": "almanak.connectors.pendle.accounting_spec",
+}
+
 
 @pytest.fixture(autouse=True)
 def _isolate_strategy_connector_registry() -> Iterator[None]:
@@ -528,6 +556,46 @@ def test_connector_rejects_invalid_runner_hook_connector_ref() -> None:
             name="bad_runner_hook_ref",
             kind=ProtocolKind.LP,
             runner_hook_connector=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_invalid_protocol_metadata_ref() -> None:
+    """Invalid protocol-metadata refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.protocol_metadata"):
+        Connector(
+            name="bad_protocol_metadata_ref",
+            kind=ProtocolKind.YIELD_TRADING,
+            protocol_metadata=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_invalid_principal_token_market_reader_ref() -> None:
+    """Invalid principal-token reader refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.principal_token_market_reader"):
+        Connector(
+            name="bad_principal_token_market_reader_ref",
+            kind=ProtocolKind.YIELD_TRADING,
+            principal_token_market_reader=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_invalid_swap_route_inference_ref() -> None:
+    """Invalid swap-route inference refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.swap_route_inference"):
+        Connector(
+            name="bad_swap_route_inference_ref",
+            kind=ProtocolKind.YIELD_TRADING,
+            swap_route_inference=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_invalid_accounting_treatment_ref() -> None:
+    """Invalid accounting-treatment refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.accounting_treatment"):
+        Connector(
+            name="bad_accounting_treatment_ref",
+            kind=ProtocolKind.YIELD_TRADING,
+            accounting_treatment=object(),  # type: ignore[arg-type]
         )
 
 
@@ -958,6 +1026,84 @@ def test_runner_hook_connectors_instantiate_from_descriptors() -> None:
         assert type(connector).__module__ == module
 
 
+def test_protocol_metadata_connectors_instantiate_from_descriptors() -> None:
+    """Migrated protocol-metadata providers are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, tuple[ProtocolMetadataConnector, str]] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_protocol_metadata():
+        assert connector_manifest.protocol_metadata is not None
+        connector = connector_manifest.protocol_metadata.instantiate()
+        connectors[str(connector.protocol)] = (connector, connector_manifest.protocol_metadata.module)
+
+    assert set(EXPECTED_PROTOCOL_METADATA_MODULES) == connectors.keys()
+    for name, module in EXPECTED_PROTOCOL_METADATA_MODULES.items():
+        connector, actual_module = connectors[name]
+
+        assert isinstance(connector, ProtocolMetadataConnector)
+        assert connector.protocol == ProtocolName(name)
+        assert actual_module == module
+        assert type(connector).__module__ == module
+
+
+def test_principal_token_market_readers_instantiate_from_descriptors() -> None:
+    """Migrated principal-token market readers are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, tuple[PrincipalTokenMarketReadConnector, str]] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_principal_token_market_reader():
+        assert connector_manifest.principal_token_market_reader is not None
+        connector = connector_manifest.principal_token_market_reader.instantiate()
+        connectors[str(connector.protocol)] = (connector, connector_manifest.principal_token_market_reader.module)
+
+    assert set(EXPECTED_PRINCIPAL_TOKEN_MARKET_READER_MODULES) == connectors.keys()
+    for name, module in EXPECTED_PRINCIPAL_TOKEN_MARKET_READER_MODULES.items():
+        connector, actual_module = connectors[name]
+
+        assert isinstance(connector, PrincipalTokenMarketReadConnector)
+        assert connector.protocol == ProtocolName(name)
+        assert actual_module == module
+        assert type(connector).__module__ == module
+
+
+def test_swap_route_inference_connectors_instantiate_from_descriptors() -> None:
+    """Migrated swap-route inference providers are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, tuple[SwapRouteInferenceConnector, str]] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_swap_route_inference():
+        assert connector_manifest.swap_route_inference is not None
+        connector = connector_manifest.swap_route_inference.instantiate()
+        connectors[str(connector.protocol)] = (connector, connector_manifest.swap_route_inference.module)
+
+    assert set(EXPECTED_SWAP_ROUTE_INFERENCE_MODULES) == connectors.keys()
+    for name, module in EXPECTED_SWAP_ROUTE_INFERENCE_MODULES.items():
+        connector, actual_module = connectors[name]
+
+        assert isinstance(connector, SwapRouteInferenceConnector)
+        assert connector.protocol == ProtocolName(name)
+        assert actual_module == module
+        assert type(connector).__module__ == module
+
+
+def test_accounting_treatment_specs_load_from_descriptors() -> None:
+    """Migrated accounting-treatment specs are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    specs: dict[str, tuple[AccountingTreatmentSpec, str]] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_accounting_treatment():
+        assert connector_manifest.accounting_treatment is not None
+        spec = connector_manifest.accounting_treatment.load()
+        specs[connector_manifest.name] = (spec, connector_manifest.accounting_treatment.module)
+
+    assert set(EXPECTED_ACCOUNTING_TREATMENT_MODULES) == specs.keys()
+    for name, module in EXPECTED_ACCOUNTING_TREATMENT_MODULES.items():
+        spec, actual_module = specs[name]
+
+        assert isinstance(spec, AccountingTreatmentSpec)
+        assert actual_module == module
+
+
 def test_gateway_connectors_instantiate_from_descriptors() -> None:
     """Migrated gateway providers are published through connectors."""
     CONNECTOR_REGISTRY.clear()
@@ -1164,6 +1310,69 @@ def test_connector_runner_hooks_are_not_hardcoded_in_framework_runner() -> None:
     assert "almanak.connectors.uniswap_v4.gateway_pool_key_client" not in source
     assert "make_sync_pool_key_lookup" not in source
     assert "_build_v4_pool_key_lookup" not in source
+
+
+def test_connector_protocol_metadata_is_not_hardcoded_in_framework_data() -> None:
+    """Framework data paths must not import concrete connector metadata modules."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/framework/data/tokens/resolver.py").read_text()
+
+    assert "almanak.connectors.pendle.sdk" not in source
+
+
+def test_framework_pendle_data_package_is_removed() -> None:
+    """Pendle data implementation must stay connector-owned."""
+    repo_root = Path(__file__).resolve().parents[3]
+
+    assert not (repo_root / "almanak/framework/data/pendle").exists()
+
+
+def test_connector_principal_token_reader_is_not_hardcoded_in_framework_data() -> None:
+    """Framework data and valuation paths must not import concrete Pendle reader modules."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = "\n".join(
+        (repo_root / path).read_text()
+        for path in (
+            "almanak/framework/data/position_health.py",
+            "almanak/framework/valuation/pendle_valuer.py",
+        )
+    )
+
+    assert "almanak.framework.data.pendle.on_chain_reader" not in source
+    assert "almanak.connectors.pendle.on_chain_reader" not in source
+    assert "PendleOnChainReader" not in source
+
+
+def test_connector_swap_route_inference_is_not_hardcoded_in_framework_compiler() -> None:
+    """Framework compiler asks route inference providers instead of naming concrete heuristics."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/framework/intents/compiler.py").read_text()
+
+    for connector_manifest in CONNECTOR_REGISTRY.with_swap_route_inference():
+        assert connector_manifest.swap_route_inference is not None
+        assert connector_manifest.swap_route_inference.module not in source
+        assert connector_manifest.swap_route_inference.attribute not in source
+    assert "_has_pendle_token_prefix" not in source
+    assert 'get_connector_compiler("pendle")' not in source
+
+
+def test_connector_accounting_treatment_is_not_hardcoded_in_framework_registry() -> None:
+    """Framework accounting paths discover connector treatments from manifests."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = "\n".join(
+        (repo_root / path).read_text()
+        for path in (
+            "almanak/connectors/_strategy_base/accounting_treatment_registry.py",
+            "almanak/connectors/_strategy_accounting_treatment_registry.py",
+            "almanak/framework/accounting/processor.py",
+            "almanak/framework/runner/strategy_runner.py",
+        )
+    )
+
+    for connector_manifest in CONNECTOR_REGISTRY.with_accounting_treatment():
+        assert connector_manifest.accounting_treatment is not None
+        assert connector_manifest.accounting_treatment.module not in source
+    assert '"pendle": ("almanak.connectors.pendle.accounting_spec"' not in source
 
 
 def test_connector_modules_use_canonical_connector_name() -> None:

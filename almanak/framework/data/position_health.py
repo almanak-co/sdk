@@ -300,12 +300,20 @@ class PositionHealthProvider:
         days_to_maturity = 0
 
         try:
-            from almanak.framework.data.pendle.on_chain_reader import PendleOnChainReader
+            from almanak.connectors._strategy_principal_token_market_reader_registry import (
+                PRINCIPAL_TOKEN_MARKET_READ_REGISTRY,
+            )
 
             if self._gateway_client is not None:
-                reader = PendleOnChainReader(gateway_client=self._gateway_client, chain=self._chain)
+                reader = PRINCIPAL_TOKEN_MARKET_READ_REGISTRY.build_default_reader(
+                    gateway_client=self._gateway_client,
+                    chain=self._chain,
+                )
             else:
-                reader = PendleOnChainReader(rpc_url=self._rpc_url, chain=self._chain)
+                reader = PRINCIPAL_TOKEN_MARKET_READ_REGISTRY.build_default_reader(
+                    rpc_url=self._rpc_url,
+                    chain=self._chain,
+                )
             implied_apy = reader.get_implied_apy(pendle_market_address)
 
             # Check if market is expired

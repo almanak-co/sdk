@@ -94,6 +94,10 @@ class Connector:
     vault_tool_connector: ImportRef | None = None
     vault_tool_connectors: tuple[ImportRef, ...] = field(default_factory=tuple)
     runner_hook_connector: ImportRef | None = None
+    protocol_metadata: ImportRef | None = None
+    principal_token_market_reader: ImportRef | None = None
+    swap_route_inference: ImportRef | None = None
+    accounting_treatment: ImportRef | None = None
     gateway_connector: ImportRef | None = None
     gateway_connectors: tuple[ImportRef, ...] = field(default_factory=tuple)
     protocol_family: ImportRef | None = None
@@ -127,6 +131,10 @@ class Connector:
         self._validate_agent_read_connectors()
         self._validate_vault_tool_connectors()
         self._validate_runner_hook_connector()
+        self._validate_protocol_metadata()
+        self._validate_principal_token_market_reader()
+        self._validate_swap_route_inference()
+        self._validate_accounting_treatment()
         self._validate_protocol_family()
         self._validate_swap_classification()
         self._validate_contract_roles()
@@ -229,6 +237,37 @@ class Connector:
         if self.runner_hook_connector is not None and not isinstance(self.runner_hook_connector, ImportRef):
             raise ValueError(
                 f"Connector.runner_hook_connector must be None or an ImportRef, got {self.runner_hook_connector!r}"
+            )
+
+    def _validate_protocol_metadata(self) -> None:
+        """Validate the strategy-side protocol-metadata provider import reference."""
+        if self.protocol_metadata is not None and not isinstance(self.protocol_metadata, ImportRef):
+            raise ValueError(
+                f"Connector.protocol_metadata must be None or an ImportRef, got {self.protocol_metadata!r}"
+            )
+
+    def _validate_principal_token_market_reader(self) -> None:
+        """Validate the strategy-side principal-token market reader import reference."""
+        if self.principal_token_market_reader is not None and not isinstance(
+            self.principal_token_market_reader, ImportRef
+        ):
+            raise ValueError(
+                "Connector.principal_token_market_reader must be None or an ImportRef, "
+                f"got {self.principal_token_market_reader!r}"
+            )
+
+    def _validate_swap_route_inference(self) -> None:
+        """Validate the strategy-side swap-route inference import reference."""
+        if self.swap_route_inference is not None and not isinstance(self.swap_route_inference, ImportRef):
+            raise ValueError(
+                f"Connector.swap_route_inference must be None or an ImportRef, got {self.swap_route_inference!r}"
+            )
+
+    def _validate_accounting_treatment(self) -> None:
+        """Validate the strategy-side accounting-treatment spec import reference."""
+        if self.accounting_treatment is not None and not isinstance(self.accounting_treatment, ImportRef):
+            raise ValueError(
+                f"Connector.accounting_treatment must be None or an ImportRef, got {self.accounting_treatment!r}"
             )
 
     def _validate_protocol_family(self) -> None:
@@ -405,6 +444,22 @@ class ConnectorRegistry:
     def with_runner_hooks(self) -> tuple[Connector, ...]:
         """Return connectors that publish strategy-runner hook connectors."""
         return tuple(d for d in self.all() if d.runner_hook_connector is not None)
+
+    def with_protocol_metadata(self) -> tuple[Connector, ...]:
+        """Return connectors that publish protocol metadata providers."""
+        return tuple(d for d in self.all() if d.protocol_metadata is not None)
+
+    def with_principal_token_market_reader(self) -> tuple[Connector, ...]:
+        """Return connectors that publish principal-token market readers."""
+        return tuple(d for d in self.all() if d.principal_token_market_reader is not None)
+
+    def with_swap_route_inference(self) -> tuple[Connector, ...]:
+        """Return connectors that publish swap-route inference providers."""
+        return tuple(d for d in self.all() if d.swap_route_inference is not None)
+
+    def with_accounting_treatment(self) -> tuple[Connector, ...]:
+        """Return connectors that publish accounting-treatment specs."""
+        return tuple(d for d in self.all() if d.accounting_treatment is not None)
 
     def with_protocol_family(self) -> tuple[Connector, ...]:
         """Return connectors that publish protocol-family specs."""

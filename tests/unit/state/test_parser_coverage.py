@@ -180,7 +180,7 @@ def test_parser_class_and_methods_exist(module_path, class_names, method_names):
 # the receipt parser" claim is invalidated and Pendle's TIER-1-CLEAN-WITH-CAVEAT
 # verdict needs revisiting.
 def test_pendle_expiry_eth_call_path_exists():
-    module = importlib.import_module("almanak.framework.data.pendle.on_chain_reader")
+    module = importlib.import_module("almanak.connectors.pendle.on_chain_reader")
     assert hasattr(module, "EXPIRY_SELECTOR"), (
         "audit cites EXPIRY_SELECTOR in pendle/on_chain_reader.py; "
         "constant has been renamed or removed"

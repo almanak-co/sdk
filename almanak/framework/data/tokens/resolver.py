@@ -508,66 +508,66 @@ class TokenResolver:
                         chain_addresses[addr_key] = token
 
     def _register_pendle_tokens(self) -> None:
-        """Auto-register Pendle PT/YT tokens from the connector's static mappings.
+        """Auto-register Pendle PT/YT tokens from connector-owned metadata.
 
         This avoids requiring every Pendle strategy to manually call
         register_token() for PT/YT tokens (VIB-2536).  Tokens are indexed
         by symbol (uppercased) and address so both resolve paths work.
         """
         try:
-            from almanak.connectors.pendle.sdk import PT_TOKEN_INFO, YT_TOKEN_INFO
+            from almanak.connectors._strategy_protocol_metadata_registry import (
+                PROTOCOL_METADATA_REGISTRY,
+            )
         except ImportError:
-            return  # Pendle connector not installed — nothing to register
+            return
 
-        for token_map in (PT_TOKEN_INFO, YT_TOKEN_INFO):
-            for chain, tokens in token_map.items():
-                chain_lower = chain.lower()
-                seen_addresses: set[str] = set()
-                for name, (address, decimals) in tokens.items():
-                    addr_key = _normalize_address_for_chain(address, chain_lower)
-                    if addr_key in seen_addresses:
-                        continue  # Skip case-variant duplicates
-                    seen_addresses.add(addr_key)
+        seen_by_chain: dict[str, set[str]] = {}
+        for metadata in PROTOCOL_METADATA_REGISTRY.synthetic_tokens():
+            chain = metadata.chain
+            chain_lower = chain.lower()
+            addr_key = _normalize_address_for_chain(metadata.address, chain_lower)
+            seen_addresses = seen_by_chain.setdefault(chain_lower, set())
+            if addr_key in seen_addresses:
+                continue  # Skip case-variant duplicates
+            seen_addresses.add(addr_key)
 
-                    token = Token(
-                        symbol=name,
-                        name=name,
-                        decimals=decimals,
-                        addresses={chain: address},
-                    )
-                    symbol_upper = name.upper()
+            token = Token(
+                symbol=metadata.symbol,
+                name=metadata.symbol,
+                decimals=metadata.decimals,
+                addresses={chain_lower: metadata.address},
+            )
+            symbol_upper = metadata.symbol.upper()
 
-                    # Respect first-write-wins: if tokens.json (loaded
-                    # in ``_build_static_indices``) already registered
-                    # this (chain, symbol) or (chain, address), keep the
-                    # JSON entry as the source of truth. Pendle's in-
-                    # memory mappings are useful for tokens the JSON
-                    # doesn't know about, but must never silently
-                    # shadow a curated entry.
-                    chain_symbols = self._static_registry.setdefault(chain_lower, {})
-                    if symbol_upper not in chain_symbols:
-                        chain_symbols[symbol_upper] = token
-                    elif chain_symbols[symbol_upper] is not token:
-                        logger.debug(
-                            "pendle_registry_symbol_collision chain=%s symbol=%s kept=%s dropped_pendle=%s",
-                            chain_lower,
-                            symbol_upper,
-                            chain_symbols[symbol_upper].get_address(chain_lower),
-                            address,
-                        )
+            # Respect first-write-wins: if tokens.json (loaded in
+            # ``_build_static_indices``) already registered this (chain,
+            # symbol) or (chain, address), keep the JSON entry as the source
+            # of truth. Connector metadata is useful for tokens the JSON
+            # doesn't know about, but must never silently shadow a curated
+            # entry.
+            chain_symbols = self._static_registry.setdefault(chain_lower, {})
+            if symbol_upper not in chain_symbols:
+                chain_symbols[symbol_upper] = token
+            elif chain_symbols[symbol_upper] is not token:
+                logger.debug(
+                    "pendle_registry_symbol_collision chain=%s symbol=%s kept=%s dropped_pendle=%s",
+                    chain_lower,
+                    symbol_upper,
+                    chain_symbols[symbol_upper].get_address(chain_lower),
+                    metadata.address,
+                )
 
-                    chain_addresses = self._static_address_index.setdefault(chain_lower, {})
-                    if addr_key not in chain_addresses:
-                        chain_addresses[addr_key] = token
-                    elif chain_addresses[addr_key] is not token:
-                        logger.warning(
-                            "pendle_registry_address_collision chain=%s address=%s "
-                            "kept_symbol=%s dropped_pendle_symbol=%s",
-                            chain_lower,
-                            addr_key,
-                            chain_addresses[addr_key].symbol,
-                            name,
-                        )
+            chain_addresses = self._static_address_index.setdefault(chain_lower, {})
+            if addr_key not in chain_addresses:
+                chain_addresses[addr_key] = token
+            elif chain_addresses[addr_key] is not token:
+                logger.warning(
+                    "pendle_registry_address_collision chain=%s address=%s kept_symbol=%s dropped_pendle_symbol=%s",
+                    chain_lower,
+                    addr_key,
+                    chain_addresses[addr_key].symbol,
+                    metadata.symbol,
+                )
 
     def _refresh_canonical_address_cache_entries(self) -> None:
         """Overwrite stale cache rows for address->symbol canonical overrides.

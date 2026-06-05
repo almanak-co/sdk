@@ -511,7 +511,7 @@ def _position_key(
 
 
 #: Connector-published accounting treatment spec resolved by
-#: ``AccountingTreatmentRegistry`` (``_SPEC_LOADERS["pendle"]``).
+#: ``AccountingTreatmentRegistry`` via ``CONNECTOR.accounting_treatment``.
 ACCOUNTING_TREATMENT_SPEC = AccountingTreatmentSpec(
     categorize=_categorize,
     treatments={"pendle_lp": treat_pendle_lp, "pendle_pt": treat_pendle_pt},

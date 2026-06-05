@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 PENDLE_ASSETS_URL = "https://api-v2.pendle.finance/core/v1/assets/all"
 
 # EVM chains supported by Pendle that we currently map to gateway chain names.
-# Kept in sync with ``almanak.framework.data.pendle.api_client.CHAIN_ID_MAP``.
+# Kept in sync with ``almanak.connectors.pendle.api_client.CHAIN_ID_MAP``.
 # Pendle's /assets/all endpoint also returns entries for newer chains (Sonic,
 # Mantle, Berachain, ...); those are skipped during index building because the
 # gateway doesn't yet know how to talk to them.
