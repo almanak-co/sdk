@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from importlib import import_module
 from typing import Any
 
 from almanak.framework.accounting.lending_nav import compute_lending_nav
@@ -145,30 +146,7 @@ def render_lending_section(section: LendingSection, snapshot: object = None) -> 
 
 
 def render_pendle_section(section: Any) -> str:
-    if section.is_empty:
-        return ""
-    lines: list[str] = ["", "Pendle Positions", _LINE]
-    for pos in section.positions:
-        status = "REDEEMED" if pos.is_redeemed else "ACTIVE"
-        lines.append(f"  {pos.pt_token} [{pos.protocol} / {pos.chain}] [{status}]")
-        lines.append(f"    Market:        {pos.market_id[:16]}…")
-        if pos.maturity_timestamp:
-            lines.append(f"    Maturity:      {pos.maturity_timestamp.date()}")
-        if pos.days_to_maturity is not None:
-            lines.append(f"    Days to mat.:  {pos.days_to_maturity}")
-        if pos.pt_amount is not None:
-            lines.append(f"    PT amount:     {pos.pt_amount:.4f}")
-        if pos.pt_price is not None:
-            lines.append(f"    PT price:      {pos.pt_price:.4f} (underlying)")
-        if pos.implied_apr_pct_at_entry is not None:
-            lines.append(f"    APR at entry:  {_pct(pos.implied_apr_pct_at_entry)}")
-        if pos.implied_apr_pct_latest is not None and pos.implied_apr_pct_latest != pos.implied_apr_pct_at_entry:
-            lines.append(f"    APR latest:    {_pct(pos.implied_apr_pct_latest)}")
-        if pos.realized_yield_usd != 0:
-            lines.append(f"    Realized yld:  {_m(pos.realized_yield_usd)}")
-        lines.append(f"    Events:        {pos.event_count}")
-        lines.append("")
-    return "\n".join(lines)
+    return import_module("almanak.connectors.pendle.reporting").render_pendle_section(section)
 
 
 def render_data_quality_section(section: DataQualitySection) -> str:

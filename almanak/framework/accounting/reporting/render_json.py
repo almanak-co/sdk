@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from importlib import import_module
 from typing import Any
 
 from .data_quality import DataQualitySection
@@ -72,27 +73,7 @@ def lending_section_to_dict(section: LendingSection) -> dict[str, Any]:
 
 
 def pendle_section_to_dict(section: Any) -> dict[str, Any]:
-    return {
-        "positions": [
-            {
-                "position_key": p.position_key,
-                "market_id": p.market_id,
-                "pt_token": p.pt_token,
-                "protocol": p.protocol,
-                "chain": p.chain,
-                "is_redeemed": p.is_redeemed,
-                "pt_amount": _m(p.pt_amount),
-                "pt_price": _m(p.pt_price),
-                "implied_apr_pct_at_entry": _m(p.implied_apr_pct_at_entry),
-                "implied_apr_pct_latest": _m(p.implied_apr_pct_latest),
-                "days_to_maturity": p.days_to_maturity,
-                "maturity_timestamp": p.maturity_timestamp.isoformat() if p.maturity_timestamp else None,
-                "realized_yield_usd": str(p.realized_yield_usd),
-                "event_count": p.event_count,
-            }
-            for p in section.positions
-        ]
-    }
+    return import_module("almanak.connectors.pendle.reporting").pendle_section_to_dict(section)
 
 
 def data_quality_to_dict(section: DataQualitySection) -> dict[str, Any]:

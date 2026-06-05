@@ -488,10 +488,7 @@ def test_connector_registry_rejects_duplicate_order_bearing_refs(
     registry = ConnectorRegistry()
     kwargs_for_name = connector_kwargs
     assert callable(kwargs_for_name)
-    connectors = {
-        name: Connector(name=name, **kwargs_for_name(name))
-        for name in ("alpha", "beta")
-    }
+    connectors = {name: Connector(name=name, **kwargs_for_name(name)) for name in ("alpha", "beta")}
 
     monkeypatch.setattr(
         connector_descriptor_module.pkgutil,
@@ -1445,17 +1442,28 @@ def test_connector_accounting_sections_are_not_hardcoded_in_strat_pnl() -> None:
     assert "acct_data.pendle_events" not in source
 
 
-def test_connector_accounting_sections_do_not_require_pendle_renderer_imports() -> None:
-    """Central render helpers keep compatibility functions without importing Pendle section classes."""
+def test_connector_accounting_sections_are_owned_by_connector_modules() -> None:
+    """Framework Pendle reporting compatibility wrappers do not own connector section logic."""
     repo_root = Path(__file__).resolve().parents[3]
 
     reporting_init_source = (repo_root / "almanak/framework/accounting/reporting/__init__.py").read_text()
+    pendle_report_source = (repo_root / "almanak/framework/accounting/reporting/pendle_report.py").read_text()
     render_text_source = (repo_root / "almanak/framework/accounting/reporting/render_text.py").read_text()
     render_json_source = (repo_root / "almanak/framework/accounting/reporting/render_json.py").read_text()
+    connector_source = (repo_root / "almanak/connectors/pendle/reporting.py").read_text()
 
     assert "from .pendle_report import" not in reporting_init_source
     assert "from .pendle_report import" not in render_text_source
     assert "from .pendle_report import" not in render_json_source
+    assert "PendleAccountingEvent" not in pendle_report_source
+    assert "PendleEventType" not in pendle_report_source
+    assert "class PendlePositionSummary" not in pendle_report_source
+    assert "class PendleSection" not in pendle_report_source
+
+    assert "PendleAccountingEvent" in connector_source
+    assert "PendleEventType" in connector_source
+    assert "class PendlePositionSummary" in connector_source
+    assert "class PendleSection" in connector_source
 
 
 def test_connector_modules_use_canonical_connector_name() -> None:

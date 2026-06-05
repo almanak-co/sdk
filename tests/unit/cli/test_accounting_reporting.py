@@ -10,6 +10,9 @@ import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from almanak.connectors.pendle.reporting import (
+    build_pendle_report,
+)
 from almanak.framework.accounting.models import (
     AccountingConfidence,
     AccountingIdentity,
@@ -31,9 +34,6 @@ from almanak.framework.accounting.reporting.loader import (
     _detect_strategy_classes,
 )
 from almanak.framework.accounting.reporting.lp_report import build_lp_report
-from almanak.framework.accounting.reporting.pendle_report import (
-    build_pendle_report,
-)
 from almanak.framework.accounting.reporting.render_json import (
     data_quality_to_dict,
     lending_section_to_dict,

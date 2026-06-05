@@ -157,7 +157,7 @@ class PendleOnChainReader:
             # Direct/web3 mode (legacy)
             from web3 import Web3
 
-            self.web3 = Web3(Web3.HTTPProvider(rpc_url))
+            self.web3 = Web3(Web3.HTTPProvider(rpc_url))  # vib-2986-exempt: gateway-internal fallback
             self.router_static = self.web3.eth.contract(
                 address=self.web3.to_checksum_address(self.router_static_address),
                 abi=ROUTER_STATIC_ABI,

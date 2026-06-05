@@ -19,6 +19,10 @@ import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from almanak.connectors.pendle.reporting import (
+    PendlePositionSummary,
+    PendleSection,
+)
 from almanak.framework.accounting.reporting.data_quality import (
     DataQualityIssue,
     DataQualitySection,
@@ -30,10 +34,6 @@ from almanak.framework.accounting.reporting.lending_report import (
 from almanak.framework.accounting.reporting.lp_report import (
     LPPositionSummary,
     LPSection,
-)
-from almanak.framework.accounting.reporting.pendle_report import (
-    PendlePositionSummary,
-    PendleSection,
 )
 from almanak.framework.accounting.reporting.render_json import (
     data_quality_to_dict,
@@ -312,9 +312,7 @@ class TestPendleSectionToDict:
 
     def test_output_is_json_serialisable(self):
         ts = datetime(2026, 12, 31, 0, 0, tzinfo=UTC)
-        out = pendle_section_to_dict(
-            PendleSection(positions=[_pendle_pos(maturity_timestamp=ts)])
-        )
+        out = pendle_section_to_dict(PendleSection(positions=[_pendle_pos(maturity_timestamp=ts)]))
         _assert_json_roundtrip(out)
 
 

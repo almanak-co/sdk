@@ -13,6 +13,10 @@ from decimal import Decimal
 
 import pytest
 
+from almanak.connectors.pendle.reporting import (
+    PendlePositionSummary,
+    PendleSection,
+)
 from almanak.framework.accounting.reporting.data_quality import (
     DataQualityIssue,
     DataQualitySection,
@@ -25,10 +29,6 @@ from almanak.framework.accounting.reporting.lp_report import (
     LPPositionSummary,
     LPSection,
 )
-from almanak.framework.accounting.reporting.pendle_report import (
-    PendlePositionSummary,
-    PendleSection,
-)
 from almanak.framework.accounting.reporting.render_text import (
     _hf,
     _m,
@@ -38,7 +38,6 @@ from almanak.framework.accounting.reporting.render_text import (
     render_lp_section,
     render_pendle_section,
 )
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Formatter helpers
