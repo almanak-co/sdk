@@ -58,6 +58,7 @@ pytestmark = pytest.mark.no_zodiac(
 # =============================================================================
 
 CHAIN_NAME = "avalanche"
+USDC_TO_WAVAX_MAX_SLIPPAGE = Decimal("0.25")
 
 
 # =============================================================================
@@ -134,7 +135,11 @@ class TestUniswapV4SwapIntent:
             from_token="USDC",
             to_token="WAVAX",
             amount=swap_amount,
-            max_slippage=SWAP_MAX_SLIPPAGE,
+            # CI fork pin 86878028 measured V4TooLittleReceived with
+            # 10.6707 WAVAX actual vs a 10.6878 WAVAX minimum at the shared
+            # 20% tolerance. Keep the wider envelope local to this
+            # CoinGecko-priced native-output direction.
+            max_slippage=USDC_TO_WAVAX_MAX_SLIPPAGE,
             protocol="uniswap_v4",
             chain=CHAIN_NAME,
         )

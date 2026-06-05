@@ -24,6 +24,10 @@ from almanak.connectors._connector_descriptor import (
     ConnectorDescriptor,
     ConnectorDescriptorRegistry,
 )
+from almanak.connectors._strategy_base.accounting_report_registry import (
+    AccountingReportConnector,
+    AccountingReportSectionCapability,
+)
 from almanak.connectors._strategy_base.accounting_treatment_base import (
     AccountingTreatmentSpec,
 )
@@ -359,6 +363,10 @@ EXPECTED_ACCOUNTING_TREATMENT_MODULES = {
     "pendle": "almanak.connectors.pendle.accounting_spec",
 }
 
+EXPECTED_ACCOUNTING_REPORT_MODULES = {
+    "pendle": "almanak.connectors.pendle.reporting",
+}
+
 
 @pytest.fixture(autouse=True)
 def _isolate_strategy_connector_registry() -> Iterator[None]:
@@ -596,6 +604,16 @@ def test_connector_rejects_invalid_accounting_treatment_ref() -> None:
             name="bad_accounting_treatment_ref",
             kind=ProtocolKind.YIELD_TRADING,
             accounting_treatment=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_invalid_accounting_report_ref() -> None:
+    """Invalid accounting-report refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.accounting_report"):
+        Connector(
+            name="bad_accounting_report_ref",
+            kind=ProtocolKind.YIELD_TRADING,
+            accounting_report=object(),  # type: ignore[arg-type]
         )
 
 
@@ -1104,6 +1122,29 @@ def test_accounting_treatment_specs_load_from_descriptors() -> None:
         assert actual_module == module
 
 
+def test_accounting_report_connectors_instantiate_from_descriptors() -> None:
+    """Migrated accounting-report providers are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, tuple[AccountingReportConnector, str]] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_accounting_report():
+        assert connector_manifest.accounting_report is not None
+        connector = connector_manifest.accounting_report.instantiate()
+        connectors[connector.key] = (connector, connector_manifest.accounting_report.module)
+
+    assert set(EXPECTED_ACCOUNTING_REPORT_MODULES) == connectors.keys()
+    for name, module in EXPECTED_ACCOUNTING_REPORT_MODULES.items():
+        connector, actual_module = connectors[name]
+
+        assert isinstance(connector, AccountingReportConnector)
+        assert connector.key == name
+        assert connector.strategy_class == name
+        assert isinstance(connector, AccountingReportSectionCapability)
+        assert connector.section_key == name
+        assert actual_module == module
+        assert type(connector).__module__ == module
+
+
 def test_gateway_connectors_instantiate_from_descriptors() -> None:
     """Migrated gateway providers are published through connectors."""
     CONNECTOR_REGISTRY.clear()
@@ -1373,6 +1414,48 @@ def test_connector_accounting_treatment_is_not_hardcoded_in_framework_registry()
         assert connector_manifest.accounting_treatment is not None
         assert connector_manifest.accounting_treatment.module not in source
     assert '"pendle": ("almanak.connectors.pendle.accounting_spec"' not in source
+
+
+def test_connector_accounting_report_is_not_hardcoded_in_reporting_loader() -> None:
+    """Framework reporting loader asks connector report providers for connector events."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/framework/accounting/reporting/loader.py").read_text()
+
+    for connector_manifest in CONNECTOR_REGISTRY.with_accounting_report():
+        assert connector_manifest.accounting_report is not None
+        assert connector_manifest.accounting_report.module not in source
+        assert connector_manifest.accounting_report.attribute not in source
+    assert "PendleAccountingEvent" not in source
+    assert "PendleEventType" not in source
+
+
+def test_connector_accounting_sections_are_not_hardcoded_in_strat_pnl() -> None:
+    """The strat-pnl CLI discovers connector report sections through providers."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/framework/cli/strat_pnl.py").read_text()
+
+    for connector_manifest in CONNECTOR_REGISTRY.with_accounting_report():
+        assert connector_manifest.accounting_report is not None
+        assert connector_manifest.accounting_report.module not in source
+        assert connector_manifest.accounting_report.attribute not in source
+
+    assert "build_pendle_report" not in source
+    assert "render_pendle_section" not in source
+    assert "pendle_section_to_dict" not in source
+    assert "acct_data.pendle_events" not in source
+
+
+def test_connector_accounting_sections_do_not_require_pendle_renderer_imports() -> None:
+    """Central render helpers keep compatibility functions without importing Pendle section classes."""
+    repo_root = Path(__file__).resolve().parents[3]
+
+    reporting_init_source = (repo_root / "almanak/framework/accounting/reporting/__init__.py").read_text()
+    render_text_source = (repo_root / "almanak/framework/accounting/reporting/render_text.py").read_text()
+    render_json_source = (repo_root / "almanak/framework/accounting/reporting/render_json.py").read_text()
+
+    assert "from .pendle_report import" not in reporting_init_source
+    assert "from .pendle_report import" not in render_text_source
+    assert "from .pendle_report import" not in render_json_source
 
 
 def test_connector_modules_use_canonical_connector_name() -> None:

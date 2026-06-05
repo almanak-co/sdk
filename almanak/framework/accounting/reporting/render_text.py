@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 
 from almanak.framework.accounting.lending_nav import compute_lending_nav
 
 from .data_quality import DataQualitySection
 from .lending_report import LendingSection
 from .lp_report import LPSection
-from .pendle_report import PendleSection
 
 _MISSING = "—"
 _LINE = "-" * 44
@@ -144,7 +144,7 @@ def render_lending_section(section: LendingSection, snapshot: object = None) -> 
     return "\n".join(lines)
 
 
-def render_pendle_section(section: PendleSection) -> str:
+def render_pendle_section(section: Any) -> str:
     if section.is_empty:
         return ""
     lines: list[str] = ["", "Pendle Positions", _LINE]

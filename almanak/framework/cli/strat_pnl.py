@@ -35,7 +35,6 @@ from almanak.framework.accounting.reporting import (
     build_data_quality,
     build_lending_report,
     build_lp_report,
-    build_pendle_report,
     load_accounting_data,
 )
 from almanak.framework.accounting.reporting.leveraged_lending import (
@@ -46,13 +45,11 @@ from almanak.framework.accounting.reporting.render_json import (
     data_quality_to_dict,
     lending_section_to_dict,
     lp_section_to_dict,
-    pendle_section_to_dict,
 )
 from almanak.framework.accounting.reporting.render_text import (
     render_data_quality_section,
     render_lending_section,
     render_lp_section,
-    render_pendle_section,
 )
 from almanak.framework.accounting.reporting.swap_class_fallback import (
     detect_stale_post_teardown_snapshot,
@@ -1184,12 +1181,19 @@ def render_text(breakdown: PnLBreakdown) -> str:
 _PNL_JSON_SCHEMA_VERSION = 1
 
 
+def _build_connector_report_sections(acct_data: Any) -> tuple[Any, ...]:
+    """Build connector-owned report sections discovered from connector manifests."""
+    from almanak.connectors._strategy_accounting_report_registry import ACCOUNTING_REPORT_REGISTRY
+
+    return ACCOUNTING_REPORT_REGISTRY.build_sections(acct_data)
+
+
 def _emit_json_output(
     breakdown: PnLBreakdown,
     acct_data: Any,
     lp_section: Any,
     lending_section: Any,
-    pendle_section: Any,
+    connector_sections: tuple[Any, ...],
     dq_section: Any,
 ) -> None:
     """Serialise the strat-pnl payload to JSON and ``click.echo`` it.
@@ -1209,8 +1213,9 @@ def _emit_json_output(
         out["lp"] = lp_section_to_dict(lp_section)
     if not lending_section.is_empty:
         out["lending"] = lending_section_to_dict(lending_section)
-    if not pendle_section.is_empty:
-        out["pendle"] = pendle_section_to_dict(pendle_section)
+    for connector_section in connector_sections:
+        if not connector_section.is_empty:
+            out[connector_section.key] = connector_section.to_json()
     if not dq_section.is_empty:
         out["data_quality"] = data_quality_to_dict(dq_section)
     click.echo(json.dumps(out, indent=2))
@@ -1325,7 +1330,7 @@ def strat_pnl(  # noqa: C901
         and not position_events
         and snapshot is None
         and not acct_data.lending_events
-        and not acct_data.pendle_events
+        and not any(acct_data.connector_events.values())
     ):
         click.secho(
             f"No persisted data found for strategy '{deployment_id}' in {resolved_db}.",
@@ -1381,11 +1386,11 @@ def strat_pnl(  # noqa: C901
     # Strategy-class-specific sections
     lp_section = build_lp_report(acct_data)
     lending_section = build_lending_report(acct_data)
-    pendle_section = build_pendle_report(acct_data)
+    connector_sections = _build_connector_report_sections(acct_data)
     dq_section = build_data_quality(acct_data)
 
     if as_json:
-        _emit_json_output(breakdown, acct_data, lp_section, lending_section, pendle_section, dq_section)
+        _emit_json_output(breakdown, acct_data, lp_section, lending_section, connector_sections, dq_section)
         return
 
     # Text output
@@ -1400,7 +1405,7 @@ def strat_pnl(  # noqa: C901
             [
                 render_lp_section(lp_section),
                 render_lending_section(lending_section, snapshot=acct_data.snapshot),
-                render_pendle_section(pendle_section),
+                *(connector_section.render_text(acct_data) for connector_section in connector_sections),
                 render_data_quality_section(dq_section),
             ],
         )

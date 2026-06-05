@@ -98,6 +98,7 @@ class Connector:
     principal_token_market_reader: ImportRef | None = None
     swap_route_inference: ImportRef | None = None
     accounting_treatment: ImportRef | None = None
+    accounting_report: ImportRef | None = None
     gateway_connector: ImportRef | None = None
     gateway_connectors: tuple[ImportRef, ...] = field(default_factory=tuple)
     protocol_family: ImportRef | None = None
@@ -135,6 +136,7 @@ class Connector:
         self._validate_principal_token_market_reader()
         self._validate_swap_route_inference()
         self._validate_accounting_treatment()
+        self._validate_accounting_report()
         self._validate_protocol_family()
         self._validate_swap_classification()
         self._validate_contract_roles()
@@ -268,6 +270,13 @@ class Connector:
         if self.accounting_treatment is not None and not isinstance(self.accounting_treatment, ImportRef):
             raise ValueError(
                 f"Connector.accounting_treatment must be None or an ImportRef, got {self.accounting_treatment!r}"
+            )
+
+    def _validate_accounting_report(self) -> None:
+        """Validate the strategy-side accounting-report provider import reference."""
+        if self.accounting_report is not None and not isinstance(self.accounting_report, ImportRef):
+            raise ValueError(
+                f"Connector.accounting_report must be None or an ImportRef, got {self.accounting_report!r}"
             )
 
     def _validate_protocol_family(self) -> None:
@@ -460,6 +469,10 @@ class ConnectorRegistry:
     def with_accounting_treatment(self) -> tuple[Connector, ...]:
         """Return connectors that publish accounting-treatment specs."""
         return tuple(d for d in self.all() if d.accounting_treatment is not None)
+
+    def with_accounting_report(self) -> tuple[Connector, ...]:
+        """Return connectors that publish accounting-report providers."""
+        return tuple(d for d in self.all() if d.accounting_report is not None)
 
     def with_protocol_family(self) -> tuple[Connector, ...]:
         """Return connectors that publish protocol-family specs."""

@@ -20,8 +20,6 @@ from almanak.framework.accounting.models import (
     AccountingIdentity,
     LendingAccountingEvent,
     LendingEventType,
-    PendleAccountingEvent,
-    PendleEventType,
 )
 
 
@@ -34,7 +32,6 @@ class StrategyClass(StrEnum):
 
 
 _LENDING_TYPES: frozenset[str] = frozenset(e.value for e in LendingEventType)
-_PENDLE_TYPES: frozenset[str] = frozenset(e.value for e in PendleEventType)
 
 
 @dataclass
@@ -48,13 +45,16 @@ class AccountingData:
     snapshot: Any  # PortfolioSnapshot | None
 
     lending_events: list[LendingAccountingEvent] = field(default_factory=list)
-    pendle_events: list[PendleAccountingEvent] = field(default_factory=list)
+    connector_events: dict[str, list[Any]] = field(default_factory=dict)
+    # Compatibility surface for the current Pendle report builder. New connector
+    # reporting code should consume connector_events by provider key instead.
+    pendle_events: list[Any] = field(default_factory=list)
     # Raw dicts for events where confidence == UNAVAILABLE
     unavailable_records: list[dict] = field(default_factory=list)
     # Count of rows that failed payload deserialization (schema mismatch, etc.)
     parse_errors: int = 0
 
-    strategy_classes: frozenset[StrategyClass] = field(default_factory=frozenset)
+    strategy_classes: frozenset[StrategyClass | str] = field(default_factory=frozenset)
 
     # VIB-4907 / F4: recent portfolio snapshots ordered oldest-first within
     # the loaded window.  ``snapshot`` (above) is always the latest of these
@@ -64,6 +64,13 @@ class AccountingData:
     # headline PnL on the SWAP-class fallback pattern.  Empty list when no
     # snapshots exist.
     recent_snapshots: list[Any] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Mirror legacy Pendle events into the generic connector-event bucket."""
+        if "pendle" in self.connector_events:
+            self.pendle_events = self.connector_events["pendle"]
+        elif self.pendle_events:
+            self.connector_events["pendle"] = self.pendle_events
 
     @property
     def has_lending(self) -> bool:
@@ -95,9 +102,11 @@ def _parse_identity(row: dict) -> AccountingIdentity:
 
 def _deserialize_events(
     raw_events: list[dict],
-) -> tuple[list[LendingAccountingEvent], list[PendleAccountingEvent], list[dict], int]:
+) -> tuple[list[LendingAccountingEvent], dict[str, list[Any]], list[dict], int]:
+    from almanak.connectors._strategy_accounting_report_registry import ACCOUNTING_REPORT_REGISTRY
+
     lending: list[LendingAccountingEvent] = []
-    pendle: list[PendleAccountingEvent] = []
+    connector_events: dict[str, list[Any]] = {}
     unavailable: list[dict] = []
     parse_errors = 0
 
@@ -114,26 +123,44 @@ def _deserialize_events(
             identity = _parse_identity(row)
             if event_type in _LENDING_TYPES:
                 lending.append(LendingAccountingEvent.from_payload_json(identity, payload))
-            elif event_type in _PENDLE_TYPES:
-                pendle.append(PendleAccountingEvent.from_payload_json(identity, payload))
+                continue
+            connector_event = ACCOUNTING_REPORT_REGISTRY.deserialize_event(event_type, identity, payload)
+            if connector_event is not None:
+                key, event = connector_event
+                connector_events.setdefault(key, []).append(event)
         except Exception as exc:
             logger.debug("Failed to deserialize accounting row id=%s event_type=%s: %s", row.get("id"), event_type, exc)
             parse_errors += 1
 
-    return lending, pendle, unavailable, parse_errors
+    return lending, connector_events, unavailable, parse_errors
+
+
+def _strategy_class_label(value: str) -> StrategyClass | str:
+    try:
+        return StrategyClass(value)
+    except ValueError:
+        return value
 
 
 def _detect_strategy_classes(
     lending_events: list[LendingAccountingEvent],
-    pendle_events: list[PendleAccountingEvent],
+    pendle_events: list[Any],
     position_events: list[dict],
     ledger_entries: list[Any],
     unavailable_records: list[dict] | None = None,
-) -> frozenset[StrategyClass]:
-    classes: set[StrategyClass] = set()
+    connector_events: dict[str, list[Any]] | None = None,
+) -> frozenset[StrategyClass | str]:
+    from almanak.connectors._strategy_accounting_report_registry import ACCOUNTING_REPORT_REGISTRY
+
+    classes: set[StrategyClass | str] = set()
 
     if lending_events:
         classes.add(StrategyClass.LENDING)
+    for key, events in (connector_events or {}).items():
+        if not events:
+            continue
+        connector = ACCOUNTING_REPORT_REGISTRY.get(key)
+        classes.add(_strategy_class_label(connector.strategy_class if connector is not None else key))
     if pendle_events:
         classes.add(StrategyClass.PENDLE)
 
@@ -143,8 +170,10 @@ def _detect_strategy_classes(
         et = (row.get("event_type") or "").upper()
         if et in _LENDING_TYPES:
             classes.add(StrategyClass.LENDING)
-        elif et in _PENDLE_TYPES:
-            classes.add(StrategyClass.PENDLE)
+            continue
+        connector_class = ACCOUNTING_REPORT_REGISTRY.strategy_class_for_event_type(et)
+        if connector_class is not None:
+            classes.add(_strategy_class_label(connector_class))
 
     for ev in position_events:
         if (ev.get("position_type") or "").upper() == "LP":
@@ -198,10 +227,16 @@ async def load_accounting_data(
     # available alongside.
     snapshot = recent_snapshots[-1] if recent_snapshots else None
 
-    lending_events, pendle_events, unavailable, parse_errors = _deserialize_events(raw_accounting or [])
+    lending_events, connector_events, unavailable, parse_errors = _deserialize_events(raw_accounting or [])
+    pendle_events = connector_events.get("pendle", [])
 
     strategy_classes = _detect_strategy_classes(
-        lending_events, pendle_events, position_events or [], ledger_entries or [], unavailable
+        lending_events,
+        pendle_events,
+        position_events or [],
+        ledger_entries or [],
+        unavailable,
+        connector_events=connector_events,
     )
 
     return AccountingData(
@@ -211,6 +246,7 @@ async def load_accounting_data(
         position_events=position_events or [],
         snapshot=snapshot,
         lending_events=lending_events,
+        connector_events=connector_events,
         pendle_events=pendle_events,
         unavailable_records=unavailable,
         parse_errors=parse_errors,

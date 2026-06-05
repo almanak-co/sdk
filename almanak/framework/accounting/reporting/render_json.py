@@ -8,7 +8,6 @@ from typing import Any
 from .data_quality import DataQualitySection
 from .lending_report import LendingSection
 from .lp_report import LPSection
-from .pendle_report import PendleSection
 
 
 def _m(v: Decimal | None) -> str | None:
@@ -72,7 +71,7 @@ def lending_section_to_dict(section: LendingSection) -> dict[str, Any]:
     }
 
 
-def pendle_section_to_dict(section: PendleSection) -> dict[str, Any]:
+def pendle_section_to_dict(section: Any) -> dict[str, Any]:
     return {
         "positions": [
             {

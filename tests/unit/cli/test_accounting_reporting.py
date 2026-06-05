@@ -10,8 +10,6 @@ import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
-import pytest
-
 from almanak.framework.accounting.models import (
     AccountingConfidence,
     AccountingIdentity,
@@ -21,11 +19,9 @@ from almanak.framework.accounting.models import (
     PendleEventType,
 )
 from almanak.framework.accounting.reporting.data_quality import (
-    DataQualitySection,
     build_data_quality,
 )
 from almanak.framework.accounting.reporting.lending_report import (
-    LendingSection,
     build_lending_report,
 )
 from almanak.framework.accounting.reporting.loader import (
@@ -34,9 +30,8 @@ from almanak.framework.accounting.reporting.loader import (
     _deserialize_events,
     _detect_strategy_classes,
 )
-from almanak.framework.accounting.reporting.lp_report import LPSection, build_lp_report
+from almanak.framework.accounting.reporting.lp_report import build_lp_report
 from almanak.framework.accounting.reporting.pendle_report import (
-    PendleSection,
     build_pendle_report,
 )
 from almanak.framework.accounting.reporting.render_json import (
@@ -172,8 +167,15 @@ def _make_data(
     pendle_events = pendle or []
     pos_evts = position_events or []
     led_entries = ledger_entries or []
+    connector_events = {"pendle": pendle_events} if pendle_events else {}
 
-    classes = _detect_strategy_classes(lending_events, pendle_events, pos_evts, led_entries)
+    classes = _detect_strategy_classes(
+        lending_events,
+        pendle_events,
+        pos_evts,
+        led_entries,
+        connector_events=connector_events,
+    )
     return AccountingData(
         deployment_id=DEPLOYMENT_ID,
         metrics=None,
@@ -181,6 +183,7 @@ def _make_data(
         position_events=pos_evts,
         snapshot=None,
         lending_events=lending_events,
+        connector_events=connector_events,
         pendle_events=pendle_events,
         unavailable_records=unavailable or [],
         strategy_classes=classes,
@@ -217,6 +220,24 @@ def test_detect_mixed():
 def test_detect_unknown_when_empty():
     data = _make_data()
     assert StrategyClass.UNKNOWN in data.strategy_classes
+
+
+def test_accounting_data_prefers_connector_events_for_pendle_alias():
+    legacy_event = _pendle_event(position_key="legacy")
+    connector_event = _pendle_event(position_key="connector")
+
+    data = AccountingData(
+        deployment_id=DEPLOYMENT_ID,
+        metrics=None,
+        ledger_entries=[],
+        position_events=[],
+        snapshot=None,
+        connector_events={"pendle": [connector_event]},
+        pendle_events=[legacy_event],
+    )
+
+    assert data.pendle_events == [connector_event]
+    assert data.connector_events["pendle"] is data.pendle_events
 
 
 # ---------------------------------------------------------------------------
@@ -430,12 +451,41 @@ def test_deserialize_lending_from_raw():
             "position_key": "aave:USDC",
         }
     ]
-    lending, pendle, unavailable, parse_errors = _deserialize_events(raw)
+    lending, connector_events, unavailable, parse_errors = _deserialize_events(raw)
     assert len(lending) == 1
-    assert len(pendle) == 0
+    assert connector_events == {}
     assert len(unavailable) == 0
     assert parse_errors == 0
     assert lending[0].event_type == LendingEventType.SUPPLY
+
+
+def test_deserialize_pendle_from_connector_report_provider():
+    ev = _pendle_event()
+    payload = ev.to_payload_json()
+    raw = [
+        {
+            "id": "evt-pendle-001",
+            "deployment_id": DEPLOYMENT_ID,
+            "cycle_id": "c1",
+            "execution_mode": "live",
+            "timestamp": "2026-04-26T10:00:00",
+            "chain": "arbitrum",
+            "protocol": "pendle",
+            "wallet_address": "0xdeadbeef",
+            "tx_hash": "0xabc",
+            "ledger_entry_id": "led-1",
+            "event_type": PendleEventType.PT_BUY.value,
+            "confidence": AccountingConfidence.HIGH.value,
+            "payload_json": payload,
+            "position_key": "pendle:wstETH",
+        }
+    ]
+    lending, connector_events, unavailable, parse_errors = _deserialize_events(raw)
+    assert len(lending) == 0
+    assert len(connector_events["pendle"]) == 1
+    assert len(unavailable) == 0
+    assert parse_errors == 0
+    assert connector_events["pendle"][0].event_type == PendleEventType.PT_BUY
 
 
 def test_deserialize_unavailable_flagged():
@@ -459,9 +509,10 @@ def test_deserialize_unavailable_flagged():
             "position_key": "aave:USDC",
         }
     ]
-    _lending, _pendle, unavailable, parse_errors = _deserialize_events(raw)
+    _lending, connector_events, unavailable, parse_errors = _deserialize_events(raw)
     assert len(unavailable) == 1
     assert len(_lending) == 0  # UNAVAILABLE must not also be in typed list
+    assert connector_events == {}
     assert parse_errors == 0
 
 
@@ -484,10 +535,10 @@ def test_deserialize_ignores_malformed_payload():
             "position_key": "bad",
         }
     ]
-    lending, pendle, unavailable, parse_errors = _deserialize_events(raw)
+    lending, connector_events, unavailable, parse_errors = _deserialize_events(raw)
     # Malformed payloads are counted but not silently dropped without notice
     assert len(lending) == 0
-    assert len(pendle) == 0
+    assert connector_events == {}
     assert parse_errors == 1
 
 
@@ -636,9 +687,10 @@ def test_unavailable_events_not_in_typed_lists():
             "position_key": "aave:USDC",
         }
     ]
-    lending, pendle, unavailable, parse_errors = _deserialize_events(raw)
+    lending, connector_events, unavailable, parse_errors = _deserialize_events(raw)
     assert len(unavailable) == 1
     assert len(lending) == 0  # must NOT also appear in lending list
+    assert connector_events == {}
     assert parse_errors == 0
 
 
