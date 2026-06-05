@@ -103,6 +103,48 @@ class _PaddedSectionConnector(_EarlySectionConnector):
     section_key: ClassVar[str] = "early "
 
 
+class _TypedSectionConnector(_EarlySectionConnector):
+    key: ClassVar[str] = "typed"
+    event_types: ClassVar[frozenset[str]] = frozenset({"TYPED_SECTION_EVENT"})
+    section_key: ClassVar[str] = "typed"
+    section_type: ClassVar[type[tuple]] = tuple
+
+
+class _ParentSection:
+    pass
+
+
+class _ChildSection(_ParentSection):
+    pass
+
+
+class _ParentSectionConnector(_EarlySectionConnector):
+    key: ClassVar[str] = "parent_section"
+    event_types: ClassVar[frozenset[str]] = frozenset({"PARENT_SECTION_EVENT"})
+    section_key: ClassVar[str] = "parent_section"
+    section_type: ClassVar[type[_ParentSection]] = _ParentSection
+
+
+class _ChildSectionConnector(_EarlySectionConnector):
+    key: ClassVar[str] = "child_section"
+    event_types: ClassVar[frozenset[str]] = frozenset({"CHILD_SECTION_EVENT"})
+    section_key: ClassVar[str] = "child_section"
+    section_type: ClassVar[type[_ChildSection]] = _ChildSection
+
+
+class _DuplicateSectionTypeConnector(_TypedSectionConnector):
+    key: ClassVar[str] = "duplicate_section_type"
+    event_types: ClassVar[frozenset[str]] = frozenset({"DUPLICATE_SECTION_TYPE_EVENT"})
+    section_key: ClassVar[str] = "duplicate_section_type"
+
+
+class _MalformedSectionTypeConnector(_EarlySectionConnector):
+    key: ClassVar[str] = "malformed_section_type"
+    event_types: ClassVar[frozenset[str]] = frozenset({"MALFORMED_SECTION_TYPE_EVENT"})
+    section_key: ClassVar[str] = "malformed_section_type"
+    section_type: ClassVar[object] = "not-a-type"
+
+
 def test_register_rejects_classes() -> None:
     registry = AccountingReportRegistry()
 
@@ -197,6 +239,39 @@ def test_register_rejects_duplicate_report_sections() -> None:
         registry.register(_DuplicateSectionConnector())
 
 
+def test_register_rejects_duplicate_report_section_types() -> None:
+    registry = AccountingReportRegistry()
+    registry.register(_TypedSectionConnector())
+
+    with pytest.raises(AccountingReportRegistryError, match="section type"):
+        registry.register(_DuplicateSectionTypeConnector())
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (_ParentSectionConnector(), _ChildSectionConnector()),
+        (_ChildSectionConnector(), _ParentSectionConnector()),
+    ],
+)
+def test_register_rejects_overlapping_report_section_types(
+    first: AccountingReportConnector,
+    second: AccountingReportConnector,
+) -> None:
+    registry = AccountingReportRegistry()
+    registry.register(first)
+
+    with pytest.raises(AccountingReportRegistryError, match="overlaps"):
+        registry.register(second)
+
+
+def test_register_rejects_malformed_report_section_type() -> None:
+    registry = AccountingReportRegistry()
+
+    with pytest.raises(AccountingReportRegistryError, match="section_type"):
+        registry.register(_MalformedSectionTypeConnector())
+
+
 def test_build_sections_routes_to_ordered_section_providers() -> None:
     registry = AccountingReportRegistry()
     registry.register(_LateSectionConnector())
@@ -209,6 +284,45 @@ def test_build_sections_routes_to_ordered_section_providers() -> None:
     assert sections[0].section == ("early", "payload")
     assert sections[0].render_text("context") == "early:context"
     assert sections[0].to_json() == {"section": "early", "data": "payload"}
+
+
+def test_section_renderer_lookup_routes_by_section_key() -> None:
+    registry = AccountingReportRegistry()
+    connector = _EarlySectionConnector()
+    registry.register(connector)
+
+    assert registry.section_provider("early") is connector
+    assert registry.render_section_text("early", ("early", "payload"), "context") == "early:context"
+    assert registry.section_to_json("early", ("early", "payload")) == {"section": "early", "data": "payload"}
+
+
+def test_section_renderer_lookup_routes_by_section_type() -> None:
+    registry = AccountingReportRegistry()
+    connector = _TypedSectionConnector()
+    registry.register(connector)
+
+    assert registry.section_provider_for(("early", "payload")) is connector
+    assert registry.render_section_text_for(("early", "payload"), "context") == "early:context"
+    assert registry.section_to_json_for(("early", "payload")) == {"section": "early", "data": "payload"}
+
+
+def test_section_renderer_lookup_rejects_unknown_section_key() -> None:
+    registry = AccountingReportRegistry()
+
+    with pytest.raises(AccountingReportRegistryError, match="no accounting report section provider"):
+        registry.render_section_text("missing", object())
+    with pytest.raises(AccountingReportRegistryError, match="no accounting report section provider"):
+        registry.section_to_json("missing", object())
+
+
+def test_section_renderer_lookup_rejects_unknown_section_type() -> None:
+    registry = AccountingReportRegistry()
+    registry.register(_TypedSectionConnector())
+
+    with pytest.raises(AccountingReportRegistryError, match="no accounting report section provider"):
+        registry.render_section_text_for(object())
+    with pytest.raises(AccountingReportRegistryError, match="no accounting report section provider"):
+        registry.section_to_json_for(object())
 
 
 def test_accounting_report_section_treats_none_and_empty_collections_as_empty() -> None:
@@ -278,3 +392,16 @@ def test_pendle_accounting_report_provider_is_boot_registered() -> None:
 
     assert connector is not None
     assert connector.event_types == frozenset(event_type.value for event_type in PendleEventType)
+
+
+def test_boot_registered_pendle_section_type_routes_through_singleton_registry() -> None:
+    from almanak.connectors._strategy_accounting_report_registry import ACCOUNTING_REPORT_REGISTRY
+    from almanak.connectors.pendle.reporting import PendleSection
+
+    provider = ACCOUNTING_REPORT_REGISTRY.get("pendle")
+    section = PendleSection()
+
+    assert provider is not None
+    assert ACCOUNTING_REPORT_REGISTRY.section_provider_for(section) is provider
+    assert ACCOUNTING_REPORT_REGISTRY.render_section_text_for(section) == ""
+    assert ACCOUNTING_REPORT_REGISTRY.section_to_json_for(section) == {"positions": []}

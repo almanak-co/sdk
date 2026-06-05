@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from importlib import import_module
 from typing import Any
 
 from almanak.framework.accounting.lending_nav import compute_lending_nav
@@ -146,7 +145,10 @@ def render_lending_section(section: LendingSection, snapshot: object = None) -> 
 
 
 def render_pendle_section(section: Any) -> str:
-    return import_module("almanak.connectors.pendle.reporting").render_pendle_section(section)
+    """Render a connector-owned Pendle section through the boot-populated registry."""
+    from almanak.connectors._strategy_accounting_report_registry import ACCOUNTING_REPORT_REGISTRY
+
+    return ACCOUNTING_REPORT_REGISTRY.render_section_text_for(section)
 
 
 def render_data_quality_section(section: DataQualitySection) -> str:

@@ -1455,6 +1455,8 @@ def test_connector_accounting_sections_are_owned_by_connector_modules() -> None:
     assert "from .pendle_report import" not in reporting_init_source
     assert "from .pendle_report import" not in render_text_source
     assert "from .pendle_report import" not in render_json_source
+    assert "almanak.connectors.pendle.reporting" not in render_text_source
+    assert "almanak.connectors.pendle.reporting" not in render_json_source
     assert "PendleAccountingEvent" not in pendle_report_source
     assert "PendleEventType" not in pendle_report_source
     assert "class PendlePositionSummary" not in pendle_report_source

@@ -203,6 +203,7 @@ class PendleAccountingReportConnector(
     event_types: ClassVar[frozenset[str]] = frozenset(event_type.value for event_type in PendleEventType)
     section_key: ClassVar[str] = "pendle"
     section_order: ClassVar[int] = 300
+    section_type: ClassVar[type[PendleSection]] = PendleSection
 
     def deserialize_event(self, identity: Any, payload_json: str) -> PendleAccountingEvent:
         return PendleAccountingEvent.from_payload_json(identity, payload_json)

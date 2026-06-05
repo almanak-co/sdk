@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from importlib import import_module
 from typing import Any
 
 from .data_quality import DataQualitySection
@@ -73,7 +72,10 @@ def lending_section_to_dict(section: LendingSection) -> dict[str, Any]:
 
 
 def pendle_section_to_dict(section: Any) -> dict[str, Any]:
-    return import_module("almanak.connectors.pendle.reporting").pendle_section_to_dict(section)
+    """Serialize a connector-owned Pendle section through the boot-populated registry."""
+    from almanak.connectors._strategy_accounting_report_registry import ACCOUNTING_REPORT_REGISTRY
+
+    return ACCOUNTING_REPORT_REGISTRY.section_to_json_for(section)
 
 
 def data_quality_to_dict(section: DataQualitySection) -> dict[str, Any]:

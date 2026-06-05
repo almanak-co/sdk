@@ -92,7 +92,8 @@ class AccountingReportRegistry:
     def __init__(self) -> None:
         self._connectors: dict[str, AccountingReportConnector] = {}
         self._event_type_index: dict[str, AccountingReportConnector] = {}
-        self._section_key_index: dict[str, AccountingReportConnector] = {}
+        self._section_key_index: dict[str, AccountingReportSectionCapability] = {}
+        self._section_type_index: dict[type[Any], AccountingReportSectionCapability] = {}
 
     def get(self, key: str) -> AccountingReportConnector | None:
         """Return the registered provider for ``key``, if any."""
@@ -123,6 +124,8 @@ class AccountingReportRegistry:
             self._event_type_index[event_type] = connector
         if isinstance(connector, AccountingReportSectionCapability):
             self._section_key_index[connector.section_key] = connector
+            for section_type in self._section_types(connector):
+                self._section_type_index[section_type] = connector
 
     def _validate_connector_metadata(self, connector: AccountingReportConnector) -> tuple[str, frozenset[str]]:
         """Validate provider identity and event metadata."""
@@ -189,9 +192,25 @@ class AccountingReportRegistry:
             raise AccountingReportRegistryError(f"connector section_order must be an int, got {section_order!r}")
         section_owner = self._section_key_index.get(section_key)
         if section_owner is not None:
+            owner_label = getattr(section_owner, "key", type(section_owner).__qualname__)
             raise AccountingReportRegistryError(
-                f"accounting report section {section_key!r} already claimed by {section_owner.key!r}; refusing {key!r}"
+                f"accounting report section {section_key!r} already claimed by {owner_label!r}; refusing {key!r}"
             )
+        for section_type in self._section_types(connector):
+            section_type_owner = self._section_type_index.get(section_type)
+            if section_type_owner is not None:
+                owner_label = getattr(section_type_owner, "key", type(section_type_owner).__qualname__)
+                raise AccountingReportRegistryError(
+                    f"accounting report section type {section_type.__qualname__!r} already claimed by "
+                    f"{owner_label!r}; refusing {key!r}"
+                )
+            for existing_type, existing_owner in self._section_type_index.items():
+                if issubclass(section_type, existing_type) or issubclass(existing_type, section_type):
+                    owner_label = getattr(existing_owner, "key", type(existing_owner).__qualname__)
+                    raise AccountingReportRegistryError(
+                        f"accounting report section type {section_type.__qualname__!r} overlaps with "
+                        f"{existing_type.__qualname__!r} claimed by {owner_label!r}; refusing {key!r}"
+                    )
 
     def deserialize_event(self, event_type: str, identity: Any, payload_json: str) -> tuple[str, Any] | None:
         """Deserialize one row through the owning connector, if any."""
@@ -217,6 +236,65 @@ class AccountingReportRegistry:
         """Return registered providers that can build report sections."""
         providers = [c for c in self._connectors.values() if isinstance(c, AccountingReportSectionCapability)]
         return tuple(sorted(providers, key=lambda provider: provider.section_order))
+
+    def section_provider(self, section_key: str) -> AccountingReportSectionCapability | None:
+        """Return the provider that owns ``section_key``, if registered."""
+        return self._section_key_index.get(section_key)
+
+    def section_provider_for(self, section: Any) -> AccountingReportSectionCapability | None:
+        """Return the provider that claims ``section``'s concrete type."""
+        exact_type = type(section)
+        if provider := self._section_type_index.get(exact_type):
+            return provider
+        for section_type, provider in self._section_type_index.items():
+            if isinstance(section, section_type):
+                return provider
+        return None
+
+    def render_section_text(self, section_key: str, section: Any, data: Any = None) -> str:
+        """Render a connector-owned section by registry key."""
+        return self._require_section_provider(section_key).render_text(section, data)
+
+    def render_section_text_for(self, section: Any, data: Any = None) -> str:
+        """Render a connector-owned section by its registered section type."""
+        return self._require_section_provider_for(section).render_text(section, data)
+
+    def section_to_json(self, section_key: str, section: Any) -> dict[str, Any]:
+        """Serialize a connector-owned section by registry key."""
+        return self._require_section_provider(section_key).to_json(section)
+
+    def section_to_json_for(self, section: Any) -> dict[str, Any]:
+        """Serialize a connector-owned section by its registered section type."""
+        return self._require_section_provider_for(section).to_json(section)
+
+    def _require_section_provider(self, section_key: str) -> AccountingReportSectionCapability:
+        """Return the provider for ``section_key`` or raise a registry error."""
+        provider = self.section_provider(section_key)
+        if provider is None:
+            raise AccountingReportRegistryError(f"no accounting report section provider registered for {section_key!r}")
+        return provider
+
+    def _require_section_provider_for(self, section: Any) -> AccountingReportSectionCapability:
+        """Return the provider for ``section`` or raise a registry error."""
+        provider = self.section_provider_for(section)
+        if provider is None:
+            raise AccountingReportRegistryError(
+                f"no accounting report section provider registered for {type(section).__qualname__}"
+            )
+        return provider
+
+    def _section_types(self, connector: AccountingReportSectionCapability) -> tuple[type[Any], ...]:
+        """Return optional concrete section type claims for a provider."""
+        section_type = getattr(connector, "section_type", None)
+        if section_type is None:
+            return ()
+        if isinstance(section_type, type):
+            return (section_type,)
+        if isinstance(section_type, tuple) and all(isinstance(item, type) for item in section_type):
+            return section_type
+        raise AccountingReportRegistryError(
+            f"connector section_type must be a type, tuple[type, ...], or None, got {section_type!r}"
+        )
 
     def build_sections(self, data: Any) -> tuple[AccountingReportSection, ...]:
         """Build every connector-owned accounting report section."""
@@ -245,6 +323,7 @@ class AccountingReportRegistry:
         self._connectors.clear()
         self._event_type_index.clear()
         self._section_key_index.clear()
+        self._section_type_index.clear()
 
 
 ACCOUNTING_REPORT_REGISTRY: AccountingReportRegistry = AccountingReportRegistry()
