@@ -1,7 +1,7 @@
 """Tests for PendleMarketResolver -- dynamic market discovery."""
 
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -9,10 +9,10 @@ from almanak.connectors.pendle.api_client import CHAIN_ID_MAP, PendleAPIClient, 
 from almanak.connectors.pendle.models import PendleMarketData
 from almanak.connectors.pendle.resolver import PendleMarketResolver
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 def _make_market(
     market_address: str = "0xmarket1",
@@ -199,6 +199,7 @@ class TestResolveByMarketAddress:
         market = resolver.resolve_by_market_address("0xnewmarket_not_in_list")
         # Should try API fetch for unknown addresses
         mock_api_client.get_market_data.assert_called_once()
+        assert market is unknown_market
 
 
 # ---------------------------------------------------------------------------

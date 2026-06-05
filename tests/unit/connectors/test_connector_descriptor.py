@@ -1365,6 +1365,22 @@ def test_framework_pendle_data_package_is_removed() -> None:
     assert not (repo_root / "almanak/framework/data/pendle").exists()
 
 
+def test_pendle_data_tests_are_connector_owned() -> None:
+    """Pendle data tests must live with the connector-owned implementation."""
+    repo_root = Path(__file__).resolve().parents[3]
+    old_test_dir = repo_root / "tests/unit/data/pendle"
+    connector_test_dir = repo_root / "tests/unit/connectors/pendle"
+
+    assert not list(old_test_dir.glob("*.py"))
+    for test_name in (
+        "test_api_client.py",
+        "test_models.py",
+        "test_on_chain_reader.py",
+        "test_resolver.py",
+    ):
+        assert (connector_test_dir / test_name).exists()
+
+
 def test_connector_principal_token_reader_is_not_hardcoded_in_framework_data() -> None:
     """Framework PT health paths must not import concrete Pendle reader modules."""
     repo_root = Path(__file__).resolve().parents[3]

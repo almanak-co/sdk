@@ -7,13 +7,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from almanak.connectors.pendle.api_client import (
-    CHAIN_ID_MAP,
-    PENDLE_API_BASE,
     PendleAPIClient,
     PendleAPIError,
 )
 from almanak.connectors.pendle.models import PendleMarketData, PendleSwapQuote
-
 
 # =========================================================================
 # Fixtures
