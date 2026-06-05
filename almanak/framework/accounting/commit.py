@@ -70,8 +70,8 @@ class RegistryRow:
         chain: Chain name (``arbitrum``, ``ethereum``, …).
         primitive: ``Primitive`` enum value (``Primitive.LP``, ``Primitive.PERP``,
             …). Stored as the StrEnum's string value.
-        accounting_category: ``AccountingCategory`` enum value (``LP``,
-            ``PENDLE_LP``, …). Stored as the StrEnum's string value.
+        accounting_category: ``AccountingCategory`` enum value (``LP``, ``PERP``,
+            …). Stored as the StrEnum's string value.
         physical_identity_hash: Receipt-derived stable identity. Hash over
             the per-primitive identity tuple (UniV3: ``(token_id,
             nft_manager_addr, chain)``; GMX V2: ``(market, collateral,

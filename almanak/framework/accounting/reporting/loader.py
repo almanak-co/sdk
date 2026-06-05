@@ -31,7 +31,6 @@ class StrategyClass(StrEnum):
 
 
 _LENDING_TYPES: frozenset[str] = frozenset(e.value for e in LendingEventType)
-_LEGACY_PENDLE_CONNECTOR_KEY = "pendle"
 
 
 @dataclass
@@ -46,9 +45,6 @@ class AccountingData:
 
     lending_events: list[LendingAccountingEvent] = field(default_factory=list)
     connector_events: dict[str, list[Any]] = field(default_factory=dict)
-    # Legacy constructor compatibility. Loader output and report builders consume
-    # connector_events; callers should not add new reads from this field.
-    pendle_events: list[Any] = field(default_factory=list)
     # Raw dicts for events where confidence == UNAVAILABLE
     unavailable_records: list[dict] = field(default_factory=list)
     # Count of rows that failed payload deserialization (schema mismatch, etc.)
@@ -65,13 +61,6 @@ class AccountingData:
     # snapshots exist.
     recent_snapshots: list[Any] = field(default_factory=list)
 
-    def __post_init__(self) -> None:
-        """Mirror legacy Pendle events into the generic connector-event bucket."""
-        if _LEGACY_PENDLE_CONNECTOR_KEY in self.connector_events:
-            self.pendle_events = self.connector_events[_LEGACY_PENDLE_CONNECTOR_KEY]
-        elif self.pendle_events:
-            self.connector_events[_LEGACY_PENDLE_CONNECTOR_KEY] = self.pendle_events
-
     @property
     def has_lending(self) -> bool:
         return self.has_strategy_class(StrategyClass.LENDING)
@@ -79,10 +68,6 @@ class AccountingData:
     def has_strategy_class(self, strategy_class: StrategyClass | str) -> bool:
         """Return whether this data bundle includes a framework or connector class label."""
         return strategy_class in self.strategy_classes
-
-    @property
-    def has_pendle(self) -> bool:
-        return self.has_strategy_class(_LEGACY_PENDLE_CONNECTOR_KEY)
 
     @property
     def has_lp(self) -> bool:

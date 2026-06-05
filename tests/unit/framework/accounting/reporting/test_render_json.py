@@ -1,8 +1,9 @@
 """Tests for ``almanak.framework.accounting.reporting.render_json``.
 
 Pure dict-builders — given a section dataclass, produce a JSON-serialisable
-dict. Tests cover the four ``*_to_dict`` entry points used by
-``cli/strat_pnl.py`` for ``--json`` output.
+dict. Tests cover framework ``*_to_dict`` entry points used by
+``cli/strat_pnl.py`` for ``--json`` output, plus connector-owned Pendle
+serialization kept here with the historical fixtures.
 
 The contract these tests pin:
 
@@ -22,6 +23,7 @@ from decimal import Decimal
 from almanak.connectors.pendle.reporting import (
     PendlePositionSummary,
     PendleSection,
+    pendle_section_to_dict,
 )
 from almanak.framework.accounting.reporting.data_quality import (
     DataQualityIssue,
@@ -39,7 +41,6 @@ from almanak.framework.accounting.reporting.render_json import (
     data_quality_to_dict,
     lending_section_to_dict,
     lp_section_to_dict,
-    pendle_section_to_dict,
 )
 
 

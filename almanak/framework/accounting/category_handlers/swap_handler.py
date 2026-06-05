@@ -8,9 +8,8 @@ FIFO cost basis:
                realized_pnl_usd = amount_in_usd - cost_basis_consumed.
   - token_out: record a new acquisition lot so future disposals can match against it.
 
-Pendle PT swaps are routed to handle_pendle_pt() by the classifier before this
-handler is called.  A belt-and-suspenders guard still returns None if a Pendle
-swap reaches this handler to prevent double-counting.
+Connector-specific swap treatments are routed by ``AccountingProcessor`` before
+this generic handler is called.
 """
 
 from __future__ import annotations
@@ -303,7 +302,6 @@ def handle_swap(
     """Build a SwapAccountingEvent from an outbox + ledger row pair.
 
     All inputs are read from the ledger row fields — no live chain calls.
-    Returns None for Pendle PT swaps (handled by handle_pendle_pt).
 
     The outbox_row provides: wallet_address, position_key.
     The ledger_row provides: all other fields.
@@ -314,20 +312,12 @@ def handle_swap(
 
     Called from AccountingProcessor._dispatch after category routing.
     """
-    protocol = (ledger_row.get("protocol") or "").lower()
-
-    # Belt-and-suspenders Pendle guard — classifier should have routed these to
-    # handle_pendle_pt already.  If one arrives here, return None to avoid
-    # double-counting (PT buy events carry the cost basis for Pendle, not swap lots).
-    if "pendle" in protocol:
-        logger.debug("handle_swap: skipping Pendle swap (protocol=%s) — owned by pendle_pt handler", protocol)
-        return None
-
     # ── Identity fields ──────────────────────────────────────────────────────
     deployment_id = ledger_row.get("deployment_id") or outbox_row.get("deployment_id") or ""
     cycle_id = ledger_row.get("cycle_id") or outbox_row.get("cycle_id") or ""
     execution_mode = ledger_row.get("execution_mode") or ""
     chain = ledger_row.get("chain") or ""
+    protocol = (ledger_row.get("protocol") or "").lower()
     tx_hash = ledger_row.get("tx_hash") or ""
     ledger_entry_id = ledger_row.get("id") or ""
     wallet_address = outbox_row.get("wallet_address") or ""

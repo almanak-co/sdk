@@ -2,8 +2,8 @@
 
 Pure renderers — given a section dataclass, produce a multi-line text block.
 Tests cover empty-section short-circuit, dataclass-field formatting helpers
-(``_m``, ``_pct``, ``_hf``), and the four ``render_*_section`` entry points
-used by ``cli/strat_pnl.py`` / ``cli/ax_render.py`` / ``cli/status_helpers.py``.
+(``_m``, ``_pct``, ``_hf``), framework ``render_*_section`` entry points, and
+the connector-owned Pendle renderer kept here with the historical fixtures.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import pytest
 from almanak.connectors.pendle.reporting import (
     PendlePositionSummary,
     PendleSection,
+    render_pendle_section,
 )
 from almanak.framework.accounting.reporting.data_quality import (
     DataQualityIssue,
@@ -36,7 +37,6 @@ from almanak.framework.accounting.reporting.render_text import (
     render_data_quality_section,
     render_lending_section,
     render_lp_section,
-    render_pendle_section,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────

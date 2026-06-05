@@ -206,6 +206,17 @@ class TestPendleSwapIntent:
 
     @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason=(
+            "#2635: Arbitrum Pendle USDC->PT-wstETH route reverts on the CI "
+            "pinned Anvil fork with ModuleTransactionFailed selector 0xd27b44a9, "
+            "while the WETH->PT-wstETH sibling passes on the same run. This is "
+            "fork-state-specific: latest local forks can xpass, so keep "
+            "strict=False until the CI fork pin has a stable USDC-input path "
+            "(as of 2026-06-05)."
+        ),
+        strict=False,
+    )
     async def test_swap_usdc_to_pt_wsteth_using_intent(
         self,
         web3: Web3,

@@ -352,23 +352,6 @@ class TestHandleLpOpen:
         assert result.pool_address == "0x1111111111111111111111111111111111111111"
         assert result.position_key == "lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111"
 
-    def test_pendle_lp_returns_none(self) -> None:
-        led_id = str(uuid.uuid4())
-        outbox_row = _make_outbox_row(
-            led_id,
-            intent_type="LP_OPEN",
-            position_key="pendle_lp:base:0xwallet:0xmarket",
-        )
-        ledger_row = _make_ledger_row(
-            led_id,
-            intent_type="LP_OPEN",
-            protocol="pendle",
-        )
-
-        result = handle_lp(outbox_row, ledger_row)
-
-        assert result is None, "Pendle LP must return None (handled by pendle_handler)"
-
     def test_non_lp_intent_returns_none(self) -> None:
         led_id = str(uuid.uuid4())
         outbox_row = _make_outbox_row(led_id, intent_type="SWAP")

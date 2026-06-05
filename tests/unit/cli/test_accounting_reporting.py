@@ -12,6 +12,8 @@ from decimal import Decimal
 
 from almanak.connectors.pendle.reporting import (
     build_pendle_report,
+    pendle_section_to_dict,
+    render_pendle_section,
 )
 from almanak.framework.accounting.models import (
     AccountingConfidence,
@@ -38,13 +40,11 @@ from almanak.framework.accounting.reporting.render_json import (
     data_quality_to_dict,
     lending_section_to_dict,
     lp_section_to_dict,
-    pendle_section_to_dict,
 )
 from almanak.framework.accounting.reporting.render_text import (
     render_data_quality_section,
     render_lending_section,
     render_lp_section,
-    render_pendle_section,
 )
 
 DEPLOYMENT_ID = "test:deploy01"
@@ -203,7 +203,6 @@ def test_detect_pendle():
     data = _make_data(pendle=[_pendle_event()])
     assert "pendle" in data.strategy_classes
     assert data.has_strategy_class("pendle")
-    assert data.has_pendle
 
 
 def test_detect_lp():
@@ -221,40 +220,6 @@ def test_detect_mixed():
 def test_detect_unknown_when_empty():
     data = _make_data()
     assert StrategyClass.UNKNOWN in data.strategy_classes
-
-
-def test_accounting_data_prefers_connector_events_for_pendle_alias():
-    legacy_event = _pendle_event(position_key="legacy")
-    connector_event = _pendle_event(position_key="connector")
-    data = AccountingData(
-        deployment_id=DEPLOYMENT_ID,
-        metrics=None,
-        ledger_entries=[],
-        position_events=[],
-        snapshot=None,
-        connector_events={"pendle": [connector_event]},
-        pendle_events=[legacy_event],
-    )
-
-    assert data.pendle_events == [connector_event]
-    assert data.connector_events["pendle"] is data.pendle_events
-
-
-def test_legacy_pendle_events_constructor_mirrors_to_connector_events():
-    event = _pendle_event()
-    data = AccountingData(
-        deployment_id=DEPLOYMENT_ID,
-        metrics=None,
-        ledger_entries=[],
-        position_events=[],
-        snapshot=None,
-        pendle_events=[event],
-        strategy_classes=frozenset({"pendle"}),
-    )
-
-    assert data.connector_events["pendle"] == [event]
-    assert data.pendle_events == [event]
-    assert data.has_pendle
 
 
 # ---------------------------------------------------------------------------

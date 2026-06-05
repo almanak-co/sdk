@@ -2,9 +2,6 @@
 
 Ports logic from lp_accounting.py to work from ledger_row / outbox_row dicts
 rather than live intent / result objects.  No live chain calls.
-
-Pendle LP is handled by pendle_handler.py; this handler skips any intent whose
-protocol contains "pendle".
 """
 
 from __future__ import annotations
@@ -1050,7 +1047,6 @@ def handle_lp(
 
     Returns None for:
     - Non-LP intent types
-    - Pendle LP intents (handled by pendle_handler.py)
     - Intents where both position_key and market_id are absent (cannot identify pool)
 
     All inputs come from the dicts — no live chain calls.
@@ -1063,10 +1059,6 @@ def handle_lp(
 
     intent_type_str = (ledger_row.get("intent_type") or "").upper()
     if intent_type_str not in _LP_OPEN_CLOSE:
-        return None
-
-    protocol = (ledger_row.get("protocol") or "").lower()
-    if "pendle" in protocol:
         return None
 
     event_type = _INTENT_TO_EVENT_TYPE.get(intent_type_str)
@@ -1087,6 +1079,7 @@ def handle_lp(
     timestamp = _parse_lp_timestamp(ledger_row.get("timestamp"))
     token0, token1 = _resolve_lp_tokens(ledger_row, position_key)
     chain = ledger_row.get("chain") or ""
+    protocol = (ledger_row.get("protocol") or "").lower()
 
     amount0, amount1, fees0, fees1, assumed_decimals = _resolve_lp_amounts(
         extracted=extracted,

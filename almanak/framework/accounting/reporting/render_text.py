@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any
 
 from almanak.framework.accounting.lending_nav import compute_lending_nav
 
@@ -142,13 +141,6 @@ def render_lending_section(section: LendingSection, snapshot: object = None) -> 
         lines.append(f"  Net unrealized:      {_m_signed(nav.net_unrealized_carry_usd)}")
 
     return "\n".join(lines)
-
-
-def render_pendle_section(section: Any) -> str:
-    """Render a connector-owned Pendle section through the boot-populated registry."""
-    from almanak.connectors._strategy_accounting_report_registry import ACCOUNTING_REPORT_REGISTRY
-
-    return ACCOUNTING_REPORT_REGISTRY.render_section_text_for(section)
 
 
 def render_data_quality_section(section: DataQualitySection) -> str:

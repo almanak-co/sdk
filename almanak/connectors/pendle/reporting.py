@@ -85,8 +85,6 @@ def _pendle_events_from_data(data: Any) -> list[PendleAccountingEvent]:
     """Read Pendle events from connector-owned data, with legacy mirror fallback."""
     connector_events = getattr(data, "connector_events", {}) or {}
     events = connector_events.get("pendle")
-    if events is None:
-        events = getattr(data, "pendle_events", [])
     return list(events or [])
 
 

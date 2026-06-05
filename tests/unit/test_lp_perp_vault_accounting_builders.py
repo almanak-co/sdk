@@ -65,13 +65,6 @@ class TestLPAccountingBuilder:
         result = build_lp_accounting_event(intent=intent, result=_make_result(), **_COMMON_KWARGS)
         assert result is None
 
-    def test_returns_none_for_pendle(self) -> None:
-        from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
-
-        intent = _make_intent("LP_OPEN", protocol="pendle")
-        result = build_lp_accounting_event(intent=intent, result=_make_result(), **_COMMON_KWARGS)
-        assert result is None
-
     def test_lp_open_event_built(self) -> None:
         from almanak.framework.accounting.lp_accounting import build_lp_accounting_event
 

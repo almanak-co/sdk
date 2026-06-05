@@ -1413,6 +1413,21 @@ def test_connector_accounting_treatment_is_not_hardcoded_in_framework_registry()
     assert '"pendle": ("almanak.connectors.pendle.accounting_spec"' not in source
 
 
+def test_connector_accounting_treatment_is_not_hardcoded_in_generic_handlers() -> None:
+    """Generic accounting handlers do not carry protocol-name treatment guards."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = "\n".join(
+        (repo_root / path).read_text().lower()
+        for path in (
+            "almanak/framework/accounting/category_handlers/lp_handler.py",
+            "almanak/framework/accounting/category_handlers/swap_handler.py",
+            "almanak/framework/accounting/lp_accounting.py",
+        )
+    )
+
+    assert "pendle" not in source
+
+
 def test_connector_accounting_report_is_not_hardcoded_in_reporting_loader() -> None:
     """Framework reporting loader asks connector report providers for connector events."""
     repo_root = Path(__file__).resolve().parents[3]
@@ -1426,6 +1441,8 @@ def test_connector_accounting_report_is_not_hardcoded_in_reporting_loader() -> N
     assert "PendleEventType" not in source
     assert "StrategyClass.PENDLE" not in source
     assert 'connector_events.get("pendle"' not in source
+    assert "pendle_events" not in source
+    assert "has_pendle" not in source
 
 
 def test_connector_accounting_sections_are_not_hardcoded_in_strat_pnl() -> None:
@@ -1445,24 +1462,25 @@ def test_connector_accounting_sections_are_not_hardcoded_in_strat_pnl() -> None:
 
 
 def test_connector_accounting_sections_are_owned_by_connector_modules() -> None:
-    """Framework Pendle reporting compatibility wrappers do not own connector section logic."""
+    """Framework reporting does not own or re-export connector section logic."""
     repo_root = Path(__file__).resolve().parents[3]
 
     reporting_init_source = (repo_root / "almanak/framework/accounting/reporting/__init__.py").read_text()
-    pendle_report_source = (repo_root / "almanak/framework/accounting/reporting/pendle_report.py").read_text()
+    pendle_report_path = repo_root / "almanak/framework/accounting/reporting/pendle_report.py"
     render_text_source = (repo_root / "almanak/framework/accounting/reporting/render_text.py").read_text()
     render_json_source = (repo_root / "almanak/framework/accounting/reporting/render_json.py").read_text()
     connector_source = (repo_root / "almanak/connectors/pendle/reporting.py").read_text()
 
+    assert not pendle_report_path.exists()
     assert "from .pendle_report import" not in reporting_init_source
     assert "from .pendle_report import" not in render_text_source
     assert "from .pendle_report import" not in render_json_source
     assert "almanak.connectors.pendle.reporting" not in render_text_source
     assert "almanak.connectors.pendle.reporting" not in render_json_source
-    assert "PendleAccountingEvent" not in pendle_report_source
-    assert "PendleEventType" not in pendle_report_source
-    assert "class PendlePositionSummary" not in pendle_report_source
-    assert "class PendleSection" not in pendle_report_source
+    assert "PendleSection" not in reporting_init_source
+    assert "build_pendle_report" not in reporting_init_source
+    assert "render_pendle_section" not in render_text_source
+    assert "pendle_section_to_dict" not in render_json_source
 
     assert "PendleAccountingEvent" in connector_source
     assert "PendleEventType" in connector_source

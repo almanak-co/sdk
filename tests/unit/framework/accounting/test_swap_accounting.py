@@ -4,7 +4,6 @@ Tests:
   - test_handle_swap_basic
   - test_handle_swap_realized_pnl
   - test_handle_swap_no_prior_lot
-  - test_handle_swap_pendle_skip
   - test_handle_swap_missing_prices
   - test_record_swap_acquisition_and_match_disposal
 
@@ -18,8 +17,6 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
-
-import pytest
 
 from almanak.framework.accounting.basis import FIFOBasisStore
 from almanak.framework.accounting.category_handlers.swap_handler import handle_swap
@@ -409,26 +406,6 @@ class TestHandleSwapNoPriorLot:
         assert event.realized_pnl_usd is None
         # But token_out lot WAS recorded
         assert event.cost_basis_recorded is True
-
-
-class TestHandleSwapPendleSkip:
-    """Pendle SWAPs return None (owned by the Pendle PT handler)."""
-
-    def test_handle_swap_pendle_skip(self) -> None:
-        outbox = _make_outbox_row()
-        ledger = _make_ledger_row(protocol="pendle")
-
-        result = handle_swap(outbox, ledger, FIFOBasisStore())
-
-        assert result is None
-
-    def test_handle_swap_pendle_mixed_case(self) -> None:
-        outbox = _make_outbox_row()
-        ledger = _make_ledger_row(protocol="Pendle")
-
-        result = handle_swap(outbox, ledger, None)
-
-        assert result is None
 
 
 class TestHandleSwapMissingPrices:

@@ -1,8 +1,7 @@
-"""Generic LP accounting event builder for non-Pendle LP strategies (VIB-3515).
+"""Generic LP accounting event builder for LP strategies (VIB-3515).
 
 Covers: Aerodrome, Uniswap V3/V4, Curve, Velodrome, TraderJoe V2,
         PancakeSwap V3, SushiSwap V3, and any future LP connectors.
-Pendle LP is handled by pendle_accounting.py; this builder skips Pendle.
 
 Amounts are stored in human-decimal form using token0/token1 decimals from
 the intent where available.  confidence is ESTIMATED when decimals must be
@@ -232,7 +231,7 @@ def _get_pool_address(intent: Any, resolved_pool: str | None = None) -> str:
 
     Handles several pool field formats used across protocols:
     - "0xaddr"              → bare pool address
-    - "TOKEN/0xaddr"        → Pendle-style (Pendle is excluded upstream, but handles gracefully)
+    - "TOKEN/0xaddr"        → single-token LP shorthand
     - "TOKEN0/TOKEN1/0xaddr" → last segment is the pool address
     - "TOKEN0/TOKEN1/stable" → stable/volatile type string — returned as-is for stable pool
       position_key disambiguation
@@ -428,7 +427,6 @@ def build_lp_accounting_event(  # noqa: C901
 
     Returns None for:
     - Non-LP intents
-    - Pendle LP intents (handled by pendle_accounting.py)
     - Intents where the pool address cannot be resolved
 
     Amounts are sourced from result.lp_open_data / result.lp_close_data when
@@ -449,10 +447,7 @@ def build_lp_accounting_event(  # noqa: C901
     if intent_type_str not in _LP_INTENT_TYPES:
         return None
 
-    # Skip Pendle: it has its own builder with Pendle-specific market data.
     protocol = (getattr(intent, "protocol", "") or "").lower()
-    if "pendle" in protocol:
-        return None
 
     pool_address = _get_pool_address(intent, resolved_pool)
     if not pool_address:

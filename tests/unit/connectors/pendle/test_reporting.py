@@ -60,6 +60,7 @@ def test_pendle_reporting_provider_claims_pendle_event_types() -> None:
     assert connector.strategy_class == "pendle"
     assert connector.event_types == frozenset(event_type.value for event_type in PendleEventType)
     assert connector.section_key == "pendle"
+    assert connector.section_type is PendleSection
     assert connector.section_order == 300
 
 
@@ -131,25 +132,3 @@ def test_render_pendle_section_truncates_long_market_id() -> None:
     text = render_pendle_section(section)
 
     assert "    Market:        0x1234567890abcd…\n" in text
-
-
-def test_framework_pendle_report_compat_exports_connector_section() -> None:
-    from almanak.framework.accounting.reporting import PendleSection as PackagePendleSection
-    from almanak.framework.accounting.reporting import build_pendle_report as package_build_pendle_report
-    from almanak.framework.accounting.reporting.pendle_report import PendleSection as CompatPendleSection
-    from almanak.framework.accounting.reporting.pendle_report import build_pendle_report as compat_build_pendle_report
-
-    event = _event()
-    data = AccountingData(
-        deployment_id="dep",
-        metrics=None,
-        ledger_entries=[],
-        position_events=[],
-        snapshot=None,
-        connector_events={"pendle": [event]},
-    )
-
-    assert CompatPendleSection is PendleSection
-    assert PackagePendleSection is PendleSection
-    assert compat_build_pendle_report(data).positions[0].pt_token == "PT-wstETH-25JUN2026"
-    assert package_build_pendle_report(data).positions[0].pt_token == "PT-wstETH-25JUN2026"
