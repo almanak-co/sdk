@@ -6,17 +6,353 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Removed
+## [2.17.0] - 2026-06-05
 
-- Radiant V2 lending connector and its incubating strategies. The protocol
-  retired on-chain, so the connector, its receipt parser, registry entries,
-  the now-dead Aave-V2-fork machinery (`AAVE_V2_FORKS`,
-  `AAVE_V2_DEPOSIT_SELECTOR`), and the `Protocol.RADIANT_V2` enum member have
-  been removed.
+### BREAKING — Removed retired Radiant V2 lending connector
+
+The Radiant V2 connector retired on-chain. All Radiant V2 surfaces are removed:
+the `almanak.framework.connectors.radiant_v2` package, its receipt parser and
+registry entries, its incubating strategies, the now-dead Aave-V2-fork machinery
+(`AAVE_V2_FORKS`, `AAVE_V2_DEPOSIT_SELECTOR`), and the `Protocol.RADIANT_V2`
+enum member.
+
+Strategies that imported any of the above hard-fail with `ImportError` /
+`AttributeError`. Move lending positions to Aave V3, Compound V3, Morpho Blue,
+Silo V2, Euler V2, Benqi, or Spark — all of which now share a single generic
+lending account-state read path (see Added below). (#2557)
+
+### BREAKING — Connector self-containment: deleted duplicate framework copies
+
+As part of the VIB-4851 / VIB-4928 / VIB-4933 / VIB-4989 epic, protocol code
+(intent compilers, address tables, receipt parsers, capability registries,
+synthetic-intent discovery, contract-role tables) now lives under each
+`almanak.framework.connectors.<protocol>/` package instead of central framework
+modules. The legacy central copies have been removed.
+
+Direct imports that now hard-fail:
+- `from almanak.framework.execution import Chain` — the duplicate execution-layer
+  `Chain` enum has been deleted; use `from almanak.framework.chains import Chain`
+  (single source of truth). (#2628)
+- `from almanak.framework.connectors.polymarket import *` framework originals —
+  Polymarket now lives entirely in its connector package; the duplicate framework
+  copies were removed in CONNECTOR_IMPORT 0. (#2618)
+- Legacy router overlay, generic-taxonomy Pendle entries, and central
+  per-protocol dispatch tables (intent compilers, FlashLoanSelector, address
+  tables) are gone — they are now published by each connector's manifest.
+  (#2562, #2600, #2452, #2580, #2579)
+
+If you were importing framework-internal protocol modules, repoint your imports
+at the connector package. Strategies built with the public `IntentStrategy` /
+`MarketSnapshot` surfaces are unaffected.
+
+### BREAKING — Connector-published metadata replaces central registries
+
+The protocol registries that strategy code relied on at import time are now
+published from each connector's manifest. The shape of the public dicts is
+unchanged where it existed, but they are now lazily assembled from connectors
+at boot — code that *patched* or *mutated* the central registries directly is
+broken. Use the connector capability seams instead.
+
+Affected registries: protocol families, swap classifications, contract roles,
+bridge providers, flash-loan providers, gas-estimate hooks, agent-tool / vault
+capabilities, address tables, permission hooks. (#2614, #2617, #2622, #2621,
+#2543, #2537, #2477, #2498, #2456, #2457, #2564, #2559)
+
+### Added
+
+#### New lending connectors and shared lending read path
+
+- **Benqi lending** state reader + receipt-parser extractors (VIB-4967, #2620)
+- **Euler V2 lending** pre/post-state reader (vault/EVC) (VIB-4966, #2615)
+- **Silo V2 lending** pre/post-state reader (bespoke per-silo) (VIB-4965, #2612)
+- **Spark** enabled on the generic lending read path (VIB-4929 PR-3c /
+  VIB-4963, #2575)
+- Lending **account-state read capability** foundation + Aave/Morpho spec
+  (VIB-4929, #2558, #2561, #2563)
+- Compound V3 multi-collateral health via connector-owned gateway read
+  (VIB-4851 #2 PR-2, #2599)
+- Compound V3 account-state migrated onto the generic spec (VIB-4929 PR-3b,
+  #2574)
+- Closed-state leveraged-lending lifecycle PnL (read-side) (VIB-4976, #2592)
+- Lending NAV helper + surface unrealized carry in `strat pnl` (W1-1, W1-2,
+  #2482)
+- Read-side PnL reporting bundle (VIB-4788 / VIB-4792 / VIB-4793, #2506)
+
+#### Connector self-containment epic (VIB-4851 / VIB-4928 / VIB-4929 / VIB-4933 / VIB-4989 / VIB-4837 / VIB-4854–4860)
+
+- **Connector manifests** for gateway and receipt registration (#2614)
+- Connector-self-registering **receipt parsers** via `ReceiptParserCapability`
+  (VIB-4854, #2457)
+- Connector-self-registering **addresses** + coupling-scan CI gate
+  (VIB-4852 / VIB-4853, #2456)
+- Connector-self-registering **bridge / flash-loan provider registries**
+  (VIB-4837, #2543, #2537)
+- **`GasEstimateCapability`** on every connector (VIB-4858 W6, #2477)
+- **AgentReadToolRegistry + VaultToolCapability** — collapse per-protocol
+  dispatch (VIB-4860 W8, #2498)
+- **AddressRegistry** strategy-side + repointed framework consumers (#2527)
+- Connector-owned `supported_chains` (W5, VIB-4857, #2526)
+- Connector-owned `Primitive` via PrimitiveRegistry (#2525)
+- Connector-owned report sections / report module / metadata routing for
+  Pendle and Uniswap runner hooks (#2629, #2632, #2630, #2625, #2633, #2634)
+- Connector-published swap classifications, protocol families, contract roles
+  (batched via #2614 / #2617 / #2621 / #2622)
+- Lagoon vault lifecycle routed through connector capability (#2623)
+- Strategy-side **per-connector migration** foundation + docs sweep (VIB-4835
+  Phases 1/2/3/4, #2441, #2447, #2448, #2430, #2433, #2436, #2437, #2440)
+- Polymarket self-containment — additive PR A (VIB-4989, #2603)
+- Pendle connector-owned accounting seam — additive PR A (VIB-4931, #2598)
+- Connector-published perp read+value — decouple valuation from single-venue
+  GMX (VIB-4930, #2595)
+
+#### Chain registry consolidation (VIB-4801 / VIB-4803 / VIB-4804 / VIB-4855 / VIB-4857)
+
+- **`ChainDescriptor` + `ChainRegistry`** — retire scattered chain dicts
+  (VIB-4801, #2418)
+- Per-chain knobs unified onto `ChainDescriptor` (VIB-4857, #2472)
+- **`ChainFamily` behavior protocol** (EVM + SVM adapters) (VIB-4803, #2424)
+- **SVM signer extraction** (Jupiter, Kamino) (VIB-4804, #2425)
+- Fold native-token + chain-id dicts onto `ChainDescriptor` (VIB-4933, #2547)
+- Fold `config/rpc_defaults.json` into `ChainDescriptor` (#2461)
+- Native-token symbols on `ChainDescriptor` (VIB-4851 A1, #2605)
+- `ChainDescriptor.external_ids` + per-vendor derive helpers (VIB-4851 B1.1,
+  #2611)
+- Backtesting `chain_id→name` derived from registry (VIB-4851 A2, #2608)
+- Price-layer vendor maps derived from registry (VIB-4851 B1.2, #2616)
+- Integration vendor maps derived from registry (VIB-4851 B1.3, #2619)
+- CLI chain choices + config maps derived from registry (VIB-4851 C2 / C,
+  #2624, #2627)
+- Tenderly/Alchemy simulation folded onto `ChainDescriptor` (VIB-4851 Phase 2,
+  #2540)
+- Connector chain-support validator CI gate (VIB-4802, #2422)
+- `chain == "solana"` string compares replaced with `ChainFamily.SOLANA`
+  (VIB-4855, #2464)
+
+#### MarketSnapshot read-side surface
+
+- **Gas observability** on `MarketSnapshot` (T3-A) + stateless calculator
+  wiring (T3-B) (VIB-4844, #2500)
+- **`twap()` / `lwap()`** via gateway DEX services (VIB-4924, VIB-4948, #2551)
+- **`pool_reader` / `liquidity_depth` / `slippage` / `rate_history`** providers
+  wired (T3-C, T3-D, VIB-4845, #2555)
+- Missing `MarketSnapshot.aave_health_factor` accessor restored (#2602)
+- Multi-indicator support in `render_ta_dashboard` (VIB-4897, #2496)
+- Cross-iteration MarketSnapshot price cache + lazy valuation (VIB-4843,
+  #2466)
+
+#### Gateway PoolHistoryService pipeline (VIB-4749–4754, VIB-4728)
+
+- PoolHistoryService **proto + UAT card** (VIB-4749, #2401)
+- PoolHistoryService **skeleton + kill-switch** (VIB-4750, #2402)
+- PoolHistory **validator + shared history-common** (VIB-4751, #2403)
+- **HistoryCache two-tier cache + dedup** (VIB-4752, #2404)
+- Pool history **providers + dispatcher** (VIB-4753, #2460)
+- Pool history **truncation + finality re-promotion** (VIB-4754, #2479)
+- Framework thin gRPC **PoolHistoryReader** + `NullPoolHistoryReader` (POOL-7,
+  VIB-4755, #2486)
+- Pool history **telemetry + acceptance pack + docs + egress coordination**
+  (POOL-8, POOL-9, VIB-4728, #2489)
+
+#### Rate history capability (VIB-4859 W7)
+
+- **`RateHistoryCapability` + `RateHistoryService`** (W7 steps 1-2, #2474)
+- RateMonitor callers migrated to `MarketSnapshot.lending_rate` (VIB-4869,
+  #2492)
+- W7 deferred clusters — DEX volume + deferred-protocol rate capabilities
+  (VIB-4870, #2493)
+
+#### Accounting
+
+- **Wallet-basis pool** for LP_CLOSE value-weighted distribution (VIB-4264,
+  #2550)
+- LP attribution correctness (T8 + T9 + T12) (VIB-4848, #2487)
+- Canonical token-identity helper for read-side inventory matching (W1-4,
+  #2483)
+- Soft-fail decimal-unit guard hardening + `AccountingWriter` wiring (W1-5,
+  #2485)
+- Repair-teardown-LP-close backfill CLI (VIB-4896, #2510)
+- LP registry preflight + teardown watchdog (VIB-4614 / VIB-3951, #2582)
+- Lag-aware gateway retry + pinned lending post-state read (VIB-4985 / ALM-2777
+  / VIB-4964, #2596)
+- L3/L5 lending position keys aligned on `market_id` (VIB-4981, #2591)
+- Layer 5 accounting assertions added for Pendle / Curve / Fluid+Agni LPs and
+  for Euler V2 / Silo V2 / Benqi / Spark lending (VIB-4599 / VIB-4600 /
+  VIB-4602 / VIB-4605 / VIB-4606 / VIB-4607 / VIB-4608, #2572, #2571, #2570,
+  #2569, #2568, #2567, #2565)
+- LP5 Accountant Test cell — data-presence predicate + PASS branch (VIB-4263,
+  #2583)
+- **Accountant-Test ratchet CI gate** (VIB-3836, #2554)
+- Native-gas symmetry in wallet PnL + sub-cent earn display (VIB-4979 /
+  VIB-4980, #2587)
+- Stamp signed `net_pnl_usd` in lending CLOSE attribution (VIB-4977, #2586)
+- Strategy PnL leveraged-lending headline scoped to debt-netted NAV (VIB-4975,
+  #2585)
+- Lending-report interest signed by event side (VIB-4974, #2584)
+- Canonical token identity for swap FIFO basis + 4 receipt parsers (VIB-4487,
+  #2581)
+- Curve / TraderJoe V2 / V4 PoolId stamping (VIB-4634 / VIB-4637 / VIB-4968,
+  #2607, #2610, #2606)
+- Morpho Blue collateral-withdraw measurement (VIB-4635, #2609)
+- Compound V3 collateral-supply amount + REPAY account-state (VIB-4633, #2613)
+
+#### CLI / `ax` / dashboards
+
+- **`almanak ax lending-reserves`** — read-only lending reserve discovery
+  command (VIB-4925, #2544)
+- **Deployment-start banner** at CLI entry (#2423, #2427, #2435)
+- `support_matrix` derived from `GATEWAY_REGISTRY` + connector metadata
+  (VIB-4856, #2469)
+- Roll up protocol fees + gas-efficiency + win-rate range in `strat pnl`
+  (VIB-4846, #2467)
+- Custom dashboards for `buy_the_dip` + `macd_momentum` (#2434)
+- Strategy-scoped PnL/APR in Money Trail dashboard (robust to unmeasured cost
+  basis) (#2576)
+- Multi-indicator TA dashboard support: Bollinger / CCI / Stochastic / ATR /
+  ADX (VIB-4884, #2494)
+- Thread strategy candle timeframe into TA/LP dashboards (VIB-4969, #2573)
+- Populate Current Position balances in TA template (#2566)
+- TA Performance section populated (trades/PnL); fake win-rate removed (#2594)
+
+#### Other
+
+- USD-cost gas cap + chain-scoped override (VIB-4879, #2488)
+- CoinGecko OHLCV provider + provider-chain invariant (VIB-4847, #2468)
+- CoinGecko cooldown circuit-breaker + stablecoin peg fast-path (VIB-4841,
+  #2462)
+- Polygon native price/OHLCV off live POLUSDT (MATIC→POL rebrand) +
+  MATIC→POL bridge contract (#2476)
+- Aerodrome Slipstream support in `ax pool` and `PoolReader` (#2378)
+- Aave V3 pool addresses sourced from canonical connector table (ALM-2794,
+  #2534)
+- Unified SDK deployment identity (#2398)
+- Hosted `GatewayStateManager` bulk-hydrate recent-open cache (VIB-4894,
+  #2499)
 
 ### Changed
 
-- Ratchet `fail_under` coverage floor 75 → 77 (main HEAD ec259bf measured 77.73% in CI)
+- Ratchet coverage `fail_under` floor 72 → 75 → 77 (#2497 and prior commits)
+- Lending position reader is now protocol-agnostic via capability registry
+  (#2533, #2535, #2536)
+- Backtest paper-engine chain coupling routed through `ChainRegistry`;
+  protocol telemetry heuristic dropped (VIB-4861, #2512)
+- Migration backfill no longer carries residual per-protocol coupling
+  (VIB-4864, #2491)
+- `GetStrategyDetails` Postgres fallback for decoupled dashboards (#2593)
+- Banner: env wins over CLI hint; flush stdout to preserve order (#2435)
+- Pendle accounting moved from generic taxonomy onto a connector seam (PR B
+  destructive) (VIB-4931, #2600)
+- Receipt-parser dispatch routed through receipt registry (VIB-4932, #2548)
+- `compiler_constants` no longer carries protocol literals (VIB-4928 PR-3c,
+  #2580)
+- Config-set tables inverted onto connector registries (VIB-4928 PR-3b, #2579)
+- Address tables driven from connector contract-role registry (VIB-4928 PR-3a,
+  #2564)
+- Legacy router overlay retired (VIB-4928 PR-2, #2562)
+- Pendle / Curve / Compound V3 / Morpho Blue / Perp BSC + TraderJoe V2
+  synthetic discovery folded into connectors (#2411–#2415)
+- Aggregator swap / bridge / perp / staking / Solana LP compilers folded into
+  connectors (#2408, #2405, #2397, #2420, #2416)
+- Closed `hyperliquid` / `jupiter_lend` / `joelend` stubs (#2426)
+
+### Deprecated
+
+- Global `*_gwei` gas-cap env vars — superseded by USD-cost gas cap with
+  chain-scoped overrides. The legacy env var still resolves with a deprecation
+  warning. (VIB-4879, #2488)
+
+### Removed
+
+- **Radiant V2** connector + receipt parser + registry entries + incubating
+  strategies + `AAVE_V2_FORKS` / `AAVE_V2_DEPOSIT_SELECTOR` + `Protocol.RADIANT_V2`
+  enum member. (#2557 — see BREAKING)
+- **Execution-layer duplicate `Chain` enum** — use `almanak.framework.chains.Chain`.
+  (#2628 — see BREAKING)
+- **Framework Polymarket originals** (`CONNECTOR_IMPORT 0`) — Polymarket now lives
+  in its connector package. (#2618 — see BREAKING)
+- `audit/` one-off VIB-4062 verification artifact (#2455)
+- Stale `config/` entry from `.syncinclude` (#2522)
+
+### Fixed
+
+- **Survive quiet-pool DEX data gaps** instead of killing the agent (#2528)
+- Forward-fill quiet DEX pools to stop false `DATA_ERROR` (VIB-4875, #2481)
+- Make fork-block-sensitive perp + TJv2 swap tests robust to the weekly
+  fork-pin roll (#2529)
+- **Uniswap V4** correct `PositionManager` address drift + derive from
+  connector (VIB-4874, #2480)
+- Uniswap V4 `PositionManager` / `PoolManager` revert decoding (VIB-2703, #2511)
+- Uniswap V4 PoolKey cache bisection error-family distinction (VIB-4536, #2520)
+- Uniswap V4 surface estimated `sqrtPrice` + cap silent slippage override
+  (VIB-2180, #2508)
+- **Curve NG** intent-test support + drop dead skip guards (VIB-4822 /
+  VIB-4823 / VIB-4824 / VIB-4836, #2445)
+- Curve LP asset-set resolver (VIB-3946, #2577)
+- **TraderJoe V2** teardown LB-pair address + pool auto-detect (VIB-4877 /
+  VIB-3100, #2578)
+- **Token registry** canonical BTCB on BSC (decimals=18) — registry/cache +
+  aster_perps + pancakeswap demos + binance + coingecko maps (#2505)
+- **Teardown** classify execution-failure reasons before slippage escalation
+  (VIB-4532 / VIB-4664 / VIB-4258, #2507)
+- Teardown: invalidate MarketSnapshot cache before each snapshot bracket
+  (VIB-4906, #2516)
+- Teardown: warm + validate price oracle before compile (VIB-4842, #2465)
+- Teardown: emit position_events from Lane B `commit_teardown_intent`
+  (VIB-4895, #2501)
+- Teardown: prevent duplicate `position_events` CLOSE row (VIB-4904, #2504)
+- Teardown: TOKEN/swap teardown ledger + no-position-event boundary (VIB-4790,
+  #2514)
+- **Execution**: clamp simulation-enabled gas estimate to compiler floor
+  (VIB-4915, #2515)
+- **Accounting** sweep: eliminate silent token-decimal fallbacks (VIB-3164,
+  #2556)
+- Accounting: re-stamp MarketSnapshot scope before post-exec snapshot
+  (VIB-4926, #2549)
+- Accounting: surface matched PnL on partial-match SWAPs (VIB-4905, #2518)
+- Accounting: dedup positions by canonical identity (stops confidence
+  poisoning + NAV double-count) (VIB-4838, #2453)
+- Accounting: attribute LP close to its own co-pool open (VIB-4275 / VIB-4301,
+  #2459)
+- Accounting: `wallet_total_value_usd` no longer double-counts TOKEN pseudo-positions
+  (VIB-4909, #2530)
+- Accounting: exclude wallet pseudo-positions from `total_value_usd` (#2541)
+- Accounting: debt-net dashboard NAV for open leveraged-lending positions
+  (VIB-4983, #2590)
+- Accounting: `lp_dual` / `lp_triple` LP sizing clamps to configured
+  allocation (VIB-4917 / VIB-4787, #2532, #2521)
+- **CLI** correct LP_OPEN/CLOSE `_amount_in_usd` raw-wei conversion (W1-3,
+  #2484)
+- CLI: apply hosted `ALMANAK_STRATEGY_CONFIG` env override to loaded strategy
+  config (#2419)
+- **Strat PnL** suppress headline PnL on SWAP-class fallback (VIB-4907, #2513)
+- **buy_the_dip** report live wallet value in teardown positions (VIB-4910,
+  #2509)
+- **Backtest** remove fabricated LP fee-volume fallback; fail loud (VIB-4849,
+  #2463)
+- **Observability** LP_CLOSE log noise + teardown `cycle_id` binding
+  (VIB-4805 / VIB-4807, #2451)
+- Observability: LP_CLOSE durable hydration fallback (VIB-4839, #2490)
+- **Framework source-inspection guard** — denylist → allowlist + L1 closure +
+  L4a/L4b-single closure (VIB-4901 / VIB-4886, #2517, #2502)
+- **Dashboard** resolve `deployment_id` via `mode.py`, drop "deployed"
+  fallback (#2409)
+- Dashboard: multi-indicator TA as one shared-axis subplot figure (VIB-4982,
+  #2589)
+- **Postgres** `PostgresStore.get_position_registry_open_rows` + insert
+  backfill (VIB-4794, #2410)
+- Postgres teardown: align `mark_failed` signature with Protocol (VIB-4338,
+  #2446)
+- Synthetic flash-loan metadata completeness guard + manifest order-collision
+  guard (#2622 follow-up internal hardening)
+- **Intent-tests** unskip VIB-4820 / VIB-4821 / VIB-4825 coverage + Across
+  BRIDGE for Linea (#2449, #2475)
+- **CI**: rename committed accounting fixture off reserved `almanak_state.db`
+  name (#2523)
+- CI: regenerate docs before public-sync rsync so `docs/cli/` exists (#2442)
+- CI: wire `uniswap_v4` sidecar regression coverage (VIB-4543, #2519)
+- Static-tests gateway-isolation allowlist drift (VIB-4817, #2438)
+- Reporting: detect connector strategy classes generically (#2634)
+- Reporting: route legacy connector renderers through registry (#2633)
+- Reporting: discover connector-owned report sections (#2630)
 
 ## [2.16.0] - 2026-05-22
 
