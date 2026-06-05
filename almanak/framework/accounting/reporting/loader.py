@@ -28,10 +28,10 @@ class StrategyClass(StrEnum):
     SWAP = "swap"
     LP = "lp"
     LENDING = "lending"
-    PENDLE = "pendle"
 
 
 _LENDING_TYPES: frozenset[str] = frozenset(e.value for e in LendingEventType)
+_LEGACY_PENDLE_CONNECTOR_KEY = "pendle"
 
 
 @dataclass
@@ -46,8 +46,8 @@ class AccountingData:
 
     lending_events: list[LendingAccountingEvent] = field(default_factory=list)
     connector_events: dict[str, list[Any]] = field(default_factory=dict)
-    # Compatibility surface for the current Pendle report builder. New connector
-    # reporting code should consume connector_events by provider key instead.
+    # Legacy constructor compatibility. Loader output and report builders consume
+    # connector_events; callers should not add new reads from this field.
     pendle_events: list[Any] = field(default_factory=list)
     # Raw dicts for events where confidence == UNAVAILABLE
     unavailable_records: list[dict] = field(default_factory=list)
@@ -67,22 +67,26 @@ class AccountingData:
 
     def __post_init__(self) -> None:
         """Mirror legacy Pendle events into the generic connector-event bucket."""
-        if "pendle" in self.connector_events:
-            self.pendle_events = self.connector_events["pendle"]
+        if _LEGACY_PENDLE_CONNECTOR_KEY in self.connector_events:
+            self.pendle_events = self.connector_events[_LEGACY_PENDLE_CONNECTOR_KEY]
         elif self.pendle_events:
-            self.connector_events["pendle"] = self.pendle_events
+            self.connector_events[_LEGACY_PENDLE_CONNECTOR_KEY] = self.pendle_events
 
     @property
     def has_lending(self) -> bool:
-        return StrategyClass.LENDING in self.strategy_classes
+        return self.has_strategy_class(StrategyClass.LENDING)
+
+    def has_strategy_class(self, strategy_class: StrategyClass | str) -> bool:
+        """Return whether this data bundle includes a framework or connector class label."""
+        return strategy_class in self.strategy_classes
 
     @property
     def has_pendle(self) -> bool:
-        return StrategyClass.PENDLE in self.strategy_classes
+        return self.has_strategy_class(_LEGACY_PENDLE_CONNECTOR_KEY)
 
     @property
     def has_lp(self) -> bool:
-        return StrategyClass.LP in self.strategy_classes
+        return self.has_strategy_class(StrategyClass.LP)
 
 
 def _parse_identity(row: dict) -> AccountingIdentity:
@@ -144,7 +148,6 @@ def _strategy_class_label(value: str) -> StrategyClass | str:
 
 def _detect_strategy_classes(
     lending_events: list[LendingAccountingEvent],
-    pendle_events: list[Any],
     position_events: list[dict],
     ledger_entries: list[Any],
     unavailable_records: list[dict] | None = None,
@@ -161,8 +164,6 @@ def _detect_strategy_classes(
             continue
         connector = ACCOUNTING_REPORT_REGISTRY.get(key)
         classes.add(_strategy_class_label(connector.strategy_class if connector is not None else key))
-    if pendle_events:
-        classes.add(StrategyClass.PENDLE)
 
     # Also check raw event_type markers from UNAVAILABLE/malformed rows —
     # these carry the protocol signal even when payload deserialization fails.
@@ -228,11 +229,9 @@ async def load_accounting_data(
     snapshot = recent_snapshots[-1] if recent_snapshots else None
 
     lending_events, connector_events, unavailable, parse_errors = _deserialize_events(raw_accounting or [])
-    pendle_events = connector_events.get("pendle", [])
 
     strategy_classes = _detect_strategy_classes(
         lending_events,
-        pendle_events,
         position_events or [],
         ledger_entries or [],
         unavailable,
@@ -247,7 +246,6 @@ async def load_accounting_data(
         snapshot=snapshot,
         lending_events=lending_events,
         connector_events=connector_events,
-        pendle_events=pendle_events,
         unavailable_records=unavailable,
         parse_errors=parse_errors,
         strategy_classes=strategy_classes,

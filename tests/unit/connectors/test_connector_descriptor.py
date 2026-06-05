@@ -1424,6 +1424,8 @@ def test_connector_accounting_report_is_not_hardcoded_in_reporting_loader() -> N
         assert connector_manifest.accounting_report.attribute not in source
     assert "PendleAccountingEvent" not in source
     assert "PendleEventType" not in source
+    assert "StrategyClass.PENDLE" not in source
+    assert 'connector_events.get("pendle"' not in source
 
 
 def test_connector_accounting_sections_are_not_hardcoded_in_strat_pnl() -> None:

@@ -133,7 +133,7 @@ def _make_data(
     lending_events: list[LendingAccountingEvent],
     snapshot: PortfolioSnapshot | None = None,
 ) -> AccountingData:
-    classes = _detect_strategy_classes(lending_events, [], [], [])
+    classes = _detect_strategy_classes(lending_events, [], [])
     return AccountingData(
         deployment_id=DEPLOYMENT_ID,
         metrics=None,
@@ -141,7 +141,6 @@ def _make_data(
         position_events=[],
         snapshot=snapshot,
         lending_events=lending_events,
-        pendle_events=[],
         unavailable_records=[],
         strategy_classes=classes,
     )

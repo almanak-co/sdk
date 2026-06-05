@@ -171,7 +171,6 @@ def _make_data(
 
     classes = _detect_strategy_classes(
         lending_events,
-        pendle_events,
         pos_evts,
         led_entries,
         connector_events=connector_events,
@@ -184,7 +183,6 @@ def _make_data(
         snapshot=None,
         lending_events=lending_events,
         connector_events=connector_events,
-        pendle_events=pendle_events,
         unavailable_records=unavailable or [],
         strategy_classes=classes,
     )
@@ -198,11 +196,14 @@ def _make_data(
 def test_detect_lending():
     data = _make_data(lending=[_lending_event()])
     assert StrategyClass.LENDING in data.strategy_classes
+    assert data.has_strategy_class("lending")
 
 
 def test_detect_pendle():
     data = _make_data(pendle=[_pendle_event()])
-    assert StrategyClass.PENDLE in data.strategy_classes
+    assert "pendle" in data.strategy_classes
+    assert data.has_strategy_class("pendle")
+    assert data.has_pendle
 
 
 def test_detect_lp():
@@ -213,7 +214,7 @@ def test_detect_lp():
 def test_detect_mixed():
     data = _make_data(lending=[_lending_event()], pendle=[_pendle_event()])
     assert StrategyClass.LENDING in data.strategy_classes
-    assert StrategyClass.PENDLE in data.strategy_classes
+    assert "pendle" in data.strategy_classes
     assert StrategyClass.UNKNOWN not in data.strategy_classes
 
 
@@ -225,7 +226,6 @@ def test_detect_unknown_when_empty():
 def test_accounting_data_prefers_connector_events_for_pendle_alias():
     legacy_event = _pendle_event(position_key="legacy")
     connector_event = _pendle_event(position_key="connector")
-
     data = AccountingData(
         deployment_id=DEPLOYMENT_ID,
         metrics=None,
@@ -238,6 +238,23 @@ def test_accounting_data_prefers_connector_events_for_pendle_alias():
 
     assert data.pendle_events == [connector_event]
     assert data.connector_events["pendle"] is data.pendle_events
+
+
+def test_legacy_pendle_events_constructor_mirrors_to_connector_events():
+    event = _pendle_event()
+    data = AccountingData(
+        deployment_id=DEPLOYMENT_ID,
+        metrics=None,
+        ledger_entries=[],
+        position_events=[],
+        snapshot=None,
+        pendle_events=[event],
+        strategy_classes=frozenset({"pendle"}),
+    )
+
+    assert data.connector_events["pendle"] == [event]
+    assert data.pendle_events == [event]
+    assert data.has_pendle
 
 
 # ---------------------------------------------------------------------------
