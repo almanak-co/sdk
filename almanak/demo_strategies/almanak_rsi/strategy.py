@@ -4,13 +4,13 @@ ALMANAK RSI Strategy
 ===============================================================================
 
 An RSI-based mean reversion strategy for trading ALMANAK/USDC on Uniswap V3
-on the Base chain. Uses CoinGecko DEX (GeckoTerminal) OHLCV data for 15-minute
-candles to calculate RSI.
+on the Base chain. Uses CoinGecko Onchain OHLCV data for 15-minute candles to
+calculate RSI.
 
 WHAT THIS STRATEGY DOES:
 ------------------------
 1. On first run: Buys ALMANAK with half of initial USDC capital (initialization)
-2. Monitors RSI(14) using 15-minute candles from GeckoTerminal
+2. Monitors RSI(14) using 15-minute candles from CoinGecko Onchain
 3. When RSI < 30 (oversold): Buys ALMANAK with all available USDC
 4. When RSI > 70 (overbought): Sells all ALMANAK for USDC
 5. Enforces 1-hour cooldown between trades
@@ -81,7 +81,7 @@ class AlmanakRSIStrategy(IntentStrategy):
 
     This strategy demonstrates:
     - Trading a custom token by address
-    - Using GeckoTerminal for DEX-native OHLCV data
+    - Using CoinGecko Onchain for DEX-native OHLCV data
     - Initialization phase (buying initial position)
     - Cooldown enforcement between trades
     - Comprehensive metrics tracking

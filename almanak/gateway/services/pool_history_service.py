@@ -356,7 +356,8 @@ _TRUNCATION_REASON_NAMES: tuple[str, ...] = (
 )
 
 # Provider-bound counters. The provider set is OPEN — POOL-5 adds
-# ``the_graph`` / ``defillama`` / ``geckoterminal`` when it lands. POOL-2
+# ``the_graph`` / ``defillama`` / ``geckoterminal`` (legacy key for
+# CoinGecko Onchain) when it lands. POOL-2
 # initializes the keyset empty so health() returns a stable shape even
 # pre-POOL-5.
 _PER_PROVIDER_COUNTER_NAMES: tuple[str, ...] = (
@@ -494,13 +495,14 @@ class PoolHistoryServiceServicer(gateway_pb2_grpc.PoolHistoryServiceServicer):
             thegraph_monthly_budget_max=settings.pool_history_thegraph_monthly_budget_max,
             is_supported_fn=is_supported_pool_pair,
             finality_cutoffs=self._finality_cutoffs,
+            coingecko_api_key=settings.coingecko_api_key,
             counters=_DispatchCounters(
                 on_provider_request=self._bump_provider_request,
                 on_provider_error=self._bump_provider_error,
                 on_provider_fallback=self._bump_provider_fallback,
                 # POOL-8 (VIB-4756): per-provider ``bucket_throttle_waits_ms``.
                 # Fires once per bucket refusal (BOTH the_graph
-                # ``_ProviderError`` primary path AND defillama/geckoterminal
+                # ``_ProviderError`` primary path AND defillama/CoinGecko Onchain
                 # ``_NotAttempted`` fallback paths — the ``_ObservableTokenBucket``
                 # covers both). UAT card §D2.M2.b.3.
                 on_provider_throttle_wait=self._bump_provider_throttle_wait,

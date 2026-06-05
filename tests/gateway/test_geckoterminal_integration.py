@@ -37,10 +37,12 @@ class TestGeckoTerminalGetOHLCV:
     @pytest.fixture
     def service(self):
         """Create an IntegrationServiceServicer with mocked dependencies."""
+        from almanak.gateway.core.settings import GatewaySettings
         from almanak.gateway.services.integration_service import IntegrationServiceServicer
 
         svc = IntegrationServiceServicer.__new__(IntegrationServiceServicer)
         svc._initialized = True
+        svc.settings = GatewaySettings(coingecko_api_key="test-key")
         svc._binance = None
         svc._coingecko = None
         svc._thegraph = None

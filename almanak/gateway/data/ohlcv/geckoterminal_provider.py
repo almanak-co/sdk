@@ -1,6 +1,6 @@
-"""GeckoTerminal OHLCV Data Provider.
+"""CoinGecko Onchain OHLCV Data Provider.
 
-Provides DEX-native OHLCV candlestick data from GeckoTerminal's free API.
+Provides DEX-native OHLCV candlestick data from CoinGecko's Onchain API.
 Primary data source for DeFi pairs where on-chain DEX trade data is preferred
 over CEX reference prices.
 
@@ -8,7 +8,7 @@ Key Features:
     - DEX-native price data from actual on-chain trades
     - Supported timeframes: 1m, 5m, 15m, 1h, 4h, 1d
     - Rate limiting: 30 req/min with built-in token bucket
-    - No API key required
+    - Requires a CoinGecko Pro API key for Onchain endpoints
     - Implements both OHLCVProvider and DataProvider protocols
 
 Example:
@@ -47,19 +47,23 @@ from almanak.framework.data.models import (
     DataEnvelope,
     DataMeta,
 )
+from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
 
 logger = logging.getLogger(__name__)
 
-# GeckoTerminal API base URL
-_API_BASE = "https://api.geckoterminal.com/api/v2"
+# CoinGecko Onchain API base URLs. The Onchain DEX endpoints share the
+# GeckoTerminal backend, but the requested migration is to route through
+# CoinGecko's API host.
+_FREE_API_BASE = "https://api.coingecko.com/api/v3/onchain"
+_PRO_API_BASE = "https://pro-api.coingecko.com/api/v3/onchain"
+_SOURCE = "coingecko_onchain"
 
-# Chain name -> GeckoTerminal network ID mapping
-# Derived from ``ChainDescriptor.external_ids`` per VIB-4851 B1 (canonical-only).
+# Chain name -> CoinGecko Onchain network ID mapping. CoinGecko's onchain
+# network ids are the same ids previously used by GeckoTerminal.
 _CHAIN_TO_NETWORK: Mapping[str, str] = MappingProxyType(vendor_chain_map("geckoterminal"))
 
-# GeckoTerminal timeframe -> API parameter mapping
-# GeckoTerminal uses: day, hour, minute as aggregate param
-# with specific numeric values
+# CoinGecko Onchain timeframe -> API parameter mapping. The endpoint uses day,
+# hour, minute path segments plus an aggregate query param.
 _TIMEFRAME_TO_GT: dict[str, dict[str, str]] = {
     "1m": {"aggregate": "1", "timeframe": "minute"},
     "5m": {"aggregate": "5", "timeframe": "minute"},
@@ -110,11 +114,11 @@ class _TokenBucket:
 
 
 class GeckoTerminalOHLCVProvider:
-    """GeckoTerminal OHLCV data provider for DEX-native candle data.
+    """Legacy-named CoinGecko Onchain OHLCV provider for DEX-native candle data.
 
-    Fetches OHLCV data from GeckoTerminal's public API. This provider
-    returns data based on actual DEX trades, making it the preferred
-    source for DeFi-native pairs.
+    Fetches OHLCV data from CoinGecko's Onchain API. This provider returns
+    data based on actual DEX trades, making it the preferred source for
+    DeFi-native pairs. The class name remains for compatibility.
 
     Implements both the OHLCVProvider and DataProvider protocols.
 
@@ -130,13 +134,16 @@ class GeckoTerminalOHLCVProvider:
         cache_ttl: int = 60,
         request_timeout: float = 10.0,
         rate_limit: int = 30,
+        api_key: str | None = None,
     ) -> None:
-        """Initialize the GeckoTerminal OHLCV provider.
+        """Initialize the CoinGecko Onchain OHLCV provider.
 
         Args:
             cache_ttl: Cache time-to-live in seconds. Default 60.
             request_timeout: HTTP request timeout in seconds. Default 10.
             rate_limit: Maximum requests per minute. Default 30.
+            api_key: CoinGecko Pro API key. Uses the gateway environment
+                fallback when omitted.
         """
         self._cache_ttl = cache_ttl
         self._request_timeout = request_timeout
@@ -144,8 +151,13 @@ class GeckoTerminalOHLCVProvider:
         self._metrics = _HealthMetrics()
         self._session: aiohttp.ClientSession | None = None
         self._cache: dict[str, tuple[list[OHLCVCandle], float]] = {}
+        self._api_key = api_key if api_key is not None else _get_gateway_api_key("COINGECKO_API_KEY")
 
-        logger.info("Initialized GeckoTerminalOHLCVProvider (rate_limit=%d/min)", rate_limit)
+        logger.info(
+            "Initialized CoinGeckoOnchainOHLCVProvider (tier=%s, rate_limit=%d/min)",
+            "pro" if self._api_key else "free",
+            rate_limit,
+        )
 
     # -- DataProvider protocol --------------------------------------------------
 
@@ -270,7 +282,7 @@ class GeckoTerminalOHLCVProvider:
         chain: str = "ethereum",
         include_empty_intervals: bool = False,
     ) -> list[OHLCVCandle]:
-        """Fetch OHLCV candles from GeckoTerminal.
+        """Fetch OHLCV candles from CoinGecko Onchain.
 
         Args:
             token: Token symbol (e.g. "WETH", "ETH").
@@ -280,7 +292,7 @@ class GeckoTerminalOHLCVProvider:
             pool_address: Explicit pool contract address. If provided, fetched
                 directly. Otherwise a search is performed.
             chain: Chain name for network resolution (default "ethereum").
-            include_empty_intervals: When True, ask GeckoTerminal to backfill
+            include_empty_intervals: When True, ask CoinGecko Onchain to backfill
                 no-trade intervals as continuous buckets. Fills *interior* gaps
                 up to the most recent trade; it does NOT advance the newest
                 candle past the last trade (that trailing-edge gap is handled
@@ -309,7 +321,7 @@ class GeckoTerminalOHLCVProvider:
         if not self._rate_limiter.acquire():
             self._metrics.errors += 1
             raise DataSourceUnavailable(
-                source="geckoterminal",
+                source=_SOURCE,
                 reason="Rate limited (30 req/min)",
                 retry_after=2.0,
             )
@@ -319,7 +331,7 @@ class GeckoTerminalOHLCVProvider:
         if network is None:
             self._metrics.errors += 1
             raise DataSourceUnavailable(
-                source="geckoterminal",
+                source=_SOURCE,
                 reason=f"Unsupported chain: {chain}. Supported: {', '.join(sorted(_CHAIN_TO_NETWORK))}",
             )
 
@@ -328,13 +340,23 @@ class GeckoTerminalOHLCVProvider:
         if tf_params is None:
             self._metrics.errors += 1
             raise DataSourceUnavailable(
-                source="geckoterminal",
+                source=_SOURCE,
                 reason=f"Unsupported timeframe: {timeframe}",
+            )
+
+        if not self._api_key:
+            self._metrics.errors += 1
+            raise DataSourceUnavailable(
+                source=_SOURCE,
+                reason=(
+                    "CoinGecko Onchain API requires a valid COINGECKO_API_KEY; "
+                    "set ALMANAK_GATEWAY_COINGECKO_API_KEY on the gateway"
+                ),
             )
 
         # Build URL
         if pool_address:
-            url = f"{_API_BASE}/networks/{network}/pools/{pool_address}/ohlcv/{tf_params['timeframe']}"
+            url = f"{self._api_base}/networks/{network}/pools/{pool_address}/ohlcv/{tf_params['timeframe']}"
         else:
             # Search for pool by token symbol -- use top pool from search
             url = await self._resolve_pool_ohlcv_url(token, quote, network, tf_params["timeframe"])
@@ -357,17 +379,23 @@ class GeckoTerminalOHLCVProvider:
                 if response.status == 429:
                     self._metrics.errors += 1
                     raise DataSourceUnavailable(
-                        source="geckoterminal",
-                        reason="Rate limited by GeckoTerminal API",
+                        source=_SOURCE,
+                        reason="Rate limited by CoinGecko Onchain API",
                         retry_after=60.0,
                     )
 
                 if response.status != 200:
                     error_text = await response.text()
                     self._metrics.errors += 1
+                    reason = f"HTTP {response.status}: {error_text[:200]}"
+                    if response.status == 401:
+                        reason = (
+                            "CoinGecko Onchain API requires a valid COINGECKO_API_KEY; "
+                            "the key may be missing, invalid, or expired; HTTP 401"
+                        )
                     raise DataSourceUnavailable(
-                        source="geckoterminal",
-                        reason=f"HTTP {response.status}: {error_text[:200]}",
+                        source=_SOURCE,
+                        reason=reason,
                     )
 
                 data = await response.json()
@@ -376,7 +404,7 @@ class GeckoTerminalOHLCVProvider:
                 if not candles:
                     self._metrics.errors += 1
                     raise DataSourceUnavailable(
-                        source="geckoterminal",
+                        source=_SOURCE,
                         reason=f"No OHLCV data returned for {token} on {chain}",
                     )
 
@@ -386,7 +414,7 @@ class GeckoTerminalOHLCVProvider:
                 self._metrics.total_latency_ms += latency_ms
 
                 logger.debug(
-                    "Fetched %d GeckoTerminal OHLCV candles for %s/%s (latency: %.1fms)",
+                    "Fetched %d CoinGecko Onchain OHLCV candles for %s/%s (latency: %.1fms)",
                     len(candles),
                     token,
                     chain,
@@ -398,13 +426,13 @@ class GeckoTerminalOHLCVProvider:
         except aiohttp.ClientError as e:
             self._metrics.errors += 1
             raise DataSourceUnavailable(
-                source="geckoterminal",
+                source=_SOURCE,
                 reason=str(e),
             ) from e
         except TimeoutError:
             self._metrics.errors += 1
             raise DataSourceUnavailable(
-                source="geckoterminal",
+                source=_SOURCE,
                 reason=f"Timeout after {self._request_timeout}s",
             ) from None
 
@@ -416,9 +444,20 @@ class GeckoTerminalOHLCVProvider:
             timeout = aiohttp.ClientTimeout(total=self._request_timeout)
             self._session = aiohttp.ClientSession(
                 timeout=timeout,
-                headers={"Accept": "application/json"},
+                headers=self._headers,
             )
         return self._session
+
+    @property
+    def _api_base(self) -> str:
+        return _PRO_API_BASE if self._api_key else _FREE_API_BASE
+
+    @property
+    def _headers(self) -> dict[str, str]:
+        headers = {"Accept": "application/json", "User-Agent": "Almanak-Gateway/1.0"}
+        if self._api_key:
+            headers["x-cg-pro-api-key"] = self._api_key
+        return headers
 
     async def close(self) -> None:
         """Close the HTTP session."""
@@ -433,21 +472,27 @@ class GeckoTerminalOHLCVProvider:
         network: str,
         timeframe_key: str,
     ) -> str:
-        """Search GeckoTerminal for a pool and return the OHLCV URL.
+        """Search CoinGecko Onchain for a pool and return the OHLCV URL.
 
         Uses the search endpoint to find the top pool for the token pair.
         """
         # Try the search endpoint to find pools for this token
-        search_url = f"{_API_BASE}/search/pools"
+        search_url = f"{self._api_base}/search/pools"
         params = {"query": token, "network": network}
 
         try:
             session = await self._get_session()
             async with session.get(search_url, params=params) as response:
                 if response.status != 200:
+                    reason = f"Pool search failed for {token} on {network}: HTTP {response.status}"
+                    if response.status == 401:
+                        reason = (
+                            "CoinGecko Onchain pool search requires a valid COINGECKO_API_KEY; "
+                            "the key may be missing, invalid, or expired; HTTP 401"
+                        )
                     raise DataSourceUnavailable(
-                        source="geckoterminal",
-                        reason=f"Pool search failed for {token} on {network}: HTTP {response.status}",
+                        source=_SOURCE,
+                        reason=reason,
                     )
 
                 data = await response.json()
@@ -455,7 +500,7 @@ class GeckoTerminalOHLCVProvider:
 
                 if not pools:
                     raise DataSourceUnavailable(
-                        source="geckoterminal",
+                        source=_SOURCE,
                         reason=f"No pools found for {token} on {network}",
                     )
 
@@ -469,22 +514,22 @@ class GeckoTerminalOHLCVProvider:
 
                 if not pool_address:
                     raise DataSourceUnavailable(
-                        source="geckoterminal",
+                        source=_SOURCE,
                         reason=f"Could not resolve pool address for {token} on {network}",
                     )
 
-                return f"{_API_BASE}/networks/{network}/pools/{pool_address}/ohlcv/{timeframe_key}"
+                return f"{self._api_base}/networks/{network}/pools/{pool_address}/ohlcv/{timeframe_key}"
 
         except aiohttp.ClientError as e:
             raise DataSourceUnavailable(
-                source="geckoterminal",
+                source=_SOURCE,
                 reason=f"Pool search network error: {e}",
             ) from e
 
     def _parse_ohlcv_response(self, data: dict[str, Any]) -> list[OHLCVCandle]:
-        """Parse GeckoTerminal OHLCV JSON response into OHLCVCandle list.
+        """Parse CoinGecko Onchain OHLCV JSON response into OHLCVCandle list.
 
-        GeckoTerminal response format:
+        CoinGecko Onchain response format:
             {
                 "data": {
                     "attributes": {
@@ -520,7 +565,7 @@ class GeckoTerminalOHLCVProvider:
                 logger.debug("Skipping malformed OHLCV entry: %s", entry)
                 continue
 
-        # GeckoTerminal returns newest first; reverse to ascending
+        # CoinGecko Onchain returns newest first; reverse to ascending
         candles.sort(key=lambda c: c.timestamp)
         return candles
 
@@ -553,7 +598,7 @@ class GeckoTerminalOHLCVProvider:
     def clear_cache(self) -> None:
         """Clear the OHLCV cache."""
         self._cache.clear()
-        logger.info("Cleared GeckoTerminal OHLCV cache")
+        logger.info("Cleared CoinGecko Onchain OHLCV cache")
 
     async def __aenter__(self) -> GeckoTerminalOHLCVProvider:
         """Async context manager entry."""

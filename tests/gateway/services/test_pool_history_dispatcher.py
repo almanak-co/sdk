@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from almanak.gateway.core.settings import GatewaySettings
+from almanak.gateway.data.pool_history.dispatcher import PoolHistoryDispatcher
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.pool_history_service import (
     PoolHistoryServiceServicer,
@@ -73,3 +74,42 @@ def test_dispatcher_is_supported_delegates_to_module_table():
         ("solana", "uniswap_v3"),
     ]:
         assert d.is_supported(chain, protocol) == is_supported_pool_pair(chain, protocol)
+
+
+def test_dispatcher_propagates_coingecko_api_key_to_pool_history_provider():
+    """PoolHistoryDispatcher wires the CoinGecko key into the fallback provider."""
+    dispatcher = PoolHistoryDispatcher(
+        thegraph_api_key=None,
+        thegraph_monthly_budget_max=100000,
+        is_supported_fn=lambda _chain, _protocol: True,
+        coingecko_api_key="test-key",
+    )
+
+    provider = dispatcher._geckoterminal
+    assert "pro-api.coingecko.com" in provider._api_base
+    assert provider._headers["x-cg-pro-api-key"] == "test-key"
+
+
+def test_dispatcher_without_coingecko_api_key_has_no_auth_header():
+    """An omitted CoinGecko key never sends a bogus auth header."""
+    dispatcher = PoolHistoryDispatcher(
+        thegraph_api_key=None,
+        thegraph_monthly_budget_max=100000,
+        is_supported_fn=lambda _chain, _protocol: True,
+        coingecko_api_key=None,
+    )
+
+    provider = dispatcher._geckoterminal
+    assert "api.coingecko.com" in provider._api_base
+    assert "x-cg-pro-api-key" not in provider._headers
+
+
+def test_servicer_propagates_coingecko_api_key_to_dispatcher():
+    """GatewaySettings.coingecko_api_key reaches the pool-history provider."""
+    servicer = PoolHistoryServiceServicer(
+        GatewaySettings(pool_history_enabled=True, coingecko_api_key="settings-key")
+    )
+
+    provider = servicer._dispatcher._geckoterminal
+    assert "pro-api.coingecko.com" in provider._api_base
+    assert provider._headers["x-cg-pro-api-key"] == "settings-key"

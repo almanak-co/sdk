@@ -1,7 +1,7 @@
 """OHLCV providers that perform raw HTTP egress.
 
 These providers belong to the gateway egress layer because they make
-direct outbound HTTP calls to external data APIs (Binance, GeckoTerminal).
+direct outbound HTTP calls to external data APIs (Binance, CoinGecko Onchain).
 The strategy container has no outbound network access except the gateway
 gRPC channel, so these classes must NOT be imported from
 ``almanak/framework/`` or ``strategies/`` code paths.

@@ -56,7 +56,7 @@ Price oracles, balance providers, OHLCV sources, and the indicator/analytics pri
 
 VIB-4727: this reader is a thin gRPC client over the gateway's
 `PoolAnalyticsService`. It owns no HTTP egress; all upstream provider
-calls (DefiLlama / GeckoTerminal) happen inside the gateway sidecar.
+calls (DefiLlama / CoinGecko Onchain) happen inside the gateway sidecar.
 See the [Market Snapshot HOLD contract](market.md#hold-contract-for-data-unavailable-errors)
 for the propagation rule strategy authors must follow.
 
@@ -82,7 +82,7 @@ or HOLD).
 
 VIB-4728: thin gRPC client over the gateway's `PoolHistoryService`. The
 framework reader owns NO HTTP / GraphQL egress — all upstream provider
-calls (The Graph subgraphs → DefiLlama → GeckoTerminal) happen inside
+calls (The Graph subgraphs → DefiLlama → CoinGecko Onchain) happen inside
 the gateway sidecar; the strategy container holds zero API keys.
 Returns a `DataEnvelope[list[PoolSnapshot]]` covering the requested
 window, with chain-aware canonical address normalization,

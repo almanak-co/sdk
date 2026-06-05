@@ -150,7 +150,8 @@ class GatewaySettings(
     # The Graph bills per query against a monthly plan quota. Once the
     # gateway's in-memory monthly query count reaches this max, the TheGraph
     # provider is skipped and the dispatcher falls through to DefiLlama /
-    # GeckoTerminal (UAT card D3.F11 trip). Operators tune this to their
+    # CoinGecko Onchain (legacy geckoterminal provider key; UAT card D3.F11
+    # trip). Operators tune this to their
     # Graph plan via ``ALMANAK_GATEWAY_POOL_HISTORY_THEGRAPH_MONTHLY_BUDGET_MAX``.
     # Non-positive / malformed overrides fall back to the default via
     # ``_validate_pool_history_thegraph_budget`` so a typo can't silently
@@ -163,7 +164,7 @@ class GatewaySettings(
     # and the cache entry is written under the short-TTL ``provisional`` band
     # (see ``_history_cache``). DefiLlama revises daily TVL / volume >24h after
     # the fact (PoolX.md §D4), so its cutoff is longer than The Graph's /
-    # GeckoTerminal's 24h. Operators override via
+    # CoinGecko Onchain's 24h. Operators override via
     # ``ALMANAK_GATEWAY_POOL_HISTORY_FINALITY_CUTOFF_SECONDS_{THE_GRAPH,DEFILLAMA,GECKOTERMINAL}``.
     # Non-positive / malformed overrides fall back to the default via
     # ``_validate_pool_history_finality_cutoff`` so a typo can't silently mark

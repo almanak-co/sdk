@@ -2701,7 +2701,7 @@ class IntegrationServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def GeckoTerminalGetOHLCV(self, request, context):
-        """GeckoTerminal DEX OHLCV endpoint (proxy for deployed strategies without internet)
+        """Legacy-named CoinGecko Onchain DEX OHLCV endpoint
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -3376,7 +3376,7 @@ class PoolAnalyticsServiceStub(object):
 
     VIB-4727. Replaces the in-framework PoolAnalyticsReader (which used direct
     aiohttp egress from inside the strategy container, violating the gateway
-    boundary). HTTP egress to DefiLlama and GeckoTerminal happens server-side
+    boundary). HTTP egress to DefiLlama and CoinGecko Onchain happens server-side
     only; the framework reader is a thin gRPC client.
 
     Error semantics — dual-channel wire shape, v1 behavior:
@@ -3418,7 +3418,7 @@ class PoolAnalyticsServiceServicer(object):
 
     VIB-4727. Replaces the in-framework PoolAnalyticsReader (which used direct
     aiohttp egress from inside the strategy container, violating the gateway
-    boundary). HTTP egress to DefiLlama and GeckoTerminal happens server-side
+    boundary). HTTP egress to DefiLlama and CoinGecko Onchain happens server-side
     only; the framework reader is a thin gRPC client.
 
     Error semantics — dual-channel wire shape, v1 behavior:
@@ -3442,7 +3442,7 @@ class PoolAnalyticsServiceServicer(object):
 
     def GetPoolAnalytics(self, request, context):
         """Get analytics (TVL, volume, fee APR/APY) for a single pool. Tries
-        DefiLlama first, GeckoTerminal as fallback. Returns UNAVAILABLE when
+        DefiLlama first, CoinGecko Onchain as fallback. Returns UNAVAILABLE when
         both providers fail.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -3472,7 +3472,7 @@ class PoolAnalyticsService(object):
 
     VIB-4727. Replaces the in-framework PoolAnalyticsReader (which used direct
     aiohttp egress from inside the strategy container, violating the gateway
-    boundary). HTTP egress to DefiLlama and GeckoTerminal happens server-side
+    boundary). HTTP egress to DefiLlama and CoinGecko Onchain happens server-side
     only; the framework reader is a thin gRPC client.
 
     Error semantics — dual-channel wire shape, v1 behavior:
@@ -3544,9 +3544,9 @@ class PoolHistoryServiceServicer(object):
     def GetPoolHistory(self, request, context):
         """Get a time-series of historical PoolSnapshot rows for a single pool.
         Provider fallback order is dispatcher policy (VIB-4753 / POOL-5):
-        1h / 4h: TheGraph (primary) -> GeckoTerminal (fallback). DefiLlama is
-        SKIPPED (daily-only).
-        1d:      TheGraph (primary) -> DefiLlama (fallback) -> GeckoTerminal
+        1h / 4h: TheGraph (primary) -> CoinGecko Onchain (fallback).
+        DefiLlama is SKIPPED (daily-only).
+        1d:      TheGraph (primary) -> DefiLlama (fallback) -> CoinGecko Onchain
         (last resort).
         Returns UNAVAILABLE when all eligible providers fail or when the pool
         is not found anywhere (NEVER fake-success with snapshots=[]).

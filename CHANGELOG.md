@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Route gateway Onchain DEX pool analytics, pool history, and DEX-native OHLCV
+  through CoinGecko Onchain API instead of GeckoTerminal. CoinGecko Onchain
+  pool endpoints now require `COINGECKO_API_KEY` locally or
+  `ALMANAK_GATEWAY_COINGECKO_API_KEY` in gateway environments.
+
 ## [2.17.0] - 2026-06-05
 
 ### BREAKING — Removed retired Radiant V2 lending connector

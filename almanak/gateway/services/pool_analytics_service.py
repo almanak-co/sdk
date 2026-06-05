@@ -1,7 +1,7 @@
 """PoolAnalyticsService implementation - off-chain pool analytics (VIB-4727).
 
 Server-side handler that owns the HTTP egress to DefiLlama (primary) and
-GeckoTerminal (fallback). The framework-side ``PoolAnalyticsReader`` is a
+CoinGecko Onchain (fallback). The framework-side ``PoolAnalyticsReader`` is a
 thin gRPC client that calls into this service via the gateway sidecar —
 strategies in production containers never see ``aiohttp``.
 
@@ -55,6 +55,7 @@ from almanak.gateway.data._history_common import (
     is_solana_family,
 )
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,9 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 _YIELDS_API = "https://yields.llama.fi"
-_GT_API = "https://api.geckoterminal.com/api/v2"
+_CG_ONCHAIN_FREE_API = "https://api.coingecko.com/api/v3/onchain"
+_CG_ONCHAIN_PRO_API = "https://pro-api.coingecko.com/api/v3/onchain"
+_COINGECKO_ONCHAIN_SOURCE = "coingecko_onchain"
 
 # Chain-name maps (``_CHAIN_TO_GT_NETWORK`` / ``_CHAIN_TO_LLAMA_DISPLAY``) and
 # the ``is_solana_family`` helper are imported from the shared
@@ -203,7 +206,8 @@ _CACHE_MAX_ENTRIES = 5000
 
 # DefiLlama pools listing rate: 10 req/s per IP per their public docs.
 _DEFILLAMA_RATE_PER_S = 10
-# GeckoTerminal public tier: 30 req/min.
+# CoinGecko Onchain fallback bucket: keep the historical 30 req/min public
+# budget as the conservative local throttle.
 _GECKOTERMINAL_RATE_PER_MIN = 30
 
 # Address validation regexes — chain-aware. EVM is case-insensitive hex;
@@ -231,7 +235,7 @@ def _normalize_pool_address(address: str, chain: str) -> str:
 def _validate_pool_address(address: str, chain: str) -> bool:
     """Return True when ``address`` is a syntactically valid pool address for ``chain``.
 
-    Rejecting malformed input here means the upstream URL (GeckoTerminal
+    Rejecting malformed input here means the upstream URL (CoinGecko Onchain
     embeds the address) can never carry an attacker-supplied path / query
     segment.
     """
@@ -392,7 +396,7 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
         self._rate_limiter_gt = _TokenBucket(rate=_GECKOTERMINAL_RATE_PER_MIN, period=60.0)
         self._metrics: dict[str, _ProviderMetrics] = {
             "defillama": _ProviderMetrics(),
-            "geckoterminal": _ProviderMetrics(),
+            _COINGECKO_ONCHAIN_SOURCE: _ProviderMetrics(),
         }
         self._public_cache: dict[tuple[str, str, str], _CacheEntry] = {}
         self._raw_cache: dict[tuple[str, str, str, str], _CacheEntry] = {}
@@ -469,7 +473,7 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
                 error=f"unsupported chain: {chain}",
             )
 
-        # Syntactic address validation prevents the GeckoTerminal URL
+        # Syntactic address validation prevents the CoinGecko Onchain URL
         # template (line ~470) from carrying attacker-supplied path / query
         # segments, and stops the DefiLlama equality matcher from running
         # on garbage input.
@@ -513,19 +517,19 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
             errors.append(f"defillama: {e}")
             logger.debug("DefiLlama pool analytics failed for %s on %s: %s", pool_address, chain, e)
 
-        # GeckoTerminal fallback.
+        # CoinGecko Onchain fallback.
         try:
             record = await self._fetch_from_geckoterminal(chain, pool_address, protocol)
             if record is not None:
-                self._metrics["geckoterminal"].successes += 1
-                self._cache_put(public_key, "geckoterminal", record)
+                self._metrics[_COINGECKO_ONCHAIN_SOURCE].successes += 1
+                self._cache_put(public_key, _COINGECKO_ONCHAIN_SOURCE, record)
                 return self._record_to_response(record, is_live_data=True)
-            errors.append("geckoterminal: not found")
+            errors.append(f"{_COINGECKO_ONCHAIN_SOURCE}: not found")
         except _ProviderError as e:
-            self._metrics["geckoterminal"].failures += 1
-            errors.append(f"geckoterminal: {e}")
+            self._metrics[_COINGECKO_ONCHAIN_SOURCE].failures += 1
+            errors.append(f"{_COINGECKO_ONCHAIN_SOURCE}: {e}")
             logger.debug(
-                "GeckoTerminal pool analytics failed for %s on %s: %s",
+                "CoinGecko Onchain pool analytics failed for %s on %s: %s",
                 pool_address,
                 chain,
                 e,
@@ -676,7 +680,7 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
             data = await response.json()
             return data.get("data", [])
 
-    # -- GeckoTerminal provider ----------------------------------------------
+    # -- CoinGecko Onchain provider ------------------------------------------
 
     async def _fetch_from_geckoterminal(
         self,
@@ -706,15 +710,42 @@ class PoolAnalyticsServiceServicer(gateway_pb2_grpc.PoolAnalyticsServiceServicer
         network: str,
         pool_address: str,
     ) -> dict[str, Any] | None:
+        if not self._coingecko_api_key:
+            raise _ProviderError(
+                "CoinGecko Onchain API requires a valid COINGECKO_API_KEY for pool data; "
+                "set ALMANAK_GATEWAY_COINGECKO_API_KEY on the gateway"
+            )
+
         session = await self._get_http_session()
-        url = f"{_GT_API}/networks/{network}/pools/{pool_address}"
-        async with session.get(url) as response:
+        url = f"{self._coingecko_onchain_api_base}/networks/{network}/pools/{pool_address}"
+        async with session.get(url, headers=self._coingecko_onchain_headers) as response:
             if response.status == 404:
                 return None
             if response.status != 200:
                 text = await response.text()
+                if response.status == 401:
+                    raise _ProviderError(
+                        "CoinGecko Onchain API requires a valid COINGECKO_API_KEY for pool data; "
+                        "the key may be missing, invalid, or expired; HTTP 401"
+                    )
                 raise _ProviderError(f"HTTP {response.status}: {text[:200]}")
             return await response.json()
+
+    @property
+    def _coingecko_api_key(self) -> str | None:
+        key = getattr(self.settings, "coingecko_api_key", None)
+        return key or _get_gateway_api_key("COINGECKO_API_KEY")
+
+    @property
+    def _coingecko_onchain_api_base(self) -> str:
+        return _CG_ONCHAIN_PRO_API if self._coingecko_api_key else _CG_ONCHAIN_FREE_API
+
+    @property
+    def _coingecko_onchain_headers(self) -> dict[str, str]:
+        headers = {"Accept": "application/json", "User-Agent": "Almanak-Gateway/1.0"}
+        if self._coingecko_api_key:
+            headers["x-cg-pro-api-key"] = self._coingecko_api_key
+        return headers
 
     # -- Cache helpers --------------------------------------------------
 
@@ -851,16 +882,19 @@ def _parse_gt_pool(
     chain: str,
     protocol: str,
 ) -> _PoolAnalyticsRecord:
-    """Translate a GeckoTerminal pool response into the internal record shape."""
+    """Translate a CoinGecko Onchain pool response into the internal record shape."""
     attrs = data.get("data", {}).get("attributes", {}) if isinstance(data, dict) else {}
 
     tvl_raw = attrs.get("reserve_in_usd")
     tvl_usd = _safe_decimal_str(tvl_raw)
     vol_24h_raw = attrs.get("volume_usd", {}).get("h24") if isinstance(attrs.get("volume_usd"), dict) else None
     vol_24h_usd = _safe_decimal_str(vol_24h_raw)
-    vol_7d_usd = ""  # GeckoTerminal doesn't expose 7d volume directly.
+    vol_7d_usd = ""  # CoinGecko Onchain doesn't expose 7d volume directly.
 
-    pool_fee = _safe_float(attrs.get("pool_fee"))
+    pool_fee_raw = attrs.get("pool_fee_percentage", attrs.get("pool_fee"))
+    pool_fee = (
+        _safe_float(pool_fee_raw) / 100 if attrs.get("pool_fee_percentage") is not None else _safe_float(pool_fee_raw)
+    )
     tvl_num = _safe_float(tvl_raw)
     vol_24h_num = _safe_float(vol_24h_raw)
     fee_apr_num = 0.0
@@ -885,7 +919,7 @@ def _parse_gt_pool(
         utilization_rate="",
         token0_weight="",
         token1_weight="",
-        source="geckoterminal",
+        source=_COINGECKO_ONCHAIN_SOURCE,
         observed_at=int(time.time()),
         is_live_data=True,
     )

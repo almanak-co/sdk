@@ -11,7 +11,7 @@ dispatcher can all depend on it without an import cycle. Holds:
 * ``_safe_decimal_str`` — Empty != Zero decimal coercion (NOT ``_safe_decimal``
   which collapses to ``Decimal("0")`` — decision #9 must-fix port).
 * Chain-name maps + the ``is_solana_family`` helper for DefiLlama +
-  GeckoTerminal, re-exported from the shared ``_history_common`` home so the
+  CoinGecko Onchain, re-exported from the shared ``_history_common`` home so the
   analytics service and the pool-history providers agree on chain spelling.
 * The provider interface result type alias + the ``PoolHistoryProvider``
   Protocol.
@@ -125,7 +125,7 @@ class _ObservableTokenBucket(_TokenBucket):
     ``bucket_throttle_waits_ms`` per-provider counter can accumulate the
     THEORETICAL ms-until-next-token on each bucket-empty event — independent
     of whether the empty path raises ``_ProviderError`` (TheGraph primary)
-    or returns ``_NotAttempted`` (DefiLlama / GeckoTerminal fallbacks). The
+    or returns ``_NotAttempted`` (DefiLlama / CoinGecko Onchain fallbacks). The
     callback runs UNDER the bucket lock so the refusal observation can't be
     reordered against a concurrent successful acquire.
 

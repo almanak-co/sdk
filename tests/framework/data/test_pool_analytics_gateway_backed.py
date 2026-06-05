@@ -200,7 +200,7 @@ def test_all_providers_unavailable_maps_to_datasource_unavailable():
     stub = MagicMock()
     stub.GetPoolAnalytics.return_value = _make_response(
         success=False,
-        error="defillama: timeout; geckoterminal: 503",
+        error="defillama: timeout; coingecko_onchain: 503",
         tvl_usd="",
         fee_apr="",
         source="",
@@ -212,9 +212,9 @@ def test_all_providers_unavailable_maps_to_datasource_unavailable():
             pool_address=_ANTONIS_POOL,
             chain="arbitrum",
             protocol="uniswap_v3",
-        )
+    )
     assert "defillama" in excinfo.value.reason
-    assert "geckoterminal" in excinfo.value.reason
+    assert "coingecko_onchain" in excinfo.value.reason
     assert classify_failure(excinfo.value) == FailureKind.DATA_UNAVAILABLE
 
 

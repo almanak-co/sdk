@@ -1705,7 +1705,7 @@ class MarketSnapshot:
             "service unavailable",
             # gRPC status codes that indicate transient upstream failures.
             # StatusCode.INTERNAL is included because the gateway emits it for
-            # transient GeckoTerminal API blips, not for local bugs.
+            # transient CoinGecko Onchain API blips, not for local bugs.
             "statuscode.internal",
             "statuscode.unavailable",
             "statuscode.resource_exhausted",
@@ -3553,7 +3553,7 @@ class MarketSnapshot:
                 ``"uniswap_v3"``, ``"aerodrome"``. NO default — closes the
                 silent cross-protocol surface flagged by VIB-4755 Phase 0b
                 Round-4: a defaulted ``protocol="uniswap_v3"`` would let a
-                caller on a Base Aerodrome pool address get GeckoTerminal-
+                caller on a Base Aerodrome pool address get CoinGecko Onchain-
                 served Aerodrome data labelled as ``uniswap_v3`` in any
                 audit log. Forgetting this kwarg raises ``TypeError`` at
                 the framework boundary BEFORE any gateway round-trip. See

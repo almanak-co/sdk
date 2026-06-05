@@ -12,6 +12,8 @@ Public surface:
   cache's ``get_or_fetch`` closure.
 * The three providers (``TheGraphPoolHistoryProvider`` /
   ``DefiLlamaPoolHistoryProvider`` / ``GeckoTerminalPoolHistoryProvider``).
+  The GeckoTerminal class name is retained as a compatibility key; its
+  upstream egress is CoinGecko Onchain.
 * The 3-state taxonomy sentinels + ``_ProviderError`` (parallel copies of the
   analytics-service types — the two services are intentionally decoupled,
   decision #3).

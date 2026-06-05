@@ -1,13 +1,13 @@
-"""GeckoTerminal pool-history provider (POOL-5 / VIB-4753) — LAST RESORT, all resolutions.
+"""CoinGecko Onchain pool-history provider (POOL-5 / VIB-4753) — LAST RESORT, all resolutions.
 
-Uses GeckoTerminal's OHLCV endpoint
-``/networks/{network}/pools/{address}/ohlcv/{timeframe}`` with
+Uses CoinGecko's Onchain OHLCV endpoint
+``/onchain/networks/{network}/pools/{address}/ohlcv/{timeframe}`` with
 ``aggregate`` ∈ {1, 4} to cover 1h / 4h / 1d. OHLCV carries volume only —
 TVL, fee revenue, and reserves are unmeasured on this series (Empty != Zero:
 they stay ``""`` and are listed in ``unmeasured_fields``).
 
-GeckoTerminal returns newest-first OHLCV lists ``[ts, open, high, low, close,
-volume]``; this provider reverses them to ascending and maps ``volume`` to
+CoinGecko Onchain returns newest-first OHLCV lists ``[ts, open, high, low,
+close, volume]``; this provider reverses them to ascending and maps ``volume`` to
 ``volume_24h``.
 """
 
@@ -20,6 +20,7 @@ from typing import Any
 import aiohttp
 
 from almanak.gateway.proto import gateway_pb2
+from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
 
 from ._base import (
     _CHAIN_TO_GT_NETWORK,
@@ -33,9 +34,10 @@ from ._base import (
 
 logger = logging.getLogger(__name__)
 
-_GT_API = "https://api.geckoterminal.com/api/v2"
+_CG_ONCHAIN_FREE_API = "https://api.coingecko.com/api/v3/onchain"
+_CG_ONCHAIN_PRO_API = "https://pro-api.coingecko.com/api/v3/onchain"
 
-#: GeckoTerminal OHLCV per-call row limit. Windows longer than this MUST be
+#: CoinGecko Onchain OHLCV per-call row limit. Windows longer than this MUST be
 #: fetched across multiple backward-paginated calls (audit blocker #1) — a
 #: single call silently truncates to the most-recent 1000 bars.
 _OHLCV_LIMIT = 1000
@@ -45,7 +47,7 @@ _OHLCV_LIMIT = 1000
 #: 90d-1h = 2160 bars = 3 pages; this comfortably covers the soft caps.
 _GT_MAX_PAGES = 100
 
-#: Resolution -> (timeframe path segment, aggregate). GeckoTerminal exposes
+#: Resolution -> (timeframe path segment, aggregate). CoinGecko Onchain exposes
 #: ``hour`` + ``day`` timeframes; 4h is ``hour`` aggregated by 4.
 _RESOLUTION_TO_OHLCV: dict[int, tuple[str, int]] = {
     gateway_pb2.Resolution.RESOLUTION_1H: ("hour", 1),
@@ -55,7 +57,12 @@ _RESOLUTION_TO_OHLCV: dict[int, tuple[str, int]] = {
 
 
 class GeckoTerminalPoolHistoryProvider:
-    """Last-resort pool-history provider backed by GeckoTerminal OHLCV."""
+    """Last-resort pool-history provider backed by CoinGecko Onchain OHLCV.
+
+    The class name and provider id remain for compatibility with the existing
+    pool-history dispatcher/cache knobs. The upstream API host is CoinGecko
+    Onchain, whose pool-history endpoints require a valid CoinGecko Pro API key.
+    """
 
     name = "geckoterminal"
 
@@ -64,9 +71,11 @@ class GeckoTerminalPoolHistoryProvider:
         *,
         session_getter: Callable[[], Any],
         rate_limiter: _TokenBucket,
+        api_key: str | None = None,
     ) -> None:
         self._session_getter = session_getter
         self._rate_limiter = rate_limiter
+        self._api_key = api_key if api_key is not None else _get_gateway_api_key("COINGECKO_API_KEY")
 
     async def fetch(
         self,
@@ -87,9 +96,15 @@ class GeckoTerminalPoolHistoryProvider:
             return _NOT_ATTEMPTED
         timeframe, aggregate = ohlcv_spec
 
+        if not self._api_key:
+            raise _ProviderError(
+                "CoinGecko Onchain API requires a valid COINGECKO_API_KEY for pool OHLCV; "
+                "set ALMANAK_GATEWAY_COINGECKO_API_KEY on the gateway"
+            )
+
         # Fallback bucket empty -> local skip (only the PRIMARY raises).
         if not self._rate_limiter.acquire():
-            logger.debug("GeckoTerminal rate-limit bucket empty; skipping this fetch")
+            logger.debug("CoinGecko Onchain rate-limit bucket empty; skipping this fetch")
             return _NOT_ATTEMPTED
 
         try:
@@ -105,7 +120,7 @@ class GeckoTerminalPoolHistoryProvider:
             # ValueError covers json.JSONDecodeError on a 200-with-malformed-body:
             # a garbage upstream payload is a provider failure, not an unhandled
             # crash — map it into the _ProviderError taxonomy like any other.
-            raise _ProviderError(f"geckoterminal: {exc}") from exc
+            raise _ProviderError(f"coingecko_onchain: {exc}") from exc
 
         if ohlcv is None:
             return None  # 404 = not found, not a transport failure.
@@ -127,7 +142,7 @@ class GeckoTerminalPoolHistoryProvider:
     ) -> list[list[Any]] | None:
         """Fetch OHLCV across the whole window, paginating backward.
 
-        GeckoTerminal returns up to ``_OHLCV_LIMIT`` candles newest-first,
+        CoinGecko Onchain returns up to ``_OHLCV_LIMIT`` candles newest-first,
         ending at ``before_timestamp``. A single call therefore silently
         truncates windows longer than 1000 bars (audit blocker #1) — so we
         page backward via ``before_timestamp`` until the window's ``start_ts``
@@ -136,7 +151,7 @@ class GeckoTerminalPoolHistoryProvider:
         is genuinely not found (404 on the first page) or no data exists.
         """
         session = await self._session_getter()
-        url = f"{_GT_API}/networks/{network}/pools/{pool_address}/ohlcv/{timeframe}"
+        url = f"{self._api_base}/networks/{network}/pools/{pool_address}/ohlcv/{timeframe}"
         all_rows: list[list[Any]] = []
         before_timestamp = int(end_ts)
         for _page in range(_GT_MAX_PAGES):
@@ -145,7 +160,7 @@ class GeckoTerminalPoolHistoryProvider:
                 "limit": str(_OHLCV_LIMIT),
                 "before_timestamp": str(before_timestamp),
             }
-            async with session.get(url, params=params) as response:
+            async with session.get(url, params=params, headers=self._headers) as response:
                 if response.status == 404:
                     # 404 on the first page = pool not found. On a later page
                     # (older data exhausted) keep what we already paged.
@@ -154,6 +169,11 @@ class GeckoTerminalPoolHistoryProvider:
                     break
                 if response.status != 200:
                     text = await response.text()
+                    if response.status == 401:
+                        raise _ProviderError(
+                            "CoinGecko Onchain API requires a valid COINGECKO_API_KEY for pool OHLCV; "
+                            "the key may be missing, invalid, or expired; HTTP 401"
+                        )
                     raise _ProviderError(f"HTTP {response.status}: {text[:200]}")
                 data = await response.json()
             if not isinstance(data, dict):
@@ -174,6 +194,17 @@ class GeckoTerminalPoolHistoryProvider:
             before_timestamp = oldest
         return all_rows or None
 
+    @property
+    def _api_base(self) -> str:
+        return _CG_ONCHAIN_PRO_API if self._api_key else _CG_ONCHAIN_FREE_API
+
+    @property
+    def _headers(self) -> dict[str, str]:
+        headers = {"Accept": "application/json", "User-Agent": "Almanak-Gateway/1.0"}
+        if self._api_key:
+            headers["x-cg-pro-api-key"] = self._api_key
+        return headers
+
 
 def _ohlcv_to_snapshots(
     ohlcv: list[list[Any]],
@@ -182,10 +213,10 @@ def _ohlcv_to_snapshots(
     end_ts: int,
     resolution: int,
 ) -> list[gateway_pb2.PoolSnapshot]:
-    """Translate GeckoTerminal OHLCV rows to ``PoolSnapshot`` (ascending, windowed).
+    """Translate CoinGecko Onchain OHLCV rows to ``PoolSnapshot`` (ascending, windowed).
 
     Each OHLCV row is ``[timestamp, open, high, low, close, volume]``.
-    GeckoTerminal returns newest-first; we reverse to ascending. Only
+    CoinGecko Onchain returns newest-first; we reverse to ascending. Only
     ``volume`` is measured (-> ``volume_24h``); TVL / fee / reserves are
     unmeasured on the OHLCV series.
     """
@@ -229,7 +260,7 @@ def _ohlcv_to_snapshots(
 
 
 def _oldest_ts(rows: list[list[Any]]) -> int | None:
-    """Return the oldest (min) timestamp in a GeckoTerminal OHLCV page."""
+    """Return the oldest (min) timestamp in a CoinGecko Onchain OHLCV page."""
     timestamps: list[int] = []
     for row in rows:
         if isinstance(row, list | tuple) and row:

@@ -61,7 +61,7 @@ def render_custom_dashboard(
     st.markdown(f"**Pool:** `{pool_address[:16]}...{pool_address[-8:]}`")
     st.markdown("**DEX:** Uniswap V3")
     st.markdown("**Chain:** Base")
-    st.markdown("**Data Source:** CoinGecko DEX (GeckoTerminal)")
+    st.markdown("**Data Source:** CoinGecko Onchain")
 
     st.divider()
 

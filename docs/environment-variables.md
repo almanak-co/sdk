@@ -54,7 +54,7 @@ Set these based on which protocols and features your strategy uses.
 | Variable | When needed | Get a key |
 |----------|-------------|-----------|
 | `ENSO_API_KEY` | Swap routing via Enso Finance aggregator | [enso.finance](https://enso.finance/) |
-| `COINGECKO_API_KEY` | Improves rate limits for price data (works without key) | [coingecko.com/en/api](https://www.coingecko.com/en/api) |
+| `COINGECKO_API_KEY` | CoinGecko API key for market prices. Also required for CoinGecko Onchain pool/OHLCV data when running a local gateway. | [coingecko.com/en/api](https://www.coingecko.com/en/api) |
 | `ALMANAK_API_KEY` | Almanak platform authentication | [app.almanak.co](https://app.almanak.co/) |
 | `ALMANAK_DASHBOARD_API_KEY` | API key used by the operator dashboard when calling non-gateway REST endpoints (pause/resume go through gateway; `bump-gas` / `cancel-tx` still use REST). Must match a key listed in `ALMANAK_API_KEYS` on the API server. | `dash_abc123...` |
 | `THEGRAPH_API_KEY` | Backtesting with subgraph data (DEX volumes, lending APYs) | [thegraph.com/studio](https://thegraph.com/studio/) |
@@ -367,5 +367,10 @@ RPC_URL=https://your-rpc-provider.com/v1/your-key
 ENSO_API_KEY=your_enso_key
 COINGECKO_API_KEY=your_coingecko_key
 ```
+
+For deployed or sidecar gateway environments, set
+`ALMANAK_GATEWAY_COINGECKO_API_KEY`. CoinGecko Onchain DEX endpoints require a
+valid Pro API key via the gateway; without it, pool analytics, pool history, and
+DEX-native OHLCV fallbacks fail fast with an explicit key error.
 
 All other gateway and framework settings have sensible defaults and do not need to be set. See [`.env.example`](https://github.com/almanak-co/sdk/blob/main/.env.example) for the full list of advanced options.

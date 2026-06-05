@@ -22,11 +22,11 @@ provider method):
   per-subgraph). Empty bucket -> ``_ProviderError`` (decision #6: a throttled
   PRIMARY must fall through AND be observable — not a silent local skip).
 * A ``_MonthlyBudgetTracker``. When tripped -> ``_NotAttempted`` (the chain
-  falls through to DefiLlama / GeckoTerminal — D3.F11 trip).
+  falls through to DefiLlama / CoinGecko Onchain — D3.F11 trip).
 
 No URL registered for ``(protocol, chain)`` -> ``_NotAttempted`` (this is how
 Aerodrome — which registers no subgraph endpoints — falls through to
-GeckoTerminal at sub-daily and 1d resolutions).
+CoinGecko Onchain at sub-daily and 1d resolutions).
 """
 
 from __future__ import annotations

@@ -280,7 +280,7 @@ class GatewayClient:
         # VIB-4728 / POOL-7 (VIB-4755): PoolHistoryService stub. Backs
         # ``PoolHistoryReader`` / ``MarketSnapshot.pool_history(...)``.
         # All HTTP / GraphQL egress to The Graph / DefiLlama /
-        # GeckoTerminal happens on the gateway side.
+        # CoinGecko Onchain happens on the gateway side.
         self._pool_history_stub: gateway_pb2_grpc.PoolHistoryServiceStub | None = None
         # VIB-4859 / W7: RateHistoryService — lending APY / perp funding
         # / DEX TWAP / DEX volume. Backs ``RateMonitor`` /
@@ -373,7 +373,7 @@ class GatewayClient:
         """Get PoolAnalyticsService stub (VIB-4727). Raises if not connected.
 
         The strategy-container ``PoolAnalyticsReader`` calls this stub to fetch
-        TVL / volume / fee-APR. All HTTP egress to DefiLlama / GeckoTerminal
+        TVL / volume / fee-APR. All HTTP egress to DefiLlama / CoinGecko Onchain
         happens on the gateway side; the strategy container only speaks gRPC.
         """
         if self._pool_analytics_stub is None:
@@ -387,7 +387,7 @@ class GatewayClient:
         The strategy-container ``PoolHistoryReader`` calls this stub to fetch
         historical pool snapshots (TVL / volume / fee revenue / reserves over
         time). All HTTP / GraphQL egress to The Graph / DefiLlama /
-        GeckoTerminal happens on the gateway side. The framework reader is a
+        CoinGecko Onchain happens on the gateway side. The framework reader is a
         thin gRPC client per `docs/internal/uat-cards/VIB-4755.md`.
         """
         if self._pool_history_stub is None:

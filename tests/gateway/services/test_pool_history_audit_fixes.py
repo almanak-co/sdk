@@ -108,9 +108,11 @@ class _FakeSession:
     def __init__(self, pages: list[Any]) -> None:
         self._pages = pages
         self.calls: list[dict] = []
+        self.request_kwargs: list[dict[str, Any]] = []
 
-    def get(self, url: str, params: dict | None = None) -> _FakeResp:
+    def get(self, url: str, params: dict | None = None, **kwargs: Any) -> _FakeResp:
         self.calls.append(params or {})
+        self.request_kwargs.append({"url": url, "params": params or {}, **kwargs})
         idx = len(self.calls) - 1
         return self._pages[idx]
 
@@ -130,6 +132,7 @@ def test_geckoterminal_paginates_backward_over_window():
     provider = GeckoTerminalPoolHistoryProvider(
         session_getter=AsyncMock(return_value=session),
         rate_limiter=_TokenBucket(rate=100, period=1.0),
+        api_key="test-key",
     )
 
     with patch("almanak.gateway.data.pool_history.geckoterminal._OHLCV_LIMIT", 3):
@@ -158,6 +161,7 @@ def test_geckoterminal_404_first_page_is_not_found():
     provider = GeckoTerminalPoolHistoryProvider(
         session_getter=AsyncMock(return_value=session),
         rate_limiter=_TokenBucket(rate=100, period=1.0),
+        api_key="test-key",
     )
     result = asyncio.run(
         provider.fetch(
@@ -170,6 +174,62 @@ def test_geckoterminal_404_first_page_is_not_found():
         )
     )
     assert result is None
+
+
+def test_geckoterminal_missing_api_key_fails_before_egress():
+    """CoinGecko Onchain pool-history fallback requires a gateway-owned key."""
+    session = _FakeSession([_FakeResp(200, _ohlcv_payload([[3600, 0, 0, 0, 0, "1"]]))])
+    provider = GeckoTerminalPoolHistoryProvider(
+        session_getter=AsyncMock(return_value=session),
+        rate_limiter=_TokenBucket(rate=100, period=1.0),
+        api_key="",
+    )
+
+    try:
+        asyncio.run(
+            provider.fetch(
+                chain="base",
+                pool_address="0xc6962004f452be9203591991d15f6b388e09e8d0",
+                protocol="aerodrome",
+                start_ts=0,
+                end_ts=10 * 3600,
+                resolution=gateway_pb2.Resolution.RESOLUTION_1H,
+            )
+        )
+        raise AssertionError("expected _ProviderError")
+    except _ProviderError as exc:
+        assert "requires a valid COINGECKO_API_KEY" in str(exc)
+
+    assert session.calls == []
+
+
+def test_geckoterminal_401_with_key_mentions_key_validation():
+    """Invalid or expired keys get the same operator-facing 401 guidance."""
+    session = _FakeSession([_FakeResp(401, {"error": "bad key"})])
+    provider = GeckoTerminalPoolHistoryProvider(
+        session_getter=AsyncMock(return_value=session),
+        rate_limiter=_TokenBucket(rate=100, period=1.0),
+        api_key="bad-key",
+    )
+
+    try:
+        asyncio.run(
+            provider.fetch(
+                chain="base",
+                pool_address="0xc6962004f452be9203591991d15f6b388e09e8d0",
+                protocol="aerodrome",
+                start_ts=0,
+                end_ts=10 * 3600,
+                resolution=gateway_pb2.Resolution.RESOLUTION_1H,
+            )
+        )
+        raise AssertionError("expected _ProviderError")
+    except _ProviderError as exc:
+        text = str(exc)
+        assert "requires a valid COINGECKO_API_KEY" in text
+        assert "HTTP 401" in text
+
+    assert session.request_kwargs[0]["headers"]["x-cg-pro-api-key"] == "bad-key"
 
 
 # ===========================================================================
@@ -295,6 +355,7 @@ def test_geckoterminal_null_data_does_not_crash():
     provider = GeckoTerminalPoolHistoryProvider(
         session_getter=AsyncMock(return_value=session),
         rate_limiter=_TokenBucket(rate=100, period=1.0),
+        api_key="test-key",
     )
     result = asyncio.run(
         provider.fetch(
@@ -317,6 +378,7 @@ def test_geckoterminal_json_decode_error_maps_to_provider_error():
     provider = GeckoTerminalPoolHistoryProvider(
         session_getter=AsyncMock(return_value=session),
         rate_limiter=_TokenBucket(rate=100, period=1.0),
+        api_key="test-key",
     )
     try:
         asyncio.run(
@@ -331,7 +393,7 @@ def test_geckoterminal_json_decode_error_maps_to_provider_error():
         )
         raise AssertionError("expected _ProviderError")
     except _ProviderError as exc:
-        assert "geckoterminal" in str(exc)
+        assert "coingecko_onchain" in str(exc)
 
 
 def test_defillama_json_decode_error_maps_to_provider_error():

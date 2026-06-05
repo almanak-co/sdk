@@ -67,12 +67,12 @@ logger = logging.getLogger(__name__)
 _THEGRAPH_RATE_PER_S = 2
 #: DefiLlama public tier: 10 req/s per IP.
 _DEFILLAMA_RATE_PER_S = 10
-#: GeckoTerminal public tier: 30 req/min.
+#: CoinGecko Onchain fallback bucket: keep the legacy 30 req/min throttle.
 _GECKOTERMINAL_RATE_PER_MIN = 30
 
 #: Per-provider finality cutoff defaults (seconds), POOL-6 (VIB-4754). DefiLlama
 #: revises daily data >24h after the fact (PoolX.md §D4), so its default is 72h
-#: vs 24h for The Graph / GeckoTerminal. These are baked into the dispatcher so a
+#: vs 24h for The Graph / CoinGecko Onchain. These are baked into the dispatcher so a
 #: direct ``PoolHistoryDispatcher(...)`` (e.g. a test) still classifies DefiLlama
 #: with the 72h contract even when ``finality_cutoffs`` is omitted; the servicer
 #: passes the settings-derived map which overrides these.
@@ -100,7 +100,7 @@ class _DispatchCounters:
 
     ``on_provider_throttle_wait`` (POOL-8 / VIB-4756) is invoked once per
     bucket refusal — for BOTH the TheGraph primary path (refusal becomes
-    ``_ProviderError``) AND the DefiLlama / GeckoTerminal fallback path
+    ``_ProviderError``) AND the DefiLlama / CoinGecko Onchain fallback path
     (refusal becomes ``_NotAttempted`` silent skip) — with the THEORETICAL
     ms-until-next-token computed at provider-bucket construction. Default
     is a no-op so callers that don't care about throttle accounting don't
@@ -148,6 +148,7 @@ class PoolHistoryDispatcher:
         thegraph_monthly_budget_max: int,
         is_supported_fn: Callable[[str, str], bool],
         finality_cutoffs: dict[str, int] | None = None,
+        coingecko_api_key: str | None = None,
         clock: Callable[[], float] = time.time,
         counters: _DispatchCounters | None = None,
     ) -> None:
@@ -226,6 +227,7 @@ class PoolHistoryDispatcher:
         self._geckoterminal = GeckoTerminalPoolHistoryProvider(
             session_getter=self._get_http_session,
             rate_limiter=self._geckoterminal_bucket,
+            api_key=coingecko_api_key,
         )
         self._providers: dict[str, PoolHistoryProvider] = {
             self._thegraph.name: self._thegraph,
@@ -349,7 +351,7 @@ class PoolHistoryDispatcher:
         # Defense-in-depth (audit Important #6): the gRPC servicer runs the
         # full validator before reaching dispatch, but ``dispatch()`` is a
         # reusable surface and ``pool_address`` is interpolated into provider
-        # egress URLs (GeckoTerminal path / DefiLlama matcher). Never let an
+        # egress URLs (CoinGecko Onchain path / DefiLlama matcher). Never let an
         # unvalidated address reach a provider. Lazy import breaks the
         # services/__init__ -> pool_history_service -> this-package cycle
         # (same rationale as ``_compute_finality``).
@@ -437,7 +439,7 @@ def _resolve_subgraph_url(protocol: str, chain: str) -> str | None:
     ``<protocol-with-hyphens>-<chain>`` (e.g. ``uniswap_v3`` -> alias
     ``uniswap-v3-arbitrum``). Returns ``None`` when no endpoint is registered
     (e.g. Aerodrome publishes no ``GatewaySubgraphCapability`` -> falls
-    through to GeckoTerminal).
+    through to the legacy ``geckoterminal`` provider key).
     """
     table = _subgraph_endpoint_table()
     alias = f"{protocol.replace('_', '-').lower()}-{chain.lower()}"

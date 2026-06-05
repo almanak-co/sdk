@@ -90,7 +90,7 @@ class MarketSnapshotBuilder:
 
         # VIB-4727: pool analytics reader is a thin gRPC client over the
         # gateway's PoolAnalyticsService. The strategy container never
-        # makes its own HTTP calls — all DefiLlama / GeckoTerminal egress
+        # makes its own HTTP calls — all DefiLlama / CoinGecko Onchain egress
         # happens server-side. Strategies may inject their own reader via
         # `strategy._pool_analytics_reader` (e.g. for tests); otherwise
         # build one from the wired gateway_client. When no gateway_client

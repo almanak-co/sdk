@@ -28,6 +28,7 @@ from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.pool_analytics_service import (
     PoolAnalyticsServiceServicer,
+    _parse_gt_pool,
 )
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "pool_analytics"
@@ -107,6 +108,68 @@ def test_get_pool_analytics_arbitrum_univ3():
     assert ctx.code is None
 
 
+def _coingecko_pool_payload(attrs: dict[str, Any]) -> dict[str, Any]:
+    return {"data": {"attributes": attrs}}
+
+
+def test_parse_coingecko_pool_fee_percentage_is_percent_units():
+    """pool_fee_percentage is percent units, so 0.3 means a 0.003 fee rate."""
+    record = _parse_gt_pool(
+        _coingecko_pool_payload(
+            {
+                "reserve_in_usd": "10000",
+                "volume_usd": {"h24": "1000"},
+                "pool_fee_percentage": "0.3",
+                "dex_id": "uniswap_v3",
+            }
+        ),
+        pool_address=_ETH_USDC_WETH,
+        chain="ethereum",
+        protocol="",
+    )
+
+    assert record.protocol == "uniswap_v3"
+    assert record.fee_apr == "10.95"
+
+
+def test_parse_coingecko_pool_fee_fraction_remains_direct_rate():
+    """Legacy pool_fee is already a fraction, so 0.003 is used as-is."""
+    record = _parse_gt_pool(
+        _coingecko_pool_payload(
+            {
+                "reserve_in_usd": "10000",
+                "volume_usd": {"h24": "1000"},
+                "pool_fee": "0.003",
+            }
+        ),
+        pool_address=_ETH_USDC_WETH,
+        chain="ethereum",
+        protocol="uniswap_v3",
+    )
+
+    assert record.fee_apr == "10.95"
+
+
+def test_parse_coingecko_pool_fee_missing_stays_unmeasured():
+    """Missing fee data is unmeasured, not silently substituted into APR."""
+    record = _parse_gt_pool(
+        _coingecko_pool_payload({"reserve_in_usd": "10000", "volume_usd": {"h24": "1000"}}),
+        pool_address=_ETH_USDC_WETH,
+        chain="ethereum",
+        protocol="uniswap_v3",
+    )
+
+    assert record.fee_apr == ""
+
+
+def test_pool_analytics_uses_bare_coingecko_api_key_fallback(monkeypatch: pytest.MonkeyPatch):
+    """Bare COINGECKO_API_KEY remains valid for local gateway operators."""
+    monkeypatch.setenv("COINGECKO_API_KEY", "bare-key")
+    servicer = PoolAnalyticsServiceServicer(settings=GatewaySettings())
+
+    assert servicer._coingecko_api_key == "bare-key"
+
+
 # ============================================================================
 # D2.M1 — Chain matrix (Arbitrum / Ethereum) — provider name-mapping divergence
 # ============================================================================
@@ -152,8 +215,8 @@ def test_chain_matrix_arbitrum_and_ethereum(
     assert str(selected["tvlUsd"]) == response.tvl_usd.rstrip("0").rstrip(".") or response.tvl_usd == f"{selected['tvlUsd']}"
 
 
-def test_chain_matrix_geckoterminal_url_includes_correct_network():
-    """D2.M1 (cont.): GeckoTerminal fallback URL embeds the per-chain
+def test_chain_matrix_coingecko_onchain_url_includes_correct_network():
+    """D2.M1 (cont.): CoinGecko Onchain fallback URL embeds the per-chain
     network slug (``arbitrum`` for arbitrum, ``eth`` for ethereum)."""
     servicer = _make_servicer()
     captured_networks: list[str] = []
@@ -179,7 +242,7 @@ def test_chain_matrix_geckoterminal_url_includes_correct_network():
                 ),
             )
             assert response.success is True, response.error
-            assert response.source == "geckoterminal"
+            assert response.source == "coingecko_onchain"
 
     # ``arbitrum`` maps to GT network slug ``arbitrum``;
     # ``ethereum`` maps to GT network slug ``eth``.
@@ -187,13 +250,13 @@ def test_chain_matrix_geckoterminal_url_includes_correct_network():
 
 
 # ============================================================================
-# D2.M2 — Provider fallback (DefiLlama -> GeckoTerminal)
+# D2.M2 — Provider fallback (DefiLlama -> CoinGecko Onchain)
 # ============================================================================
 
 
-def test_provider_fallback_defillama_to_geckoterminal():
-    """D2.M2: DefiLlama HTTP failure routes to GeckoTerminal; metrics
-    record one failure on DefiLlama and one success on GeckoTerminal."""
+def test_provider_fallback_defillama_to_coingecko_onchain():
+    """D2.M2: DefiLlama HTTP failure routes to CoinGecko Onchain; metrics
+    record one failure on DefiLlama and one success on CoinGecko Onchain."""
     servicer = _make_servicer()
     gt_fixture = _load_fixture("geckoterminal_arbitrum_univ3.json")
     ctx = _MockContext()
@@ -213,11 +276,11 @@ def test_provider_fallback_defillama_to_geckoterminal():
         response = asyncio.run(servicer.GetPoolAnalytics(_request(), ctx))
 
     assert response.success is True
-    assert response.source == "geckoterminal"
+    assert response.source == "coingecko_onchain"
     assert ctx.code is None
     metrics = servicer.health()
     assert metrics["defillama"]["failures"] == 1
-    assert metrics["geckoterminal"]["successes"] == 1
+    assert metrics["coingecko_onchain"]["successes"] == 1
 
 
 # ============================================================================
@@ -251,7 +314,7 @@ def test_cache_hit_skips_upstream_http():
 
     with (
         patch.object(servicer, "_query_defillama_pools", new=counting_query),
-        # Stub GeckoTerminal too so the 3rd-call fallback (when the DefiLlama
+        # Stub CoinGecko Onchain too so the 3rd-call fallback (when the DefiLlama
         # protocol filter rejects the uniswap_v3 fixture) doesn't touch real HTTP.
         patch.object(servicer, "_query_geckoterminal_pool", new=AsyncMock(return_value=None)),
     ):
@@ -314,7 +377,7 @@ def test_all_providers_unavailable():
 
     assert response.success is False
     assert "defillama" in response.error
-    assert "geckoterminal" in response.error
+    assert "coingecko_onchain" in response.error
     assert ctx.code == grpc.StatusCode.UNAVAILABLE
 
 
@@ -332,7 +395,7 @@ def test_all_providers_unavailable():
 def test_invalid_evm_pool_address_returns_invalid_argument():
     """Blocker #3 from the multi-auditor audit: malformed pool_address
     must be rejected before any upstream URL is constructed (the
-    GeckoTerminal URL template embeds the address segment)."""
+    CoinGecko Onchain URL template embeds the address segment)."""
     servicer = _make_servicer()
     ctx = _MockContext()
 
@@ -351,13 +414,13 @@ def test_invalid_evm_pool_address_returns_invalid_argument():
 def test_solana_pool_address_preserves_case():
     """Blocker #1: Solana base58 addresses are case-sensitive. Lowercasing
     them produces a different address. The PR includes ``solana`` in the
-    GeckoTerminal chain map, so the case-preservation contract must hold
+    CoinGecko Onchain chain map, so the case-preservation contract must hold
     end-to-end."""
     servicer = _make_servicer()
     # Real-looking Solana base58 address with mixed case.
     solana_addr = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
     ctx = _MockContext()
-    # Stub the GeckoTerminal seam to capture the address it receives.
+    # Stub the CoinGecko Onchain seam to capture the address it receives.
     captured_addresses: list[str] = []
 
     async def fake_gt(network: str, pool_address: str) -> dict[str, Any]:
@@ -488,7 +551,7 @@ def test_defillama_local_rate_limit_skip_is_not_a_not_found_miss():
     ):
         response = asyncio.run(servicer.GetPoolAnalytics(_request(), ctx))
 
-    # GeckoTerminal returned not-found, but defillama should NOT appear in
+    # CoinGecko Onchain returned not-found, but defillama should NOT appear in
     # the error string (the skip was local, not a miss).
     assert response.success is False
     assert "defillama: not found" not in response.error
@@ -541,7 +604,7 @@ def test_concurrent_cold_cache_callers_share_one_catalog_fetch():
 
 def test_pool_not_found_does_not_return_zero_envelope(caplog):
     """D3.F6: deterministic "not found" from both providers (DefiLlama list
-    contains only the pool on a different chain; GeckoTerminal 404) must
+    contains only the pool on a different chain; CoinGecko Onchain 404) must
     surface as success=False UNAVAILABLE — never as a zero-filled
     success=True envelope."""
     import logging
@@ -553,7 +616,7 @@ def test_pool_not_found_does_not_return_zero_envelope(caplog):
 
     with (
         patch.object(servicer, "_query_defillama_pools", new=AsyncMock(return_value=pools)),
-        # GeckoTerminal returns None on 404 (per servicer convention).
+        # CoinGecko Onchain returns None on 404 (per servicer convention).
         patch.object(servicer, "_query_geckoterminal_pool", new=AsyncMock(return_value=None)),
         caplog.at_level(logging.WARNING, logger="almanak.gateway.services.pool_analytics_service"),
     ):

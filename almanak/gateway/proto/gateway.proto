@@ -1356,7 +1356,7 @@ service IntegrationService {
   // TheGraph subgraph query endpoint
   rpc TheGraphQuery(TheGraphQueryRequest) returns (TheGraphQueryResponse);
 
-  // GeckoTerminal DEX OHLCV endpoint (proxy for deployed strategies without internet)
+  // Legacy-named CoinGecko Onchain DEX OHLCV endpoint
   rpc GeckoTerminalGetOHLCV(GeckoTerminalOHLCVRequest) returns (GeckoTerminalOHLCVResponse);
 
   // External portfolio APIs (Zerion, future providers)
@@ -1684,7 +1684,7 @@ message FundingRateSpreadResponse {
 //
 // VIB-4727. Replaces the in-framework PoolAnalyticsReader (which used direct
 // aiohttp egress from inside the strategy container, violating the gateway
-// boundary). HTTP egress to DefiLlama and GeckoTerminal happens server-side
+// boundary). HTTP egress to DefiLlama and CoinGecko Onchain happens server-side
 // only; the framework reader is a thin gRPC client.
 //
 // Error semantics — dual-channel wire shape, v1 behavior:
@@ -1706,7 +1706,7 @@ message FundingRateSpreadResponse {
 
 service PoolAnalyticsService {
   // Get analytics (TVL, volume, fee APR/APY) for a single pool. Tries
-  // DefiLlama first, GeckoTerminal as fallback. Returns UNAVAILABLE when
+  // DefiLlama first, CoinGecko Onchain as fallback. Returns UNAVAILABLE when
   // both providers fail.
   rpc GetPoolAnalytics(PoolAnalyticsRequest) returns (PoolAnalyticsResponse);
 }
@@ -1743,7 +1743,7 @@ message PoolAnalyticsResponse {
   string token1_weight = 11;   // Fraction of TVL in token1 (0.0-1.0)
 
   // Provenance
-  string source = 12;          // "defillama" | "geckoterminal" | …
+  string source = 12;          // "defillama" | "coingecko_onchain" | …
   int64  observed_at = 13;     // Unix seconds when the gateway fetched the data
   bool   is_live_data = 14;    // False if served from cache or degraded
 
@@ -1761,7 +1761,7 @@ message PoolAnalyticsResponse {
 // PoolHistoryReader (`almanak/framework/data/pools/history.py`) which used
 // direct aiohttp / GraphQL egress from inside the strategy container,
 // violating the gateway boundary. HTTP / GraphQL egress to The Graph,
-// DefiLlama, and GeckoTerminal happens server-side only; the framework
+// DefiLlama, and CoinGecko Onchain happens server-side only; the framework
 // reader is a thin gRPC client (POOL-7 / VIB-4755).
 //
 // Wire conventions (Decimal as string, Empty != Zero, dual-channel envelope)
@@ -1860,9 +1860,9 @@ message PoolSnapshot {
 service PoolHistoryService {
   // Get a time-series of historical PoolSnapshot rows for a single pool.
   // Provider fallback order is dispatcher policy (VIB-4753 / POOL-5):
-  //   1h / 4h: TheGraph (primary) -> GeckoTerminal (fallback). DefiLlama is
-  //            SKIPPED (daily-only).
-  //   1d:      TheGraph (primary) -> DefiLlama (fallback) -> GeckoTerminal
+  //   1h / 4h: TheGraph (primary) -> CoinGecko Onchain (fallback).
+  //            DefiLlama is SKIPPED (daily-only).
+  //   1d:      TheGraph (primary) -> DefiLlama (fallback) -> CoinGecko Onchain
   //            (last resort).
   // Returns UNAVAILABLE when all eligible providers fail or when the pool
   // is not found anywhere (NEVER fake-success with snapshots=[]).
@@ -1921,9 +1921,9 @@ message PoolHistoryResponse {
   int64 next_start_ts = 3;
 
   // Provider that served the response: "the_graph" | "defillama" |
-  // "geckoterminal" on success. On failure: "" or "none" (NEVER a provider
-  // name with snapshots=[] — that would imply a (failed) provider's data is
-  // in the envelope).
+  // "geckoterminal" (legacy key for CoinGecko Onchain) on success. On
+  // failure: "" or "none" (NEVER a provider name with snapshots=[] — that
+  // would imply a (failed) provider's data is in the envelope).
   string source = 4;
 
   // Per-response finality (kept small; per-row finality is recomputable
@@ -3790,7 +3790,7 @@ message WriteApprovalResponseByStrategyRequest {
 }
 
 // =============================================================================
-// GeckoTerminal Integration Messages
+// Legacy-named CoinGecko Onchain Integration Messages
 // =============================================================================
 
 message GeckoTerminalOHLCVRequest {

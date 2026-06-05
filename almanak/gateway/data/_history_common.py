@@ -1,7 +1,7 @@
 """Shared chain-name maps + Solana-family helper for the two off-chain
 pool-history / pool-analytics gateway services (VIB-4727 + POOL-5 / VIB-4753).
 
-Single home for the DefiLlama / GeckoTerminal chain-spelling tables so the
+Single home for the DefiLlama / CoinGecko Onchain chain-spelling tables so the
 ``PoolAnalyticsService`` handler (``almanak/gateway/services/pool_analytics_service.py``)
 and the ``PoolHistoryDispatcher`` providers (``almanak/gateway/data/pool_history/``)
 agree on chain spelling without duplicating the literals. Previously each
@@ -30,7 +30,7 @@ from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import vendor_chain_map
 from almanak.core.enums import ChainFamily
 
-#: Chain -> GeckoTerminal network slug. Derived compat view (VIB-4851 B1);
+#: Chain -> CoinGecko Onchain network slug. Derived compat view (VIB-4851 B1);
 #: canonical home is ``ChainDescriptor.external_ids["geckoterminal"]``.
 #: INTENTIONALLY the union of this service's historical 9-entry map with the
 #: price-layer geckoterminal map — it gains ``mantle`` (9 -> 10 keys). Pinned by

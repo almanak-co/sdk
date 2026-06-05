@@ -41,7 +41,7 @@ class Resolution(_Resolution, metaclass=_ResolutionEnumTypeWrapper):
     PoolHistoryReader (`almanak/framework/data/pools/history.py`) which used
     direct aiohttp / GraphQL egress from inside the strategy container,
     violating the gateway boundary. HTTP / GraphQL egress to The Graph,
-    DefiLlama, and GeckoTerminal happens server-side only; the framework
+    DefiLlama, and CoinGecko Onchain happens server-side only; the framework
     reader is a thin gRPC client (POOL-7 / VIB-4755).
 
     Wire conventions (Decimal as string, Empty != Zero, dual-channel envelope)
@@ -5331,7 +5331,7 @@ class PoolAnalyticsResponse(_message.Message):
     """Fraction of TVL in token1 (0.0-1.0)"""
     source: _builtins.str
     """Provenance
-    "defillama" | "geckoterminal" | …
+    "defillama" | "coingecko_onchain" | …
     """
     observed_at: _builtins.int
     """Unix seconds when the gateway fetched the data"""
@@ -5497,9 +5497,9 @@ class PoolHistoryResponse(_message.Message):
     """
     source: _builtins.str
     """Provider that served the response: "the_graph" | "defillama" |
-    "geckoterminal" on success. On failure: "" or "none" (NEVER a provider
-    name with snapshots=[] — that would imply a (failed) provider's data is
-    in the envelope).
+    "geckoterminal" (legacy key for CoinGecko Onchain) on success. On
+    failure: "" or "none" (NEVER a provider name with snapshots=[] — that
+    would imply a (failed) provider's data is in the envelope).
     """
     finalized_only: _builtins.bool
     """Per-response finality (kept small; per-row finality is recomputable
@@ -10146,7 +10146,7 @@ Global___WriteApprovalResponseByStrategyRequest: _TypeAlias = WriteApprovalRespo
 @_typing.final
 class GeckoTerminalOHLCVRequest(_message.Message):
     """=============================================================================
-    GeckoTerminal Integration Messages
+    Legacy-named CoinGecko Onchain Integration Messages
     =============================================================================
     """
 

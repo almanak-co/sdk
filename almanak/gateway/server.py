@@ -228,7 +228,7 @@ class GatewayServer:
         # appended to ``self._connector_servicers`` so the shutdown loop can
         # call ``close()`` on each without naming individual providers.
         self._connector_servicers: list[Any] = []
-        # VIB-4727: pool analytics (off-chain DefiLlama / GeckoTerminal egress
+        # VIB-4727: pool analytics (off-chain DefiLlama / CoinGecko Onchain egress
         # moved from the framework PoolAnalyticsReader to the gateway).
         self._pool_analytics_servicer: PoolAnalyticsServiceServicer | None = None
         # VIB-4728 / POOL-2 (VIB-4750): pool history skeleton. Default-disabled
@@ -506,7 +506,7 @@ class GatewayServer:
                 self._connector_servicers.append(provider.servicer)
 
         # VIB-4727: pool analytics service. Owns the HTTP egress to
-        # DefiLlama / GeckoTerminal so strategy containers do not.
+        # DefiLlama / CoinGecko Onchain so strategy containers do not.
         self._pool_analytics_servicer = PoolAnalyticsServiceServicer(self.settings)
         gateway_pb2_grpc.add_PoolAnalyticsServiceServicer_to_server(self._pool_analytics_servicer, self.server)
 

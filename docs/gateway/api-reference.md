@@ -12,7 +12,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
 | RpcService | 6 | JSON-RPC proxy to blockchains with typed queries |
-| IntegrationService | 13 | Third-party data (Binance, CoinGecko, TheGraph, GeckoTerminal, Zerion) |
+| IntegrationService | 13 | Third-party data (Binance, CoinGecko, TheGraph, CoinGecko Onchain, Zerion) |
 | DashboardService | 22 | Operator dashboard data, actions, transaction ledger, PnL/cost stack, audit posture, trade tape, activity feed, positions, reconciliation report, and operator reconciliation actions |
 | FundingRateService | 2 | Perpetual funding rates and spreads |
 | SimulationService | 1 | Transaction bundle simulation (Tenderly/Alchemy) |
@@ -954,7 +954,8 @@ message CoinGeckoOHLCVResponse {
 
 ### GeckoTerminalGetOHLCV
 
-Get DEX OHLCV data from GeckoTerminal for on-chain pool pricing.
+Legacy-named RPC for DEX OHLCV data from CoinGecko Onchain for on-chain
+pool pricing.
 
 ```protobuf
 rpc GeckoTerminalGetOHLCV(GeckoTerminalOHLCVRequest) returns (GeckoTerminalOHLCVResponse)
@@ -1307,8 +1308,8 @@ wired (POOL-2 → POOL-5 window) it returns `UNIMPLEMENTED`.
 Return a time-series of `PoolSnapshot` rows for a single pool. Provider fallback
 order is dispatcher policy (VIB-4753 / POOL-5):
 
-- **1h / 4h:** TheGraph → GeckoTerminal (DefiLlama is skipped — daily-only).
-- **1d:** TheGraph → DefiLlama → GeckoTerminal.
+- **1h / 4h:** TheGraph → CoinGecko Onchain (DefiLlama is skipped — daily-only).
+- **1d:** TheGraph → DefiLlama → CoinGecko Onchain.
 
 Returns `UNAVAILABLE` when all eligible providers fail or when the pool is not
 found anywhere — **never** fake-success with an empty `snapshots` array.
@@ -1335,7 +1336,7 @@ message PoolHistoryResponse {
   repeated PoolSnapshot snapshots = 1;     // Ascending by timestamp, one row per aligned bucket
   TruncationReason truncation_reason = 2;  // CAP_EXCEEDED | PROVIDER_PAGE_CAP | PROVIDER_RETENTION
   int64 next_start_ts = 3;                 // Re-chunk hint for paged backfill
-  string source = 4;                       // "the_graph" | "defillama" | "geckoterminal"
+  string source = 4;                       // "the_graph" | "defillama" | "geckoterminal" (legacy key for CoinGecko Onchain)
   bool finalized_only = 5;                 // false if any row is provisional within the finality cutoff
   bool success = 6;
   string error = 7;

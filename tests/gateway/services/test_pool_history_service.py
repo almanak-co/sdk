@@ -60,7 +60,9 @@ def _fx(name: str) -> Any:
 
 
 def _enabled_servicer() -> PoolHistoryServiceServicer:
-    return PoolHistoryServiceServicer(GatewaySettings(pool_history_enabled=True))
+    return PoolHistoryServiceServicer(
+        GatewaySettings(pool_history_enabled=True, coingecko_api_key="test-key")
+    )
 
 
 class _Ctx:
@@ -680,6 +682,39 @@ def test_all_providers_unavailable():
     assert resp.next_start_ts == 0
     assert resp.finalized_only is False
     assert len(resp.snapshots) == 0
+
+
+def test_keyless_coingecko_onchain_fallback_fails_before_egress():
+    """A keyless gateway must fail fast before CoinGecko Onchain egress."""
+    servicer = PoolHistoryServiceServicer(
+        GatewaySettings(pool_history_enabled=True, coingecko_api_key="")
+    )
+    ctx = _Ctx()
+    start = 1_699_920_000
+    tg_down = AsyncMock(side_effect=SubgraphConnectionError("thegraph 503"))
+    gt_ohlcv = AsyncMock()
+
+    with _patch_thegraph(servicer, tg_down), patch.object(
+        servicer._dispatcher._geckoterminal, "_query_ohlcv", new=gt_ohlcv
+    ):
+        resp = asyncio.run(
+            servicer.GetPoolHistory(
+                _request(
+                    pool_address=_ARB_POOL,
+                    chain="arbitrum",
+                    protocol="uniswap_v3",
+                    start_ts=start,
+                    end_ts=start + 7 * HOUR,
+                    resolution=gateway_pb2.Resolution.RESOLUTION_1H,
+                ),
+                ctx,
+            )
+        )
+
+    assert resp.success is False
+    assert ctx.code == grpc.StatusCode.UNAVAILABLE
+    assert "requires a valid COINGECKO_API_KEY" in resp.error
+    assert gt_ohlcv.call_count == 0
 
 
 def test_failed_then_success_reattempts_providers():

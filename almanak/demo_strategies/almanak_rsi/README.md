@@ -25,7 +25,7 @@ This strategy implements a classic RSI mean reversion approach:
 
 ## Data Source
 
-- **Source**: CoinGecko DEX (GeckoTerminal)
+- **Source**: CoinGecko Onchain
 - **Data Type**: OHLCV candlestick data
 - **Granularity**: 15-minute candles
 
@@ -138,7 +138,7 @@ almanak strat run -d strategies/demo/almanak_rsi --interval 900
 
 1. **Token Resolution**: ALMANAK is resolved by address since it may not be in standard token registries.
 
-2. **Data Availability**: GeckoTerminal needs sufficient trading history to provide OHLCV data. New pools may have limited data.
+2. **Data Availability**: CoinGecko Onchain needs sufficient trading history to provide OHLCV data. New pools may have limited data.
 
 3. **Pool Liquidity**: Trading success depends on available liquidity in the ALMANAK/USDC pool.
 
@@ -160,5 +160,5 @@ strategies/demo/almanak_rsi/
 ## Dependencies
 
 - Almanak Framework v2
-- GeckoTerminal API (free tier)
+- CoinGecko Onchain API
 - Uniswap V3 on Base

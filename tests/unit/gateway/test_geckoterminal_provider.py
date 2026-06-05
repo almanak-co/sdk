@@ -37,7 +37,7 @@ from almanak.gateway.data.ohlcv.geckoterminal_provider import (
 @pytest.fixture
 def provider() -> GeckoTerminalOHLCVProvider:
     """Create a fresh provider for each test."""
-    return GeckoTerminalOHLCVProvider(cache_ttl=60, request_timeout=5.0)
+    return GeckoTerminalOHLCVProvider(cache_ttl=60, request_timeout=5.0, api_key="test-key")
 
 
 def _make_ohlcv_response(
@@ -314,6 +314,25 @@ class TestGetOHLCV:
                 pool_address="0xabc",
                 chain="ethereum",
             )
+
+    @pytest.mark.asyncio
+    async def test_missing_api_key_raises_before_http(self) -> None:
+        """CoinGecko Onchain OHLCV requires a gateway-owned CoinGecko key."""
+        provider = GeckoTerminalOHLCVProvider(api_key="", request_timeout=5.0)
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock()
+        mock_session.closed = False
+        provider._session = mock_session
+
+        with pytest.raises(DataSourceUnavailable, match="requires a valid COINGECKO_API_KEY"):
+            await provider.get_ohlcv(
+                "WETH",
+                timeframe="1h",
+                pool_address="0xabc",
+                chain="ethereum",
+            )
+
+        mock_session.get.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -649,6 +668,23 @@ class TestMetrics:
 
         assert provider._metrics.total_requests == 1
         assert provider._metrics.errors == 1
+
+
+# ---------------------------------------------------------------------------
+# CoinGecko auth tests
+# ---------------------------------------------------------------------------
+
+
+class TestCoinGeckoAuth:
+    """Test CoinGecko Onchain host/header selection."""
+
+    def test_api_key_selects_pro_host_and_header(self, provider: GeckoTerminalOHLCVProvider) -> None:
+        assert "pro-api.coingecko.com" in provider._api_base
+        assert provider._headers["x-cg-pro-api-key"] == "test-key"
+
+    def test_missing_api_key_uses_no_auth_header(self) -> None:
+        provider = GeckoTerminalOHLCVProvider(api_key="")
+        assert "x-cg-pro-api-key" not in provider._headers
 
 
 # ---------------------------------------------------------------------------

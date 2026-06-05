@@ -753,7 +753,7 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             )
 
     # =========================================================================
-    # GeckoTerminal endpoints
+    # CoinGecko Onchain DEX OHLCV endpoint
     # =========================================================================
 
     async def GeckoTerminalGetOHLCV(
@@ -761,10 +761,10 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
         request: gateway_pb2.GeckoTerminalOHLCVRequest,
         context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.GeckoTerminalOHLCVResponse:
-        """Get DEX OHLCV data from GeckoTerminal.
+        """Get DEX OHLCV data from CoinGecko Onchain.
 
-        Proxies GeckoTerminal API requests from strategy containers that
-        have no internet access. Mirrors the BinanceGetKlines pattern.
+        This method keeps the legacy GeckoTerminal* RPC name for client/proto
+        compatibility, but the upstream egress is CoinGecko's Onchain API.
 
         Args:
             request: OHLCV request with token, chain, timeframe, limit
@@ -787,7 +787,7 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             return gateway_pb2.GeckoTerminalOHLCVResponse()
 
         req_timeframe = request.timeframe or "1h"
-        valid_timeframes = {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
+        valid_timeframes = {"1m", "5m", "15m", "1h", "4h", "1d"}
         if req_timeframe not in valid_timeframes:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(f"Invalid timeframe: {req_timeframe}. Valid: {sorted(valid_timeframes)}")
@@ -804,7 +804,7 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
 
             start_time_metric = time.monotonic()
 
-            async with GeckoTerminalOHLCVProvider() as provider:
+            async with GeckoTerminalOHLCVProvider(api_key=self.settings.coingecko_api_key) as provider:
                 candles = await provider.get_ohlcv(
                     token=request.token.strip(),
                     quote=request.quote or "USD",
@@ -816,8 +816,8 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
                 )
 
             latency = time.monotonic() - start_time_metric
-            record_integration_request("geckoterminal", "get_ohlcv")
-            record_integration_latency("geckoterminal", "get_ohlcv", latency)
+            record_integration_request("coingecko_onchain", "get_ohlcv")
+            record_integration_latency("coingecko_onchain", "get_ohlcv", latency)
 
             candle_messages = []
             for c in candles:
@@ -839,8 +839,8 @@ class IntegrationServiceServicer(gateway_pb2_grpc.IntegrationServiceServicer):
             context.set_details(str(e))
             return gateway_pb2.GeckoTerminalOHLCVResponse()
         except Exception as e:
-            logger.exception("GeckoTerminalGetOHLCV failed for %s on %s", request.token, request.chain)
-            set_error_from_upstream(context, e, upstream="geckoterminal")
+            logger.exception("CoinGecko Onchain OHLCV failed for %s on %s", request.token, request.chain)
+            set_error_from_upstream(context, e, upstream="coingecko_onchain")
             return gateway_pb2.GeckoTerminalOHLCVResponse()
 
     # =========================================================================
