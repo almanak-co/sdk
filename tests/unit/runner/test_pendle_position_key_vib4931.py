@@ -55,6 +55,14 @@ def test_pendle_lp_no_market_returns_empty():
     assert position_key == "" and market_id == ""
 
 
+def test_pendle_lp_collect_fees_stays_connector_owned_without_generic_fallback():
+    # The connector claims Pendle LP_COLLECT_FEES accounting but intentionally emits
+    # no event/key today; the runner must not synthesize a generic lp: key.
+    intent = SimpleNamespace(protocol="pendle_v2", pool="0xMarketAddr")
+    position_key, market_id = _call(intent, "LP_COLLECT_FEES")
+    assert position_key == "" and market_id == ""
+
+
 def test_non_pendle_swap_falls_through_to_generic():
     # The registry declines a non-Pendle event, so the runner's generic SWAP branch runs.
     intent = SimpleNamespace(protocol="uniswap_v3", pool="0xPool")

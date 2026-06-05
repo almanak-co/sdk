@@ -18,7 +18,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from almanak.connectors._connector import CONNECTOR_REGISTRY
 from almanak.connectors._strategy_base.address_registry import AddressRegistry
+from almanak.connectors._strategy_base.contract_monitoring import ContractMonitoringSpec
 from almanak.core.constants import resolve_chain_name
 
 
@@ -89,142 +91,162 @@ class ContractRegistry:
         }
 
 
-@dataclass(frozen=True)
-class _ProtocolDef:
-    """One (protocol, contract-kind) → receipt-parser binding.
-
-    ``protocol`` is the :class:`AddressRegistry` identifier whose per-chain
-    address table supplies the on-chain address for ``contract_key``; the
-    registry brokers the connector's ``addresses.py`` so this table never
-    imports a connector module directly.
-    """
-
-    protocol: str
-    contract_key: str
-    parser_module: str
-    parser_class: str
-    actions: tuple[str, ...]
-
-
-_PROTOCOL_DEFS: tuple[_ProtocolDef, ...] = (
+_PROTOCOL_DEFS: tuple[ContractMonitoringSpec, ...] = (
     # DEX swap routers
-    _ProtocolDef(
-        "uniswap_v3",
-        "swap_router",
-        "almanak.connectors.uniswap_v3.receipt_parser",
-        "UniswapV3ReceiptParser",
-        ("SWAP",),
+    ContractMonitoringSpec(
+        protocol="uniswap_v3",
+        contract_key="swap_router",
+        parser_module="almanak.connectors.uniswap_v3.receipt_parser",
+        parser_class_name="UniswapV3ReceiptParser",
+        supported_actions=("SWAP",),
     ),
-    _ProtocolDef(
-        "agni_finance",
-        "swap_router",
-        "almanak.connectors.uniswap_v3.receipt_parser",
-        "UniswapV3ReceiptParser",
-        ("SWAP",),
+    ContractMonitoringSpec(
+        protocol="agni_finance",
+        contract_key="swap_router",
+        parser_module="almanak.connectors.uniswap_v3.receipt_parser",
+        parser_class_name="UniswapV3ReceiptParser",
+        supported_actions=("SWAP",),
     ),
-    _ProtocolDef(
-        "pancakeswap_v3",
-        "swap_router",
-        "almanak.connectors.pancakeswap_v3.receipt_parser",
-        "PancakeSwapV3ReceiptParser",
-        ("SWAP",),
+    ContractMonitoringSpec(
+        protocol="pancakeswap_v3",
+        contract_key="swap_router",
+        parser_module="almanak.connectors.pancakeswap_v3.receipt_parser",
+        parser_class_name="PancakeSwapV3ReceiptParser",
+        supported_actions=("SWAP",),
     ),
-    _ProtocolDef(
-        "sushiswap_v3",
-        "swap_router",
-        "almanak.connectors.sushiswap_v3.receipt_parser",
-        "SushiSwapV3ReceiptParser",
-        ("SWAP",),
+    ContractMonitoringSpec(
+        protocol="sushiswap_v3",
+        contract_key="swap_router",
+        parser_module="almanak.connectors.sushiswap_v3.receipt_parser",
+        parser_class_name="SushiSwapV3ReceiptParser",
+        supported_actions=("SWAP",),
     ),
-    _ProtocolDef(
-        "aerodrome",
-        "router",
-        "almanak.connectors.aerodrome.receipt_parser",
-        "AerodromeReceiptParser",
-        ("SWAP",),
+    ContractMonitoringSpec(
+        protocol="aerodrome",
+        contract_key="router",
+        parser_module="almanak.connectors.aerodrome.receipt_parser",
+        parser_class_name="AerodromeReceiptParser",
+        supported_actions=("SWAP",),
     ),
-    _ProtocolDef(
-        "traderjoe_v2",
-        "router",
-        "almanak.connectors.traderjoe_v2.receipt_parser",
-        "TraderJoeV2ReceiptParser",
-        ("SWAP",),
-    ),
-    _ProtocolDef(
-        "pendle",
-        "router",
-        "almanak.connectors.pendle.receipt_parser",
-        "PendleReceiptParser",
-        ("SWAP", "LP_OPEN", "LP_CLOSE"),
+    ContractMonitoringSpec(
+        protocol="traderjoe_v2",
+        contract_key="router",
+        parser_module="almanak.connectors.traderjoe_v2.receipt_parser",
+        parser_class_name="TraderJoeV2ReceiptParser",
+        supported_actions=("SWAP",),
     ),
     # Uniswap V4 — singleton PoolManager handles swaps, PositionManager handles LP
-    _ProtocolDef(
-        "uniswap_v4",
-        "pool_manager",
-        "almanak.connectors.uniswap_v4.receipt_parser",
-        "UniswapV4ReceiptParser",
-        ("SWAP",),
+    ContractMonitoringSpec(
+        protocol="uniswap_v4",
+        contract_key="pool_manager",
+        parser_module="almanak.connectors.uniswap_v4.receipt_parser",
+        parser_class_name="UniswapV4ReceiptParser",
+        supported_actions=("SWAP",),
     ),
-    _ProtocolDef(
-        "uniswap_v4",
-        "position_manager",
-        "almanak.connectors.uniswap_v4.receipt_parser",
-        "UniswapV4ReceiptParser",
-        ("LP_OPEN", "LP_CLOSE"),
+    ContractMonitoringSpec(
+        protocol="uniswap_v4",
+        contract_key="position_manager",
+        parser_module="almanak.connectors.uniswap_v4.receipt_parser",
+        parser_class_name="UniswapV4ReceiptParser",
+        supported_actions=("LP_OPEN", "LP_CLOSE"),
     ),
     # LP managers
-    _ProtocolDef(
-        "uniswap_v3",
-        "position_manager",
-        "almanak.connectors.uniswap_v3.receipt_parser",
-        "UniswapV3ReceiptParser",
-        ("LP_OPEN", "LP_CLOSE"),
+    ContractMonitoringSpec(
+        protocol="uniswap_v3",
+        contract_key="position_manager",
+        parser_module="almanak.connectors.uniswap_v3.receipt_parser",
+        parser_class_name="UniswapV3ReceiptParser",
+        supported_actions=("LP_OPEN", "LP_CLOSE"),
     ),
-    _ProtocolDef(
-        "agni_finance",
-        "position_manager",
-        "almanak.connectors.uniswap_v3.receipt_parser",
-        "UniswapV3ReceiptParser",
-        ("LP_OPEN", "LP_CLOSE"),
+    ContractMonitoringSpec(
+        protocol="agni_finance",
+        contract_key="position_manager",
+        parser_module="almanak.connectors.uniswap_v3.receipt_parser",
+        parser_class_name="UniswapV3ReceiptParser",
+        supported_actions=("LP_OPEN", "LP_CLOSE"),
     ),
-    _ProtocolDef(
-        "pancakeswap_v3",
-        "position_manager",
-        "almanak.connectors.pancakeswap_v3.receipt_parser",
-        "PancakeSwapV3ReceiptParser",
-        ("LP_OPEN", "LP_CLOSE"),
+    ContractMonitoringSpec(
+        protocol="pancakeswap_v3",
+        contract_key="nft",
+        parser_module="almanak.connectors.pancakeswap_v3.receipt_parser",
+        parser_class_name="PancakeSwapV3ReceiptParser",
+        supported_actions=("LP_OPEN", "LP_CLOSE"),
     ),
-    _ProtocolDef(
-        "sushiswap_v3",
-        "position_manager",
-        "almanak.connectors.sushiswap_v3.receipt_parser",
-        "SushiSwapV3ReceiptParser",
-        ("LP_OPEN", "LP_CLOSE"),
+    ContractMonitoringSpec(
+        protocol="sushiswap_v3",
+        contract_key="position_manager",
+        parser_module="almanak.connectors.sushiswap_v3.receipt_parser",
+        parser_class_name="SushiSwapV3ReceiptParser",
+        supported_actions=("LP_OPEN", "LP_CLOSE"),
     ),
     # Lending
-    _ProtocolDef(
-        "aave_v3",
-        "pool",
-        "almanak.connectors.aave_v3.receipt_parser",
-        "AaveV3ReceiptParser",
-        ("SUPPLY", "WITHDRAW", "BORROW", "REPAY"),
+    ContractMonitoringSpec(
+        protocol="aave_v3",
+        contract_key="pool",
+        parser_module="almanak.connectors.aave_v3.receipt_parser",
+        parser_class_name="AaveV3ReceiptParser",
+        supported_actions=("SUPPLY", "WITHDRAW", "BORROW", "REPAY"),
     ),
-    _ProtocolDef(
-        "morpho_blue",
-        "morpho",
-        "almanak.connectors.morpho_blue.receipt_parser",
-        "MorphoBlueReceiptParser",
-        ("SUPPLY", "WITHDRAW", "BORROW", "REPAY"),
+    ContractMonitoringSpec(
+        protocol="morpho_blue",
+        contract_key="morpho",
+        parser_module="almanak.connectors.morpho_blue.receipt_parser",
+        parser_class_name="MorphoBlueReceiptParser",
+        supported_actions=("SUPPLY", "WITHDRAW", "BORROW", "REPAY"),
     ),
     # Perpetuals
-    _ProtocolDef(
-        "gmx_v2",
-        "exchange_router",
-        "almanak.connectors.gmx_v2.receipt_parser",
-        "GMXv2ReceiptParser",
-        ("PERP_OPEN", "PERP_CLOSE"),
+    ContractMonitoringSpec(
+        protocol="gmx_v2",
+        contract_key="exchange_router",
+        parser_module="almanak.connectors.gmx_v2.receipt_parser",
+        parser_class_name="GMXv2ReceiptParser",
+        supported_actions=("PERP_OPEN", "PERP_CLOSE"),
     ),
 )
+
+
+def _connector_contract_monitoring_specs() -> tuple[ContractMonitoringSpec, ...]:
+    """Load connector-published contract-monitoring specs from manifests."""
+    specs: list[ContractMonitoringSpec] = []
+    for connector_manifest in CONNECTOR_REGISTRY.with_contract_monitoring():
+        if connector_manifest.contract_monitoring is None:
+            continue
+        loaded = connector_manifest.contract_monitoring.load()
+        if isinstance(loaded, ContractMonitoringSpec):
+            specs.append(loaded)
+            continue
+        if not isinstance(loaded, tuple) or not all(isinstance(spec, ContractMonitoringSpec) for spec in loaded):
+            raise TypeError(
+                f"{connector_manifest.contract_monitoring.module}.{connector_manifest.contract_monitoring.attribute} "
+                "must be a ContractMonitoringSpec or tuple[ContractMonitoringSpec, ...]"
+            )
+        specs.extend(loaded)
+    return tuple(specs)
+
+
+def _register_contract_spec(registry: ContractRegistry, definition: ContractMonitoringSpec) -> None:
+    """Register every address selected by one contract-monitoring spec."""
+    matched_any = False
+    for chain in AddressRegistry.address_supported_chains(definition.protocol):
+        contracts = AddressRegistry.addresses_for(definition.protocol, chain)
+        for contract_type, address in definition.matching_contracts(contracts):
+            matched_any = True
+            registry.register(
+                chain,
+                address,
+                ContractInfo(
+                    protocol=definition.protocol,
+                    contract_type=contract_type,
+                    parser_module=definition.parser_module,
+                    parser_class_name=definition.parser_class_name,
+                    supported_actions=list(definition.supported_actions),
+                ),
+            )
+    if not matched_any:
+        raise ValueError(
+            f"ContractMonitoringSpec for protocol={definition.protocol!r} matched no addresses "
+            f"(contract_key={definition.contract_key!r}, contract_key_prefix={definition.contract_key_prefix!r})"
+        )
 
 
 def get_default_registry() -> ContractRegistry:
@@ -236,41 +258,6 @@ def get_default_registry() -> ContractRegistry:
     ``almanak.core.contracts`` has been deleted.
     """
     registry = ContractRegistry()
-    for definition in _PROTOCOL_DEFS:
-        for chain in AddressRegistry.address_supported_chains(definition.protocol):
-            contracts = AddressRegistry.addresses_for(definition.protocol, chain)
-            address = contracts.get(definition.contract_key)
-            if not address:
-                continue
-            registry.register(
-                chain,
-                address,
-                ContractInfo(
-                    protocol=definition.protocol,
-                    contract_type=definition.contract_key,
-                    parser_module=definition.parser_module,
-                    parser_class_name=definition.parser_class,
-                    supported_actions=list(definition.actions),
-                ),
-            )
-
-        # Pendle has dynamic market addresses (`market_*`) where LP actions happen.
-        if definition.protocol == "pendle":
-            for chain in AddressRegistry.address_supported_chains(definition.protocol):
-                contracts = AddressRegistry.addresses_for(definition.protocol, chain)
-                for key, address in contracts.items():
-                    if not key.startswith("market_"):
-                        continue
-                    registry.register(
-                        chain,
-                        address,
-                        ContractInfo(
-                            protocol="pendle",
-                            contract_type=key,
-                            parser_module="almanak.connectors.pendle.receipt_parser",
-                            parser_class_name="PendleReceiptParser",
-                            supported_actions=["SWAP", "LP_OPEN", "LP_CLOSE"],
-                        ),
-                    )
-
+    for definition in (*_PROTOCOL_DEFS, *_connector_contract_monitoring_specs()):
+        _register_contract_spec(registry, definition)
     return registry

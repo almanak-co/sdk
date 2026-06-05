@@ -20,9 +20,9 @@ The contract-kind vocabulary (``router`` / ``router_static`` /
 ``market_factory`` / ``yt_factory`` / ``pt_oracle`` /
 ``market_*`` / ``pt_*`` / ``yt_*`` / ``sy_*``) is connector-private —
 callers outside this folder should consume the gateway registry, not
-guess key names. The ``market_*`` prefix is load-bearing: the strategy-
-side ``ContractRegistry`` discovers dynamic per-market addresses by
-scanning for keys that start with ``market_``.
+guess key names. The connector's contract-monitoring manifest declares
+the ``market_*`` prefix for strategy-side monitoring of per-market
+addresses.
 """
 
 from __future__ import annotations

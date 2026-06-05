@@ -1160,8 +1160,25 @@ class ResultEnricher:
         # metadata to swap_amounts extractors so parsers can compute realized
         # slippage_bps. Parsers that do not accept the kwarg degrade to the
         # legacy behavior (slippage_bps=None) via the TypeError fallback in
-        # _invoke_extract.
-        extract_kwargs = self._build_extract_kwargs(field, bundle_metadata)
+        # _invoke_extract. Connector-owned parsers may add parser-specific
+        # kwargs through ``build_extract_kwargs`` without framework changes.
+        # A buggy hook is treated as ExtractError: these kwargs feed
+        # accounting-relevant extraction, so silently ignoring hook failures
+        # would hide parser-owned data loss.
+        try:
+            extract_kwargs = self._build_extract_kwargs_for_parser(parser, field, bundle_metadata)
+        except CriticalAccountingError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - malformed parser hook is extraction-critical
+            self._handle_extract_error(
+                result,
+                ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc),
+                field,
+                intent_type,
+                parser,
+                protocol,
+            )
+            return
 
         # Iterate receipts. Remember any ExtractError and keep looking — the
         # data might land in a later receipt (multi-tx bundle). Only escalate
@@ -1376,11 +1393,11 @@ class ResultEnricher:
         return any(name in klass.__dict__ for klass in type(obj).__mro__)
 
     @staticmethod
-    def _build_extract_kwargs(  # noqa: C901
+    def _build_extract_kwargs(
         field: str,
         bundle_metadata: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Compute per-field extra kwargs for ``extract_<field>`` methods.
+        """Compute framework-owned extra kwargs for ``extract_<field>`` methods.
 
         VIB-3203 — swap_amounts extractors can consume an ``expected_out``
         Decimal (human units) to compute realized ``slippage_bps`` from
@@ -1392,10 +1409,8 @@ class ResultEnricher:
         re-reading on-chain pool metadata. Sourced from
         ``ActionBundle.metadata["selected_fee_tier"]``.
 
-        Returns a mapping that can be passed directly as ``**kwargs`` to
-        the extract method. Parsers that do not accept the kwarg fall back
-        to positional-only invocation via :meth:`_invoke_extract` (TypeError
-        fallback).
+        Returns framework-generic kwargs only. Connector-specific parser
+        kwargs are appended by :meth:`_build_extract_kwargs_for_parser`.
         """
         if not bundle_metadata:
             return {}
@@ -1409,59 +1424,6 @@ class ResultEnricher:
                         kwargs["expected_out"] = expected_out
                 except (InvalidOperation, TypeError, ValueError):
                     logger.debug("Could not coerce expected_output_human=%r to Decimal; skipping", raw)
-            # VIB-3751: thread Pendle YT swap context so the parser can
-            # reconstruct user-facing amounts from Transfer events (the
-            # Pendle Market Swap event is misleading for YT trades — it
-            # reports the internal PT flash-mint, not the user's YT trade).
-            #
-            # Gate strictly to Pendle: other swap parsers (Uniswap, Aerodrome,
-            # Curve, ...) accept ``expected_out`` but not the new
-            # ``intent_swap_type`` / ``token_in_address`` / ``token_out_address``
-            # / ``wallet_address`` kwargs. Without this gate, _invoke_extract's
-            # TypeError fallback would drop ALL kwargs (including the valid
-            # ``expected_out``), silently regressing realized-slippage reporting
-            # on every non-Pendle SWAP. (Codex audit P2.)
-            if (bundle_metadata.get("protocol") or "").lower() == "pendle":
-                for key in (
-                    "swap_type",
-                    "to_token_address",
-                    "to_token_decimals",
-                    "wallet_address",
-                ):
-                    val = bundle_metadata.get(key)
-                    if val is not None and val != "":
-                        if key == "swap_type":
-                            kwargs["intent_swap_type"] = val
-                        elif key == "to_token_address":
-                            kwargs["token_out_address"] = val
-                        elif key == "to_token_decimals":
-                            # Coerce to int — receipt parser uses 10**decimals;
-                            # str/Decimal slips through the bundle metadata path.
-                            try:
-                                kwargs["token_out_decimals"] = int(val)
-                            except (TypeError, ValueError):
-                                logger.debug(
-                                    "Could not coerce to_token_decimals=%r to int; "
-                                    "parser will fall back to constructor default",
-                                    val,
-                                )
-                        else:
-                            kwargs[key] = val
-                from_token_meta = bundle_metadata.get("from_token") or {}
-                if isinstance(from_token_meta, dict):
-                    addr = from_token_meta.get("address")
-                    if addr:
-                        kwargs["token_in_address"] = addr
-                    decimals = from_token_meta.get("decimals")
-                    if decimals is not None:
-                        try:
-                            kwargs["token_in_decimals"] = int(decimals)
-                        except (TypeError, ValueError):
-                            logger.debug(
-                                "Could not coerce from_token.decimals=%r to int; "
-                                "parser will fall back to constructor default",
-                                decimals,
-                            )
             return kwargs
         if field == "protocol_fees":
             return ResultEnricher._build_protocol_fees_kwargs(bundle_metadata)
@@ -1484,6 +1446,51 @@ class ResultEnricher:
                 bridge_kwargs["expected_amount_out"] = out_amount
             return bridge_kwargs
         return {}
+
+    def _build_extract_kwargs_for_parser(
+        self,
+        parser: Any,
+        field: str,
+        bundle_metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Merge framework-generic kwargs with optional parser-owned kwargs.
+
+        Parser-owned hooks may only add disjoint kwargs. Framework-owned
+        metadata such as ``expected_out`` and fee hints must not be shadowed by
+        connector hooks because those values are compiler/orchestrator facts.
+        """
+        kwargs = self._build_extract_kwargs(field, bundle_metadata)
+        parser_kwargs = self._build_parser_extract_kwargs(parser, field, bundle_metadata)
+        if not parser_kwargs:
+            return kwargs
+        duplicate_keys = kwargs.keys() & parser_kwargs.keys()
+        if duplicate_keys:
+            keys = ", ".join(sorted(duplicate_keys))
+            raise ValueError(
+                f"{type(parser).__name__}.build_extract_kwargs() must not return "
+                f"framework-owned extraction kwarg(s): {keys}"
+            )
+        return {**kwargs, **parser_kwargs}
+
+    @staticmethod
+    def _build_parser_extract_kwargs(
+        parser: Any,
+        field: str,
+        bundle_metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Ask a parser for connector-specific extraction kwargs when it opts in."""
+        if not bundle_metadata or not ResultEnricher._class_has_method(parser, "build_extract_kwargs"):
+            return {}
+
+        raw_kwargs = parser.build_extract_kwargs(field=field, bundle_metadata=bundle_metadata)
+        if raw_kwargs is None:
+            return {}
+        if not isinstance(raw_kwargs, dict):
+            raise TypeError(
+                f"{type(parser).__name__}.build_extract_kwargs() must return dict[str, Any] or None, "
+                f"got {type(raw_kwargs).__name__}"
+            )
+        return dict(raw_kwargs)
 
     @staticmethod
     def _build_protocol_fees_kwargs(bundle_metadata: dict[str, Any]) -> dict[str, Any]:
@@ -1827,13 +1834,10 @@ class ResultEnricher:
 
         def cached_parse_receipt(receipt: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
             # Use transactionHash + a deterministic kwargs signature as the
-            # key. VIB-3751: kwargs (e.g., intent_swap_type, token_in_address)
-            # MUST be part of the cache key — the original implementation
-            # dropped them entirely, which silently neutered context-aware
-            # parsing. The receipt itself is identical for every extract_*
-            # call within one enrichment, but two extract_* calls may pass
-            # different kwargs (e.g., one with `intent_swap_type` and one
-            # without), and we must not return the wrong cached result.
+            # key. Context kwargs MUST be part of the cache key. The receipt
+            # itself is identical for every extract_* call within one
+            # enrichment, but two extract_* calls may pass different kwargs,
+            # and we must not return the wrong cached result.
             tx_hash = receipt.get("transactionHash") or receipt.get("tx_hash")
             if tx_hash is None:
                 tx_hash = id(receipt)

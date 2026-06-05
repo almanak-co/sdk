@@ -103,6 +103,7 @@ class Connector:
     gateway_connectors: tuple[ImportRef, ...] = field(default_factory=tuple)
     protocol_family: ImportRef | None = None
     swap_classification: ImportRef | None = None
+    contract_monitoring: ImportRef | None = None
     contract_roles: ImportRef | None = None
     permission_infrastructure: ImportRef | None = None
     bridge_adapter: ImportRef | None = None
@@ -139,6 +140,7 @@ class Connector:
         self._validate_accounting_report()
         self._validate_protocol_family()
         self._validate_swap_classification()
+        self._validate_contract_monitoring()
         self._validate_contract_roles()
         self._validate_permission_infrastructure()
         self._validate_bridge_adapter()
@@ -289,6 +291,13 @@ class Connector:
         if self.swap_classification is not None and not isinstance(self.swap_classification, ImportRef):
             raise ValueError(
                 f"Connector.swap_classification must be None or an ImportRef, got {self.swap_classification!r}"
+            )
+
+    def _validate_contract_monitoring(self) -> None:
+        """Validate the contract-monitoring spec import reference."""
+        if self.contract_monitoring is not None and not isinstance(self.contract_monitoring, ImportRef):
+            raise ValueError(
+                f"Connector.contract_monitoring must be None or an ImportRef, got {self.contract_monitoring!r}"
             )
 
     def _validate_contract_roles(self) -> None:
@@ -481,6 +490,10 @@ class ConnectorRegistry:
     def with_swap_classification(self) -> tuple[Connector, ...]:
         """Return connectors that publish swap-classification specs."""
         return tuple(d for d in self.all() if d.swap_classification is not None)
+
+    def with_contract_monitoring(self) -> tuple[Connector, ...]:
+        """Return connectors that publish contract-monitoring specs."""
+        return tuple(d for d in self.all() if d.contract_monitoring is not None)
 
     def with_contract_roles(self) -> tuple[Connector, ...]:
         """Return connectors that publish contract-role specs."""

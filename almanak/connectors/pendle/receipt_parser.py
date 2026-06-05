@@ -416,6 +416,59 @@ class PendleReceiptParser:
         # Initialize event registry
         self.registry = EventRegistry(EVENT_TOPICS, EVENT_NAME_TO_TYPE)
 
+    def build_extract_kwargs(
+        self,
+        *,
+        field: str,
+        bundle_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return Pendle-owned kwargs for ResultEnricher extraction calls.
+
+        VIB-3751: Pendle YT swaps need compiler metadata to reconstruct
+        user-facing amounts from Transfer events. The Market Swap event reports
+        an internal PT flash-mint for YT trades, so the generic framework cannot
+        derive these parser-specific hints.
+        """
+        if field != "swap_amounts":
+            return {}
+
+        kwargs: dict[str, Any] = {}
+        for metadata_key, kwarg_key in (
+            ("swap_type", "intent_swap_type"),
+            ("to_token_address", "token_out_address"),
+            ("wallet_address", "wallet_address"),
+        ):
+            value = bundle_metadata.get(metadata_key)
+            if value is not None and value != "":
+                kwargs[kwarg_key] = value
+
+        value = bundle_metadata.get("to_token_decimals")
+        if value is not None:
+            try:
+                kwargs["token_out_decimals"] = int(value)
+            except (TypeError, ValueError):
+                logger.debug(
+                    "Could not coerce to_token_decimals=%r to int; parser will fall back to constructor default",
+                    value,
+                )
+
+        from_token_meta = bundle_metadata.get("from_token") or {}
+        if isinstance(from_token_meta, dict):
+            address = from_token_meta.get("address")
+            if address:
+                kwargs["token_in_address"] = address
+            decimals = from_token_meta.get("decimals")
+            if decimals is not None:
+                try:
+                    kwargs["token_in_decimals"] = int(decimals)
+                except (TypeError, ValueError):
+                    logger.debug(
+                        "Could not coerce from_token.decimals=%r to int; parser will fall back to constructor default",
+                        decimals,
+                    )
+
+        return kwargs
+
     def parse_receipt(  # noqa: C901
         self,
         receipt: dict[str, Any],

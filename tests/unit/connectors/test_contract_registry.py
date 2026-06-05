@@ -1,8 +1,12 @@
 """Tests for the contract address registry."""
 
+import pytest
+
+from almanak.connectors._strategy_base.contract_monitoring import ContractMonitoringSpec
 from almanak.connectors._strategy_base.contract_registry import (
     ContractInfo,
     ContractRegistry,
+    _register_contract_spec,
     get_default_registry,
 )
 
@@ -136,6 +140,14 @@ class TestDefaultRegistry:
         assert info is not None
         assert info.protocol == "pancakeswap_v3"
 
+    def test_pancakeswap_v3_position_manager_registered(self) -> None:
+        registry = get_default_registry()
+        info = registry.lookup("bnb", "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364")
+        assert info is not None
+        assert info.protocol == "pancakeswap_v3"
+        assert info.contract_type == "nft"
+        assert set(info.supported_actions) == {"LP_OPEN", "LP_CLOSE"}
+
     def test_aerodrome_base_lookup(self) -> None:
         registry = get_default_registry()
         info = registry.lookup("base", "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43")
@@ -193,6 +205,24 @@ class TestDefaultRegistry:
         assert info.protocol == "gmx_v2"
         assert set(info.supported_actions) == {"PERP_OPEN", "PERP_CLOSE"}
 
+    def test_pendle_router_registered_from_connector_manifest(self) -> None:
+        registry = get_default_registry()
+        info = registry.lookup("arbitrum", "0x888888888889758F76e7103c6CbF23ABbF58F946")
+        assert info is not None
+        assert info.protocol == "pendle"
+        assert info.contract_type == "router"
+        assert info.parser_class_name == "PendleReceiptParser"
+        assert set(info.supported_actions) == {"SWAP", "LP_OPEN", "LP_CLOSE"}
+
+    def test_pendle_dynamic_market_registered_from_connector_manifest(self) -> None:
+        registry = get_default_registry()
+        info = registry.lookup("arbitrum", "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B")
+        assert info is not None
+        assert info.protocol == "pendle"
+        assert info.contract_type == "market_wsteth_active"
+        assert info.parser_class_name == "PendleReceiptParser"
+        assert set(info.supported_actions) == {"SWAP", "LP_OPEN", "LP_CLOSE"}
+
     def test_uniswap_v3_position_manager_has_lp_actions(self) -> None:
         registry = get_default_registry()
         # Uniswap V3 position manager on arbitrum
@@ -200,3 +230,16 @@ class TestDefaultRegistry:
         assert info is not None
         assert info.protocol == "uniswap_v3"
         assert set(info.supported_actions) == {"LP_OPEN", "LP_CLOSE"}
+
+    def test_contract_monitoring_spec_matching_no_addresses_raises(self) -> None:
+        registry = ContractRegistry()
+        definition = ContractMonitoringSpec(
+            protocol="uniswap_v3",
+            contract_key="missing_contract",
+            parser_module="test.parser",
+            parser_class_name="TestParser",
+            supported_actions=("SWAP",),
+        )
+
+        with pytest.raises(ValueError, match="matched no addresses"):
+            _register_contract_spec(registry, definition)

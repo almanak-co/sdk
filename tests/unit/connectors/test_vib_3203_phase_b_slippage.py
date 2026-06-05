@@ -304,6 +304,7 @@ class TestEnricherForwardsKwargToPhaseBParsers:
     def test_pendle_swap_threads_yt_kwargs(self) -> None:
         """VIB-3751: Pendle swap bundles forward the YT-context kwargs
         alongside the existing ``expected_out``."""
+        from almanak.connectors.pendle.receipt_parser import PendleReceiptParser
         from almanak.framework.execution.result_enricher import ResultEnricher
 
         bundle = {
@@ -315,7 +316,11 @@ class TestEnricherForwardsKwargToPhaseBParsers:
             "to_token_decimals": 18,
             "wallet_address": "0x" + "33" * 20,
         }
-        kwargs = ResultEnricher._build_extract_kwargs("swap_amounts", bundle)
+        kwargs = ResultEnricher(live_mode=False)._build_extract_kwargs_for_parser(
+            PendleReceiptParser(),
+            "swap_amounts",
+            bundle,
+        )
         assert kwargs["expected_out"] == Decimal("60971")
         assert kwargs["intent_swap_type"] == "token_to_yt"
         assert kwargs["token_in_address"] == "0x" + "11" * 20

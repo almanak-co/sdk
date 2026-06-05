@@ -350,10 +350,14 @@ class TestPendleYTSwapIntent:
         bundle = compilation_result.action_bundle
         assert bundle is not None
 
-        # Drive the enricher's ``_build_extract_kwargs`` directly — same code
-        # path the orchestrator runs in production after every SWAP.
-        # ``_build_extract_kwargs`` is a @staticmethod (see result_enricher.py).
-        kwargs = ResultEnricher._build_extract_kwargs("swap_amounts", bundle.metadata)
+        # Drive the enricher's parser-aware kwarg builder directly. This is the
+        # same path production uses after every SWAP once the Pendle parser has
+        # been selected from the receipt-parser registry.
+        kwargs = ResultEnricher(live_mode=False)._build_extract_kwargs_for_parser(
+            PendleReceiptParser(chain=CHAIN_NAME),
+            "swap_amounts",
+            bundle.metadata,
+        )
 
         # The Pendle YT context that VIB-3751 introduced. ALL must be present
         # — Gemini's PR #1973 high-priority concern was that the enricher

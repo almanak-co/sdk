@@ -35,6 +35,9 @@ from almanak.connectors._strategy_base.agent_read_registry import (
     AgentReadConnector,
 )
 from almanak.connectors._strategy_base.bridge_base import BridgeAdapter
+from almanak.connectors._strategy_base.contract_monitoring import (
+    ContractMonitoringSpec,
+)
 from almanak.connectors._strategy_base.contract_role_registry import (
     ContractRoleSpec,
 )
@@ -367,6 +370,10 @@ EXPECTED_ACCOUNTING_REPORT_MODULES = {
     "pendle": "almanak.connectors.pendle.reporting",
 }
 
+EXPECTED_CONTRACT_MONITORING_MODULES = {
+    "pendle": "almanak.connectors.pendle.contract_monitoring",
+}
+
 
 @pytest.fixture(autouse=True)
 def _isolate_strategy_connector_registry() -> Iterator[None]:
@@ -631,6 +638,16 @@ def test_connector_rejects_invalid_swap_classification_ref() -> None:
             name="bad_swap_classification_ref",
             kind=ProtocolKind.SWAP,
             swap_classification=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_invalid_contract_monitoring_ref() -> None:
+    """Invalid contract-monitoring refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.contract_monitoring"):
+        Connector(
+            name="bad_contract_monitoring_ref",
+            kind=ProtocolKind.YIELD_TRADING,
+            contract_monitoring=object(),  # type: ignore[arg-type]
         )
 
 
@@ -969,6 +986,30 @@ def test_swap_classification_specs_load_from_descriptors() -> None:
     )
 
 
+def test_contract_monitoring_specs_load_from_descriptors() -> None:
+    """Migrated contract-monitoring specs are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, tuple[tuple[ContractMonitoringSpec, ...], str]] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_contract_monitoring():
+        assert connector_manifest.contract_monitoring is not None
+        loaded = connector_manifest.contract_monitoring.load()
+        specs = (loaded,) if isinstance(loaded, ContractMonitoringSpec) else loaded
+
+        assert isinstance(specs, tuple)
+        assert specs
+        assert all(isinstance(spec, ContractMonitoringSpec) for spec in specs)
+        connectors[connector_manifest.name] = (specs, connector_manifest.contract_monitoring.module)
+
+    assert set(EXPECTED_CONTRACT_MONITORING_MODULES) == connectors.keys()
+    for name, module in EXPECTED_CONTRACT_MONITORING_MODULES.items():
+        specs, actual_module = connectors[name]
+
+        assert actual_module == module
+        assert any(spec.protocol == name and spec.contract_key == "router" for spec in specs)
+        assert any(spec.protocol == name and spec.contract_key_prefix == "market_" for spec in specs)
+
+
 def test_agent_read_connectors_instantiate_from_descriptors() -> None:
     """Migrated agent-read providers are published through connectors."""
     CONNECTOR_REGISTRY.clear()
@@ -1284,6 +1325,23 @@ def test_connector_swap_classifications_are_not_in_legacy_boot_file() -> None:
         assert import_ref.module not in source
 
 
+def test_connector_contract_monitoring_is_not_hardcoded_in_contract_registry() -> None:
+    """Connector-backed contract-monitoring specs must not also be hardcoded."""
+    CONNECTOR_REGISTRY.clear()
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/connectors/_strategy_base/contract_registry.py").read_text()
+
+    for connector_manifest in CONNECTOR_REGISTRY.with_contract_monitoring():
+        assert connector_manifest.contract_monitoring is not None
+        import_ref = connector_manifest.contract_monitoring
+        assert import_ref.module not in source
+        assert import_ref.attribute not in source
+    assert "almanak.connectors.pendle.receipt_parser" not in source
+    assert "PendleReceiptParser" not in source
+    assert 'definition.protocol == "pendle"' not in source
+    assert 'protocol="pendle"' not in source
+
+
 def test_connector_agent_tools_are_not_in_legacy_boot_file() -> None:
     """Connector-backed agent-tool providers must not also be hardcoded."""
     CONNECTOR_REGISTRY.clear()
@@ -1356,6 +1414,9 @@ def test_connector_protocol_metadata_is_not_hardcoded_in_framework_data() -> Non
     source = (repo_root / "almanak/framework/data/tokens/resolver.py").read_text()
 
     assert "almanak.connectors.pendle.sdk" not in source
+    assert "_register_pendle_tokens" not in source
+    assert "pendle_registry_" not in source
+    assert "dropped_pendle" not in source
 
 
 def test_framework_pendle_data_package_is_removed() -> None:
@@ -1412,6 +1473,25 @@ def test_connector_swap_route_inference_is_not_hardcoded_in_framework_compiler()
     assert 'get_connector_compiler("pendle")' not in source
 
 
+def test_connector_swap_discovery_is_not_hardcoded_in_framework_router_gate() -> None:
+    """Framework permission discovery must not exempt Pendle from the router gate."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/framework/permissions/synthetic_intents.py").read_text()
+
+    assert '("enso", "pendle")' not in source
+    assert 'protocol not in ("enso", "pendle")' not in source
+    assert "Enso/Pendle" not in source
+
+
+def test_connector_enrichment_kwargs_are_not_hardcoded_in_framework_enricher() -> None:
+    """Framework result enrichment lets parsers own connector-specific kwargs."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/framework/execution/result_enricher.py").read_text()
+
+    assert "pendle" not in source.lower()
+    assert "intent_swap_type" not in source
+
+
 def test_connector_accounting_treatment_is_not_hardcoded_in_framework_registry() -> None:
     """Framework accounting paths discover connector treatments from manifests."""
     repo_root = Path(__file__).resolve().parents[3]
@@ -1429,6 +1509,15 @@ def test_connector_accounting_treatment_is_not_hardcoded_in_framework_registry()
         assert connector_manifest.accounting_treatment is not None
         assert connector_manifest.accounting_treatment.module not in source
     assert '"pendle": ("almanak.connectors.pendle.accounting_spec"' not in source
+
+
+def test_connector_accounting_position_keys_are_not_hardcoded_in_framework_runner() -> None:
+    """Framework runner position-key routing must not carry protocol-name exclusions."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/framework/runner/strategy_runner.py").read_text()
+
+    assert re.search(r"['\"]pendle['\"]\s+not\s+in\s+protocol", source) is None
+    assert "Non-Pendle LP" not in source
 
 
 def test_connector_accounting_treatment_is_not_hardcoded_in_generic_handlers() -> None:

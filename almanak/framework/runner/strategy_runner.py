@@ -3646,7 +3646,7 @@ class StrategyRunner:
         so the outbox row and accounting_events row use identical keys.
 
         ``resolved_pool`` (VIB-3946): the compiler-resolved canonical pool label
-        (``metadata["pool_name"]``). For the non-Pendle LP branch it is threaded
+        (``metadata["pool_name"]``). For the generic LP branch it is threaded
         into ``_get_pool_address`` so the position_key uses the resolved label
         instead of re-parsing raw ``intent.pool``. ``None`` for every connector
         except Curve, so all other position keys are byte-identical.
@@ -3664,10 +3664,10 @@ class StrategyRunner:
                 position_key = _derive_position_key(protocol, chain, wallet_address, market_id or None, asset)
                 return position_key, market_id
 
-            # Pendle (and any future connector with custom accounting) publishes its
-            # outbox position-key derivation via the strategy-side registry (VIB-4931),
-            # so the runner routes it without naming the protocol. Returns
-            # (position_key, market_id) when the connector owns the event, else None.
+            # Connectors with custom accounting publish their outbox position-key
+            # derivation via the strategy-side registry (VIB-4931), so the runner
+            # routes them without naming the protocol. Returns (position_key,
+            # market_id) when a connector contributes a custom key, else None.
             from almanak.connectors._strategy_accounting_treatment_registry import (
                 AccountingTreatmentRegistry,
             )
@@ -3678,7 +3678,7 @@ class StrategyRunner:
             if registry_key is not None:
                 return registry_key
 
-            # Non-Pendle SWAP — position key groups by chain+wallet for FIFO lot tracking.
+            # Generic SWAP — position key groups by chain+wallet for FIFO lot tracking.
             if t == "SWAP":
                 position_key = (
                     f"swap:{chain.lower().strip()}:{wallet_address.lower().strip()}"
@@ -3687,8 +3687,13 @@ class StrategyRunner:
                 )
                 return position_key, ""
 
-            # Non-Pendle LP (LP_OPEN / LP_CLOSE / LP_COLLECT_FEES)
-            if t in {"LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"} and "pendle" not in protocol:
+            # Generic LP (LP_OPEN / LP_CLOSE / LP_COLLECT_FEES). Connector-owned
+            # accounting treatments opt out of this fallback even when they do not
+            # publish a custom position key for a particular LP event.
+            if (
+                t in {"LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"}
+                and AccountingTreatmentRegistry.categorize(t, protocol, "") is None
+            ):
                 from ..accounting.lp_accounting import _get_pool_address as _lp_pool_addr
 
                 pool_address = _lp_pool_addr(intent, resolved_pool)

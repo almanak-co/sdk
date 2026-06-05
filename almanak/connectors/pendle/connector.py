@@ -40,6 +40,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.pendle.reporting",
         attribute="PendleAccountingReportConnector",
     ),
+    contract_monitoring=ImportRef(
+        module="almanak.connectors.pendle.contract_monitoring",
+        attribute="PENDLE_CONTRACT_MONITORING_SPECS",
+    ),
 )
 
 __all__ = ["CONNECTOR"]

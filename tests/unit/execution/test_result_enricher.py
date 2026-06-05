@@ -21,9 +21,11 @@ from almanak.framework.execution.result_enricher import ResultEnricher
 # Minimal stubs for ExecutionResult / TransactionResult / TransactionReceipt
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class _FakeReceipt:
     """Mimics TransactionReceipt.to_dict() for enricher consumption."""
+
     tx_hash: str = "0xabc123"
     block_number: int = 100
     block_hash: str = "0xblock"
@@ -215,7 +217,7 @@ class TestSushiSwapV3SwapEnrichment:
             pool_address=self.POOL_BASE,
             sender=self.ROUTER_BASE,
             recipient=self.WALLET,
-            amount0=50_000_000,       # 50 USDC in (6 decimals)
+            amount0=50_000_000,  # 50 USDC in (6 decimals)
             amount1=-24_000_000_000_000_000,  # ~0.024 WETH out
         )
         transfer_out = _make_transfer_log(usdc_base, self.WALLET, self.ROUTER_BASE, 50_000_000)
@@ -242,12 +244,14 @@ class TestSushiSwapV3SwapEnrichment:
             pool_address=self.POOL_OPTIMISM,
             sender=self.ROUTER_OPTIMISM,
             recipient=self.WALLET,
-            amount0=500_000_000,      # 500 USDC in (6 decimals)
+            amount0=500_000_000,  # 500 USDC in (6 decimals)
             amount1=-180_000_000_000_000_000,  # ~0.18 WETH out
         )
         transfer_out = _make_transfer_log(usdc_op, self.WALLET, self.ROUTER_OPTIMISM, 500_000_000)
         transfer_in = _make_transfer_log(weth_op, self.ROUTER_OPTIMISM, self.WALLET, 180_000_000_000_000_000)
-        receipt = _FakeReceipt(status=1, logs=[transfer_out, swap_log, transfer_in], gas_used=22796, from_address=self.WALLET)
+        receipt = _FakeReceipt(
+            status=1, logs=[transfer_out, swap_log, transfer_in], gas_used=22796, from_address=self.WALLET
+        )
         result = _FakeExecResult(
             transaction_results=[_FakeTxResult(receipt=receipt)],
         )
@@ -298,7 +302,7 @@ class TestSushiSwapV3SwapEnrichment:
             pool_address=self.POOL_OPTIMISM,
             sender=self.ROUTER_OPTIMISM,
             recipient=self.WALLET,
-            amount0=500_000_000,      # 500 USDC in
+            amount0=500_000_000,  # 500 USDC in
             amount1=-180_000_000_000_000_000,  # ~0.18 WETH out
         )
         transfer_out = _make_transfer_log(usdc_op, self.WALLET, self.ROUTER_OPTIMISM, 500_000_000)
@@ -357,7 +361,12 @@ class TestSushiSwapV3SwapEnrichment:
             total_gas_used=78_245,
             receipts=[
                 {"status": "0x1", "gas_used": 55_449, "logs": None},  # approve tx: OP-style hex status + null logs
-                {"status": "0x1", "gas_used": 22_796, "logs": [transfer_out, swap_log, transfer_in], "from_address": self.WALLET},  # swap tx
+                {
+                    "status": "0x1",
+                    "gas_used": 22_796,
+                    "logs": [transfer_out, swap_log, transfer_in],
+                    "from_address": self.WALLET,
+                },  # swap tx
             ],
             execution_id="test-vib-1437",
         )
@@ -390,7 +399,7 @@ class TestUniswapV3SwapEnrichment:
             pool_address=self.POOL,
             sender=self.ROUTER,
             recipient=self.WALLET,
-            amount0=1_000_000_000,    # 1000 USDC
+            amount0=1_000_000_000,  # 1000 USDC
             amount1=-500_000_000_000_000_000,  # ~0.5 WETH
         )
         transfer_out = _make_transfer_log(usdc_arb, self.WALLET, self.ROUTER, 1_000_000_000)
@@ -715,6 +724,128 @@ class TestExpectedOutPlumbing:
         assert enriched.swap_amounts.slippage_bps == 500
         assert enriched.swap_amounts.expected_out_decimal == Decimal("100")
 
+    def test_parser_owned_extract_kwargs_are_merged(self):
+        """Connector parsers can add extraction kwargs without framework branches."""
+        captured_kwargs: dict[str, Any] = {}
+
+        class _SpyParser:
+            def __init__(self, **_kwargs):
+                pass
+
+            def parse_receipt(self, receipt):  # noqa: ARG002
+                class _Ok:
+                    success = True
+                    error = None
+
+                return _Ok()
+
+            def build_extract_kwargs(
+                self,
+                *,
+                field: str,
+                bundle_metadata: dict[str, Any],
+            ) -> dict[str, Any]:
+                if field != "swap_amounts":
+                    return {}
+                return {"connector_hint": bundle_metadata["connector_hint"]}
+
+            def extract_swap_amounts(
+                self,
+                receipt,  # noqa: ARG002
+                *,
+                expected_out: Decimal | None = None,
+                connector_hint: str | None = None,
+            ) -> SwapAmounts:
+                captured_kwargs["expected_out"] = expected_out
+                captured_kwargs["connector_hint"] = connector_hint
+                return SwapAmounts(
+                    amount_in=100,
+                    amount_out=95,
+                    amount_in_decimal=Decimal("100"),
+                    amount_out_decimal=Decimal("95"),
+                    effective_price=Decimal("0.95"),
+                    slippage_bps=None,
+                    expected_out_decimal=expected_out,
+                    token_in="USDC",
+                    token_out="ETH",
+                )
+
+        tx_result = _FakeTxResult(success=True, receipt=_FakeReceipt(logs=[{}]))
+        result = _FakeExecResult(transaction_results=[tx_result])
+        intent = _FakeIntent(intent_type="SWAP", protocol="parser_hook")
+        context = _FakeContext(chain="arbitrum", protocol="parser_hook")
+
+        enricher = ResultEnricher(live_mode=False)
+        enricher.parser_registry.register("parser_hook", _SpyParser)
+
+        enriched = enricher.enrich(
+            result,
+            intent,
+            context,
+            bundle_metadata={
+                "expected_output_human": "100",
+                "connector_hint": "owned-by-parser",
+            },
+        )
+
+        assert captured_kwargs == {
+            "expected_out": Decimal("100"),
+            "connector_hint": "owned-by-parser",
+        }
+        assert enriched.swap_amounts is not None
+
+    def test_parser_owned_extract_kwargs_cannot_override_framework_kwargs(self):
+        """Connector hooks must not shadow framework-owned extraction kwargs."""
+
+        class _ShadowingParser:
+            def __init__(self, **_kwargs):
+                pass
+
+            def parse_receipt(self, receipt):  # noqa: ARG002
+                class _Ok:
+                    success = True
+                    error = None
+
+                return _Ok()
+
+            def build_extract_kwargs(
+                self,
+                *,
+                field: str,
+                bundle_metadata: dict[str, Any],  # noqa: ARG002
+            ) -> dict[str, Any]:
+                if field != "swap_amounts":
+                    return {}
+                return {"expected_out": Decimal("1")}
+
+            def extract_swap_amounts(
+                self,
+                receipt,  # noqa: ARG002
+                *,
+                expected_out: Decimal | None = None,  # noqa: ARG002
+            ) -> SwapAmounts:
+                raise AssertionError("shadowing kwargs must fail before parser extraction")
+
+        tx_result = _FakeTxResult(success=True, receipt=_FakeReceipt(logs=[{}]))
+        result = _FakeExecResult(transaction_results=[tx_result])
+        intent = _FakeIntent(intent_type="SWAP", protocol="shadowing_parser")
+        context = _FakeContext(chain="arbitrum", protocol="shadowing_parser")
+
+        enricher = ResultEnricher(live_mode=False)
+        enricher.parser_registry.register("shadowing_parser", _ShadowingParser)
+
+        enriched = enricher.enrich(
+            result,
+            intent,
+            context,
+            bundle_metadata={"expected_output_human": "100"},
+        )
+
+        assert enriched.swap_amounts is None
+        assert any(
+            "framework-owned extraction kwarg(s): expected_out" in warning for warning in enriched.extraction_warnings
+        )
+
     def test_missing_expected_output_leaves_slippage_none(self):
         """When bundle metadata has no expected_output_human, kwarg is not set."""
         captured_kwargs: dict[str, Any] = {}
@@ -890,8 +1021,7 @@ class TestExtractionSpecPerProtocolOverlay:
         enriched = enricher.enrich(result, intent, context)
 
         assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
-            f"Unexpected bin_ids warning for uniswap_v3 LP_OPEN: "
-            f"{enriched.extraction_warnings}"
+            f"Unexpected bin_ids warning for uniswap_v3 LP_OPEN: {enriched.extraction_warnings}"
         )
 
     # ----- 2. PancakeSwap V3 LP_OPEN no longer emits the bin_ids warning.
@@ -910,8 +1040,7 @@ class TestExtractionSpecPerProtocolOverlay:
         enriched = enricher.enrich(result, intent, context)
 
         assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
-            f"Unexpected bin_ids warning for pancakeswap_v3 LP_OPEN: "
-            f"{enriched.extraction_warnings}"
+            f"Unexpected bin_ids warning for pancakeswap_v3 LP_OPEN: {enriched.extraction_warnings}"
         )
 
     # ----- 3. Uniswap V3 LP_COLLECT_FEES: no bin_ids warning;
@@ -931,8 +1060,7 @@ class TestExtractionSpecPerProtocolOverlay:
         enriched = enricher.enrich(result, intent, context)
 
         assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
-            f"Unexpected bin_ids warning for uniswap_v3 LP_COLLECT_FEES: "
-            f"{enriched.extraction_warnings}"
+            f"Unexpected bin_ids warning for uniswap_v3 LP_COLLECT_FEES: {enriched.extraction_warnings}"
         )
         # fees0 / fees1 are genuinely unsupported on Uniswap V3 today (VIB-4344
         # follow-up). Their SUPPORTED_EXTRACTIONS warning must still fire so
@@ -962,8 +1090,7 @@ class TestExtractionSpecPerProtocolOverlay:
         enriched = enricher.enrich(result, intent, context)
 
         assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
-            f"Unexpected bin_ids warning for pancakeswap_v3 LP_COLLECT_FEES: "
-            f"{enriched.extraction_warnings}"
+            f"Unexpected bin_ids warning for pancakeswap_v3 LP_COLLECT_FEES: {enriched.extraction_warnings}"
         )
 
     # ----- 5. TraderJoe V2 LP_OPEN still extracts bin_ids into extracted_data,
@@ -992,14 +1119,7 @@ class TestExtractionSpecPerProtocolOverlay:
         ids_len_hex = _uint256_hex(len(bin_ids))
         ids_elements = "".join(_uint256_hex(b) for b in bin_ids)
         amounts_len_hex = _uint256_hex(0)
-        data_hex = (
-            "0x"
-            + ids_offset_hex
-            + amounts_offset_hex
-            + ids_len_hex
-            + ids_elements
-            + amounts_len_hex
-        )
+        data_hex = "0x" + ids_offset_hex + amounts_offset_hex + ids_len_hex + ids_elements + amounts_len_hex
 
         topic_addr = "0x" + "00" * 12 + wallet[2:].lower()
         deposit_log = {
@@ -1011,9 +1131,7 @@ class TestExtractionSpecPerProtocolOverlay:
 
         parser = TraderJoeV2ReceiptParser()
         enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
-        result = _LpExecResult(
-            transaction_results=[_FakeTxResult(receipt=_FakeReceipt(logs=[deposit_log]))]
-        )
+        result = _LpExecResult(transaction_results=[_FakeTxResult(receipt=_FakeReceipt(logs=[deposit_log]))])
         intent = _FakeIntent(intent_type="LP_OPEN", protocol="traderjoe_v2")
         context = _FakeContext(chain="avalanche", protocol="traderjoe_v2")
 
@@ -1023,8 +1141,7 @@ class TestExtractionSpecPerProtocolOverlay:
             f"TJ V2 bin_ids missing from extracted_data: {enriched.extracted_data}"
         )
         assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
-            f"Unexpected bin_ids warning for traderjoe_v2 LP_OPEN: "
-            f"{enriched.extraction_warnings}"
+            f"Unexpected bin_ids warning for traderjoe_v2 LP_OPEN: {enriched.extraction_warnings}"
         )
 
     # ----- 6. LPPositionTracker._extract_bin_ids reads the enriched result.
@@ -1048,14 +1165,7 @@ class TestExtractionSpecPerProtocolOverlay:
         ids_len_hex = _uint256_hex(len(bin_ids))
         ids_elements = "".join(_uint256_hex(b) for b in bin_ids)
         amounts_len_hex = _uint256_hex(0)
-        data_hex = (
-            "0x"
-            + ids_offset_hex
-            + amounts_offset_hex
-            + ids_len_hex
-            + ids_elements
-            + amounts_len_hex
-        )
+        data_hex = "0x" + ids_offset_hex + amounts_offset_hex + ids_len_hex + ids_elements + amounts_len_hex
         topic_addr = "0x" + "00" * 12 + wallet[2:].lower()
         deposit_log = {
             "topics": [EVENT_TOPICS["DepositedToBins"], topic_addr, topic_addr],
@@ -1066,9 +1176,7 @@ class TestExtractionSpecPerProtocolOverlay:
 
         parser = TraderJoeV2ReceiptParser()
         enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
-        result = _LpExecResult(
-            transaction_results=[_FakeTxResult(receipt=_FakeReceipt(logs=[deposit_log]))]
-        )
+        result = _LpExecResult(transaction_results=[_FakeTxResult(receipt=_FakeReceipt(logs=[deposit_log]))])
         intent = _FakeIntent(intent_type="LP_OPEN", protocol="traderjoe_v2")
         context = _FakeContext(chain="avalanche", protocol="traderjoe_v2")
 
@@ -1106,14 +1214,7 @@ class TestExtractionSpecPerProtocolOverlay:
         ids_len_hex = _uint256_hex(len(bin_ids))
         ids_elements = "".join(_uint256_hex(b) for b in bin_ids)
         amounts_len_hex = _uint256_hex(0)
-        data_hex = (
-            "0x"
-            + ids_offset_hex
-            + amounts_offset_hex
-            + ids_len_hex
-            + ids_elements
-            + amounts_len_hex
-        )
+        data_hex = "0x" + ids_offset_hex + amounts_offset_hex + ids_len_hex + ids_elements + amounts_len_hex
         topic_addr = "0x" + "00" * 12 + wallet[2:].lower()
         withdraw_log = {
             "topics": [EVENT_TOPICS["WithdrawnFromBins"], topic_addr, topic_addr],
@@ -1124,21 +1225,17 @@ class TestExtractionSpecPerProtocolOverlay:
 
         parser = TraderJoeV2ReceiptParser()
         enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
-        result = _LpExecResult(
-            transaction_results=[_FakeTxResult(receipt=_FakeReceipt(logs=[withdraw_log]))]
-        )
+        result = _LpExecResult(transaction_results=[_FakeTxResult(receipt=_FakeReceipt(logs=[withdraw_log]))])
         intent = _FakeIntent(intent_type="LP_COLLECT_FEES", protocol="traderjoe_v2")
         context = _FakeContext(chain="avalanche", protocol="traderjoe_v2")
 
         enriched = enricher.enrich(result, intent, context)
 
         assert enriched.extracted_data.get("bin_ids") == bin_ids, (
-            f"TJ V2 bin_ids missing from extracted_data on LP_COLLECT_FEES: "
-            f"{enriched.extracted_data}"
+            f"TJ V2 bin_ids missing from extracted_data on LP_COLLECT_FEES: {enriched.extracted_data}"
         )
         assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
-            f"Unexpected bin_ids warning for traderjoe_v2 LP_COLLECT_FEES: "
-            f"{enriched.extraction_warnings}"
+            f"Unexpected bin_ids warning for traderjoe_v2 LP_COLLECT_FEES: {enriched.extraction_warnings}"
         )
 
     # ----- 6c. Protocol aliases must canonicalise into the overlay (Codex P2 fix).
@@ -1167,14 +1264,7 @@ class TestExtractionSpecPerProtocolOverlay:
         ids_len_hex = _uint256_hex(len(bin_ids))
         ids_elements = "".join(_uint256_hex(b) for b in bin_ids)
         amounts_len_hex = _uint256_hex(0)
-        data_hex = (
-            "0x"
-            + ids_offset_hex
-            + amounts_offset_hex
-            + ids_len_hex
-            + ids_elements
-            + amounts_len_hex
-        )
+        data_hex = "0x" + ids_offset_hex + amounts_offset_hex + ids_len_hex + ids_elements + amounts_len_hex
         topic_addr = "0x" + "00" * 12 + wallet[2:].lower()
         deposit_log = {
             "topics": [EVENT_TOPICS["DepositedToBins"], topic_addr, topic_addr],
@@ -1185,9 +1275,7 @@ class TestExtractionSpecPerProtocolOverlay:
 
         parser = TraderJoeV2ReceiptParser()
         enricher = ResultEnricher(parser_registry=_PinnedRegistry(parser), live_mode=False)
-        result = _LpExecResult(
-            transaction_results=[_FakeTxResult(receipt=_FakeReceipt(logs=[deposit_log]))]
-        )
+        result = _LpExecResult(transaction_results=[_FakeTxResult(receipt=_FakeReceipt(logs=[deposit_log]))])
         # Use a non-canonical alias on both intent and context.
         intent = _FakeIntent(intent_type="LP_OPEN", protocol="trader-joe-v2")
         context = _FakeContext(chain="avalanche", protocol="trader-joe-v2")
@@ -1199,8 +1287,7 @@ class TestExtractionSpecPerProtocolOverlay:
             f"and populate bin_ids; got: {enriched.extracted_data}"
         )
         assert not _bin_warning_present(enriched.extraction_warnings, "bin_ids"), (
-            f"Unexpected bin_ids warning for aliased traderjoe_v2: "
-            f"{enriched.extraction_warnings}"
+            f"Unexpected bin_ids warning for aliased traderjoe_v2: {enriched.extraction_warnings}"
         )
 
     # ----- 7. Pure unit test of _merge_spec_with_overlay.
@@ -1290,8 +1377,7 @@ class TestExtractionSpecPerProtocolOverlay:
         # base spec, so no SUPPORTED_EXTRACTIONS warning for any field.
         for field_name in ("bin_ids", "fees0", "fees1"):
             assert not _bin_warning_present(enriched.extraction_warnings, field_name), (
-                f"Unexpected {field_name!r} warning for sushiswap_v3 LP_OPEN: "
-                f"{enriched.extraction_warnings}"
+                f"Unexpected {field_name!r} warning for sushiswap_v3 LP_OPEN: {enriched.extraction_warnings}"
             )
 
 
@@ -1404,13 +1490,10 @@ class TestExtractionSpecRemoveOverlay:
         effective = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "traderjoe_v2")
         base = list(ResultEnricher.EXTRACTION_SPECS["LP_OPEN"])
         assert "bin_ids" in effective, (
-            f"TraderJoe V2 LP_OPEN must still append bin_ids via the additive "
-            f"overlay (VIB-4320). Got: {effective}"
+            f"TraderJoe V2 LP_OPEN must still append bin_ids via the additive overlay (VIB-4320). Got: {effective}"
         )
         # bin_ids appended at the tail (post-base-fields)
-        assert effective.index("bin_ids") >= len(base), (
-            f"bin_ids must come after base fields. Got: {effective}"
-        )
+        assert effective.index("bin_ids") >= len(base), f"bin_ids must come after base fields. Got: {effective}"
 
     # ----- 5. Direct unit test of two-phase merge ordering.
 
@@ -1432,15 +1515,9 @@ class TestExtractionSpecRemoveOverlay:
                 "LP_OPEN": frozenset({"position_id", "synthetic_added"}),
             }
             merged = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "__test_merge__")
-            assert "position_id" not in merged, (
-                f"REMOVE must drop base field. Got: {merged}"
-            )
-            assert "synthetic_added" not in merged, (
-                f"REMOVE must drop additive-overlay field. Got: {merged}"
-            )
-            assert "bin_ids" in merged, (
-                f"Additive overlay field not in REMOVE must remain. Got: {merged}"
-            )
+            assert "position_id" not in merged, f"REMOVE must drop base field. Got: {merged}"
+            assert "synthetic_added" not in merged, f"REMOVE must drop additive-overlay field. Got: {merged}"
+            assert "bin_ids" in merged, f"Additive overlay field not in REMOVE must remain. Got: {merged}"
         finally:
             if saved_add is None:
                 ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL.pop("__test_merge__", None)
@@ -1457,8 +1534,7 @@ class TestExtractionSpecRemoveOverlay:
         effective = ResultEnricher._merge_spec_with_overlay("LP_OPEN", "aerodrome")
         for field_name in ("lp_open_data", "tick_lower", "tick_upper"):
             assert field_name not in effective, (
-                f"Aerodrome V1 LP_OPEN effective spec must drop {field_name!r}. "
-                f"Got: {effective}"
+                f"Aerodrome V1 LP_OPEN effective spec must drop {field_name!r}. Got: {effective}"
             )
         # Sanity — the V1-supported fields are still in the effective spec.
         assert "position_id" in effective
@@ -1496,8 +1572,7 @@ class TestExtractionSpecRemoveOverlay:
         effective = ResultEnricher._merge_spec_with_overlay("LP_CLOSE", "aerodrome_slipstream")
         for field_name in ("amount0_collected", "amount1_collected"):
             assert field_name not in effective, (
-                f"Aerodrome Slipstream LP_CLOSE effective spec must drop {field_name!r}. "
-                f"Got: {effective}"
+                f"Aerodrome Slipstream LP_CLOSE effective spec must drop {field_name!r}. Got: {effective}"
             )
         # fees0 / fees1 MUST remain because Slipstream has standalone
         # extract_fees0 / extract_fees1 methods.
@@ -1540,8 +1615,7 @@ class TestExtractionSpecRemoveOverlay:
             )
         # lp_close_data must remain — it IS the source of truth.
         assert "lp_close_data" in effective, (
-            f"lp_close_data must remain in uniswap_v3 LP_CLOSE effective spec. "
-            f"Got: {effective}"
+            f"lp_close_data must remain in uniswap_v3 LP_CLOSE effective spec. Got: {effective}"
         )
 
 
@@ -1614,9 +1688,7 @@ class TestVib4805LpCloseFlatFieldSuppression:
             )
         # lp_close_data field must still be attempted (and return None on empty
         # receipt — parser returns None gracefully, not a warning).
-        lp_close_warning = any(
-            "'lp_close_data'" in w for w in enriched.extraction_warnings
-        )
+        lp_close_warning = any("'lp_close_data'" in w for w in enriched.extraction_warnings)
         assert not lp_close_warning, (
             f"lp_close_data must not produce a 'does not declare support' "
             f"warning — UniswapV3ReceiptParser declares it in SUPPORTED_EXTRACTIONS. "

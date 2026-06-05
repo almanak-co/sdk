@@ -89,12 +89,12 @@ def _collect_swap_params() -> list[tuple[str, str]]:
     """Collect (protocol, chain) pairs for SWAP intents.
 
     Router-checked protocols use PROTOCOL_ROUTERS.
-    Router-exempt protocols (enso, curve, pendle) use arbitrum as default.
+    Routerless protocols covered by dedicated discovery paths use arbitrum as default.
     """
-    router_exempt = {"enso", "curve", "pendle"}
+    routerless_discovery = {"enso", "curve", "pendle"}
     params = []
     for protocol in sorted(_SWAP_PROTOCOLS):
-        if protocol in router_exempt:
+        if protocol in routerless_discovery:
             params.append((protocol, "arbitrum"))
         else:
             for chain, routers in sorted(PROTOCOL_ROUTERS.items()):

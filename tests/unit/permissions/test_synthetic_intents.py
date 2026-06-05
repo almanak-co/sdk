@@ -64,8 +64,8 @@ class TestSwapIntents:
         ``PROTOCOL_ROUTERS``. ``_build_swap_intents`` used to skip TJv2 because of
         the PROTOCOL_ROUTERS check, producing a manifest that omitted the
         ``swapExactTokensForTokens`` selector (0x2a443fae) and caused Zodiac
-        authorisation to revert on-chain. TJv2 is now exempt from that check so
-        the real compile path runs.
+        authorisation to revert on-chain. TJv2's connector-owned discovery
+        override now returns before that check so the real compile path runs.
         """
         intents = build_synthetic_intents("traderjoe_v2", "SWAP", "avalanche")
         assert len(intents) == 1
@@ -88,6 +88,19 @@ class TestSwapIntents:
         """Enso uses DELEGATECALL via the generator, not compilation-based discovery."""
         intents = build_synthetic_intents("enso", "SWAP", "arbitrum")
         assert intents == []
+
+    def test_pendle_swap_uses_connector_discovery_without_router_entry(self):
+        """Pendle SWAP discovery is owned by the connector override, not PROTOCOL_ROUTERS."""
+        from almanak.framework.permissions import synthetic_intents
+
+        assert "pendle" not in synthetic_intents.PROTOCOL_ROUTERS.get("arbitrum", {})
+
+        intents = synthetic_intents.build_synthetic_intents("pendle", "SWAP", "arbitrum")
+
+        assert len(intents) >= 4
+        assert all(isinstance(intent, SwapIntent) for intent in intents)
+        assert {intent.protocol for intent in intents} == {"pendle"}
+        assert {intent.chain for intent in intents} == {"arbitrum"}
 
 
 class TestLPIntents:
@@ -312,6 +325,44 @@ class TestOverrideBypassesLendingPoolGate:
         # LENDING_POOL_ADDRESSES["monad"] (would fail pool gate without the
         # override). The fix ensures the override fires first.
         result = synthetic_intents.build_synthetic_intents("spark", intent_type, "monad")
+        assert result is sentinel
+
+
+class TestOverrideBypassesSwapRouterGate:
+    """The ``build_discovery_vectors`` override MUST run before ``PROTOCOL_ROUTERS``.
+
+    Connector-owned SWAP discovery is the self-containment path for protocols
+    whose executable target is not represented in the framework router table.
+    The test mocks ``get_discovery_vectors_override`` to return a sentinel list
+    for ``sushiswap_v3`` on ``monad``. That protocol is in ``_SWAP_PROTOCOLS``,
+    but ``PROTOCOL_ROUTERS["monad"]`` has no sushiswap_v3 entry, so the router
+    gate would return ``[]`` if it ran before the override.
+    """
+
+    def test_override_result_returned_before_router_gate(self, monkeypatch):
+        from decimal import Decimal
+
+        from almanak.framework.permissions import synthetic_intents
+
+        sentinel = [
+            SwapIntent(
+                from_token="0xT0",
+                to_token="0xT1",
+                amount=Decimal("1"),
+                protocol="sushiswap_v3",
+                chain="monad",
+            )
+        ]
+
+        def stub_override(protocol):
+            def fn(p, it, ch, ctx):
+                return sentinel
+
+            return fn
+
+        monkeypatch.setattr(synthetic_intents, "get_discovery_vectors_override", stub_override)
+
+        result = synthetic_intents.build_synthetic_intents("sushiswap_v3", "SWAP", "monad")
         assert result is sentinel
 
 

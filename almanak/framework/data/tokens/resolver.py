@@ -370,7 +370,7 @@ class TokenResolver:
         self._static_address_index: dict[str, dict[str, Token]] = {}
 
         self._build_static_indices()
-        self._register_pendle_tokens()
+        self._register_protocol_metadata_tokens()
         self._refresh_canonical_address_cache_entries()
 
         # Performance tracking
@@ -507,12 +507,12 @@ class TokenResolver:
                     else:
                         chain_addresses[addr_key] = token
 
-    def _register_pendle_tokens(self) -> None:
-        """Auto-register Pendle PT/YT tokens from connector-owned metadata.
+    def _register_protocol_metadata_tokens(self) -> None:
+        """Auto-register synthetic tokens from connector-owned metadata.
 
-        This avoids requiring every Pendle strategy to manually call
-        register_token() for PT/YT tokens (VIB-2536).  Tokens are indexed
-        by symbol (uppercased) and address so both resolve paths work.
+        This avoids requiring strategies to manually call ``register_token()``
+        for connector-published synthetic tokens. Tokens are indexed by symbol
+        (uppercased) and address so both resolve paths work.
         """
         try:
             from almanak.connectors._strategy_protocol_metadata_registry import (
@@ -550,8 +550,9 @@ class TokenResolver:
                 chain_symbols[symbol_upper] = token
             elif chain_symbols[symbol_upper] is not token:
                 logger.debug(
-                    "pendle_registry_symbol_collision chain=%s symbol=%s kept=%s dropped_pendle=%s",
+                    "protocol_metadata_symbol_collision chain=%s protocol=%s symbol=%s kept=%s dropped_address=%s",
                     chain_lower,
+                    metadata.protocol,
                     symbol_upper,
                     chain_symbols[symbol_upper].get_address(chain_lower),
                     metadata.address,
@@ -562,8 +563,10 @@ class TokenResolver:
                 chain_addresses[addr_key] = token
             elif chain_addresses[addr_key] is not token:
                 logger.warning(
-                    "pendle_registry_address_collision chain=%s address=%s kept_symbol=%s dropped_pendle_symbol=%s",
+                    "protocol_metadata_address_collision chain=%s protocol=%s address=%s "
+                    "kept_symbol=%s dropped_symbol=%s",
                     chain_lower,
+                    metadata.protocol,
                     addr_key,
                     chain_addresses[addr_key].symbol,
                     metadata.symbol,

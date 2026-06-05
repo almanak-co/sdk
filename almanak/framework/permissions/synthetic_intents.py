@@ -363,12 +363,10 @@ def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list
         if result is not None:
             return result
     # Check that this protocol has a router on this chain.
-    # Protocols with dedicated swap compile paths (enso, pendle) are exempt
-    # because their router address is not stored in PROTOCOL_ROUTERS -- the
-    # compiler resolves it from protocol-specific registries (the connector's
-    # own module for Enso/Pendle). Their dedicated compile path returns FAILED
-    # with "not supported" for unsupported chains, which discover_permissions()
-    # treats as a non-fatal skip.
+    # Protocols with dedicated swap compile paths that still rely on framework
+    # defaults (currently Enso) are exempt because their router address is not
+    # stored in PROTOCOL_ROUTERS. Connectors that own synthetic discovery should
+    # return from ``build_discovery_vectors`` above before this gate.
     #
     # ``traderjoe_v2`` USED to be in this tuple for the same reason — its
     # LBRouter lives in ``LP_POSITION_MANAGERS`` rather than
@@ -378,11 +376,11 @@ def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list
     # LBRouter swap synthetic above this gate ever fires; if the override
     # ever returns ``None`` for SWAP on a supported chain, that's a connector
     # bug — not a reason to keep the exemption.
-    if protocol not in ("enso", "pendle"):
+    if protocol != "enso":
         routers = PROTOCOL_ROUTERS.get(chain, {})
         if protocol not in routers:
             return []
-    # Some protocols need specific token pairs (e.g., Pendle PT tokens).
+    # Some protocols need connector-declared token pairs.
     # Use hints override when available.
     hints = get_permission_hints(protocol)
     from_token, to_token = usdc, weth
