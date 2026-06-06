@@ -31,6 +31,7 @@ from almanak.connectors._strategy_base.accounting_report_registry import (
 from almanak.connectors._strategy_base.accounting_treatment_base import (
     AccountingTreatmentSpec,
 )
+from almanak.connectors._strategy_base.address_registry import AddressRegistry
 from almanak.connectors._strategy_base.agent_read_registry import (
     AgentReadConnector,
 )
@@ -371,7 +372,29 @@ EXPECTED_ACCOUNTING_REPORT_MODULES = {
 }
 
 EXPECTED_CONTRACT_MONITORING_MODULES = {
+    "aave_v3": "almanak.connectors.aave_v3.contract_monitoring",
+    "aerodrome": "almanak.connectors.aerodrome.contract_monitoring",
+    "gmx_v2": "almanak.connectors.gmx_v2.contract_monitoring",
+    "morpho_blue": "almanak.connectors.morpho_blue.contract_monitoring",
+    "pancakeswap_v3": "almanak.connectors.pancakeswap_v3.contract_monitoring",
     "pendle": "almanak.connectors.pendle.contract_monitoring",
+    "sushiswap_v3": "almanak.connectors.sushiswap_v3.contract_monitoring",
+    "traderjoe_v2": "almanak.connectors.traderjoe_v2.contract_monitoring",
+    "uniswap_v3": "almanak.connectors.uniswap_v3.contract_monitoring",
+    "uniswap_v4": "almanak.connectors.uniswap_v4.contract_monitoring",
+}
+
+EXPECTED_CONTRACT_MONITORING_PROTOCOLS = {
+    "aave_v3": ("aave_v3",),
+    "aerodrome": ("aerodrome",),
+    "gmx_v2": ("gmx_v2",),
+    "morpho_blue": ("morpho_blue",),
+    "pancakeswap_v3": ("pancakeswap_v3",),
+    "pendle": ("pendle",),
+    "sushiswap_v3": ("sushiswap_v3",),
+    "traderjoe_v2": ("traderjoe_v2",),
+    "uniswap_v3": ("uniswap_v3", "agni_finance"),
+    "uniswap_v4": ("uniswap_v4",),
 }
 
 
@@ -1006,8 +1029,14 @@ def test_contract_monitoring_specs_load_from_descriptors() -> None:
         specs, actual_module = connectors[name]
 
         assert actual_module == module
-        assert any(spec.protocol == name and spec.contract_key == "router" for spec in specs)
-        assert any(spec.protocol == name and spec.contract_key_prefix == "market_" for spec in specs)
+        assert {spec.protocol for spec in specs} == set(EXPECTED_CONTRACT_MONITORING_PROTOCOLS[name])
+
+        for spec in specs:
+            matches = []
+            for chain in AddressRegistry.address_supported_chains(spec.protocol):
+                contracts = AddressRegistry.addresses_for(spec.protocol, chain)
+                matches.extend(spec.matching_contracts(contracts))
+            assert matches, f"{name} contract-monitoring spec matched no addresses: {spec!r}"
 
 
 def test_agent_read_connectors_instantiate_from_descriptors() -> None:
@@ -1331,15 +1360,19 @@ def test_connector_contract_monitoring_is_not_hardcoded_in_contract_registry() -
     repo_root = Path(__file__).resolve().parents[3]
     source = (repo_root / "almanak/connectors/_strategy_base/contract_registry.py").read_text()
 
+    assert "_PROTOCOL_DEFS" not in source
+    assert "ContractMonitoringSpec(" not in source
     for connector_manifest in CONNECTOR_REGISTRY.with_contract_monitoring():
         assert connector_manifest.contract_monitoring is not None
         import_ref = connector_manifest.contract_monitoring
         assert import_ref.module not in source
         assert import_ref.attribute not in source
-    assert "almanak.connectors.pendle.receipt_parser" not in source
-    assert "PendleReceiptParser" not in source
-    assert 'definition.protocol == "pendle"' not in source
-    assert 'protocol="pendle"' not in source
+        loaded = import_ref.load()
+        specs = (loaded,) if isinstance(loaded, ContractMonitoringSpec) else loaded
+        for spec in specs:
+            assert spec.parser_module not in source
+            assert spec.parser_class_name not in source
+            assert not re.search(rf'protocol\s*=\s*["\']{re.escape(spec.protocol)}["\']', source)
 
 
 def test_connector_agent_tools_are_not_in_legacy_boot_file() -> None:

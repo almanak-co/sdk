@@ -91,120 +91,6 @@ class ContractRegistry:
         }
 
 
-_PROTOCOL_DEFS: tuple[ContractMonitoringSpec, ...] = (
-    # DEX swap routers
-    ContractMonitoringSpec(
-        protocol="uniswap_v3",
-        contract_key="swap_router",
-        parser_module="almanak.connectors.uniswap_v3.receipt_parser",
-        parser_class_name="UniswapV3ReceiptParser",
-        supported_actions=("SWAP",),
-    ),
-    ContractMonitoringSpec(
-        protocol="agni_finance",
-        contract_key="swap_router",
-        parser_module="almanak.connectors.uniswap_v3.receipt_parser",
-        parser_class_name="UniswapV3ReceiptParser",
-        supported_actions=("SWAP",),
-    ),
-    ContractMonitoringSpec(
-        protocol="pancakeswap_v3",
-        contract_key="swap_router",
-        parser_module="almanak.connectors.pancakeswap_v3.receipt_parser",
-        parser_class_name="PancakeSwapV3ReceiptParser",
-        supported_actions=("SWAP",),
-    ),
-    ContractMonitoringSpec(
-        protocol="sushiswap_v3",
-        contract_key="swap_router",
-        parser_module="almanak.connectors.sushiswap_v3.receipt_parser",
-        parser_class_name="SushiSwapV3ReceiptParser",
-        supported_actions=("SWAP",),
-    ),
-    ContractMonitoringSpec(
-        protocol="aerodrome",
-        contract_key="router",
-        parser_module="almanak.connectors.aerodrome.receipt_parser",
-        parser_class_name="AerodromeReceiptParser",
-        supported_actions=("SWAP",),
-    ),
-    ContractMonitoringSpec(
-        protocol="traderjoe_v2",
-        contract_key="router",
-        parser_module="almanak.connectors.traderjoe_v2.receipt_parser",
-        parser_class_name="TraderJoeV2ReceiptParser",
-        supported_actions=("SWAP",),
-    ),
-    # Uniswap V4 — singleton PoolManager handles swaps, PositionManager handles LP
-    ContractMonitoringSpec(
-        protocol="uniswap_v4",
-        contract_key="pool_manager",
-        parser_module="almanak.connectors.uniswap_v4.receipt_parser",
-        parser_class_name="UniswapV4ReceiptParser",
-        supported_actions=("SWAP",),
-    ),
-    ContractMonitoringSpec(
-        protocol="uniswap_v4",
-        contract_key="position_manager",
-        parser_module="almanak.connectors.uniswap_v4.receipt_parser",
-        parser_class_name="UniswapV4ReceiptParser",
-        supported_actions=("LP_OPEN", "LP_CLOSE"),
-    ),
-    # LP managers
-    ContractMonitoringSpec(
-        protocol="uniswap_v3",
-        contract_key="position_manager",
-        parser_module="almanak.connectors.uniswap_v3.receipt_parser",
-        parser_class_name="UniswapV3ReceiptParser",
-        supported_actions=("LP_OPEN", "LP_CLOSE"),
-    ),
-    ContractMonitoringSpec(
-        protocol="agni_finance",
-        contract_key="position_manager",
-        parser_module="almanak.connectors.uniswap_v3.receipt_parser",
-        parser_class_name="UniswapV3ReceiptParser",
-        supported_actions=("LP_OPEN", "LP_CLOSE"),
-    ),
-    ContractMonitoringSpec(
-        protocol="pancakeswap_v3",
-        contract_key="nft",
-        parser_module="almanak.connectors.pancakeswap_v3.receipt_parser",
-        parser_class_name="PancakeSwapV3ReceiptParser",
-        supported_actions=("LP_OPEN", "LP_CLOSE"),
-    ),
-    ContractMonitoringSpec(
-        protocol="sushiswap_v3",
-        contract_key="position_manager",
-        parser_module="almanak.connectors.sushiswap_v3.receipt_parser",
-        parser_class_name="SushiSwapV3ReceiptParser",
-        supported_actions=("LP_OPEN", "LP_CLOSE"),
-    ),
-    # Lending
-    ContractMonitoringSpec(
-        protocol="aave_v3",
-        contract_key="pool",
-        parser_module="almanak.connectors.aave_v3.receipt_parser",
-        parser_class_name="AaveV3ReceiptParser",
-        supported_actions=("SUPPLY", "WITHDRAW", "BORROW", "REPAY"),
-    ),
-    ContractMonitoringSpec(
-        protocol="morpho_blue",
-        contract_key="morpho",
-        parser_module="almanak.connectors.morpho_blue.receipt_parser",
-        parser_class_name="MorphoBlueReceiptParser",
-        supported_actions=("SUPPLY", "WITHDRAW", "BORROW", "REPAY"),
-    ),
-    # Perpetuals
-    ContractMonitoringSpec(
-        protocol="gmx_v2",
-        contract_key="exchange_router",
-        parser_module="almanak.connectors.gmx_v2.receipt_parser",
-        parser_class_name="GMXv2ReceiptParser",
-        supported_actions=("PERP_OPEN", "PERP_CLOSE"),
-    ),
-)
-
-
 def _connector_contract_monitoring_specs() -> tuple[ContractMonitoringSpec, ...]:
     """Load connector-published contract-monitoring specs from manifests."""
     specs: list[ContractMonitoringSpec] = []
@@ -258,6 +144,6 @@ def get_default_registry() -> ContractRegistry:
     ``almanak.core.contracts`` has been deleted.
     """
     registry = ContractRegistry()
-    for definition in (*_PROTOCOL_DEFS, *_connector_contract_monitoring_specs()):
+    for definition in _connector_contract_monitoring_specs():
         _register_contract_spec(registry, definition)
     return registry

@@ -26,6 +26,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.aerodrome.receipt_parser_provider",
         attribute="AerodromeReceiptParserConnector",
     ),
+    contract_monitoring=ImportRef(
+        module="almanak.connectors.aerodrome.contract_monitoring",
+        attribute="AERODROME_CONTRACT_MONITORING_SPECS",
+    ),
     contract_roles=ImportRef(
         module="almanak.connectors.aerodrome.contract_roles",
         attribute="CONTRACT_ROLES",

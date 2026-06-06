@@ -20,6 +20,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.traderjoe_v2.receipt_parser_provider",
         attribute="TraderJoeV2ReceiptParserConnector",
     ),
+    contract_monitoring=ImportRef(
+        module="almanak.connectors.traderjoe_v2.contract_monitoring",
+        attribute="TRADERJOE_V2_CONTRACT_MONITORING_SPECS",
+    ),
     contract_roles=ImportRef(
         module="almanak.connectors.traderjoe_v2.contract_roles",
         attribute="CONTRACT_ROLES",

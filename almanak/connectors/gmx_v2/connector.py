@@ -20,6 +20,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.gmx_v2.receipt_parser_provider",
         attribute="GmxV2ReceiptParserConnector",
     ),
+    contract_monitoring=ImportRef(
+        module="almanak.connectors.gmx_v2.contract_monitoring",
+        attribute="GMX_V2_CONTRACT_MONITORING_SPECS",
+    ),
 )
 
 __all__ = ["CONNECTOR"]

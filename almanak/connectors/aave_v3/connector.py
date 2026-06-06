@@ -29,6 +29,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.aave_v3.receipt_parser_provider",
         attribute="AaveV3ReceiptParserConnector",
     ),
+    contract_monitoring=ImportRef(
+        module="almanak.connectors.aave_v3.contract_monitoring",
+        attribute="AAVE_V3_CONTRACT_MONITORING_SPECS",
+    ),
     contract_roles=ImportRef(
         module="almanak.connectors.aave_v3.contract_roles",
         attribute="CONTRACT_ROLES",
