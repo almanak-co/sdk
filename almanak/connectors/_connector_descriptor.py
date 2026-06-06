@@ -31,6 +31,7 @@ __all__ = [
     "ConnectorDescriptorRegistry",
     "ConnectorDiscoveryError",
     "ImportRef",
+    "StrategyMatrixEntry",
 ]
 
 
@@ -77,6 +78,20 @@ class ImportRef:
 
 
 @dataclass(frozen=True)
+class StrategyMatrixEntry:
+    """Strategy support-matrix row declared from a connector manifest.
+
+    Kept separate from ``_strategy_base.registry.MatrixEntry`` so descriptor
+    discovery can stay strategy-safe and avoid importing framework intent
+    vocabulary during connector manifest loading.
+    """
+
+    matrix_name: str
+    category: str
+    chains: frozenset[str]
+
+
+@dataclass(frozen=True)
 class Connector:
     """Lightweight connector-owned capability manifest.
 
@@ -113,6 +128,9 @@ class Connector:
     flash_loan_provider: ImportRef | None = None
     flash_loan_builder: ImportRef | None = None
     flash_loan_synthetic_discovery: bool = False
+    strategy_intents: tuple[str, ...] | None = None
+    strategy_chains: tuple[str, ...] | None = None
+    strategy_matrix_entries: tuple[StrategyMatrixEntry, ...] | None = None
 
     def __post_init__(self) -> None:
         """Validate connector-owned manifest metadata."""
@@ -148,6 +166,7 @@ class Connector:
         self._validate_permission_infrastructure()
         self._validate_bridge_adapter()
         self._validate_flash_loan()
+        self._validate_strategy_support()
 
     def _validate_address_tables(self) -> None:
         """Validate strategy-side address-table selectors."""
@@ -368,6 +387,76 @@ class Connector:
             if self.flash_loan_builder is None:
                 raise ValueError("Connector.flash_loan_builder is required when flash-loan metadata is set")
 
+    def _validate_strategy_support(self) -> None:
+        """Validate optional strategy-side registration metadata."""
+        if self.strategy_intents is None:
+            if self.strategy_chains is not None:
+                raise ValueError("Connector.strategy_chains may only be set when strategy_intents is set")
+            if self.strategy_matrix_entries is not None:
+                raise ValueError("Connector.strategy_matrix_entries may only be set when strategy_intents is set")
+            return
+
+        if not isinstance(self.strategy_intents, tuple) or not self.strategy_intents:
+            raise ValueError(
+                f"Connector.strategy_intents must be None or a non-empty tuple[str, ...], got {self.strategy_intents!r}"
+            )
+        bad_intents = [intent for intent in self.strategy_intents if not isinstance(intent, str) or not intent.strip()]
+        if bad_intents:
+            raise ValueError(f"Connector.strategy_intents must contain only non-empty strings, got {bad_intents!r}")
+        if len(set(self.strategy_intents)) != len(self.strategy_intents):
+            raise ValueError(f"Connector.strategy_intents contains duplicates: {self.strategy_intents!r}")
+
+        self._validate_strategy_chains()
+        self._validate_strategy_matrix_entries()
+
+    def _validate_strategy_chains(self) -> None:
+        """Validate strategy-side chain identifiers without importing chain registries."""
+        if self.strategy_chains is None:
+            return
+        if not isinstance(self.strategy_chains, tuple) or not self.strategy_chains:
+            raise ValueError(
+                "Connector.strategy_chains must be None or a non-empty tuple[str, ...], "
+                f"got {self.strategy_chains!r}. Use strategy_chains=None for off-chain venues."
+            )
+        bad_chains = [chain for chain in self.strategy_chains if not isinstance(chain, str) or not chain.strip()]
+        if bad_chains:
+            raise ValueError(f"Connector.strategy_chains must contain only non-empty strings, got {bad_chains!r}")
+        if len(set(self.strategy_chains)) != len(self.strategy_chains):
+            raise ValueError(f"Connector.strategy_chains contains duplicates: {self.strategy_chains!r}")
+
+    def _validate_strategy_matrix_entries(self) -> None:
+        """Validate descriptor-owned support-matrix rows."""
+        if self.strategy_matrix_entries is None:
+            return
+        if not isinstance(self.strategy_matrix_entries, tuple):
+            raise ValueError(
+                "Connector.strategy_matrix_entries must be None or a tuple[StrategyMatrixEntry, ...], "
+                f"got {self.strategy_matrix_entries!r}"
+            )
+        bad_entries = [entry for entry in self.strategy_matrix_entries if not isinstance(entry, StrategyMatrixEntry)]
+        if bad_entries:
+            raise ValueError(
+                f"Connector.strategy_matrix_entries must contain only StrategyMatrixEntry values, got {bad_entries!r}"
+            )
+        for entry in self.strategy_matrix_entries:
+            self._validate_strategy_matrix_entry_fields(entry)
+        keys = [(entry.matrix_name, entry.category) for entry in self.strategy_matrix_entries]
+        if len(set(keys)) != len(keys):
+            raise ValueError(f"Connector.strategy_matrix_entries has duplicate (matrix_name, category) keys: {keys!r}")
+
+    @staticmethod
+    def _validate_strategy_matrix_entry_fields(entry: StrategyMatrixEntry) -> None:
+        """Validate one strategy support-matrix row's fields."""
+        if not isinstance(entry.matrix_name, str) or not entry.matrix_name.strip():
+            raise ValueError(f"StrategyMatrixEntry.matrix_name must be a non-empty string, got {entry.matrix_name!r}")
+        if not isinstance(entry.category, str) or not entry.category.strip():
+            raise ValueError(f"StrategyMatrixEntry.category must be a non-empty string, got {entry.category!r}")
+        if not isinstance(entry.chains, frozenset) or not entry.chains:
+            raise ValueError(f"StrategyMatrixEntry.chains must be a non-empty frozenset[str], got {entry.chains!r}")
+        bad_chains = [chain for chain in entry.chains if not isinstance(chain, str) or not chain.strip()]
+        if bad_chains:
+            raise ValueError(f"StrategyMatrixEntry.chains must contain only non-empty strings, got {bad_chains!r}")
+
     @property
     def protocol(self) -> ProtocolName:
         """Canonical protocol name as the registry key type."""
@@ -416,6 +505,11 @@ class Connector:
         if self.vault_tool_connector is None:
             return self.vault_tool_connectors
         return (self.vault_tool_connector, *self.vault_tool_connectors)
+
+    @property
+    def has_strategy_support(self) -> bool:
+        """Whether this manifest owns strategy-side registry metadata."""
+        return self.strategy_intents is not None
 
     @property
     def discovery_keys(self) -> frozenset[str]:
@@ -533,6 +627,10 @@ class ConnectorRegistry:
     def with_flash_loan(self) -> tuple[Connector, ...]:
         """Return connectors that publish flash-loan providers."""
         return tuple(d for d in self.all() if d.flash_loan_provider is not None)
+
+    def with_strategy_support(self) -> tuple[Connector, ...]:
+        """Return connectors that publish strategy-side registration metadata."""
+        return tuple(d for d in self.all() if d.has_strategy_support)
 
     def clear(self) -> None:
         """Test helper: clear the discovery cache."""

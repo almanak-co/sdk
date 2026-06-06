@@ -124,8 +124,9 @@ def test_known_venues_includes_hyperliquid_and_solana() -> None:
 
 
 def test_known_venues_uses_bnb_not_bsc() -> None:
-    # ``resolve_chain_name`` normalises "bsc" -> "bnb"; the canonical form
-    # in the registry must match the normalised output.
+    # The strategy registry still uses the historical "bnb" venue key for
+    # BNB Chain; runtime chain inputs and matrix output normalize to "bsc"
+    # at their own boundaries.
     assert "bnb" in KNOWN_VENUES
     assert "bsc" not in KNOWN_VENUES
 

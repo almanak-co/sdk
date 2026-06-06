@@ -13,11 +13,16 @@ from pkgutil import ModuleInfo
 
 import pytest
 
+import almanak.connectors._strategy_base.registry as registry_module
+from almanak.connectors._base.types import ProtocolKind
+from almanak.connectors._connector import Connector, StrategyMatrixEntry
 from almanak.connectors._strategy_base.registry import (
     ConnectorManifest,
     ConnectorRegistry,
     _import_one_connector,
     _is_protocol_leaf,
+    _manifest_from_descriptor,
+    _register_descriptor_connectors,
     register_connector,
 )
 from almanak.framework.intents.vocabulary import IntentType
@@ -109,6 +114,87 @@ def test_off_chain_connector_registers_with_chains_none() -> None:
     m = ConnectorRegistry.get("kraken")
     assert m is not None
     assert m.chains is None
+
+
+def test_manifest_from_descriptor_converts_strategy_support() -> None:
+    connector = Connector(
+        name="descriptor_swap",
+        kind=ProtocolKind.SWAP,
+        strategy_intents=("SWAP",),
+        strategy_chains=("ethereum",),
+        strategy_matrix_entries=(
+            StrategyMatrixEntry(
+                matrix_name="descriptor_swap",
+                category="aggregator",
+                chains=frozenset({"ethereum"}),
+            ),
+        ),
+    )
+
+    manifest = _manifest_from_descriptor(connector)
+
+    assert manifest.name == "descriptor_swap"
+    assert manifest.intents == (IntentType.SWAP,)
+    assert manifest.chains == ("ethereum",)
+    assert manifest.matrix_entries is not None
+    assert manifest.matrix_entries[0].matrix_name == "descriptor_swap"
+    assert manifest.matrix_entries[0].category == "aggregator"
+
+
+def test_manifest_from_descriptor_rejects_unknown_intent() -> None:
+    connector = Connector(
+        name="bad_descriptor",
+        kind=ProtocolKind.SWAP,
+        strategy_intents=("NOT_AN_INTENT",),
+        strategy_chains=("ethereum",),
+    )
+
+    with pytest.raises(ValueError, match="unknown intent"):
+        _manifest_from_descriptor(connector)
+
+
+def test_register_descriptor_connectors_populates_strategy_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    connector = Connector(
+        name="descriptor_registered",
+        kind=ProtocolKind.SWAP,
+        strategy_intents=("SWAP",),
+        strategy_chains=("ethereum",),
+    )
+    monkeypatch.setattr(
+        registry_module.CONNECTOR_DESCRIPTOR_REGISTRY,
+        "with_strategy_support",
+        lambda: (connector,),
+    )
+
+    registered = _register_descriptor_connectors()
+
+    assert registered == frozenset({"descriptor_registered"})
+    manifest = ConnectorRegistry.get("descriptor_registered")
+    assert manifest is not None
+    assert manifest.intents == (IntentType.SWAP,)
+
+
+def test_import_all_imports_descriptor_registered_connectors(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        registry_module,
+        "_register_descriptor_connectors",
+        lambda: frozenset({"descriptor_only"}),
+    )
+    monkeypatch.setattr(
+        registry_module.pkgutil,
+        "iter_modules",
+        lambda _paths: iter((_info("descriptor_only"), _info("legacy_only"))),
+    )
+    monkeypatch.setattr(
+        registry_module,
+        "_import_one_connector",
+        lambda _package_name, subpackage_name: calls.append(subpackage_name) or [],
+    )
+
+    registry_module._import_all_connectors()
+
+    assert calls == ["descriptor_only", "legacy_only"]
 
 
 # --- helpers powering _import_all_connectors -------------------------------

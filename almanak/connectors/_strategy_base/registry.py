@@ -1,30 +1,28 @@
-"""Connector registration & registry.
+"""Connector strategy-registration registry.
 
-Every connector under :mod:`almanak.connectors` declares which
-intent verbs it implements and which chains those implementations are alive
-on. Strategies route intents to connectors via the compiler; this registry
-makes the *universe* of (connector, intent, chain) triples machine-readable
-so that downstream tooling — coverage gates, docs generation, demo gating,
-agent-tool exposure — does not need to hand-maintain a parallel list.
+Every connector under :mod:`almanak.connectors` declares which intent verbs it
+implements and which chains those implementations are alive on. Strategies
+route intents to connectors via the compiler; this registry makes the
+*universe* of (connector, intent, chain) triples machine-readable so downstream
+tooling - coverage gates, docs generation, demo gating, agent-tool exposure -
+does not need to hand-maintain a parallel list.
 
-The shape:
+The registry currently accepts two sources while the connector self-containment
+migration is in flight:
 
-* Each connector dir contains an ``__init__.py`` that calls
-  :func:`register_connector` exactly once at module level. ``__init__.py``
-  is used because it is the only file structure uniform across all
-  connectors (adapter classes vary: ``Adapter``, ``SDK``, ``Client``,
-  ``ctf_sdk``, ...).
-* Calls run as a side effect of importing the connector package. Validation
-  happens at decoration time, so bad input (typo'd chain, empty intents,
-  duplicate registration) raises immediately at import with a clean
-  traceback pointing at the call site.
-* :class:`ConnectorRegistry` is a module-level singleton populated by those
-  calls. :func:`_import_all_connectors` is the CI-only hook that ensures
-  every subpackage is imported before the gate queries the registry.
+* **Descriptor-owned** metadata on ``CONNECTOR`` in
+  ``almanak/connectors/<name>/connector.py``. This is the canonical direction:
+  descriptor discovery can load strategy support without importing connector
+  packages or framework intent vocabulary.
+* **Legacy imperative** ``register_connector(...)`` calls from connector
+  ``__init__.py`` files. These remain supported until each connector has moved
+  its strategy registration into the descriptor.
 
-Enforcement that every non-excluded connector dir actually calls
-:func:`register_connector` lives at
-``scripts/ci/check_connector_registry.py`` and is wired into ``make lint``.
+Both paths end in :class:`ConnectorManifest`, so downstream consumers keep one
+stable read API. :func:`_import_all_connectors` is the CI/tooling sweep that
+hydrates the registry from descriptors first, then imports every connector
+package to verify import safety and fire legacy side-effect registration where
+needed.
 """
 
 from __future__ import annotations
@@ -33,12 +31,17 @@ import importlib
 import pkgutil
 from dataclasses import dataclass, field
 
+from almanak.connectors._connector import CONNECTOR_REGISTRY as CONNECTOR_DESCRIPTOR_REGISTRY
+from almanak.connectors._connector import Connector as ConnectorDescriptor
+from almanak.connectors._connector import StrategyMatrixEntry
 from almanak.framework.intents.vocabulary import IntentType
 
-# Canonical venue identifiers a connector may declare. EVM chains use the
-# normalized form already established by ``almanak.core.constants`` (``bnb``
-# not ``bsc``); Solana protocols use ``solana``; non-EVM L1s with their own
-# chain-like semantics (Hyperliquid) live here as first-class venues.
+# Strategy registry venue identifiers a connector may declare. EVM connectors
+# currently use the historical strategy-side BNB Chain key (``bnb``); runtime
+# chain inputs canonicalize through ``resolve_chain_name`` to ``bsc`` and
+# matrix rendering normalizes at that boundary. Solana protocols use
+# ``solana``; non-EVM L1s with their own chain-like semantics (Hyperliquid)
+# live here as first-class venues.
 # Off-chain venues (centralized exchanges like Kraken) do NOT appear in
 # this set — they register with ``chains=None`` instead.
 KNOWN_VENUES: frozenset[str] = frozenset(
@@ -379,6 +382,63 @@ def register_connector(
     )
 
 
+def _intent_from_descriptor(connector_name: str, intent_value: str) -> IntentType:
+    """Convert one descriptor-owned intent string into ``IntentType``."""
+    try:
+        return IntentType[intent_value]
+    except KeyError:
+        try:
+            return IntentType(intent_value)
+        except ValueError as exc:
+            raise ValueError(
+                f"Connector {connector_name!r} strategy_intents contains unknown intent "
+                f"{intent_value!r}; expected one of {sorted(IntentType.__members__)}"
+            ) from exc
+
+
+def _matrix_entry_from_descriptor(entry: StrategyMatrixEntry) -> MatrixEntry:
+    """Convert descriptor strategy-matrix metadata into the registry type."""
+    return MatrixEntry(
+        matrix_name=entry.matrix_name,
+        category=entry.category,
+        chains=entry.chains,
+    )
+
+
+def _manifest_from_descriptor(connector: ConnectorDescriptor) -> ConnectorManifest:
+    """Build a strategy registry manifest from connector-owned metadata."""
+    if connector.strategy_intents is None:
+        raise ValueError(f"Connector {connector.name!r} does not declare strategy_intents")
+    matrix_entries = (
+        None
+        if connector.strategy_matrix_entries is None
+        else tuple(_matrix_entry_from_descriptor(entry) for entry in connector.strategy_matrix_entries)
+    )
+    return ConnectorManifest(
+        name=connector.name,
+        intents=tuple(_intent_from_descriptor(connector.name, intent) for intent in connector.strategy_intents),
+        chains=connector.strategy_chains,
+        matrix_entries=matrix_entries,
+    )
+
+
+def _register_descriptor_connectors() -> frozenset[str]:
+    """Register strategy manifests declared by connector descriptors."""
+    registered: set[str] = set()
+    for connector in CONNECTOR_DESCRIPTOR_REGISTRY.with_strategy_support():
+        manifest = _manifest_from_descriptor(connector)
+        existing = ConnectorRegistry.get(manifest.name)
+        if existing is None:
+            ConnectorRegistry.register(manifest)
+        elif existing != manifest:
+            raise ValueError(
+                f"Connector {manifest.name!r} has conflicting descriptor and legacy strategy registrations. "
+                f"Descriptor manifest: {manifest!r}; existing manifest: {existing!r}"
+            )
+        registered.add(manifest.name)
+    return frozenset(registered)
+
+
 def _is_protocol_leaf(info: pkgutil.ModuleInfo) -> bool:
     """A protocol leaf is a non-underscored subpackage of ``almanak.connectors``.
 
@@ -432,6 +492,7 @@ def _import_all_connectors() -> None:
     """
     import almanak.connectors as pkg
 
+    _register_descriptor_connectors()
     errors: list[str] = []
     for info in pkgutil.iter_modules(pkg.__path__):
         if _is_protocol_leaf(info):

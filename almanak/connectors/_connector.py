@@ -11,6 +11,7 @@ from almanak.connectors._connector_descriptor import (
     ConnectorDiscoveryError,
     ConnectorRegistry,
     ImportRef,
+    StrategyMatrixEntry,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "ConnectorDiscoveryError",
     "ConnectorRegistry",
     "ImportRef",
+    "StrategyMatrixEntry",
 ]

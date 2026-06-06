@@ -29,6 +29,8 @@ CONNECTOR = Connector(
         attribute="SWAP_CLASSIFICATION",
         order=4,
     ),
+    strategy_intents=("SWAP",),
+    strategy_chains=("arbitrum",),
 )
 
 __all__ = ["CONNECTOR"]

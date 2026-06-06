@@ -16,8 +16,6 @@ authority on "the gate works against reality".
 
 from __future__ import annotations
 
-import importlib
-import sys
 import textwrap
 from pathlib import Path
 
@@ -44,6 +42,12 @@ def _write(tmp_path: Path, src: str) -> Path:
     init = tmp_path / "__init__.py"
     init.write_text(textwrap.dedent(src), encoding="utf-8")
     return init
+
+
+def _write_connector(tmp_path: Path, src: str) -> Path:
+    connector = tmp_path / "connector.py"
+    connector.write_text(textwrap.dedent(src), encoding="utf-8")
+    return connector
 
 
 def test_counter_counts_zero_when_absent(tmp_path: Path) -> None:
@@ -124,6 +128,107 @@ def test_counter_handles_syntax_error(tmp_path: Path) -> None:
     # Syntax-broken __init__.py reports 0 from the AST pass; the
     # registry-import pass will produce a real import error later.
     assert gate._count_register_connector_calls(init) == 0
+
+
+def test_descriptor_strategy_support_detector_counts_connector_manifest(tmp_path: Path) -> None:
+    connector = _write_connector(
+        tmp_path,
+        """
+        CONNECTOR = Connector(
+            name="foo",
+            kind=ProtocolKind.SWAP,
+            strategy_intents=("SWAP",),
+            strategy_chains=("ethereum",),
+        )
+        """,
+    )
+
+    assert gate._connector_descriptor_has_strategy_support(connector) is True
+
+
+def test_descriptor_strategy_support_detector_counts_annotated_manifest(tmp_path: Path) -> None:
+    connector = _write_connector(
+        tmp_path,
+        """
+        CONNECTOR: Connector = Connector(
+            name="foo",
+            kind=ProtocolKind.SWAP,
+            strategy_intents=("SWAP",),
+            strategy_chains=("ethereum",),
+        )
+        """,
+    )
+
+    assert gate._connector_descriptor_has_strategy_support(connector) is True
+
+
+def test_descriptor_strategy_support_detector_ignores_missing_field(tmp_path: Path) -> None:
+    connector = _write_connector(
+        tmp_path,
+        """
+        CONNECTOR = Connector(
+            name="foo",
+            kind=ProtocolKind.SWAP,
+        )
+        """,
+    )
+
+    assert gate._connector_descriptor_has_strategy_support(connector) is False
+
+
+def test_static_scan_accepts_descriptor_owned_strategy_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _build_fake_connectors_tree(
+        tmp_path,
+        {"foo": '"""descriptor-owned strategy registration."""\n'},
+    )
+    _write_connector(
+        conn / "foo",
+        """
+        CONNECTOR = Connector(
+            name="foo",
+            kind=ProtocolKind.SWAP,
+            strategy_intents=("SWAP",),
+            strategy_chains=("ethereum",),
+        )
+        """,
+    )
+    _force_connectors_dir(monkeypatch, conn)
+
+    assert gate._static_scan(("foo",)) == []
+
+
+def test_static_scan_rejects_dual_descriptor_and_legacy_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _build_fake_connectors_tree(
+        tmp_path,
+        {
+            "foo": """
+                register_connector(name="foo", intents=(), chains=None)
+                """,
+        },
+    )
+    _write_connector(
+        conn / "foo",
+        """
+        CONNECTOR = Connector(
+            name="foo",
+            kind=ProtocolKind.SWAP,
+            strategy_intents=("SWAP",),
+            strategy_chains=("ethereum",),
+        )
+        """,
+    )
+    _force_connectors_dir(monkeypatch, conn)
+
+    violations = gate._static_scan(("foo",))
+
+    assert len(violations) == 1
+    assert violations[0].kind == "duplicate-registration-source"
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +323,70 @@ def test_main_fails_on_excluded_dir_with_registration(
     rc = gate.main([])
     assert rc == 1
     assert "excluded-also-registered" in capsys.readouterr().err
+
+
+def test_excluded_dir_with_descriptor_registration_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _build_fake_connectors_tree(
+        tmp_path,
+        {"base": '"""descriptor-owned strategy registration."""\n'},
+    )
+    _write_connector(
+        conn / "base",
+        """
+        CONNECTOR = Connector(
+            name="base",
+            kind=ProtocolKind.SWAP,
+            strategy_intents=("SWAP",),
+            strategy_chains=("ethereum",),
+        )
+        """,
+    )
+    _force_connectors_dir(monkeypatch, conn)
+
+    violations = gate._check_excluded_dirs_dont_register(("base",))
+
+    assert len(violations) == 1
+    assert violations[0].kind == "excluded-also-registered"
+    assert violations[0].where.endswith("base/connector.py")
+    assert "connector.py strategy_intents" in violations[0].detail
+    assert "__init__.py also calls register_connector" not in violations[0].detail
+
+
+def test_excluded_dir_with_both_registration_sources_lists_both(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _build_fake_connectors_tree(
+        tmp_path,
+        {
+            "base": """
+                register_connector(name="base", intents=(), chains=None)
+                """,
+        },
+    )
+    _write_connector(
+        conn / "base",
+        """
+        CONNECTOR = Connector(
+            name="base",
+            kind=ProtocolKind.SWAP,
+            strategy_intents=("SWAP",),
+            strategy_chains=("ethereum",),
+        )
+        """,
+    )
+    _force_connectors_dir(monkeypatch, conn)
+
+    violations = gate._check_excluded_dirs_dont_register(("base",))
+
+    assert len(violations) == 1
+    assert violations[0].kind == "excluded-also-registered"
+    assert violations[0].where.endswith("base/__init__.py")
+    assert "__init__.py register_connector(...)" in violations[0].detail
+    assert "connector.py strategy_intents" in violations[0].detail
 
 
 def test_main_fails_on_stale_excluded_entry(

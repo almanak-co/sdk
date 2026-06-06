@@ -74,12 +74,11 @@ SUPPORTED_CATEGORIES: tuple[str, ...] = (
 def _matrix_chain(chain: str) -> str:
     """Normalise a manifest chain name to the matrix's canonical form.
 
-    The strategy-side :data:`KNOWN_VENUES` uses ``"bnb"`` (the
-    ``resolve_chain_name`` canonical form for BNB Chain), but the matrix
-    has rendered ``"bsc"`` since inception so downstream Edge / CI
-    consumers match on that string. Normalising at the matrix boundary
-    keeps both surfaces consistent without changing the strategy-side
-    contract.
+    The strategy-side :data:`KNOWN_VENUES` uses ``"bnb"`` (the historical
+    strategy registry key for BNB Chain), but the matrix has rendered
+    ``"bsc"`` since inception so downstream Edge / CI consumers match on
+    that string. Normalising at the matrix boundary keeps both surfaces
+    consistent without changing the strategy-side contract.
     """
     return "bsc" if chain == "bnb" else chain
 

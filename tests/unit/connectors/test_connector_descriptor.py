@@ -18,6 +18,7 @@ from almanak.connectors._connector import (
     ConnectorDiscoveryError,
     ConnectorRegistry,
     ImportRef,
+    StrategyMatrixEntry,
 )
 from almanak.connectors._connector_descriptor import (
     CONNECTOR_DESCRIPTOR_REGISTRY,
@@ -452,6 +453,66 @@ def test_descriptor_names_alias_connector_interface() -> None:
     assert ConnectorDescriptor is Connector
     assert ConnectorDescriptorRegistry is ConnectorRegistry
     assert CONNECTOR_DESCRIPTOR_REGISTRY is CONNECTOR_REGISTRY
+
+
+def test_connector_accepts_strategy_support_metadata() -> None:
+    """Connector manifests can own strategy registry metadata without framework imports."""
+    connector = Connector(
+        name="strategy_supported",
+        kind=ProtocolKind.SWAP,
+        strategy_intents=("SWAP",),
+        strategy_chains=("ethereum",),
+        strategy_matrix_entries=(
+            StrategyMatrixEntry(
+                matrix_name="strategy_supported",
+                category="swap",
+                chains=frozenset({"ethereum"}),
+            ),
+        ),
+    )
+
+    assert connector.has_strategy_support is True
+    assert connector.strategy_intents == ("SWAP",)
+    assert connector.strategy_chains == ("ethereum",)
+
+
+def test_connector_rejects_strategy_chains_without_strategy_intents() -> None:
+    """Strategy chains are meaningful only when the connector declares intents."""
+    with pytest.raises(ValueError, match="strategy_chains"):
+        Connector(
+            name="bad_strategy_chains",
+            kind=ProtocolKind.SWAP,
+            strategy_chains=("ethereum",),
+        )
+
+
+def test_connector_rejects_duplicate_strategy_intents() -> None:
+    """Descriptor-owned strategy intents must stay unambiguous."""
+    with pytest.raises(ValueError, match="strategy_intents contains duplicates"):
+        Connector(
+            name="bad_strategy_intents",
+            kind=ProtocolKind.SWAP,
+            strategy_intents=("SWAP", "SWAP"),
+            strategy_chains=("ethereum",),
+        )
+
+
+def test_connector_registry_filters_strategy_support() -> None:
+    """Descriptor registry exposes connectors that own strategy support."""
+    registry = ConnectorRegistry()
+    connectors = (
+        Connector(name="without_strategy", kind=ProtocolKind.SWAP),
+        Connector(
+            name="with_strategy",
+            kind=ProtocolKind.SWAP,
+            strategy_intents=("SWAP",),
+            strategy_chains=("ethereum",),
+        ),
+    )
+
+    registry._connectors = connectors
+
+    assert registry.with_strategy_support() == (connectors[1],)
 
 
 def test_discovers_migrated_connectors() -> None:
