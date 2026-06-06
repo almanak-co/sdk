@@ -9,8 +9,12 @@ cleanly and expose a non-empty per-chain address table.
 
 from __future__ import annotations
 
+import sys
+from types import ModuleType, SimpleNamespace
+
 import pytest
 
+import almanak.connectors._strategy_base.address_registry as address_registry_module
 from almanak.connectors._strategy_base.address_registry import (
     AbiFamily,
     AddressRegistry,
@@ -18,8 +22,16 @@ from almanak.connectors._strategy_base.address_registry import (
     addresses_for,
     resolve_contract_address,
 )
+from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
 KNOWN_PROTOCOLS = AddressRegistry.supported_protocols()
+
+
+@pytest.fixture(autouse=True)
+def _reset_address_registry() -> None:
+    AddressRegistry.reset_cache()
+    yield
+    AddressRegistry.reset_cache()
 
 
 def test_supported_protocols_nonempty_and_sorted():
@@ -49,11 +61,31 @@ def test_unknown_protocol_is_fail_closed():
     assert AddressRegistry.resolve_contract_address("not_a_protocol", "ethereum", "pool") is None
 
 
+def test_lookup_does_not_import_unrelated_address_table_modules(monkeypatch: pytest.MonkeyPatch):
+    good_module = ModuleType("fake_good_address_table_module")
+    good_module.GOOD = {"ethereum": {"router": "0x0000000000000000000000000000000000000001"}}
+    monkeypatch.setitem(sys.modules, good_module.__name__, good_module)
+
+    good_spec = AddressTableSpec(protocol="good", module=good_module.__name__, attribute="GOOD")
+    broken_spec = AddressTableSpec(
+        protocol="broken",
+        module="fake_broken_address_table_module",
+        attribute="BROKEN",
+    )
+    fake_registry = SimpleNamespace(
+        with_address_tables=lambda: (SimpleNamespace(address_tables=(good_spec, broken_spec)),)
+    )
+    monkeypatch.setattr(address_registry_module, "CONNECTOR_REGISTRY", fake_registry)
+
+    assert AddressRegistry.supported_protocols() == ("broken", "good")
+    assert AddressRegistry.addresses_for("good", "ethereum") == good_module.GOOD["ethereum"]
+    assert AddressRegistry.addresses_for("broken", "ethereum") == {}
+    assert "fake_broken_address_table_module" not in sys.modules
+
+
 def test_lookup_is_case_insensitive():
     chain = next(iter(AddressRegistry.address_supported_chains("aave_v3")))
-    assert AddressRegistry.addresses_for("AAVE_V3", chain.upper()) == AddressRegistry.addresses_for(
-        "aave_v3", chain
-    )
+    assert AddressRegistry.addresses_for("AAVE_V3", chain.upper()) == AddressRegistry.addresses_for("aave_v3", chain)
 
 
 def test_resolve_contract_address_round_trips_a_present_kind():
@@ -63,10 +95,7 @@ def test_resolve_contract_address_round_trips_a_present_kind():
     # exact kind resolves
     assert AddressRegistry.resolve_contract_address("uniswap_v3", chain, kind) == expected
     # tuple form: absent kinds are skipped, first present wins
-    assert (
-        AddressRegistry.resolve_contract_address("uniswap_v3", chain, ("definitely_absent_kind", kind))
-        == expected
-    )
+    assert AddressRegistry.resolve_contract_address("uniswap_v3", chain, ("definitely_absent_kind", kind)) == expected
     # all-absent → fail-closed None
     assert AddressRegistry.resolve_contract_address("uniswap_v3", chain, "definitely_absent_kind") is None
 
@@ -81,7 +110,8 @@ def test_agni_finance_quirk_is_owned_by_uniswap_v3_module():
 def test_abi_families_are_consistent():
     factory = AddressRegistry.protocols_with_abi(AbiFamily.V3_FACTORY)
     npm = AddressRegistry.protocols_with_abi(AbiFamily.V3_NPM)
-    assert factory and npm
+    assert factory == ("uniswap_v3", "agni_finance", "pancakeswap_v3", "sushiswap_v3")
+    assert npm == factory
     # every family member is a registered protocol
     for proto in set(factory) | set(npm):
         assert AddressRegistry.has(proto), f"{proto} in an ABI family but not registered"

@@ -39,6 +39,4 @@ AERODROME_TOKENS: dict[str, dict[str, str]] = {
         "rETH": "0xB6fe221Fe9EeF5aBa221c348bA20A1Bf5e73624c",
     },
 }
-
-
 __all__ = ["AERODROME", "AERODROME_TOKENS"]

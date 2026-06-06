@@ -7,11 +7,30 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
+
+_V3_ABI_FAMILIES = (AbiFamily.V3_FACTORY, AbiFamily.V3_NPM)
 
 CONNECTOR = Connector(
     name="uniswap_v3",
     kind=ProtocolKind.LP,
     aliases=("agni_finance",),
+    address_tables=(
+        AddressTableSpec(
+            protocol="uniswap_v3",
+            module="almanak.connectors.uniswap_v3.addresses",
+            attribute="UNISWAP_V3",
+            abi_families=_V3_ABI_FAMILIES,
+            abi_family_order=1,
+        ),
+        AddressTableSpec(
+            protocol="agni_finance",
+            module="almanak.connectors.uniswap_v3.addresses",
+            attribute="AGNI_FINANCE",
+            abi_families=_V3_ABI_FAMILIES,
+            abi_family_order=2,
+        ),
+    ),
     gateway_connector=ImportRef(
         module="almanak.connectors.uniswap_v3.gateway.provider",
         attribute="UniswapV3GatewayConnector",

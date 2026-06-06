@@ -246,6 +246,4 @@ AGNI_FINANCE: dict[str, dict[str, str]] = {
         "quoter_v2": "0xc4aaDc921E1cdb66c5300Bc158a313292923C0cb",  # Agni QuoterV2
     },
 }
-
-
 __all__ = ["UNISWAP_V3", "UNISWAP_V3_TOKENS", "AGNI_FINANCE"]

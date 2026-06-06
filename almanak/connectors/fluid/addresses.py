@@ -24,6 +24,4 @@ FLUID: dict[str, dict[str, str]] = {
         "dex_factory": "0x91716C4EDA1Fb55e84Bf8b4c7085f84285c19085",
     },
 }
-
-
 __all__ = ["FLUID"]

@@ -7,10 +7,18 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
 CONNECTOR = Connector(
     name="uniswap_v4",
     kind=ProtocolKind.LP,
+    address_tables=(
+        AddressTableSpec(
+            protocol="uniswap_v4",
+            module="almanak.connectors.uniswap_v4.addresses",
+            attribute="UNISWAP_V4",
+        ),
+    ),
     gateway_connector=ImportRef(
         module="almanak.connectors.uniswap_v4.gateway.provider",
         attribute="UniswapV4GatewayConnector",

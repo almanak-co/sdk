@@ -66,5 +66,4 @@ UNISWAP_V4: dict[str, dict[str, str]] = {
     },
 }
 
-
 __all__ = ["UNISWAP_V4"]

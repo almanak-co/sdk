@@ -393,5 +393,4 @@ MORPHO_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
     },
 }
 
-
 __all__ = ["MORPHO_BLUE_ADDRESS", "MORPHO_BLUE", "MORPHO_BLUE_TOKENS", "MORPHO_MARKETS"]

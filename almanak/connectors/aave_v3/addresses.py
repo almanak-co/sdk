@@ -189,5 +189,4 @@ AAVE_V3_TOKENS: dict[str, dict[str, str]] = {
     },
 }
 
-
 __all__ = ["AAVE_V3", "AAVE_V3_TOKENS"]

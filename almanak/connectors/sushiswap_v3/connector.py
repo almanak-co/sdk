@@ -7,10 +7,20 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
 
 CONNECTOR = Connector(
     name="sushiswap_v3",
     kind=ProtocolKind.LP,
+    address_tables=(
+        AddressTableSpec(
+            protocol="sushiswap_v3",
+            module="almanak.connectors.sushiswap_v3.addresses",
+            attribute="SUSHISWAP_V3",
+            abi_families=(AbiFamily.V3_FACTORY, AbiFamily.V3_NPM),
+            abi_family_order=4,
+        ),
+    ),
     gateway_connector=ImportRef(
         module="almanak.connectors.sushiswap_v3.gateway.provider",
         attribute="SushiSwapV3GatewayConnector",

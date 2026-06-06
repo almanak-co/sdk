@@ -7,10 +7,18 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
 CONNECTOR = Connector(
     name="pendle",
     kind=ProtocolKind.YIELD_TRADING,
+    address_tables=(
+        AddressTableSpec(
+            protocol="pendle",
+            module="almanak.connectors.pendle.addresses",
+            attribute="PENDLE",
+        ),
+    ),
     gateway_connector=ImportRef(
         module="almanak.connectors.pendle.gateway.provider",
         attribute="PendleGatewayConnector",

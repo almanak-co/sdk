@@ -7,10 +7,18 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
 CONNECTOR = Connector(
     name="gmx_v2",
     kind=ProtocolKind.PERP,
+    address_tables=(
+        AddressTableSpec(
+            protocol="gmx_v2",
+            module="almanak.connectors.gmx_v2.addresses",
+            attribute="GMX_V2",
+        ),
+    ),
     gateway_connector=ImportRef(
         module="almanak.connectors.gmx_v2.gateway.provider",
         attribute="GmxV2GatewayConnector",

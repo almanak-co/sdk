@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
+from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
 __all__ = [
     "CONNECTOR_REGISTRY",
@@ -86,6 +87,7 @@ class Connector:
     name: str
     kind: ProtocolKind
     aliases: tuple[str, ...] = field(default_factory=tuple)
+    address_tables: tuple[AddressTableSpec, ...] | None = None
     receipt_parser_protocols: tuple[str, ...] | None = None
     receipt_parser_connector: ImportRef | None = None
     gas_estimate_connector: ImportRef | None = None
@@ -127,6 +129,7 @@ class Connector:
             raise ValueError(f"Connector.aliases contains duplicates: {self.aliases!r}")
         if self.name in self.aliases:
             raise ValueError(f"Connector.aliases must not include canonical name {self.name!r}")
+        self._validate_address_tables()
         self._validate_gateway_connectors()
         self._validate_receipt_parser_protocols()
         self._validate_gas_estimate_connector()
@@ -145,6 +148,22 @@ class Connector:
         self._validate_permission_infrastructure()
         self._validate_bridge_adapter()
         self._validate_flash_loan()
+
+    def _validate_address_tables(self) -> None:
+        """Validate strategy-side address-table selectors."""
+        if self.address_tables is None:
+            return
+        if not isinstance(self.address_tables, tuple) or not self.address_tables:
+            raise ValueError(
+                "Connector.address_tables must be None or a non-empty tuple[AddressTableSpec, ...], "
+                f"got {self.address_tables!r}"
+            )
+        bad_specs = [spec for spec in self.address_tables if not isinstance(spec, AddressTableSpec)]
+        if bad_specs:
+            raise ValueError(f"Connector.address_tables must contain only AddressTableSpec values, got {bad_specs!r}")
+        protocols = [spec.protocol for spec in self.address_tables]
+        if len(set(protocols)) != len(protocols):
+            raise ValueError(f"Connector.address_tables contains duplicate protocols: {protocols!r}")
 
     def _validate_gateway_connectors(self) -> None:
         """Validate gateway provider import references and ordering keys."""
@@ -446,6 +465,10 @@ class ConnectorRegistry:
     def with_receipt_parser(self) -> tuple[Connector, ...]:
         """Return connectors that publish a receipt-parser connector."""
         return tuple(d for d in self.all() if d.receipt_parser_connector is not None)
+
+    def with_address_tables(self) -> tuple[Connector, ...]:
+        """Return connectors that publish strategy-side address-table specs."""
+        return tuple(d for d in self.all() if d.address_tables is not None)
 
     def with_gas_estimate(self) -> tuple[Connector, ...]:
         """Return connectors that publish a gas-estimate connector."""

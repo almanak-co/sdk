@@ -137,5 +137,4 @@ TRADERJOE_V2_TOKENS: dict[str, dict[str, str]] = {
     },
 }
 
-
 __all__ = ["TRADERJOE_V2", "TRADERJOE_V2_LBPAIRS", "TRADERJOE_V2_TOKENS"]

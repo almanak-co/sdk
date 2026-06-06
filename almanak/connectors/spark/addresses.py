@@ -24,5 +24,4 @@ SPARK: dict[str, dict[str, str]] = {
     },
 }
 
-
 __all__ = ["SPARK"]

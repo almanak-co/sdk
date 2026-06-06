@@ -120,5 +120,4 @@ PENDLE_TOKENS: dict[str, dict[str, str]] = {
     },
 }
 
-
 __all__ = ["PENDLE", "PENDLE_TOKENS"]

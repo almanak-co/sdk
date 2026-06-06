@@ -7,10 +7,18 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
 CONNECTOR = Connector(
     name="pancakeswap_perps",
     kind=ProtocolKind.PERP,
+    address_tables=(
+        AddressTableSpec(
+            protocol="pancakeswap_perps",
+            module="almanak.connectors.pancakeswap_perps.addresses",
+            attribute="PANCAKESWAP_PERPS",
+        ),
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.pancakeswap_perps.receipt_parser_provider",
         attribute="PancakeSwapPerpsReceiptParserConnector",

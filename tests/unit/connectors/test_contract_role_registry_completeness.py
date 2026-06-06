@@ -145,7 +145,7 @@ def test_every_role_protocol_owns_an_address_table() -> None:
         addr_proto = CONTRACT_ROLE_REGISTRY.address_protocol(protocol)
         assert AddressRegistry.has(addr_proto), (
             f"{protocol!r} (address_protocol={addr_proto!r}) has a contract-role "
-            f"registration but no AddressRegistry._BUILTIN_LOADERS table"
+            "registration but no AddressRegistry address-table spec"
         )
         assert AddressRegistry.address_chains_ordered(addr_proto), (
             f"{protocol!r} resolves to an empty address table via {addr_proto!r}"

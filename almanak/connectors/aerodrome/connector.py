@@ -7,11 +7,19 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
 CONNECTOR = Connector(
     name="aerodrome",
     kind=ProtocolKind.LP,
     aliases=("aerodrome_slipstream",),
+    address_tables=(
+        AddressTableSpec(
+            protocol="aerodrome",
+            module="almanak.connectors.aerodrome.addresses",
+            attribute="AERODROME",
+        ),
+    ),
     gateway_connector=ImportRef(
         module="almanak.connectors.aerodrome.gateway.provider",
         attribute="AerodromeGatewayConnector",

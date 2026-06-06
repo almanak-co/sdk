@@ -32,6 +32,7 @@ from almanak.connectors._strategy_base.accounting_treatment_base import (
     AccountingTreatmentSpec,
 )
 from almanak.connectors._strategy_base.address_registry import AddressRegistry
+from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.agent_read_registry import (
     AgentReadConnector,
 )
@@ -397,12 +398,52 @@ EXPECTED_CONTRACT_MONITORING_PROTOCOLS = {
     "uniswap_v4": ("uniswap_v4",),
 }
 
+EXPECTED_ADDRESS_TABLE_MODULES = {
+    "aave_v3": "almanak.connectors.aave_v3.addresses",
+    "aerodrome": "almanak.connectors.aerodrome.addresses",
+    "aster_perps": "almanak.connectors.aster_perps.addresses",
+    "balancer_v2": "almanak.connectors.balancer_v2.addresses",
+    "camelot": "almanak.connectors.camelot.addresses",
+    "fluid": "almanak.connectors.fluid.addresses",
+    "gmx_v2": "almanak.connectors.gmx_v2.addresses",
+    "morpho_blue": "almanak.connectors.morpho_blue.addresses",
+    "pancakeswap_perps": "almanak.connectors.pancakeswap_perps.addresses",
+    "pancakeswap_v3": "almanak.connectors.pancakeswap_v3.addresses",
+    "pendle": "almanak.connectors.pendle.addresses",
+    "spark": "almanak.connectors.spark.addresses",
+    "sushiswap_v3": "almanak.connectors.sushiswap_v3.addresses",
+    "traderjoe_v2": "almanak.connectors.traderjoe_v2.addresses",
+    "uniswap_v3": "almanak.connectors.uniswap_v3.addresses",
+    "uniswap_v4": "almanak.connectors.uniswap_v4.addresses",
+}
+
+EXPECTED_ADDRESS_TABLE_PROTOCOLS = {
+    "aave_v3": ("aave_v3",),
+    "aerodrome": ("aerodrome",),
+    "aster_perps": ("aster_perps",),
+    "balancer_v2": ("balancer_v2",),
+    "camelot": ("camelot",),
+    "fluid": ("fluid",),
+    "gmx_v2": ("gmx_v2",),
+    "morpho_blue": ("morpho_blue",),
+    "pancakeswap_perps": ("pancakeswap_perps",),
+    "pancakeswap_v3": ("pancakeswap_v3",),
+    "pendle": ("pendle",),
+    "spark": ("spark",),
+    "sushiswap_v3": ("sushiswap_v3",),
+    "traderjoe_v2": ("traderjoe_v2",),
+    "uniswap_v3": ("uniswap_v3", "agni_finance"),
+    "uniswap_v4": ("uniswap_v4",),
+}
+
 
 @pytest.fixture(autouse=True)
 def _isolate_strategy_connector_registry() -> Iterator[None]:
     """Keep descriptor provider imports from leaking strategy registry state."""
+    AddressRegistry.reset_cache()
     StrategyConnectorRegistry._clear()
     yield
+    AddressRegistry.reset_cache()
     StrategyConnectorRegistry._clear()
 
 
@@ -541,6 +582,16 @@ def test_connector_rejects_invalid_gateway_connector_ref() -> None:
             name="bad_gateway_ref",
             kind=ProtocolKind.LP,
             gateway_connector=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_invalid_address_tables_ref() -> None:
+    """Invalid address-table refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.address_tables"):
+        Connector(
+            name="bad_address_tables_ref",
+            kind=ProtocolKind.LP,
+            address_tables=object(),  # type: ignore[arg-type]
         )
 
 
@@ -1007,6 +1058,48 @@ def test_swap_classification_specs_load_from_descriptors() -> None:
         )
         == EXPECTED_SWAP_CLASSIFICATION_ORDER
     )
+
+
+def test_address_table_specs_load_from_descriptors() -> None:
+    """Migrated address-table specs are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, tuple[tuple[AddressTableSpec, ...], str]] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_address_tables():
+        assert connector_manifest.address_tables is not None
+        specs = connector_manifest.address_tables
+        modules = {spec.module for spec in specs}
+
+        assert specs
+        assert all(isinstance(spec, AddressTableSpec) for spec in specs)
+        assert len(modules) == 1
+        connectors[connector_manifest.name] = (specs, next(iter(modules)))
+
+    assert set(EXPECTED_ADDRESS_TABLE_MODULES) == connectors.keys()
+    for name, module in EXPECTED_ADDRESS_TABLE_MODULES.items():
+        specs, actual_module = connectors[name]
+
+        assert actual_module == module
+        assert {spec.protocol for spec in specs} == set(EXPECTED_ADDRESS_TABLE_PROTOCOLS[name])
+
+        for spec in specs:
+            table = spec.load_table()
+            assert table
+            assert all(
+                isinstance(chain, str) and isinstance(contracts, dict) and contracts
+                for chain, contracts in table.items()
+            )
+
+
+def test_connector_address_tables_are_not_hardcoded_in_address_registry() -> None:
+    """The address registry discovers manifests instead of naming connectors."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/connectors/_strategy_base/address_registry.py").read_text()
+
+    assert "_BUILTIN_LOADERS" not in source
+    assert "_ABI_FAMILIES" not in source
+    for module in EXPECTED_ADDRESS_TABLE_MODULES.values():
+        assert module not in source
 
 
 def test_contract_monitoring_specs_load_from_descriptors() -> None:

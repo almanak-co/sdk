@@ -74,5 +74,4 @@ GMX_V2_TOKENS: dict[str, dict[str, str]] = {
     },
 }
 
-
 __all__ = ["GMX_V2", "GMX_V2_TOKENS"]

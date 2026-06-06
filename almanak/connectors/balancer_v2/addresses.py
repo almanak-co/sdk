@@ -36,6 +36,4 @@ BALANCER_V2: dict[str, dict[str, str]] = {
     "base": {"vault": BALANCER_V2_VAULT_ADDRESS},
     "avalanche": {"vault": BALANCER_V2_VAULT_ADDRESS},
 }
-
-
 __all__ = ["BALANCER_V2", "BALANCER_V2_VAULT_ADDRESS"]

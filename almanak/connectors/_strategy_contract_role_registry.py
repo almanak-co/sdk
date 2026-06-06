@@ -27,9 +27,9 @@ intentionally changing that
 surface. The full-dict equivalence pins in
 ``tests/unit/intents/test_contract_role_registry_equivalence.py`` enforce it.
 
-The completeness invariant: every ``_BUILTIN_LOADERS`` address-owning connector
-that appears in any PR-3a table MUST publish its roles from its manifest. This
-is enforced statically by
+The completeness invariant: every address-owning connector that appears in any
+PR-3a table MUST publish its roles from its manifest. This is enforced
+statically by
 ``tests/unit/connectors/test_contract_role_registry_completeness.py``.
 
 Gateway-boundary note: this module is strategy-side and performs no network

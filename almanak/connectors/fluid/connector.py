@@ -7,10 +7,18 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
 CONNECTOR = Connector(
     name="fluid",
     kind=ProtocolKind.LP,
+    address_tables=(
+        AddressTableSpec(
+            protocol="fluid",
+            module="almanak.connectors.fluid.addresses",
+            attribute="FLUID",
+        ),
+    ),
     gateway_connector=ImportRef(
         module="almanak.connectors.fluid.gateway.provider",
         attribute="FluidGatewayConnector",

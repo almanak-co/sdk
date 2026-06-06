@@ -137,9 +137,9 @@ class ContractRoleSpec:
         roles: Map of :class:`ContractRole` → ordered connector-private
             contract kinds satisfying that role (tried in order by
             ``AddressRegistry.resolve_contract_address``).
-        address_protocol: ``AddressRegistry._BUILTIN_LOADERS`` key whose
-            per-chain table backs this slug. ``None`` → same as ``protocol``;
-            set it only for a pseudo-slug riding on another connector's table
+        address_protocol: ``AddressRegistry`` protocol key whose per-chain
+            table backs this slug. ``None`` → same as ``protocol``; set it
+            only for a pseudo-slug riding on another connector's table
             (``aerodrome_slipstream`` → ``"aerodrome"``).
         npm_view: which backfill NPM view-map this slug's LP/CL position manager
             feeds (:class:`NpmView`), or ``None`` if it feeds none. Lets
@@ -180,8 +180,8 @@ class ContractRoleRegistry:
     #: yields a stable, byte-equivalent sequence.
     _roles: ClassVar[dict[str, dict[ContractRole, tuple[str, ...]]]] = {}
 
-    #: protocol slug -> the ``AddressRegistry._BUILTIN_LOADERS`` key whose
-    #: per-chain table backs the slug. Only differs from the slug itself for
+    #: protocol slug -> the ``AddressRegistry`` protocol key whose per-chain
+    #: table backs the slug. Only differs from the slug itself for
     #: pseudo-protocols that ride on another connector's table
     #: (``aerodrome_slipstream`` → ``aerodrome``).
     _aliases: ClassVar[dict[str, str]] = {}
@@ -219,10 +219,10 @@ class ContractRoleRegistry:
                 (tried in order; first non-empty wins). Iteration order of
                 ``roles`` is otherwise irrelevant — only ``protocol``
                 registration order matters for the derived tables.
-            address_protocol: The ``AddressRegistry._BUILTIN_LOADERS`` key
-                whose per-chain table backs ``protocol``. Defaults to
-                ``protocol``; set it only for a pseudo-protocol that resolves
-                its addresses from another connector's table
+            address_protocol: The ``AddressRegistry`` protocol key whose
+                per-chain table backs ``protocol``. Defaults to ``protocol``;
+                set it only for a pseudo-protocol that resolves its addresses
+                from another connector's table
                 (``aerodrome_slipstream`` → ``"aerodrome"``).
         """
         # Insertion-ordered: re-registering an existing slug keeps its original

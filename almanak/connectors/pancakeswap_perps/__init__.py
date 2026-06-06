@@ -1,81 +1,38 @@
 """Backwards-compatibility shim for ``pancakeswap_perps``.
 
-PancakeSwap Perps is powered by Aster (formerly ApolloX, rebranded March 2025).
-The canonical connector moved to ``almanak.connectors.aster_perps``
-(PRD: ``docs/internal/discussions/aster-dex-integration-20260418.md`` · VIB-3044).
+PancakeSwap Perps is powered by Aster, formerly ApolloX. The canonical
+connector lives in ``almanak.connectors.aster_perps``; this package keeps the
+legacy import path and binds ``broker_id=2`` for PancakeSwap attribution.
 
-This shim re-exports every previously-public symbol. Legacy consumers using
-``from almanak.connectors.pancakeswap_perps import ...`` continue to
-work unchanged. The shim binds ``broker_id=2`` (PancakeSwap attribution) in
-every config it constructs, which preserves pre-rebrand behaviour byte-for-byte.
-
-Deprecation: importing from this module emits ``DeprecationWarning`` once per
-process. New strategies must import from ``aster_perps`` directly and set
-``protocol="aster_perps"`` on intents.
+The package body is intentionally lazy. Importing submodules such as
+``almanak.connectors.pancakeswap_perps.addresses`` must stay pure so descriptor
+discovery can load connector-owned data without triggering strategy registry
+registration. Accessing a legacy public symbol emits a one-shot
+``DeprecationWarning``, resolves the canonical Aster symbol, and registers the
+legacy connector key.
 """
 
 from __future__ import annotations
 
+import importlib
 import warnings
+from typing import TYPE_CHECKING, Any
 
-# Re-export every previously-public symbol via aster_perps. Class aliases keep
-# the legacy names (PancakeSwapPerps*) pointing at the canonical Aster* class
-# objects; factory functions mimic the old positional-default API shape.
-from almanak.connectors.aster_perps import (
-    EVENT_CLOSE_TRADE_RECEIVED,
-    EVENT_CLOSE_TRADE_SUCCESSFUL,
-    EVENT_MARKET_PENDING_TRADE,
-    EVENT_OPEN_MARKET_TRADE,
-    EVENT_PENDING_TRADE_REFUND,
-    GAS_CLOSE_TRADE,
-    GAS_OPEN_MARKET_TRADE,
-    GAS_OPEN_MARKET_TRADE_BNB,
-    NATIVE_BNB_ADDRESS,
-    PCS_BROKER_ID,
-    PRICE_DECIMALS,
-    QTY_DECIMALS,
-    SELECTOR_CLOSE_TRADE,
-    SELECTOR_OPEN_MARKET_TRADE,
-    SELECTOR_OPEN_MARKET_TRADE_BNB,
-    AsterPerpsAdapter,
-    AsterPerpsConfig,
-    AsterPerpsReceiptParser,
-    AsterPerpsTx,
-    CloseTradeReceivedEvent,
-    CloseTradeSuccessfulEvent,
-    MarketPendingTradeEvent,
-    OpenMarketTradeEvent,
-    OpenTradeStruct,
-    ParsedReceipt,
-    PendingTradeRefundEvent,
-    PerpOpenOrderResult,
-    encode_close_trade_calldata,
-    encode_get_pending_trade_calldata,
-    encode_get_position_by_hash_calldata,
-    encode_open_market_trade_calldata,
-    get_margin_token_address,
-    get_pair_base,
-    get_router_address,
-    slippage_to_limit_price,
-    usd_size_to_qty,
-)
-from almanak.connectors.aster_perps import (
-    build_close_transaction as _aster_build_close_transaction,
-)
-from almanak.connectors.aster_perps import (
-    build_open_transaction as _aster_build_open_transaction,
-)
-from almanak.connectors.aster_perps.addresses import PANCAKESWAP_PERPS_BROKER_ID
+if TYPE_CHECKING:
+    from almanak.connectors.aster_perps import (
+        AsterPerpsConfig,
+        AsterPerpsTx,
+        PerpOpenOrderResult,
+    )
+
+PANCAKESWAP_PERPS_BROKER_ID = 2
 
 _DEPRECATION_EMITTED = False
+_registered = False
 
 
 def _emit_deprecation() -> None:
-    """Emit the one-shot deprecation warning for the pancakeswap_perps import path.
-
-    Called on module import and from the factory helpers below so callers that
-    skip a star-import still see it.
-    """
+    """Emit the one-shot deprecation warning for the legacy import path."""
     global _DEPRECATION_EMITTED
     if _DEPRECATION_EMITTED:
         return
@@ -89,36 +46,91 @@ def _emit_deprecation() -> None:
     )
 
 
-_emit_deprecation()
+def _register_once() -> None:
+    """Fire ``register_connector`` once on first strategy-side access."""
+    global _registered
+    if _registered:
+        return
+    _registered = True
+    try:
+        from almanak.connectors._strategy_base.registry import register_connector
+        from almanak.framework.intents.vocabulary import IntentType
+
+        register_connector(
+            name="pancakeswap_perps",
+            intents=(
+                IntentType.PERP_OPEN,
+                IntentType.PERP_CLOSE,
+            ),
+            chains=("bnb",),
+        )
+    except Exception:
+        _registered = False
+        raise
 
 
-# -----------------------------------------------------------------------------
-# Class aliases — legacy names continue to resolve to the canonical Aster* types.
-# -----------------------------------------------------------------------------
-
-PancakeSwapPerpsAdapter = AsterPerpsAdapter
-PancakeSwapPerpsTx = AsterPerpsTx
-PancakeSwapPerpsReceiptParser = AsterPerpsReceiptParser
+def _aster_symbol(name: str) -> Any:
+    """Resolve one public symbol from the canonical Aster connector."""
+    module = importlib.import_module("almanak.connectors.aster_perps")
+    return getattr(module, name)
 
 
-def PancakeSwapPerpsConfig(  # noqa: N802 — class-style factory for back-compat API shape.
+_ASTER_EXPORTS: dict[str, str] = {
+    # Event topics
+    "EVENT_CLOSE_TRADE_RECEIVED": "EVENT_CLOSE_TRADE_RECEIVED",
+    "EVENT_CLOSE_TRADE_SUCCESSFUL": "EVENT_CLOSE_TRADE_SUCCESSFUL",
+    "EVENT_MARKET_PENDING_TRADE": "EVENT_MARKET_PENDING_TRADE",
+    "EVENT_OPEN_MARKET_TRADE": "EVENT_OPEN_MARKET_TRADE",
+    "EVENT_PENDING_TRADE_REFUND": "EVENT_PENDING_TRADE_REFUND",
+    # Gas budgets
+    "GAS_CLOSE_TRADE": "GAS_CLOSE_TRADE",
+    "GAS_OPEN_MARKET_TRADE": "GAS_OPEN_MARKET_TRADE",
+    "GAS_OPEN_MARKET_TRADE_BNB": "GAS_OPEN_MARKET_TRADE_BNB",
+    # Sentinels / constants
+    "NATIVE_BNB_ADDRESS": "NATIVE_BNB_ADDRESS",
+    "PCS_BROKER_ID": "PCS_BROKER_ID",
+    "PRICE_DECIMALS": "PRICE_DECIMALS",
+    "QTY_DECIMALS": "QTY_DECIMALS",
+    # Selectors
+    "SELECTOR_CLOSE_TRADE": "SELECTOR_CLOSE_TRADE",
+    "SELECTOR_OPEN_MARKET_TRADE": "SELECTOR_OPEN_MARKET_TRADE",
+    "SELECTOR_OPEN_MARKET_TRADE_BNB": "SELECTOR_OPEN_MARKET_TRADE_BNB",
+    # Parser aliases
+    "CloseTradeReceivedEvent": "CloseTradeReceivedEvent",
+    "CloseTradeSuccessfulEvent": "CloseTradeSuccessfulEvent",
+    "MarketPendingTradeEvent": "MarketPendingTradeEvent",
+    "OpenMarketTradeEvent": "OpenMarketTradeEvent",
+    "PancakeSwapPerpsReceiptParser": "AsterPerpsReceiptParser",
+    "ParsedReceipt": "ParsedReceipt",
+    "PendingTradeRefundEvent": "PendingTradeRefundEvent",
+    # Adapter aliases
+    "OpenTradeStruct": "OpenTradeStruct",
+    "PancakeSwapPerpsAdapter": "AsterPerpsAdapter",
+    "PancakeSwapPerpsTx": "AsterPerpsTx",
+    "PerpOpenOrderResult": "PerpOpenOrderResult",
+    # Convenience
+    "encode_close_trade_calldata": "encode_close_trade_calldata",
+    "encode_get_pending_trade_calldata": "encode_get_pending_trade_calldata",
+    "encode_get_position_by_hash_calldata": "encode_get_position_by_hash_calldata",
+    "encode_open_market_trade_calldata": "encode_open_market_trade_calldata",
+    "get_margin_token_address": "get_margin_token_address",
+    "get_pair_base": "get_pair_base",
+    "get_router_address": "get_router_address",
+    "slippage_to_limit_price": "slippage_to_limit_price",
+    "usd_size_to_qty": "usd_size_to_qty",
+}
+
+
+def PancakeSwapPerpsConfig(  # noqa: N802 - class-style factory for back-compat API shape.
     chain: str = "bsc",
     wallet_address: str | None = None,
     broker_id: int = PANCAKESWAP_PERPS_BROKER_ID,
 ) -> AsterPerpsConfig:
-    """Backwards-compat factory mimicking the old dataclass signature.
-
-    The legacy ``PancakeSwapPerpsConfig`` had ``broker_id`` defaulted to 2. The
-    canonical ``AsterPerpsConfig`` requires ``broker_id`` with no default so
-    raw-aster callers are forced to pick 0 explicitly. This factory preserves
-    the old default (=2) for every call that comes through the shim.
-    """
-    return AsterPerpsConfig(broker_id=broker_id, chain=chain, wallet_address=wallet_address)
-
-
-# -----------------------------------------------------------------------------
-# Convenience helpers — same old signatures, now route through the shim config.
-# -----------------------------------------------------------------------------
+    """Backwards-compatible factory defaulting broker id to PancakeSwap."""
+    _emit_deprecation()
+    _register_once()
+    config_cls = _aster_symbol("AsterPerpsConfig")
+    return config_cls(broker_id=broker_id, chain=chain, wallet_address=wallet_address)
 
 
 def build_open_transaction(
@@ -126,11 +138,13 @@ def build_open_transaction(
     chain: str = "bsc",
     wallet_address: str | None = None,
     broker_id: int = PANCAKESWAP_PERPS_BROKER_ID,
-    **open_kwargs,
+    **open_kwargs: Any,
 ) -> PerpOpenOrderResult:
-    """Legacy ``build_open_transaction`` signature: defaults broker_id=2 (PCS)."""
+    """Legacy ``build_open_transaction`` signature: defaults broker_id=2."""
     _emit_deprecation()
-    return _aster_build_open_transaction(
+    _register_once()
+    builder = _aster_symbol("build_open_transaction")
+    return builder(
         broker_id=broker_id,
         chain=chain,
         wallet_address=wallet_address,
@@ -140,19 +154,33 @@ def build_open_transaction(
 
 def build_close_transaction(
     *,
-    trade_hash,
+    trade_hash: Any,
     chain: str = "bsc",
     wallet_address: str | None = None,
     broker_id: int = PANCAKESWAP_PERPS_BROKER_ID,
 ) -> AsterPerpsTx:
-    """Legacy ``build_close_transaction`` signature: defaults broker_id=2 (PCS)."""
+    """Legacy ``build_close_transaction`` signature: defaults broker_id=2."""
     _emit_deprecation()
-    return _aster_build_close_transaction(
+    _register_once()
+    builder = _aster_symbol("build_close_transaction")
+    return builder(
         trade_hash=trade_hash,
         broker_id=broker_id,
         chain=chain,
         wallet_address=wallet_address,
     )
+
+
+def __getattr__(name: str) -> Any:
+    """PEP 562 lazy attribute access for legacy Aster aliases."""
+    aster_name = _ASTER_EXPORTS.get(name)
+    if aster_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    _emit_deprecation()
+    value = _aster_symbol(aster_name)
+    globals()[name] = value
+    _register_once()
+    return value
 
 
 __all__ = [
@@ -202,44 +230,3 @@ __all__ = [
     "slippage_to_limit_price",
     "usd_size_to_qty",
 ]
-
-# Connector registration (VIB-4298). The registry powers the (connector,
-# intent, chain) coverage gate in scripts/ci/check_connector_registry.py
-# and will be consumed by PR 2's intent-test coverage check.
-#
-# Lazy-fire pattern (VIB-4835 alignment): every sibling connector uses
-# ``_register_once`` so that ``ConnectorRegistry._clear()`` followed by
-# a fresh ``_import_all_connectors()`` re-registers everything cleanly.
-# Eager registration at module top-level skips that re-registration
-# (the module body only runs once per process) and leaves downstream
-# consumers — ``support_matrix._build_matrix`` and the CI coverage gate —
-# stuck with a missing manifest after the registry tests clear state
-# (VIB-4856 / W4).
-
-_registered = False
-
-
-def _register_once() -> None:
-    """Fire ``register_connector`` once on first strategy-side access."""
-    global _registered
-    if _registered:
-        return
-    _registered = True
-    try:
-        from almanak.connectors._strategy_base.registry import register_connector
-        from almanak.framework.intents.vocabulary import IntentType
-
-        register_connector(
-            name="pancakeswap_perps",
-            intents=(
-                IntentType.PERP_OPEN,
-                IntentType.PERP_CLOSE,
-            ),
-            chains=("bnb",),
-        )
-    except Exception:
-        _registered = False
-        raise
-
-
-_register_once()

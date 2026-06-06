@@ -7,10 +7,18 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
 CONNECTOR = Connector(
     name="spark",
     kind=ProtocolKind.LENDING,
+    address_tables=(
+        AddressTableSpec(
+            protocol="spark",
+            module="almanak.connectors.spark.addresses",
+            attribute="SPARK",
+        ),
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.spark.receipt_parser_provider",
         attribute="SparkReceiptParserConnector",

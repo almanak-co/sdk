@@ -7,10 +7,18 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
 CONNECTOR = Connector(
     name="camelot",
     kind=ProtocolKind.SWAP,
+    address_tables=(
+        AddressTableSpec(
+            protocol="camelot",
+            module="almanak.connectors.camelot.addresses",
+            attribute="CAMELOT",
+        ),
+    ),
     contract_roles=ImportRef(
         module="almanak.connectors.camelot.contract_roles",
         attribute="CONTRACT_ROLES",

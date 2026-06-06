@@ -7,10 +7,18 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
 CONNECTOR = Connector(
     name="aave_v3",
     kind=ProtocolKind.LENDING,
+    address_tables=(
+        AddressTableSpec(
+            protocol="aave_v3",
+            module="almanak.connectors.aave_v3.addresses",
+            attribute="AAVE_V3",
+        ),
+    ),
     gateway_connector=ImportRef(
         module="almanak.connectors.aave_v3.gateway.provider",
         attribute="AaveV3GatewayConnector",

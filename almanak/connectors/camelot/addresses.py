@@ -32,6 +32,4 @@ CAMELOT: dict[str, dict[str, str]] = {
         "quoter": "0x0Fc73040b26E9bC8514fA028D998E73A254Fa76E",
     },
 }
-
-
 __all__ = ["CAMELOT"]

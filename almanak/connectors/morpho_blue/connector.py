@@ -7,11 +7,19 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
 CONNECTOR = Connector(
     name="morpho_blue",
     kind=ProtocolKind.LENDING,
     aliases=("morpho",),
+    address_tables=(
+        AddressTableSpec(
+            protocol="morpho_blue",
+            module="almanak.connectors.morpho_blue.addresses",
+            attribute="MORPHO_BLUE",
+        ),
+    ),
     gateway_connector=ImportRef(
         module="almanak.connectors.morpho_blue.gateway.provider",
         attribute="MorphoBlueGatewayConnector",

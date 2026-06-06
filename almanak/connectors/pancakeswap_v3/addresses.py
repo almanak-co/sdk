@@ -74,5 +74,4 @@ PANCAKESWAP_V3_TOKENS: dict[str, dict[str, str]] = {
     },
 }
 
-
 __all__ = ["PANCAKESWAP_V3", "PANCAKESWAP_V3_TOKENS"]

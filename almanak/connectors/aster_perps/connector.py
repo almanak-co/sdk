@@ -7,10 +7,18 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
 CONNECTOR = Connector(
     name="aster_perps",
     kind=ProtocolKind.PERP,
+    address_tables=(
+        AddressTableSpec(
+            protocol="aster_perps",
+            module="almanak.connectors.aster_perps.addresses",
+            attribute="ASTER_PERPS",
+        ),
+    ),
     gateway_connector=ImportRef(
         module="almanak.connectors.aster_perps.gateway.provider",
         attribute="AsterPerpsGatewayConnector",

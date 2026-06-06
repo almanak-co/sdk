@@ -86,7 +86,6 @@ PANCAKESWAP_PERPS: dict[str, dict[str, str]] = ASTER_PERPS
 PANCAKESWAP_PERPS_MARKETS: dict[str, dict[str, str]] = ASTER_PERPS_MARKETS
 PANCAKESWAP_PERPS_TOKENS: dict[str, dict[str, str]] = ASTER_PERPS_TOKENS
 
-
 __all__ = [
     "ASTER_PERPS",
     "ASTER_PERPS_MARKETS",

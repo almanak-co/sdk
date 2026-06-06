@@ -93,6 +93,15 @@ def test_star_import_exposes_legacy_surface():
     assert not missing, f"star-import missing symbols: {missing}"
 
 
+def test_addresses_shim_reexports_pancakeswap_perps_table():
+    """The address shim must expose only the deprecated protocol address table."""
+    import almanak.connectors.pancakeswap_perps.addresses as shim_addresses
+    from almanak.connectors.aster_perps.addresses import PANCAKESWAP_PERPS
+
+    assert shim_addresses.__all__ == ["PANCAKESWAP_PERPS"]
+    assert shim_addresses.PANCAKESWAP_PERPS is PANCAKESWAP_PERPS
+
+
 def test_shim_class_names_are_aster_aliases():
     """Legacy class names must be identity-equal to their Aster* canonicals."""
     from almanak.connectors.aster_perps import (

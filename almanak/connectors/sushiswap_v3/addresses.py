@@ -122,5 +122,4 @@ SUSHISWAP_V3_TOKENS: dict[str, dict[str, str]] = {
     },
 }
 
-
 __all__ = ["SUSHISWAP_V3", "SUSHISWAP_V3_TOKENS"]

@@ -16,18 +16,15 @@ sometimes perform. Before this module, the strategy-side consumers that
 need a protocol's address table (pool-existence validation, on-chain LP
 discovery, teardown post-conditions) each re-imported the connector
 ``addresses`` modules by name and hand-rolled their own
-``{protocol: address_table}`` dispatch dict. That is exactly the
-cross-cutting connector knowledge VIB-4851 set out to retire: adding a new
-V3-fork connector meant editing three framework files.
+``{protocol: address_table}`` dispatch dict. Adding a new connector should not
+require editing this framework-facing registry.
 
-This registry is the strategy-side seam. It owns the single
-protocol-identifier → ``addresses`` module mapping (``_BUILTIN_LOADERS``)
-and lazily imports only the connector module that owns a requested
-protocol, so a broken sibling connector cannot poison an unrelated
-lookup. Consumers ask :func:`addresses_for` / :func:`address_supported_chains`
-/ :func:`resolve_contract_address` instead of importing connectors
-directly — the dispatch table lives here (a canonical foundation home the
-coupling scanner allowlists), not scattered across the framework.
+This registry is the strategy-side seam. It composes connector-published
+``AddressTableSpec`` manifests and lazily imports only the address-table module
+that owns a requested protocol, so a broken sibling address module cannot
+poison an unrelated lookup. Consumers ask :func:`addresses_for` /
+:func:`address_supported_chains` / :func:`resolve_contract_address` instead of
+importing connectors directly.
 
 The protocol-identifier vocabulary intentionally mirrors the gateway-side
 contract: a single connector may publish several identifiers (the Uniswap
@@ -41,9 +38,11 @@ egress — every ``addresses.py`` it loads is a pure-Python dict literal.
 
 from __future__ import annotations
 
-import importlib
-from enum import StrEnum
+import logging
 from typing import ClassVar
+
+from almanak.connectors._connector import CONNECTOR_REGISTRY
+from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
 
 __all__ = [
     "AbiFamily",
@@ -53,139 +52,87 @@ __all__ = [
     "resolve_contract_address",
 ]
 
-
-class AbiFamily(StrEnum):
-    """Shared on-chain ABI family a group of connectors exposes.
-
-    Several strategy-side consumers (pool-existence validation, on-chain LP
-    discovery, teardown post-conditions) speak one canonical ABI to a whole
-    *family* of connectors — every Uniswap V3 fork exposes the same
-    ``factory.getPool(...)`` and the same NonfungiblePositionManager
-    ``positions(tokenId)`` interface, for instance. The family membership is
-    connector knowledge, so it lives on this registry (a canonical
-    foundation home) rather than as a hardcoded protocol set inside each
-    framework consumer. Consumers ask :meth:`AddressRegistry.protocols_with_abi`
-    for the members and iterate — they never name a protocol themselves.
-
-    Members are intentionally *not* chain or protocol identifiers (so the
-    coupling scanner doesn't conflate them): they name the ABI shape.
-    """
-
-    #: Uniswap-V3-style factory exposing ``getPool(address,address,uint24)``.
-    V3_FACTORY = "v3_factory"
-    #: Canonical Uniswap V3 NonfungiblePositionManager
-    #: (``balanceOf`` / ``tokenOfOwnerByIndex`` / ``positions(tokenId)``).
-    V3_NPM = "v3_npm"
+logger = logging.getLogger(__name__)
 
 
 class AddressRegistry:
     """Protocol-identifier → connector contract-address-table registry.
 
-    ``_BUILTIN_LOADERS`` maps each protocol identifier to the
-    ``(module_path, attribute)`` pair naming the connector ``addresses.py``
-    dict that owns that protocol's per-chain contract addresses. Multiple
-    identifiers can point at the same connector module (``uniswap_v3`` and
-    ``agni_finance`` both live in ``uniswap_v3.addresses`` under distinct
-    attributes). The connector module is imported lazily on first lookup
-    of a protocol it owns, and the resolved table is cached for the
-    process lifetime.
+    Connector manifests publish lightweight ``AddressTableSpec`` values that
+    map each protocol identifier to the connector ``addresses.py`` dict that
+    owns that protocol's per-chain contract addresses. Multiple identifiers can
+    point at the same connector module (``uniswap_v3`` and ``agni_finance`` both
+    live in ``uniswap_v3.addresses`` under distinct attributes). The address
+    table module is imported lazily on first lookup of a protocol it owns, and
+    the resolved table is cached for the process lifetime.
 
     The cached table is the connector module's own dict (not a copy), so
     its identity is stable across calls — consumers must treat the returned
     mapping as read-only.
     """
 
-    _BUILTIN_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
-        # Concentrated-liquidity / V3-fork DEXes (canonical NPM ABI).
-        "uniswap_v3": ("almanak.connectors.uniswap_v3.addresses", "UNISWAP_V3"),
-        "agni_finance": ("almanak.connectors.uniswap_v3.addresses", "AGNI_FINANCE"),
-        "pancakeswap_v3": ("almanak.connectors.pancakeswap_v3.addresses", "PANCAKESWAP_V3"),
-        "sushiswap_v3": ("almanak.connectors.sushiswap_v3.addresses", "SUSHISWAP_V3"),
-        "uniswap_v4": ("almanak.connectors.uniswap_v4.addresses", "UNISWAP_V4"),
-        "camelot": ("almanak.connectors.camelot.addresses", "CAMELOT"),
-        # Solidly-fork DEXes.
-        "aerodrome": ("almanak.connectors.aerodrome.addresses", "AERODROME"),
-        # Liquidity Book DEX.
-        "traderjoe_v2": ("almanak.connectors.traderjoe_v2.addresses", "TRADERJOE_V2"),
-        # Weighted / stable AMM.
-        "balancer_v2": ("almanak.connectors.balancer_v2.addresses", "BALANCER_V2"),
-        # Yield / fixed-rate.
-        "pendle": ("almanak.connectors.pendle.addresses", "PENDLE"),
-        # Lending — pooled.
-        "aave_v3": ("almanak.connectors.aave_v3.addresses", "AAVE_V3"),
-        "spark": ("almanak.connectors.spark.addresses", "SPARK"),
-        "fluid": ("almanak.connectors.fluid.addresses", "FLUID"),
-        # Lending — isolated markets.
-        "morpho_blue": ("almanak.connectors.morpho_blue.addresses", "MORPHO_BLUE"),
-        # Perpetuals.
-        "gmx_v2": ("almanak.connectors.gmx_v2.addresses", "GMX_V2"),
-        "aster_perps": ("almanak.connectors.aster_perps.addresses", "ASTER_PERPS"),
-        "pancakeswap_perps": ("almanak.connectors.aster_perps.addresses", "PANCAKESWAP_PERPS"),
-    }
-
-    # ABI family -> the protocol identifiers whose connectors expose that
-    # canonical interface. Membership is ordered deterministically so
-    # consumers that fan out over the family produce stable output.
-    #
-    # The V3 forks (Uniswap V3 and bytecode-compatible forks) all expose the
-    # same ``factory.getPool(...)`` *and* the same NonfungiblePositionManager
-    # interface, so they appear in both families. ``camelot`` and
-    # ``uniswap_v4`` are deliberately absent: Camelot V3 uses Algebra's
-    # ``getPool(address,address)`` (no fee arg) and V4 has a singleton
-    # PoolManager rather than per-pool NPM NFTs — neither matches the
-    # canonical V3 ABI these families denote.
-    _ABI_FAMILIES: ClassVar[dict[AbiFamily, tuple[str, ...]]] = {
-        AbiFamily.V3_FACTORY: (
-            "uniswap_v3",
-            "agni_finance",
-            "pancakeswap_v3",
-            "sushiswap_v3",
-        ),
-        AbiFamily.V3_NPM: (
-            "uniswap_v3",
-            "agni_finance",
-            "pancakeswap_v3",
-            "sushiswap_v3",
-        ),
-    }
-
     # protocol identifier -> the connector module's own per-chain table.
     _cache: ClassVar[dict[str, dict[str, dict[str, str]]]] = {}
+    _spec_cache: ClassVar[dict[str, AddressTableSpec] | None] = None
+
+    @classmethod
+    def _address_table_specs(cls) -> dict[str, AddressTableSpec]:
+        """Return protocol -> connector-published address-table spec."""
+        if cls._spec_cache is not None:
+            return cls._spec_cache
+
+        specs: dict[str, AddressTableSpec] = {}
+        for connector_manifest in CONNECTOR_REGISTRY.with_address_tables():
+            if connector_manifest.address_tables is None:
+                continue
+            for spec in connector_manifest.address_tables:
+                owner = specs.get(spec.protocol)
+                if owner is not None:
+                    raise ValueError(
+                        f"AddressTableSpec protocol {spec.protocol!r} is declared twice "
+                        f"({owner.module}.{owner.attribute} and {spec.module}.{spec.attribute})"
+                    )
+                specs[spec.protocol] = spec
+
+        cls._spec_cache = specs
+        return specs
 
     @classmethod
     def _load_table(cls, protocol: str) -> dict[str, dict[str, str]] | None:
         """Resolve and cache one protocol's per-chain address table.
 
-        Imports ONLY the connector module that owns ``protocol`` (per
-        ``_BUILTIN_LOADERS``) — a broken sibling connector cannot block
-        this lookup. Returns ``None`` when the protocol is unknown.
+        Imports ONLY the connector module that owns ``protocol`` (per its
+        ``AddressTableSpec``) — a broken sibling connector cannot block this
+        lookup. Returns ``None`` when the protocol is unknown.
         """
         cached = cls._cache.get(protocol)
         if cached is not None:
             return cached
-        entry = cls._BUILTIN_LOADERS.get(protocol)
-        if entry is None:
+        spec = cls._address_table_specs().get(protocol)
+        if spec is None:
             return None
-        module_path, attribute = entry
-        module = importlib.import_module(module_path)
-        table = getattr(module, attribute, None)
-        if not isinstance(table, dict):
-            raise TypeError(
-                f"Registry maps {protocol!r} to {module_path}.{attribute}, "
-                f"but that attribute is {type(table).__name__}, not a dict."
+        try:
+            table = spec.load_table()
+        except Exception:
+            logger.exception(
+                "Failed to load address table for protocol %r from %s.%s",
+                protocol,
+                spec.module,
+                spec.attribute,
             )
+            return None
         cls._cache[protocol] = table
         return table
 
     @classmethod
     def has(cls, protocol: str) -> bool:
         """Return True when ``protocol`` has a connector-owned address table."""
-        return protocol.lower() in cls._BUILTIN_LOADERS
+        return protocol.lower() in cls._address_table_specs()
 
     @classmethod
     def supported_protocols(cls) -> tuple[str, ...]:
         """Return every protocol identifier with a connector-owned table."""
-        return tuple(sorted(cls._BUILTIN_LOADERS))
+        return tuple(sorted(cls._address_table_specs()))
 
     @classmethod
     def protocols_with_abi(cls, family: AbiFamily) -> tuple[str, ...]:
@@ -193,16 +140,24 @@ class AddressRegistry:
 
         Lets a strategy-side consumer fan out over every connector that
         speaks a shared ABI (e.g. every Uniswap V3 fork) without naming a
-        single protocol in framework code — the membership lives here, in
-        the canonical foundation home. Membership order is deterministic so
-        the consumer's output is stable across runs.
+        single protocol in framework code. The membership lives in each
+        connector's address-table manifest; this registry composes it into a
+        deterministic order so the consumer's output is stable across runs.
         """
-        return cls._ABI_FAMILIES.get(family, ())
+        specs = [spec for spec in cls._address_table_specs().values() if family in spec.abi_families]
+        return tuple(
+            spec.protocol
+            for spec in sorted(
+                specs,
+                key=lambda spec: (spec.abi_family_order is None, spec.abi_family_order or 0, spec.protocol),
+            )
+        )
 
     @classmethod
     def has_abi(cls, protocol: str, family: AbiFamily) -> bool:
         """Return True when ``protocol``'s connector exposes ``family``."""
-        return protocol.lower() in cls._ABI_FAMILIES.get(family, ())
+        spec = cls._address_table_specs().get(protocol.lower())
+        return spec is not None and family in spec.abi_families
 
     @classmethod
     def addresses_for(cls, protocol: str, chain: str) -> dict[str, str]:
@@ -288,12 +243,13 @@ class AddressRegistry:
 
     @classmethod
     def reset_cache(cls) -> None:
-        """Test helper: drop the resolved-table cache so the next call re-imports.
+        """Test helper: drop resolved specs/tables so the next call re-imports.
 
         Production code should never call this — it exists for narrow test
         setups that intentionally re-trigger a connector import.
         """
         cls._cache.clear()
+        cls._spec_cache = None
 
 
 def addresses_for(protocol: str, chain: str) -> dict[str, str]:
