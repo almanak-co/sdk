@@ -20,6 +20,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.polymarket.receipt_parser_provider",
         attribute="PolymarketReceiptParserConnector",
     ),
+    strategy_intents=("PREDICTION_BUY", "PREDICTION_SELL", "PREDICTION_REDEEM"),
+    strategy_chains=("polygon",),
 )
 
 __all__ = ["CONNECTOR"]

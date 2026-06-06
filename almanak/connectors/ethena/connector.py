@@ -20,6 +20,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.ethena.receipt_parser_provider",
         attribute="EthenaReceiptParserConnector",
     ),
+    strategy_intents=("STAKE", "UNSTAKE"),
+    strategy_chains=("ethereum",),
 )
 
 __all__ = ["CONNECTOR"]

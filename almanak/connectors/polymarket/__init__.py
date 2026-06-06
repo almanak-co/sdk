@@ -53,8 +53,9 @@ Example:
 # strategy surface (``framework.intents.vocabulary``) would re-enter
 # ``config.env`` mid-init and explode a circular import. PEP 562
 # attribute lookup defers resolution until the symbol is actually read,
-# which only happens from strategy-side callers — by then ``config.env``
-# is fully loaded. ``register_connector`` defers similarly.
+# which only happens from strategy-side callers after ``config.env`` is
+# fully loaded. Strategy registration metadata is descriptor-owned in
+# ``connector.py``.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -444,33 +445,11 @@ _registered = False
 
 
 def _register_once() -> None:
-    """Fire ``register_connector`` once on first strategy-side access.
-
-    Importing ``framework.intents.vocabulary`` at module-init time
-    re-enters ``config.env`` mid-load during gateway boot (see the
-    docstring above). Deferring registration to first strategy use
-    sidesteps the cycle.
-    """
+    """Compatibility no-op; strategy registration metadata lives in connector.py."""
     global _registered
     if _registered:
         return
     _registered = True
-    try:
-        from almanak.connectors._strategy_base.registry import register_connector
-        from almanak.framework.intents.vocabulary import IntentType
-
-        register_connector(
-            name="polymarket",
-            intents=(
-                IntentType.PREDICTION_BUY,
-                IntentType.PREDICTION_SELL,
-                IntentType.PREDICTION_REDEEM,
-            ),
-            chains=("polygon",),
-        )
-    except Exception:
-        _registered = False
-        raise
 
 
 def __getattr__(name: str) -> Any:

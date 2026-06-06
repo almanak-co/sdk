@@ -28,6 +28,8 @@ CONNECTOR = Connector(
         attribute="CONTRACT_ROLES",
         order=10,
     ),
+    strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+    strategy_chains=("ethereum",),
 )
 
 __all__ = ["CONNECTOR"]

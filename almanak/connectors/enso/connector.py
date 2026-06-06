@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    StrategyMatrixEntry,
 )
 
 CONNECTOR = Connector(
@@ -23,6 +24,32 @@ CONNECTOR = Connector(
     permission_infrastructure=ImportRef(
         module="almanak.connectors.enso.permission_hints",
         attribute="build_enso_infrastructure_permissions",
+    ),
+    strategy_intents=("SWAP",),
+    strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb"),
+    # Aggregators render as aggregator rows instead of generic swap rows.
+    strategy_matrix_entries=(
+        StrategyMatrixEntry(
+            matrix_name="enso",
+            category="aggregator",
+            chains=frozenset(
+                (
+                    "ethereum",
+                    "optimism",
+                    "bsc",
+                    "gnosis",
+                    "polygon",
+                    "zksync",
+                    "base",
+                    "arbitrum",
+                    "avalanche",
+                    "sonic",
+                    "linea",
+                    "berachain",
+                    "sepolia",
+                )
+            ),
+        ),
     ),
 )
 

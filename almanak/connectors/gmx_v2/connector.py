@@ -32,6 +32,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.gmx_v2.contract_monitoring",
         attribute="GMX_V2_CONTRACT_MONITORING_SPECS",
     ),
+    strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
+    strategy_chains=("arbitrum", "avalanche"),
 )
 
 __all__ = ["CONNECTOR"]

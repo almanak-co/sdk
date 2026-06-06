@@ -31,18 +31,15 @@ exposed via PEP 562 lazy ``__getattr__``. This keeps the package's
 import EnsoGatewaySettings``, which Python implements by first running
 this ``__init__.py``. The strategy-side adapter pulls
 ``almanak.framework.intents.vocabulary`` whose package init triggers
-``framework.intents.compiler`` → ``config.cli_runtime`` → ``config.env``
-— and that last module is the one importing ``GatewaySettings`` in the
+``framework.intents.compiler`` → ``config.cli_runtime`` → ``config.env``;
+that last module is the one importing ``GatewaySettings`` in the
 first place, producing a circular import. Lazy attributes avoid the
 cycle entirely: strategy code accessing ``EnsoAdapter`` triggers the
 adapter import only after ``config.env`` is fully initialised.
 
-``register_connector`` is also deferred — it requires
-``framework.intents.vocabulary`` and is only consumed by the strategy-side
-CI registry gate, never by gateway boot. The registration fires the
-first time any strategy symbol is accessed (or via the explicit
-``almanak.connectors._strategy_base.registry`` import driven by
-``scripts/ci/check_connector_registry.py``).
+Strategy registration metadata is descriptor-owned: ``connector.py`` is the
+single source of truth. The ``_register_once()`` hook below remains only as an
+idempotent compatibility no-op for the lazy-init contract.
 """
 
 from __future__ import annotations
@@ -118,54 +115,11 @@ _registered = False
 
 
 def _register_once() -> None:
-    """Fire ``register_connector`` once on first strategy-side access.
-
-    Importing ``framework.intents.vocabulary`` at module-init time
-    explodes a circular config-init chain during gateway boot (see the
-    module docstring). Deferring the registration until the first
-    strategy-side symbol is requested sidesteps the cycle — by then
-    ``config.env`` is fully loaded.
-    """
+    """Compatibility no-op; strategy registration lives in connector.py."""
     global _registered
     if _registered:
         return
     _registered = True
-    try:
-        from almanak.connectors._strategy_base.registry import MatrixEntry, register_connector
-        from almanak.framework.intents.vocabulary import IntentType
-
-        from .client import CHAIN_MAPPING
-
-        register_connector(
-            name="enso",
-            intents=(IntentType.SWAP,),
-            chains=(
-                "ethereum",
-                "arbitrum",
-                "optimism",
-                "polygon",
-                "base",
-                "avalanche",
-                "bnb",
-            ),
-            # Matrix output is owned by the connector (VIB-4856 / W4).
-            # Enso surfaces under ``aggregator`` (not ``swap``) because it
-            # aggregates routes across multiple DEXes / lending venues; Edge
-            # / agent classifiers should not treat it as a primary swap
-            # venue. Chain coverage is the full Enso API set (~13 chains,
-            # ahead of the strategy ``chains`` field's 7) so the matrix
-            # advertises every chain Enso can route on.
-            matrix_entries=(
-                MatrixEntry(
-                    matrix_name="enso",
-                    category="aggregator",
-                    chains=frozenset(CHAIN_MAPPING.keys()),
-                ),
-            ),
-        )
-    except Exception:
-        _registered = False
-        raise
 
 
 def __getattr__(name: str) -> Any:

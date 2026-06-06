@@ -113,28 +113,11 @@ _registered = False
 
 
 def _register_once() -> None:
-    """Fire ``register_connector`` once on first strategy-side access.
-
-    Deferred so importing the connector's gateway-side surface during
-    gateway boot does not pull ``framework.intents.vocabulary`` into the
-    partially-initialised config-init chain (VIB-4835).
-    """
+    """Compatibility no-op; strategy registration lives in connector.py."""
     global _registered
     if _registered:
         return
     _registered = True
-    try:
-        from almanak.connectors._strategy_base.registry import register_connector
-        from almanak.framework.intents.vocabulary import IntentType
-
-        register_connector(
-            name="curve",
-            intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE),
-            chains=("ethereum", "arbitrum", "optimism", "polygon", "base"),
-        )
-    except Exception:
-        _registered = False
-        raise
 
 
 def __getattr__(name: str) -> Any:

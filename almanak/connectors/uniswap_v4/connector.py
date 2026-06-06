@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    StrategyMatrixEntry,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
@@ -40,6 +41,21 @@ CONNECTOR = Connector(
         module="almanak.connectors.uniswap_v4.contract_roles",
         attribute="CONTRACT_ROLES",
         order=2,
+    ),
+    strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
+    strategy_chains=("ethereum", "arbitrum", "base"),
+    # Matrix output covers deployed V4 chains for both swap and LP rows.
+    strategy_matrix_entries=(
+        StrategyMatrixEntry(
+            matrix_name="uniswap_v4",
+            category="swap",
+            chains=frozenset(("ethereum", "base", "arbitrum", "optimism", "polygon", "avalanche", "bsc")),
+        ),
+        StrategyMatrixEntry(
+            matrix_name="uniswap_v4",
+            category="lp",
+            chains=frozenset(("ethereum", "base", "arbitrum", "optimism", "polygon", "avalanche", "bsc")),
+        ),
     ),
 )
 

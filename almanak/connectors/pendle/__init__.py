@@ -177,45 +177,11 @@ _registered = False
 
 
 def _register_once() -> None:
+    """Compatibility no-op; strategy registration lives in connector.py."""
     global _registered
     if _registered:
         return
     _registered = True
-    try:
-        from almanak.connectors._strategy_base.registry import MatrixEntry, register_connector
-        from almanak.framework.intents.vocabulary import IntentType
-
-        from .addresses import PENDLE
-
-        register_connector(
-            name="pendle",
-            intents=(
-                IntentType.SWAP,
-                IntentType.LP_OPEN,
-                IntentType.LP_CLOSE,
-                IntentType.WITHDRAW,
-            ),
-            chains=(
-                "arbitrum",
-                "ethereum",
-            ),
-            # Matrix output is owned by the connector (VIB-4856 / W4).
-            # The strategy-side manifest declares SWAP/LP/WITHDRAW intents
-            # but the matrix has historically rendered Pendle as a single
-            # ``yield`` row (Edge / agent classifiers treat yield-trading
-            # positions that way). Chain coverage is the ``PENDLE`` address
-            # dict (7 chains, ahead of the strategy ``chains`` field's 2).
-            matrix_entries=(
-                MatrixEntry(
-                    matrix_name="pendle",
-                    category="yield",
-                    chains=frozenset(PENDLE.keys()),
-                ),
-            ),
-        )
-    except Exception:
-        _registered = False
-        raise
 
 
 def __getattr__(name: str) -> Any:

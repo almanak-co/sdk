@@ -53,6 +53,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.sushiswap_v3.protocol_family",
         attribute="PROTOCOL_FAMILY",
     ),
+    strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
+    strategy_chains=("ethereum", "arbitrum", "base", "optimism", "polygon", "bnb"),
 )
 
 __all__ = ["CONNECTOR"]

@@ -33,6 +33,8 @@ CONNECTOR = Connector(
         attribute="CONTRACT_ROLES",
         order=8,
     ),
+    strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE"),
+    strategy_chains=("arbitrum",),
 )
 
 __all__ = ["CONNECTOR"]

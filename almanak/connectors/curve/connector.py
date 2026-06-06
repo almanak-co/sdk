@@ -20,6 +20,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.curve.receipt_parser_provider",
         attribute="CurveReceiptParserConnector",
     ),
+    strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE"),
+    strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base"),
 )
 
 __all__ = ["CONNECTOR"]

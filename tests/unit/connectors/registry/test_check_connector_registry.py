@@ -34,7 +34,7 @@ def _isolate_registry() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Layer 1 unit tests — _count_register_connector_calls
+# Layer 1 unit tests: legacy register_connector detection
 # ---------------------------------------------------------------------------
 
 
@@ -83,10 +83,9 @@ def test_counter_counts_two_when_duplicated(tmp_path: Path) -> None:
     assert gate._count_register_connector_calls(init) == 2
 
 
-def test_counter_ignores_nested_calls(tmp_path: Path) -> None:
-    # The whole point of the static + import double-layer is that nested
-    # calls don't count — the registry-import pass catches whether they
-    # actually fired. Confirming the static layer behaves as advertised.
+def test_counter_counts_nested_calls(tmp_path: Path) -> None:
+    # Any connector-package register_connector(...) call is now forbidden,
+    # even if it is hidden in a guard or helper.
     init = _write(
         tmp_path,
         """
@@ -100,13 +99,10 @@ def test_counter_ignores_nested_calls(tmp_path: Path) -> None:
             register_connector(name="baz", intents=(), chains=None)
         """,
     )
-    assert gate._count_register_connector_calls(init) == 0
+    assert gate._count_register_connector_calls(init) == 3
 
 
-def test_counter_ignores_attribute_call(tmp_path: Path) -> None:
-    # ``module.register_connector(...)`` is not the bare imported name.
-    # Convention is to import the function directly; this catches a
-    # connector that imports it via the module instead.
+def test_counter_counts_attribute_call(tmp_path: Path) -> None:
     init = _write(
         tmp_path,
         """
@@ -114,7 +110,7 @@ def test_counter_ignores_attribute_call(tmp_path: Path) -> None:
         r.register_connector(name="foo", intents=(), chains=None)
         """,
     )
-    assert gate._count_register_connector_calls(init) == 0
+    assert gate._count_register_connector_calls(init) == 1
 
 
 def test_counter_handles_unreadable_file(tmp_path: Path) -> None:
@@ -200,7 +196,7 @@ def test_static_scan_accepts_descriptor_owned_strategy_registration(
     assert gate._static_scan(("foo",)) == []
 
 
-def test_static_scan_rejects_dual_descriptor_and_legacy_registration(
+def test_static_scan_rejects_legacy_registration_even_with_descriptor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -228,7 +224,7 @@ def test_static_scan_rejects_dual_descriptor_and_legacy_registration(
     violations = gate._static_scan(("foo",))
 
     assert len(violations) == 1
-    assert violations[0].kind == "duplicate-registration-source"
+    assert violations[0].kind == "legacy-registration-source"
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +276,7 @@ def test_main_fails_on_missing_registration(
     assert "foo_connector" in err
 
 
-def test_main_fails_on_duplicate_registration_in_one_init(
+def test_main_fails_on_legacy_registration_in_init(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -299,7 +295,9 @@ def test_main_fails_on_duplicate_registration_in_one_init(
 
     rc = gate.main([])
     assert rc == 1
-    assert "duplicate-registration" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "legacy-registration-source" in err
+    assert "missing-registration" in err
 
 
 def test_main_fails_on_excluded_dir_with_registration(

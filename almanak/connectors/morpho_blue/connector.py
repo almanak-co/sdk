@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    StrategyMatrixEntry,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
@@ -42,6 +43,16 @@ CONNECTOR = Connector(
     flash_loan_builder=ImportRef(
         module="almanak.connectors.morpho_blue.flash_loan",
         attribute="build_morpho_flash_loan",
+    ),
+    strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
+    strategy_chains=("ethereum", "base", "arbitrum", "polygon", "monad"),
+    # Matrix output stays lending-only even though flash-loan intent is registered.
+    strategy_matrix_entries=(
+        StrategyMatrixEntry(
+            matrix_name="morpho_blue",
+            category="lending",
+            chains=frozenset(("ethereum", "base", "arbitrum", "polygon", "monad")),
+        ),
     ),
 )
 

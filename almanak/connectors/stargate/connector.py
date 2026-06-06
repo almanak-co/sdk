@@ -20,6 +20,8 @@ CONNECTOR = Connector(
         attribute="StargateBridgeAdapter",
         order=2,
     ),
+    strategy_intents=("BRIDGE",),
+    strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb"),
 )
 
 __all__ = ["CONNECTOR"]

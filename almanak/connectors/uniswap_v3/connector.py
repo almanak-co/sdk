@@ -85,6 +85,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.uniswap_v3.protocol_family",
         attribute="PROTOCOL_FAMILY",
     ),
+    strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
+    strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "monad"),
 )
 
 __all__ = ["CONNECTOR"]

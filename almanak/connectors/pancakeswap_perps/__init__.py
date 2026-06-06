@@ -8,8 +8,8 @@ The package body is intentionally lazy. Importing submodules such as
 ``almanak.connectors.pancakeswap_perps.addresses`` must stay pure so descriptor
 discovery can load connector-owned data without triggering strategy registry
 registration. Accessing a legacy public symbol emits a one-shot
-``DeprecationWarning``, resolves the canonical Aster symbol, and registers the
-legacy connector key.
+``DeprecationWarning`` and resolves the canonical Aster symbol. Strategy
+registration is descriptor-owned in ``connector.py``.
 """
 
 from __future__ import annotations
@@ -47,26 +47,11 @@ def _emit_deprecation() -> None:
 
 
 def _register_once() -> None:
-    """Fire ``register_connector`` once on first strategy-side access."""
+    """Compatibility no-op; strategy registration lives in connector.py."""
     global _registered
     if _registered:
         return
     _registered = True
-    try:
-        from almanak.connectors._strategy_base.registry import register_connector
-        from almanak.framework.intents.vocabulary import IntentType
-
-        register_connector(
-            name="pancakeswap_perps",
-            intents=(
-                IntentType.PERP_OPEN,
-                IntentType.PERP_CLOSE,
-            ),
-            chains=("bnb",),
-        )
-    except Exception:
-        _registered = False
-        raise
 
 
 def _aster_symbol(name: str) -> Any:

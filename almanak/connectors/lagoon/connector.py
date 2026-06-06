@@ -20,6 +20,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.lagoon.receipt_parser_provider",
         attribute="LagoonReceiptParserConnector",
     ),
+    strategy_intents=("VAULT_DEPOSIT", "VAULT_REDEEM"),
+    strategy_chains=("ethereum", "base"),
+    # Vault lifecycle support is intentionally hidden from the support matrix.
+    strategy_matrix_entries=(),
 )
 
 __all__ = ["CONNECTOR"]

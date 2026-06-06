@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    StrategyMatrixEntry,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
@@ -61,6 +62,32 @@ CONNECTOR = Connector(
         attribute="build_aave_flash_loan",
     ),
     flash_loan_synthetic_discovery=True,
+    strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
+    strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "mantle", "xlayer"),
+    # Matrix output stays lending-only for now; Aave flash-loan support exists
+    # but historically has not rendered as its own support-matrix row.
+    strategy_matrix_entries=(
+        StrategyMatrixEntry(
+            matrix_name="aave_v3",
+            category="lending",
+            chains=frozenset(
+                (
+                    "ethereum",
+                    "arbitrum",
+                    "optimism",
+                    "polygon",
+                    "base",
+                    "avalanche",
+                    "bsc",
+                    "linea",
+                    "plasma",
+                    "sonic",
+                    "mantle",
+                    "xlayer",
+                )
+            ),
+        ),
+    ),
 )
 
 __all__ = ["CONNECTOR"]

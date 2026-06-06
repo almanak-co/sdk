@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    StrategyMatrixEntry,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
@@ -44,6 +45,16 @@ CONNECTOR = Connector(
         attribute="build_balancer_flash_loan",
     ),
     flash_loan_synthetic_discovery=True,
+    strategy_intents=("FLASH_LOAN",),
+    strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche"),
+    # Matrix output keeps the historical "balancer" row name for flash loans.
+    strategy_matrix_entries=(
+        StrategyMatrixEntry(
+            matrix_name="balancer",
+            category="flash_loan",
+            chains=frozenset(("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche")),
+        ),
+    ),
 )
 
 __all__ = ["CONNECTOR"]

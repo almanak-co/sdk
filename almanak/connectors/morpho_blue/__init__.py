@@ -249,48 +249,11 @@ _registered = False
 
 
 def _register_once() -> None:
-    """Fire ``register_connector`` once on first strategy-side access.
-
-    Deferred so importing the connector's gateway-side surface during
-    gateway boot does not pull ``framework.intents.vocabulary`` into the
-    partially-initialised config-init chain (VIB-4835).
-    """
+    """Compatibility no-op; strategy registration lives in connector.py."""
     global _registered
     if _registered:
         return
     _registered = True
-    try:
-        from almanak.connectors._strategy_base.registry import MatrixEntry, register_connector
-        from almanak.framework.intents.vocabulary import IntentType
-
-        from .addresses import MORPHO_BLUE
-
-        register_connector(
-            name="morpho_blue",
-            intents=(
-                IntentType.SUPPLY,
-                IntentType.BORROW,
-                IntentType.REPAY,
-                IntentType.WITHDRAW,
-                IntentType.FLASH_LOAN,
-            ),
-            chains=("ethereum", "base", "arbitrum", "polygon", "monad"),
-            # Matrix output is owned by the connector (VIB-4856 / W4).
-            # Single ``lending`` row across every chain Morpho Blue ships;
-            # flash-loan capability exists on-chain but the matrix has
-            # historically scoped ``flash_loan`` to Balancer V2 (the
-            # cross-protocol venue).
-            matrix_entries=(
-                MatrixEntry(
-                    matrix_name="morpho_blue",
-                    category="lending",
-                    chains=frozenset(MORPHO_BLUE.keys()),
-                ),
-            ),
-        )
-    except Exception:
-        _registered = False
-        raise
 
 
 def __getattr__(name: str) -> Any:

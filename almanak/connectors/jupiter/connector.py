@@ -20,6 +20,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.jupiter.receipt_parser_provider",
         attribute="JupiterReceiptParserConnector",
     ),
+    strategy_intents=("SWAP",),
+    strategy_chains=("solana",),
 )
 
 __all__ = ["CONNECTOR"]

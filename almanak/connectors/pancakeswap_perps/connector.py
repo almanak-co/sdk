@@ -23,6 +23,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.pancakeswap_perps.receipt_parser_provider",
         attribute="PancakeSwapPerpsReceiptParserConnector",
     ),
+    strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
+    strategy_chains=("bnb",),
 )
 
 __all__ = ["CONNECTOR"]

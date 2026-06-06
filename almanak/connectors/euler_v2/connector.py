@@ -15,6 +15,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.euler_v2.receipt_parser_provider",
         attribute="EulerV2ReceiptParserConnector",
     ),
+    strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+    strategy_chains=("ethereum", "avalanche"),
 )
 
 __all__ = ["CONNECTOR"]

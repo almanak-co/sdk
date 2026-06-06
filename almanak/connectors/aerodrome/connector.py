@@ -47,6 +47,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.aerodrome.protocol_family",
         attribute="PROTOCOL_FAMILY",
     ),
+    strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE"),
+    strategy_chains=("base", "optimism"),
 )
 
 __all__ = ["CONNECTOR"]

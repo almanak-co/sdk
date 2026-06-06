@@ -21,6 +21,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.raydium.receipt_parser_provider",
         attribute="RaydiumReceiptParserConnector",
     ),
+    strategy_intents=("LP_OPEN", "LP_CLOSE"),
+    strategy_chains=("solana",),
 )
 
 __all__ = ["CONNECTOR"]

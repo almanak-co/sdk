@@ -20,6 +20,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.lido.receipt_parser_provider",
         attribute="LidoReceiptParserConnector",
     ),
+    strategy_intents=("STAKE", "UNSTAKE"),
+    strategy_chains=("ethereum",),
 )
 
 __all__ = ["CONNECTOR"]

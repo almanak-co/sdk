@@ -16,6 +16,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.kamino.receipt_parser_provider",
         attribute="KaminoReceiptParserConnector",
     ),
+    strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+    strategy_chains=("solana",),
 )
 
 __all__ = ["CONNECTOR"]

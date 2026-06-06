@@ -15,6 +15,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.silo_v2.receipt_parser_provider",
         attribute="SiloV2ReceiptParserConnector",
     ),
+    strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+    strategy_chains=("avalanche",),
 )
 
 __all__ = ["CONNECTOR"]

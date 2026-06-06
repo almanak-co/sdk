@@ -25,6 +25,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.morpho_vault.receipt_parser_provider",
         attribute="MetaMorphoReceiptParserConnector",
     ),
+    strategy_intents=("VAULT_DEPOSIT", "VAULT_REDEEM"),
+    strategy_chains=("ethereum", "base"),
 )
 
 __all__ = ["CONNECTOR"]

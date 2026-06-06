@@ -15,6 +15,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.gimo.receipt_parser_provider",
         attribute="GimoReceiptParserConnector",
     ),
+    strategy_intents=("STAKE", "UNSTAKE"),
+    strategy_chains=("zerog",),
 )
 
 __all__ = ["CONNECTOR"]

@@ -73,47 +73,11 @@ _registered = False
 
 
 def _register_once() -> None:
-    """Fire ``register_connector`` once on first strategy-side access.
-
-    Deferred so importing the connector's gateway-side surface during
-    gateway boot does not pull ``framework.intents.vocabulary`` into the
-    partially-initialised config-init chain (VIB-4835).
-    """
+    """Compatibility no-op; strategy registration lives in connector.py."""
     global _registered
     if _registered:
         return
     _registered = True
-    try:
-        from almanak.connectors._strategy_base.registry import MatrixEntry, register_connector
-        from almanak.framework.intents.vocabulary import IntentType
-
-        from .adapter import BALANCER_VAULT_ADDRESSES
-
-        register_connector(
-            # Renamed during VIB-4835 Phase 2 — see the rename commit message.
-            # Strategies that referenced ``balancer`` need to update; coverage
-            # gate entries under ``scripts/ci/intent-coverage-excused.yml``
-            # follow the new name too.
-            name="balancer_v2",
-            intents=(IntentType.FLASH_LOAN,),
-            chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche"),
-            # Matrix output is owned by the connector (VIB-4856 / W4).
-            # The Vault is the canonical flash-loan venue; the matrix has
-            # historically rendered the row under the bare ``"balancer"``
-            # name (not ``"balancer_v2"``) because that's the only Balancer
-            # surface advertised. Chains come from ``BALANCER_VAULT_ADDRESSES``,
-            # the connector-owned source of truth.
-            matrix_entries=(
-                MatrixEntry(
-                    matrix_name="balancer",
-                    category="flash_loan",
-                    chains=frozenset(BALANCER_VAULT_ADDRESSES.keys()),
-                ),
-            ),
-        )
-    except Exception:
-        _registered = False
-        raise
 
 
 def __getattr__(name: str) -> Any:

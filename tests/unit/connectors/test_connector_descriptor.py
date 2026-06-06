@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -99,6 +100,7 @@ EXPECTED_CONNECTOR_KINDS = {
     "jupiter": ProtocolKind.SWAP,
     "jupiter_lend": ProtocolKind.LENDING,
     "kamino": ProtocolKind.LENDING,
+    "kraken": ProtocolKind.SWAP,
     "lagoon": ProtocolKind.VAULT,
     "lido": ProtocolKind.LENDING,
     "lifi": ProtocolKind.BRIDGE,
@@ -129,6 +131,154 @@ EXPECTED_ALIASES = {
     "orca": ("orca_whirlpools",),
     "raydium": ("raydium_clmm",),
     "uniswap_v3": ("agni_finance",),
+}
+
+MIGRATED_STRATEGY_REGISTRATION = {
+    "aave_v3": (
+        ("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
+        ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "mantle", "xlayer"),
+    ),
+    "across": (("BRIDGE",), ("ethereum", "arbitrum", "base", "optimism", "polygon", "linea")),
+    "aerodrome": (("SWAP", "LP_OPEN", "LP_CLOSE"), ("base", "optimism")),
+    "aster_perps": (("PERP_OPEN", "PERP_CLOSE"), ("bnb",)),
+    "balancer_v2": (("FLASH_LOAN",), ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche")),
+    "benqi": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("avalanche",)),
+    "camelot": (("SWAP",), ("arbitrum",)),
+    "compound_v3": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("ethereum", "arbitrum", "base", "optimism", "polygon")),
+    "curvance": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("monad",)),
+    "curve": (("SWAP", "LP_OPEN", "LP_CLOSE"), ("ethereum", "arbitrum", "optimism", "polygon", "base")),
+    "drift": (("PERP_OPEN", "PERP_CLOSE"), ("solana",)),
+    "enso": (("SWAP",), ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb")),
+    "ethena": (("STAKE", "UNSTAKE"), ("ethereum",)),
+    "euler_v2": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("ethereum", "avalanche")),
+    "fluid": (("SWAP", "LP_OPEN", "LP_CLOSE"), ("arbitrum",)),
+    "gimo": (("STAKE", "UNSTAKE"), ("zerog",)),
+    "gmx_v2": (("PERP_OPEN", "PERP_CLOSE"), ("arbitrum", "avalanche")),
+    "jupiter": (("SWAP",), ("solana",)),
+    "kamino": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("solana",)),
+    "kraken": (("SWAP",), None),
+    "lagoon": (("VAULT_DEPOSIT", "VAULT_REDEEM"), ("ethereum", "base")),
+    "lido": (("STAKE", "UNSTAKE"), ("ethereum",)),
+    "lifi": (("SWAP", "BRIDGE"), ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb")),
+    "meteora": (("LP_OPEN", "LP_CLOSE"), ("solana",)),
+    "morpho_blue": (
+        ("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
+        ("ethereum", "base", "arbitrum", "polygon", "monad"),
+    ),
+    "morpho_vault": (("VAULT_DEPOSIT", "VAULT_REDEEM"), ("ethereum", "base")),
+    "orca": (("LP_OPEN", "LP_CLOSE"), ("solana",)),
+    "pancakeswap_perps": (("PERP_OPEN", "PERP_CLOSE"), ("bnb",)),
+    "pancakeswap_v3": (("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"), ("bnb", "ethereum", "arbitrum", "base")),
+    "pendle": (("SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW"), ("arbitrum", "ethereum")),
+    "polymarket": (("PREDICTION_BUY", "PREDICTION_SELL", "PREDICTION_REDEEM"), ("polygon",)),
+    "raydium": (("LP_OPEN", "LP_CLOSE"), ("solana",)),
+    "silo_v2": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("avalanche",)),
+    "spark": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("ethereum",)),
+    "stargate": (("BRIDGE",), ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb")),
+    "sushiswap_v3": (
+        ("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
+        ("ethereum", "arbitrum", "base", "optimism", "polygon", "bnb"),
+    ),
+    "traderjoe_v2": (
+        ("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
+        ("avalanche", "arbitrum", "bnb", "ethereum"),
+    ),
+    "uniswap_v3": (
+        ("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
+        ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "monad"),
+    ),
+    "uniswap_v4": (("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"), ("ethereum", "arbitrum", "base")),
+}
+
+EXPECTED_STRATEGY_MATRIX_ENTRIES = {
+    "aave_v3": (
+        StrategyMatrixEntry(
+            matrix_name="aave_v3",
+            category="lending",
+            chains=frozenset(
+                (
+                    "ethereum",
+                    "arbitrum",
+                    "optimism",
+                    "polygon",
+                    "base",
+                    "avalanche",
+                    "bsc",
+                    "linea",
+                    "plasma",
+                    "sonic",
+                    "mantle",
+                    "xlayer",
+                )
+            ),
+        ),
+    ),
+    "balancer_v2": (
+        StrategyMatrixEntry(
+            matrix_name="balancer",
+            category="flash_loan",
+            chains=frozenset(("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche")),
+        ),
+    ),
+    "enso": (
+        StrategyMatrixEntry(
+            matrix_name="enso",
+            category="aggregator",
+            chains=frozenset(
+                (
+                    "ethereum",
+                    "optimism",
+                    "bsc",
+                    "gnosis",
+                    "polygon",
+                    "zksync",
+                    "base",
+                    "arbitrum",
+                    "avalanche",
+                    "sonic",
+                    "linea",
+                    "berachain",
+                    "sepolia",
+                )
+            ),
+        ),
+    ),
+    "lagoon": (),
+    "lifi": (
+        StrategyMatrixEntry(
+            matrix_name="lifi",
+            category="aggregator",
+            chains=frozenset(
+                ("ethereum", "optimism", "bsc", "gnosis", "polygon", "base", "arbitrum", "avalanche", "sonic", "linea")
+            ),
+        ),
+    ),
+    "morpho_blue": (
+        StrategyMatrixEntry(
+            matrix_name="morpho_blue",
+            category="lending",
+            chains=frozenset(("ethereum", "base", "arbitrum", "polygon", "monad")),
+        ),
+    ),
+    "pendle": (
+        StrategyMatrixEntry(
+            matrix_name="pendle",
+            category="yield",
+            chains=frozenset(("arbitrum", "ethereum", "plasma", "sonic", "base", "mantle", "bsc")),
+        ),
+    ),
+    "uniswap_v4": (
+        StrategyMatrixEntry(
+            matrix_name="uniswap_v4",
+            category="swap",
+            chains=frozenset(("ethereum", "base", "arbitrum", "optimism", "polygon", "avalanche", "bsc")),
+        ),
+        StrategyMatrixEntry(
+            matrix_name="uniswap_v4",
+            category="lp",
+            chains=frozenset(("ethereum", "base", "arbitrum", "optimism", "polygon", "avalanche", "bsc")),
+        ),
+    ),
 }
 
 EXPECTED_RECEIPT_PROVIDER_MODULES = {
@@ -513,6 +663,46 @@ def test_connector_registry_filters_strategy_support() -> None:
     registry._connectors = connectors
 
     assert registry.with_strategy_support() == (connectors[1],)
+
+
+def test_migrated_strategy_registration_is_descriptor_owned() -> None:
+    """Migrated canary connectors publish strategy support without legacy init calls."""
+    repo_root = Path(__file__).resolve().parents[3]
+    CONNECTOR_REGISTRY.clear()
+    connectors = {connector.name: connector for connector in CONNECTOR_REGISTRY.with_strategy_support()}
+
+    for name, (intents, chains) in MIGRATED_STRATEGY_REGISTRATION.items():
+        connector = connectors[name]
+        assert connector.strategy_intents == intents
+        assert connector.strategy_chains == chains
+        if name in EXPECTED_STRATEGY_MATRIX_ENTRIES:
+            assert connector.strategy_matrix_entries == EXPECTED_STRATEGY_MATRIX_ENTRIES[name]
+
+        init_py = repo_root / "almanak" / "connectors" / name / "__init__.py"
+        assert "register_connector(" not in init_py.read_text(encoding="utf-8")
+
+
+def test_connector_inits_do_not_call_legacy_strategy_registration() -> None:
+    """Connector package init files are lazy export surfaces, not registration owners."""
+    repo_root = Path(__file__).resolve().parents[3]
+    connector_root = repo_root / "almanak" / "connectors"
+    offenders: list[str] = []
+
+    for init_py in sorted(connector_root.glob("*/__init__.py")):
+        if init_py.parent.name.startswith("_"):
+            continue
+        tree = ast.parse(init_py.read_text(encoding="utf-8"), filename=str(init_py))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            is_legacy_call = (isinstance(func, ast.Name) and func.id == "register_connector") or (
+                isinstance(func, ast.Attribute) and func.attr == "register_connector"
+            )
+            if is_legacy_call:
+                offenders.append(str(init_py.relative_to(repo_root)))
+
+    assert offenders == []
 
 
 def test_discovers_migrated_connectors() -> None:

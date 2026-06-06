@@ -15,6 +15,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.curvance.receipt_parser_provider",
         attribute="CurvanceReceiptParserConnector",
     ),
+    strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+    strategy_chains=("monad",),
 )
 
 __all__ = ["CONNECTOR"]

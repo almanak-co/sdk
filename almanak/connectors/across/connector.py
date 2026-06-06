@@ -24,6 +24,8 @@ CONNECTOR = Connector(
         attribute="AcrossBridgeAdapter",
         order=1,
     ),
+    strategy_intents=("BRIDGE",),
+    strategy_chains=("ethereum", "arbitrum", "base", "optimism", "polygon", "linea"),
 )
 
 __all__ = ["CONNECTOR"]

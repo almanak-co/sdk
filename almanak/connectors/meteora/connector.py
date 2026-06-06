@@ -16,6 +16,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.meteora.receipt_parser_provider",
         attribute="MeteoraReceiptParserConnector",
     ),
+    strategy_intents=("LP_OPEN", "LP_CLOSE"),
+    strategy_chains=("solana",),
 )
 
 __all__ = ["CONNECTOR"]

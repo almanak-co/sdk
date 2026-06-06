@@ -7,22 +7,15 @@ route intents to connectors via the compiler; this registry makes the
 tooling - coverage gates, docs generation, demo gating, agent-tool exposure -
 does not need to hand-maintain a parallel list.
 
-The registry currently accepts two sources while the connector self-containment
-migration is in flight:
+Connector-owned ``CONNECTOR`` manifests in
+``almanak/connectors/<name>/connector.py`` are the source of truth. Descriptor
+discovery can load strategy support without importing connector packages or
+framework intent vocabulary, then this module converts that metadata into
+:class:`ConnectorManifest` values for downstream consumers.
 
-* **Descriptor-owned** metadata on ``CONNECTOR`` in
-  ``almanak/connectors/<name>/connector.py``. This is the canonical direction:
-  descriptor discovery can load strategy support without importing connector
-  packages or framework intent vocabulary.
-* **Legacy imperative** ``register_connector(...)`` calls from connector
-  ``__init__.py`` files. These remain supported until each connector has moved
-  its strategy registration into the descriptor.
-
-Both paths end in :class:`ConnectorManifest`, so downstream consumers keep one
-stable read API. :func:`_import_all_connectors` is the CI/tooling sweep that
-hydrates the registry from descriptors first, then imports every connector
-package to verify import safety and fire legacy side-effect registration where
-needed.
+:func:`_import_all_connectors` is the CI/tooling sweep that hydrates the
+registry from descriptors and then imports remaining protocol packages to catch
+package import errors.
 """
 
 from __future__ import annotations
@@ -354,23 +347,22 @@ def register_connector(
     chains: tuple[str, ...] | None,
     matrix_entries: tuple[MatrixEntry, ...] | None = None,
 ) -> None:
-    """Imperative call placed at module level in each connector's ``__init__.py``.
+    """Register a validated connector strategy manifest.
 
-    Keyword-only — positional args are rejected to keep call sites
-    self-documenting at the back-fill scale (~42 connectors).
+    Keyword-only - positional args are rejected to keep call sites
+    self-documenting.
 
     ``matrix_entries`` is optional declarative override for the
     ``almanak info matrix`` CLI (VIB-4856 / W4). When set, the connector
     publishes its own ``MatrixEntry`` rows verbatim and the matrix
-    builder's intent → category derivation is skipped for this
+    builder's intent-to-category derivation is skipped for this
     connector. When ``None``, the matrix builder derives entries from
     ``intents`` + ``chains``. See :class:`MatrixEntry` for the field
     semantics.
 
-    The function constructs a :class:`ConnectorManifest` (which validates the
-    arguments) and registers it with :class:`ConnectorRegistry`. Both steps
-    can raise ``ValueError`` and will surface at import time with a traceback
-    pointing at the connector's ``__init__.py`` line.
+    Connector authors should declare ``strategy_intents`` and related fields on
+    ``CONNECTOR`` in ``connector.py`` rather than calling this helper from a
+    package ``__init__.py``.
     """
     ConnectorRegistry.register(
         ConnectorManifest(
@@ -432,7 +424,7 @@ def _register_descriptor_connectors() -> frozenset[str]:
             ConnectorRegistry.register(manifest)
         elif existing != manifest:
             raise ValueError(
-                f"Connector {manifest.name!r} has conflicting descriptor and legacy strategy registrations. "
+                f"Connector {manifest.name!r} has conflicting descriptor strategy registrations. "
                 f"Descriptor manifest: {manifest!r}; existing manifest: {existing!r}"
             )
         registered.add(manifest.name)
@@ -451,17 +443,15 @@ def _is_protocol_leaf(info: pkgutil.ModuleInfo) -> bool:
 def _import_one_connector(package_name: str, subpackage_name: str) -> list[str]:
     """Import one connector subpackage and fire its lazy ``_register_once`` if present.
 
-    Returns a list of error strings — empty on success, one entry for an
+    Returns a list of error strings - empty on success, one entry for an
     import failure, one entry for a ``_register_once`` failure. The two
     failure modes are reported separately so the gate operator can tell
     them apart.
 
-    Most protocol connectors are PEP 562 lazy (VIB-4835 cleanup): their
-    ``register_connector(...)`` call lives inside a ``_register_once()``
-    helper that fires on first strategy-side attribute access, NOT at
-    package init. Eager-registering connectors continue to work because
-    their registration already ran during the bare import and the helper
-    is absent.
+    Protocol connectors are PEP 562 lazy (VIB-4835 cleanup). The optional
+    ``_register_once()`` hook is retained only as an idempotent compatibility
+    no-op for migrated packages; strategy registration itself is descriptor-
+    owned.
     """
     errors: list[str] = []
     try:

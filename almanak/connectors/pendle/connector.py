@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    StrategyMatrixEntry,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
@@ -51,6 +52,16 @@ CONNECTOR = Connector(
     contract_monitoring=ImportRef(
         module="almanak.connectors.pendle.contract_monitoring",
         attribute="PENDLE_CONTRACT_MONITORING_SPECS",
+    ),
+    strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW"),
+    strategy_chains=("arbitrum", "ethereum"),
+    # Matrix output renders Pendle as yield across deployed markets.
+    strategy_matrix_entries=(
+        StrategyMatrixEntry(
+            matrix_name="pendle",
+            category="yield",
+            chains=frozenset(("arbitrum", "ethereum", "plasma", "sonic", "base", "mantle", "bsc")),
+        ),
     ),
 )
 

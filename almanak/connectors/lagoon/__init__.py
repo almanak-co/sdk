@@ -71,32 +71,11 @@ _registered = False
 
 
 def _register_once() -> None:
-    """Fire ``register_connector`` once on first strategy-side access.
-
-    Deferred so importing the connector's gateway-side surface during
-    gateway boot does not pull ``framework.intents.vocabulary`` into the
-    partially-initialised config-init chain (VIB-4835).
-    """
+    """Compatibility no-op; strategy registration lives in connector.py."""
     global _registered
     if _registered:
         return
     _registered = True
-    try:
-        from almanak.connectors._strategy_base.registry import register_connector
-        from almanak.framework.intents.vocabulary import IntentType
-
-        register_connector(
-            name="lagoon",
-            intents=(IntentType.VAULT_DEPOSIT, IntentType.VAULT_REDEEM),
-            chains=("ethereum", "base"),
-            # Hidden from ``almanak info matrix`` — no demo or intent test yet,
-            # and the matrix has never surfaced Lagoon. Re-add a MatrixEntry
-            # row once a Lagoon vault demo lands. VIB-4856.
-            matrix_entries=(),
-        )
-    except Exception:
-        _registered = False
-        raise
 
 
 def __getattr__(name: str) -> Any:
