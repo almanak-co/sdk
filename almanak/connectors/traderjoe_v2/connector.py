@@ -37,6 +37,10 @@ CONNECTOR = Connector(
         attribute="CONTRACT_ROLES",
         order=6,
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.traderjoe_v2.compiler",
+        attribute="TraderJoeV2Compiler",
+    ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
     strategy_chains=("avalanche", "arbitrum", "bnb", "ethereum"),
 )

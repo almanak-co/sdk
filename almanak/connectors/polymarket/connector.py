@@ -16,10 +16,20 @@ CONNECTOR = Connector(
         attribute="PolymarketGatewayConnector",
         order=11,
     ),
+    gateway_settings=ImportRef(
+        module="almanak.connectors.polymarket.gateway.settings",
+        attribute="PolymarketGatewaySettings",
+        order=10,
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.polymarket.receipt_parser_provider",
         attribute="PolymarketReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.polymarket.compiler",
+        attribute="PolymarketCompiler",
+    ),
+    compiler_default_keys=("PREDICTION",),
     strategy_intents=("PREDICTION_BUY", "PREDICTION_SELL", "PREDICTION_REDEEM"),
     strategy_chains=("polygon",),
 )

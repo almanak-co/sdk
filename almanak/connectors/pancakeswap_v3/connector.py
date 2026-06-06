@@ -53,6 +53,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.pancakeswap_v3.protocol_family",
         attribute="PROTOCOL_FAMILY",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.uniswap_v3.compiler",
+        attribute="UniswapV3Compiler",
+    ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
     strategy_chains=("bnb", "ethereum", "arbitrum", "base"),
 )

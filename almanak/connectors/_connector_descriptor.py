@@ -114,8 +114,11 @@ class Connector:
     protocol_metadata: ImportRef | None = None
     principal_token_market_reader: ImportRef | None = None
     swap_route_inference: ImportRef | None = None
+    deferred_refresh: ImportRef | None = None
+    swap_quote_connector: ImportRef | None = None
     accounting_treatment: ImportRef | None = None
     accounting_report: ImportRef | None = None
+    gateway_settings: ImportRef | None = None
     gateway_connector: ImportRef | None = None
     gateway_connectors: tuple[ImportRef, ...] = field(default_factory=tuple)
     protocol_family: ImportRef | None = None
@@ -124,6 +127,9 @@ class Connector:
     contract_roles: ImportRef | None = None
     permission_infrastructure: ImportRef | None = None
     bridge_adapter: ImportRef | None = None
+    compiler: ImportRef | None = None
+    compiler_protocols: tuple[str, ...] | None = None
+    compiler_default_keys: tuple[str, ...] = field(default_factory=tuple)
     flash_loan_provider_name: str | None = None
     flash_loan_provider: ImportRef | None = None
     flash_loan_builder: ImportRef | None = None
@@ -157,14 +163,18 @@ class Connector:
         self._validate_protocol_metadata()
         self._validate_principal_token_market_reader()
         self._validate_swap_route_inference()
+        self._validate_deferred_refresh()
+        self._validate_swap_quote_connector()
         self._validate_accounting_treatment()
         self._validate_accounting_report()
+        self._validate_gateway_settings()
         self._validate_protocol_family()
         self._validate_swap_classification()
         self._validate_contract_monitoring()
         self._validate_contract_roles()
         self._validate_permission_infrastructure()
         self._validate_bridge_adapter()
+        self._validate_compiler()
         self._validate_flash_loan()
         self._validate_strategy_support()
 
@@ -305,6 +315,18 @@ class Connector:
                 f"Connector.swap_route_inference must be None or an ImportRef, got {self.swap_route_inference!r}"
             )
 
+    def _validate_deferred_refresh(self) -> None:
+        """Validate the strategy-side deferred-refresh provider import reference."""
+        if self.deferred_refresh is not None and not isinstance(self.deferred_refresh, ImportRef):
+            raise ValueError(f"Connector.deferred_refresh must be None or an ImportRef, got {self.deferred_refresh!r}")
+
+    def _validate_swap_quote_connector(self) -> None:
+        """Validate the strategy-side swap quote provider import reference."""
+        if self.swap_quote_connector is not None and not isinstance(self.swap_quote_connector, ImportRef):
+            raise ValueError(
+                f"Connector.swap_quote_connector must be None or an ImportRef, got {self.swap_quote_connector!r}"
+            )
+
     def _validate_accounting_treatment(self) -> None:
         """Validate the strategy-side accounting-treatment spec import reference."""
         if self.accounting_treatment is not None and not isinstance(self.accounting_treatment, ImportRef):
@@ -318,6 +340,11 @@ class Connector:
             raise ValueError(
                 f"Connector.accounting_report must be None or an ImportRef, got {self.accounting_report!r}"
             )
+
+    def _validate_gateway_settings(self) -> None:
+        """Validate the gateway-side settings-fragment import reference."""
+        if self.gateway_settings is not None and not isinstance(self.gateway_settings, ImportRef):
+            raise ValueError(f"Connector.gateway_settings must be None or an ImportRef, got {self.gateway_settings!r}")
 
     def _validate_protocol_family(self) -> None:
         """Validate the protocol-family spec import reference."""
@@ -355,6 +382,34 @@ class Connector:
         """Validate the bridge-adapter factory import reference."""
         if self.bridge_adapter is not None and not isinstance(self.bridge_adapter, ImportRef):
             raise ValueError(f"Connector.bridge_adapter must be None or an ImportRef, got {self.bridge_adapter!r}")
+
+    def _validate_compiler(self) -> None:
+        """Validate compiler import references and advertised protocol keys."""
+        if self.compiler is not None and not isinstance(self.compiler, ImportRef):
+            raise ValueError(f"Connector.compiler must be None or an ImportRef, got {self.compiler!r}")
+        if self.compiler_protocols is not None:
+            if self.compiler is None:
+                raise ValueError("Connector.compiler_protocols may only be set when compiler is also set")
+            self._validate_non_empty_string_tuple("compiler_protocols", self.compiler_protocols)
+        if not isinstance(self.compiler_default_keys, tuple):
+            raise ValueError(
+                f"Connector.compiler_default_keys must be a tuple[str, ...], got {self.compiler_default_keys!r}"
+            )
+        if self.compiler_default_keys:
+            if self.compiler is None:
+                raise ValueError("Connector.compiler_default_keys may only be set when compiler is also set")
+            self._validate_non_empty_string_tuple("compiler_default_keys", self.compiler_default_keys)
+
+    @staticmethod
+    def _validate_non_empty_string_tuple(field_name: str, value: tuple[str, ...]) -> None:
+        """Validate a non-empty tuple of unique, non-blank strings."""
+        if not isinstance(value, tuple) or not value:
+            raise ValueError(f"Connector.{field_name} must be a non-empty tuple[str, ...], got {value!r}")
+        bad_values = [item for item in value if not isinstance(item, str) or not item.strip()]
+        if bad_values:
+            raise ValueError(f"Connector.{field_name} must contain only non-empty strings, got {bad_values!r}")
+        if len(set(value)) != len(value):
+            raise ValueError(f"Connector.{field_name} contains duplicates: {value!r}")
 
     def _validate_flash_loan(self) -> None:
         """Validate flash-loan provider import references and metadata."""
@@ -507,6 +562,20 @@ class Connector:
         return (self.vault_tool_connector, *self.vault_tool_connectors)
 
     @property
+    def compiler_keys(self) -> frozenset[str]:
+        """Protocol keys resolved by this connector's compiler.
+
+        Defaults to the connector identity keys. Connectors whose compiler
+        protocol vocabulary differs from discovery aliases can set
+        ``compiler_protocols`` explicitly.
+        """
+        if self.compiler is None:
+            return frozenset()
+        if self.compiler_protocols is None:
+            return self.protocol_keys
+        return frozenset(self.compiler_protocols)
+
+    @property
     def has_strategy_support(self) -> bool:
         """Whether this manifest owns strategy-side registry metadata."""
         return self.strategy_intents is not None
@@ -592,6 +661,14 @@ class ConnectorRegistry:
         """Return connectors that publish swap-route inference providers."""
         return tuple(d for d in self.all() if d.swap_route_inference is not None)
 
+    def with_deferred_refresh(self) -> tuple[Connector, ...]:
+        """Return connectors that publish deferred transaction refresh providers."""
+        return tuple(d for d in self.all() if d.deferred_refresh is not None)
+
+    def with_swap_quote(self) -> tuple[Connector, ...]:
+        """Return connectors that publish swap quote providers."""
+        return tuple(d for d in self.all() if d.swap_quote_connector is not None)
+
     def with_accounting_treatment(self) -> tuple[Connector, ...]:
         """Return connectors that publish accounting-treatment specs."""
         return tuple(d for d in self.all() if d.accounting_treatment is not None)
@@ -599,6 +676,10 @@ class ConnectorRegistry:
     def with_accounting_report(self) -> tuple[Connector, ...]:
         """Return connectors that publish accounting-report providers."""
         return tuple(d for d in self.all() if d.accounting_report is not None)
+
+    def with_gateway_settings(self) -> tuple[Connector, ...]:
+        """Return connectors that publish gateway settings fragments."""
+        return tuple(d for d in self.all() if d.gateway_settings is not None)
 
     def with_protocol_family(self) -> tuple[Connector, ...]:
         """Return connectors that publish protocol-family specs."""
@@ -624,6 +705,10 @@ class ConnectorRegistry:
         """Return connectors that publish bridge-adapter factories."""
         return tuple(d for d in self.all() if d.bridge_adapter is not None)
 
+    def with_compiler(self) -> tuple[Connector, ...]:
+        """Return connectors that publish intent compilers."""
+        return tuple(d for d in self.all() if d.compiler is not None)
+
     def with_flash_loan(self) -> tuple[Connector, ...]:
         """Return connectors that publish flash-loan providers."""
         return tuple(d for d in self.all() if d.flash_loan_provider is not None)
@@ -648,6 +733,9 @@ class ConnectorRegistry:
         seen_swap_classification_orders: dict[int, str] = {}
         seen_bridge_adapter_orders: dict[int, str] = {}
         seen_flash_loan_provider_orders: dict[int, str] = {}
+        seen_gateway_settings_orders: dict[int, str] = {}
+        seen_compiler_keys: dict[str, str] = {}
+        seen_compiler_default_keys: dict[str, str] = {}
 
         for info in pkgutil.iter_modules(package.__path__):
             if not info.ispkg or info.name.startswith("_"):
@@ -696,6 +784,17 @@ class ConnectorRegistry:
                 refs=() if connector.flash_loan_provider is None else (connector.flash_loan_provider,),
                 seen_orders=seen_flash_loan_provider_orders,
             )
+            self._validate_unique_ref_order(
+                connector_name=connector.name,
+                capability="Gateway settings",
+                refs=() if connector.gateway_settings is None else (connector.gateway_settings,),
+                seen_orders=seen_gateway_settings_orders,
+            )
+            self._validate_unique_compiler_keys(
+                connector=connector,
+                seen_compiler_keys=seen_compiler_keys,
+                seen_compiler_default_keys=seen_compiler_default_keys,
+            )
             connectors.append(connector)
 
         return tuple(sorted(connectors, key=lambda d: d.name))
@@ -718,6 +817,31 @@ class ConnectorRegistry:
                     f"{capability} order {import_ref.order} is claimed by both {owner!r} and {connector_name!r}"
                 )
             seen_orders[import_ref.order] = connector_name
+
+    @staticmethod
+    def _validate_unique_compiler_keys(
+        *,
+        connector: Connector,
+        seen_compiler_keys: dict[str, str],
+        seen_compiler_default_keys: dict[str, str],
+    ) -> None:
+        """Reject duplicate compiler protocol and dispatch-default claims."""
+        for key in connector.compiler_keys:
+            normalized_key = key.strip().lower().replace("-", "_")
+            owner = seen_compiler_keys.get(normalized_key)
+            if owner is not None:
+                raise ConnectorDiscoveryError(
+                    f"Compiler protocol {normalized_key!r} is claimed by both {owner!r} and {connector.name!r}"
+                )
+            seen_compiler_keys[normalized_key] = connector.name
+        for key in connector.compiler_default_keys:
+            normalized_key = key.strip().upper()
+            owner = seen_compiler_default_keys.get(normalized_key)
+            if owner is not None:
+                raise ConnectorDiscoveryError(
+                    f"Compiler default key {normalized_key!r} is claimed by both {owner!r} and {connector.name!r}"
+                )
+            seen_compiler_default_keys[normalized_key] = connector.name
 
     def _load_connector(self, connector_name: str) -> Connector | None:
         """Load ``CONNECTOR`` from one connector package if its manifest exists."""

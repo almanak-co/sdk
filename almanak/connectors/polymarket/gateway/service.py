@@ -1357,7 +1357,7 @@ class PolymarketServiceServicer(polymarket_pb2_grpc.PolymarketServiceServicer):
         """
         message = f"{timestamp}{method}{path}{body}"
         try:
-            secret_bytes = base64.b64decode(self._api_secret)  # type: ignore[arg-type]
+            secret_bytes = base64.b64decode(self._api_secret)
         except Exception as e:
             err_msg = f"Invalid Polymarket API secret: not valid base64 - {e}"
             raise ValueError(err_msg) from e

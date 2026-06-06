@@ -44,6 +44,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.morpho_blue.flash_loan",
         attribute="build_morpho_flash_loan",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.morpho_blue.compiler",
+        attribute="MorphoBlueCompiler",
+    ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
     strategy_chains=("ethereum", "base", "arbitrum", "polygon", "monad"),
     # Matrix output stays lending-only even though flash-loan intent is registered.

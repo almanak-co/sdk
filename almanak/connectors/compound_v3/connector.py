@@ -20,6 +20,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.compound_v3.receipt_parser_provider",
         attribute="CompoundV3ReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.compound_v3.compiler",
+        attribute="CompoundV3Compiler",
+    ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("ethereum", "arbitrum", "base", "optimism", "polygon"),
 )

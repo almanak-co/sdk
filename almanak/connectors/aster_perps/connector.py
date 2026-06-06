@@ -28,6 +28,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.aster_perps.receipt_parser_provider",
         attribute="AsterPerpsReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.aster_perps.compiler",
+        attribute="AsterPerpsCompiler",
+    ),
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
     strategy_chains=("bnb",),
 )

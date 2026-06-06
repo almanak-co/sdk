@@ -20,6 +20,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.ethena.receipt_parser_provider",
         attribute="EthenaReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.ethena.compiler",
+        attribute="EthenaCompiler",
+    ),
     strategy_intents=("STAKE", "UNSTAKE"),
     strategy_chains=("ethereum",),
 )

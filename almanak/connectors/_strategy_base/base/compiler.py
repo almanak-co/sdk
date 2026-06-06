@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
 if TYPE_CHECKING:
     from almanak.connectors._strategy_base.base.swap_adapter import DefaultSwapAdapter
@@ -113,6 +113,25 @@ class SwapCompilerContext(BaseCompilerContext):
 
 
 @dataclass(frozen=True, kw_only=True)
+class CLAdapterFactoryContext:
+    """Inputs needed to build concentrated-liquidity adapter factories.
+
+    The framework owns runtime plumbing such as chain, RPC, and config values.
+    Connector compilers own the concrete adapter classes they need for those
+    factories. Keeping this as a small value object prevents framework compiler
+    context assembly from importing connector-specific adapters.
+    """
+
+    chain: str
+    rpc_url: str | None
+    rpc_timeout: float
+    gateway_client: Any
+    swap_pool_selection_mode: Literal["auto", "fixed"]
+    fixed_swap_fee_tier: int | None
+    default_swap_adapter_cls: Callable[..., Any] | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
 class CLCompilerContext(SwapCompilerContext):
     """Concentrated-liquidity compiler context.
 
@@ -125,7 +144,7 @@ class CLCompilerContext(SwapCompilerContext):
     protocol: str
     default_swap_adapter_factory: Callable[[str], Any]
     lp_adapter_factory: Callable[[str], Any]
-    swap_pool_selection_mode: str
+    swap_pool_selection_mode: Literal["auto", "fixed"]
     fixed_swap_fee_tier: int | None
     default_lp_slippage: Decimal
 
@@ -192,6 +211,55 @@ class BaseConcentratedLiquidityCompiler(BaseProtocolCompiler[CLCompilerContext])
     """
 
     context_type: ClassVar[type[BaseCompilerContext]] = CLCompilerContext
+
+    def build_default_swap_adapter_factory(
+        self,
+        factory_context: CLAdapterFactoryContext,
+    ) -> Callable[[str], Any]:
+        """Build the swap adapter factory for CL-family swap legs.
+
+        Most CL-family compilers use the shared V3-style swap adapter. Concrete
+        connectors may override this if their swap router requires a different
+        adapter while still sharing the CL context shape.
+        """
+        adapter_cls = factory_context.default_swap_adapter_cls
+        if adapter_cls is None:
+            from almanak.connectors._strategy_base.base.swap_adapter import DefaultSwapAdapter
+
+            adapter_cls = DefaultSwapAdapter
+
+        def factory(protocol: str) -> Any:
+            return adapter_cls(
+                factory_context.chain,
+                protocol,
+                pool_selection_mode=factory_context.swap_pool_selection_mode,
+                fixed_fee_tier=factory_context.fixed_swap_fee_tier,
+                rpc_url=factory_context.rpc_url,
+                rpc_timeout=factory_context.rpc_timeout,
+                gateway_client=factory_context.gateway_client,
+            )
+
+        return factory
+
+    def build_lp_adapter_factory(
+        self,
+        factory_context: CLAdapterFactoryContext,
+    ) -> Callable[[str], Any]:
+        """Build the LP adapter factory for CL-family LP legs.
+
+        Connectors that compile NFT-position LP operations override this to
+        return their connector-owned adapter. The default is intentionally lazy:
+        swap-only CL compilers can still share ``CLCompilerContext`` without
+        importing an LP adapter they never use.
+        """
+        _ = factory_context
+
+        def unsupported(protocol: str) -> Any:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not provide an LP adapter factory for protocol {protocol!r}"
+            )
+
+        return unsupported
 
     def compile(self, ctx: CLCompilerContext, intent: Any) -> CompilationResult:
         from almanak.framework.intents.vocabulary import IntentType
@@ -332,6 +400,7 @@ class BaseStakingCompiler(BaseProtocolCompiler[BaseCompilerContext]):
 __all__ = [
     "BaseCompilerContext",
     "BaseBridgeCompiler",
+    "CLAdapterFactoryContext",
     "BaseConcentratedLiquidityCompiler",
     "BasePerpCompiler",
     "BaseProtocolCompiler",

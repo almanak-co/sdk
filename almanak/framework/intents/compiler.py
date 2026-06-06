@@ -33,7 +33,9 @@ import grpc
 from almanak.config.cli_runtime import anvil_port_for_chain
 from almanak.connectors._strategy_base.base.compiler import (
     BaseCompilerContext,
+    BaseConcentratedLiquidityCompiler,
     BaseProtocolCompiler,
+    CLAdapterFactoryContext,
     CLCompilerContext,
     PerpCompilerContext,
     SwapCompilerContext,
@@ -626,7 +628,12 @@ class IntentCompiler:
         """
         context_type = getattr(connector_compiler, "context_type", BaseCompilerContext)
         if issubclass(context_type, CLCompilerContext):
-            return self._build_cl_compiler_context(protocol)
+            if not isinstance(connector_compiler, BaseConcentratedLiquidityCompiler):
+                raise TypeError(
+                    f"Connector compiler {type(connector_compiler).__name__} declares CLCompilerContext "
+                    "but is not a BaseConcentratedLiquidityCompiler"
+                )
+            return self._build_cl_compiler_context(protocol, connector_compiler)
         if issubclass(context_type, PerpCompilerContext):
             return PerpCompilerContext(**self._base_compiler_context_kwargs(resolve_rpc_url=False), protocol=protocol)
         if issubclass(context_type, SwapCompilerContext):
@@ -655,31 +662,28 @@ class IntentCompiler:
         chains_set = frozenset(chains)
         return bool(chains_set) and chains_set <= frozenset({"solana"})
 
-    def _build_cl_compiler_context(self, protocol: str) -> CLCompilerContext:
+    def _build_cl_compiler_context(
+        self,
+        protocol: str,
+        connector_compiler: BaseConcentratedLiquidityCompiler,
+    ) -> CLCompilerContext:
         """Build the connector compiler context for concentrated-liquidity protocols."""
         config = getattr(self, "_config", IntentCompilerConfig(allow_placeholder_prices=True))
-
-        def default_swap_adapter_factory(adapter_protocol: str) -> DefaultSwapAdapter:
-            return DefaultSwapAdapter(
-                self.chain,
-                adapter_protocol,
-                pool_selection_mode=config.swap_pool_selection_mode,
-                fixed_fee_tier=config.fixed_swap_fee_tier,
-                rpc_url=self._get_chain_rpc_url(),
-                rpc_timeout=getattr(self, "rpc_timeout", 10.0),
-                gateway_client=getattr(self, "_gateway_client", None),
-            )
-
-        def lp_adapter_factory(adapter_protocol: str) -> Any:
-            from almanak.connectors.uniswap_v3.adapter import UniswapV3LPAdapter
-
-            return UniswapV3LPAdapter(self.chain, adapter_protocol)
+        factory_context = CLAdapterFactoryContext(
+            chain=self.chain,
+            rpc_url=self._get_chain_rpc_url(),
+            rpc_timeout=getattr(self, "rpc_timeout", 10.0),
+            gateway_client=getattr(self, "_gateway_client", None),
+            swap_pool_selection_mode=config.swap_pool_selection_mode,
+            fixed_swap_fee_tier=config.fixed_swap_fee_tier,
+            default_swap_adapter_cls=DefaultSwapAdapter,
+        )
 
         return CLCompilerContext(
             **self._swap_compiler_context_kwargs(),
             protocol=protocol,
-            default_swap_adapter_factory=default_swap_adapter_factory,
-            lp_adapter_factory=lp_adapter_factory,
+            default_swap_adapter_factory=connector_compiler.build_default_swap_adapter_factory(factory_context),
+            lp_adapter_factory=connector_compiler.build_lp_adapter_factory(factory_context),
             swap_pool_selection_mode=config.swap_pool_selection_mode,
             fixed_swap_fee_tier=config.fixed_swap_fee_tier,
             default_lp_slippage=self.default_lp_slippage,

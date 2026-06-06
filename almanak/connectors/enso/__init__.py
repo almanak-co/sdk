@@ -26,16 +26,14 @@ Lazy attribute access (VIB-4835)
 --------------------------------
 The strategy-facing surface (``EnsoClient``, ``EnsoAdapter``, …) is
 exposed via PEP 562 lazy ``__getattr__``. This keeps the package's
-``__init__`` cheap enough to be safely imported during gateway boot:
-``almanak.gateway.core.settings`` does ``from almanak.connectors.enso.gateway.settings
-import EnsoGatewaySettings``, which Python implements by first running
-this ``__init__.py``. The strategy-side adapter pulls
-``almanak.framework.intents.vocabulary`` whose package init triggers
-``framework.intents.compiler`` → ``config.cli_runtime`` → ``config.env``;
-that last module is the one importing ``GatewaySettings`` in the
-first place, producing a circular import. Lazy attributes avoid the
-cycle entirely: strategy code accessing ``EnsoAdapter`` triggers the
-adapter import only after ``config.env`` is fully initialised.
+``__init__`` cheap enough to be safely imported during gateway boot
+while manifest-declared gateway settings fragments are loaded. The
+strategy-side adapter pulls ``almanak.framework.intents.vocabulary``
+whose package init triggers ``framework.intents.compiler`` →
+``config.cli_runtime`` → ``config.env``; that last module imports
+``GatewaySettings``. Lazy attributes avoid the cycle entirely: strategy
+code accessing ``EnsoAdapter`` triggers the adapter import only after
+``config.env`` is fully initialised.
 
 Strategy registration metadata is descriptor-owned: ``connector.py`` is the
 single source of truth. The ``_register_once()`` hook below remains only as an

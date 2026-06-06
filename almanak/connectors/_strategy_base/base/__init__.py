@@ -37,6 +37,7 @@ from almanak.connectors._strategy_base.base.compiler import (
     BaseCompilerContext,
     BaseConcentratedLiquidityCompiler,
     BaseProtocolCompiler,
+    CLAdapterFactoryContext,
     CLCompilerContext,
     CompilerServices,
 )
@@ -55,6 +56,7 @@ __all__ = [
     "BaseConcentratedLiquidityCompiler",
     "BaseEvent",
     "BaseProtocolCompiler",
+    "CLAdapterFactoryContext",
     "CLCompilerContext",
     "CompilerServices",
     "BaseReceiptParser",

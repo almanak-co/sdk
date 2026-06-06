@@ -27,6 +27,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors._strategy_base.rpc import eth_call_uint256
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
@@ -306,6 +307,8 @@ REMOVE_LIQUIDITY_4_SELECTOR = "0x7d49d875"  # remove_liquidity(uint256,uint256[4
 REMOVE_LIQUIDITY_DYN_SELECTOR = "0xd40ddb8c"  # remove_liquidity(uint256,uint256[]) — StableSwap NG
 REMOVE_LIQUIDITY_ONE_SELECTOR = "0x1a4d01d2"  # remove_liquidity_one_coin(uint256,int128,uint256)
 GET_DY_SELECTOR = "0x5e0d443f"  # get_dy(int128,int128,uint256)
+GET_DY_UINT256_SELECTOR = "0x556d6e9f"  # get_dy(uint256,uint256,uint256)
+GET_DY_UNDERLYING_SELECTOR = "0x07211ef7"  # get_dy_underlying(int128,int128,uint256)
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"  # approve(address,uint256)
 
 # Max uint256 for unlimited approvals
@@ -500,7 +503,7 @@ class SwapResult:
     amount_in: int = 0
     amount_out_minimum: int = 0
     amount_out_estimate: int = 0  # VIB-3203 Phase B — pre-slippage quote (wei)
-    token_out_decimals: int = 18  # VIB-3203 Phase B — for human-unit conversion
+    token_out_decimals: int = 18  # decimal-policy-exempt: display fallback only; measured value overwrites on success
     token_in: str = ""
     token_out: str = ""
     error: str | None = None
@@ -745,7 +748,34 @@ class CurveAdapter:
             # VIB-3203 Phase B: also surface this pre-slippage estimate on
             # SwapResult so the IntentCompiler can persist it as
             # ``expected_output_human`` for realized slippage tracking.
-            amount_out_estimate = self._estimate_swap_output(pool_info, i, j, amount_in_wei, price_ratio=price_ratio)
+            if self._gateway_client is not None or self._rpc_url:
+                try:
+                    amount_out_estimate = self.quote_swap_output(
+                        pool_address=pool_address,
+                        token_in=token_in,
+                        token_out=token_out,
+                        amount_in_wei=amount_in_wei,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Curve on-chain quote unavailable for %s (%s -> %s): %s. "
+                        "Falling back to deterministic pool estimate.",
+                        pool_info.name,
+                        token_in,
+                        token_out,
+                        exc,
+                    )
+                    amount_out_estimate = self._estimate_swap_output(
+                        pool_info,
+                        i,
+                        j,
+                        amount_in_wei,
+                        price_ratio=price_ratio,
+                    )
+            else:
+                amount_out_estimate = self._estimate_swap_output(
+                    pool_info, i, j, amount_in_wei, price_ratio=price_ratio
+                )
             amount_out_minimum = max(1, int(amount_out_estimate * (10000 - slippage_bps) // 10000))
             token_out_decimals = self._get_token_decimals(pool_info.coins[j])
 
@@ -1361,6 +1391,54 @@ class CurveAdapter:
             "price_ratio is required for accurate slippage protection but was not provided. "
             "Ensure price oracle data is available for both tokens before swapping volatile pairs."
         )
+
+    def quote_swap_output(
+        self,
+        *,
+        pool_address: str,
+        token_in: str,
+        token_out: str,
+        amount_in_wei: int,
+    ) -> int:
+        """Quote a Curve exact-input swap with the pool's on-chain quote method."""
+        if self._gateway_client is None and not self._rpc_url:
+            raise ValueError("Curve on-chain swap quote requires either a gateway client or rpc_url")
+        if amount_in_wei <= 0:
+            raise ValueError(f"amount_in_wei must be positive, got {amount_in_wei}")
+
+        pool_info = self.get_pool_info(pool_address)
+        if not pool_info:
+            raise ValueError(f"Unknown Curve pool: {pool_address}")
+        i = pool_info.get_coin_index(token_in)
+        j = pool_info.get_coin_index(token_out)
+        return self._query_swap_output_onchain(pool_info, i, j, amount_in_wei)
+
+    def _query_swap_output_onchain(self, pool_info: PoolInfo, i: int, j: int, amount_in: int) -> int:
+        """Query Curve get_dy for a swap output quote."""
+        if pool_info.use_underlying:
+            selector = GET_DY_UNDERLYING_SELECTOR
+            pad_index = self._pad_int128
+        elif pool_info.pool_type in (PoolType.CRYPTOSWAP, PoolType.TRICRYPTO):
+            selector = GET_DY_UINT256_SELECTOR
+            pad_index = self._pad_uint256
+        else:
+            selector = GET_DY_SELECTOR
+            pad_index = self._pad_int128
+
+        calldata = selector + pad_index(i) + pad_index(j) + self._pad_uint256(amount_in)
+        amount_out = eth_call_uint256(
+            chain=self.chain,
+            to=pool_info.address,
+            data=calldata,
+            rpc_url=self._rpc_url,
+            gateway_client=self._gateway_client,
+            timeout=10.0,
+        )
+        if amount_out is None:
+            raise ValueError(f"Curve get_dy returned no result for {pool_info.name}")
+        if amount_out <= 0:
+            raise ValueError(f"Curve get_dy returned non-positive amount_out for {pool_info.name}: {amount_out}")
+        return amount_out
 
     def _estimate_add_liquidity(self, pool_info: PoolInfo, amounts: list[int]) -> int:
         """Estimate LP tokens from add_liquidity.

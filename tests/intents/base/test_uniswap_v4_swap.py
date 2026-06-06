@@ -287,8 +287,8 @@ class TestUniswapV4SwapIntent:
         assert usdc_balance > 0, "funded_wallet must hold USDC for this test"
         in_decimals = get_token_decimals(web3, token_in)
         balance_decimal = Decimal(usdc_balance) / Decimal(10**in_decimals)
-
-        excessive_amount = balance_decimal * Decimal("100")
+        excessive_amount_raw = usdc_balance + 1
+        excessive_amount = Decimal(excessive_amount_raw) / Decimal(10**in_decimals)
 
         print(f"\n{'='*80}")
         print("Test: Uniswap V4 SwapIntent with Insufficient Balance on Base")

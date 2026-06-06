@@ -71,6 +71,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.uniswap_v3.runner_hooks",
         attribute="UniswapV3RunnerHookConnector",
     ),
+    swap_quote_connector=ImportRef(
+        module="almanak.connectors.uniswap_v3.swap_quote_provider",
+        attribute="UniswapV3SwapQuoteConnector",
+    ),
     contract_roles=ImportRef(
         module="almanak.connectors.uniswap_v3.contract_roles",
         attribute="CONTRACT_ROLES",
@@ -84,6 +88,10 @@ CONNECTOR = Connector(
     protocol_family=ImportRef(
         module="almanak.connectors.uniswap_v3.protocol_family",
         attribute="PROTOCOL_FAMILY",
+    ),
+    compiler=ImportRef(
+        module="almanak.connectors.uniswap_v3.compiler",
+        attribute="UniswapV3Compiler",
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
     strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "monad"),

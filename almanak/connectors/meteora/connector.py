@@ -16,6 +16,11 @@ CONNECTOR = Connector(
         module="almanak.connectors.meteora.receipt_parser_provider",
         attribute="MeteoraReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.meteora.compiler",
+        attribute="MeteoraCompiler",
+    ),
+    compiler_protocols=("meteora_dlmm",),
     strategy_intents=("LP_OPEN", "LP_CLOSE"),
     strategy_chains=("solana",),
 )

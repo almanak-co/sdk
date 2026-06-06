@@ -16,9 +16,17 @@ CONNECTOR = Connector(
         attribute="CurveGatewayConnector",
         order=24,
     ),
+    swap_quote_connector=ImportRef(
+        module="almanak.connectors.curve.swap_quote_provider",
+        attribute="CurveSwapQuoteConnector",
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.curve.receipt_parser_provider",
         attribute="CurveReceiptParserConnector",
+    ),
+    compiler=ImportRef(
+        module="almanak.connectors.curve.compiler",
+        attribute="CurveCompiler",
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE"),
     strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base"),

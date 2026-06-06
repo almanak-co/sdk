@@ -11,6 +11,7 @@ from almanak.connectors.uniswap_v4.adapter import (
     UniswapV4Adapter,
     UniswapV4Config,
 )
+from almanak.connectors.uniswap_v4.sdk import SwapQuote
 from almanak.framework.data.tokens import TokenNotFoundError
 
 # Known tokens for mock resolver
@@ -128,6 +129,44 @@ class TestSwapExactInput:
         assert result.success is True
         # amount_out_minimum should be ~99% of quote output
         assert result.amount_out_minimum > 0
+
+    def test_rpc_quote_failure_falls_back_to_local_estimate(self):
+        config = UniswapV4Config(
+            chain="arbitrum",
+            wallet_address=_TEST_WALLET,
+            rpc_url="https://arb.example.invalid",
+        )
+        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        local_quote = SwapQuote(
+            amount_in=1_000_000_000,
+            amount_out=300_000_000_000_000_000,
+            fee_tier=3000,
+            token_in=self._USDC_ADDR,
+            token_out=self._WETH_ADDR,
+        )
+        adapter._sdk.get_quote = MagicMock(side_effect=ValueError("quoter unavailable"))
+        adapter._sdk.get_quote_local = MagicMock(return_value=local_quote)
+
+        result = adapter.swap_exact_input(
+            token_in=self._USDC_ADDR,
+            token_out=self._WETH_ADDR,
+            amount_in=Decimal("1000"),
+            slippage_bps=50,
+            price_ratio=self._USDC_TO_WETH_PRICE_RATIO,
+        )
+
+        assert result.success is True
+        assert result.amount_out_quoted == local_quote.amount_out
+        adapter._sdk.get_quote.assert_called_once()
+        adapter._sdk.get_quote_local.assert_called_once_with(
+            token_in=self._USDC_ADDR,
+            token_out=self._WETH_ADDR,
+            amount_in=1_000_000_000,
+            fee_tier=3000,
+            token_in_decimals=6,
+            token_out_decimals=18,
+            price_ratio=self._USDC_TO_WETH_PRICE_RATIO,
+        )
 
 
 class TestTokenResolution:
@@ -287,4 +326,5 @@ class TestIntentCompilerV4Routing:
         assert result.action_bundle is not None
         assert result.action_bundle.metadata["protocol"] == "uniswap_v4"
         from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
+
         assert result.action_bundle.metadata["router"] == UNISWAP_V4["arbitrum"]["universal_router"]

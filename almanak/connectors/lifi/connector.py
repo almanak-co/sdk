@@ -16,6 +16,14 @@ CONNECTOR = Connector(
         module="almanak.connectors.lifi.receipt_parser_provider",
         attribute="LiFiReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.lifi.compiler",
+        attribute="LiFiCompiler",
+    ),
+    deferred_refresh=ImportRef(
+        module="almanak.connectors.lifi.deferred_refresh_provider",
+        attribute="LiFiDeferredRefreshConnector",
+    ),
     strategy_intents=("SWAP", "BRIDGE"),
     strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb"),
     # Aggregators render as aggregator rows instead of generic swap/bridge rows.

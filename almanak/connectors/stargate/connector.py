@@ -20,6 +20,10 @@ CONNECTOR = Connector(
         attribute="StargateBridgeAdapter",
         order=2,
     ),
+    compiler=ImportRef(
+        module="almanak.connectors._strategy_base.bridge_compiler",
+        attribute="BridgeCompiler",
+    ),
     strategy_intents=("BRIDGE",),
     strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb"),
 )

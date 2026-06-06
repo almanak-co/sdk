@@ -17,6 +17,7 @@ AERODROME: dict[str, dict[str, str]] = {
         "cl_router": "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5",
         "cl_factory": "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A",
         "cl_nft": "0x827922686190790b37229fd06084350E74485b72",  # Slipstream NonfungiblePositionManager
+        "cl_quoter": "0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0",
     },
     # Velodrome V2 on Optimism — same Solidly fork interface as Aerodrome on Base.
     # Addresses verified on Optimism block explorer (optimistic.etherscan.io).

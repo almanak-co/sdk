@@ -20,6 +20,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.benqi.receipt_parser_provider",
         attribute="BenqiReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.benqi.compiler",
+        attribute="BenqiCompiler",
+    ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("avalanche",),
 )

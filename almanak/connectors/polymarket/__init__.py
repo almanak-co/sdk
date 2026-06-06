@@ -47,9 +47,9 @@ Example:
         print(f"{market.question}: YES={market.yes_price}, NO={market.no_price}")
 """
 
-# Lazy attribute access (VIB-4835). Polymarket's gateway-side settings
-# are composed into ``GatewaySettings`` via multi-inheritance, so the
-# package ``__init__`` runs during gateway boot. Eager-importing the
+# Lazy attribute access (VIB-4835). Polymarket's manifest-declared
+# gateway-side settings fragment is composed into ``GatewaySettings``, so
+# the package ``__init__`` can run during gateway boot. Eager-importing the
 # strategy surface (``framework.intents.vocabulary``) would re-enter
 # ``config.env`` mid-init and explode a circular import. PEP 562
 # attribute lookup defers resolution until the symbol is actually read,

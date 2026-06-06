@@ -131,7 +131,7 @@ class UniswapV4Config:
         default_fee_tier: Default fee tier for swaps. Default 3000 (0.3%).
         default_slippage_bps: Default slippage in basis points. Default 50 (0.5%).
         gateway_client: Optional GatewayClient. When provided, on-chain
-            eth_call queries route through ``gateway_client.rpc.Call`` and
+            eth_call queries route through ``gateway_client.eth_call`` and
             the ``rpc_url`` fallback is never exercised.
     """
 
@@ -238,16 +238,41 @@ class UniswapV4Adapter:
         # Convert to smallest units
         amount_in_raw = int(amount_in * Decimal(10**token_in_dec))
 
-        # Get quote
-        quote = self._sdk.get_quote_local(
-            token_in=token_in_addr,
-            token_out=token_out_addr,
-            amount_in=amount_in_raw,
-            fee_tier=fee_tier,
-            token_in_decimals=token_in_dec,
-            token_out_decimals=token_out_dec,
-            price_ratio=price_ratio,
-        )
+        # Prefer executable pool-state quotes when gateway/RPC is configured.
+        # Offline compilation still uses the local estimate for permission
+        # discovery and unit tests that intentionally avoid chain I/O.
+        gateway_connected = self._gateway_client is not None and getattr(self._gateway_client, "is_connected", False)
+        if gateway_connected or self.rpc_url:
+            try:
+                quote = self._sdk.get_quote(
+                    token_in=token_in_addr,
+                    token_out=token_out_addr,
+                    amount_in=amount_in_raw,
+                    fee_tier=fee_tier,
+                    token_in_decimals=token_in_dec,
+                    token_out_decimals=token_out_dec,
+                )
+            except Exception as exc:
+                logger.warning("V4 executable quote failed, falling back to local estimate: %s", exc)
+                quote = self._sdk.get_quote_local(
+                    token_in=token_in_addr,
+                    token_out=token_out_addr,
+                    amount_in=amount_in_raw,
+                    fee_tier=fee_tier,
+                    token_in_decimals=token_in_dec,
+                    token_out_decimals=token_out_dec,
+                    price_ratio=price_ratio,
+                )
+        else:
+            quote = self._sdk.get_quote_local(
+                token_in=token_in_addr,
+                token_out=token_out_addr,
+                amount_in=amount_in_raw,
+                fee_tier=fee_tier,
+                token_in_decimals=token_in_dec,
+                token_out_decimals=token_out_dec,
+                price_ratio=price_ratio,
+            )
 
         # Build transactions
         transactions: list[SwapTransaction] = []

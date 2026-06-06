@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import re
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 
 import almanak.connectors._connector_descriptor as connector_descriptor_module
 from almanak.connectors._base.gateway_connector import GatewayConnector
@@ -38,12 +40,17 @@ from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.agent_read_registry import (
     AgentReadConnector,
 )
+from almanak.connectors._strategy_base.base.compiler import BaseProtocolCompiler
 from almanak.connectors._strategy_base.bridge_base import BridgeAdapter
+from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
 from almanak.connectors._strategy_base.contract_monitoring import (
     ContractMonitoringSpec,
 )
 from almanak.connectors._strategy_base.contract_role_registry import (
     ContractRoleSpec,
+)
+from almanak.connectors._strategy_base.deferred_refresh_registry import (
+    DeferredRefreshConnector,
 )
 from almanak.connectors._strategy_base.flash_loan_base import FlashLoanProvider
 from almanak.connectors._strategy_base.gas_estimate_registry import (
@@ -67,6 +74,10 @@ from almanak.connectors._strategy_base.runner_hook_registry import (
 )
 from almanak.connectors._strategy_base.swap_classification_registry import (
     SwapClassificationSpec,
+)
+from almanak.connectors._strategy_base.swap_quote_registry import (
+    SWAP_QUOTE_REGISTRY,
+    SwapQuoteConnector,
 )
 from almanak.connectors._strategy_base.swap_route_inference_registry import (
     SwapRouteInferenceConnector,
@@ -384,6 +395,14 @@ EXPECTED_GATEWAY_PROVIDER_ORDER = (
     "aster_perps",
 )
 
+EXPECTED_GATEWAY_SETTINGS_MODULES = {
+    "polymarket": ("almanak.connectors.polymarket.gateway.settings", "PolymarketGatewaySettings"),
+    "enso": ("almanak.connectors.enso.gateway.settings", "EnsoGatewaySettings"),
+    "pendle": ("almanak.connectors.pendle.gateway.settings", "PendleGatewaySettings"),
+}
+
+EXPECTED_GATEWAY_SETTINGS_ORDER = ("polymarket", "enso", "pendle")
+
 EXPECTED_GAS_ESTIMATE_PROVIDER_MODULES = {
     "aave_v3": "almanak.connectors.aave_v3.gas_estimate_provider",
     "across": "almanak.connectors.across.gas_estimate_provider",
@@ -430,6 +449,94 @@ EXPECTED_BRIDGE_ADAPTER_MODULES = {
 }
 
 EXPECTED_BRIDGE_ADAPTER_ORDER = ("across", "stargate")
+
+EXPECTED_COMPILER_MODULES = {
+    "aave_v3": ("almanak.connectors.aave_v3.compiler", "AaveV3Compiler"),
+    "across": ("almanak.connectors._strategy_base.bridge_compiler", "BridgeCompiler"),
+    "aerodrome": ("almanak.connectors.aerodrome.compiler", "AerodromeCompiler"),
+    "aster_perps": ("almanak.connectors.aster_perps.compiler", "AsterPerpsCompiler"),
+    "benqi": ("almanak.connectors.benqi.compiler", "BenqiCompiler"),
+    "camelot": ("almanak.connectors.camelot.compiler", "CamelotCompiler"),
+    "compound_v3": ("almanak.connectors.compound_v3.compiler", "CompoundV3Compiler"),
+    "curvance": ("almanak.connectors.curvance.compiler", "CurvanceCompiler"),
+    "curve": ("almanak.connectors.curve.compiler", "CurveCompiler"),
+    "drift": ("almanak.connectors.drift.compiler", "DriftCompiler"),
+    "enso": ("almanak.connectors.enso.compiler", "EnsoCompiler"),
+    "ethena": ("almanak.connectors.ethena.compiler", "EthenaCompiler"),
+    "euler_v2": ("almanak.connectors.euler_v2.compiler", "EulerV2Compiler"),
+    "fluid": ("almanak.connectors.fluid.compiler", "FluidCompiler"),
+    "gimo": ("almanak.connectors.gimo.compiler", "GimoCompiler"),
+    "gmx_v2": ("almanak.connectors.gmx_v2.compiler", "GMXV2Compiler"),
+    "hyperliquid": ("almanak.connectors.hyperliquid.compiler", "HyperliquidCompiler"),
+    "jupiter": ("almanak.connectors.jupiter.compiler", "JupiterCompiler"),
+    "jupiter_lend": ("almanak.connectors.jupiter_lend.compiler", "JupiterLendCompiler"),
+    "kamino": ("almanak.connectors.kamino.compiler", "KaminoCompiler"),
+    "lido": ("almanak.connectors.lido.compiler", "LidoCompiler"),
+    "lifi": ("almanak.connectors.lifi.compiler", "LiFiCompiler"),
+    "meteora": ("almanak.connectors.meteora.compiler", "MeteoraCompiler"),
+    "morpho_blue": ("almanak.connectors.morpho_blue.compiler", "MorphoBlueCompiler"),
+    "morpho_vault": ("almanak.connectors.morpho_vault.compiler", "MorphoVaultCompiler"),
+    "orca": ("almanak.connectors.orca.compiler", "OrcaCompiler"),
+    "pancakeswap_perps": ("almanak.connectors.aster_perps.compiler", "AsterPerpsCompiler"),
+    "pancakeswap_v3": ("almanak.connectors.uniswap_v3.compiler", "UniswapV3Compiler"),
+    "pendle": ("almanak.connectors.pendle.compiler", "PendleCompiler"),
+    "polymarket": ("almanak.connectors.polymarket.compiler", "PolymarketCompiler"),
+    "raydium": ("almanak.connectors.raydium.compiler", "RaydiumCompiler"),
+    "silo_v2": ("almanak.connectors.silo_v2.compiler", "SiloV2Compiler"),
+    "spark": ("almanak.connectors.spark.compiler", "SparkCompiler"),
+    "stargate": ("almanak.connectors._strategy_base.bridge_compiler", "BridgeCompiler"),
+    "sushiswap_v3": ("almanak.connectors.uniswap_v3.compiler", "UniswapV3Compiler"),
+    "traderjoe_v2": ("almanak.connectors.traderjoe_v2.compiler", "TraderJoeV2Compiler"),
+    "uniswap_v3": ("almanak.connectors.uniswap_v3.compiler", "UniswapV3Compiler"),
+    "uniswap_v4": ("almanak.connectors.uniswap_v4.compiler", "UniswapV4Compiler"),
+}
+
+EXPECTED_COMPILER_PROTOCOLS = {
+    "aave_v3": ("aave_v3",),
+    "across": ("across",),
+    "aerodrome": ("aerodrome", "aerodrome_slipstream"),
+    "aster_perps": ("aster_perps",),
+    "benqi": ("benqi",),
+    "camelot": ("camelot",),
+    "compound_v3": ("compound_v3",),
+    "curvance": ("curvance",),
+    "curve": ("curve",),
+    "drift": ("drift",),
+    "enso": ("enso",),
+    "ethena": ("ethena",),
+    "euler_v2": ("euler_v2",),
+    "fluid": ("fluid",),
+    "gimo": ("gimo",),
+    "gmx_v2": ("gmx_v2",),
+    "hyperliquid": ("hyperliquid",),
+    "jupiter": ("jupiter",),
+    "jupiter_lend": ("jupiter_lend",),
+    "kamino": ("kamino",),
+    "lido": ("lido",),
+    "lifi": ("lifi",),
+    "meteora": ("meteora_dlmm",),
+    "morpho_blue": ("morpho", "morpho_blue"),
+    "morpho_vault": ("metamorpho", "morpho_vault"),
+    "orca": ("orca_whirlpools",),
+    "pancakeswap_perps": ("pancakeswap_perps",),
+    "pancakeswap_v3": ("pancakeswap_v3",),
+    "pendle": ("pendle",),
+    "polymarket": ("polymarket",),
+    "raydium": ("raydium_clmm",),
+    "silo_v2": ("silo_v2",),
+    "spark": ("spark",),
+    "stargate": ("stargate",),
+    "sushiswap_v3": ("sushiswap_v3",),
+    "traderjoe_v2": ("traderjoe_v2",),
+    "uniswap_v3": ("agni_finance", "uniswap_v3"),
+    "uniswap_v4": ("uniswap_v4",),
+}
+
+EXPECTED_COMPILER_DEFAULTS = {
+    "across": ("BRIDGE",),
+    "enso": ("SWAP_CROSS_CHAIN",),
+    "polymarket": ("PREDICTION",),
+}
 
 EXPECTED_FLASH_LOAN_MODULES = {
     "aave_v3": (
@@ -515,6 +622,18 @@ EXPECTED_SWAP_ROUTE_INFERENCE_MODULES = {
     "pendle": "almanak.connectors.pendle.swap_route_inference",
 }
 
+EXPECTED_DEFERRED_REFRESH_MODULES = {
+    "enso": "almanak.connectors.enso.deferred_refresh_provider",
+    "lifi": "almanak.connectors.lifi.deferred_refresh_provider",
+}
+
+EXPECTED_SWAP_QUOTE_MODULES = {
+    "aerodrome": "almanak.connectors.aerodrome.swap_quote_provider",
+    "curve": "almanak.connectors.curve.swap_quote_provider",
+    "uniswap_v3": "almanak.connectors.uniswap_v3.swap_quote_provider",
+    "uniswap_v4": "almanak.connectors.uniswap_v4.swap_quote_provider",
+}
+
 EXPECTED_ACCOUNTING_TREATMENT_MODULES = {
     "pendle": "almanak.connectors.pendle.accounting_spec",
 }
@@ -592,9 +711,11 @@ EXPECTED_ADDRESS_TABLE_PROTOCOLS = {
 def _isolate_strategy_connector_registry() -> Iterator[None]:
     """Keep descriptor provider imports from leaking strategy registry state."""
     AddressRegistry.reset_cache()
+    CompilerRegistry.reset_cache()
     StrategyConnectorRegistry._clear()
     yield
     AddressRegistry.reset_cache()
+    CompilerRegistry.reset_cache()
     StrategyConnectorRegistry._clear()
 
 
@@ -766,6 +887,13 @@ def test_connector_registry_rejects_reentrant_discovery(monkeypatch: pytest.Monk
             },
         ),
         (
+            "Gateway settings",
+            lambda name: {
+                "kind": ProtocolKind.SWAP,
+                "gateway_settings": ImportRef(module=f"tests.fake_{name}", attribute="Settings", order=7),
+            },
+        ),
+        (
             "Contract-role",
             lambda name: {
                 "kind": ProtocolKind.LP,
@@ -826,6 +954,62 @@ def test_connector_registry_rejects_duplicate_order_bearing_refs(
         registry.all()
 
 
+def test_connector_registry_rejects_duplicate_compiler_protocol_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two connectors cannot claim the same compiler protocol key."""
+    registry = ConnectorRegistry()
+    protocols = {"alpha": ("shared-protocol ",), "beta": (" shared_protocol",)}
+    connectors = {
+        name: Connector(
+            name=name,
+            kind=ProtocolKind.SWAP,
+            compiler=ImportRef(module=f"tests.fake_{name}", attribute="Compiler"),
+            compiler_protocols=protocols[name],
+        )
+        for name in ("alpha", "beta")
+    }
+
+    monkeypatch.setattr(
+        connector_descriptor_module.pkgutil,
+        "iter_modules",
+        lambda _paths: iter(SimpleNamespace(ispkg=True, name=name) for name in connectors),
+    )
+    monkeypatch.setattr(registry, "_load_connector", lambda name: connectors[name])
+
+    with pytest.raises(
+        ConnectorDiscoveryError,
+        match=r"Compiler protocol 'shared_protocol' is claimed by both 'alpha' and 'beta'",
+    ):
+        registry.all()
+
+
+def test_connector_registry_rejects_duplicate_compiler_default_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two connectors cannot claim the same compiler dispatch default key."""
+    registry = ConnectorRegistry()
+    defaults = {"alpha": (" prediction ",), "beta": ("PREDICTION",)}
+    connectors = {
+        name: Connector(
+            name=name,
+            kind=ProtocolKind.SWAP,
+            compiler=ImportRef(module=f"tests.fake_{name}", attribute="Compiler"),
+            compiler_default_keys=defaults[name],
+        )
+        for name in ("alpha", "beta")
+    }
+
+    monkeypatch.setattr(
+        connector_descriptor_module.pkgutil,
+        "iter_modules",
+        lambda _paths: iter(SimpleNamespace(ispkg=True, name=name) for name in connectors),
+    )
+    monkeypatch.setattr(registry, "_load_connector", lambda name: connectors[name])
+
+    with pytest.raises(
+        ConnectorDiscoveryError,
+        match=r"Compiler default key 'PREDICTION' is claimed by both 'alpha' and 'beta'",
+    ):
+        registry.all()
+
+
 def test_connector_rejects_invalid_gateway_connector_ref() -> None:
     """Invalid singular gateway refs fail during manifest validation."""
     with pytest.raises(ValueError, match="Connector.gateway_connector"):
@@ -833,6 +1017,34 @@ def test_connector_rejects_invalid_gateway_connector_ref() -> None:
             name="bad_gateway_ref",
             kind=ProtocolKind.LP,
             gateway_connector=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_accepts_gateway_settings_ref() -> None:
+    """Connector manifests can own gateway settings fragments."""
+    connector = Connector(
+        name="settings_supported",
+        kind=ProtocolKind.SWAP,
+        gateway_settings=ImportRef(
+            module="tests.fake_gateway_settings",
+            attribute="FakeGatewaySettings",
+            order=3,
+        ),
+    )
+
+    assert connector.gateway_settings is not None
+    assert connector.gateway_settings.module == "tests.fake_gateway_settings"
+    assert connector.gateway_settings.attribute == "FakeGatewaySettings"
+    assert connector.gateway_settings.order == 3
+
+
+def test_connector_rejects_invalid_gateway_settings_ref() -> None:
+    """Invalid gateway-settings refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.gateway_settings"):
+        Connector(
+            name="bad_gateway_settings_ref",
+            kind=ProtocolKind.SWAP,
+            gateway_settings=object(),  # type: ignore[arg-type]
         )
 
 
@@ -926,6 +1138,16 @@ def test_connector_rejects_invalid_swap_route_inference_ref() -> None:
         )
 
 
+def test_connector_rejects_invalid_deferred_refresh_ref() -> None:
+    """Invalid deferred-refresh refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.deferred_refresh"):
+        Connector(
+            name="bad_deferred_refresh_ref",
+            kind=ProtocolKind.SWAP,
+            deferred_refresh=object(),  # type: ignore[arg-type]
+        )
+
+
 def test_connector_rejects_invalid_accounting_treatment_ref() -> None:
     """Invalid accounting-treatment refs fail during manifest validation."""
     with pytest.raises(ValueError, match="Connector.accounting_treatment"):
@@ -1003,6 +1225,62 @@ def test_connector_rejects_invalid_bridge_adapter_ref() -> None:
             name="bad_bridge_adapter_ref",
             kind=ProtocolKind.BRIDGE,
             bridge_adapter=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_accepts_compiler_metadata() -> None:
+    """Connector manifests can own compiler refs and dispatch defaults."""
+    connector = Connector(
+        name="compiler_supported",
+        kind=ProtocolKind.SWAP,
+        compiler=ImportRef(module="tests.fake_compiler", attribute="FakeCompiler"),
+        compiler_protocols=("compiler_supported", "compiler_alias"),
+        compiler_default_keys=("SWAP_CROSS_CHAIN",),
+    )
+
+    assert connector.compiler is not None
+    assert connector.compiler_keys == frozenset({"compiler_supported", "compiler_alias"})
+    assert connector.compiler_default_keys == ("SWAP_CROSS_CHAIN",)
+
+
+def test_connector_rejects_invalid_compiler_ref() -> None:
+    """Invalid compiler refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.compiler"):
+        Connector(
+            name="bad_compiler_ref",
+            kind=ProtocolKind.SWAP,
+            compiler=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_compiler_protocols_without_compiler() -> None:
+    """Compiler protocol keys only make sense with a compiler ref."""
+    with pytest.raises(ValueError, match="compiler_protocols"):
+        Connector(
+            name="bad_compiler_protocols",
+            kind=ProtocolKind.SWAP,
+            compiler_protocols=("bad_compiler_protocols",),
+        )
+
+
+def test_connector_rejects_duplicate_compiler_protocols() -> None:
+    """Descriptor-owned compiler protocol keys must stay unambiguous."""
+    with pytest.raises(ValueError, match="compiler_protocols contains duplicates"):
+        Connector(
+            name="bad_compiler_protocols",
+            kind=ProtocolKind.SWAP,
+            compiler=ImportRef(module="tests.fake_compiler", attribute="FakeCompiler"),
+            compiler_protocols=("bad", "bad"),
+        )
+
+
+def test_connector_rejects_compiler_default_keys_without_compiler() -> None:
+    """Default dispatch keys only make sense with a compiler ref."""
+    with pytest.raises(ValueError, match="compiler_default_keys"):
+        Connector(
+            name="bad_compiler_default",
+            kind=ProtocolKind.SWAP,
+            compiler_default_keys=("PREDICTION",),
         )
 
 
@@ -1206,6 +1484,54 @@ def test_bridge_adapters_load_from_descriptors() -> None:
         )
         == EXPECTED_BRIDGE_ADAPTER_ORDER
     )
+
+
+def test_compilers_load_from_descriptors() -> None:
+    """Connector compiler loaders are published through manifests."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, tuple[str, str, frozenset[str], tuple[str, ...]]] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_compiler():
+        assert connector_manifest.compiler is not None
+        compiler_cls = connector_manifest.compiler.load()
+
+        assert isinstance(compiler_cls, type)
+        assert issubclass(compiler_cls, BaseProtocolCompiler)
+        connectors[connector_manifest.name] = (
+            connector_manifest.compiler.module,
+            connector_manifest.compiler.attribute,
+            connector_manifest.compiler_keys,
+            connector_manifest.compiler_default_keys,
+        )
+
+    assert set(EXPECTED_COMPILER_MODULES) == connectors.keys()
+    for name, (expected_module, expected_attribute) in EXPECTED_COMPILER_MODULES.items():
+        actual_module, actual_attribute, actual_protocols, actual_defaults = connectors[name]
+
+        assert actual_module == expected_module
+        assert actual_attribute == expected_attribute
+        assert actual_protocols == frozenset(EXPECTED_COMPILER_PROTOCOLS[name])
+        assert actual_defaults == EXPECTED_COMPILER_DEFAULTS.get(name, ())
+
+
+def test_compiler_registry_is_manifest_owned() -> None:
+    """The compiler registry composes descriptors instead of naming connectors."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/connectors/_strategy_base/compiler_registry.py").read_text()
+
+    assert "_BUILTIN_LOADERS" not in source
+    assert "_DEFAULT_BY_KEY" not in source
+    for module, _attribute in EXPECTED_COMPILER_MODULES.values():
+        if "._strategy_base." in module:
+            continue
+        assert module not in source
+
+    assert CompilerRegistry.supported_protocols() == tuple(
+        sorted(protocol for protocols in EXPECTED_COMPILER_PROTOCOLS.values() for protocol in protocols)
+    )
+    assert CompilerRegistry.default_protocol("BRIDGE") == "across"
+    assert CompilerRegistry.default_protocol("SWAP_CROSS_CHAIN") == "enso"
+    assert CompilerRegistry.default_protocol("PREDICTION") == "polymarket"
 
 
 def test_flash_loan_providers_load_from_descriptors() -> None:
@@ -1515,6 +1841,63 @@ def test_swap_route_inference_connectors_instantiate_from_descriptors() -> None:
         assert type(connector).__module__ == module
 
 
+def test_deferred_refresh_connectors_instantiate_from_descriptors() -> None:
+    """Migrated deferred-refresh providers are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, tuple[DeferredRefreshConnector, str]] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_deferred_refresh():
+        assert connector_manifest.deferred_refresh is not None
+        connector = connector_manifest.deferred_refresh.instantiate()
+        connectors[str(connector.protocol)] = (connector, connector_manifest.deferred_refresh.module)
+
+    assert set(EXPECTED_DEFERRED_REFRESH_MODULES) == connectors.keys()
+    for name, module in EXPECTED_DEFERRED_REFRESH_MODULES.items():
+        connector, actual_module = connectors[name]
+
+        assert isinstance(connector, DeferredRefreshConnector)
+        assert connector.protocol == ProtocolName(name)
+        assert actual_module == module
+        assert type(connector).__module__ == module
+
+
+def test_swap_quote_connectors_instantiate_from_descriptors() -> None:
+    """Swap quote providers are published through connector descriptors."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, tuple[SwapQuoteConnector, str]] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_swap_quote():
+        assert connector_manifest.swap_quote_connector is not None
+        connector = connector_manifest.swap_quote_connector.instantiate()
+        connectors[str(connector.protocol)] = (connector, connector_manifest.swap_quote_connector.module)
+
+    assert set(EXPECTED_SWAP_QUOTE_MODULES) == connectors.keys()
+    for name, module in EXPECTED_SWAP_QUOTE_MODULES.items():
+        connector, actual_module = connectors[name]
+
+        assert isinstance(connector, SwapQuoteConnector)
+        assert connector.protocol == ProtocolName(name)
+        assert actual_module == module
+        assert type(connector).__module__ == module
+
+
+def test_swap_quote_bootstrap_registers_manifest_providers() -> None:
+    """The swap-quote boot module hydrates runtime registry entries from manifests."""
+    CONNECTOR_REGISTRY.clear()
+    SWAP_QUOTE_REGISTRY.clear()
+
+    boot_module = importlib.import_module("almanak.connectors._strategy_swap_quote_registry")
+    boot_module = importlib.reload(boot_module)
+    boot_module.ensure_swap_quote_registry_loaded()
+
+    connectors = {str(connector.protocol): connector for connector in SWAP_QUOTE_REGISTRY.all()}
+    assert set(EXPECTED_SWAP_QUOTE_MODULES) == connectors.keys()
+    for name, connector in connectors.items():
+        assert isinstance(connector, SwapQuoteConnector)
+        assert connector.protocol == ProtocolName(name)
+        assert type(connector).__module__ == EXPECTED_SWAP_QUOTE_MODULES[name]
+
+
 def test_accounting_treatment_specs_load_from_descriptors() -> None:
     """Migrated accounting-treatment specs are published through connectors."""
     CONNECTOR_REGISTRY.clear()
@@ -1580,6 +1963,44 @@ def test_gateway_connectors_instantiate_from_descriptors() -> None:
         EXPECTED_GATEWAY_PROVIDER_ORDER
     )
     assert CONNECTOR_REGISTRY.get("agni_finance").name == "uniswap_v3"
+
+
+def test_gateway_settings_load_from_descriptors() -> None:
+    """Gateway settings fragments are published through connector manifests."""
+    CONNECTOR_REGISTRY.clear()
+
+    settings: dict[str, tuple[str, str]] = {}
+    orders: dict[str, int | None] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_gateway_settings():
+        assert connector_manifest.gateway_settings is not None
+        settings_cls = connector_manifest.gateway_settings.load()
+
+        assert isinstance(settings_cls, type)
+        assert issubclass(settings_cls, BaseModel)
+        settings[connector_manifest.name] = (
+            connector_manifest.gateway_settings.module,
+            connector_manifest.gateway_settings.attribute,
+        )
+        orders[connector_manifest.name] = connector_manifest.gateway_settings.order
+
+    assert settings == EXPECTED_GATEWAY_SETTINGS_MODULES
+    assert tuple(name for name, _order in sorted(orders.items(), key=lambda item: item[1] or 0)) == (
+        EXPECTED_GATEWAY_SETTINGS_ORDER
+    )
+
+
+def test_gateway_settings_fragments_are_not_hardcoded_in_gateway_settings() -> None:
+    """Connector-backed settings fragments must not also be hardcoded."""
+    CONNECTOR_REGISTRY.clear()
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/gateway/core/settings.py").read_text()
+
+    assert "with_gateway_settings()" in source
+    for connector_manifest in CONNECTOR_REGISTRY.with_gateway_settings():
+        assert connector_manifest.gateway_settings is not None
+        import_ref = connector_manifest.gateway_settings
+        assert import_ref.module not in source
+        assert import_ref.attribute not in source
 
 
 def test_connector_receipt_parsers_are_not_in_legacy_boot_file() -> None:
@@ -1850,6 +2271,32 @@ def test_connector_swap_route_inference_is_not_hardcoded_in_framework_compiler()
     assert 'get_connector_compiler("pendle")' not in source
 
 
+def test_connector_cl_lp_adapter_factory_is_not_hardcoded_in_framework_compiler() -> None:
+    """Framework compiler asks CL compilers for LP adapter factories instead of naming Uniswap."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/framework/intents/compiler.py").read_text()
+
+    assert "connector_compiler.build_lp_adapter_factory(factory_context)" in source
+    assert "UniswapV3LPAdapter" not in source
+    assert "almanak.connectors.uniswap_v3.adapter" not in source
+
+
+def test_connector_deferred_refresh_is_not_hardcoded_in_framework_execution() -> None:
+    """Framework execution asks deferred-refresh providers instead of naming connectors."""
+    CONNECTOR_REGISTRY.clear()
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/framework/execution/deferred_refresh.py").read_text()
+
+    assert "DEFERRED_REFRESH_REGISTRY.lookup" in source
+    for connector_manifest in CONNECTOR_REGISTRY.with_deferred_refresh():
+        assert connector_manifest.deferred_refresh is not None
+        assert connector_manifest.deferred_refresh.module not in source
+        assert connector_manifest.deferred_refresh.attribute not in source
+    assert "_DEFERRED_REFRESHERS" not in source
+    assert "LiFiAdapter" not in source
+    assert "EnsoAdapter" not in source
+
+
 def test_connector_swap_discovery_is_not_hardcoded_in_framework_router_gate() -> None:
     """Framework permission discovery must not exempt Pendle from the router gate."""
     repo_root = Path(__file__).resolve().parents[3]
@@ -1867,6 +2314,19 @@ def test_connector_enrichment_kwargs_are_not_hardcoded_in_framework_enricher() -
 
     assert "pendle" not in source.lower()
     assert "intent_swap_type" not in source
+
+
+def test_connector_swap_quotes_are_not_in_legacy_boot_file() -> None:
+    """Connector-backed swap quote providers must not also be hardcoded."""
+    CONNECTOR_REGISTRY.clear()
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/connectors/_strategy_swap_quote_registry.py").read_text()
+
+    for connector_manifest in CONNECTOR_REGISTRY.with_swap_quote():
+        assert connector_manifest.swap_quote_connector is not None
+        import_ref = connector_manifest.swap_quote_connector
+        assert import_ref.module not in source
+        assert import_ref.attribute not in source
 
 
 def test_connector_accounting_treatment_is_not_hardcoded_in_framework_registry() -> None:

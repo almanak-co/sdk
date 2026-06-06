@@ -15,6 +15,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.gimo.receipt_parser_provider",
         attribute="GimoReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.gimo.compiler",
+        attribute="GimoCompiler",
+    ),
     strategy_intents=("STAKE", "UNSTAKE"),
     strategy_chains=("zerog",),
 )

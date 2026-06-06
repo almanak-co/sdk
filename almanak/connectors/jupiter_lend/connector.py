@@ -15,6 +15,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.jupiter_lend.receipt_parser_provider",
         attribute="JupiterLendReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.jupiter_lend.compiler",
+        attribute="JupiterLendCompiler",
+    ),
 )
 
 __all__ = ["CONNECTOR"]

@@ -1,25 +1,13 @@
 """Gateway configuration using Pydantic Settings."""
 
+import importlib
 import logging
 import math
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
-from pydantic import ValidationInfo, field_validator
+from pydantic import BaseModel, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, NoDecode
-
-# VIB-4812: per-connector settings fragments composed into the central
-# ``GatewaySettings`` via multi-inheritance. Each fragment is a
-# ``BaseModel`` (NOT ``BaseSettings``) — the composed class is the single
-# env-loader. The env-var surface (``ALMANAK_GATEWAY_<FIELD>``) is
-# preserved byte-identically; adding a new connector field is a one-line
-# edit in the connector's ``gateway/settings.py`` plus one extra base
-# class on ``GatewaySettings`` below.
-from almanak.connectors.enso.gateway.settings import EnsoGatewaySettings
-from almanak.connectors.pendle.gateway.settings import PendleGatewaySettings
-from almanak.connectors.polymarket.gateway.settings import (
-    PolymarketGatewaySettings,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +15,54 @@ logger = logging.getLogger(__name__)
 DEFAULT_GATEWAY_DB_PATH = str(Path.home() / ".config" / "almanak" / "gateway.db")
 
 
-class GatewaySettings(
-    BaseSettings,
-    PolymarketGatewaySettings,
-    EnsoGatewaySettings,
-    PendleGatewaySettings,
-):
+def _connector_descriptor_module() -> Any:
+    """Load connector descriptor foundation without a gateway-side import edge."""
+    return importlib.import_module("almanak.connectors._connector")
+
+
+def _load_gateway_settings_base(import_ref: Any) -> type[BaseModel]:
+    """Load one manifest-declared gateway settings fragment."""
+    settings_cls = import_ref.load()
+    connector_discovery_error = _connector_descriptor_module().ConnectorDiscoveryError
+    if not isinstance(settings_cls, type) or not issubclass(settings_cls, BaseModel):
+        raise connector_discovery_error(
+            f"{import_ref.module}.{import_ref.attribute} must be a pydantic BaseModel subclass"
+        )
+    if issubclass(settings_cls, BaseSettings):
+        raise connector_discovery_error(
+            f"{import_ref.module}.{import_ref.attribute} must be a pydantic BaseModel fragment, "
+            "not a BaseSettings subclass. GatewaySettings is the single gateway env loader."
+        )
+    return settings_cls
+
+
+def _gateway_settings_fragment_bases() -> tuple[type[BaseModel], ...]:
+    """Return connector-owned settings fragments in deterministic composition order."""
+    connector_registry = _connector_descriptor_module().CONNECTOR_REGISTRY
+    refs = [
+        (connector.name, connector.gateway_settings)
+        for connector in connector_registry.with_gateway_settings()
+        if connector.gateway_settings is not None
+    ]
+    ordered_refs = sorted(
+        refs,
+        key=lambda item: (
+            item[1].order is None,
+            item[1].order if item[1].order is not None else 0,
+            item[0],
+        ),
+    )
+    return tuple(_load_gateway_settings_base(import_ref) for _connector_name, import_ref in ordered_refs)
+
+
+_GatewaySettingsBase = type(
+    "_GatewaySettingsBase",
+    (BaseSettings, *_gateway_settings_fragment_bases()),
+    {"__module__": __name__},
+)
+
+
+class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     """Gateway configuration from environment variables.
 
     The gateway server supports both HTTP (FastAPI) and gRPC interfaces:
@@ -201,9 +231,8 @@ class GatewaySettings(
     # Platform secrets - only gateway has access to these
     alchemy_api_key: str | None = None
     coingecko_api_key: str | None = None
-    # ``enso_api_key`` is contributed by ``EnsoGatewaySettings`` (VIB-4812).
-    # ``pendle_api_key`` + ``pendle_api_cache_ttl`` by ``PendleGatewaySettings``.
-    # ``polymarket_*`` by ``PolymarketGatewaySettings``.
+    # Connector-specific gateway fields are contributed by manifest-declared
+    # settings fragments. The composed class remains the single env-loader.
     thegraph_api_key: str | None = None
     portfolio_api_key: str | None = None
     portfolio_api_provider: str = "zerion"
@@ -238,7 +267,7 @@ class GatewaySettings(
     signer_service_jwt: str | None = None  # Remote signer service JWT (zodiac mode)
 
     # Polymarket gateway-owned credentials/configuration are contributed by
-    # ``PolymarketGatewaySettings`` (VIB-4812). They are optional: local EOA
+    # the Polymarket connector's settings fragment. They are optional: local EOA
     # mode derives the signer from the gateway execution identity and
     # lazy-derives L2 credentials automatically when absent.
 
@@ -348,8 +377,8 @@ class GatewaySettings(
             raise ValueError(f"dexscreener_min_turnover_ratio must be in [0, 1] (got {value})")
         return value
 
-    # ``polymarket_market_cache_ttl_seconds`` validator is contributed by
-    # ``PolymarketGatewaySettings`` (VIB-4812).
+    # ``polymarket_market_cache_ttl_seconds`` validator is contributed by the
+    # Polymarket connector's manifest-declared settings fragment.
 
     @field_validator("chains", mode="before")
     @classmethod

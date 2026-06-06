@@ -16,6 +16,11 @@ CONNECTOR = Connector(
         module="almanak.connectors.kamino.receipt_parser_provider",
         attribute="KaminoReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.kamino.compiler",
+        attribute="KaminoCompiler",
+    ),
+    compiler_protocols=("kamino",),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("solana",),
 )

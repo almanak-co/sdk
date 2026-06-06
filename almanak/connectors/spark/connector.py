@@ -28,6 +28,10 @@ CONNECTOR = Connector(
         attribute="CONTRACT_ROLES",
         order=10,
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.spark.compiler",
+        attribute="SparkCompiler",
+    ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("ethereum",),
 )

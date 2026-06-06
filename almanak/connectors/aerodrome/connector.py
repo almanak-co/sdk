@@ -34,6 +34,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.aerodrome.receipt_parser_provider",
         attribute="AerodromeReceiptParserConnector",
     ),
+    swap_quote_connector=ImportRef(
+        module="almanak.connectors.aerodrome.swap_quote_provider",
+        attribute="AerodromeSwapQuoteConnector",
+    ),
     contract_monitoring=ImportRef(
         module="almanak.connectors.aerodrome.contract_monitoring",
         attribute="AERODROME_CONTRACT_MONITORING_SPECS",
@@ -46,6 +50,10 @@ CONNECTOR = Connector(
     protocol_family=ImportRef(
         module="almanak.connectors.aerodrome.protocol_family",
         attribute="PROTOCOL_FAMILY",
+    ),
+    compiler=ImportRef(
+        module="almanak.connectors.aerodrome.compiler",
+        attribute="AerodromeCompiler",
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE"),
     strategy_chains=("base", "optimism"),

@@ -28,13 +28,12 @@ Example::
 Lazy attribute access (VIB-4835)
 --------------------------------
 Strategy-facing symbols (``PendleSDK``, ``PendleAdapter``, …) are exposed
-via PEP 562 ``__getattr__``. ``almanak.gateway.core.settings`` imports
-``almanak.connectors.pendle.gateway.settings`` at module load (composes
-``PendleGatewaySettings`` into ``GatewaySettings`` via multi-inheritance);
+via PEP 562 ``__getattr__``. Gateway boot may load the manifest-declared
+``PendleGatewaySettings`` fragment while composing ``GatewaySettings``;
 Python runs this ``__init__.py`` first, and an eager import of
-``almanak.framework.intents.vocabulary`` would explode a circular
-config-init chain (see the matching note in ``enso/__init__.py``). Lazy
-attributes avoid the cycle entirely.
+``almanak.framework.intents.vocabulary`` would explode a circular config-init
+chain (see the matching note in ``enso/__init__.py``). Lazy attributes avoid
+the cycle entirely.
 """
 
 from __future__ import annotations

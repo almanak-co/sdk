@@ -37,10 +37,18 @@ CONNECTOR = Connector(
         module="almanak.connectors.uniswap_v4.runner_hooks",
         attribute="UniswapV4RunnerHookConnector",
     ),
+    swap_quote_connector=ImportRef(
+        module="almanak.connectors.uniswap_v4.swap_quote_provider",
+        attribute="UniswapV4SwapQuoteConnector",
+    ),
     contract_roles=ImportRef(
         module="almanak.connectors.uniswap_v4.contract_roles",
         attribute="CONTRACT_ROLES",
         order=2,
+    ),
+    compiler=ImportRef(
+        module="almanak.connectors.uniswap_v4.compiler",
+        attribute="UniswapV4Compiler",
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
     strategy_chains=("ethereum", "arbitrum", "base"),

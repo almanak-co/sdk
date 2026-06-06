@@ -15,6 +15,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.curvance.receipt_parser_provider",
         attribute="CurvanceReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.curvance.compiler",
+        attribute="CurvanceCompiler",
+    ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("monad",),
 )

@@ -24,6 +24,11 @@ CONNECTOR = Connector(
         attribute="AcrossBridgeAdapter",
         order=1,
     ),
+    compiler=ImportRef(
+        module="almanak.connectors._strategy_base.bridge_compiler",
+        attribute="BridgeCompiler",
+    ),
+    compiler_default_keys=("BRIDGE",),
     strategy_intents=("BRIDGE",),
     strategy_chains=("ethereum", "arbitrum", "base", "optimism", "polygon", "linea"),
 )

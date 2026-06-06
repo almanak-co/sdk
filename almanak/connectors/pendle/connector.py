@@ -25,6 +25,11 @@ CONNECTOR = Connector(
         attribute="PendleGatewayConnector",
         order=6,
     ),
+    gateway_settings=ImportRef(
+        module="almanak.connectors.pendle.gateway.settings",
+        attribute="PendleGatewaySettings",
+        order=30,
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.pendle.receipt_parser_provider",
         attribute="PendleReceiptParserConnector",
@@ -52,6 +57,10 @@ CONNECTOR = Connector(
     contract_monitoring=ImportRef(
         module="almanak.connectors.pendle.contract_monitoring",
         attribute="PENDLE_CONTRACT_MONITORING_SPECS",
+    ),
+    compiler=ImportRef(
+        module="almanak.connectors.pendle.compiler",
+        attribute="PendleCompiler",
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW"),
     strategy_chains=("arbitrum", "ethereum"),

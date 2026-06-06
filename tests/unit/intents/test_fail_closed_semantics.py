@@ -11,10 +11,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from almanak import IntentCompiler, IntentCompilerConfig, SwapIntent
-from almanak.framework.intents.compiler import CompilationStatus
 from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason, PoolValidationResult
+from almanak.framework.intents.compiler import CompilationStatus
 
 ADAPTER_CLS = "almanak.framework.intents.compiler.DefaultSwapAdapter"
+V3_REGISTRY_QUOTE = "almanak.connectors.uniswap_v3.compiler.UniswapV3Compiler._quote_swap_via_registry"
 
 
 def _make_compiler(
@@ -178,8 +179,9 @@ class TestPriceImpactGuardFailClosed:
     """When the on-chain quoter returns None for a live (non-placeholder) swap,
     the compiler must fail rather than degrade to an oracle-only estimate."""
 
+    @patch(V3_REGISTRY_QUOTE, return_value=None)
     @patch(ADAPTER_CLS)
-    def test_quoter_none_live_swap_fails_closed(self, mock_adapter_cls) -> None:
+    def test_quoter_none_live_swap_fails_closed(self, mock_adapter_cls, mock_registry_quote) -> None:
         compiler = _make_compiler()
         mock_adapter = _make_mock_adapter(quoter_amount=None)
         mock_adapter_cls.return_value = mock_adapter
@@ -190,10 +192,12 @@ class TestPriceImpactGuardFailClosed:
         assert result.status == CompilationStatus.FAILED
         assert "on-chain quoter returned no amount" in (result.error or "").lower()
         # Prove the failure came from the quoter path, not an unrelated early exit.
+        mock_registry_quote.assert_called_once()
         mock_adapter.get_quoted_amount_out.assert_called()
 
+    @patch(V3_REGISTRY_QUOTE, return_value=None)
     @patch(ADAPTER_CLS)
-    def test_quoter_none_placeholder_mode_still_passes(self, mock_adapter_cls) -> None:
+    def test_quoter_none_placeholder_mode_still_passes(self, mock_adapter_cls, mock_registry_quote) -> None:
         compiler = _make_compiler(allow_placeholder_prices=True)
         compiler._using_placeholders = True
 
@@ -204,9 +208,11 @@ class TestPriceImpactGuardFailClosed:
         result = compiler.compile(intent)
 
         assert result.status == CompilationStatus.SUCCESS
+        mock_registry_quote.assert_called_once()
 
+    @patch(V3_REGISTRY_QUOTE, return_value=None)
     @patch(ADAPTER_CLS)
-    def test_quoter_none_permission_discovery_still_passes(self, mock_adapter_cls) -> None:
+    def test_quoter_none_permission_discovery_still_passes(self, mock_adapter_cls, mock_registry_quote) -> None:
         """Permission-discovery runs legitimately have no RPC and must be able to
         emit calldata shapes — mirror the offline-mode exemption _validate_pool uses."""
         compiler = _make_compiler()
@@ -219,6 +225,7 @@ class TestPriceImpactGuardFailClosed:
         result = compiler.compile(intent)
 
         assert result.status == CompilationStatus.SUCCESS
+        mock_registry_quote.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -248,9 +255,7 @@ class TestTickMathDecimalPrecision:
 
     def test_tick_is_integer_and_bounded(self) -> None:
         for p in ["0.000001", "1", "3400", "1e6"]:
-            tick = IntentCompiler._price_to_tick(
-                Decimal(p), token0_decimals=18, token1_decimals=6
-            )
+            tick = IntentCompiler._price_to_tick(Decimal(p), token0_decimals=18, token1_decimals=6)
             assert isinstance(tick, int)
             assert IntentCompiler.UNISWAP_MIN_TICK <= tick <= IntentCompiler.UNISWAP_MAX_TICK
 
@@ -262,9 +267,7 @@ class TestTickMathDecimalPrecision:
 
     def test_decimal_sweep_is_monotonic(self) -> None:
         prices = [Decimal("100"), Decimal("1000"), Decimal("2000"), Decimal("3000"), Decimal("5000")]
-        ticks = [
-            IntentCompiler._price_to_tick(p, token0_decimals=18, token1_decimals=6) for p in prices
-        ]
+        ticks = [IntentCompiler._price_to_tick(p, token0_decimals=18, token1_decimals=6) for p in prices]
         assert ticks == sorted(ticks)
 
     def test_exact_tick_boundary_is_exact_tick(self) -> None:

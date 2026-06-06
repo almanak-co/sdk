@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, ClassVar
@@ -11,7 +12,18 @@ from almanak.connectors._strategy_base.base.cl_math import (
     compute_lp_slippage_mins,
     maybe_recompute_lp_amounts_from_slot0,
 )
-from almanak.connectors._strategy_base.base.compiler import BaseConcentratedLiquidityCompiler, CLCompilerContext
+from almanak.connectors._strategy_base.base.compiler import (
+    BaseConcentratedLiquidityCompiler,
+    CLAdapterFactoryContext,
+    CLCompilerContext,
+)
+from almanak.connectors._strategy_base.swap_quote_registry import (
+    SwapQuoteRequest,
+    SwapQuoteResult,
+    SwapQuoteUnavailable,
+)
+from almanak.connectors._strategy_swap_quote_registry import SWAP_QUOTE_REGISTRY, ensure_swap_quote_registry_loaded
+from almanak.framework.execution.simulator.config import is_local_rpc
 from almanak.framework.intents._compiler_helpers import (
     PriceImpactDecision,
     assemble_action_bundle,
@@ -39,6 +51,15 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
     intents: ClassVar[frozenset[IntentType]] = frozenset(
         {IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES}
     )
+
+    def build_lp_adapter_factory(self, factory_context: CLAdapterFactoryContext) -> Callable[[str], Any]:
+        """Build the connector-owned V3 LP adapter factory."""
+        from almanak.connectors.uniswap_v3.adapter import UniswapV3LPAdapter
+
+        def factory(protocol: str) -> Any:
+            return UniswapV3LPAdapter(factory_context.chain, protocol)
+
+        return factory
 
     def compile_swap(self, ctx: CLCompilerContext, intent: SwapIntent) -> CompilationResult:
         protocol = self._protocol(ctx, intent.protocol)
@@ -91,16 +112,28 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 warnings=warnings,
             )
 
-            try:
-                adapter.select_fee_tier(actual_from_token, actual_to_token, amount_in)
-            except Exception as exc:
-                logger.warning("Fee tier pre-selection failed, falling back to oracle estimate: %s", exc)
+            quoter_amount = self._quote_swap_via_registry(
+                ctx=ctx,
+                protocol=protocol,
+                from_token=from_token,
+                to_token=to_token,
+                actual_from_token=actual_from_token,
+                actual_to_token=actual_to_token,
+                amount_in=amount_in,
+                adapter=adapter,
+            )
+            if quoter_amount is None:
+                try:
+                    adapter.select_fee_tier(actual_from_token, actual_to_token, amount_in)
+                except Exception as exc:
+                    logger.warning("Fee tier pre-selection failed, falling back to oracle estimate: %s", exc)
+                quoter_amount = adapter.get_quoted_amount_out()
 
             slippage_or_fail = self._apply_swap_slippage_and_impact(
                 ctx=ctx,
                 intent=intent,
                 oracle_estimate=expected_output,
-                quoter_amount=adapter.get_quoted_amount_out(),
+                quoter_amount=quoter_amount,
             )
             if isinstance(slippage_or_fail, CompilationResult):
                 return slippage_or_fail
@@ -601,6 +634,74 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         return value, actual_from, actual_to
 
     @staticmethod
+    def _quote_swap_via_registry(
+        *,
+        ctx: CLCompilerContext,
+        protocol: str,
+        from_token: TokenInfo,
+        to_token: TokenInfo,
+        actual_from_token: str,
+        actual_to_token: str,
+        amount_in: int,
+        adapter: Any,
+    ) -> int | None:
+        request = SwapQuoteRequest(
+            chain=ctx.chain,
+            protocol=protocol,
+            token_in=actual_from_token,
+            token_out=actual_to_token,
+            amount_in=amount_in,
+            token_in_symbol=from_token.symbol,
+            token_out_symbol=to_token.symbol,
+            token_in_decimals=from_token.decimals,
+            token_out_decimals=to_token.decimals,
+            fee_tier=ctx.fixed_swap_fee_tier if ctx.swap_pool_selection_mode == "fixed" else None,
+        )
+        ensure_swap_quote_registry_loaded()
+        try:
+            quote = SWAP_QUOTE_REGISTRY.quote_swap(ctx, request)
+        except SwapQuoteUnavailable as exc:
+            logger.warning("Swap quote provider unavailable for %s, falling back to adapter quote: %s", protocol, exc)
+            return None
+        except Exception as exc:
+            logger.warning("Swap quote provider failed for %s, falling back to adapter quote: %s", protocol, exc)
+            return None
+
+        if quote is None:
+            return None
+
+        selected_fee = quote.metadata.get("fee_tier")
+        if selected_fee is None:
+            logger.warning("Swap quote provider for %s returned no fee tier, falling back to adapter quote", protocol)
+            return None
+
+        UniswapV3Compiler._apply_external_quote_selection(adapter, quote, int(selected_fee))
+        return quote.amount_out
+
+    @staticmethod
+    def _apply_external_quote_selection(adapter: Any, quote: SwapQuoteResult, selected_fee: int) -> None:
+        fee_selection_raw = quote.metadata.get("fee_selection")
+        fee_selection = dict(fee_selection_raw) if isinstance(fee_selection_raw, Mapping) else None
+        apply_selection = getattr(adapter, "apply_external_quote_selection", None)
+        if callable(apply_selection):
+            apply_selection(
+                fee_tier=selected_fee,
+                amount_out=quote.amount_out,
+                source=quote.source,
+                fee_selection=fee_selection,
+            )
+            return
+
+        adapter._cached_fee = selected_fee
+        adapter.last_quoted_amount_out = quote.amount_out
+        adapter.last_fee_selection = fee_selection or {
+            "mode": "auto",
+            "source": quote.source,
+            "selected_fee_tier": selected_fee,
+            "candidate_fee_tiers": [selected_fee],
+        }
+
+    @staticmethod
     def _apply_swap_slippage_and_impact(
         *,
         ctx: CLCompilerContext,
@@ -608,37 +709,55 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         oracle_estimate: int,
         quoter_amount: int | None,
     ) -> tuple[int, int, int] | CompilationResult:
-        clamped_expected, used_quoter = choose_safer_quote(oracle_estimate, quoter_amount)
-        if used_quoter:
+        if quoter_amount is not None:
+            clamped_expected = quoter_amount
             logger.info(
-                "Quoter amount (%s) is lower than price oracle estimate (%s) — "
-                "using quoter amount as slippage basis for safer execution",
+                "Using executable quoter amount (%s) instead of price oracle estimate (%s) as swap slippage basis",
                 quoter_amount,
                 oracle_estimate,
             )
+        else:
+            clamped_expected, used_quoter = choose_safer_quote(oracle_estimate, quoter_amount)
+            if used_quoter:
+                logger.info(
+                    "Quoter amount (%s) is lower than price oracle estimate (%s); "
+                    "using quoter amount as slippage basis for safer execution",
+                    quoter_amount,
+                    oracle_estimate,
+                )
 
         offline_mode = ctx.using_placeholders or ctx.permission_discovery
-        impact = check_price_impact(
-            oracle_estimate=oracle_estimate,
-            quoter_amount=quoter_amount,
-            intent_max_impact=intent.max_price_impact,
-            config_max_impact=ctx.max_price_impact_pct,
-            offline_mode=offline_mode,
-            using_placeholders=ctx.using_placeholders,
-        )
-        if impact.decision is PriceImpactDecision.IMPACT_TOO_HIGH:
+        impact: PriceImpactDecision | None = None
+        impact_result = None
+        if quoter_amount is not None and UniswapV3Compiler._is_local_anvil_rpc(ctx.rpc_url):
+            logger.info(
+                "Skipping oracle price-impact guard for local Anvil fork quote "
+                "(rpc_url=%s). Fork block pool state and live oracle prices are not time-aligned.",
+                ctx.rpc_url,
+            )
+        else:
+            impact_result = check_price_impact(
+                oracle_estimate=oracle_estimate,
+                quoter_amount=quoter_amount,
+                intent_max_impact=intent.max_price_impact,
+                config_max_impact=ctx.max_price_impact_pct,
+                offline_mode=offline_mode,
+                using_placeholders=ctx.using_placeholders,
+            )
+            impact = impact_result.decision
+        if impact is PriceImpactDecision.IMPACT_TOO_HIGH and impact_result is not None:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
                     f"Price impact too high: quoter returned amount implying "
-                    f"{impact.price_impact:.1%} price impact "
+                    f"{impact_result.price_impact:.1%} price impact "
                     f"(oracle estimate: {oracle_estimate}, quoter: {quoter_amount}). "
-                    f"Maximum allowed: {impact.effective_max_impact:.0%}. "
+                    f"Maximum allowed: {impact_result.effective_max_impact:.0%}. "
                     f"Likely cause: pool has insufficient liquidity for "
                     f"{intent.from_token}->{intent.to_token}."
                 ),
             )
-        if impact.decision is PriceImpactDecision.QUOTER_MISSING_FAIL_CLOSED:
+        if impact is PriceImpactDecision.QUOTER_MISSING_FAIL_CLOSED:
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
@@ -653,6 +772,10 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         quoted_for_metrics = quoter_amount if quoter_amount is not None else oracle_estimate
         min_output = compute_min_amount_out(clamped_expected, intent.max_slippage)
         return min_output, quoted_for_metrics, clamped_expected
+
+    @staticmethod
+    def _is_local_anvil_rpc(rpc_url: str | None) -> bool:
+        return is_local_rpc(rpc_url)
 
     @staticmethod
     def _validate_swap_pool_after_fee_selection(

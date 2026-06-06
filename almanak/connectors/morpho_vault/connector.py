@@ -25,6 +25,11 @@ CONNECTOR = Connector(
         module="almanak.connectors.morpho_vault.receipt_parser_provider",
         attribute="MetaMorphoReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.morpho_vault.compiler",
+        attribute="MorphoVaultCompiler",
+    ),
+    compiler_protocols=("morpho_vault", "metamorpho"),
     strategy_intents=("VAULT_DEPOSIT", "VAULT_REDEEM"),
     strategy_chains=("ethereum", "base"),
 )

@@ -21,6 +21,11 @@ CONNECTOR = Connector(
         module="almanak.connectors.raydium.receipt_parser_provider",
         attribute="RaydiumReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.raydium.compiler",
+        attribute="RaydiumCompiler",
+    ),
+    compiler_protocols=("raydium_clmm",),
     strategy_intents=("LP_OPEN", "LP_CLOSE"),
     strategy_chains=("solana",),
 )

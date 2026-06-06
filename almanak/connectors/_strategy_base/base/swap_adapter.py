@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Literal
 
@@ -118,6 +119,29 @@ class DefaultSwapAdapter:
         was not used or no valid quotes were returned.
         """
         return self.last_quoted_amount_out
+
+    def apply_external_quote_selection(
+        self,
+        *,
+        fee_tier: int,
+        amount_out: int,
+        source: str,
+        fee_selection: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Cache a quote selected by a connector-owned provider."""
+        self._cached_fee = fee_tier
+        self.last_quoted_amount_out = amount_out
+        if fee_selection is not None:
+            self.last_fee_selection = dict(fee_selection)
+            self.last_fee_selection.setdefault("selected_fee_tier", fee_tier)
+            self.last_fee_selection.setdefault("source", source)
+            return
+        self.last_fee_selection = {
+            "mode": self.pool_selection_mode,
+            "source": source,
+            "selected_fee_tier": fee_tier,
+            "candidate_fee_tiers": [fee_tier],
+        }
 
     def get_swap_calldata(
         self,

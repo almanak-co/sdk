@@ -71,6 +71,8 @@ SWAP_EXACT_TOKENS_SELECTOR = "0xcac88ea9"
 
 # Slipstream CL SwapRouter: exactInputSingle((address,address,int24,address,uint256,uint256,uint256,uint160))
 CL_EXACT_INPUT_SINGLE_SELECTOR = "0xa026383e"
+# Slipstream CL Quoter: quoteExactInputSingle((address,address,uint256,int24,uint160))
+CL_QUOTE_EXACT_INPUT_SINGLE_SELECTOR = "0x9e7defe6"
 
 # ERC20 approve selector
 ERC20_APPROVE_SELECTOR = "0x095ea7b3"
@@ -524,13 +526,17 @@ class AerodromeAdapter:
             routing = "classic" if use_classic else "cl"
 
             # Get quote (estimate output)
-            # For CL, skip on-chain Classic router quoting; use oracle-based estimation
             if routing == "cl":
                 quote = self._get_quote_exact_input(
-                    token_in_address, token_out_address, amount_in_wei, stable, skip_onchain=True
+                    actual_token_in,
+                    token_out_address,
+                    amount_in_wei,
+                    stable,
+                    tick_spacing=tick_spacing,
+                    use_cl=True,
                 )
             else:
-                quote = self._get_quote_exact_input(token_in_address, token_out_address, amount_in_wei, stable)
+                quote = self._get_quote_exact_input(actual_token_in, token_out_address, amount_in_wei, stable)
 
             amount_out_minimum = int(quote.amount_out * (10000 - slippage_bps) // 10000)
 
@@ -1581,12 +1587,45 @@ class AerodromeAdapter:
     # Quote Functions
     # =========================================================================
 
+    def quote_swap_output(
+        self,
+        *,
+        token_in: str,
+        token_out: str,
+        amount_in_wei: int,
+        stable: bool = False,
+        tick_spacing: int = 100,
+        use_cl: bool = True,
+        require_onchain: bool = False,
+    ) -> int:
+        """Quote an exact-input swap output in token base units."""
+        if require_onchain:
+            amount_out = (
+                self._try_get_cl_amount_out_onchain(token_in, token_out, amount_in_wei, tick_spacing)
+                if use_cl
+                else self._try_get_amount_out_onchain(token_in, token_out, amount_in_wei, stable)
+            )
+            if amount_out is None:
+                raise ValueError("Aerodrome on-chain swap quote unavailable")
+            return amount_out
+        quote = self._get_quote_exact_input(
+            token_in,
+            token_out,
+            amount_in_wei,
+            stable,
+            tick_spacing=tick_spacing,
+            use_cl=use_cl,
+        )
+        return quote.amount_out
+
     def _get_quote_exact_input(
         self,
         token_in: str,
         token_out: str,
         amount_in: int,
         stable: bool,
+        tick_spacing: int | None = None,
+        use_cl: bool = False,
         skip_onchain: bool = False,
     ) -> SwapQuote:
         """Get quote for exact input swap.
@@ -1601,7 +1640,17 @@ class AerodromeAdapter:
         token_in_decimals = self._get_token_decimals(token_in_symbol)
         token_out_decimals = self._get_token_decimals(token_out_symbol)
 
-        amount_out = None if skip_onchain else self._try_get_amount_out_onchain(token_in, token_out, amount_in, stable)
+        if skip_onchain:
+            amount_out = None
+        elif use_cl:
+            amount_out = self._try_get_cl_amount_out_onchain(
+                token_in,
+                token_out,
+                amount_in,
+                tick_spacing or 100,
+            )
+        else:
+            amount_out = self._try_get_amount_out_onchain(token_in, token_out, amount_in, stable)
         if amount_out is not None:
             amount_in_decimal = Decimal(str(amount_in)) / Decimal(10**token_in_decimals)
             amount_out_decimal = Decimal(str(amount_out)) / Decimal(10**token_out_decimals)
@@ -1682,6 +1731,48 @@ class AerodromeAdapter:
             return int(amounts[-1])
         except Exception as e:
             logger.debug("Aerodrome on-chain quote failed; falling back to price oracle: %s", e)
+            return None
+
+    def _try_get_cl_amount_out_onchain(
+        self,
+        token_in: str,
+        token_out: str,
+        amount_in: int,
+        tick_spacing: int,
+    ) -> int | None:
+        """Best-effort on-chain quote for Slipstream CL exact-input swaps."""
+        quoter = self.addresses.get("cl_quoter")
+        if not quoter:
+            return None
+        if self.config.gateway_client is None and not self.config.rpc_url:
+            return None
+        try:
+            from eth_abi import encode as abi_encode
+
+            from almanak.connectors._strategy_base.rpc import eth_call
+
+            calldata = (
+                "0x"
+                + CL_QUOTE_EXACT_INPUT_SINGLE_SELECTOR[2:]
+                + abi_encode(
+                    ["(address,address,uint256,int24,uint160)"],
+                    [(token_in, token_out, amount_in, tick_spacing, 0)],
+                ).hex()
+            )
+            raw = eth_call(
+                chain=self.chain,
+                to=quoter,
+                data=calldata,
+                rpc_url=self.config.rpc_url,
+                gateway_client=self.config.gateway_client,
+                timeout=10.0,
+            )
+            if raw is None or len(raw) < 32:
+                return None
+            amount_out = int.from_bytes(raw[:32], "big")
+            return amount_out if amount_out > 0 else None
+        except Exception as e:
+            logger.debug("Aerodrome CL on-chain quote failed; falling back to price oracle: %s", e)
             return None
 
     # =========================================================================

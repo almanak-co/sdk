@@ -15,6 +15,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.drift.receipt_parser_provider",
         attribute="DriftReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.drift.compiler",
+        attribute="DriftCompiler",
+    ),
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
     strategy_chains=("solana",),
 )

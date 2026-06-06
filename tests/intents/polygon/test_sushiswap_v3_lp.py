@@ -875,8 +875,8 @@ class TestSushiSwapV3CollectFeesIntent:
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES)
     @pytest.mark.asyncio
     @pytest.mark.xfail(
-        strict=True,
-        reason="VIB-4314: same-pool fee-accrual fixture not yet wired — swap routes to different fee tier than LP position (as of 2026-05-12)",
+        strict=False,
+        reason="VIB-4314: same-pool fee-accrual fixture not yet wired - swap routes to different fee tier than LP position on some fork pins; strict=False because the current polygon fork can accrue fees on the right pool and produce a legitimate XPASS without the fixture (as of 2026-06-06)",
     )
     async def test_collect_fees_weth_usdc(
         self,

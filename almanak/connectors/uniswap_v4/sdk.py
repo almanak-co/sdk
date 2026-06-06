@@ -26,14 +26,14 @@ Example:
     pool_key = sdk.compute_pool_key(token0, token1, fee=3000)
 """
 
-import json
 import logging
 import math
 import time
-import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
+
+from almanak.connectors._strategy_base.rpc import eth_call, eth_call_hex
 
 from .addresses import UNISWAP_V4
 
@@ -100,6 +100,9 @@ UNIVERSAL_ROUTER_EXECUTE_SELECTOR = "0x3593564c"
 
 # Permit2.approve(address token, address spender, uint160 amount, uint48 expiration)
 PERMIT2_APPROVE_SELECTOR = "0x87517c45"
+
+# V4Quoter.quoteExactInputSingle(QuoteExactSingleParams)
+QUOTE_EXACT_INPUT_SINGLE_SELECTOR = "0xaa9d21cb"
 
 # UniversalRouter command bytes
 # Source: https://github.com/Uniswap/universal-router/blob/main/contracts/base/Dispatcher.sol
@@ -286,7 +289,7 @@ class UniswapV4SDK:
         chain: Chain name (e.g. "arbitrum", "ethereum").
         rpc_url: Optional RPC URL for on-chain queries (direct HTTP fallback).
         gateway_client: Optional GatewayClient. When provided, on-chain
-            ``eth_call`` queries go through ``gateway_client.rpc.Call`` instead
+            ``eth_call`` queries go through ``gateway_client.eth_call`` instead
             of direct urllib/HTTP. Strategy containers in production have no
             outbound HTTP so the gateway is required there; local dev and
             gateway-internal execution may still pass ``rpc_url`` instead.
@@ -313,30 +316,6 @@ class UniswapV4SDK:
         self.router = self.addresses["universal_router"]
         self.quoter = self.addresses["quoter"]
 
-    def _eth_call_via_gateway(self, to: str, data: str, call_id: str) -> str | None:
-        """Issue eth_call through the gateway. Returns the hex result or None on failure."""
-        if self._gateway_client is None:
-            raise RuntimeError("_eth_call_via_gateway called without gateway_client")
-        from almanak.gateway.proto import gateway_pb2
-
-        rpc_request = gateway_pb2.RpcRequest(
-            chain=self.chain,
-            method="eth_call",
-            params=json.dumps([{"to": to, "data": data}, "latest"]),
-            id=call_id,
-        )
-        response = self._gateway_client.rpc.Call(rpc_request, timeout=10.0)
-        if not response.success:
-            return None
-        if not response.result:
-            return None
-        # gateway returns result as JSON-encoded string ("0x..." wrapped in quotes)
-        try:
-            decoded = json.loads(response.result)
-            return decoded if isinstance(decoded, str) else None
-        except json.JSONDecodeError:
-            return None
-
     # =========================================================================
     # On-Chain Queries
     # =========================================================================
@@ -360,54 +339,23 @@ class UniswapV4SDK:
         token_id_hex = format(token_id, "064x")
         calldata = "0x" + selector + token_id_hex
 
-        # Prefer gateway when available (production containers have no HTTP egress).
-        if self._gateway_client is not None:
-            hex_result = self._eth_call_via_gateway(self.position_manager, calldata, "v4_get_position_liquidity")
-            if hex_result is None:
-                raise ValueError("Gateway eth_call for getPositionLiquidity returned no result")
-            try:
-                liquidity = int(hex_result, 16)
-            except (TypeError, ValueError) as e:
-                raise ValueError(
-                    f"Malformed liquidity hex for position {token_id} on {self.chain}: {hex_result!r}"
-                ) from e
-            logger.info("V4 position %d liquidity: %d (chain=%s, via=gateway)", token_id, liquidity, self.chain)
-            return liquidity
-
         url = rpc_url or self.rpc_url
-        if not url:
+        if self._gateway_client is None and not url:
             raise ValueError("RPC URL required to query on-chain position liquidity")
-
-        if not url.startswith(("http://", "https://")):
-            raise ValueError(f"RPC URL must use http:// or https:// scheme, got: {url[:20]}")
-
-        payload = json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "eth_call",
-                "params": [{"to": self.position_manager, "data": calldata}, "latest"],
-            }
-        ).encode()
-
-        # Direct urllib fallback for trusted contexts only (gateway-internal / local dev).
-        req = urllib.request.Request(  # vib-2986-exempt: gateway-internal fallback
-            url, data=payload, headers={"Content-Type": "application/json"}
-        )
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310  # vib-2986-exempt: gateway-internal fallback
-                result = json.loads(resp.read())
+            hex_result = eth_call_hex(
+                chain=self.chain,
+                to=self.position_manager,
+                data=calldata,
+                rpc_url=url,
+                gateway_client=self._gateway_client,
+                timeout=10.0,
+            )
         except Exception as e:
             raise ValueError(f"RPC call to getPositionLiquidity failed: {e}") from e
 
-        if "error" in result:
-            raise ValueError(f"getPositionLiquidity reverted: {result['error']}")
-
-        if "result" not in result or not isinstance(result["result"], str):
-            raise ValueError(
-                f"Malformed RPC response for position {token_id} on {self.chain}: missing or invalid 'result' field"
-            )
-        hex_result = result["result"]
+        if hex_result is None:
+            raise ValueError("eth_call for getPositionLiquidity returned no result")
         try:
             liquidity = int(hex_result, 16)
         except (TypeError, ValueError) as e:
@@ -438,58 +386,15 @@ class UniswapV4SDK:
 
         calldata = build_get_slot0_calldata(pool_key)
 
-        # Prefer gateway when available. Returns None on any failure to preserve
-        # the existing "fall back to estimated sqrtPrice" semantics.
-        if self._gateway_client is not None:
-            hex_result = self._eth_call_via_gateway(state_view, calldata, "v4_get_pool_sqrt_price")
-            if hex_result is None:
-                logger.warning(
-                    "V4 StateView.getSlot0 via gateway failed on %s — falling back to estimated sqrtPrice",
-                    self.chain,
-                )
-                return None
-            try:
-                pool_state = decode_slot0_response(hex_result)
-            except Exception:
-                logger.warning(
-                    "V4 StateView.getSlot0 decode failed on %s, falling back to estimated sqrtPrice", self.chain
-                )
-                return None
-            if not pool_state.exists or pool_state.sqrt_price_x96 == 0:
-                logger.warning("V4 pool not initialized on %s, falling back to estimated sqrtPrice", self.chain)
-                return None
-            logger.info(
-                "V4 on-chain sqrtPriceX96=%d tick=%d (chain=%s, via=gateway)",
-                pool_state.sqrt_price_x96,
-                pool_state.tick,
-                self.chain,
-            )
-            return pool_state.sqrt_price_x96
-
-        url = rpc_url or self.rpc_url
-        if not url:
-            return None
-
-        if not url.startswith(("http://", "https://")):
-            logger.warning("RPC URL must use http:// or https:// scheme, got: %s", url[:20])
-            return None
-
-        payload = json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "eth_call",
-                "params": [{"to": state_view, "data": calldata}, "latest"],
-            }
-        ).encode()
-
-        # Direct urllib fallback for trusted contexts only (gateway-internal / local dev).
-        req = urllib.request.Request(  # vib-2986-exempt: gateway-internal fallback
-            url, data=payload, headers={"Content-Type": "application/json"}
-        )
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310  # vib-2986-exempt: gateway-internal fallback
-                result = json.loads(resp.read())
+            hex_result = eth_call_hex(
+                chain=self.chain,
+                to=state_view,
+                data=calldata,
+                rpc_url=rpc_url or self.rpc_url,
+                gateway_client=self._gateway_client,
+                timeout=10.0,
+            )
         except Exception as e:
             logger.warning(
                 "V4 StateView.getSlot0 RPC call failed on %s: %s — falling back to estimated sqrtPrice",
@@ -498,17 +403,15 @@ class UniswapV4SDK:
             )
             return None
 
-        if "error" in result or "result" not in result:
-            error_detail = result.get("error", "missing 'result' field")
+        if hex_result is None:
             logger.warning(
-                "V4 StateView.getSlot0 returned error on %s: %s — falling back to estimated sqrtPrice",
+                "V4 StateView.getSlot0 returned no result on %s — falling back to estimated sqrtPrice",
                 self.chain,
-                error_detail,
             )
             return None
 
         try:
-            pool_state = decode_slot0_response(result["result"])
+            pool_state = decode_slot0_response(hex_result)
         except Exception:
             logger.warning("V4 StateView.getSlot0 decode failed on %s, falling back to estimated sqrtPrice", self.chain)
             return None
@@ -554,6 +457,102 @@ class UniswapV4SDK:
             fee=fee,
             tick_spacing=tick_spacing,
             hooks=hooks,
+        )
+
+    def get_quote(
+        self,
+        token_in: str,
+        token_out: str,
+        amount_in: int,
+        fee_tier: int = 3000,
+        token_in_decimals: int = 18,
+        token_out_decimals: int = 18,
+        rpc_url: str | None = None,
+    ) -> SwapQuote:
+        """Get an executable exact-input quote from the V4 Quoter contract.
+
+        Args:
+            token_in: Input token address.
+            token_out: Output token address.
+            amount_in: Input amount in smallest units.
+            fee_tier: Fee tier (e.g. 3000 = 0.3%).
+            token_in_decimals: Decimals for input token.
+            token_out_decimals: Decimals for output token.
+            rpc_url: Optional direct RPC fallback for local-dev contexts.
+
+        Returns:
+            SwapQuote with V4 Quoter amount_out.
+        """
+        if fee_tier not in FEE_TIERS:
+            raise ValueError(f"Invalid V4 fee tier {fee_tier}; supported tiers: {FEE_TIERS}")
+        if amount_in <= 0:
+            raise ValueError(f"amount_in must be positive, got {amount_in}")
+        if amount_in > (1 << 128) - 1:
+            raise ValueError(f"amount_in exceeds V4 uint128 limit: {amount_in}")
+
+        from eth_abi import decode as abi_decode
+        from eth_abi import encode as abi_encode
+
+        pool_token_in = NATIVE_CURRENCY if self._is_wrapped_native(token_in) else token_in
+        pool_token_out = NATIVE_CURRENCY if self._is_wrapped_native(token_out) else token_out
+        if pool_token_in.lower() == pool_token_out.lower():
+            raise ValueError("Cannot quote a V4 swap from a token to itself")
+
+        pool_key = self.compute_pool_key(pool_token_in, pool_token_out, fee_tier)
+        zero_for_one = pool_token_in.lower() == pool_key.currency0
+        params = (
+            (
+                pool_key.currency0,
+                pool_key.currency1,
+                pool_key.fee,
+                pool_key.tick_spacing,
+                pool_key.hooks,
+            ),
+            zero_for_one,
+            amount_in,
+            b"",
+        )
+        calldata = (
+            "0x"
+            + QUOTE_EXACT_INPUT_SINGLE_SELECTOR[2:]
+            + abi_encode(
+                ["((address,address,uint24,int24,address),bool,uint128,bytes)"],
+                [params],
+            ).hex()
+        )
+        try:
+            raw_result = eth_call(
+                chain=self.chain,
+                to=self.quoter,
+                data=calldata,
+                rpc_url=rpc_url or self.rpc_url,
+                gateway_client=self._gateway_client,
+                timeout=10.0,
+            )
+        except Exception as exc:
+            raise ValueError(f"V4 Quoter quoteExactInputSingle failed: {exc}") from exc
+        if raw_result is None:
+            raise ValueError("V4 Quoter quoteExactInputSingle returned no result")
+
+        try:
+            amount_out, gas_estimate = abi_decode(["uint256", "uint256"], raw_result)
+        except Exception as exc:
+            raise ValueError(f"Malformed V4 Quoter response: 0x{raw_result.hex()}") from exc
+
+        effective_price = None
+        if amount_in > 0 and amount_out > 0:
+            effective_price = (Decimal(amount_out) / Decimal(10**token_out_decimals)) / (
+                Decimal(amount_in) / Decimal(10**token_in_decimals)
+            )
+
+        return SwapQuote(
+            amount_in=amount_in,
+            amount_out=int(amount_out),
+            fee_tier=fee_tier,
+            token_in=token_in,
+            token_out=token_out,
+            effective_price=effective_price,
+            gas_estimate=int(gas_estimate),
         )
 
     def get_quote_local(

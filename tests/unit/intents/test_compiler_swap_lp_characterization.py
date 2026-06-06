@@ -34,6 +34,7 @@ SWAP_ADAPTER_CLS = "almanak.framework.intents.compiler.DefaultSwapAdapter"
 LP_ADAPTER_CLS = "almanak.connectors.uniswap_v3.adapter.UniswapV3LPAdapter"
 VALIDATE_V3_POOL = "almanak.connectors.uniswap_v3.pool_validation.validate_v3_pool"
 FETCH_SLOT0 = "almanak.connectors.uniswap_v3.pool_validation.fetch_v3_pool_sqrt_price_x96"
+REGISTRY_QUOTE = "almanak.connectors.uniswap_v3.compiler.UniswapV3Compiler._quote_swap_via_registry"
 
 
 # Realistic oracle shared across most tests. Deliberately small so derived
@@ -258,7 +259,8 @@ class TestCompileSwapPriceImpactGuard:
         )
         compiler = _make_compiler()
 
-        result = compiler.compile(_make_swap_intent())
+        with patch(REGISTRY_QUOTE, return_value=200_000_000_000_000):
+            result = compiler.compile(_make_swap_intent())
 
         assert result.status == CompilationStatus.FAILED
         assert "Price impact too high" in (result.error or "")
@@ -271,7 +273,8 @@ class TestCompileSwapPriceImpactGuard:
         mock_adapter_cls.return_value = _make_mock_swap_adapter(quoter_amount=None)
         compiler = _make_compiler()
 
-        result = compiler.compile(_make_swap_intent())
+        with patch(REGISTRY_QUOTE, return_value=None):
+            result = compiler.compile(_make_swap_intent())
 
         assert result.status == CompilationStatus.FAILED
         assert "on-chain quoter returned no amount" in (result.error or "").lower()
@@ -292,7 +295,8 @@ class TestCompileSwapSlippage:
 
         # 1% slippage
         intent = _make_swap_intent(max_slippage=Decimal("0.01"))
-        result = compiler.compile(intent)
+        with patch(REGISTRY_QUOTE, return_value=quoter_amount):
+            result = compiler.compile(intent)
 
         assert result.status == CompilationStatus.SUCCESS, result.error
         expected_min = int(Decimal(str(quoter_amount)) * Decimal("0.99"))
@@ -307,7 +311,8 @@ class TestCompileSwapSlippage:
         compiler = _make_compiler()
 
         intent = _make_swap_intent(max_slippage=Decimal("0"))
-        result = compiler.compile(intent)
+        with patch(REGISTRY_QUOTE, return_value=quoter_amount):
+            result = compiler.compile(intent)
 
         assert result.status == CompilationStatus.SUCCESS, result.error
         assert result.action_bundle.metadata["min_amount_out"] == str(quoter_amount)

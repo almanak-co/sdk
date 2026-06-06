@@ -13,13 +13,13 @@ import pytest
 from almanak import IntentCompiler, IntentCompilerConfig, SwapIntent
 from almanak.framework.intents.compiler import CompilationStatus
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 # Patch target for DefaultSwapAdapter — the compiler imports it from its own module.
 ADAPTER_CLS = "almanak.framework.intents.compiler.DefaultSwapAdapter"
+REGISTRY_QUOTE = "almanak.connectors.uniswap_v3.compiler.UniswapV3Compiler._quote_swap_via_registry"
 
 
 def _make_compiler(
@@ -66,6 +66,15 @@ def _make_mock_adapter(
     adapter.get_swap_calldata.return_value = bytes.fromhex("abcdef")
     adapter.estimate_gas.return_value = 200_000
     return adapter
+
+
+def _compile_with_registry_quote(
+    compiler: IntentCompiler,
+    intent: SwapIntent,
+    quoter_amount: int | None,
+) -> object:
+    with patch(REGISTRY_QUOTE, return_value=quoter_amount):
+        return compiler.compile(intent)
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +218,7 @@ class TestPriceImpactGuardCompilation:
         mock_adapter = _make_mock_adapter(quoter_amount=200_000_000_000_000)
         mock_adapter_cls.return_value = mock_adapter
 
-        result = compiler.compile(intent)
+        result = _compile_with_registry_quote(compiler, intent, 200_000_000_000_000)
 
         assert result.status == CompilationStatus.FAILED
         assert "Price impact too high" in result.error
@@ -232,7 +241,7 @@ class TestPriceImpactGuardCompilation:
         mock_adapter = _make_mock_adapter(quoter_amount=quoter_at_20pct)
         mock_adapter_cls.return_value = mock_adapter
 
-        result = compiler.compile(intent)
+        result = _compile_with_registry_quote(compiler, intent, quoter_at_20pct)
 
         assert result.status == CompilationStatus.SUCCESS
 
@@ -254,7 +263,7 @@ class TestPriceImpactGuardCompilation:
         mock_adapter = _make_mock_adapter(quoter_amount=quoter_at_30pct)
         mock_adapter_cls.return_value = mock_adapter
 
-        result = compiler.compile(intent)
+        result = _compile_with_registry_quote(compiler, intent, quoter_at_30pct)
 
         # At exactly the threshold, should NOT block (uses > not >=)
         assert result.status == CompilationStatus.SUCCESS
@@ -275,7 +284,7 @@ class TestPriceImpactGuardCompilation:
         mock_adapter = _make_mock_adapter(quoter_amount=quoter_just_above)
         mock_adapter_cls.return_value = mock_adapter
 
-        result = compiler.compile(intent)
+        result = _compile_with_registry_quote(compiler, intent, quoter_just_above)
 
         assert result.status == CompilationStatus.FAILED
         assert "Price impact too high" in result.error
@@ -297,7 +306,7 @@ class TestPriceImpactGuardCompilation:
         mock_adapter = _make_mock_adapter(quoter_amount=quoter_at_90pct)
         mock_adapter_cls.return_value = mock_adapter
 
-        result = compiler.compile(intent)
+        result = _compile_with_registry_quote(compiler, intent, quoter_at_90pct)
 
         # 90% < 95% override, so should pass
         assert result.status == CompilationStatus.SUCCESS
@@ -319,7 +328,7 @@ class TestPriceImpactGuardCompilation:
         mock_adapter = _make_mock_adapter(quoter_amount=quoter_at_97pct)
         mock_adapter_cls.return_value = mock_adapter
 
-        result = compiler.compile(intent)
+        result = _compile_with_registry_quote(compiler, intent, quoter_at_97pct)
 
         assert result.status == CompilationStatus.FAILED
         assert "Price impact too high" in result.error
@@ -340,7 +349,7 @@ class TestPriceImpactGuardCompilation:
         mock_adapter = _make_mock_adapter(quoter_amount=quoter_better)
         mock_adapter_cls.return_value = mock_adapter
 
-        result = compiler.compile(intent)
+        result = _compile_with_registry_quote(compiler, intent, quoter_better)
 
         assert result.status == CompilationStatus.SUCCESS
 
@@ -358,7 +367,7 @@ class TestPriceImpactGuardCompilation:
         mock_adapter = _make_mock_adapter(quoter_amount=None)
         mock_adapter_cls.return_value = mock_adapter
 
-        result = compiler.compile(intent)
+        result = _compile_with_registry_quote(compiler, intent, None)
 
         assert result.status == CompilationStatus.FAILED
         assert "on-chain quoter returned no amount" in (result.error or "").lower()
@@ -382,7 +391,7 @@ class TestPriceImpactGuardCompilation:
         mock_adapter = _make_mock_adapter(quoter_amount=1)
         mock_adapter_cls.return_value = mock_adapter
 
-        result = compiler.compile(intent)
+        result = _compile_with_registry_quote(compiler, intent, 1)
 
         # Should succeed — guard skipped in placeholder mode
         assert result.status == CompilationStatus.SUCCESS
@@ -403,7 +412,7 @@ class TestPriceImpactGuardCompilation:
         mock_adapter = _make_mock_adapter(quoter_amount=quoter_at_30pct)
         mock_adapter_cls.return_value = mock_adapter
 
-        result = compiler.compile(intent)
+        result = _compile_with_registry_quote(compiler, intent, quoter_at_30pct)
 
         assert result.status == CompilationStatus.FAILED
         assert "Price impact too high" in result.error
@@ -421,7 +430,7 @@ class TestPriceImpactGuardCompilation:
         mock_adapter = _make_mock_adapter(quoter_amount=200_000_000_000_000)
         mock_adapter_cls.return_value = mock_adapter
 
-        result = compiler.compile(intent)
+        result = _compile_with_registry_quote(compiler, intent, 200_000_000_000_000)
 
         assert result.status == CompilationStatus.FAILED
         assert "oracle estimate:" in result.error

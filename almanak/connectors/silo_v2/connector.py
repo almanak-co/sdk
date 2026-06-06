@@ -15,6 +15,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.silo_v2.receipt_parser_provider",
         attribute="SiloV2ReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.silo_v2.compiler",
+        attribute="SiloV2Compiler",
+    ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("avalanche",),
 )

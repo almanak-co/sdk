@@ -17,6 +17,11 @@ CONNECTOR = Connector(
         attribute="EnsoGatewayConnector",
         order=10,
     ),
+    gateway_settings=ImportRef(
+        module="almanak.connectors.enso.gateway.settings",
+        attribute="EnsoGatewaySettings",
+        order=20,
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.enso.receipt_parser_provider",
         attribute="EnsoReceiptParserConnector",
@@ -25,6 +30,15 @@ CONNECTOR = Connector(
         module="almanak.connectors.enso.permission_hints",
         attribute="build_enso_infrastructure_permissions",
     ),
+    deferred_refresh=ImportRef(
+        module="almanak.connectors.enso.deferred_refresh_provider",
+        attribute="EnsoDeferredRefreshConnector",
+    ),
+    compiler=ImportRef(
+        module="almanak.connectors.enso.compiler",
+        attribute="EnsoCompiler",
+    ),
+    compiler_default_keys=("SWAP_CROSS_CHAIN",),
     strategy_intents=("SWAP",),
     strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb"),
     # Aggregators render as aggregator rows instead of generic swap rows.

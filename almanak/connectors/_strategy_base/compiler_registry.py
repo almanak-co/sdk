@@ -2,241 +2,57 @@
 
 from __future__ import annotations
 
-import importlib
 from typing import Any, ClassVar
 
+from almanak.connectors._connector import CONNECTOR_REGISTRY, ImportRef
 from almanak.connectors._strategy_base.base.compiler import BaseProtocolCompiler
 
 
 class CompilerRegistry:
-    """Protocol-name to connector compiler registry."""
+    """Protocol-name to connector compiler registry.
 
-    # Connector-name defaults for dispatch keys whose protocol isn't carried on
-    # the intent itself. Keeps the strings connector-adjacent so framework code
-    # (``intents/compiler.py``) doesn't hardcode protocol names. Add a new key
-    # when a new dispatch fallback emerges; remove a key when the underlying
-    # decision moves onto the intent vocabulary.
-    _DEFAULT_BY_KEY: ClassVar[dict[str, str]] = {
-        # BridgeIntent.preferred_bridge=None falls back to this.
-        "BRIDGE": "across",
-        # SwapIntent.protocol=None on a cross-chain swap falls back to this.
-        "SWAP_CROSS_CHAIN": "enso",
-        # Prediction intents (PredictionBuy/Sell/Redeem) with protocol=None fall
-        # back to this (VIB-4989: relocated from the intent-vocabulary defaults).
-        "PREDICTION": "polymarket",
-    }
+    Connector manifests publish compiler ``ImportRef`` values. This strategy-side
+    registry composes those refs into the protocol dispatch table consumed by
+    ``IntentCompiler`` without naming concrete connector modules here.
+    """
 
-    _BUILTIN_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
-        "uniswap_v3": (
-            "almanak.connectors.uniswap_v3.compiler",
-            "UniswapV3Compiler",
-        ),
-        "sushiswap_v3": (
-            "almanak.connectors.uniswap_v3.compiler",
-            "UniswapV3Compiler",
-        ),
-        "pancakeswap_v3": (
-            "almanak.connectors.uniswap_v3.compiler",
-            "UniswapV3Compiler",
-        ),
-        "agni_finance": (
-            "almanak.connectors.uniswap_v3.compiler",
-            "UniswapV3Compiler",
-        ),
-        "curve": (
-            "almanak.connectors.curve.compiler",
-            "CurveCompiler",
-        ),
-        "fluid": (
-            "almanak.connectors.fluid.compiler",
-            "FluidCompiler",
-        ),
-        "camelot": (
-            "almanak.connectors.camelot.compiler",
-            "CamelotCompiler",
-        ),
-        "uniswap_v4": (
-            "almanak.connectors.uniswap_v4.compiler",
-            "UniswapV4Compiler",
-        ),
-        "traderjoe_v2": (
-            "almanak.connectors.traderjoe_v2.compiler",
-            "TraderJoeV2Compiler",
-        ),
-        "aerodrome": (
-            "almanak.connectors.aerodrome.compiler",
-            "AerodromeCompiler",
-        ),
-        "aerodrome_slipstream": (
-            "almanak.connectors.aerodrome.compiler",
-            "AerodromeCompiler",
-        ),
-        "pendle": (
-            "almanak.connectors.pendle.compiler",
-            "PendleCompiler",
-        ),
-        "lido": (
-            "almanak.connectors.lido.compiler",
-            "LidoCompiler",
-        ),
-        "ethena": (
-            "almanak.connectors.ethena.compiler",
-            "EthenaCompiler",
-        ),
-        "gimo": (
-            "almanak.connectors.gimo.compiler",
-            "GimoCompiler",
-        ),
-        "aave_v3": (
-            "almanak.connectors.aave_v3.compiler",
-            "AaveV3Compiler",
-        ),
-        "compound_v3": (
-            "almanak.connectors.compound_v3.compiler",
-            "CompoundV3Compiler",
-        ),
-        "morpho": (
-            "almanak.connectors.morpho_blue.compiler",
-            "MorphoBlueCompiler",
-        ),
-        "morpho_blue": (
-            "almanak.connectors.morpho_blue.compiler",
-            "MorphoBlueCompiler",
-        ),
-        "spark": (
-            "almanak.connectors.spark.compiler",
-            "SparkCompiler",
-        ),
-        "silo_v2": (
-            "almanak.connectors.silo_v2.compiler",
-            "SiloV2Compiler",
-        ),
-        "euler_v2": (
-            "almanak.connectors.euler_v2.compiler",
-            "EulerV2Compiler",
-        ),
-        "benqi": (
-            "almanak.connectors.benqi.compiler",
-            "BenqiCompiler",
-        ),
-        "curvance": (
-            "almanak.connectors.curvance.compiler",
-            "CurvanceCompiler",
-        ),
-        "jupiter_lend": (
-            "almanak.connectors.jupiter_lend.compiler",
-            "JupiterLendCompiler",
-        ),
-        "jupiter": (
-            "almanak.connectors.jupiter.compiler",
-            "JupiterCompiler",
-        ),
-        "kamino": (
-            "almanak.connectors.kamino.compiler",
-            "KaminoCompiler",
-        ),
-        "gmx_v2": (
-            "almanak.connectors.gmx_v2.compiler",
-            "GMXV2Compiler",
-        ),
-        "aster_perps": (
-            "almanak.connectors.aster_perps.compiler",
-            "AsterPerpsCompiler",
-        ),
-        "pancakeswap_perps": (
-            "almanak.connectors.aster_perps.compiler",
-            "AsterPerpsCompiler",
-        ),
-        "drift": (
-            "almanak.connectors.drift.compiler",
-            "DriftCompiler",
-        ),
-        "hyperliquid": (
-            "almanak.connectors.hyperliquid.compiler",
-            "HyperliquidCompiler",
-        ),
-        "enso": (
-            "almanak.connectors.enso.compiler",
-            "EnsoCompiler",
-        ),
-        "lifi": (
-            "almanak.connectors.lifi.compiler",
-            "LiFiCompiler",
-        ),
-        "across": (
-            "almanak.connectors._strategy_base.bridge_compiler",
-            "BridgeCompiler",
-        ),
-        "stargate": (
-            "almanak.connectors._strategy_base.bridge_compiler",
-            "BridgeCompiler",
-        ),
-        "meteora_dlmm": (
-            "almanak.connectors.meteora.compiler",
-            "MeteoraCompiler",
-        ),
-        "orca_whirlpools": (
-            "almanak.connectors.orca.compiler",
-            "OrcaCompiler",
-        ),
-        "raydium_clmm": (
-            "almanak.connectors.raydium.compiler",
-            "RaydiumCompiler",
-        ),
-        "metamorpho": (
-            "almanak.connectors.morpho_vault.compiler",
-            "MorphoVaultCompiler",
-        ),
-        "morpho_vault": (
-            "almanak.connectors.morpho_vault.compiler",
-            "MorphoVaultCompiler",
-        ),
-        "polymarket": (
-            "almanak.connectors.polymarket.compiler",
-            "PolymarketCompiler",
-        ),
-    }
     _cache: ClassVar[dict[str, BaseProtocolCompiler]] = {}
 
     @classmethod
     def get(cls, protocol: str) -> BaseProtocolCompiler | None:
         """Return a compiler instance for ``protocol`` when one is registered."""
-        key = protocol.lower().replace("-", "_")
+        key = cls._normalize_protocol(protocol)
         if key in cls._cache:
             return cls._cache[key]
-        loader = cls._BUILTIN_LOADERS.get(key)
-        if loader is None:
+        compiler_cls = cls._load_class(key)
+        if compiler_cls is None:
             return None
-        module_path, class_name = loader
-        module = importlib.import_module(module_path)
-        compiler_cls = getattr(module, class_name)
         compiler = compiler_cls()
         if not isinstance(compiler, BaseProtocolCompiler):
-            raise TypeError(f"{module_path}.{class_name} is not a BaseProtocolCompiler")
+            raise TypeError(f"{compiler_cls.__module__}.{compiler_cls.__qualname__} is not a BaseProtocolCompiler")
         cls._cache[key] = compiler
         return compiler
 
     @classmethod
     def has(cls, protocol: str) -> bool:
         """Return True when ``protocol`` has a connector compiler."""
-        return protocol.lower().replace("-", "_") in cls._BUILTIN_LOADERS
+        return cls._normalize_protocol(protocol) in cls._compiler_loaders()
 
     @classmethod
     def supported_protocols(cls) -> tuple[str, ...]:
         """Return all protocol names with connector-owned compilers."""
-        return tuple(sorted(cls._BUILTIN_LOADERS))
+        return tuple(sorted(cls._compiler_loaders()))
 
     @classmethod
     def _load_class(cls, key: str) -> type[BaseProtocolCompiler] | None:
         """Import a connector compiler class without instantiating it."""
-        loader = cls._BUILTIN_LOADERS.get(key)
+        normalized_key = cls._normalize_protocol(key)
+        loader = cls._compiler_loaders().get(normalized_key)
         if loader is None:
             return None
-        module_path, class_name = loader
-        module = importlib.import_module(module_path)
-        compiler_cls = getattr(module, class_name)
+        compiler_cls = loader.load()
         if not isinstance(compiler_cls, type) or not issubclass(compiler_cls, BaseProtocolCompiler):
-            raise TypeError(f"{module_path}.{class_name} is not a BaseProtocolCompiler class")
+            raise TypeError(f"{loader.module}.{loader.attribute} is not a BaseProtocolCompiler class")
         return compiler_cls
 
     @classmethod
@@ -248,7 +64,7 @@ class CompilerRegistry:
         ``intents/compiler.py``.
         """
         out: list[str] = []
-        for key in sorted(cls._BUILTIN_LOADERS):
+        for key in cls.supported_protocols():
             compiler_cls = cls._load_class(key)
             if compiler_cls is None:
                 continue
@@ -259,7 +75,65 @@ class CompilerRegistry:
     @classmethod
     def default_protocol(cls, dispatch_key: str) -> str | None:
         """Return the configured fallback protocol for a dispatch key, or None."""
-        return cls._DEFAULT_BY_KEY.get(dispatch_key)
+        return cls._default_protocols().get(cls._normalize_default_key(dispatch_key))
+
+    @classmethod
+    def reset_cache(cls) -> None:
+        """Test helper: clear instantiated compiler instances."""
+        cls._cache.clear()
+
+    @classmethod
+    def _compiler_loaders(cls) -> dict[str, ImportRef]:
+        """Return protocol -> connector-published compiler import ref."""
+        loaders: dict[str, ImportRef] = {}
+        owners: dict[str, str] = {}
+        for connector in CONNECTOR_REGISTRY.with_compiler():
+            if connector.compiler is None:
+                continue
+            for protocol in connector.compiler_keys:
+                key = cls._normalize_protocol(protocol)
+                owner = owners.get(key)
+                if owner is not None:
+                    raise ValueError(f"compiler protocol {key!r} is claimed by both {owner!r} and {connector.name!r}")
+                owners[key] = connector.name
+                loaders[key] = connector.compiler
+        return loaders
+
+    @classmethod
+    def _default_protocols(cls) -> dict[str, str]:
+        """Return dispatch-default key -> connector protocol mapping."""
+        defaults: dict[str, str] = {}
+        owners: dict[str, str] = {}
+        loaders = cls._compiler_loaders()
+        for connector in CONNECTOR_REGISTRY.with_compiler():
+            if not connector.compiler_default_keys:
+                continue
+            protocol = cls._normalize_protocol(connector.name)
+            if protocol not in loaders:
+                raise ValueError(
+                    f"compiler default keys for connector {connector.name!r} point to {protocol!r}, "
+                    "but that protocol is not published by the connector compiler"
+                )
+            for dispatch_key in connector.compiler_default_keys:
+                key = cls._normalize_default_key(dispatch_key)
+                owner = owners.get(key)
+                if owner is not None:
+                    raise ValueError(
+                        f"compiler default key {key!r} is claimed by both {owner!r} and {connector.name!r}"
+                    )
+                owners[key] = connector.name
+                defaults[key] = protocol
+        return defaults
+
+    @staticmethod
+    def _normalize_protocol(protocol: str) -> str:
+        """Normalize protocol identifiers for compiler dispatch."""
+        return protocol.strip().lower().replace("-", "_")
+
+    @staticmethod
+    def _normalize_default_key(dispatch_key: str) -> str:
+        """Normalize non-protocol compiler dispatch-default keys."""
+        return dispatch_key.strip().upper()
 
 
 def get_compiler(protocol: str) -> BaseProtocolCompiler | None:

@@ -1,14 +1,9 @@
 """Per-connector settings composition (VIB-4812).
 
 ``GatewaySettings`` is composed from per-connector ``BaseModel``
-fragments via multi-inheritance:
-
-    class GatewaySettings(
-        BaseSettings,
-        PolymarketGatewaySettings,
-        EnsoGatewaySettings,
-        PendleGatewaySettings,
-    ): ...
+fragments discovered through connector manifests. The concrete composition is
+still Pydantic multi-inheritance; the base classes are resolved from
+``CONNECTOR.gateway_settings`` import refs instead of direct gateway imports.
 
 These tests pin the load-bearing contracts of that composition:
 
@@ -29,13 +24,15 @@ import math
 
 import pytest
 from pydantic import ValidationError
+from pydantic_settings import BaseSettings
 
+from almanak.connectors._connector import ConnectorDiscoveryError
 from almanak.connectors.enso.gateway.settings import EnsoGatewaySettings
 from almanak.connectors.pendle.gateway.settings import PendleGatewaySettings
 from almanak.connectors.polymarket.gateway.settings import (
     PolymarketGatewaySettings,
 )
-from almanak.gateway.core.settings import GatewaySettings
+from almanak.gateway.core.settings import GatewaySettings, _load_gateway_settings_base
 
 
 # ---------------------------------------------------------------------------
@@ -96,16 +93,23 @@ class TestCompositionSurface:
     def test_field_reachable(self, s: GatewaySettings, field: str) -> None:
         assert hasattr(s, field), f"{field} not reachable on GatewaySettings"
 
-    def test_polymarket_defaults_preserved_through_composition(
-        self, s: GatewaySettings
-    ) -> None:
+    def test_polymarket_defaults_preserved_through_composition(self, s: GatewaySettings) -> None:
         assert s.polymarket_network == "mainnet"
         assert s.polymarket_market_cache_ttl_seconds == 60.0
 
-    def test_pendle_defaults_preserved_through_composition(
-        self, s: GatewaySettings
-    ) -> None:
+    def test_pendle_defaults_preserved_through_composition(self, s: GatewaySettings) -> None:
         assert s.pendle_api_cache_ttl == 15.0
+
+
+class TestFragmentLoading:
+    def test_rejects_base_settings_fragment(self) -> None:
+        class BadSettingsFragment(BaseSettings):
+            bad_field: str = "bad"
+
+        import_ref = MagicImportRef(BadSettingsFragment)
+
+        with pytest.raises(ConnectorDiscoveryError, match="not a BaseSettings subclass"):
+            _load_gateway_settings_base(import_ref)
 
 
 # ---------------------------------------------------------------------------
@@ -210,9 +214,7 @@ class TestEnvVarBinding:
 # ---------------------------------------------------------------------------
 class TestPolymarketCacheTTLValidator:
     def test_negative_rejected(self) -> None:
-        with pytest.raises(
-            ValidationError, match="polymarket_market_cache_ttl_seconds must be >= 0"
-        ):
+        with pytest.raises(ValidationError, match="polymarket_market_cache_ttl_seconds must be >= 0"):
             GatewaySettings(polymarket_market_cache_ttl_seconds=-1.0)
 
     def test_nan_rejected(self) -> None:
@@ -253,3 +255,14 @@ def test_model_dump_includes_every_per_connector_field() -> None:
         "pendle_api_cache_ttl",
     ):
         assert field in dumped, f"{field} missing from model_dump()"
+
+
+class MagicImportRef:
+    module = "tests.bad_connector.gateway.settings"
+    attribute = "BadSettingsFragment"
+
+    def __init__(self, target: type[BaseSettings]) -> None:
+        self._target = target
+
+    def load(self) -> type[BaseSettings]:
+        return self._target

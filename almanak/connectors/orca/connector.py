@@ -21,6 +21,11 @@ CONNECTOR = Connector(
         module="almanak.connectors.orca.receipt_parser_provider",
         attribute="OrcaReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.orca.compiler",
+        attribute="OrcaCompiler",
+    ),
+    compiler_protocols=("orca_whirlpools",),
     strategy_intents=("LP_OPEN", "LP_CLOSE"),
     strategy_chains=("solana",),
 )

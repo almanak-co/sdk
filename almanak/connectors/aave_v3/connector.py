@@ -51,6 +51,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.aave_v3.protocol_family",
         attribute="PROTOCOL_FAMILY",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.aave_v3.compiler",
+        attribute="AaveV3Compiler",
+    ),
     flash_loan_provider_name="aave",
     flash_loan_provider=ImportRef(
         module="almanak.connectors.aave_v3.flash_loan_provider",

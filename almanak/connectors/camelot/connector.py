@@ -29,6 +29,10 @@ CONNECTOR = Connector(
         attribute="SWAP_CLASSIFICATION",
         order=4,
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.camelot.compiler",
+        attribute="CamelotCompiler",
+    ),
     strategy_intents=("SWAP",),
     strategy_chains=("arbitrum",),
 )

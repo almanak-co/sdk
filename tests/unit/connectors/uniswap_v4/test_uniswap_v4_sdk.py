@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -26,7 +25,6 @@ from almanak.connectors.uniswap_v4.sdk import (
     _encode_execute,
 )
 
-
 # =============================================================================
 # Constants tests
 # =============================================================================
@@ -47,6 +45,7 @@ class TestConstants:
     def test_pool_manager_addresses(self):
         # Each chain should have a non-empty pool manager address
         from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
+
         for chain, addr in POOL_MANAGER_ADDRESSES.items():
             expected = UNISWAP_V4[chain]["pool_manager"].lower()
             assert addr.lower() == expected, f"PoolManager on {chain} mismatch"
@@ -125,6 +124,7 @@ class TestPoolKey:
 class TestUniswapV4SDKInit:
     def test_init_supported_chain(self):
         from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
+
         sdk = UniswapV4SDK(chain="arbitrum")
         assert sdk.chain == "arbitrum"
         assert sdk.pool_manager.lower() == UNISWAP_V4["arbitrum"]["pool_manager"].lower()
@@ -272,6 +272,53 @@ class TestGetQuoteLocal:
         assert 2_990_000_000 <= quote.amount_out <= 3_000_000_000
 
 
+class TestGetQuote:
+    RPC_URL = "https://arb-mainnet.g.alchemy.com/v2/test"
+    TOKEN_IN = "0x1111111111111111111111111111111111111111"
+    TOKEN_OUT = "0x2222222222222222222222222222222222222222"
+
+    def _make_sdk(self) -> UniswapV4SDK:
+        return UniswapV4SDK(chain="arbitrum", rpc_url=self.RPC_URL)
+
+    def test_transport_failure_raises_value_error(self):
+        sdk = self._make_sdk()
+
+        with patch("almanak.connectors.uniswap_v4.sdk.eth_call", side_effect=ConnectionError("timeout")):
+            with pytest.raises(ValueError, match="V4 Quoter quoteExactInputSingle failed"):
+                sdk.get_quote(
+                    token_in=self.TOKEN_IN,
+                    token_out=self.TOKEN_OUT,
+                    amount_in=100,
+                    fee_tier=3000,
+                )
+
+    def test_no_result_raises_value_error(self):
+        sdk = self._make_sdk()
+
+        with patch("almanak.connectors.uniswap_v4.sdk.eth_call", return_value=None):
+            with pytest.raises(ValueError, match="returned no result"):
+                sdk.get_quote(
+                    token_in=self.TOKEN_IN,
+                    token_out=self.TOKEN_OUT,
+                    amount_in=100,
+                    fee_tier=3000,
+                )
+
+    def test_malformed_response_raises_value_error_with_payload(self):
+        sdk = self._make_sdk()
+
+        with patch("almanak.connectors.uniswap_v4.sdk.eth_call", return_value=b"\x12\x34"):
+            with pytest.raises(ValueError, match="Malformed V4 Quoter response") as exc_info:
+                sdk.get_quote(
+                    token_in=self.TOKEN_IN,
+                    token_out=self.TOKEN_OUT,
+                    amount_in=100,
+                    fee_tier=3000,
+                )
+
+        assert "0x1234" in str(exc_info.value)
+
+
 # =============================================================================
 # Transaction building tests
 # =============================================================================
@@ -334,8 +381,11 @@ class TestWethRouting:
         """WETH -> ERC20: commands = [PERMIT2_TRANSFER_FROM, UNWRAP_WETH, V4_SWAP]."""
         sdk = UniswapV4SDK(chain="ethereum")
         quote = SwapQuote(
-            amount_in=5 * 10**16, amount_out=100 * 10**6,
-            fee_tier=500, token_in=self.WETH_ETHEREUM, token_out=self.USDC,
+            amount_in=5 * 10**16,
+            amount_out=100 * 10**6,
+            fee_tier=500,
+            token_in=self.WETH_ETHEREUM,
+            token_out=self.USDC,
         )
         tx = sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
         assert tx.value == 0, "WETH-in should not send native ETH"
@@ -348,22 +398,26 @@ class TestWethRouting:
         """ERC20 -> WETH: commands = [V4_SWAP, WRAP_ETH]."""
         sdk = UniswapV4SDK(chain="ethereum")
         quote = SwapQuote(
-            amount_in=100 * 10**6, amount_out=5 * 10**16,
-            fee_tier=500, token_in=self.USDC, token_out=self.WETH_ETHEREUM,
+            amount_in=100 * 10**6,
+            amount_out=5 * 10**16,
+            fee_tier=500,
+            token_in=self.USDC,
+            token_out=self.WETH_ETHEREUM,
         )
         tx = sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
         assert tx.value == 0, "ERC20-in should not send native ETH"
         cmds = self._extract_commands(tx.data)
-        assert cmds == [0x10, 0x0B], (
-            f"Expected [V4_SWAP, WRAP_ETH], got {[hex(c) for c in cmds]}"
-        )
+        assert cmds == [0x10, 0x0B], f"Expected [V4_SWAP, WRAP_ETH], got {[hex(c) for c in cmds]}"
 
     def test_weth_to_weth_raises(self):
         """WETH -> WETH: should raise ValueError."""
         sdk = UniswapV4SDK(chain="ethereum")
         quote = SwapQuote(
-            amount_in=10**18, amount_out=10**18,
-            fee_tier=500, token_in=self.WETH_ETHEREUM, token_out=self.WETH_ETHEREUM,
+            amount_in=10**18,
+            amount_out=10**18,
+            fee_tier=500,
+            token_in=self.WETH_ETHEREUM,
+            token_out=self.WETH_ETHEREUM,
         )
         with pytest.raises(ValueError, match="Cannot swap wrapped native token to itself"):
             sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
@@ -372,8 +426,11 @@ class TestWethRouting:
         """Native ETH swap should NOT trigger WETH routing."""
         sdk = UniswapV4SDK(chain="ethereum")
         quote = SwapQuote(
-            amount_in=10**18, amount_out=100 * 10**6,
-            fee_tier=500, token_in=NATIVE_CURRENCY, token_out=self.USDC,
+            amount_in=10**18,
+            amount_out=100 * 10**6,
+            fee_tier=500,
+            token_in=NATIVE_CURRENCY,
+            token_out=self.USDC,
         )
         tx = sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
         assert tx.value == 10**18, "Native ETH-in should set msg.value"
@@ -384,15 +441,16 @@ class TestWethRouting:
         """ERC20 -> native ETH: commands = [V4_SWAP, SWEEP]."""
         sdk = UniswapV4SDK(chain="ethereum")
         quote = SwapQuote(
-            amount_in=100 * 10**6, amount_out=5 * 10**16,
-            fee_tier=500, token_in=self.USDC, token_out=NATIVE_CURRENCY,
+            amount_in=100 * 10**6,
+            amount_out=5 * 10**16,
+            fee_tier=500,
+            token_in=self.USDC,
+            token_out=NATIVE_CURRENCY,
         )
         tx = sdk.build_swap_tx(quote, recipient=self.RECIPIENT)
         assert tx.value == 0
         cmds = self._extract_commands(tx.data)
-        assert cmds == [0x10, 0x04], (
-            f"Expected [V4_SWAP, SWEEP], got {[hex(c) for c in cmds]}"
-        )
+        assert cmds == [0x10, 0x04], f"Expected [V4_SWAP, SWEEP], got {[hex(c) for c in cmds]}"
 
 
 class TestBuildApproveTx:
@@ -451,7 +509,7 @@ class TestBuildPermit2ApproveTx:
 
     def test_permit2_approve_clamps_uint160(self):
         sdk = UniswapV4SDK(chain="arbitrum")
-        huge_amount = (1 << 200)  # exceeds uint160
+        huge_amount = 1 << 200  # exceeds uint160
         tx = sdk.build_permit2_approve_tx(
             token_address="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             spender="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -570,9 +628,7 @@ class TestEncodeExactInputSingleParams:
             token_out="0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         )
         # build_swap_tx uses integer floor division now
-        tx = sdk.build_swap_tx(
-            quote, recipient="0x1234567890123456789012345678901234567890", slippage_bps=50
-        )
+        tx = sdk.build_swap_tx(quote, recipient="0x1234567890123456789012345678901234567890", slippage_bps=50)
         # The amount_out_minimum should be exactly: 10^30 * 9950 // 10000
         expected = 10**30 * 9950 // 10000
         assert expected == 995000000000000000000000000000
@@ -596,35 +652,22 @@ class TestGetPositionLiquidity:
         sdk.rpc_url = self.RPC_URL
         return sdk
 
-    def _mock_urlopen(self, response_body: dict):
-        """Return a context-manager mock for urllib.request.urlopen."""
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps(response_body).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        return mock_resp
-
     def test_success_returns_liquidity(self):
         sdk = self._make_sdk()
         liquidity_value = 123456789
-        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1, "result": hex(liquidity_value)})
 
-        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
+        with patch("almanak.connectors.uniswap_v4.sdk.eth_call_hex", return_value=hex(liquidity_value)) as mock_call:
             result = sdk.get_position_liquidity(self.TOKEN_ID)
 
         assert result == liquidity_value
-        # Verify calldata includes selector and position_manager
-        call_args = mock_open.call_args[0][0]
-        payload = json.loads(call_args.data)
-        assert payload["method"] == "eth_call"
-        assert payload["params"][0]["data"].startswith("0x1efeed33")
-        assert payload["params"][0]["to"] == sdk.position_manager
+        call_kwargs = mock_call.call_args.kwargs
+        assert call_kwargs["data"].startswith("0x1efeed33")
+        assert call_kwargs["to"] == sdk.position_manager
 
     def test_rpc_error_response_raises(self):
         sdk = self._make_sdk()
-        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "revert"}})
 
-        with patch("urllib.request.urlopen", return_value=resp):
+        with patch("almanak.connectors.uniswap_v4.sdk.eth_call_hex", side_effect=ValueError("reverted")):
             with pytest.raises(ValueError, match="reverted"):
                 sdk.get_position_liquidity(self.TOKEN_ID)
 
@@ -637,54 +680,47 @@ class TestGetPositionLiquidity:
 
     def test_malformed_result_missing_field_raises(self):
         sdk = self._make_sdk()
-        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1})  # no "result" key
 
-        with patch("urllib.request.urlopen", return_value=resp):
-            with pytest.raises(ValueError, match="missing or invalid"):
+        with patch("almanak.connectors.uniswap_v4.sdk.eth_call_hex", return_value=None):
+            with pytest.raises(ValueError, match="returned no result"):
                 sdk.get_position_liquidity(self.TOKEN_ID)
 
     def test_malformed_result_non_hex_raises(self):
         sdk = self._make_sdk()
-        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1, "result": "not_hex"})
 
-        with patch("urllib.request.urlopen", return_value=resp):
+        with patch("almanak.connectors.uniswap_v4.sdk.eth_call_hex", return_value="not_hex"):
             with pytest.raises(ValueError, match="Malformed liquidity hex"):
                 sdk.get_position_liquidity(self.TOKEN_ID)
 
     def test_transport_failure_raises(self):
         sdk = self._make_sdk()
 
-        with patch("urllib.request.urlopen", side_effect=ConnectionError("timeout")):
+        with patch("almanak.connectors.uniswap_v4.sdk.eth_call_hex", side_effect=ConnectionError("timeout")):
             with pytest.raises(ValueError, match="RPC call to getPositionLiquidity failed"):
                 sdk.get_position_liquidity(self.TOKEN_ID)
 
     def test_explicit_rpc_url_overrides_default(self):
         sdk = self._make_sdk()
         override_url = "https://other-rpc.example.com"
-        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1, "result": "0x1"})
 
-        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
+        with patch("almanak.connectors.uniswap_v4.sdk.eth_call_hex", return_value="0x1") as mock_call:
             sdk.get_position_liquidity(self.TOKEN_ID, rpc_url=override_url)
 
-        call_args = mock_open.call_args[0][0]
-        assert call_args.full_url == override_url
+        assert mock_call.call_args.kwargs["rpc_url"] == override_url
 
     def test_file_scheme_rejected(self):
         sdk = self._make_sdk()
-        with pytest.raises(ValueError, match="must use http"):
+        with pytest.raises(ValueError, match="Unsupported RPC URL scheme 'file'"):
             sdk.get_position_liquidity(self.TOKEN_ID, rpc_url="file:///etc/hosts")
 
     def test_calldata_encodes_token_id(self):
         sdk = self._make_sdk()
         token_id = 9999
-        resp = self._mock_urlopen({"jsonrpc": "2.0", "id": 1, "result": "0x0"})
 
-        with patch("urllib.request.urlopen", return_value=resp) as mock_open:
+        with patch("almanak.connectors.uniswap_v4.sdk.eth_call_hex", return_value="0x0") as mock_call:
             sdk.get_position_liquidity(token_id)
 
-        call_args = mock_open.call_args[0][0]
-        payload = json.loads(call_args.data)
-        calldata = payload["params"][0]["data"]
+        calldata = mock_call.call_args.kwargs["data"]
         # Token ID should be zero-padded to 64 hex chars after selector
         expected_token_hex = format(token_id, "064x")
         assert calldata == "0x1efeed33" + expected_token_hex

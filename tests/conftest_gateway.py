@@ -119,6 +119,30 @@ class AnvilFixture:
         self._ready = threading.Event()
         self._stop_event = threading.Event()
         self._error: Exception | None = None
+        self._original_env: dict[str, str | None] = {}
+
+    def _anvil_port_env_vars(self) -> tuple[str, ...]:
+        """Environment variables that should point at this fixture's port."""
+        names = [f"ANVIL_{self.chain.upper()}_PORT"]
+        if self.chain == "bsc":
+            names.append("ANVIL_BNB_PORT")
+        return tuple(names)
+
+    def _publish_anvil_port_env(self) -> None:
+        """Publish this fixture's dynamic port for compiler-side RPC lookup."""
+        for env_var in self._anvil_port_env_vars():
+            if env_var not in self._original_env:
+                self._original_env[env_var] = os.environ.get(env_var)
+            os.environ[env_var] = str(self.port)
+
+    def _restore_anvil_port_env(self) -> None:
+        """Restore env vars changed by ``_publish_anvil_port_env``."""
+        for env_var, original_value in self._original_env.items():
+            if original_value is None:
+                os.environ.pop(env_var, None)
+            else:
+                os.environ[env_var] = original_value
+        self._original_env.clear()
 
     def start(self, timeout: float = 60.0) -> None:
         """Start the Anvil fork in a background thread.
@@ -129,16 +153,19 @@ class AnvilFixture:
         Raises:
             RuntimeError: If Anvil fails to start within timeout
         """
+        self._publish_anvil_port_env()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
         if not self._ready.wait(timeout=timeout):
+            self._restore_anvil_port_env()
             if self._error:
                 raise RuntimeError(f"Anvil for {self.chain} failed to start: {self._error}")
             raise RuntimeError(f"Anvil for {self.chain} failed to start within {timeout}s")
 
         # Check for errors that occurred during startup (ready is set in finally block)
         if self._error:
+            self._restore_anvil_port_env()
             raise RuntimeError(f"Anvil for {self.chain} failed to start: {self._error}")
 
         logger.info(f"Anvil fixture started: chain={self.chain}, port={self.port}")
@@ -165,6 +192,7 @@ class AnvilFixture:
         if self._thread:
             self._thread.join(timeout=5.0)
 
+        self._restore_anvil_port_env()
         logger.info(f"Anvil fixture stopped: chain={self.chain}")
 
     def get_rpc_url(self) -> str:
@@ -276,10 +304,12 @@ class AnvilFixture:
 
         # Start fresh
         try:
+            self._publish_anvil_port_env()
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
 
             if not self._ready.wait(timeout=timeout):
+                self._restore_anvil_port_env()
                 if self._error:
                     logger.error(f"Anvil restart failed for {self.chain}: {self._error}")
                     return False
@@ -287,6 +317,7 @@ class AnvilFixture:
                 return False
 
             if self._error:
+                self._restore_anvil_port_env()
                 logger.error(f"Anvil restart failed for {self.chain}: {self._error}")
                 return False
 
@@ -299,6 +330,7 @@ class AnvilFixture:
             logger.info(f"Anvil fixture restarted: chain={self.chain}, port={self.port}")
             return True
         except Exception as e:
+            self._restore_anvil_port_env()
             logger.error(f"Anvil restart exception for {self.chain}: {e}")
             return False
 

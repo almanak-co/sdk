@@ -16,6 +16,10 @@ CONNECTOR = Connector(
         attribute="HyperliquidGatewayConnector",
         order=15,
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.hyperliquid.compiler",
+        attribute="HyperliquidCompiler",
+    ),
 )
 
 __all__ = ["CONNECTOR"]

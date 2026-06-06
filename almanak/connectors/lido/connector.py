@@ -20,6 +20,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.lido.receipt_parser_provider",
         attribute="LidoReceiptParserConnector",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.lido.compiler",
+        attribute="LidoCompiler",
+    ),
     strategy_intents=("STAKE", "UNSTAKE"),
     strategy_chains=("ethereum",),
 )

@@ -4,22 +4,55 @@ Tests the refresh_deferred_bundle() function which re-fetches fresh calldata
 from aggregator protocols (LiFi, Enso) immediately before execution.
 """
 
+from typing import Any
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from almanak.framework.execution import deferred_refresh
-from almanak.framework.execution.deferred_refresh import (
-    _ANVIL_MIN_SLIPPAGE_BPS,
-    refresh_deferred_bundle,
+from almanak.connectors._base.types import ProtocolKind, ProtocolName
+from almanak.connectors._strategy_base.deferred_refresh_registry import (
+    DeferredRefreshCapability,
+    DeferredRefreshConnector,
+    DeferredRefreshRegistry,
 )
+from almanak.connectors.enso.deferred_refresh_provider import (
+    ANVIL_MIN_SLIPPAGE_BPS,
+    EnsoDeferredRefreshConnector,
+)
+from almanak.framework.execution import deferred_refresh
+from almanak.framework.execution.deferred_refresh import refresh_deferred_bundle
 from almanak.framework.execution.simulator.config import is_local_rpc
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
 
-def _patch_refresher(protocol: str, mock):
-    """Patch the dispatch entry for a protocol in _DEFERRED_REFRESHERS."""
-    return patch.dict(deferred_refresh._DEFERRED_REFRESHERS, {protocol: mock})
+class _MockDeferredRefreshConnector(DeferredRefreshConnector, DeferredRefreshCapability):
+    """Test connector that forwards refresh calls to a mock."""
+
+    kind = ProtocolKind.SWAP
+
+    def __init__(self, protocol: str, mock: MagicMock) -> None:
+        self.protocol = ProtocolName(protocol)
+        self._mock = mock
+
+    def refresh_transaction(
+        self,
+        metadata: dict[str, Any],
+        wallet_address: str,
+        *,
+        rpc_url: str | None = None,
+    ) -> dict[str, Any]:
+        return self._mock(metadata, wallet_address, rpc_url)
+
+
+def _patch_registry(connector: DeferredRefreshConnector):
+    """Patch deferred_refresh to use a temporary registry with one connector."""
+    registry = DeferredRefreshRegistry()
+    registry.register(connector)
+    return patch.object(deferred_refresh, "DEFERRED_REFRESH_REGISTRY", registry)
+
+
+def _patch_refresher(protocol: str, mock: MagicMock):
+    """Patch the dispatch entry for a protocol with a mock refresh connector."""
+    return _patch_registry(_MockDeferredRefreshConnector(protocol, mock))
+
 
 WALLET = "0x1234567890abcdef1234567890abcdef12345678"
 
@@ -119,14 +152,16 @@ class TestDeferredRefresh:
 
     def test_lifi_deferred_bundle_gets_refreshed(self):
         """LiFi deferred bundle gets fresh transaction data."""
-        mock_refresh_lifi = MagicMock(return_value={
-            "to": "0xNewLiFiTarget",
-            "value": 0,
-            "data": "0xfresh_lifi_calldata",
-            "gas_estimate": 250000,
-            "description": "Swap USDC -> WETH via LiFi",
-            "tx_type": "swap",
-        })
+        mock_refresh_lifi = MagicMock(
+            return_value={
+                "to": "0xNewLiFiTarget",
+                "value": 0,
+                "data": "0xfresh_lifi_calldata",
+                "gas_estimate": 250000,
+                "description": "Swap USDC -> WETH via LiFi",
+                "tx_type": "swap",
+            }
+        )
 
         bundle = _make_lifi_bundle(deferred=True)
         with _patch_refresher("lifi", mock_refresh_lifi):
@@ -153,13 +188,15 @@ class TestDeferredRefresh:
 
     def test_enso_deferred_bundle_gets_refreshed(self):
         """Enso deferred bundle gets fresh transaction data."""
-        mock_refresh_enso = MagicMock(return_value={
-            "to": "0xNewEnsoRouter",
-            "value": 0,
-            "data": "0xfresh_enso_calldata",
-            "gas_estimate": 180000,
-            "tx_type": "swap",
-        })
+        mock_refresh_enso = MagicMock(
+            return_value={
+                "to": "0xNewEnsoRouter",
+                "value": 0,
+                "data": "0xfresh_enso_calldata",
+                "gas_estimate": 180000,
+                "tx_type": "swap",
+            }
+        )
 
         bundle = _make_enso_bundle()
         with _patch_refresher("enso", mock_refresh_enso):
@@ -207,51 +244,57 @@ class TestDeferredRefresh:
         assert result.transactions[1]["data"] == "0xstale_lifi_calldata"
 
     def test_anvil_widens_enso_slippage(self):
-        """On Anvil forks, slippage_bps is widened to _ANVIL_MIN_SLIPPAGE_BPS."""
-        mock_refresh_enso = MagicMock(return_value={
-            "to": "0xEnsoRouter",
-            "value": 0,
-            "data": "0xfresh_calldata",
-            "gas_estimate": 180000,
-            "tx_type": "swap",
-        })
+        """On Anvil forks, slippage_bps is widened to ANVIL_MIN_SLIPPAGE_BPS."""
+        mock_refresh_enso = MagicMock(
+            return_value={
+                "to": "0xEnsoRouter",
+                "value": 0,
+                "data": "0xfresh_calldata",
+                "gas_estimate": 180000,
+                "tx_type": "swap",
+            }
+        )
 
         bundle = _make_enso_bundle()
         # Set tight slippage (50 bps = 0.5%)
         bundle.metadata["route_params"]["slippage_bps"] = 50
 
-        with _patch_refresher("enso", mock_refresh_enso):
-            result = refresh_deferred_bundle(
-                bundle, WALLET, rpc_url="http://localhost:8545"
-            )
+        connector = EnsoDeferredRefreshConnector()
+
+        with patch.object(connector, "_refresh_from_adapter", mock_refresh_enso):
+            with _patch_registry(connector):
+                result = refresh_deferred_bundle(bundle, WALLET, rpc_url="http://localhost:8545")
 
         # Slippage should have been widened in the result
-        assert result.metadata["route_params"]["slippage_bps"] == _ANVIL_MIN_SLIPPAGE_BPS
+        assert result.metadata["route_params"]["slippage_bps"] == ANVIL_MIN_SLIPPAGE_BPS
         # Original bundle must NOT be mutated
         assert bundle.metadata["route_params"]["slippage_bps"] == 50
         mock_refresh_enso.assert_called_once()
         # Verify widened slippage was passed to the API call (not applied after)
         called_metadata = mock_refresh_enso.call_args[0][0]
-        assert called_metadata["route_params"]["slippage_bps"] == _ANVIL_MIN_SLIPPAGE_BPS
+        assert called_metadata["route_params"]["slippage_bps"] == ANVIL_MIN_SLIPPAGE_BPS
 
     def test_anvil_keeps_wide_slippage_unchanged(self):
-        """If slippage is already >= _ANVIL_MIN_SLIPPAGE_BPS, don't change it."""
-        mock_refresh_enso = MagicMock(return_value={
-            "to": "0xEnsoRouter",
-            "value": 0,
-            "data": "0xfresh_calldata",
-            "gas_estimate": 180000,
-            "tx_type": "swap",
-        })
+        """If slippage is already >= ANVIL_MIN_SLIPPAGE_BPS, don't change it."""
+        mock_refresh_enso = MagicMock(
+            return_value={
+                "to": "0xEnsoRouter",
+                "value": 0,
+                "data": "0xfresh_calldata",
+                "gas_estimate": 180000,
+                "tx_type": "swap",
+            }
+        )
 
         bundle = _make_enso_bundle()
         # Already wide slippage (1000 bps = 10%)
         bundle.metadata["route_params"]["slippage_bps"] = 1000
 
-        with _patch_refresher("enso", mock_refresh_enso):
-            result = refresh_deferred_bundle(
-                bundle, WALLET, rpc_url="http://127.0.0.1:8545"
-            )
+        connector = EnsoDeferredRefreshConnector()
+
+        with patch.object(connector, "_refresh_from_adapter", mock_refresh_enso):
+            with _patch_registry(connector):
+                result = refresh_deferred_bundle(bundle, WALLET, rpc_url="http://127.0.0.1:8545")
 
         # Should not widen further
         assert result.metadata["route_params"]["slippage_bps"] == 1000
@@ -259,23 +302,50 @@ class TestDeferredRefresh:
         called_metadata = mock_refresh_enso.call_args[0][0]
         assert called_metadata["route_params"]["slippage_bps"] == 1000
 
+    def test_anvil_enso_missing_slippage_bps_is_left_unchanged(self):
+        """Missing slippage_bps should not crash the Enso deferred refresh path."""
+        mock_refresh_enso = MagicMock(
+            return_value={
+                "to": "0xEnsoRouter",
+                "value": 0,
+                "data": "0xfresh_calldata",
+                "gas_estimate": 180000,
+                "tx_type": "swap",
+            }
+        )
+
+        bundle = _make_enso_bundle()
+        del bundle.metadata["route_params"]["slippage_bps"]
+        connector = EnsoDeferredRefreshConnector()
+
+        with patch.object(connector, "_refresh_from_adapter", mock_refresh_enso):
+            with _patch_registry(connector):
+                result = refresh_deferred_bundle(bundle, WALLET, rpc_url="http://localhost:8545")
+
+        assert "slippage_bps" not in result.metadata["route_params"]
+        called_metadata = mock_refresh_enso.call_args[0][0]
+        assert "slippage_bps" not in called_metadata["route_params"]
+
     def test_mainnet_rpc_does_not_widen_slippage(self):
         """Mainnet RPC URLs should NOT trigger slippage widening."""
-        mock_refresh_enso = MagicMock(return_value={
-            "to": "0xEnsoRouter",
-            "value": 0,
-            "data": "0xfresh_calldata",
-            "gas_estimate": 180000,
-            "tx_type": "swap",
-        })
+        mock_refresh_enso = MagicMock(
+            return_value={
+                "to": "0xEnsoRouter",
+                "value": 0,
+                "data": "0xfresh_calldata",
+                "gas_estimate": 180000,
+                "tx_type": "swap",
+            }
+        )
 
         bundle = _make_enso_bundle()
         bundle.metadata["route_params"]["slippage_bps"] = 50
 
-        with _patch_refresher("enso", mock_refresh_enso):
-            result = refresh_deferred_bundle(
-                bundle, WALLET, rpc_url="https://arb-mainnet.g.alchemy.com/v2/key"
-            )
+        connector = EnsoDeferredRefreshConnector()
+
+        with patch.object(connector, "_refresh_from_adapter", mock_refresh_enso):
+            with _patch_registry(connector):
+                result = refresh_deferred_bundle(bundle, WALLET, rpc_url="https://arb-mainnet.g.alchemy.com/v2/key")
 
         # Slippage should NOT have been widened
         assert result.metadata["route_params"]["slippage_bps"] == 50
@@ -285,22 +355,22 @@ class TestDeferredRefresh:
 
     def test_lifi_on_anvil_does_not_widen_slippage(self):
         """LiFi bundles on Anvil should NOT trigger Enso slippage widening."""
-        mock_refresh_lifi = MagicMock(return_value={
-            "to": "0xLiFiRouter",
-            "value": 0,
-            "data": "0xfresh_lifi_calldata",
-            "gas_estimate": 200000,
-            "tx_type": "swap",
-        })
+        mock_refresh_lifi = MagicMock(
+            return_value={
+                "to": "0xLiFiRouter",
+                "value": 0,
+                "data": "0xfresh_lifi_calldata",
+                "gas_estimate": 200000,
+                "tx_type": "swap",
+            }
+        )
 
         bundle = _make_lifi_bundle(deferred=True)
         # LiFi uses "slippage" not "slippage_bps"
         bundle.metadata["route_params"]["slippage"] = 0.005
 
         with _patch_refresher("lifi", mock_refresh_lifi):
-            result = refresh_deferred_bundle(
-                bundle, WALLET, rpc_url="http://localhost:8545"
-            )
+            result = refresh_deferred_bundle(bundle, WALLET, rpc_url="http://localhost:8545")
 
         # Should succeed without crashing; slippage unchanged
         assert result.metadata["route_params"]["slippage"] == 0.005
@@ -308,13 +378,15 @@ class TestDeferredRefresh:
 
     def test_bridge_deferred_tx_type_is_handled(self):
         """Bridge transactions with _deferred suffix are also refreshed."""
-        mock_refresh_lifi = MagicMock(return_value={
-            "to": "0xBridgeTarget",
-            "value": 0,
-            "data": "0xfresh_bridge_calldata",
-            "gas_estimate": 300000,
-            "tx_type": "bridge",
-        })
+        mock_refresh_lifi = MagicMock(
+            return_value={
+                "to": "0xBridgeTarget",
+                "value": 0,
+                "data": "0xfresh_bridge_calldata",
+                "gas_estimate": 300000,
+                "tx_type": "bridge",
+            }
+        )
 
         bundle = _make_lifi_bundle(deferred=True)
         bundle.transactions[1]["tx_type"] = "bridge_deferred"

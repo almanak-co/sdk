@@ -86,15 +86,34 @@ def eth_call(
     *,
     chain: str | None = None,
     gateway_client: GatewayClient | None = None,
+    raise_errors: bool = False,
 ) -> bytes | None:
-    """Perform an eth_call via gateway when available, otherwise direct JSON-RPC."""
+    """Perform an eth_call via gateway when available, otherwise direct JSON-RPC.
+
+    Args:
+        rpc_url: Direct RPC URL fallback when no connected gateway is available.
+        to: Contract address to call.
+        data: Encoded calldata.
+        timeout: Direct JSON-RPC request timeout in seconds.
+        chain: Chain name used for gateway routing.
+        gateway_client: Optional connected gateway client for routed calls.
+        raise_errors: When True, raise ``ValueError`` on gateway or direct-RPC
+            failures. When False, the default, suppress those failures and
+            return ``None`` so callers can treat the read as unavailable.
+
+    Returns:
+        Raw result bytes, or ``None`` when the call returns no data or fails
+        while ``raise_errors`` is False.
+    """
     if gateway_client is not None and getattr(gateway_client, "is_connected", False) and chain:
         try:
             result = gateway_client.eth_call(chain=chain, to=to, data=data)
             if not result or result == "0x":
                 return None
             return bytes.fromhex(result.removeprefix("0x"))
-        except Exception:
+        except Exception as exc:
+            if raise_errors:
+                raise ValueError(f"Gateway eth_call failed for {to} on {chain}: {exc}") from exc
             return None
 
     if not rpc_url:
@@ -113,11 +132,20 @@ def eth_call(
             },
             timeout=timeout,
         )
-        result = resp.json().get("result")
+        resp.raise_for_status()
+        payload = resp.json()
+        rpc_error = payload.get("error")
+        if rpc_error is not None:
+            raise ValueError(f"RPC eth_call error for {to}: {rpc_error}")
+        result = payload.get("result")
         if not result or result == "0x":
             return None
+        if not isinstance(result, str) or not result.startswith("0x"):
+            raise ValueError(f"RPC eth_call result for {to} must be 0x hex, got {result!r}")
         return bytes.fromhex(result[2:])
-    except Exception:
+    except Exception as exc:
+        if raise_errors:
+            raise ValueError(f"RPC eth_call failed for {to}: {exc}") from exc
         return None
 
 

@@ -33,6 +33,10 @@ CONNECTOR = Connector(
         attribute="CONTRACT_ROLES",
         order=8,
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.fluid.compiler",
+        attribute="FluidCompiler",
+    ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE"),
     strategy_chains=("arbitrum",),
 )

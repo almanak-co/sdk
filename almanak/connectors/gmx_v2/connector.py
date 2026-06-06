@@ -32,6 +32,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.gmx_v2.contract_monitoring",
         attribute="GMX_V2_CONTRACT_MONITORING_SPECS",
     ),
+    compiler=ImportRef(
+        module="almanak.connectors.gmx_v2.compiler",
+        attribute="GMXV2Compiler",
+    ),
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
     strategy_chains=("arbitrum", "avalanche"),
 )
