@@ -1,5 +1,4 @@
 {
-    "chain": "base",
     "chains": ["base", "arbitrum"],
     "target_chain": "arbitrum",
     "budget_usd": 2,
