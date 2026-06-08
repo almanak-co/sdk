@@ -1584,8 +1584,10 @@ class MarketSnapshot:
             return filled
 
         # Use provider if available. Two protocols are supported:
-        #   1. Legacy aggregator object: ``provider.get_balance(token)`` returns
-        #      ``BalanceResult`` (sync-bridged via ``_run_async_bridged``).
+        #   1. ``provider.get_balance(token[, chain=...])`` returns
+        #      ``BalanceResult`` (sync-bridged via ``_run_async_bridged``). The
+        #      ``chain`` kwarg is threaded only when the method declares it
+        #      (VIB-5002: ``MultiChainGatewayBalanceProvider`` requires it).
         #   2. Modern callable provider: ``provider(token, chain=...)`` returns
         #      ``TokenBalance`` directly.
         if self._balance_provider:
@@ -1600,7 +1602,20 @@ class MarketSnapshot:
                 # the AsyncMock and get a TypeError downstream.
                 use_get_balance = hasattr(bp, "get_balance") and callable(getattr(bp, "get_balance", None))
                 if use_get_balance:
-                    coro = bp.get_balance(resolved)  # type: ignore[attr-defined]
+                    # VIB-5002: chain-aware providers (e.g.
+                    # ``MultiChainGatewayBalanceProvider.get_balance(token,
+                    # chain)``) require the chain. Thread ``chain=`` through when
+                    # the method's signature accepts it — an explicit ``chain``
+                    # param or ``**kwargs`` (which covers ``AsyncMock`` fixtures,
+                    # whose signature is ``(*args, **kwargs)`` and harmlessly
+                    # ignore the kwarg). Stay single-arg only for providers that
+                    # declare neither — e.g. the single-chain gateway provider's
+                    # ``get_balance(token, *, force_refresh=...)``.
+                    get_balance = bp.get_balance  # type: ignore[attr-defined]
+                    if _balance_provider_supports_chain_arg(get_balance):
+                        coro = get_balance(resolved, chain=requested_chain)
+                    else:
+                        coro = get_balance(resolved)
                     if asyncio.iscoroutine(coro):
                         result = self._run_async_bridged(coro)
                     else:
