@@ -24,7 +24,6 @@ from tests.intents.conftest import (
     TEST_SUBMITTER_MAX_RETRIES,
     TEST_TX_TIMEOUT_SECONDS,
     TEST_WALLET,
-    TEST_WEB3_REQUEST_TIMEOUT,
     ZodiacContext,
     _wrap_native_token,
     fund_erc20_token,
@@ -33,6 +32,7 @@ from tests.intents.conftest import (
     make_intent_test_web3,
     reset_fork_to_pristine,
     seed_wallet_state_with_recovery,
+    web3_request_timeout,
 )
 
 CHAIN_NAME = "arbitrum"
@@ -80,7 +80,7 @@ def anvil_rpc_url(anvil_arbitrum: AnvilFixture) -> str:
 @pytest.fixture(scope="module")
 def web3(anvil_rpc_url: str) -> Web3:
     """Connect to gateway's Anvil fork for Arbitrum."""
-    w3 = Web3(Web3.HTTPProvider(anvil_rpc_url, request_kwargs={"timeout": TEST_WEB3_REQUEST_TIMEOUT}))
+    w3 = Web3(Web3.HTTPProvider(anvil_rpc_url, request_kwargs={"timeout": web3_request_timeout(CHAIN_NAME)}))
     assert w3.is_connected(), f"Anvil not responding at {anvil_rpc_url}"
     actual_id = w3.eth.chain_id
     assert actual_id == REQUIRED_CHAIN_ID, f"Expected chain {REQUIRED_CHAIN_ID}, got {actual_id}"

@@ -26,6 +26,7 @@ from tests.intents.conftest import (
     CHAIN_CONFIGS,
     SWAP_MAX_SLIPPAGE,
     format_token_amount,
+    fund_erc20_token,
     get_token_balance,
     get_token_decimals,
 )
@@ -256,6 +257,7 @@ class TestUniswapV3SwapIntent:
     async def test_swap_intent_with_insufficient_balance_fails(
         self,
         web3: Web3,
+        anvil_rpc_url: str,
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         price_oracle: dict[str, Decimal],
@@ -264,16 +266,32 @@ class TestUniswapV3SwapIntent:
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         token_in = tokens["USDC"]
         token_out = tokens["WETH"]
+        in_decimals = get_token_decimals(web3, token_in)
 
-        # Get current balance
+        # Shrink the input-token balance to a small known amount so the over-balance
+        # swap stays tiny in ABSOLUTE terms — far below the compiler's price-impact
+        # guard (default 30%) regardless of pool depth — while still exceeding the
+        # wallet balance so execution reverts on-chain for insufficient funds.
+        # Sizing the 2x amount off the full seeded balance (100k USDC) tripped the
+        # guard once the weekly fork-block roll moved to a thinner-pool block,
+        # flipping this into a compile-time rejection instead of the intended
+        # execution-level failure.
+        small_balance = Decimal("100")
+        fund_erc20_token(
+            funded_wallet,
+            token_in,
+            int(small_balance * Decimal(10**in_decimals)),
+            CHAIN_CONFIGS[CHAIN_NAME]["balance_slots"]["USDC"],
+            anvil_rpc_url,
+        )
+
+        # Get current (now small) balance
         usdc_balance = get_token_balance(web3, token_in, funded_wallet)
         weth_before = get_token_balance(web3, token_out, funded_wallet)
-        in_decimals = get_token_decimals(web3, token_in)
         balance_decimal = Decimal(usdc_balance) / Decimal(10**in_decimals)
 
-        # Exceed balance by 2x so execution fails on-chain with insufficient balance,
-        # but stay inside the compiler's price-impact guard (default 30%) so this path
-        # exercises execution-level failure rather than compile-time rejection.
+        # Exceed the (now small) balance by 2x: ~200 USDC clears the price-impact
+        # guard but is still > balance, so execution fails with insufficient funds.
         excessive_amount = balance_decimal * Decimal("2")
 
         print(f"\n{'='*80}")

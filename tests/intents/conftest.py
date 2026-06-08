@@ -60,14 +60,44 @@ TEST_SUBMITTER_MAX_RETRIES = int(os.environ.get("ALMANAK_TEST_SUBMITTER_MAX_RETR
 # requests-style (connect, read) timeouts for sync Web3 HTTPProvider
 TEST_WEB3_REQUEST_TIMEOUT = (TEST_RPC_CONNECT_TIMEOUT_SECONDS, TEST_RPC_READ_TIMEOUT_SECONDS)
 
-# Polygon-specific read timeout: bumped 30s -> 60s (#1804). The polygon Anvil fork
-# consistently hits ReadTimeoutError at the 30s default set by #1738 under CI load
-# (see PR #1798 run 24793717120). Scoped to polygon only; other chains keep 30s.
-TEST_POLYGON_RPC_READ_TIMEOUT_SECONDS = float(os.environ.get("ALMANAK_TEST_POLYGON_RPC_READ_TIMEOUT_SECONDS", "60"))
-TEST_POLYGON_WEB3_REQUEST_TIMEOUT = (
-    TEST_RPC_CONNECT_TIMEOUT_SECONDS,
-    TEST_POLYGON_RPC_READ_TIMEOUT_SECONDS,
+# Slow-fork read timeout: bumped 30s -> 60s. Some Anvil forks legitimately need
+# >30s reads under CI load. Polygon consistently hit ReadTimeoutError at the 30s
+# default set by #1738 (#1804, PR #1798 run 24793717120); and after the weekly
+# fork-block roll the cold RPC-proxy cache makes the FIRST eth_call / evm_revert
+# on a chain re-fetch state from a slow upstream — that timed out arbitrum +
+# mantle's pristine-reset (30s) and killed the job on the W24 roll (2026-06-08).
+# Scoped to TEST_SLOW_FORK_CHAINS; other chains keep the aggressive 30s default so
+# a genuinely-stalled fork still surfaces quickly. The legacy
+# ALMANAK_TEST_POLYGON_RPC_READ_TIMEOUT_SECONDS env override is still honoured.
+TEST_SLOW_FORK_RPC_READ_TIMEOUT_SECONDS = float(
+    os.environ.get(
+        "ALMANAK_TEST_SLOW_FORK_RPC_READ_TIMEOUT_SECONDS",
+        os.environ.get("ALMANAK_TEST_POLYGON_RPC_READ_TIMEOUT_SECONDS", "60"),
+    )
 )
+TEST_SLOW_FORK_WEB3_REQUEST_TIMEOUT = (
+    TEST_RPC_CONNECT_TIMEOUT_SECONDS,
+    TEST_SLOW_FORK_RPC_READ_TIMEOUT_SECONDS,
+)
+# Chains whose Anvil fork needs the bumped read timeout above.
+TEST_SLOW_FORK_CHAINS = frozenset({"polygon", "arbitrum", "mantle"})
+
+# Back-compat aliases — polygon/conftest.py imports these names directly.
+TEST_POLYGON_RPC_READ_TIMEOUT_SECONDS = TEST_SLOW_FORK_RPC_READ_TIMEOUT_SECONDS
+TEST_POLYGON_WEB3_REQUEST_TIMEOUT = TEST_SLOW_FORK_WEB3_REQUEST_TIMEOUT
+
+
+def web3_request_timeout(chain_name: str) -> tuple[float, float]:
+    """Return the (connect, read) HTTP timeout for a chain's intent-test web3.
+
+    Slow-fork chains (``TEST_SLOW_FORK_CHAINS``) get the bumped 60s read timeout so
+    the first eth_call / evm_revert after a cold RPC-proxy cache (the weekly fork
+    roll) can complete instead of timing out; every other chain keeps the
+    aggressive 30s default that surfaces a stalled fork quickly.
+    """
+    if chain_name in TEST_SLOW_FORK_CHAINS:
+        return TEST_SLOW_FORK_WEB3_REQUEST_TIMEOUT
+    return TEST_WEB3_REQUEST_TIMEOUT
 
 # Retry config for Anvil RPC calls during wallet funding.
 # Only applies to setup-time RPC calls (anvil_setBalance, anvil_setStorageAt, evm_mine),
@@ -748,6 +778,10 @@ __all__ = [
     "TEST_WEB3_REQUEST_TIMEOUT",
     "TEST_POLYGON_RPC_READ_TIMEOUT_SECONDS",
     "TEST_POLYGON_WEB3_REQUEST_TIMEOUT",
+    "TEST_SLOW_FORK_RPC_READ_TIMEOUT_SECONDS",
+    "TEST_SLOW_FORK_WEB3_REQUEST_TIMEOUT",
+    "TEST_SLOW_FORK_CHAINS",
+    "web3_request_timeout",
     "TEST_CAST_TIMEOUT_SECONDS",
     "TEST_TX_TIMEOUT_SECONDS",
     "TEST_SUBMITTER_MAX_RETRIES",
