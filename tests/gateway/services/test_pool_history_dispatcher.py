@@ -90,8 +90,11 @@ def test_dispatcher_propagates_coingecko_api_key_to_pool_history_provider():
     assert provider._headers["x-cg-pro-api-key"] == "test-key"
 
 
-def test_dispatcher_without_coingecko_api_key_has_no_auth_header():
+def test_dispatcher_without_coingecko_api_key_has_no_auth_header(monkeypatch):
     """An omitted CoinGecko key never sends a bogus auth header."""
+    monkeypatch.delenv("ALMANAK_GATEWAY_COINGECKO_API_KEY", raising=False)
+    monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
+
     dispatcher = PoolHistoryDispatcher(
         thegraph_api_key=None,
         thegraph_monthly_budget_max=100000,
