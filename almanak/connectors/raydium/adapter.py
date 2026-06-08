@@ -34,7 +34,7 @@ from solders.hash import Hash
 from solders.message import MessageV0
 from solders.transaction import VersionedTransaction
 
-from almanak.connectors.jupiter.adapter import SolanaTransactionData
+from almanak.framework.execution.solana.types import SolanaTransactionData
 from almanak.framework.intents.vocabulary import IntentType, LPCloseIntent, LPOpenIntent
 from almanak.framework.models.reproduction_bundle import ActionBundle
 

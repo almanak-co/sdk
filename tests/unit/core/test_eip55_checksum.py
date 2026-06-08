@@ -119,6 +119,13 @@ def test_all_production_addresses_are_eip55():
         "connectors/pendle/sdk.py",
         "connectors/lifi/adapter.py",
         "connectors/spark/receipt_parser.py",
+        # Connector-owned CL pool-reader specs: known_pools tuple keys hold
+        # lowercase token addresses matched against the lowercased query in
+        # framework/data/pools/reader.py (relocated out of data/pools/reader.py).
+        # Pool-address values in these files are checksummed; only the keys are lowercase.
+        "connectors/aerodrome/pool_reader.py",
+        "connectors/uniswap_v3/pool_reader.py",
+        "connectors/pancakeswap_v3/pool_reader.py",
         "execution/enso_state_provider.py",
         "execution/signer/safe/constants.py",
         "permissions/generator.py",

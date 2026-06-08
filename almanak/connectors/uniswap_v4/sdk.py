@@ -27,12 +27,12 @@ Example:
 """
 
 import logging
-import math
 import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from almanak.connectors._strategy_base import concentrated_liquidity_math as cl_math
 from almanak.connectors._strategy_base.rpc import eth_call, eth_call_hex
 
 from .addresses import UNISWAP_V4
@@ -47,12 +47,10 @@ logger = logging.getLogger(__name__)
 # Constants
 # =============================================================================
 
-Q96 = 2**96
-Q128 = 2**128
-
-# Tick bounds (same as V3)
-MIN_TICK = -887272
-MAX_TICK = 887272
+Q96 = cl_math.Q96
+Q128 = cl_math.Q128
+MIN_TICK = cl_math.MIN_TICK
+MAX_TICK = cl_math.MAX_TICK
 
 # sqrtPriceX96 bounds for swap price limits (from PoolManager)
 # zeroForOne swaps require sqrtPriceLimitX96 >= MIN_SQRT_PRICE + 1
@@ -1212,9 +1210,7 @@ class UniswapV4SDK:
 
         Uses Decimal arithmetic to avoid float overflow at extreme ticks.
         """
-        raw_price = Decimal("1.0001") ** tick
-        decimal_adjustment = Decimal(10 ** (decimals0 - decimals1))
-        return raw_price * decimal_adjustment
+        return cl_math.tick_to_price(tick, decimals0=decimals0, decimals1=decimals1)
 
     @staticmethod
     def price_to_tick(price: Decimal, decimals0: int = 18, decimals1: int = 18) -> int:
@@ -1222,11 +1218,7 @@ class UniswapV4SDK:
 
         Uses math.log for the inverse computation. Safe for typical price ranges.
         """
-        decimal_adjustment = Decimal(10 ** (decimals0 - decimals1))
-        adjusted_price = price / decimal_adjustment
-        if adjusted_price <= 0:
-            raise ValueError("Price must be positive")
-        return int(math.log(float(adjusted_price)) / math.log(1.0001))
+        return cl_math.price_to_tick(price, decimals0=decimals0, decimals1=decimals1)
 
 
 # =============================================================================

@@ -28,12 +28,23 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from almanak.connectors.uniswap_v3.pool_validation import V3_GET_POOL_SELECTOR as GET_POOL_SELECTOR
+from almanak.connectors._strategy_base.concentrated_liquidity_math import Q96
+from almanak.connectors._strategy_base.v3_pool_abi import (
+    V3_FEE_SELECTOR,
+    V3_GET_POOL_SELECTOR,
+    V3_LIQUIDITY_SELECTOR,
+    V3_SLOT0_SELECTOR,
+    V3_TOKEN0_SELECTOR,
+    V3_TOKEN1_SELECTOR,
+    encode_get_pool,
+)
+from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
 from almanak.framework.data.exceptions import DataUnavailableError
 from almanak.framework.data.models import (
     DataClassification,
@@ -47,137 +58,25 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# Uniswap V3 slot0() function selector
-SLOT0_SELECTOR = "0x3850c7bd"
+SLOT0_SELECTOR = V3_SLOT0_SELECTOR
+LIQUIDITY_SELECTOR = V3_LIQUIDITY_SELECTOR
+TOKEN0_SELECTOR = V3_TOKEN0_SELECTOR
+TOKEN1_SELECTOR = V3_TOKEN1_SELECTOR
+FEE_SELECTOR = V3_FEE_SELECTOR
+GET_POOL_SELECTOR = V3_GET_POOL_SELECTOR
 
-# Uniswap V3 liquidity() function selector
-LIQUIDITY_SELECTOR = "0x1a686502"
+_UNISWAP_POOL_READER_SPEC = POOL_READER_REGISTRY.require("uniswap_v3")
+_AERODROME_POOL_READER_SPEC = POOL_READER_REGISTRY.require("aerodrome")
+_PANCAKESWAP_POOL_READER_SPEC = POOL_READER_REGISTRY.require("pancakeswap_v3")
 
-# Uniswap V3 token0() / token1() / fee() selectors
-TOKEN0_SELECTOR = "0x0dfe1681"
-TOKEN1_SELECTOR = "0xd21220a7"
-FEE_SELECTOR = "0xddca3f43"
-
-# Q96 = 2**96 for sqrtPriceX96 decoding
-Q96 = 2**96
-
-# Uniswap V3 factory addresses per chain (same on most chains)
-UNISWAP_V3_FACTORY: dict[str, str] = {
-    "ethereum": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
-    "arbitrum": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
-    "optimism": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
-    "polygon": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
-    "base": "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
-}
-
-# Uniswap V3 pool init code hash for CREATE2 address computation
-POOL_INIT_CODE_HASH = "0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54"
-
-# getPool(address,address,uint24) selector on factory. The canonical literal is
-# owned by the Uniswap V3 connector (it owns the V3 factory ABI); re-exported
-# here (see top-of-module import) so the historical ``reader.GET_POOL_SELECTOR``
-# import path keeps working.
-
-# Well-known Uniswap V3 pool addresses for fast lookup
-# Format: {chain: {(token_a_lower, token_b_lower, fee_tier): pool_address}}
-_KNOWN_POOLS: dict[str, dict[tuple[str, str, int], str]] = {
-    "ethereum": {
-        # USDC/WETH 0.05%
-        (
-            "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-            "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-            500,
-        ): "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
-        # USDC/WETH 0.3%
-        (
-            "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-            "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-            3000,
-        ): "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8",
-    },
-    "arbitrum": {
-        # WETH/USDC 0.05% (keys sorted: 0x82af < 0xaf88)
-        (
-            "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
-            "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
-            500,
-        ): "0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
-        # WETH/USDC 0.3%
-        (
-            "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
-            "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
-            3000,
-        ): "0xc473e2aEE3441BF9240Be85eb122aBB059A3B57c",
-    },
-    "base": {
-        # WETH/USDC 0.05% (keys sorted: 0x4200 < 0x8335)
-        (
-            "0x4200000000000000000000000000000000000006",
-            "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
-            500,
-        ): "0xd0b53D9277642d899DF5C87A3966A349A798F224",
-    },
-}
-
-# ---------------------------------------------------------------------------
-# Aerodrome CL factory addresses and known pools (Base only)
-# ---------------------------------------------------------------------------
-
-AERODROME_CL_FACTORY: dict[str, str] = {
-    "base": "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A",
-}
-
-_AERODROME_KNOWN_POOLS: dict[str, dict[tuple[str, str, int], str]] = {
-    "base": {
-        # USDC/WETH tick spacing 1 (0.01%)
-        (
-            "0x4200000000000000000000000000000000000006",
-            "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
-            100,
-        ): "0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59",
-        # USDC/WETH tick spacing 100 (1%)
-        (
-            "0x4200000000000000000000000000000000000006",
-            "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
-            200,
-        ): "0x6cDcb1C4A4D1C3C6d054b27AC5B77e89eAFb971d",
-    },
-}
-
-# ---------------------------------------------------------------------------
-# PancakeSwap V3 factory addresses and known pools
-# ---------------------------------------------------------------------------
-
-PANCAKESWAP_V3_FACTORY: dict[str, str] = {
-    "ethereum": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
-    "arbitrum": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
-    "base": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
-    "bsc": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
-}
-
-_PANCAKESWAP_KNOWN_POOLS: dict[str, dict[tuple[str, str, int], str]] = {
-    "arbitrum": {
-        # USDC/WETH 0.05%
-        (
-            "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
-            "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
-            500,
-        ): "0xd9E2A1A61B6e61b275ceC326465D417E52c1A621",
-    },
-    "ethereum": {
-        # USDC/WETH 0.05% — verified on-chain via PancakeSwap V3 factory
-        # getPool(USDC, WETH, 500). The previous entry
-        # (0x6CA298D2983aB03Aa1dA7679389D955A4eFEE15C) was a WETH/USDT pool
-        # (token0=WETH, token1=USDT) — a wrong-pair address that corrupted the
-        # LWAP aggregate for WETH/USDC (VIB-4924; caught in Ethereum mainnet
-        # re-validation). The gateway pair filter now also guards against this.
-        (
-            "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-            "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-            500,
-        ): "0x1ac1A8FEaAEa1900C4166dEeed0C11cC10669D36",
-    },
-}
+# Historical module-level aliases are preserved for tests and callers that
+# imported them directly. The data is connector-owned and manifest-loaded.
+UNISWAP_V3_FACTORY = _UNISWAP_POOL_READER_SPEC.factory_addresses
+_KNOWN_POOLS = _UNISWAP_POOL_READER_SPEC.known_pools
+AERODROME_CL_FACTORY = _AERODROME_POOL_READER_SPEC.factory_addresses
+_AERODROME_KNOWN_POOLS = _AERODROME_POOL_READER_SPEC.known_pools
+PANCAKESWAP_V3_FACTORY = _PANCAKESWAP_POOL_READER_SPEC.factory_addresses
+_PANCAKESWAP_KNOWN_POOLS = _PANCAKESWAP_POOL_READER_SPEC.known_pools
 
 # RpcCallFn type: (chain, to_address, calldata_hex) -> bytes
 # This abstracts over gateway RPC vs direct Web3 calls.
@@ -328,8 +227,8 @@ class UniswapV3PoolPriceReader:
     """
 
     # Protocol-specific config — overridden by subclasses
-    _factory_addresses: dict[str, str] = UNISWAP_V3_FACTORY
-    _known_pools: dict[str, dict[tuple[str, str, int], str]] = _KNOWN_POOLS
+    _factory_addresses: Mapping[str, str] = UNISWAP_V3_FACTORY
+    _known_pools: Mapping[str, Mapping[tuple[str, str, int], str]] = _KNOWN_POOLS
     protocol_name: str = "uniswap_v3"
     _get_pool_selector: str = GET_POOL_SELECTOR
 
@@ -522,13 +421,7 @@ class UniswapV3PoolPriceReader:
             return None
 
         try:
-            # getPool(address,address,uint24) -> address
-            # Encode: selector + address_a (padded) + address_b (padded) + fee (padded)
-            calldata = self._get_pool_selector
-            calldata += sorted_a.replace("0x", "").zfill(64)
-            calldata += sorted_b.replace("0x", "").zfill(64)
-            calldata += hex(fee_tier)[2:].zfill(64)
-
+            calldata = encode_get_pool(self._get_pool_selector, sorted_a, sorted_b, fee_tier)
             result = self._rpc_call(chain_lower, factory, calldata)
             pool_addr = decode_address(result)
 
@@ -707,8 +600,8 @@ class AerodromePoolReader(UniswapV3PoolPriceReader):
         source_name: Source identifier for DataMeta (default "alchemy_rpc").
     """
 
-    _factory_addresses: dict[str, str] = AERODROME_CL_FACTORY
-    _known_pools: dict[str, dict[tuple[str, str, int], str]] = _AERODROME_KNOWN_POOLS
+    _factory_addresses: Mapping[str, str] = AERODROME_CL_FACTORY
+    _known_pools: Mapping[str, Mapping[tuple[str, str, int], str]] = _AERODROME_KNOWN_POOLS
     protocol_name: str = "aerodrome"
     _get_pool_selector: str = "0x28af8d0b"  # int24 (tick_spacing), not v3 uint24 (fee_tier)
 
@@ -731,8 +624,8 @@ class PancakeSwapV3PoolReader(UniswapV3PoolPriceReader):
         source_name: Source identifier for DataMeta (default "alchemy_rpc").
     """
 
-    _factory_addresses: dict[str, str] = PANCAKESWAP_V3_FACTORY
-    _known_pools: dict[str, dict[tuple[str, str, int], str]] = _PANCAKESWAP_KNOWN_POOLS
+    _factory_addresses: Mapping[str, str] = PANCAKESWAP_V3_FACTORY
+    _known_pools: Mapping[str, Mapping[tuple[str, str, int], str]] = _PANCAKESWAP_KNOWN_POOLS
     protocol_name: str = "pancakeswap_v3"
 
 

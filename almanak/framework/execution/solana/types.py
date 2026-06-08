@@ -64,6 +64,38 @@ class SolanaTransaction:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class SolanaTransactionData:
+    """Serialized Solana transaction data for ActionBundle transactions.
+
+    Attributes:
+        serialized_transaction: Base64-encoded VersionedTransaction.
+        chain_family: Always "SOLANA".
+        tx_type: Type of transaction (e.g. "swap").
+        description: Human-readable description.
+        last_valid_block_height: Block height after which tx expires.
+        priority_fee_lamports: Priority fee included.
+    """
+
+    serialized_transaction: str
+    chain_family: str = "SOLANA"
+    tx_type: str = "swap"
+    description: str = ""
+    last_valid_block_height: int = 0
+    priority_fee_lamports: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for ActionBundle.transactions."""
+        return {
+            "serialized_transaction": self.serialized_transaction,
+            "chain_family": self.chain_family,
+            "tx_type": self.tx_type,
+            "description": self.description,
+            "last_valid_block_height": self.last_valid_block_height,
+            "priority_fee_lamports": self.priority_fee_lamports,
+        }
+
+
 @dataclass(frozen=True)
 class SignedSolanaTransaction:
     """A signed Solana transaction ready for submission.

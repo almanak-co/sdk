@@ -118,6 +118,7 @@ class Connector:
     swap_route_inference: ImportRef | None = None
     teardown_post_condition: ImportRef | None = None
     deferred_refresh: ImportRef | None = None
+    pool_reader: ImportRef | None = None
     swap_quote_connector: ImportRef | None = None
     accounting_treatment: ImportRef | None = None
     accounting_report: ImportRef | None = None
@@ -169,6 +170,7 @@ class Connector:
         self._validate_swap_route_inference()
         self._validate_teardown_post_condition()
         self._validate_deferred_refresh()
+        self._validate_pool_reader()
         self._validate_swap_quote_connector()
         self._validate_accounting_treatment()
         self._validate_accounting_report()
@@ -350,6 +352,11 @@ class Connector:
         """Validate the strategy-side deferred-refresh provider import reference."""
         if self.deferred_refresh is not None and not isinstance(self.deferred_refresh, ImportRef):
             raise ValueError(f"Connector.deferred_refresh must be None or an ImportRef, got {self.deferred_refresh!r}")
+
+    def _validate_pool_reader(self) -> None:
+        """Validate the strategy-side pool reader spec import reference."""
+        if self.pool_reader is not None and not isinstance(self.pool_reader, ImportRef):
+            raise ValueError(f"Connector.pool_reader must be None or an ImportRef, got {self.pool_reader!r}")
 
     def _validate_swap_quote_connector(self) -> None:
         """Validate the strategy-side swap quote provider import reference."""
@@ -703,6 +710,10 @@ class ConnectorRegistry:
     def with_deferred_refresh(self) -> tuple[Connector, ...]:
         """Return connectors that publish deferred transaction refresh providers."""
         return tuple(d for d in self.all() if d.deferred_refresh is not None)
+
+    def with_pool_reader(self) -> tuple[Connector, ...]:
+        """Return connectors that publish pool reader specs."""
+        return tuple(d for d in self.all() if d.pool_reader is not None)
 
     def with_swap_quote(self) -> tuple[Connector, ...]:
         """Return connectors that publish swap quote providers."""

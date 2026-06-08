@@ -35,7 +35,6 @@ Example:
 
 import hashlib
 import logging
-import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -43,6 +42,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
+
+from almanak.connectors._strategy_base import concentrated_liquidity_math as cl_math
 
 from .addresses import UNISWAP_V3
 
@@ -53,15 +54,12 @@ logger = logging.getLogger(__name__)
 # Constants
 # =============================================================================
 
-# Uniswap V3 constants
-Q96 = 2**96
-Q128 = 2**128
-MAX_UINT128 = 2**128 - 1
-MAX_UINT256 = 2**256 - 1
-
-# Tick bounds
-MIN_TICK = -887272
-MAX_TICK = 887272
+Q96 = cl_math.Q96
+Q128 = cl_math.Q128
+MAX_UINT128 = cl_math.MAX_UINT128
+MAX_UINT256 = cl_math.MAX_UINT256
+MIN_TICK = cl_math.MIN_TICK
+MAX_TICK = cl_math.MAX_TICK
 
 # Tick spacing per fee tier
 TICK_SPACING: dict[int, int] = {
@@ -329,13 +327,10 @@ def tick_to_sqrt_price_x96(tick: int) -> int:
     Raises:
         InvalidTickError: If tick is out of bounds
     """
-    if tick < MIN_TICK or tick > MAX_TICK:
-        raise InvalidTickError(tick, f"Must be between {MIN_TICK} and {MAX_TICK}")
-
-    # Calculate sqrt(1.0001^tick)
-    # Using math.pow for precision at moderate tick values
-    sqrt_ratio = math.pow(1.0001, tick / 2)
-    return int(sqrt_ratio * Q96)
+    try:
+        return cl_math.tick_to_sqrt_price_x96(tick)
+    except ValueError as exc:
+        raise InvalidTickError(tick, f"Must be between {MIN_TICK} and {MAX_TICK}") from exc
 
 
 def sqrt_price_x96_to_tick(sqrt_price_x96: int) -> int:
@@ -350,16 +345,7 @@ def sqrt_price_x96_to_tick(sqrt_price_x96: int) -> int:
     Raises:
         ValueError: If sqrt_price_x96 is invalid
     """
-    if sqrt_price_x96 <= 0:
-        raise ValueError("sqrt_price_x96 must be positive")
-
-    # Convert back: tick = 2 * log_1.0001(sqrt_price_x96 / 2^96)
-    ratio = sqrt_price_x96 / Q96
-    if ratio <= 0:
-        raise ValueError("Invalid sqrt price ratio")
-
-    tick = math.floor(math.log(ratio, math.sqrt(1.0001)))
-    return max(MIN_TICK, min(MAX_TICK, tick))
+    return cl_math.sqrt_price_x96_to_tick(sqrt_price_x96)
 
 
 def tick_to_price(tick: int, decimals0: int = 18, decimals1: int = 18) -> Decimal:
@@ -373,9 +359,7 @@ def tick_to_price(tick: int, decimals0: int = 18, decimals1: int = 18) -> Decima
     Returns:
         Price of token0 in terms of token1 (adjusted for decimals)
     """
-    raw_price = Decimal(str(1.0001**tick))
-    decimal_adjustment = Decimal(10 ** (decimals0 - decimals1))
-    return raw_price * decimal_adjustment
+    return cl_math.tick_to_price(tick, decimals0=decimals0, decimals1=decimals1)
 
 
 def price_to_tick(
@@ -393,18 +377,7 @@ def price_to_tick(
     Returns:
         Tick value (may not be on a valid tick spacing boundary)
     """
-    if price <= 0:
-        return MIN_TICK
-
-    # Adjust for decimals
-    decimal_adjustment = 10 ** (decimals0 - decimals1)
-    adjusted_price = float(price) / decimal_adjustment
-
-    if adjusted_price <= 0:
-        return MIN_TICK
-
-    tick = math.floor(math.log(adjusted_price, 1.0001))
-    return max(MIN_TICK, min(MAX_TICK, tick))
+    return cl_math.price_to_tick(price, decimals0=decimals0, decimals1=decimals1, non_positive="min_tick")
 
 
 def sqrt_price_x96_to_price(sqrt_price_x96: int) -> Decimal:
@@ -416,10 +389,7 @@ def sqrt_price_x96_to_price(sqrt_price_x96: int) -> Decimal:
     Returns:
         Price as Decimal
     """
-    if sqrt_price_x96 <= 0:
-        return Decimal("0")
-    ratio = Decimal(str(sqrt_price_x96)) / Decimal(str(Q96))
-    return ratio * ratio
+    return cl_math.sqrt_price_x96_to_price(sqrt_price_x96)
 
 
 def price_to_sqrt_price_x96(price: Decimal | float) -> int:
@@ -431,10 +401,7 @@ def price_to_sqrt_price_x96(price: Decimal | float) -> int:
     Returns:
         Sqrt price in Q64.96 format
     """
-    if price <= 0:
-        return 0
-    sqrt_price = math.sqrt(float(price))
-    return int(sqrt_price * Q96)
+    return cl_math.price_to_sqrt_price_x96(price)
 
 
 def get_nearest_tick(tick: int, fee: int) -> int:
@@ -450,17 +417,10 @@ def get_nearest_tick(tick: int, fee: int) -> int:
     Raises:
         InvalidFeeError: If fee is not a valid tier
     """
-    if fee not in TICK_SPACING:
-        raise InvalidFeeError(fee)
-
-    tick_spacing = TICK_SPACING[fee]
-    rounded = round(tick / tick_spacing) * tick_spacing
-
-    # Clamp to valid range
-    min_tick = get_min_tick(fee)
-    max_tick = get_max_tick(fee)
-
-    return max(min_tick, min(max_tick, rounded))
+    try:
+        return cl_math.get_nearest_tick(tick, fee, TICK_SPACING)
+    except ValueError as exc:
+        raise InvalidFeeError(fee) from exc
 
 
 def get_min_tick(fee: int) -> int:
@@ -475,12 +435,10 @@ def get_min_tick(fee: int) -> int:
     Raises:
         InvalidFeeError: If fee is not a valid tier
     """
-    if fee not in TICK_SPACING:
-        raise InvalidFeeError(fee)
-
-    tick_spacing = TICK_SPACING[fee]
-    # Round towards zero (ceiling for negative)
-    return -(-MIN_TICK // tick_spacing) * tick_spacing
+    try:
+        return cl_math.get_min_tick(fee, TICK_SPACING)
+    except ValueError as exc:
+        raise InvalidFeeError(fee) from exc
 
 
 def get_max_tick(fee: int) -> int:
@@ -495,11 +453,10 @@ def get_max_tick(fee: int) -> int:
     Raises:
         InvalidFeeError: If fee is not a valid tier
     """
-    if fee not in TICK_SPACING:
-        raise InvalidFeeError(fee)
-
-    tick_spacing = TICK_SPACING[fee]
-    return (MAX_TICK // tick_spacing) * tick_spacing
+    try:
+        return cl_math.get_max_tick(fee, TICK_SPACING)
+    except ValueError as exc:
+        raise InvalidFeeError(fee) from exc
 
 
 # =============================================================================

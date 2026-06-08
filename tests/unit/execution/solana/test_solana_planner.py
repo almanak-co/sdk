@@ -15,6 +15,10 @@ import solders.system_program as sp
 
 from almanak.framework.execution.solana.planner import SolanaExecutionPlanner
 from almanak.framework.execution.solana.rpc import TransactionReceipt
+from almanak.framework.execution.solana.route_refresh import (
+    SolanaRouteRefreshRequest,
+    SolanaRouteRefreshResult,
+)
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
 
@@ -35,6 +39,19 @@ def _make_unsigned_tx_b64(keypair: Keypair) -> str:
     msg = MessageV0.try_compile(keypair.pubkey(), [ix], [], SolHash.default())
     unsigned_tx = VersionedTransaction.populate(msg, [Signature.default()])
     return base64.b64encode(bytes(unsigned_tx)).decode()
+
+
+class _FakeRouteRefresher:
+    def __init__(self, result=None, error: Exception | None = None):
+        self.result = result or {}
+        self.error = error
+        self.requests: list[SolanaRouteRefreshRequest] = []
+
+    def refresh_route(self, request: SolanaRouteRefreshRequest) -> SolanaRouteRefreshResult:
+        self.requests.append(request)
+        if self.error is not None:
+            raise self.error
+        return SolanaRouteRefreshResult.from_mapping(self.result)
 
 
 # ---------------------------------------------------------------------------
@@ -302,22 +319,19 @@ class TestMultiSignerPassthrough:
 
 
 # ---------------------------------------------------------------------------
-# Deferred swap (Jupiter route refresh) tests
+# Deferred swap route refresh tests
 # ---------------------------------------------------------------------------
 
 
 class TestDeferredSwap:
     @pytest.mark.asyncio
     async def test_deferred_swap_refreshes_route(self, planner, deferred_bundle, mock_receipt, keypair):
-        """Deferred swap should call Jupiter to refresh the route."""
+        """Deferred swap should use the injected route refresher."""
         fresh_tx_b64 = _make_unsigned_tx_b64(keypair)
+        fake_refresher = _FakeRouteRefresher({"serialized_transaction": fresh_tx_b64})
+        planner._route_refresher = fake_refresher
 
         with (
-            patch.object(
-                planner,
-                "_refresh_jupiter_route",
-                return_value={"serialized_transaction": fresh_tx_b64},
-            ) as mock_refresh,
             patch.object(planner._rpc, "send_transaction", new_callable=AsyncMock) as mock_send,
             patch.object(planner._rpc, "confirm_and_get_receipt", new_callable=AsyncMock) as mock_confirm,
         ):
@@ -326,23 +340,49 @@ class TestDeferredSwap:
 
             outcome = await planner.execute_actions([deferred_bundle])
 
-        mock_refresh.assert_called_once()
+        assert len(fake_refresher.requests) == 1
+        assert fake_refresher.requests[0].protocol == "jupiter"
+        assert fake_refresher.requests[0].wallet_address == planner.wallet_address
         assert outcome.success is True
 
     @pytest.mark.asyncio
-    async def test_deferred_swap_fails_hard_on_refresh_error(
-        self, planner, deferred_bundle, mock_receipt
-    ):
-        """If Jupiter refresh fails, should fail hard (not submit stale tx)."""
-        with patch.object(
-            planner,
-            "_refresh_jupiter_route",
-            side_effect=Exception("Jupiter API error"),
-        ):
+    async def test_deferred_swap_fails_without_route_refresher(self, planner, deferred_bundle):
+        """Deferred swaps fail clearly when no refresher is configured."""
+        outcome = await planner.execute_actions([deferred_bundle])
+
+        assert outcome.success is False
+        assert "No Solana route refresher configured" in outcome.error
+
+    @pytest.mark.asyncio
+    async def test_deferred_swap_fails_hard_on_refresh_error(self, planner, deferred_bundle):
+        """Refresh errors fail hard and do not submit stale transactions."""
+        planner._route_refresher = _FakeRouteRefresher(error=Exception("Jupiter API error"))
+        with patch.object(planner._rpc, "send_transaction", new_callable=AsyncMock) as mock_send:
             outcome = await planner.execute_actions([deferred_bundle])
 
-        # Should fail — no stale transaction fallback
         assert outcome.success is False
+        assert "Jupiter API error" in outcome.error
+        mock_send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_deferred_swap_rejects_slippage_degradation(self, planner, deferred_bundle, keypair):
+        """Fresh routes that degrade beyond tolerance fail before submission."""
+        fresh_tx_b64 = _make_unsigned_tx_b64(keypair)
+        deferred_bundle.metadata["amount_out"] = "100000"
+        fake_refresher = _FakeRouteRefresher(
+            {
+                "serialized_transaction": fresh_tx_b64,
+                "amount_out": "99000",
+            }
+        )
+        planner._route_refresher = fake_refresher
+
+        with patch.object(planner._rpc, "send_transaction", new_callable=AsyncMock) as mock_send:
+            outcome = await planner.execute_actions([deferred_bundle])
+
+        assert outcome.success is False
+        assert "slippage too high" in outcome.error
+        mock_send.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

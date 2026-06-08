@@ -25,6 +25,11 @@ from almanak.connectors._strategy_base.pool_validation_base import (
     decode_address,
     eth_call,
 )
+from almanak.connectors._strategy_base.v3_pool_abi import (
+    V3_GET_POOL_SELECTOR,
+    V3_SLOT0_SELECTOR,
+    encode_v3_get_pool,
+)
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
@@ -35,19 +40,10 @@ __all__ = [
     "validate_v3_pool",
 ]
 
-# getPool(address,address,uint24) selector on the V3 factory.
-V3_GET_POOL_SELECTOR = "0x1698ee82"
-
-# slot0() selector on a Uniswap V3-compatible pool.
-_SLOT0_SELECTOR = "0x3850c7bd"
-
 
 def _encode_get_pool_v3(token_a: str, token_b: str, fee: int) -> str:
     """Encode getPool(address,address,uint24) calldata for V3 factories."""
-    a = token_a.lower().replace("0x", "").zfill(64)
-    b = token_b.lower().replace("0x", "").zfill(64)
-    f = hex(fee)[2:].zfill(64)
-    return V3_GET_POOL_SELECTOR + a + b + f
+    return encode_v3_get_pool(token_a, token_b, fee)
 
 
 def validate_v3_pool(
@@ -148,7 +144,7 @@ def fetch_v3_pool_sqrt_price_x96(
     Returns:
         (sqrtPriceX96, current_tick) as (int, int), or None on any failure.
     """
-    raw = eth_call(rpc_url or "", pool_address, _SLOT0_SELECTOR, chain=chain, gateway_client=gateway_client)
+    raw = eth_call(rpc_url or "", pool_address, V3_SLOT0_SELECTOR, chain=chain, gateway_client=gateway_client)
     if raw is None or len(raw) < 64:
         return None
     sqrt_price_x96 = int.from_bytes(raw[:32], "big")

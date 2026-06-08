@@ -24,9 +24,14 @@ from typing import ClassVar
 from almanak.connectors._base.gateway_capabilities import (
     GatewayMarketLookupCapability,
     GatewayPriceIdCapability,
+    GatewaySolanaRouteRefreshCapability,
 )
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
+from almanak.framework.execution.solana.route_refresh import (
+    SolanaRouteRefreshRequest,
+    SolanaRouteRefreshResult,
+)
 
 from .token_lookup import get_jupiter_lookup
 
@@ -35,6 +40,7 @@ class JupiterGatewayConnector(
     GatewayConnector,
     GatewayMarketLookupCapability,
     GatewayPriceIdCapability,
+    GatewaySolanaRouteRefreshCapability,
 ):
     """Gateway-side connector for Jupiter."""
 
@@ -52,6 +58,19 @@ class JupiterGatewayConnector(
     def dexscreener_ids(self) -> dict[str, dict[str, str]]:
         """JUP on-chain address for DexScreener Solana lookups."""
         return {"solana": {"JUP": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"}}
+
+    def refresh_solana_route(self, request: SolanaRouteRefreshRequest) -> SolanaRouteRefreshResult:
+        """Refresh a stale Jupiter swap transaction immediately before signing."""
+        from almanak.connectors.jupiter.adapter import JupiterAdapter
+        from almanak.connectors.jupiter.client import JupiterConfig
+
+        config = JupiterConfig(wallet_address=request.wallet_address)
+        adapter = JupiterAdapter(
+            config=config,
+            allow_placeholder_prices=True,
+            rpc_url=request.rpc_url,
+        )
+        return SolanaRouteRefreshResult.from_mapping(adapter.get_fresh_swap_transaction(request.metadata))
 
 
 __all__ = ["JupiterGatewayConnector"]

@@ -38,6 +38,8 @@ dispatch tables with registry queries by adding:
   Dexscreener IDs for its protocol token(s).
 * ``GatewayDexQuoteCapability`` — DEX connector publishes a quote
   function + supported chains.
+* ``GatewaySolanaRouteRefreshCapability`` — Solana route connector refreshes
+  stale serialized transactions immediately before gateway-side signing.
 
 Strategy-side code MUST NOT import this module.
 """
@@ -88,6 +90,13 @@ class GatewayMarketLookupCapability(Protocol):
     """
 
     def market_lookup(self) -> Any: ...
+
+
+@runtime_checkable
+class GatewaySolanaRouteRefreshCapability(Protocol):
+    """Connector refreshes stale Solana route transactions at execution time."""
+
+    def refresh_solana_route(self, request: Any) -> Any: ...
 
 
 class PoolKeyCacheError(Exception):

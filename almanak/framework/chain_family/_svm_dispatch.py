@@ -2,10 +2,9 @@
 
 VIB-4803. Owns the protocol-level routing for SWAP / LP_OPEN / LP_CLOSE
 intents on Solana chains. The actual per-protocol compilation lives in
-``almanak.connectors.jupiter.compiler`` (Jupiter swap) and in
-the per-protocol connector compilers (Meteora, Orca,
-Raydium) — this module is the seam between :class:`SvmFamily.compile_intent`
-and those compilers.
+per-protocol connector compilers registered through
+:data:`CompilerRegistry`. This module is the routing boundary between
+:class:`SvmFamily.compile_intent` and those compilers.
 
 Post-#2416: Solana LP compile bodies were moved into per-connector
 compilers (``connectors/meteora/compiler.py`` etc.) and dispatched through
@@ -25,7 +24,7 @@ Why this lives next to :class:`SvmFamily` and not inside ``compiler.py``:
     The whole point of VIB-4803 is to make adding a hypothetical ``MoveFamily``
     "a single new class + adapter, no edits elsewhere" (ticket acceptance). The
     dispatch table for "which adapter compiles a SWAP on family X" should
-    therefore live with the family adapter — not buried in ``IntentCompiler``.
+    therefore live with the family adapter, not buried in ``IntentCompiler``.
 """
 
 from __future__ import annotations
@@ -86,14 +85,14 @@ def _dispatch_lp_via_connector(
 
     Mirrors ``IntentCompiler._resolve_lp_protocol`` + connector-registry
     dispatch from the post-#2416 framework path, but kept in the SVM family
-    seam so the family adapter owns the (chain, protocol) decision matrix.
+    boundary so the family adapter owns the (chain, protocol) decision matrix.
 
     * On Solana chains, normalise ``protocol=None`` to the default
       (``raydium_clmm``), reject non-Solana LP protocols with the canonical
       ``"Protocol 'X' is not supported for {intent_label} on Solana"`` error,
       then dispatch to the connector compiler.
     * On non-Solana chains (entered only when ``intent.protocol`` is
-      Solana-only), dispatch to the connector compiler — the connector
+      Solana-only), dispatch to the connector compiler - the connector
       enforces ``chain in {"solana"}`` itself and emits the explicit
       "<Protocol> is only supported on Solana" error.
     """

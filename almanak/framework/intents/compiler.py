@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import grpc
 
 from almanak.config.cli_runtime import anvil_port_for_chain
+from almanak.connectors._strategy_base import concentrated_liquidity_math as cl_math
 from almanak.connectors._strategy_base.base.compiler import (
     BaseCompilerContext,
     BaseConcentratedLiquidityCompiler,
@@ -2790,8 +2791,8 @@ class IntentCompiler:
         return (token0, token1, fee_tier, tokens_swapped)
 
     # Uniswap V3 tick bounds
-    UNISWAP_MIN_TICK = -887272
-    UNISWAP_MAX_TICK = 887272
+    UNISWAP_MIN_TICK = cl_math.MIN_TICK
+    UNISWAP_MAX_TICK = cl_math.MAX_TICK
 
     @staticmethod
     def _price_to_tick(
@@ -2826,39 +2827,7 @@ class IntentCompiler:
         Raises:
             ValueError: If price is zero or negative.
         """
-        from decimal import Decimal as _Decimal
-        from decimal import localcontext
-
-        if price <= 0:
-            raise ValueError("Price must be positive")
-
-        price_dec = price if isinstance(price, _Decimal) else _Decimal(str(price))
-
-        # 50 digits exceeds any realistic Uniswap V3 price magnitude (|tick| <= 887272,
-        # price range >250 orders of magnitude) so floor(ln / ln(1.0001)) is invariant
-        # under further precision increases.
-        with localcontext() as ctx:
-            ctx.prec = 50
-
-            decimal_diff = token0_decimals - token1_decimals
-            if decimal_diff >= 0:
-                adjusted_price = price_dec / (_Decimal(10) ** decimal_diff)
-            else:
-                adjusted_price = price_dec * (_Decimal(10) ** (-decimal_diff))
-
-            if adjusted_price <= 0:
-                return IntentCompiler.UNISWAP_MIN_TICK
-
-            ratio = adjusted_price.ln() / _Decimal("1.0001").ln()
-
-            # Decimal.__floor__ truncates toward negative infinity — matches math.floor semantics.
-            import math
-
-            tick = math.floor(ratio)
-
-        tick = max(tick, IntentCompiler.UNISWAP_MIN_TICK)
-        tick = min(tick, IntentCompiler.UNISWAP_MAX_TICK)
-        return tick
+        return cl_math.price_to_tick(price, decimals0=token0_decimals, decimals1=token1_decimals)
 
     @staticmethod
     def _tick_to_price(tick: int) -> Decimal:
@@ -2870,7 +2839,7 @@ class IntentCompiler:
         Returns:
             The price (1.0001^tick)
         """
-        return Decimal(str(1.0001**tick))
+        return cl_math.tick_to_price(tick)
 
     @staticmethod
     def _get_tick_spacing(fee_tier: int) -> int:

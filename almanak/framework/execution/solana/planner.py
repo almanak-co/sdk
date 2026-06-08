@@ -1,7 +1,7 @@
 """SolanaExecutionPlanner — ChainExecutionStrategy for Solana.
 
 Handles the full Solana transaction lifecycle:
-1. Refresh deferred swap routes (Jupiter) for fresh blockhash
+1. Refresh deferred route transactions for fresh blockhash
 2. Sign with Ed25519 keypair via SolanaSigner
 3. Submit via JSON-RPC
 4. Confirm and parse receipts
@@ -10,12 +10,18 @@ Handles the full Solana transaction lifecycle:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from decimal import Decimal
 from typing import Any
 
 from almanak.framework.execution.chain_strategy import ChainExecutionStrategy
 from almanak.framework.execution.outcome import ExecutionOutcome
+from almanak.framework.execution.solana.route_refresh import (
+    SolanaRouteRefresher,
+    SolanaRouteRefreshRequest,
+    SolanaRouteRefreshResult,
+)
 from almanak.framework.execution.solana.rpc import (
     SolanaRpcClient,
     SolanaRpcConfig,
@@ -44,7 +50,7 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
     """Solana execution strategy.
 
     Implements ChainExecutionStrategy for signing and submitting Solana
-    transactions. Designed for Jupiter swap transactions that arrive as
+    transactions. Designed for Solana transactions that arrive as
     base64-encoded VersionedTransactions in ActionBundles.
 
     Args:
@@ -66,12 +72,14 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
         commitment: str = "confirmed",
         priority_fee_ceiling_lamports: int = DEFAULT_PRIORITY_FEE_CEILING_LAMPORTS,
         cu_buffer_multiplier: float = DEFAULT_CU_BUFFER_MULTIPLIER,
+        route_refresher: SolanaRouteRefresher | None = None,
     ):
         self.wallet_address = wallet_address
         self.rpc_url = rpc_url
         self.commitment = commitment
         self.priority_fee_ceiling_lamports = priority_fee_ceiling_lamports
         self.cu_buffer_multiplier = cu_buffer_multiplier
+        self._route_refresher = route_refresher
 
         # Initialize RPC client
         self._rpc = (
@@ -99,7 +107,7 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
     ) -> ExecutionOutcome:
         """Execute Solana actions from compiled ActionBundles.
 
-        Handles Jupiter swap bundles with the deferred_swap pattern:
+        Handles Solana bundles with the deferred_swap pattern:
         1. For each ActionBundle, refresh the route if deferred_swap=True
         2. Sign each transaction with Ed25519
         3. Submit to Solana RPC
@@ -151,14 +159,14 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
                 blockhash_refreshed = False
                 if metadata.get("deferred_swap"):
                     try:
-                        fresh_tx = self._refresh_jupiter_route(metadata)
+                        fresh_tx = await asyncio.to_thread(self._refresh_deferred_route, metadata)
                         fresh_serialized = fresh_tx.get("serialized_transaction")
                         if not fresh_serialized:
                             return ExecutionOutcome(
                                 success=False,
                                 chain_family="SOLANA",
                                 tx_ids=all_signatures,
-                                error="Jupiter route refresh returned no serialized_transaction",
+                                error="Solana route refresh returned no serialized_transaction",
                             )
 
                         # Validate slippage: reject if fresh out_amount degraded
@@ -180,7 +188,7 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
                                             chain_family="SOLANA",
                                             tx_ids=all_signatures,
                                             error=(
-                                                f"Jupiter route refresh slippage too high: "
+                                                f"Solana route refresh slippage too high: "
                                                 f"original_out={original_out_int}, fresh_out={fresh_out_int}, "
                                                 f"degradation={slippage_ratio:.4%} exceeds tolerance={slippage_tolerance:.4%}"
                                             ),
@@ -191,7 +199,7 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
                         serialized_tx = fresh_serialized
                         blockhash_refreshed = True
                         logger.info(
-                            f"Refreshed Jupiter route for fresh blockhash "
+                            f"Refreshed Solana route for fresh blockhash "
                             f"(original_out={original_out}, fresh_out={fresh_out})"
                         )
                     except Exception as e:
@@ -199,7 +207,7 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
                             success=False,
                             chain_family="SOLANA",
                             tx_ids=all_signatures,
-                            error=f"Jupiter route refresh failed: {e}",
+                            error=f"Solana route refresh failed: {e}",
                         )
 
                 # Step 1b: For non-deferred transactions (e.g. Raydium LP), replace
@@ -426,28 +434,31 @@ class SolanaExecutionPlanner(ChainExecutionStrategy):
     # Internal helpers
     # =========================================================================
 
-    def _refresh_jupiter_route(self, metadata: dict[str, Any]) -> dict[str, Any]:
-        """Refresh a deferred Jupiter swap route for a fresh transaction.
-
-        Calls Jupiter API to get a fresh quote + serialized transaction
-        with a fresh blockhash. This is critical because Jupiter routes
-        expire within ~60 seconds.
+    def _refresh_deferred_route(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        """Refresh a deferred Solana route for a fresh transaction.
 
         Args:
-            metadata: ActionBundle metadata with route_params.
+            metadata: ActionBundle metadata with protocol-specific route params.
 
         Returns:
             Fresh transaction data dict with serialized_transaction.
         """
-        from almanak.connectors.jupiter.adapter import JupiterAdapter
-        from almanak.connectors.jupiter.client import JupiterConfig
+        if self._route_refresher is None:
+            protocol = metadata.get("protocol", "")
+            raise ValueError(f"No Solana route refresher configured for deferred protocol '{protocol}'")
 
-        config = JupiterConfig(wallet_address=self.wallet_address)
-        adapter = JupiterAdapter(
-            config=config,
-            allow_placeholder_prices=True,
+        request = SolanaRouteRefreshRequest(
+            protocol=str(metadata.get("protocol", "")),
+            metadata=metadata,
+            wallet_address=self.wallet_address,
+            rpc_url=self.rpc_url,
         )
-        return adapter.get_fresh_swap_transaction(metadata)
+        result = self._route_refresher.refresh_route(request)
+        if isinstance(result, SolanaRouteRefreshResult):
+            return result.to_transaction_dict()
+        if isinstance(result, dict):
+            return SolanaRouteRefreshResult.from_mapping(result).to_transaction_dict()
+        raise TypeError(f"Solana route refresher returned unsupported result {type(result).__qualname__}")
 
     async def _replace_blockhash(self, serialized_tx_base64: str) -> str:
         """Replace the blockhash in a serialized transaction with a fresh one.

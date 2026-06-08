@@ -28,7 +28,7 @@ import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from almanak.connectors.jupiter.adapter import SolanaTransactionData
+from almanak.framework.execution.solana.types import SolanaTransactionData
 from almanak.framework.intents.vocabulary import (
     BorrowIntent,
     IntentType,

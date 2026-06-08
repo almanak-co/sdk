@@ -17,6 +17,11 @@ import pydantic
 
 from almanak.core.chains import ChainRegistry
 from almanak.core.enums import ChainFamily
+from almanak.framework.execution.solana.route_refresh import (
+    SolanaRouteRefresher,
+    SolanaRouteRefreshRequest,
+    SolanaRouteRefreshResult,
+)
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.validation import (
@@ -47,6 +52,38 @@ PRICE_SENSITIVE_INTENT_TYPES = frozenset(
 )
 
 
+class _GatewaySolanaRouteRefresher:
+    """Gateway-side Solana route refresher backed by connector capabilities."""
+
+    def __init__(self) -> None:
+        from almanak.connectors._base.gateway_capabilities import GatewaySolanaRouteRefreshCapability
+        from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+
+        providers = GATEWAY_REGISTRY.capability_providers(GatewaySolanaRouteRefreshCapability)  # type: ignore[type-abstract]
+        self._providers: dict[str, Any] = {}
+        for provider in providers:
+            # ``provider.protocol`` is declared on the base ``GatewayConnector``; the capability
+            # Protocol intentionally only contributes ``refresh_solana_route``. Normalize the key
+            # so dispatch is case/whitespace-insensitive (mirrors the pool-reader registry).
+            self._providers[str(provider.protocol).strip().lower()] = provider  # type: ignore[attr-defined]
+
+    def refresh_route(self, request: SolanaRouteRefreshRequest) -> SolanaRouteRefreshResult:
+        """Refresh a Solana route through the connector that owns it."""
+        provider = self._providers.get(request.protocol.strip().lower())
+        if provider is None:
+            available = ", ".join(sorted(self._providers)) or "none"
+            raise ValueError(
+                f"No gateway Solana route refresh capability registered for protocol {request.protocol!r}. "
+                f"Available: {available}"
+            )
+        result = provider.refresh_solana_route(request)
+        if isinstance(result, SolanaRouteRefreshResult):
+            return result
+        if isinstance(result, dict):
+            return SolanaRouteRefreshResult.from_mapping(result)
+        raise TypeError(f"Solana route refresh provider returned unsupported result {type(result).__qualname__}")
+
+
 class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
     """Implements ExecutionService gRPC interface.
 
@@ -71,6 +108,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         self._compiler_cache: dict[str, tuple[object, float]] = {}
         self._compiler_locks: dict[str, asyncio.Lock] = {}
         self._solana_rpc_cache: dict[str, object] = {}
+        self._solana_route_refresher: SolanaRouteRefresher | None = None
         self._initialized = False
         self.wallet_registry: Any = None
         self.market_servicer: object | None = None  # Set by GatewayServer after creation
@@ -79,6 +117,12 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         # Chains for which we have already logged a public-RPC-fallback ERROR,
         # so the alert fires once per chain per gateway lifetime, not per request.
         self._public_rpc_warned_chains: set[str] = set()
+
+    def _get_solana_route_refresher(self) -> SolanaRouteRefresher:
+        """Return the gateway connector-backed Solana route refresher."""
+        if self._solana_route_refresher is None:
+            self._solana_route_refresher = _GatewaySolanaRouteRefresher()
+        return self._solana_route_refresher
 
     async def _fetch_prices_for_tokens(self, tokens: list[str]) -> dict[str, Decimal]:
         """Fetch prices from the gateway's own market service for the given tokens.
@@ -455,6 +499,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             wallet_address=wallet_address,
             rpc_url=rpc_url,
             private_key=private_key,
+            route_refresher=self._get_solana_route_refresher(),
         )
 
         self._orchestrator_cache[cache_key] = planner

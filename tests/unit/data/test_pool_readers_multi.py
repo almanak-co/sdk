@@ -13,6 +13,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.connectors._strategy_base.v3_pool_abi import V3_GET_POOL_SELECTOR
+from almanak.connectors._strategy_pool_reader_registry import POOL_READER_REGISTRY
 from almanak.framework.data.exceptions import DataUnavailableError
 from almanak.framework.data.models import DataClassification, DataEnvelope
 from almanak.framework.data.pools.reader import (
@@ -21,6 +23,7 @@ from almanak.framework.data.pools.reader import (
     _PANCAKESWAP_KNOWN_POOLS,
     AERODROME_CL_FACTORY,
     FEE_SELECTOR,
+    GET_POOL_SELECTOR,
     LIQUIDITY_SELECTOR,
     PANCAKESWAP_V3_FACTORY,
     SLOT0_SELECTOR,
@@ -607,3 +610,33 @@ class TestProtocolIsolation:
         addr = reader.resolve_pool_address(WETH_BASE, USDC_BASE, "base", fee_tier=100)
         # Not in Uniswap known pools
         assert addr is None
+
+
+# ---------------------------------------------------------------------------
+# Test connector-owned pool reader specs
+# ---------------------------------------------------------------------------
+
+
+class TestManifestPoolReaderSpecs:
+    """Verify framework pool readers are backed by connector manifest specs."""
+
+    def test_uniswap_spec_feeds_reader_aliases(self):
+        spec = POOL_READER_REGISTRY.require("uniswap_v3")
+        assert spec.factory_addresses is UNISWAP_V3_FACTORY
+        assert spec.known_pools is _KNOWN_POOLS
+        assert spec.get_pool_selector == V3_GET_POOL_SELECTOR
+        assert GET_POOL_SELECTOR == V3_GET_POOL_SELECTOR
+
+    def test_aerodrome_alias_resolves_to_same_spec(self):
+        spec = POOL_READER_REGISTRY.require("aerodrome")
+        alias = POOL_READER_REGISTRY.require("aerodrome_slipstream")
+        assert alias is spec
+        assert spec.factory_addresses is AERODROME_CL_FACTORY
+        assert spec.known_pools is _AERODROME_KNOWN_POOLS
+        assert spec.get_pool_selector == "0x28af8d0b"
+
+    def test_pancakeswap_spec_feeds_reader_aliases(self):
+        spec = POOL_READER_REGISTRY.require("pancakeswap_v3")
+        assert spec.factory_addresses is PANCAKESWAP_V3_FACTORY
+        assert spec.known_pools is _PANCAKESWAP_KNOWN_POOLS
+        assert spec.get_pool_selector == V3_GET_POOL_SELECTOR

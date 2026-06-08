@@ -10,8 +10,10 @@ Verifies:
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from solders.keypair import Keypair
 
 from almanak.gateway.proto import gateway_pb2
+from almanak.framework.execution.solana.route_refresh import SolanaRouteRefreshRequest
 
 
 def _make_settings(**overrides):
@@ -263,3 +265,55 @@ class TestSolanaTxStatusMapping:
 
         assert result.status == "unknown"
         assert "RPC timeout" in result.error
+
+
+class TestSolanaRouteRefreshInjection:
+    """Gateway Solana execution injects connector-discovered route refresh."""
+
+    def test_gateway_refresher_dispatches_to_capability_provider(self):
+        from almanak.gateway.services.execution_service import _GatewaySolanaRouteRefresher
+
+        class FakeProvider:
+            protocol = "jupiter"
+
+            def __init__(self):
+                self.requests: list[SolanaRouteRefreshRequest] = []
+
+            def refresh_solana_route(self, request):
+                self.requests.append(request)
+                return {"serialized_transaction": "fresh-tx"}
+
+        provider = FakeProvider()
+        with patch(
+            "almanak.connectors._gateway_registry.GATEWAY_REGISTRY.capability_providers",
+            return_value=[provider],
+        ):
+            refresher = _GatewaySolanaRouteRefresher()
+
+        request = SolanaRouteRefreshRequest(
+            protocol="jupiter",
+            metadata={"protocol": "jupiter"},
+            wallet_address="wallet",
+            rpc_url="http://localhost:8899",
+        )
+        result = refresher.refresh_route(request)
+
+        assert result.serialized_transaction == "fresh-tx"
+        assert provider.requests == [request]
+
+    @pytest.mark.asyncio
+    async def test_solana_planner_receives_gateway_route_refresher(self):
+        from almanak.gateway.services.execution_service import ExecutionServiceServicer
+
+        keypair = Keypair()
+        settings = _make_settings(solana_private_key=str(keypair))
+        service = ExecutionServiceServicer(settings)
+        fake_refresher = MagicMock()
+
+        with (
+            patch.object(service, "_get_solana_route_refresher", return_value=fake_refresher),
+            patch("almanak.gateway.utils.get_rpc_url", return_value="http://localhost:8899"),
+        ):
+            planner = await service._get_solana_planner("solana", str(keypair.pubkey()))
+
+        assert planner._route_refresher is fake_refresher

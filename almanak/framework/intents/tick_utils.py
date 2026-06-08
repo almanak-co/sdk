@@ -28,18 +28,18 @@ Example::
 import logging
 from decimal import Decimal
 
+from almanak.connectors._strategy_base.concentrated_liquidity_math import (
+    MAX_TICK,
+    MIN_TICK,
+)
+from almanak.connectors._strategy_base.concentrated_liquidity_math import (
+    price_to_tick as _price_to_tick,
+)
+from almanak.connectors._strategy_base.concentrated_liquidity_math import (
+    tick_to_price as _tick_to_price,
+)
+
 logger = logging.getLogger(__name__)
-
-
-# Lazy-loaded reference to ``almanak.connectors.uniswap_v3.sdk``.
-# Importing the uniswap_v3 connector at module level pulls in the connector's
-# receipt parser, which transitively loads ``framework.execution.orchestrator``
-# and ``framework.strategies.base``, defeating the lazy-init memory work in
-# the gateway sidecar. Each call site grabs the symbol it needs on demand.
-def _uniswap_sdk():
-    from almanak.connectors.uniswap_v3 import sdk as _sdk
-
-    return _sdk
 
 
 def price_to_tick(
@@ -65,9 +65,10 @@ def price_to_tick(
     Raises:
         ValueError: If *price* is zero or negative.
     """
-    if price <= 0:
-        raise ValueError(f"price must be positive, got {price}")
-    return _uniswap_sdk().price_to_tick(price, decimals0=decimals0, decimals1=decimals1)
+    try:
+        return _price_to_tick(price, decimals0=decimals0, decimals1=decimals1)
+    except ValueError as exc:
+        raise ValueError(f"price must be positive, got {price}") from exc
 
 
 def tick_to_price(
@@ -85,7 +86,7 @@ def tick_to_price(
     Returns:
         Price of token0 in terms of token1.
     """
-    return _uniswap_sdk().tick_to_price(tick, decimals0=decimals0, decimals1=decimals1)
+    return _tick_to_price(tick, decimals0=decimals0, decimals1=decimals1)
 
 
 _TICK_SPACINGS: dict[int, int] = {
@@ -151,7 +152,7 @@ def get_min_tick(fee_tier: int) -> int:
         Minimum valid tick aligned to the fee tier's tick spacing
     """
     spacing = get_tick_spacing(fee_tier)
-    return -(-_uniswap_sdk().MIN_TICK // spacing) * spacing
+    return -(-MIN_TICK // spacing) * spacing
 
 
 def get_max_tick(fee_tier: int) -> int:
@@ -164,7 +165,7 @@ def get_max_tick(fee_tier: int) -> int:
         Maximum valid tick aligned to the fee tier's tick spacing
     """
     spacing = get_tick_spacing(fee_tier)
-    return (_uniswap_sdk().MAX_TICK // spacing) * spacing
+    return (MAX_TICK // spacing) * spacing
 
 
 __all__ = [
