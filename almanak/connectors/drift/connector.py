@@ -7,10 +7,19 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
+from almanak.connectors.drift.constants import DRIFT_PROGRAM_ID
 
 CONNECTOR = Connector(
     name="drift",
     kind=ProtocolKind.PERP,
+    solana_programs=(
+        SolanaProgramSpec(
+            protocol="drift",
+            program_id=DRIFT_PROGRAM_ID,
+            notes="Drift V2 perpetual futures (Anchor program).",
+        ),
+    ),
     receipt_parser_connector=ImportRef(
         module="almanak.connectors.drift.receipt_parser_provider",
         attribute="DriftReceiptParserConnector",

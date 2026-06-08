@@ -72,6 +72,7 @@ from almanak.connectors._strategy_base.registry import ConnectorRegistry as Stra
 from almanak.connectors._strategy_base.runner_hook_registry import (
     RunnerHookConnector,
 )
+from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 from almanak.connectors._strategy_base.swap_classification_registry import (
     SwapClassificationSpec,
 )
@@ -706,6 +707,15 @@ EXPECTED_ADDRESS_TABLE_PROTOCOLS = {
     "uniswap_v4": ("uniswap_v4",),
 }
 
+EXPECTED_SOLANA_PROGRAM_PROTOCOLS = {
+    "drift": ("drift",),
+    "jupiter": ("jupiter",),
+    "kamino": ("kamino",),
+    "meteora": ("meteora",),
+    "orca": ("metaplex_token_metadata", "orca"),
+    "raydium": ("raydium",),
+}
+
 
 @pytest.fixture(autouse=True)
 def _isolate_strategy_connector_registry() -> Iterator[None]:
@@ -1056,6 +1066,36 @@ def test_connector_rejects_invalid_address_tables_ref() -> None:
             kind=ProtocolKind.LP,
             address_tables=object(),  # type: ignore[arg-type]
         )
+
+
+def test_connector_rejects_invalid_solana_programs_ref() -> None:
+    """Invalid Solana program specs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.solana_programs"):
+        Connector(
+            name="bad_solana_programs_ref",
+            kind=ProtocolKind.LP,
+            solana_programs=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_connector_rejects_duplicate_solana_program_ids() -> None:
+    """A single connector may not declare the same Solana program ID twice."""
+    shared_program_id = "dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH"
+    with pytest.raises(ValueError, match="Connector.solana_programs contains duplicate program IDs"):
+        Connector(
+            name="dup_solana_program_ids",
+            kind=ProtocolKind.LP,
+            solana_programs=(
+                SolanaProgramSpec(protocol="alpha", program_id=shared_program_id),
+                SolanaProgramSpec(protocol="beta", program_id=shared_program_id),
+            ),
+        )
+
+
+def test_solana_program_spec_rejects_whitespace_program_id() -> None:
+    """Base58 program IDs never contain whitespace; a stray newline is a copy-paste error."""
+    with pytest.raises(ValueError, match="must not contain whitespace"):
+        SolanaProgramSpec(protocol="drift", program_id="dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH\n")
 
 
 def test_connector_rejects_invalid_receipt_parser_connector_ref() -> None:
@@ -1677,6 +1717,39 @@ def test_connector_address_tables_are_not_hardcoded_in_address_registry() -> Non
     assert "_ABI_FAMILIES" not in source
     for module in EXPECTED_ADDRESS_TABLE_MODULES.values():
         assert module not in source
+
+
+def test_solana_program_specs_load_from_descriptors() -> None:
+    """Solana validator clone specs are published through connector manifests."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, tuple[str, ...]] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_solana_programs():
+        assert connector_manifest.solana_programs is not None
+        specs = connector_manifest.solana_programs
+
+        assert specs
+        assert all(isinstance(spec, SolanaProgramSpec) for spec in specs)
+        # program_id is required; notes is optional (defaults to "") per the spec contract.
+        assert all(spec.program_id for spec in specs)
+        assert all(isinstance(spec.notes, str) for spec in specs)
+        connectors[connector_manifest.name] = tuple(spec.protocol for spec in specs)
+
+    assert connectors == EXPECTED_SOLANA_PROGRAM_PROTOCOLS
+
+
+def test_solana_program_specs_are_not_hardcoded_in_framework_registry() -> None:
+    """The framework Solana program registry discovers manifests instead of naming connectors."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/framework/anvil/solana_program_registry.py").read_text()
+
+    assert "with_solana_programs()" in source
+    assert "almanak.connectors.drift" not in source
+    assert "almanak.connectors.jupiter" not in source
+    assert "almanak.connectors.kamino" not in source
+    assert "almanak.connectors.meteora" not in source
+    assert "almanak.connectors.orca" not in source
+    assert "almanak.connectors.raydium" not in source
 
 
 def test_contract_monitoring_specs_load_from_descriptors() -> None:

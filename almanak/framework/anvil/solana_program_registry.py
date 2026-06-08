@@ -5,160 +5,102 @@ touch real on-chain protocols (Drift, Orca, Raydium, Meteora, Jupiter,
 Kamino, ...) hit ``ProgramAccountNotFound`` because the protocol programs
 aren't deployed on the local ledger.
 
-This module is the single source of truth for the protocol program IDs
-that ``SolanaForkManager`` clones from mainnet via
-``--clone-upgradeable-program <PROGRAM_ID>`` so every Solana strategy can
-execute against a faithful local fork.
-
-Each entry pulls the program ID from the connector's own ``constants``
-module where possible — connectors already own their program ID for
-runtime instruction building, so re-defining the value here would create
-a maintenance trap. Where a connector relies on a REST API and does not
-itself encode the program ID (Jupiter, Kamino), the program ID is
-recorded here with a provenance comment pointing at the upstream source.
+The program IDs are connector-owned data published from each connector's
+``CONNECTOR.solana_programs`` manifest field. This module composes that
+manifest data into the stable runtime view that ``SolanaForkManager`` clones
+from mainnet via ``--clone-upgradeable-program <PROGRAM_ID>`` so every Solana
+strategy can execute against a faithful local fork.
 
 Why explicit ``--clone-program`` over ``--warp-slot`` (VIB-3753 design call):
 - Deterministic / reproducible: the registry is the only thing that
   changes the validator's program set.
 - Doesn't drag random unrelated programs into the validator state.
-- Aligns with the connector-by-connector model — adding a new Solana
-  connector means appending one row here, mirroring how EVM chain support
-  is added one entry at a time elsewhere in the framework.
+- Aligns with the connector-by-connector model: adding a new Solana
+  connector means adding one manifest spec in that connector folder,
+  mirroring how other connector-owned capabilities are declared.
 
 Adding a new Solana connector
 -----------------------------
-1. Add its program ID constant in ``connectors/<name>/constants.py``.
-2. Append a ``SolanaProgramEntry`` to ``SOLANA_PROTOCOL_PROGRAMS`` below,
-   importing the constant from the connector module.
+1. Add its program ID constant in ``connectors/<name>/constants.py`` when the
+   connector runtime also needs it, or define the verified literal in
+   ``connectors/<name>/connector.py`` for REST-only protocols.
+2. Publish a ``SolanaProgramSpec`` from ``CONNECTOR.solana_programs``.
 3. Run the unit tests (``tests/unit/anvil/test_solana_program_registry.py``).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-# Connector-owned program IDs. Importing the constants module directly
-# avoids triggering each connector's full ``__init__`` (which pulls in the
-# adapter, SDK, and receipt parser). The constants modules themselves do
-# perform light import-time work — env-var lookups for things like
-# ``DRIFT_DATA_API_BASE_URL`` — but no network calls and no expensive
-# initialization.
-from almanak.connectors.drift.constants import DRIFT_PROGRAM_ID
-from almanak.connectors.meteora.constants import DLMM_PROGRAM_ID
-from almanak.connectors.orca.constants import (
-    METADATA_PROGRAM_ID as ORCA_METADATA_PROGRAM_ID,
-)
-from almanak.connectors.orca.constants import WHIRLPOOL_PROGRAM_ID
-from almanak.connectors.raydium.constants import CLMM_PROGRAM_ID
-
-# =============================================================================
-# Program IDs not currently exposed by their connector modules
-# =============================================================================
-#
-# Jupiter and Kamino connectors hit a REST API that returns pre-built
-# ``VersionedTransaction``s, so they have no need for the program ID at
-# instruction-build time. The validator still needs to clone these programs
-# so the resulting transactions can execute on the local fork.
-#
-# Each ID has been verified against ``getAccountInfo`` on
-# ``api.mainnet-beta.solana.com`` — the account exists, is executable, and
-# is owned by ``BPFLoaderUpgradeab1e11111111111111111111111`` (which is
-# what allows ``--clone-upgradeable-program`` to succeed against it).
-#
-# Provenance:
-# - Jupiter v6 Aggregator: https://station.jup.ag/docs/apis/swap-api
-#   (Program ID published on Jupiter docs and Solana Explorer.)
-# - Kamino Lending V2 (KLend): https://docs.kamino.finance/
-#   (Anchor-deployed program; ID matches the program owner of every
-#   reserve account returned by the Kamino REST API.)
-#
-# Note on Jupiter Lend (Earn): the connector uses the REST API at
-# ``https://api.jup.ag/lend`` and the underlying on-chain program ID is
-# not currently published in the connector or this codebase. Tracked as
-# VIB-3784 — once the program ID is captured and verified via
-# ``getAccountInfo`` against ``api.mainnet-beta.solana.com``, append a
-# new ``SolanaProgramEntry`` below in the same pattern as Jupiter v6 / Kamino.
-
-JUPITER_V6_PROGRAM_ID = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
-KAMINO_LENDING_PROGRAM_ID = "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD"
-
-# Metaplex Token Metadata is required by Orca's openPositionWithMetadata
-# instruction (Position NFTs). Re-export the connector's value under the
-# registry's neutral name so the ``__init__`` order in the registry is
-# stable even if Raydium also references it.
-METAPLEX_TOKEN_METADATA_PROGRAM_ID = ORCA_METADATA_PROGRAM_ID
-
+from almanak.connectors._connector import CONNECTOR_REGISTRY
+from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 
 # =============================================================================
 # Registry data model
 # =============================================================================
 
 
-@dataclass(frozen=True)
-class SolanaProgramEntry:
+class SolanaProgramEntry(SolanaProgramSpec):
     """A protocol program that the local validator must clone from mainnet.
 
-    Attributes:
-        protocol: Short protocol name used in logs (``drift``, ``orca``, ...).
-        program_id: Solana program address (base58).
-        upgradeable: When True, clone via ``--clone-upgradeable-program``;
-            when False, clone via ``--clone``. All Anchor / BPFLoaderUpgradeable
-            programs (the vast majority of modern Solana protocols) are
-            upgradeable; some older non-upgradeable BPF programs (e.g. some
-            Metaplex deployments) are not.
-        notes: Optional free-form provenance note shown in debug logs only.
+    Compatibility subclass for the historical framework export. Connector
+    manifests publish ``SolanaProgramSpec``; framework callers keep receiving
+    ``SolanaProgramEntry`` instances from ``SOLANA_PROTOCOL_PROGRAMS``.
     """
 
-    protocol: str
-    program_id: str
-    upgradeable: bool = True
-    notes: str = ""
+
+def _build_solana_protocol_programs() -> tuple[SolanaProgramEntry, ...]:
+    """Compose connector-owned Solana program specs into a stable registry."""
+    entries: list[SolanaProgramEntry] = []
+    protocol_owners: dict[str, str] = {}
+    program_id_owners: dict[str, str] = {}
+
+    for connector_manifest in CONNECTOR_REGISTRY.with_solana_programs():
+        if connector_manifest.solana_programs is None:
+            continue
+        for spec in connector_manifest.solana_programs:
+            protocol_owner = protocol_owners.get(spec.protocol)
+            if protocol_owner is not None:
+                raise ValueError(
+                    f"Solana program protocol {spec.protocol!r} is declared by both "
+                    f"{protocol_owner!r} and {connector_manifest.name!r}"
+                )
+            program_id_owner = program_id_owners.get(spec.program_id)
+            if program_id_owner is not None:
+                raise ValueError(
+                    f"Solana program ID {spec.program_id!r} is declared by both "
+                    f"{program_id_owner!r} and {connector_manifest.name!r}"
+                )
+            protocol_owners[spec.protocol] = connector_manifest.name
+            program_id_owners[spec.program_id] = connector_manifest.name
+            entries.append(
+                SolanaProgramEntry(
+                    protocol=spec.protocol,
+                    program_id=spec.program_id,
+                    upgradeable=spec.upgradeable,
+                    notes=spec.notes,
+                )
+            )
+
+    return tuple(sorted(entries, key=lambda entry: entry.protocol))
 
 
-# =============================================================================
-# The registry
-# =============================================================================
-#
-# Order matters only for log readability — the validator does not care.
-# Keep alphabetical by protocol so diffs are easy to review.
+SOLANA_PROTOCOL_PROGRAMS: tuple[SolanaProgramEntry, ...] = _build_solana_protocol_programs()
 
-SOLANA_PROTOCOL_PROGRAMS: tuple[SolanaProgramEntry, ...] = (
-    SolanaProgramEntry(
-        protocol="drift",
-        program_id=DRIFT_PROGRAM_ID,
-        notes="Drift V2 perpetual futures (Anchor program).",
-    ),
-    SolanaProgramEntry(
-        protocol="jupiter",
-        program_id=JUPITER_V6_PROGRAM_ID,
-        notes="Jupiter v6 aggregator — required for any Jupiter-routed swap.",
-    ),
-    SolanaProgramEntry(
-        protocol="kamino",
-        program_id=KAMINO_LENDING_PROGRAM_ID,
-        notes="Kamino Lending V2 (KLend).",
-    ),
-    SolanaProgramEntry(
-        protocol="metaplex_token_metadata",
-        program_id=METAPLEX_TOKEN_METADATA_PROGRAM_ID,
-        notes="Required by Orca openPositionWithMetadata for LP NFTs.",
-    ),
-    SolanaProgramEntry(
-        protocol="meteora",
-        program_id=DLMM_PROGRAM_ID,
-        notes="Meteora DLMM (discrete-bin liquidity book).",
-    ),
-    SolanaProgramEntry(
-        protocol="orca",
-        program_id=WHIRLPOOL_PROGRAM_ID,
-        notes="Orca Whirlpools concentrated liquidity (CLMM).",
-    ),
-    SolanaProgramEntry(
-        protocol="raydium",
-        program_id=CLMM_PROGRAM_ID,
-        notes="Raydium CLMM concentrated liquidity.",
-    ),
-)
+
+def _required_program_id(protocol: str) -> str:
+    """Return a required program id for backwards-compatible module constants."""
+    program_id = next((entry.program_id for entry in SOLANA_PROTOCOL_PROGRAMS if entry.protocol == protocol), None)
+    if program_id is None:
+        raise ValueError(f"Required Solana program {protocol!r} is not published by any connector manifest")
+    return program_id
+
+
+DRIFT_PROGRAM_ID = _required_program_id("drift")
+DLMM_PROGRAM_ID = _required_program_id("meteora")
+JUPITER_V6_PROGRAM_ID = _required_program_id("jupiter")
+KAMINO_LENDING_PROGRAM_ID = _required_program_id("kamino")
+METAPLEX_TOKEN_METADATA_PROGRAM_ID = _required_program_id("metaplex_token_metadata")
+WHIRLPOOL_PROGRAM_ID = _required_program_id("orca")
+CLMM_PROGRAM_ID = _required_program_id("raydium")
 
 
 def get_protocol_program_ids(*, upgradeable: bool | None = None) -> list[str]:

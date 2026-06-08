@@ -7,11 +7,25 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
+from almanak.connectors.orca.constants import METADATA_PROGRAM_ID, WHIRLPOOL_PROGRAM_ID
 
 CONNECTOR = Connector(
     name="orca",
     kind=ProtocolKind.LP,
     aliases=("orca_whirlpools",),
+    solana_programs=(
+        SolanaProgramSpec(
+            protocol="metaplex_token_metadata",
+            program_id=METADATA_PROGRAM_ID,
+            notes="Required by Orca openPositionWithMetadata for LP NFTs.",
+        ),
+        SolanaProgramSpec(
+            protocol="orca",
+            program_id=WHIRLPOOL_PROGRAM_ID,
+            notes="Orca Whirlpools concentrated liquidity (CLMM).",
+        ),
+    ),
     gateway_connector=ImportRef(
         module="almanak.connectors.orca.gateway.provider",
         attribute="OrcaGatewayConnector",

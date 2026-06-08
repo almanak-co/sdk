@@ -7,11 +7,20 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
+from almanak.connectors.raydium.constants import CLMM_PROGRAM_ID
 
 CONNECTOR = Connector(
     name="raydium",
     kind=ProtocolKind.LP,
     aliases=("raydium_clmm",),
+    solana_programs=(
+        SolanaProgramSpec(
+            protocol="raydium",
+            program_id=CLMM_PROGRAM_ID,
+            notes="Raydium CLMM concentrated liquidity.",
+        ),
+    ),
     gateway_connector=ImportRef(
         module="almanak.connectors.raydium.gateway.provider",
         attribute="RaydiumGatewayConnector",

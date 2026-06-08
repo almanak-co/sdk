@@ -269,3 +269,41 @@ class TestForkManagerWiring:
         # Every upgradeable program in the registry should be in the
         # upgradeable bucket on the command line.
         assert upgradeable_ids.issubset(seen_via_upgradeable)
+
+
+# =============================================================================
+# _build_solana_protocol_programs() — manifest composition guards
+# =============================================================================
+
+
+class TestRegistryBuildValidation:
+    """The composer enforces protocol AND program-ID ownership across connectors."""
+
+    def test_build_rejects_duplicate_program_id_across_connectors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import almanak.framework.anvil.solana_program_registry as registry_module
+        from almanak.connectors._base.types import ProtocolKind
+        from almanak.connectors._connector import Connector
+        from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
+
+        # Two connectors claiming the same program ID under different protocol
+        # names must fail fast — a shared program is cloned once, owned by one.
+        alpha = Connector(
+            name="alpha",
+            kind=ProtocolKind.LP,
+            solana_programs=(SolanaProgramSpec(protocol="alpha", program_id=DRIFT_PROGRAM_ID),),
+        )
+        beta = Connector(
+            name="beta",
+            kind=ProtocolKind.LP,
+            solana_programs=(SolanaProgramSpec(protocol="beta", program_id=DRIFT_PROGRAM_ID),),
+        )
+        monkeypatch.setattr(
+            registry_module.CONNECTOR_REGISTRY,
+            "with_solana_programs",
+            lambda: (alpha, beta),
+        )
+
+        with pytest.raises(ValueError, match=r"Solana program ID .* is declared by both 'alpha' and 'beta'"):
+            registry_module._build_solana_protocol_programs()

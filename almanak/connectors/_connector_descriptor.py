@@ -21,6 +21,7 @@ from typing import Any
 
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
+from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 
 __all__ = [
     "CONNECTOR_REGISTRY",
@@ -103,6 +104,7 @@ class Connector:
     kind: ProtocolKind
     aliases: tuple[str, ...] = field(default_factory=tuple)
     address_tables: tuple[AddressTableSpec, ...] | None = None
+    solana_programs: tuple[SolanaProgramSpec, ...] | None = None
     receipt_parser_protocols: tuple[str, ...] | None = None
     receipt_parser_connector: ImportRef | None = None
     gas_estimate_connector: ImportRef | None = None
@@ -154,6 +156,7 @@ class Connector:
         if self.name in self.aliases:
             raise ValueError(f"Connector.aliases must not include canonical name {self.name!r}")
         self._validate_address_tables()
+        self._validate_solana_programs()
         self._validate_gateway_connectors()
         self._validate_receipt_parser_protocols()
         self._validate_gas_estimate_connector()
@@ -193,6 +196,25 @@ class Connector:
         protocols = [spec.protocol for spec in self.address_tables]
         if len(set(protocols)) != len(protocols):
             raise ValueError(f"Connector.address_tables contains duplicate protocols: {protocols!r}")
+
+    def _validate_solana_programs(self) -> None:
+        """Validate connector-owned Solana program clone specs."""
+        if self.solana_programs is None:
+            return
+        if not isinstance(self.solana_programs, tuple) or not self.solana_programs:
+            raise ValueError(
+                "Connector.solana_programs must be None or a non-empty tuple[SolanaProgramSpec, ...], "
+                f"got {self.solana_programs!r}"
+            )
+        bad_specs = [spec for spec in self.solana_programs if not isinstance(spec, SolanaProgramSpec)]
+        if bad_specs:
+            raise ValueError(f"Connector.solana_programs must contain only SolanaProgramSpec values, got {bad_specs!r}")
+        protocols = [spec.protocol for spec in self.solana_programs]
+        if len(set(protocols)) != len(protocols):
+            raise ValueError(f"Connector.solana_programs contains duplicate protocols: {protocols!r}")
+        program_ids = [spec.program_id for spec in self.solana_programs]
+        if len(set(program_ids)) != len(program_ids):
+            raise ValueError(f"Connector.solana_programs contains duplicate program IDs: {program_ids!r}")
 
     def _validate_gateway_connectors(self) -> None:
         """Validate gateway provider import references and ordering keys."""
@@ -632,6 +654,10 @@ class ConnectorRegistry:
     def with_address_tables(self) -> tuple[Connector, ...]:
         """Return connectors that publish strategy-side address-table specs."""
         return tuple(d for d in self.all() if d.address_tables is not None)
+
+    def with_solana_programs(self) -> tuple[Connector, ...]:
+        """Return connectors that publish local Solana program clone specs."""
+        return tuple(d for d in self.all() if d.solana_programs is not None)
 
     def with_gas_estimate(self) -> tuple[Connector, ...]:
         """Return connectors that publish a gas-estimate connector."""
