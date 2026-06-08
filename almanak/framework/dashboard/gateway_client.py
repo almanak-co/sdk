@@ -8,7 +8,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import grpc
@@ -207,6 +207,9 @@ class CostStackInfo:
     funding_earned_usd: Decimal
     realized_pnl_usd: Decimal
     il_usd: Decimal
+    # VIB-4984: mark-to-market of held directional swap inventory.
+    # None = unmeasured (Empty≠Zero), set presence-aware from the proto.
+    inventory_unrealized_usd: Decimal | None = None
 
 
 @dataclass
@@ -295,6 +298,21 @@ def _safe_decimal(s: str) -> Decimal:
         return Decimal("0")
 
 
+def _safe_optional_decimal(s: str) -> Decimal | None:
+    """Presence-aware proto-string → Decimal (VIB-4984; Empty≠Zero).
+
+    Returns ``None`` for an empty / unparseable proto string (unmeasured),
+    NOT ``Decimal("0")``. Use for optional proto fields where "" carries the
+    "the gateway did not measure this" signal (e.g. inventory_unrealized_usd).
+    """
+    if not s:
+        return None
+    try:
+        return Decimal(s)
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
 def _convert_pnl_summary(proto: gateway_pb2.PnLSummary) -> PnLSummary:
     return PnLSummary(
         deployed_usd=_safe_decimal(proto.deployed_usd),
@@ -328,6 +346,8 @@ def _convert_cost_stack(proto: gateway_pb2.CostStackInfo) -> CostStackInfo:
         funding_earned_usd=_safe_decimal(proto.funding_earned_usd),
         realized_pnl_usd=_safe_decimal(proto.realized_pnl_usd),
         il_usd=_safe_decimal(proto.il_usd),
+        # VIB-4984: presence-aware — "" => None (unmeasured), never Decimal("0").
+        inventory_unrealized_usd=_safe_optional_decimal(proto.inventory_unrealized_usd),
     )
 
 

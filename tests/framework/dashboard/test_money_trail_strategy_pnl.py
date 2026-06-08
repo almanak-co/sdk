@@ -183,6 +183,66 @@ def test_strategy_pnl_is_wallet_independent() -> None:
     assert (clean.nav_usd - clean.deployed_usd) - (contaminated.nav_usd - contaminated.deployed_usd) == D("25")
 
 
+# ── VIB-4984: swap-inventory unrealized folds into Strategy PnL ──────────────
+
+
+def test_strategy_pnl_adds_inventory_unrealized_when_present() -> None:
+    """A net-long swap-inventory mark (mark − cost = −0.0038) folds additively."""
+    p = _pnl(nav_usd=D("110"), available_cash_usd=D("70"), deployed_capital_usd=D("40"))
+    open_nav = p.nav_usd - p.available_cash_usd  # 40 ; unrealized = 0
+    cost = _cost(realized_pnl_usd=D("3"), inventory_unrealized_usd=D("-0.0038"))
+    # realized 3 + unrealized 0 + inventory −0.0038
+    assert _strategy_pnl_usd(p, cost, open_nav) == D("2.9962")
+
+
+def test_strategy_pnl_treats_inventory_none_as_zero() -> None:
+    """None (unmeasured) must not crash and must not overstate — contributes 0."""
+    p = _pnl(nav_usd=D("110"), available_cash_usd=D("70"), deployed_capital_usd=D("40"))
+    open_nav = p.nav_usd - p.available_cash_usd
+    cost = _cost(realized_pnl_usd=D("3"), inventory_unrealized_usd=None)
+    assert _strategy_pnl_usd(p, cost, open_nav) == D("3")
+
+
+def test_inventory_unrealized_does_not_double_count_in_nav_or_open_nav() -> None:
+    """Double-count guard: the inventory mark is already in NAV (via cash), but
+    NAV is not an input to ``_strategy_pnl_usd`` — only ``open_position_nav`` is,
+    and that's ``nav − available_cash`` where the mark cancels (it's in both).
+    Adding the (mark − cost) delta therefore enters PnL exactly ONCE.
+
+    Concretely: a strategy with NO open positions but net-long swap inventory.
+    open_position_nav ~ 0, deployed_capital_usd ~ 0 (genuinely flat), so the
+    realized+unrealized legs are 0; the entire strategy mark-to-market comes
+    from the inventory term — counted once, with no leakage into NAV-derived
+    inputs.
+    """
+    # All inventory is booked as available_cash by the snapshot writer, so
+    # open_position_nav == 0 and deployed_capital_usd == 0.
+    p = _pnl(
+        nav_usd=D("100"),
+        available_cash_usd=D("100"),
+        deployed_capital_usd=D("0"),
+        open_position_count=0,
+    )
+    open_nav = p.nav_usd - p.available_cash_usd
+    assert open_nav == D("0")  # inventory mark cancels out of open_position_nav
+
+    inv = D("5")  # +$5 unrealized on held inventory
+    cost = _cost(realized_pnl_usd=D("0"), inventory_unrealized_usd=inv)
+    pnl_with_inv = _strategy_pnl_usd(p, cost, open_nav)
+    pnl_without_inv = _strategy_pnl_usd(
+        p, _cost(realized_pnl_usd=D("0"), inventory_unrealized_usd=None), open_nav
+    )
+    # The inventory term enters exactly once: the difference is precisely +$5.
+    assert pnl_with_inv is not None and pnl_without_inv is not None
+    assert pnl_with_inv - pnl_without_inv == inv
+    assert pnl_with_inv == inv  # realized 0 + unrealized 0 + inventory 5
+
+    # NAV-derived inputs are untouched by the inventory fold.
+    assert (p.nav_usd - p.available_cash_usd) == open_nav  # open position NAV unchanged
+    assert p.nav_usd == D("100")  # NAV unchanged
+    assert p.available_cash_usd == D("100")  # cash unchanged
+
+
 # ── _strategy_apr_pct ────────────────────────────────────────────────────────
 
 

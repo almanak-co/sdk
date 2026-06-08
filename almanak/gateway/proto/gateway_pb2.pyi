@@ -7485,6 +7485,7 @@ class CostStackInfo(_message.Message):
     FUNDING_EARNED_USD_FIELD_NUMBER: _builtins.int
     REALIZED_PNL_USD_FIELD_NUMBER: _builtins.int
     IL_USD_FIELD_NUMBER: _builtins.int
+    INVENTORY_UNREALIZED_USD_FIELD_NUMBER: _builtins.int
     cost_gas_usd: _builtins.str
     cost_protocol_fees_usd: _builtins.str
     cost_slippage_usd: _builtins.str
@@ -7496,6 +7497,10 @@ class CostStackInfo(_message.Message):
     realized_pnl_usd: _builtins.str
     il_usd: _builtins.str
     """diagnostic only"""
+    inventory_unrealized_usd: _builtins.str
+    """VIB-4984: mark-to-market of held directional swap inventory.
+    Empty string => unmeasured (None client-side), NOT zero (Empty≠Zero).
+    """
     def __init__(
         self,
         *,
@@ -7509,8 +7514,9 @@ class CostStackInfo(_message.Message):
         funding_earned_usd: _builtins.str = ...,
         realized_pnl_usd: _builtins.str = ...,
         il_usd: _builtins.str = ...,
+        inventory_unrealized_usd: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["cost_gas_usd", b"cost_gas_usd", "cost_protocol_fees_usd", b"cost_protocol_fees_usd", "cost_slippage_usd", b"cost_slippage_usd", "fees_earned_usd", b"fees_earned_usd", "funding_earned_usd", b"funding_earned_usd", "funding_paid_usd", b"funding_paid_usd", "il_usd", b"il_usd", "interest_earned_usd", b"interest_earned_usd", "interest_paid_usd", b"interest_paid_usd", "realized_pnl_usd", b"realized_pnl_usd"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["cost_gas_usd", b"cost_gas_usd", "cost_protocol_fees_usd", b"cost_protocol_fees_usd", "cost_slippage_usd", b"cost_slippage_usd", "fees_earned_usd", b"fees_earned_usd", "funding_earned_usd", b"funding_earned_usd", "funding_paid_usd", b"funding_paid_usd", "il_usd", b"il_usd", "interest_earned_usd", b"interest_earned_usd", "interest_paid_usd", b"interest_paid_usd", "inventory_unrealized_usd", b"inventory_unrealized_usd", "realized_pnl_usd", b"realized_pnl_usd"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___CostStackInfo: _TypeAlias = CostStackInfo  # noqa: Y015

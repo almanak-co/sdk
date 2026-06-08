@@ -1955,6 +1955,64 @@ class TestGetCostStack:
             value = getattr(response, field)
             assert value in ("", "0", "0.00") or Decimal(value) == Decimal("0")
 
+    @pytest.mark.asyncio
+    async def test_inventory_unrealized_empty_when_no_inventory(self, dashboard_service, mock_context):
+        """VIB-4984: no open swap inventory → field is "" (None client-side)."""
+        dashboard_service._initialized = True
+        sm = MagicMock()
+        sm.get_portfolio_metrics = AsyncMock(return_value=None)
+        sm.get_snapshots_since = AsyncMock(return_value=[])
+        sm.get_ledger_entries = AsyncMock(return_value=[])
+        sm.get_accounting_events_for_dashboard = AsyncMock(return_value=[])
+        sm.get_latest_snapshot = AsyncMock(return_value=None)
+        dashboard_service._state_manager = sm
+
+        request = gateway_pb2.GetCostStackRequest(deployment_id="test_strategy")
+        response = await dashboard_service.GetCostStack(request, mock_context)
+        assert isinstance(response, gateway_pb2.CostStackInfo)
+        # Empty string => unmeasured (Empty≠Zero), NOT "0".
+        assert response.inventory_unrealized_usd == ""
+
+    @pytest.mark.asyncio
+    async def test_inventory_unrealized_round_trips_held_mark(self, dashboard_service, mock_context):
+        """VIB-4984: a net-long swap inventory lot marks to (mark − cost)."""
+        dashboard_service._initialized = True
+        dep = "test_strategy"
+        swap_event = {
+            "event_type": "SWAP",
+            "deployment_id": dep,
+            "position_key": "swap:arbitrum:0xwallet",
+            "chain": "arbitrum",
+            "wallet_address": "0xwallet",
+            "timestamp": "2026-06-01T00:00:00+00:00",
+            "payload_json": json.dumps(
+                {
+                    "token_in": "USDC",
+                    "amount_in": "2000",
+                    "token_out": "WETH",
+                    "amount_out": "1.0",
+                    "amount_out_usd": "2000",
+                }
+            ),
+        }
+        snapshot = MagicMock()
+        # token_prices in the persisted {chain:address: {price_usd, symbol}} shape.
+        snapshot.token_prices = {"arbitrum:0xweth": {"symbol": "WETH", "price_usd": "2100"}}
+
+        sm = MagicMock()
+        sm.get_portfolio_metrics = AsyncMock(return_value=None)
+        sm.get_snapshots_since = AsyncMock(return_value=[])
+        sm.get_ledger_entries = AsyncMock(return_value=[])
+        sm.get_accounting_events_for_dashboard = AsyncMock(return_value=[swap_event])
+        sm.get_latest_snapshot = AsyncMock(return_value=snapshot)
+        dashboard_service._state_manager = sm
+
+        request = gateway_pb2.GetCostStackRequest(deployment_id=dep)
+        response = await dashboard_service.GetCostStack(request, mock_context)
+        assert isinstance(response, gateway_pb2.CostStackInfo)
+        # 1.0 WETH * 2100 - 2000 = +100
+        assert Decimal(response.inventory_unrealized_usd) == Decimal("100")
+
 
 class TestGetAuditPosture:
     """Smoke tests for GetAuditPosture RPC (VIB-3969)."""

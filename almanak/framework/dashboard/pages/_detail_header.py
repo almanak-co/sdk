@@ -264,9 +264,11 @@ def _maybe_render_beta_banner(p: PnLSummary) -> None:
 _STRATEGY_PNL_HELP = (
     "Strategy-scoped PnL = realized (closed positions + swaps, net of LP fees, "
     "funding, interest and gas — from accounting) + unrealized (open position "
-    "NAV − open cost basis). Excludes idle wallet balances, so unlike the old "
-    "wallet PnL it is NOT moved by gas spend or by another strategy sharing the "
-    "wallet (deployment_id is wallet+chain-scoped)."
+    "NAV − open cost basis) + swap-inventory unrealized (mark-to-market of held "
+    "directional swap inventory, e.g. a net-long token a swap strategy holds in "
+    "the wallet — its FIFO held cost vs current mark). Excludes idle wallet "
+    "balances, so unlike the old wallet PnL it is NOT moved by gas spend or by "
+    "another strategy sharing the wallet (deployment_id is wallet+chain-scoped)."
 )
 _STRATEGY_APR_HELP = (
     "Annualised Strategy PnL ÷ open cost basis × (365 / age_days). "
@@ -318,7 +320,15 @@ def _strategy_pnl_usd(p: PnLSummary, cost: CostStackInfo | None, open_position_n
     if p.deployed_capital_usd <= _COST_BASIS_DUST_USD and open_position_nav > _COST_BASIS_DUST_USD:
         return None
     unrealized = open_position_nav - p.deployed_capital_usd
-    return _net_realized_pnl_usd(cost) + unrealized
+    # VIB-4984: held directional swap inventory (e.g. RSI net-long WETH) is
+    # valued by the snapshot writer as ``available_cash_usd``, so its mark
+    # cancels out of BOTH ``open_position_nav`` (= nav − available_cash) and
+    # ``deployed_capital_usd`` (excludes it) → zero unrealized contribution.
+    # ``cost.inventory_unrealized_usd`` is an additive (mark − cost) DELTA that
+    # recovers it. NAV is NOT an input here, so this cannot double-count (the
+    # mark enters Strategy PnL exactly once). ``None`` (unmeasured) ⇒ 0.
+    inventory_unrealized = cost.inventory_unrealized_usd or Decimal("0")
+    return _net_realized_pnl_usd(cost) + unrealized + inventory_unrealized
 
 
 def _strategy_apr_pct(strategy_pnl: Decimal | None, deployed_capital_usd: Decimal, age_days: int) -> Decimal | None:
@@ -342,6 +352,16 @@ def render_money_trail(p: PnLSummary, cost: CostStackInfo | None = None) -> None
     deployed`` PnL / APR which double-counted idle wallet balances and moved
     whenever gas was spent or another strategy traded the same wallet
     (``deployment_id`` is wallet+chain-scoped). VIB-3969.
+
+    VIB-4984: Strategy PnL also folds in ``cost.inventory_unrealized_usd`` —
+    the mark-to-market of held *directional swap inventory* (e.g. RSI net-long
+    WETH). That inventory is booked as ``available_cash_usd`` by the snapshot
+    writer, so its mark cancels out of both ``open_position_nav`` and
+    ``deployed_capital_usd`` and would otherwise be silently omitted from
+    Strategy PnL (NAV stays correct; only the attribution missed it). The
+    folded term is an additive (mark − FIFO cost) delta, so it enters PnL
+    exactly once. ``None`` means unmeasured and is rendered as "—" on its own
+    sub-line, never "$0.00" (Empty ≠ Zero).
 
     Public renderer — used by the operator-console quant header AND by
     ``render_pnl_section`` (custom-dashboard helper). ``cost`` carries the
@@ -456,6 +476,19 @@ def render_cost_stack(cost: CostStackInfo) -> None:
     row AND by ``render_cost_stack_section`` (custom-dashboard helper).
     VIB-3969.
     """
+    # VIB-4984: held directional swap inventory mark-to-market. None =
+    # unmeasured ⇒ render "—" (Empty ≠ Zero, NOT "$0.00"); a measured value
+    # uses the precise-small formatter (a sub-cent net-long mark is common).
+    inv = cost.inventory_unrealized_usd
+    if inv is None:
+        inv_html = "<span style='color:#888;'>Inventory MTM —</span>"
+    else:
+        inv_color = "#00c853" if inv >= 0 else "#f44336"
+        inv_sign = "+" if inv >= 0 else "−"
+        inv_html = (
+            f"<span style='color:{inv_color};'>Inventory MTM "
+            f"{inv_sign}{format_usd(abs(inv), precise_small=True)}</span>"
+        )
     cost_html = (
         f"<div style='color:#888;font-size:0.85rem;'>Cost stack (LTD)</div>"
         f"<div style='font-size:0.95rem;line-height:1.5;'>"
@@ -465,7 +498,9 @@ def render_cost_stack(cost: CostStackInfo) -> None:
         # precision so a real $0.0023 fee no longer reads as "+$0.00".
         f"<span style='color:#f44336;'>Fees −{format_usd(cost.cost_protocol_fees_usd, precise_small=True)}</span><br>"
         f"<span style='color:#f44336;'>Slip −{format_usd(cost.cost_slippage_usd, precise_small=True)}</span><br>"
-        f"<span style='color:#00c853;'>Earn +{format_usd(cost.fees_earned_usd + cost.interest_earned_usd, precise_small=True)}</span>"
+        f"<span style='color:#00c853;'>Earn +{format_usd(cost.fees_earned_usd + cost.interest_earned_usd, precise_small=True)}</span><br>"
+        # VIB-4984: swap-inventory unrealized as its own line.
+        f"{inv_html}"
         f"</div>"
     )
     # VIB-3926 — life-to-date cost decomposition. Gas is on every tx;

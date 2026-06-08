@@ -2789,6 +2789,9 @@ message CostStackInfo {
   string funding_earned_usd = 8;
   string realized_pnl_usd = 9;
   string il_usd = 10;               // diagnostic only
+  // VIB-4984: mark-to-market of held directional swap inventory.
+  // Empty string => unmeasured (None client-side), NOT zero (Empty≠Zero).
+  string inventory_unrealized_usd = 11;
 }
 
 // AuditPosture — Reconciliation (G6) + audit-trail completeness +

@@ -148,6 +148,11 @@ class CostStack:
     funding_earned_usd: Decimal = Decimal("0")
     realized_pnl_usd: Decimal = Decimal("0")
     il_usd: Decimal = Decimal("0")  # diagnostic (not in net PnL)
+    # VIB-4984: mark-to-market of held directional swap inventory (e.g. RSI
+    # net-long WETH). None = unmeasured (Empty≠Zero), NOT Decimal("0").
+    # Computed separately by compute_inventory_unrealized (needs token prices)
+    # and stamped by the GetCostStack producer — NOT by compute_cost_stack.
+    inventory_unrealized_usd: Decimal | None = None
 
 
 @dataclass
@@ -474,6 +479,124 @@ def compute_cost_stack(
             continue
 
     return stack
+
+
+def _inventory_price_for_token(prices: dict[str, Any], token: str) -> Decimal | None:
+    """Look up a held swap-inventory token's mark price (VIB-4984).
+
+    ``token`` is the FIFO lot's resolved symbol (e.g. ``"WETH"``).
+    ``prices`` is the ``portfolio_snapshots.token_prices`` map. Two shapes
+    are supported (mirrors ``pnl_attributor._price_for_token``):
+
+    - flat ``{symbol: price}`` / ``{"chain:address": price}``
+    - snapshot shape ``{"chain:0xaf88…": {"price_usd": "1.0", "symbol": "USDC"}}``
+
+    Matching is case-insensitive on the symbol field and on the ``chain:``
+    suffix. Returns ``None`` when no mark price is found (degrade — never
+    fetch a live price; gateway boundary).
+    """
+    if not prices or not token:
+        return None
+    needle = str(token).lower()
+    for key, val in prices.items():
+        key_str = str(key).lower()
+        if key_str == needle or key_str.endswith(":" + needle):
+            if isinstance(val, dict):
+                price = val.get("price_usd")
+                parsed = _to_decimal_or_none(price)
+                if parsed is not None:
+                    return parsed
+                continue
+            parsed = _to_decimal_or_none(val)
+            if parsed is not None:
+                return parsed
+        if isinstance(val, dict):
+            symbol = val.get("symbol")
+            if symbol and str(symbol).lower() == needle:
+                parsed = _to_decimal_or_none(val.get("price_usd"))
+                if parsed is not None:
+                    return parsed
+    return None
+
+
+def _to_decimal_or_none(value: Any) -> Decimal | None:
+    """Parse to a finite Decimal or return None (no zero-coercion)."""
+    if value is None:
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def compute_inventory_unrealized(
+    accounting_events: list[dict[str, Any]],
+    deployment_id: str,
+    latest_token_prices: dict[str, Any],
+) -> Decimal | None:
+    """Mark-to-market the held directional swap inventory (VIB-4984).
+
+    A directional swap strategy's net-long ``token_out`` inventory (e.g. RSI
+    net-long WETH) is valued by the snapshot writer as ``available_cash_usd``,
+    so it never enters ``deployed_capital_usd`` and its mark cancels out of the
+    Strategy-PnL ``unrealized = open_position_nav − deployed_capital_usd``
+    term. This function recovers that omitted mark-to-market by replaying the
+    already-persisted SWAP accounting events into ``FIFOBasisStore``, summing
+    ``remaining * mark_price − cost_usd_for_remaining`` over every open swap
+    inventory lot. The result is an ADDITIVE delta (``mark − cost``), so it can
+    only enter Strategy PnL once (the mark is already in NAV via cash, but NAV
+    is not an input to the tile — see ``_detail_header._strategy_pnl_usd``).
+
+    ``latest_token_prices`` is the ``portfolio_snapshots.token_prices`` map.
+    The store-key reconstruction is per-``deployment_id`` so a shared wallet
+    only marks this strategy's own inventory.
+
+    Returns ``None`` (unmeasured — Empty≠Zero) when:
+      - ``deployment_id`` is missing/empty — we cannot scope events to this
+        strategy, and summing a shared wallet's full event stream would leak a
+        co-located strategy's inventory into this tile; fail closed,
+      - there are NO open swap inventory lots,
+      - any held lot has ``cost_usd_for_remaining is None`` (missing basis —
+        do NOT read held inventory as pure profit),
+      - a held token has no mark price in ``latest_token_prices`` (degrade —
+        do NOT fetch a live price; gateway boundary).
+    Otherwise returns the summed Decimal.
+    """
+    from almanak.framework.accounting.basis import FIFOBasisStore
+
+    # Shared-wallet isolation: replay ONLY this deployment's events so a
+    # co-located strategy on the same wallet cannot leak inventory into this
+    # tile. Without a deployment_id we cannot scope, so we FAIL CLOSED
+    # (return None ⇒ tile renders "—") rather than mark over an unscoped,
+    # potentially shared-wallet event stream — cross-strategy contamination
+    # is worse than an unmeasured tile (CodeRabbit, VIB-4984).
+    if not deployment_id:
+        return None
+    scoped_events = [
+        ev for ev in accounting_events if isinstance(ev, dict) and ev.get("deployment_id") == deployment_id
+    ]
+
+    store = FIFOBasisStore()
+    store.reconstruct_from_events(scoped_events)
+
+    total = Decimal("0")
+    saw_lot = False
+    for _position_key, token, remaining, cost_for_remaining in store.iter_open_swap_lots():
+        saw_lot = True
+        if cost_for_remaining is None:
+            # Missing basis — refuse to mark held inventory as pure profit.
+            return None
+        mark = _inventory_price_for_token(latest_token_prices, token)
+        if mark is None:
+            # No persisted mark for this held token — degrade rather than
+            # fetch a live price (gateway boundary).
+            return None
+        total += (remaining * mark) - cost_for_remaining
+
+    if not saw_lot:
+        return None
+    return total
 
 
 def compute_reconciliation(

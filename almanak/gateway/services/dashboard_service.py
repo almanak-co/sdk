@@ -2034,11 +2034,24 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         await self._ensure_initialized()
 
-        from almanak.framework.dashboard.quant_aggregations import compute_cost_stack
+        from almanak.framework.dashboard.quant_aggregations import (
+            compute_cost_stack,
+            compute_inventory_unrealized,
+        )
 
         _, _, ledger_entries, accounting_events, _ = await self._load_quant_inputs(deployment_id)
 
         cs = compute_cost_stack(ledger_entries, accounting_events)
+
+        # VIB-4984: mark-to-market of held directional swap inventory. Pure
+        # computation over the already-loaded accounting_events + the latest
+        # snapshot's persisted token_prices — NO new network egress / live
+        # oracle call (gateway boundary preserved).
+        latest_snapshot = await self._get_latest_snapshot(deployment_id)
+        latest_token_prices = getattr(latest_snapshot, "token_prices", None) or {}
+        cs.inventory_unrealized_usd = compute_inventory_unrealized(
+            accounting_events, deployment_id, latest_token_prices
+        )
 
         return gateway_pb2.CostStackInfo(
             cost_gas_usd=str(cs.gas_usd),
@@ -2051,6 +2064,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             funding_earned_usd=str(cs.funding_earned_usd),
             realized_pnl_usd=str(cs.realized_pnl_usd),
             il_usd=str(cs.il_usd),
+            # Empty string => unmeasured (None); presence-aware on the client
+            # side. Never coerce None → "0" (Empty≠Zero).
+            inventory_unrealized_usd=("" if cs.inventory_unrealized_usd is None else str(cs.inventory_unrealized_usd)),
         )
 
     async def GetAuditPosture(

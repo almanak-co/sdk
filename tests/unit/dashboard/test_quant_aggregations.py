@@ -27,6 +27,7 @@ from almanak.framework.dashboard.quant_aggregations import (
     build_quant_header,
     compute_audit_trail,
     compute_cost_stack,
+    compute_inventory_unrealized,
     compute_pnl_summary,
     compute_reconciliation,
 )
@@ -1097,3 +1098,163 @@ def test_vib3924_hf_ladder_no_debt_neutral():
     h = _hf_header(Decimal("0"))
     assert h.primary_risk_value == "no debt"
     assert h.primary_risk_color == "neutral"
+
+
+# ---------------------------------------------------------------------------
+# VIB-4984: compute_inventory_unrealized — held swap-inventory mark-to-market
+# ---------------------------------------------------------------------------
+
+
+def _swap_event(
+    *,
+    deployment_id: str,
+    chain: str = "arbitrum",
+    wallet: str = "0xwallet",
+    token_in: str,
+    amount_in: str,
+    token_out: str,
+    amount_out: str,
+    amount_out_usd: str,
+    timestamp: str = "2026-06-01T00:00:00+00:00",
+) -> dict:
+    """Build a raw accounting_events SWAP row (the shape FIFOBasisStore replays)."""
+    return {
+        "event_type": "SWAP",
+        "deployment_id": deployment_id,
+        "position_key": f"swap:{chain}:{wallet}",
+        "chain": chain,
+        "wallet_address": wallet,
+        "timestamp": timestamp,
+        "payload_json": json.dumps(
+            {
+                "token_in": token_in,
+                "amount_in": amount_in,
+                "token_out": token_out,
+                "amount_out": amount_out,
+                "amount_out_usd": amount_out_usd,
+            }
+        ),
+    }
+
+
+def _price(chain: str, address: str, symbol: str, price_usd: str) -> dict:
+    """A portfolio_snapshots.token_prices entry: {chain:address: {price_usd, symbol}}."""
+    return {f"{chain}:{address}": {"symbol": symbol, "price_usd": price_usd}}
+
+
+_DEP = "Strat:abc"
+
+
+def test_inventory_unrealized_no_inventory_returns_none():
+    # All acquired inventory disposed (net-flat round-trip leaves no residual).
+    events = [
+        _swap_event(deployment_id=_DEP, token_in="USDC", amount_in="2000", token_out="WETH",
+                    amount_out="1.0", amount_out_usd="2000"),
+        _swap_event(deployment_id=_DEP, token_in="WETH", amount_in="1.0", token_out="USDC",
+                    amount_out="2000", amount_out_usd="2000"),
+    ]
+    prices = _price("arbitrum", "0xweth", "WETH", "2000")
+    assert compute_inventory_unrealized(events, _DEP, prices) is None
+
+
+def test_inventory_unrealized_empty_events_returns_none():
+    assert compute_inventory_unrealized([], _DEP, {}) is None
+
+
+def test_inventory_unrealized_trending_gain_positive():
+    # Net-long 1 WETH at cost 2000; mark 2100 → +100.
+    events = [
+        _swap_event(deployment_id=_DEP, token_in="USDC", amount_in="2000", token_out="WETH",
+                    amount_out="1.0", amount_out_usd="2000"),
+    ]
+    prices = _price("arbitrum", "0xweth", "WETH", "2100")
+    result = compute_inventory_unrealized(events, _DEP, prices)
+    assert result == Decimal("100")
+
+
+def test_inventory_unrealized_live_rsi_trending_loss():
+    # Live RSI shape: net-long ~0.0064 WETH, FIFO cost 11.9105, mark 11.9067.
+    # Acquire 0.0064 WETH for 11.9105 USD; price = 11.9067 / 0.0064.
+    events = [
+        _swap_event(deployment_id=_DEP, token_in="USDC", amount_in="12", token_out="WETH",
+                    amount_out="0.0064", amount_out_usd="11.9105"),
+    ]
+    mark = (Decimal("11.9067") / Decimal("0.0064"))
+    prices = _price("arbitrum", "0xweth", "WETH", str(mark))
+    result = compute_inventory_unrealized(events, _DEP, prices)
+    # 0.0064 * mark - 11.9105 = 11.9067 - 11.9105 = -0.0038
+    assert result is not None
+    assert abs(result - Decimal("-0.0038")) < Decimal("1e-9")
+
+
+def test_inventory_unrealized_multi_token_sums():
+    # Two net-long legs: WETH (+100) and WBTC (-50).
+    events = [
+        _swap_event(deployment_id=_DEP, token_in="USDC", amount_in="2000", token_out="WETH",
+                    amount_out="1.0", amount_out_usd="2000"),
+        _swap_event(deployment_id=_DEP, token_in="USDC", amount_in="1000", token_out="WBTC",
+                    amount_out="0.02", amount_out_usd="1000"),
+    ]
+    prices = {}
+    prices.update(_price("arbitrum", "0xweth", "WETH", "2100"))  # +100
+    prices.update(_price("arbitrum", "0xwbtc", "WBTC", "47500"))  # 0.02*47500=950 -> -50
+    result = compute_inventory_unrealized(events, _DEP, prices)
+    assert result == Decimal("50")  # +100 + (-50)
+
+
+def test_inventory_unrealized_shared_wallet_isolation():
+    # Two deployments trading the same wallet — each marks only its own lots.
+    other = "Other:zzz"
+    events = [
+        _swap_event(deployment_id=_DEP, token_in="USDC", amount_in="2000", token_out="WETH",
+                    amount_out="1.0", amount_out_usd="2000"),
+        _swap_event(deployment_id=other, token_in="USDC", amount_in="9000", token_out="WETH",
+                    amount_out="5.0", amount_out_usd="9000"),
+    ]
+    prices = _price("arbitrum", "0xweth", "WETH", "2100")
+    # _DEP: 1 WETH, cost 2000, mark 2100 → +100 (NOT affected by other's 5 WETH).
+    assert compute_inventory_unrealized(events, _DEP, prices) == Decimal("100")
+
+
+def test_inventory_unrealized_missing_deployment_id_fails_closed():
+    # Without a deployment_id the events cannot be scoped to this strategy;
+    # summing a shared wallet's full stream would leak a co-located strategy's
+    # inventory. Fail closed (None ⇒ "—"), NOT an unscoped sum. (CodeRabbit)
+    other = "Other:zzz"
+    events = [
+        _swap_event(deployment_id=_DEP, token_in="USDC", amount_in="2000", token_out="WETH",
+                    amount_out="1.0", amount_out_usd="2000"),
+        _swap_event(deployment_id=other, token_in="USDC", amount_in="9000", token_out="WETH",
+                    amount_out="5.0", amount_out_usd="9000"),
+    ]
+    prices = _price("arbitrum", "0xweth", "WETH", "2100")
+    assert compute_inventory_unrealized(events, "", prices) is None
+    assert compute_inventory_unrealized(events, None, prices) is None  # type: ignore[arg-type]
+
+
+def test_inventory_unrealized_missing_basis_returns_none():
+    # Held lot has cost_usd=None (amount_out_usd absent) → whole term None.
+    events = [
+        {
+            "event_type": "SWAP",
+            "deployment_id": _DEP,
+            "position_key": "swap:arbitrum:0xwallet",
+            "chain": "arbitrum",
+            "wallet_address": "0xwallet",
+            "timestamp": "2026-06-01T00:00:00+00:00",
+            "payload_json": json.dumps(
+                {"token_in": "USDC", "amount_in": "2000", "token_out": "WETH", "amount_out": "1.0"}
+            ),
+        }
+    ]
+    prices = _price("arbitrum", "0xweth", "WETH", "2100")
+    assert compute_inventory_unrealized(events, _DEP, prices) is None
+
+
+def test_inventory_unrealized_missing_mark_price_returns_none():
+    # Net-long WETH but no mark price in token_prices → degrade (no fetch).
+    events = [
+        _swap_event(deployment_id=_DEP, token_in="USDC", amount_in="2000", token_out="WETH",
+                    amount_out="1.0", amount_out_usd="2000"),
+    ]
+    assert compute_inventory_unrealized(events, _DEP, {}) is None

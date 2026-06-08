@@ -13,7 +13,7 @@ MATCHING_POLICY_VERSION must be bumped any time the matching algorithm changes.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -791,6 +791,77 @@ class FIFOBasisStore:
         if not isinstance(basis, Decimal):
             basis = Decimal(str(basis))
         return size, basis
+
+    def iter_open_swap_lots(self) -> Iterable[tuple[str, str, Decimal, Decimal | None]]:
+        """Yield every open swap-inventory lot for read-only valuation (VIB-4984).
+
+        Yields ``(position_key, token, remaining, cost_usd_for_remaining)`` for
+        each lot with ``remaining > 0`` whose ``position_key`` is ``swap:``-prefixed
+        AND whose ``source == "SWAP"``. Lending (``supply:``), prediction
+        (``<dep>|prediction|...``) and PT keys are excluded — only the directional
+        swap-inventory residual is surfaced.
+
+        NOTE on the source filter: the ``swap:<chain>:<wallet>`` key is a *fungible
+        wallet-basis pool*, so ``_replay_borrow`` / ``_replay_withdraw`` also mint
+        ``swap:``-keyed lots (``source`` = ``"BORROW"`` / ``"WITHDRAW"``) for
+        borrowed/withdrawn tokens that land in the wallet (VIB-3964). Those are
+        genuine wallet inventory, but attributing their mark-to-market to a
+        *swap-inventory* tile would mislabel a looping strategy's transient
+        borrowed-token MTM as swap PnL. VIB-4984 is scoped to directional **swap**
+        inventory, so non-SWAP-sourced lots are excluded here. Whether the
+        dashboard should surface unrealized MTM for the full wallet-basis pool
+        (incl. borrowed-then-held tokens) is deferred to VIB-4997.
+
+        ``cost_usd_for_remaining`` is the lot's stored ``cost_usd`` pro-rated by
+        ``remaining / amount``. It is ``None`` when the lot's ``cost_usd`` is
+        ``None`` (Empty≠Zero — missing basis is unmeasured, NOT zero cost).
+
+        Read-only accessor: does NOT mutate lot state. Callers must not reach into
+        the private ``_lots`` dict (mirrors ``get_prediction_position``).
+
+        The composite store key is ``{deployment_id}:{position_key}:{token}`` and
+        the swap ``position_key`` itself is ``swap:<chain>:<wallet>``. We locate the
+        ``:swap:`` marker to split off the leading ``deployment_id``, then take the
+        final colon-segment as the token; everything between is the ``position_key``.
+        """
+        marker = ":swap:"
+        for composite_key, lots in self._lots.items():
+            idx = composite_key.find(marker)
+            if idx < 0:
+                continue
+            # position_key starts just after the deployment_id + ':' boundary.
+            remainder = composite_key[idx + 1 :]  # "swap:<chain>:<wallet>:<token>"
+            last_colon = remainder.rfind(":")
+            if last_colon <= 0:
+                continue
+            position_key = remainder[:last_colon]
+            token = remainder[last_colon + 1 :]
+            if not position_key.startswith("swap:") or not token:
+                continue
+            for lot in lots:
+                # Scope to directional swap inventory only (VIB-4984). The
+                # swap-keyed pool is fungible across SWAP/BORROW/WITHDRAW
+                # sources (VIB-3964); borrowed/withdrawn-then-held tokens are
+                # excluded here so their MTM is not mislabeled as swap PnL.
+                # Broadening to the full wallet-basis pool → VIB-4997.
+                if lot.get("source") != "SWAP":
+                    continue
+                remaining = lot.get("remaining")
+                if not isinstance(remaining, Decimal):
+                    remaining = _parse_decimal(remaining)
+                if remaining is None or remaining <= 0:
+                    continue
+                amount = lot.get("amount")
+                if not isinstance(amount, Decimal):
+                    amount = _parse_decimal(amount)
+                cost_usd: Decimal | None = lot.get("cost_usd")
+                if cost_usd is not None and not isinstance(cost_usd, Decimal):
+                    cost_usd = _parse_decimal(cost_usd)
+                if cost_usd is None or amount is None or amount <= 0:
+                    cost_for_remaining: Decimal | None = None
+                else:
+                    cost_for_remaining = cost_usd * (remaining / amount)
+                yield position_key, token, remaining, cost_for_remaining
 
     def record_prediction_buy(
         self,
