@@ -178,9 +178,14 @@ class CompoundV3BalanceReader(ProtocolBalanceReader):
         return ["compound_v3"]
 
     def _get_comet_address(self, chain: str, market_id: str | None) -> str | None:
-        from almanak.connectors.compound_v3.adapter import COMPOUND_V3_COMET_ADDRESSES
+        from almanak.connectors._strategy_base.address_registry import AddressRegistry
 
-        markets = COMPOUND_V3_COMET_ADDRESSES.get(chain, {})
+        markets = AddressRegistry.addresses_for("compound_v3", chain)
+        if not markets:
+            # Unsupported/unconfigured chain — the connector publishes no Comet
+            # table for it. Return None so the caller falls back to withdraw_all
+            # rather than guessing an address.
+            return None
         if not market_id:
             # Don't silently default to USDC — wrong market means wrong balance.
             # Return None to trigger withdraw_all fallback.

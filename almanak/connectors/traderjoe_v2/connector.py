@@ -41,6 +41,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.traderjoe_v2.compiler",
         attribute="TraderJoeV2Compiler",
     ),
+    teardown_post_condition=ImportRef(
+        module="almanak.connectors.traderjoe_v2.teardown_post_condition",
+        attribute="traderjoe_v2_post_condition",
+    ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
     strategy_chains=("avalanche", "arbitrum", "bnb", "ethereum"),
 )

@@ -623,6 +623,10 @@ EXPECTED_SWAP_ROUTE_INFERENCE_MODULES = {
     "pendle": "almanak.connectors.pendle.swap_route_inference",
 }
 
+EXPECTED_TEARDOWN_POST_CONDITION_MODULES = {
+    "traderjoe_v2": "almanak.connectors.traderjoe_v2.teardown_post_condition",
+}
+
 EXPECTED_DEFERRED_REFRESH_MODULES = {
     "enso": "almanak.connectors.enso.deferred_refresh_provider",
     "lifi": "almanak.connectors.lifi.deferred_refresh_provider",
@@ -675,6 +679,7 @@ EXPECTED_ADDRESS_TABLE_MODULES = {
     "aster_perps": "almanak.connectors.aster_perps.addresses",
     "balancer_v2": "almanak.connectors.balancer_v2.addresses",
     "camelot": "almanak.connectors.camelot.addresses",
+    "compound_v3": "almanak.connectors.compound_v3.addresses",
     "fluid": "almanak.connectors.fluid.addresses",
     "gmx_v2": "almanak.connectors.gmx_v2.addresses",
     "morpho_blue": "almanak.connectors.morpho_blue.addresses",
@@ -694,6 +699,7 @@ EXPECTED_ADDRESS_TABLE_PROTOCOLS = {
     "aster_perps": ("aster_perps",),
     "balancer_v2": ("balancer_v2",),
     "camelot": ("camelot",),
+    "compound_v3": ("compound_v3",),
     "fluid": ("fluid",),
     "gmx_v2": ("gmx_v2",),
     "morpho_blue": ("morpho_blue",),
@@ -1096,6 +1102,16 @@ def test_solana_program_spec_rejects_whitespace_program_id() -> None:
     """Base58 program IDs never contain whitespace; a stray newline is a copy-paste error."""
     with pytest.raises(ValueError, match="must not contain whitespace"):
         SolanaProgramSpec(protocol="drift", program_id="dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH\n")
+
+
+def test_connector_rejects_invalid_teardown_post_condition_ref() -> None:
+    """Invalid teardown post-condition refs fail during manifest validation."""
+    with pytest.raises(ValueError, match="Connector.teardown_post_condition"):
+        Connector(
+            name="bad_teardown_post_condition_ref",
+            kind=ProtocolKind.LP,
+            teardown_post_condition=object(),  # type: ignore[arg-type]
+        )
 
 
 def test_connector_rejects_invalid_receipt_parser_connector_ref() -> None:
@@ -1912,6 +1928,30 @@ def test_swap_route_inference_connectors_instantiate_from_descriptors() -> None:
         assert connector.protocol == ProtocolName(name)
         assert actual_module == module
         assert type(connector).__module__ == module
+
+
+def test_teardown_post_conditions_load_from_descriptors() -> None:
+    """Migrated teardown post-condition hooks are published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, str] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_teardown_post_condition():
+        assert connector_manifest.teardown_post_condition is not None
+        hook = connector_manifest.teardown_post_condition.load()
+
+        assert callable(hook)
+        connectors[connector_manifest.name] = connector_manifest.teardown_post_condition.module
+
+    assert connectors == EXPECTED_TEARDOWN_POST_CONDITION_MODULES
+
+
+def test_connector_teardown_post_conditions_are_not_hardcoded_in_framework() -> None:
+    """The framework teardown registry discovers connector-owned post-condition hooks."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/framework/teardown/post_conditions.py").read_text()
+
+    assert "with_teardown_post_condition()" in source
+    assert "almanak.connectors.traderjoe_v2" not in source
 
 
 def test_deferred_refresh_connectors_instantiate_from_descriptors() -> None:

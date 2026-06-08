@@ -7,10 +7,18 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
 CONNECTOR = Connector(
     name="compound_v3",
     kind=ProtocolKind.LENDING,
+    address_tables=(
+        AddressTableSpec(
+            protocol="compound_v3",
+            module="almanak.connectors.compound_v3.addresses",
+            attribute="COMPOUND_V3_COMET_ADDRESSES",
+        ),
+    ),
     gateway_connector=ImportRef(
         module="almanak.connectors.compound_v3.gateway.provider",
         attribute="CompoundV3GatewayConnector",

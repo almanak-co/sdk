@@ -12,9 +12,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from almanak.connectors.traderjoe_v2.teardown_post_condition import (
+    traderjoe_v2_post_condition,
+)
 from almanak.framework.teardown.post_conditions import (
     ClosureCheckResult,
-    _traderjoe_v2_post_condition,
     get_teardown_post_condition,
     has_teardown_post_condition,
     register_teardown_post_condition,
@@ -66,6 +68,29 @@ class TestRegistry:
             if original is not None:
                 register_teardown_post_condition("traderjoe_v2", original)
 
+    def test_v3_default_does_not_clobber_connector_owned_hook(self) -> None:
+        """The V3 NPM default registration must not overwrite a connector that
+        already owns its teardown post-condition (manifest-published). Connector
+        hooks win; the framework default is a fallback only.
+        """
+        from almanak.framework.teardown import post_conditions as pc
+
+        v3_slugs = sorted(pc._V3_NPM_PROTOCOLS)
+        if not v3_slugs:
+            pytest.skip("no V3 NPM protocols registered in this build")
+        slug = v3_slugs[0]
+        original = get_teardown_post_condition(slug)
+        sentinel = lambda **_: ClosureCheckResult(closed=True)  # noqa: E731
+        try:
+            register_teardown_post_condition(slug, sentinel)
+            pc._register_default_v3_post_conditions()
+            # Re-running default registration must leave the connector-owned hook
+            # in place rather than swapping in the generic V3 default.
+            assert get_teardown_post_condition(slug) is sentinel
+        finally:
+            if original is not None:
+                register_teardown_post_condition(slug, original)
+
 
 # ---------------------------------------------------------------------------
 # TraderJoe V2 default post-condition
@@ -82,7 +107,7 @@ class TestTraderJoeV2PostCondition:
             adapter_cls.return_value.sdk = sdk
 
             position = _make_position(bin_ids=[100, 101, 102])
-            result = _traderjoe_v2_post_condition(
+            result = traderjoe_v2_post_condition(
                 position=position,
                 wallet_address=WALLET,
                 rpc_url="http://localhost:8545",
@@ -103,7 +128,7 @@ class TestTraderJoeV2PostCondition:
             adapter_cls.return_value.sdk = sdk
 
             position = _make_position(bin_ids=[100, 101, 102])
-            result = _traderjoe_v2_post_condition(
+            result = traderjoe_v2_post_condition(
                 position=position,
                 wallet_address=WALLET,
                 rpc_url="http://localhost:8545",
@@ -125,7 +150,7 @@ class TestTraderJoeV2PostCondition:
             adapter_cls.return_value.sdk = sdk
 
             position = _make_position(bin_ids=None)
-            result = _traderjoe_v2_post_condition(
+            result = traderjoe_v2_post_condition(
                 position=position,
                 wallet_address=WALLET,
                 rpc_url="http://localhost:8545",
@@ -145,7 +170,7 @@ class TestTraderJoeV2PostCondition:
             adapter_cls.return_value.sdk = sdk
 
             position = _make_position(bin_ids=None)
-            result = _traderjoe_v2_post_condition(
+            result = traderjoe_v2_post_condition(
                 position=position,
                 wallet_address=WALLET,
                 rpc_url="http://localhost:8545",
@@ -162,7 +187,7 @@ class TestTraderJoeV2PostCondition:
             chain="avalanche",
             details={},
         )
-        result = _traderjoe_v2_post_condition(position=position, wallet_address=WALLET)
+        result = traderjoe_v2_post_condition(position=position, wallet_address=WALLET)
         assert result.closed is False
         assert "pool_address" in (result.error or "")
 
@@ -179,7 +204,7 @@ class TestTraderJoeV2PostCondition:
             chain="avalanche",
             details={"pool": "WAVAX/USDC/20"},
         )
-        result = _traderjoe_v2_post_condition(position=position, wallet_address=WALLET)
+        result = traderjoe_v2_post_condition(position=position, wallet_address=WALLET)
         assert result.closed is False
         assert "42-char hex address" in (result.error or "")
         assert "WAVAX/USDC/20" in (result.error or "")
@@ -190,7 +215,7 @@ class TestTraderJoeV2PostCondition:
             side_effect=RuntimeError("boom"),
         ):
             position = _make_position()
-            result = _traderjoe_v2_post_condition(
+            result = traderjoe_v2_post_condition(
                 position=position,
                 wallet_address=WALLET,
                 rpc_url="http://localhost:8545",
@@ -216,7 +241,7 @@ class TestTraderJoeV2PostCondition:
                 position_type=SimpleNamespace(value="TOKEN"),
                 details={"asset": "WAVAX", "balance": "1000000000000000000"},
             )
-            result = _traderjoe_v2_post_condition(
+            result = traderjoe_v2_post_condition(
                 position=position,
                 wallet_address=WALLET,
             )
@@ -248,7 +273,7 @@ class TestTraderJoeV2PostCondition:
                 position_type=SimpleNamespace(value="LP"),
                 details={"pool_address": POOL, "bin_ids": [10, 11, 12]},
             )
-            result = _traderjoe_v2_post_condition(
+            result = traderjoe_v2_post_condition(
                 position=position,
                 wallet_address=WALLET,
                 rpc_url="http://localhost:8545",
@@ -275,7 +300,7 @@ class TestTraderJoeV2PostCondition:
                 position_type=SimpleNamespace(value="LP"),
                 details={"pool_address": POOL, "bin_ids": [10]},
             )
-            result = _traderjoe_v2_post_condition(
+            result = traderjoe_v2_post_condition(
                 position=position,
                 wallet_address=WALLET,
                 rpc_url="http://localhost:8545",
@@ -291,13 +316,76 @@ class TestTraderJoeV2PostCondition:
             adapter_cls.return_value.sdk = sdk
 
             position = _make_position(bin_ids=[1, 2])
-            result = _traderjoe_v2_post_condition(
+            result = traderjoe_v2_post_condition(
                 position=position,
                 wallet_address=WALLET,
                 rpc_url="http://localhost:8545",
             )
         assert result.closed is False
         assert "rpc-down" in (result.error or "")
+
+    def test_missing_chain_fails_closed(self) -> None:
+        """A position without a chain must fail closed, not default to
+        "avalanche". The LB pair address is chain-scoped, so guessing would
+        verify against the wrong network. Mirrors the Uniswap V3 sibling.
+        """
+        with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls:
+            position = SimpleNamespace(
+                protocol="traderjoe_v2",
+                position_id="tj-no-chain",
+                chain=None,
+                details={"pool_address": POOL},
+            )
+            result = traderjoe_v2_post_condition(
+                position=position,
+                wallet_address=WALLET,
+                rpc_url="http://localhost:8545",
+            )
+        assert result.closed is False
+        assert "position.chain" in (result.error or "")
+        # The chain check fires before SDK construction.
+        adapter_cls.assert_not_called()
+
+    def test_hosted_mode_without_gateway_client_fails_closed(self) -> None:
+        """Gateway-boundary: in hosted mode a missing gateway_client must fail
+        closed rather than silently fall back to direct rpc_url egress.
+        """
+        with (
+            patch("almanak.framework.deployment.is_hosted", return_value=True),
+            patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls,
+        ):
+            position = _make_position(bin_ids=[1, 2])
+            result = traderjoe_v2_post_condition(
+                position=position,
+                wallet_address=WALLET,
+                gateway_client=None,
+                rpc_url="http://localhost:8545",
+            )
+        assert result.closed is False
+        assert "hosted" in (result.error or "")
+        # No direct-RPC SDK is built when the gateway path is unavailable in hosted.
+        adapter_cls.assert_not_called()
+
+    def test_local_mode_without_gateway_client_uses_rpc(self) -> None:
+        """Local/test mode keeps the rpc_url dual path: a missing gateway_client
+        is allowed and the SDK is driven over the supplied rpc_url.
+        """
+        sdk = MagicMock()
+        sdk.get_position_balances_for_ids.return_value = {}
+        with (
+            patch("almanak.framework.deployment.is_hosted", return_value=False),
+            patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls,
+        ):
+            adapter_cls.return_value.sdk = sdk
+            position = _make_position(bin_ids=[1, 2])
+            result = traderjoe_v2_post_condition(
+                position=position,
+                wallet_address=WALLET,
+                gateway_client=None,
+                rpc_url="http://localhost:8545",
+            )
+        assert result.closed is True
+        adapter_cls.assert_called_once()
 
 
 if __name__ == "__main__":

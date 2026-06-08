@@ -1,11 +1,11 @@
 """Teardown post-conditions: protocol-specific on-chain closure verification.
 
-VIB-3742 — Framework hardening for graceful teardown.
+VIB-3742 - Framework hardening for graceful teardown.
 
 Background
 ----------
 ``TeardownManager._verify_closure`` historically only re-read
-``strategy.get_open_positions()`` — an in-memory call that returns 0
+``strategy.get_open_positions()`` - an in-memory call that returns 0
 immediately after ``on_intent_executed`` clears the strategy's tracked
 ``_position_id``. Result: the framework reported teardown success while
 liquidity remained on-chain (the $1.16-leak scenario behind VIB-3741 / 3742).
@@ -18,317 +18,53 @@ the positions that existed *before* execution started (via the snapshot it
 already took for ``starting_value_usd``) and dispatches each to the
 post-condition registered for the position's protocol.
 
-The registry is open: connectors can register their own post-condition by
-calling ``register_teardown_post_condition(protocol, hook)`` at import time.
-We ship a default for TraderJoe V2 because that's the protocol the bug was
-filed against; future CL connectors (Aerodrome Slipstream, Uniswap V4,
-Orca/Raydium CLMM) plug in via the same hook.
+The registry is manifest-backed: connectors publish post-conditions through
+``CONNECTOR.teardown_post_condition``. This module loads those manifest refs
+at import time and keeps the framework-facing lookup helpers stable.
 
 Hard constraints
 ----------------
-- All on-chain reads MUST go through the gateway in production. The TJ V2
-  default uses ``TraderJoeV2Adapter`` which already accepts a
-  ``GatewayClient`` and routes RPC through it. Callers that test locally
-  may pass ``rpc_url`` for direct anvil access; this is the same dual-path
-  the compiler uses.
+- All on-chain reads MUST go through the gateway in production. Connector
+  post-conditions receive the teardown gateway client when one is available.
+  Tests and local Anvil flows may pass ``rpc_url`` only when the connector
+  hook explicitly supports the same dual path as its compiler.
 - Failures in a hook return ``ClosureCheckResult(closed=False)`` with an
-  error message rather than raising — verification is informational and a
+  error message rather than raising. Verification is informational and a
   hook crash must not silently pass the teardown.
 - No emojis. No Postgres DDL.
 """
 
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
+from almanak.connectors._connector import CONNECTOR_REGISTRY, ConnectorDiscoveryError
 from almanak.connectors._strategy_base.address_registry import AbiFamily, AddressRegistry
-
-logger = logging.getLogger(__name__)
-
-
-@dataclass
-class ClosureCheckResult:
-    """Outcome of an on-chain closure verification for a single position.
-
-    Attributes:
-        closed: True iff the post-condition determined the position is fully
-            closed on-chain. False means residual liquidity / debt was
-            detected, OR the check itself errored out (fail-closed).
-        protocol: Protocol the result is for (informational, for logs).
-        position_id: Position identifier checked.
-        residual: Protocol-specific residual data (e.g.
-            ``{"bin_balances": {123: 4567}, "total_lb_tokens": 4567}`` for
-            TraderJoe V2). Empty when ``closed=True``.
-        error: Set when the check itself failed (RPC error, missing
-            dependency, etc.). Treated as ``closed=False`` for the
-            teardown verifier — fail-closed.
-    """
-
-    closed: bool
-    protocol: str = ""
-    position_id: str = ""
-    residual: dict[str, Any] = field(default_factory=dict)
-    error: str | None = None
+from almanak.connectors._strategy_base.teardown_post_condition import (
+    ClosureCheckResult,
+    TeardownPostCondition,
+    get_teardown_post_condition,
+    has_teardown_post_condition,
+    register_teardown_post_condition,
+)
 
 
-class TeardownPostCondition(Protocol):
-    """Protocol-specific on-chain closure check.
-
-    Implementations must be side-effect free — only read state. They run
-    AFTER the teardown intents have completed; the teardown manager uses
-    the result to decide whether to mark the teardown ``success=False``.
-
-    Implementations should:
-    - Return ``ClosureCheckResult(closed=True)`` only when ALL liquidity /
-      debt for the given position is provably gone on-chain.
-    - Return ``ClosureCheckResult(closed=False, residual=...)`` with a
-      detailed residual map when liquidity remains. The residual goes into
-      the teardown ``error`` so operators can see exactly which bins / NFTs
-      / accounts still have value.
-    - Return ``ClosureCheckResult(closed=False, error=...)`` on internal
-      failure. The teardown verifier treats this as fail-closed.
-    """
-
-    def __call__(
-        self,
-        position: Any,
-        wallet_address: str,
-        gateway_client: Any | None = None,
-        rpc_url: str | None = None,
-    ) -> ClosureCheckResult: ...
-
-
-# =============================================================================
-# Registry
-# =============================================================================
-
-_REGISTRY: dict[str, TeardownPostCondition] = {}
-
-
-def register_teardown_post_condition(protocol: str, hook: TeardownPostCondition) -> None:
-    """Register a post-condition for a protocol.
-
-    Idempotent: re-registering the same hook is fine. Replacing an existing
-    hook logs a warning so accidental shadowing is visible in logs.
-    """
-    key = protocol.lower()
-    existing = _REGISTRY.get(key)
-    if existing is not None and existing is not hook:
-        logger.warning(
-            "Replacing existing teardown post-condition for protocol %r",
-            protocol,
-        )
-    _REGISTRY[key] = hook
-
-
-def get_teardown_post_condition(protocol: str) -> TeardownPostCondition | None:
-    """Look up a registered post-condition. Returns ``None`` when none."""
-    return _REGISTRY.get(protocol.lower())
-
-
-def has_teardown_post_condition(protocol: str) -> bool:
-    """``True`` iff a post-condition is registered for ``protocol``."""
-    return protocol.lower() in _REGISTRY
-
-
-# =============================================================================
-# TraderJoe V2 default post-condition
-# =============================================================================
-
-
-def _traderjoe_v2_post_condition(
-    position: Any,
-    wallet_address: str,
-    gateway_client: Any | None = None,
-    rpc_url: str | None = None,
-) -> ClosureCheckResult:
-    """Verify a TraderJoe V2 LP position has zero residual LB token balance.
-
-    Uses the SDK's ``balanceOfBatch`` over the position's known bin_ids when
-    they're present in ``position.details``; otherwise falls back to the
-    same ±50 bin scan the compiler uses (with the same caveats). When the
-    fallback path runs we mark the result with ``residual['fallback_scan']``
-    so operators can see the scan was inherently incomplete and treat
-    ``closed=True`` from the fallback with appropriate skepticism.
-    """
-    protocol = "traderjoe_v2"
-    position_id = getattr(position, "position_id", "") or ""
-
-    # Gate by position type: ``protocol="traderjoe_v2"`` is shared between
-    # LP positions (``PositionType.LP`` — the LB pair / bin-balances shape
-    # this hook verifies) and TOKEN positions reported by swap-only
-    # strategies (e.g. S-008 RSI flipper on Avalanche, which surfaces
-    # ``PositionType.TOKEN`` with ``details={"asset": "WAVAX", "balance": ...}``
-    # and no ``pool_address``). The LB-pair-shaped check must NOT run on
-    # TOKEN positions — doing so fail-closes every swap-only TraderJoe V2
-    # teardown on the missing-pool_address branch (VIB-3974). Mirror the
-    # Uniswap V3 hook's gate: treat non-LP positions as "outside this
-    # hook's scope" — closed=True with a residual note so the verifier
-    # moves on. Balance-zero verification for TOKEN positions is the
-    # strategy's ``get_open_positions()`` contract, not this hook's
-    # responsibility.
-    position_type_raw = getattr(position, "position_type", None)
-    position_type_value = (getattr(position_type_raw, "value", None) or str(position_type_raw or "")).upper()
-    if position_type_value and position_type_value != "LP":
-        return ClosureCheckResult(
-            closed=True,
-            protocol=protocol,
-            position_id=position_id,
-            residual={
-                "skipped_reason": (
-                    f"TraderJoe V2 post-condition only verifies LP LB-pair positions; "
-                    f"position_type={position_type_value!r} is outside scope"
-                ),
-            },
-        )
-
-    # Pull pool + bin metadata. ``position`` is a teardown ``PositionInfo``
-    # (from ``strategy.get_open_positions()``), or anything else with a
-    # ``.details`` mapping.
-    details = getattr(position, "details", None) or {}
-    pool_address = details.get("pool_address") or details.get("pool_addr") or details.get("pool")
-    if not pool_address:
-        return ClosureCheckResult(
-            closed=False,
-            protocol=protocol,
-            position_id=position_id,
-            error=(
-                "TraderJoe V2 post-condition needs position.details['pool_address'] "
-                "(or 'pool', 'pool_addr'); none found"
-            ),
-        )
-
-    # VIB-3943: ``details["pool"]`` is dual-purpose across the codebase — some
-    # callers stash the LB pair address there, others stash a symbol triple
-    # like ``"WAVAX/USDC/20"``. Without this hex check the symbol path slips
-    # straight into ``balanceOf`` and web3.py raises ``ValueError: when sending
-    # a str, it must be a hex string``. The on-chain TX already succeeded by
-    # the time we get here, so a verifier crash flips a successful teardown
-    # to a false-positive failure.  Reject non-hex addresses up front so the
-    # operator gets a precise, actionable message instead of a stack trace.
-    if not (isinstance(pool_address, str) and pool_address.startswith("0x") and len(pool_address) == 42):
-        return ClosureCheckResult(
-            closed=False,
-            protocol=protocol,
-            position_id=position_id,
-            error=(
-                f"TraderJoe V2 post-condition: position.details pool_address must be a "
-                f"42-char hex address (got {pool_address!r}). Strategies must populate "
-                "details['pool_address'] with the LB pair contract address, not a symbol."
-            ),
-        )
-
-    try:
-        from almanak.connectors.traderjoe_v2 import (
-            TraderJoeV2Adapter,
-            TraderJoeV2Config,
-        )
-    except Exception as exc:  # noqa: BLE001 — defensive
-        return ClosureCheckResult(
-            closed=False,
-            protocol=protocol,
-            position_id=position_id,
-            error=f"TraderJoe V2 connector unavailable: {exc}",
-        )
-
-    chain = getattr(position, "chain", None) or "avalanche"
-
-    config = TraderJoeV2Config(
-        chain=chain,
-        wallet_address=wallet_address,
-        rpc_url=rpc_url if gateway_client is None else None,
-        gateway_client=gateway_client,
-    )
-
-    try:
-        adapter = TraderJoeV2Adapter(config)
-        sdk = adapter.sdk
-    except Exception as exc:  # noqa: BLE001
-        return ClosureCheckResult(
-            closed=False,
-            protocol=protocol,
-            position_id=position_id,
-            error=f"TraderJoe V2 SDK init failed: {exc}",
-        )
-
-    # Prefer the explicit bin_ids list — that's the only guaranteed-complete
-    # check. If we have it, we're done with one balanceOfBatch round-trip.
-    bin_ids_raw = details.get("bin_ids") or []
-    try:
-        known_bin_ids = [int(b) for b in bin_ids_raw]
-    except (TypeError, ValueError):
-        known_bin_ids = []
-
-    used_fallback = False
-    try:
-        if known_bin_ids:
-            balances = sdk.get_position_balances_for_ids(pool_address, wallet_address, known_bin_ids)
-        else:
-            used_fallback = True
-            # The active-bin ±50 fallback. Mark as incomplete in residual so
-            # the verifier surfaces "scan may have missed bins" to operators.
-            balances = sdk.get_position_balances(pool_address, wallet_address)
-    except Exception as exc:  # noqa: BLE001
-        return ClosureCheckResult(
-            closed=False,
-            protocol=protocol,
-            position_id=position_id,
-            error=f"TraderJoe V2 balanceOf query failed: {exc}",
-        )
-
-    residual: dict[str, Any] = {}
-    if balances:
-        residual["bin_balances"] = {int(b): int(v) for b, v in balances.items()}
-        residual["total_lb_tokens"] = int(sum(balances.values()))
-        residual["pool_address"] = pool_address
-        if used_fallback:
-            residual["fallback_scan"] = (
-                "Used active-id ±50 heuristic (bin_ids unavailable in position.details). "
-                "Bins outside that window were NOT checked."
+def _register_manifest_teardown_post_conditions() -> None:
+    """Register connector-owned teardown post-conditions from manifests."""
+    for connector_manifest in CONNECTOR_REGISTRY.with_teardown_post_condition():
+        if connector_manifest.teardown_post_condition is None:
+            continue
+        hook = connector_manifest.teardown_post_condition.load()
+        if not callable(hook):
+            raise ConnectorDiscoveryError(
+                f"{connector_manifest.teardown_post_condition.module}."
+                f"{connector_manifest.teardown_post_condition.attribute} must be callable, "
+                f"got {type(hook).__qualname__}"
             )
-
-    if balances:
-        return ClosureCheckResult(
-            closed=False,
-            protocol=protocol,
-            position_id=position_id,
-            residual=residual,
-        )
-
-    if used_fallback:
-        # Closed-with-asterisk: heuristic returned empty, but it only checked
-        # ±50 bins. Surface the caveat so operators know the verifier ran in
-        # weak-mode for this position. We still return closed=True because
-        # marking otherwise would block every TJ V2 teardown that did not
-        # round-trip bin_ids — defeating the purpose of best-effort
-        # verification. The compiler-level WARNING (item 1) catches the
-        # silent-leak case at a different seam.
-        return ClosureCheckResult(
-            closed=True,
-            protocol=protocol,
-            position_id=position_id,
-            residual={
-                "fallback_scan": (
-                    "TraderJoe V2 post-condition used active-id ±50 fallback "
-                    "(no bin_ids in position.details). No residual liquidity "
-                    "found in the scanned window, but bins outside it were "
-                    "NOT checked. To get strong verification, ensure your "
-                    "strategy attaches bin_ids to the PositionInfo.details "
-                    "for teardown."
-                ),
-            },
-        )
-
-    return ClosureCheckResult(
-        closed=True,
-        protocol=protocol,
-        position_id=position_id,
-    )
+        register_teardown_post_condition(connector_manifest.name, hook)
 
 
-register_teardown_post_condition("traderjoe_v2", _traderjoe_v2_post_condition)
+_register_manifest_teardown_post_conditions()
 
 
 # =============================================================================
@@ -628,8 +364,21 @@ def _uniswap_v3_post_condition(
     )
 
 
-for _v3_slug in sorted(_V3_NPM_PROTOCOLS):
-    register_teardown_post_condition(_v3_slug, _uniswap_v3_post_condition)
+def _register_default_v3_post_conditions() -> None:
+    """Register the generic V3 NPM hook as the default for each V3-fork slug.
+
+    Never clobbers a connector that already published its own
+    ``teardown_post_condition`` via its manifest (loaded above by
+    ``_register_manifest_teardown_post_conditions``): connector-owned hooks win,
+    and this framework default is a fallback only. Without the guard a V3-fork
+    connector that later owns its hook would have it silently overwritten here.
+    """
+    for v3_slug in sorted(_V3_NPM_PROTOCOLS):
+        if not has_teardown_post_condition(v3_slug):
+            register_teardown_post_condition(v3_slug, _uniswap_v3_post_condition)
+
+
+_register_default_v3_post_conditions()
 
 
 __all__ = [

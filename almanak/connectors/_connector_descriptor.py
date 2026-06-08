@@ -116,6 +116,7 @@ class Connector:
     protocol_metadata: ImportRef | None = None
     principal_token_market_reader: ImportRef | None = None
     swap_route_inference: ImportRef | None = None
+    teardown_post_condition: ImportRef | None = None
     deferred_refresh: ImportRef | None = None
     swap_quote_connector: ImportRef | None = None
     accounting_treatment: ImportRef | None = None
@@ -166,6 +167,7 @@ class Connector:
         self._validate_protocol_metadata()
         self._validate_principal_token_market_reader()
         self._validate_swap_route_inference()
+        self._validate_teardown_post_condition()
         self._validate_deferred_refresh()
         self._validate_swap_quote_connector()
         self._validate_accounting_treatment()
@@ -335,6 +337,13 @@ class Connector:
         if self.swap_route_inference is not None and not isinstance(self.swap_route_inference, ImportRef):
             raise ValueError(
                 f"Connector.swap_route_inference must be None or an ImportRef, got {self.swap_route_inference!r}"
+            )
+
+    def _validate_teardown_post_condition(self) -> None:
+        """Validate the strategy-side teardown post-condition import reference."""
+        if self.teardown_post_condition is not None and not isinstance(self.teardown_post_condition, ImportRef):
+            raise ValueError(
+                f"Connector.teardown_post_condition must be None or an ImportRef, got {self.teardown_post_condition!r}"
             )
 
     def _validate_deferred_refresh(self) -> None:
@@ -686,6 +695,10 @@ class ConnectorRegistry:
     def with_swap_route_inference(self) -> tuple[Connector, ...]:
         """Return connectors that publish swap-route inference providers."""
         return tuple(d for d in self.all() if d.swap_route_inference is not None)
+
+    def with_teardown_post_condition(self) -> tuple[Connector, ...]:
+        """Return connectors that publish teardown post-condition hooks."""
+        return tuple(d for d in self.all() if d.teardown_post_condition is not None)
 
     def with_deferred_refresh(self) -> tuple[Connector, ...]:
         """Return connectors that publish deferred transaction refresh providers."""
