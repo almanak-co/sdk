@@ -67,11 +67,14 @@ RUN ARCH=$(case "${TARGETARCH}" in arm64) echo "arm64" ;; *) echo "amd64" ;; esa
     chmod +x /usr/local/bin/grpc_health_probe && \
     rm -f /tmp/checksums.txt
 
-# Install Foundry (anvil, forge, cast) via foundryup
+# Install Foundry (anvil, forge, cast) via foundryup.
+# Version pinned by the repo-root .foundry-version (single source of truth).
+COPY .foundry-version /tmp/.foundry-version
 RUN curl -fsSL https://foundry.paradigm.xyz | SHELL=/bin/bash bash && \
-    /root/.foundry/bin/foundryup && \
+    FOUNDRY_VERSION="$(tr -d '[:space:]' < /tmp/.foundry-version)" && \
+    /root/.foundry/bin/foundryup --install "${FOUNDRY_VERSION#v}" && \
     mv /root/.foundry/bin/anvil /root/.foundry/bin/forge /root/.foundry/bin/cast /usr/local/bin/ && \
-    rm -rf /root/.foundry
+    rm -rf /root/.foundry /tmp/.foundry-version
 
 # Create non-root user
 RUN groupadd --gid 1000 almanak && \
