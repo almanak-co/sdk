@@ -424,12 +424,12 @@ class _StubMarket:
         self._balances = balances
         self._prices = prices
 
-    def balance(self, token, protocol=None):
+    def balance(self, token, protocol=None, *, chain=None, price=None):
         from types import SimpleNamespace
 
         return SimpleNamespace(balance=self._balances[token])
 
-    def price(self, token):
+    def price(self, token, quote="USD", *, chain=None):
         return self._prices[token]
 
 

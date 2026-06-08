@@ -264,16 +264,26 @@ class TestBenqiBorrowIntent:
         5. Verify WAVAX decreased (collateral) and USDC increased (borrowed)
         6. Layer 5: assert persisted BORROW accounting event
 
-        LTV calculation: ~10 WAVAX at ~$20 = $200 collateral.
-        Borrow $50 USDC = ~25% LTV (safe under 30% cap).
+        LTV calculation: AVAX trades around ~$6.60 (live CoinGecko, as of
+        2026-06; it was ~$20 when this test was first authored). 40 AVAX at
+        ~$6.60 = ~$264 collateral; borrowing 50 USDC = ~19% LTV — safely under
+        the 30% cap AND under BENQI's qiAVAX collateral-factor capacity
+        (~$264 × 0.6 ≈ $158). A thinner collateral buffer (the original 10 AVAX)
+        now exceeds the comptroller's borrow capacity at the depressed AVAX
+        price: the Compound-V2 ``borrow()`` is rejected with a ``Failure`` event
+        (error 3 / info 14 / detail 4 = COMPTROLLER_REJECTION / INSUFFICIENT_
+        LIQUIDITY) WITHOUT reverting (tx status == 1), so no ``Borrow`` event is
+        emitted and ``amount_token`` comes back ``None`` (intent-tests.md LTV-cap
+        rule #10 — keep borrow amounts ≤ 30% LTV so fork-block price moves don't
+        silently fail the borrow).
         """
         tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
         usdc = tokens["USDC"]
 
         usdc_decimals = get_token_decimals(web3, usdc)
 
-        # Supply 10 AVAX as collateral (~$200), borrow 50 USDC (~25% LTV)
-        collateral_amount = Decimal("10")
+        # 40 AVAX collateral (~$264 at ~$6.60), borrow 50 USDC (~19% LTV — safe)
+        collateral_amount = Decimal("40")
         borrow_amount = Decimal("50")
 
         print(f"\n{'=' * 80}")
@@ -465,10 +475,16 @@ class TestBenqiBorrowIntent:
         )
 
         setup_borrow = Decimal("50")
+        # 40 AVAX collateral (~$264 at ~$6.60) → borrowing 50 USDC is ~19% LTV,
+        # safely under the 30% cap and BENQI's qiAVAX collateral-factor capacity.
+        # The original 10 AVAX (~$66) now sits over capacity at the depressed AVAX
+        # price: Compound-V2 ``borrow()`` is comptroller-rejected via a ``Failure``
+        # event WITHOUT reverting (status == 1), so no ``Borrow`` event is emitted
+        # and ``amount_token`` comes back ``None`` (intent-tests.md LTV-cap rule #10).
         borrow_intent = BorrowIntent(
             protocol="benqi",
             collateral_token="AVAX",
-            collateral_amount=Decimal("10"),
+            collateral_amount=Decimal("40"),
             borrow_token="USDC",
             borrow_amount=setup_borrow,
             chain=CHAIN_NAME,

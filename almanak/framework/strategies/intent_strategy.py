@@ -1562,14 +1562,23 @@ class IntentStrategy(StrategyBase[ConfigT]):
         if any((b.symbol or "").upper() == native_symbol_canon for b in wallet_balances):
             return ("already_tracked", Decimal("0"))
 
+        # ``native_token_for_chain`` defaults to "ETH" for an empty/None chain,
+        # so a falsy ``self._chain`` slips past the ``if not native_symbol``
+        # guard above. Reading balance/price with ``chain=None`` on a
+        # multi-chain snapshot would then raise ``AmbiguousChainError`` and be
+        # misclassified as ``balance_failed`` (a hard live-mode halt). Treat an
+        # unresolved chain as ``unknown_chain`` instead.
+        if not self._chain:
+            return ("unknown_chain", Decimal("0"))
+
         try:
-            native_balance_data = market.balance(native_symbol)
+            native_balance_data = market.balance(native_symbol, chain=self._chain)
         except Exception as e:  # noqa: BLE001 — typed status path
             logger.debug(f"native gas-token balance fetch failed: {e}")
             return ("balance_failed", Decimal("0"))
 
         try:
-            native_price = market.price(native_symbol)
+            native_price = market.price(native_symbol, chain=self._chain)
         except Exception as e:  # noqa: BLE001 — typed status path
             logger.debug(f"native gas-token price fetch failed: {e}")
             return ("price_missing", Decimal("0"))

@@ -45,16 +45,54 @@ def _market_mock(
     bal_raises = balance_raises or set()
     pr_raises = price_raises or set()
 
-    def _balance(token: str) -> Any:
+    def _balance(token: str, protocol: Any = None, *, chain: str | None = None, price: Any = None) -> Any:
         if token in bal_raises:
             raise RuntimeError(f"synthetic balance error for {token}")
         b = MagicMock()
         b.balance = bal_map.get(token, Decimal("0"))
         return b
 
-    def _price(token: str) -> Any:
+    def _price(token: str, quote: str = "USD", *, chain: str | None = None) -> Any:
         if token in pr_raises:
             raise RuntimeError(f"synthetic price error for {token}")
+        return price_map.get(token, Decimal("0"))
+
+    market.balance.side_effect = _balance
+    market.price.side_effect = _price
+    return market
+
+
+def _multichain_market_mock(
+    *,
+    chains: tuple[str, ...],
+    balance_returns: dict[str, Decimal] | None = None,
+    price_returns: dict[str, Decimal | None] | None = None,
+) -> MagicMock:
+    """Build a MarketSnapshot mock that behaves like a MULTI-chain snapshot:
+
+    ``balance``/``price`` raise ``AmbiguousChainError`` when called with
+    ``chain=None`` (the default), exactly as the real snapshot does, and only
+    resolve when an explicit ``chain=`` is threaded through. This pins the
+    VIB-5001 Fix 2 contract: ``_append_native_gas_to_wallet`` must pass
+    ``chain=self._chain`` so native-gas accounting succeeds on a multi-chain
+    snapshot instead of failing with ``balance_failed``.
+    """
+    from almanak.framework.market.errors import AmbiguousChainError
+
+    market = MagicMock()
+    bal_map = balance_returns or {}
+    price_map = price_returns or {}
+
+    def _balance(token: str, protocol: Any = None, *, chain: str | None = None, price: Any = None) -> Any:
+        if chain is None:
+            raise AmbiguousChainError(chains=chains)
+        b = MagicMock()
+        b.balance = bal_map.get(token, Decimal("0"))
+        return b
+
+    def _price(token: str, quote: str = "USD", *, chain: str | None = None) -> Any:
+        if chain is None:
+            raise AmbiguousChainError(chains=chains)
         return price_map.get(token, Decimal("0"))
 
     market.balance.side_effect = _balance
@@ -120,6 +158,62 @@ def test_native_dedupes_case_insensitively() -> None:
     assert status == "already_tracked"
     assert value == Decimal("0")
     assert len(wallet_balances) == 1  # NOT duplicated
+
+
+# --- VIB-5001 — native gas on a MULTI-chain snapshot ---------------------------
+
+def test_native_gas_on_multichain_snapshot_passes_chain() -> None:
+    """VIB-5001 Fix 2: native-gas accounting must succeed on a MULTI-chain snapshot.
+
+    A multi-chain snapshot raises ``AmbiguousChainError`` for any
+    ``balance``/``price`` call made with ``chain=None``. The helper must thread
+    ``chain=self._chain`` through both reads so the native symbol is appended
+    and status is 'ok' — NOT 'balance_failed' (which the live-mode enforcer
+    escalates to ACCOUNTING_FAILED). Without the fix this returns
+    'balance_failed' and the wallet stays empty.
+    """
+    strategy = _fake_strategy(chain="base")
+    market = _multichain_market_mock(
+        chains=("base", "arbitrum"),
+        balance_returns={"ETH": Decimal("0.5")},
+        price_returns={"ETH": Decimal("3000")},
+    )
+    wallet_balances = []
+    status, value = strategy._append_native_gas_to_wallet(market, wallet_balances)
+    assert status == "ok"
+    assert value == Decimal("1500")  # 0.5 ETH * $3000
+    assert len(wallet_balances) == 1
+    assert wallet_balances[0].symbol == "ETH"
+    # Confirm the chain was actually threaded through (not chain=None).
+    assert market.balance.call_args.kwargs.get("chain") == "base"
+    assert market.price.call_args.kwargs.get("chain") == "base"
+
+
+def test_native_gas_falsy_chain_returns_unknown_chain_not_balance_failed() -> None:
+    """VIB-5001 (CodeRabbit/gemini): a falsy ``self._chain`` must yield 'unknown_chain'.
+
+    ``native_token_for_chain('')`` defaults to 'ETH' (truthy), so an empty/None
+    ``self._chain`` slips past the ``if not native_symbol`` guard. Without an
+    explicit ``self._chain`` guard the helper would call
+    ``market.balance('ETH', chain=None)`` on a multi-chain snapshot, raise
+    ``AmbiguousChainError``, and misclassify it as 'balance_failed' — a hard
+    live-mode halt. The guard must short-circuit to 'unknown_chain' before any
+    balance read.
+    """
+    strategy = _fake_strategy(chain="")
+    market = _multichain_market_mock(
+        chains=("base", "arbitrum"),
+        balance_returns={"ETH": Decimal("0.5")},
+        price_returns={"ETH": Decimal("3000")},
+    )
+    wallet_balances = []
+    status, value = strategy._append_native_gas_to_wallet(market, wallet_balances)
+    assert status == "unknown_chain"
+    assert value == Decimal("0")
+    assert wallet_balances == []
+    # Guard must trip BEFORE any balance read (no AmbiguousChainError raised).
+    market.balance.assert_not_called()
+    market.price.assert_not_called()
 
 
 # --- F1 — unknown_chain --------------------------------------------------------

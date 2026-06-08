@@ -123,14 +123,14 @@ class AvalancheLPLifecycleProbeStrategy(IntentStrategy):
 
     def _bal_usd(self, market: MarketSnapshot, token: str, chain: str) -> Decimal:
         try:
-            b = market.balance(token, chain)
+            b = market.balance(token, chain=chain)
             return Decimal(str(b.balance_usd)) if b and b.balance_usd else Decimal("0")
         except Exception:
             return Decimal("0")
 
     def _bal_raw(self, market: MarketSnapshot, token: str, chain: str) -> Decimal:
         try:
-            b = market.balance(token, chain)
+            b = market.balance(token, chain=chain)
             return Decimal(str(b.balance)) if b and b.balance else Decimal("0")
         except Exception:
             return Decimal("0")
@@ -143,7 +143,7 @@ class AvalancheLPLifecycleProbeStrategy(IntentStrategy):
 
     def decide(self, market: MarketSnapshot) -> Intent:
         if self._start_usdc_balance is None:
-            b = market.balance(self.relay_token, "base")
+            b = market.balance(self.relay_token, chain="base")
             if b and b.balance_usd:
                 self._start_usdc_balance = Decimal(str(b.balance_usd))
                 logger.info(f"BUDGET: starting USDC = ${self._start_usdc_balance}")
@@ -202,7 +202,7 @@ class AvalancheLPLifecycleProbeStrategy(IntentStrategy):
             return Intent.hold(reason="No WAVAX for LP")
 
         try:
-            wavax_price = market.price(self.lp_token0, self.target_chain)
+            wavax_price = market.price(self.lp_token0, chain=self.target_chain)
             if wavax_price and Decimal(str(wavax_price)) > 0:
                 max_wavax = self.swap_wavax_usd / Decimal(str(wavax_price))
                 if wavax_raw > max_wavax:
@@ -213,7 +213,7 @@ class AvalancheLPLifecycleProbeStrategy(IntentStrategy):
 
         # Price range: +/- 10% around current price (or fallback)
         try:
-            token0_price = market.price(self.lp_token0, self.target_chain)
+            token0_price = market.price(self.lp_token0, chain=self.target_chain)
             current_price = float(token0_price) if token0_price else None
         except Exception:
             current_price = None

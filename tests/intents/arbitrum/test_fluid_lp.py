@@ -89,7 +89,14 @@ class TestFluidLPCompilation:
         if pool_info is None:
             pytest.skip("No unencumbered Fluid DEX pool found on this fork")
         dex_address = pool_info[0]
-        compiler = IntentCompiler(chain=CHAIN_NAME, wallet_address=funded_wallet, rpc_url=anvil_rpc_url)
+        from almanak.framework.intents.compiler import IntentCompilerConfig
+
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            rpc_url=anvil_rpc_url,
+            config=IntentCompilerConfig(allow_placeholder_prices=True),
+        )
         intent = LPOpenIntent(
             pool=dex_address,
             amount0=Decimal("0.001"),
@@ -108,7 +115,14 @@ class TestFluidLPCompilation:
         pool_info = _find_unencumbered_pool(sdk)
         if pool_info is None:
             pytest.skip("No unencumbered Fluid DEX pool found on this fork")
-        compiler = IntentCompiler(chain=CHAIN_NAME, wallet_address=funded_wallet, rpc_url=anvil_rpc_url)
+        from almanak.framework.intents.compiler import IntentCompilerConfig
+
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            rpc_url=anvil_rpc_url,
+            config=IntentCompilerConfig(allow_placeholder_prices=True),
+        )
         intent = LPCloseIntent(position_id="1", protocol="fluid", pool=pool_info[0])
         result = compiler.compile(intent)
         assert result.status.value == "SUCCESS", f"Compilation failed: {result.error}"

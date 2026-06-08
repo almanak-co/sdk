@@ -113,7 +113,7 @@ class ArbitrumFullCycleProbeStrategy(IntentStrategy):
         """Phase-driven decision."""
         # Record starting balance on first tick
         if self._start_usdc_balance is None:
-            usdc_balance = market.balance(self.relay_token, "base")
+            usdc_balance = market.balance(self.relay_token, chain="base")
             if usdc_balance and usdc_balance.balance_usd:
                 self._start_usdc_balance = Decimal(str(usdc_balance.balance_usd))
                 logger.info(f"BUDGET: starting USDC balance = ${self._start_usdc_balance}")
@@ -121,7 +121,7 @@ class ArbitrumFullCycleProbeStrategy(IntentStrategy):
         if self._phase == "BRIDGE_IN":
             # Auto-detect if bridge already landed (handles callback-miss after retries)
             try:
-                target_balance = market.balance(self.relay_token, self.target_chain)
+                target_balance = market.balance(self.relay_token, chain=self.target_chain)
                 if target_balance and target_balance.balance_usd and Decimal(str(target_balance.balance_usd)) > Decimal("1"):
                     logger.info(
                         f"BRIDGE_IN auto-advance: detected ${target_balance.balance_usd} USDC on "
@@ -145,7 +145,7 @@ class ArbitrumFullCycleProbeStrategy(IntentStrategy):
     def _do_bridge_in(self, market: MarketSnapshot) -> Intent:
         """Bridge USDC from Base to Arbitrum."""
         # Pre-flight balance check
-        base_usdc = market.balance(self.relay_token, "base")
+        base_usdc = market.balance(self.relay_token, chain="base")
         base_usdc_usd = Decimal(str(base_usdc.balance_usd)) if base_usdc and base_usdc.balance_usd else Decimal("0")
         if base_usdc_usd < self.budget_usd:
             logger.error(f"BRIDGE_IN: insufficient Base USDC (${base_usdc_usd} < ${self.budget_usd})")
@@ -154,7 +154,7 @@ class ArbitrumFullCycleProbeStrategy(IntentStrategy):
             return Intent.hold(reason=f"PROBE_FAIL: Base USDC ${base_usdc_usd} < ${self.budget_usd} minimum")
 
         # Check Base ETH for gas
-        base_eth = market.balance("ETH", "base")
+        base_eth = market.balance("ETH", chain="base")
         base_eth_raw = Decimal(str(base_eth.balance)) if base_eth and base_eth.balance else Decimal("0")
         if base_eth_raw < Decimal("0.0005"):
             logger.error(f"BRIDGE_IN: insufficient Base ETH for gas ({base_eth_raw} < 0.0005)")
@@ -183,8 +183,8 @@ class ArbitrumFullCycleProbeStrategy(IntentStrategy):
 
     def _do_execute(self, market: MarketSnapshot) -> Intent:
         """Swap relay through 3 DEXs + Aave V3 lending lifecycle."""
-        market.price(self.relay_token, self.target_chain)
-        market.price(self.intermediate_token, self.target_chain)
+        market.price(self.relay_token, chain=self.target_chain)
+        market.price(self.intermediate_token, chain=self.target_chain)
 
         intents: list[Any] = []
 
@@ -297,7 +297,7 @@ class ArbitrumFullCycleProbeStrategy(IntentStrategy):
 
     def _do_done(self, market: MarketSnapshot) -> Intent:
         """Evaluate and report."""
-        usdc_balance = market.balance(self.relay_token, "base")
+        usdc_balance = market.balance(self.relay_token, chain="base")
         end_balance = Decimal(str(usdc_balance.balance_usd)) if usdc_balance and usdc_balance.balance_usd else None
 
         if self._start_usdc_balance and end_balance:
