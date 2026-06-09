@@ -87,6 +87,8 @@ class UniswapV3RSISweepArbitrumStrategy(IntentStrategy):
         self._total_trades = 0
         self._total_buys = 0
         self._total_sells = 0
+        # Neutral-rearm latch: only act on a signal transition, re-arm via neutral.
+        self._last_signal = "neutral"
 
         logger.info(
             f"UniswapV3RSISweepArbitrum initialized: "
@@ -113,8 +115,29 @@ class UniswapV3RSISweepArbitrumStrategy(IntentStrategy):
 
         max_slippage = Decimal(str(self.max_slippage_bps)) / Decimal("10000")
 
+        # Neutral re-arm: act only on a transition into a signal zone, not every
+        # tick RSI stays extreme. Re-arm when RSI returns to neutral; the buy/sell
+        # latch is set in on_intent_executed on a SUCCESSFUL swap, so a held-back
+        # (insufficient balance) or failed swap never locks out the next attempt.
+        current_signal = (
+            "buy" if rsi.value < self.rsi_oversold
+            else "sell" if rsi.value > self.rsi_overbought
+            else "neutral"
+        )
+        if current_signal == "neutral":
+            self._last_signal = "neutral"
+            self._consecutive_holds += 1
+            return Intent.hold(
+                reason=f"RSI={rsi.value:.2f} in neutral zone "
+                f"[{self.rsi_oversold}, {self.rsi_overbought}]"
+            )
+        if current_signal == self._last_signal:
+            return Intent.hold(
+                reason=f"RSI={rsi.value:.2f} still {current_signal}; awaiting neutral reset"
+            )
+
         # BUY when oversold
-        if rsi.value < self.rsi_oversold:
+        if current_signal == "buy":
             if quote_balance.balance_usd < self.trade_size_usd:
                 return Intent.hold(
                     reason=f"Oversold (RSI={rsi.value:.1f}) but insufficient {self.quote_token} "
@@ -139,7 +162,7 @@ class UniswapV3RSISweepArbitrumStrategy(IntentStrategy):
             )
 
         # SELL when overbought
-        if rsi.value > self.rsi_overbought:
+        if current_signal == "sell":
             try:
                 base_price = market.price(self.base_token)
             except (ValueError, KeyError) as e:
@@ -172,12 +195,36 @@ class UniswapV3RSISweepArbitrumStrategy(IntentStrategy):
                 chain=self.chain,
             )
 
-        # HOLD in neutral zone
-        self._consecutive_holds += 1
-        return Intent.hold(
-            reason=f"RSI={rsi.value:.2f} in neutral zone "
-            f"[{self.rsi_oversold}, {self.rsi_overbought}]"
-        )
+        return Intent.hold(reason=f"RSI={rsi.value:.2f}; no actionable signal")
+
+    def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
+        """Latch the acted signal only on a successful swap (drives neutral re-arm)."""
+        if not success:
+            return
+        intent_type = getattr(intent, "intent_type", None)
+        if not intent_type or intent_type.value != "SWAP":
+            return
+        if getattr(intent, "to_token", None) == self.base_token:
+            self._last_signal = "buy"
+        elif getattr(intent, "from_token", None) == self.base_token:
+            self._last_signal = "sell"
+
+    def get_persistent_state(self) -> dict[str, Any]:
+        return {
+            "last_signal": self._last_signal,
+            "consecutive_holds": self._consecutive_holds,
+            "total_trades": self._total_trades,
+            "total_buys": self._total_buys,
+            "total_sells": self._total_sells,
+        }
+
+    def load_persistent_state(self, state: dict[str, Any]) -> None:
+        if state:
+            self._last_signal = state.get("last_signal", "neutral")
+            self._consecutive_holds = int(state.get("consecutive_holds", 0))
+            self._total_trades = int(state.get("total_trades", 0))
+            self._total_buys = int(state.get("total_buys", 0))
+            self._total_sells = int(state.get("total_sells", 0))
 
     def get_status(self) -> dict[str, Any]:
         return {

@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     tags=["demo", "pnl-backtest", "lp", "traderjoe", "avalanche", "backtesting"],
     supported_chains=["avalanche"],
     supported_protocols=["traderjoe_v2"],
-    intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
+    intent_types=["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"],
     default_chain="avalanche",
 )
 class TraderJoePnLLPStrategy(IntentStrategy):
@@ -99,6 +99,9 @@ class TraderJoePnLLPStrategy(IntentStrategy):
         self.range_width_pct = Decimal(str(self.get_config("range_width_pct", "0.10")))
         self.rebalance_threshold_pct = Decimal(str(self.get_config("rebalance_threshold_pct", "0.08")))
 
+        # Minimum total inventory (USD) required to (re)open a position.
+        self.min_position_usd = Decimal(str(self.get_config("min_position_usd", "50")))
+
         # Internal state
         self._state = "idle"
         self._entry_price: Decimal | None = None
@@ -119,13 +122,44 @@ class TraderJoePnLLPStrategy(IntentStrategy):
             logger.warning(f"Could not get {self.token_x} price: {e}")
             return Intent.hold(reason=f"Price data unavailable for {self.token_x}: {e}")
 
-        # State: idle -> open LP position
+        # State: idle -> balance inventory to ~50/50, then open LP position
         if self._state == "idle":
+            # After a drift-close the wallet holds a skewed inventory (mostly one
+            # token), so swap the heavy side back toward 50/50 BEFORE reopening --
+            # otherwise the new range opens lopsided. We stay in 'idle' while
+            # swapping and only transition to 'opening' once balanced.
+            try:
+                token_y_price = market.price(self.token_y)
+                bx = market.balance(self.token_x, price=base_price)
+                by = market.balance(self.token_y, price=token_y_price)
+                balance_x = Decimal(str(bx.balance))
+                balance_y = Decimal(str(by.balance))
+                usd_x = Decimal(str(bx.balance_usd))
+                usd_y = Decimal(str(by.balance_usd))
+            except (ValueError, KeyError) as e:
+                logger.warning(f"Could not read balances: {e}")
+                return Intent.hold(reason=f"Cannot check balances: {e}")
+
+            total_usd = usd_x + usd_y
+            if total_usd < self.min_position_usd:
+                return Intent.hold(
+                    reason=f"Total ${total_usd:.2f} below min_position_usd ${self.min_position_usd:.2f}"
+                )
+
+            # Skewed beyond tolerance -> swap toward 50/50 and STAY in idle.
+            swap_intent = self._rebalance_swap_intent(usd_x, usd_y, total_usd)
+            if swap_intent is not None:
+                return swap_intent
+
+            # Balanced enough -> open LP deploying ~95% of each side.
             self._state = "opening"
             self._entry_price = base_price
 
+            amount_x = balance_x * Decimal("0.95")
+            amount_y = balance_y * Decimal("0.95")
+
             logger.info(
-                f"Opening LP: {self.amount_x} {self.token_x} + {self.amount_y} {self.token_y} "
+                f"Opening LP: {amount_x} {self.token_x} + {amount_y} {self.token_y} "
                 f"at price {base_price:.2f}, range_width={self.range_width_pct}"
             )
 
@@ -136,8 +170,8 @@ class TraderJoePnLLPStrategy(IntentStrategy):
 
             return Intent.lp_open(
                 pool=f"{self.token_x}/{self.token_y}/{self.bin_step}",
-                amount0=self.amount_x,
-                amount1=self.amount_y,
+                amount0=amount_x,
+                amount1=amount_y,
                 range_lower=range_lower,
                 range_upper=range_upper,
                 protocol="traderjoe_v2",
@@ -183,8 +217,50 @@ class TraderJoePnLLPStrategy(IntentStrategy):
 
         return Intent.hold(reason=f"Holding (state={self._state}, price={base_price:.2f})")
 
+    def _rebalance_swap_intent(
+        self, usd_x: Decimal, usd_y: Decimal, total_usd: Decimal
+    ) -> Intent | None:
+        """Swap the heavy side toward a ~50/50 USD split before (re)opening.
+
+        Returns a SWAP intent when inventory is skewed beyond a 10% tolerance
+        band, else None (balanced enough to open as-is).
+        """
+        half_usd = total_usd / Decimal("2")
+        tolerance_usd = total_usd * Decimal("0.10")
+        if usd_x - half_usd > tolerance_usd:
+            logger.info(
+                f"Rebalance swap: {self.token_x} -> {self.token_y} "
+                f"(${usd_x - half_usd:.2f} to reach ~50/50)"
+            )
+            return Intent.swap(
+                from_token=self.token_x,
+                to_token=self.token_y,
+                amount_usd=usd_x - half_usd,
+                max_slippage=Decimal("0.01"),
+                protocol="traderjoe_v2",
+            )
+        if usd_y - half_usd > tolerance_usd:
+            logger.info(
+                f"Rebalance swap: {self.token_y} -> {self.token_x} "
+                f"(${usd_y - half_usd:.2f} to reach ~50/50)"
+            )
+            return Intent.swap(
+                from_token=self.token_y,
+                to_token=self.token_x,
+                amount_usd=usd_y - half_usd,
+                max_slippage=Decimal("0.01"),
+                protocol="traderjoe_v2",
+            )
+        return None
+
     def on_intent_executed(self, intent: Intent, success: bool, result: Any = None) -> None:
         """Handle intent execution results."""
+        # Rebalance SWAPs run while idle and must not advance the LP state
+        # machine -- only LP_OPEN / LP_CLOSE drive opening/closing transitions.
+        intent_type = getattr(getattr(intent, "intent_type", None), "value", None)
+        if intent_type not in ("LP_OPEN", "LP_CLOSE"):
+            return
+
         if not success:
             if self._state == "opening":
                 self._state = "idle"

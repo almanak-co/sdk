@@ -83,6 +83,8 @@ class SushiSwapV3PnLSwapBaseStrategy(IntentStrategy):
         self._total_sells = 0
         self._base_held = Decimal("0")
         self._current_timestamp: datetime | None = None
+        # Neutral-rearm latch: only act on a signal transition, re-arm via neutral.
+        self._last_signal = "neutral"
 
         logger.info(
             f"SushiSwapV3PnLSwapBase initialized: "
@@ -105,8 +107,28 @@ class SushiSwapV3PnLSwapBaseStrategy(IntentStrategy):
             logger.warning(f"RSI data unavailable: {e}")
             return Intent.hold(reason=f"RSI data unavailable: {e}")
 
+        # Neutral re-arm: act only on a transition into a signal zone, not every
+        # tick RSI stays extreme. Re-arm when RSI returns to neutral; the buy/sell
+        # latch is set in on_intent_executed on a SUCCESSFUL swap, so a held-back
+        # (insufficient balance) or failed swap never locks out the next attempt.
+        current_signal = (
+            "buy" if rsi_value < self.rsi_oversold
+            else "sell" if rsi_value > self.rsi_overbought
+            else "neutral"
+        )
+        if current_signal == "neutral":
+            self._last_signal = "neutral"
+            return Intent.hold(
+                reason=f"RSI={rsi_value:.1f} in neutral zone "
+                f"[{self.rsi_oversold}, {self.rsi_overbought}]"
+            )
+        if current_signal == self._last_signal:
+            return Intent.hold(
+                reason=f"RSI={rsi_value:.1f} still {current_signal}; awaiting neutral reset"
+            )
+
         # BUY: RSI oversold -> buy base token with quote
-        if rsi_value < self.rsi_oversold:
+        if current_signal == "buy":
             try:
                 quote_balance = market.balance(self.quote_token)
                 if quote_balance.balance_usd < self.trade_size_usd:
@@ -132,7 +154,7 @@ class SushiSwapV3PnLSwapBaseStrategy(IntentStrategy):
             )
 
         # SELL: RSI overbought -> sell base token for quote
-        if rsi_value > self.rsi_overbought:
+        if current_signal == "sell":
             try:
                 base_price = market.price(self.base_token)
             except (ValueError, KeyError) as e:
@@ -172,10 +194,7 @@ class SushiSwapV3PnLSwapBaseStrategy(IntentStrategy):
                 chain=self.chain,
             )
 
-        return Intent.hold(
-            reason=f"RSI={rsi_value:.1f} in neutral zone "
-            f"[{self.rsi_oversold}, {self.rsi_overbought}]"
-        )
+        return Intent.hold(reason=f"RSI={rsi_value:.1f} no actionable signal")
 
     def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
         """Track buy/sell counts."""
@@ -184,38 +203,46 @@ class SushiSwapV3PnLSwapBaseStrategy(IntentStrategy):
             return
 
         intent_type = getattr(intent, "intent_type", None)
-        if intent_type and intent_type.value == "SWAP":
-            from_token = getattr(intent, "from_token", "")
-            if from_token == self.quote_token:
-                self._total_buys += 1
-                out = self._extract_amount_out(result)
-                if out:
-                    self._base_held += out
-                ts = getattr(result, "timestamp", None) or self._current_timestamp or datetime.now(UTC)
-                add_event(
-                    TimelineEvent(
-                        timestamp=ts,
-                        event_type=TimelineEventType.TRADE,
-                        description=f"BUY {self.base_token} (trade #{self._total_buys})",
-                        deployment_id=self.deployment_id,
-                        details={"action": "buy", "total_buys": self._total_buys},
-                    )
+        if not intent_type or intent_type.value != "SWAP":
+            return
+
+        # Latch the acted signal only on a successful swap (drives neutral re-arm).
+        if getattr(intent, "to_token", None) == self.base_token:
+            self._last_signal = "buy"
+        elif getattr(intent, "from_token", None) == self.base_token:
+            self._last_signal = "sell"
+
+        from_token = getattr(intent, "from_token", "")
+        if from_token == self.quote_token:
+            self._total_buys += 1
+            out = self._extract_amount_out(result)
+            if out:
+                self._base_held += out
+            ts = getattr(result, "timestamp", None) or self._current_timestamp or datetime.now(UTC)
+            add_event(
+                TimelineEvent(
+                    timestamp=ts,
+                    event_type=TimelineEventType.TRADE,
+                    description=f"BUY {self.base_token} (trade #{self._total_buys})",
+                    deployment_id=self.deployment_id,
+                    details={"action": "buy", "total_buys": self._total_buys},
                 )
-            else:
-                self._total_sells += 1
-                in_amt = self._extract_amount_in(result)
-                if in_amt:
-                    self._base_held = max(Decimal("0"), self._base_held - in_amt)
-                ts = getattr(result, "timestamp", None) or self._current_timestamp or datetime.now(UTC)
-                add_event(
-                    TimelineEvent(
-                        timestamp=ts,
-                        event_type=TimelineEventType.TRADE,
-                        description=f"SELL {self.base_token} (trade #{self._total_sells})",
-                        deployment_id=self.deployment_id,
-                        details={"action": "sell", "total_sells": self._total_sells},
-                    )
+            )
+        else:
+            self._total_sells += 1
+            in_amt = self._extract_amount_in(result)
+            if in_amt:
+                self._base_held = max(Decimal("0"), self._base_held - in_amt)
+            ts = getattr(result, "timestamp", None) or self._current_timestamp or datetime.now(UTC)
+            add_event(
+                TimelineEvent(
+                    timestamp=ts,
+                    event_type=TimelineEventType.TRADE,
+                    description=f"SELL {self.base_token} (trade #{self._total_sells})",
+                    deployment_id=self.deployment_id,
+                    details={"action": "sell", "total_sells": self._total_sells},
                 )
+            )
 
     @staticmethod
     def _extract_amount_out(result: Any) -> Decimal | None:
@@ -257,6 +284,7 @@ class SushiSwapV3PnLSwapBaseStrategy(IntentStrategy):
             "total_buys": self._total_buys,
             "total_sells": self._total_sells,
             "base_held": str(self._base_held),
+            "last_signal": self._last_signal,
         }
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
@@ -268,6 +296,8 @@ class SushiSwapV3PnLSwapBaseStrategy(IntentStrategy):
             self._total_sells = int(state["total_sells"])
         if "base_held" in state:
             self._base_held = Decimal(str(state["base_held"]))
+        if "last_signal" in state:
+            self._last_signal = state["last_signal"]
         logger.info(
             f"Restored state: buys={self._total_buys}, sells={self._total_sells}, "
             f"base_held={self._base_held}"

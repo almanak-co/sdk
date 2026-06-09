@@ -90,7 +90,7 @@ class UniswapV4LPConfig:
     tags=["demo", "lp", "liquidity", "uniswap-v4", "arbitrum", "v4"],
     supported_chains=["arbitrum", "ethereum", "base"],
     supported_protocols=["uniswap_v4"],
-    intent_types=["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES", "HOLD"],
+    intent_types=["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES", "SWAP", "HOLD"],
     default_chain="arbitrum",
 )
 class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
@@ -119,8 +119,15 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
         self.force_action = str(self.config.force_action).lower() if self.config.force_action else ""
         self._config_position_id = self.config.position_id
 
+        # Minimum total inventory (USD) required to (re)open a position.
+        self.min_position_usd = Decimal(str(self.get_config("min_position_usd", "100")))
+
         self._current_position_id: str | None = None
         self._liquidity: int | None = None
+        # Range the live position was opened with -- used to detect drift and
+        # trigger a rebalance (close -> swap-to-ratio -> reopen).
+        self._range_lower: Decimal | None = None
+        self._range_upper: Decimal | None = None
         self._load_position_from_state()
 
         # Config position_id overrides state (for testing)
@@ -166,56 +173,99 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
             logger.info("Forced LP_OPEN")
             return self._create_open_intent(current_price)
 
-        # If we have a position, monitor it
+        # Position open -> rebalance if price has drifted out of range
         if self._current_position_id:
-            return Intent.hold(reason=f"V4 position {self._current_position_id} active — monitoring")
+            if self._range_lower is not None and self._range_upper is not None:
+                if current_price < self._range_lower or current_price > self._range_upper:
+                    logger.info(
+                        f"Price {current_price:.2f} exited range "
+                        f"[{self._range_lower:.2f}, {self._range_upper:.2f}] - closing to rebalance"
+                    )
+                    return self._create_close_intent(self._current_position_id)
+                return Intent.hold(
+                    reason=f"V4 position {self._current_position_id} in range "
+                    f"[{self._range_lower:.2f}, {self._range_upper:.2f}]"
+                )
+            # Range unknown (e.g. opened by an older version) -- hold rather than
+            # rebalance blindly.
+            return Intent.hold(
+                reason=f"V4 position {self._current_position_id} active — range unknown"
+            )
 
-        # No position — check balances and open
+        # No position -> balance inventory to ~50/50, then (re)open.
+        # After a drift-close the wallet holds a skewed inventory (mostly one
+        # token), so swap the heavy side back toward 50/50 BEFORE reopening --
+        # otherwise the new range opens lopsided.
         try:
-            token0_bal = market.balance(self.token0_symbol)
-            token1_bal = market.balance(self.token1_symbol)
-            bal0 = token0_bal.balance if hasattr(token0_bal, "balance") else token0_bal
-            bal1 = token1_bal.balance if hasattr(token1_bal, "balance") else token1_bal
-
-            if bal0 < self.amount0:
-                return Intent.hold(reason=f"Insufficient {self.token0_symbol}: {bal0} < {self.amount0}")
-            if bal1 < self.amount1:
-                return Intent.hold(reason=f"Insufficient {self.token1_symbol}: {bal1} < {self.amount1}")
+            t0 = market.balance(self.token0_symbol, price=token0_price_usd)
+            t1 = market.balance(self.token1_symbol, price=token1_price_usd)
+            token0_balance = Decimal(str(t0.balance))
+            token1_balance = Decimal(str(t1.balance))
+            token0_usd = Decimal(str(t0.balance_usd))
+            token1_usd = Decimal(str(t1.balance_usd))
         except (ValueError, KeyError):
-            logger.warning("Could not verify balances, proceeding anyway")
+            return Intent.hold(reason="Cannot check balances")
 
-        logger.info("No V4 position found — opening new LP position")
+        total_usd = token0_usd + token1_usd
+        if total_usd < self.min_position_usd:
+            return Intent.hold(
+                reason=f"Total ${total_usd:.2f} below min_position_usd ${self.min_position_usd:.2f}"
+            )
+
+        swap_intent = self._rebalance_swap_intent(token0_usd, token1_usd, total_usd)
+        if swap_intent is not None:
+            return swap_intent
+
+        logger.info("No V4 position found — opening new LP position with balanced inventory")
         add_event(
             TimelineEvent(
                 timestamp=datetime.now(UTC),
                 event_type=TimelineEventType.STATE_CHANGE,
-                description="Opening new V4 LP position",
+                description="Opening new V4 LP position with balanced inventory",
                 deployment_id=self.deployment_id,
                 details={"action": "opening_v4_position"},
             )
         )
-        return self._create_open_intent(current_price)
+        # Deploy ~95% of each balanced side (small buffer for gas/rounding).
+        return self._create_open_intent(
+            current_price,
+            amount0=token0_balance * Decimal("0.95"),
+            amount1=token1_balance * Decimal("0.95"),
+        )
 
     # =========================================================================
     # INTENT CREATION
     # =========================================================================
 
-    def _create_open_intent(self, current_price: Decimal) -> Intent:
-        """Create LP_OPEN intent for V4 PositionManager."""
+    def _create_open_intent(
+        self,
+        current_price: Decimal,
+        amount0: Decimal | None = None,
+        amount1: Decimal | None = None,
+    ) -> Intent:
+        """Create LP_OPEN intent for V4 PositionManager.
+
+        Amounts default to the configured amount0/amount1 (initial open /
+        force_action); the rebalance path passes the balanced wallet amounts
+        to redeploy.
+        """
+        amount0 = self.amount0 if amount0 is None else amount0
+        amount1 = self.amount1 if amount1 is None else amount1
+
         half_width = self.range_width_pct / Decimal("2")
         range_lower = current_price * (Decimal("1") - half_width)
         range_upper = current_price * (Decimal("1") + half_width)
 
         logger.info(
-            f"LP_OPEN (V4): {format_token_amount_human(self.amount0, self.token0_symbol)} + "
-            f"{format_token_amount_human(self.amount1, self.token1_symbol)}, "
+            f"LP_OPEN (V4): {format_token_amount_human(amount0, self.token0_symbol)} + "
+            f"{format_token_amount_human(amount1, self.token1_symbol)}, "
             f"range [{format_usd(range_lower)} - {format_usd(range_upper)}]"
         )
 
         return Intent.lp_open(
             pool=self.pool,
-            amount0=self.amount0,
-            amount1=self.amount1,
+            amount0=amount0,
+            amount1=amount1,
             range_lower=range_lower,
             range_upper=range_upper,
             protocol="uniswap_v4",
@@ -223,6 +273,42 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
             # estimated price; opt in so the money-safety guard doesn't block the open.
             protocol_params={"allow_estimated_price": True},
         )
+
+    def _rebalance_swap_intent(
+        self, token0_usd: Decimal, token1_usd: Decimal, total_usd: Decimal
+    ) -> Intent | None:
+        """Swap the heavy side toward a ~50/50 USD split before (re)opening.
+
+        Returns a SWAP intent when inventory is skewed beyond a 10% tolerance
+        band, else None (balanced enough to open as-is).
+        """
+        half_usd = total_usd / Decimal("2")
+        tolerance_usd = total_usd * Decimal("0.10")
+        if token0_usd - half_usd > tolerance_usd:
+            logger.info(
+                f"Rebalance swap: {self.token0_symbol} -> {self.token1_symbol} "
+                f"(${token0_usd - half_usd:.2f} to reach ~50/50)"
+            )
+            return Intent.swap(
+                from_token=self.token0_symbol,
+                to_token=self.token1_symbol,
+                amount_usd=token0_usd - half_usd,
+                max_slippage=Decimal("0.01"),
+                protocol="uniswap_v4",
+            )
+        if token1_usd - half_usd > tolerance_usd:
+            logger.info(
+                f"Rebalance swap: {self.token1_symbol} -> {self.token0_symbol} "
+                f"(${token1_usd - half_usd:.2f} to reach ~50/50)"
+            )
+            return Intent.swap(
+                from_token=self.token1_symbol,
+                to_token=self.token0_symbol,
+                amount_usd=token1_usd - half_usd,
+                max_slippage=Decimal("0.01"),
+                protocol="uniswap_v4",
+            )
+        return None
 
     def _create_close_intent(self, position_id: str) -> Intent:
         """Create LP_CLOSE intent for V4 PositionManager.
@@ -263,6 +349,13 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
     def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
         if success and intent.intent_type.value == "LP_OPEN":
             position_id = result.position_id if result else None
+
+            # Record the range we opened with so decide() can detect drift.
+            rl = getattr(intent, "range_lower", None)
+            ru = getattr(intent, "range_upper", None)
+            self._range_lower = Decimal(str(rl)) if rl is not None else None
+            self._range_upper = Decimal(str(ru)) if ru is not None else None
+
             if position_id:
                 self._current_position_id = str(position_id)
                 # Reset liquidity before extraction to avoid stale values from previous position
@@ -290,6 +383,8 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
             logger.info(f"V4 LP position closed: position_id={self._current_position_id}")
             self._current_position_id = None
             self._liquidity = None
+            self._range_lower = None
+            self._range_upper = None
 
     # =========================================================================
     # STATE PERSISTENCE
@@ -314,6 +409,14 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
             # Clear stale position after LP_CLOSE so restarts don't see a phantom position
             state.pop("current_position_id", None)
             state.pop("position_opened_at", None)
+        if self._range_lower is not None:
+            state["range_lower"] = str(self._range_lower)
+        else:
+            state.pop("range_lower", None)
+        if self._range_upper is not None:
+            state["range_upper"] = str(self._range_upper)
+        else:
+            state.pop("range_upper", None)
         return state
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
@@ -321,6 +424,10 @@ class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
             super().load_persistent_state(state)
         if "current_position_id" in state:
             self._current_position_id = str(state["current_position_id"])
+        if state.get("range_lower") is not None:
+            self._range_lower = Decimal(str(state["range_lower"]))
+        if state.get("range_upper") is not None:
+            self._range_upper = Decimal(str(state["range_upper"]))
 
     # =========================================================================
     # TEARDOWN

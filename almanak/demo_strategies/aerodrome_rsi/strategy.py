@@ -72,6 +72,8 @@ class AerodromeRSIStrategy(IntentStrategy):
         self.quote_token = self.get_config("quote_token", "USDC")
 
         self._consecutive_holds = 0
+        # Neutral-rearm latch: only act on a signal transition, re-arm via neutral.
+        self._last_signal = "neutral"
 
         logger.info(
             f"AerodromeRSI initialized: trade_size=${self.trade_size_usd}, "
@@ -102,8 +104,29 @@ class AerodromeRSIStrategy(IntentStrategy):
 
         max_slippage = Decimal(str(self.max_slippage_bps)) / Decimal("10000")
 
-        # OVERSOLD -> BUY
-        if rsi.value <= self.rsi_oversold:
+        # Neutral re-arm: act only on a transition into a signal zone, not every
+        # tick RSI stays extreme. Re-arm when RSI returns to neutral; the buy/sell
+        # latch is set in on_intent_executed on a SUCCESSFUL swap, so a held-back
+        # (insufficient balance) or failed swap never locks out the next attempt.
+        current_signal = (
+            "buy" if rsi.value <= self.rsi_oversold
+            else "sell" if rsi.value >= self.rsi_overbought
+            else "neutral"
+        )
+        if current_signal == "neutral":
+            self._last_signal = "neutral"
+            self._consecutive_holds += 1
+            return Intent.hold(
+                reason=f"RSI={rsi.value:.2f} neutral [{self.rsi_oversold}-{self.rsi_overbought}] "
+                f"(hold #{self._consecutive_holds})"
+            )
+        if current_signal == self._last_signal:
+            return Intent.hold(
+                reason=f"RSI={rsi.value:.2f} still {current_signal}; awaiting neutral reset"
+            )
+
+        # OVERSOLD -> BUY (on transition)
+        if current_signal == "buy":
             if quote_balance.balance_usd < self.trade_size_usd:
                 return Intent.hold(
                     reason=f"Oversold (RSI={rsi.value:.1f}) but insufficient "
@@ -123,35 +146,46 @@ class AerodromeRSIStrategy(IntentStrategy):
                 protocol="aerodrome",
             )
 
-        # OVERBOUGHT -> SELL
-        elif rsi.value >= self.rsi_overbought:
-            min_base_to_sell = self.trade_size_usd / base_price
-            if base_balance.balance < min_base_to_sell:
-                return Intent.hold(
-                    reason=f"Overbought (RSI={rsi.value:.1f}) but insufficient "
-                    f"{self.base_token} ({base_balance.balance:.4f})"
-                )
-
-            logger.info(
-                f"SELL: RSI={rsi.value:.2f} > {self.rsi_overbought} | "
-                f"Selling {format_usd(self.trade_size_usd)} of {self.base_token}"
-            )
-            self._consecutive_holds = 0
-            return Intent.swap(
-                from_token=self.base_token,
-                to_token=self.quote_token,
-                amount_usd=self.trade_size_usd,
-                max_slippage=max_slippage,
-                protocol="aerodrome",
-            )
-
-        # NEUTRAL -> HOLD
-        else:
-            self._consecutive_holds += 1
+        # OVERBOUGHT -> SELL (on transition)
+        min_base_to_sell = self.trade_size_usd / base_price
+        if base_balance.balance < min_base_to_sell:
             return Intent.hold(
-                reason=f"RSI={rsi.value:.2f} neutral [{self.rsi_oversold}-{self.rsi_overbought}] "
-                f"(hold #{self._consecutive_holds})"
+                reason=f"Overbought (RSI={rsi.value:.1f}) but insufficient "
+                f"{self.base_token} ({base_balance.balance:.4f})"
             )
+
+        logger.info(
+            f"SELL: RSI={rsi.value:.2f} > {self.rsi_overbought} | "
+            f"Selling {format_usd(self.trade_size_usd)} of {self.base_token}"
+        )
+        self._consecutive_holds = 0
+        return Intent.swap(
+            from_token=self.base_token,
+            to_token=self.quote_token,
+            amount_usd=self.trade_size_usd,
+            max_slippage=max_slippage,
+            protocol="aerodrome",
+        )
+
+    def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
+        """Latch the acted signal only on a successful swap (drives neutral re-arm)."""
+        if not success:
+            return
+        intent_type = getattr(intent, "intent_type", None)
+        if not intent_type or intent_type.value != "SWAP":
+            return
+        if getattr(intent, "to_token", None) == self.base_token:
+            self._last_signal = "buy"
+        elif getattr(intent, "from_token", None) == self.base_token:
+            self._last_signal = "sell"
+
+    def get_persistent_state(self) -> dict[str, Any]:
+        return {"last_signal": self._last_signal, "consecutive_holds": self._consecutive_holds}
+
+    def load_persistent_state(self, state: dict[str, Any]) -> None:
+        if state:
+            self._last_signal = state.get("last_signal", "neutral")
+            self._consecutive_holds = int(state.get("consecutive_holds", 0))
 
     # =========================================================================
     # TEARDOWN

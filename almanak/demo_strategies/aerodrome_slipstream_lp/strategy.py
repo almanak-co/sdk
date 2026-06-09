@@ -213,7 +213,7 @@ class AerodromeSlipstreamLPConfig:
     tags=["demo", "tutorial", "lp", "liquidity", "aerodrome", "slipstream", "concentrated", "base", "clmm"],
     supported_chains=["base"],
     supported_protocols=["aerodrome_slipstream"],
-    intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
+    intent_types=["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"],
     default_chain="base",
 )
 class AerodromeSlipstreamLPStrategy(IntentStrategy[AerodromeSlipstreamLPConfig]):
@@ -268,9 +268,21 @@ class AerodromeSlipstreamLPStrategy(IntentStrategy[AerodromeSlipstreamLPConfig])
         self.range_upper_price = self.config.range_upper_price
         self.force_action = self.config.force_action.lower() if self.config.force_action else ""
 
+        # Minimum total inventory (USD) required to (re)open a position.
+        self.min_position_usd = Decimal(str(self.get_config("min_position_usd", "100")))
+
         # Internal state: track NFT tokenId
         self._has_position: bool = False
         self._position_token_id: str = ""
+        # PRICE band the live position was opened with -- used to detect drift
+        # and trigger a rebalance (close -> swap-to-ratio -> reopen). Stored
+        # separately from the tick math in _compute_tick_range / the intent's
+        # tick-valued range_lower/range_upper.
+        self._range_lower: Decimal | None = None
+        self._range_upper: Decimal | None = None
+        # Price band staged when we emit an LP_OPEN, committed on success.
+        self._pending_range_lower: Decimal | None = None
+        self._pending_range_upper: Decimal | None = None
 
         logger.info(
             f"AerodromeSlipstreamLPStrategy initialized: "
@@ -340,6 +352,26 @@ class AerodromeSlipstreamLPStrategy(IntentStrategy[AerodromeSlipstreamLPConfig])
         )
         return tick_lower, tick_upper
 
+    def _compute_price_band(self, current_price: Decimal) -> tuple[Decimal, Decimal]:
+        """Compute the PRICE band [lower, upper] used for drift detection.
+
+        Mirrors the bounds logic in _compute_tick_range but returns prices (not
+        ticks). Uses explicit price bounds if configured, otherwise ±range_percent
+        around current_price.
+
+        Args:
+            current_price: Current price of token0 in terms of token1
+
+        Returns:
+            Tuple of (lower_price, upper_price)
+        """
+        if self.range_lower_price > 0 and self.range_upper_price > 0:
+            return self.range_lower_price, self.range_upper_price
+        range_factor = self.range_percent / Decimal("100")
+        lower_price = current_price * (Decimal("1") - range_factor)
+        upper_price = current_price * (Decimal("1") + range_factor)
+        return lower_price, upper_price
+
     # =========================================================================
     # MAIN DECISION LOGIC
     # =========================================================================
@@ -371,59 +403,153 @@ class AerodromeSlipstreamLPStrategy(IntentStrategy[AerodromeSlipstreamLPConfig])
             logger.info("Forced action: CLOSE CL LP position")
             return self._create_close_intent()
 
-        # Check current position status
+        # =================================================================
+        # Position open -> rebalance if price has drifted out of the band
+        # =================================================================
         if self._has_tracked_position():
-            return Intent.hold(reason=f"CL position exists (tokenId={self._position_token_id}) - monitoring")
+            if self._range_lower is not None and self._range_upper is not None:
+                if current_price < self._range_lower or current_price > self._range_upper:
+                    logger.info(
+                        f"Price {current_price:.4f} exited band "
+                        f"[{self._range_lower:.4f}, {self._range_upper:.4f}] - closing to rebalance"
+                    )
+                    return self._create_close_intent()
+                return Intent.hold(
+                    reason=f"CL position (tokenId={self._position_token_id}) in band "
+                    f"[{self._range_lower:.4f}, {self._range_upper:.4f}]"
+                )
+            # Band unknown (e.g. opened by an older version) -- hold rather than
+            # rebalance blindly.
+            return Intent.hold(reason=f"CL position exists (tokenId={self._position_token_id}) - band unknown")
 
-        # Check sufficient balance
+        # =================================================================
+        # No position -> balance inventory to ~50/50, then (re)open
+        # =================================================================
+        # After a drift-close the wallet holds a skewed inventory (mostly one
+        # token), so swap the heavy side back toward 50/50 BEFORE reopening --
+        # otherwise the new range opens lopsided.
         try:
-            token0_bal = market.balance(self.token0_symbol)
-            token1_bal = market.balance(self.token1_symbol)
-            if token0_bal.balance < self.amount0:
-                return Intent.hold(reason=f"Insufficient {self.token0_symbol}: {token0_bal.balance} < {self.amount0}")
-            if token1_bal.balance < self.amount1:
-                return Intent.hold(reason=f"Insufficient {self.token1_symbol}: {token1_bal.balance} < {self.amount1}")
+            t0 = market.balance(self.token0_symbol, price=token0_price_usd)
+            t1 = market.balance(self.token1_symbol, price=token1_price_usd)
+            token0_balance = Decimal(str(t0.balance))
+            token1_balance = Decimal(str(t1.balance))
+            token0_usd = Decimal(str(t0.balance_usd))
+            token1_usd = Decimal(str(t1.balance_usd))
         except (ValueError, KeyError, AttributeError):
-            logger.warning("Could not verify balances, proceeding anyway")
+            return Intent.hold(reason="Cannot check balances")
 
-        # Open new CL position
-        logger.info("No CL position found - opening new Slipstream LP position")
-        return self._create_open_intent(current_price)
+        total_usd = token0_usd + token1_usd
+        if total_usd < self.min_position_usd:
+            return Intent.hold(
+                reason=f"Total ${total_usd:.2f} below min_position_usd ${self.min_position_usd:.2f}"
+            )
+
+        swap_intent = self._rebalance_swap_intent(token0_usd, token1_usd, total_usd)
+        if swap_intent is not None:
+            return swap_intent
+
+        # Open new CL position deploying ~95% of each balanced side.
+        logger.info("No CL position found - opening new Slipstream LP position with balanced inventory")
+        add_event(
+            TimelineEvent(
+                timestamp=datetime.now(UTC),
+                event_type=TimelineEventType.STATE_CHANGE,
+                description="Opening Slipstream CL position with balanced inventory",
+                deployment_id=self.deployment_id,
+                details={"action": "opening_new_position"},
+            )
+        )
+        return self._create_open_intent(
+            current_price,
+            amount0=token0_balance * Decimal("0.95"),
+            amount1=token1_balance * Decimal("0.95"),
+        )
 
     # =========================================================================
     # INTENT CREATION HELPERS
     # =========================================================================
 
-    def _create_open_intent(self, current_price: Decimal) -> Intent:
+    def _create_open_intent(
+        self,
+        current_price: Decimal,
+        amount0: Decimal | None = None,
+        amount1: Decimal | None = None,
+    ) -> Intent:
         """Create an LP_OPEN intent for Aerodrome Slipstream CL.
 
         Pool format for Slipstream: "TOKEN0/TOKEN1/tick_spacing"
-        Tick range is computed from current_price ± range_percent.
+        Tick range is computed from current_price ± range_percent. Amounts
+        default to the configured amount0/amount1 (initial open / force_action);
+        the rebalance path passes the balanced wallet amounts to redeploy.
 
         Args:
             current_price: Current price of token0 in token1 units
+            amount0/amount1: Optional deploy amounts; fall back to config.
 
         Returns:
             LPOpenIntent ready for compilation
         """
+        amount0 = self.amount0 if amount0 is None else amount0
+        amount1 = self.amount1 if amount1 is None else amount1
+
         tick_lower, tick_upper = self._compute_tick_range(current_price)
+
+        # Stage the PRICE band (mirrors the tick bounds) so it can be committed
+        # to drift-detection state once the open succeeds.
+        self._pending_range_lower, self._pending_range_upper = self._compute_price_band(current_price)
 
         pool_with_spacing = f"{self.pool}/{self.tick_spacing}"
 
         logger.info(
-            f"LP_OPEN (Slipstream CL): {format_token_amount_human(self.amount0, self.token0_symbol)} + "
-            f"{format_token_amount_human(self.amount1, self.token1_symbol)}, "
+            f"LP_OPEN (Slipstream CL): {format_token_amount_human(amount0, self.token0_symbol)} + "
+            f"{format_token_amount_human(amount1, self.token1_symbol)}, "
             f"pool={pool_with_spacing}, ticks=[{tick_lower},{tick_upper}]"
         )
 
         return Intent.lp_open(
             pool=pool_with_spacing,
-            amount0=self.amount0,
-            amount1=self.amount1,
+            amount0=amount0,
+            amount1=amount1,
             range_lower=Decimal(str(tick_lower)),
             range_upper=Decimal(str(tick_upper)),
             protocol="aerodrome_slipstream",
         )
+
+    def _rebalance_swap_intent(
+        self, token0_usd: Decimal, token1_usd: Decimal, total_usd: Decimal
+    ) -> Intent | None:
+        """Swap the heavy side toward a ~50/50 USD split before (re)opening.
+
+        Returns a SWAP intent when inventory is skewed beyond a 10% tolerance
+        band, else None (balanced enough to open as-is).
+        """
+        half_usd = total_usd / Decimal("2")
+        tolerance_usd = total_usd * Decimal("0.10")
+        if token0_usd - half_usd > tolerance_usd:
+            logger.info(
+                f"Rebalance swap: {self.token0_symbol} -> {self.token1_symbol} "
+                f"(${token0_usd - half_usd:.2f} to reach ~50/50)"
+            )
+            return Intent.swap(
+                from_token=self.token0_symbol,
+                to_token=self.token1_symbol,
+                amount_usd=token0_usd - half_usd,
+                max_slippage=Decimal("0.01"),
+                protocol="aerodrome_slipstream",
+            )
+        if token1_usd - half_usd > tolerance_usd:
+            logger.info(
+                f"Rebalance swap: {self.token1_symbol} -> {self.token0_symbol} "
+                f"(${token1_usd - half_usd:.2f} to reach ~50/50)"
+            )
+            return Intent.swap(
+                from_token=self.token1_symbol,
+                to_token=self.token0_symbol,
+                amount_usd=token1_usd - half_usd,
+                max_slippage=Decimal("0.01"),
+                protocol="aerodrome_slipstream",
+            )
+        return None
 
     def _create_close_intent(self) -> Intent:
         """Create an LP_CLOSE intent for Aerodrome Slipstream CL.
@@ -458,6 +584,11 @@ class AerodromeSlipstreamLPStrategy(IntentStrategy[AerodromeSlipstreamLPConfig])
                     self._position_token_id = str(position_id)
                     self._has_position = True
                     logger.info(f"CL position opened: tokenId={self._position_token_id}")
+                    # Commit the PRICE band so decide() can detect drift. The
+                    # intent's range_lower/range_upper are TICKS, so we use the
+                    # band staged at open time (current price ± configured width).
+                    self._range_lower = self._pending_range_lower
+                    self._range_upper = self._pending_range_upper
                 else:
                     logger.error(
                         "LP_OPEN succeeded on-chain but tokenId was not extracted from the result. "
@@ -485,6 +616,8 @@ class AerodromeSlipstreamLPStrategy(IntentStrategy[AerodromeSlipstreamLPConfig])
             logger.info("Aerodrome Slipstream CL position closed successfully")
             self._has_position = False
             self._position_token_id = ""
+            self._range_lower = None
+            self._range_upper = None
 
     # =========================================================================
     # STATE PERSISTENCE
@@ -496,6 +629,10 @@ class AerodromeSlipstreamLPStrategy(IntentStrategy[AerodromeSlipstreamLPConfig])
         state = parent_get_state() if callable(parent_get_state) else {}
         state["has_position"] = self._has_tracked_position()
         state["position_token_id"] = self._position_token_id
+        if self._range_lower is not None:
+            state["range_lower"] = str(self._range_lower)
+        if self._range_upper is not None:
+            state["range_upper"] = str(self._range_upper)
         return state
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
@@ -513,6 +650,11 @@ class AerodromeSlipstreamLPStrategy(IntentStrategy[AerodromeSlipstreamLPConfig])
         self._position_token_id = str(state.get("position_token_id", ""))
         if self._position_token_id and self._position_token_id not in ("", "None", "0"):
             self._has_position = True
+
+        if state.get("range_lower") is not None:
+            self._range_lower = Decimal(str(state["range_lower"]))
+        if state.get("range_upper") is not None:
+            self._range_upper = Decimal(str(state["range_upper"]))
 
     # =========================================================================
     # STATUS REPORTING

@@ -82,6 +82,8 @@ class CurveCryptoSwapPnLStrategy(IntentStrategy):
 
         self._consecutive_holds = 0
         self._has_position = False
+        # Neutral-rearm latch: only act on a signal transition, re-arm via neutral.
+        self._last_signal = "neutral"
 
         logger.info(
             f"CurveCryptoSwapPnL initialized: trade_size={format_usd(self.trade_size_usd)}, "
@@ -116,8 +118,29 @@ class CurveCryptoSwapPnLStrategy(IntentStrategy):
 
         max_slippage = Decimal(str(self.max_slippage_bps)) / Decimal("10000")
 
-        # OVERSOLD -> BUY WETH with USDT
-        if rsi.value <= self.rsi_oversold:
+        # Neutral re-arm: act only on a transition into a signal zone, not every
+        # tick RSI stays extreme. Re-arm when RSI returns to neutral; the buy/sell
+        # latch is set in on_intent_executed on a SUCCESSFUL swap, so a held-back
+        # (insufficient balance) or failed swap never locks out the next attempt.
+        current_signal = (
+            "buy" if rsi.value <= self.rsi_oversold
+            else "sell" if rsi.value >= self.rsi_overbought
+            else "neutral"
+        )
+        if current_signal == "neutral":
+            self._last_signal = "neutral"
+            self._consecutive_holds += 1
+            return Intent.hold(
+                reason=f"RSI={rsi.value:.2f} neutral [{self.rsi_oversold}-{self.rsi_overbought}] "
+                f"(hold #{self._consecutive_holds})"
+            )
+        if current_signal == self._last_signal:
+            return Intent.hold(
+                reason=f"RSI={rsi.value:.2f} still {current_signal}; awaiting neutral reset"
+            )
+
+        # OVERSOLD -> BUY WETH with USDT (on transition)
+        if current_signal == "buy":
             if quote_balance.balance_usd < self.trade_size_usd:
                 return Intent.hold(
                     reason=f"Oversold (RSI={rsi.value:.1f}) but insufficient "
@@ -137,35 +160,26 @@ class CurveCryptoSwapPnLStrategy(IntentStrategy):
                 protocol="curve",
             )
 
-        # OVERBOUGHT -> SELL WETH for USDT
-        elif rsi.value >= self.rsi_overbought:
-            min_base_to_sell = self.trade_size_usd / base_price
-            if base_balance.balance < min_base_to_sell:
-                return Intent.hold(
-                    reason=f"Overbought (RSI={rsi.value:.1f}) but insufficient "
-                    f"{self.base_token} ({base_balance.balance:.4f})"
-                )
-
-            logger.info(
-                f"SELL: RSI={rsi.value:.2f} > {self.rsi_overbought} | "
-                f"Selling {format_usd(self.trade_size_usd)} of {self.base_token} via Curve"
-            )
-            self._consecutive_holds = 0
-            return Intent.swap(
-                from_token=self.base_token,
-                to_token=self.quote_token,
-                amount_usd=self.trade_size_usd,
-                max_slippage=max_slippage,
-                protocol="curve",
-            )
-
-        # NEUTRAL -> HOLD
-        else:
-            self._consecutive_holds += 1
+        # OVERBOUGHT -> SELL WETH for USDT (on transition)
+        min_base_to_sell = self.trade_size_usd / base_price
+        if base_balance.balance < min_base_to_sell:
             return Intent.hold(
-                reason=f"RSI={rsi.value:.2f} neutral [{self.rsi_oversold}-{self.rsi_overbought}] "
-                f"(hold #{self._consecutive_holds})"
+                reason=f"Overbought (RSI={rsi.value:.1f}) but insufficient "
+                f"{self.base_token} ({base_balance.balance:.4f})"
             )
+
+        logger.info(
+            f"SELL: RSI={rsi.value:.2f} > {self.rsi_overbought} | "
+            f"Selling {format_usd(self.trade_size_usd)} of {self.base_token} via Curve"
+        )
+        self._consecutive_holds = 0
+        return Intent.swap(
+            from_token=self.base_token,
+            to_token=self.quote_token,
+            amount_usd=self.trade_size_usd,
+            max_slippage=max_slippage,
+            protocol="curve",
+        )
 
     # =========================================================================
     # LIFECYCLE HOOKS
@@ -188,12 +202,14 @@ class CurveCryptoSwapPnLStrategy(IntentStrategy):
         to_token = getattr(intent, "to_token", None)
 
         if from_token == self.quote_token and to_token == self.base_token:
-            # BUY: acquired base token position
+            # BUY: acquired base token position (latch buy signal for neutral re-arm)
             self._has_position = True
+            self._last_signal = "buy"
             logger.info(f"Position opened: bought {self.base_token} with {self.quote_token}")
         elif from_token == self.base_token and to_token == self.quote_token:
-            # SELL: exited base token position
+            # SELL: exited base token position (latch sell signal for neutral re-arm)
             self._has_position = False
+            self._last_signal = "sell"
             logger.info(f"Position closed: sold {self.base_token} for {self.quote_token}")
 
     # =========================================================================
@@ -204,6 +220,7 @@ class CurveCryptoSwapPnLStrategy(IntentStrategy):
         return {
             "has_position": self._has_position,
             "consecutive_holds": self._consecutive_holds,
+            "last_signal": self._last_signal,
         }
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
@@ -211,6 +228,8 @@ class CurveCryptoSwapPnLStrategy(IntentStrategy):
             self._has_position = bool(state["has_position"])
         if "consecutive_holds" in state:
             self._consecutive_holds = int(state["consecutive_holds"])
+        if "last_signal" in state:
+            self._last_signal = state["last_signal"]
         logger.info(f"Restored state: has_position={self._has_position}")
 
     # =========================================================================

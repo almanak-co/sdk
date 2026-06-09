@@ -97,6 +97,8 @@ class UniswapPaperTradeOptimismStrategy(IntentStrategy):
         self._total_buys = 0
         self._total_sells = 0
         self._holding_base = False
+        # Neutral-rearm latch: only act on a signal transition, re-arm via neutral.
+        self._last_signal = "neutral"
 
         logger.info(
             f"UniswapPaperTradeOptimism initialized: "
@@ -131,23 +133,35 @@ class UniswapPaperTradeOptimismStrategy(IntentStrategy):
             logger.warning(f"Could not get balances: {e}")
             return Intent.hold(reason="Balance data unavailable")
 
+        # Neutral re-arm: act only on a transition into a signal zone, not every
+        # tick RSI stays extreme. Re-arm when RSI returns to neutral; the buy/sell
+        # latch is set in on_intent_executed on a SUCCESSFUL swap, so a held-back
+        # (insufficient balance) or failed swap never locks out the next attempt.
+        current_signal = (
+            "buy" if rsi_value <= self.rsi_oversold else "sell" if rsi_value >= self.rsi_overbought else "neutral"
+        )
+        if current_signal == "neutral":
+            self._last_signal = "neutral"
+            self._consecutive_holds += 1
+            return Intent.hold(
+                reason=f"RSI={rsi_value:.1f} in neutral zone "
+                f"[{self.rsi_oversold}-{self.rsi_overbought}] "
+                f"(hold #{self._consecutive_holds})"
+            )
+        if current_signal == self._last_signal:
+            return Intent.hold(reason=f"RSI={rsi_value:.1f} still {current_signal}; awaiting neutral reset")
+
         # BUY: RSI oversold
-        if rsi_value <= self.rsi_oversold:
+        if current_signal == "buy":
             if quote_balance.balance_usd < self.trade_size_usd:
-                return Intent.hold(
-                    reason=f"Oversold (RSI={rsi_value:.1f}) but insufficient {self.quote_token}"
-                )
+                return Intent.hold(reason=f"Oversold (RSI={rsi_value:.1f}) but insufficient {self.quote_token}")
 
+            # Reset the hold counter on an actionable signal. The trade counter,
+            # holding flag, and timeline event are NOT set here -- they are
+            # reconciled in on_intent_executed on a SUCCESSFUL swap, so a failed
+            # or held-back swap can't persist a phantom holding_base (which
+            # teardown acts on) or inflate the counters across a restart.
             self._consecutive_holds = 0
-            self._total_buys += 1
-            self._holding_base = True
-
-            add_event(TimelineEvent(
-                timestamp=datetime.now(UTC),
-                event_type=TimelineEventType.POSITION_MODIFIED,
-                deployment_id=getattr(self, "deployment_id", "demo_uniswap_paper_trade_optimism"),
-                description=f"BUY {format_usd(self.trade_size_usd)} {self.base_token} (RSI={rsi_value:.1f})",
-            ))
 
             logger.info(
                 f"BUY SIGNAL: RSI={rsi_value:.1f} < {self.rsi_oversold} | "
@@ -163,23 +177,12 @@ class UniswapPaperTradeOptimismStrategy(IntentStrategy):
             )
 
         # SELL: RSI overbought
-        elif rsi_value >= self.rsi_overbought:
+        if current_signal == "sell":
             min_base_to_sell = self.trade_size_usd / base_price
             if base_balance.balance < min_base_to_sell:
-                return Intent.hold(
-                    reason=f"Overbought (RSI={rsi_value:.1f}) but insufficient {self.base_token}"
-                )
+                return Intent.hold(reason=f"Overbought (RSI={rsi_value:.1f}) but insufficient {self.base_token}")
 
             self._consecutive_holds = 0
-            self._total_sells += 1
-            self._holding_base = False
-
-            add_event(TimelineEvent(
-                timestamp=datetime.now(UTC),
-                event_type=TimelineEventType.POSITION_MODIFIED,
-                deployment_id=getattr(self, "deployment_id", "demo_uniswap_paper_trade_optimism"),
-                description=f"SELL {format_usd(self.trade_size_usd)} {self.base_token} (RSI={rsi_value:.1f})",
-            ))
 
             logger.info(
                 f"SELL SIGNAL: RSI={rsi_value:.1f} > {self.rsi_overbought} | "
@@ -194,14 +197,64 @@ class UniswapPaperTradeOptimismStrategy(IntentStrategy):
                 protocol="uniswap_v3",
             )
 
-        # HOLD: neutral RSI
-        else:
-            self._consecutive_holds += 1
-            return Intent.hold(
-                reason=f"RSI={rsi_value:.1f} in neutral zone "
-                f"[{self.rsi_oversold}-{self.rsi_overbought}] "
-                f"(hold #{self._consecutive_holds})"
+        return Intent.hold(reason=f"RSI={rsi_value:.1f}; no actionable signal")
+
+    def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
+        """Reconcile execution-derived state ONLY on a successful swap.
+
+        The holding flag, trade counters, neutral-rearm latch, and timeline
+        event are all set here -- never optimistically in decide(). A failed or
+        held-back swap therefore can't leave a phantom holding_base (which
+        teardown would act on with an ``amount="all"`` sell) or inflate the
+        buy/sell counters, including across a restart via persisted state.
+        """
+        if not success:
+            return
+        intent_type = getattr(intent, "intent_type", None)
+        if not intent_type or intent_type.value != "SWAP":
+            return
+        amount_usd = getattr(intent, "amount_usd", None) or self.trade_size_usd
+        if getattr(intent, "to_token", None) == self.base_token:
+            self._holding_base = True
+            self._total_buys += 1
+            self._last_signal = "buy"
+            add_event(
+                TimelineEvent(
+                    timestamp=datetime.now(UTC),
+                    event_type=TimelineEventType.POSITION_MODIFIED,
+                    deployment_id=getattr(self, "deployment_id", "demo_uniswap_paper_trade_optimism"),
+                    description=f"BUY {format_usd(amount_usd)} {self.base_token} executed",
+                )
             )
+        elif getattr(intent, "from_token", None) == self.base_token:
+            self._holding_base = False
+            self._total_sells += 1
+            self._last_signal = "sell"
+            add_event(
+                TimelineEvent(
+                    timestamp=datetime.now(UTC),
+                    event_type=TimelineEventType.POSITION_MODIFIED,
+                    deployment_id=getattr(self, "deployment_id", "demo_uniswap_paper_trade_optimism"),
+                    description=f"SELL {format_usd(amount_usd)} {self.base_token} executed",
+                )
+            )
+
+    def get_persistent_state(self) -> dict[str, Any]:
+        return {
+            "last_signal": self._last_signal,
+            "consecutive_holds": self._consecutive_holds,
+            "total_buys": self._total_buys,
+            "total_sells": self._total_sells,
+            "holding_base": self._holding_base,
+        }
+
+    def load_persistent_state(self, state: dict[str, Any]) -> None:
+        if state:
+            self._last_signal = state.get("last_signal", "neutral")
+            self._consecutive_holds = int(state.get("consecutive_holds", 0))
+            self._total_buys = int(state.get("total_buys", 0))
+            self._total_sells = int(state.get("total_sells", 0))
+            self._holding_base = bool(state.get("holding_base", False))
 
     def get_status(self) -> dict[str, Any]:
         return {
@@ -252,7 +305,9 @@ class UniswapPaperTradeOptimismStrategy(IntentStrategy):
 
         from almanak.framework.teardown import TeardownMode
 
-        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal(str(self.max_slippage_bps)) / Decimal("10000")
+        max_slippage = (
+            Decimal("0.03") if mode == TeardownMode.HARD else Decimal(str(self.max_slippage_bps)) / Decimal("10000")
+        )
 
         return [
             Intent.swap(

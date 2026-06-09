@@ -343,6 +343,67 @@ def _resolve_lp_pool_address(
     return None
 
 
+def _v4_realign_token_pair(
+    lp_data: Any,
+    chain: str,
+    token0: str,
+    token1: str,
+) -> tuple[str, str]:
+    """VIB-4636 (sibling) — return ``(token0, token1)`` re-paired by canonical V4 PoolKey order.
+
+    The V4 receipt parser emits ``amount0`` / ``amount1`` in PoolKey-sorted
+    order (``int(currency0, 16) < int(currency1, 16)``). The user's intent
+    may carry the pair in the OPPOSITE order (``"USDC/WETH"`` when canonical
+    is ``WETH<USDC``); without alignment, the WETH-shaped raw amount0 gets
+    scaled with USDC's 6 decimals and labelled USDC — silent misattribution
+    that corrupts cost basis. Mirrors
+    ``almanak.framework.accounting.lp_accounting._v4_align_tokens_to_currency_order``
+    (which is part of the unused ``build_lp_accounting_event`` ladder); kept
+    inline here so the production handler is the single source of truth.
+
+    Returns the inputs unchanged when ``currency0`` / ``currency1`` are
+    absent (V3 callers, single-sided V4 opens that did not surface both
+    legs, or token-resolver failures — fail-open so a missing resolver
+    cannot block the write).
+    """
+    # ``deserialize_extracted_data`` falls back to a plain dict when typed
+    # reconstruction fails — read both shapes so the realign is not silently
+    # disabled (which would re-introduce the misattribution this fixes).
+    if isinstance(lp_data, dict):
+        c0 = lp_data.get("currency0")
+        c1 = lp_data.get("currency1")
+    else:
+        c0 = getattr(lp_data, "currency0", None)
+        c1 = getattr(lp_data, "currency1", None)
+    if not c0 or not c1:
+        return token0, token1
+    try:
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        resolver = get_token_resolver()
+        ti0 = resolver.resolve(c0, chain=chain, log_errors=False)
+        ti1 = resolver.resolve(c1, chain=chain, log_errors=False)
+    except Exception:  # noqa: BLE001 — fail-open per docstring contract
+        logger.warning(
+            "V4 LP accounting: token resolver failed for currency pair (%s, %s) on %s; "
+            "falling back to user-intent token order — amounts may be misattributed",
+            c0,
+            c1,
+            chain,
+        )
+        return token0, token1
+    if ti0 is None or ti1 is None:
+        logger.warning(
+            "V4 LP accounting: token resolver returned None for currency pair (%s, %s) on %s; "
+            "falling back to user-intent token order",
+            c0,
+            c1,
+            chain,
+        )
+        return token0, token1
+    return (ti0.symbol or c0).upper(), (ti1.symbol or c1).upper()
+
+
 def _resolve_lp_tokens(ledger_row: dict[str, Any], position_key: str) -> tuple[str, str]:
     """Resolve (token0, token1) symbols, falling back to position-key descriptor for V3-style closes."""
     # LP_OPEN ledger rows carry token_in/token_out from the swap-style intent
@@ -1081,6 +1142,19 @@ def handle_lp(
     chain = ledger_row.get("chain") or ""
     protocol = (ledger_row.get("protocol") or "").lower()
 
+    # VIB-4636 (sibling alignment fix) — V4 LP amounts ship in canonical
+    # PoolKey order (``currency0 < currency1``) regardless of the order the
+    # user wrote into the intent / ledger row. Re-pair ``(token0, token1)``
+    # by canonical currency addresses BEFORE decimals are resolved, so
+    # ``_resolve_lp_amounts`` scales each raw amount with the matching
+    # decimals instead of silently mis-scaling. Capability-gated, not
+    # protocol-name-gated: ``_v4_realign_token_pair`` no-ops unless the typed
+    # LP data carries ``currency0/currency1`` (the V4 PoolKey signal), so V3
+    # and fungible-LP callers fall through unchanged.
+    lp_field = "lp_open_data" if intent_type_str == "LP_OPEN" else "lp_close_data"
+    lp_data = extracted.get(lp_field) if isinstance(extracted, dict) else None
+    token0, token1 = _v4_realign_token_pair(lp_data, chain, token0, token1)
+
     amount0, amount1, fees0, fees1, assumed_decimals = _resolve_lp_amounts(
         extracted=extracted,
         intent_type_str=intent_type_str,
@@ -1144,6 +1218,22 @@ def handle_lp(
         position_id_v = _resolve_lp_open_discriminator(intent_type_str, extracted)
     else:
         position_id_v = _resolve_lp_close_discriminator(ledger_row)
+
+    # VIB-4473 / VIB-4636 — V4 lot-matching anchor read from
+    # ``extracted["lp_open_data"]`` on LP_OPEN. V3 parsers leave the field
+    # ``None`` and it forwards as-is so the payload key shape is stable
+    # across protocols. LP_CLOSE / LP_COLLECT_FEES leave it ``None``: the
+    # close leg matches against the prior OPEN payload by ``position_key``,
+    # not by re-reading the hash off the burn receipt.
+    position_hash_v: str | None = None
+    if intent_type_str == "LP_OPEN":
+        lp_open_extracted = extracted.get("lp_open_data") if isinstance(extracted, dict) else None
+        if isinstance(lp_open_extracted, dict):
+            # dict fallback from deserialize_extracted_data — getattr would
+            # silently lose the anchor, so read the key directly.
+            position_hash_v = lp_open_extracted.get("position_hash")
+        elif lp_open_extracted is not None:
+            position_hash_v = getattr(lp_open_extracted, "position_hash", None)
 
     realized_pnl_usd, fees_total_usd = _compute_lp_realized_pnl_and_fees(
         intent_type_str=intent_type_str,
@@ -1228,6 +1318,7 @@ def handle_lp(
         il_usd=il_usd,
         hodl_value_usd=hodl_value_usd,
         position_id=position_id_v,
+        position_hash=position_hash_v,
     )
 
 

@@ -179,7 +179,7 @@ class SushiSwapLPConfig:
     # Protocols this strategy interacts with
     supported_protocols=["sushiswap_v3"],
     # Types of intents this strategy may return
-    intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
+    intent_types=["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"],
     default_chain="arbitrum",
 )
 class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
@@ -252,11 +252,21 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
         # Force action for testing ("open" or "close")
         self.force_action = str(self.config.force_action).lower()
 
+        # Minimum total inventory (USD) required to (re)open a position.
+        self.min_position_usd = Decimal(str(self.get_config("min_position_usd", "100")))
+
         # Internal state - track position NFT
         self._position_id: int | None = self.config.position_id
         self._liquidity: int | None = None
         self._tick_lower: int | None = None
         self._tick_upper: int | None = None
+        # Range the live position was opened with -- used to detect drift and
+        # trigger a rebalance (close -> swap-to-ratio -> reopen).
+        self._range_lower: Decimal | None = None
+        self._range_upper: Decimal | None = None
+
+        # Load persisted position / range state if available.
+        self._load_position_from_state()
 
         logger.info(
             f"SushiSwapLPStrategy initialized: "
@@ -324,38 +334,53 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
             return self._create_close_intent()
 
         # =================================================================
-        # STEP 3: Check current position status
+        # STEP 3: Position open -> rebalance if price has drifted out of range
         # =================================================================
 
         if self._position_id:
-            # We have a position - check if it's still in range
-            # In production, you would query the pool's current tick
+            if self._range_lower is not None and self._range_upper is not None:
+                if current_price < self._range_lower or current_price > self._range_upper:
+                    logger.info(
+                        f"Price {current_price:.4f} exited range "
+                        f"[{self._range_lower:.4f}, {self._range_upper:.4f}] - closing to rebalance"
+                    )
+                    return self._create_close_intent()
+                return Intent.hold(
+                    reason=f"Position {self._position_id} in range "
+                    f"[{self._range_lower:.4f}, {self._range_upper:.4f}]"
+                )
+            # Range unknown (e.g. opened by an older version) -- hold rather than
+            # rebalance blindly.
+            return Intent.hold(reason=f"Position {self._position_id} exists - range unknown")
+
+        # =================================================================
+        # STEP 4: No position -> balance inventory to ~50/50, then (re)open
+        # =================================================================
+        # After a drift-close the wallet holds a skewed inventory (mostly one
+        # token), so swap the heavy side back toward 50/50 BEFORE reopening --
+        # otherwise the new range opens lopsided.
+        try:
+            t0 = market.balance(self.token0_symbol, price=token0_price_usd)
+            t1 = market.balance(self.token1_symbol, price=token1_price_usd)
+            token0_balance = Decimal(str(t0.balance))
+            token1_balance = Decimal(str(t1.balance))
+            token0_usd = Decimal(str(t0.balance_usd))
+            token1_usd = Decimal(str(t1.balance_usd))
+        except (ValueError, KeyError):
+            return Intent.hold(reason="Cannot check balances")
+
+        total_usd = token0_usd + token1_usd
+        if total_usd < self.min_position_usd:
             return Intent.hold(
-                reason=f"Position {self._position_id} exists in range [{self._tick_lower}, {self._tick_upper}] - monitoring"
+                reason=f"Total ${total_usd:.2f} below min_position_usd ${self.min_position_usd:.2f}"
             )
 
-        # =================================================================
-        # STEP 4: No position - decide whether to open one
-        # =================================================================
-
-        # Check we have sufficient balance
-        try:
-            token0_balance = market.balance(self.token0_symbol)
-            token1_balance = market.balance(self.token1_symbol)
-
-            if token0_balance.balance < self.amount0:
-                return Intent.hold(
-                    reason=f"Insufficient {self.token0_symbol}: {token0_balance.balance} < {self.amount0}"
-                )
-            if token1_balance.balance < self.amount1:
-                return Intent.hold(
-                    reason=f"Insufficient {self.token1_symbol}: {token1_balance.balance} < {self.amount1}"
-                )
-        except (ValueError, KeyError):
-            logger.warning("Could not verify balances, proceeding anyway")
+        swap_intent = self._rebalance_swap_intent(token0_usd, token1_usd, total_usd)
+        if swap_intent is not None:
+            return swap_intent
 
         # Open new position centered on current price
-        logger.info("No position found - opening new LP position")
+        logger.info("No position found - opening new LP position with balanced inventory")
         add_event(
             TimelineEvent(
                 timestamp=datetime.now(UTC),
@@ -365,18 +390,30 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
                 details={"action": "opening_new_position", "pool": self.pool},
             )
         )
-        return self._create_open_intent(current_price)
+        # Deploy ~95% of each balanced side (small buffer for gas/rounding).
+        return self._create_open_intent(
+            current_price,
+            amount0=token0_balance * Decimal("0.95"),
+            amount1=token1_balance * Decimal("0.95"),
+        )
 
     # =========================================================================
     # INTENT CREATION HELPERS
     # =========================================================================
 
-    def _create_open_intent(self, current_price: Decimal) -> Intent:
+    def _create_open_intent(
+        self,
+        current_price: Decimal,
+        amount0: Decimal | None = None,
+        amount1: Decimal | None = None,
+    ) -> Intent:
         """
         Create an LP_OPEN intent to open a new concentrated liquidity position.
 
         Calculates the tick range centered on the current price using
-        the configured range_width_pct.
+        the configured range_width_pct. Amounts default to the configured
+        amount0/amount1 (initial open / force_action); the rebalance path
+        passes the balanced wallet amounts to redeploy.
 
         For SushiSwap V3, this translates to:
         - Lower price bound -> lower tick
@@ -385,10 +422,14 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
 
         Parameters:
             current_price: Current price (token0 per token1)
+            amount0/amount1: Optional deploy amounts; fall back to config.
 
         Returns:
             LPOpenIntent ready for compilation
         """
+        amount0 = self.amount0 if amount0 is None else amount0
+        amount1 = self.amount1 if amount1 is None else amount1
+
         # Calculate price range
         half_width = self.range_width_pct / Decimal("2")
         range_lower = current_price * (Decimal("1") - half_width)
@@ -422,8 +463,8 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
         self._tick_upper = tick_upper
 
         logger.info(
-            f"LP_OPEN: {format_token_amount_human(self.amount0, self.token0_symbol)} + "
-            f"{format_token_amount_human(self.amount1, self.token1_symbol)}, "
+            f"LP_OPEN: {format_token_amount_human(amount0, self.token0_symbol)} + "
+            f"{format_token_amount_human(amount1, self.token1_symbol)}, "
             f"price range [{range_lower:.4f} - {range_upper:.4f}], "
             f"ticks [{tick_lower} - {tick_upper}]"
         )
@@ -431,12 +472,48 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
         # Use LP_OPEN intent with sushiswap_v3 protocol
         return Intent.lp_open(
             pool=self.pool,
-            amount0=self.amount0,
-            amount1=self.amount1,
+            amount0=amount0,
+            amount1=amount1,
             range_lower=range_lower,
             range_upper=range_upper,
             protocol="sushiswap_v3",
         )
+
+    def _rebalance_swap_intent(
+        self, token0_usd: Decimal, token1_usd: Decimal, total_usd: Decimal
+    ) -> Intent | None:
+        """Swap the heavy side toward a ~50/50 USD split before (re)opening.
+
+        Returns a SWAP intent when inventory is skewed beyond a 10% tolerance
+        band, else None (balanced enough to open as-is).
+        """
+        half_usd = total_usd / Decimal("2")
+        tolerance_usd = total_usd * Decimal("0.10")
+        if token0_usd - half_usd > tolerance_usd:
+            logger.info(
+                f"Rebalance swap: {self.token0_symbol} -> {self.token1_symbol} "
+                f"(${token0_usd - half_usd:.2f} to reach ~50/50)"
+            )
+            return Intent.swap(
+                from_token=self.token0_symbol,
+                to_token=self.token1_symbol,
+                amount_usd=token0_usd - half_usd,
+                max_slippage=Decimal("0.01"),
+                protocol="sushiswap_v3",
+            )
+        if token1_usd - half_usd > tolerance_usd:
+            logger.info(
+                f"Rebalance swap: {self.token1_symbol} -> {self.token0_symbol} "
+                f"(${token1_usd - half_usd:.2f} to reach ~50/50)"
+            )
+            return Intent.swap(
+                from_token=self.token1_symbol,
+                to_token=self.token0_symbol,
+                amount_usd=token1_usd - half_usd,
+                max_slippage=Decimal("0.01"),
+                protocol="sushiswap_v3",
+            )
+        return None
 
     def _create_close_intent(self) -> Intent:
         """
@@ -512,6 +589,12 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
             position_id = result.position_id if result else None
             liquidity = result.extracted_data.get("liquidity") if result else None
 
+            # Record the range we opened with so decide() can detect drift.
+            rl = getattr(intent, "range_lower", None)
+            ru = getattr(intent, "range_upper", None)
+            self._range_lower = Decimal(str(rl)) if rl is not None else None
+            self._range_upper = Decimal(str(ru)) if ru is not None else None
+
             if position_id:
                 self._position_id = int(position_id)
                 self._liquidity = liquidity
@@ -539,6 +622,52 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
             self._liquidity = None
             self._tick_lower = None
             self._tick_upper = None
+            self._range_lower = None
+            self._range_upper = None
+
+    # =========================================================================
+    # PERSISTENCE
+    # =========================================================================
+
+    def _load_position_from_state(self) -> None:
+        """Load persisted position / range state if available."""
+        state = self.get_persistent_state() if hasattr(self, "get_persistent_state") else None
+        if state and state.get("current_position_id") is not None:
+            self._position_id = int(state["current_position_id"])
+            logger.info(f"Loaded position ID from state: {self._position_id}")
+
+    def get_persistent_state(self) -> dict[str, Any]:
+        """Get persistent state including position ID and opened range.
+
+        Returns:
+            Dictionary with strategy state including position tracking
+        """
+        state = super().get_persistent_state() if hasattr(super(), "get_persistent_state") else {}
+
+        if self._position_id is not None:
+            state["current_position_id"] = str(self._position_id)
+        if self._range_lower is not None:
+            state["range_lower"] = str(self._range_lower)
+        if self._range_upper is not None:
+            state["range_upper"] = str(self._range_upper)
+
+        return state
+
+    def load_persistent_state(self, state: dict[str, Any]) -> None:
+        """Load persistent state including position ID and opened range.
+
+        Args:
+            state: Dictionary with strategy state
+        """
+        super().load_persistent_state(state) if hasattr(super(), "load_persistent_state") else None
+
+        if state.get("current_position_id") is not None:
+            self._position_id = int(state["current_position_id"])
+            logger.info(f"Restored position ID from state: {self._position_id}")
+        if state.get("range_lower") is not None:
+            self._range_lower = Decimal(str(state["range_lower"]))
+        if state.get("range_upper") is not None:
+            self._range_upper = Decimal(str(state["range_upper"]))
 
     # =========================================================================
     # STATUS REPORTING

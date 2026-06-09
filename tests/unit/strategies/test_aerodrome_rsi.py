@@ -31,6 +31,7 @@ def strategy():
     strat.base_token = "WETH"
     strat.quote_token = "USDC"
     strat._consecutive_holds = 0
+    strat._last_signal = "neutral"
     return strat
 
 
@@ -161,6 +162,47 @@ class TestDecision:
         market_buy = _mock_market(rsi_value=30.0)
         strategy.decide(market_buy)
         assert strategy._consecutive_holds == 0
+
+
+class TestNeutralRearm:
+    """The re-arm latch: act on a signal transition, re-arm only via neutral."""
+
+    def test_repeated_signal_suppressed_until_neutral_resets(self, strategy):
+        # First oversold tick -> BUY.
+        buy = strategy.decide(_mock_market(rsi_value=30.0))
+        assert buy.intent_type.value == "SWAP"
+        assert buy.to_token == "WETH"
+
+        # The latch is set only on a successful swap.
+        strategy.on_intent_executed(buy, success=True, result=None)
+        assert strategy._last_signal == "buy"
+
+        # Still oversold -> HOLD (already acted; awaiting neutral re-arm).
+        held = strategy.decide(_mock_market(rsi_value=30.0))
+        assert held.intent_type.value == "HOLD"
+        assert "awaiting neutral reset" in held.reason
+
+        # A neutral tick re-arms the latch.
+        neutral = strategy.decide(_mock_market(rsi_value=50.0))
+        assert neutral.intent_type.value == "HOLD"
+        assert strategy._last_signal == "neutral"
+
+        # Oversold again -> BUY fires once more.
+        rebought = strategy.decide(_mock_market(rsi_value=30.0))
+        assert rebought.intent_type.value == "SWAP"
+        assert rebought.to_token == "WETH"
+
+    def test_failed_swap_does_not_latch(self, strategy):
+        # A held-back / failed swap must NOT set the latch, so the next tick
+        # can retry rather than being locked out awaiting a neutral reset.
+        buy = strategy.decide(_mock_market(rsi_value=30.0))
+        assert buy.intent_type.value == "SWAP"
+
+        strategy.on_intent_executed(buy, success=False, result=None)
+        assert strategy._last_signal == "neutral"
+
+        retry = strategy.decide(_mock_market(rsi_value=30.0))
+        assert retry.intent_type.value == "SWAP"
 
 
 class TestTeardown:

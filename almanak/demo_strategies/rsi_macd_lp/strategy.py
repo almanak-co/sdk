@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
     supported_chains=["arbitrum"],
     default_chain="arbitrum",
     supported_protocols=["uniswap_v3"],
-    intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
+    intent_types=["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"],
 )
 class RSIMACDLPStrategy(IntentStrategy):
     """Uniswap V3 LP with dual-signal confluence entry (RSI + MACD)."""
@@ -61,6 +61,9 @@ class RSIMACDLPStrategy(IntentStrategy):
         self.lp_range_pct = Decimal(str(self.get_config("lp_range_pct", "0.15")))
         self.amount0 = Decimal(str(self.get_config("amount0", "0.001")))
         self.amount1 = Decimal(str(self.get_config("amount1", "3")))
+
+        # Minimum total inventory (USD) required to (re)open a position.
+        self.min_position_usd = Decimal(str(self.get_config("min_position_usd", "50")))
 
         # State
         self._current_position_id: str | None = None
@@ -134,14 +137,41 @@ class RSIMACDLPStrategy(IntentStrategy):
                     f"Confluence entry! RSI={rsi:.1f} < {self.rsi_oversold} "
                     f"AND MACD bullish (histogram={histogram:.6f})"
                 )
+
+                # Balance inventory to ~50/50 before (re)opening. After a prior
+                # close the wallet can be skewed toward one token, so swap the
+                # heavy side first -- otherwise the new range opens lopsided.
+                try:
+                    t0 = market.balance(self.token0_symbol, price=token0_price)
+                    t1 = market.balance(self.token1_symbol, price=token1_price)
+                    token0_balance = Decimal(str(t0.balance))
+                    token1_balance = Decimal(str(t1.balance))
+                    token0_usd = Decimal(str(t0.balance_usd))
+                    token1_usd = Decimal(str(t1.balance_usd))
+                except (ValueError, KeyError):
+                    return Intent.hold(reason="Cannot check balances")
+
+                total_usd = token0_usd + token1_usd
+                if total_usd < self.min_position_usd:
+                    return Intent.hold(
+                        reason=f"Total ${total_usd:.2f} below min_position_usd ${self.min_position_usd:.2f}"
+                    )
+
+                swap_intent = self._rebalance_swap_intent(token0_usd, token1_usd, total_usd)
+                if swap_intent is not None:
+                    # Skewed: rebalance this tick. Signal still fires next tick,
+                    # by which point inventory is balanced and the LP opens.
+                    return swap_intent
+
                 half_width = self.lp_range_pct / Decimal("2")
                 range_lower = current_price * (Decimal("1") - half_width)
                 range_upper = current_price * (Decimal("1") + half_width)
 
+                # Deploy ~95% of each balanced side (buffer for gas/rounding).
                 return Intent.lp_open(
                     pool=self.pool,
-                    amount0=self.amount0,
-                    amount1=self.amount1,
+                    amount0=token0_balance * Decimal("0.95"),
+                    amount1=token1_balance * Decimal("0.95"),
                     range_lower=range_lower,
                     range_upper=range_upper,
                     protocol="uniswap_v3",
@@ -175,6 +205,42 @@ class RSIMACDLPStrategy(IntentStrategy):
         return Intent.hold(
             reason=f"Holding LP {self._current_position_id}: RSI={rsi:.1f}, MACD={macd_status}"
         )
+
+    def _rebalance_swap_intent(
+        self, token0_usd: Decimal, token1_usd: Decimal, total_usd: Decimal
+    ) -> Intent | None:
+        """Swap the heavy side toward a ~50/50 USD split before (re)opening.
+
+        Returns a SWAP intent when inventory is skewed beyond a 10% tolerance
+        band, else None (balanced enough to open as-is).
+        """
+        half_usd = total_usd / Decimal("2")
+        tolerance_usd = total_usd * Decimal("0.10")
+        if token0_usd - half_usd > tolerance_usd:
+            logger.info(
+                f"Rebalance swap: {self.token0_symbol} -> {self.token1_symbol} "
+                f"(${token0_usd - half_usd:.2f} to reach ~50/50)"
+            )
+            return Intent.swap(
+                from_token=self.token0_symbol,
+                to_token=self.token1_symbol,
+                amount_usd=token0_usd - half_usd,
+                max_slippage=Decimal("0.01"),
+                protocol="uniswap_v3",
+            )
+        if token1_usd - half_usd > tolerance_usd:
+            logger.info(
+                f"Rebalance swap: {self.token1_symbol} -> {self.token0_symbol} "
+                f"(${token1_usd - half_usd:.2f} to reach ~50/50)"
+            )
+            return Intent.swap(
+                from_token=self.token1_symbol,
+                to_token=self.token0_symbol,
+                amount_usd=token1_usd - half_usd,
+                max_slippage=Decimal("0.01"),
+                protocol="uniswap_v3",
+            )
+        return None
 
     def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
         """Track position ID after LP_OPEN, clear after LP_CLOSE."""

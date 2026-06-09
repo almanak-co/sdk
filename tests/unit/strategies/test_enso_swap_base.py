@@ -34,6 +34,7 @@ def strategy():
     strat.quote_token = "USDC"
     strat.force_action = None
     strat._trades_executed = 0
+    strat._last_signal = "neutral"
     return strat
 
 

@@ -147,6 +147,8 @@ class EnsoRSIStrategy(IntentStrategy):
 
         # Internal state
         self._trades_executed = 0
+        # Neutral-rearm latch: only act on a signal transition, re-arm via neutral.
+        self._last_signal = "neutral"
 
         logger.info(
             f"EnsoRSIStrategy initialized: "
@@ -206,28 +208,43 @@ class EnsoRSIStrategy(IntentStrategy):
         # STEP 3: MAKE TRADING DECISION
         # =================================================================
 
-        # OVERSOLD: RSI < threshold -> BUY
-        if current_rsi < self.rsi_oversold:
+        # Neutral re-arm: act only on a transition into a signal zone, not every
+        # tick RSI stays extreme. Re-arm when RSI returns to neutral; the buy/sell
+        # latch is set in on_intent_executed on a SUCCESSFUL swap.
+        current_signal = (
+            "buy" if current_rsi < self.rsi_oversold
+            else "sell" if current_rsi > self.rsi_overbought
+            else "neutral"
+        )
+
+        # NEUTRAL: HOLD (and re-arm)
+        if current_signal == "neutral":
+            self._last_signal = "neutral"
+            logger.debug(
+                f"RSI {current_rsi:.2f} in neutral zone [{self.rsi_oversold}-{self.rsi_overbought}] -> HOLD"
+            )
+            return Intent.hold(reason=f"RSI {current_rsi:.2f} in neutral zone")
+
+        # Already acted on this signal — wait for a neutral reset before re-firing.
+        if current_signal == self._last_signal:
+            return Intent.hold(
+                reason=f"RSI {current_rsi:.2f} still {current_signal}; awaiting neutral reset"
+            )
+
+        # OVERSOLD: RSI < threshold -> BUY (on transition)
+        if current_signal == "buy":
             logger.info(
                 f"📈 BUY SIGNAL: RSI={current_rsi:.2f} < {self.rsi_oversold} (oversold) "
                 f"| Buying {format_usd(self.trade_size_usd)} of {self.base_token} via Enso"
             )
             return self._create_buy_intent()
 
-        # OVERBOUGHT: RSI > threshold -> SELL
-        elif current_rsi > self.rsi_overbought:
-            logger.info(
-                f"📉 SELL SIGNAL: RSI={current_rsi:.2f} > {self.rsi_overbought} (overbought) "
-                f"| Selling {format_usd(self.trade_size_usd)} of {self.base_token} via Enso"
-            )
-            return self._create_sell_intent()
-
-        # NEUTRAL: HOLD
-        else:
-            logger.debug(
-                f"RSI {current_rsi:.2f} in neutral zone [{self.rsi_oversold}-{self.rsi_overbought}] -> HOLD"
-            )
-            return Intent.hold(reason=f"RSI {current_rsi:.2f} in neutral zone")
+        # OVERBOUGHT: RSI > threshold -> SELL (on transition)
+        logger.info(
+            f"📉 SELL SIGNAL: RSI={current_rsi:.2f} > {self.rsi_overbought} (overbought) "
+            f"| Selling {format_usd(self.trade_size_usd)} of {self.base_token} via Enso"
+        )
+        return self._create_sell_intent()
 
     # =========================================================================
     # INTENT CREATION METHODS
@@ -290,6 +307,30 @@ class EnsoRSIStrategy(IntentStrategy):
             max_slippage=max_slippage,
             protocol="enso",  # USE ENSO AGGREGATOR
         )
+
+    # =========================================================================
+    # NEUTRAL RE-ARM LATCH
+    # =========================================================================
+
+    def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
+        """Latch the acted signal only on a successful swap (drives neutral re-arm)."""
+        if not success:
+            return
+        intent_type = getattr(intent, "intent_type", None)
+        if not intent_type or intent_type.value != "SWAP":
+            return
+        if getattr(intent, "to_token", None) == self.base_token:
+            self._last_signal = "buy"
+        elif getattr(intent, "from_token", None) == self.base_token:
+            self._last_signal = "sell"
+
+    def get_persistent_state(self) -> dict[str, Any]:
+        return {"last_signal": self._last_signal, "trades_executed": self._trades_executed}
+
+    def load_persistent_state(self, state: dict[str, Any]) -> None:
+        if state:
+            self._last_signal = state.get("last_signal", "neutral")
+            self._trades_executed = int(state.get("trades_executed", 0))
 
     # =========================================================================
     # STATUS AND MONITORING

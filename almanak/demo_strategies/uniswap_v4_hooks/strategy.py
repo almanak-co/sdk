@@ -99,7 +99,7 @@ class UniswapV4HooksConfig:
     tags=["demo", "lp", "hooks", "uniswap-v4", "base", "v4"],
     supported_chains=["base", "ethereum", "arbitrum"],
     supported_protocols=["uniswap_v4"],
-    intent_types=["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES", "HOLD"],
+    intent_types=["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES", "SWAP", "HOLD"],
     default_chain="base",
 )
 class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
@@ -131,6 +131,9 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
         self.amount1 = Decimal(str(self.config.amount1))
         self.fee_hint = self.config.fee_hint
 
+        # Minimum total inventory (USD) required to (re)open a position.
+        self.min_position_usd = Decimal(str(self.get_config("min_position_usd", "100")))
+
         # -- Hook discovery --
         # Decode hook capabilities from the hook address's last 14 bits
         self.hook_flags = HookFlags.from_address(self.hook_address)
@@ -154,6 +157,10 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
         self._pool_discovery = None
 
         self._current_position_id: str | None = None
+        # Range the live position was opened with -- used to detect drift and
+        # trigger a rebalance (close -> swap-to-ratio -> reopen).
+        self._range_lower: Decimal | None = None
+        self._range_upper: Decimal | None = None
         self._load_position_from_state()
 
         logger.info(
@@ -178,27 +185,54 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
         except (ValueError, KeyError, ZeroDivisionError) as e:
             return Intent.hold(reason=f"Price data unavailable: {e}")
 
-        # If we have a position, monitor it
+        # =================================================================
+        # Position open -> rebalance if price has drifted out of range
+        # =================================================================
         if self._current_position_id:
+            if self._range_lower is not None and self._range_upper is not None:
+                if current_price < self._range_lower or current_price > self._range_upper:
+                    logger.info(
+                        f"Price {current_price:.2f} exited range "
+                        f"[{self._range_lower:.2f}, {self._range_upper:.2f}] - closing to rebalance"
+                    )
+                    return self._create_close_intent(self._current_position_id)
+                return Intent.hold(
+                    reason=f"V4 hooked position {self._current_position_id} in range "
+                    f"[{self._range_lower:.2f}, {self._range_upper:.2f}]"
+                )
+            # Range unknown (e.g. opened by an older version) -- hold rather than
+            # rebalance blindly.
             return Intent.hold(
-                reason=f"V4 hooked position {self._current_position_id} active — monitoring"
+                reason=f"V4 hooked position {self._current_position_id} active — range unknown"
             )
 
-        # Check balances
+        # =================================================================
+        # No position -> balance inventory to ~50/50, then (re)open
+        # =================================================================
+        # After a drift-close the wallet holds a skewed inventory (mostly one
+        # token), so swap the heavy side back toward 50/50 BEFORE reopening --
+        # otherwise the new range opens lopsided.
         try:
-            token0_bal = market.balance(self.token0_symbol)
-            token1_bal = market.balance(self.token1_symbol)
-            bal0 = token0_bal.balance if hasattr(token0_bal, "balance") else token0_bal
-            bal1 = token1_bal.balance if hasattr(token1_bal, "balance") else token1_bal
-
-            if bal0 < self.amount0:
-                return Intent.hold(reason=f"Insufficient {self.token0_symbol}: {bal0} < {self.amount0}")
-            if bal1 < self.amount1:
-                return Intent.hold(reason=f"Insufficient {self.token1_symbol}: {bal1} < {self.amount1}")
+            t0 = market.balance(self.token0_symbol, price=token0_price_usd)
+            t1 = market.balance(self.token1_symbol, price=token1_price_usd)
+            token0_balance = Decimal(str(t0.balance))
+            token1_balance = Decimal(str(t1.balance))
+            token0_usd = Decimal(str(t0.balance_usd))
+            token1_usd = Decimal(str(t1.balance_usd))
         except (ValueError, KeyError):
-            logger.warning("Could not verify balances, proceeding anyway")
+            return Intent.hold(reason="Cannot check balances")
 
-        logger.info("No V4 hooked position found — opening new LP position")
+        total_usd = token0_usd + token1_usd
+        if total_usd < self.min_position_usd:
+            return Intent.hold(
+                reason=f"Total ${total_usd:.2f} below min_position_usd ${self.min_position_usd:.2f}"
+            )
+
+        swap_intent = self._rebalance_swap_intent(token0_usd, token1_usd, total_usd)
+        if swap_intent is not None:
+            return swap_intent
+
+        logger.info("No V4 hooked position found — opening new LP position with balanced inventory")
         add_event(
             TimelineEvent(
                 timestamp=datetime.now(UTC),
@@ -212,18 +246,34 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
                 },
             )
         )
-        return self._create_open_intent(current_price)
+        # Deploy ~95% of each balanced side (small buffer for gas/rounding).
+        return self._create_open_intent(
+            current_price,
+            amount0=token0_balance * Decimal("0.95"),
+            amount1=token1_balance * Decimal("0.95"),
+        )
 
     # =========================================================================
     # INTENT CREATION WITH HOOK DATA
     # =========================================================================
 
-    def _create_open_intent(self, current_price: Decimal) -> Intent:
+    def _create_open_intent(
+        self,
+        current_price: Decimal,
+        amount0: Decimal | None = None,
+        amount1: Decimal | None = None,
+    ) -> Intent:
         """Create LP_OPEN intent with encoded hookData.
 
         For hooked pools, the hookData is passed via protocol_params.
         The compiler forwards it to the PositionManager's modifyLiquidities call.
+
+        Amounts default to the configured amount0/amount1 (initial open); the
+        rebalance path passes the balanced wallet amounts to redeploy.
         """
+        amount0 = self.amount0 if amount0 is None else amount0
+        amount1 = self.amount1 if amount1 is None else amount1
+
         half_width = self.range_width_pct / Decimal("2")
         range_lower = current_price * (Decimal("1") - half_width)
         range_upper = current_price * (Decimal("1") + half_width)
@@ -237,8 +287,8 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
             logger.warning(warning)
 
         logger.info(
-            f"LP_OPEN (V4 hooked): {format_token_amount_human(self.amount0, self.token0_symbol)} + "
-            f"{format_token_amount_human(self.amount1, self.token1_symbol)}, "
+            f"LP_OPEN (V4 hooked): {format_token_amount_human(amount0, self.token0_symbol)} + "
+            f"{format_token_amount_human(amount1, self.token1_symbol)}, "
             f"range [{format_usd(range_lower)} - {format_usd(range_upper)}], "
             f"hook={self._encoder.hook_name}, hookData={len(hook_data)} bytes"
         )
@@ -256,13 +306,49 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
 
         return Intent.lp_open(
             pool=self.pool,
-            amount0=self.amount0,
-            amount1=self.amount1,
+            amount0=amount0,
+            amount1=amount1,
             range_lower=range_lower,
             range_upper=range_upper,
             protocol="uniswap_v4",
             protocol_params=protocol_params,
         )
+
+    def _rebalance_swap_intent(
+        self, token0_usd: Decimal, token1_usd: Decimal, total_usd: Decimal
+    ) -> Intent | None:
+        """Swap the heavy side toward a ~50/50 USD split before (re)opening.
+
+        Returns a SWAP intent when inventory is skewed beyond a 10% tolerance
+        band, else None (balanced enough to open as-is).
+        """
+        half_usd = total_usd / Decimal("2")
+        tolerance_usd = total_usd * Decimal("0.10")
+        if token0_usd - half_usd > tolerance_usd:
+            logger.info(
+                f"Rebalance swap: {self.token0_symbol} -> {self.token1_symbol} "
+                f"(${token0_usd - half_usd:.2f} to reach ~50/50)"
+            )
+            return Intent.swap(
+                from_token=self.token0_symbol,
+                to_token=self.token1_symbol,
+                amount_usd=token0_usd - half_usd,
+                max_slippage=Decimal("0.01"),
+                protocol="uniswap_v4",
+            )
+        if token1_usd - half_usd > tolerance_usd:
+            logger.info(
+                f"Rebalance swap: {self.token1_symbol} -> {self.token0_symbol} "
+                f"(${token1_usd - half_usd:.2f} to reach ~50/50)"
+            )
+            return Intent.swap(
+                from_token=self.token1_symbol,
+                to_token=self.token0_symbol,
+                amount_usd=token1_usd - half_usd,
+                max_slippage=Decimal("0.01"),
+                protocol="uniswap_v4",
+            )
+        return None
 
     def _create_close_intent(self, position_id: str) -> Intent:
         """Create LP_CLOSE intent with hookData for hooked pools."""
@@ -284,6 +370,13 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
     def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
         if success and intent.intent_type.value == "LP_OPEN":
             position_id = result.position_id if result else None
+
+            # Record the range we opened with so decide() can detect drift.
+            rl = getattr(intent, "range_lower", None)
+            ru = getattr(intent, "range_upper", None)
+            self._range_lower = Decimal(str(rl)) if rl is not None else None
+            self._range_upper = Decimal(str(ru)) if ru is not None else None
+
             if position_id:
                 self._current_position_id = str(position_id)
                 logger.info(f"V4 hooked LP position opened: position_id={position_id}")
@@ -293,6 +386,14 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
                 self._run_pool_discovery()
             else:
                 logger.warning("V4 hooked LP opened but could not extract position ID")
+        elif success and intent.intent_type.value == "LP_CLOSE":
+            logger.info(
+                "V4 hooked LP position closed: clearing cached position_id=%s",
+                self._current_position_id,
+            )
+            self._current_position_id = None
+            self._range_lower = None
+            self._range_upper = None
 
     def _run_pool_discovery(self) -> None:
         """Discover pool details and log hook information."""
@@ -338,6 +439,14 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
         else:
             state.pop("current_position_id", None)
             state.pop("position_opened_at", None)
+        if self._range_lower is not None:
+            state["range_lower"] = str(self._range_lower)
+        else:
+            state.pop("range_lower", None)
+        if self._range_upper is not None:
+            state["range_upper"] = str(self._range_upper)
+        else:
+            state.pop("range_upper", None)
         return state
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
@@ -345,6 +454,10 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
             super().load_persistent_state(state)
         if "current_position_id" in state:
             self._current_position_id = str(state["current_position_id"])
+        if state.get("range_lower") is not None:
+            self._range_lower = Decimal(str(state["range_lower"]))
+        if state.get("range_upper") is not None:
+            self._range_upper = Decimal(str(state["range_upper"]))
 
     # =========================================================================
     # TEARDOWN

@@ -9,6 +9,11 @@ from unittest.mock import MagicMock
 def _mock_intent(intent_type: str) -> MagicMock:
     intent = MagicMock()
     intent.intent_type.value = intent_type
+    # Bare MagicMock auto-vivifies range_lower/range_upper into truthy mocks,
+    # which the LP drift-tracking path would try to Decimal()-convert. Real
+    # LP_OPEN intents carry these; tests that don't exercise drift set None.
+    intent.range_lower = None
+    intent.range_upper = None
     return intent
 
 

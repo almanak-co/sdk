@@ -431,6 +431,20 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     # rsi_bb mode: falling back to RSI-only signals
                     logger.warning("Bollinger Bands unavailable in rsi_bb mode -- falling back to RSI-only signals")
 
+            # Neutral re-arm: act only when a signal first appears, not every tick
+            # the indicator stays in the extreme zone. Reset to neutral here when
+            # there's no signal; the buy/sell latch is set in on_intent_executed on
+            # a SUCCESSFUL swap, so a held-back (gas/balance) or failed swap never
+            # locks out the next attempt.
+            current_signal = "buy" if buy_signal else "sell" if sell_signal else "neutral"
+            if current_signal == "neutral":
+                self._last_signal = "neutral"
+                return Intent.hold(reason=reason or "No signal")
+            if current_signal == self._last_signal:
+                return Intent.hold(
+                    reason=f"{reason} -- already acted on this {current_signal} signal; awaiting neutral reset"
+                )
+
             if buy_signal and quote_balance.balance_usd >= self.trade_size_usd:
                 # Gas-worthiness gate: don't pay $5 gas to move $1. Authors can
                 # tune via `min_trade_value_usd` (absolute floor) and
@@ -513,25 +527,72 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                         )
                 return Intent.hold(reason=f"LP position {self._position_id} in range")
 
-            # No position -- open one
+            # No position -- rebalance inventory toward ~50/50, then open. A range
+            # that drifted out before closing leaves a heavily skewed inventory
+            # (mostly one token), so swap the heavy side's excess over half to the
+            # light side BEFORE reopening. Without this the new range opens lopsided
+            # -- and the old "both sides funded" check could never reopen at all
+            # once the inventory went one-sided.
             try:
                 base_balance = market.balance(self.base_token)
                 quote_balance = market.balance(self.quote_token)
             except ValueError:
                 return Intent.hold(reason="Cannot check balances")
 
-            min_each_usd = self.min_position_usd / Decimal("2")
-            if base_balance.balance_usd < min_each_usd or quote_balance.balance_usd < min_each_usd:
-                return Intent.hold(reason="Insufficient balance for LP -- need both tokens funded")
+            base_usd = base_balance.balance_usd
+            quote_usd = quote_balance.balance_usd
+            total_usd = base_usd + quote_usd
+            if total_usd < self.min_position_usd:
+                return Intent.hold(reason="Insufficient balance for LP -- total below min_position_usd")
 
-            # Use symbolic pool format (e.g. "WETH/USDC/3000") and pass amounts in that
-            # same order (amount0=base, amount1=quote). The compiler reorders to match
-            # on-chain token0/token1 sorting if needed. Provide BOTH amounts.
+            # Swap the heavy side down to half once it exceeds a 10% tolerance band;
+            # the next iteration (now balanced) opens the range.
+            half_usd = total_usd / Decimal("2")
+            tolerance_usd = total_usd * Decimal("0.10")
+            if base_usd - half_usd > tolerance_usd:
+                logger.info(
+                    f"Rebalance swap before reopen: {self.base_token} -> {self.quote_token} "
+                    f"(${base_usd - half_usd:.2f} to reach ~50/50)"
+                )
+                return Intent.swap(
+                    from_token=self.base_token,
+                    to_token=self.quote_token,
+                    amount_usd=base_usd - half_usd,
+                    max_slippage=Decimal("0.01"),
+                    protocol=self.protocol,
+                )
+            if quote_usd - half_usd > tolerance_usd:
+                logger.info(
+                    f"Rebalance swap before reopen: {self.quote_token} -> {self.base_token} "
+                    f"(${quote_usd - half_usd:.2f} to reach ~50/50)"
+                )
+                return Intent.swap(
+                    from_token=self.quote_token,
+                    to_token=self.base_token,
+                    amount_usd=quote_usd - half_usd,
+                    max_slippage=Decimal("0.01"),
+                    protocol=self.protocol,
+                )
+
+            # Inventory balanced -- open the new range. Symbolic pool format
+            # (e.g. "WETH/USDC/3000"); amounts in that order (amount0=base,
+            # amount1=quote). The compiler reorders to on-chain token0/token1.
+            #
+            # Deploy ~95% of each side (the multiplier is the fraction of the
+            # wallet balance committed to the pool). The swap above already
+            # rebalanced inventory to ~50/50, so deploy nearly everything; the
+            # 5% buffer covers gas and the small token-ratio rounding the pool
+            # needs. NOTE: a 50/50 split is only capital-efficient for a NARROW
+            # range centered on price -- widen `range_width_pct` materially and
+            # the efficient split drifts off 50/50, leaving idle inventory. There
+            # is also no rebalance cooldown here: each drift costs close + swap +
+            # open (gas + swap fee + slippage), so add hysteresis before running
+            # this on a choppy pair with real funds.
             logger.info(f"Opening LP: {lower_price:.2f} - {upper_price:.2f}")
             return Intent.lp_open(
                 pool=self.pool,
-                amount0=base_balance.balance * Decimal("0.45"),
-                amount1=quote_balance.balance * Decimal("0.45"),
+                amount0=base_balance.balance * Decimal("0.95"),
+                amount1=quote_balance.balance * Decimal("0.95"),
                 range_lower=lower_price,
                 range_upper=upper_price,
                 protocol=self.protocol,
@@ -2065,7 +2126,9 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self.quote_token = get_config("quote_token", "USDC")
 
         # Position tracking (restored via load_persistent_state)
-        self._holding_base = False"""
+        self._holding_base = False
+        # Neutral-rearm latch: last signal we acted on (buy/sell/neutral)
+        self._last_signal = 'neutral'"""
 
     elif template == StrategyTemplate.DYNAMIC_LP:
         return """
@@ -2501,7 +2564,11 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "            return\n"
             '        intent_type = getattr(intent, "intent_type", None)\n'
             '        if intent_type and intent_type.value == "LP_OPEN" and result:\n'
-            "            self._position_id = getattr(result, 'position_id', None)\n"
+            "            pid = getattr(result, 'position_id', None)\n"
+            "            # LPCloseIntent.position_id requires a string, but the LP_OPEN\n"
+            "            # result returns the NFT id as an int -- cast so both the\n"
+            "            # rebalance close and the teardown close validate.\n"
+            "            self._position_id = str(pid) if pid is not None else None\n"
             "            self._range_lower = getattr(intent, 'range_lower', None)\n"
             "            self._range_upper = getattr(intent, 'range_upper', None)\n"
             '            logger.info(f"LP opened: position_id={self._position_id}")\n'
@@ -2522,7 +2589,8 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "    def load_persistent_state(self, state):\n"
             '        """Restore position state after restart."""\n'
             "        if state:\n"
-            '            self._position_id = state.get("position_id")\n'
+            '            pid = state.get("position_id")\n'
+            "            self._position_id = str(pid) if pid is not None else None\n"
             '            rl = state.get("range_lower")\n'
             '            ru = state.get("range_upper")\n'
             "            self._range_lower = Decimal(rl) if rl else None\n"
@@ -2829,7 +2897,10 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "            return\n"
             '        intent_type = getattr(intent, "intent_type", None)\n'
             '        if intent_type and intent_type.value == "LP_OPEN" and result:\n'
-            "            self._position_id = getattr(result, 'position_id', None)\n"
+            "            pid = getattr(result, 'position_id', None)\n"
+            "            # LPCloseIntent.position_id requires a string, but the LP_OPEN\n"
+            "            # result returns the NFT id as an int -- cast so the close validates.\n"
+            "            self._position_id = str(pid) if pid is not None else None\n"
             "            self._range_lower = getattr(intent, 'range_lower', None)\n"
             "            self._range_upper = getattr(intent, 'range_upper', None)\n"
             '            logger.info(f"LP opened: position_id={self._position_id}")\n'
@@ -2850,7 +2921,8 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "    def load_persistent_state(self, state):\n"
             '        """Restore position state after restart."""\n'
             "        if state:\n"
-            '            self._position_id = state.get("position_id")\n'
+            '            pid = state.get("position_id")\n'
+            "            self._position_id = str(pid) if pid is not None else None\n"
             '            rl = state.get("range_lower")\n'
             '            ru = state.get("range_upper")\n'
             "            self._range_lower = Decimal(rl) if rl else None\n"
@@ -2870,19 +2942,22 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "            to_token = getattr(intent, 'to_token', None)\n"
             "            if to_token == self.base_token:\n"
             "                self._holding_base = True\n"
+            '                self._last_signal = "buy"\n'
             '                logger.info(f"Bought {self.base_token}")\n'
             "            elif from_token == self.base_token:\n"
             "                self._holding_base = False\n"
+            '                self._last_signal = "sell"\n'
             '                logger.info(f"Sold {self.base_token}")\n'
             "\n"
             "    def get_persistent_state(self):\n"
             '        """Save position state for crash recovery."""\n'
-            '        return {"holding_base": self._holding_base}\n'
+            '        return {"holding_base": self._holding_base, "last_signal": self._last_signal}\n'
             "\n"
             "    def load_persistent_state(self, state):\n"
             '        """Restore position state after restart."""\n'
             "        if state:\n"
             '            self._holding_base = state.get("holding_base", False)\n'
+            '            self._last_signal = state.get("last_signal", "neutral")\n'
             "\n"
         )
 
@@ -2901,7 +2976,11 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             "            \"to_token\": getattr(intent, 'to_token', None),\n"
             "            \"token\": getattr(intent, 'token', None),\n"
             "            \"protocol\": getattr(intent, 'protocol', None),\n"
-            "            \"position_id\": getattr(result, 'position_id', None) if result else None,\n"
+            '            "position_id": (\n'
+            "                str(getattr(result, 'position_id', None))\n"
+            "                if result and getattr(result, 'position_id', None) is not None\n"
+            "                else None\n"
+            "            ),\n"
             "            # Fields needed for LP/perp/borrow teardown\n"
             "            \"pool\": getattr(intent, 'pool', None),\n"
             "            \"market\": getattr(intent, 'market', None),\n"
@@ -2964,7 +3043,7 @@ def _build_strategy_content(
     intent_types = {
         StrategyTemplate.BLANK: '["SWAP", "HOLD"]',
         StrategyTemplate.TA_SWAP: '["SWAP", "HOLD"]',
-        StrategyTemplate.DYNAMIC_LP: '["LP_OPEN", "LP_CLOSE", "HOLD"]',
+        StrategyTemplate.DYNAMIC_LP: '["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"]',
         StrategyTemplate.LENDING_LOOP: '["SUPPLY", "BORROW", "REPAY", "WITHDRAW", "HOLD"]',
         StrategyTemplate.BASIS_TRADE: '["SWAP", "PERP_OPEN", "PERP_CLOSE", "HOLD"]',
         StrategyTemplate.VAULT_YIELD: '["VAULT_DEPOSIT", "VAULT_REDEEM", "HOLD"]',
@@ -3361,29 +3440,29 @@ _BLANK_TEST_SPEC = _TemplateTestSpec()
 # __init__ fields produced by ``_get_template_init_params``.
 _TEMPLATE_TEST_SPECS: dict[StrategyTemplate, _TemplateTestSpec] = {
     StrategyTemplate.TA_SWAP: _TemplateTestSpec(
-        state_fields=("_holding_base",),
+        state_fields=("_holding_base", "_last_signal"),
         has_callbacks=True,
         has_teardown_intents=True,
         position_setup="strategy._holding_base = True",
         transitions=(
             _StateTransition(
-                name="swap_to_base_sets_holding",
+                name="swap_to_base_sets_holding_and_buy_latch",
                 intent_type="SWAP",
                 intent_attrs={"from_token": "USDC", "to_token": "WETH"},
                 result_attrs={},
-                pre_state={"_holding_base": False},
-                expected={"_holding_base": True},
+                pre_state={"_holding_base": False, "_last_signal": "neutral"},
+                expected={"_holding_base": True, "_last_signal": "buy"},
             ),
             _StateTransition(
-                name="swap_from_base_clears_holding",
+                name="swap_from_base_clears_holding_and_sell_latch",
                 intent_type="SWAP",
                 intent_attrs={"from_token": "WETH", "to_token": "USDC"},
                 result_attrs={},
-                pre_state={"_holding_base": True},
-                expected={"_holding_base": False},
+                pre_state={"_holding_base": True, "_last_signal": "buy"},
+                expected={"_holding_base": False, "_last_signal": "sell"},
             ),
         ),
-        persistent_state_sample={"holding_base": True},
+        persistent_state_sample={"holding_base": True, "last_signal": "buy"},
     ),
     StrategyTemplate.DYNAMIC_LP: _TemplateTestSpec(
         state_fields=("_position_id", "_range_lower", "_range_upper"),
@@ -3397,10 +3476,13 @@ _TEMPLATE_TEST_SPECS: dict[StrategyTemplate, _TemplateTestSpec] = {
         ),
         transitions=(
             _StateTransition(
-                name="lp_open_stores_position_id",
+                name="lp_open_coerces_int_position_id_to_str",
                 intent_type="LP_OPEN",
                 intent_attrs={"range_lower": "1800", "range_upper": "2200"},
-                result_attrs={"position_id": "99999"},
+                # Int NFT id from the LP_OPEN receipt must be coerced to str so
+                # LPCloseIntent (which requires str) validates -- seed an int to
+                # pin the coercion; dropping str(...) makes this assert fail.
+                result_attrs={"position_id": 99999},
                 pre_state={"_position_id": None},
                 expected={"_position_id": "99999"},
             ),
@@ -3430,10 +3512,13 @@ _TEMPLATE_TEST_SPECS: dict[StrategyTemplate, _TemplateTestSpec] = {
         ),
         transitions=(
             _StateTransition(
-                name="lp_open_stores_position_id",
+                name="lp_open_coerces_int_position_id_to_str",
                 intent_type="LP_OPEN",
                 intent_attrs={},
-                result_attrs={"position_id": "99999"},
+                # Int NFT id from the LP_OPEN receipt must be coerced to str so
+                # LPCloseIntent (which requires str) validates -- seed an int to
+                # pin the coercion; dropping str(...) makes this assert fail.
+                result_attrs={"position_id": 99999},
                 pre_state={"_position_id": None},
                 expected={"_position_id": "99999"},
             ),

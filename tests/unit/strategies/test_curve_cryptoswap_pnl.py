@@ -32,6 +32,7 @@ def strategy():
     strat.quote_token = "USDT"
     strat._consecutive_holds = 0
     strat._has_position = False
+    strat._last_signal = "neutral"
     return strat
 
 

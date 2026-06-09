@@ -48,6 +48,7 @@ def _make_strategy(
     strat._wallet_address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
     strat._consecutive_holds = 0
     strat._has_position = False
+    strat._last_signal = "neutral"
     return strat
 
 

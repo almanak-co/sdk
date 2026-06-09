@@ -82,6 +82,8 @@ class PancakeSwapPnLSwapBSCStrategy(IntentStrategy):
         self._total_buys = 0
         self._total_sells = 0
         self._base_held = Decimal("0")
+        # Neutral-rearm latch: only act on a signal transition, re-arm via neutral.
+        self._last_signal = "neutral"
 
         logger.info(
             f"PancakeSwapPnLSwapBSC initialized: "
@@ -103,8 +105,28 @@ class PancakeSwapPnLSwapBSCStrategy(IntentStrategy):
             logger.warning(f"RSI data unavailable: {e}")
             return Intent.hold(reason=f"RSI data unavailable: {e}")
 
+        # Neutral re-arm: act only on a transition into a signal zone, not every
+        # tick RSI stays extreme. Re-arm when RSI returns to neutral; the buy/sell
+        # latch is set in on_intent_executed on a SUCCESSFUL swap, so a held-back
+        # (insufficient balance) or failed swap never locks out the next attempt.
+        current_signal = (
+            "buy" if rsi_value < self.rsi_oversold
+            else "sell" if rsi_value > self.rsi_overbought
+            else "neutral"
+        )
+        if current_signal == "neutral":
+            self._last_signal = "neutral"
+            return Intent.hold(
+                reason=f"RSI={rsi_value:.1f} in neutral zone "
+                f"[{self.rsi_oversold}, {self.rsi_overbought}]"
+            )
+        if current_signal == self._last_signal:
+            return Intent.hold(
+                reason=f"RSI={rsi_value:.1f} still {current_signal}; awaiting neutral reset"
+            )
+
         # BUY: RSI oversold -> buy base token with quote
-        if rsi_value < self.rsi_oversold:
+        if current_signal == "buy":
             try:
                 quote_balance = market.balance(self.quote_token)
                 if quote_balance.balance_usd < self.trade_size_usd:
@@ -130,7 +152,7 @@ class PancakeSwapPnLSwapBSCStrategy(IntentStrategy):
             )
 
         # SELL: RSI overbought -> sell base token for quote
-        if rsi_value > self.rsi_overbought:
+        if current_signal == "sell":
             try:
                 base_price = market.price(self.base_token)
             except (ValueError, KeyError) as e:
@@ -168,10 +190,7 @@ class PancakeSwapPnLSwapBSCStrategy(IntentStrategy):
                 chain=self.chain,
             )
 
-        return Intent.hold(
-            reason=f"RSI={rsi_value:.1f} in neutral zone "
-            f"[{self.rsi_oversold}, {self.rsi_overbought}]"
-        )
+        return Intent.hold(reason=f"RSI={rsi_value:.1f} no actionable signal")
 
     def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
         """Track buy/sell counts."""
@@ -181,6 +200,11 @@ class PancakeSwapPnLSwapBSCStrategy(IntentStrategy):
 
         intent_type = getattr(intent, "intent_type", None)
         if intent_type and intent_type.value == "SWAP":
+            # Latch the acted signal on a successful swap (drives neutral re-arm)
+            if getattr(intent, "to_token", None) == self.base_token:
+                self._last_signal = "buy"
+            elif getattr(intent, "from_token", None) == self.base_token:
+                self._last_signal = "sell"
             from_token = getattr(intent, "from_token", "")
             if from_token == self.quote_token:
                 self._total_buys += 1
@@ -255,9 +279,12 @@ class PancakeSwapPnLSwapBSCStrategy(IntentStrategy):
             "total_buys": self._total_buys,
             "total_sells": self._total_sells,
             "base_held": str(self._base_held),
+            "last_signal": self._last_signal,
         }
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
+        if "last_signal" in state:
+            self._last_signal = state["last_signal"]
         if "tick_count" in state:
             self._tick_count = int(state["tick_count"])
         if "total_buys" in state:

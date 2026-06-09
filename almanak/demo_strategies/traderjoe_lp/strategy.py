@@ -168,7 +168,7 @@ logger = logging.getLogger(__name__)
     # Protocols this strategy interacts with
     supported_protocols=["traderjoe_v2"],
     # Types of intents this strategy may return
-    intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
+    intent_types=["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"],
     default_chain="avalanche",
 )
 class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
@@ -244,8 +244,18 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         # Number of bins to distribute liquidity across
         self.num_bins = self.config.num_bins
 
+        # Minimum total inventory (USD) required to (re)open a position.
+        self.min_position_usd = Decimal(str(self.get_config("min_position_usd", "100")))
+
         # Internal state - track bin IDs where we have liquidity
         self._position_bin_ids: list[int] = []
+
+        # PRICE band the live position was opened with -- used to detect drift
+        # and trigger a rebalance (close -> swap-to-ratio -> reopen). TraderJoe
+        # is bin-based, but we detect drift on price (entry_price ± width),
+        # mirroring traderjoe_crisis_lp.
+        self._range_lower: Decimal | None = None
+        self._range_upper: Decimal | None = None
 
         logger.info(
             f"TraderJoeLPStrategy initialized: "
@@ -305,36 +315,59 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             return self._create_close_intent()
 
         # =================================================================
-        # STEP 3: Check current position status
+        # STEP 3: Position open -> rebalance if price has drifted out of band
         # =================================================================
-
+        # TraderJoe is bin-based, but we detect drift on price: the stored
+        # band is current_price ± half the configured range width, set when
+        # the position was opened (mirrors traderjoe_crisis_lp's entry-price
+        # drift check). On drift, close via the existing close helper (which
+        # preserves the TraderJoe bin_ids/protocol_params).
         if self._position_bin_ids:
-            # We have a position - check if it's still in range
-            # In production, you would query the pool's active bin
-            return Intent.hold(reason=f"Position exists in bins {self._position_bin_ids[:3]}... - monitoring")
+            if self._range_lower is not None and self._range_upper is not None:
+                if current_price < self._range_lower or current_price > self._range_upper:
+                    logger.info(
+                        f"Price {current_price:.4f} exited band "
+                        f"[{self._range_lower:.4f}, {self._range_upper:.4f}] - closing to rebalance"
+                    )
+                    return self._create_close_intent()
+                return Intent.hold(
+                    reason=f"Position in bins {self._position_bin_ids[:3]}... in band "
+                    f"[{self._range_lower:.4f}, {self._range_upper:.4f}]"
+                )
+            # Band unknown (e.g. opened by an older version) -- hold rather than
+            # rebalance blindly.
+            return Intent.hold(
+                reason=f"Position exists in bins {self._position_bin_ids[:3]}... - band unknown"
+            )
 
         # =================================================================
-        # STEP 4: No position - decide whether to open one
+        # STEP 4: No position -> balance inventory to ~50/50, then (re)open
         # =================================================================
-
-        # Check we have sufficient balance
+        # After a drift-close the wallet holds a skewed inventory (mostly one
+        # token), so swap the heavy side back toward 50/50 BEFORE reopening --
+        # otherwise the new range opens lopsided.
         try:
-            token_x_balance = market.balance(self.token_x_symbol)
-            token_y_balance = market.balance(self.token_y_symbol)
-
-            if token_x_balance.balance < self.amount_x:
-                return Intent.hold(
-                    reason=f"Insufficient {self.token_x_symbol}: {token_x_balance.balance} < {self.amount_x}"
-                )
-            if token_y_balance.balance < self.amount_y:
-                return Intent.hold(
-                    reason=f"Insufficient {self.token_y_symbol}: {token_y_balance.balance} < {self.amount_y}"
-                )
+            tx = market.balance(self.token_x_symbol, price=token_x_price_usd)
+            ty = market.balance(self.token_y_symbol, price=token_y_price_usd)
+            token_x_balance = Decimal(str(tx.balance))
+            token_y_balance = Decimal(str(ty.balance))
+            token_x_usd = Decimal(str(tx.balance_usd))
+            token_y_usd = Decimal(str(ty.balance_usd))
         except (ValueError, KeyError):
-            logger.warning("Could not verify balances, proceeding anyway")
+            return Intent.hold(reason="Cannot check balances")
 
-        # Open new position centered on current price
-        logger.info("No position found - opening new LP position")
+        total_usd = token_x_usd + token_y_usd
+        if total_usd < self.min_position_usd:
+            return Intent.hold(
+                reason=f"Total ${total_usd:.2f} below min_position_usd ${self.min_position_usd:.2f}"
+            )
+
+        swap_intent = self._rebalance_swap_intent(token_x_usd, token_y_usd, total_usd)
+        if swap_intent is not None:
+            return swap_intent
+
+        # Open new position centered on current price with balanced inventory
+        logger.info("No position found - opening new LP position with balanced inventory")
         add_event(
             TimelineEvent(
                 timestamp=datetime.now(UTC),
@@ -344,18 +377,30 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
                 details={"action": "opening_new_position", "pool": self.pool},
             )
         )
-        return self._create_open_intent(current_price)
+        # Deploy ~95% of each balanced side (small buffer for gas/rounding).
+        return self._create_open_intent(
+            current_price,
+            amount_x=token_x_balance * Decimal("0.95"),
+            amount_y=token_y_balance * Decimal("0.95"),
+        )
 
     # =========================================================================
     # INTENT CREATION HELPERS
     # =========================================================================
 
-    def _create_open_intent(self, current_price: Decimal) -> Intent:
+    def _create_open_intent(
+        self,
+        current_price: Decimal,
+        amount_x: Decimal | None = None,
+        amount_y: Decimal | None = None,
+    ) -> Intent:
         """
         Create an LP_OPEN intent to open a new Liquidity Book position.
 
         Calculates the price range centered on the current price using
-        the configured range_width_pct.
+        the configured range_width_pct. Amounts default to the configured
+        amount_x/amount_y (initial open / force_action); the rebalance path
+        passes the balanced wallet amounts to redeploy.
 
         For TraderJoe V2, this translates to:
         - Lower price bound -> lower bin ID
@@ -364,18 +409,27 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
 
         Parameters:
             current_price: Current price (token_y per token_x)
+            amount_x/amount_y: Optional deploy amounts; fall back to config.
 
         Returns:
             LPOpenIntent ready for compilation
         """
-        # Calculate price range
+        amount_x = self.amount_x if amount_x is None else amount_x
+        amount_y = self.amount_y if amount_y is None else amount_y
+
+        # Calculate price band
         half_width = self.range_width_pct / Decimal("2")
         range_lower = current_price * (Decimal("1") - half_width)
         range_upper = current_price * (Decimal("1") + half_width)
 
+        # Record the band so decide() can detect drift even before
+        # on_intent_executed fires.
+        self._range_lower = range_lower
+        self._range_upper = range_upper
+
         logger.info(
-            f"💧 LP_OPEN: {format_token_amount_human(self.amount_x, self.token_x_symbol)} + "
-            f"{format_token_amount_human(self.amount_y, self.token_y_symbol)}, "
+            f"💧 LP_OPEN: {format_token_amount_human(amount_x, self.token_x_symbol)} + "
+            f"{format_token_amount_human(amount_y, self.token_y_symbol)}, "
             f"price range [{range_lower:.4f} - {range_upper:.4f}], bin_step={self.bin_step}"
         )
 
@@ -383,12 +437,48 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         # The compiler will handle conversion to bin-based parameters
         return Intent.lp_open(
             pool=self.pool,
-            amount0=self.amount_x,
-            amount1=self.amount_y,
+            amount0=amount_x,
+            amount1=amount_y,
             range_lower=range_lower,
             range_upper=range_upper,
             protocol="traderjoe_v2",
         )
+
+    def _rebalance_swap_intent(
+        self, token_x_usd: Decimal, token_y_usd: Decimal, total_usd: Decimal
+    ) -> Intent | None:
+        """Swap the heavy side toward a ~50/50 USD split before (re)opening.
+
+        Returns a SWAP intent when inventory is skewed beyond a 10% tolerance
+        band, else None (balanced enough to open as-is).
+        """
+        half_usd = total_usd / Decimal("2")
+        tolerance_usd = total_usd * Decimal("0.10")
+        if token_x_usd - half_usd > tolerance_usd:
+            logger.info(
+                f"Rebalance swap: {self.token_x_symbol} -> {self.token_y_symbol} "
+                f"(${token_x_usd - half_usd:.2f} to reach ~50/50)"
+            )
+            return Intent.swap(
+                from_token=self.token_x_symbol,
+                to_token=self.token_y_symbol,
+                amount_usd=token_x_usd - half_usd,
+                max_slippage=Decimal("0.01"),
+                protocol="traderjoe_v2",
+            )
+        if token_y_usd - half_usd > tolerance_usd:
+            logger.info(
+                f"Rebalance swap: {self.token_y_symbol} -> {self.token_x_symbol} "
+                f"(${token_y_usd - half_usd:.2f} to reach ~50/50)"
+            )
+            return Intent.swap(
+                from_token=self.token_y_symbol,
+                to_token=self.token_x_symbol,
+                amount_usd=token_y_usd - half_usd,
+                max_slippage=Decimal("0.01"),
+                protocol="traderjoe_v2",
+            )
+        return None
 
     def _create_close_intent(self) -> Intent:
         """
@@ -484,6 +574,12 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
             else:
                 logger.info("TraderJoe LP position opened successfully")
 
+            # Record the range we opened with so decide() can detect drift.
+            rl = getattr(intent, "range_lower", None)
+            ru = getattr(intent, "range_upper", None)
+            self._range_lower = Decimal(str(rl)) if rl is not None else None
+            self._range_upper = Decimal(str(ru)) if ru is not None else None
+
             add_event(
                 TimelineEvent(
                     timestamp=datetime.now(UTC),
@@ -497,6 +593,8 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         elif success and intent.intent_type.value == "LP_CLOSE":
             logger.info("TraderJoe LP position closed successfully")
             self._position_bin_ids = []
+            self._range_lower = None
+            self._range_upper = None
 
     def get_persistent_state(self) -> dict[str, Any]:
         """Persist bin IDs so teardown can recover after process restarts."""
@@ -504,6 +602,12 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         state = parent_get_state() if callable(parent_get_state) else {}
         if self._position_bin_ids:
             state["position_bin_ids"] = list(self._position_bin_ids)
+        range_lower = getattr(self, "_range_lower", None)
+        range_upper = getattr(self, "_range_upper", None)
+        if range_lower is not None:
+            state["range_lower"] = str(range_lower)
+        if range_upper is not None:
+            state["range_upper"] = str(range_upper)
         return state
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
@@ -520,6 +624,11 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         )
         if self._position_bin_ids:
             logger.info("Restored TraderJoe LP bin_ids from state: %s...", self._position_bin_ids[:3])
+
+        if state and state.get("range_lower") is not None:
+            self._range_lower = Decimal(str(state["range_lower"]))
+        if state and state.get("range_upper") is not None:
+            self._range_upper = Decimal(str(state["range_upper"]))
 
     # =========================================================================
     # STATUS REPORTING
