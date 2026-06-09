@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
 @almanak_strategy(
     name="demo_aave_loop_mantle",
+    quote_asset={"type": "token", "chain_id": 5000, "address": "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111"},
     description="Aave V3 looping strategy on Mantle - recursive supply/borrow for leveraged yield",
     version="1.0.0",
     author="Almanak",

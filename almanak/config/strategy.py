@@ -26,7 +26,7 @@ import os
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Hosted-platform env var carrying the user's UI-edited strategy config.
 # The V2 agent deployer injects this on the strategy container as JSON;
@@ -88,6 +88,12 @@ class StrategyConfig(BaseModel):
     vault_chain: str | None = None
     vault_safe_address: str | None = None
 
+    # Performance quote asset (definition-only; the hosted platform consumes it).
+    # Accepts "USD" or {"type": "token", "chain_id": <int>, "address": "0x..."}.
+    # Normalised to the canonical dict at load (see ``_normalise_quote_asset``);
+    # the @almanak_strategy decorator's quote_asset is the default when omitted.
+    quote_asset: str | dict[str, Any] | None = None
+
     model_config = ConfigDict(
         # Phase 3: lenient. Tightened to ``extra="forbid"`` in a follow-up
         # once per-strategy extensions migrate from dataclass to BaseModel.
@@ -119,6 +125,22 @@ class StrategyConfig(BaseModel):
                 f"Got chain={self.chain!r} and chains={self.chains!r}."
             )
         return self
+
+    @field_validator("quote_asset")
+    @classmethod
+    def _normalise_quote_asset(cls, v: Any) -> dict[str, Any] | None:
+        """Validate + normalise ``quote_asset`` to its canonical dict at load.
+
+        Accepts the same inputs as ``QuoteAsset.parse`` (``"USD"`` or a token
+        object). Stored as a plain dict so ``model_dump`` stays JSON-clean; the
+        runner re-parses it when resolving the per-deployment override. Imported
+        lazily so this schema module stays import-light.
+        """
+        if v is None:
+            return None
+        from almanak.core.models.quote_asset import QuoteAsset
+
+        return QuoteAsset.parse(v).to_dict()
 
 
 class StrategyConfigEnvError(ValueError):

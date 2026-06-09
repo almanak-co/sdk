@@ -46,6 +46,8 @@ if TYPE_CHECKING:
     )
     from ..vault.config import SettlementResult
 
+from almanak.core.models.quote_asset import QuoteAsset
+
 from ..intents import (
     CompilationStatus,
     DecideResult,
@@ -222,6 +224,16 @@ class IntentStrategy(StrategyBase[ConfigT]):
         self._rpc_url = rpc_url
         self._chains = chains or [chain]
         self._chain_wallets = {k.lower(): v for k, v in chain_wallets.items()} if chain_wallets else None
+
+        # Performance quote asset (definition-only). Resolved from the
+        # @almanak_strategy decorator default here; a per-deployment config.json
+        # override is applied once at boot by the runner/CLI
+        # (apply_quote_asset_override) and then frozen — it is intentionally NOT
+        # part of the hot-reloadable config surface, since changing the
+        # denomination mid-run would make the performance series discontinuous.
+        # The SDK does not branch on this value; the hosted platform consumes it.
+        _qa_meta = getattr(self.__class__, "STRATEGY_METADATA", None)
+        self._quote_asset: QuoteAsset = getattr(_qa_meta, "quote_asset", None) or QuoteAsset.usd()
 
         # Strategy-defined config validation hook.
         # Called AFTER config load (super().__init__) AND chain/wallet wiring,
@@ -1289,6 +1301,26 @@ class IntentStrategy(StrategyBase[ConfigT]):
             result.execution_time_ms = elapsed_ms
             logger.debug(f"State machine execution completed in {elapsed_ms:.2f}ms")
 
+    @property
+    def quote_asset(self) -> QuoteAsset:
+        """The resolved performance quote asset (decorator default or boot override).
+
+        Definition-only: exposed as metadata for the hosted platform. The SDK does
+        not change valuation/accounting/CLI behaviour based on it, and it is frozen
+        after boot (not part of the hot-reloadable config surface).
+        """
+        return getattr(self, "_quote_asset", None) or QuoteAsset.usd()
+
+    def apply_quote_asset_override(self, raw: QuoteAsset | str | dict[str, Any] | None) -> None:
+        """Apply a per-deployment config.json ``quote_asset`` override at boot.
+
+        Called once by the runner/CLI after construction. ``None`` keeps the
+        decorator default. Frozen thereafter — there is no hot-reload path that
+        mutates it, by design.
+        """
+        if raw is not None:
+            self._quote_asset = QuoteAsset.parse(raw)
+
     def get_metadata(self) -> StrategyMetadata | None:
         """Get strategy metadata if available.
 
@@ -1313,6 +1345,10 @@ class IntentStrategy(StrategyBase[ConfigT]):
             "config_version": self.get_current_config_version(),
             "current_intent": self._current_intent.serialize() if self._current_intent else None,
             "metadata": metadata.to_dict() if metadata else None,
+            # Effective (boot-resolved) quote asset — reflects any config.json
+            # override; the authoritative denomination for THIS deployment.
+            # (metadata["quote_asset"] above is the un-overridden decorator default.)
+            "quote_asset": self.quote_asset.to_dict(),
         }
 
     # =========================================================================

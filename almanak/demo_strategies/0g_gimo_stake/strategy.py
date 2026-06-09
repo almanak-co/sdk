@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 @almanak_strategy(
     name="demo_0g_gimo_stake",
+    quote_asset={"type": "token", "chain_id": 16661, "address": "0x1Cd0690fF9a693f5EF2dD976660a8dAFc81A109c"},
     description="Stake A0GI with Gimo Finance on 0G Chain for yield-bearing st0G",
     version="1.0.0",
     author="Almanak",

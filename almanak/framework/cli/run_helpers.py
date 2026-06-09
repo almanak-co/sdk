@@ -1604,6 +1604,14 @@ def _instantiate_strategy(  # noqa: C901
                 init_kwargs = base_kwargs
 
             strategy_instance = strategy_class(**init_kwargs)
+
+            # Apply a per-deployment ``quote_asset`` override from config.json, if
+            # present. Definition-only: resolved + frozen here at boot; the SDK does
+            # not branch on it. The @almanak_strategy decorator's quote_asset is the
+            # default when config.json omits it.
+            _qa_override = strategy_config.get("quote_asset")
+            if _qa_override is not None and hasattr(strategy_instance, "apply_quote_asset_override"):
+                strategy_instance.apply_quote_asset_override(_qa_override)
         else:
             # Try dict config first, then no config
             cls_any: Any = strategy_class

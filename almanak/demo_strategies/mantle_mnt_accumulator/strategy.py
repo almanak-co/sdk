@@ -44,6 +44,7 @@ def _cfg(config, key: str, default: Any = None) -> Any:
 
 @almanak_strategy(
     name="mantle_mnt_accumulator",
+    quote_asset={"type": "token", "chain_id": 5000, "address": "0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8"},
     description="Multi-signal MNT accumulation with Agni Finance on Mantle",
     version="1.0.0",
     author="Almanak",

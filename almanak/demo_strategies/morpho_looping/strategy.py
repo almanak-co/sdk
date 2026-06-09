@@ -98,6 +98,7 @@ logger = logging.getLogger(__name__)
 @almanak_strategy(
     # Unique identifier for CLI
     name="demo_morpho_looping",
+    quote_asset={"type": "token", "chain_id": 1, "address": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"},
     # Description
     description="Tutorial strategy - leveraged yield farming via recursive borrowing on Morpho Blue",
     # Version

@@ -87,6 +87,7 @@ _DUST_THRESHOLD = Decimal("0.0001")
 @almanak_strategy(
     # Unique identifier for CLI (matches the directory name)
     name="lido_staker",
+    quote_asset={"type": "token", "chain_id": 1, "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"},
     # Description
     description="Tutorial strategy - stake ETH with Lido for liquid staking yield",
     # Version

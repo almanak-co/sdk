@@ -195,6 +195,7 @@ Attaches metadata used by the framework and CLI:
     supported_protocols=["uniswap_v3"],  # Which protocols it uses
     intent_types=["SWAP", "HOLD"],   # Intent types it may return
     default_chain="arbitrum",        # Default chain for execution
+    quote_asset="USD",               # Asset performance is measured in (USD default, or a token)
 )
 ```
 
@@ -215,6 +216,29 @@ on-chain** because the wallet lacks permission for the close operation.
 The decorator emits a `UserWarning` at import time if complements are missing.
 The permission generator also auto-expands missing complements as a safety net,
 but always declare them explicitly.
+
+### Quote asset (performance denomination)
+
+`quote_asset` declares the asset your strategy's performance is measured in. It defaults
+to **USD** and is **definition-only** today: the hosted platform reads it for performance
+reporting, but the SDK does not change any valuation/accounting behaviour based on it — so
+adding it is always safe.
+
+- **USD (default):** omit it, or `quote_asset="USD"`.
+- **Token:** `quote_asset={"type": "token", "chain_id": <int>, "address": "0x..."}` (or
+  `QuoteAsset.token(chain_id, address)` from `almanak.core.models.quote_asset`),
+  identifying the token by its canonical `(chain_id, address)`. Use a **numeric `chain_id`
+  only**, never a chain name. Represent native gas tokens by their wrapped ERC-20
+  (ETH->WETH, MNT->WMNT, 0G->W0G).
+
+Set a **token** quote asset only when the strategy's goal is to grow a quantity of that
+token — pure accumulators, ETH-denominated LST leverage loops (collateral *and* borrow are
+ETH-family), native-asset staking. LP, USD-yield lending, stablecoin, delta-neutral, and
+USD-collateral perp strategies stay on the USD default. `quote_asset` is distinct from
+`quote_token` (a trading-pair leg) and `starting_asset` (an LP round-trip asset).
+
+You can also set it per-deployment in `config.json` (`"quote_asset": "USD"` or the token
+object), which overrides the decorator default. It is frozen at boot — not hot-reloadable.
 
 ### Config Access
 

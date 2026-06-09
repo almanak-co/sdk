@@ -12,6 +12,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
+from almanak.core.models.quote_asset import QuoteAsset
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,6 +75,9 @@ class StrategyMetadata:
         intent_types: List of intent types this strategy may use
         default_chain: Default chain for single-chain execution (falls back to supported_chains[0])
         data_requirements: Which optional data services the strategy requires.
+        quote_asset: The asset this strategy's performance is measured in (USD by
+            default, or a token). Definition-only metadata consumed by the hosted
+            platform; the SDK does not branch on it.
     """
 
     name: str
@@ -85,6 +90,7 @@ class StrategyMetadata:
     intent_types: list[str] = field(default_factory=list)
     default_chain: str = ""
     data_requirements: StrategyDataRequirements = field(default_factory=StrategyDataRequirements)
+    quote_asset: QuoteAsset = field(default_factory=QuoteAsset.usd)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -105,6 +111,7 @@ class StrategyMetadata:
                 "lending_rates": self.data_requirements.lending_rates,
                 "funding_rates": self.data_requirements.funding_rates,
             },
+            "quote_asset": self.quote_asset.to_dict(),
         }
 
 
@@ -123,6 +130,7 @@ def almanak_strategy(
     intent_types: list[str] | None = None,
     default_chain: str = "",
     data_requirements: StrategyDataRequirements | dict[str, bool] | None = None,
+    quote_asset: QuoteAsset | str | dict[str, Any] | None = None,
 ) -> Callable[[StrategyClassT], StrategyClassT]:
     """Decorator to add metadata to an IntentStrategy class.
 
@@ -144,6 +152,12 @@ def almanak_strategy(
             the legacy compat defaults (all services) are used and a debug warning is emitted.
             Pass StrategyDataRequirements(...) or a dict of bool fields to opt into
             selective wiring.
+        quote_asset: The asset this strategy's performance is measured in. Accepts
+            "USD" (the default), a ``QuoteAsset``, or
+            ``{"type": "token", "chain_id": <int>, "address": "0x..."}``.
+            Definition-only: declared here as the source of truth, optionally
+            overridden per-deployment in config.json, and consumed by the hosted
+            platform. The SDK does not change valuation/accounting behaviour on it.
 
     Returns:
         Decorated class with STRATEGY_METADATA attribute
@@ -223,6 +237,8 @@ def almanak_strategy(
         else:
             resolved_requirements = data_requirements
 
+        resolved_quote_asset = QuoteAsset.parse(quote_asset)
+
         metadata = StrategyMetadata(
             name=name,
             description=description,
@@ -234,6 +250,7 @@ def almanak_strategy(
             intent_types=expanded_intent_types,
             default_chain=resolved_default_chain,
             data_requirements=resolved_requirements,
+            quote_asset=resolved_quote_asset,
         )
 
         # Attach metadata to class

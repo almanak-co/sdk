@@ -19,6 +19,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.strategies.metadata import StrategyMetadata
 
 from .sidecar import SidecarEntry, SidecarRegistry
@@ -151,6 +152,17 @@ class DemoSpec:
     @property
     def intent_types(self) -> list[str]:
         return list(self.metadata.intent_types)
+
+    @property
+    def quote_asset(self) -> dict[str, Any]:
+        """Performance quote asset (canonical dict): config.json override else decorator default.
+
+        Definition-only metadata for the hosted platform; not consumed by demo execution.
+        """
+        cfg = self.config.get("quote_asset")
+        if cfg is not None:
+            return QuoteAsset.parse(cfg).to_dict()
+        return self.metadata.quote_asset.to_dict()
 
     @property
     def description(self) -> str:
