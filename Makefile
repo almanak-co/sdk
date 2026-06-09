@@ -547,20 +547,20 @@ list-demo-strategies:
 # Run the VIB-4316 accounting matrix end-to-end across every in-scope fixture
 # defined in scripts/qa/accounting-matrix.yml. Drives each strategy on managed
 # Anvil, scores the 21-cell Accountant Test per row, and writes a typed gap
-# report. Per-row artifacts land under notes/.tmp/accounting-matrix/<row_id>/
+# report. Per-row artifacts land under docs/internal/notes/.tmp/accounting-matrix/<row_id>/
 # (gitignored). Full matrix is ~92 min serial — use test-accounting-matrix-quick
 # for a 7-min smoke gate on the two baselined rows.
 test-accounting-matrix:
 	uv run python scripts/qa/run_accounting_matrix.py \
 		--matrix scripts/qa/accounting-matrix.yml \
-		--output-dir notes/.tmp/accounting-matrix
+		--output-dir docs/internal/notes/.tmp/accounting-matrix
 
 # Quick accounting matrix smoke: only the two baselined rows (lp + looping),
 # ~7-8 min total. Use as a CI gate for accounting-affecting PRs.
 test-accounting-matrix-quick:
 	uv run python scripts/qa/run_accounting_matrix.py \
 		--matrix scripts/qa/accounting-matrix.yml \
-		--output-dir notes/.tmp/accounting-matrix \
+		--output-dir docs/internal/notes/.tmp/accounting-matrix \
 		--rows-include lp-uniswap_v3-arbitrum,looping-aave_v3-arbitrum
 
 # Check Pendle market expiry dates in demo and incubating strategy configs.

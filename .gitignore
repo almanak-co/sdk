@@ -68,6 +68,10 @@ scripts/kitchenloop/kitchenloop.log
 scripts/pr-manager/pr-manager.log
 scripts/pr-manager/state.json
 docs/internal/notes/.tmp/
+# Guard: no root-level notes/. Canonical scratch + notes live under
+# docs/internal/notes/ (durable .md tracked; docs/internal/notes/.tmp/ ignored
+# above). This keeps the repo root clean if a tool ever writes here by accident.
+notes/
 
 # Smoke-test runtime output (scripts/smoke-test-all.sh, smoke-test-batch.sh)
 /results/
