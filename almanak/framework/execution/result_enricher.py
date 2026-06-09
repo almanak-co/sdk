@@ -33,7 +33,7 @@ from .extract_result import (
     ExtractMissing,
     ExtractOk,
 )
-from .extracted_data import BridgeData, LPCloseData, ProtocolFees, SwapAmounts
+from .extracted_data import BridgeData, LPCloseData, LPOpenData, ProtocolFees, SwapAmounts
 from .receipt_registry import ReceiptParserRegistry
 
 if TYPE_CHECKING:
@@ -653,6 +653,22 @@ class ResultEnricher:
         elif not offchain_extracted:
             # No parser AND no off-chain extraction — nothing to log, return.
             return result
+
+        # VIB-4636 — V4 LP_OPEN current_tick fallback from compiler metadata.
+        # The V4 receipt parser reads current_tick from a Swap event in the
+        # mint receipt; pure NPM.mint receipts (the canonical PositionManager-
+        # mediated path) carry none, so the parser leaves current_tick=None
+        # and the persisted accounting_events payload would lose in_range.
+        # The V4 adapter stamps ``compile_time_current_tick`` from the same
+        # sqrtPriceX96 it sized liquidity against — the V4 mint itself never
+        # moves price, so the compile-time tick is correct for post-mint
+        # accounting unless an interleaving tx moves the pool. Use it as a
+        # fallback only; on-chain extraction always wins. Capability-gated,
+        # not protocol-name-gated: the helper no-ops unless the V4 adapter
+        # stamped ``compile_time_current_tick`` AND the parser left an
+        # ``LPOpenData.current_tick`` of None, so an unconditional call is
+        # safe for every intent type / protocol / paper-mode receipt.
+        self._fill_v4_lp_open_current_tick_from_metadata(result, bundle_metadata)
 
         # Log enrichment summary with actual extracted values
         extracted_parts = []
@@ -1627,6 +1643,55 @@ class ResultEnricher:
         self.extract_error_count += 1
         logger.warning(f"{message} (paper mode — surfaced as warning, not raised)")
         result.extraction_warnings.append(f"ExtractError[{field}]: {err.error}")
+
+    @staticmethod
+    def _fill_v4_lp_open_current_tick_from_metadata(
+        result: ExecutionResult,
+        bundle_metadata: dict[str, Any] | None,
+    ) -> None:
+        """VIB-4636 — fill V4 ``LPOpenData.current_tick`` from compiler metadata.
+
+        V4 pure-mint receipts (PositionManager-mediated) emit no Swap event,
+        so ``UniswapV4ReceiptParser.extract_lp_open_data`` leaves
+        ``current_tick=None``. The adapter stamps the compile-time tick on
+        ``ActionBundle.metadata["compile_time_current_tick"]``; the mint
+        itself never moves price, so that value is correct for post-mint
+        accounting (caveat: an interleaving tx between compile and mint
+        could move the pool — same caveat applies to the V3 slot0 fallback,
+        which queries at a slightly different block than the mint).
+
+        Authoritative on-chain extraction always wins: this only fires when
+        the parser left ``current_tick`` ``None``. No-ops on every other
+        shape (no ``lp_open_data``, missing metadata key, already populated).
+        """
+        if not bundle_metadata:
+            return
+        compile_tick = bundle_metadata.get("compile_time_current_tick")
+        if compile_tick is None:
+            return
+        lp_open = result.extracted_data.get("lp_open_data")
+        if not isinstance(lp_open, LPOpenData):
+            return
+        if lp_open.current_tick is not None:
+            return
+        try:
+            tick_value = int(compile_tick)
+        except (TypeError, ValueError):
+            logger.warning(
+                "V4 LP_OPEN current_tick fallback: ignoring non-integer "
+                "bundle metadata value compile_time_current_tick=%r",
+                compile_tick,
+            )
+            return
+        source = bundle_metadata.get("compile_time_current_tick_source", "unknown")
+        logger.info(
+            "filled V4 LP_OPEN current_tick from compile-time metadata (tick=%d source=%s)",
+            tick_value,
+            source,
+        )
+        import dataclasses
+
+        result.extracted_data["lp_open_data"] = dataclasses.replace(lp_open, current_tick=tick_value)
 
     def _attach_to_result(
         self,

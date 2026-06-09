@@ -257,6 +257,30 @@ def _sqlite_row_to_accounting_event(row: dict[str, Any]) -> gateway_pb2.Accounti
     )
 
 
+def _coerce_decimal_str(raw: object) -> str | None:
+    """Validate a smuggled decimal scalar before it reaches a TEXT column /
+    ``Decimal(...)`` (VIB-5007). Returns the stringified value only when ``raw``
+    is a Decimal-parseable scalar; any malformed value (dict/list/bool/None or a
+    non-numeric string) degrades to ``None`` so the column keeps its default
+    rather than persisting junk on Postgres or crashing ``from_dict`` on the
+    SQLite write path. Symmetric with the collection type-guards in
+    ``_extract_smuggled_snapshot_fields``.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    if not isinstance(raw, str | int | float):
+        return None
+    try:
+        parsed = Decimal(str(raw))
+    except (InvalidOperation, ValueError):
+        return None
+    # NaN / ±Infinity are valid Decimal constructions (and json.loads accepts the
+    # literals), but must never reach a money column / Decimal arithmetic.
+    if not parsed.is_finite():
+        return None
+    return str(raw)
+
+
 class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     """Implements StateService gRPC interface.
 
@@ -604,12 +628,22 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     # caller-supplied canonical id — no asymmetric "preserve once stamped"
     # CASE logic is needed for it. cycle_id/execution_mode remain optional
     # Phase-4 columns and keep the once-stamped-never-blanked guard.
+    # VIB-5007 — these four columns exist in the deployed Postgres schema
+    # (defaults '0'/'0'/'[]'/'{}') but were never bound by the INSERT, so
+    # every hosted snapshot persisted them at default. The values cannot ride
+    # the proto wire (SaveSnapshotRequest has no slots — see VIB-3894); they
+    # are smuggled through the positions_json envelope and lifted by
+    # ``_extract_smuggled_snapshot_fields``, mirroring the SQLite path.
     _SAVE_SNAPSHOT_PG_SQL = """
         INSERT INTO portfolio_snapshots (
             deployment_id, timestamp, iteration_number, total_value_usd,
             available_cash_usd, value_confidence, positions_json, chain, created_at,
-            cycle_id, execution_mode
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11)
+            deployed_capital_usd, wallet_total_value_usd, wallet_balances_json,
+            token_prices_json, cycle_id, execution_mode
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12::jsonb,
+            $13::jsonb, $14, $15
+        )
         ON CONFLICT (deployment_id, timestamp) DO UPDATE SET
             iteration_number = EXCLUDED.iteration_number,
             total_value_usd = EXCLUDED.total_value_usd,
@@ -617,6 +651,37 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             value_confidence = EXCLUDED.value_confidence,
             positions_json = EXCLUDED.positions_json,
             chain = EXCLUDED.chain,
+            -- VIB-5007 — value-aware update: a conflicting upsert for the same
+            -- (deployment_id, timestamp) from a degraded or legacy envelope
+            -- (missing/invalid wallet fields → bound as defaults) must NOT wipe
+            -- already-persisted values back to defaults. Mirrors the
+            -- once-stamped-never-blanked guard on cycle_id/execution_mode below:
+            -- a default EXCLUDED preserves the existing column; a real value
+            -- still lands (incl. upgrading a prior default to a measured value).
+            deployed_capital_usd = CASE
+                WHEN EXCLUDED.deployed_capital_usd IS NULL
+                  OR EXCLUDED.deployed_capital_usd = '0'
+                THEN portfolio_snapshots.deployed_capital_usd
+                ELSE EXCLUDED.deployed_capital_usd
+            END,
+            wallet_total_value_usd = CASE
+                WHEN EXCLUDED.wallet_total_value_usd IS NULL
+                  OR EXCLUDED.wallet_total_value_usd = '0'
+                THEN portfolio_snapshots.wallet_total_value_usd
+                ELSE EXCLUDED.wallet_total_value_usd
+            END,
+            wallet_balances_json = CASE
+                WHEN EXCLUDED.wallet_balances_json IS NULL
+                  OR EXCLUDED.wallet_balances_json = '[]'::jsonb
+                THEN portfolio_snapshots.wallet_balances_json
+                ELSE EXCLUDED.wallet_balances_json
+            END,
+            token_prices_json = CASE
+                WHEN EXCLUDED.token_prices_json IS NULL
+                  OR EXCLUDED.token_prices_json = '{}'::jsonb
+                THEN portfolio_snapshots.token_prices_json
+                ELSE EXCLUDED.token_prices_json
+            END,
             cycle_id = CASE
                 WHEN portfolio_snapshots.cycle_id IS NULL
                   OR portfolio_snapshots.cycle_id = ''
@@ -632,6 +697,49 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         RETURNING id
         """
 
+    @staticmethod
+    def _extract_smuggled_snapshot_fields(
+        positions_payload: object,
+        metadata: object,
+    ) -> tuple[str | None, str | None, list | None, dict | None]:
+        """Lift the four snapshot fields the ``SaveSnapshotRequest`` proto wire
+        cannot carry directly (VIB-3894 / Phase 1c / VIB-5007).
+
+        ``deployed_capital_usd`` and ``wallet_total_value_usd`` are smuggled
+        through the envelope ``metadata`` under double-underscore keys and are
+        **popped** so the persisted metadata stays clean; ``wallet_balances``
+        and ``token_prices`` ride on the envelope payload.
+
+        Returns ``(deployed_capital_usd, wallet_total_value_usd,
+        wallet_balances, token_prices)``. Each element is ``None`` when the
+        source key is absent so callers can distinguish "unset — keep the
+        column/constructor default" from a measured value. Shared by the
+        SQLite and Postgres write paths so the two backends cannot drift
+        (the drift WAS the VIB-5007 bug).
+        """
+        deployed_capital_usd: str | None = None
+        wallet_total_value_usd: str | None = None
+        if isinstance(metadata, dict):
+            deployed_capital_usd = _coerce_decimal_str(metadata.pop("__deployed_capital_usd__", None))
+            wallet_total_value_usd = _coerce_decimal_str(metadata.pop("__wallet_total_value_usd__", None))
+        # Type-guard the envelope sub-fields (defense-in-depth at the
+        # persistence boundary): ``_validate_save_snapshot_payload`` checks the
+        # top-level shape but not these inner types. A malformed payload (e.g.
+        # ``wallet_balances`` as a string) must degrade to the column/constructor
+        # default, not crash ``PortfolioSnapshot.from_dict`` on the SQLite write
+        # path. Mirrors the isinstance guards on the read side
+        # (``_pg_row_to_portfolio_snapshot``).
+        wallet_balances: list | None = None
+        token_prices: dict | None = None
+        if isinstance(positions_payload, dict):
+            wb_raw = positions_payload.get("wallet_balances")
+            if isinstance(wb_raw, list):
+                wallet_balances = wb_raw
+            tp_raw = positions_payload.get("token_prices")
+            if isinstance(tp_raw, dict):
+                token_prices = tp_raw
+        return deployed_capital_usd, wallet_total_value_usd, wallet_balances, token_prices
+
     async def _save_snapshot_postgres(
         self,
         deployment_id: str,
@@ -639,7 +747,20 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         now: datetime,
         request: gateway_pb2.SaveSnapshotRequest,
     ) -> int:
-        """Run the snapshot upsert against Postgres and return the row id."""
+        """Run the snapshot upsert against Postgres and return the row id.
+
+        VIB-5007 — binds ``deployed_capital_usd`` / ``wallet_total_value_usd``
+        / ``wallet_balances_json`` / ``token_prices_json`` lifted from the
+        envelope, mirroring ``_build_sqlite_snapshot``. ``positions_json`` is
+        persisted verbatim (smuggle keys retained, matching prior behaviour).
+        """
+        positions_json = request.positions_json.decode("utf-8") if request.positions_json else "[]"
+        try:
+            positions_payload: object = json.loads(positions_json)
+        except (ValueError, TypeError):
+            positions_payload = None
+        metadata = positions_payload.get("metadata") if isinstance(positions_payload, dict) else None
+        dep, wtv, wallet_balances, token_prices = self._extract_smuggled_snapshot_fields(positions_payload, metadata)
         row = await self._snapshot_fetchrow(
             self._SAVE_SNAPSHOT_PG_SQL,
             deployment_id,
@@ -648,9 +769,13 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             request.total_value_usd,
             request.available_cash_usd,
             request.value_confidence or "HIGH",
-            request.positions_json.decode("utf-8") if request.positions_json else "[]",
+            positions_json,
             request.chain,
             now,
+            dep if dep is not None else "0",
+            wtv if wtv is not None else "0",
+            json.dumps(wallet_balances if wallet_balances is not None else []),
+            json.dumps(token_prices if token_prices is not None else {}),
             request.cycle_id or "",
             request.execution_mode or "",
         )
@@ -693,23 +818,25 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         snapshot_dict = snapshot.to_dict()
         snapshot_dict["positions"] = positions
         snapshot_dict["snapshot_metadata"] = snapshot_metadata
-        # VIB-3894 — SaveSnapshotRequest is missing ``deployed_capital_usd``
-        # and ``wallet_total_value_usd`` on the proto wire. The runner's
-        # GatewayStateManager smuggles them through the envelope's metadata;
-        # lift them onto the rebuilt snapshot so the SQLite writer persists
-        # the actual values rather than the ``Decimal("0")`` default.
-        if isinstance(snapshot_metadata, dict):
-            dep_str = snapshot_metadata.pop("__deployed_capital_usd__", None)
-            wtv_str = snapshot_metadata.pop("__wallet_total_value_usd__", None)
-            if dep_str is not None:
-                snapshot_dict["deployed_capital_usd"] = str(dep_str)
-            if wtv_str is not None:
-                snapshot_dict["wallet_total_value_usd"] = str(wtv_str)
-        if isinstance(positions_payload, dict):
-            if "token_prices" in positions_payload:
-                snapshot_dict["token_prices"] = positions_payload["token_prices"]
-            if "wallet_balances" in positions_payload:
-                snapshot_dict["wallet_balances"] = positions_payload["wallet_balances"]
+        # VIB-3894 / VIB-5007 — SaveSnapshotRequest cannot carry
+        # ``deployed_capital_usd`` / ``wallet_total_value_usd`` /
+        # ``wallet_balances`` / ``token_prices`` on the proto wire. The runner's
+        # GatewayStateManager smuggles them through the envelope; lift them onto
+        # the rebuilt snapshot (shared with the Postgres path) so the SQLite
+        # writer persists the actual values rather than the ``Decimal("0")`` /
+        # empty defaults. ``snapshot_metadata`` is mutated in place (smuggle
+        # keys popped) so the persisted metadata stays clean.
+        dep_str, wtv_str, wallet_balances, token_prices = StateServiceServicer._extract_smuggled_snapshot_fields(
+            positions_payload, snapshot_metadata
+        )
+        if dep_str is not None:
+            snapshot_dict["deployed_capital_usd"] = dep_str
+        if wtv_str is not None:
+            snapshot_dict["wallet_total_value_usd"] = wtv_str
+        if token_prices is not None:
+            snapshot_dict["token_prices"] = token_prices
+        if wallet_balances is not None:
+            snapshot_dict["wallet_balances"] = wallet_balances
         return PortfolioSnapshot.from_dict(snapshot_dict)
 
     async def _save_snapshot_sqlite(

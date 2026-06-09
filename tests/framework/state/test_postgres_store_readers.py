@@ -16,6 +16,7 @@ What is intentionally NOT covered here:
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -822,6 +823,59 @@ def test_pg_row_to_portfolio_snapshot_handles_envelope_payload():
     assert len(snap.positions) == 1
     # Envelope metadata round-trips into snapshot_metadata
     assert snap.snapshot_metadata.get("source") == "test"
+
+
+def test_pg_row_to_portfolio_snapshot_hydrates_populated_wallet_columns():
+    # VIB-5007 — the four wallet-side columns the PG WRITE path now binds must
+    # round-trip on the READ path into the snapshot's typed fields. This is the
+    # consumer half of the end-to-end chain: ``snapshot.wallet_balances`` is the
+    # PRIMARY source for the dashboard "Current Position" panel
+    # (``build_position_proto`` → ``token_balances``), and it is the per-snapshot
+    # audit record of token composition. Both must be recoverable from the
+    # dedicated columns alone — not only from the positions_json envelope.
+    wallet_balances = [
+        {
+            "symbol": "WBTC",
+            "balance": "0.00009864",
+            "value_usd": "6.24",
+            "address": "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f",
+            "price_usd": "63251.0",
+        },
+        {
+            "symbol": "USDC",
+            "balance": "1.978059",
+            "value_usd": "1.978059",
+            "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            "price_usd": "1.0",
+        },
+    ]
+    token_prices = {
+        "arbitrum:0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f": "63251.0",
+        "arbitrum:0xaf88d065e77c8cc2239327c5edb3a432268e5831": "1.0",
+    }
+    row = _snapshot_row(
+        wallet_balances_text=json.dumps(wallet_balances),
+        token_prices_text=json.dumps(token_prices),
+        deployed_capital_usd="0",
+        wallet_total_value_usd="8.218059",
+    )
+
+    snap = _pg_row_to_portfolio_snapshot(row)
+
+    # Per-token composition recovered (not merely "non-empty") — this is what
+    # makes snapshot↔trade-tape reconciliation a DB read instead of on-chain
+    # forensics.
+    assert [b.symbol for b in snap.wallet_balances] == ["WBTC", "USDC"]
+    wbtc, usdc = snap.wallet_balances
+    assert wbtc.balance == Decimal("0.00009864")
+    assert wbtc.value_usd == Decimal("6.24")
+    assert wbtc.price_usd == Decimal("63251.0")
+    assert wbtc.address == "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f"
+    assert usdc.balance == Decimal("1.978059")
+    # Scalar + price-map columns hydrate too.
+    assert snap.wallet_total_value_usd == Decimal("8.218059")
+    assert snap.deployed_capital_usd == Decimal("0")
+    assert snap.token_prices == token_prices
 
 
 def test_pg_row_to_portfolio_metrics_defaults_missing_columns():

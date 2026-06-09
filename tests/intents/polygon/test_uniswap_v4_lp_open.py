@@ -39,9 +39,7 @@ from tests.intents.conftest import (
     get_token_decimals,
 )
 
-pytestmark = pytest.mark.no_zodiac(
-    reason="VIB-4343: uniswap_v4 not yet in synthetic_intents matrix"
-)
+pytestmark = pytest.mark.no_zodiac(reason="VIB-4343: uniswap_v4 not yet in synthetic_intents matrix")
 
 # =============================================================================
 # Test Configuration
@@ -59,11 +57,11 @@ LP_POOL = "WETH/USDC/3000"
 
 # Small amounts to minimize capital requirements
 LP_AMOUNT_WETH = Decimal("0.01")  # ~$25 of WETH
-LP_AMOUNT_USDC = Decimal("25")    # $25 of USDC
+LP_AMOUNT_USDC = Decimal("25")  # $25 of USDC
 
 # Wide price range to ensure position is in range
 # Roughly 50% below and 200% above current price
-LP_RANGE_LOWER = Decimal("1000")   # 1000 USDC per WETH
+LP_RANGE_LOWER = Decimal("1000")  # 1000 USDC per WETH
 LP_RANGE_UPPER = Decimal("10000")  # 10000 USDC per WETH
 
 
@@ -144,9 +142,7 @@ def _assert_v4_open_position_hash(payload: dict) -> None:
             "correct above (amounts/pool/ticks/confidence hard-asserted)."
         )
     # Reactivates automatically once VIB-4636 wires position_hash through.
-    assert isinstance(ph, str) and ph.startswith("0x"), (
-        f"V4 position_hash must be 0x-prefixed hex, got {ph!r}"
-    )
+    assert isinstance(ph, str) and ph.startswith("0x"), f"V4 position_hash must be 0x-prefixed hex, got {ph!r}"
     assert len(ph) == 66, f"V4 position_hash must be a 32-byte keccak hash, got {ph!r}"
 
 
@@ -194,9 +190,9 @@ class TestUniswapV4LPOpenIntent:
         weth_decimals = get_token_decimals(web3, weth_addr)
         usdc_decimals = get_token_decimals(web3, usdc_addr)
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Test: LP_OPEN WETH/USDC via Uniswap V4 on Polygon")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
         print(f"WETH amount: {LP_AMOUNT_WETH}")
         print(f"USDC amount: {LP_AMOUNT_USDC}")
         print(f"Price range: {LP_RANGE_LOWER} - {LP_RANGE_UPPER}")
@@ -248,16 +244,16 @@ class TestUniswapV4LPOpenIntent:
         print("Compiling intent to ActionBundle...")
         compilation_result = compiler.compile(intent)
 
-        assert compilation_result.status.value == "SUCCESS", (
-            f"Compilation failed: {compilation_result.error}"
-        )
+        assert compilation_result.status.value == "SUCCESS", f"Compilation failed: {compilation_result.error}"
         assert compilation_result.action_bundle is not None, "ActionBundle must be created"
 
         bundle = compilation_result.action_bundle
         print(f"ActionBundle created with {len(bundle.transactions)} transactions")
-        print(f"Metadata: liquidity={bundle.metadata.get('liquidity')}, "
-              f"tick_lower={bundle.metadata.get('tick_lower')}, "
-              f"tick_upper={bundle.metadata.get('tick_upper')}")
+        print(
+            f"Metadata: liquidity={bundle.metadata.get('liquidity')}, "
+            f"tick_lower={bundle.metadata.get('tick_lower')}, "
+            f"tick_upper={bundle.metadata.get('tick_upper')}"
+        )
 
         # Layer 2: Execution
         print("\nExecuting via ExecutionOrchestrator...")
@@ -268,9 +264,7 @@ class TestUniswapV4LPOpenIntent:
 
         # Enrich for accounting (populates result.lp_open_data — Layer 5 needs
         # it; mirrors the V3 golden / SushiSwap precedent ordering).
-        execution_result = _enrich_for_accounting(
-            execution_result, intent, funded_wallet, bundle.metadata
-        )
+        execution_result = _enrich_for_accounting(execution_result, intent, funded_wallet, bundle.metadata)
 
         # Layer 3: Receipt Parsing
         parser = UniswapV4ReceiptParser(chain=CHAIN_NAME)
@@ -280,7 +274,7 @@ class TestUniswapV4LPOpenIntent:
         saw_transfer_event = False
 
         for i, tx_result in enumerate(execution_result.transaction_results):
-            print(f"\nTransaction {i+1}:")
+            print(f"\nTransaction {i + 1}:")
             print(f"  Hash: {tx_result.tx_hash[:16]}...")
             print(f"  Gas used: {tx_result.gas_used}")
 
@@ -313,12 +307,8 @@ class TestUniswapV4LPOpenIntent:
         assert position_id > 0, f"Position ID must be positive, got {position_id}"
         assert liquidity is not None, "Must extract liquidity from ModifyLiquidity event"
         assert liquidity > 0, f"Liquidity must be positive, got {liquidity}"
-        assert saw_modify_liquidity_event, (
-            "parse_receipt() must surface the ModifyLiquidity event for an LP_OPEN"
-        )
-        assert saw_transfer_event, (
-            "parse_receipt() must surface the ERC-721 mint Transfer for an LP_OPEN"
-        )
+        assert saw_modify_liquidity_event, "parse_receipt() must surface the ModifyLiquidity event for an LP_OPEN"
+        assert saw_transfer_event, "parse_receipt() must surface the ERC-721 mint Transfer for an LP_OPEN"
 
         # Layer 4: Balance Deltas
         weth_after = get_token_balance(web3, weth_addr, funded_wallet)
@@ -339,8 +329,7 @@ class TestUniswapV4LPOpenIntent:
         # MUST have been deposited. Permitting `or` here would let a V4 no-op
         # silently pass.
         assert weth_spent > 0 and usdc_spent > 0, (
-            f"In-range LP_OPEN must deposit BOTH tokens (no-op guard). "
-            f"weth_spent={weth_spent}, usdc_spent={usdc_spent}"
+            f"In-range LP_OPEN must deposit BOTH tokens (no-op guard). weth_spent={weth_spent}, usdc_spent={usdc_spent}"
         )
         # Upper-bound the spend at the requested amount0 / amount1 so a regression
         # that overspends (e.g. an off-by-decimals or fee-on-transfer surprise)
@@ -381,11 +370,19 @@ class TestUniswapV4LPOpenIntent:
         # Tie the persisted amounts to the exact Layer-4 spend and pin
         # confidence — `>= 0` would pass on a zero/mis-scaled row and an
         # un-pinned confidence hides a degraded read (CodeRabbit PR #2369).
-        assert Decimal(payload["amount0"]) == (Decimal(weth_spent) / Decimal(10**weth_decimals))
-        assert Decimal(payload["amount1"]) == (Decimal(usdc_spent) / Decimal(10**usdc_decimals))
+        # VIB-4636 sibling alignment: V4 persists ``amount{0,1}`` in canonical
+        # PoolKey order, which differs from the user-intent order on Polygon
+        # (USDC address < WETH address). Match by token symbol so the test
+        # is order-agnostic and still catches a zero / mis-scaled / wrong-
+        # token row.
+        amounts_by_symbol = {
+            payload["token0"].upper(): Decimal(payload["amount0"]),
+            payload["token1"].upper(): Decimal(payload["amount1"]),
+        }
+        assert amounts_by_symbol["WETH"] == (Decimal(weth_spent) / Decimal(10**weth_decimals))
+        assert amounts_by_symbol["USDC"] == (Decimal(usdc_spent) / Decimal(10**usdc_decimals))
         assert payload["confidence"] == "HIGH", (
-            f"V4 LP_OPEN with the Anvil eth_call reader must persist "
-            f"confidence=HIGH, got {payload['confidence']!r}"
+            f"V4 LP_OPEN with the Anvil eth_call reader must persist confidence=HIGH, got {payload['confidence']!r}"
         )
         assert payload["tick_lower"] is not None
         assert payload["tick_upper"] is not None
@@ -411,9 +408,9 @@ class TestUniswapV4LPOpenIntent:
         and (Layer 5) that a failed LP_OPEN writes ZERO accounting_events
         rows (epic VIB-4591 decision #7).
         """
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("Test: LP_OPEN with invalid pool (should fail)")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         intent = LPOpenIntent(
             pool="INVALID/TOKENS/3000",
@@ -433,9 +430,7 @@ class TestUniswapV4LPOpenIntent:
 
         compilation_result = compiler.compile(intent)
 
-        assert compilation_result.status.value == "FAILED", (
-            "Compilation should fail for invalid token symbols"
-        )
+        assert compilation_result.status.value == "FAILED", "Compilation should fail for invalid token symbols"
         assert compilation_result.error is not None
         assert compilation_result.action_bundle is None, (
             "Compiler must not return an ActionBundle on FAILED compilation"

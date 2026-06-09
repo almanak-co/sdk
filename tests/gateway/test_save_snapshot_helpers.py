@@ -346,3 +346,166 @@ class TestSaveSnapshotPostgres:
         args = pg_service._snapshot_fetchrow.await_args.args
         # positions_json is param 7 (after SQL)
         assert args[7] == "[]"
+
+    @pytest.mark.asyncio
+    async def test_smuggled_accounting_columns_bound_from_envelope(self, pg_service: StateServiceServicer):
+        # VIB-5007 — deployed_capital_usd / wallet_total_value_usd ride in
+        # envelope metadata; wallet_balances / token_prices ride on the
+        # payload. The PG INSERT MUST bind all four (previously dropped to the
+        # column defaults on every hosted snapshot).
+        pg_service._snapshot_fetchrow = AsyncMock(return_value={"id": 1})
+        ts = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 5, 7, 12, 0, 1, tzinfo=UTC)
+        wallet_balances = [
+            {"symbol": "WBTC", "balance": "0.0000327", "value_usd": "2.07", "price_usd": "63351.0"},
+            {"symbol": "USDC", "balance": "6.0", "value_usd": "6.0", "price_usd": "1.0"},
+        ]
+        token_prices = {"arbitrum:0xwbtc": "63351.0"}
+        envelope = {
+            "positions": [_position("x")],
+            "metadata": {
+                "__deployed_capital_usd__": "750.00",
+                "__wallet_total_value_usd__": "8.06",
+            },
+            "wallet_balances": wallet_balances,
+            "token_prices": token_prices,
+        }
+        req = _request(positions_json=json.dumps(envelope).encode())
+        await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req)
+        args = pg_service._snapshot_fetchrow.await_args.args
+        # Bind order: ... created_at($9)=args[9], deployed_capital_usd=args[10],
+        # wallet_total_value_usd=args[11], wallet_balances_json=args[12],
+        # token_prices_json=args[13], cycle_id=args[14], execution_mode=args[15].
+        assert args[10] == "750.00"
+        assert args[11] == "8.06"
+        assert json.loads(args[12]) == wallet_balances
+        assert json.loads(args[13]) == token_prices
+        # Identity columns stay last; positions_json verbatim at args[7].
+        assert tuple(args[-2:]) == ("", "")
+        assert json.loads(args[7])["metadata"]["__wallet_total_value_usd__"] == "8.06"
+
+    @pytest.mark.asyncio
+    async def test_accounting_columns_default_when_envelope_bare(self, pg_service: StateServiceServicer):
+        # Legacy list positions / no smuggled fields ⇒ the four columns fall to
+        # their schema defaults ('0' / '0' / '[]' / '{}') — never NULL.
+        pg_service._snapshot_fetchrow = AsyncMock(return_value={"id": 1})
+        ts = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 5, 7, 12, 0, 1, tzinfo=UTC)
+        req = _request(positions_json=json.dumps([_position("x")]).encode())
+        await pg_service._save_snapshot_postgres("Strat:abc", ts, now, req)
+        args = pg_service._snapshot_fetchrow.await_args.args
+        assert args[10] == "0"
+        assert args[11] == "0"
+        assert json.loads(args[12]) == []
+        assert json.loads(args[13]) == {}
+
+    def test_conflict_update_does_not_clobber_wallet_columns_with_defaults(self):
+        # VIB-5007 (CodeRabbit Major) — a conflicting upsert for the same
+        # (deployment_id, timestamp) from a degraded/legacy envelope binds the
+        # wallet columns as defaults; the ON CONFLICT DO UPDATE must NOT wipe
+        # already-persisted values with those defaults. Each wallet column must
+        # be guarded by a CASE that preserves the existing row when EXCLUDED is
+        # the default (mirrors cycle_id/execution_mode). The PG harness mocks
+        # fetchrow (no real Postgres), so this enforces the protective SQL
+        # contract; a live upsert-twice round-trip is tracked under VIB-5008.
+        sql = StateServiceServicer._SAVE_SNAPSHOT_PG_SQL
+        for col, default in (
+            ("deployed_capital_usd", "'0'"),
+            ("wallet_total_value_usd", "'0'"),
+            ("wallet_balances_json", "'[]'::jsonb"),
+            ("token_prices_json", "'{}'::jsonb"),
+        ):
+            assert f"{col} = CASE" in sql, f"{col} not guarded by CASE on conflict"
+            assert f"EXCLUDED.{col} = {default}" in sql, f"{col} default-guard missing"
+            assert f"THEN portfolio_snapshots.{col}" in sql, f"{col} preserve-existing missing"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _extract_smuggled_snapshot_fields — shared envelope-unpack (VIB-5007)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestExtractSmuggledSnapshotFields:
+    def test_lifts_all_four_fields_and_pops_metadata(self):
+        wallet_balances = [{"symbol": "USDC", "balance": "6", "value_usd": "6"}]
+        token_prices = {"arbitrum:0xusdc": "1.0"}
+        metadata = {
+            "__deployed_capital_usd__": "750.00",
+            "__wallet_total_value_usd__": "8.06",
+            "gas_native_status": "ok",
+        }
+        payload = {
+            "positions": [],
+            "metadata": metadata,
+            "wallet_balances": wallet_balances,
+            "token_prices": token_prices,
+        }
+        dep, wtv, wb, tp = StateServiceServicer._extract_smuggled_snapshot_fields(payload, metadata)
+        assert dep == "750.00"
+        assert wtv == "8.06"
+        assert wb == wallet_balances
+        assert tp == token_prices
+        # Smuggle keys consumed; unrelated metadata preserved.
+        assert "__deployed_capital_usd__" not in metadata
+        assert "__wallet_total_value_usd__" not in metadata
+        assert metadata["gas_native_status"] == "ok"
+
+    def test_returns_none_for_legacy_list_payload(self):
+        dep, wtv, wb, tp = StateServiceServicer._extract_smuggled_snapshot_fields([{"x": 1}], None)
+        assert (dep, wtv, wb, tp) == (None, None, None, None)
+
+    def test_scalar_keys_coerced_to_str(self):
+        # Numeric smuggle values are stringified (column is TEXT).
+        metadata = {"__deployed_capital_usd__": 750, "__wallet_total_value_usd__": 8.06}
+        dep, wtv, _wb, _tp = StateServiceServicer._extract_smuggled_snapshot_fields({}, metadata)
+        assert dep == "750"
+        assert wtv == "8.06"
+
+    def test_malformed_collection_fields_degrade_to_none(self):
+        # Defense-in-depth (Gemini review): a payload whose
+        # wallet_balances/token_prices are the wrong type must NOT propagate —
+        # it would crash PortfolioSnapshot.from_dict on the SQLite write path.
+        # They degrade to None -> column/constructor default. Mirrors the
+        # isinstance guards on the read side.
+        payload = {
+            "positions": [],
+            "metadata": {},
+            "wallet_balances": "0.00009864 WBTC",  # str, not list
+            "token_prices": [["arbitrum:0xwbtc", "63251.0"]],  # list, not dict
+        }
+        dep, wtv, wb, tp = StateServiceServicer._extract_smuggled_snapshot_fields(payload, payload["metadata"])
+        assert dep is None and wtv is None
+        assert wb is None
+        assert tp is None
+
+    def test_malformed_decimal_scalars_degrade_to_none(self):
+        # Defense-in-depth (CodeRabbit): non-decimal smuggled scalars
+        # (dict/list/bool/non-numeric str) must NOT be stringified into the TEXT
+        # column or crash Decimal() on from_dict — they degrade to None ->
+        # default. Mirrors the collection type-guards.
+        for bad in (
+            {},
+            [],
+            True,
+            False,
+            "not-a-number",
+            {"x": 1},
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            "NaN",
+            "Infinity",
+            "-Infinity",
+        ):
+            metadata = {
+                "__deployed_capital_usd__": bad,
+                "__wallet_total_value_usd__": bad,
+            }
+            dep, wtv, _wb, _tp = StateServiceServicer._extract_smuggled_snapshot_fields({}, metadata)
+            assert dep is None, f"dep should degrade for {bad!r}"
+            assert wtv is None, f"wtv should degrade for {bad!r}"
+        # Valid numeric strings / numbers still pass through.
+        ok = {"__deployed_capital_usd__": "750.00", "__wallet_total_value_usd__": 8}
+        dep, wtv, _wb, _tp = StateServiceServicer._extract_smuggled_snapshot_fields({}, ok)
+        assert dep == "750.00"
+        assert wtv == "8"
