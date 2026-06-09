@@ -695,23 +695,6 @@ class UniswapV4Adapter:
             token0_dict = {"symbol": token0_symbol, "address": token0_addr, "decimals": token0_dec}
             token1_dict = {"symbol": token1_symbol, "address": token1_addr, "decimals": token1_dec}
 
-            # VIB-4636 — derive a compile-time current tick from the
-            # sqrtPriceX96 the adapter just sized liquidity against. The V4
-            # mint itself never moves price, so this tick is correct for
-            # post-mint accounting as long as no other tx interleaves. The
-            # receipt parser leaves ``lp_open_data.current_tick`` None for
-            # pure-mint receipts (no in-receipt Swap event to read tick
-            # from); the enricher uses this metadata key as the fallback so
-            # the persisted ``accounting_events`` payload carries a real
-            # ``current_tick`` / ``in_range`` instead of NULL. Source-of-
-            # truth note: when ``used_onchain_price`` is True this is the
-            # actual on-chain tick at compile time; when False it is the
-            # oracle-derived estimate and inherits the same accuracy
-            # caveat the slippage cap is widened for.
-            from almanak.connectors.uniswap_v4.sdk import sqrt_ratio_x96_to_tick
-
-            compile_time_current_tick = sqrt_ratio_x96_to_tick(sqrt_price_x96)
-
             metadata: dict[str, Any] = {
                 "intent_id": intent.intent_id,
                 "token0": token0_dict,
@@ -734,8 +717,6 @@ class UniswapV4Adapter:
                 # VIB-2180: surface the sqrtPrice provenance to the strategy author.
                 "price_source": price_source,
                 "estimated_sqrt_price_x96": (str(sqrt_price_x96) if price_source != "on_chain" else None),
-                "compile_time_current_tick": compile_time_current_tick,
-                "compile_time_current_tick_source": "onchain" if used_onchain_price else "estimated",
             }
             if warnings:
                 metadata["warnings"] = warnings

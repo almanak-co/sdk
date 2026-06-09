@@ -1350,32 +1350,6 @@ def _tick_to_sqrt_ratio_x96(tick: int) -> int:
         return int(sqrt_price)
 
 
-def sqrt_ratio_x96_to_tick(sqrt_ratio_x96: int) -> int | None:
-    """Inverse of :func:`_tick_to_sqrt_ratio_x96`: derive tick from sqrtPriceX96.
-
-    Uses the canonical Uniswap relation ``sqrtPrice = sqrt(1.0001^tick) * 2^96``
-    so ``tick = floor(2 * log_{1.0001}(sqrtPrice / 2^96))``. Floor matches v3-core
-    / v4-core ``TickMath.getTickAtSqrtRatio`` semantics.
-
-    Returns ``None`` for non-positive ``sqrt_ratio_x96`` (uninitialized pool /
-    bogus input — callers must treat tick as unmeasured rather than substitute
-    a sentinel; Empty ≠ Zero per blueprint 27).
-    """
-    import decimal as _decimal
-
-    if sqrt_ratio_x96 <= 0:
-        return None
-    with _decimal.localcontext() as ctx:
-        ctx.prec = 50  # Plenty for the ln() round-trip
-        ratio = Decimal(sqrt_ratio_x96) / Decimal(Q96)
-        if ratio <= 0:
-            return None
-        # 2 * log_{1.0001}(ratio) = 2 * ln(ratio) / ln(1.0001)
-        log_ratio = ratio.ln()
-        log_base = Decimal("1.0001").ln()
-        return int((Decimal(2) * log_ratio / log_base).to_integral_value(rounding=_decimal.ROUND_FLOOR))
-
-
 def _get_liquidity_for_amount0(sqrt_ratio_a: int, sqrt_ratio_b: int, amount0: int) -> int:
     """Compute liquidity from amount0 given two sqrt ratios."""
     if sqrt_ratio_a > sqrt_ratio_b:
@@ -1476,7 +1450,6 @@ __all__ = [
     "QUOTER_ADDRESSES",
     "ROUTER_ADDRESSES",
     "SWAP_SELECTOR",
-    "sqrt_ratio_x96_to_tick",
     "SwapQuote",
     "SwapTransaction",
     "TICK_SPACING",
