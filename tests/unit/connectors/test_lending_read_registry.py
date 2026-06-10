@@ -310,3 +310,20 @@ def test_lending_position_on_chain_is_re_exported_from_reader():
     )
 
     assert ReExported is LendingPositionOnChain
+
+
+class TestCapabilityAccessors:
+    """The VIB-4851 B2 capability bits framework consumers dispatch on."""
+
+    def test_publishes_market_table_truth_table(self):
+        for protocol in ("morpho_blue", "compound_v3", "silo_v2", "euler_v2", "benqi"):
+            assert LendingReadRegistry.publishes_market_table(protocol), protocol
+        for protocol in ("aave_v3", "spark", "aave", "definitely_not_a_protocol"):
+            assert not LendingReadRegistry.publishes_market_table(protocol), protocol
+
+    def test_declares_valuation_roles_truth_table(self):
+        # Non-USD-native per-market protocols declare roles; USD-native ones do not.
+        for protocol in ("morpho_blue", "silo_v2", "euler_v2"):
+            assert LendingReadRegistry.declares_valuation_roles(protocol), protocol
+        for protocol in ("benqi", "aave_v3", "spark", "definitely_not_a_protocol"):
+            assert not LendingReadRegistry.declares_valuation_roles(protocol), protocol

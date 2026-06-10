@@ -690,7 +690,7 @@ class TestMorphoHealthFactorProvider:
             self._MARKET_PARAMS_TARGET,
             return_value={"collateral_token": "WETH", "loan_token": "WETH"},
         ):
-            oracle = provider._build_price_oracle_dict("0xmarket", None, None)
+            oracle = provider._build_price_oracle_dict("morpho_blue", "0xmarket", None, None)
         assert oracle == {"WETH": Decimal("1")}
 
     def test_build_price_oracle_dict_cross_asset_with_overrides(self):
@@ -700,7 +700,7 @@ class TestMorphoHealthFactorProvider:
             self._MARKET_PARAMS_TARGET,
             return_value={"collateral_token": "wstETH", "loan_token": "USDC"},
         ):
-            oracle = provider._build_price_oracle_dict("0xmarket", Decimal("2500"), Decimal("1"))
+            oracle = provider._build_price_oracle_dict("morpho_blue", "0xmarket", Decimal("2500"), Decimal("1"))
         assert oracle == {"USDC": Decimal("1"), "wstETH": Decimal("2500")}
 
     def test_build_price_oracle_dict_off_catalogue_fails_closed(self):
@@ -708,7 +708,7 @@ class TestMorphoHealthFactorProvider:
         provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
         with patch(self._MARKET_PARAMS_TARGET, return_value=None):
             with pytest.raises(ValueError, match="not found"):
-                provider._build_price_oracle_dict("0xnope", None, None)
+                provider._build_price_oracle_dict("morpho_blue", "0xnope", None, None)
 
     def test_build_price_oracle_dict_missing_symbols_fails_closed(self):
         """Market params present but without collateral/loan symbols fails closed.
@@ -723,7 +723,7 @@ class TestMorphoHealthFactorProvider:
             return_value={"lltv": 860000000000000000},  # no collateral/loan token
         ):
             with pytest.raises(ValueError, match="no collateral/loan"):
-                provider._build_price_oracle_dict("0xmarket", None, None)
+                provider._build_price_oracle_dict("morpho_blue", "0xmarket", None, None)
 
     def test_to_position_health_none_state_raises(self):
         """``_to_position_health`` fails closed on a ``None`` state.
@@ -1277,3 +1277,123 @@ class TestVIB4851ReviewFixes:
             provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
             with pytest.raises(ValueError, match="Failed to read"):
                 provider.get_health("aave_v3", None, "0xabc")
+
+
+class TestMarketScopedHealthSeam:
+    """Silo V2 / Euler V2 / BENQI: capability-driven health via the shared seam.
+
+    VIB-4851 phase B2 (Option B): ``get_health`` dispatches on connector-declared
+    capabilities — ``market_health_reader`` first (Compound V3), then the
+    account-state seam with the market id passed through for every protocol
+    publishing a market table. The market-scoped trio therefore gains real
+    position-health support: silo/euler (non-USD-native, valuation roles
+    declared) get the same price-override translation contract as Morpho;
+    BENQI (USD-native qiToken reads) gets a ``None`` oracle injection. These
+    tests load each connector's REAL account-state spec (pure data) and mock
+    only the market catalogue + the gateway-routed read.
+    """
+
+    _SEAM_TARGET = "almanak.framework.accounting.lending_reads.read_lending_account_state"
+    _MARKET_PARAMS_TARGET = "almanak.connectors._strategy_base.lending_read_registry.LendingReadRegistry.market_params"
+
+    def _crafted_state(self, hf: str):
+        from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
+
+        return LendingAccountState(
+            collateral_usd=Decimal("10"),
+            debt_usd=Decimal("5"),
+            health_factor=Decimal(hf),
+            liquidation_threshold_bps=None,
+            e_mode_category=None,
+            lltv=Decimal("0.90"),
+        )
+
+    def test_silo_cross_asset_passes_market_id_and_prices(self):
+        """Silo health passes the synthetic market id + override-keyed oracle dict."""
+        cross_asset_params = {
+            "collateral_token": "wstETH",
+            "loan_token": "USDC",
+            "comet_address": "0xsilo",
+        }
+        with (
+            patch(self._SEAM_TARGET, return_value=self._crafted_state("1.80")) as mock_seam,
+            patch(self._MARKET_PARAMS_TARGET, return_value=cross_asset_params),
+        ):
+            provider = PositionHealthProvider(chain="arbitrum", gateway_client=MagicMock())
+            health = provider.get_health(
+                "silo_v2",
+                "wsteth/usdc",
+                "0xabc",
+                collateral_price_usd=Decimal("2500"),
+                debt_price_usd=Decimal("1"),
+            )
+
+        assert health.health_factor == Decimal("1.80")
+        assert health.protocol == "silo_v2"
+        seam_kwargs = mock_seam.call_args.kwargs
+        assert seam_kwargs["market_id"] == "wsteth/usdc"
+        assert seam_kwargs["price_oracle"] == {"wstETH": Decimal("2500"), "USDC": Decimal("1")}
+
+    def test_silo_cross_asset_requires_prices(self):
+        """Silo inherits the Morpho contract: cross-asset overrides are mandatory."""
+        cross_asset_params = {"collateral_token": "wstETH", "loan_token": "USDC"}
+        with patch(self._MARKET_PARAMS_TARGET, return_value=cross_asset_params):
+            provider = PositionHealthProvider(chain="arbitrum", gateway_client=MagicMock())
+            with pytest.raises(ValueError, match="Price overrides required"):
+                provider.get_health("silo_v2", "wsteth/usdc", "0xabc")
+
+    def test_euler_same_asset_defaults_to_one(self):
+        """Euler same-asset markets need no overrides (the price cancels in HF)."""
+        same_asset_params = {"collateral_token": "WETH", "loan_token": "WETH"}
+        with (
+            patch(self._SEAM_TARGET, return_value=self._crafted_state("1.83")) as mock_seam,
+            patch(self._MARKET_PARAMS_TARGET, return_value=same_asset_params),
+        ):
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+            health = provider.get_health("euler_v2", "weth", "0xabc")
+
+        assert health.health_factor == Decimal("1.83")
+        assert health.protocol == "euler_v2"
+        assert mock_seam.call_args.kwargs["price_oracle"] == {"WETH": Decimal("1")}
+        assert mock_seam.call_args.kwargs["market_id"] == "weth"
+
+    def test_benqi_usd_native_injects_no_prices(self):
+        """BENQI declares no valuation roles: market id flows, oracle stays None."""
+        benqi_params = {
+            "comet_address": "0xqiavax",
+            "comptroller_address": "0xcomptroller",
+        }
+        with (
+            patch(self._SEAM_TARGET, return_value=self._crafted_state("2.10")) as mock_seam,
+            patch(self._MARKET_PARAMS_TARGET, return_value=benqi_params),
+        ):
+            provider = PositionHealthProvider(chain="avalanche", gateway_client=MagicMock())
+            health = provider.get_health("benqi", "savax/avax", "0xabc")
+
+        assert health.health_factor == Decimal("2.10")
+        assert health.protocol == "benqi"
+        seam_kwargs = mock_seam.call_args.kwargs
+        assert seam_kwargs["market_id"] == "savax/avax"
+        assert seam_kwargs["price_oracle"] is None
+
+    def test_market_scoped_protocol_requires_market_id(self):
+        """A per-market protocol with no market id fails closed before reading."""
+        provider = PositionHealthProvider(chain="arbitrum", gateway_client=MagicMock())
+        with pytest.raises(ValueError, match="market_id is required"):
+            provider.get_health("silo_v2", "", "0xabc")
+
+    def test_market_scoped_off_catalogue_market_fails_closed(self):
+        """An off-catalogue market raises 'not found' (never reads unpriced legs)."""
+        with patch(self._MARKET_PARAMS_TARGET, return_value=None):
+            provider = PositionHealthProvider(chain="ethereum", gateway_client=MagicMock())
+            with pytest.raises(ValueError, match="not found"):
+                provider.get_health("euler_v2", "0xnope", "0xabc")
+
+    def test_compound_still_routes_to_market_health(self):
+        """Dispatch order: a market-health-capable protocol never takes the
+        account-state path, even though Compound also publishes that spec."""
+        provider = PositionHealthProvider(chain="ethereum", gateway_client=None)
+        # The market-health path demands a gateway client up front; reaching this
+        # error (rather than the account-state read) proves the routing.
+        with pytest.raises(ValueError, match="GatewayClient is required to read compound_v3 health"):
+            provider.get_health("compound_v3", "usdc", "0xabc")

@@ -344,6 +344,32 @@ class LendingReadRegistry:
         return cls._normalize(protocol) in cls._dispatch().account_state_loaders
 
     @classmethod
+    def publishes_market_table(cls, protocol: str) -> bool:
+        """Return True when ``protocol`` publishes a per-market parameter table.
+
+        Per-market protocols (Morpho Blue, Compound V3, Silo V2, Euler V2,
+        BENQI) scope their account-state reads to a caller-supplied market id;
+        whole-account protocols (the Aave family) publish no table. Framework
+        consumers branch on this instead of naming a protocol.
+        """
+        return cls._normalize(protocol) in cls._dispatch().market_table_loaders
+
+    @classmethod
+    def declares_valuation_roles(cls, protocol: str) -> bool:
+        """Return True when ``protocol``'s account-state spec declares valuation roles.
+
+        Non-USD-native protocols (Morpho Blue, Silo V2, Euler V2) declare which
+        market-params tokens the framework must price + inject; USD-native ones
+        (the Aave family, BENQI) declare none. Distinct from
+        :meth:`valuation_roles`, which also returns an empty tuple when the
+        *market* cannot be resolved — this answers the protocol-level question
+        so consumers can tell "no roles declared" apart from "market unknown".
+        Imports only the owning connector's spec module (lazy, isolated).
+        """
+        spec = cls._load_account_state_spec(cls._normalize(protocol))
+        return spec is not None and bool(spec.valuation_role_keys)
+
+    @classmethod
     def _load_account_state_spec(cls, protocol: str) -> AccountStateReadSpec | None:
         """Resolve and cache one protocol's account-state spec.
 

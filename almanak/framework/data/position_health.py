@@ -1,8 +1,12 @@
 """Position health monitoring for lending protocols.
 
-Provides health factor calculations and deleverage trigger detection
-for Aave V3, Morpho Blue and Compound V3 positions, with support for
-principal-token collateral enrichment via connector-owned market readers.
+Provides health factor calculations and deleverage trigger detection for any
+lending connector publishing the account-state read seam (the Aave family,
+Morpho Blue, Silo V2, Euler V2, BENQI) or a multi-collateral market-health
+reader (Compound V3), with support for principal-token collateral enrichment
+via connector-owned market readers. Dispatch is capability-driven — the
+framework names no protocol; connectors opt in through their manifests
+(VIB-4851).
 
 Key Classes:
     PositionHealth: Health factor and risk metrics for a lending position
@@ -180,13 +184,15 @@ class _CachedHealth:
 class PositionHealthProvider:
     """Reads on-chain position data and computes health factors.
 
-    Supports Aave V3 / Spark, Morpho Blue, and Compound V3. For Morpho positions
+    Supports every lending connector publishing an account-state read spec
+    (Aave V3 / Spark, Morpho Blue, Silo V2, Euler V2, BENQI) or a
+    multi-collateral market-health reader (Compound V3). For Morpho positions
     with PT collateral, can also compute PT-specific risk metrics.
 
-    Aave/Spark and Morpho reads route through the connector-owned lending-read
-    seam (``read_lending_account_state``); Compound V3 routes through the
+    Account-state reads route through the connector-owned lending-read seam
+    (``read_lending_account_state``); market-health protocols route through the
     connector-owned multi-collateral health read (``read_lending_market_health``,
-    VIB-4851 PR-2). All three therefore REQUIRE a connected ``gateway_client`` —
+    VIB-4851 PR-2). Both paths therefore REQUIRE a connected ``gateway_client`` —
     VIB-4851 removed the in-strategy ``Web3(HTTPProvider)`` path for every lending
     protocol. (``rpc_url`` survives only for connector-owned principal-token
     enrichment readers, VIB-4931's territory.)
@@ -233,14 +239,20 @@ class PositionHealthProvider:
         """Get health factor for a lending position.
 
         Args:
-            protocol: "morpho_blue", "aave_v3", or "compound_v3"
-            market_id: Protocol-specific market identifier. For Aave V3 this
-                is ignored / informational (one pool per chain). For Morpho
-                Blue this is the bytes32 market id. For Compound V3 this
-                is the market key (e.g. "usdc", "weth") used to look up the
-                Comet contract.
+            protocol: Any lending protocol publishing the account-state read
+                seam or a market-health reader (e.g. "aave_v3", "morpho_blue",
+                "compound_v3", "silo_v2", "euler_v2", "benqi", or an alias
+                handled by :func:`_normalize_protocol`).
+            market_id: Protocol-specific market identifier. For whole-account
+                protocols (the Aave family) this is ignored / informational.
+                For per-market protocols it scopes the read: Morpho Blue takes
+                the bytes32 market id; Compound V3 the Comet market key (e.g.
+                "usdc", "weth"); Silo V2 / Euler V2 / BENQI their synthetic
+                ``"<col>"`` / ``"<col>/<loan>"`` ids.
             user_address: Wallet address holding the position
             collateral_price_usd: Optional override for collateral price
+                (required, with ``debt_price_usd``, for cross-asset markets on
+                non-USD-native protocols).
             debt_price_usd: Optional override for debt token price
 
         Returns:
@@ -252,24 +264,33 @@ class PositionHealthProvider:
         protocol_lower = _normalize_protocol(protocol)
         from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
 
-        if protocol_lower == "morpho_blue":
-            # VIB-4851: Morpho health reads route through the seam. The legacy
-            # collateral/debt price overrides are translated into the seam's
-            # ``{symbol: price}`` oracle dict via ``_build_price_oracle_dict``.
-            price_oracle = self._build_price_oracle_dict(market_id, collateral_price_usd, debt_price_usd)
-            state = self._read_account_state(protocol_lower, market_id, user_address, price_oracle=price_oracle)
-            return self._to_position_health(state, protocol="morpho_blue", market_id=market_id)
-        elif protocol_lower == "compound_v3":
-            return self._get_compound_health(market_id, user_address)
-        elif LendingReadRegistry.supports_account_state(protocol_lower):
-            # VIB-4851: the Aave V3 family (Aave V3, Spark, and any future fork) is
-            # USD-native + whole-account. Route every account-state-capable protocol
-            # that is NOT Morpho/Compound through the shared seam, resolved from the
-            # registry so adding an Aave fork needs no new protocol name here.
-            state = self._read_account_state(protocol_lower, market_id, user_address)
-            return self._to_position_health(state, protocol=protocol_lower, market_id=market_id)
-        else:
+        # Dispatch on connector-declared capabilities, never on protocol names
+        # (VIB-4851). Order matters: a protocol that publishes BOTH a
+        # multi-collateral market-health reader and an account-state spec
+        # (Compound V3) takes the market-health path — the summed-HF product
+        # contract that the single-leg account-state read cannot express.
+        if LendingReadRegistry.market_health_reader(protocol_lower) is not None:
+            return self._get_market_health(protocol_lower, market_id, user_address)
+
+        if not LendingReadRegistry.supports_account_state(protocol_lower):
             raise ValueError(f"Unsupported protocol for health monitoring: {protocol}")
+
+        price_oracle: dict[str, Decimal] | None = None
+        if LendingReadRegistry.publishes_market_table(protocol_lower):
+            # Per-market protocol (Morpho Blue, Silo V2, Euler V2, BENQI): the
+            # caller's market id scopes the read, and the legacy collateral/debt
+            # price overrides are translated onto the connector-declared
+            # valuation roles via ``_build_price_oracle_dict`` (``None`` for a
+            # USD-native per-market protocol that declares no roles).
+            price_oracle = self._build_price_oracle_dict(
+                protocol_lower, market_id, collateral_price_usd, debt_price_usd
+            )
+
+        # Whole-account protocols (the Aave family — USD-native, no market
+        # table) fall through with no oracle dict; ``_read_account_state``
+        # drops the informational market id for them.
+        state = self._read_account_state(protocol_lower, market_id, user_address, price_oracle=price_oracle)
+        return self._to_position_health(state, protocol=protocol_lower, market_id=market_id)
 
     def get_pt_position_health(
         self,
@@ -420,9 +441,12 @@ class PositionHealthProvider:
         if not self._gateway_client.is_connected:
             raise ValueError(f"GatewayClient is not connected; cannot fetch {protocol} health on {self._chain}.")
 
-        # Whole-account protocols (the Aave family) carry no market id; per-market
-        # protocols (Morpho) pass the bytes32 market id straight through.
-        seam_market_id = market_id if protocol == "morpho_blue" else None
+        # Per-market protocols (those publishing a market table: Morpho Blue,
+        # Silo V2, Euler V2, BENQI) pass the caller's market id straight
+        # through; whole-account protocols (the Aave family) carry none.
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        seam_market_id = market_id if LendingReadRegistry.publishes_market_table(protocol) else None
 
         state = read_lending_account_state(
             protocol=protocol,
@@ -513,18 +537,20 @@ class PositionHealthProvider:
 
     def _build_price_oracle_dict(
         self,
+        protocol: str,
         market_id: str,
         collateral_price_usd: Decimal | None,
         debt_price_usd: Decimal | None,
     ) -> dict[str, Decimal] | None:
-        """Translate legacy Morpho price overrides into the seam's oracle dict.
+        """Translate legacy price overrides into the seam's oracle dict.
 
-        The seam values Morpho positions from a ``{token_symbol: USD price}`` map
-        (Morpho is not USD-native). This method maps the legacy
-        ``collateral_price_usd`` / ``debt_price_usd`` Decimal overrides onto that
-        shape, keyed by the market's collateral/loan token *symbols* from
-        :meth:`LendingReadRegistry.market_params`, preserving the pre-refactor
-        semantics exactly:
+        Non-USD-native per-market protocols (Morpho Blue, Silo V2, Euler V2)
+        are valued from a ``{token_symbol: USD price}`` map. This method maps
+        the legacy ``collateral_price_usd`` / ``debt_price_usd`` Decimal
+        overrides onto that shape, keyed by the symbols the connector's
+        valuation roles name (``collateral_token`` / ``loan_token`` — the
+        ``AccountStateQuery`` field-name convention every spec declares),
+        preserving the pre-refactor Morpho semantics exactly:
 
         * **Same-asset market** (collateral symbol == loan symbol): one symbol, one
           price -- use whichever override is supplied (else ``Decimal("1")``). The
@@ -535,27 +561,42 @@ class PositionHealthProvider:
           1:1 across differing assets.
         * **Off-catalogue market** (``market_params`` is ``None``): fail closed
           consistently with a ``ValueError`` -- we cannot name the legs to value.
+
+        A USD-native per-market protocol that declares no valuation roles
+        (BENQI — its qiToken reads price legs on-chain) returns ``None``:
+        there is nothing to inject.
         """
         from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
 
         if not market_id:
             raise ValueError(
-                f"market_id is required to value a Morpho Blue position on {self._chain}; none was provided."
+                f"market_id is required to value a {protocol} position on {self._chain}; none was provided."
             )
 
-        params = LendingReadRegistry.market_params("morpho_blue", self._chain, market_id)
+        params = LendingReadRegistry.market_params(protocol, self._chain, market_id)
         if not params:
             raise ValueError(
-                f"Morpho market {market_id} not found on {self._chain}; cannot resolve "
+                f"{protocol} market {market_id} not found on {self._chain}; cannot resolve "
                 f"its collateral/loan tokens to value the position."
             )
 
-        collateral_symbol = params.get("collateral_token")
-        loan_symbol = params.get("loan_token")
-        if not isinstance(collateral_symbol, str) or not isinstance(loan_symbol, str):
+        roles = dict(LendingReadRegistry.valuation_roles(protocol, self._chain, market_id))
+        if not roles:
+            if LendingReadRegistry.declares_valuation_roles(protocol):
+                # Declared roles that resolve to no symbols = a malformed
+                # catalogue entry; fail closed rather than read unpriced legs.
+                raise ValueError(
+                    f"{protocol} market {market_id} on {self._chain} has no collateral/loan "
+                    f"token symbols; cannot value the position."
+                )
+            return None
+
+        collateral_symbol = roles.get("collateral_token")
+        loan_symbol = roles.get("loan_token")
+        if not collateral_symbol or not loan_symbol:
             raise ValueError(
-                f"Morpho market {market_id} on {self._chain} has no collateral/loan "
-                f"token symbols; cannot value the position."
+                f"{protocol} declares valuation roles {sorted(roles)} that do not map onto "
+                f"the collateral/debt price-override contract; cannot value the position."
             )
 
         same_asset = collateral_symbol.lower() == loan_symbol.lower()
@@ -580,15 +621,15 @@ class PositionHealthProvider:
         # branch) so both values narrow to non-None for the return.
         if collateral_price_usd is None or debt_price_usd is None:
             raise ValueError(
-                f"Price overrides required for cross-asset Morpho market {market_id}. "
+                f"Price overrides required for cross-asset {protocol} market {market_id}. "
                 f"Collateral and debt tokens differ -- cannot default to 1:1."
             )
         return {collateral_symbol: collateral_price_usd, loan_symbol: debt_price_usd}
 
-    # Base tokens that are USD-pegged stablecoins. These are the *only* symbols
-    # for which it is safe to assume price == $1 when no external price oracle
-    # is provided. Anything else (WETH, AERO, WBTC, etc.) MUST have an
-    # explicit ``price_oracle`` or the HF computation fails closed.
+    # Market-health base tokens that are USD-pegged stablecoins. These are the
+    # *only* symbols for which it is safe to assume price == $1 when no external
+    # price oracle is provided. Anything else (WETH, AERO, WBTC, etc.) MUST have
+    # an explicit ``price_oracle`` or the HF computation fails closed.
     _STABLE_BASE_SYMBOLS: frozenset[str] = frozenset(
         {"USDC", "USDT", "USDS", "USDC.E", "DAI", "FRAX", "LUSD", "USDBC", "SUSDS"}
     )
@@ -599,7 +640,8 @@ class PositionHealthProvider:
         Raises on failure. NEVER guesses -- a wrong decimals value silently
         mis-scales debt by orders of magnitude (e.g. WETH=18 vs USDC=6 is a
         1e12 miscalculation). Per CLAUDE.md: "NEVER default to 18 decimals
-        - always raise TokenNotFoundError if decimals unknown."
+        - always raise TokenNotFoundError if decimals unknown." Used by the
+        market-health read path (Compound V3 today).
         """
         from almanak.framework.data.tokens import TokenNotFoundError, get_token_resolver
 
@@ -614,14 +656,14 @@ class PositionHealthProvider:
                 token=symbol,
                 chain=self._chain,
                 reason=(
-                    f"Could not resolve decimals for Compound V3 base token "
+                    f"Could not resolve decimals for market-health base token "
                     f"{symbol!r} ({address}) on {self._chain}: {e}. "
                     f"Refusing to guess -- a wrong decimals value silently mis-scales debt."
                 ),
             ) from e
 
     def _resolve_base_price(self, symbol: str) -> Decimal:
-        """Resolve USD price for a Compound V3 base token.
+        """Resolve USD price for a market-health base token (Compound V3 today).
 
         Price-source protocol, in order:
           1. ``price_oracle`` supports ``.get_aggregated_price(symbol, quote)``
@@ -659,13 +701,13 @@ class PositionHealthProvider:
                     price = getattr(result, "price", result)
                     return Decimal(str(price))
                 except Exception as e:
-                    logger.warning(f"Compound V3 PriceOracle({symbol}) failed: {e}")
+                    logger.warning(f"Market-health PriceOracle({symbol}) failed: {e}")
             # Case 2: plain callable.
             elif callable(oracle):
                 try:
                     return Decimal(str(oracle(symbol)))
                 except Exception as e:
-                    logger.warning(f"Compound V3 price_oracle({symbol}) failed: {e}")
+                    logger.warning(f"Market-health price_oracle({symbol}) failed: {e}")
 
         # Case 3: stablecoin 1:1 fallback.
         if symbol.upper() in self._STABLE_BASE_SYMBOLS:
@@ -673,24 +715,25 @@ class PositionHealthProvider:
 
         # Case 4: fail closed -- refuse to silently mis-price non-stable bases.
         raise ValueError(
-            f"Compound V3 base token {symbol!r} is not a recognized USD stablecoin "
+            f"Market-health base token {symbol!r} is not a recognized USD stablecoin "
             f"and no working price_oracle was provided. Pass an async PriceOracle "
             f"(with .get_aggregated_price) or a callable(symbol)->Decimal to "
             f"PositionHealthProvider / MarketSnapshot.position_health() to avoid "
             f"inflating reported health factor."
         )
 
-    def _get_compound_health(
+    def _get_market_health(
         self,
+        protocol: str,
         market_id: str,
         user_address: str,
     ) -> PositionHealth:
-        """Compute the multi-collateral Compound V3 (Comet) health factor.
+        """Compute a multi-collateral market health factor via the connector seam.
 
         VIB-4851 PR-2: routes the read through the connector-owned, gateway-routed
         :func:`~almanak.framework.accounting.lending_reads.read_lending_market_health`
-        -> :func:`~almanak.connectors.compound_v3.lending_read.read_compound_v3_market_health`.
-        That reader preserves the product-owner-chosen *summed* health factor
+        -> the manifest-declared market-health reader (Compound V3 today). That
+        reader preserves the product-owner-chosen *summed* health factor
         ``HF = Σ_over_held_collaterals(value_usd × LCF) / borrow_value_usd`` exactly —
         the per-collateral price / scale / liquidation factor are read ON-CHAIN
         (``getAssetInfoByAddress`` / ``getPrice``), and only the base/borrow token
@@ -703,33 +746,35 @@ class PositionHealthProvider:
         rather than fabricating a false-safe health factor (Empty ≠ Zero).
 
         Args:
-            market_id: Comet market key (e.g. "usdc", "weth").
+            protocol: Canonical protocol key publishing a market-health reader
+                (e.g. ``"compound_v3"``).
+            market_id: Per-market key (e.g. "usdc", "weth").
             user_address: Wallet to inspect.
         """
         from almanak.framework.accounting.lending_reads import read_lending_market_health
 
         if self._gateway_client is None:
             raise ValueError(
-                f"GatewayClient is required to read compound_v3 health on {self._chain}; none was provided."
+                f"GatewayClient is required to read {protocol} health on {self._chain}; none was provided."
             )
         if not self._gateway_client.is_connected:
-            raise ValueError(f"GatewayClient is not connected; cannot fetch Compound V3 health on {self._chain}.")
+            raise ValueError(f"GatewayClient is not connected; cannot fetch {protocol} health on {self._chain}.")
 
         from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
 
         # Disambiguate the two fail-closed cases the legacy path raised distinctly
         # (preserved for the byte-equivalence contract): unknown chain vs unknown
         # market. Both lookups are owned by the registry's connector-backed market
-        # table now — no private Compound address copy is imported here. The
-        # market-scoped ``position_manager_address`` is the chain-level existence
-        # signal (truthy when the chain has ANY published Compound market).
-        if LendingReadRegistry.market_health_inputs("compound_v3", self._chain, market_id) is None:
-            if not LendingReadRegistry.position_manager_address("compound_v3", self._chain):
-                raise ValueError(f"Compound V3 not configured for chain: {self._chain}")
-            raise ValueError(f"Compound V3 market '{market_id}' not found on {self._chain}.")
+        # table — no private address copy is imported here. The market-scoped
+        # ``position_manager_address`` is the chain-level existence signal (truthy
+        # when the chain has ANY published market for the protocol).
+        if LendingReadRegistry.market_health_inputs(protocol, self._chain, market_id) is None:
+            if not LendingReadRegistry.position_manager_address(protocol, self._chain):
+                raise ValueError(f"{protocol} not configured for chain: {self._chain}")
+            raise ValueError(f"{protocol} market '{market_id}' not found on {self._chain}.")
 
         state = read_lending_market_health(
-            protocol="compound_v3",
+            protocol=protocol,
             chain=self._chain,
             wallet_address=user_address,
             market_id=market_id,
@@ -741,9 +786,9 @@ class PositionHealthProvider:
             # Empty != Zero: a failed read must surface, never become a fabricated
             # healthy/zero HF that would mask a liquidation-risk position.
             raise ValueError(
-                f"Failed to read Compound V3 health for market '{market_id}' on {self._chain} (read returned no data)."
+                f"Failed to read {protocol} health for market '{market_id}' on {self._chain} (read returned no data)."
             )
-        return self._to_position_health(state, protocol="compound_v3", market_id=market_id)
+        return self._to_position_health(state, protocol=protocol, market_id=market_id)
 
 
 # =============================================================================
