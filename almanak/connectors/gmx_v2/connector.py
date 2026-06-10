@@ -52,6 +52,7 @@ CONNECTOR = Connector(
     ),
     perps_read=PerpsReadDecl(
         spec=ImportRef(module="almanak.connectors.gmx_v2.perps_read", attribute="PERPS_READ_SPEC"),
+        aliases=("gmx",),
     ),
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
     strategy_chains=("arbitrum", "avalanche"),

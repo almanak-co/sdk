@@ -53,6 +53,7 @@ CONNECTOR = Connector(
         market_health=ImportRef(
             module="almanak.connectors.compound_v3.lending_read", attribute="read_compound_v3_market_health"
         ),
+        aliases=("comet", "compound", "compoundv3"),
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("ethereum", "arbitrum", "base", "optimism", "polygon"),

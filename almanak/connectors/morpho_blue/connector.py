@@ -64,6 +64,7 @@ CONNECTOR = Connector(
             module="almanak.connectors.morpho_blue.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"
         ),
         market_table=ImportRef(module="almanak.connectors.morpho_blue.addresses", attribute="MORPHO_MARKETS"),
+        aliases=("morpho", "morphoblue"),
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
     strategy_chains=("ethereum", "base", "arbitrum", "polygon", "monad"),

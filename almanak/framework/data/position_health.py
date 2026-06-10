@@ -797,23 +797,17 @@ class PositionHealthProvider:
 
 
 def _normalize_protocol(protocol: str) -> str:
-    """Normalize common protocol name aliases."""
-    if protocol is None:
-        return ""
-    p = protocol.lower().strip()
-    aliases = {
-        "aave": "aave_v3",
-        "aavev3": "aave_v3",
-        "aave-v3": "aave_v3",
-        "morpho": "morpho_blue",
-        "morphoblue": "morpho_blue",
-        "morpho-blue": "morpho_blue",
-        "compound": "compound_v3",
-        "compoundv3": "compound_v3",
-        "compound-v3": "compound_v3",
-        "comet": "compound_v3",
-    }
-    return aliases.get(p, p)
+    """Normalize protocol aliases via the manifest-declared lending alias map.
+
+    Delegates to :meth:`LendingReadRegistry.normalize_protocol` (whitespace /
+    case / hyphen folding + the lending aliases each connector declares on its
+    ``LendingReadDecl``), so this module owns no alias table of its own
+    (VIB-4851 B3). Unknown spellings pass through in folded form and fail
+    closed at the capability dispatch.
+    """
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    return LendingReadRegistry.normalize_protocol(protocol)
 
 
 @runtime_checkable

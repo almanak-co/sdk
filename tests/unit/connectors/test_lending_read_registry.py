@@ -170,9 +170,7 @@ def test_each_protocol_key_resolves_a_usable_plan(protocol: str, chain: str):
 
 @pytest.mark.parametrize("chain", sorted(_LEGACY_AAVE_V3_POOL_DATA_PROVIDER))
 def test_resolved_target_matches_legacy_pool_data_provider(chain: str):
-    plan = LendingReadRegistry.resolve(
-        "aave_v3", chain, "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "0x" + "1" * 40
-    )
+    plan = LendingReadRegistry.resolve("aave_v3", chain, "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "0x" + "1" * 40)
     assert plan is not None
     assert plan.target_address == _LEGACY_AAVE_V3_POOL_DATA_PROVIDER[chain]
 
@@ -327,3 +325,32 @@ class TestCapabilityAccessors:
             assert LendingReadRegistry.declares_valuation_roles(protocol), protocol
         for protocol in ("benqi", "aave_v3", "spark", "definitely_not_a_protocol"):
             assert not LendingReadRegistry.declares_valuation_roles(protocol), protocol
+
+
+class TestNormalizeProtocol:
+    """The public alias-aware folding consumers use instead of local tables."""
+
+    def test_manifest_aliases_resolve(self):
+        for alias, canonical in (
+            ("aave", "aave_v3"),
+            ("aavev3", "aave_v3"),
+            ("morpho", "morpho_blue"),
+            ("morphoblue", "morpho_blue"),
+            ("comet", "compound_v3"),
+            ("compound", "compound_v3"),
+            ("compoundv3", "compound_v3"),
+        ):
+            assert LendingReadRegistry.normalize_protocol(alias) == canonical, alias
+
+    def test_folding_handles_case_hyphens_whitespace(self):
+        assert LendingReadRegistry.normalize_protocol("Aave-V3") == "aave_v3"
+        assert LendingReadRegistry.normalize_protocol("  Morpho-Blue  ") == "morpho_blue"
+        assert LendingReadRegistry.normalize_protocol("COMPOUND-V3") == "compound_v3"
+
+    def test_unknown_passes_through_folded(self):
+        # No silent swallowing of typos: downstream capability checks fail closed.
+        assert LendingReadRegistry.normalize_protocol("Definitely-Not_A Protocol") == "definitely_not_a protocol"
+
+    def test_total_on_none_and_non_str(self):
+        assert LendingReadRegistry.normalize_protocol(None) == ""
+        assert LendingReadRegistry.normalize_protocol(123) == ""  # type: ignore[arg-type]

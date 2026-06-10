@@ -240,9 +240,7 @@ class TestAxSwap:
         mock_executor.execute = mock_execute
 
         runner = CliRunner()
-        result = runner.invoke(
-            almanak, ["ax", "--dry-run", "swap", "USDC", "ETH", "100", "--protocol", "uniswap_v3"]
-        )
+        result = runner.invoke(almanak, ["ax", "--dry-run", "swap", "USDC", "ETH", "100", "--protocol", "uniswap_v3"])
         assert result.exit_code == 0
         assert captured_args["protocol"] == "uniswap_v3"
 
@@ -325,9 +323,7 @@ class TestAxSwap:
         mock_executor.execute = mock_execute
 
         runner = CliRunner()
-        result = runner.invoke(
-            almanak, ["ax", "--dry-run", "--chain", "avalanche", "swap", "USDC", "AVAX", "10"]
-        )
+        result = runner.invoke(almanak, ["ax", "--dry-run", "--chain", "avalanche", "swap", "USDC", "AVAX", "10"])
         assert result.exit_code == 0
         assert "WAVAX" in result.output
 
@@ -345,9 +341,7 @@ class TestAxSwap:
         mock_executor.execute = mock_execute
 
         runner = CliRunner()
-        result = runner.invoke(
-            almanak, ["ax", "--dry-run", "--chain", "bsc", "swap", "USDC", "BNB", "10"]
-        )
+        result = runner.invoke(almanak, ["ax", "--dry-run", "--chain", "bsc", "swap", "USDC", "BNB", "10"])
         assert result.exit_code == 0
         assert "WBNB" in result.output
 
@@ -1251,9 +1245,7 @@ class TestAxReadCommands:
 
         async def mock_execute(tool_name, args):
             captured.append({"tool": tool_name, "network": args.get("network")})
-            return ToolResponse(
-                status="success", data={"chain": "arbitrum", "count": 0, "positions": []}
-            )
+            return ToolResponse(status="success", data={"chain": "arbitrum", "count": 0, "positions": []})
 
         mock_executor.execute = mock_execute
 
@@ -1274,16 +1266,12 @@ class TestAxReadCommands:
 
         async def mock_execute(tool_name, args):
             captured.append(args.get("network"))
-            return ToolResponse(
-                status="success", data={"chain": "arbitrum", "count": 0, "positions": []}
-            )
+            return ToolResponse(status="success", data={"chain": "arbitrum", "count": 0, "positions": []})
 
         mock_executor.execute = mock_execute
 
         runner = CliRunner()
-        result = runner.invoke(
-            almanak, ["ax", "--network", "anvil", "lp-list", "--network", "mainnet"]
-        )
+        result = runner.invoke(almanak, ["ax", "--network", "anvil", "lp-list", "--network", "mainnet"])
         assert result.exit_code == 0
         assert captured[0] == "mainnet"
 
@@ -1386,3 +1374,42 @@ class TestAxBundleCommands:
         assert fresh.get("bundle-fresh") is not None
         # Expired bundle gone (must not raise expired error).
         assert fresh.get("bundle-expired") is None
+
+
+class TestUsesIsolatedMarkets:
+    """Capability-derived --market-id gate (VIB-4851 B3).
+
+    ``_uses_isolated_markets`` derives from the connector-owned
+    ``requires_market_id`` capability instead of a hardcoded protocol set.
+    Tested against the REAL capabilities registry (pure data modules) so the
+    truth table pins what connectors actually declare — mocking the registry
+    would only test the mock.
+    """
+
+    def test_isolated_market_protocols_accept_format_variants(self):
+        from almanak.framework.cli.ax import _uses_isolated_markets
+
+        for spelling in (
+            "morpho_blue",
+            "morpho-blue",
+            "morpho blue",
+            "Morpho_Blue",
+            "morpho",  # legacy alias key the morpho_blue capabilities module declares
+            "curvance",
+        ):
+            assert _uses_isolated_markets(spelling), spelling
+
+    def test_unified_pool_protocols_rejected(self):
+        from almanak.framework.cli.ax import _uses_isolated_markets
+
+        # Unified-pool lenders must NOT accept --market-id routing — including
+        # the market-scoped read-seam protocols (Compound/Silo/Euler/BENQI),
+        # whose CLI market selection deliberately does not use --market-id.
+        for protocol in ("aave_v3", "compound_v3", "spark", "silo_v2", "euler_v2", "benqi"):
+            assert not _uses_isolated_markets(protocol), protocol
+
+    def test_unknown_protocol_fails_closed(self):
+        from almanak.framework.cli.ax import _uses_isolated_markets
+
+        assert not _uses_isolated_markets("definitely_not_a_protocol")
+        assert not _uses_isolated_markets("")

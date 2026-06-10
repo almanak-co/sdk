@@ -219,8 +219,28 @@ class LendingReadRegistry:
 
     @classmethod
     def _normalize(cls, protocol: str) -> str:
-        key = protocol.lower().replace("-", "_")
+        key = protocol.strip().lower().replace("-", "_")
         return cls._dispatch().aliases.get(key, key)
+
+    @classmethod
+    def normalize_protocol(cls, protocol: str | None) -> str:
+        """Resolve a loosely-spelled lending protocol onto its canonical key.
+
+        Folds whitespace, case, and hyphens, then applies the manifest-declared
+        lending aliases (e.g. ``"comet"`` -> ``compound_v3``,
+        ``"morpho"`` -> ``morpho_blue``). Unknown spellings pass through in
+        folded form — no silent swallowing of typos; downstream capability
+        checks fail closed on them. Consumers (``position_health``, …) call
+        this instead of rolling their own alias tables, so protocol-identity
+        knowledge stays declared on the owning connector's manifest.
+
+        Total by design: ``None`` / non-``str`` input (loosely typed strategy
+        metadata) normalises to the empty string rather than raising, so every
+        capability lookup then fails closed.
+        """
+        if not isinstance(protocol, str):
+            return ""
+        return cls._normalize(protocol)
 
     @classmethod
     def default_protocol(cls) -> str:

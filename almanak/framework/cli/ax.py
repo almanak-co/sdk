@@ -1650,19 +1650,20 @@ def portfolio(ctx, tokens, wallet_override, pf_network):
 # ---------------------------------------------------------------------------
 
 
-_ISOLATED_MARKET_PROTOCOLS = frozenset({"morpho", "morpho_blue", "curvance"})
-
-
 def _uses_isolated_markets(protocol: str) -> bool:
     """True if the protocol uses isolated markets (requires --market-id).
 
-    Normalizes hyphens and whitespace to underscores so ``morpho-blue`` and
-    ``"morpho blue"`` are accepted alongside ``morpho_blue`` — consistent with
-    the schema-layer protocol-key normalization.
+    Derived from the connector-owned capability declaration
+    (``requires_market_id`` in each connector's ``capabilities.py`` — Morpho
+    Blue and Curvance today) instead of a hardcoded protocol set (VIB-4851
+    B3). Normalizes hyphens and whitespace to underscores so ``morpho-blue``
+    and ``"morpho blue"`` are accepted alongside ``morpho_blue`` — consistent
+    with the schema-layer protocol-key normalization.
     """
+    from almanak.connectors._strategy_base.capabilities_registry import get_protocol_capabilities
     from almanak.framework.agent_tools.schemas import _normalize_protocol_key
 
-    return _normalize_protocol_key(protocol) in _ISOLATED_MARKET_PROTOCOLS
+    return bool(get_protocol_capabilities(_normalize_protocol_key(protocol)).get("requires_market_id"))
 
 
 def _guard_market_id_flag(protocol: str, market_id: str | None) -> None:

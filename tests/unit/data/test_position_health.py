@@ -365,8 +365,13 @@ class TestProtocolNormalization:
         assert _normalize_protocol("comet") == "compound_v3"
 
     def test_unknown_passthrough(self):
-        # Unknown protocols pass through so callers can register custom providers.
-        assert _normalize_protocol("custom-lender") == "custom-lender"
+        # Unknown protocols pass through in registry-folded form (case +
+        # hyphens folded, B3) so callers can register custom providers.
+        # Registration and dispatch fold identically, so the round-trip holds
+        # for any spelling of the same name.
+        assert _normalize_protocol("custom_lender") == "custom_lender"
+        assert _normalize_protocol("custom-lender") == "custom_lender"
+        assert _normalize_protocol("Custom-Lender") == "custom_lender"
 
 
 class TestHealthFactorProviderProtocol:

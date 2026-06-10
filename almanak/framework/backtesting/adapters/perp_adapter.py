@@ -48,6 +48,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
+from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
 from almanak.framework.backtesting.adapters.base import (
     StrategyBacktestAdapter,
     StrategyBacktestConfig,
@@ -551,7 +552,9 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         """
         protocol_lower = protocol.lower()
 
-        if protocol_lower in ("gmx", "gmx_v2"):
+        # "gmx" -> gmx_v2 resolves through the manifest-declared perps alias
+        # (VIB-4851 B3) instead of a local alias tuple.
+        if PerpsReadRegistry.canonical(protocol_lower) == "gmx_v2":
             return self._ensure_gmx_provider()
         elif protocol_lower == "hyperliquid":
             return self._ensure_hyperliquid_provider()

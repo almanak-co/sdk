@@ -84,7 +84,7 @@ CONNECTOR = Connector(
     lending_read=LendingReadDecl(
         spec=ImportRef(module="almanak.connectors.aave_v3.lending_read", attribute="LENDING_READ_SPEC"),
         account_state=ImportRef(module="almanak.connectors.aave_v3.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"),
-        aliases=("aave",),
+        aliases=("aave", "aavev3"),
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
     strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "mantle", "xlayer"),

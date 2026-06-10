@@ -42,6 +42,8 @@ from typing import Any
 
 import aiohttp
 
+from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
+
 logger = logging.getLogger(__name__)
 
 
@@ -460,7 +462,9 @@ class FundingRateProvider:
 
         # Fetch from appropriate API
         try:
-            if protocol_lower in ("gmx", "gmx_v2"):
+            # "gmx" -> gmx_v2 resolves through the manifest-declared perps
+            # alias (VIB-4851 B3) instead of a local alias tuple.
+            if PerpsReadRegistry.canonical(protocol_lower) == "gmx_v2":
                 data = await self._fetch_gmx_funding_rate(market, timestamp)
             elif protocol_lower == "hyperliquid":
                 data = await self._fetch_hyperliquid_funding_rate(market, timestamp)

@@ -145,7 +145,20 @@ FROZEN_LENDING_MARKET_TABLE_LOADERS = {
     "euler_v2": ("almanak.connectors.euler_v2.lending_read", "EULER_V2_ACCOUNT_STATE_MARKETS"),
     "benqi": ("almanak.connectors.benqi.lending_read", "BENQI_ACCOUNT_STATE_MARKETS"),
 }
-FROZEN_LENDING_ALIASES = {"aave": "aave_v3"}
+# B3 (VIB-4851) deliberately WIDENED the lending aliases beyond the legacy
+# registry table: the spellings previously private to
+# ``position_health._normalize_protocol`` now resolve in every registry
+# consumer. Hyphenated variants ("aave-v3", "morpho-blue", "compound-v3") are
+# NOT aliases — ``_normalize`` folds hyphens before the alias map is consulted.
+FROZEN_LENDING_ALIASES = {
+    "aave": "aave_v3",
+    "aavev3": "aave_v3",
+    "morpho": "morpho_blue",
+    "morphoblue": "morpho_blue",
+    "comet": "compound_v3",
+    "compound": "compound_v3",
+    "compoundv3": "compound_v3",
+}
 
 # almanak/connectors/_strategy_base/perps_read_registry.py tables as of
 # 2026-06-10, frozen verbatim.
@@ -153,7 +166,9 @@ FROZEN_PERPS_SPEC_LOADERS = {
     "gmx_v2": ("almanak.connectors.gmx_v2.perps_read", "PERPS_READ_SPEC"),
     "aster_perps": ("almanak.connectors.aster_perps.perps_read", "PERPS_READ_SPEC"),
 }
-FROZEN_PERPS_ALIASES = {"pancakeswap_perps": "aster_perps"}
+# B3 (VIB-4851) added "gmx" (previously a local tuple in the backtesting
+# funding-rate dispatch) as a manifest-declared perps alias.
+FROZEN_PERPS_ALIASES = {"pancakeswap_perps": "aster_perps", "gmx": "gmx_v2"}
 
 
 def test_lending_read_dispatch_equals_frozen_legacy_tables() -> None:
