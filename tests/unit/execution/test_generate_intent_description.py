@@ -131,7 +131,7 @@ class TestSwapDescriptions:
 class TestLendingDescriptions:
     def test_supply_full(self) -> None:
         # Production metadata always carries the canonical protocol key
-        # (``aave_v3``) rather than the display name. ``_WEI_LENDING_PROTOCOLS``
+        # (``aave_v3``) rather than the display name. ``_wei_lending_protocols``
         # is keyed by the canonical name so the wei-vs-human metadata
         # convention can be resolved consistently with the pre-flight checker.
         bundle = ActionBundle(
@@ -161,7 +161,7 @@ class TestLendingDescriptions:
             metadata={
                 "borrow_token": {"symbol": "USDC", "decimals": 6},
                 "collateral_token": {"symbol": "WETH"},
-                # 1,500 USDC in wei. Aave V3 (in ``_WEI_LENDING_PROTOCOLS``)
+                # 1,500 USDC in wei. Aave V3 (in ``_wei_lending_protocols``)
                 # encodes lending amounts as wei, so the formatter must scale.
                 "borrow_amount": "1500000000",
                 "protocol": "aave_v3",
@@ -409,7 +409,11 @@ class TestSmallAmountSixDecimalTokens:
         bundle = ActionBundle(
             intent_type="SWAP",
             metadata={
-                "from_token": {"symbol": "USDC", "decimals": 6, "address": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"},
+                "from_token": {
+                    "symbol": "USDC",
+                    "decimals": 6,
+                    "address": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+                },
                 "to_token": {"symbol": "WETH", "decimals": 18},
                 "amount_in": "100000000",  # $100 USDC, 6 decimals
                 "protocol": "enso",
@@ -467,7 +471,7 @@ class TestSmallAmountSixDecimalTokens:
 
     def test_supply_100_usdc_aave_polygon(self) -> None:
         """Aave V3 SUPPLY uses wei-encoded ``supply_amount`` per
-        ``_WEI_LENDING_PROTOCOLS``. $100 USDC = 1e8 raw < old threshold.
+        ``_wei_lending_protocols``. $100 USDC = 1e8 raw < old threshold.
         """
         bundle = ActionBundle(
             intent_type="SUPPLY",
@@ -481,7 +485,7 @@ class TestSmallAmountSixDecimalTokens:
         assert _generate_intent_description(bundle) == "Supply 100 USDC as collateral on aave_v3"
 
     def test_supply_100_usdc_morpho_blue_uses_human_amount(self) -> None:
-        """Morpho Blue is OUTSIDE ``_WEI_LENDING_PROTOCOLS`` -- supply_amount
+        """Morpho Blue is OUTSIDE ``_wei_lending_protocols`` -- supply_amount
         is already human ("100"). Without my fix it was rescued by accident
         because the value was below 1e9; after the fix the explicit
         ``is_wei=False`` path keeps the human shape working too.
@@ -584,7 +588,7 @@ class TestSmallAmountSixDecimalTokens:
 # ---------------------------------------------------------------------------
 # Pre-flight collector coverage for VIB-3747.
 #
-# The same ``_WEI_LENDING_PROTOCOLS`` / ``_HUMAN_AMOUNT_SWAP_PROTOCOLS`` sets
+# The same ``_wei_lending_protocols`` / ``_human_amount_swap_protocols`` sets
 # now drive both ``_describe_*`` (description rendering, this file's main
 # subject) AND ``_preflight_*_requirements`` (balance-check pipeline, see
 # ``test_preflight_balance_check.py`` for end-to-end coverage). Even though
@@ -869,3 +873,16 @@ def test_bare_metadata_defaults(intent_type: str, expected: str) -> None:
     """Every known intent type must produce a deterministic bare default string."""
     bundle = ActionBundle(intent_type=intent_type, metadata={})
     assert _generate_intent_description(bundle) == expected
+
+
+class TestAmountEncodingDerivation:
+    """The manifest-derived encoding sets match the legacy frozensets (VIB-4851 C1)."""
+
+    def test_derived_sets_match_frozen_legacy(self) -> None:
+        from almanak.framework.execution.orchestrator import (
+            _human_amount_swap_protocols,
+            _wei_lending_protocols,
+        )
+
+        assert _wei_lending_protocols() == frozenset({"aave_v3", "spark"})
+        assert _human_amount_swap_protocols() == frozenset({"curve", "aerodrome"})

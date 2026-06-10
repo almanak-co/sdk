@@ -515,22 +515,52 @@ RegistryPreflightCheck = Callable[["ActionBundle"], Awaitable[str | None]]
 # =============================================================================
 
 
-# Lending protocols whose metadata encodes amounts already in wei. Every other
-# lending protocol (morpho, morpho_blue, compound_v3, curvance, ...) ships
-# human-readable amounts in metadata that must be multiplied by 10**decimals
-# to compare against on-chain ``balanceOf`` values. This set is the single
-# source of truth used by both the description formatter and the pre-flight
-# balance checker — keep them in sync. (VIB-3747)
-_WEI_LENDING_PROTOCOLS: frozenset[str] = frozenset({"aave_v3", "spark"})
+def _wei_lending_protocols() -> frozenset[str]:
+    """Lending protocols whose metadata encodes amounts already in wei.
 
-# SWAP compilers that ship the input amount as a human-readable Decimal in
-# metadata (``"amount_in": str(amount_decimal)``) instead of the wei-encoded
-# default. Curve and Aerodrome diverged from the wei convention used by every
-# other SWAP compiler (Uniswap V3, Enso, LiFi, Pendle, SushiSwap V3, ...).
-# Adding a new SWAP protocol that uses human Decimals? Add it here AND match
-# the wider pattern in ``compiler_*.py`` — both sites must agree or the
-# description will mis-render. (VIB-3747)
-_HUMAN_AMOUNT_SWAP_PROTOCOLS: frozenset[str] = frozenset({"curve", "aerodrome"})
+    Derived from each connector's manifest ``metadata_amount_encoding``
+    declaration (VIB-4851 C1) — the encoding convention lives next to the
+    compiler that produces it, and this single derived set keeps the
+    description formatter and the pre-flight balance checker in sync
+    (VIB-3747). Every undeclared lending protocol (morpho_blue, compound_v3,
+    curvance, ...) ships human-readable amounts that must be multiplied by
+    ``10**decimals`` to compare against on-chain ``balanceOf`` values.
+
+    Recomputed per call — a cheap filter over the registry's cached manifest
+    tuple — so test-side ``CONNECTOR_REGISTRY.clear()`` is honoured; a
+    module-level cache here would serve stale sets after a registry reset.
+    """
+    # Deferred import: connector discovery must never run at module import.
+    from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+    return frozenset(
+        connector.name
+        for connector in CONNECTOR_REGISTRY.with_metadata_amount_encoding()
+        if connector.metadata_amount_encoding is not None and connector.metadata_amount_encoding.lending == "wei"
+    )
+
+
+def _human_amount_swap_protocols() -> frozenset[str]:
+    """SWAP compilers shipping ``amount_in`` as a human-readable Decimal.
+
+    Derived from the manifest ``metadata_amount_encoding`` declarations
+    (VIB-4851 C1). Curve and Aerodrome diverged from the wei convention used
+    by every other SWAP compiler (Uniswap V3, Enso, LiFi, Pendle,
+    SushiSwap V3, ...); a new human-Decimal SWAP compiler declares
+    ``MetadataAmountEncoding(swap="human")`` on its own manifest, next to the
+    compiler whose convention it describes.
+
+    Recomputed per call — a cheap filter over the registry's cached manifest
+    tuple — so test-side ``CONNECTOR_REGISTRY.clear()`` is honoured; a
+    module-level cache here would serve stale sets after a registry reset.
+    """
+    from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+    return frozenset(
+        connector.name
+        for connector in CONNECTOR_REGISTRY.with_metadata_amount_encoding()
+        if connector.metadata_amount_encoding is not None and connector.metadata_amount_encoding.swap == "human"
+    )
 
 
 def _normalize_protocol_key(protocol: Any) -> str:
@@ -564,7 +594,7 @@ def _lending_amount_is_wei(protocol: Any) -> bool:
     never silently disagree with the balance-check path on the wei /
     human classification, regardless of caller casing or formatting.
     """
-    return _normalize_protocol_key(protocol) in _WEI_LENDING_PROTOCOLS
+    return _normalize_protocol_key(protocol) in _wei_lending_protocols()
 
 
 def _swap_amount_is_wei(protocol: Any) -> bool:
@@ -582,7 +612,7 @@ def _swap_amount_is_wei(protocol: Any) -> bool:
         # legacy code path that always tried to scale large amounts by
         # 10**decimals when ``token_data`` was present.
         return True
-    return key not in _HUMAN_AMOUNT_SWAP_PROTOCOLS
+    return key not in _human_amount_swap_protocols()
 
 
 def _get_token_symbol(token_data: Any) -> str:
@@ -628,7 +658,7 @@ def _format_amount(amount: Any, token_data: Any = None, *, is_wei: bool = True) 
         is_wei: Whether ``amount`` is encoded in wei (default True).
             Pass False for protocols that ship human-readable amounts in
             metadata (e.g. ``morpho_blue``, ``compound_v3``, ``curvance``).
-            See ``_WEI_LENDING_PROTOCOLS`` for the canonical list.
+            See ``_wei_lending_protocols`` for the canonical list.
     """
     if not amount:
         return ""
@@ -675,7 +705,7 @@ def _describe_swap(metadata: dict[str, Any], protocol: str) -> str:
     # ``amount`` are legacy aliases kept for manually-constructed bundles.
     # Most SWAP compilers store wei (``str(amount_in)``); Curve and
     # Aerodrome diverged and ship human Decimals (``str(amount_decimal)``).
-    # See ``_HUMAN_AMOUNT_SWAP_PROTOCOLS`` for the canonical list.
+    # See ``_human_amount_swap_protocols`` for the canonical list.
     raw_amount = metadata.get("amount_in", metadata.get("from_amount", metadata.get("amount", "")))
     amount = _format_amount(raw_amount, from_token_data, is_wei=_swap_amount_is_wei(protocol))
 
@@ -892,7 +922,7 @@ def _generate_intent_description(action_bundle: "ActionBundle") -> str:
 # =============================================================================
 
 
-# ``_WEI_LENDING_PROTOCOLS`` is declared near the top of the file (next to
+# ``_wei_lending_protocols`` is declared near the top of the file (next to
 # the description formatter) so it's available to both pre-flight and
 # description code paths. Same metadata-encoding rule applies here.
 

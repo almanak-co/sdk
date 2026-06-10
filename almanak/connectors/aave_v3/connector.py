@@ -7,6 +7,7 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
     LendingReadDecl,
+    MetadataAmountEncoding,
     StrategyMatrixEntry,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
@@ -86,6 +87,8 @@ CONNECTOR = Connector(
         account_state=ImportRef(module="almanak.connectors.aave_v3.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"),
         aliases=("aave", "aavev3"),
     ),
+    # Aave-family compilers ship lending metadata amounts wei-encoded (VIB-3747).
+    metadata_amount_encoding=MetadataAmountEncoding(lending="wei"),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
     strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "mantle", "xlayer"),
     # Matrix output stays lending-only for now; Aave flash-loan support exists

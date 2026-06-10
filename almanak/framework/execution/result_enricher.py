@@ -101,6 +101,29 @@ def _legacy_warn(parser: Any, field: str) -> None:
     )
 
 
+def _pool_key_lookup_protocols() -> frozenset[str]:
+    """Receipt-parser keys whose connector declares the ``pool_key_lookup`` kwarg.
+
+    Derived from each connector's manifest ``receipt_parser_kwargs`` declaration
+    (VIB-4851 C3) — keyed by ``receipt_parser_keys`` (canonical name + aliases +
+    explicit receipt-parser protocols) so fork keys resolve like the parser
+    registry itself does.
+
+    Recomputed per call — a cheap filter over the registry's cached manifest
+    tuple — so test-side ``CONNECTOR_REGISTRY.clear()`` is honoured; a
+    module-level cache here would serve stale sets after a registry reset.
+    """
+    # Deferred import: connector discovery must never run at module import.
+    from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+    return frozenset(
+        key
+        for connector in CONNECTOR_REGISTRY.all()
+        if "pool_key_lookup" in connector.receipt_parser_kwargs
+        for key in connector.receipt_parser_keys
+    )
+
+
 class ResultEnricher:
     """Enriches ExecutionResult with intent-specific extracted data.
 
@@ -1927,17 +1950,19 @@ class ResultEnricher:
     def _build_parser_kwargs(self, protocol: str, chain: str) -> dict[str, Any]:
         """Build kwargs for ReceiptParserRegistry.get(protocol, **kwargs).
 
-        VIB-4477 (T08): thread ``pool_key_lookup`` into the V4 parser so it
-        can resolve ``ModifyLiquidity.pool_id`` -> canonical ``PoolKey`` via
-        the gateway. Without this, V4 LP_CLOSE events drop with a structured
+        VIB-4477 (T08): thread ``pool_key_lookup`` into parsers whose
+        connector declares it in ``receipt_parser_kwargs`` (the V4 parser,
+        which resolves ``ModifyLiquidity.pool_id`` -> canonical ``PoolKey``
+        via the gateway; VIB-4851 C3 moved the opt-in onto the manifest).
+        Without this, V4 LP_CLOSE events drop with a structured
         ``missing_pool_key_lookup`` warning and the lp_accounting pipeline
-        never sees V4 events. The kwarg is only sent for the V4 parser to
+        never sees V4 events. The kwarg is only sent to declaring parsers to
         keep other parsers' caching behaviour unchanged --
         ``ReceiptParserRegistry.get`` bypasses its protocol cache when any
         kwarg is provided (see ``_load_builtin``).
         """
         kwargs: dict[str, Any] = {"chain": chain}
-        if protocol.lower() == "uniswap_v4" and self._pool_key_lookup is not None:
+        if self._pool_key_lookup is not None and protocol.lower() in _pool_key_lookup_protocols():
             kwargs["pool_key_lookup"] = self._pool_key_lookup
         return kwargs
 

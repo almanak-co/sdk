@@ -35,6 +35,7 @@ __all__ = [
     "ConnectorDiscoveryError",
     "ImportRef",
     "LendingReadDecl",
+    "MetadataAmountEncoding",
     "PerpsReadDecl",
     "StrategyMatrixEntry",
     "SupportedChainsSpec",
@@ -152,6 +153,32 @@ class LendingReadDecl:
 
 
 @dataclass(frozen=True)
+class MetadataAmountEncoding:
+    """How this connector's compiler encodes amounts in intent metadata.
+
+    ``None`` for a family means the family default applies: lending metadata
+    defaults to HUMAN-readable amounts (multiplied by ``10**decimals``
+    downstream); swap metadata defaults to WEI. Declare only divergences from
+    those defaults. The orchestrator's description formatter and pre-flight
+    balance checker both derive from this declaration, so the encoding
+    convention lives next to the compiler that produces it and the two
+    consumers can never disagree (VIB-3747 / VIB-4851 C1).
+    """
+
+    lending: str | None = None
+    swap: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate declared encodings."""
+        for family in ("lending", "swap"):
+            value = getattr(self, family)
+            if value is not None and value not in ("wei", "human"):
+                raise ValueError(f"MetadataAmountEncoding.{family} must be None, 'wei', or 'human', got {value!r}")
+        if self.lending is None and self.swap is None:
+            raise ValueError("MetadataAmountEncoding must declare at least one family encoding")
+
+
+@dataclass(frozen=True)
 class PerpsReadDecl:
     """Connector-owned perps-read dispatch declaration.
 
@@ -185,6 +212,7 @@ class Connector:
     solana_programs: tuple[SolanaProgramSpec, ...] | None = None
     receipt_parser_protocols: tuple[str, ...] | None = None
     receipt_parser_connector: ImportRef | None = None
+    receipt_parser_kwargs: tuple[str, ...] = field(default_factory=tuple)
     gas_estimate_connector: ImportRef | None = None
     agent_read_connector: ImportRef | None = None
     agent_read_connectors: tuple[ImportRef, ...] = field(default_factory=tuple)
@@ -202,6 +230,8 @@ class Connector:
     primitive: ImportRef | None = None
     lending_read: LendingReadDecl | None = None
     perps_read: PerpsReadDecl | None = None
+    metadata_amount_encoding: MetadataAmountEncoding | None = None
+    fungible_lp: bool = False
     prediction_read: ImportRef | None = None
     prediction_execute: ImportRef | None = None
     gateway_stub: ImportRef | None = None
@@ -268,6 +298,9 @@ class Connector:
         self._validate_primitive()
         self._validate_lending_read()
         self._validate_perps_read()
+        self._validate_metadata_amount_encoding()
+        self._validate_fungible_lp()
+        self._validate_receipt_parser_kwargs()
         self._validate_prediction_read()
         self._validate_prediction_execute()
         self._validate_gateway_stub()
@@ -484,6 +517,35 @@ class Connector:
         """Validate the perps-read dispatch declaration."""
         if self.perps_read is not None and not isinstance(self.perps_read, PerpsReadDecl):
             raise ValueError(f"Connector.perps_read must be None or a PerpsReadDecl, got {self.perps_read!r}")
+
+    def _validate_fungible_lp(self) -> None:
+        """Validate the fungible-LP (ERC20 LP token, no NFT discriminator) flag."""
+        if not isinstance(self.fungible_lp, bool):
+            raise ValueError(f"Connector.fungible_lp must be a bool, got {self.fungible_lp!r}")
+
+    def _validate_receipt_parser_kwargs(self) -> None:
+        """Validate the optional enrichment kwargs the receipt parser accepts."""
+        if not isinstance(self.receipt_parser_kwargs, tuple):
+            raise ValueError(
+                f"Connector.receipt_parser_kwargs must be a tuple[str, ...], got {self.receipt_parser_kwargs!r}"
+            )
+        if not self.receipt_parser_kwargs:
+            return
+        if self.receipt_parser_connector is None:
+            raise ValueError(
+                "Connector.receipt_parser_kwargs may only be set when receipt_parser_connector is also set"
+            )
+        self._validate_non_empty_string_tuple("receipt_parser_kwargs", self.receipt_parser_kwargs)
+
+    def _validate_metadata_amount_encoding(self) -> None:
+        """Validate the compiler metadata amount-encoding declaration."""
+        if self.metadata_amount_encoding is not None and not isinstance(
+            self.metadata_amount_encoding, MetadataAmountEncoding
+        ):
+            raise ValueError(
+                "Connector.metadata_amount_encoding must be None or a MetadataAmountEncoding, "
+                f"got {self.metadata_amount_encoding!r}"
+            )
 
     def _validate_prediction_read(self) -> None:
         """Validate the prediction-read spec import reference."""
@@ -878,6 +940,14 @@ class ConnectorRegistry:
     def with_perps_read(self) -> tuple[Connector, ...]:
         """Return connectors that publish perps-read dispatch declarations."""
         return tuple(d for d in self.all() if d.perps_read is not None)
+
+    def with_metadata_amount_encoding(self) -> tuple[Connector, ...]:
+        """Return connectors that declare a metadata amount encoding."""
+        return tuple(d for d in self.all() if d.metadata_amount_encoding is not None)
+
+    def with_fungible_lp(self) -> tuple[Connector, ...]:
+        """Return connectors whose LP positions are fungible (ERC20 LP tokens)."""
+        return tuple(d for d in self.all() if d.fungible_lp)
 
     def with_prediction_read(self) -> tuple[Connector, ...]:
         """Return connectors that publish prediction-read specs."""

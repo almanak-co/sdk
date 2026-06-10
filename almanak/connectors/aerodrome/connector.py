@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    MetadataAmountEncoding,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
@@ -63,6 +64,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.aerodrome.primitive",
         attribute="PRIMITIVE",
     ),
+    # Aerodrome's SWAP compiler ships amount_in as a human-readable Decimal (VIB-3747).
+    metadata_amount_encoding=MetadataAmountEncoding(swap="human"),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE"),
     strategy_chains=("base", "optimism"),
 )

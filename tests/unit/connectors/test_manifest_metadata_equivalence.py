@@ -205,3 +205,50 @@ def test_prediction_and_stub_dispatch_equals_frozen_legacy_tables() -> None:
     assert PredictionReadRegistry._spec_loaders() == FROZEN_PREDICTION_READ_LOADERS
     assert PredictionExecuteRegistry._spec_loaders() == FROZEN_PREDICTION_EXECUTE_LOADERS
     assert GatewayStubRegistry._spec_loaders() == FROZEN_GATEWAY_STUB_LOADERS
+
+
+# almanak/framework/execution/orchestrator.py amount-encoding frozensets as of
+# 2026-06-10, frozen verbatim (VIB-3747; manifest-derived in VIB-4851 C1).
+FROZEN_WEI_LENDING_PROTOCOLS = frozenset({"aave_v3", "spark"})
+FROZEN_HUMAN_AMOUNT_SWAP_PROTOCOLS = frozenset({"curve", "aerodrome"})
+
+
+def test_metadata_amount_encoding_equals_frozen_legacy_sets() -> None:
+    """Manifest-declared amount encodings == the legacy orchestrator frozensets."""
+    declaring = CONNECTOR_REGISTRY.with_metadata_amount_encoding()
+    wei_lending = frozenset(
+        connector.name
+        for connector in declaring
+        if connector.metadata_amount_encoding is not None and connector.metadata_amount_encoding.lending == "wei"
+    )
+    human_swap = frozenset(
+        connector.name
+        for connector in declaring
+        if connector.metadata_amount_encoding is not None and connector.metadata_amount_encoding.swap == "human"
+    )
+    assert wei_lending == FROZEN_WEI_LENDING_PROTOCOLS
+    assert human_swap == FROZEN_HUMAN_AMOUNT_SWAP_PROTOCOLS
+
+
+# almanak/framework/observability/ledger.py and
+# almanak/framework/execution/result_enricher.py protocol carve-outs as of
+# 2026-06-10, frozen verbatim (manifest-derived in VIB-4851 C2/C3).
+FROZEN_FUNGIBLE_LP_PROTOCOLS = frozenset({"curve"})
+FROZEN_POOL_KEY_LOOKUP_PROTOCOLS = frozenset({"uniswap_v4"})
+
+
+def test_fungible_lp_equals_frozen_legacy_set() -> None:
+    """Manifest fungible_lp flags == the legacy ledger frozenset."""
+    derived = frozenset(connector.name for connector in CONNECTOR_REGISTRY.with_fungible_lp())
+    assert derived == FROZEN_FUNGIBLE_LP_PROTOCOLS
+
+
+def test_pool_key_lookup_kwarg_equals_frozen_legacy_carveout() -> None:
+    """Manifest receipt_parser_kwargs declarations == the legacy V4 enricher carve-out."""
+    derived = frozenset(
+        key
+        for connector in CONNECTOR_REGISTRY.all()
+        if "pool_key_lookup" in connector.receipt_parser_kwargs
+        for key in connector.receipt_parser_keys
+    )
+    assert derived == FROZEN_POOL_KEY_LOOKUP_PROTOCOLS

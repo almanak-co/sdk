@@ -702,13 +702,24 @@ def _build_extracted_data_json(result: Any) -> str:
         return extracted_data_json
 
 
-# Fungible-LP (ERC20 LP-token) venues where ``LPCloseIntent.position_id`` is
-# NOT an NFT token id. On Curve the close intent's ``position_id`` is overloaded
-# as the LP-token *amount* to burn (a human-decimal string), so stamping it as a
-# per-position discriminator (VIB-4275) would write a bogus amount-shaped
-# ``position_id`` onto the fungible-LP close event — which has no co-leg to
-# disambiguate (one balance per pool). VIB-4968.
-_FUNGIBLE_LP_NO_DISCRIMINATOR_PROTOCOLS = frozenset({"curve"})
+def _fungible_lp_protocols() -> frozenset[str]:
+    """Fungible-LP (ERC20 LP-token) venues where ``position_id`` is not an NFT id.
+
+    Derived from each connector's manifest ``fungible_lp`` flag (VIB-4851 C2).
+    On Curve the close intent's ``position_id`` is overloaded as the LP-token
+    *amount* to burn (a human-decimal string), so stamping it as a per-position
+    discriminator (VIB-4275) would write a bogus amount-shaped ``position_id``
+    onto the fungible-LP close event — which has no co-leg to disambiguate
+    (one balance per pool). VIB-4968.
+
+    Recomputed per call — a cheap filter over the registry's cached manifest
+    tuple — so test-side ``CONNECTOR_REGISTRY.clear()`` is honoured; a
+    module-level cache here would serve stale sets after a registry reset.
+    """
+    # Deferred import: connector discovery must never run at module import.
+    from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+    return frozenset(connector.name for connector in CONNECTOR_REGISTRY.with_fungible_lp())
 
 
 def _stamp_lp_close_discriminator(intent: Any, result: Any, intent_type: str, protocol: str = "") -> None:
@@ -730,12 +741,12 @@ def _stamp_lp_close_discriminator(intent: Any, result: Any, intent_type: str, pr
     the close data (e.g. a future parser that learns to emit it) is preserved.
 
     Skipped entirely for fungible-LP venues
-    (:data:`_FUNGIBLE_LP_NO_DISCRIMINATOR_PROTOCOLS`) where the close intent's
+    (:func:`_fungible_lp_protocols`) where the close intent's
     ``position_id`` is overloaded as a burn *amount*, not an NFT id (VIB-4968).
     """
     if intent_type not in ("LP_CLOSE", "LP_COLLECT_FEES"):
         return
-    if (protocol or "").lower() in _FUNGIBLE_LP_NO_DISCRIMINATOR_PROTOCOLS:
+    if (protocol or "").lower() in _fungible_lp_protocols():
         return
     raw = getattr(intent, "position_id", None)
     # Uniformly ignore the degenerate 0 / "0" id across stamp + both resolvers:

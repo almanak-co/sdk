@@ -7,6 +7,7 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
     LendingReadDecl,
+    MetadataAmountEncoding,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
@@ -47,6 +48,8 @@ CONNECTOR = Connector(
         spec=ImportRef(module="almanak.connectors.spark.lending_read", attribute="LENDING_READ_SPEC"),
         account_state=ImportRef(module="almanak.connectors.spark.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"),
     ),
+    # Aave-fork compiler: lending metadata amounts are wei-encoded (VIB-3747).
+    metadata_amount_encoding=MetadataAmountEncoding(lending="wei"),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("ethereum",),
 )

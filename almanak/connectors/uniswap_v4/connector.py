@@ -29,6 +29,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.uniswap_v4.receipt_parser_provider",
         attribute="UniswapV4ReceiptParserConnector",
     ),
+    # The V4 receipt parser resolves ModifyLiquidity.pool_id -> canonical
+    # PoolKey via the gateway; the enricher threads this kwarg only to
+    # parsers that declare it (VIB-4477 T08).
+    receipt_parser_kwargs=("pool_key_lookup",),
     contract_monitoring=ImportRef(
         module="almanak.connectors.uniswap_v4.contract_monitoring",
         attribute="UNISWAP_V4_CONTRACT_MONITORING_SPECS",
