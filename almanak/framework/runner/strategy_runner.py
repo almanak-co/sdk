@@ -2245,6 +2245,20 @@ class StrategyRunner:
                 # token columns and breaking ``_apply_lp_close_value_usd``
                 # (which reads ``event.token0`` / ``event.token1`` to
                 # resolve decimals + prices).
+                # VIB-5018 — also stamp ``amount0`` / ``amount1`` (wei) so the
+                # same-iteration V4 LP snapshot valuation
+                # (``PortfolioValuer._v4_open_amounts``) can re-mark the opened
+                # amounts straight from this cache without a store round-trip.
+                # Empty ≠ Zero: only stamp when the OPEN event actually surfaces
+                # the amount; an absent / empty value stays "" so the valuer reads
+                # it as a miss (and falls through to the authoritative store
+                # query) rather than a measured zero.
+                # Empty ≠ Zero: ``str(x or "")`` would collapse a measured ``0``
+                # amount (a legitimate single-sided open) into ``""``, which the
+                # valuer reads as a MISS. Preserve "0" as measured; only None/""
+                # stay "" (unmeasured → store fall-through).
+                raw_amount0 = getattr(pos_event, "amount0", "")
+                raw_amount1 = getattr(pos_event, "amount1", "")
                 self._recent_open_events[key] = {
                     "value_usd": str(getattr(pos_event, "value_usd", "") or ""),
                     "ledger_entry_id": str(getattr(pos_event, "ledger_entry_id", "") or ""),
@@ -2254,6 +2268,8 @@ class StrategyRunner:
                     "liquidity": str(getattr(pos_event, "liquidity", "") or ""),
                     "token0": str(getattr(pos_event, "token0", "") or ""),
                     "token1": str(getattr(pos_event, "token1", "") or ""),
+                    "amount0": "" if raw_amount0 in (None, "") else str(raw_amount0),
+                    "amount1": "" if raw_amount1 in (None, "") else str(raw_amount1),
                 }
             elif event_type == "CLOSE":
                 self._recent_open_events.pop(key, None)

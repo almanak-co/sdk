@@ -47,6 +47,21 @@ logger = logging.getLogger(__name__)
 FRAMEWORK_EXTERNAL_AGREEMENT_THRESHOLD = Decimal("0.10")
 FRAMEWORK_EXTERNAL_DIVERGENCE_THRESHOLD = Decimal("0.20")
 
+# VIB-5018 / VIB-4586 — Uniswap V4 LP positions do NOT live on the V3
+# NonfungiblePositionManager. Routing a V4 tokenId through the V3-shaped
+# ``LPPositionReader`` reads an unrelated NFT (or garbage) on the V3 PM and
+# corrupts BOTH token identity (token0_symbol="link" on a WETH/USDC pool) and
+# amount scaling (~10^7), producing a $289M value for a ~$5 position at HIGH
+# confidence. The V4 stream has its own isolated valuation path
+# (``_reprice_v4_lp_enriched``) keyed off the canonical PoolKey resolved via the
+# gateway — never a V3 NFT read. V4 is detected by DATA SHAPE (a 64-hex PoolKey
+# hash in ``details``), not by a hardcoded protocol name — the VIB-4636
+# capability-gate discipline that keeps the framework free of connector-name
+# coupling. A V4 pool has no contract address (singleton PoolManager), so a
+# 64-hex value in the pool slot is unambiguously a V4 pool_id; a V3 LP carries a
+# 40-hex pool *contract* address (or none).
+_V4_POOL_ID_HEX_LEN = 64
+
 
 def _looks_like_evm_address(value: object) -> bool:
     """Return True iff ``value`` is the 42-char ``0x``-prefixed hex shape.
@@ -574,6 +589,13 @@ class PortfolioValuer:
         if not has_any_value and (positions_unavailable or wallet_data_incomplete):
             return ValueConfidence.UNAVAILABLE
         if positions_unavailable or wallet_data_incomplete:
+            return ValueConfidence.ESTIMATED
+        # VIB-5018 / VIB-4586 — a position valued through an approximate path
+        # (e.g. Uniswap V4 LP, which reconstructs amounts from a price-ratio tick
+        # rather than an authoritative pool slot0 read) downgrades the snapshot to
+        # ESTIMATED. The value is real and traceable, but a reader must not treat
+        # it as HIGH-confidence on-chain truth.
+        if any(p.details.get("valuation_status") == "estimated" for p in positions):
             return ValueConfidence.ESTIMATED
         return ValueConfidence.HIGH
 
@@ -1485,14 +1507,26 @@ class PortfolioValuer:
         from almanak.framework.teardown.models import PositionType
 
         if position.position_type == PositionType.LP:
+            # VIB-5018 / VIB-4586 — Uniswap V4 LP has its own isolated,
+            # identity-faithful valuation path. It MUST NOT fall through to the
+            # V3 ``_reprice_lp_on_chain_enriched`` path, whose V3-shaped
+            # ``positions(uint256)`` read corrupts a V4 tokenId into a wrong
+            # pool / wrong tokens / 10^7 amounts (the $289M bug). The V4 stream is
+            # detected by data shape, not protocol name (VIB-4636 capability-gate
+            # discipline): a V4 LP carries a 64-hex PoolKey hash in details, while
+            # a V3 LP carries a 40-hex pool *contract* address (V4 pools have no
+            # contract address — they live in the singleton PoolManager).
+            if self._is_v4_lp_position(position):
+                return self._reprice_v4_lp_enriched(position, chain, market)
+
             result = self._reprice_lp_on_chain_enriched(position, chain, market)
             if result is not None:
                 return result[0], result[1], True
-            # No LP path matched (e.g. Aerodrome CL, Uniswap V4) or on-chain
-            # read failed. VIB-4584 / F3.1 scope: only flag as "no path"
-            # when no value source exists anywhere — strategies that report
-            # value_usd > 0 are asserting a value we trust (the overnight
-            # matrix specifically hit value_usd == 0 with no on-chain path).
+            # No LP path matched (e.g. Aerodrome CL) or on-chain read failed.
+            # VIB-4584 / F3.1 scope: only flag as "no path" when no value source
+            # exists anywhere — strategies that report value_usd > 0 are
+            # asserting a value we trust (the overnight matrix specifically hit
+            # value_usd == 0 with no on-chain path).
             if position.value_usd > 0:
                 return position.value_usd, {}, True
             return position.value_usd, {}, False
@@ -1641,6 +1675,316 @@ class PortfolioValuer:
 
         except Exception:
             logger.debug("LP enriched re-pricing failed for %s", position.position_id, exc_info=True)
+            return None
+
+    def _reprice_v4_lp_enriched(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, dict[str, Any], bool]:
+        """Identity-faithful Uniswap V4 LP valuation (VIB-5018 / VIB-4586).
+
+        V4 LP positions do NOT live on the V3 NonfungiblePositionManager, so the
+        V3-shaped ``LPPositionReader.read_position`` cannot value them — routing a
+        V4 tokenId there reads an unrelated NFT and corrupts both token identity
+        and amount scaling (the $289M bug).
+
+        The gateway exposes ``LookupV4PoolKey`` (pool_id → PoolKey identity) but
+        no boundary-compliant V4 PositionManager liquidity/tick reader, and the
+        V4 strategy reports no liquidity/ticks on its open positions. So this path
+        values the position from the **receipt-parsed OPEN amounts** persisted on
+        the Layer-3 ``position_events`` row (``token0`` / ``token1`` / ``amount0``
+        / ``amount1`` in wei) re-marked at current prices:
+
+        1. Identity comes from the OPEN event's token symbols, cross-checked
+           against the canonical ``PoolKey`` resolved from the V4 ``pool_id`` via
+           the gateway (``LookupV4PoolKey`` — boundary compliant; no direct RPC).
+        2. Amounts are the actual opened token amounts (authoritative, identity-
+           faithful), re-priced at the current oracle price.
+        3. Confidence is ``ESTIMATED`` (``valuation_status="estimated"``): re-
+           marking the opening amounts ignores subsequent in-range drift /
+           fee accrual, so a reader must not treat it as HIGH on-chain truth.
+
+        Returns ``(value_usd, enriched_details, repriced)``. ``repriced`` is
+        ``False`` only when the V4 path genuinely cannot produce a value (no
+        OPEN event, no identity, no price) — driving the snapshot to UNAVAILABLE
+        (VIB-4584) rather than ever emitting a wrong value at HIGH confidence.
+        """
+        try:
+            open_amounts = self._v4_open_amounts(position)
+            if open_amounts is None:
+                return self._v4_no_path(position)
+            token0_symbol_open, token1_symbol_open, amount0_wei, amount1_wei = open_amounts
+
+            # Identity: prefer the gateway PoolKey (authoritative addresses →
+            # symbols); fall back to the OPEN event's reported symbols. Either
+            # way this is identity-faithful — never the V3-read garbage.
+            token0_symbol, token1_symbol = self._resolve_v4_symbols(
+                position, chain, token0_symbol_open, token1_symbol_open
+            )
+            if not token0_symbol or not token1_symbol:
+                return self._v4_no_path(position)
+
+            try:
+                token0_price = Decimal(str(market.price(token0_symbol)))
+                token1_price = Decimal(str(market.price(token1_symbol)))
+            except Exception:
+                return self._v4_no_path(position)
+            if token0_price <= 0 or token1_price <= 0:
+                return self._v4_no_path(position)
+
+            token0_decimals = self._get_token_decimals(token0_symbol, chain)
+            token1_decimals = self._get_token_decimals(token1_symbol, chain)
+            if token0_decimals is None or token1_decimals is None:
+                return self._v4_no_path(position)
+
+            amount0 = Decimal(amount0_wei) / Decimal(10**token0_decimals)
+            amount1 = Decimal(amount1_wei) / Decimal(10**token1_decimals)
+            token0_value_usd = amount0 * token0_price
+            token1_value_usd = amount1 * token1_price
+            total = token0_value_usd + token1_value_usd
+
+            enriched = {
+                "position_id": str(position.position_id or ""),
+                "amount0": str(amount0),
+                "amount1": str(amount1),
+                "token0_value_usd": str(token0_value_usd),
+                "token1_value_usd": str(token1_value_usd),
+                "token0_symbol": token0_symbol,
+                "token1_symbol": token1_symbol,
+                "valuation_source": "v4_open_amounts",
+                "valuation_status": "estimated",
+            }
+            return total, enriched, True
+
+        except Exception:
+            logger.debug("V4 LP enriched re-pricing failed for %s", position.position_id, exc_info=True)
+            return self._v4_no_path(position)
+
+    def _v4_open_amounts(self, position: "PositionInfo") -> tuple[str, str, int, int] | None:
+        """Read the OPEN ``position_events`` row for a V4 LP position.
+
+        Returns ``(token0_symbol, token1_symbol, amount0_wei, amount1_wei)`` from
+        the receipt-parsed open, or ``None`` when no usable OPEN row exists
+        (no accounting store / no row / unparseable amounts). The OPEN amounts are
+        the authoritative, identity-faithful token amounts the connector emitted
+        from the LP_OPEN receipt — the framework's only boundary-compliant source
+        of V4 LP token amounts until a gateway V4 position reader exists.
+
+        VIB-5018 (live re-baseline) — the same-iteration runner cache
+        (``_recent_open_events``, VIB-3894) is checked first for speed, but its
+        dict does NOT carry ``amount0`` / ``amount1`` for every primitive (the
+        runner stamps them only when the OPEN event surfaces them). A cache hit
+        that lacks usable amounts MUST fall through to the store query — which
+        always carries them — instead of short-circuiting to no_path. Treating
+        "cache present but incomplete" as a cache miss is what makes the
+        ESTIMATED path actually fire in the live snapshot pipeline.
+        """
+        position_id = position.position_id
+        if not position_id:
+            return None
+
+        # Prefer the in-memory runner cache, but accept it ONLY when complete.
+        cache = getattr(self, "_recent_open_events", None) or {}
+        parsed = self._parse_v4_open_event(cache.get((str(position_id), "LP")))
+        if parsed is not None:
+            return parsed
+
+        # Cache miss / cache incomplete → authoritative store query (carries amounts).
+        # Guard the deployment scope explicitly (mirrors the position_id guard
+        # above): an unconfigured valuer with ``_deployment_id == ""`` must not
+        # issue a deployment-wide store query (pr-audit #4 defense-in-depth).
+        if (
+            self._accounting_store is None
+            or not self._deployment_id
+            or not hasattr(self._accounting_store, "get_position_events_sync")
+        ):
+            return None
+        try:
+            events = self._accounting_store.get_position_events_sync(
+                self._deployment_id,
+                position_id=position_id,
+                position_type="LP",
+                event_type="OPEN",
+            )
+        except Exception:
+            return None
+        if not events:
+            return None
+        return self._parse_v4_open_event(events[0])
+
+    @staticmethod
+    def _parse_v4_open_event(open_event: object) -> tuple[str, str, int, int] | None:
+        """Parse one OPEN ``position_events`` dict into the V4 valuation tuple.
+
+        Returns ``(token0_symbol, token1_symbol, amount0_wei, amount1_wei)`` only
+        when ALL four are present and well-formed; ``None`` otherwise (so an
+        incomplete runner-cache dict reads as a miss rather than a measured zero).
+        Empty ≠ Zero: an absent / ``""`` / unparseable amount is ``None`` (miss),
+        not a measured zero.
+        """
+        if not isinstance(open_event, dict):
+            return None
+        token0_symbol = open_event.get("token0")
+        token1_symbol = open_event.get("token1")
+        amount0_wei = PortfolioValuer._coerce_int(open_event.get("amount0"))
+        amount1_wei = PortfolioValuer._coerce_int(open_event.get("amount1"))
+        if (
+            not isinstance(token0_symbol, str)
+            or not token0_symbol
+            or not isinstance(token1_symbol, str)
+            or not token1_symbol
+            or amount0_wei is None
+            or amount1_wei is None
+        ):
+            return None
+        return token0_symbol, token1_symbol, amount0_wei, amount1_wei
+
+    def _resolve_v4_symbols(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        token0_symbol_open: str,
+        token1_symbol_open: str,
+    ) -> tuple[str | None, str | None]:
+        """Resolve identity-faithful (token0, token1) symbols for a V4 position.
+
+        Prefers the canonical ``PoolKey`` resolved from the V4 ``pool_id`` via the
+        gateway (authoritative on-chain addresses → symbols), falling back to the
+        OPEN event's reported symbols. The OPEN symbols are themselves derived
+        from the receipt, so both sources are identity-faithful — neither is the
+        V3-read corruption.
+        """
+        pool_key = self._resolve_v4_pool_key(position, chain)
+        if pool_key is not None:
+            # Resolve BOTH currencies from their on-chain addresses ONLY. We do
+            # NOT use ``_resolve_token_symbol`` here: its strategy-metadata
+            # fallback reads ``details["token0"/"token1"]`` (user order), which
+            # can splice a user-order symbol into a sorted ``currency0<currency1``
+            # slot when only one currency resolves — a silent identity mix
+            # (pr-audit Important #1). Either both addresses resolve as a sorted
+            # pair, or we fall back to the OPEN-event pair below — the receipt
+            # parser already emits those in canonical currency0<currency1 order,
+            # so they stay paired with the sorted amount0/amount1.
+            sym0 = self._symbol_from_address(pool_key.currency0, chain)
+            sym1 = self._symbol_from_address(pool_key.currency1, chain)
+            if sym0 and sym1:
+                return sym0, sym1
+        return token0_symbol_open or None, token1_symbol_open or None
+
+    @staticmethod
+    def _symbol_from_address(token_address: str, chain: str) -> str | None:
+        """Resolve a token symbol from its on-chain address ONLY.
+
+        Unlike ``_resolve_token_symbol`` there is NO strategy-metadata fallback:
+        a miss returns ``None`` so :meth:`_resolve_v4_symbols` falls back to the
+        (already canonically-sorted) OPEN-event symbol *pair* rather than
+        splicing a user-order ``details`` symbol into a sorted PoolKey slot.
+        """
+        try:
+            from almanak.framework.data.tokens import get_token_resolver
+
+            resolver = get_token_resolver()
+            resolved = resolver.resolve(token_address, chain)
+            if resolved and resolved.symbol:
+                return resolved.symbol
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _v4_no_path(position: "PositionInfo") -> tuple[Decimal, dict[str, Any], bool]:
+        """V4 path could not value this position.
+
+        VIB-5018 / VIB-4584 — never emit a wrong value at HIGH. When the V4 path
+        cannot produce an identity-faithful value, fall back ONLY to a positive
+        strategy-reported value (an explicit assertion we trust); otherwise flag
+        ``no_path`` so the snapshot confidence drops to UNAVAILABLE rather than
+        masquerading as a measured zero.
+        """
+        if position.value_usd > 0:
+            return position.value_usd, {"valuation_status": "estimated"}, True
+        return position.value_usd, {}, False
+
+    def _resolve_v4_pool_key(self, position: "PositionInfo", chain: str) -> Any | None:
+        """Resolve the canonical V4 PoolKey from the position's pool_id via the gateway.
+
+        Boundary-compliant AND connector-self-contained: routes through the
+        protocol-agnostic ``STRATEGY_RUNNER_HOOK_REGISTRY.build_pool_key_lookup``
+        capability seam (Blueprint 22), which the V4 connector backs with the
+        gateway ``MarketService.LookupV4PoolKey`` RPC — no direct chain RPC and no
+        framework→connector import. Returns ``None`` on any failure (no pool_id,
+        gateway unavailable, no lookup capability registered, NOT_FOUND, unexpected
+        error) so the caller falls back to the receipt-reported identity.
+        """
+        if self._gateway_client is None:
+            return None
+        pool_id = self._extract_v4_pool_id(position)
+        if not pool_id:
+            return None
+        try:
+            from almanak.connectors._strategy_runner_hook_registry import (
+                STRATEGY_RUNNER_HOOK_REGISTRY,
+            )
+
+            lookup = STRATEGY_RUNNER_HOOK_REGISTRY.build_pool_key_lookup(self._gateway_client)
+            if lookup is None:
+                return None
+            return lookup(pool_id, chain)
+        except Exception:
+            logger.debug(
+                "V4 PoolKey lookup failed for position=%s pool_id=%s",
+                position.position_id,
+                pool_id,
+                exc_info=True,
+            )
+            return None
+
+    @classmethod
+    def _is_v4_lp_position(cls, position: "PositionInfo") -> bool:
+        """Detect a Uniswap-V4-stream LP position by DATA SHAPE, not protocol name.
+
+        VIB-4636 capability-gate discipline: a V4 LP carries a 64-hex PoolKey hash
+        in ``details`` (``pool_id`` / legacy ``pool_address`` / ``pool``); a V3 LP
+        carries a 40-hex pool *contract* address (or none), since a V4 pool has no
+        contract address (it lives in the singleton PoolManager). This keeps the
+        framework valuer free of any hardcoded ``"uniswap_v4"`` protocol string.
+        """
+        return cls._extract_v4_pool_id(position) is not None
+
+    @staticmethod
+    def _extract_v4_pool_id(position: "PositionInfo") -> str | None:
+        """Extract the 32-byte V4 pool_id (64-hex string) from position details.
+
+        The V4 connector stashes the pool_id under ``pool_id`` or (legacy) in the
+        ``pool_address`` slot — a V4 pool has no contract address, so a 64-hex
+        ``pool_address`` is actually the pool_id. A 40-hex (EVM-address-shaped)
+        value is NOT a pool_id and is rejected.
+        """
+        for key in ("pool_id", "pool_address", "pool"):
+            raw = position.details.get(key)
+            if not isinstance(raw, str) or not raw:
+                continue
+            clean = raw.lower().removeprefix("0x")
+            if len(clean) == _V4_POOL_ID_HEX_LEN and all(c in "0123456789abcdef" for c in clean):
+                return clean
+        return None
+
+    @staticmethod
+    def _coerce_int(value: object) -> int | None:
+        """Coerce a stored liquidity / tick / amount (wei) value to int, or None if unparseable.
+
+        Empty ≠ Zero: ``None`` / ``""`` / unparseable → ``None`` (unmeasured);
+        a real numeric string or int → its int value (``"0"`` → measured zero).
+        """
+        if value is None or value == "":
+            return None
+        if not isinstance(value, int | str):
+            return None
+        try:
+            return int(value)
+        except (ValueError, TypeError):
             return None
 
     def _reprice_lending_on_chain_enriched(

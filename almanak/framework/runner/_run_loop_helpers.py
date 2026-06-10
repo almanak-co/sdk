@@ -110,7 +110,20 @@ def reconstruct_lending_basis_store(
 
 
 def _open_event_payload(ev: dict) -> dict:
-    """Project a position_events row into the runner's cache shape."""
+    """Project a position_events row into the runner's cache shape.
+
+    VIB-5018 — carries ``amount0`` / ``amount1`` (wei) so the post-restart /
+    hosted bulk-hydration fast path matches the live OPEN stamp
+    (``StrategyRunner._update_recent_open_events_cache``): without them, a
+    hosted runner that restarts with an open V4 LP hydrates an amount-less
+    cache entry and — because ``GatewayStateManager`` exposes no
+    ``get_position_events_sync`` fall-through — values the LP as UNAVAILABLE
+    instead of ESTIMATED. The hosted read surface already carries amount0/1
+    (``_proto_position_event_to_dict``), so this only stops dropping them.
+    Empty ≠ Zero: preserve a measured ``0``; only None/"" become "".
+    """
+    raw_amount0 = ev.get("amount0")
+    raw_amount1 = ev.get("amount1")
     return {
         "value_usd": str(ev.get("value_usd") or ""),
         "ledger_entry_id": str(ev.get("ledger_entry_id") or ""),
@@ -120,6 +133,8 @@ def _open_event_payload(ev: dict) -> dict:
         "liquidity": str(ev.get("liquidity") or ""),
         "token0": str(ev.get("token0") or ""),
         "token1": str(ev.get("token1") or ""),
+        "amount0": "" if raw_amount0 in (None, "") else str(raw_amount0),
+        "amount1": "" if raw_amount1 in (None, "") else str(raw_amount1),
     }
 
 
