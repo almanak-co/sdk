@@ -175,14 +175,15 @@ class TestGetPosition:
 class TestGetMarketState:
     def test_decodes_market_state(self) -> None:
         sdk = _make_sdk()
-        # 6 uint128 fields packed into 3 uint256 words; each field is 32 hex chars
+        # Solidity's struct getter ABI-encodes each uint128 in its own 32-byte
+        # word (64 hex chars), zero-padded -- 6 words total.
         encoded = (
-            hex(1000)[2:].zfill(32)  # total_supply_assets (upper 128 of word 0)
-            + hex(900)[2:].zfill(32)  # total_supply_shares (lower 128 of word 0)
-            + hex(500)[2:].zfill(32)
-            + hex(450)[2:].zfill(32)
-            + hex(1234567890)[2:].zfill(32)
-            + hex(0)[2:].zfill(32)
+            hex(1000)[2:].zfill(64)  # total_supply_assets (word 0)
+            + hex(900)[2:].zfill(64)  # total_supply_shares (word 1)
+            + hex(500)[2:].zfill(64)  # total_borrow_assets (word 2)
+            + hex(450)[2:].zfill(64)  # total_borrow_shares (word 3)
+            + hex(1234567890)[2:].zfill(64)  # last_update (word 4)
+            + hex(0)[2:].zfill(64)  # fee (word 5)
         )
         mock_result = MagicMock()
         mock_result.hex.return_value = encoded
@@ -190,13 +191,16 @@ class TestGetMarketState:
 
         state = sdk.get_market_state("0x" + "ab" * 32)
         assert state.total_supply_assets == 1000
+        assert state.total_supply_shares == 900
+        assert state.total_borrow_assets == 500
+        assert state.total_borrow_shares == 450
         assert state.last_update == 1234567890
 
     def test_market_not_found_when_state_empty_and_no_params(self) -> None:
         sdk = _make_sdk()
 
         # All zeros = empty state; then get_market_params raises MarketNotFoundError
-        empty = "0" * (32 * 6)
+        empty = "0" * (64 * 6)
         params_result = "0" * 64 * 5  # zero loan_token triggers MarketNotFoundError
 
         mock_state_result = MagicMock()

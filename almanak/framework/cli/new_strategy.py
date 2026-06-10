@@ -761,7 +761,9 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     self._loop_state = LendingLoopState.MONITORING
                     return Intent.hold(reason="Insufficient collateral for next loop, entering monitoring")
 
-                amount = self.supply_amount if self._loop_count == 0 else "all"
+                # Re-supply the full wallet balance, resolved to a concrete Decimal so
+                # on_intent_executed can track it into _total_collateral (it skips "all").
+                amount = self.supply_amount if self._loop_count == 0 else collateral_bal.balance
                 logger.info(
                     f"Loop {self._loop_count + 1}: supplying {amount} {self.collateral_token} "
                     f"on {self.lending_protocol}"
@@ -787,6 +789,34 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 if borrow_amount < Decimal("1"):
                     self._loop_state = LendingLoopState.MONITORING
                     return Intent.hold(reason="Borrow amount too small, entering monitoring")
+
+                # Refuse the borrow if it would push the projected health factor below
+                # min_health_factor. Skipped (with a warning) if HF data is unavailable.
+                try:
+                    pre = market.position_health(
+                        protocol=self.lending_protocol,
+                        market_id=self.lending_market,
+                    )
+                    borrow_price = market.price(self.borrow_token)
+                    if borrow_price and borrow_price > 0 and pre.collateral_value_usd > 0:
+                        new_debt_usd = borrow_amount * Decimal(str(borrow_price))
+                        projected_debt_usd = pre.debt_value_usd + new_debt_usd
+                        if projected_debt_usd > 0:
+                            projected_hf = (pre.collateral_value_usd * pre.lltv) / projected_debt_usd
+                            if projected_hf < self.min_health_factor:
+                                self._loop_state = LendingLoopState.MONITORING
+                                return Intent.hold(
+                                    reason=(
+                                        f"Refusing borrow: projected HF {projected_hf:.3f} "
+                                        f"< min_health_factor {self.min_health_factor} "
+                                        f"(collateral=${pre.collateral_value_usd:.2f}, "
+                                        f"projected_debt=${projected_debt_usd:.2f}, lltv={pre.lltv}) "
+                                        f"-- entering monitoring"
+                                    )
+                                )
+                except Exception as e:
+                    logger.warning(f"Projected-HF guard unavailable, proceeding with borrow: {e}")
+
                 logger.info(
                     f"Loop {self._loop_count + 1}: borrowing {borrow_amount} {self.borrow_token} "
                     f"on {self.lending_protocol}"
@@ -1456,111 +1486,24 @@ def _get_template_teardown(
         )
 
     def generate_teardown_intents(self, mode=None, market=None) -> list[Intent]:
-        """Generate intents to safely unwind the looped position.
+        """Health-factor-aware unwind: {teardown_comment}
 
-        Teardown goal: {teardown_comment}
-
-        Order matters for leveraged loops. Each loop iteration has supplied the
-        borrowed token back as collateral, so at teardown time the wallet
-        holds NO debt token and a plain ``REPAY(all)`` would revert. The safe
-        sequence sources the debt token from the deposited collateral first:
-
-          1. WITHDRAW a slice of collateral (sized at 110% of outstanding debt
-             converted via oracle prices to cover swap slippage).
-          2. SWAP that slice into the debt token.
-          3. REPAY the full outstanding debt.
-          4. WITHDRAW all remaining collateral.
-          5. SWAP residual collateral back to the debt/quote token.
+        Delegates to the framework staircase helper, which sizes each withdraw to
+        keep the post-withdraw health factor safe (avoids the single-shot revert
+        at higher leverage). See generate_leverage_loop_teardown.
         """
-        from almanak.framework.teardown import TeardownMode
+        from almanak.framework.teardown.leverage_loop import generate_leverage_loop_teardown
 
-        intents: list[Intent] = []
-        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
-
-        if self._total_borrowed > Decimal("0"):
-            # Oracle is required to size the debt-funding slice. Falling back to
-            # a heuristic would either revert on-chain or strand collateral, so
-            # raise loudly instead. Production teardown always passes ``market``;
-            # ``create_market_snapshot`` is a best-effort fallback for tests.
-            snapshot = market
-            if snapshot is None:
-                snapshot = self.create_market_snapshot()
-            borrow_price = Decimal(str(snapshot.price(self.borrow_token)))
-            collateral_price = Decimal(str(snapshot.price(self.collateral_token)))
-            if borrow_price <= 0 or collateral_price <= 0:
-                raise ValueError(
-                    "Teardown cannot size the unwind slice without oracle prices "
-                    "for {{!r}} / {{!r}} (got collateral={{}}, borrow={{}})".format(
-                        self.collateral_token,
-                        self.borrow_token,
-                        collateral_price,
-                        borrow_price,
-                    )
-                )
-
-            collateral_slice = (
-                self._total_borrowed * Decimal("1.10") * borrow_price
-            ) / collateral_price
-
-            # Step 1: withdraw the slice. A bare ``amount=`` (not ``withdraw_all``)
-            # keeps the rest of the position intact until step 4.
-            slice_kwargs = {{
-                "protocol": self.lending_protocol,
-                "token": self.collateral_token,
-                "amount": collateral_slice,
-            }}
-            if self.lending_market:
-                slice_kwargs["market_id"] = self.lending_market
-            intents.append(Intent.withdraw(**slice_kwargs))
-
-            # Step 2: swap the slice into the debt token so the repay has funds.
-            intents.append(
-                Intent.swap(
-                    from_token=self.collateral_token,
-                    to_token=self.borrow_token,
-                    amount=collateral_slice,
-                    max_slippage=max_slippage,
-                )
-            )
-
-            # Step 3: repay the full outstanding debt. Protocol implementations
-            # interpret ``repay_full=True`` as "use exact outstanding shares"
-            # which avoids dust-leftover repay-then-repay loops.
-            repay_kwargs = {{
-                "protocol": self.lending_protocol,
-                "token": self.borrow_token,
-                "repay_full": True,
-            }}
-            if self.lending_market:
-                repay_kwargs["market_id"] = self.lending_market
-            intents.append(Intent.repay(**repay_kwargs))
-
-        # Step 4: withdraw whatever collateral is left (the slice from step 1
-        # has already left the lending pool; this empties the remainder).
-        if self._total_collateral > Decimal("0"):
-            final_kwargs = {{
-                "protocol": self.lending_protocol,
-                "token": self.collateral_token,
-                "amount": "all",
-                "withdraw_all": True,
-            }}
-            if self.lending_market:
-                final_kwargs["market_id"] = self.lending_market
-            intents.append(Intent.withdraw(**final_kwargs))
-
-        # Step 5: swap residual collateral back to the debt/quote token so the
-        # wallet ends up in a single, accountable position.
-        if self._total_collateral > Decimal("0") or self._total_borrowed > Decimal("0"):
-            intents.append(
-                Intent.swap(
-                    from_token=self.collateral_token,
-                    to_token=self.borrow_token,
-                    amount="all",
-                    max_slippage=max_slippage,
-                )
-            )
-
-        return intents
+        snapshot = market if market is not None else self.create_market_snapshot()
+        return generate_leverage_loop_teardown(
+            market=snapshot,
+            protocol=self.lending_protocol,
+            collateral_token=self.collateral_token,
+            borrow_token=self.borrow_token,
+            market_id=self.lending_market or None,
+            chain=self.chain,
+            mode=mode,
+        )
 
 '''
 
@@ -2615,7 +2558,7 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             '            logger.info(f"Supply confirmed (loop {self._loop_count + 1}) -> supplied")\n'
             '        elif intent_type.value == "BORROW":\n'
             "            self._loop_state = LendingLoopState.BORROWED\n"
-            '            borrow_amt = getattr(intent, "amount", None)\n'
+            '            borrow_amt = getattr(intent, "borrow_amount", None)\n'
             "            if isinstance(borrow_amt, Decimal):\n"
             "                self._total_borrowed += borrow_amt\n"
             '            logger.info(f"Borrow confirmed (loop {self._loop_count + 1}) -> borrowed")\n'
@@ -3547,11 +3490,13 @@ _TEMPLATE_TEST_SPECS: dict[StrategyTemplate, _TemplateTestSpec] = {
         ),
         has_callbacks=True,
         has_teardown_intents=True,
-        # Inject totals so the buffered-slice teardown has something to size,
-        # and stub ``create_market_snapshot`` so the no-``market``-arg call
-        # path used by the auto-rendered teardown tests still resolves oracle
-        # prices. The real production caller (TeardownManager) always passes
-        # ``market`` -- this is a test-only safety net.
+        # Inject totals plus a stubbed ``create_market_snapshot`` so the
+        # no-``market``-arg teardown tests resolve without a network call. The
+        # teardown now delegates to the health-factor-aware staircase helper,
+        # which reads ``position_health`` (collateral/debt/lltv) to size the
+        # unwind -- so the stub must expose a numeric health snapshot, prices,
+        # and balances. The real production caller (TeardownManager) always
+        # passes ``market``; this is a test-only safety net.
         position_setup=(
             'strategy._loop_state = "borrowed"\n'
             "        strategy._loop_count = 1\n"
@@ -3559,6 +3504,15 @@ _TEMPLATE_TEST_SPECS: dict[StrategyTemplate, _TemplateTestSpec] = {
             '        strategy._total_collateral = Decimal("0.5")\n'
             "        _lending_loop_snapshot = MagicMock()\n"
             '        _lending_loop_snapshot.price.return_value = Decimal("1")\n'
+            "        _ll_balance = MagicMock()\n"
+            '        _ll_balance.balance = Decimal("0")\n'
+            "        _lending_loop_snapshot.balance.return_value = _ll_balance\n"
+            "        _ll_health = MagicMock()\n"
+            '        _ll_health.collateral_value_usd = Decimal("1000")\n'
+            '        _ll_health.debt_value_usd = Decimal("500")\n'
+            '        _ll_health.lltv = Decimal("0.83")\n'
+            '        _ll_health.health_factor = Decimal("1.66")\n'
+            "        _lending_loop_snapshot.position_health.return_value = _ll_health\n"
             "        strategy.create_market_snapshot = lambda: _lending_loop_snapshot"
         ),
         transitions=(
@@ -3976,6 +3930,16 @@ def _render_teardown_tests(
     spec: "_TemplateTestSpec",
 ) -> str:
     """Teardown contract tests: returns summary, soft/hard modes, slippage."""
+    # The "returns a list" contract tests call generate_teardown_intents() with
+    # no market arg, so the strategy falls back to create_market_snapshot(). For
+    # templates whose teardown reads on-chain state (e.g. lending_loop, via the
+    # health-factor-aware staircase helper), reuse the same position_setup that
+    # stubs create_market_snapshot -- otherwise the fallback hits the network.
+    if spec.has_teardown_intents and spec.position_setup:
+        returns_list_setup = spec.position_setup
+    else:
+        returns_list_setup = "# no held position required; teardown returns an empty list"
+
     position_tests = ""
     if spec.has_teardown_intents and spec.position_setup:
         position_tests = f'''
@@ -4051,6 +4015,37 @@ def _render_teardown_tests(
         positions = getattr(summary, "positions", None)
         assert positions is not None, "summary must have a .positions attribute"
         assert len(positions) >= 1, "Expected at least one position to be reported"
+
+    def test_generate_teardown_intents_no_position_returns_empty_list(
+        self, strategy: {class_name}
+    ) -> None:
+        """A fresh strategy with no open position returns an empty list (no raise).
+
+        The held-position path is covered above; this pins the []/no-raise
+        contract on a FRESH strategy. ``create_market_snapshot`` is stubbed to a
+        no-position snapshot so the no-``market``-arg fallback stays network-free
+        (the teardown helper reads price/balance/position_health off it).
+        """
+        from almanak.framework.teardown import TeardownMode
+
+        _empty = MagicMock()
+        _empty.price.return_value = Decimal("1")
+        _empty_bal = MagicMock()
+        _empty_bal.balance = Decimal("0")
+        _empty.balance.return_value = _empty_bal
+        _empty_health = MagicMock()
+        _empty_health.collateral_value_usd = Decimal("0")
+        _empty_health.debt_value_usd = Decimal("0")
+        _empty_health.lltv = Decimal("0.83")
+        _empty_health.health_factor = Decimal("0")
+        _empty.position_health.return_value = _empty_health
+        strategy.create_market_snapshot = lambda: _empty
+
+        intents = strategy.generate_teardown_intents(mode=TeardownMode.SOFT)
+        assert isinstance(intents, list), (
+            f"Must return a list, got {{type(intents).__name__}}"
+        )
+        assert intents == [], "fresh strategy (no position) must yield no teardown intents"
 '''
 
     return f'''
@@ -4089,6 +4084,7 @@ class Test{class_name}Teardown:
         """Must return a list (possibly empty) of Intent-like objects."""
         from almanak.framework.teardown import TeardownMode
 
+        {returns_list_setup}
         intents = strategy.generate_teardown_intents(mode=TeardownMode.SOFT)
         assert isinstance(intents, list), (
             f"Must return a list, got {{type(intents).__name__}}"
@@ -4100,6 +4096,7 @@ class Test{class_name}Teardown:
         """HARD mode must also return a list (possibly empty)."""
         from almanak.framework.teardown import TeardownMode
 
+        {returns_list_setup}
         intents = strategy.generate_teardown_intents(mode=TeardownMode.HARD)
         assert isinstance(intents, list)
 {position_tests}

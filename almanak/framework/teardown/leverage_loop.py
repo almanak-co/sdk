@@ -1,0 +1,314 @@
+"""Health-factor-aware unwind for leverage-loop strategies.
+
+A leverage loop ends with all the borrowed token swapped back into collateral
+and supplied, so at teardown the wallet holds ~no debt token. The naive unwind
+(``REPAY(all) -> WITHDRAW(all)``) reverts: there is nothing to repay with, and
+even after funding the repay, withdrawing enough collateral in one shot to cover
+the full debt trips the protocol's on-chain LLTV check whenever the position's
+health factor is below ~1.9.
+
+``generate_leverage_loop_teardown`` solves this by reading the live on-chain
+position (collateral, debt, LLTV) and emitting a *staircase* of
+``WITHDRAW -> SWAP -> REPAY`` rounds. Each round withdraws only as much
+collateral as keeps the post-withdraw health factor above a floor, swaps it to
+the debt token, and repays. As debt shrinks, the next round's safe withdraw
+grows, so the position unwinds in a small bounded number of rounds before the
+final ``WITHDRAW(all)`` + residual swap. The whole staircase is computed up
+front from the current health snapshot, so it executes as one intent list.
+
+If the position's health factor is already so low that no collateral can be
+withdrawn safely, no withdraw-first sequence can unwind it (only an atomic
+flash-loan repay can) and the helper raises ``LeverageUnwindError`` rather than
+emitting an intent that would revert on-chain.
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any
+
+from almanak.framework.intents.base import BaseIntent
+from almanak.framework.intents.vocabulary import Intent
+
+if TYPE_CHECKING:  # pragma: no cover
+    from almanak.framework.teardown.models import TeardownMode
+
+
+class LeverageUnwindError(RuntimeError):
+    """Raised when a leveraged position cannot be unwound by withdraw-first.
+
+    Signals that the health factor is too low for any safe collateral
+    withdrawal — the caller should escalate (flash-loan deleverage or manual
+    intervention) rather than emit a reverting teardown.
+    """
+
+
+# Debt below this USD value is treated as fully repaid.
+_DUST_USD = Decimal("0.01")
+
+# Extra margin below the swap's guaranteed min-out so an intermediate PARTIAL
+# repay never asks for more loan token than the round's swap actually delivered.
+_REPAY_SAFETY_HAIRCUT = Decimal("0.01")
+
+# Extra collateral withdrawn on the debt-clearing round so the final full repay
+# stays funded despite swap slippage and interest accrued during teardown.
+_SETTLE_BUFFER = Decimal("0.02")
+
+
+def generate_leverage_loop_teardown(
+    *,
+    market: Any,
+    protocol: str,
+    collateral_token: str,
+    borrow_token: str,
+    market_id: str | None = None,
+    chain: str | None = None,
+    mode: TeardownMode | None = None,
+    hf_floor: Decimal = Decimal("1.05"),
+    hf_floor_hard: Decimal = Decimal("1.01"),
+    max_slippage: Decimal = Decimal("0.005"),
+    max_slippage_hard: Decimal = Decimal("0.03"),
+    max_rounds: int = 12,
+    swap_protocol: str | None = None,
+) -> list[BaseIntent]:
+    """Build a health-factor-aware unwind for a leverage-loop position.
+
+    Args:
+        market: MarketSnapshot exposing ``position_health(...)`` and ``price(...)``.
+        protocol: Lending protocol ("aave_v3", "morpho_blue", "compound_v3").
+        collateral_token / borrow_token: Position legs.
+        market_id: Isolated-market id (required for morpho_blue, ignored for aave_v3).
+        chain: Execution chain (defaults to the strategy's primary chain).
+        mode: TeardownMode; HARD uses a lower HF floor and wider slippage so an
+            emergency unwind makes progress even close to liquidation.
+        hf_floor / hf_floor_hard: Minimum post-withdraw health factor per round.
+        max_slippage / max_slippage_hard: Swap slippage cap per round.
+        max_rounds: Backstop on the number of staircase rounds.
+        swap_protocol: Optional aggregator to route every collateral->debt swap
+            through (e.g. "enso"). Required for exotic collateral with no direct
+            DEX pool against the debt token (e.g. sUSDe/USDC, which has no
+            Uniswap V3 pool); left None the swap uses the default router.
+
+    Returns:
+        Ordered list of intents: N x (withdraw, swap, repay) then withdraw-all +
+        residual swap. Empty when there is no position.
+
+    Raises:
+        LeverageUnwindError: Health factor too low to withdraw any collateral
+            safely (needs flash-loan deleverage).
+        ValueError: Health or price data unavailable (cannot size the unwind).
+    """
+    is_hard = _is_hard_mode(mode)
+    floor = hf_floor_hard if is_hard else hf_floor
+    slippage = max_slippage_hard if is_hard else max_slippage
+
+    # Prices are needed both to size the staircase and as overrides for
+    # cross-asset Morpho markets (collateral != debt token), where
+    # position_health cannot derive USD values on its own.
+    collateral_price = _price(market, collateral_token)
+    borrow_price = _price(market, borrow_token)
+
+    health = market.position_health(
+        protocol=protocol,
+        market_id=market_id or "",
+        collateral_price_usd=collateral_price if collateral_price > 0 else None,
+        debt_price_usd=borrow_price if borrow_price > 0 else None,
+    )
+    collateral_usd = Decimal(str(health.collateral_value_usd))
+    debt_usd = Decimal(str(health.debt_value_usd))
+    lltv = Decimal(str(health.lltv))
+
+    intents: list[BaseIntent] = []
+
+    if debt_usd <= _DUST_USD:
+        if collateral_usd > _DUST_USD:
+            intents.append(_withdraw(protocol, collateral_token, withdraw_all=True, market_id=market_id, chain=chain))
+            intents.append(_swap_all(collateral_token, borrow_token, slippage, chain, swap_protocol))
+        return intents
+
+    if lltv <= 0:
+        raise ValueError(f"position_health returned non-positive LLTV ({lltv}); cannot size unwind")
+
+    if collateral_price <= 0 or borrow_price <= 0:
+        raise ValueError(
+            f"Missing oracle price (collateral={collateral_price}, borrow={borrow_price}); cannot size unwind"
+        )
+
+    # Wallet-first: repay any debt token already sitting in the wallet before
+    # withdrawing collateral. This reduces health-factor pressure for free (no
+    # withdraw/swap gas) and shrinks what the staircase has to unwind.
+    #
+    # CRITICAL: only emit repay_full when the wallet is known to cover the whole
+    # debt. ``repay_full`` sends MAX_UINT256 (Aave/Compound) or the position's
+    # full borrow shares (Morpho), which makes Morpho and Compound pull the
+    # ENTIRE outstanding debt from the wallet and revert on a shortfall. (Aave
+    # caps at the wallet balance, but the helper must not rely on that.) When the
+    # wallet covers only part of the debt, repay an explicit partial amount.
+    wallet_borrow = _wallet_balance(market, borrow_token)
+    remaining_debt_usd = debt_usd
+    if wallet_borrow > 0:
+        if wallet_borrow * borrow_price >= debt_usd:
+            intents.append(_repay_full(protocol, borrow_token, market_id=market_id, chain=chain))
+            remaining_debt_usd = Decimal("0")
+        else:
+            repay_tokens = wallet_borrow * (Decimal("1") - _REPAY_SAFETY_HAIRCUT)
+            intents.append(_repay(protocol, borrow_token, amount=repay_tokens, market_id=market_id, chain=chain))
+            remaining_debt_usd -= repay_tokens * borrow_price
+
+    # Staircase: each round withdraws collateral, swaps it to the debt token, and
+    # repays. When the position is healthy enough that one round's swap can fund
+    # the whole remaining debt, that round withdraws a buffered slice and repays
+    # in full (the wallet then covers it). While the health factor still caps the
+    # withdraw below what the full debt needs, the round repays ONLY what the swap
+    # is guaranteed to deliver -- an explicit PARTIAL repay. Using repay_full on a
+    # partial slice would pull the entire debt and revert on Morpho/Compound.
+    remaining_collateral_usd = collateral_usd
+    for _ in range(max_rounds):
+        if remaining_debt_usd <= _DUST_USD:
+            break
+
+        # safe slice solves (collateral - slice) * lltv / debt == floor
+        safe_slice_usd = remaining_collateral_usd - (floor * remaining_debt_usd / lltv)
+        if safe_slice_usd <= _DUST_USD:
+            raise LeverageUnwindError(
+                f"Cannot unwind {protocol} {collateral_token}/{borrow_token}: health factor too low "
+                f"for a safe withdrawal (collateral=${remaining_collateral_usd:.2f}, "
+                f"debt=${remaining_debt_usd:.2f}, lltv={lltv}, hf_floor={floor}). "
+                "Needs flash-loan deleverage or manual intervention."
+            )
+
+        # Slice whose swap proceeds cover the WHOLE remaining debt, plus a buffer
+        # so the final full repay stays funded despite slippage and interest.
+        settle_slice_usd = (remaining_debt_usd / (Decimal("1") - slippage)) * (Decimal("1") + _SETTLE_BUFFER)
+
+        if safe_slice_usd >= settle_slice_usd:
+            # Healthy enough to clear the debt this round: buffered withdraw, swap,
+            # then repay the full remaining debt (the wallet now covers it).
+            slice_tokens = settle_slice_usd / collateral_price
+            intents.append(_withdraw(protocol, collateral_token, amount=slice_tokens, market_id=market_id, chain=chain))
+            intents.append(_swap(collateral_token, borrow_token, slice_tokens, slippage, chain, swap_protocol))
+            intents.append(_repay_full(protocol, borrow_token, market_id=market_id, chain=chain))
+            remaining_collateral_usd -= settle_slice_usd
+            remaining_debt_usd = Decimal("0")
+            break
+
+        # HF-constrained round: withdraw the largest safe slice and repay only the
+        # swap's guaranteed output (explicit partial amount, never repay_full).
+        slice_tokens = safe_slice_usd / collateral_price
+        repay_usd = safe_slice_usd * (Decimal("1") - slippage) * (Decimal("1") - _REPAY_SAFETY_HAIRCUT)
+        repay_tokens = repay_usd / borrow_price
+        intents.append(_withdraw(protocol, collateral_token, amount=slice_tokens, market_id=market_id, chain=chain))
+        intents.append(_swap(collateral_token, borrow_token, slice_tokens, slippage, chain, swap_protocol))
+        intents.append(_repay(protocol, borrow_token, amount=repay_tokens, market_id=market_id, chain=chain))
+
+        remaining_debt_usd -= repay_usd
+        remaining_collateral_usd -= safe_slice_usd
+    else:
+        raise LeverageUnwindError(
+            f"Could not unwind {protocol} {collateral_token}/{borrow_token} within {max_rounds} rounds "
+            f"(remaining debt ~${remaining_debt_usd:.2f}). Increase max_rounds or use flash-loan deleverage."
+        )
+
+    intents.append(_withdraw(protocol, collateral_token, withdraw_all=True, market_id=market_id, chain=chain))
+    intents.append(_swap_all(collateral_token, borrow_token, slippage, chain, swap_protocol))
+    return intents
+
+
+def _price(market: Any, token: str) -> Decimal:
+    """Oracle price of ``token``; 0 if unavailable."""
+    try:
+        p = market.price(token)
+        return Decimal(str(p)) if p else Decimal("0")
+    except Exception:
+        return Decimal("0")
+
+
+def _wallet_balance(market: Any, token: str) -> Decimal:
+    """Token amount of ``token`` already in the wallet; 0 if unavailable."""
+    try:
+        bal = market.balance(token)
+        amount = getattr(bal, "balance", bal)
+        return Decimal(str(amount))
+    except Exception:
+        return Decimal("0")
+
+
+def _is_hard_mode(mode: TeardownMode | None) -> bool:
+    if mode is None:
+        return False
+    return getattr(mode, "name", "").upper() == "HARD" or str(mode).upper().endswith("HARD")
+
+
+def _withdraw(
+    protocol: str,
+    token: str,
+    *,
+    amount: Decimal | None = None,
+    withdraw_all: bool = False,
+    market_id: str | None,
+    chain: str | None,
+) -> BaseIntent:
+    kwargs: dict[str, Any] = {
+        "protocol": protocol,
+        "token": token,
+        "amount": amount if amount is not None else Decimal("0"),
+        "withdraw_all": withdraw_all,
+    }
+    if market_id:
+        kwargs["market_id"] = market_id
+    if chain:
+        kwargs["chain"] = chain
+    return Intent.withdraw(**kwargs)
+
+
+def _repay_full(protocol: str, token: str, *, market_id: str | None, chain: str | None) -> BaseIntent:
+    kwargs: dict[str, Any] = {"protocol": protocol, "token": token, "repay_full": True}
+    if market_id:
+        kwargs["market_id"] = market_id
+    if chain:
+        kwargs["chain"] = chain
+    return Intent.repay(**kwargs)
+
+
+def _repay(protocol: str, token: str, *, amount: Decimal, market_id: str | None, chain: str | None) -> BaseIntent:
+    kwargs: dict[str, Any] = {"protocol": protocol, "token": token, "amount": amount, "repay_full": False}
+    if market_id:
+        kwargs["market_id"] = market_id
+    if chain:
+        kwargs["chain"] = chain
+    return Intent.repay(**kwargs)
+
+
+def _swap(
+    from_token: str,
+    to_token: str,
+    amount: Decimal,
+    slippage: Decimal,
+    chain: str | None,
+    protocol: str | None = None,
+) -> BaseIntent:
+    return Intent.swap(
+        from_token=from_token,
+        to_token=to_token,
+        amount=amount,
+        max_slippage=slippage,
+        protocol=protocol,
+        chain=chain,
+    )
+
+
+def _swap_all(
+    from_token: str,
+    to_token: str,
+    slippage: Decimal,
+    chain: str | None,
+    protocol: str | None = None,
+) -> BaseIntent:
+    return Intent.swap(
+        from_token=from_token,
+        to_token=to_token,
+        amount="all",
+        max_slippage=slippage,
+        protocol=protocol,
+        chain=chain,
+    )

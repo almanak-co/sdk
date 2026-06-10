@@ -54,7 +54,9 @@ def create_strategy(config: dict | None = None) -> MorphoLoopingStrategy:
         "initial_collateral": "1.0",
         "target_loops": 3,
         "target_ltv": "0.75",
+        "lltv": "0.86",
         "min_health_factor": "1.5",
+        "target_min_hf": "1.10",
         "swap_slippage": "0.005",
         "force_action": "",
     }
@@ -75,7 +77,12 @@ def create_strategy(config: dict | None = None) -> MorphoLoopingStrategy:
     strategy.initial_collateral = Decimal(str(default_config["initial_collateral"]))
     strategy.target_loops = int(default_config["target_loops"])
     strategy.target_ltv = Decimal(str(default_config["target_ltv"]))
+    # VIB-4491: lltv + target_min_hf drive the projected-HF borrow guard. The
+    # production __init__ requires lltv and defaults target_min_hf to 1.10; this
+    # __new__-based fixture must set them explicitly or the borrow path AttributeErrors.
+    strategy.lltv = Decimal(str(default_config["lltv"]))
     strategy.min_health_factor = Decimal(str(default_config["min_health_factor"]))
+    strategy.target_min_hf = Decimal(str(default_config["target_min_hf"]))
     strategy.swap_slippage = Decimal(str(default_config["swap_slippage"]))
     strategy.force_action = str(default_config.get("force_action", "")).lower()
 
@@ -90,6 +97,44 @@ def create_strategy(config: dict | None = None) -> MorphoLoopingStrategy:
     strategy._current_health_factor = Decimal("0")
 
     return strategy
+
+
+def _market_with_health(
+    collateral_usd: str,
+    debt_usd: str,
+    lltv: str = "0.86",
+    col_price: str = "3400",
+    borrow_price: str = "1",
+    wallet_borrow: str = "0",
+    wallet_collateral: str = "0",
+) -> MagicMock:
+    """MagicMock market exposing price/balance/position_health for the staircase helper.
+
+    Teardown now delegates to ``framework.teardown.leverage_loop``, which sizes
+    the unwind from the live on-chain position rather than internal tracking.
+    """
+    market = MagicMock()
+    market.price.side_effect = lambda t: {
+        "wstETH": Decimal(col_price),
+        "USDC": Decimal(borrow_price),
+    }.get(t, Decimal("1"))
+
+    def _bal(t: str) -> MagicMock:
+        b = MagicMock()
+        b.balance = Decimal(wallet_borrow) if t == "USDC" else Decimal(wallet_collateral)
+        return b
+
+    market.balance.side_effect = _bal
+
+    health = MagicMock()
+    health.collateral_value_usd = Decimal(collateral_usd)
+    health.debt_value_usd = Decimal(debt_usd)
+    health.lltv = Decimal(lltv)
+    health.health_factor = (
+        Decimal(collateral_usd) * Decimal(lltv) / Decimal(debt_usd) if Decimal(debt_usd) > 0 else Decimal("Infinity")
+    )
+    market.position_health.return_value = health
+    return market
 
 
 @pytest.fixture
@@ -293,39 +338,28 @@ class TestTeardown:
     def test_generate_teardown_intents(self, strategy: MorphoLoopingStrategy) -> None:
         from almanak.framework.teardown import TeardownMode
 
-        strategy._total_collateral = Decimal("3.0")
-        strategy._total_borrowed = Decimal("5000")
-
-        market = MagicMock()
-        market.price.side_effect = lambda token: {
-            "USDC": Decimal("1"),
-            "wstETH": Decimal("3400"),
-        }[token]
-
+        # Live position: ~$10,200 wstETH collateral, $5,000 USDC debt (HF ~1.75).
+        market = _market_with_health(collateral_usd="10200", debt_usd="5000")
         intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=market)
 
-        assert [intent.intent_type.value for intent in intents] == [
-            "WITHDRAW",
-            "SWAP",
-            "REPAY",
-            "WITHDRAW",
-            "SWAP",
-        ]
+        kinds = [intent.intent_type.value for intent in intents]
+        # Staircase: WITHDRAW -> SWAP -> REPAY round(s), then WITHDRAW(all) + consolidate.
+        assert "WITHDRAW" in kinds and "SWAP" in kinds and "REPAY" in kinds
+        assert kinds[-1] == "SWAP"  # ends consolidated to borrow_token
 
-    def test_generate_teardown_intents_wallet_collateral_only(self, strategy: MorphoLoopingStrategy) -> None:
+    def test_generate_teardown_no_debt_withdraws_and_consolidates(self, strategy: MorphoLoopingStrategy) -> None:
         from almanak.framework.teardown import TeardownMode
 
-        strategy._pending_wallet_collateral = Decimal("1.25")
+        market = _market_with_health(collateral_usd="10200", debt_usd="0")
+        intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=market)
 
-        intents = strategy.generate_teardown_intents(TeardownMode.SOFT)
-
-        assert len(intents) == 1
-        assert intents[0].intent_type.value == "SWAP"
+        assert [intent.intent_type.value for intent in intents] == ["WITHDRAW", "SWAP"]
 
     def test_generate_teardown_intents_no_position(self, strategy: MorphoLoopingStrategy) -> None:
         from almanak.framework.teardown import TeardownMode
 
-        intents = strategy.generate_teardown_intents(TeardownMode.SOFT)
+        market = _market_with_health(collateral_usd="0", debt_usd="0")
+        intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=market)
 
         assert len(intents) == 0
 
@@ -388,7 +422,8 @@ class TestOnIntentExecuted:
 
         from almanak.framework.teardown import TeardownMode
 
-        intents = strategy.generate_teardown_intents(TeardownMode.SOFT)
+        market = _market_with_health(collateral_usd="3400", debt_usd="0")
+        intents = strategy.generate_teardown_intents(TeardownMode.SOFT, market=market)
         intent_types = [i.intent_type.value for i in intents]
         assert "WITHDRAW" in intent_types
 
@@ -509,7 +544,9 @@ class TestOnIntentExecuted:
         strategy.on_intent_executed(mock_intent, success=True, result=None)
         assert strategy._total_borrowed == Decimal("0")
 
-    def test_restart_after_withdraw_still_schedules_final_swap(self, strategy: MorphoLoopingStrategy) -> None:
+    def test_teardown_reads_onchain_after_restart(self, strategy: MorphoLoopingStrategy) -> None:
+        # Teardown sizing reads the live on-chain position, so a process restart
+        # (which loses internal _total_* tracking) does not affect the unwind.
         strategy._total_collateral = Decimal("2.0")
 
         withdraw = MagicMock()
@@ -523,8 +560,11 @@ class TestOnIntentExecuted:
 
         from almanak.framework.teardown import TeardownMode
 
-        intents = fresh.generate_teardown_intents(TeardownMode.SOFT)
-        assert [intent.intent_type.value for intent in intents] == ["SWAP"]
+        # On-chain still shows a live position regardless of restarted state.
+        market = _market_with_health(collateral_usd="6800", debt_usd="3000")
+        intents = fresh.generate_teardown_intents(TeardownMode.SOFT, market=market)
+        kinds = [intent.intent_type.value for intent in intents]
+        assert "WITHDRAW" in kinds and kinds[-1] == "SWAP"
 
     def test_swap_to_usdc_clears_pending_wallet_collateral(self, strategy: MorphoLoopingStrategy) -> None:
         strategy._pending_wallet_collateral = Decimal("2.0")
@@ -612,15 +652,7 @@ class TestOnIntentExecuted:
 
         from almanak.framework.teardown import TeardownMode
 
-        intents = strategy.generate_teardown_intents(TeardownMode.SOFT)
-        assert [intent.intent_type.value for intent in intents] == ["SWAP"]
-
-        swap = MagicMock()
-        swap.intent_type.value = "SWAP"
-        swap.from_token = "wstETH"
-        swap.to_token = "USDC"
-        swap.amount = "all"
-        strategy.on_intent_executed(swap, success=True, result=None)
-
-        assert strategy._pending_wallet_collateral == Decimal("0")
-        assert strategy.generate_teardown_intents(TeardownMode.SOFT) == []
+        # On-chain position is fully unwound (debt repaid, collateral withdrawn),
+        # so the helper-based teardown emits nothing.
+        market = _market_with_health(collateral_usd="0", debt_usd="0")
+        assert strategy.generate_teardown_intents(TeardownMode.SOFT, market=market) == []

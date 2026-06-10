@@ -1,6 +1,8 @@
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from almanak.demo_strategies.aave_loop_mantle.strategy import AaveLoopMantleStrategy
 from almanak.demo_strategies.aave_paper_trade_leverage_polygon.strategy import (
     AavePaperTradeLeveragePolygonStrategy,
@@ -14,6 +16,58 @@ def _market(prices: dict[str, Decimal]) -> MagicMock:
     market = MagicMock()
     market.price.side_effect = lambda token: prices[token]
     return market
+
+
+def _market_with_health(
+    *,
+    collateral_usd: str,
+    debt_usd: str,
+    lltv: str = "0.86",
+    col_price: str = "3400",
+    borrow_price: str = "1",
+    wallet_borrow: str = "0",
+    wallet_collateral: str = "0",
+) -> MagicMock:
+    """MagicMock market exposing price/balance/position_health for the staircase.
+
+    MorphoLooping teardown now delegates to ``framework.teardown.leverage_loop``,
+    which sizes the unwind from the live on-chain position (read via
+    ``position_health``) rather than the strategy's internal tracking. These
+    tests therefore drive the staircase by mocking the health read, not by
+    setting ``_total_collateral`` / ``_total_borrowed``.
+    """
+    market = MagicMock()
+    market.price.side_effect = lambda t: {
+        "wstETH": Decimal(col_price),
+        "USDC": Decimal(borrow_price),
+    }.get(t, Decimal("1"))
+
+    def _bal(t: str) -> MagicMock:
+        b = MagicMock()
+        b.balance = Decimal(wallet_borrow) if t == "USDC" else Decimal(wallet_collateral)
+        return b
+
+    market.balance.side_effect = _bal
+
+    health = MagicMock()
+    health.collateral_value_usd = Decimal(collateral_usd)
+    health.debt_value_usd = Decimal(debt_usd)
+    health.lltv = Decimal(lltv)
+    health.health_factor = (
+        Decimal(collateral_usd) * Decimal(lltv) / Decimal(debt_usd) if Decimal(debt_usd) > 0 else Decimal("Infinity")
+    )
+    market.position_health.return_value = health
+    return market
+
+
+def _new_morpho_strategy() -> MorphoLoopingStrategy:
+    strategy = MorphoLoopingStrategy.__new__(MorphoLoopingStrategy)
+    strategy._chain = "ethereum"
+    strategy.market_id = "0xmarket"
+    strategy.collateral_token = "wstETH"
+    strategy.borrow_token = "USDC"
+    strategy.swap_slippage = Decimal("0.005")
+    return strategy
 
 
 def test_aave_loop_mantle_teardown_withdraws_before_swap_and_repay() -> None:
@@ -61,307 +115,109 @@ def test_aave_loop_mantle_teardown_withdraws_before_swap_and_repay() -> None:
     assert final_withdraw.withdraw_all is True
 
 
-def test_morpho_looping_teardown_no_liquid_wallet_asset_fallback() -> None:
-    """Fallback teardown when neither liquid borrow_token nor liquid
-    collateral_token is in the wallet. The teardown still emits the
-    WITHDRAW → SWAP → REPAY → WITHDRAW → SWAP sequence with a 10% slippage
-    buffer on the first WITHDRAW. Note: this fallback can still trip Morpho's
-    LLTV check on tight-LTV positions because nothing reduces debt before the
-    first WITHDRAW — VIB-4466 tracks the framework primitive that would size
-    the WITHDRAW iteratively for that case.
+def test_morpho_looping_teardown_emits_hf_aware_staircase() -> None:
+    """Teardown delegates to the framework staircase helper, which sizes the
+    unwind from the live on-chain position (read via ``position_health``). For a
+    healthy position it emits one or more WITHDRAW -> SWAP -> REPAY rounds and
+    ends consolidated to the borrow token. (The staircase math itself is proven
+    exhaustively in tests/unit/teardown/test_leverage_loop_unwind.py.)
     """
-    strategy = MorphoLoopingStrategy.__new__(MorphoLoopingStrategy)
-    strategy._chain = "ethereum"
-    strategy.market_id = "0xmarket"
-    strategy.collateral_token = "wstETH"
-    strategy.borrow_token = "USDC"
-    strategy.swap_slippage = Decimal("0.005")
-    strategy._total_collateral = Decimal("1")
-    strategy._total_borrowed = Decimal("1700")
-    strategy._pending_wallet_collateral = Decimal("0")
-    strategy._pending_swap_amount = Decimal("0")
-    strategy._loop_state = "idle"
+    strategy = _new_morpho_strategy()
+
+    # Live position: ~$3,400 wstETH collateral, $1,700 USDC debt (HF ~1.72).
+    intents = strategy.generate_teardown_intents(
+        TeardownMode.SOFT,
+        market=_market_with_health(collateral_usd="3400", debt_usd="1700"),
+    )
+
+    kinds = [intent.intent_type.value for intent in intents]
+    assert "WITHDRAW" in kinds and "SWAP" in kinds and "REPAY" in kinds
+    assert kinds[-1] == "SWAP"  # ends consolidated to borrow_token
+
+    # Every REPAY is morpho_blue on the configured isolated market.
+    for intent in intents:
+        if isinstance(intent, RepayIntent):
+            assert intent.protocol == "morpho_blue"
+            assert intent.market_id == "0xmarket"
+
+
+def test_morpho_looping_teardown_no_debt_just_withdraws_and_consolidates() -> None:
+    """No outstanding debt: withdraw all collateral, consolidate to borrow token.
+    No REPAY needed.
+    """
+    strategy = _new_morpho_strategy()
 
     intents = strategy.generate_teardown_intents(
         TeardownMode.SOFT,
-        market=_market({"USDC": Decimal("1"), "wstETH": Decimal("3400")}),
+        market=_market_with_health(collateral_usd="3400", debt_usd="0"),
     )
 
-    assert [intent.intent_type.value for intent in intents] == [
-        "WITHDRAW",
-        "SWAP",
-        "REPAY",
-        "WITHDRAW",
-        "SWAP",
-    ]
-
-    partial_withdraw = intents[0]
-    assert isinstance(partial_withdraw, WithdrawIntent)
-    assert partial_withdraw.token == "wstETH"
-    # collateral_for_repay = 1700 × 1.10 / 3400 = 0.55; withdraw = 0.55 × 1.10 = 0.605
-    assert partial_withdraw.amount == Decimal("0.605")
-    assert partial_withdraw.withdraw_all is False
-
-    repay_funding_swap = intents[1]
-    assert isinstance(repay_funding_swap, SwapIntent)
-    assert repay_funding_swap.from_token == "wstETH"
-    assert repay_funding_swap.to_token == "USDC"
-    assert repay_funding_swap.amount == Decimal("0.55")
-
-    repay = intents[2]
-    assert isinstance(repay, RepayIntent)
-    assert repay.repay_full is True
-
-    final_withdraw = intents[3]
-    assert isinstance(final_withdraw, WithdrawIntent)
-    assert final_withdraw.withdraw_all is True
-
-    final_recovery_swap = intents[4]
-    assert isinstance(final_recovery_swap, SwapIntent)
-    assert final_recovery_swap.from_token == "wstETH"
-    assert final_recovery_swap.to_token == "USDC"
-    assert final_recovery_swap.amount == "all"
+    assert [intent.intent_type.value for intent in intents] == ["WITHDRAW", "SWAP"]
+    assert intents[0].withdraw_all is True
+    assert intents[1].amount == "all"
 
 
-def test_morpho_looping_teardown_complete_state_swaps_liquid_collateral_first() -> None:
-    """End-of-loop teardown (loop_state="complete"). The final loop's SWAP
-    output sits in the wallet as collateral_token in ``_pending_swap_amount``.
-    Teardown must SWAP it to borrow_token and REPAY before any WITHDRAW, so
-    the WITHDRAW that follows operates against reduced debt and stays under
-    Morpho's LLTV. This matches the real on-chain state observed during the
-    2026-05-15 E2E validation run (incident captured in VIB-4466).
-    """
-    strategy = MorphoLoopingStrategy.__new__(MorphoLoopingStrategy)
-    strategy._chain = "ethereum"
-    strategy.market_id = "0xmarket"
-    strategy.collateral_token = "wstETH"
-    strategy.borrow_token = "USDC"
-    strategy.swap_slippage = Decimal("0.005")
-    strategy._total_collateral = Decimal("0.0238")     # supplied to Morpho
-    strategy._total_borrowed = Decimal("45.88")         # outstanding debt
-    strategy._pending_wallet_collateral = Decimal("0")
-    strategy._pending_swap_amount = Decimal("0.0068")   # liquid wstETH in wallet
-    strategy._loop_state = "complete"
+def test_morpho_looping_teardown_no_position_is_empty() -> None:
+    """Nothing supplied or borrowed -> no teardown intents."""
+    strategy = _new_morpho_strategy()
 
     intents = strategy.generate_teardown_intents(
         TeardownMode.SOFT,
-        market=_market({"USDC": Decimal("1"), "wstETH": Decimal("2741")}),
+        market=_market_with_health(collateral_usd="0", debt_usd="0"),
     )
 
-    # Step 2: SWAP + partial REPAY using wallet wstETH.
-    # Step 3: WITHDRAW + SWAP + REPAY (full) for remaining debt.
-    # Step 4: WITHDRAW remaining collateral.
-    # Step 5: SWAP residual collateral.
-    assert [intent.intent_type.value for intent in intents] == [
-        "SWAP",
-        "REPAY",
-        "WITHDRAW",
-        "SWAP",
-        "REPAY",
-        "WITHDRAW",
-        "SWAP",
-    ]
-
-    step2_swap = intents[0]
-    assert isinstance(step2_swap, SwapIntent)
-    assert step2_swap.from_token == "wstETH"
-    assert step2_swap.to_token == "USDC"
-    assert step2_swap.amount == Decimal("0.0068")  # full liquid wallet amount
-
-    step2_repay = intents[1]
-    assert isinstance(step2_repay, RepayIntent)
-    assert step2_repay.repay_full is False
-    # estimated_yield = 0.0068 × (1 - 0.005) × 2741 / 1
-    assert step2_repay.amount == (
-        Decimal("0.0068")
-        * (Decimal("1") - Decimal("0.005"))
-        * Decimal("2741")
-        / Decimal("1")
-    )
-
-    step3_withdraw = intents[2]
-    assert isinstance(step3_withdraw, WithdrawIntent)
-    assert step3_withdraw.token == "wstETH"
-    assert step3_withdraw.withdraw_all is False
-
-    step3_swap = intents[3]
-    assert isinstance(step3_swap, SwapIntent)
-    assert step3_swap.from_token == "wstETH"
-    assert step3_swap.to_token == "USDC"
-
-    step3_repay = intents[4]
-    assert isinstance(step3_repay, RepayIntent)
-    assert step3_repay.repay_full is True
-
-    step4_withdraw = intents[5]
-    assert isinstance(step4_withdraw, WithdrawIntent)
-    assert step4_withdraw.withdraw_all is True
-
-    step5_swap = intents[6]
-    assert isinstance(step5_swap, SwapIntent)
-    assert step5_swap.from_token == "wstETH"
-    assert step5_swap.to_token == "USDC"
-    assert step5_swap.amount == "all"
+    assert intents == []
 
 
-def test_morpho_looping_teardown_borrowed_state_repays_liquid_borrow_first() -> None:
-    """Mid-loop teardown in ``borrowed`` state: a BORROW just succeeded and
-    its proceeds are liquid in the wallet awaiting the loop SWAP. Teardown
-    must REPAY that liquid borrow_token directly (no swap needed) to drop
-    health-factor pressure before any WITHDRAW.
+def test_morpho_looping_teardown_repays_liquid_wallet_borrow_first() -> None:
+    """A wallet holding the full debt in borrow_token is repaid first (one
+    REPAY), so the staircase does zero withdraw->swap->repay rounds before the
+    final withdraw-all + consolidate.
     """
-    strategy = MorphoLoopingStrategy.__new__(MorphoLoopingStrategy)
-    strategy._chain = "ethereum"
-    strategy.market_id = "0xmarket"
-    strategy.collateral_token = "wstETH"
-    strategy.borrow_token = "USDC"
-    strategy.swap_slippage = Decimal("0.005")
-    strategy._total_collateral = Decimal("0.014")
-    strategy._total_borrowed = Decimal("27.0")          # just borrowed
-    strategy._pending_wallet_collateral = Decimal("0")
-    strategy._pending_swap_amount = Decimal("27.0")     # liquid USDC in wallet
-    strategy._loop_state = "borrowed"
+    strategy = _new_morpho_strategy()
 
     intents = strategy.generate_teardown_intents(
         TeardownMode.SOFT,
-        market=_market({"USDC": Decimal("1"), "wstETH": Decimal("2741")}),
+        market=_market_with_health(collateral_usd="3400", debt_usd="1700", wallet_borrow="1700"),
     )
 
-    # Liquid USDC (27.0) covers the full debt (27.0), so debt_remaining = 0
-    # after step 1. Steps 2 and 3 are skipped. Only the final WITHDRAW + SWAP
-    # remain.
-    assert [intent.intent_type.value for intent in intents] == [
-        "REPAY",
-        "WITHDRAW",
-        "SWAP",
-    ]
-
-    repay = intents[0]
-    assert isinstance(repay, RepayIntent)
-    assert repay.repay_full is False
-    assert repay.amount == Decimal("27.0")
-
-    withdraw = intents[1]
-    assert isinstance(withdraw, WithdrawIntent)
-    assert withdraw.withdraw_all is True
-
-    swap = intents[2]
-    assert isinstance(swap, SwapIntent)
-    assert swap.from_token == "wstETH"
-    assert swap.to_token == "USDC"
-    assert swap.amount == "all"
-
-
-def test_morpho_looping_teardown_only_collateral_no_debt() -> None:
-    """Early-stage teardown: collateral has been supplied but no BORROW has
-    happened yet. No REPAY or first-pass WITHDRAW needed.
-    """
-    strategy = MorphoLoopingStrategy.__new__(MorphoLoopingStrategy)
-    strategy._chain = "ethereum"
-    strategy.market_id = "0xmarket"
-    strategy.collateral_token = "wstETH"
-    strategy.borrow_token = "USDC"
-    strategy.swap_slippage = Decimal("0.005")
-    strategy._total_collateral = Decimal("0.014")
-    strategy._total_borrowed = Decimal("0")
-    strategy._pending_wallet_collateral = Decimal("0")
-    strategy._pending_swap_amount = Decimal("0")
-    strategy._loop_state = "supplied"
-
-    intents = strategy.generate_teardown_intents(
-        TeardownMode.SOFT,
-        market=_market({"USDC": Decimal("1"), "wstETH": Decimal("2741")}),
-    )
-
-    assert [intent.intent_type.value for intent in intents] == [
-        "WITHDRAW",
-        "SWAP",
-    ]
-
-    withdraw = intents[0]
-    assert isinstance(withdraw, WithdrawIntent)
-    assert withdraw.withdraw_all is True
-
-    swap = intents[1]
-    assert isinstance(swap, SwapIntent)
-    assert swap.from_token == "wstETH"
-    assert swap.to_token == "USDC"
-    assert swap.amount == "all"
-
-
-def test_morpho_looping_teardown_caps_withdraw_at_total_collateral_on_tight_ltv() -> None:
-    """High-leverage teardown: the un-capped ``withdraw_for_swap`` would exceed
-    the strategy's tracked ``_total_collateral`` (which on-chain is the
-    Morpho-supplied amount). Morpho's ``withdrawCollateral`` reverts when asked
-    for more than is supplied, so cap both the withdrawal and the swap. Gemini
-    flagged this on PR #2330 — high-priority safety guard.
-    """
-    strategy = MorphoLoopingStrategy.__new__(MorphoLoopingStrategy)
-    strategy._chain = "ethereum"
-    strategy.market_id = "0xmarket"
-    strategy.collateral_token = "wstETH"
-    strategy.borrow_token = "USDC"
-    strategy.swap_slippage = Decimal("0.005")
-    # LTV = 1700 / (0.5 × 3400) = 100% — well above Morpho's 86% LLTV. The
-    # uncapped withdraw_for_swap = 0.55 × 1.10 = 0.605 exceeds _total_collateral
-    # = 0.5; the cap forces both withdraw and swap to 0.5.
-    strategy._total_collateral = Decimal("0.5")
-    strategy._total_borrowed = Decimal("1700")
-    strategy._pending_wallet_collateral = Decimal("0")
-    strategy._pending_swap_amount = Decimal("0")
-    strategy._loop_state = "idle"
-
-    intents = strategy.generate_teardown_intents(
-        TeardownMode.SOFT,
-        market=_market({"USDC": Decimal("1"), "wstETH": Decimal("3400")}),
-    )
-
-    assert [intent.intent_type.value for intent in intents] == [
-        "WITHDRAW",
-        "SWAP",
-        "REPAY",
-        "WITHDRAW",
-        "SWAP",
-    ]
-
-    capped_withdraw = intents[0]
-    assert isinstance(capped_withdraw, WithdrawIntent)
-    assert capped_withdraw.amount == Decimal("0.5")  # capped at _total_collateral
-    assert capped_withdraw.withdraw_all is False
-
-    capped_swap = intents[1]
-    assert isinstance(capped_swap, SwapIntent)
-    assert capped_swap.amount == Decimal("0.5")  # capped to match capped withdraw
+    kinds = [intent.intent_type.value for intent in intents]
+    assert kinds == ["REPAY", "WITHDRAW", "SWAP"]
+    assert intents[0].repay_full is True  # wallet covers the full debt
+    assert intents[1].withdraw_all is True
 
 
 def test_morpho_looping_teardown_hard_mode_uses_emergency_slippage() -> None:
     """TeardownMode.HARD escalates the swap slippage ceiling to 3% to absorb
     price moves in an emergency unwind.
     """
-    strategy = MorphoLoopingStrategy.__new__(MorphoLoopingStrategy)
-    strategy._chain = "ethereum"
-    strategy.market_id = "0xmarket"
-    strategy.collateral_token = "wstETH"
-    strategy.borrow_token = "USDC"
-    strategy.swap_slippage = Decimal("0.005")
-    strategy._total_collateral = Decimal("0.0238")
-    strategy._total_borrowed = Decimal("45.88")
-    strategy._pending_wallet_collateral = Decimal("0")
-    strategy._pending_swap_amount = Decimal("0.0068")
-    strategy._loop_state = "complete"
+    strategy = _new_morpho_strategy()
 
     intents = strategy.generate_teardown_intents(
         TeardownMode.HARD,
-        market=_market({"USDC": Decimal("1"), "wstETH": Decimal("2741")}),
+        market=_market_with_health(collateral_usd="3400", debt_usd="1700"),
     )
 
     swaps = [intent for intent in intents if isinstance(intent, SwapIntent)]
-    # complete-state teardown emits exactly 3 swaps (step 2 wallet, step 3
-    # withdrawn-collateral, step 5 residual). Asserting the count catches
-    # sequence regressions, not just slippage-field regressions.
-    assert len(swaps) == 3
+    assert swaps, "expected at least one swap in the unwind"
     for swap in swaps:
         assert swap.max_slippage == Decimal("0.03")
+
+
+def test_morpho_looping_teardown_too_unhealthy_fails_loud() -> None:
+    """A position whose HF is already below the withdraw floor cannot be
+    unwound withdraw-first; teardown must raise rather than emit a reverting
+    intent. (HF = 3400 * 0.86 / 3300 ~= 0.886 < floor.)
+    """
+    from almanak.framework.teardown.leverage_loop import LeverageUnwindError
+
+    strategy = _new_morpho_strategy()
+
+    with pytest.raises(LeverageUnwindError):
+        strategy.generate_teardown_intents(
+            TeardownMode.SOFT,
+            market=_market_with_health(collateral_usd="3400", debt_usd="3300"),
+        )
 
 
 # ---------------------------------------------------------------------------

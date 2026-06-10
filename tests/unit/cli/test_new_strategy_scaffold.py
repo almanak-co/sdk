@@ -681,11 +681,21 @@ def test_lending_loop_supply_transition() -> None:
 
 
 def test_lending_loop_borrow_transition() -> None:
-    """BORROW intent -> state advances to 'borrowed'."""
+    """BORROW intent -> state advances to 'borrowed' and tracks borrow_amount.
+
+    Pins the accounting fix: the callback must read ``intent.borrow_amount`` (not
+    ``intent.amount``). Passing borrow_amount and asserting ``_total_borrowed``
+    grew makes a regression back to ``intent.amount`` fail.
+    """
+    from decimal import Decimal
+
     strat = _make_strategy()
     strat._loop_state = "supplied"
-    strat.on_intent_executed(_make_mock_intent("BORROW"), success=True, result=None)
+    strat.on_intent_executed(
+        _make_mock_intent("BORROW", borrow_amount=Decimal("500")), success=True, result=None
+    )
     assert strat._loop_state == "borrowed"
+    assert strat._total_borrowed == Decimal("500")
 
 
 def test_lending_loop_swap_below_target_loops() -> None:

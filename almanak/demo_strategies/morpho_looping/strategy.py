@@ -1157,144 +1157,26 @@ class MorphoLoopingStrategy(IntentStrategy):
         return Decimal("0"), pending_wallet_collateral
 
     def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:  # noqa: F821
-        """Generate intents to unwind the looped position.
+        """Unwind the looped position via the health-factor-aware staircase.
 
-        Teardown order (CRITICAL for Morpho's LLTV health check):
-
-        1. REPAY any liquid borrow_token in the wallet (no swap needed).
-        2. SWAP any liquid collateral_token in the wallet to borrow_token, then
-           REPAY (partial). Steps 1 + 2 reduce health-factor pressure BEFORE
-           any WITHDRAW that would otherwise violate LLTV.
-        3. For any debt still remaining, WITHDRAW collateral + SWAP + REPAY (full).
-           With prior REPAYs done, the post-WITHDRAW LTV stays below LLTV.
-        4. WITHDRAW all remaining collateral (safe — debt is now zero).
-        5. SWAP any residual collateral_token in the wallet back to borrow_token.
-
-        Why this matters: Morpho's ``withdrawCollateral()`` validates post-withdrawal
-        health on-chain and reverts if LTV would exceed LLTV. The earlier shape of
-        this method (WITHDRAW-first) reverted for any leverage above ~1.16× LLTV
-        because the WITHDRAW alone could not satisfy the constraint while debt was
-        still at full value. Mirrors the invariant noted in
-        ``strategies/accounting/looping/strategy.py:563-564``: *"The first REPAY
-        reduces health-factor pressure before withdrawing collateral."*
-
-        Args:
-            mode: TeardownMode.SOFT (graceful) or TeardownMode.HARD (emergency).
-
-        Returns:
-            List of intents in correct execution order.
+        The wallet holds no borrow_token after looping, so a plain repay-then-
+        withdraw reverts. The helper repays any liquid wallet balance first, then
+        emits WITHDRAW -> SWAP -> REPAY rounds, each withdraw sized to keep the
+        post-withdraw health factor under LLTV (Morpho reverts the withdraw
+        otherwise), and consolidates the remainder back to borrow_token.
         """
-        from almanak.framework.teardown import TeardownMode
+        from almanak.framework.teardown.leverage_loop import generate_leverage_loop_teardown
 
-        intents: list[Intent] = []
-        max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else self.swap_slippage
+        return generate_leverage_loop_teardown(
+            market=market if market is not None else self.create_market_snapshot(),
+            protocol="morpho_blue",
+            collateral_token=self.collateral_token,
+            borrow_token=self.borrow_token,
+            market_id=self.market_id,
+            chain=self.chain,
+            mode=mode,
+        )
 
-        liquid_borrow_token, liquid_collateral_token = self._wallet_liquidity_at_teardown()
-        debt_remaining = self._total_borrowed
-
-        if debt_remaining > 0:
-            # Step 1 — REPAY with liquid borrow_token directly (no swap needed).
-            if liquid_borrow_token > 0:
-                repay_amount = min(liquid_borrow_token, debt_remaining)
-                intents.append(self._create_repay_intent(amount=repay_amount))
-                debt_remaining = max(Decimal("0"), debt_remaining - repay_amount)
-
-            # Step 2 — SWAP liquid collateral_token to borrow_token, then REPAY.
-            # The estimated yield uses the oracle price with a slippage haircut
-            # so we never request more borrow_token than the SWAP can plausibly
-            # deliver (REPAY would otherwise fail with "insufficient balance").
-            if liquid_collateral_token > 0 and debt_remaining > 0:
-                estimated_borrow_yield = self._convert_token_amount(
-                    amount=liquid_collateral_token * (Decimal("1") - max_slippage),
-                    from_token=self.collateral_token,
-                    to_token=self.borrow_token,
-                    market=market,
-                )
-                intents.append(
-                    Intent.swap(
-                        from_token=self.collateral_token,
-                        to_token=self.borrow_token,
-                        amount=liquid_collateral_token,
-                        max_slippage=max_slippage,
-                        chain=self.chain,
-                    )
-                )
-                partial_repay = min(estimated_borrow_yield, debt_remaining)
-                if partial_repay > 0:
-                    intents.append(self._create_repay_intent(amount=partial_repay))
-                    debt_remaining = max(Decimal("0"), debt_remaining - partial_repay)
-
-            # Step 3 — For any debt still remaining, WITHDRAW + SWAP + REPAY (full).
-            # Steps 1–2 should have eliminated or substantially reduced debt,
-            # making the resulting LTV safely below LLTV. The 10% buffers absorb
-            # interest accrued during teardown plus swap slippage.
-            if debt_remaining > 0:
-                collateral_for_repay = self._convert_token_amount(
-                    amount=debt_remaining * Decimal("1.10"),
-                    from_token=self.borrow_token,
-                    to_token=self.collateral_token,
-                    market=market,
-                )
-                # Cap at actual supplied collateral: Morpho's withdrawCollateral
-                # reverts if we ask for more than is supplied. The same cap then
-                # bounds the SWAP so the swap router never asks for more wstETH
-                # than was just withdrawn into the wallet.
-                withdraw_for_swap = min(
-                    collateral_for_repay * Decimal("1.10"),
-                    self._total_collateral,
-                )
-                swap_amount = min(collateral_for_repay, withdraw_for_swap)
-                intents.append(
-                    Intent.withdraw(
-                        protocol="morpho_blue",
-                        token=self.collateral_token,
-                        amount=withdraw_for_swap,
-                        market_id=self.market_id,
-                        chain=self.chain,
-                    )
-                )
-                intents.append(
-                    Intent.swap(
-                        from_token=self.collateral_token,
-                        to_token=self.borrow_token,
-                        amount=swap_amount,
-                        max_slippage=max_slippage,
-                        chain=self.chain,
-                    )
-                )
-                intents.append(self._create_repay_intent())  # repay_full=True
-
-        # Step 4 — WITHDRAW all remaining collateral. With debt=0 this never
-        # trips LLTV.
-        if self._total_collateral > 0:
-            intents.append(
-                Intent.withdraw(
-                    protocol="morpho_blue",
-                    token=self.collateral_token,
-                    amount=self._total_collateral,
-                    withdraw_all=True,
-                    market_id=self.market_id,
-                    chain=self.chain,
-                )
-            )
-
-        # Step 5 — SWAP any residual collateral_token in the wallet to borrow_token.
-        if (
-            liquid_collateral_token > 0
-            or self._total_collateral > 0
-            or self._pending_wallet_collateral > 0
-        ):
-            intents.append(
-                Intent.swap(
-                    from_token=self.collateral_token,
-                    to_token=self.borrow_token,
-                    amount="all",
-                    max_slippage=max_slippage,
-                    chain=self.chain,
-                )
-            )
-
-        return intents
 
     def on_teardown_started(self, mode: "TeardownMode") -> None:  # noqa: F821
         """Called when teardown starts."""

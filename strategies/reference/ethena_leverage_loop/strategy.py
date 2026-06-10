@@ -58,6 +58,14 @@ from almanak.framework.utils.log_formatters import format_token_amount_human, fo
 
 logger = logging.getLogger(__name__)
 
+# Headroom required before taking the full-repay path: the wallet must cover the
+# debt by this margin, since Morpho debt accrues interest between the health read
+# and execution. Below it, repay an explicit partial amount instead (Morpho
+# repay_full pulls the full borrow shares and reverts on a shortfall).
+_REPAY_HEADROOM = Decimal("0.01")
+# Haircut on an explicit partial repay so it never asks for more than the wallet holds.
+_REPAY_SAFETY_HAIRCUT = Decimal("0.01")
+
 # Morpho Blue sUSDe/USDC market (Ethereum, 91.5% LLTV)
 DEFAULT_MARKET_ID = "0x85c7f4374f3a403b36d54cc284983b2b02bbd8581ee0f3c36494447b87d9fcab"
 DEFAULT_LLTV = Decimal("0.915")
@@ -121,6 +129,9 @@ class EthenaLeverageLoopStrategy(IntentStrategy):
         # Health tracking
         self._current_health_factor = Decimal("0")
         self._last_known_susde_price = Decimal("1.05")  # conservative initial estimate
+        # One-shot guard so a stuck (un-deleverageable) position logs once instead
+        # of spamming ERROR every iteration. Cleared once the position recovers.
+        self._deleverage_stuck_logged = False
 
         logger.info(
             f"EthenaLeverageLoop initialized: market={self.market_id[:16]}..., "
@@ -154,6 +165,7 @@ class EthenaLeverageLoopStrategy(IntentStrategy):
             "loop_stake": self._handle_loop_stake,
             "complete": self._handle_complete,
             "monitoring": self._handle_monitoring,
+            "deleveraging": self._handle_deleverage,
         }.get(self._phase)
 
         if handler:
@@ -283,26 +295,29 @@ class EthenaLeverageLoopStrategy(IntentStrategy):
         self._reconcile_state(market)
 
         if self._total_borrowed_usdc > Decimal("0") and susde_price > Decimal("0"):
-            collateral_value = self._total_collateral_susde * susde_price
-            borrow_value = self._total_borrowed_usdc * usdc_price
-            self._current_health_factor = (collateral_value * self.lltv) / borrow_value
+            # Read the real on-chain health factor: it tracks accrued borrow
+            # interest, which the cached intent-time debt does not (overstating HF).
+            try:
+                health = market.position_health(
+                    protocol="morpho_blue", market_id=self.market_id,
+                    collateral_price_usd=susde_price, debt_price_usd=usdc_price,
+                )
+                self._current_health_factor = health.health_factor
+            except Exception as e:
+                # Fail closed: do NOT fall back to a cached-debt HF. The tracked
+                # debt excludes accrued Morpho interest, so the fabricated HF can
+                # read above min while the real position is already below it,
+                # masking the need to deleverage. Hold and retry the live read.
+                logger.warning(f"Health factor unavailable, holding (will retry live read): {e}")
+                return Intent.hold(reason="Monitoring paused: live health read unavailable")
 
-            if self._current_health_factor < self.min_health_factor:
-                logger.error(
-                    f"CRITICAL: Health factor {self._current_health_factor:.3f} < "
-                    f"{self.min_health_factor} -- position at liquidation risk"
+            if Decimal("0") < self._current_health_factor < self.min_health_factor:
+                logger.warning(
+                    f"Health factor {self._current_health_factor:.3f} < min "
+                    f"{self.min_health_factor}: deleveraging."
                 )
-                # Emit repay intent to deleverage: repay 25% of outstanding debt
-                repay_amount = (self._total_borrowed_usdc * Decimal("0.25")).quantize(
-                    Decimal("0.01"), rounding=ROUND_DOWN
-                )
-                if repay_amount > Decimal("0"):
-                    return Intent.repay(
-                        token="USDC",
-                        amount=repay_amount,
-                        protocol="morpho_blue",
-                        market_id=self.market_id,
-                    )
+                self._phase = "deleveraging"
+                return self._handle_deleverage(market, susde_price, usdc_price)
 
         leverage = Decimal("1")
         if self._total_collateral_susde > Decimal("0") and self._total_borrowed_usdc > Decimal("0"):
@@ -315,6 +330,84 @@ class EthenaLeverageLoopStrategy(IntentStrategy):
             f"Leverage: {leverage:.2f}x, "
             f"Collateral: {self._total_collateral_susde:.2f} sUSDe, "
             f"Debt: {self._total_borrowed_usdc:.2f} USDC"
+        )
+
+    def _handle_deleverage(self, market: MarketSnapshot, susde_price: Decimal, usdc_price: Decimal) -> Intent:
+        """Reduce leverage one safe round until the health factor is restored.
+
+        The wallet holds no USDC after looping, so the debt is sourced from the
+        sUSDe collateral: withdraw a safe slice -> swap sUSDe -> USDC -> repay.
+        Each withdraw keeps the position under LLTV so it never reverts, and the
+        next step is inferred from what the wallet holds. Repeats until the
+        health factor is back above min_health_factor.
+        """
+        dust = Decimal("0.0001")
+        hf_floor = Decimal("1.05")
+
+        try:
+            health = market.position_health(
+                protocol="morpho_blue", market_id=self.market_id,
+                collateral_price_usd=susde_price, debt_price_usd=usdc_price,
+            )
+        except Exception as e:
+            logger.warning(f"Health factor unavailable during deleverage: {e}")
+            return Intent.hold(reason="Deleverage paused: health data unavailable")
+
+        self._current_health_factor = health.health_factor
+        if self._current_health_factor >= self.min_health_factor or health.debt_value_usd <= Decimal("0"):
+            self._phase = "monitoring"
+            self._deleverage_stuck_logged = False
+            if susde_price > 0:
+                self._total_collateral_susde = Decimal(str(health.collateral_value_usd)) / susde_price
+            if usdc_price > 0:
+                self._total_borrowed_usdc = Decimal(str(health.debt_value_usd)) / usdc_price
+            logger.info(f"Deleverage complete: HF={self._current_health_factor:.3f}")
+            return Intent.hold(reason=f"Deleverage complete - HF: {self._current_health_factor:.3f}")
+
+        wallet_usdc = self._get_balance(market, "USDC")
+        if wallet_usdc > dust:
+            # CRITICAL: repay_full on Morpho sends the position's FULL borrow
+            # shares, pulling the entire outstanding debt and reverting on a
+            # wallet shortfall. An HF-constrained round only swaps a partial
+            # slice to USDC, so only repay_full when the wallet provably covers
+            # the whole debt; otherwise repay an explicit amount capped to the
+            # wallet balance (with a haircut so it never asks for more than held).
+            debt_usd = Decimal(str(health.debt_value_usd))
+            if usdc_price > 0 and wallet_usdc * usdc_price >= debt_usd * (Decimal("1") + _REPAY_HEADROOM):
+                return Intent.repay(
+                    protocol="morpho_blue", token="USDC", repay_full=True,
+                    market_id=self.market_id, chain="ethereum",
+                )
+            repay_amount = wallet_usdc * (Decimal("1") - _REPAY_SAFETY_HAIRCUT)
+            return Intent.repay(
+                protocol="morpho_blue", token="USDC", amount=repay_amount,
+                repay_full=False, market_id=self.market_id, chain="ethereum",
+            )
+        if self._get_balance(market, "sUSDe") > dust:
+            # sUSDe has no Uniswap V3 pool against USDC; route via Enso (Curve),
+            # matching the build leg and the teardown helper's swap_protocol.
+            return Intent.swap(
+                from_token="sUSDe", to_token="USDC", amount="all",
+                max_slippage=self.swap_slippage, protocol="enso", chain="ethereum",
+            )
+
+        if susde_price <= 0:
+            return Intent.hold(reason="Deleverage paused: sUSDe price unavailable")
+        lltv = Decimal(str(health.lltv))
+        safe_slice_usd = Decimal(str(health.collateral_value_usd)) - (hf_floor * Decimal(str(health.debt_value_usd)) / lltv)
+        if safe_slice_usd <= dust:
+            # Stay in deleveraging (do NOT bounce back to monitoring, which would
+            # re-detect HF<min and toggle straight back here). The entry check
+            # above transitions out once the position recovers. Log once.
+            if not self._deleverage_stuck_logged:
+                logger.error("Cannot deleverage safely: HF too low to withdraw. Teardown / flash loan required.")
+                self._deleverage_stuck_logged = True
+            return Intent.hold(reason="Deleverage stuck: HF too low to withdraw safely")
+        needed_usd = Decimal(str(health.debt_value_usd)) / (Decimal("1") - self.swap_slippage)
+        slice_tokens = min(safe_slice_usd, needed_usd) / susde_price
+        return Intent.withdraw(
+            protocol="morpho_blue", token="sUSDe", amount=slice_tokens,
+            market_id=self.market_id, chain="ethereum",
         )
 
     # =========================================================================
@@ -454,7 +547,7 @@ class EthenaLeverageLoopStrategy(IntentStrategy):
         except Exception:
             logger.debug("Could not reconcile sUSDe balance from on-chain data")
 
-    def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
+    def on_intent_executed(self, intent: Intent, success: bool, result: Any, **_kwargs: Any) -> None:
         """Update state tracking after each intent execution.
 
         Prefers receipt-derived data when available, falls back to intent
@@ -658,31 +751,29 @@ class EthenaLeverageLoopStrategy(IntentStrategy):
         )
 
     def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:  # noqa: F821
-        """Unwind: repay debt -> withdraw collateral -> swap to USDC."""
-        intents = []
-        if self._total_borrowed_usdc > Decimal("0"):
-            intents.append(
-                Intent.repay(
-                    protocol="morpho_blue",
-                    token="USDC",
-                    amount=Decimal("0"),
-                    repay_full=True,
-                    market_id=self.market_id,
-                    chain="ethereum",
-                )
-            )
-        if self._total_collateral_susde > Decimal("0"):
-            intents.append(
-                Intent.withdraw(
-                    protocol="morpho_blue",
-                    token="sUSDe",
-                    amount=self._total_collateral_susde,
-                    withdraw_all=True,
-                    market_id=self.market_id,
-                    chain="ethereum",
-                )
-            )
-        return intents
+        """Unwind via the health-factor-aware staircase.
+
+        Withdraws sUSDe collateral and swaps it to USDC to fund the repay -- this
+        sources the debt token from collateral (the wallet holds no USDC after
+        looping) and sidesteps Ethena's 7-day unstake cooldown. Each withdraw is
+        sized to keep the position under LLTV.
+
+        The collateral->debt swap is routed through Enso: sUSDe has no Uniswap V3
+        pool against USDC, so the default router would revert. Enso aggregates the
+        Curve sUSDe route (matching the build leg's USDC->USDe Enso swap).
+        """
+        from almanak.framework.teardown.leverage_loop import generate_leverage_loop_teardown
+
+        return generate_leverage_loop_teardown(
+            market=market if market is not None else self.create_market_snapshot(),
+            protocol="morpho_blue",
+            collateral_token="sUSDe",
+            borrow_token="USDC",
+            market_id=self.market_id,
+            chain="ethereum",
+            mode=mode,
+            swap_protocol="enso",
+        )
 
     def on_teardown_started(self, mode: "TeardownMode") -> None:  # noqa: F821
         from almanak.framework.teardown import TeardownMode

@@ -528,13 +528,16 @@ class MorphoBlueSDK:
             # Decode: (uint128 totalSupplyAssets, uint128 totalSupplyShares,
             #          uint128 totalBorrowAssets, uint128 totalBorrowShares,
             #          uint128 lastUpdate, uint128 fee)
-            # Morpho packs these as 6 uint128 values in 3 uint256 words
-            total_supply_assets = int(result[0:32], 16)  # Upper 128 bits of word 0
-            total_supply_shares = int(result[32:64], 16)  # Lower 128 bits of word 0
-            total_borrow_assets = int(result[64:96], 16)  # Upper 128 bits of word 1
-            total_borrow_shares = int(result[96:128], 16)  # Lower 128 bits of word 1
-            last_update = int(result[128:160], 16)  # Upper 128 bits of word 2
-            fee = int(result[160:192], 16)  # Lower 128 bits of word 2
+            # Solidity's struct getter ABI-encodes each uint128 in its OWN 32-byte
+            # word (64 hex chars), zero-padded -- NOT packed two-per-word. Reading
+            # half-words offsets every field and zeroes totalBorrowAssets. Mirrors
+            # the full-word decode in get_position().
+            total_supply_assets = int(result[0:64], 16)
+            total_supply_shares = int(result[64:128], 16)
+            total_borrow_assets = int(result[128:192], 16)
+            total_borrow_shares = int(result[192:256], 16)
+            last_update = int(result[256:320], 16)
+            fee = int(result[320:384], 16)
 
             # Check if market exists (all zeros = not created)
             if (
