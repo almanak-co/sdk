@@ -21,11 +21,13 @@ from typing import Any
 
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 
 __all__ = [
     "CONNECTOR_REGISTRY",
     "CONNECTOR_DESCRIPTOR_REGISTRY",
+    "CapabilitiesSpec",
     "Connector",
     "ConnectorDescriptor",
     "ConnectorRegistry",
@@ -33,6 +35,7 @@ __all__ = [
     "ConnectorDiscoveryError",
     "ImportRef",
     "StrategyMatrixEntry",
+    "SupportedChainsSpec",
 ]
 
 
@@ -119,6 +122,9 @@ class Connector:
     teardown_post_condition: ImportRef | None = None
     deferred_refresh: ImportRef | None = None
     pool_reader: ImportRef | None = None
+    capabilities: CapabilitiesSpec | None = None
+    supported_chains: SupportedChainsSpec | None = None
+    primitive: ImportRef | None = None
     swap_quote_connector: ImportRef | None = None
     accounting_treatment: ImportRef | None = None
     accounting_report: ImportRef | None = None
@@ -171,6 +177,9 @@ class Connector:
         self._validate_teardown_post_condition()
         self._validate_deferred_refresh()
         self._validate_pool_reader()
+        self._validate_capabilities()
+        self._validate_supported_chains()
+        self._validate_primitive()
         self._validate_swap_quote_connector()
         self._validate_accounting_treatment()
         self._validate_accounting_report()
@@ -357,6 +366,23 @@ class Connector:
         """Validate the strategy-side pool reader spec import reference."""
         if self.pool_reader is not None and not isinstance(self.pool_reader, ImportRef):
             raise ValueError(f"Connector.pool_reader must be None or an ImportRef, got {self.pool_reader!r}")
+
+    def _validate_capabilities(self) -> None:
+        """Validate the protocol-capabilities ownership spec."""
+        if self.capabilities is not None and not isinstance(self.capabilities, CapabilitiesSpec):
+            raise ValueError(f"Connector.capabilities must be None or a CapabilitiesSpec, got {self.capabilities!r}")
+
+    def _validate_supported_chains(self) -> None:
+        """Validate the chain-coverage ownership spec."""
+        if self.supported_chains is not None and not isinstance(self.supported_chains, SupportedChainsSpec):
+            raise ValueError(
+                f"Connector.supported_chains must be None or a SupportedChainsSpec, got {self.supported_chains!r}"
+            )
+
+    def _validate_primitive(self) -> None:
+        """Validate the position-primitive declaration import reference."""
+        if self.primitive is not None and not isinstance(self.primitive, ImportRef):
+            raise ValueError(f"Connector.primitive must be None or an ImportRef, got {self.primitive!r}")
 
     def _validate_swap_quote_connector(self) -> None:
         """Validate the strategy-side swap quote provider import reference."""
@@ -715,6 +741,18 @@ class ConnectorRegistry:
         """Return connectors that publish pool reader specs."""
         return tuple(d for d in self.all() if d.pool_reader is not None)
 
+    def with_capabilities(self) -> tuple[Connector, ...]:
+        """Return connectors that publish protocol-capability ownership specs."""
+        return tuple(d for d in self.all() if d.capabilities is not None)
+
+    def with_supported_chains(self) -> tuple[Connector, ...]:
+        """Return connectors that publish chain-coverage ownership specs."""
+        return tuple(d for d in self.all() if d.supported_chains is not None)
+
+    def with_primitive(self) -> tuple[Connector, ...]:
+        """Return connectors that publish position-primitive declarations."""
+        return tuple(d for d in self.all() if d.primitive is not None)
+
     def with_swap_quote(self) -> tuple[Connector, ...]:
         """Return connectors that publish swap quote providers."""
         return tuple(d for d in self.all() if d.swap_quote_connector is not None)
@@ -786,6 +824,8 @@ class ConnectorRegistry:
         seen_gateway_settings_orders: dict[int, str] = {}
         seen_compiler_keys: dict[str, str] = {}
         seen_compiler_default_keys: dict[str, str] = {}
+        seen_capability_keys: dict[str, str] = {}
+        seen_supported_chain_keys: dict[str, str] = {}
 
         for info in pkgutil.iter_modules(package.__path__):
             if not info.ispkg or info.name.startswith("_"):
@@ -845,9 +885,38 @@ class ConnectorRegistry:
                 seen_compiler_keys=seen_compiler_keys,
                 seen_compiler_default_keys=seen_compiler_default_keys,
             )
+            self._validate_unique_ownership_keys(
+                connector_name=connector.name,
+                capability="Capabilities",
+                keys=() if connector.capabilities is None else connector.capabilities.keys,
+                seen_keys=seen_capability_keys,
+            )
+            self._validate_unique_ownership_keys(
+                connector_name=connector.name,
+                capability="Supported-chains",
+                keys=() if connector.supported_chains is None else connector.supported_chains.keys,
+                seen_keys=seen_supported_chain_keys,
+            )
             connectors.append(connector)
 
         return tuple(sorted(connectors, key=lambda d: d.name))
+
+    @staticmethod
+    def _validate_unique_ownership_keys(
+        *,
+        connector_name: str,
+        capability: str,
+        keys: tuple[str, ...],
+        seen_keys: dict[str, str],
+    ) -> None:
+        """Reject one metadata-ownership key claimed by two connector manifests."""
+        for key in keys:
+            owner = seen_keys.get(key)
+            if owner is not None:
+                raise ConnectorDiscoveryError(
+                    f"{capability} key {key!r} is claimed by both {owner!r} and {connector_name!r}"
+                )
+            seen_keys[key] = connector_name
 
     @staticmethod
     def _validate_unique_ref_order(

@@ -8,6 +8,7 @@ from almanak.connectors._connector import (
     ImportRef,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
 
 CONNECTOR = Connector(
     name="spark",
@@ -31,6 +32,14 @@ CONNECTOR = Connector(
     compiler=ImportRef(
         module="almanak.connectors.spark.compiler",
         attribute="SparkCompiler",
+    ),
+    capabilities=CapabilitiesSpec(
+        keys=("spark",),
+        module="almanak.connectors.spark.capabilities",
+    ),
+    supported_chains=SupportedChainsSpec(
+        keys=("spark",),
+        module="almanak.connectors.spark.supported_chains",
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("ethereum",),

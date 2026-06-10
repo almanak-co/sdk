@@ -7,6 +7,7 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 
 CONNECTOR = Connector(
     name="polymarket",
@@ -30,6 +31,14 @@ CONNECTOR = Connector(
         attribute="PolymarketCompiler",
     ),
     compiler_default_keys=("PREDICTION",),
+    capabilities=CapabilitiesSpec(
+        keys=("polymarket",),
+        module="almanak.connectors.polymarket.capabilities",
+    ),
+    primitive=ImportRef(
+        module="almanak.connectors.polymarket.primitive",
+        attribute="PRIMITIVE",
+    ),
     strategy_intents=("PREDICTION_BUY", "PREDICTION_SELL", "PREDICTION_REDEEM"),
     strategy_chains=("polygon",),
 )

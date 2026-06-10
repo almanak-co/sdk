@@ -7,6 +7,7 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 
 CONNECTOR = Connector(
     name="morpho_vault",
@@ -30,6 +31,10 @@ CONNECTOR = Connector(
         attribute="MorphoVaultCompiler",
     ),
     compiler_protocols=("morpho_vault", "metamorpho"),
+    capabilities=CapabilitiesSpec(
+        keys=("metamorpho",),
+        module="almanak.connectors.morpho_vault.capabilities",
+    ),
     strategy_intents=("VAULT_DEPOSIT", "VAULT_REDEEM"),
     strategy_chains=("ethereum", "base"),
 )

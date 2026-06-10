@@ -7,6 +7,7 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.protocol_ownership import SupportedChainsSpec
 
 CONNECTOR = Connector(
     name="ethena",
@@ -23,6 +24,10 @@ CONNECTOR = Connector(
     compiler=ImportRef(
         module="almanak.connectors.ethena.compiler",
         attribute="EthenaCompiler",
+    ),
+    supported_chains=SupportedChainsSpec(
+        keys=("ethena",),
+        module="almanak.connectors.ethena.supported_chains",
     ),
     strategy_intents=("STAKE", "UNSTAKE"),
     strategy_chains=("ethereum",),

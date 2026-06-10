@@ -20,12 +20,15 @@ drift from the connectors.
 
 This registry deliberately mirrors
 :class:`almanak.connectors._strategy_base.capabilities_registry.CapabilitiesRegistry`:
-``_BUILTIN_LOADERS`` maps each protocol identifier to the connector module
-that owns it; multiple identifiers may resolve to the same module
+the protocol → module ownership map is derived from connector manifests
+(``supported_chains=SupportedChainsSpec(keys=..., module=...)`` on each
+``CONNECTOR``); multiple identifiers may resolve to the same module
 (``uniswap_v3`` and the fork ``agni_finance`` both resolve to
 ``uniswap_v3.supported_chains``). Per-protocol lookups import ONLY the owning
 module — a broken sibling cannot poison an unrelated lookup. Bulk consumers
-load every module once and cache the merged dict.
+load every module once and cache the merged dict. Adding a connector requires
+no edit here — the manifest declaration in the connector's own folder is the
+registration.
 
 **Import boundary.** This module is strategy-side
 (``almanak/connectors/_strategy_base``) and pulls in nothing gateway-side.
@@ -40,50 +43,50 @@ from __future__ import annotations
 import importlib
 from typing import ClassVar
 
+from almanak.connectors._strategy_base.protocol_ownership import SupportedChainsSpec
+
 
 class SupportedChainsRegistry:
     """Protocol-name to connector chain-set registry.
 
-    ``_BUILTIN_LOADERS`` maps each protocol identifier to the connector
-    module that owns it. Multiple identifiers can point at the same module
-    (``uniswap_v3`` and its fork ``agni_finance`` both resolve to
-    ``uniswap_v3.supported_chains``). The ``supported_chains`` module itself
-    is responsible for declaring every key it owns via
-    ``SUPPORTED_CHAINS_BY_PROTOCOL`` -- the registry does not infer key lists
-    from the protocol→module mapping, keeping the fork-ownership contract
-    explicit at the connector level.
+    The protocol → module ownership map is derived from connector manifests:
+    each connector declares
+    ``supported_chains=SupportedChainsSpec(keys=..., module=...)``. Multiple
+    identifiers can point at the same module (``uniswap_v3`` and its fork
+    ``agni_finance`` both resolve to ``uniswap_v3.supported_chains``). The
+    ``supported_chains`` module must declare every key its manifest claims via
+    ``SUPPORTED_CHAINS_BY_PROTOCOL`` -- the registry raises on lookup when the
+    two drift. Cross-connector key collisions are rejected at manifest
+    discovery (``ConnectorRegistry._discover``).
     """
 
-    _BUILTIN_LOADERS: ClassVar[dict[str, str]] = {
-        # Lending — pooled / forks
-        "aave_v3": "almanak.connectors.aave_v3.supported_chains",
-        "spark": "almanak.connectors.spark.supported_chains",
-        "benqi": "almanak.connectors.benqi.supported_chains",
-        "euler_v2": "almanak.connectors.euler_v2.supported_chains",
-        "silo_v2": "almanak.connectors.silo_v2.supported_chains",
-        # Concentrated-liquidity / swap / aggregator
-        "uniswap_v3": "almanak.connectors.uniswap_v3.supported_chains",
-        # Agni Finance is a Uniswap V3 fork with no own folder; the
-        # uniswap_v3 connector module declares it.
-        "agni_finance": "almanak.connectors.uniswap_v3.supported_chains",
-        "sushiswap_v3": "almanak.connectors.sushiswap_v3.supported_chains",
-        "pancakeswap_v3": "almanak.connectors.pancakeswap_v3.supported_chains",
-        "traderjoe_v2": "almanak.connectors.traderjoe_v2.supported_chains",
-        "enso": "almanak.connectors.enso.supported_chains",
-        # Perps
-        "gmx_v2": "almanak.connectors.gmx_v2.supported_chains",
-        "hyperliquid": "almanak.connectors.hyperliquid.supported_chains",
-        # Staking / synthetic
-        "lido": "almanak.connectors.lido.supported_chains",
-        "ethena": "almanak.connectors.ethena.supported_chains",
-        "gimo": "almanak.connectors.gimo.supported_chains",
-    }
+    # ``protocol identifier -> supported_chains module path`` derived from
+    # the connector manifests on first use. ``None`` means "not built yet".
+    _loader_map: ClassVar[dict[str, str] | None] = None
+
+    @classmethod
+    def _loaders(cls) -> dict[str, str]:
+        """Return the manifest-derived protocol → module ownership map."""
+        if cls._loader_map is None:
+            # Deferred import: this module is imported by the connector
+            # descriptor (for ``SupportedChainsSpec``), so importing the
+            # registry at module level would be circular.
+            from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+            loaders: dict[str, str] = {}
+            for connector_manifest in CONNECTOR_REGISTRY.with_supported_chains():
+                spec = connector_manifest.supported_chains
+                assert spec is not None
+                for key in spec.keys:
+                    loaders[key] = spec.module
+            cls._loader_map = loaders
+        return cls._loader_map
 
     # Aggregated ``protocol -> frozenset[chains]`` view. Populated
     # incrementally by ``get`` and fully by ``all_supported_chains``. Once an
     # entry is added it is never replaced or removed within a process.
     _aggregated: ClassVar[dict[str, frozenset[str]]] = {}
-    # True once every module in ``_BUILTIN_LOADERS`` has been loaded.
+    # True once every module in the ownership map has been loaded.
     _all_loaded: ClassVar[bool] = False
 
     @classmethod
@@ -100,12 +103,12 @@ class SupportedChainsRegistry:
         """Resolve a single protocol's chain set and cache it.
 
         Imports ONLY the connector module that owns ``key`` (per the
-        ``_BUILTIN_LOADERS`` mapping) — a broken sibling connector cannot
+        manifest-derived ownership map) — a broken sibling connector cannot
         block this lookup. Returns ``None`` when the protocol is unknown.
         """
         if key in cls._aggregated:
             return cls._aggregated[key]
-        module_path = cls._BUILTIN_LOADERS.get(key)
+        module_path = cls._loaders().get(key)
         if module_path is None:
             return None
         module_chains = cls._load_module_chains(module_path)
@@ -134,7 +137,7 @@ class SupportedChainsRegistry:
         """
         if cls._all_loaded:
             return cls._aggregated
-        for key in cls._BUILTIN_LOADERS:
+        for key in cls._loaders():
             cls._load_protocol(key)
         cls._all_loaded = True
         return cls._aggregated
@@ -151,12 +154,12 @@ class SupportedChainsRegistry:
     @classmethod
     def has(cls, protocol: str) -> bool:
         """Return True when ``protocol`` has a connector-owned chain entry."""
-        return protocol.lower() in cls._BUILTIN_LOADERS
+        return protocol.lower() in cls._loaders()
 
     @classmethod
     def supported_protocols(cls) -> tuple[str, ...]:
         """Return all protocol names with a connector-owned chain entry."""
-        return tuple(cls._BUILTIN_LOADERS)
+        return tuple(cls._loaders())
 
     @classmethod
     def reset_cache(cls) -> None:
@@ -168,6 +171,7 @@ class SupportedChainsRegistry:
         """
         cls._aggregated.clear()
         cls._all_loaded = False
+        cls._loader_map = None
 
 
 def supported_protocols_matrix() -> dict[str, set[str]]:
@@ -195,6 +199,7 @@ def supported_chains_for(protocol: str) -> frozenset[str]:
 
 __all__ = [
     "SupportedChainsRegistry",
+    "SupportedChainsSpec",
     "supported_chains_for",
     "supported_protocols_matrix",
 ]

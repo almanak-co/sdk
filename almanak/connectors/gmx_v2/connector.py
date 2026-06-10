@@ -8,6 +8,7 @@ from almanak.connectors._connector import (
     ImportRef,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
 
 CONNECTOR = Connector(
     name="gmx_v2",
@@ -35,6 +36,18 @@ CONNECTOR = Connector(
     compiler=ImportRef(
         module="almanak.connectors.gmx_v2.compiler",
         attribute="GMXV2Compiler",
+    ),
+    capabilities=CapabilitiesSpec(
+        keys=("gmx_v2",),
+        module="almanak.connectors.gmx_v2.capabilities",
+    ),
+    supported_chains=SupportedChainsSpec(
+        keys=("gmx_v2",),
+        module="almanak.connectors.gmx_v2.supported_chains",
+    ),
+    primitive=ImportRef(
+        module="almanak.connectors.gmx_v2.primitive",
+        attribute="PRIMITIVE",
     ),
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
     strategy_chains=("arbitrum", "avalanche"),

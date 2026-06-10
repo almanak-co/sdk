@@ -7,6 +7,7 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 from almanak.connectors.orca.constants import METADATA_PROGRAM_ID, WHIRLPOOL_PROGRAM_ID
 
@@ -40,6 +41,10 @@ CONNECTOR = Connector(
         attribute="OrcaCompiler",
     ),
     compiler_protocols=("orca_whirlpools",),
+    capabilities=CapabilitiesSpec(
+        keys=("orca_whirlpools",),
+        module="almanak.connectors.orca.capabilities",
+    ),
     strategy_intents=("LP_OPEN", "LP_CLOSE"),
     strategy_chains=("solana",),
 )

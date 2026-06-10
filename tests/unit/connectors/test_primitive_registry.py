@@ -10,9 +10,12 @@ accounting-critical.
 from __future__ import annotations
 
 import importlib
+from unittest.mock import patch
 
 import pytest
 
+from almanak.connectors._base.types import ProtocolKind
+from almanak.connectors._connector import CONNECTOR_REGISTRY, Connector, ImportRef
 from almanak.connectors._strategy_base.primitive_registry import (
     PrimitiveDeclaration,
     PrimitiveRegistry,
@@ -22,13 +25,13 @@ from almanak.framework.primitives.types import Primitive
 
 
 class TestDeclarationCompleteness:
-    """Every loader entry resolves to a valid, non-empty declaration."""
+    """Every manifest-declared primitive resolves to a valid, non-empty declaration."""
 
     @pytest.mark.parametrize(
         "connector, module_path",
-        sorted(PrimitiveRegistry._BUILTIN_LOADERS.items()),
+        sorted((c.name, c.primitive.module) for c in CONNECTOR_REGISTRY.with_primitive() if c.primitive is not None),
     )
-    def test_loader_module_exports_valid_declaration(self, connector: str, module_path: str) -> None:
+    def test_manifest_module_exports_valid_declaration(self, connector: str, module_path: str) -> None:
         module = importlib.import_module(module_path)
         decl = getattr(module, "PRIMITIVE", None)
         assert isinstance(decl, PrimitiveDeclaration), f"{module_path} must export a PRIMITIVE: PrimitiveDeclaration"
@@ -37,11 +40,15 @@ class TestDeclarationCompleteness:
         for alias in decl.position_type_aliases:
             assert isinstance(alias, str) and alias, f"{module_path} declares an invalid alias {alias!r}"
 
-    def test_loader_module_path_matches_connector_folder(self) -> None:
-        for connector, module_path in PrimitiveRegistry._BUILTIN_LOADERS.items():
-            assert module_path == f"almanak.connectors.{connector}.primitive", (
-                f"{connector!r} loader points at {module_path!r}; expected almanak.connectors.{connector}.primitive"
+    def test_manifest_ref_matches_connector_folder(self) -> None:
+        for connector_manifest in CONNECTOR_REGISTRY.with_primitive():
+            ref = connector_manifest.primitive
+            assert ref is not None
+            assert ref.module == f"almanak.connectors.{connector_manifest.name}.primitive", (
+                f"{connector_manifest.name!r} manifest points at {ref.module!r}; "
+                f"expected almanak.connectors.{connector_manifest.name}.primitive"
             )
+            assert ref.attribute == "PRIMITIVE"
 
 
 class TestLabelResolution:
@@ -177,40 +184,41 @@ class TestBrokenConnectorIsolation:
     connectors. Its own labels simply resolve to ``None``.
     """
 
+    @staticmethod
+    def _synthetic_connector(name: str, module: str) -> Connector:
+        """A manifest whose primitive ref points at ``module``."""
+        return Connector(
+            name=name,
+            kind=ProtocolKind.LENDING,
+            primitive=ImportRef(module=module, attribute="PRIMITIVE"),
+        )
+
     def test_broken_connector_skipped_others_resolve(self) -> None:
-        # Inject a loader pointing at a non-importable module alongside the
-        # real built-ins. The build must skip it (warning) and still index
-        # every healthy connector's labels.
-        original = dict(PrimitiveRegistry._BUILTIN_LOADERS)
+        # Inject a manifest pointing at a non-importable module alongside the
+        # real ones. The build must skip it (warning) and still index every
+        # healthy connector's labels.
+        broken = self._synthetic_connector("definitely_broken", "almanak.connectors.definitely_broken.primitive")
+        real = CONNECTOR_REGISTRY.with_primitive()
         try:
-            PrimitiveRegistry._BUILTIN_LOADERS = {
-                **original,
-                "definitely_broken": "almanak.connectors.definitely_broken.primitive",
-            }
-            PrimitiveRegistry.reset_cache()
-            # Healthy connectors still resolve.
-            assert PrimitiveRegistry.primitive_for_label("AAVE_V3") is Primitive.LENDING
-            assert PrimitiveRegistry.primitive_for_label("UNI_V4") is Primitive.LP_V4
-            assert PrimitiveRegistry.primitive_for_label("GMX_V2") is Primitive.PERP
+            with patch.object(CONNECTOR_REGISTRY, "with_primitive", return_value=(*real, broken)):
+                PrimitiveRegistry.reset_cache()
+                # Healthy connectors still resolve.
+                assert PrimitiveRegistry.primitive_for_label("AAVE_V3") is Primitive.LENDING
+                assert PrimitiveRegistry.primitive_for_label("UNI_V4") is Primitive.LP_V4
+                assert PrimitiveRegistry.primitive_for_label("GMX_V2") is Primitive.PERP
         finally:
-            PrimitiveRegistry._BUILTIN_LOADERS = original
             PrimitiveRegistry.reset_cache()
 
-    def test_connector_with_invalid_declaration_skipped(self, tmp_path) -> None:
-        # A loader whose module exists but exports a malformed PRIMITIVE
-        # (caught by _load_declaration) is likewise skipped, not fatal.
-        original = dict(PrimitiveRegistry._BUILTIN_LOADERS)
+    def test_connector_with_invalid_declaration_skipped(self) -> None:
+        # A manifest whose module exists but exports no PRIMITIVE attribute
+        # (``ImportRef.load`` raises) is likewise skipped, not fatal.
+        broken = self._synthetic_connector("no_primitive", "almanak.connectors._strategy_base.capabilities_registry")
+        real = CONNECTOR_REGISTRY.with_primitive()
         try:
-            # Point at a real module that has no PRIMITIVE attribute at all —
-            # _load_declaration raises TypeError, which must be isolated.
-            PrimitiveRegistry._BUILTIN_LOADERS = {
-                **original,
-                "no_primitive": "almanak.connectors._strategy_base.capabilities_registry",
-            }
-            PrimitiveRegistry.reset_cache()
-            assert PrimitiveRegistry.primitive_for_label("AAVE_V3") is Primitive.LENDING
-            # The broken loader contributed nothing.
-            assert PrimitiveRegistry.primitive_for_label("CAPABILITIES_REGISTRY") is None
+            with patch.object(CONNECTOR_REGISTRY, "with_primitive", return_value=(*real, broken)):
+                PrimitiveRegistry.reset_cache()
+                assert PrimitiveRegistry.primitive_for_label("AAVE_V3") is Primitive.LENDING
+                # The broken manifest contributed nothing.
+                assert PrimitiveRegistry.primitive_for_label("CAPABILITIES_REGISTRY") is None
         finally:
-            PrimitiveRegistry._BUILTIN_LOADERS = original
             PrimitiveRegistry.reset_cache()

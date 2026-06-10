@@ -59,6 +59,10 @@ CONNECTOR = Connector(
         module="almanak.connectors.aerodrome.compiler",
         attribute="AerodromeCompiler",
     ),
+    primitive=ImportRef(
+        module="almanak.connectors.aerodrome.primitive",
+        attribute="PRIMITIVE",
+    ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE"),
     strategy_chains=("base", "optimism"),
 )

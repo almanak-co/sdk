@@ -89,24 +89,23 @@ def test_removing_a_connector_declaration_drops_it_from_the_matrix() -> None:
     """Removing a connector's declaration removes it from the derived matrix.
 
     Proves there is no hand-maintained fallback: the matrix is built purely by
-    iterating the per-connector registry. Mutates a copy of ``_BUILTIN_LOADERS``
-    and clears the aggregated cache, restoring both in ``finally`` so the
-    process-wide registry contract is untouched for sibling tests.
+    iterating the per-connector registry. Overrides the manifest-derived
+    ownership map with a trimmed copy and clears the aggregated cache,
+    resetting in ``finally`` so the process-wide registry contract (rebuilt
+    from manifests on next use) is untouched for sibling tests.
     """
-    original_loaders = SupportedChainsRegistry._BUILTIN_LOADERS
+    trimmed = dict(SupportedChainsRegistry._loaders())
+    # Drop the aave_v3 connector's declaration entirely.
+    del trimmed["aave_v3"]
     try:
-        # Drop the aave_v3 connector's declaration entirely.
-        trimmed = dict(original_loaders)
-        del trimmed["aave_v3"]
-        SupportedChainsRegistry._BUILTIN_LOADERS = trimmed
         SupportedChainsRegistry.reset_cache()
+        SupportedChainsRegistry._loader_map = trimmed
 
         matrix = supported_protocols_matrix()
         assert "aave_v3" not in matrix
         # Sibling connectors are unaffected.
         assert "uniswap_v3" in matrix
     finally:
-        SupportedChainsRegistry._BUILTIN_LOADERS = original_loaders
         SupportedChainsRegistry.reset_cache()
 
 
@@ -122,12 +121,12 @@ def test_uniswap_connector_owns_agni_finance_fork() -> None:
     Both identifiers resolve to the same connector module, and the fork's chain
     set matches the historical ``{"mantle"}``.
     """
-    loaders = SupportedChainsRegistry._BUILTIN_LOADERS
+    loaders = SupportedChainsRegistry._loaders()
     assert loaders["agni_finance"] == loaders["uniswap_v3"]
     assert supported_chains_for("agni_finance") == frozenset({"mantle"})
 
 
-@pytest.mark.parametrize("protocol", sorted(SupportedChainsRegistry._BUILTIN_LOADERS))
+@pytest.mark.parametrize("protocol", sorted(SupportedChainsRegistry._loaders()))
 def test_every_registered_protocol_resolves_to_a_nonempty_chain_set(protocol: str) -> None:
     """Every registered protocol resolves to a non-empty frozenset of chains."""
     chains = supported_chains_for(protocol)

@@ -2,10 +2,15 @@
 
 Each connector with capability data ships a ``capabilities.py`` module
 exporting a module-level ``PROTOCOL_CAPABILITIES`` dict keyed by every
-protocol identifier the connector validates against. This registry imports
-those modules on demand and exposes a single aggregated view to the framework
-validators (``vocabulary.PROTOCOL_CAPABILITIES`` is the consumer-facing seam
-that calls into this module).
+protocol identifier the connector validates against, and declares that
+ownership on its ``CONNECTOR`` manifest via
+``capabilities=CapabilitiesSpec(keys=..., module=...)``. This registry
+derives the protocol → module ownership map from the connector manifests
+(``CONNECTOR_REGISTRY``), imports capability modules on demand, and exposes a
+single aggregated view to the framework validators
+(``vocabulary.PROTOCOL_CAPABILITIES`` is the consumer-facing seam that calls
+into this module). Adding a connector therefore requires no edit here — the
+manifest declaration in the connector's own folder is the registration.
 
 Per-protocol lookups (``get`` / ``get_protocol_capabilities``) import ONLY
 the connector module that owns the requested protocol — a broken sibling
@@ -27,49 +32,43 @@ from __future__ import annotations
 import importlib
 from typing import Any, ClassVar
 
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
+
 
 class CapabilitiesRegistry:
     """Protocol-name to connector capability-dict registry.
 
-    ``_BUILTIN_LOADERS`` maps each protocol identifier to the connector module
-    that owns it. Multiple identifiers can point at the same connector module
+    The protocol → module ownership map is derived from connector manifests:
+    each connector declares ``capabilities=CapabilitiesSpec(keys=..., module=...)``
+    and multiple identifiers can point at the same connector module
     (``morpho`` and ``morpho_blue`` both resolve to ``morpho_blue.capabilities``).
-    The capability module itself is responsible for declaring every key it
-    owns -- the registry does not infer key lists from the protocol→module
-    mapping. This keeps the alias contract explicit at the connector level.
+    The capability module must declare every key its manifest claims -- the
+    registry raises on lookup when the two drift. Cross-connector key
+    collisions are rejected at manifest discovery
+    (``ConnectorRegistry._discover``).
     """
 
-    _BUILTIN_LOADERS: ClassVar[dict[str, str]] = {
-        # Lending — pooled
-        "aave_v3": "almanak.connectors.aave_v3.capabilities",
-        "spark": "almanak.connectors.spark.capabilities",
-        "compound_v3": "almanak.connectors.compound_v3.capabilities",
-        "benqi": "almanak.connectors.benqi.capabilities",
-        "euler_v2": "almanak.connectors.euler_v2.capabilities",
-        # Lending — isolated markets
-        "morpho": "almanak.connectors.morpho_blue.capabilities",
-        "morpho_blue": "almanak.connectors.morpho_blue.capabilities",
-        "curvance": "almanak.connectors.curvance.capabilities",
-        "silo_v2": "almanak.connectors.silo_v2.capabilities",
-        # Lending — Solana
-        "kamino": "almanak.connectors.kamino.capabilities",
-        # Perps
-        "gmx_v2": "almanak.connectors.gmx_v2.capabilities",
-        "hyperliquid": "almanak.connectors.hyperliquid.capabilities",
-        "drift": "almanak.connectors.drift.capabilities",
-        # Concentrated-liquidity / swap
-        "uniswap_v3": "almanak.connectors.uniswap_v3.capabilities",
-        "enso": "almanak.connectors.enso.capabilities",
-        "pendle": "almanak.connectors.pendle.capabilities",
-        # ERC-4626 vaults
-        "metamorpho": "almanak.connectors.morpho_vault.capabilities",
-        # Prediction markets
-        "polymarket": "almanak.connectors.polymarket.capabilities",
-        # Solana LP
-        "raydium_clmm": "almanak.connectors.raydium.capabilities",
-        "meteora_dlmm": "almanak.connectors.meteora.capabilities",
-        "orca_whirlpools": "almanak.connectors.orca.capabilities",
-    }
+    # ``protocol identifier -> capabilities module path`` derived from the
+    # connector manifests on first use. ``None`` means "not built yet".
+    _loader_map: ClassVar[dict[str, str] | None] = None
+
+    @classmethod
+    def _loaders(cls) -> dict[str, str]:
+        """Return the manifest-derived protocol → module ownership map."""
+        if cls._loader_map is None:
+            # Deferred import: this module is imported by the connector
+            # descriptor (for ``CapabilitiesSpec``), so importing the
+            # registry at module level would be circular.
+            from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+            loaders: dict[str, str] = {}
+            for connector_manifest in CONNECTOR_REGISTRY.with_capabilities():
+                spec = connector_manifest.capabilities
+                assert spec is not None
+                for key in spec.keys:
+                    loaders[key] = spec.module
+            cls._loader_map = loaders
+        return cls._loader_map
 
     # Stable aggregated dict. Populated incrementally: ``get`` adds entries
     # one at a time as protocols are first looked up; ``all_capabilities``
@@ -77,7 +76,7 @@ class CapabilitiesRegistry:
     # replaced or removed within a process, preserving the long-standing
     # identity contract of the hand-written ``PROTOCOL_CAPABILITIES`` table.
     _aggregated: ClassVar[dict[str, dict[str, Any]]] = {}
-    # True once every module in ``_BUILTIN_LOADERS`` has been loaded.
+    # True once every module in the ownership map has been loaded.
     _all_loaded: ClassVar[bool] = False
 
     @classmethod
@@ -94,12 +93,12 @@ class CapabilitiesRegistry:
         """Resolve a single protocol's capability dict and cache it.
 
         Imports ONLY the connector module that owns ``key`` (per the
-        ``_BUILTIN_LOADERS`` mapping) — a broken sibling connector cannot
+        manifest-derived ownership map) — a broken sibling connector cannot
         block this lookup. Returns ``None`` when the protocol is unknown.
         """
         if key in cls._aggregated:
             return cls._aggregated[key]
-        module_path = cls._BUILTIN_LOADERS.get(key)
+        module_path = cls._loaders().get(key)
         if module_path is None:
             return None
         module_caps = cls._load_module_capabilities(module_path)
@@ -125,7 +124,7 @@ class CapabilitiesRegistry:
         """
         if cls._all_loaded:
             return cls._aggregated
-        for key in cls._BUILTIN_LOADERS:
+        for key in cls._loaders():
             cls._load_protocol(key)
         cls._all_loaded = True
         return cls._aggregated
@@ -145,12 +144,12 @@ class CapabilitiesRegistry:
     @classmethod
     def has(cls, protocol: str) -> bool:
         """Return True when ``protocol`` has a connector-owned capability entry."""
-        return protocol.lower() in cls._BUILTIN_LOADERS
+        return protocol.lower() in cls._loaders()
 
     @classmethod
     def supported_protocols(cls) -> tuple[str, ...]:
         """Return all protocol names with connector-owned capability entries."""
-        return tuple(sorted(cls._BUILTIN_LOADERS))
+        return tuple(sorted(cls._loaders()))
 
     @classmethod
     def reset_cache(cls) -> None:
@@ -166,6 +165,7 @@ class CapabilitiesRegistry:
         """
         cls._aggregated.clear()
         cls._all_loaded = False
+        cls._loader_map = None
 
 
 def get_protocol_capabilities(protocol: str) -> dict[str, Any]:
@@ -186,6 +186,7 @@ def all_protocol_capabilities() -> dict[str, dict[str, Any]]:
 
 __all__ = [
     "CapabilitiesRegistry",
+    "CapabilitiesSpec",
     "all_protocol_capabilities",
     "get_protocol_capabilities",
 ]

@@ -7,6 +7,7 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 from almanak.connectors.drift.constants import DRIFT_PROGRAM_ID
 
@@ -27,6 +28,14 @@ CONNECTOR = Connector(
     compiler=ImportRef(
         module="almanak.connectors.drift.compiler",
         attribute="DriftCompiler",
+    ),
+    capabilities=CapabilitiesSpec(
+        keys=("drift",),
+        module="almanak.connectors.drift.capabilities",
+    ),
+    primitive=ImportRef(
+        module="almanak.connectors.drift.primitive",
+        attribute="PRIMITIVE",
     ),
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
     strategy_chains=("solana",),

@@ -8,6 +8,7 @@ from almanak.connectors._connector import (
     ImportRef,
 )
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
 
 _V3_ABI_FAMILIES = (AbiFamily.V3_FACTORY, AbiFamily.V3_NPM)
 
@@ -96,6 +97,18 @@ CONNECTOR = Connector(
     compiler=ImportRef(
         module="almanak.connectors.uniswap_v3.compiler",
         attribute="UniswapV3Compiler",
+    ),
+    capabilities=CapabilitiesSpec(
+        keys=("uniswap_v3",),
+        module="almanak.connectors.uniswap_v3.capabilities",
+    ),
+    supported_chains=SupportedChainsSpec(
+        keys=("uniswap_v3", "agni_finance"),
+        module="almanak.connectors.uniswap_v3.supported_chains",
+    ),
+    primitive=ImportRef(
+        module="almanak.connectors.uniswap_v3.primitive",
+        attribute="PRIMITIVE",
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
     strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "monad"),

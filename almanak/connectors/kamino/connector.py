@@ -7,6 +7,7 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 
 KAMINO_LENDING_PROGRAM_ID = "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD"
@@ -31,6 +32,10 @@ CONNECTOR = Connector(
         attribute="KaminoCompiler",
     ),
     compiler_protocols=("kamino",),
+    capabilities=CapabilitiesSpec(
+        keys=("kamino",),
+        module="almanak.connectors.kamino.capabilities",
+    ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("solana",),
 )

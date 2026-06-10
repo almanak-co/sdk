@@ -9,6 +9,7 @@ from almanak.connectors._connector import (
     StrategyMatrixEntry,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 
 CONNECTOR = Connector(
     name="pendle",
@@ -61,6 +62,10 @@ CONNECTOR = Connector(
     compiler=ImportRef(
         module="almanak.connectors.pendle.compiler",
         attribute="PendleCompiler",
+    ),
+    capabilities=CapabilitiesSpec(
+        keys=("pendle",),
+        module="almanak.connectors.pendle.capabilities",
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW"),
     strategy_chains=("arbitrum", "ethereum"),

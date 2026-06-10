@@ -7,6 +7,7 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
 
 CONNECTOR = Connector(
     name="benqi",
@@ -23,6 +24,14 @@ CONNECTOR = Connector(
     compiler=ImportRef(
         module="almanak.connectors.benqi.compiler",
         attribute="BenqiCompiler",
+    ),
+    capabilities=CapabilitiesSpec(
+        keys=("benqi",),
+        module="almanak.connectors.benqi.capabilities",
+    ),
+    supported_chains=SupportedChainsSpec(
+        keys=("benqi",),
+        module="almanak.connectors.benqi.supported_chains",
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("avalanche",),

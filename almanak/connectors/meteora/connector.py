@@ -7,6 +7,7 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 from almanak.connectors.meteora.constants import DLMM_PROGRAM_ID
 
@@ -30,6 +31,10 @@ CONNECTOR = Connector(
         attribute="MeteoraCompiler",
     ),
     compiler_protocols=("meteora_dlmm",),
+    capabilities=CapabilitiesSpec(
+        keys=("meteora_dlmm",),
+        module="almanak.connectors.meteora.capabilities",
+    ),
     strategy_intents=("LP_OPEN", "LP_CLOSE"),
     strategy_chains=("solana",),
 )

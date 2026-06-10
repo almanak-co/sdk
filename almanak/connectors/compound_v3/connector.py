@@ -8,6 +8,7 @@ from almanak.connectors._connector import (
     ImportRef,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 
 CONNECTOR = Connector(
     name="compound_v3",
@@ -31,6 +32,14 @@ CONNECTOR = Connector(
     compiler=ImportRef(
         module="almanak.connectors.compound_v3.compiler",
         attribute="CompoundV3Compiler",
+    ),
+    capabilities=CapabilitiesSpec(
+        keys=("compound_v3",),
+        module="almanak.connectors.compound_v3.capabilities",
+    ),
+    primitive=ImportRef(
+        module="almanak.connectors.compound_v3.primitive",
+        attribute="PRIMITIVE",
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("ethereum", "arbitrum", "base", "optimism", "polygon"),

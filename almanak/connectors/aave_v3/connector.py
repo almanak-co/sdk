@@ -9,6 +9,7 @@ from almanak.connectors._connector import (
     StrategyMatrixEntry,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
 
 CONNECTOR = Connector(
     name="aave_v3",
@@ -66,6 +67,18 @@ CONNECTOR = Connector(
         attribute="build_aave_flash_loan",
     ),
     flash_loan_synthetic_discovery=True,
+    capabilities=CapabilitiesSpec(
+        keys=("aave_v3",),
+        module="almanak.connectors.aave_v3.capabilities",
+    ),
+    supported_chains=SupportedChainsSpec(
+        keys=("aave_v3",),
+        module="almanak.connectors.aave_v3.supported_chains",
+    ),
+    primitive=ImportRef(
+        module="almanak.connectors.aave_v3.primitive",
+        attribute="PRIMITIVE",
+    ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
     strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "mantle", "xlayer"),
     # Matrix output stays lending-only for now; Aave flash-loan support exists

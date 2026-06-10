@@ -59,7 +59,6 @@ table and are intentionally NOT registered here.
 
 from __future__ import annotations
 
-import importlib
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
@@ -73,6 +72,9 @@ if TYPE_CHECKING:
     # (order-dependent). Nothing here references ``Primitive`` at runtime —
     # every use is an annotation, which ``from __future__ import annotations``
     # keeps as a string — so the type-checking-only import is sufficient.
+    # ``ImportRef`` likewise only appears in annotations; the runtime value
+    # arrives from the connector manifest.
+    from almanak.connectors._connector_descriptor import ImportRef
     from almanak.framework.primitives.types import Primitive
 
 logger = logging.getLogger(__name__)
@@ -140,31 +142,16 @@ class PrimitiveDeclaration:
 class PrimitiveRegistry:
     """Position-type-label to connector-owned :class:`Primitive` registry.
 
-    ``_BUILTIN_LOADERS`` maps each connector folder name to the module path of
-    its ``primitive`` declaration. The registry imports a module on demand,
-    reads its ``PRIMITIVE`` declaration, and indexes every alias string it
-    declares. Two connectors may not claim the same alias string — that is a
-    hard error surfaced at aggregated-map build time.
+    The set of declaring connectors is derived from connector manifests: each
+    position-bearing connector sets
+    ``primitive=ImportRef(<module>, "PRIMITIVE")`` on its ``CONNECTOR``. The
+    registry imports a declaration module on demand, validates its
+    ``PRIMITIVE`` declaration, and indexes every alias string it declares.
+    Two connectors may not claim the same alias string — that is a hard error
+    surfaced at aggregated-map build time. Adding a connector requires no
+    edit here — the manifest declaration in the connector's own folder is the
+    registration.
     """
-
-    _BUILTIN_LOADERS: ClassVar[dict[str, str]] = {
-        # Concentrated-liquidity / LP — Primitive.LP
-        "uniswap_v3": "almanak.connectors.uniswap_v3.primitive",
-        "aerodrome": "almanak.connectors.aerodrome.primitive",
-        "traderjoe_v2": "almanak.connectors.traderjoe_v2.primitive",
-        # Concentrated-liquidity / LP — Primitive.LP_V4 (isolated version stream)
-        "uniswap_v4": "almanak.connectors.uniswap_v4.primitive",
-        # Lending — Primitive.LENDING
-        "aave_v3": "almanak.connectors.aave_v3.primitive",
-        "morpho_blue": "almanak.connectors.morpho_blue.primitive",
-        "compound_v3": "almanak.connectors.compound_v3.primitive",
-        # Perps — Primitive.PERP
-        "gmx_v2": "almanak.connectors.gmx_v2.primitive",
-        "drift": "almanak.connectors.drift.primitive",
-        "hyperliquid": "almanak.connectors.hyperliquid.primitive",
-        # Prediction markets — Primitive.PREDICTION
-        "polymarket": "almanak.connectors.polymarket.primitive",
-    }
 
     # Aggregated {normalized_label: Primitive} map, built lazily and cached.
     # ``None`` means "not built yet".
@@ -175,15 +162,15 @@ class PrimitiveRegistry:
         return label.upper().strip()
 
     @classmethod
-    def _load_declaration(cls, module_path: str) -> PrimitiveDeclaration:
-        """Import a connector ``primitive`` module and return its declaration."""
-        module = importlib.import_module(module_path)
-        decl = getattr(module, "PRIMITIVE", None)
+    def _load_declaration(cls, ref: ImportRef) -> PrimitiveDeclaration:
+        """Load a connector's manifest-declared primitive declaration."""
+        target = f"{ref.module}.{ref.attribute}"
+        decl = ref.load()
         if not isinstance(decl, PrimitiveDeclaration):
-            raise TypeError(f"{module_path}.PRIMITIVE must be a PrimitiveDeclaration, got {type(decl).__name__}")
+            raise TypeError(f"{target} must be a PrimitiveDeclaration, got {type(decl).__name__}")
         if not decl.position_type_aliases:
             raise ValueError(
-                f"{module_path}.PRIMITIVE declares no position_type_aliases; a "
+                f"{target} declares no position_type_aliases; a "
                 "connector that ships a primitive.py must claim at least one "
                 "label string (otherwise it would be silently unroutable)."
             )
@@ -191,7 +178,7 @@ class PrimitiveRegistry:
 
     @classmethod
     def _build_label_map(cls) -> dict[str, Primitive]:
-        """Import every built-in declaration (in isolation) and index its labels.
+        """Import every manifest-declared primitive (in isolation) and index its labels.
 
         Each connector's declaration is loaded inside its own ``try``/``except``
         so a broken or missing sibling (failed import, malformed declaration)
@@ -206,11 +193,19 @@ class PrimitiveRegistry:
         each protocol-alias label, so a collision is a programming error the
         accounting materializer must not silently resolve.
         """
+        # Deferred import: keeps this module's import graph minimal (it is
+        # imported by ``framework.primitives.taxonomy``) and mirrors the other
+        # manifest-derived metadata registries.
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
+
         label_map: dict[str, Primitive] = {}
         owner_of: dict[str, str] = {}
-        for connector, module_path in cls._BUILTIN_LOADERS.items():
+        for connector_manifest in CONNECTOR_REGISTRY.with_primitive():
+            connector = connector_manifest.name
+            ref = connector_manifest.primitive
+            assert ref is not None
             try:
-                decl = cls._load_declaration(module_path)
+                decl = cls._load_declaration(ref)
             except Exception:  # noqa: BLE001 — isolate one broken connector
                 logger.warning(
                     "Skipping primitive declaration for connector %r (%r): its "
@@ -218,7 +213,7 @@ class PrimitiveRegistry:
                     "Its position-type labels will resolve to None; unrelated "
                     "connectors are unaffected.",
                     connector,
-                    module_path,
+                    ref.module,
                     exc_info=True,
                 )
                 continue

@@ -7,6 +7,7 @@ from almanak.connectors._connector import (
     Connector,
     ImportRef,
 )
+from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 from almanak.connectors.raydium.constants import CLMM_PROGRAM_ID
 
@@ -35,6 +36,10 @@ CONNECTOR = Connector(
         attribute="RaydiumCompiler",
     ),
     compiler_protocols=("raydium_clmm",),
+    capabilities=CapabilitiesSpec(
+        keys=("raydium_clmm",),
+        module="almanak.connectors.raydium.capabilities",
+    ),
     strategy_intents=("LP_OPEN", "LP_CLOSE"),
     strategy_chains=("solana",),
 )
