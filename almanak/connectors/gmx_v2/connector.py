@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    PerpsReadDecl,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
@@ -48,6 +49,9 @@ CONNECTOR = Connector(
     primitive=ImportRef(
         module="almanak.connectors.gmx_v2.primitive",
         attribute="PRIMITIVE",
+    ),
+    perps_read=PerpsReadDecl(
+        spec=ImportRef(module="almanak.connectors.gmx_v2.perps_read", attribute="PERPS_READ_SPEC"),
     ),
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
     strategy_chains=("arbitrum", "avalanche"),

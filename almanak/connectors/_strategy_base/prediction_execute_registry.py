@@ -8,9 +8,9 @@ hardcodes a venue name (or a chain) to wire CLOB execution.
 Each prediction connector that exposes CLOB order execution publishes a
 module-level :data:`PREDICTION_EXECUTE_SPEC` (a
 :class:`~almanak.connectors._strategy_base.prediction_execute_base.PredictionExecuteSpec`)
-in its ``clob_handler`` module. ``_SPEC_LOADERS`` maps the protocol identifier to
+in its ``clob_handler`` module. The manifest-derived dispatch maps the protocol identifier to
 that module + attribute. Adding a prediction venue is one folder plus one
-``_SPEC_LOADERS`` row — no framework edit.
+``prediction_execute=ImportRef(...)`` manifest declaration — no framework edit.
 
 The table is **empty** until a connector opts in (the Polymarket row lands with
 ``polymarket/clob_handler.py`` in a later commit of VIB-4989).
@@ -39,38 +39,51 @@ class PredictionExecuteRegistry:
     """Protocol-identifier → connector prediction-execute-spec dispatch registry.
 
     Adding a prediction venue is one folder (the connector's ``clob_handler``
-    module publishing ``PREDICTION_EXECUTE_SPEC``) plus one row in
-    :data:`_SPEC_LOADERS` — no framework edit. The table is empty until a
-    connector opts in.
+    module publishing ``PREDICTION_EXECUTE_SPEC`` and its ``CONNECTOR`` manifest
+    declaring ``prediction_execute=ImportRef(...)``) — no framework or registry
+    edit.
     """
 
-    # Protocol identifier -> (module path, attribute) naming the connector's
-    # published ``PredictionExecuteSpec``.
-    _SPEC_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
-        "polymarket": ("almanak.connectors.polymarket.clob_handler", "PREDICTION_EXECUTE_SPEC"),
-    }
-
-    _ALIASES: ClassVar[dict[str, str]] = {}
+    # Manifest-derived ``protocol -> (module path, attribute)`` spec map, built
+    # lazily on first use. ``None`` means "not built yet".
+    _spec_loader_map: ClassVar[dict[str, tuple[str, str]] | None] = None
 
     _spec_cache: ClassVar[dict[str, PredictionExecuteSpec]] = {}
+
+    @classmethod
+    def _spec_loaders(cls) -> dict[str, tuple[str, str]]:
+        """Return the manifest-derived ``protocol -> (module, attribute)`` map."""
+        if cls._spec_loader_map is None:
+            # Deferred import: avoids a module-level cycle through the
+            # connector descriptor.
+            from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+            cls._spec_loader_map = {
+                connector_manifest.name: (
+                    connector_manifest.prediction_execute.module,
+                    connector_manifest.prediction_execute.attribute,
+                )
+                for connector_manifest in CONNECTOR_REGISTRY.with_prediction_execute()
+                if connector_manifest.prediction_execute is not None
+            }
+        return cls._spec_loader_map
 
     @classmethod
     def _normalize(cls, protocol: str | None) -> str:
         # Total by design (see PredictionReadRegistry._normalize).
         if not isinstance(protocol, str):
             return ""
-        key = protocol.lower().replace("-", "_")
-        return cls._ALIASES.get(key, key)
+        return protocol.lower().replace("-", "_")
 
     @classmethod
     def has(cls, protocol: str) -> bool:
         """Return True when ``protocol`` has a connector-owned CLOB execution handler."""
-        return cls._normalize(protocol) in cls._SPEC_LOADERS
+        return cls._normalize(protocol) in cls._spec_loaders()
 
     @classmethod
     def supported_protocols(cls) -> tuple[str, ...]:
         """Return every protocol identifier with a connector-owned CLOB handler."""
-        return tuple(sorted(cls._SPEC_LOADERS))
+        return tuple(sorted(cls._spec_loaders()))
 
     @classmethod
     def canonical(cls, protocol: str | None) -> str | None:
@@ -78,7 +91,7 @@ class PredictionExecuteRegistry:
         if not isinstance(protocol, str) or not protocol:
             return None
         key = cls._normalize(protocol)
-        return key if key in cls._SPEC_LOADERS else None
+        return key if key in cls._spec_loaders() else None
 
     @classmethod
     def _load_spec(cls, protocol: str) -> PredictionExecuteSpec | None:
@@ -91,7 +104,7 @@ class PredictionExecuteRegistry:
         cached = cls._spec_cache.get(protocol)
         if cached is not None:
             return cached
-        entry = cls._SPEC_LOADERS.get(protocol)
+        entry = cls._spec_loaders().get(protocol)
         if entry is None:
             return None
         module_path, attribute = entry
@@ -131,7 +144,7 @@ class PredictionExecuteRegistry:
         """
         norm_chain = chain.lower() if isinstance(chain, str) else ""
         out: list[str] = []
-        for protocol in cls._SPEC_LOADERS:
+        for protocol in cls._spec_loaders():
             try:
                 spec = cls._load_spec(protocol)
             except Exception:  # noqa: BLE001 — isolate one broken connector
@@ -170,3 +183,4 @@ class PredictionExecuteRegistry:
     def reset_cache(cls) -> None:
         """Test helper: drop the resolved-spec cache so the next call re-imports."""
         cls._spec_cache.clear()
+        cls._spec_loader_map = None

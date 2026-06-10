@@ -39,6 +39,18 @@ CONNECTOR = Connector(
         module="almanak.connectors.polymarket.primitive",
         attribute="PRIMITIVE",
     ),
+    prediction_read=ImportRef(
+        module="almanak.connectors.polymarket.prediction_read",
+        attribute="PREDICTION_READ_SPEC",
+    ),
+    prediction_execute=ImportRef(
+        module="almanak.connectors.polymarket.clob_handler",
+        attribute="PREDICTION_EXECUTE_SPEC",
+    ),
+    gateway_stub=ImportRef(
+        module="almanak.connectors.polymarket.gateway_stub",
+        attribute="GATEWAY_STUB_SPEC",
+    ),
     strategy_intents=("PREDICTION_BUY", "PREDICTION_SELL", "PREDICTION_REDEEM"),
     strategy_chains=("polygon",),
 )

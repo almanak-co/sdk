@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    LendingReadDecl,
     StrategyMatrixEntry,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
@@ -78,6 +79,12 @@ CONNECTOR = Connector(
     primitive=ImportRef(
         module="almanak.connectors.aave_v3.primitive",
         attribute="PRIMITIVE",
+    ),
+    # Aave-family reads (VIB-4929): whole-wallet account state; 'aave' alias is lending-scoped.
+    lending_read=LendingReadDecl(
+        spec=ImportRef(module="almanak.connectors.aave_v3.lending_read", attribute="LENDING_READ_SPEC"),
+        account_state=ImportRef(module="almanak.connectors.aave_v3.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"),
+        aliases=("aave",),
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
     strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "mantle", "xlayer"),

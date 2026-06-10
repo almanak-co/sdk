@@ -9,10 +9,10 @@ prediction surface never hardcodes a venue name.
 Each prediction connector that exposes a CLOB market-data read publishes a
 module-level :data:`PREDICTION_READ_SPEC` (a
 :class:`~almanak.connectors._strategy_base.prediction_read_base.PredictionReadSpec`)
-in its ``prediction_read`` module. ``_SPEC_LOADERS`` maps the protocol identifier
+in its ``prediction_read`` module. The manifest-derived dispatch maps the protocol identifier
 to that module + attribute. Adding a prediction venue is one folder (its
 ``prediction_read`` module publishing ``PREDICTION_READ_SPEC``) plus one
-``_SPEC_LOADERS`` row — no framework edit.
+``prediction_read=ImportRef(...)`` manifest declaration — no framework edit.
 
 The table is **empty** until a connector opts in (the Polymarket row lands with
 ``polymarket/prediction_read.py`` in a later commit of VIB-4989).
@@ -42,22 +42,35 @@ __all__ = ["PredictionReadRegistry"]
 class PredictionReadRegistry:
     """Protocol-identifier → connector prediction-read-spec dispatch registry.
 
-    Adding a prediction venue is one folder (the connector's ``prediction_read``
-    module publishing ``PREDICTION_READ_SPEC``) plus one row in
-    :data:`_SPEC_LOADERS` — no framework edit. The table is empty until a
-    connector opts in.
+    Adding a prediction venue is one folder: the connector's ``prediction_read``
+    module publishes ``PREDICTION_READ_SPEC`` and its ``CONNECTOR`` manifest
+    declares ``prediction_read=ImportRef(...)`` — no framework or registry edit.
     """
 
-    # Protocol identifier -> (module path, attribute) naming the connector's
-    # published ``PredictionReadSpec``.
-    _SPEC_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
-        "polymarket": ("almanak.connectors.polymarket.prediction_read", "PREDICTION_READ_SPEC"),
-    }
-
-    # Optional protocol aliases mapping onto a canonical key in ``_SPEC_LOADERS``.
-    _ALIASES: ClassVar[dict[str, str]] = {}
+    # Manifest-derived ``protocol -> (module path, attribute)`` spec map, built
+    # lazily on first use. ``None`` means "not built yet". Values stay
+    # (module, attribute) so per-protocol imports remain lazy.
+    _spec_loader_map: ClassVar[dict[str, tuple[str, str]] | None] = None
 
     _spec_cache: ClassVar[dict[str, PredictionReadSpec]] = {}
+
+    @classmethod
+    def _spec_loaders(cls) -> dict[str, tuple[str, str]]:
+        """Return the manifest-derived ``protocol -> (module, attribute)`` map."""
+        if cls._spec_loader_map is None:
+            # Deferred import: avoids a module-level cycle through the
+            # connector descriptor.
+            from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+            cls._spec_loader_map = {
+                connector_manifest.name: (
+                    connector_manifest.prediction_read.module,
+                    connector_manifest.prediction_read.attribute,
+                )
+                for connector_manifest in CONNECTOR_REGISTRY.with_prediction_read()
+                if connector_manifest.prediction_read is not None
+            }
+        return cls._spec_loader_map
 
     @classmethod
     def _normalize(cls, protocol: str | None) -> str:
@@ -67,13 +80,12 @@ class PredictionReadRegistry:
         # point then fails closed (no spec for "" ⇒ ``None`` / ``False`` / empty).
         if not isinstance(protocol, str):
             return ""
-        key = protocol.lower().replace("-", "_")
-        return cls._ALIASES.get(key, key)
+        return protocol.lower().replace("-", "_")
 
     @classmethod
     def has(cls, protocol: str) -> bool:
         """Return True when ``protocol`` has a connector-owned prediction read."""
-        return cls._normalize(protocol) in cls._SPEC_LOADERS
+        return cls._normalize(protocol) in cls._spec_loaders()
 
     @classmethod
     def supported_protocols(cls) -> tuple[str, ...]:
@@ -83,7 +95,7 @@ class PredictionReadRegistry:
         of hardcoding a venue list, so adding a connector extends discovery with no
         framework edit.
         """
-        return tuple(sorted(cls._SPEC_LOADERS))
+        return tuple(sorted(cls._spec_loaders()))
 
     @classmethod
     def canonical(cls, protocol: str | None) -> str | None:
@@ -95,14 +107,14 @@ class PredictionReadRegistry:
         if not isinstance(protocol, str) or not protocol:
             return None
         key = cls._normalize(protocol)
-        return key if key in cls._SPEC_LOADERS else None
+        return key if key in cls._spec_loaders() else None
 
     @classmethod
     def _load_spec(cls, protocol: str) -> PredictionReadSpec | None:
         """Resolve and cache one protocol's prediction-read spec.
 
         Imports ONLY the connector module that owns ``protocol`` (per
-        ``_SPEC_LOADERS``) — a broken sibling connector cannot block this lookup.
+        the manifest-derived dispatch) — a broken sibling connector cannot block this lookup.
         Returns ``None`` when the protocol is unknown; raises on a broken import or
         wrong-type attribute (the public ``build_provider`` wraps this to fail
         closed).
@@ -110,7 +122,7 @@ class PredictionReadRegistry:
         cached = cls._spec_cache.get(protocol)
         if cached is not None:
             return cached
-        entry = cls._SPEC_LOADERS.get(protocol)
+        entry = cls._spec_loaders().get(protocol)
         if entry is None:
             return None
         module_path, attribute = entry
@@ -171,6 +183,7 @@ class PredictionReadRegistry:
         """Test helper: drop the resolved-spec cache so the next call re-imports.
 
         Production code should never call this — it exists for narrow test setups
-        that intentionally re-trigger a connector import or swap ``_SPEC_LOADERS``.
+        that intentionally re-trigger a connector import or swap the dispatch map.
         """
         cls._spec_cache.clear()
+        cls._spec_loader_map = None

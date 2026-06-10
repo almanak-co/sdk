@@ -1,7 +1,8 @@
 """Unit tests for the VIB-4989 prediction/CLOB/stub ``_strategy_base`` seams.
 
-PR A commit 1 lands the seam *infrastructure* with empty ``_SPEC_LOADERS`` (no
-connector opts in yet — Polymarket wires in later commits). These tests pin the
+PR A commit 1 landed the seam *infrastructure* with empty dispatch (no
+connector opted in yet — Polymarket wired in later commits; dispatch is now
+derived from connector manifests). These tests pin the
 registry machinery in isolation: empty-registry fail-closed behaviour, keyed
 dispatch + chains discovery (via a monkeypatched loader), broken-sibling
 isolation, the gateway-stub ``service_name`` collision guard, spec validation, and
@@ -23,11 +24,12 @@ from almanak.connectors._strategy_base.prediction_read_registry import Predictio
 @pytest.fixture(autouse=True)
 def _reset_registries(monkeypatch):
     # Clear real connector registrations so these are pure *machinery* tests,
-    # independent of which connectors opt in via _SPEC_LOADERS (e.g. polymarket,
-    # wired in VIB-4989 commit 2). Each test that needs a loader sets its own.
+    # independent of which connectors opt in via manifest declarations (e.g.
+    # polymarket). Pre-seeding ``_spec_loader_map`` with a fresh empty dict
+    # bypasses manifest derivation; each test that needs a loader sets its own.
     for reg in (PredictionReadRegistry, PredictionExecuteRegistry, GatewayStubRegistry):
         reg.reset_cache()
-        monkeypatch.setattr(reg, "_SPEC_LOADERS", {})
+        monkeypatch.setattr(reg, "_spec_loader_map", {})
     yield
     for reg in (PredictionReadRegistry, PredictionExecuteRegistry, GatewayStubRegistry):
         reg.reset_cache()
@@ -84,7 +86,7 @@ def test_read_registry_keyed_dispatch(monkeypatch):
         chains=frozenset({"polygon"}),
     )
     # Canonical key carries an underscore; inputs with a dash / mixed case normalize onto it.
-    monkeypatch.setitem(PredictionReadRegistry._SPEC_LOADERS, "test_proto", ("unused.mod", "SPEC"))
+    monkeypatch.setitem(PredictionReadRegistry._spec_loader_map, "test_proto", ("unused.mod", "SPEC"))
     monkeypatch.setitem(PredictionReadRegistry._spec_cache, "test_proto", spec)
 
     assert PredictionReadRegistry.has("Test-Proto") is True  # normalized: case + '-'→'_'
@@ -101,7 +103,7 @@ def test_execute_registry_keyed_dispatch_and_protocols_for_chain(monkeypatch):
         build_handler=lambda *, gateway_client, wallet: handler,
         chains=frozenset({"polygon"}),
     )
-    monkeypatch.setitem(PredictionExecuteRegistry._SPEC_LOADERS, "testproto", ("unused.mod", "SPEC"))
+    monkeypatch.setitem(PredictionExecuteRegistry._spec_loader_map, "testproto", ("unused.mod", "SPEC"))
     monkeypatch.setitem(PredictionExecuteRegistry._spec_cache, "testproto", spec)
 
     assert PredictionExecuteRegistry.build_handler("testproto", gateway_client=object()) is handler
@@ -111,7 +113,7 @@ def test_execute_registry_keyed_dispatch_and_protocols_for_chain(monkeypatch):
 
 def test_stub_registry_build_and_names(monkeypatch):
     spec = GatewayStubSpec(service_name="poly", stub_factory=lambda ch: f"stub:{ch}")
-    monkeypatch.setitem(GatewayStubRegistry._SPEC_LOADERS, "polyconn", ("unused.mod", "SPEC"))
+    monkeypatch.setitem(GatewayStubRegistry._spec_loader_map, "polyconn", ("unused.mod", "SPEC"))
     monkeypatch.setitem(GatewayStubRegistry._spec_cache, "polyconn", spec)
 
     assert GatewayStubRegistry.stub_names() == ("poly",)
@@ -126,10 +128,10 @@ def test_stub_registry_build_and_names(monkeypatch):
 def test_read_registry_broken_sibling_fails_closed(monkeypatch):
     good = object()
     good_spec = PredictionReadSpec(build_provider=lambda *, gateway_client, wallet: good, chains=frozenset({"polygon"}))
-    monkeypatch.setitem(PredictionReadRegistry._SPEC_LOADERS, "good", ("unused.mod", "SPEC"))
+    monkeypatch.setitem(PredictionReadRegistry._spec_loader_map, "good", ("unused.mod", "SPEC"))
     monkeypatch.setitem(PredictionReadRegistry._spec_cache, "good", good_spec)
     # 'broken' has NO cache entry → _load_spec attempts a real import that fails.
-    monkeypatch.setitem(PredictionReadRegistry._SPEC_LOADERS, "broken", ("almanak.does.not.exist", "SPEC"))
+    monkeypatch.setitem(PredictionReadRegistry._spec_loader_map, "broken", ("almanak.does.not.exist", "SPEC"))
 
     assert PredictionReadRegistry.build_provider("broken", gateway_client=object()) is None  # fail closed, no raise
     assert PredictionReadRegistry.supports_chain("broken", "polygon") is False
@@ -138,10 +140,12 @@ def test_read_registry_broken_sibling_fails_closed(monkeypatch):
 
 
 def test_execute_registry_broken_sibling_omitted_from_chain_scan(monkeypatch):
-    good_spec = PredictionExecuteSpec(build_handler=lambda *, gateway_client, wallet: object(), chains=frozenset({"polygon"}))
-    monkeypatch.setitem(PredictionExecuteRegistry._SPEC_LOADERS, "good", ("unused.mod", "SPEC"))
+    good_spec = PredictionExecuteSpec(
+        build_handler=lambda *, gateway_client, wallet: object(), chains=frozenset({"polygon"})
+    )
+    monkeypatch.setitem(PredictionExecuteRegistry._spec_loader_map, "good", ("unused.mod", "SPEC"))
     monkeypatch.setitem(PredictionExecuteRegistry._spec_cache, "good", good_spec)
-    monkeypatch.setitem(PredictionExecuteRegistry._SPEC_LOADERS, "broken", ("almanak.does.not.exist", "SPEC"))
+    monkeypatch.setitem(PredictionExecuteRegistry._spec_loader_map, "broken", ("almanak.does.not.exist", "SPEC"))
 
     # Broken connector is simply absent from the chain scan; the good one shows.
     assert PredictionExecuteRegistry.protocols_for_chain("polygon") == ("good",)
@@ -150,9 +154,9 @@ def test_execute_registry_broken_sibling_omitted_from_chain_scan(monkeypatch):
 
 def test_stub_registry_broken_sibling_skipped(monkeypatch):
     good_spec = GatewayStubSpec(service_name="good", stub_factory=lambda ch: "ok")
-    monkeypatch.setitem(GatewayStubRegistry._SPEC_LOADERS, "goodconn", ("unused.mod", "SPEC"))
+    monkeypatch.setitem(GatewayStubRegistry._spec_loader_map, "goodconn", ("unused.mod", "SPEC"))
     monkeypatch.setitem(GatewayStubRegistry._spec_cache, "goodconn", good_spec)
-    monkeypatch.setitem(GatewayStubRegistry._SPEC_LOADERS, "brokenconn", ("almanak.does.not.exist", "SPEC"))
+    monkeypatch.setitem(GatewayStubRegistry._spec_loader_map, "brokenconn", ("almanak.does.not.exist", "SPEC"))
 
     assert GatewayStubRegistry.build_stubs("CH") == {"good": "ok"}  # broken skipped, not raised
 
@@ -167,9 +171,9 @@ def test_stub_registry_raising_factory_isolated_at_runtime(monkeypatch):
     bad_spec = GatewayStubSpec(service_name="bad", stub_factory=_boom)
     good_spec = GatewayStubSpec(service_name="good", stub_factory=lambda ch: "ok")
     # 'badconn' loads before 'goodconn'; both have valid cached specs.
-    monkeypatch.setitem(GatewayStubRegistry._SPEC_LOADERS, "badconn", ("unused.mod", "SPEC"))
+    monkeypatch.setitem(GatewayStubRegistry._spec_loader_map, "badconn", ("unused.mod", "SPEC"))
     monkeypatch.setitem(GatewayStubRegistry._spec_cache, "badconn", bad_spec)
-    monkeypatch.setitem(GatewayStubRegistry._SPEC_LOADERS, "goodconn", ("unused.mod", "SPEC"))
+    monkeypatch.setitem(GatewayStubRegistry._spec_loader_map, "goodconn", ("unused.mod", "SPEC"))
     monkeypatch.setitem(GatewayStubRegistry._spec_cache, "goodconn", good_spec)
 
     stubs = GatewayStubRegistry.build_stubs("CH")  # does not raise
@@ -184,9 +188,9 @@ def test_stub_registry_raising_factory_isolated_at_runtime(monkeypatch):
 def test_stub_registry_service_name_collision_raises(monkeypatch):
     spec_a = GatewayStubSpec(service_name="dup", stub_factory=lambda ch: "A")
     spec_b = GatewayStubSpec(service_name="dup", stub_factory=lambda ch: "B")
-    monkeypatch.setitem(GatewayStubRegistry._SPEC_LOADERS, "connA", ("unused.mod", "SPEC"))
+    monkeypatch.setitem(GatewayStubRegistry._spec_loader_map, "connA", ("unused.mod", "SPEC"))
     monkeypatch.setitem(GatewayStubRegistry._spec_cache, "connA", spec_a)
-    monkeypatch.setitem(GatewayStubRegistry._SPEC_LOADERS, "connB", ("unused.mod", "SPEC"))
+    monkeypatch.setitem(GatewayStubRegistry._spec_loader_map, "connB", ("unused.mod", "SPEC"))
     monkeypatch.setitem(GatewayStubRegistry._spec_cache, "connB", spec_b)
 
     with pytest.raises(ValueError, match="service_name 'dup' claimed by both"):
@@ -200,7 +204,7 @@ def test_stub_registry_service_name_collision_raises(monkeypatch):
 
 @pytest.mark.parametrize("spec_cls", [PredictionReadSpec, PredictionExecuteSpec])
 def test_spec_rejects_bare_str_chains(spec_cls):
-    fn = (lambda *, gateway_client, wallet: None)
+    fn = lambda *, gateway_client, wallet: None
     field = "build_provider" if spec_cls is PredictionReadSpec else "build_handler"
     with pytest.raises(TypeError, match="bare str"):
         spec_cls(**{field: fn}, chains="polygon")  # type: ignore[arg-type]
@@ -208,7 +212,7 @@ def test_spec_rejects_bare_str_chains(spec_cls):
 
 @pytest.mark.parametrize("spec_cls", [PredictionReadSpec, PredictionExecuteSpec])
 def test_spec_coerces_iterable_chains(spec_cls):
-    fn = (lambda *, gateway_client, wallet: None)
+    fn = lambda *, gateway_client, wallet: None
     field = "build_provider" if spec_cls is PredictionReadSpec else "build_handler"
     spec = spec_cls(**{field: fn}, chains=["polygon", "polygon"])  # list → frozenset, dedup
     assert spec.chains == frozenset({"polygon"})

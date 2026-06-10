@@ -21,6 +21,8 @@ from almanak.connectors._connector import (
     ConnectorDiscoveryError,
     ConnectorRegistry,
     ImportRef,
+    LendingReadDecl,
+    PerpsReadDecl,
     StrategyMatrixEntry,
 )
 from almanak.connectors._connector_descriptor import (
@@ -2556,3 +2558,35 @@ def test_connector_modules_use_canonical_connector_name() -> None:
             offenders.append(connector_file.relative_to(repo_root).as_posix())
 
     assert not offenders
+
+
+class TestDeclarationReachabilityGuards:
+    """Names and decl aliases must already be in lookup-folded form.
+
+    Registry lookups fold case + hyphens on the REQUEST side only; the
+    canonical name and domain-scoped decl aliases are consumed raw as dispatch
+    keys. Anything not already folded would be silently unreachable, so the
+    descriptor rejects it at construction (PR #2664 review).
+    """
+
+    def test_connector_name_rejects_uppercase(self):
+        with pytest.raises(ValueError, match="lowercase, hyphen-free"):
+            Connector(name="Aave_V3", kind=ProtocolKind.LENDING)
+
+    def test_connector_name_rejects_hyphens(self):
+        with pytest.raises(ValueError, match="lowercase, hyphen-free"):
+            Connector(name="aave-v3", kind=ProtocolKind.LENDING)
+
+    def test_lending_decl_rejects_hyphenated_alias(self):
+        with pytest.raises(ValueError, match="must not contain hyphens"):
+            LendingReadDecl(
+                spec=ImportRef(module="almanak.connectors.aave_v3.lending_read", attribute="LENDING_READ_SPEC"),
+                aliases=("aave-v3",),
+            )
+
+    def test_perps_decl_rejects_hyphenated_alias(self):
+        with pytest.raises(ValueError, match="must not contain hyphens"):
+            PerpsReadDecl(
+                spec=ImportRef(module="almanak.connectors.gmx_v2.perps_read", attribute="PERPS_READ_SPEC"),
+                aliases=("gmx-v2",),
+            )

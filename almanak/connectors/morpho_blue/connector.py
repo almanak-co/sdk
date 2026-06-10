@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    LendingReadDecl,
     StrategyMatrixEntry,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
@@ -56,6 +57,13 @@ CONNECTOR = Connector(
     primitive=ImportRef(
         module="almanak.connectors.morpho_blue.primitive",
         attribute="PRIMITIVE",
+    ),
+    # Market-scoped account state (VIB-4929 PR-3a): non-USD-native; market params inject lltv.
+    lending_read=LendingReadDecl(
+        account_state=ImportRef(
+            module="almanak.connectors.morpho_blue.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"
+        ),
+        market_table=ImportRef(module="almanak.connectors.morpho_blue.addresses", attribute="MORPHO_MARKETS"),
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
     strategy_chains=("ethereum", "base", "arbitrum", "polygon", "monad"),

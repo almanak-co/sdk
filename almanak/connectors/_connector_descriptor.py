@@ -34,6 +34,8 @@ __all__ = [
     "ConnectorDescriptorRegistry",
     "ConnectorDiscoveryError",
     "ImportRef",
+    "LendingReadDecl",
+    "PerpsReadDecl",
     "StrategyMatrixEntry",
     "SupportedChainsSpec",
 ]
@@ -95,6 +97,79 @@ class StrategyMatrixEntry:
     chains: frozenset[str]
 
 
+def _validate_decl_aliases(decl_name: str, aliases: tuple[str, ...]) -> None:
+    """Validate one read-decl's domain-scoped protocol aliases."""
+    if not isinstance(aliases, tuple):
+        raise ValueError(f"{decl_name}.aliases must be a tuple[str, ...], got {aliases!r}")
+    bad = [alias for alias in aliases if not isinstance(alias, str) or not alias.strip()]
+    if bad:
+        raise ValueError(f"{decl_name}.aliases must contain only non-empty strings, got {bad!r}")
+    if len(set(aliases)) != len(aliases):
+        raise ValueError(f"{decl_name}.aliases contains duplicates: {aliases!r}")
+    non_lowercase = [alias for alias in aliases if alias != alias.lower()]
+    if non_lowercase:
+        # Registry lookups lower-case the requested protocol, so a non-lowercase
+        # alias would be silently unreachable.
+        raise ValueError(f"{decl_name}.aliases must be lowercase, got {non_lowercase!r}")
+    with_hyphens = [alias for alias in aliases if "-" in alias]
+    if with_hyphens:
+        # Registry lookups fold hyphens to underscores before consulting the
+        # alias map, so a hyphenated alias would be silently unreachable.
+        raise ValueError(f"{decl_name}.aliases must not contain hyphens, got {with_hyphens!r}")
+
+
+@dataclass(frozen=True)
+class LendingReadDecl:
+    """Connector-owned lending-read dispatch declaration.
+
+    Bundles the lazy import references ``LendingReadRegistry`` used to hold in
+    central loader tables. ``spec`` names the connector's module-level
+    ``LendingReadSpec`` (single-reserve read); ``account_state`` its
+    ``AccountStateReadSpec`` (aggregate read, VIB-4929); ``market_table`` its
+    per-chain ``market_id -> params`` catalogue (market-scoped protocols);
+    ``market_health`` its multi-collateral market-health reader callable.
+    ``aliases`` are lending-scoped protocol aliases resolving to this
+    connector's canonical key (e.g. ``"aave"`` -> ``aave_v3``) — they join the
+    lending dispatch namespace only, NOT the manifest discovery/compiler
+    alias namespaces.
+    """
+
+    spec: ImportRef | None = None
+    account_state: ImportRef | None = None
+    market_table: ImportRef | None = None
+    market_health: ImportRef | None = None
+    aliases: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the declaration's import references and aliases."""
+        for field_name in ("spec", "account_state", "market_table", "market_health"):
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, ImportRef):
+                raise ValueError(f"LendingReadDecl.{field_name} must be None or an ImportRef, got {value!r}")
+        if self.spec is None and self.account_state is None:
+            raise ValueError("LendingReadDecl must set at least one of spec / account_state")
+        _validate_decl_aliases("LendingReadDecl", self.aliases)
+
+
+@dataclass(frozen=True)
+class PerpsReadDecl:
+    """Connector-owned perps-read dispatch declaration.
+
+    ``spec`` names the connector's module-level ``PerpsReadSpec``. ``aliases``
+    are perps-scoped protocol aliases resolving to this connector's canonical
+    key (e.g. the deprecated ``"pancakeswap_perps"`` -> ``aster_perps``).
+    """
+
+    spec: ImportRef
+    aliases: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the declaration's import reference and aliases."""
+        if not isinstance(self.spec, ImportRef):
+            raise ValueError(f"PerpsReadDecl.spec must be an ImportRef, got {self.spec!r}")
+        _validate_decl_aliases("PerpsReadDecl", self.aliases)
+
+
 @dataclass(frozen=True)
 class Connector:
     """Lightweight connector-owned capability manifest.
@@ -125,6 +200,11 @@ class Connector:
     capabilities: CapabilitiesSpec | None = None
     supported_chains: SupportedChainsSpec | None = None
     primitive: ImportRef | None = None
+    lending_read: LendingReadDecl | None = None
+    perps_read: PerpsReadDecl | None = None
+    prediction_read: ImportRef | None = None
+    prediction_execute: ImportRef | None = None
+    gateway_stub: ImportRef | None = None
     swap_quote_connector: ImportRef | None = None
     accounting_treatment: ImportRef | None = None
     accounting_report: ImportRef | None = None
@@ -152,6 +232,12 @@ class Connector:
         """Validate connector-owned manifest metadata."""
         if not isinstance(self.name, str) or not self.name.strip():
             raise ValueError(f"Connector.name must be a non-empty string, got {self.name!r}")
+        if self.name != self.name.lower() or "-" in self.name:
+            # Registry lookups fold case and hyphens on the REQUEST side only;
+            # the canonical name is consumed raw as the dispatch key (and must
+            # equal the connector folder, a Python package segment), so any
+            # uppercase or hyphenated name would be silently unreachable.
+            raise ValueError(f"Connector.name must be a lowercase, hyphen-free folder name, got {self.name!r}")
         if not isinstance(self.kind, ProtocolKind):
             raise ValueError(f"Connector.kind must be a ProtocolKind, got {self.kind!r}")
         if not isinstance(self.aliases, tuple):
@@ -180,6 +266,11 @@ class Connector:
         self._validate_capabilities()
         self._validate_supported_chains()
         self._validate_primitive()
+        self._validate_lending_read()
+        self._validate_perps_read()
+        self._validate_prediction_read()
+        self._validate_prediction_execute()
+        self._validate_gateway_stub()
         self._validate_swap_quote_connector()
         self._validate_accounting_treatment()
         self._validate_accounting_report()
@@ -383,6 +474,33 @@ class Connector:
         """Validate the position-primitive declaration import reference."""
         if self.primitive is not None and not isinstance(self.primitive, ImportRef):
             raise ValueError(f"Connector.primitive must be None or an ImportRef, got {self.primitive!r}")
+
+    def _validate_lending_read(self) -> None:
+        """Validate the lending-read dispatch declaration."""
+        if self.lending_read is not None and not isinstance(self.lending_read, LendingReadDecl):
+            raise ValueError(f"Connector.lending_read must be None or a LendingReadDecl, got {self.lending_read!r}")
+
+    def _validate_perps_read(self) -> None:
+        """Validate the perps-read dispatch declaration."""
+        if self.perps_read is not None and not isinstance(self.perps_read, PerpsReadDecl):
+            raise ValueError(f"Connector.perps_read must be None or a PerpsReadDecl, got {self.perps_read!r}")
+
+    def _validate_prediction_read(self) -> None:
+        """Validate the prediction-read spec import reference."""
+        if self.prediction_read is not None and not isinstance(self.prediction_read, ImportRef):
+            raise ValueError(f"Connector.prediction_read must be None or an ImportRef, got {self.prediction_read!r}")
+
+    def _validate_prediction_execute(self) -> None:
+        """Validate the prediction CLOB-execution spec import reference."""
+        if self.prediction_execute is not None and not isinstance(self.prediction_execute, ImportRef):
+            raise ValueError(
+                f"Connector.prediction_execute must be None or an ImportRef, got {self.prediction_execute!r}"
+            )
+
+    def _validate_gateway_stub(self) -> None:
+        """Validate the gateway gRPC-client-stub spec import reference."""
+        if self.gateway_stub is not None and not isinstance(self.gateway_stub, ImportRef):
+            raise ValueError(f"Connector.gateway_stub must be None or an ImportRef, got {self.gateway_stub!r}")
 
     def _validate_swap_quote_connector(self) -> None:
         """Validate the strategy-side swap quote provider import reference."""
@@ -753,6 +871,26 @@ class ConnectorRegistry:
         """Return connectors that publish position-primitive declarations."""
         return tuple(d for d in self.all() if d.primitive is not None)
 
+    def with_lending_read(self) -> tuple[Connector, ...]:
+        """Return connectors that publish lending-read dispatch declarations."""
+        return tuple(d for d in self.all() if d.lending_read is not None)
+
+    def with_perps_read(self) -> tuple[Connector, ...]:
+        """Return connectors that publish perps-read dispatch declarations."""
+        return tuple(d for d in self.all() if d.perps_read is not None)
+
+    def with_prediction_read(self) -> tuple[Connector, ...]:
+        """Return connectors that publish prediction-read specs."""
+        return tuple(d for d in self.all() if d.prediction_read is not None)
+
+    def with_prediction_execute(self) -> tuple[Connector, ...]:
+        """Return connectors that publish prediction CLOB-execution specs."""
+        return tuple(d for d in self.all() if d.prediction_execute is not None)
+
+    def with_gateway_stub(self) -> tuple[Connector, ...]:
+        """Return connectors that publish gateway gRPC-client-stub specs."""
+        return tuple(d for d in self.all() if d.gateway_stub is not None)
+
     def with_swap_quote(self) -> tuple[Connector, ...]:
         """Return connectors that publish swap quote providers."""
         return tuple(d for d in self.all() if d.swap_quote_connector is not None)
@@ -826,6 +964,8 @@ class ConnectorRegistry:
         seen_compiler_default_keys: dict[str, str] = {}
         seen_capability_keys: dict[str, str] = {}
         seen_supported_chain_keys: dict[str, str] = {}
+        seen_lending_read_keys: dict[str, str] = {}
+        seen_perps_read_keys: dict[str, str] = {}
 
         for info in pkgutil.iter_modules(package.__path__):
             if not info.ispkg or info.name.startswith("_"):
@@ -896,6 +1036,18 @@ class ConnectorRegistry:
                 capability="Supported-chains",
                 keys=() if connector.supported_chains is None else connector.supported_chains.keys,
                 seen_keys=seen_supported_chain_keys,
+            )
+            self._validate_unique_ownership_keys(
+                connector_name=connector.name,
+                capability="Lending-read",
+                keys=() if connector.lending_read is None else (connector.name, *connector.lending_read.aliases),
+                seen_keys=seen_lending_read_keys,
+            )
+            self._validate_unique_ownership_keys(
+                connector_name=connector.name,
+                capability="Perps-read",
+                keys=() if connector.perps_read is None else (connector.name, *connector.perps_read.aliases),
+                seen_keys=seen_perps_read_keys,
             )
             connectors.append(connector)
 

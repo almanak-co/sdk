@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    PerpsReadDecl,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
@@ -31,6 +32,11 @@ CONNECTOR = Connector(
     compiler=ImportRef(
         module="almanak.connectors.aster_perps.compiler",
         attribute="AsterPerpsCompiler",
+    ),
+    # 'pancakeswap_perps' is the deprecated name for the Aster Diamond (PCS Perps = broker id 2).
+    perps_read=PerpsReadDecl(
+        spec=ImportRef(module="almanak.connectors.aster_perps.perps_read", attribute="PERPS_READ_SPEC"),
+        aliases=("pancakeswap_perps",),
     ),
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
     strategy_chains=("bnb",),

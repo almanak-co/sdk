@@ -47,28 +47,55 @@ __all__ = ["PerpsReadRegistry"]
 class PerpsReadRegistry:
     """Protocol-identifier → connector perps-read-spec dispatch registry.
 
-    Adding a perp venue is one folder (the connector's ``perps_read`` module
-    publishing ``PERPS_READ_SPEC``) plus one row in :data:`_SPEC_LOADERS` — no
-    framework edit. The table is empty until a connector opts in (the GMX row
-    lands with ``gmx_v2/perps_read.py``; Aster with ``aster_perps/perps_read.py``).
+    Adding a perp venue is one folder: the connector's ``perps_read`` module
+    publishes ``PERPS_READ_SPEC`` and its ``CONNECTOR`` manifest declares
+    ``perps_read=PerpsReadDecl(...)`` — no framework or registry edit. Aliases
+    (e.g. the deprecated ``pancakeswap_perps`` name for the Aster Diamond) are
+    declared on the owning connector's ``PerpsReadDecl``.
     """
 
-    # Protocol identifier -> (module path, attribute) naming the connector's
-    # published ``PerpsReadSpec``.
-    _SPEC_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
-        "gmx_v2": ("almanak.connectors.gmx_v2.perps_read", "PERPS_READ_SPEC"),
-        "aster_perps": ("almanak.connectors.aster_perps.perps_read", "PERPS_READ_SPEC"),
-    }
-
-    # Protocol aliases that map onto a canonical key in ``_SPEC_LOADERS``.
-    # ``pancakeswap_perps`` is the deprecated name for the Aster Diamond (PCS
-    # Perps is broker id=2 on Aster; see pancakeswap_perps/__init__.py), so the
-    # legacy name resolves to the canonical ``aster_perps`` spec.
-    _ALIASES: ClassVar[dict[str, str]] = {
-        "pancakeswap_perps": "aster_perps",
-    }
+    # Manifest-derived ``protocol -> (module path, attribute)`` spec map and
+    # ``alias -> canonical key`` map, built lazily on first use. ``None`` means
+    # "not built yet". Values stay (module, attribute) so per-protocol imports
+    # remain lazy (importlib on first lookup, never at derivation time).
+    _spec_loader_map: ClassVar[dict[str, tuple[str, str]] | None] = None
+    _alias_map: ClassVar[dict[str, str] | None] = None
 
     _spec_cache: ClassVar[dict[str, PerpsReadSpec]] = {}
+
+    @classmethod
+    def _build_dispatch(cls) -> None:
+        """Derive the spec-loader and alias maps from connector manifests."""
+        # Deferred import: avoids a module-level cycle through the connector
+        # descriptor.
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+        spec_loaders: dict[str, tuple[str, str]] = {}
+        aliases: dict[str, str] = {}
+        for connector_manifest in CONNECTOR_REGISTRY.with_perps_read():
+            decl = connector_manifest.perps_read
+            assert decl is not None
+            spec_loaders[connector_manifest.name] = (decl.spec.module, decl.spec.attribute)
+            for alias in decl.aliases:
+                aliases[alias] = connector_manifest.name
+        cls._spec_loader_map = spec_loaders
+        cls._alias_map = aliases
+
+    @classmethod
+    def _spec_loaders(cls) -> dict[str, tuple[str, str]]:
+        """Return the manifest-derived ``protocol -> (module, attribute)`` map."""
+        if cls._spec_loader_map is None:
+            cls._build_dispatch()
+        assert cls._spec_loader_map is not None
+        return cls._spec_loader_map
+
+    @classmethod
+    def _aliases(cls) -> dict[str, str]:
+        """Return the manifest-derived ``alias -> canonical key`` map."""
+        if cls._alias_map is None:
+            cls._build_dispatch()
+        assert cls._alias_map is not None
+        return cls._alias_map
 
     @classmethod
     def _normalize(cls, protocol: str | None) -> str:
@@ -80,12 +107,12 @@ class PerpsReadRegistry:
         if not isinstance(protocol, str):
             return ""
         key = protocol.lower().replace("-", "_")
-        return cls._ALIASES.get(key, key)
+        return cls._aliases().get(key, key)
 
     @classmethod
     def has(cls, protocol: str) -> bool:
         """Return True when ``protocol`` has a connector-owned perps read."""
-        return cls._normalize(protocol) in cls._SPEC_LOADERS
+        return cls._normalize(protocol) in cls._spec_loaders()
 
     @classmethod
     def supported_protocols(cls) -> tuple[str, ...]:
@@ -95,7 +122,7 @@ class PerpsReadRegistry:
         venue list, so adding a connector extends discovery with no framework
         edit.
         """
-        return tuple(sorted(cls._SPEC_LOADERS))
+        return tuple(sorted(cls._spec_loaders()))
 
     @classmethod
     def canonical(cls, protocol: str | None) -> str | None:
@@ -108,20 +135,20 @@ class PerpsReadRegistry:
         if not isinstance(protocol, str) or not protocol:
             return None
         key = cls._normalize(protocol)
-        return key if key in cls._SPEC_LOADERS else None
+        return key if key in cls._spec_loaders() else None
 
     @classmethod
     def _load_spec(cls, protocol: str) -> PerpsReadSpec | None:
         """Resolve and cache one protocol's perps-read spec.
 
-        Imports ONLY the connector module that owns ``protocol`` (per
-        ``_SPEC_LOADERS``) — a broken sibling connector cannot block this lookup.
+        Imports ONLY the connector module that owns ``protocol`` (per the
+        manifest-derived dispatch) — a broken sibling connector cannot block this lookup.
         Returns ``None`` when the protocol is unknown.
         """
         cached = cls._spec_cache.get(protocol)
         if cached is not None:
             return cached
-        entry = cls._SPEC_LOADERS.get(protocol)
+        entry = cls._spec_loaders().get(protocol)
         if entry is None:
             return None
         module_path, attribute = entry
@@ -204,3 +231,5 @@ class PerpsReadRegistry:
         that intentionally re-trigger a connector import.
         """
         cls._spec_cache.clear()
+        cls._spec_loader_map = None
+        cls._alias_map = None

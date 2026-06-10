@@ -26,7 +26,7 @@ single-reserve one. A connector that supports an account-state read publishes a
 module-level :data:`ACCOUNT_STATE_READ_SPEC` (an
 :class:`~almanak.connectors._strategy_base.lending_read_base.AccountStateReadSpec`)
 in the same ``lending_read`` module; the registry maps it through the parallel
-``_ACCOUNT_STATE_LOADERS`` table and exposes
+manifest-derived account-state dispatch and exposes
 :meth:`LendingReadRegistry.supports_account_state`,
 :meth:`LendingReadRegistry.position_manager_address`,
 :meth:`LendingReadRegistry.resolve_account_state_plan`, and — for per-market
@@ -124,114 +124,36 @@ class AccountStatePlan:
     reduce: Callable[[AccountStateQuery, list[str | None]], LendingAccountState | None]
 
 
+@dataclass(frozen=True)
+class _LendingDispatchMaps:
+    """Manifest-derived dispatch tables, built once per process.
+
+    Each map mirrors one of the registry's historical hardcoded loader tables;
+    values stay ``(module path, attribute)`` so per-protocol imports remain
+    lazy (importlib on first lookup, never at derivation time — the VIB-4928
+    PR-1 xdist member-drop hazard).
+    """
+
+    spec_loaders: dict[str, tuple[str, str]]
+    account_state_loaders: dict[str, tuple[str, str]]
+    market_health_loaders: dict[str, tuple[str, str]]
+    market_table_loaders: dict[str, tuple[str, str]]
+    aliases: dict[str, str]
+
+
 class LendingReadRegistry:
     """Protocol-identifier → connector lending-read-spec dispatch registry.
 
-    Owns two parallel dispatch tables: ``_SPEC_LOADERS`` for single-reserve reads
-    (:class:`LendingReadSpec`) and ``_ACCOUNT_STATE_LOADERS`` for aggregate
-    account-state reads (:class:`AccountStateReadSpec`, VIB-4929). A protocol may
-    appear in either or both.
+    Dispatch is derived from connector manifests: each lending connector
+    declares ``lending_read=LendingReadDecl(...)`` on its ``CONNECTOR``,
+    bundling its single-reserve spec (:class:`LendingReadSpec`), aggregate
+    account-state spec (:class:`AccountStateReadSpec`, VIB-4929), per-market
+    catalogue, multi-collateral health reader, and lending-scoped aliases. A
+    protocol may publish either or both specs. Adding a lending connector (or
+    an Aave fork) requires no edit here — the manifest declaration in the
+    connector's own folder is the registration. Per-connector reader design
+    notes live on each connector's manifest / ``lending_read`` module.
     """
-
-    # Protocol identifier -> (module path, attribute) naming the connector's
-    # published LendingReadSpec. The Aave V3 forks (Aave V3, Spark) each
-    # publish their own spec attribute; the specs happen to be the shared
-    # AAVE_FORK_RESERVE_READ instance, but the *opt-in* lives in each connector
-    # so adding a fork needs no edit here beyond one row.
-    _SPEC_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
-        "aave_v3": ("almanak.connectors.aave_v3.lending_read", "LENDING_READ_SPEC"),
-        "spark": ("almanak.connectors.spark.lending_read", "LENDING_READ_SPEC"),
-    }
-
-    # Parallel table for aggregate account-state reads (VIB-4929). Maps a
-    # protocol identifier to the connector's published ``ACCOUNT_STATE_READ_SPEC``.
-    # The Aave V3 forks (Aave V3, Spark) each publish their own attribute; the
-    # specs happen to be the shared ``AAVE_FORK_ACCOUNT_STATE_READ`` instance, but
-    # the opt-in lives in each connector so adding a fork needs one row here.
-    # Morpho Blue joined in PR-3a — its spec consumes the price/decimals/market-
-    # params injection seam on ``AccountStateQuery`` (Morpho is not USD-native).
-    # Compound V3 joined in PR-3b — its spec declares a market-scoped read target
-    # (the per-market Comet, bound from the market table), symbol market-id
-    # normalisation, and an intent-derived collateral leg (the three connector hooks
-    # that let the framework stay generic).
-    _ACCOUNT_STATE_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
-        "aave_v3": ("almanak.connectors.aave_v3.lending_read", "ACCOUNT_STATE_READ_SPEC"),
-        "spark": ("almanak.connectors.spark.lending_read", "ACCOUNT_STATE_READ_SPEC"),
-        "morpho_blue": ("almanak.connectors.morpho_blue.lending_read", "ACCOUNT_STATE_READ_SPEC"),
-        "compound_v3": ("almanak.connectors.compound_v3.lending_read", "ACCOUNT_STATE_READ_SPEC"),
-        # Silo V2 joined in VIB-4965 — a bespoke per-silo reader (Silo has no
-        # Aave-style getUserAccountData; its isolated ERC-4626 silos are read via
-        # maxWithdraw on the deposit silo + maxRepay on the paired debt silo).
-        # Market-scoped target + synthetic "<col>/<loan>" market ids (Silo intents
-        # carry no market_id). See silo_v2/lending_read.py.
-        "silo_v2": ("almanak.connectors.silo_v2.lending_read", "ACCOUNT_STATE_READ_SPEC"),
-        # Euler V2 joined in VIB-4966 — a bespoke vault/EVC reader (Euler has no
-        # Aave-style getUserAccountData; its independent ERC-4626 vaults are read via
-        # maxWithdraw on the deposit vault + debtOf on the borrow/controller vault).
-        # Market-scoped target + synthetic "<col>" / "<col>/<loan>" market ids (Euler
-        # intents carry no market_id). See euler_v2/lending_read.py.
-        "euler_v2": ("almanak.connectors.euler_v2.lending_read", "ACCOUNT_STATE_READ_SPEC"),
-        # BENQI joined in VIB-4967 — a bespoke Compound-V2 qiToken reader (BENQI is a
-        # Compound-V2 fork, NOT an Aave fork; it has no getUserAccountData). The
-        # per-qiToken position is read via getAccountSnapshot on the collateral + debt
-        # qiTokens; the TRUE liquidation HF uses the Comptroller's
-        # markets(qiToken).collateralFactorMantissa. Market-scoped target + synthetic
-        # "<col>" / "<col>/<loan>" market ids (BENQI intents carry no market_id).
-        # See benqi/lending_read.py.
-        "benqi": ("almanak.connectors.benqi.lending_read", "ACCOUNT_STATE_READ_SPEC"),
-    }
-
-    # Multi-collateral account-HEALTH read dispatch (VIB-4851 PR-2). Distinct from the
-    # single-leg ``_ACCOUNT_STATE_LOADERS`` above: the position-health gate keeps the
-    # product-owner-chosen SUMMED health factor over every held collateral, which the
-    # single-leg read cannot express. Maps a protocol identifier to the
-    # ``(module path, attribute)`` naming the connector's published market-health
-    # reader callable (a function, not an ``AccountStateReadSpec``). Only Compound V3
-    # needs this today — the Aave family / Morpho compute HF inside the single-leg
-    # reducer. Imported lazily on first ``market_health_reader`` call and cached.
-    _MARKET_HEALTH_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
-        "compound_v3": ("almanak.connectors.compound_v3.lending_read", "read_compound_v3_market_health"),
-    }
-
-    # Lazy per-market parameter tables for protocols whose account state is scoped
-    # to a single market (VIB-4929 PR-3a). Maps a protocol identifier to the
-    # ``(module path, attribute)`` naming the connector's per-chain
-    # ``market_id -> params`` catalogue. Imported on first ``market_params`` call
-    # via ``importlib`` and cached — NEVER derived eagerly at module level (eager
-    # registry derivation caused non-deterministic xdist member-drops in VIB-4928
-    # PR-1). The Aave family has no entry: its account state is whole-wallet, not
-    # per-market.
-    _MARKET_TABLE_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
-        "morpho_blue": ("almanak.connectors.morpho_blue.addresses", "MORPHO_MARKETS"),
-        # Compound V3's derived per-market table (params + the per-market Comet
-        # address folded in), so ``market_params`` returns everything the pure spec
-        # needs — keeping this registry generic (no Compound-specific merge here).
-        "compound_v3": ("almanak.connectors.compound_v3.addresses", "COMPOUND_V3_ACCOUNT_STATE_MARKETS"),
-        # Silo V2's synthetic per-silo account-state table (VIB-4965): each entry
-        # folds in the collateral silo (``comet_address``), the paired debt silo,
-        # and the collateral/loan token symbols, keyed by a synthetic
-        # ``"<col>/<loan>"`` market id. Lives in the connector's lending_read module
-        # (derived from SILO_V2_MARKETS), not addresses.py, since Silo has no
-        # separate addresses module.
-        "silo_v2": ("almanak.connectors.silo_v2.lending_read", "SILO_V2_ACCOUNT_STATE_MARKETS"),
-        # Euler V2's synthetic per-vault account-state table (VIB-4966): each entry
-        # folds in the collateral vault (``comet_address``), the optional paired
-        # borrow/controller vault (``debt_vault_address``), and the collateral/loan
-        # token symbols, keyed by a synthetic ``"<col>"`` (collateral-only) or
-        # ``"<col>/<loan>"`` (borrow) market id. Lives in the connector's
-        # lending_read module (derived from EULER_V2_VAULTS_BY_CHAIN), since Euler
-        # has no separate addresses module.
-        "euler_v2": ("almanak.connectors.euler_v2.lending_read", "EULER_V2_ACCOUNT_STATE_MARKETS"),
-        # BENQI's synthetic per-qiToken account-state table (VIB-4967): each entry
-        # folds in the collateral qiToken (``comet_address``), the Comptroller
-        # (``comptroller_address`` — where the collateral factor is read for the true
-        # HF), the optional debt qiToken (``debt_qi_token``), and the priceable
-        # collateral/loan token symbols, keyed by a synthetic ``"<col>"``
-        # (collateral-only) or ``"<col>/<loan>"`` (borrow) market id. Lives in the
-        # connector's lending_read module (derived from BENQI_QI_TOKENS), since BENQI
-        # has no separate addresses module.
-        "benqi": ("almanak.connectors.benqi.lending_read", "BENQI_ACCOUNT_STATE_MARKETS"),
-    }
 
     # Sentinel ``position_manager_address`` returns for a market-scoped protocol
     # (empty ``contract_kinds``): a truthy "this chain has a deployment" signal for
@@ -240,10 +162,45 @@ class LendingReadRegistry:
     # market table's ``comet_address``.
     _MARKET_SCOPED_TARGET: ClassVar[str] = "<market-scoped>"
 
-    # Protocol aliases that map onto a canonical key in ``_SPEC_LOADERS``.
-    _ALIASES: ClassVar[dict[str, str]] = {
-        "aave": "aave_v3",
-    }
+    # Manifest-derived dispatch maps, built lazily on first use. ``None`` means
+    # "not built yet".
+    _dispatch_maps: ClassVar[_LendingDispatchMaps | None] = None
+
+    @classmethod
+    def _dispatch(cls) -> _LendingDispatchMaps:
+        """Return the manifest-derived dispatch maps."""
+        if cls._dispatch_maps is None:
+            # Deferred import: avoids a module-level cycle through the
+            # connector descriptor.
+            from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+            spec_loaders: dict[str, tuple[str, str]] = {}
+            account_state_loaders: dict[str, tuple[str, str]] = {}
+            market_health_loaders: dict[str, tuple[str, str]] = {}
+            market_table_loaders: dict[str, tuple[str, str]] = {}
+            aliases: dict[str, str] = {}
+            for connector_manifest in CONNECTOR_REGISTRY.with_lending_read():
+                decl = connector_manifest.lending_read
+                assert decl is not None
+                key = connector_manifest.name
+                if decl.spec is not None:
+                    spec_loaders[key] = (decl.spec.module, decl.spec.attribute)
+                if decl.account_state is not None:
+                    account_state_loaders[key] = (decl.account_state.module, decl.account_state.attribute)
+                if decl.market_health is not None:
+                    market_health_loaders[key] = (decl.market_health.module, decl.market_health.attribute)
+                if decl.market_table is not None:
+                    market_table_loaders[key] = (decl.market_table.module, decl.market_table.attribute)
+                for alias in decl.aliases:
+                    aliases[alias] = key
+            cls._dispatch_maps = _LendingDispatchMaps(
+                spec_loaders=spec_loaders,
+                account_state_loaders=account_state_loaders,
+                market_health_loaders=market_health_loaders,
+                market_table_loaders=market_table_loaders,
+                aliases=aliases,
+            )
+        return cls._dispatch_maps
 
     # Default protocol used when a caller does not know which lending protocol a
     # position belongs to (legacy single-reserve read path). The framework reader
@@ -263,7 +220,7 @@ class LendingReadRegistry:
     @classmethod
     def _normalize(cls, protocol: str) -> str:
         key = protocol.lower().replace("-", "_")
-        return cls._ALIASES.get(key, key)
+        return cls._dispatch().aliases.get(key, key)
 
     @classmethod
     def default_protocol(cls) -> str:
@@ -278,19 +235,19 @@ class LendingReadRegistry:
     @classmethod
     def has(cls, protocol: str) -> bool:
         """Return True when ``protocol`` has a connector-owned lending read."""
-        return cls._normalize(protocol) in cls._SPEC_LOADERS
+        return cls._normalize(protocol) in cls._dispatch().spec_loaders
 
     @classmethod
     def supported_protocols(cls) -> tuple[str, ...]:
         """Return every protocol identifier with a connector-owned lending read."""
-        return tuple(sorted(cls._SPEC_LOADERS))
+        return tuple(sorted(cls._dispatch().spec_loaders))
 
     @classmethod
     def canonical(cls, protocol: str | None) -> str | None:
         """Return the canonical key for ``protocol`` if it has a lending read.
 
         Resolves case and aliases (e.g. ``"aave"`` -> ``"aave_v3"``) and returns
-        the canonical ``_SPEC_LOADERS`` key, or ``None`` when the protocol has no
+        the canonical dispatch key, or ``None`` when the protocol has no
         connector-owned lending read. Lets a strategy-side caller map a declared
         / loosely-spelled protocol identifier onto the registry's canonical key
         without reaching into ``_normalize`` or duplicating the alias table — so
@@ -303,20 +260,20 @@ class LendingReadRegistry:
         if not isinstance(protocol, str) or not protocol:
             return None
         key = cls._normalize(protocol)
-        return key if key in cls._SPEC_LOADERS else None
+        return key if key in cls._dispatch().spec_loaders else None
 
     @classmethod
     def _load_spec(cls, protocol: str) -> LendingReadSpec | None:
         """Resolve and cache one protocol's read spec.
 
-        Imports ONLY the connector module that owns ``protocol`` (per
-        ``_SPEC_LOADERS``) — a broken sibling connector cannot block this
+        Imports ONLY the connector module that owns ``protocol`` (per the
+        manifest-derived dispatch) — a broken sibling connector cannot block this
         lookup. Returns ``None`` when the protocol is unknown.
         """
         cached = cls._spec_cache.get(protocol)
         if cached is not None:
             return cached
-        entry = cls._SPEC_LOADERS.get(protocol)
+        entry = cls._dispatch().spec_loaders.get(protocol)
         if entry is None:
             return None
         module_path, attribute = entry
@@ -384,20 +341,20 @@ class LendingReadRegistry:
     @classmethod
     def supports_account_state(cls, protocol: str) -> bool:
         """Return True when ``protocol`` publishes an aggregate account-state read."""
-        return cls._normalize(protocol) in cls._ACCOUNT_STATE_LOADERS
+        return cls._normalize(protocol) in cls._dispatch().account_state_loaders
 
     @classmethod
     def _load_account_state_spec(cls, protocol: str) -> AccountStateReadSpec | None:
         """Resolve and cache one protocol's account-state spec.
 
-        Imports ONLY the connector module that owns ``protocol`` (per
-        ``_ACCOUNT_STATE_LOADERS``) — a broken sibling connector cannot block
+        Imports ONLY the connector module that owns ``protocol`` (per the
+        manifest-derived dispatch) — a broken sibling connector cannot block
         this lookup. Returns ``None`` when the protocol is unknown.
         """
         cached = cls._account_state_cache.get(protocol)
         if cached is not None:
             return cached
-        entry = cls._ACCOUNT_STATE_LOADERS.get(protocol)
+        entry = cls._dispatch().account_state_loaders.get(protocol)
         if entry is None:
             return None
         module_path, attribute = entry
@@ -439,8 +396,8 @@ class LendingReadRegistry:
     def _load_market_table(cls, protocol: str) -> _MarketTable | None:
         """Resolve and cache one protocol's per-chain market table.
 
-        Imports ONLY the connector module that owns ``protocol`` (per
-        ``_MARKET_TABLE_LOADERS``), lazily on first access — a broken sibling
+        Imports ONLY the connector module that owns ``protocol`` (per the
+        manifest-derived dispatch), lazily on first access — a broken sibling
         connector cannot block this lookup, and the table is never derived
         eagerly at registry import (the VIB-4928 PR-1 xdist member-drop hazard).
         Returns ``None`` when the protocol publishes no market table.
@@ -448,7 +405,7 @@ class LendingReadRegistry:
         cached = cls._market_cache.get(protocol)
         if cached is not None:
             return cached
-        entry = cls._MARKET_TABLE_LOADERS.get(protocol)
+        entry = cls._dispatch().market_table_loaders.get(protocol)
         if entry is None:
             return None
         module_path, attribute = entry
@@ -470,7 +427,7 @@ class LendingReadRegistry:
         Blue), the reducer needs market parameters it cannot read on-chain cheaply
         (e.g. ``lltv``). The owning connector publishes the
         ``market_id -> params`` catalogue; the registry resolves it through the
-        lazy ``_MARKET_TABLE_LOADERS`` table so the framework consumer can inject
+        lazy manifest-derived market-table dispatch so the framework consumer can inject
         the params into an :class:`AccountStateQuery` without importing the
         connector itself.
 
@@ -506,7 +463,7 @@ class LendingReadRegistry:
         """Resolve the connector's multi-collateral market-health reader callable.
 
         VIB-4851 PR-2: dispatches ``(protocol) -> read_<protocol>_market_health`` via
-        the lazy ``_MARKET_HEALTH_LOADERS`` table, importing ONLY the owning connector
+        the lazy manifest-derived market-health dispatch, importing ONLY the owning connector
         module (a broken sibling cannot block this lookup) and caching the result. The
         framework consumer (:func:`~almanak.framework.accounting.lending_accounting.read_lending_market_health`)
         calls this instead of naming a connector function, so it stays protocol-agnostic
@@ -519,7 +476,7 @@ class LendingReadRegistry:
         cached = cls._market_health_cache.get(key)
         if cached is not None:
             return cached
-        entry = cls._MARKET_HEALTH_LOADERS.get(key)
+        entry = cls._dispatch().market_health_loaders.get(key)
         if entry is None:
             return None
         module_path, attribute = entry
@@ -544,7 +501,7 @@ class LendingReadRegistry:
         (it reads one collateral). This accessor resolves the connector-owned market
         catalogue the parallel
         :func:`~almanak.connectors.compound_v3.lending_read.read_compound_v3_market_health`
-        read needs, reusing the SAME lazy ``_MARKET_TABLE_LOADERS`` table
+        read needs, reusing the SAME lazy manifest-derived market-table dispatch
         (``COMPOUND_V3_ACCOUNT_STATE_MARKETS``) and connector-declared
         ``normalize_market_id`` (Compound → ``str.lower``) that :meth:`market_params`
         uses — so the registry stays generic (no Compound literal here beyond the
@@ -716,3 +673,4 @@ class LendingReadRegistry:
         cls._account_state_cache.clear()
         cls._market_cache.clear()
         cls._market_health_cache.clear()
+        cls._dispatch_maps = None

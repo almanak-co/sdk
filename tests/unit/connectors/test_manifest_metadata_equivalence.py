@@ -19,6 +19,11 @@ from __future__ import annotations
 
 from almanak.connectors._connector import CONNECTOR_REGISTRY
 from almanak.connectors._strategy_base.capabilities_registry import CapabilitiesRegistry
+from almanak.connectors._strategy_base.gateway_stub_registry import GatewayStubRegistry
+from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
+from almanak.connectors._strategy_base.prediction_execute_registry import PredictionExecuteRegistry
+from almanak.connectors._strategy_base.prediction_read_registry import PredictionReadRegistry
 from almanak.connectors._strategy_base.supported_chains_registry import SupportedChainsRegistry
 
 # almanak/connectors/_strategy_base/capabilities_registry.py
@@ -113,3 +118,75 @@ def test_primitive_refs_use_the_canonical_attribute() -> None:
             f"{connector.name!r} declares primitive attribute "
             f"{connector.primitive.attribute!r}; the registry convention is 'PRIMITIVE'"
         )
+
+
+# almanak/connectors/_strategy_base/lending_read_registry.py tables as of
+# 2026-06-10, frozen verbatim.
+FROZEN_LENDING_SPEC_LOADERS = {
+    "aave_v3": ("almanak.connectors.aave_v3.lending_read", "LENDING_READ_SPEC"),
+    "spark": ("almanak.connectors.spark.lending_read", "LENDING_READ_SPEC"),
+}
+FROZEN_LENDING_ACCOUNT_STATE_LOADERS = {
+    "aave_v3": ("almanak.connectors.aave_v3.lending_read", "ACCOUNT_STATE_READ_SPEC"),
+    "spark": ("almanak.connectors.spark.lending_read", "ACCOUNT_STATE_READ_SPEC"),
+    "morpho_blue": ("almanak.connectors.morpho_blue.lending_read", "ACCOUNT_STATE_READ_SPEC"),
+    "compound_v3": ("almanak.connectors.compound_v3.lending_read", "ACCOUNT_STATE_READ_SPEC"),
+    "silo_v2": ("almanak.connectors.silo_v2.lending_read", "ACCOUNT_STATE_READ_SPEC"),
+    "euler_v2": ("almanak.connectors.euler_v2.lending_read", "ACCOUNT_STATE_READ_SPEC"),
+    "benqi": ("almanak.connectors.benqi.lending_read", "ACCOUNT_STATE_READ_SPEC"),
+}
+FROZEN_LENDING_MARKET_HEALTH_LOADERS = {
+    "compound_v3": ("almanak.connectors.compound_v3.lending_read", "read_compound_v3_market_health"),
+}
+FROZEN_LENDING_MARKET_TABLE_LOADERS = {
+    "morpho_blue": ("almanak.connectors.morpho_blue.addresses", "MORPHO_MARKETS"),
+    "compound_v3": ("almanak.connectors.compound_v3.addresses", "COMPOUND_V3_ACCOUNT_STATE_MARKETS"),
+    "silo_v2": ("almanak.connectors.silo_v2.lending_read", "SILO_V2_ACCOUNT_STATE_MARKETS"),
+    "euler_v2": ("almanak.connectors.euler_v2.lending_read", "EULER_V2_ACCOUNT_STATE_MARKETS"),
+    "benqi": ("almanak.connectors.benqi.lending_read", "BENQI_ACCOUNT_STATE_MARKETS"),
+}
+FROZEN_LENDING_ALIASES = {"aave": "aave_v3"}
+
+# almanak/connectors/_strategy_base/perps_read_registry.py tables as of
+# 2026-06-10, frozen verbatim.
+FROZEN_PERPS_SPEC_LOADERS = {
+    "gmx_v2": ("almanak.connectors.gmx_v2.perps_read", "PERPS_READ_SPEC"),
+    "aster_perps": ("almanak.connectors.aster_perps.perps_read", "PERPS_READ_SPEC"),
+}
+FROZEN_PERPS_ALIASES = {"pancakeswap_perps": "aster_perps"}
+
+
+def test_lending_read_dispatch_equals_frozen_legacy_tables() -> None:
+    """Manifest-derived lending dispatch == the five legacy hardcoded tables."""
+    dispatch = LendingReadRegistry._dispatch()
+    assert dispatch.spec_loaders == FROZEN_LENDING_SPEC_LOADERS
+    assert dispatch.account_state_loaders == FROZEN_LENDING_ACCOUNT_STATE_LOADERS
+    assert dispatch.market_health_loaders == FROZEN_LENDING_MARKET_HEALTH_LOADERS
+    assert dispatch.market_table_loaders == FROZEN_LENDING_MARKET_TABLE_LOADERS
+    assert dispatch.aliases == FROZEN_LENDING_ALIASES
+
+
+def test_perps_read_dispatch_equals_frozen_legacy_tables() -> None:
+    """Manifest-derived perps dispatch == the legacy hardcoded tables."""
+    assert PerpsReadRegistry._spec_loaders() == FROZEN_PERPS_SPEC_LOADERS
+    assert PerpsReadRegistry._aliases() == FROZEN_PERPS_ALIASES
+
+
+# almanak/connectors/_strategy_base/{prediction_read,prediction_execute,
+# gateway_stub}_registry.py ``_SPEC_LOADERS`` as of 2026-06-10, frozen verbatim.
+FROZEN_PREDICTION_READ_LOADERS = {
+    "polymarket": ("almanak.connectors.polymarket.prediction_read", "PREDICTION_READ_SPEC"),
+}
+FROZEN_PREDICTION_EXECUTE_LOADERS = {
+    "polymarket": ("almanak.connectors.polymarket.clob_handler", "PREDICTION_EXECUTE_SPEC"),
+}
+FROZEN_GATEWAY_STUB_LOADERS = {
+    "polymarket": ("almanak.connectors.polymarket.gateway_stub", "GATEWAY_STUB_SPEC"),
+}
+
+
+def test_prediction_and_stub_dispatch_equals_frozen_legacy_tables() -> None:
+    """Manifest-derived prediction/stub dispatch == the legacy hardcoded tables."""
+    assert PredictionReadRegistry._spec_loaders() == FROZEN_PREDICTION_READ_LOADERS
+    assert PredictionExecuteRegistry._spec_loaders() == FROZEN_PREDICTION_EXECUTE_LOADERS
+    assert GatewayStubRegistry._spec_loaders() == FROZEN_GATEWAY_STUB_LOADERS

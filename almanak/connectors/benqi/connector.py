@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    LendingReadDecl,
 )
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
 
@@ -32,6 +33,11 @@ CONNECTOR = Connector(
     supported_chains=SupportedChainsSpec(
         keys=("benqi",),
         module="almanak.connectors.benqi.supported_chains",
+    ),
+    # Compound-V2 qiToken reader (VIB-4967): market-scoped, synthetic market ids; see lending_read.py.
+    lending_read=LendingReadDecl(
+        account_state=ImportRef(module="almanak.connectors.benqi.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"),
+        market_table=ImportRef(module="almanak.connectors.benqi.lending_read", attribute="BENQI_ACCOUNT_STATE_MARKETS"),
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("avalanche",),

@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    LendingReadDecl,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
@@ -40,6 +41,11 @@ CONNECTOR = Connector(
     supported_chains=SupportedChainsSpec(
         keys=("spark",),
         module="almanak.connectors.spark.supported_chains",
+    ),
+    # Aave-fork reads: own opt-in attributes backed by the shared Aave-fork specs.
+    lending_read=LendingReadDecl(
+        spec=ImportRef(module="almanak.connectors.spark.lending_read", attribute="LENDING_READ_SPEC"),
+        account_state=ImportRef(module="almanak.connectors.spark.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"),
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("ethereum",),

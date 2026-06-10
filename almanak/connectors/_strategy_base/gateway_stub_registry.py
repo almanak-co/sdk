@@ -9,7 +9,7 @@ previously carried (VIB-4989).
 Each connector that ships its own gRPC service publishes a module-level
 :data:`GATEWAY_STUB_SPEC` (a
 :class:`~almanak.connectors._strategy_base.gateway_stub_base.GatewayStubSpec`) in
-its ``gateway_stub`` module. ``_SPEC_LOADERS`` maps the connector folder name to
+its ``gateway_stub`` module. The manifest-derived dispatch maps the connector folder name to
 that module + attribute. Adding a gRPC-shipping connector is one folder + one row
 — no framework edit.
 
@@ -22,7 +22,7 @@ raises when invoked is isolated in ``build_stubs`` (its stub is simply absent). 
 one error that is *not* swallowed is a ``service_name`` collision (two connectors
 claiming the same stub name — a programming error the registry cannot resolve).
 
-``_SPEC_LOADERS`` currently registers the ``polymarket`` row
+The ``polymarket`` connector currently declares a stub spec
 (``polymarket/gateway_stub.py``); further connectors opt in the same way.
 
 Gateway-boundary note: strategy-side, no network egress. The connector
@@ -46,18 +46,34 @@ __all__ = ["GatewayStubRegistry"]
 class GatewayStubRegistry:
     """Connector folder name → published gRPC-client-stub-spec registry.
 
-    The ``polymarket`` connector is registered in ``_SPEC_LOADERS``; further
-    gRPC-shipping connectors opt in by adding a row + a published
-    ``GATEWAY_STUB_SPEC``.
+    The ``polymarket`` connector declares ``gateway_stub=ImportRef(...)`` on its
+    manifest; further gRPC-shipping connectors opt in with the same manifest
+    declaration + a published ``GATEWAY_STUB_SPEC`` — no registry edit.
     """
 
-    # Connector folder name -> (module path, attribute) naming the connector's
-    # published ``GatewayStubSpec``.
-    _SPEC_LOADERS: ClassVar[dict[str, tuple[str, str]]] = {
-        "polymarket": ("almanak.connectors.polymarket.gateway_stub", "GATEWAY_STUB_SPEC"),
-    }
+    # Manifest-derived ``connector -> (module path, attribute)`` spec map, built
+    # lazily on first use. ``None`` means "not built yet".
+    _spec_loader_map: ClassVar[dict[str, tuple[str, str]] | None] = None
 
     _spec_cache: ClassVar[dict[str, GatewayStubSpec]] = {}
+
+    @classmethod
+    def _spec_loaders(cls) -> dict[str, tuple[str, str]]:
+        """Return the manifest-derived ``connector -> (module, attribute)`` map."""
+        if cls._spec_loader_map is None:
+            # Deferred import: avoids a module-level cycle through the
+            # connector descriptor.
+            from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+            cls._spec_loader_map = {
+                connector_manifest.name: (
+                    connector_manifest.gateway_stub.module,
+                    connector_manifest.gateway_stub.attribute,
+                )
+                for connector_manifest in CONNECTOR_REGISTRY.with_gateway_stub()
+                if connector_manifest.gateway_stub is not None
+            }
+        return cls._spec_loader_map
 
     @classmethod
     def _load_spec(cls, connector: str) -> GatewayStubSpec:
@@ -70,7 +86,7 @@ class GatewayStubRegistry:
         cached = cls._spec_cache.get(connector)
         if cached is not None:
             return cached
-        module_path, attribute = cls._SPEC_LOADERS[connector]
+        module_path, attribute = cls._spec_loaders()[connector]
         module = importlib.import_module(module_path)
         spec = getattr(module, attribute, None)
         if not isinstance(spec, GatewayStubSpec):
@@ -89,7 +105,7 @@ class GatewayStubRegistry:
         type is skipped with a warning (its stub is simply absent); healthy
         connectors are unaffected.
         """
-        for connector in cls._SPEC_LOADERS:
+        for connector in cls._spec_loaders():
             try:
                 spec = cls._load_spec(connector)
             except Exception:  # noqa: BLE001 — isolate one broken connector
@@ -150,3 +166,4 @@ class GatewayStubRegistry:
     def reset_cache(cls) -> None:
         """Test helper: drop the resolved-spec cache so the next call re-imports."""
         cls._spec_cache.clear()
+        cls._spec_loader_map = None

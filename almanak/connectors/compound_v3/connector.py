@@ -6,6 +6,7 @@ from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
     ImportRef,
+    LendingReadDecl,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
@@ -40,6 +41,18 @@ CONNECTOR = Connector(
     primitive=ImportRef(
         module="almanak.connectors.compound_v3.primitive",
         attribute="PRIMITIVE",
+    ),
+    # Market-scoped Comet reads (VIB-4929 PR-3b) + summed multi-collateral health (VIB-4851 PR-2).
+    lending_read=LendingReadDecl(
+        account_state=ImportRef(
+            module="almanak.connectors.compound_v3.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"
+        ),
+        market_table=ImportRef(
+            module="almanak.connectors.compound_v3.addresses", attribute="COMPOUND_V3_ACCOUNT_STATE_MARKETS"
+        ),
+        market_health=ImportRef(
+            module="almanak.connectors.compound_v3.lending_read", attribute="read_compound_v3_market_health"
+        ),
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("ethereum", "arbitrum", "base", "optimism", "polygon"),
