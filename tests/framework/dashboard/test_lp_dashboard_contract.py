@@ -163,11 +163,57 @@ class TestPrepareGracefulDegradation:
         mock_api_client.get_price.assert_not_called()
         assert result["current_price"] is None
 
-    def test_existing_session_state_not_overwritten(self, mock_api_client, config):
-        existing = {"position_id": "override-id", "custom_key": "preserved"}
-        result = prepare_lp_session_state(mock_api_client, session_state=existing, config=config)
-        assert result["position_id"] == "override-id"
+    def test_live_state_wins_over_stale_caller_state(self, mock_api_client, config):
+        """VIB-5025: a stale, caller-preserved ``session_state`` must NOT mask
+        fresh gateway state. Live-owned keys refresh; custom keys pass through.
+        """
+        stale = {
+            "position_id": "stale-id",
+            "range_lower": "1.0",
+            "range_upper": "2.0",
+            "custom_key": "preserved",
+        }
+        result = prepare_lp_session_state(mock_api_client, session_state=stale, config=config)
+        # Live gateway reads win over the stale caller values.
+        assert result["position_id"] == "4977387"
+        assert result["range_lower"] == "2310.8008"
+        assert result["range_upper"] == "2405.1192"
+        # Non-live custom keys still pass through untouched.
         assert result["custom_key"] == "preserved"
+
+    def test_preserve_keys_pins_caller_value_over_live_read(self, mock_api_client, config):
+        """The explicit ``preserve_keys`` opt-out keeps a caller value over the
+        live read (e.g. a replay / snapshot dashboard)."""
+        pinned = {"position_id": "snapshot-id", "range_lower": "1.0"}
+        result = prepare_lp_session_state(
+            mock_api_client,
+            session_state=pinned,
+            config=config,
+            preserve_keys=["position_id"],
+        )
+        # position_id is pinned to the caller value...
+        assert result["position_id"] == "snapshot-id"
+        # ...but range_lower (not pinned) still refreshes from the live read.
+        assert result["range_lower"] == "2310.8008"
+
+    def test_live_none_not_resurrected_by_stale_caller(self, mock_api_client, config):
+        """A live ``None`` is a measured value (position closed) and must NOT be
+        overwritten by a stale caller value (VIB-5025 resurrection guard)."""
+        mock_api_client.get_state.return_value = {"position_id": None}
+        stale = {"position_id": "closed-stale-id"}
+        result = prepare_lp_session_state(mock_api_client, session_state=stale, config=config)
+        assert result["position_id"] is None
+        assert result["is_active"] is False
+
+    def test_caller_value_is_fallback_when_live_read_missing(self, mock_api_client, config):
+        """Empty != Zero: a caller value fills a live key the gateway omits,
+        rather than being blanked."""
+        mock_api_client.get_state.return_value = {"position_id": "4977387"}
+        caller = {"range_lower": "1234.5", "range_upper": "2345.6"}
+        result = prepare_lp_session_state(mock_api_client, session_state=caller, config=config)
+        # The gateway omitted the range; the caller's last-known value fills in.
+        assert result["range_lower"] == "1234.5"
+        assert result["range_upper"] == "2345.6"
 
     def test_no_token_balances_defaults_to_zero(self, mock_api_client, config):
         mock_api_client.get_position.return_value = {"token_balances": []}

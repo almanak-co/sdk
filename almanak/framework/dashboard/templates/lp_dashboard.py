@@ -35,6 +35,7 @@ Usage:
 """
 
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, TypedDict
@@ -168,44 +169,73 @@ LP_CRITICAL_KEYS: list[str] = [
 """Keys that ``prepare_lp_session_state`` must produce and the template reads."""
 
 
+LP_LIVE_STATE_KEYS: frozenset[str] = frozenset(LP_CRITICAL_KEYS) | {
+    # Hosted/local alias normalised into ``position_id`` by _normalize_position_id.
+    "current_position_id",
+    # Liquidity-distribution + range fields hydrated from live position events.
+    "lower_tick",
+    "upper_tick",
+    "current_tick",
+}
+"""LP-critical state owned by the *live* gateway/market reads.
+
+These keys reflect on-chain / market truth at render time. A caller-supplied
+``session_state`` must **not** seed them ahead of the live reads — otherwise a
+stale, preserved dashboard state masks fresh state after the strategy has
+rebalanced on-chain (VIB-5025). The live read always wins; a caller value is
+used only as a last-resort fallback when the live path produced nothing
+(Empty != Zero), or when a caller explicitly pins the key via ``preserve_keys``.
+
+Any other key a caller passes (custom chart data such as ``position_history`` /
+``price_history``, fixture/display extras) is *not* live-owned and passes
+through untouched.
+"""
+
+
 def prepare_lp_session_state(
     api_client: Any,
     session_state: dict[str, Any] | None = None,
     config: LPDashboardConfig | None = None,
+    preserve_keys: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """Load strategy data from the gateway and enrich for the LP dashboard.
 
-    Fetches strategy state via ``api_client.get_state()``, adds derived fields
-    (``is_active``, ``in_range``), and loads live market data (``current_price``,
-    token amounts).  State keys pass through directly -- no mapping layer.
+    The dashboard is a *live* view: the gateway/market reads are the source of
+    truth (blueprint 22/23; VIB-2838 "dashboard as a validation client"). The
+    result is therefore built from the live ``api_client.get_state()`` read
+    first, then enriched with derived fields (``is_active``, ``in_range``) and
+    live market data (``current_price``, token amounts).
+
+    A caller-supplied ``session_state`` contributes **custom / non-live keys
+    only** (custom chart data such as ``position_history`` / ``price_history``,
+    fixture/display extras). The LP-critical live-state keys
+    (:data:`LP_LIVE_STATE_KEYS`) are owned by the live reads and are never
+    seeded from the caller ahead of them — this prevents a stale, preserved
+    dashboard state from masking fresh on-chain state after a rebalance
+    (VIB-5025). A caller value for a live key is used only as a last-resort
+    fallback when the live path produced nothing (Empty != Zero), or when the
+    caller explicitly pins the key via ``preserve_keys``.
 
     Args:
         api_client: DashboardAPIClient instance.
-        session_state: Optional pre-existing state to enrich.  If *None*,
-            state is loaded fresh from ``api_client.get_state()``.
-            Values already present are never overwritten.
+        session_state: Optional pre-existing state. Non-live keys pass through
+            and are preserved; live-state keys are refreshed from the gateway.
+            Pass *None* (or an empty dict) for a pure fresh fetch.
         config: LPDashboardConfig -- needed to know which token to price.
             If *None*, ``current_price`` will not be fetched.
+        preserve_keys: Optional explicit opt-out. Keys listed here keep the
+            caller-provided value over the live read (e.g. a replay / snapshot
+            dashboard that intentionally renders a historical state rather than
+            live state). The safe default (``None``) refreshes every live key.
 
     Returns:
         Enriched dict containing all :data:`LP_CRITICAL_KEYS`.
     """
-    # Load state from gateway, guarding against API failures
-    if session_state is None:
-        try:
-            result: dict[str, Any] = api_client.get_state() if api_client else {}
-        except Exception:
-            logger.warning("get_state() failed — falling back to empty state")
-            result = {}
-    else:
-        result = dict(session_state)
-        # Merge in API state for any keys not already present
-        if api_client:
-            try:
-                for k, v in api_client.get_state().items():
-                    result.setdefault(k, v)
-            except Exception:
-                logger.debug("get_state() merge failed — using caller-provided state only")
+    caller_state: dict[str, Any] = dict(session_state) if session_state else {}
+
+    # Live gateway state is the source of truth; the caller contributes custom /
+    # non-live keys (and any explicit ``preserve_keys`` pins) on top (VIB-5025).
+    result = _merge_live_and_caller_state(api_client, caller_state, preserve_keys)
 
     _normalize_position_id(result)
 
@@ -236,46 +266,106 @@ def prepare_lp_session_state(
         else:
             result["in_range"] = None
 
-    # Load token amounts from position snapshot
-    if "token0_amount" not in result or "token1_amount" not in result:
-        try:
-            position = api_client.get_position() if api_client else {}
-            balances = position.get("token_balances", [])
-            # Match by symbol when config is available, fall back to index order
-            t0_amount = 0.0
-            t1_amount = 0.0
-            if config and balances:
-                bal_map = {b["symbol"].upper(): float(b.get("balance", 0)) for b in balances}
-                t0_amount = bal_map.get(config.token0.upper(), 0.0)
-                t1_amount = bal_map.get(config.token1.upper(), 0.0)
-            elif balances:
-                t0_amount = float(balances[0].get("balance", 0)) if len(balances) >= 1 else 0.0
-                t1_amount = float(balances[1].get("balance", 0)) if len(balances) >= 2 else 0.0
-            result.setdefault("token0_amount", t0_amount)
-            result.setdefault("token1_amount", t1_amount)
-        except Exception:
-            logger.warning("Failed to load position data for LP dashboard")
-            result.setdefault("token0_amount", 0)
-            result.setdefault("token1_amount", 0)
-
-    # Ensure all critical state keys have defaults
-    result.setdefault("position_id", None)
-    result.setdefault("range_lower", None)
-    result.setdefault("range_upper", None)
-    result.setdefault("total_value_usd", "0")
+    _load_token_amounts(api_client, result, config)
 
     # VIB-4347: populate position_history + price_history_by_pool via the
     # shared OHLCV stack (DashboardAPIClient.get_ohlcv → factory →
     # OHLCVRouter). Always preserve caller-provided ``price_history`` /
     # ``position_history`` — custom dashboards that supply their own chart
-    # data must not regress.
+    # data must not regress. ``_hydrate_active_position_from_events`` is a live
+    # source for range/tick fields and must run before the caller fallback.
     events = _populate_position_history(api_client, result, config)
     _hydrate_active_position_from_events(result, events, config)
     _populate_price_history_by_pool(api_client, result, config)
     _populate_liquidity_distribution(api_client, result, config)
+
+    # Live reads own their keys; fall back to the caller's (last-known) value
+    # only where the live path *omitted* the key entirely (Empty != Zero). A
+    # live ``None`` is a measured value (e.g. ``position_id=None`` == no active
+    # position) and must NOT be overwritten by a stale caller value — that is
+    # the very resurrection bug this fix exists to prevent (VIB-5025).
+    for key in LP_LIVE_STATE_KEYS:
+        if key not in result and caller_state.get(key) is not None:
+            result[key] = caller_state[key]
+
+    # Ensure all critical state keys have defaults (applied last so neither a
+    # live read, an event hydration, nor a caller fallback is clobbered).
+    result.setdefault("position_id", None)
+    result.setdefault("range_lower", None)
+    result.setdefault("range_upper", None)
+    result.setdefault("total_value_usd", "0")
+
     _refresh_in_range(result)
 
     return result
+
+
+def _merge_live_and_caller_state(
+    api_client: Any,
+    caller_state: dict[str, Any],
+    preserve_keys: Collection[str] | None,
+) -> dict[str, Any]:
+    """Build the base session state: live gateway read first, caller on top.
+
+    The live ``get_state()`` read is the source of truth and is built first so
+    a stale, caller-preserved ``session_state`` can never mask fresh on-chain
+    state (VIB-5025). On top of it:
+
+    - ``preserve_keys`` pins win over the live read (explicit opt-in only).
+      Setting the key here also short-circuits the live fetch gates downstream.
+    - Custom / non-live caller keys pass through as a base layer for the
+      chart-population helpers. Live-state keys (:data:`LP_LIVE_STATE_KEYS`) are
+      intentionally NOT seeded from the caller here so the live reads own them.
+    """
+    try:
+        # ``get_state() or {}`` — a client returning ``None`` for an empty /
+        # uninitialised state is a valid response, not an error.
+        result: dict[str, Any] = dict(api_client.get_state() or {}) if api_client else {}
+    except Exception:
+        logger.warning("get_state() failed — falling back to caller/empty state")
+        result = {}
+
+    pinned: set[str] = set(preserve_keys) if preserve_keys else set()
+    for key in pinned:
+        if key in caller_state:
+            result[key] = caller_state[key]
+
+    for key, value in caller_state.items():
+        if key not in LP_LIVE_STATE_KEYS:
+            result.setdefault(key, value)
+
+    return result
+
+
+def _load_token_amounts(api_client: Any, result: dict[str, Any], config: LPDashboardConfig | None) -> None:
+    """Load token0/token1 amounts from the live position snapshot.
+
+    Matches balances by symbol when ``config`` is available, falling back to
+    index order. Degrades to a measured zero on any read failure so the
+    template always has the amounts (LP_CRITICAL_KEYS contract).
+    """
+    if "token0_amount" in result and "token1_amount" in result:
+        return
+    try:
+        # ``or {}`` guards a client that returns ``None`` when there is no
+        # active position (avoids a spurious AttributeError + warning).
+        position = (api_client.get_position() if api_client else {}) or {}
+        balances = position.get("token_balances", [])
+        t0_amount = 0.0
+        t1_amount = 0.0
+        if config and balances:
+            bal_map = {b["symbol"].upper(): float(b.get("balance", 0)) for b in balances}
+            t0_amount = bal_map.get(config.token0.upper(), 0.0)
+            t1_amount = bal_map.get(config.token1.upper(), 0.0)
+        elif balances:
+            t0_amount = float(balances[0].get("balance", 0)) if len(balances) >= 1 else 0.0
+            t1_amount = float(balances[1].get("balance", 0)) if len(balances) >= 2 else 0.0
+        result.setdefault("token0_amount", t0_amount)
+        result.setdefault("token1_amount", t1_amount)
+    except Exception:
+        logger.warning("Failed to load position data for LP dashboard")
+        result.setdefault("token0_amount", 0)
+        result.setdefault("token1_amount", 0)
 
 
 def _normalize_position_id(result: dict[str, Any]) -> None:
