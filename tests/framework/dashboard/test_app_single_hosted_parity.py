@@ -343,6 +343,13 @@ def _install_launch_stubs(monkeypatch) -> tuple[list[list[str]], list[dict[str, 
             return None  # always "free"
 
     monkeypatch.setattr(socket_module, "socket", lambda *_a, **_kw: _FakeSock())
+
+    # VIB-5012: the launcher now routes child stdout/stderr to a
+    # strategy-local dashboard.log. These tests only assert cmd/env capture,
+    # so force the DEVNULL fallback instead of writing real files.
+    from almanak.framework.cli import run_helpers as _run_helpers
+
+    monkeypatch.setattr(_run_helpers, "_open_dashboard_log", lambda: (None, None))
     return captured_cmd, captured_env
 
 

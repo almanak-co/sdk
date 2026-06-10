@@ -417,6 +417,48 @@ def test_t_3839_cli_execute_teardown_brackets_with_capture_snapshot():
     )
 
 
+def test_vib5011_run_token_consolidation_routes_through_execute_intents():
+    """VIB-5011 static guard: ``TeardownManager.run_token_consolidation``
+    must execute its planned swaps by REUSING ``_execute_intents`` — never by
+    talking to the orchestrator directly. The reuse is what keeps the
+    consolidation lane inside the slippage-escalation ladder and the
+    per-intent commit pairing the T14 guards enforce; a direct
+    ``orchestrator.execute`` call inside this method would be a new bypass
+    surface the T14 pairing guard alone might not localize.
+
+    AST over the method body: (a) it references ``_execute_intents``;
+    (b) it contains NO attribute access on anything named ``orchestrator``.
+    """
+    src = TEARDOWN_MANAGER.read_text(encoding="utf-8")
+    tree = ast.parse(src, filename=str(TEARDOWN_MANAGER))
+    fn = _find_function(tree, "run_token_consolidation")
+
+    references_execute_intents = False
+    orchestrator_accesses: list[int] = []
+    for sub in ast.walk(fn):
+        if isinstance(sub, ast.Attribute):
+            if sub.attr == "_execute_intents":
+                references_execute_intents = True
+            # Any read of `.orchestrator` (e.g. `self.orchestrator.execute`)
+            # or attribute access ON an `orchestrator` name.
+            if sub.attr == "orchestrator":
+                orchestrator_accesses.append(getattr(sub, "lineno", -1))
+            val = sub.value
+            if isinstance(val, ast.Name) and val.id == "orchestrator":
+                orchestrator_accesses.append(getattr(sub, "lineno", -1))
+
+    assert references_execute_intents, (
+        "run_token_consolidation no longer routes execution through "
+        "_execute_intents — consolidation swaps would lose the slippage "
+        "ladder + per-intent commit pairing. See blueprint 14 §4.5 (VIB-5011)."
+    )
+    assert not orchestrator_accesses, (
+        f"run_token_consolidation accesses `orchestrator` directly at lines "
+        f"{orchestrator_accesses} — execution must go through _execute_intents "
+        "only (VIB-5011 anti-bypass)."
+    )
+
+
 def test_t_3839_cli_execute_teardown_swaps_both_cycle_id_surfaces():
     """The CLI execute lane must mutate ``runner._last_cycle_id`` AND call
     ``set_cycle_id`` — same dual-swap requirement as the runner-loop lane

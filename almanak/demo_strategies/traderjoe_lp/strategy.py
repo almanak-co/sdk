@@ -92,6 +92,8 @@ class TraderJoeLPConfig:
     amount_x: Decimal = field(default_factory=lambda: Decimal("0.001"))
     amount_y: Decimal = field(default_factory=lambda: Decimal("3"))
     num_bins: int = 11
+    # Minimum total inventory (USD) required to (re)open a position
+    min_position_usd: Decimal = field(default_factory=lambda: Decimal("100"))
     force_action: str = ""
     position_id: str | None = None
 
@@ -105,6 +107,8 @@ class TraderJoeLPConfig:
             self.amount_y = Decimal(self.amount_y)
         if isinstance(self.num_bins, str):
             self.num_bins = int(self.num_bins)
+        if isinstance(self.min_position_usd, str):
+            self.min_position_usd = Decimal(self.min_position_usd)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert config to dictionary."""
@@ -116,6 +120,7 @@ class TraderJoeLPConfig:
             "amount_x": str(self.amount_x),
             "amount_y": str(self.amount_y),
             "num_bins": self.num_bins,
+            "min_position_usd": str(self.min_position_usd),
             "force_action": self.force_action,
             "position_id": self.position_id,
         }
@@ -188,6 +193,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
     - amount_x: Amount of token X to provide (e.g., "1.0" WAVAX)
     - amount_y: Amount of token Y to provide (e.g., "30" USDC)
     - bin_step: Bin step / fee tier (e.g., 20 = 0.2%)
+    - min_position_usd: Minimum total inventory (USD) to (re)open a position (default 100)
     - force_action: Force "open" or "close" for testing
 
     Example Config:
@@ -198,6 +204,7 @@ class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
         "amount_x": "1.0",
         "amount_y": "30",
         "bin_step": 20,
+        "min_position_usd": "100",
         "force_action": "open"
     }
     """

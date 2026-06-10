@@ -57,6 +57,7 @@ class UniswapV4HooksConfig:
         range_width_pct: Total width of price range (wider for hooked pools)
         amount0: Amount of token0 to provide
         amount1: Amount of token1 to provide
+        min_position_usd: Minimum total inventory (USD) required to (re)open a position
         fee_hint: Optional fee override for dynamic fee hooks (null = let hook decide)
     """
 
@@ -65,6 +66,7 @@ class UniswapV4HooksConfig:
     range_width_pct: Decimal = Decimal("0.30")
     amount0: Decimal = Decimal("0.01")
     amount1: Decimal = Decimal("30")
+    min_position_usd: Decimal = Decimal("100")
     fee_hint: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -74,6 +76,7 @@ class UniswapV4HooksConfig:
             "range_width_pct": str(self.range_width_pct),
             "amount0": str(self.amount0),
             "amount1": str(self.amount1),
+            "min_position_usd": str(self.min_position_usd),
             "fee_hint": self.fee_hint,
         }
 

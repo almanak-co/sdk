@@ -27,7 +27,6 @@ from almanak.framework.accounting.models import AccountingConfidence, SwapAccoun
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-_DEPLOYMENT_ID = "dep-swap-test"
 _DEPLOYMENT_ID = "strat-swap-test"
 _CYCLE_ID = "cycle-1"
 _WALLET = "0xabcdef1234567890abcdef1234567890abcdef12"
@@ -43,7 +42,6 @@ def _make_outbox_row(
     return {
         "id": str(uuid.uuid4()),
         "ledger_entry_id": str(uuid.uuid4()),
-        "deployment_id": _DEPLOYMENT_ID,
         "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "intent_type": intent_type,
@@ -76,7 +74,6 @@ def _make_ledger_row(
     lid = ledger_entry_id or str(uuid.uuid4())
     return {
         "id": lid,
-        "deployment_id": _DEPLOYMENT_ID,
         "deployment_id": _DEPLOYMENT_ID,
         "cycle_id": _CYCLE_ID,
         "execution_mode": "live",
@@ -791,6 +788,191 @@ class TestReconstructFromEvents:
         replayed = basis.reconstruct_from_events(events)
 
         assert replayed == 0
+
+    # ──────────────────────────────────────────────────────────────────
+    # VIB-5010: production SWAP rows carry an EMPTY row-level position_key
+    # (the FIFO key lives in payload.swap_position_key). The pre-fix
+    # identity gate in _row_context dropped every such row, so no swap
+    # acquisition lot survived a runner restart and the first post-restart
+    # disposal booked realized_pnl=None / fully unmatched. These tests use
+    # the production row shape — the older tests above set the row key,
+    # which is why the suite stayed green while mainnet was broken.
+    # ──────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _production_swap_row(**overrides: object) -> dict:
+        """A SWAP accounting_events row as the live writer persists it."""
+        row = {
+            "event_type": "SWAP",
+            "deployment_id": "dep-1",
+            "position_key": "",  # production shape — swap has no lasting position
+            "chain": "arbitrum",
+            "wallet_address": "0xAbC",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "ledger_entry_id": "led-1",
+            "payload_json": json.dumps(
+                {
+                    "swap_position_key": "swap:arbitrum:0xabc",
+                    "token_in": "USDC",
+                    "token_out": "WETH",
+                    "amount_in": "3",
+                    "amount_out": "0.001828",
+                    "amount_out_usd": "3.00",
+                }
+            ),
+        }
+        row.update(overrides)
+        return row
+
+    def test_reconstruct_swap_with_empty_row_position_key(self) -> None:
+        """VIB-5010 regression — the live mainnet shape replays.
+
+        Buy at 23:04, runner restart, sell at 00:04: the reconstructed
+        store must hold the buy lot so the sell matches instead of
+        booking realized_pnl=None.
+        """
+        basis = FIFOBasisStore()
+
+        replayed = basis.reconstruct_from_events([self._production_swap_row()])
+
+        assert replayed == 1
+        cost_consumed, unmatched = basis.match_swap_disposal(
+            deployment_id="dep-1",
+            position_key="swap:arbitrum:0xabc",
+            token="WETH",
+            amount=Decimal("0.001828"),
+        )
+        assert cost_consumed == Decimal("3.00")
+        assert unmatched == Decimal("0")
+
+    def test_reconstruct_swap_restart_parity_with_live_path(self) -> None:
+        """Disposal results must be identical with and without a restart.
+
+        The live path records the acquisition directly; the restart path
+        rebuilds it from the persisted event. Both stores must yield the
+        same (cost_consumed, unmatched) for the same disposal.
+        """
+        live = FIFOBasisStore()
+        live.record_swap_acquisition(
+            deployment_id="dep-1",
+            position_key="swap:arbitrum:0xabc",
+            token="WETH",
+            amount=Decimal("0.001828"),
+            cost_usd=Decimal("3.00"),
+            timestamp=datetime.now(UTC),
+        )
+        restarted = FIFOBasisStore()
+        restarted.reconstruct_from_events([self._production_swap_row()])
+
+        disposal = {
+            "deployment_id": "dep-1",
+            "position_key": "swap:arbitrum:0xabc",
+            "token": "WETH",
+            "amount": Decimal("0.001828"),
+        }
+        assert live.match_swap_disposal(**disposal) == restarted.match_swap_disposal(**disposal)
+
+    def test_reconstruct_swap_key_derivable_from_row_columns(self) -> None:
+        """A SWAP row whose payload predates swap_position_key still replays.
+
+        The live write path keys swap lots under swap:{chain}:{wallet},
+        which is reconstructible from the row's chain + wallet_address
+        columns (the same derivation VIB-3964 uses for BORROW credits).
+        """
+        basis = FIFOBasisStore()
+        row = self._production_swap_row(
+            payload_json=json.dumps(
+                {
+                    "token_in": "USDC",
+                    "token_out": "WETH",
+                    "amount_in": "3",
+                    "amount_out": "0.001828",
+                    "amount_out_usd": "3.00",
+                }
+            )
+        )
+
+        replayed = basis.reconstruct_from_events([row])
+
+        assert replayed == 1
+        cost_consumed, unmatched = basis.match_swap_disposal(
+            deployment_id="dep-1",
+            position_key="swap:arbitrum:0xabc",
+            token="WETH",
+            amount=Decimal("0.001828"),
+        )
+        assert cost_consumed == Decimal("3.00")
+        assert unmatched == Decimal("0")
+
+    def test_reconstruct_swap_with_no_viable_key_is_skipped(self) -> None:
+        """No row key, no payload key, no chain/wallet → row stays skipped."""
+        basis = FIFOBasisStore()
+        row = self._production_swap_row(
+            chain="",
+            wallet_address="",
+            payload_json=json.dumps(
+                {
+                    "token_in": "USDC",
+                    "token_out": "WETH",
+                    "amount_in": "3",
+                    "amount_out": "0.001828",
+                    "amount_out_usd": "3.00",
+                }
+            ),
+        )
+
+        assert basis.reconstruct_from_events([row]) == 0
+
+    def test_reconstruct_keyless_borrow_still_skipped(self) -> None:
+        """Gate safety — a malformed BORROW row with an empty position_key
+        must NOT be admitted just because chain + wallet make a swap-wallet
+        key derivable; lending lots are keyed by the row position_key and
+        an empty-keyed lot would corrupt FIFO interest attribution.
+        """
+        basis = FIFOBasisStore()
+        row = {
+            "event_type": "BORROW",
+            "deployment_id": "dep-1",
+            "position_key": "",  # malformed — lending writers always stamp this
+            "chain": "arbitrum",
+            "wallet_address": "0xabc",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "ledger_entry_id": "led-1",
+            "payload_json": json.dumps({"asset": "USDC", "amount_token": "100"}),
+        }
+
+        assert basis.reconstruct_from_events([row]) == 0
+        assert basis._lots == {}
+
+    def test_reconstruct_borrow_with_payload_key_but_empty_row_key_skipped(self) -> None:
+        """Gate/handler agreement (pr-auditor) — lending replay keys off the
+        ROW position_key, so a BORROW row whose key exists only in the
+        payload must NOT be admitted: it would reach record_borrow with
+        position_key='' and mint a lot under the empty key, corrupting FIFO
+        interest attribution.
+        """
+        basis = FIFOBasisStore()
+        row = {
+            "event_type": "BORROW",
+            "deployment_id": "dep-1",
+            "position_key": "",  # column empty…
+            "chain": "arbitrum",
+            "wallet_address": "0xabc",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "ledger_entry_id": "led-1",
+            "payload_json": json.dumps(
+                {
+                    # …but the payload carries one (LendingAccountingEvent
+                    # embeds position_key in payload_json).
+                    "position_key": "aave_v3:arbitrum:0xabc:usdc",
+                    "asset": "USDC",
+                    "amount_token": "100",
+                }
+            ),
+        }
+
+        assert basis.reconstruct_from_events([row]) == 0
+        assert basis._lots == {}
 
 
 # ──────────────────────────────────────────────────────────────────────────────

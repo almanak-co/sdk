@@ -448,6 +448,33 @@ class SQLiteTeardownStateManager:
             return request
         return None
 
+    def get_result_payload(self, deployment_id: str) -> dict | None:
+        """Read the terminal ``result_json`` payload for a teardown request.
+
+        VIB-5011: ``mark_completed`` persists a result dict (intent counts,
+        mode, duration, and the ``"consolidation"`` summary) into the
+        SQLite-only ``result_json`` column, but :class:`TeardownRequest`
+        doesn't carry it. This read-only accessor lets the CLI ``--wait``
+        terminal print and ``status`` render the consolidation outcome
+        ("consolidated N token(s) → USDC" / residual-token warning).
+
+        Returns ``None`` when the row is missing, the column is empty, or the
+        JSON is malformed — callers render nothing in that case.
+        """
+        with _open_connection(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT result_json FROM teardown_requests WHERE deployment_id = ?",
+                (deployment_id,),
+            )
+            row = cursor.fetchone()
+        if not row or not row[0]:
+            return None
+        try:
+            payload = json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
     def get_pending_requests(self) -> list[TeardownRequest]:
         """Get all pending teardown requests.
 

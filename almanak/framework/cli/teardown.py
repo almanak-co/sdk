@@ -987,6 +987,14 @@ def request(
     runner on the next iteration. The strategy will then execute the teardown
     with the specified parameters.
 
+    Token consolidation (VIB-5011): after positions are closed and verified,
+    graceful teardowns with --asset-policy target (default) or entry swap
+    residual strategy tokens above the $5 dust floor into the target token.
+    Emergency mode and --asset-policy keep skip consolidation. The dust floor
+    is a TeardownConfig setting (token_consolidation.min_swap_value_usd) —
+    there is intentionally no CLI flag because the request row has no column
+    for it; override it programmatically via TeardownConfig if needed.
+
     Examples:
         # Graceful teardown with default settings (folder-scoped)
         almanak strat teardown request -d strategies/my_strat -s uniswap_lp --mode graceful
@@ -1074,6 +1082,57 @@ def request(
     exit_code = _wait_for_terminal_state(manager, strategy, timeout)
     if exit_code != 0:
         sys.exit(exit_code)
+
+
+def _echo_warnings(warnings: list, prefix: str) -> None:
+    """Echo up to 5 consolidation warnings with a uniform prefix."""
+    for warning in warnings[:5]:
+        click.echo(f"{prefix}{warning}")
+
+
+def _consolidation_payload(manager: Any, deployment_id: str) -> dict | None:
+    """Best-effort read of ``result_json["consolidation"]`` (display-only).
+
+    Duck-typed on the SQLite manager's ``get_result_payload`` accessor —
+    gateway-backed managers without it yield ``None`` (render nothing).
+    """
+    getter = getattr(manager, "get_result_payload", None)
+    if not callable(getter):
+        return None
+    try:
+        payload = getter(deployment_id)
+    except Exception:  # noqa: BLE001 — display-only, never block the CLI
+        return None
+    consolidation = (payload or {}).get("consolidation")
+    return consolidation if isinstance(consolidation, dict) else None
+
+
+def _render_consolidation_summary(manager: Any, deployment_id: str) -> None:
+    """Render the token-consolidation outcome from ``result_json`` (VIB-5011).
+
+    Output only; never raises and never changes exit codes — ``--wait``
+    stays 0 when consolidation failed but closure succeeded.
+    """
+    consolidation = _consolidation_payload(manager, deployment_id)
+    if consolidation is None:
+        return
+    succeeded = consolidation.get("succeeded") or 0
+    warnings = consolidation.get("warnings") or []
+    if consolidation.get("failed"):
+        click.secho(
+            f"  WARNING: {consolidation['failed']} consolidation swap(s) failed; "
+            "wallet holds residual non-target tokens.",
+            fg="yellow",
+        )
+        _echo_warnings(warnings, "    - ")
+    elif succeeded:
+        target = consolidation.get("target_token") or "target token"
+        click.echo(f"  consolidated {succeeded} token(s) → {target}")
+        # Warnings matter on success too — e.g. the wallet-scope disclosure
+        # or per-token skips (no price) ride along with a successful run.
+        _echo_warnings(warnings, "    - ")
+    elif not consolidation.get("planned"):
+        _echo_warnings(warnings, "  consolidation: ")
 
 
 def _wait_for_terminal_state(manager: Any, deployment_id: str, timeout: int) -> int:
@@ -1203,6 +1262,10 @@ def _poll_for_terminal_state(
                 f"positions_failed={request_row.positions_failed}, "
                 f"total={request_row.positions_total}"
             )
+            # VIB-5011: render the token-consolidation outcome. Exit code
+            # stays 0 even when consolidation swaps failed — the closure
+            # itself succeeded and on-chain risk is removed.
+            _render_consolidation_summary(manager, deployment_id)
             return 0
         if status == TeardownStatus.FAILED:
             click.echo()
@@ -1302,6 +1365,9 @@ def status(working_dir: str | None, strategy: str, as_json: bool):
     if request.current_phase:
         click.echo(f"  Phase:        {request.current_phase.value}")
     click.echo(f"  Progress:     {format_progress(request)}")
+    # VIB-5011: terminal consolidation summary (from result_json).
+    if request.status == TeardownStatus.COMPLETED:
+        _render_consolidation_summary(manager, strategy)
     click.echo()
     click.echo(click.style("Timestamps:", bold=True))
     click.echo(f"  Requested:    {format_datetime(request.requested_at)}")

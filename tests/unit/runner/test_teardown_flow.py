@@ -1030,6 +1030,13 @@ def _make_teardown_manager_class_mock(
     mgr.runner_helpers = MagicMock()
     mgr.runner_helpers.has_commit = False
     mgr.runner_helpers.has_snapshot = False
+    # VIB-5011: the token-consolidation phase fires after a successful
+    # closure + verify (execute_and_verify hook). Characterization default
+    # = empty outcome (nothing planned), preserving the pre-consolidation
+    # success-path behaviour these tests pin.
+    from almanak.framework.teardown.consolidation import ConsolidationOutcome
+
+    mgr.run_token_consolidation = AsyncMock(return_value=ConsolidationOutcome())
     # safety_guard.validate_teardown_request is sync
     validation = SafetyValidation(
         all_passed=safety_passed,

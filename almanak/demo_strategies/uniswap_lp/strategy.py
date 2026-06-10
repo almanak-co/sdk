@@ -97,6 +97,7 @@ class UniswapLPConfig:
         range_width_pct: Total width of price range as decimal (0.20 = 20%)
         amount0: Amount of token0 to provide (e.g., "0.001" WETH)
         amount1: Amount of token1 to provide (e.g., "0.1" USDC)
+        min_position_usd: Minimum total inventory (USD) required to (re)open a position
         force_action: Force specific action for testing ("open", "close", or "")
         position_id: NFT ID of position to close (when force_action="close")
     """
@@ -109,6 +110,9 @@ class UniswapLPConfig:
     amount0: Decimal = Decimal("0.001")
     amount1: Decimal = Decimal("0.1")
 
+    # Minimum total inventory (USD) required to (re)open a position
+    min_position_usd: Decimal = Decimal("100")
+
     # Testing/override options
     force_action: str = ""
     position_id: str | None = None
@@ -120,6 +124,7 @@ class UniswapLPConfig:
             "range_width_pct": str(self.range_width_pct),
             "amount0": str(self.amount0),
             "amount1": str(self.amount1),
+            "min_position_usd": str(self.min_position_usd),
             "force_action": self.force_action,
             "position_id": self.position_id,
         }
@@ -192,6 +197,7 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
     - range_width_pct: Total width of price range (0.20 = 20%)
     - amount0: Amount of token0 to provide (e.g., "0.1" WETH)
     - amount1: Amount of token1 to provide (e.g., "340" USDC)
+    - min_position_usd: Minimum total inventory (USD) to (re)open a position (default 100)
     - force_action: Force "open" or "close" for testing
     - position_id: NFT ID of position to close (for force_action="close")
 
@@ -202,6 +208,7 @@ class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
         "range_width_pct": 0.20,
         "amount0": "0.1",
         "amount1": "340",
+        "min_position_usd": "100",
         "force_action": "open"
     }
     """

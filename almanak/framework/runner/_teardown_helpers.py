@@ -157,7 +157,59 @@ async def fetch_positions_or_fallback(
 # =============================================================================
 
 
-def build_teardown_manager(runner: Any, compiler: Any, state_manager: Any) -> tuple[Any, Any | None]:
+def _teardown_config_from_request(request: Any | None) -> Any:
+    """Build the :class:`TeardownConfig` for a teardown run from the operator's
+    ``TeardownRequest`` (VIB-5011).
+
+    Pre-fix, ``build_teardown_manager`` passed no ``config=`` — the request's
+    ``asset_policy`` / ``target_token`` were persisted but never reached the
+    manager, so the token-consolidation phase had no configuration to act on.
+
+    ``request=None`` (strategy self-signalled / risk-guard teardown) →
+    consolidation DISABLED, close-only.
+    """
+    from ..teardown.config import TeardownConfig, TokenConsolidationConfig
+    from ..teardown.models import TeardownAssetPolicy
+
+    if request is None:
+        # No operator request → NO token consolidation (pr-auditor blocker).
+        # Consolidation swaps are wallet-scoped per token (``amount="all"``);
+        # on a wallet shared across deployments that includes sibling
+        # strategies' balances of the same token. An explicit TeardownRequest
+        # carries the operator's asset policy and is the consent for that
+        # sweep semantic (the same consent model as the long-standing
+        # strategy-emitted ``amount="all"`` teardown sweeps, VIB-4587).
+        # Self-signalled teardowns have no such consent — they keep the
+        # pre-VIB-5011 close-only behaviour.
+        cfg = TeardownConfig.default()
+        cfg.token_consolidation.enabled = False
+        logger.info(
+            "Teardown has no operator request — token consolidation disabled "
+            "(close-only); request a teardown with an asset policy to consolidate."
+        )
+        return cfg
+
+    raw_policy = getattr(request, "asset_policy", None) or TeardownAssetPolicy.TARGET_TOKEN
+    try:
+        asset_policy = TeardownAssetPolicy(raw_policy)
+    except ValueError:
+        logger.warning(
+            "Unknown teardown asset_policy %r on request — defaulting to target_token",
+            raw_policy,
+        )
+        asset_policy = TeardownAssetPolicy.TARGET_TOKEN
+    target_token = getattr(request, "target_token", None) or "USDC"
+
+    return TeardownConfig(
+        asset_policy=asset_policy,
+        target_token=target_token,
+        token_consolidation=TokenConsolidationConfig(target_token=target_token),
+    )
+
+
+def build_teardown_manager(
+    runner: Any, compiler: Any, state_manager: Any, request: Any | None = None
+) -> tuple[Any, Any | None]:
     """Instantiate the teardown state adapter and ``TeardownManager``.
 
     Runtime persistence is SQLite in local mode and gateway-backed in hosted
@@ -171,6 +223,11 @@ def build_teardown_manager(runner: Any, compiler: Any, state_manager: Any) -> tu
     fire on the runner's full accounting pipeline. Without this, the
     teardown lane bypasses every accounting writer (the original April-29
     silent-failure class).
+
+    VIB-5011: threads the operator's ``TeardownRequest`` (asset policy +
+    target token) into the manager's ``TeardownConfig`` so the
+    token-consolidation phase honours the request. ``request=None`` derives
+    defaults (consolidate to USDC).
     """
     from ..teardown import create_teardown_state_adapter_for_runtime
     from ..teardown.runner_helpers import build_runner_helpers
@@ -188,6 +245,7 @@ def build_teardown_manager(runner: Any, compiler: Any, state_manager: Any) -> tu
         compiler=compiler,
         alert_manager=runner.alert_manager,
         state_manager=teardown_state_adapter,
+        config=_teardown_config_from_request(request),
         runner_helpers=build_runner_helpers(runner),
     )
     return teardown_mgr, teardown_state_adapter
@@ -446,6 +504,39 @@ async def execute_and_verify(
             if request:
                 _safe_mark(state_manager, "mark_failed", deployment_id, error=verify_error_msg)
 
+    # VIB-5011: token-consolidation phase (Phase 2) — runs ONLY when closure
+    # AND verification both succeeded. This is the runner-lane hook; the CLI
+    # execute lane gets the same phase from ``TeardownManager.execute`` Step
+    # 7.5 (this lane calls ``_execute_intents`` directly, so the two hooks
+    # never overlap for one teardown). Failure semantics are inverted by
+    # contract: a failed consolidation swap keeps ``success=True`` — the
+    # closure already removed on-chain risk — and surfaces via the
+    # ``consolidation_*`` result fields + ``result_json["consolidation"]``.
+    if teardown_result.success:
+        from ..teardown.consolidation import fold_consolidation_outcome
+        from ..teardown.models import TeardownPhase
+
+        _safe_mark(
+            state_manager,
+            "update_progress",
+            deployment_id,
+            positions_closed=teardown_result.intents_succeeded,
+            current_phase=TeardownPhase.TOKEN_CONSOLIDATION,
+        )
+        consolidation_outcome = await teardown_mgr.run_token_consolidation(
+            strategy,
+            teardown_id=teardown_state.teardown_id,
+            teardown_state=teardown_state,
+            mode=teardown_mode,
+            market=teardown_market,
+            price_oracle=price_oracle,
+            positions=positions,
+            closing_intents=teardown_intents,
+            is_auto_mode=is_auto_mode,
+            on_approval_needed=approval_callback,
+        )
+        teardown_result = fold_consolidation_outcome(teardown_result, consolidation_outcome)
+
     return teardown_result
 
 
@@ -548,6 +639,24 @@ def map_teardown_result(
             f"({teardown_result.intents_succeeded}/{teardown_result.intents_total} intents, "
             f"{teardown_result.duration_seconds:.1f}s)"
         )
+        # VIB-5011: surface the token-consolidation summary. Consolidation
+        # failure never flips success — log loud so the operator knows the
+        # wallet holds residual non-target tokens.
+        if teardown_result.consolidation_failed > 0:
+            logger.warning(
+                "🛑 %s teardown completed with consolidation warnings: "
+                "%d of %d consolidation swap(s) failed — wallet holds residual tokens. Warnings: %s",
+                deployment_id,
+                teardown_result.consolidation_failed,
+                teardown_result.consolidation_planned,
+                "; ".join(teardown_result.consolidation_warnings) or "none",
+            )
+        elif teardown_result.consolidation_succeeded > 0:
+            logger.info(
+                "🛑 %s token consolidation: %d swap(s) executed",
+                deployment_id,
+                teardown_result.consolidation_succeeded,
+            )
         runner.request_shutdown()
         runner._lifecycle_write_state(deployment_id, "TERMINATED")
         if request:
@@ -559,6 +668,18 @@ def map_teardown_result(
                     "intents": teardown_result.intents_succeeded,
                     "mode": mode_str,
                     "duration_s": teardown_result.duration_seconds,
+                    # VIB-5011: consolidation summary for result_json — read
+                    # back by the CLI --wait terminal print + `status`.
+                    "consolidation": {
+                        "planned": teardown_result.consolidation_planned,
+                        "succeeded": teardown_result.consolidation_succeeded,
+                        "failed": teardown_result.consolidation_failed,
+                        "warnings": list(teardown_result.consolidation_warnings),
+                        # The RESOLVED target (request may omit the field; the
+                        # phase then consolidates into the USDC default) — the
+                        # status surface must report what actually happened.
+                        "target_token": getattr(request, "target_token", None) or "USDC",
+                    },
                 },
             )
         runner._record_success()

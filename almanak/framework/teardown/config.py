@@ -33,7 +33,9 @@ class TokenConsolidationConfig:
     enabled: bool = True  # ON by default
     target_token: str = "USDC"  # Default target
     keep_tokens: list[str] = field(default_factory=list)  # Don't swap these
-    min_swap_value_usd: Decimal = field(default_factory=lambda: Decimal("1"))  # Dust threshold
+    # Dust threshold: residuals below this USD value are never swapped — the
+    # swap gas would eat the proceeds. VIB-5011 raised the floor $1 → $5.
+    min_swap_value_usd: Decimal = field(default_factory=lambda: Decimal("5"))
 
     def __post_init__(self) -> None:
         """Normalize fields."""
@@ -56,7 +58,7 @@ class TokenConsolidationConfig:
             enabled=data.get("enabled", True),
             target_token=data.get("target_token", "USDC"),
             keep_tokens=data.get("keep_tokens", []),
-            min_swap_value_usd=Decimal(data.get("min_swap_value_usd", "1")),
+            min_swap_value_usd=Decimal(data.get("min_swap_value_usd", "5")),
         )
 
 

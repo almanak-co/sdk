@@ -49,12 +49,14 @@ class UniswapV4LPConfig:
         range_width_pct: Total width of price range as decimal (0.20 = 20%)
         amount0: Amount of token0 to provide (e.g., "0.01" WETH)
         amount1: Amount of token1 to provide (e.g., "30" USDC)
+        min_position_usd: Minimum total inventory (USD) required to (re)open a position
     """
 
     pool: str = "WETH/USDC/3000"
     range_width_pct: Decimal = Decimal("0.20")
     amount0: Decimal = Decimal("0.01")
     amount1: Decimal = Decimal("30")
+    min_position_usd: Decimal = Decimal("100")
     force_action: str = ""
     position_id: str | None = None
 
@@ -64,6 +66,7 @@ class UniswapV4LPConfig:
             "range_width_pct": str(self.range_width_pct),
             "amount0": str(self.amount0),
             "amount1": str(self.amount1),
+            "min_position_usd": str(self.min_position_usd),
             "force_action": self.force_action,
             "position_id": self.position_id,
         }

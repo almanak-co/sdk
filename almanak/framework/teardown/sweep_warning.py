@@ -46,6 +46,43 @@ _PAYLOAD_TOKEN_KEYS: tuple[str, ...] = (
 )
 
 
+def extract_token_footprint(events: Any) -> set[str]:
+    """Return the token symbols referenced by *events*, ORIGINAL casing.
+
+    Scans ``payload_json`` of each accounting-event row for the
+    :data:`_PAYLOAD_TOKEN_KEYS` keys. This is the single definition of the
+    "strategy accounting-event token footprint" — shared by the teardown
+    sweep DX warning (VIB-4587 / F5) and the token-consolidation planner's
+    strategy-scoped token universe (VIB-5011). Best-effort: malformed rows
+    and payloads are skipped silently.
+
+    Casing: symbols are returned exactly as persisted. Canonical registry
+    symbols can be mixed-case (``USDC.e``, ``WETH.e``) and downstream
+    consumers feed them back into ``market.balance()`` / ``Intent.swap`` —
+    upper-casing here would break those lookups (Codex audit on VIB-5011).
+    Consumers that need case-insensitive membership must fold for the
+    COMPARISON only.
+    """
+    tokens: set[str] = set()
+    for ev in events or []:
+        if not isinstance(ev, dict):
+            continue
+        payload_raw = ev.get("payload_json")
+        if not payload_raw:
+            continue
+        try:
+            payload = json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for key in _PAYLOAD_TOKEN_KEYS:
+            val = payload.get(key)
+            if isinstance(val, str) and val:
+                tokens.add(val)
+    return tokens
+
+
 def _extract_intent_type(intent: Any) -> str | None:
     """Return ``intent.intent_type`` as an upper-case string, dispatching on
     whether ``intent`` is a Pydantic object or a dict.
@@ -109,26 +146,12 @@ def warn_if_sweep_non_strategy_balance(
         # a clean iteration with no trades). No baseline to compare;
         # suppress to keep the signal-to-noise ratio sane.
         return
-    emitted_tokens: set[str] = set()
-    for ev in events:
-        if not isinstance(ev, dict):
-            continue
-        payload_raw = ev.get("payload_json")
-        if not payload_raw:
-            continue
-        try:
-            payload = json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        for key in _PAYLOAD_TOKEN_KEYS:
-            val = payload.get(key)
-            if isinstance(val, str) and val:
-                emitted_tokens.add(val.upper())
+    emitted_tokens = extract_token_footprint(events)
     if not emitted_tokens:
         return  # Nothing usable in payloads — can't make a confident claim.
-    if balance_token.upper() in emitted_tokens:
+    # Footprint preserves canonical casing (USDC.e etc.) — fold both sides
+    # for the membership check only.
+    if balance_token.upper() in {t.upper() for t in emitted_tokens}:
         return
     logger.warning(
         "🛑 Teardown sweep WARNING: amount='all' for %s would consume the "
@@ -146,4 +169,4 @@ def warn_if_sweep_non_strategy_balance(
     )
 
 
-__all__ = ["warn_if_sweep_non_strategy_balance"]
+__all__ = ["extract_token_footprint", "warn_if_sweep_non_strategy_balance"]

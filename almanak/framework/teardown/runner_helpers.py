@@ -78,6 +78,21 @@ the strategy never emitted any accounting events for. Bound via
 (``runner.state_manager``) — the teardown lifecycle state manager does not
 expose ``get_accounting_events_sync`` (VIB-4587 / F5)."""
 
+GetTokenUniverse = Callable[..., set[str]]
+"""Sync ``(strategy, closing_intents, positions) -> set[str]``. Derives the
+strategy-scoped token universe for the token-consolidation phase (VIB-5011).
+Bound via :func:`build_runner_helpers` to
+:func:`almanak.framework.teardown.consolidation.derive_strategy_token_universe`
+with the runner's **accounting** StateManager — so the universe includes the
+deployment's accounting-event token footprint, never the full shared wallet."""
+
+GetAccountingEvents = Callable[..., list]
+"""Sync ``(strategy) -> list[dict]``. Returns the deployment's accounting
+events (timestamp ASC) via the runner's accounting StateManager. Used by the
+token-consolidation phase to resolve the ``entry_token`` policy's
+earliest-SWAP fallback (VIB-5011). Best-effort: returns ``[]`` on any
+failure."""
+
 
 @dataclass(frozen=True)
 class TeardownRunnerHelpers:
@@ -100,6 +115,8 @@ class TeardownRunnerHelpers:
     reconcile_post_balances: ReconcilePostBalances | None = None
     snapshot_intent_lending_state: SnapshotIntentLendingState | None = None
     warn_sweep_non_strategy_balance: WarnSweepNonStrategyBalance | None = None
+    get_token_universe: GetTokenUniverse | None = None
+    get_accounting_events: GetAccountingEvents | None = None
 
     @property
     def has_commit(self) -> bool:
@@ -126,6 +143,16 @@ class TeardownRunnerHelpers:
     def has_sweep_warning(self) -> bool:
         """True iff the teardown-sweep DX warning helper is wired (VIB-4587 / F5)."""
         return self.warn_sweep_non_strategy_balance is not None
+
+    @property
+    def has_token_universe(self) -> bool:
+        """True iff the consolidation token-universe helper is wired (VIB-5011)."""
+        return self.get_token_universe is not None
+
+    @property
+    def has_accounting_events(self) -> bool:
+        """True iff the accounting-events accessor is wired (VIB-5011)."""
+        return self.get_accounting_events is not None
 
 
 def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
@@ -189,6 +216,34 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
             logger.debug("Teardown heartbeat refresh failed (non-fatal): %s", exc)
         return outcome
 
+    def _get_token_universe(strategy: Any, closing_intents: Any, positions: Any) -> set[str]:
+        # VIB-5011 — strategy-scoped token universe for the consolidation
+        # planner. The accounting StateManager (runner.state_manager) supplies
+        # the deployment's event footprint; the wallet is never enumerated
+        # (shared across deployments — a wallet-wide sweep would steal
+        # sibling-strategy inventory).
+        from .consolidation import derive_strategy_token_universe
+
+        return derive_strategy_token_universe(
+            getattr(runner, "state_manager", None),
+            strategy.deployment_id,
+            strategy,
+            closing_intents,
+            positions,
+        )
+
+    def _get_accounting_events(strategy: Any) -> list:
+        # VIB-5011 — best-effort accounting-event read for the entry_token
+        # policy's earliest-SWAP fallback. Never raises.
+        sm = getattr(runner, "state_manager", None)
+        if sm is None or not hasattr(sm, "get_accounting_events_sync"):
+            return []
+        try:
+            return sm.get_accounting_events_sync(strategy.deployment_id)
+        except Exception:  # noqa: BLE001 — consolidation is best-effort
+            logger.debug("accounting-event read for consolidation failed (non-fatal)", exc_info=True)
+            return []
+
     async def _snapshot_intent_lending_state(strategy: Any, intent: Any) -> Any | None:
         # VIB-3934 — capture lending pre-state via the runner's safe wrapper
         # so REPAY/WITHDRAW/DELEVERAGE teardown rows carry collateral/debt/HF
@@ -212,12 +267,16 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
         reconcile_post_balances=partial(reconcile_post_execution_balances, runner),
         snapshot_intent_lending_state=_snapshot_intent_lending_state,
         warn_sweep_non_strategy_balance=_warn_sweep_non_strategy_balance,
+        get_token_universe=_get_token_universe,
+        get_accounting_events=_get_accounting_events,
     )
 
 
 __all__ = [
     "CaptureTeardownSnapshot",
     "CommitTeardownIntent",
+    "GetAccountingEvents",
+    "GetTokenUniverse",
     "ReconcilePostBalances",
     "SnapshotIntentBalances",
     "SnapshotIntentLendingState",

@@ -15,6 +15,7 @@ up by these tests.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import sys
 from typing import Any
@@ -128,6 +129,14 @@ def _make_teardown_result() -> IterationResult:
 
 class TestStartDashboardBackground:
     """Phase 5a helper — dashboard subprocess spawn."""
+
+    @pytest.fixture(autouse=True)
+    def _devnull_dashboard_log(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep the legacy spawn tests hermetic: VIB-5012 routes child output
+        to a strategy-local ``dashboard.log``; these tests don't exercise the
+        log path, so force the DEVNULL fallback instead of writing real files.
+        ``TestDashboardLogObservability`` covers the log behaviour."""
+        monkeypatch.setattr(run_helpers, "_open_dashboard_log", lambda: (None, None))
 
     def test_happy_path_spawns_subprocess_and_returns_popen(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Port is available.
@@ -400,6 +409,7 @@ class TestStopDashboard:
 
     def test_alive_process_terminates_and_waits(self) -> None:
         proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = None  # still alive
         run_helpers._stop_dashboard(proc)
         proc.terminate.assert_called_once()
         proc.wait.assert_called_once_with(timeout=5)
@@ -407,16 +417,239 @@ class TestStopDashboard:
 
     def test_terminate_failure_falls_back_to_kill(self) -> None:
         proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = None  # still alive
         proc.terminate.side_effect = RuntimeError("nope")
         run_helpers._stop_dashboard(proc)
         proc.kill.assert_called_once()
 
     def test_terminate_and_kill_both_fail_silently(self) -> None:
         proc = MagicMock(spec=subprocess.Popen)
+        proc.poll.return_value = None  # still alive
         proc.terminate.side_effect = RuntimeError("nope")
         proc.kill.side_effect = RuntimeError("also nope")
         # Must not propagate
         run_helpers._stop_dashboard(proc)
+
+
+# ---------------------------------------------------------------------------
+# Dashboard child observability (VIB-5012)
+# ---------------------------------------------------------------------------
+
+
+class _AvailableSock:
+    """Fake socket whose bind always succeeds (port available)."""
+
+    def __enter__(self) -> _AvailableSock:
+        return self
+
+    def __exit__(self, *a: Any) -> None:
+        pass
+
+    def bind(self, addr: tuple[str, int]) -> None:
+        return None
+
+
+class TestDashboardLogObservability:
+    """VIB-5012 — dashboard child stdout/stderr capture + lifecycle logging.
+
+    The dashboard subprocess used to be spawned with stdout/stderr=DEVNULL,
+    so a hung/dead dashboard left zero evidence. These tests pin the new
+    contract: output appends to a strategy-local ``dashboard.log``, the
+    parent logs PID + log path at spawn and the return code at shutdown,
+    and a failure to open the log degrades to the old DEVNULL behaviour.
+    """
+
+    _LOGGER_NAME = "almanak.framework.cli.run_helpers"
+
+    def _spawn(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Any,
+    ) -> tuple[Any, dict[str, Any], Any]:
+        """Launch the helper with ``local_log_path`` anchored to ``tmp_path``.
+
+        Returns ``(proc, captured_popen_kwargs, log_path)``.
+        """
+        log_path = tmp_path / "dashboard.log"
+        monkeypatch.setattr(
+            "almanak.framework.local_paths.local_log_path",
+            lambda name: tmp_path / f"{name}.log",
+        )
+
+        captured: dict[str, Any] = {}
+        fake_popen = MagicMock(spec=subprocess.Popen)
+        fake_popen.pid = 4242
+
+        def _default_factory(cmd: list[str], **kwargs: Any) -> Any:
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return fake_popen
+
+        with (
+            patch("socket.socket", return_value=_AvailableSock()),
+            patch("subprocess.Popen", side_effect=_default_factory),
+            patch("importlib.util.find_spec", return_value=MagicMock()),
+        ):
+            runner = CliRunner()
+            with runner.isolation():
+                proc = run_helpers._start_dashboard_background(port=8501)
+
+        return proc, captured, log_path
+
+    def test_spawn_redirects_output_to_dashboard_log(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Any,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """stdout is the dashboard.log handle (append mode, NOT DEVNULL),
+        stderr folds into stdout, the spawn banner is written, the handle is
+        stashed for shutdown cleanup, and PID + log path are logged at INFO."""
+        with caplog.at_level(logging.INFO, logger=self._LOGGER_NAME):
+            proc, captured, log_path = self._spawn(monkeypatch, tmp_path)
+
+        assert proc is not None
+        stdout = captured["kwargs"]["stdout"]
+        assert stdout is not subprocess.DEVNULL
+        assert stdout.name == str(log_path)
+        assert stdout.mode == "a"
+        assert captured["kwargs"]["stderr"] is subprocess.STDOUT
+
+        # Spawn banner: timestamp + PID + command, flushed by the parent.
+        banner = log_path.read_text()
+        assert "dashboard spawn pid=4242" in banner
+        assert "-m streamlit run" in banner
+
+        # Handle is stashed on the Popen object so _stop_dashboard can close it.
+        assert getattr(proc, "_almanak_dashboard_log_handle", None) is stdout
+
+        # Parent INFO log carries the PID and the log path.
+        spawn_logs = [r.message for r in caplog.records if "Dashboard subprocess started" in r.message]
+        assert spawn_logs, caplog.text
+        assert "4242" in spawn_logs[0]
+        assert str(log_path) in spawn_logs[0]
+
+        stdout.close()
+
+    def test_restart_appends_instead_of_clobbering(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+        """Append mode: evidence from a previous run survives a restart."""
+        (tmp_path / "dashboard.log").write_text("prior-run-evidence\n")
+        proc, _captured, log_path = self._spawn(monkeypatch, tmp_path)
+        content = log_path.read_text()
+        assert content.startswith("prior-run-evidence\n")
+        assert "dashboard spawn pid=4242" in content
+        proc._almanak_dashboard_log_handle.close()
+
+    def test_open_failure_falls_back_to_devnull(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """When dashboard.log can't be opened, the run must proceed with the
+        historical DEVNULL behaviour and a warning — never break the run."""
+
+        def _boom(name: str) -> Any:
+            raise OSError("read-only disk")
+
+        monkeypatch.setattr("almanak.framework.local_paths.local_log_path", _boom)
+
+        captured: dict[str, Any] = {}
+        fake_popen = MagicMock(spec=subprocess.Popen)
+        fake_popen.pid = 4242
+
+        def _factory(cmd: list[str], **kwargs: Any) -> Any:
+            captured["kwargs"] = kwargs
+            return fake_popen
+
+        with (
+            patch("socket.socket", return_value=_AvailableSock()),
+            patch("subprocess.Popen", side_effect=_factory),
+            patch("importlib.util.find_spec", return_value=MagicMock()),
+            caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME),
+        ):
+            runner = CliRunner()
+            with runner.isolation():
+                proc = run_helpers._start_dashboard_background(port=8501)
+
+        assert proc is fake_popen
+        assert captured["kwargs"]["stdout"] is subprocess.DEVNULL
+        assert captured["kwargs"]["stderr"] is subprocess.DEVNULL
+        assert any("falling back to DEVNULL" in r.message for r in caplog.records), caplog.text
+
+    def test_popen_failure_closes_log_handle(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+        """The opened dashboard.log handle must not leak when the spawn raises."""
+        fake_handle = MagicMock()
+        monkeypatch.setattr(
+            run_helpers,
+            "_open_dashboard_log",
+            lambda: (fake_handle, tmp_path / "dashboard.log"),
+        )
+
+        with (
+            patch("socket.socket", return_value=_AvailableSock()),
+            patch("subprocess.Popen", side_effect=RuntimeError("boom")),
+            patch("importlib.util.find_spec", return_value=MagicMock()),
+        ):
+            runner = CliRunner()
+            with runner.isolation():
+                proc = run_helpers._start_dashboard_background(port=8501)
+
+        assert proc is None
+        fake_handle.close.assert_called_once()
+
+    def test_stop_logs_returncode_and_closes_handle(self, caplog: pytest.LogCaptureFixture) -> None:
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 4242
+        proc.poll.return_value = None  # alive until terminated
+        proc.returncode = -15
+        log_handle = MagicMock()
+        proc._almanak_dashboard_log_handle = log_handle
+
+        with caplog.at_level(logging.INFO, logger=self._LOGGER_NAME):
+            run_helpers._stop_dashboard(proc)
+
+        proc.terminate.assert_called_once()
+        log_handle.close.assert_called_once()
+        stop_logs = [r.message for r in caplog.records if "stopped with returncode" in r.message]
+        assert stop_logs, caplog.text
+        assert "4242" in stop_logs[0]
+        assert "-15" in stop_logs[0]
+
+    def test_stop_surfaces_child_that_already_died(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A dashboard that died silently mid-run is surfaced at shutdown
+        (poll() non-None before any signal) instead of being terminated again."""
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 4242
+        proc.poll.return_value = 1  # already exited
+        proc.returncode = 1
+        log_handle = MagicMock()
+        proc._almanak_dashboard_log_handle = log_handle
+
+        with caplog.at_level(logging.INFO, logger=self._LOGGER_NAME):
+            run_helpers._stop_dashboard(proc)
+
+        proc.terminate.assert_not_called()
+        log_handle.close.assert_called_once()
+        died_logs = [r.message for r in caplog.records if "had already exited" in r.message]
+        assert died_logs, caplog.text
+        assert "4242" in died_logs[0]
+        assert "returncode=1" in died_logs[0]
+
+    def test_stop_is_idempotent_for_explicit_plus_atexit_call(self) -> None:
+        """run() calls _stop_dashboard explicitly AND registers it via atexit;
+        the second invocation must be a no-op (no double terminate/close)."""
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = 4242
+        proc.poll.return_value = None
+        proc.returncode = 0
+        log_handle = MagicMock()
+        proc._almanak_dashboard_log_handle = log_handle
+
+        run_helpers._stop_dashboard(proc)
+        run_helpers._stop_dashboard(proc)
+
+        proc.terminate.assert_called_once()
+        log_handle.close.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

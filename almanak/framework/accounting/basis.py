@@ -168,22 +168,19 @@ class FIFOBasisStore:
         event_type = row.get("event_type", "")
         position_key = row.get("position_key", "")
         deployment_id = row.get("deployment_id", "")
-        # Rows missing identity fields cannot be keyed into the lot store.
-        if not deployment_id or not position_key:
+        # Rows without a deployment identity cannot be keyed into the lot store.
+        if not deployment_id:
             return None
 
         try:
             payload = _json.loads(row.get("payload_json") or "{}")
+            # A non-object payload (JSON number/string/list) would raise
+            # AttributeError at every ``payload.get`` below — treat it like
+            # an unparseable payload and skip the row (Gemini review).
+            if not isinstance(payload, dict):
+                return None
         except Exception:  # noqa: BLE001
             return None
-
-        timestamp_str = row.get("timestamp")
-        try:
-            # Normalise UTC offset — Python <3.11 fromisoformat cannot parse trailing "Z"
-            ts_norm = timestamp_str.replace("Z", "+00:00") if timestamp_str else None
-            ts: datetime | None = datetime.fromisoformat(ts_norm) if ts_norm else None
-        except (ValueError, TypeError):
-            ts = None
 
         # VIB-3964: derive the swap-key the BORROW / WITHDRAW credit was minted
         # under. The accounting_events row carries `chain` and `wallet_address`
@@ -192,6 +189,40 @@ class FIFOBasisStore:
         chain_norm = (row.get("chain") or "").lower().strip()
         wallet_norm = (row.get("wallet_address") or "").lower().strip()
         swap_wallet_key = f"swap:{chain_norm}:{wallet_norm}" if chain_norm and wallet_norm else ""
+
+        # VIB-5010: the lot key is not always the row-level position_key.
+        # SWAP events are persisted with position_key='' (a swap has no lasting
+        # position — its FIFO key lives in payload.swap_position_key) and
+        # prediction events may carry payload.position_key. Requiring the row
+        # key here silently dropped every SWAP row, so no swap acquisition lot
+        # survived a runner restart and post-restart disposals booked
+        # realized_pnl=None / fully unmatched.
+        #
+        # The admission criterion mirrors each replay handler's ACTUAL key
+        # source (pr-auditor: a gate broader than the handlers would let a
+        # keyless lending/PT row through to ``record_borrow(position_key="")``
+        # and mint a lot under the empty key):
+        #   * SWAP         → payload.swap_position_key, else row key, else the
+        #                    row-derivable swap:{chain}:{wallet}.
+        #   * PREDICTION_* → payload.position_key, else row key.
+        #   * everything else (lending / PT) → row position_key ONLY.
+        if not position_key:
+            if event_type == "SWAP":
+                if not payload.get("swap_position_key") and not swap_wallet_key:
+                    return None
+            elif event_type.startswith("PREDICTION_"):
+                if not payload.get("position_key"):
+                    return None
+            else:
+                return None
+
+        timestamp_str = row.get("timestamp")
+        try:
+            # Normalise UTC offset — Python <3.11 fromisoformat cannot parse trailing "Z"
+            ts_norm = timestamp_str.replace("Z", "+00:00") if timestamp_str else None
+            ts: datetime | None = datetime.fromisoformat(ts_norm) if ts_norm else None
+        except (ValueError, TypeError):
+            ts = None
 
         # ledger_entry_id links a lot back to the on-chain transaction (VIB-3468).
         ledger_entry_id: str | None = row.get("ledger_entry_id") or None
@@ -451,8 +482,12 @@ class FIFOBasisStore:
 
     def _replay_swap(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
         # Position key for swap lots is stored in the payload (swap:<chain>:<wallet>).
-        # Fall back to row position_key for events written before VIB-3473.
-        swap_position_key = ctx.payload.get("swap_position_key") or ctx.position_key
+        # Fall back to row position_key for events written before VIB-3473, then
+        # to the row-derived swap-wallet key (VIB-5010): by construction the
+        # live write path keys swap lots under swap:{chain}:{wallet}, which is
+        # exactly ctx.swap_wallet_key, so a row whose payload predates
+        # swap_position_key still replays under the correct key.
+        swap_position_key = ctx.payload.get("swap_position_key") or ctx.position_key or ctx.swap_wallet_key
         if not swap_position_key:
             return 0
 

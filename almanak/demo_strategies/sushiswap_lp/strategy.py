@@ -107,6 +107,8 @@ class SushiSwapLPConfig:
     amount0: Decimal = field(default_factory=lambda: Decimal("0.03"))  # WETH (token0)
     amount1: Decimal = field(default_factory=lambda: Decimal("100"))  # USDC (token1)
     fee_tier: int = 3000
+    # Minimum total inventory (USD) required to (re)open a position
+    min_position_usd: Decimal = field(default_factory=lambda: Decimal("100"))
     force_action: str = ""
     position_id: int | None = None
 
@@ -120,6 +122,8 @@ class SushiSwapLPConfig:
             self.amount1 = Decimal(self.amount1)
         if isinstance(self.fee_tier, str):
             self.fee_tier = int(self.fee_tier)
+        if isinstance(self.min_position_usd, str):
+            self.min_position_usd = Decimal(self.min_position_usd)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert config to dictionary."""
@@ -131,6 +135,7 @@ class SushiSwapLPConfig:
             "amount0": str(self.amount0),
             "amount1": str(self.amount1),
             "fee_tier": self.fee_tier,
+            "min_position_usd": str(self.min_position_usd),
             "force_action": self.force_action,
             "position_id": self.position_id,
         }
@@ -199,6 +204,7 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
     - amount0: Amount of token0 to provide (e.g., "0.03" WETH)
     - amount1: Amount of token1 to provide (e.g., "100" USDC)
     - fee_tier: Fee tier (100, 500, 3000, or 10000)
+    - min_position_usd: Minimum total inventory (USD) to (re)open a position (default 100)
     - force_action: Force "open" or "close" for testing
 
     Example Config:
@@ -209,6 +215,7 @@ class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
         "amount0": "0.03",
         "amount1": "100",
         "fee_tier": 3000,
+        "min_position_usd": "100",
         "force_action": "open"
     }
     """

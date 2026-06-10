@@ -159,6 +159,7 @@ class AerodromeSlipstreamLPConfig:
         range_percent: ±% range around current price for tick bounds (default 20%)
         range_lower_price: Explicit lower price bound (0 = use range_percent auto)
         range_upper_price: Explicit upper price bound (0 = use range_percent auto)
+        min_position_usd: Minimum total inventory (USD) required to (re)open a position
         force_action: Force "open" or "close" for dev/test only
     """
 
@@ -169,6 +170,7 @@ class AerodromeSlipstreamLPConfig:
     range_percent: Decimal = field(default_factory=lambda: Decimal("20"))
     range_lower_price: Decimal = field(default_factory=lambda: Decimal("0"))
     range_upper_price: Decimal = field(default_factory=lambda: Decimal("0"))
+    min_position_usd: Decimal = field(default_factory=lambda: Decimal("100"))
     force_action: str = ""
 
     def __post_init__(self) -> None:
@@ -185,6 +187,8 @@ class AerodromeSlipstreamLPConfig:
             self.range_upper_price = Decimal(self.range_upper_price)
         if isinstance(self.tick_spacing, str):
             self.tick_spacing = int(self.tick_spacing)
+        if isinstance(self.min_position_usd, str):
+            self.min_position_usd = Decimal(self.min_position_usd)
 
     def to_dict(self) -> dict:
         """Convert config to dictionary for serialization."""
@@ -196,6 +200,7 @@ class AerodromeSlipstreamLPConfig:
             "range_percent": str(self.range_percent),
             "range_lower_price": str(self.range_lower_price),
             "range_upper_price": str(self.range_upper_price),
+            "min_position_usd": str(self.min_position_usd),
             "force_action": self.force_action,
         }
 
@@ -235,6 +240,7 @@ class AerodromeSlipstreamLPStrategy(IntentStrategy[AerodromeSlipstreamLPConfig])
     - range_percent: ±% range around current price (default 20%)
     - range_lower_price: Override lower price (0 = auto from range_percent)
     - range_upper_price: Override upper price (0 = auto from range_percent)
+    - min_position_usd: Minimum total inventory (USD) to (re)open a position (default 100)
 
     Example Config:
     ---------------
@@ -243,7 +249,8 @@ class AerodromeSlipstreamLPStrategy(IntentStrategy[AerodromeSlipstreamLPConfig])
         "tick_spacing": 200,
         "amount0": "0.001",
         "amount1": "3",
-        "range_percent": "20"
+        "range_percent": "20",
+        "min_position_usd": "100"
     }
     """
 

@@ -362,6 +362,17 @@ class TeardownResult:
     accounting_degraded: bool = False
     accounting_degraded_count: int = 0
 
+    # VIB-5011: token-consolidation (Phase 2) summary. Consolidation failure
+    # after a successful closure keeps ``success=True`` (the closure already
+    # removed on-chain risk); the partial state is carried here and folded
+    # into ``result_json["consolidation"]`` via ``mark_completed``. There is
+    # deliberately NO new TeardownStatus member — status-protocol consumers
+    # keep seeing COMPLETED.
+    consolidation_planned: int = 0
+    consolidation_succeeded: int = 0
+    consolidation_failed: int = 0
+    consolidation_warnings: list[str] = field(default_factory=list)
+
     def __post_init__(self) -> None:
         """Convert numeric fields to Decimal."""
         for attr in ["starting_value_usd", "final_value_usd", "total_costs_usd"]:

@@ -198,6 +198,22 @@ def _zero_balance_swap_skip_reason(intent: Any, market: Any) -> str | None:
     return None
 
 
+def _serialize_intent_for_state(intent: Any) -> Any:
+    """JSON-safe serialization of an intent for ``pending_intents_json``.
+
+    Pydantic intents (``SwapIntent`` etc.) have no ``to_dict`` — use
+    ``model_dump(mode="json")`` so Decimals/enums serialize. Dicts pass
+    through; anything else falls back to ``str`` (mirrors ``_persist_state``).
+    """
+    if hasattr(intent, "to_dict"):
+        return intent.to_dict()
+    if hasattr(intent, "model_dump"):
+        return intent.model_dump(mode="json")
+    if isinstance(intent, dict):
+        return intent
+    return str(intent)
+
+
 def _teardown_chain(intents: list[Any]) -> str | None:
     """Best-effort chain for the teardown plan, for native-gas-token warming.
 
@@ -582,6 +598,33 @@ class TeardownManager:
                                 exc_info=True,
                             )
 
+            # Step 7.5 (VIB-5011): token consolidation (Phase 2). Runs ONLY
+            # after a successful closure + verification — never before, and
+            # never when the unwind is incomplete (the residual-token swap
+            # must not race a partially-unwound position). Covers the CLI
+            # execute lane (run_teardown_with_brackets → execute()); the
+            # runner lane calls _execute_intents directly and hooks the
+            # phase in _teardown_helpers.execute_and_verify instead, so the
+            # two hooks never both fire for one teardown. Failure here is
+            # non-fatal by contract: success stays True, partial state lands
+            # on the consolidation_* result fields.
+            if result.success:
+                from almanak.framework.teardown.consolidation import fold_consolidation_outcome
+
+                consolidation_outcome = await self.run_token_consolidation(
+                    strategy,
+                    teardown_id=teardown_id,
+                    teardown_state=teardown_state,
+                    mode=internal_mode,
+                    market=market,
+                    price_oracle=price_oracle,
+                    positions=positions,
+                    closing_intents=intents,
+                    is_auto_mode=is_auto_mode,
+                    on_approval_needed=on_approval_needed,
+                )
+                result = fold_consolidation_outcome(result, consolidation_outcome)
+
             # Step 8: Send completion alert
             if self.alert_manager:
                 await self.alert_manager.send_teardown_complete(result)
@@ -702,7 +745,7 @@ class TeardownManager:
                     intents = strategy.generate_teardown_intents(state.mode)
                 else:
                     raise
-            state.pending_intents_json = json.dumps([i.to_dict() for i in intents])
+            state.pending_intents_json = json.dumps([_serialize_intent_for_state(i) for i in intents])
             state.current_intent_index = 0
             # Codex re-audit P1: the freshly generated plan is a brand-new
             # intent list with zero completed work, so reset the progress
@@ -813,6 +856,201 @@ class TeardownManager:
             market=market,
         )
 
+    async def run_token_consolidation(
+        self,
+        strategy: IntentStrategy,
+        *,
+        teardown_id: str,
+        teardown_state: TeardownState,
+        mode: TeardownMode,
+        market: Any = None,
+        price_oracle: dict | None = None,
+        positions: TeardownPositionSummary | None = None,
+        closing_intents: list | None = None,
+        is_auto_mode: bool = False,
+        on_approval_needed: ApprovalCallback | None = None,
+    ) -> Any:
+        """Run the token-consolidation phase (Phase 2, VIB-5011).
+
+        Plans residual-token swaps via the pure planner
+        (:mod:`almanak.framework.teardown.consolidation`) from live
+        post-closure wallet balances, then — when the plan is non-empty —
+        extends the persisted ``teardown_state`` plan and REUSES
+        :meth:`_execute_intents` with a ``start_from_index`` offset. That
+        reuse is the load-bearing part: consolidation swaps run the same
+        slippage-escalation ladder, the same per-intent commit pairing via
+        the runner helpers (the anti-bypass guard sees no new orchestrator
+        execute site), the same zero-balance skips, and the same resume-safe
+        progress persistence as closing intents. There is deliberately
+        **no second cancel window**.
+
+        Never raises: every exception is folded into the returned
+        :class:`~almanak.framework.teardown.consolidation.ConsolidationOutcome`
+        — a consolidation failure after a successful closure must never
+        un-succeed the teardown (the on-chain risk is already removed).
+        """
+        from almanak.framework.teardown.consolidation import (
+            ConsolidationOutcome,
+            derive_strategy_token_universe,
+            plan_consolidation,
+            resolve_consolidation_targets,
+        )
+
+        try:
+            cfg = self.config.token_consolidation
+            closing = list(closing_intents or [])
+
+            # Strategy-scoped token universe — via the runner-bound helper
+            # when wired (includes the accounting-event footprint), else the
+            # planner's intents/positions/profile-only derivation.
+            if self.runner_helpers.has_token_universe:
+                token_universe = self.runner_helpers.get_token_universe(  # type: ignore[misc]
+                    strategy, closing, positions
+                )
+            else:
+                token_universe = derive_strategy_token_universe(
+                    None, strategy.deployment_id, strategy, closing, positions
+                )
+
+            accounting_events = None
+            if self.runner_helpers.has_accounting_events:
+                accounting_events = self.runner_helpers.get_accounting_events(strategy)  # type: ignore[misc]
+
+            target_token = cfg.target_token or self.config.target_token
+            targets, target_warnings = resolve_consolidation_targets(
+                self.config.asset_policy,
+                target_token,
+                strategy,
+                accounting_events=accounting_events,
+            )
+
+            chain = _teardown_chain(closing) or (getattr(strategy, "chain", None) or None)
+            plan = plan_consolidation(
+                market=market,
+                chain=chain,
+                asset_policy=self.config.asset_policy,
+                target_token=target_token,
+                token_consolidation_cfg=cfg,
+                token_universe=token_universe,
+                mode=mode,
+                targets=targets,
+            )
+            warnings = [*target_warnings, *plan.warnings]
+            if plan.intents:
+                # Wallet-scope disclosure (pr-auditor): token SELECTION is
+                # strategy-scoped, but each swap's AMOUNT is the full wallet
+                # balance of that token. On a wallet shared across
+                # deployments this includes sibling strategies' balances of
+                # the same token. Surfaced as a warning on the result (not
+                # just a log line) so the operator sees it in `teardown
+                # status` / `--wait`.
+                swept = ", ".join(getattr(i, "from_token", "?") for i in plan.intents)
+                warnings.append(
+                    f"consolidation amounts are wallet-scoped (amount=all) for: {swept} — "
+                    "on a shared wallet this includes balances owned by other "
+                    "deployments holding the same token(s)"
+                )
+            for decision in plan.decisions:
+                logger.info(
+                    "Token consolidation decision for %s: %s %s (reason=%s, value_usd=%s)",
+                    strategy.deployment_id,
+                    decision.action,
+                    decision.token,
+                    decision.reason,
+                    decision.value_usd,
+                )
+            for warning in warnings:
+                logger.warning("Token consolidation: %s", warning)
+
+            if not plan.intents:
+                return ConsolidationOutcome(
+                    planned=0, succeeded=0, failed=0, warnings=warnings, decisions=plan.decisions
+                )
+
+            logger.info(
+                "Token consolidation for %s: %d swap(s) planned → %s",
+                strategy.deployment_id,
+                len(plan.intents),
+                target_token,
+            )
+
+            # Extend the persisted plan so a crash mid-consolidation resumes
+            # at the right index (the closing intents at [0, offset) are
+            # already complete — _execute_intents starts past them).
+            try:
+                existing = (
+                    json.loads(teardown_state.pending_intents_json) if teardown_state.pending_intents_json else []
+                )
+                # A corrupted non-list value (JSON object/string) would make
+                # len() and the [*existing, ...] splat below misbehave —
+                # treat it as an empty plan (Gemini review).
+                if not isinstance(existing, list):
+                    existing = []
+            except (TypeError, ValueError):
+                existing = []
+            start_from_index = len(existing)
+            serialized = [_serialize_intent_for_state(i) for i in plan.intents]
+            teardown_state.pending_intents_json = json.dumps([*existing, *serialized])
+            teardown_state.total_intents = start_from_index + len(plan.intents)
+            teardown_state.status = TeardownStatus.EXECUTING
+            teardown_state.updated_at = datetime.now(UTC)
+            if self.state_manager:
+                await self.state_manager.save_teardown_state(teardown_state)
+
+            # Warm the oracle best-effort for the consolidation tokens — the
+            # closing-phase warm only covered closing-intent tokens. The
+            # closure already executed, so a still-incomplete oracle must
+            # never raise here (inverted-failure semantics).
+            oracle_for_swaps = price_oracle
+            warmed = _warm_oracle_best_effort(market, plan.intents, chain)
+            if warmed:
+                oracle_for_swaps = {**(price_oracle or {}), **warmed}
+
+            combined = [*existing, *plan.intents]
+            consolidation_positions = positions or TeardownPositionSummary.empty(strategy.deployment_id)
+            result = await self._execute_intents(
+                teardown_id=teardown_id,
+                strategy=strategy,
+                intents=combined,
+                positions=consolidation_positions,
+                mode=mode,
+                teardown_state=teardown_state,
+                on_approval_needed=on_approval_needed,
+                start_from_index=start_from_index,
+                is_auto_mode=is_auto_mode,
+                price_oracle=oracle_for_swaps,
+                market=market,
+            )
+
+            # _execute_intents counts only the loop it ran (offset onward),
+            # so its succeeded/failed totals ARE the consolidation counts.
+            succeeded = min(result.intents_succeeded, len(plan.intents))
+            failed = max(len(plan.intents) - succeeded, 0)
+            if failed:
+                warnings.append(
+                    f"{failed} consolidation swap(s) failed ({result.error or 'see logs'}) — "
+                    "wallet holds residual non-target tokens; teardown closure itself succeeded"
+                )
+            return ConsolidationOutcome(
+                planned=len(plan.intents),
+                succeeded=succeeded,
+                failed=failed,
+                warnings=warnings,
+                decisions=plan.decisions,
+                accounting_degraded_count=result.accounting_degraded_count,
+            )
+        except Exception as exc:  # noqa: BLE001 — consolidation must never un-succeed the teardown
+            logger.exception(
+                "Token consolidation phase raised for %s — closure already complete; continuing without consolidation",
+                strategy.deployment_id,
+            )
+            return ConsolidationOutcome(
+                planned=0,
+                succeeded=0,
+                failed=1,
+                warnings=[f"token consolidation raised: {exc}"],
+            )
+
     # crap-allowlist: PR is pure string-content cleanup (chore: VIB removal); zero branches added, function was already over threshold on main. Refactor tracked in VIB-4139.
     async def _execute_intents(  # noqa: C901
         self,
@@ -898,7 +1136,13 @@ class TeardownManager:
                     await on_progress(progress_pct, f"Skipped step {i + 1}/{len(intents)}: {skip_reason}")
                 # Mirror the success-path persist so a crash mid-teardown
                 # records the skip as completed and resume picks up at i+1.
-                teardown_state.completed_intents = succeeded
+                # ABSOLUTE count (offset + this call's successes): ``succeeded``
+                # is call-relative, and this method runs with a non-zero
+                # ``start_from_index`` both on resume and for the VIB-5011
+                # consolidation extension — persisting the relative count would
+                # rewind ``completed_intents`` below already-finished work
+                # (pr-auditor finding).
+                teardown_state.completed_intents = start_from_index + succeeded
                 teardown_state.updated_at = datetime.now(UTC)
                 if self.state_manager:
                     await self.state_manager.save_teardown_state(teardown_state)
@@ -1361,8 +1605,11 @@ class TeardownManager:
                     )
 
             # Update completed count and persist teardown progress so that
-            # a crash/restart resumes from the correct index
-            teardown_state.completed_intents = succeeded
+            # a crash/restart resumes from the correct index. ABSOLUTE count
+            # (offset + this call's successes) — see the skip-path comment
+            # above: a relative count would rewind already-finished work on
+            # resume and during the VIB-5011 consolidation extension.
+            teardown_state.completed_intents = start_from_index + succeeded
             teardown_state.updated_at = datetime.now(UTC)
             if self.state_manager:
                 await self.state_manager.save_teardown_state(teardown_state)
@@ -1423,7 +1670,7 @@ class TeardownManager:
             current_intent_index=0,
             started_at=now,
             updated_at=now,
-            pending_intents_json=json.dumps([i.to_dict() if hasattr(i, "to_dict") else str(i) for i in intents]),
+            pending_intents_json=json.dumps([_serialize_intent_for_state(i) for i in intents]),
             cancel_window_until=now,  # Will be updated by cancel window
             config_json=json.dumps(self.config.to_dict()),
         )

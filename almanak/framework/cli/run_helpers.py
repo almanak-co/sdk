@@ -3175,28 +3175,97 @@ def _start_dashboard_background(
         strategy_config=strategy_config,
     )
 
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(dashboard_path),
+        "--server.port",
+        str(actual_port),
+        "--server.headless",
+        "false",
+    ]
+
+    # VIB-5012: capture the child's stdout/stderr in a strategy-local
+    # ``dashboard.log`` instead of discarding it. When the dashboard hangs
+    # or dies on mainnet we need evidence; DEVNULL gave us none.
+    log_handle, log_path = _open_dashboard_log()
     try:
         process = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "streamlit",
-                "run",
-                str(dashboard_path),
-                "--server.port",
-                str(actual_port),
-                "--server.headless",
-                "false",
-            ],
+            cmd,
             env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_handle if log_handle is not None else subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if log_handle is not None else subprocess.DEVNULL,
         )
-        click.echo(f"Dashboard started at http://localhost:{actual_port}")
-        return process
     except Exception as e:
+        if log_handle is not None:
+            try:
+                log_handle.close()
+            except Exception:  # pragma: no cover - best-effort close
+                pass
         click.echo(f"Error launching dashboard: {e}", err=True)
         return None
+
+    if log_handle is not None:
+        # Spawn banner from the parent so restarts are delimited in the
+        # appended log and the PID/command are on record even if the child
+        # never emits a byte before hanging.
+        try:
+            from datetime import UTC, datetime
+
+            banner = (
+                f"--- [{datetime.now(UTC).isoformat()}] "
+                f"dashboard spawn pid={getattr(process, 'pid', None)} cmd={' '.join(cmd)}\n"
+            )
+            log_handle.write(banner)
+            log_handle.flush()
+        except Exception:  # pragma: no cover - observability must not break the run
+            logger.warning("Failed to write dashboard.log spawn banner", exc_info=True)
+        logger.info(
+            "Dashboard subprocess started (pid=%s); stdout/stderr -> %s",
+            getattr(process, "pid", None),
+            log_path,
+        )
+        # Stash the handle on the Popen object so _stop_dashboard can close
+        # it on the shutdown path without changing any call-site signature.
+        process._almanak_dashboard_log_handle = log_handle  # type: ignore[attr-defined]
+    else:
+        logger.info(
+            "Dashboard subprocess started (pid=%s); output discarded (dashboard.log unavailable)",
+            getattr(process, "pid", None),
+        )
+
+    click.echo(f"Dashboard started at http://localhost:{actual_port}")
+    return process
+
+
+def _open_dashboard_log() -> tuple[Any, Path | None]:
+    """Open the strategy-local ``dashboard.log`` for appending.
+
+    Resolves the path through :func:`local_log_path` so the log lands next
+    to the strategy's folder-scoped SQLite DB (the same folder that owns
+    ``config.json`` for a strategy run). Append mode so restarts don't
+    clobber prior evidence.
+
+    Returns:
+        ``(handle, path)`` on success, ``(None, None)`` when the path cannot
+        be resolved or the file cannot be opened (hosted mode, read-only
+        disk, ...). Failure degrades to the historical DEVNULL behavior with
+        a warning — observability must never break the run.
+    """
+    try:
+        from almanak.framework.local_paths import local_log_path
+
+        log_path = local_log_path("dashboard")
+        return open(log_path, "a", encoding="utf-8"), log_path
+    except Exception as exc:
+        logger.warning(
+            "Could not open dashboard.log for the dashboard subprocess (%s); "
+            "falling back to DEVNULL — dashboard output will be discarded.",
+            exc,
+        )
+        return None, None
 
 
 def _stop_dashboard(process: Any) -> None:
@@ -3206,20 +3275,62 @@ def _stop_dashboard(process: Any) -> None:
     ``run()``. ``None`` process is a no-op. Terminates first, falls back
     to kill on any exception during terminate/wait.
 
+    VIB-5012 observability: logs the child's exit/return code at INFO —
+    including the case where the dashboard already died silently mid-run
+    (``poll()`` non-None before we ever sent a signal) — and closes the
+    ``dashboard.log`` handle stashed by ``_start_dashboard_background``.
+    Idempotent: ``run()`` calls this explicitly AND registers it via
+    ``atexit``, so the second invocation is a no-op (no duplicate logs,
+    no double-close).
+
     Args:
         process: The ``subprocess.Popen`` handle returned by
             ``_start_dashboard_background`` (may be ``None``).
     """
     if process is None:
         return
+    if getattr(process, "_almanak_dashboard_stopped", False):
+        return
     try:
-        process.terminate()
-        process.wait(timeout=5)
-    except Exception:
+        process._almanak_dashboard_stopped = True
+    except Exception:  # pragma: no cover - exotic process fakes
+        pass
+
+    try:
+        pid = getattr(process, "pid", None)
         try:
-            process.kill()
-        except Exception:
-            pass
+            already_exited = process.poll() is not None
+        except Exception:  # pragma: no cover - poll is best-effort observability
+            already_exited = False
+        if already_exited:
+            # The child died silently mid-run — surface it instead of
+            # pretending the terminate below did anything.
+            logger.info(
+                "Dashboard subprocess (pid=%s) had already exited with returncode=%s",
+                pid,
+                getattr(process, "returncode", None),
+            )
+        else:
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+                logger.info(
+                    "Dashboard subprocess (pid=%s) stopped with returncode=%s",
+                    pid,
+                    getattr(process, "returncode", None),
+                )
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+    finally:
+        log_handle = getattr(process, "_almanak_dashboard_log_handle", None)
+        if log_handle is not None:
+            try:
+                log_handle.close()
+            except Exception:  # pragma: no cover - best-effort close
+                pass
 
 
 def _handle_standalone_dashboard(

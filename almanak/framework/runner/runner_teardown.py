@@ -486,6 +486,12 @@ async def execute_teardown(  # noqa: C901
     # Step T3: Execute teardown intents
     if runner._is_multi_chain:
         # Multi-chain: use inline path (TeardownManager doesn't support multi-chain yet)
+        logger.warning(
+            "🛑 %s multi-chain teardown lane performs NO token consolidation "
+            "(VIB-5011 known gap — see blueprint 14 §Token Consolidation): "
+            "residual non-target tokens stay in the wallet after closure.",
+            deployment_id,
+        )
         result = await runner._execute_multi_chain(
             strategy=strategy,
             intents=teardown_intents,
@@ -573,8 +579,10 @@ async def execute_teardown_via_manager(
     if compiler is None:
         return early  # type: ignore[return-value]
 
-    # Phase 2: construct TeardownManager + state adapter.
-    teardown_mgr, teardown_state_adapter = _h.build_teardown_manager(runner, compiler, state_manager)
+    # Phase 2: construct TeardownManager + state adapter. The request threads
+    # asset_policy / target_token into the manager's TeardownConfig so the
+    # token-consolidation phase honours the operator's choice (VIB-5011).
+    teardown_mgr, teardown_state_adapter = _h.build_teardown_manager(runner, compiler, state_manager, request)
 
     logger.info(
         f"🛑 Routing {deployment_id} teardown through TeardownManager (mode={mode_str}, intents={len(teardown_intents)})"
@@ -797,6 +805,13 @@ async def execute_teardown_inline(
     # the ``teardown-`` prefix and avoid the ``-inline-`` infix that the
     # earlier draft used; reconciliation walks ``cycle_id LIKE 'teardown-%'``
     # and any divergence breaks correlation across the 5 accounting tables.
+    logger.warning(
+        "🛑 %s inline-fallback teardown lane performs NO token consolidation "
+        "(VIB-5011 known gap — see blueprint 14 §Token Consolidation): "
+        "residual non-target tokens stay in the wallet after closure.",
+        deployment_id,
+    )
+
     teardown_id = getattr(request, "teardown_id", None) or str(uuid.uuid4())
     teardown_cycle_id = f"teardown-{teardown_id}"
     saved_last_cycle_id = getattr(runner, "_last_cycle_id", "") or ""

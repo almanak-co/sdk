@@ -1118,11 +1118,21 @@ async def run_teardown_with_brackets(
     # protocol-shaped duck. Inside the helper, machinery.orchestrator is
     # `Any` (dataclass field), so mypy doesn't need the ignore — and
     # complains if it's left in.
+    # VIB-5011: the execute lane surfaces no asset-routing knobs (those live
+    # on the request lane), so token consolidation is DISABLED here — the
+    # wallet-scoped ``amount="all"`` consolidation sweep requires the
+    # operator's explicit asset policy as consent (pr-auditor blocker).
+    # ``teardown request -a target`` is the consolidating path.
+    from ..teardown.config import TeardownConfig as _TC
+
+    _execute_lane_config = _TC.default()
+    _execute_lane_config.token_consolidation.enabled = False
     teardown_manager = TeardownManager(
         orchestrator=machinery.orchestrator,
         compiler=machinery.compiler,
         state_manager=machinery.state_adapter,
         runner_helpers=runner_helpers_for_manager,
+        config=_execute_lane_config,
     )
 
     kwargs = {
