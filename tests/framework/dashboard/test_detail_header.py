@@ -362,6 +362,97 @@ def test_apptest_nonzero_health_factor_renders_two_decimal_value() -> None:
     assert hf_metric.value == "1.50"
 
 
+def _drive_negative_strategy_pnl() -> None:
+    """Render the Money Trail with a small NEGATIVE strategy PnL.
+
+    Mirrors the live deployment that exposed the sign-stripping bug: open
+    position NAV ~= cost basis (zero unrealized) and a net realized loss of
+    a couple of cents from gas, so Strategy PnL = -$0.02.
+    """
+    from decimal import Decimal
+
+    from almanak.framework.dashboard.gateway_client import CostStackInfo, PnLSummary
+    from almanak.framework.dashboard.pages._detail_header import render_money_trail
+
+    pnl = PnLSummary(
+        deployed_usd=Decimal("5.00"),
+        nav_usd=Decimal("5.02"),
+        lifetime_pnl_usd=Decimal("0.02"),
+        lifetime_pnl_pct=Decimal("0.4"),
+        net_apr_pct=Decimal("0"),
+        max_drawdown_pct=Decimal("0.8"),
+        current_drawdown_pct=Decimal("0"),
+        value_confidence="HIGH",
+        age_days=1,
+        deployed_capital_usd=Decimal("2.43"),
+        available_cash_usd=Decimal("2.59"),
+        open_position_count=1,
+        primary_risk_kind="lp",
+        primary_risk_label="Range",
+        primary_risk_value="in-range",
+        primary_risk_color="green",
+    )
+    # Net realized = -$0.02 (gas only); zero unrealized (NAV-cash == cost basis).
+    cost = CostStackInfo(
+        cost_gas_usd=Decimal("0.02"),
+        cost_protocol_fees_usd=Decimal("0"),
+        cost_slippage_usd=Decimal("0"),
+        fees_earned_usd=Decimal("0"),
+        interest_paid_usd=Decimal("0"),
+        interest_earned_usd=Decimal("0"),
+        funding_paid_usd=Decimal("0"),
+        funding_earned_usd=Decimal("0"),
+        realized_pnl_usd=Decimal("0"),
+        il_usd=Decimal("0"),
+    )
+    render_money_trail(pnl, cost)
+
+
+def _drive_negative_24h_pnl_fallback() -> None:
+    """Render the fallback key-metrics row with a negative 24h PnL."""
+    from decimal import Decimal
+
+    from almanak.framework.dashboard.models import Strategy, StrategyStatus
+    from almanak.framework.dashboard.pages._detail_header import render_key_metrics
+
+    strategy = Strategy(
+        id="s",
+        name="Down Strat",
+        status=StrategyStatus.RUNNING,
+        pnl_24h_usd=Decimal("-1.50"),
+        total_value_usd=Decimal("100.00"),
+        chain="arbitrum",
+        protocol="Uniswap V3",
+    )
+    render_key_metrics(strategy)
+
+
+def test_apptest_negative_strategy_pnl_headline_carries_sign() -> None:
+    """Regression: a negative Strategy PnL must render the sign in the BIG number.
+
+    The headline previously used ``format_usd(abs(strategy_pnl))``, so a -$0.02
+    loss rendered as ``$0.02`` (looks like a gain) while only the delta chip
+    showed red — a direct contradiction the operator reported. The headline now
+    carries the leading ``-``.
+    """
+    at = AppTest.from_function(_drive_negative_strategy_pnl).run(timeout=30)
+
+    assert not at.exception, f"Unexpected exception: {at.exception}"
+    pnl_metric = next(m for m in at.metric if m.label == "Strategy PnL")
+    assert pnl_metric.value == "-$0.02", pnl_metric.value
+    # The bug was the headline reading as a positive gain.
+    assert pnl_metric.value != "$0.02"
+
+
+def test_apptest_negative_24h_pnl_fallback_headline_carries_sign() -> None:
+    """Regression: the fallback 24h PnL (Net) headline carries the sign too."""
+    at = AppTest.from_function(_drive_negative_24h_pnl_fallback).run(timeout=30)
+
+    assert not at.exception, f"Unexpected exception: {at.exception}"
+    pnl_metric = next(m for m in at.metric if m.label == "24h PnL (Net)")
+    assert pnl_metric.value.startswith("-$"), pnl_metric.value
+
+
 def test_apptest_strategy_with_missing_optional_fields_does_not_raise() -> None:
     """Strategy with all optional fields at defaults renders without error.
 

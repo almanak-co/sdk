@@ -1420,7 +1420,7 @@ def render_multi_chain_position_summary(strategy: Strategy) -> None:
                 st.metric("Value", format_usd(chain_position.total_value_usd))
             with col2:
                 pnl_delta = f"{'+' if chain_pnl >= 0 else ''}{chain_pnl:,.2f}"
-                st.metric("24h PnL", format_usd(abs(chain_pnl)), delta=pnl_delta)
+                st.metric("24h PnL", format_usd(chain_pnl), delta=pnl_delta)
 
             # Token balances
             if chain_position.token_balances:

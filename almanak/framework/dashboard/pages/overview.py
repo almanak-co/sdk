@@ -72,7 +72,7 @@ def render_portfolio_summary(strategies: list[Strategy]) -> None:
         pnl_delta = f"{'+' if net_pnl >= 0 else ''}{net_pnl:,.2f}"
         st.metric(
             label="24h PnL (Net)",
-            value=format_usd(abs(net_pnl)),
+            value=format_usd(net_pnl),
             delta=pnl_delta,
             help=f"Includes ${total_bridge_fees:,.2f} in bridge fees" if total_bridge_fees > 0 else None,
         )

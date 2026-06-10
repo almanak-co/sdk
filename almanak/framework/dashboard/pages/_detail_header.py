@@ -454,7 +454,11 @@ def render_money_trail(p: PnLSummary, cost: CostStackInfo | None = None) -> None
             delta = _signed(strategy_pnl) + (f"  ({_pct(pct)})" if pct is not None else "")
             st.metric(
                 "Strategy PnL",
-                format_usd(abs(strategy_pnl)),
+                # Headline carries the sign (``-$0.02`` for a loss). Stripping it
+                # with ``abs()`` made a negative PnL read as a gain in the big
+                # number while only the delta chip showed red — a direct
+                # contradiction. ``format_usd`` renders the leading ``-``.
+                format_usd(strategy_pnl),
                 delta=delta,
                 help=_STRATEGY_PNL_HELP,
             )
@@ -737,7 +741,7 @@ def _render_fallback_metrics(strategy: Strategy) -> None:
         st.metric("Total Value", format_usd(strategy.total_value_usd))
     with col2:
         net_pnl = strategy.pnl_24h_usd - strategy.bridge_fees_usd
-        st.metric("24h PnL (Net)", format_usd(abs(net_pnl)), delta=f"{'+' if net_pnl >= 0 else ''}{net_pnl:,.2f}")
+        st.metric("24h PnL (Net)", format_usd(net_pnl), delta=f"{'+' if net_pnl >= 0 else ''}{net_pnl:,.2f}")
     with col3:
         if strategy.position and strategy.position.total_lp_value_usd > 0:
             st.metric("LP Value", format_usd(strategy.position.total_lp_value_usd))
@@ -749,7 +753,7 @@ def _render_fallback_metrics(strategy: Strategy) -> None:
     with col4:
         if strategy.pnl_history:
             pnl_7d = strategy.pnl_history[-1].pnl_usd
-            st.metric("7d PnL", format_usd(abs(pnl_7d)), delta=f"{'+' if pnl_7d >= 0 else ''}{pnl_7d:,.2f}")
+            st.metric("7d PnL", format_usd(pnl_7d), delta=f"{'+' if pnl_7d >= 0 else ''}{pnl_7d:,.2f}")
 
 
 # Backwards-compatible alias for callers that haven't migrated.
