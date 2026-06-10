@@ -783,6 +783,52 @@ class PostgresStore:
             )
         return [_pg_row_to_portfolio_snapshot(row) for row in rows]
 
+    async def get_recent_snapshots(
+        self,
+        deployment_id: str,
+        limit: int = 168,
+    ) -> list["PortfolioSnapshot"]:
+        """The ``limit`` most-recent snapshots, ordered **oldest-first**.
+
+        Mirrors :meth:`SQLiteStore.get_recent_snapshots`: selects newest-first
+        (``ORDER BY timestamp DESC LIMIT N``) then reverses, so a caller that
+        reads ``[-1]`` as "latest" gets the true tail and a caller that walks
+        the window forward gets chronological order.
+
+        Use this for fixed-size *latest-window* consumers (PnL summary, PnL
+        chart). ``get_snapshots_since`` stays the right call for the
+        cursor-paginated history RPC, which must page oldest-first from a
+        ``since`` anchor (VIB-5026: pairing that ASC-from-``since`` query with
+        ``snapshots[-1]`` returned the 168th-OLDEST row once a deployment had
+        more than ``limit`` snapshots, freezing the money tiles ~14h after
+        launch).
+        """
+        if limit <= 0:
+            return []
+        if not self._initialized:
+            await self.initialize()
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT timestamp, iteration_number, total_value_usd,
+                       available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
+                       value_confidence, positions_json::text AS positions_text,
+                       token_prices_json::text AS token_prices_text,
+                       wallet_balances_json::text AS wallet_balances_text,
+                       chain,
+                       deployment_id, cycle_id, execution_mode
+                FROM portfolio_snapshots
+                WHERE deployment_id = $1
+                ORDER BY timestamp DESC
+                LIMIT $2
+                """,
+                deployment_id,
+                limit,
+            )
+        # SELECT DESC then reverse, so the caller gets oldest-first.
+        return [_pg_row_to_portfolio_snapshot(row) for row in reversed(rows)]
+
     async def get_snapshot_at(
         self,
         deployment_id: str,
@@ -2475,6 +2521,47 @@ class StateManager:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_snapshots_since", latency, False, str(e))
             logger.error(f"Failed to get snapshots since {since}: {e}")
+            return []
+
+    async def get_recent_snapshots(
+        self,
+        deployment_id: str,
+        limit: int = 168,
+    ) -> list["PortfolioSnapshot"]:
+        """Get the ``limit`` most-recent portfolio snapshots, oldest-first.
+
+        Unlike :meth:`get_snapshots_since` (oldest-first *from a ``since``
+        anchor*, for cursor-paginated charts), this returns the latest window
+        so a consumer reading ``[-1]`` always gets the true latest snapshot.
+        See VIB-5026: the PnL/quant-header loader paired ASC-from-``since``
+        with ``snapshots[-1]`` and silently surfaced the 168th-oldest row once
+        a deployment exceeded ``limit`` snapshots.
+
+        Returns:
+            List of PortfolioSnapshot, oldest first. Empty list when no WARM
+            backend is configured or the backend lacks the method.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        if not self._warm:
+            logger.warning("Cannot get portfolio snapshots: no WARM backend configured")
+            return []
+
+        if not hasattr(self._warm, "get_recent_snapshots"):
+            logger.warning("WARM backend does not support portfolio snapshot storage")
+            return []
+
+        start = time.perf_counter()
+        try:
+            result = await self._warm.get_recent_snapshots(deployment_id, limit)  # type: ignore[attr-defined]
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_recent_snapshots", latency, True)
+            return result
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_recent_snapshots", latency, False, str(e))
+            logger.error(f"Failed to get recent snapshots: {e}")
             return []
 
     async def get_snapshot_at(

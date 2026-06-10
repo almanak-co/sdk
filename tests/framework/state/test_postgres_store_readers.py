@@ -173,6 +173,57 @@ async def test_get_snapshots_since_passes_since_and_limit():
 
 
 @pytest.mark.asyncio
+async def test_get_recent_snapshots_orders_desc_and_reverses_to_oldest_first():
+    """VIB-5026: the latest-window read must SELECT newest-first then reverse.
+
+    Pairing ``get_snapshots_since`` (ASC from ``since``) with
+    ``compute_pnl_summary``'s ``snapshots[-1]`` returned the 168th-OLDEST row
+    once a deployment had >168 snapshots, freezing the dashboard money tiles
+    ~14h after launch. ``get_recent_snapshots`` instead bounds to the most
+    recent ``limit`` rows and hands them back oldest-first so ``[-1]`` is the
+    true latest.
+    """
+    # asyncpg yields ``ORDER BY timestamp DESC`` rows newest-first; the fake
+    # echoes whatever we hand it, so pass newest-first to mirror the DB.
+    newest = _snapshot_row(
+        iteration_number=200,
+        timestamp=datetime(2026, 5, 4, 14, 0, 0, tzinfo=UTC),
+        total_value_usd="4.93",
+    )
+    older_in_window = _snapshot_row(
+        iteration_number=33,
+        timestamp=datetime(2026, 5, 4, 1, 0, 0, tzinfo=UTC),
+        total_value_usd="2.43",
+    )
+    conn = _FakeConn(fetch_rows=[newest, older_in_window])  # DESC order from DB
+    store = _make_store(conn)
+
+    snaps = await store.get_recent_snapshots(_DEPLOYMENT_ID, limit=168)
+
+    # Reversed to oldest-first → [-1] is the true latest.
+    assert [s.iteration_number for s in snaps] == [33, 200]
+    assert snaps[-1].total_value_usd == Decimal("4.93")
+
+    kind, sql, args = conn.calls[0]
+    assert kind == "fetch"
+    assert "FROM portfolio_snapshots" in sql
+    assert "WHERE deployment_id = $1" in sql
+    assert "timestamp >=" not in sql  # NOT a since-anchored query
+    assert "ORDER BY timestamp DESC" in sql
+    assert "LIMIT $2" in sql
+    assert args == (_DEPLOYMENT_ID, 168)
+
+
+@pytest.mark.asyncio
+async def test_get_recent_snapshots_empty_limit_short_circuits():
+    conn = _FakeConn(fetch_rows=[_snapshot_row()])
+    store = _make_store(conn)
+
+    assert await store.get_recent_snapshots(_DEPLOYMENT_ID, limit=0) == []
+    assert conn.calls == []  # never touches the pool
+
+
+@pytest.mark.asyncio
 async def test_get_snapshot_at_uses_at_or_before_filter():
     conn = _FakeConn(fetchrow_row=_snapshot_row())
     store = _make_store(conn)

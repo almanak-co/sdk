@@ -920,7 +920,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     async def _build_pnl_history(self, deployment_id: str) -> list:
         """Build PnL time series from portfolio snapshots for chart rendering.
 
-        Returns a list of PnLDataPoint protos from the last 7 days of snapshots.
+        Returns a list of PnLDataPoint protos from the most-recent snapshots
+        (oldest-first, up to the row cap). VIB-5026: previously used
+        ``get_snapshots_since(now-7d, limit=168)``, which — once a deployment
+        had >168 snapshots — returned the OLDEST 168 rows in the window, so the
+        chart showed the first ~14h of the strategy's life and never advanced.
+        ``get_recent_snapshots`` returns the latest window instead.
         """
         from almanak.gateway.proto import gateway_pb2
 
@@ -929,8 +934,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             return pnl_points
 
         try:
-            since = datetime.now(UTC) - timedelta(days=7)
-            snapshots = await self._state_manager.get_snapshots_since(deployment_id, since, limit=168)
+            snapshots = await self._state_manager.get_recent_snapshots(deployment_id, limit=168)
 
             if not snapshots:
                 return pnl_points
@@ -1872,11 +1876,16 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             except Exception:
                 logger.debug("get_portfolio_metrics failed for %s", deployment_id, exc_info=True)
             try:
-                snapshots = await self._state_manager.get_snapshots_since(
-                    deployment_id, since=datetime.now(tz=UTC) - timedelta(days=365)
-                )
+                # VIB-5026: the latest snapshot must be the *newest* row.
+                # ``get_snapshots_since(ASC, LIMIT 168)`` returns the OLDEST
+                # 168 rows once a deployment has >168 snapshots (~14h at the
+                # 5-min cadence), so ``compute_pnl_summary``'s ``snapshots[-1]``
+                # silently froze on a ~14h-old snapshot. ``get_recent_snapshots``
+                # returns the latest window (oldest-first), so ``[-1]`` is the
+                # true latest and ``_drawdowns`` runs over recent history.
+                snapshots = await self._state_manager.get_recent_snapshots(deployment_id, limit=168)
             except Exception:
-                logger.debug("get_snapshots_since failed for %s", deployment_id, exc_info=True)
+                logger.debug("get_recent_snapshots failed for %s", deployment_id, exc_info=True)
             # The quant aggregations are LTD surfaces (cost stack,
             # audit-trail counts, G6 reconciliation). A hard row cap
             # silently understates lifetime totals and can mis-PASS G6 by
