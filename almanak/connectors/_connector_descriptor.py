@@ -375,6 +375,53 @@ class FeeModelDecl:
             raise ValueError(f"FeeModelDecl.aliases must not include the primary name {self.name!r}")
 
 
+# Canonical backtest adapter types — mirrors ``KNOWN_STRATEGY_TYPES`` in
+# ``almanak/framework/backtesting/adapters/registry.py`` (the descriptor stays
+# strategy-safe, so the vocabulary is restated here; an equivalence test pins
+# every declared value to the framework set).
+_BACKTEST_STRATEGY_TYPES = ("lp", "perp", "lending", "arbitrage", "swap", "yield", "multi_protocol")
+
+
+@dataclass(frozen=True)
+class BacktestStrategyTypeDecl:
+    """Connector-owned backtest strategy-type declaration (VIB-4851).
+
+    ``strategy_type`` is the backtesting adapter type the framework's
+    strategy-type detector (``backtesting/adapters/registry.py``) resolves
+    this venue's protocol strings to. It is declared explicitly rather than
+    derived from ``Connector.kind`` because the two disagree on purpose:
+    ``uniswap_v3`` is also a swap venue but backtests as ``"lp"``, and
+    ``lido`` / ``ethena`` / ``yearn`` backtest as ``"yield"`` while their
+    kinds are LENDING / VAULT. ``name`` is the primary detection key — it
+    defaults to the connector name; connectors whose legacy detection key
+    differs declare it explicitly (``balancer_v2`` -> ``"balancer"``,
+    ``sushiswap_v3`` -> ``"sushiswap"``). ``aliases`` are
+    backtest-detection-scoped protocol aliases resolving to the same strategy
+    type (e.g. ``"velodrome"`` -> aerodrome's type) — they join the backtest
+    detection namespace only, NOT the manifest discovery namespace.
+    """
+
+    strategy_type: str
+    name: str | None = None
+    aliases: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the declaration's strategy type, name, and aliases."""
+        if self.strategy_type not in _BACKTEST_STRATEGY_TYPES:
+            raise ValueError(
+                f"BacktestStrategyTypeDecl.strategy_type must be one of {_BACKTEST_STRATEGY_TYPES}, "
+                f"got {self.strategy_type!r}"
+            )
+        if self.name is not None:
+            if not isinstance(self.name, str) or not self.name.strip():
+                raise ValueError(f"BacktestStrategyTypeDecl.name must be None or a non-empty string, got {self.name!r}")
+            if self.name != self.name.lower() or "-" in self.name:
+                raise ValueError(f"BacktestStrategyTypeDecl.name must be lowercase and hyphen-free, got {self.name!r}")
+        _validate_decl_aliases("BacktestStrategyTypeDecl", self.aliases)
+        if self.name is not None and self.name in self.aliases:
+            raise ValueError(f"BacktestStrategyTypeDecl.aliases must not include the primary name {self.name!r}")
+
+
 @dataclass(frozen=True)
 class Connector:
     """Lightweight connector-owned capability manifest.
@@ -411,6 +458,7 @@ class Connector:
     funding_history: FundingHistoryDecl | None = None
     fee_model: FeeModelDecl | None = None
     dex_volume: DexVolumeDecl | None = None
+    backtest_strategy_type: BacktestStrategyTypeDecl | None = None
     metadata_amount_encoding: MetadataAmountEncoding | None = None
     fungible_lp: bool = False
     prediction_read: ImportRef | None = None
@@ -482,6 +530,7 @@ class Connector:
         self._validate_funding_history()
         self._validate_fee_model()
         self._validate_dex_volume()
+        self._validate_backtest_strategy_type()
         self._validate_metadata_amount_encoding()
         self._validate_fungible_lp()
         self._validate_receipt_parser_kwargs()
@@ -718,6 +767,24 @@ class Connector:
         """Validate the optional DEX backtesting-data declaration."""
         if self.dex_volume is not None and not isinstance(self.dex_volume, DexVolumeDecl):
             raise ValueError(f"Connector.dex_volume must be None or a DexVolumeDecl, got {self.dex_volume!r}")
+
+    def _validate_backtest_strategy_type(self) -> None:
+        """Validate the optional backtest strategy-type declaration."""
+        if self.backtest_strategy_type is None:
+            return
+        if not isinstance(self.backtest_strategy_type, BacktestStrategyTypeDecl):
+            raise ValueError(
+                "Connector.backtest_strategy_type must be None or a BacktestStrategyTypeDecl, "
+                f"got {self.backtest_strategy_type!r}"
+            )
+        # When the decl omits ``name`` the connector name is the effective
+        # primary key; the decl's own __post_init__ cannot see it, so the
+        # alias-shadowing guard for that case lives here.
+        effective_name = self.backtest_strategy_type.name or self.name
+        if effective_name in self.backtest_strategy_type.aliases:
+            raise ValueError(
+                f"BacktestStrategyTypeDecl.aliases must not include the effective primary name {effective_name!r}"
+            )
 
     def _validate_fungible_lp(self) -> None:
         """Validate the fungible-LP (ERC20 LP token, no NFT discriminator) flag."""
@@ -1150,6 +1217,10 @@ class ConnectorRegistry:
         """Connectors declaring DEX backtesting volume/liquidity data."""
         return tuple(d for d in self.all() if d.dex_volume is not None)
 
+    def with_backtest_strategy_type(self) -> tuple[Connector, ...]:
+        """Connectors declaring a backtest strategy type."""
+        return tuple(d for d in self.all() if d.backtest_strategy_type is not None)
+
     def with_perps_read(self) -> tuple[Connector, ...]:
         """Return connectors that publish perps-read dispatch declarations."""
         return tuple(d for d in self.all() if d.perps_read is not None)
@@ -1252,6 +1323,7 @@ class ConnectorRegistry:
         seen_funding_history_keys: dict[str, str] = {}
         seen_fee_model_keys: dict[str, str] = {}
         seen_dex_volume_keys: dict[str, str] = {}
+        seen_backtest_strategy_type_keys: dict[str, str] = {}
 
         for info in pkgutil.iter_modules(package.__path__):
             if not info.ispkg or info.name.startswith("_"):
@@ -1356,6 +1428,17 @@ class ConnectorRegistry:
                 if connector.dex_volume is None
                 else (connector.dex_volume.name or connector.name, *connector.dex_volume.aliases),
                 seen_keys=seen_dex_volume_keys,
+            )
+            self._validate_unique_ownership_keys(
+                connector_name=connector.name,
+                capability="Backtest-strategy-type",
+                keys=()
+                if connector.backtest_strategy_type is None
+                else (
+                    connector.backtest_strategy_type.name or connector.name,
+                    *connector.backtest_strategy_type.aliases,
+                ),
+                seen_keys=seen_backtest_strategy_type_keys,
             )
             connectors.append(connector)
 

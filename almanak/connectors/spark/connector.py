@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     ImportRef,
     LendingReadDecl,
@@ -15,6 +16,7 @@ from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpe
 CONNECTOR = Connector(
     name="spark",
     kind=ProtocolKind.LENDING,
+    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lending"),
     address_tables=(
         AddressTableSpec(
             protocol="spark",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     DexVolumeDecl,
     FeeModelDecl,
@@ -25,6 +26,10 @@ CONNECTOR = Connector(
         description="Aerodrome DEX fee model with stable/volatile pool distinction",
         aliases=("aero", "velodrome"),
     ),
+    # Velodrome (the Optimism original Aerodrome forked) has no connector
+    # package; this folder owns its backtest detection key, mirroring the
+    # fee-model alias above.
+    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp", aliases=("velodrome",)),
     aliases=("aerodrome_slipstream",),
     address_tables=(
         AddressTableSpec(

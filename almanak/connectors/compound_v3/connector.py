@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     FeeModelDecl,
     ImportRef,
@@ -20,6 +21,7 @@ CONNECTOR = Connector(
         description="Compound V3 (Comet) lending protocol fee model",
         aliases=("compound", "comet"),
     ),
+    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lending", aliases=("compound",)),
     address_tables=(
         AddressTableSpec(
             protocol="compound_v3",

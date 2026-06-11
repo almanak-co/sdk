@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     FeeModelDecl,
     FundingHistoryDecl,
@@ -22,6 +23,7 @@ CONNECTOR = Connector(
         description="GMX V2 perpetuals protocol fee model",
         aliases=("gmx_v2",),
     ),
+    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="perp", aliases=("gmx",)),
     address_tables=(
         AddressTableSpec(
             protocol="gmx_v2",

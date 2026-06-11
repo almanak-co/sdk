@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     DexVolumeDecl,
     ImportRef,
@@ -19,6 +20,8 @@ CONNECTOR = Connector(
         amm_family="v3_concentrated",
         aliases=("sushi_v3",),
     ),
+    # Legacy backtest detection key is the bare "sushiswap".
+    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp", name="sushiswap"),
     address_tables=(
         AddressTableSpec(
             protocol="sushiswap_v3",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     DexVolumeDecl,
     ImportRef,
@@ -22,6 +23,8 @@ CONNECTOR = Connector(
         dex="balancer_v2",
         volume_data_source="balancer_v2_subgraph",
     ),
+    # Legacy backtest detection key is the bare "balancer", mirroring dex_volume.
+    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp", name="balancer"),
     address_tables=(
         AddressTableSpec(
             protocol="balancer_v2",

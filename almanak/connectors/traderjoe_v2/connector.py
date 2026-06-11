@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     DexVolumeDecl,
     ImportRef,
@@ -20,6 +21,7 @@ CONNECTOR = Connector(
         aliases=("joe_v2",),
         chain_default=("avalanche",),
     ),
+    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp", aliases=("traderjoe",)),
     address_tables=(
         AddressTableSpec(
             protocol="traderjoe_v2",

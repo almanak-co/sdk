@@ -17,6 +17,7 @@ from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from almanak.connectors._connector import (
     CONNECTOR_REGISTRY,
+    BacktestStrategyTypeDecl,
     Connector,
     ConnectorDiscoveryError,
     ConnectorRegistry,
@@ -2683,6 +2684,64 @@ class TestDexVolumeDeclValidation:
     def test_rejects_non_import_ref_twap_reference_pools(self, bad):
         with pytest.raises(ValueError, match="twap_reference_pools must be None or an ImportRef"):
             self._decl(twap_reference_pools=bad)
+
+
+class TestBacktestStrategyTypeDeclValidation:
+    """Each BacktestStrategyTypeDecl.__post_init__ guard fails closed (VIB-4851)."""
+
+    @staticmethod
+    def _decl(**overrides):
+        kwargs = {"strategy_type": "lp"}
+        kwargs.update(overrides)
+        return BacktestStrategyTypeDecl(**kwargs)
+
+    def test_valid_declaration_accepts_all_fields(self):
+        decl = self._decl(strategy_type="lending", name="balancer", aliases=("bal",))
+        assert decl.strategy_type == "lending"
+        assert decl.name == "balancer"
+        assert decl.aliases == ("bal",)
+
+    @pytest.mark.parametrize("bad", ["", "vault", "LP", 7, None])
+    def test_rejects_unknown_strategy_type(self, bad):
+        with pytest.raises(ValueError, match="strategy_type must be one of"):
+            self._decl(strategy_type=bad)
+
+    @pytest.mark.parametrize("bad", ["", "   ", 7])
+    def test_rejects_non_string_or_blank_name(self, bad):
+        with pytest.raises(ValueError, match="name must be None or a non-empty string"):
+            self._decl(name=bad)
+
+    @pytest.mark.parametrize("bad", ["Balancer", "balancer-v2"])
+    def test_rejects_uppercase_or_hyphenated_name(self, bad):
+        with pytest.raises(ValueError, match="name must be lowercase and hyphen-free"):
+            self._decl(name=bad)
+
+    def test_rejects_hyphenated_alias(self):
+        with pytest.raises(ValueError, match="must not contain hyphens"):
+            self._decl(aliases=("uniswap-v2",))
+
+    def test_rejects_duplicate_aliases(self):
+        with pytest.raises(ValueError, match="aliases contains duplicates"):
+            self._decl(aliases=("uniswap", "uniswap"))
+
+    def test_rejects_alias_shadowing_primary_name(self):
+        with pytest.raises(ValueError, match="aliases must not include the primary name"):
+            self._decl(name="balancer", aliases=("balancer",))
+
+    def test_connector_rejects_non_decl_value(self):
+        with pytest.raises(ValueError, match="backtest_strategy_type must be None or a BacktestStrategyTypeDecl"):
+            Connector(name="aave_v3", kind=ProtocolKind.LENDING, backtest_strategy_type="lending")
+
+    def test_connector_rejects_alias_shadowing_effective_primary_name(self):
+        # name=None defaults the primary key to the connector name; an alias
+        # repeating it must fail at manifest construction, not surface later
+        # as a confusing duplicate-ownership error at discovery.
+        with pytest.raises(ValueError, match="aliases must not include the effective primary name"):
+            Connector(
+                name="aave_v3",
+                kind=ProtocolKind.LENDING,
+                backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lending", aliases=("aave_v3",)),
+            )
 
 
 class TestLendingReadDeclRateLaneValidation:

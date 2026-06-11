@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     DexVolumeDecl,
     FeeModelDecl,
@@ -25,6 +26,7 @@ CONNECTOR = Connector(
         description="PancakeSwap V3 DEX fee model with tier-based fees (0.01%, 0.05%, 0.25%, 1%)",
         aliases=("pancakeswap", "pancake_v3", "pcs_v3"),
     ),
+    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp", aliases=("pancakeswap",)),
     address_tables=(
         AddressTableSpec(
             protocol="pancakeswap_v3",

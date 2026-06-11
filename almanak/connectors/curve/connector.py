@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     DexVolumeDecl,
     FeeModelDecl,
@@ -25,6 +26,7 @@ CONNECTOR = Connector(
         description="Curve Finance DEX fee model with dynamic fee calculation",
         aliases=("curve_fi", "crv"),
     ),
+    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp"),
     gateway_connector=ImportRef(
         module="almanak.connectors.curve.gateway.provider",
         attribute="CurveGatewayConnector",

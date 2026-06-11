@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     FeeModelDecl,
     ImportRef,
@@ -22,6 +23,7 @@ CONNECTOR = Connector(
         description="Aave V3 lending protocol fee model",
         aliases=("aave", "aave_v2"),
     ),
+    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lending", aliases=("aave",)),
     address_tables=(
         AddressTableSpec(
             protocol="aave_v3",

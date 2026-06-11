@@ -643,3 +643,92 @@ def test_twap_reference_pools_rejects_non_dict_table(monkeypatch) -> None:
     monkeypatch.setattr(CONNECTOR_REGISTRY, "with_dex_volume", lambda: [bad_manifest])
     with pytest.raises(TypeError, match="fake_dex.*must resolve to a dict"):
         DexVolumeRegistry.twap_reference_pools()
+
+
+# almanak/framework/backtesting/adapters/registry.py
+# ``PROTOCOL_TO_STRATEGY_TYPE`` as of 2026-06-11, frozen verbatim
+# (manifest-derived in VIB-4851: connector ``BacktestStrategyTypeDecl`` rows
+# plus the ``_NON_CONNECTOR_STRATEGY_TYPES`` residual map).
+FROZEN_PROTOCOL_TO_STRATEGY_TYPE = {
+    # LP protocols
+    "uniswap_v3": "lp",
+    "uniswap_v2": "lp",
+    "uniswap": "lp",
+    "pancakeswap_v3": "lp",
+    "pancakeswap": "lp",
+    "aerodrome": "lp",
+    "velodrome": "lp",
+    "traderjoe": "lp",
+    "traderjoe_v2": "lp",
+    "curve": "lp",
+    "balancer": "lp",
+    "sushiswap": "lp",
+    # Perp protocols
+    "gmx_v2": "perp",
+    "gmx": "perp",
+    "hyperliquid": "perp",
+    "dydx": "perp",
+    "perpetual_protocol": "perp",
+    # Lending protocols
+    "aave_v3": "lending",
+    "aave": "lending",
+    "compound_v3": "lending",
+    "compound": "lending",
+    "morpho_blue": "lending",
+    "morpho": "lending",
+    "spark": "lending",
+    # Yield protocols
+    "lido": "yield",
+    "ethena": "yield",
+    "yearn": "yield",
+    "convex": "yield",
+}
+
+
+def test_protocol_strategy_type_equals_frozen_legacy_dict() -> None:
+    """Manifest-derived strategy-type detection map == the legacy hand literal."""
+    from almanak.framework.backtesting.adapters.registry import PROTOCOL_TO_STRATEGY_TYPE
+
+    assert PROTOCOL_TO_STRATEGY_TYPE == FROZEN_PROTOCOL_TO_STRATEGY_TYPE
+
+
+def test_backtest_strategy_type_values_are_known_framework_types() -> None:
+    """Every manifest-declared strategy type is in the framework vocabulary.
+
+    Pins the descriptor-side ``_BACKTEST_STRATEGY_TYPES`` literal (the
+    descriptor stays strategy-safe and cannot import the framework set) to the
+    framework's ``KNOWN_STRATEGY_TYPES``.
+    """
+    from almanak.connectors._connector_descriptor import _BACKTEST_STRATEGY_TYPES
+    from almanak.framework.backtesting.adapters.registry import KNOWN_STRATEGY_TYPES
+
+    assert frozenset(_BACKTEST_STRATEGY_TYPES) == KNOWN_STRATEGY_TYPES
+    for connector in CONNECTOR_REGISTRY.with_backtest_strategy_type():
+        decl = connector.backtest_strategy_type
+        assert decl is not None
+        assert decl.strategy_type in KNOWN_STRATEGY_TYPES, (connector.name, decl.strategy_type)
+
+
+def test_non_connector_strategy_type_residue_stays_connectorless() -> None:
+    """Residual strategy-type keys must not collide with any discovered connector.
+
+    The residual map is reserved for venues with NO connector package; the
+    moment a connector claims one of these keys (canonical name, discovery
+    alias, or backtest decl key), the residual entry must move onto that
+    connector's manifest. This makes ``_NON_CONNECTOR_STRATEGY_TYPES`` shrink
+    automatically as connectors appear.
+    """
+    from almanak.framework.backtesting.adapters.registry import _NON_CONNECTOR_STRATEGY_TYPES
+
+    for connector in CONNECTOR_REGISTRY.all():
+        decl = connector.backtest_strategy_type
+        decl_keys = frozenset() if decl is None else frozenset((decl.name or connector.name, *decl.aliases))
+        for residual_key in _NON_CONNECTOR_STRATEGY_TYPES:
+            assert residual_key not in connector.discovery_keys, (
+                f"Residual strategy-type key {residual_key!r} is a discovery key of connector "
+                f"{connector.name!r}; move the entry onto that connector's backtest_strategy_type decl."
+            )
+            assert residual_key not in decl_keys, (
+                f"Residual strategy-type key {residual_key!r} is already declared by connector "
+                f"{connector.name!r}'s backtest_strategy_type decl; delete the residual entry."
+            )

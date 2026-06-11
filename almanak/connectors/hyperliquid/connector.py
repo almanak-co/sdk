@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     FeeModelDecl,
     FundingHistoryDecl,
@@ -19,6 +20,7 @@ CONNECTOR = Connector(
         description="Hyperliquid perpetuals protocol fee model with maker/taker fees and volume tiers",
         aliases=("hl", "hyper"),
     ),
+    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="perp"),
     gateway_connector=ImportRef(
         module="almanak.connectors.hyperliquid.gateway.provider",
         attribute="HyperliquidGatewayConnector",

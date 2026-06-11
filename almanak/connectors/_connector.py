@@ -5,6 +5,7 @@ from __future__ import annotations
 from almanak.connectors._connector_descriptor import (
     CONNECTOR_DESCRIPTOR_REGISTRY,
     CONNECTOR_REGISTRY,
+    BacktestStrategyTypeDecl,
     CapabilitiesSpec,
     Connector,
     ConnectorDescriptor,
@@ -25,6 +26,7 @@ from almanak.connectors._connector_descriptor import (
 __all__ = [
     "CONNECTOR_DESCRIPTOR_REGISTRY",
     "CONNECTOR_REGISTRY",
+    "BacktestStrategyTypeDecl",
     "CapabilitiesSpec",
     "Connector",
     "ConnectorDescriptor",

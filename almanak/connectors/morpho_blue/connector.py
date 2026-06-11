@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     FeeModelDecl,
     ImportRef,
@@ -22,6 +23,7 @@ CONNECTOR = Connector(
         description="Morpho lending protocol fee model (fee-free operations)",
         aliases=("morpho_blue", "morpho_optimizer"),
     ),
+    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lending", aliases=("morpho",)),
     aliases=("morpho",),
     address_tables=(
         AddressTableSpec(

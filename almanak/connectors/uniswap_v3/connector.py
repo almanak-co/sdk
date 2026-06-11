@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
+    BacktestStrategyTypeDecl,
     Connector,
     DexVolumeDecl,
     FeeModelDecl,
@@ -32,6 +33,11 @@ CONNECTOR = Connector(
         description="Uniswap V3 DEX fee model with tier-based fees",
         aliases=("uniswap", "uni_v3"),
     ),
+    # Also a swap venue, but backtests as "lp". This folder owns the Uniswap
+    # family's detection keys: the bare "uniswap" (fee-model precedent above)
+    # and "uniswap_v2", which has no connector package (aave_v3 lending_read
+    # claims "aave_v2" the same way).
+    backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="lp", aliases=("uniswap", "uniswap_v2")),
     aliases=("agni_finance",),
     address_tables=(
         AddressTableSpec(

@@ -33,6 +33,7 @@ Example:
         ...
 """
 
+import functools
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -44,6 +45,12 @@ if TYPE_CHECKING:
     from almanak.framework.strategies.intent_strategy import (
         StrategyMetadata,
     )
+
+    # PEP 562 + mypy: PROTOCOL_TO_STRATEGY_TYPE is resolved at runtime through
+    # module ``__getattr__`` (lazy — see the note above it), so it is absent
+    # from the module namespace at static-analysis time. Type-only declaration;
+    # no runtime value is bound (that would shadow ``__getattr__``).
+    PROTOCOL_TO_STRATEGY_TYPE: dict[str, str]
 
 logger = logging.getLogger(__name__)
 
@@ -131,41 +138,52 @@ TAG_TO_STRATEGY_TYPE: dict[str, str] = {
     "delta_neutral": STRATEGY_TYPE_MULTI_PROTOCOL,
 }
 
-# Protocol names that indicate specific strategy types
-PROTOCOL_TO_STRATEGY_TYPE: dict[str, str] = {
-    # LP protocols
-    "uniswap_v3": STRATEGY_TYPE_LP,
-    "uniswap_v2": STRATEGY_TYPE_LP,
-    "uniswap": STRATEGY_TYPE_LP,
-    "pancakeswap_v3": STRATEGY_TYPE_LP,
-    "pancakeswap": STRATEGY_TYPE_LP,
-    "aerodrome": STRATEGY_TYPE_LP,
-    "velodrome": STRATEGY_TYPE_LP,
-    "traderjoe": STRATEGY_TYPE_LP,
-    "traderjoe_v2": STRATEGY_TYPE_LP,
-    "curve": STRATEGY_TYPE_LP,
-    "balancer": STRATEGY_TYPE_LP,
-    "sushiswap": STRATEGY_TYPE_LP,
-    # Perp protocols
-    "gmx_v2": STRATEGY_TYPE_PERP,
-    "gmx": STRATEGY_TYPE_PERP,
-    "hyperliquid": STRATEGY_TYPE_PERP,
+# Residual / legacy protocol detection keys with genuinely NO connector
+# package under ``almanak/connectors/<name>/`` (VIB-4851). Every other
+# protocol -> strategy-type fact is owned by the connector manifest
+# (``Connector.backtest_strategy_type``) and merged in lazily below. A guard
+# test (tests/unit/connectors/test_manifest_metadata_equivalence.py) asserts
+# no residual key collides with any discovered connector name/alias, so this
+# map shrinks automatically as connectors appear — when one of these venues
+# gets a connector, move the entry onto its manifest.
+_NON_CONNECTOR_STRATEGY_TYPES: dict[str, str] = {
+    # No dydx connector package (app-chain perp venue).
     "dydx": STRATEGY_TYPE_PERP,
+    # No perpetual_protocol connector package.
     "perpetual_protocol": STRATEGY_TYPE_PERP,
-    # Lending protocols
-    "aave_v3": STRATEGY_TYPE_LENDING,
-    "aave": STRATEGY_TYPE_LENDING,
-    "compound_v3": STRATEGY_TYPE_LENDING,
-    "compound": STRATEGY_TYPE_LENDING,
-    "morpho_blue": STRATEGY_TYPE_LENDING,
-    "morpho": STRATEGY_TYPE_LENDING,
-    "spark": STRATEGY_TYPE_LENDING,
-    # Yield protocols
-    "lido": STRATEGY_TYPE_YIELD,
-    "ethena": STRATEGY_TYPE_YIELD,
-    "yearn": STRATEGY_TYPE_YIELD,
+    # No convex connector package (Curve-boosting yield venue).
     "convex": STRATEGY_TYPE_YIELD,
 }
+
+
+@functools.cache
+def _protocol_to_strategy_type() -> dict[str, str]:
+    """Cached ``PROTOCOL_TO_STRATEGY_TYPE`` (lazy — see the ``__getattr__`` note).
+
+    Merges the residual non-connector entries with every connector-declared
+    ``BacktestStrategyTypeDecl`` (the builder names no connector). Duplicate
+    keys across two manifests are rejected at connector discovery; a manifest
+    key colliding with a residual entry fails loud here because the residual
+    entry must be deleted in the same change that adds the manifest decl.
+    """
+    # Deferred import: connector discovery must not run at module import time
+    # (see the ``__getattr__`` note below).
+    from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+    mapping = dict(_NON_CONNECTOR_STRATEGY_TYPES)
+    for connector in CONNECTOR_REGISTRY.with_backtest_strategy_type():
+        decl = connector.backtest_strategy_type
+        assert decl is not None  # narrowed by with_backtest_strategy_type()
+        for key in (decl.name or connector.name, *decl.aliases):
+            if key in mapping:
+                raise ValueError(
+                    f"Backtest strategy-type key {key!r} declared by connector {connector.name!r} "
+                    "collides with a _NON_CONNECTOR_STRATEGY_TYPES residual entry; "
+                    "remove the residual entry."
+                )
+            mapping[key] = decl.strategy_type
+    return mapping
+
 
 # Intent types that indicate specific strategy types
 INTENT_TO_STRATEGY_TYPE: dict[str, str] = {
@@ -290,14 +308,16 @@ def _detect_from_protocols(protocols: list[str]) -> StrategyTypeHint:
     if not protocols:
         return StrategyTypeHint(strategy_type=None)
 
+    protocol_to_strategy_type = _protocol_to_strategy_type()
+
     # Normalize protocol names to lowercase
     normalized_protocols = [p.lower() for p in protocols]
 
     # Count matches for each strategy type
     type_counts: dict[str, int] = {}
     for protocol in normalized_protocols:
-        if protocol in PROTOCOL_TO_STRATEGY_TYPE:
-            strategy_type = PROTOCOL_TO_STRATEGY_TYPE[protocol]
+        if protocol in protocol_to_strategy_type:
+            strategy_type = protocol_to_strategy_type[protocol]
             type_counts[strategy_type] = type_counts.get(strategy_type, 0) + 1
 
     if not type_counts:
@@ -314,7 +334,7 @@ def _detect_from_protocols(protocols: list[str]) -> StrategyTypeHint:
         strategy_type=best_type,
         confidence=confidence,
         source="protocols",
-        details=f"Matched protocols: {', '.join(p for p in normalized_protocols if PROTOCOL_TO_STRATEGY_TYPE.get(p) == best_type)}",
+        details=f"Matched protocols: {', '.join(p for p in normalized_protocols if protocol_to_strategy_type.get(p) == best_type)}",
     )
 
 
@@ -564,6 +584,22 @@ def get_adapter_info(strategy_type: str) -> dict[str, Any] | None:
             "adapter_class": metadata.adapter_class.__name__,
         }
     return None
+
+
+# ``PROTOCOL_TO_STRATEGY_TYPE`` is manifest-derived (connector
+# ``BacktestStrategyTypeDecl`` rows + ``_NON_CONNECTOR_STRATEGY_TYPES``).
+# Resolving it through PEP 562 ``__getattr__`` defers connector discovery to
+# first attribute access, so importing this module (and the
+# ``backtesting.adapters`` package that re-exports from it) never hydrates the
+# connector registry at import time — the same pytest-xdist
+# import-interleave hazard ``compiler_constants.py`` documents for its lazy
+# address tables. ``from X import PROTOCOL_TO_STRATEGY_TYPE`` still resolves:
+# the import statement falls back to ``X.__getattr__(...)`` when the name is
+# missing from the module dict.
+def __getattr__(name: str) -> dict[str, str]:
+    if name == "PROTOCOL_TO_STRATEGY_TYPE":
+        return _protocol_to_strategy_type()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
