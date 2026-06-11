@@ -1764,6 +1764,25 @@ class ResultEnricher:
             result.position_id = value
         elif field == "swap_amounts" and isinstance(value, SwapAmounts):
             result.swap_amounts = value
+            # VIB-3164 / Empty != Zero: a parser that could not resolve token
+            # decimals stamps the *_decimal_resolved flags False. Surface that
+            # on the result so operators see it without grepping parser logs.
+            # Non-fatal by design — ledger/sidecar already gate amounts on
+            # the flags and record the "parser didn't emit" sentinel.
+            unresolved_sides = [
+                side
+                for side, ok in (
+                    ("token_in", value.amount_in_decimal_resolved),
+                    ("token_out", value.amount_out_decimal_resolved),
+                )
+                if not ok
+            ]
+            if unresolved_sides:
+                result.extraction_warnings.append(
+                    f"swap_amounts decimals unresolved for {', '.join(unresolved_sides)}; "
+                    "decimal amounts use the legacy 18-decimal fallback and are "
+                    "excluded from ledger/sidecar amounts (VIB-3164)"
+                )
         elif field == "lp_close_data":
             # VIB-4310 — Reject anything that is not LPCloseData. The
             # aggregate path (``_AGGREGATE_FIELDS``) treats every successful

@@ -272,6 +272,12 @@ class ParsedSwapResult:
     pool_address: str
     sqrt_price_x96_after: int = 0
     tick_after: int = 0
+    # VIB-3164 — per-side decimal-resolution status. False means the
+    # corresponding ``amount_*_decimal`` was computed with the legacy
+    # 18-decimal fallback and must not be treated as measured
+    # (Empty != Zero, blueprint 27).
+    token_in_decimals_resolved: bool = True
+    token_out_decimals_resolved: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -289,6 +295,8 @@ class ParsedSwapResult:
             "pool_address": self.pool_address,
             "sqrt_price_x96_after": str(self.sqrt_price_x96_after),
             "tick_after": self.tick_after,
+            "token_in_decimals_resolved": self.token_in_decimals_resolved,
+            "token_out_decimals_resolved": self.token_out_decimals_resolved,
         }
 
     @classmethod
@@ -308,6 +316,8 @@ class ParsedSwapResult:
             pool_address=data["pool_address"],
             sqrt_price_x96_after=int(data.get("sqrt_price_x96_after", 0)),
             tick_after=int(data.get("tick_after", 0)),
+            token_in_decimals_resolved=data.get("token_in_decimals_resolved", True),
+            token_out_decimals_resolved=data.get("token_out_decimals_resolved", True),
         )
 
     def to_swap_result_payload(self) -> SwapResultPayload:
@@ -473,16 +483,65 @@ class UniswapV3ReceiptParser:
         except Exception:
             return "", None
 
+    def build_extract_kwargs(
+        self,
+        *,
+        field: str,
+        bundle_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return Uniswap-V3-owned kwargs for ResultEnricher extraction calls.
+
+        VIB-3164: the compiler records full token identity
+        (``from_token`` / ``to_token`` dicts with address, symbol, decimals —
+        see ``UniswapV3Compiler.compile_swap``) in ``ActionBundle.metadata``.
+        Threading it here lets ``_build_swap_result`` resolve decimals when
+        the TokenResolver misses or Transfer events cannot be classified,
+        instead of falling through to the 18-decimal default.
+
+        Native-token entries are skipped: the receipt's Transfer events carry
+        the wrapped token's address, so a native entry can never match by
+        address, and its decimals (18) equal the fallback anyway.
+        """
+        if field != "swap_amounts":
+            return {}
+        meta: dict[str, dict[str, Any]] = {}
+        for metadata_key, slot in (("from_token", "token_in"), ("to_token", "token_out")):
+            raw = bundle_metadata.get(metadata_key)
+            if not isinstance(raw, dict) or raw.get("is_native"):
+                continue
+            address = raw.get("address")
+            decimals = raw.get("decimals")
+            if not address or decimals is None:
+                continue
+            try:
+                decimals_int = int(decimals)
+            except (TypeError, ValueError):
+                logger.debug("Could not coerce %s.decimals=%r to int; skipping hint", metadata_key, decimals)
+                continue
+            meta[slot] = {
+                "address": str(address).lower(),
+                "symbol": str(raw.get("symbol") or ""),
+                "decimals": decimals_int,
+            }
+        return {"swap_token_meta": meta} if meta else {}
+
     def parse_receipt(
         self,
         receipt: dict[str, Any],
         quoted_amount_out: int | None = None,
+        *,
+        swap_token_meta: dict[str, dict[str, Any]] | None = None,
     ) -> ParseResult:
         """Parse a transaction receipt.
 
         Args:
             receipt: Transaction receipt dict
             quoted_amount_out: Expected output amount for slippage calculation
+            swap_token_meta: Optional compiler-supplied token metadata (VIB-3164).
+                Forwarded to ``_build_swap_result`` so decimals resolve when the
+                TokenResolver misses or Transfer events cannot be classified.
+                Shape: ``{"token_in": {"address": ..., "symbol": ..., "decimals": ...},
+                "token_out": {...}}``.
 
         Returns:
             ParseResult with extracted events and swap data
@@ -544,6 +603,8 @@ class UniswapV3ReceiptParser:
                     swap_events[0],  # Use first swap event
                     transfer_events,
                     quoted_amount_out,
+                    swap_token_meta=swap_token_meta,
+                    single_swap=len(swap_events) == 1,
                 )
 
             # Log parsed receipt with user-friendly formatting
@@ -805,10 +866,12 @@ class UniswapV3ReceiptParser:
             logger.warning(f"Failed to parse TransferEventData: {e}")
             return None
 
-    def _resolve_tokens_from_transfers(  # noqa: C901
+    def _resolve_tokens_from_transfers(
         self,
         transfer_events: list[TransferEventData],
         swap_event: SwapEventData,
+        swap_token_meta: dict[str, dict[str, Any]] | None = None,
+        single_swap: bool = True,
     ) -> dict[str, Any]:
         """Resolve token addresses and decimals from Transfer events.
 
@@ -821,15 +884,25 @@ class UniswapV3ReceiptParser:
         without mutating parser state, so cached parser instances stay clean across receipts.
         Branch 1 (addresses pre-set, just need decimals) writes to self because the correct
         decimals for those addresses are stable. Branch 2 (addresses inferred) only returns
-        local overrides.
+        local overrides. Branch 3 (VIB-3164) falls back to compiler-supplied token metadata
+        when Transfer classification produced nothing.
 
-        The Uniswap V3 Swap event emits amount0/amount1 where positive = sent to pool
-        (input) and negative = received from pool (output). The corresponding ERC-20
-        Transfer events carry the actual token contract addresses.
+        Args:
+            transfer_events: ERC-20 Transfer events from the receipt.
+            swap_event: The Swap event whose pool address is used for classification.
+            swap_token_meta: Optional compiler-supplied token metadata with shape
+                ``{"token_in": {"address": ..., "symbol": ..., "decimals": ...},
+                   "token_out": {...}}``. Either slot may be absent. Compiler hints
+                take precedence over the TokenResolver in the ``resolved`` map
+                (Branch 2b), and serve as a direction-based fallback when Transfer
+                classification produces no addresses (Branch 3).
+            single_swap: True when the receipt contains exactly one Swap event.
+                Branch 3 is restricted to single-swap receipts: in a multi-hop
+                receipt the first Swap event's output is an intermediate token,
+                not the intent's to_token, so the compiler's to_token hint would
+                map to the wrong pool slot.
         """
         overrides: dict[str, Any] = {}
-        if not transfer_events:
-            return overrides
 
         # Only resolve if we have unresolved decimals
         needs_token0 = not self._token0_decimals_resolved
@@ -837,15 +910,50 @@ class UniswapV3ReceiptParser:
         if not needs_token0 and not needs_token1:
             return overrides
 
+        hint_by_addr = self._build_hint_map(swap_token_meta)
         pool_address = swap_event.pool_address.lower() if swap_event.pool_address else ""
-        if not pool_address:
-            return overrides
 
-        # Classify transfers by direction relative to pool.
-        # In Uniswap V3: amount0 > 0 means token0 was sent TO the pool (input),
-        # amount1 < 0 means token1 was received FROM the pool (output), and vice versa.
+        input_addrs, output_addrs = self._classify_transfers_by_pool_direction(transfer_events, pool_address)
+        resolved = self._build_resolved_token_map(set(input_addrs + output_addrs), hint_by_addr)
+        needs_token0, needs_token1 = self._apply_decimals_to_known_slots(resolved, needs_token0, needs_token1)
+
+        slot0_candidates, slot1_candidates = (
+            (input_addrs, output_addrs) if swap_event.token0_is_input else (output_addrs, input_addrs)
+        )
+
+        if needs_token0 and not self.token0_address:
+            entries = self._infer_slot_override(slot0_candidates, resolved, "token0")
+            if entries:
+                overrides.update(entries)
+                needs_token0 = False
+        if needs_token1 and not self.token1_address:
+            entries = self._infer_slot_override(slot1_candidates, resolved, "token1")
+            if entries:
+                overrides.update(entries)
+                needs_token1 = False
+
+        overrides.update(
+            self._meta_fallback_overrides(
+                swap_token_meta, single_swap, swap_event.token0_is_input, needs_token0, needs_token1, overrides
+            )
+        )
+        return overrides
+
+    @staticmethod
+    def _classify_transfers_by_pool_direction(
+        transfer_events: list[TransferEventData],
+        pool_address: str,
+    ) -> tuple[list[str], list[str]]:
+        """Returns (input_token_addrs, output_token_addrs) relative to the pool.
+
+        In Uniswap V3: amount0 > 0 means token0 was sent TO the pool (input),
+        amount1 < 0 means token1 was received FROM the pool (output), and vice versa.
+        The corresponding ERC-20 Transfer events carry the actual token contract addresses.
+        """
         input_token_addrs: list[str] = []
         output_token_addrs: list[str] = []
+        if not pool_address:
+            return input_token_addrs, output_token_addrs
         for transfer in transfer_events:
             addr = transfer.token_address.lower() if transfer.token_address else ""
             if not addr:
@@ -854,17 +962,38 @@ class UniswapV3ReceiptParser:
                 input_token_addrs.append(addr)
             elif transfer.from_addr.lower() == pool_address:
                 output_token_addrs.append(addr)
+        return input_token_addrs, output_token_addrs
 
-        # Build a deduplicated mapping: address -> (symbol, decimals)
-        all_addrs = set(input_token_addrs + output_token_addrs)
+    def _build_resolved_token_map(
+        self,
+        addrs: set[str],
+        hint_by_addr: dict[str, tuple[str, int]],
+    ) -> dict[str, tuple[str, int]]:
+        """Address -> (symbol, decimals); compiler hints win over the TokenResolver.
+
+        Compiler-supplied hints are intent-specific compile-time facts and cover
+        resolver gaps. Addresses where decimals cannot be resolved are excluded.
+        """
         resolved: dict[str, tuple[str, int]] = {}
-        for addr in all_addrs:
+        for addr in addrs:
+            if addr in hint_by_addr:
+                resolved[addr] = hint_by_addr[addr]
+                continue
             symbol, decimals = self._resolve_token_info(addr)
             if decimals is not None:
                 resolved[addr] = (symbol, decimals)
+        return resolved
 
-        # --- Branch 1: addresses already known, just need decimals ---
-        # Safe to write to self because the token addresses are pre-set and stable.
+    def _apply_decimals_to_known_slots(
+        self,
+        resolved: dict[str, tuple[str, int]],
+        needs_token0: bool,
+        needs_token1: bool,
+    ) -> tuple[bool, bool]:
+        """Branch 1: write decimals to self for pre-set addresses; return updated needs flags.
+
+        Safe to write to self because the token addresses are pre-set and stable.
+        """
         for addr, (symbol, decimals) in resolved.items():
             if needs_token0 and self.token0_address and self.token0_address.lower() == addr:
                 self.token0_decimals = decimals
@@ -880,41 +1009,123 @@ class UniswapV3ReceiptParser:
                     self.token1_symbol = symbol
                 logger.debug(f"Resolved token1 decimals from Transfer: {symbol} = {decimals}")
                 needs_token1 = False
+        return needs_token0, needs_token1
 
-        # --- Branch 2: addresses unknown — infer from transfer direction + swap event ---
-        # Returns local overrides instead of mutating self, so cached parsers stay clean.
-        # Uses swap_event.token0_is_input to determine which transfer direction maps to token0.
-        if needs_token0 and not self.token0_address:
-            candidates = input_token_addrs if swap_event.token0_is_input else output_token_addrs
-            for addr in candidates:
-                if addr in resolved:
-                    symbol, decimals = resolved[addr]
-                    overrides["token0_address"] = addr
-                    overrides["token0_decimals"] = decimals
-                    overrides["token0_symbol"] = symbol or ""
-                    logger.debug(f"Inferred token0 from Transfer: {symbol} ({addr}) = {decimals}")
-                    needs_token0 = False
-                    break
+    @staticmethod
+    def _infer_slot_override(
+        candidates: list[str],
+        resolved: dict[str, tuple[str, int]],
+        prefix: str,
+    ) -> dict[str, Any]:
+        """Branch 2: first candidate present in resolved wins; {} when none match.
 
-        if needs_token1 and not self.token1_address:
-            candidates = output_token_addrs if swap_event.token0_is_input else input_token_addrs
-            for addr in candidates:
-                if addr in resolved:
-                    symbol, decimals = resolved[addr]
-                    overrides["token1_address"] = addr
-                    overrides["token1_decimals"] = decimals
-                    overrides["token1_symbol"] = symbol or ""
-                    logger.debug(f"Inferred token1 from Transfer: {symbol} ({addr}) = {decimals}")
-                    needs_token1 = False
-                    break
+        Returns local overrides instead of mutating self, so cached parsers stay
+        clean. Uses the caller-supplied candidate list (ordered by transfer direction)
+        to determine which address maps to the given pool slot.
+        """
+        for addr in candidates:
+            if addr in resolved:
+                symbol, decimals = resolved[addr]
+                logger.debug(f"Inferred {prefix} from Transfer: {symbol} ({addr}) = {decimals}")
+                return {f"{prefix}_address": addr, f"{prefix}_decimals": decimals, f"{prefix}_symbol": symbol or ""}
+        return {}
 
-        return overrides
+    def _meta_fallback_overrides(
+        self,
+        swap_token_meta: dict[str, dict[str, Any]] | None,
+        single_swap: bool,
+        token0_is_input: bool,
+        needs_token0: bool,
+        needs_token1: bool,
+        overrides: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Branch 3: compiler-metadata direction fallback; returns new entries only.
+
+        Fires only when Transfer classification produced nothing for a slot.
+        The compiler's from_token IS the swap input and to_token IS the swap output,
+        and ``token0_is_input`` maps them onto pool slots. Restricted to single-swap
+        receipts: in a multi-hop receipt the first Swap event's output is an
+        intermediate token, not the intent's to_token. Writes overrides only —
+        never ``self``. Reads ``overrides`` for dedup checks but never mutates it.
+        """
+        if not swap_token_meta or not single_swap or not (needs_token0 or needs_token1):
+            return {}
+        token_in_meta = swap_token_meta.get("token_in")
+        token_out_meta = swap_token_meta.get("token_out")
+        slot0_meta, slot1_meta = (token_in_meta, token_out_meta) if token0_is_input else (token_out_meta, token_in_meta)
+        entries: dict[str, Any] = {}
+        if needs_token0 and "token0_decimals" not in overrides:
+            entries.update(self._meta_override_for_slot(slot0_meta, self.token0_address, "token0"))
+        if needs_token1 and "token1_decimals" not in overrides:
+            entries.update(self._meta_override_for_slot(slot1_meta, self.token1_address, "token1"))
+        return entries
+
+    @staticmethod
+    def _build_hint_map(
+        swap_token_meta: dict[str, dict[str, Any]] | None,
+    ) -> dict[str, tuple[str, int]]:
+        """Map compiler token metadata to ``{address: (symbol, decimals)}``."""
+        hints: dict[str, tuple[str, int]] = {}
+        if not swap_token_meta:
+            return hints
+        for slot in ("token_in", "token_out"):
+            entry = swap_token_meta.get(slot)
+            if not isinstance(entry, dict):
+                continue
+            address = entry.get("address")
+            decimals = entry.get("decimals")
+            if not address or decimals is None:
+                continue
+            try:
+                hints[str(address).lower()] = (str(entry.get("symbol") or ""), int(decimals))
+            except (TypeError, ValueError):
+                logger.debug("Ignoring malformed token hint: %r", entry)
+        return hints
+
+    @staticmethod
+    def _meta_override_for_slot(
+        meta: dict[str, Any] | None,
+        existing_address: str | None,
+        prefix: str,
+    ) -> dict[str, Any]:
+        """Build ``{prefix}_address/_decimals/_symbol`` overrides from one hint.
+
+        Returns ``{}`` when the hint is missing/malformed, or when the parser
+        already knows a DIFFERENT address for this slot (a mismatch means the
+        hint does not describe this pool — do not apply it).
+        """
+        if not isinstance(meta, dict):
+            return {}
+        address = meta.get("address")
+        decimals = meta.get("decimals")
+        if not address or decimals is None:
+            return {}
+        addr = str(address).lower()
+        if existing_address and existing_address.lower() != addr:
+            logger.debug(
+                "Compiler token hint %s does not match pre-set %s address %s; skipping",
+                addr,
+                prefix,
+                existing_address,
+            )
+            return {}
+        try:
+            decimals_int = int(decimals)
+        except (TypeError, ValueError):
+            return {}
+        return {
+            f"{prefix}_address": addr,
+            f"{prefix}_decimals": decimals_int,
+            f"{prefix}_symbol": str(meta.get("symbol") or ""),
+        }
 
     def _build_swap_result(
         self,
         swap_event: SwapEventData,
         transfer_events: list[TransferEventData],
         quoted_amount_out: int | None,
+        swap_token_meta: dict[str, dict[str, Any]] | None = None,
+        single_swap: bool = True,
     ) -> ParsedSwapResult:
         """Build high-level swap result from events.
 
@@ -922,6 +1133,14 @@ class UniswapV3ReceiptParser:
             swap_event: The Swap event data
             transfer_events: List of Transfer events
             quoted_amount_out: Expected output for slippage calc
+            swap_token_meta: Optional compiler-supplied token metadata (VIB-3164).
+                Shape: ``{"token_in": {"address": ..., "symbol": ..., "decimals": ...},
+                "token_out": {...}}``. Threaded through to
+                ``_resolve_tokens_from_transfers`` so decimals resolve when the
+                TokenResolver misses or Transfer events cannot be classified.
+            single_swap: True when the receipt contains exactly one Swap event;
+                restricts Branch 3 of ``_resolve_tokens_from_transfers`` to
+                single-hop receipts.
 
         Returns:
             ParsedSwapResult with full swap details
@@ -930,7 +1149,9 @@ class UniswapV3ReceiptParser:
         # provided at construction time. This fixes wrong decimals (e.g., USDC treated
         # as 18 decimals instead of 6) when the parser is used via the ResultEnricher
         # without token context.
-        overrides = self._resolve_tokens_from_transfers(transfer_events, swap_event)
+        overrides = self._resolve_tokens_from_transfers(
+            transfer_events, swap_event, swap_token_meta=swap_token_meta, single_swap=single_swap
+        )
 
         # Apply per-receipt overrides (from inferred addresses) on top of self values.
         # These are local to this receipt and don't persist on the parser instance.
@@ -973,6 +1194,8 @@ class UniswapV3ReceiptParser:
             token_out_symbol = t1_symbol
             token_in_decimals = t0_decimals
             token_out_decimals = t1_decimals
+            token_in_decimals_resolved = not t0_unresolved
+            token_out_decimals_resolved = not t1_unresolved
         else:
             token_in = t1_addr
             token_out = t0_addr
@@ -980,6 +1203,8 @@ class UniswapV3ReceiptParser:
             token_out_symbol = t0_symbol
             token_in_decimals = t1_decimals
             token_out_decimals = t0_decimals
+            token_in_decimals_resolved = not t1_unresolved
+            token_out_decimals_resolved = not t0_unresolved
 
         amount_in = swap_event.amount_in
         amount_out = swap_event.amount_out
@@ -1021,6 +1246,8 @@ class UniswapV3ReceiptParser:
             pool_address=swap_event.pool_address,
             sqrt_price_x96_after=swap_event.sqrt_price_x96,
             tick_after=swap_event.tick,
+            token_in_decimals_resolved=token_in_decimals_resolved,
+            token_out_decimals_resolved=token_out_decimals_resolved,
         )
 
     # =============================================================================
@@ -1076,17 +1303,20 @@ class UniswapV3ReceiptParser:
         receipt: dict[str, Any],
         *,
         expected_out: Decimal | None = None,
+        swap_token_meta: dict[str, dict[str, Any]] | None = None,
     ) -> ExtractResult[SwapAmounts]:
         """Fail-closed variant of :meth:`extract_swap_amounts` — see VIB-3159.
 
         VIB-3203: forwards ``expected_out`` so realized slippage is populated
         when the framework supplies the compiler's pre-slippage quote.
+        VIB-3164: forwards ``swap_token_meta`` so compiler-supplied token
+        decimals resolve when the TokenResolver misses.
         """
         err = self._strict_parse(receipt)
         if err is not None:
             return err
         try:
-            value = self.extract_swap_amounts(receipt, expected_out=expected_out)
+            value = self.extract_swap_amounts(receipt, expected_out=expected_out, swap_token_meta=swap_token_meta)
         except Exception as exc:  # noqa: BLE001
             return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
         if value is None:
@@ -1279,6 +1509,7 @@ class UniswapV3ReceiptParser:
         receipt: dict[str, Any],
         *,
         expected_out: Decimal | None = None,
+        swap_token_meta: dict[str, dict[str, Any]] | None = None,
     ) -> SwapAmounts | None:
         """Extract swap amounts from a transaction receipt.
 
@@ -1292,6 +1523,11 @@ class UniswapV3ReceiptParser:
                 When provided, realized ``slippage_bps`` is computed as
                 ``(expected_out - amount_out_decimal) / expected_out * 10_000``.
                 When absent, ``slippage_bps`` stays ``None`` (legacy behavior).
+            swap_token_meta: VIB-3164 — compiler-supplied token metadata.
+                Shape: ``{"token_in": {"address": ..., "symbol": ..., "decimals": ...},
+                "token_out": {...}}``. Forwarded to ``parse_receipt`` so the parser
+                can resolve decimals when the TokenResolver misses or Transfer events
+                cannot be classified against the pool address.
 
         Returns:
             SwapAmounts dataclass if swap event found, None otherwise
@@ -1306,7 +1542,7 @@ class UniswapV3ReceiptParser:
 
         try:
             # Parse the receipt to get swap result
-            parse_result = self.parse_receipt(receipt)
+            parse_result = self.parse_receipt(receipt, swap_token_meta=swap_token_meta)
 
             if not parse_result.swap_result:
                 # Log diagnostic info to help debug enrichment failures (VIB-1653)
@@ -1349,6 +1585,8 @@ class UniswapV3ReceiptParser:
                 expected_out_decimal=expected_out,
                 token_in=sr.token_in_symbol or sr.token_in,
                 token_out=sr.token_out_symbol or sr.token_out,
+                amount_in_decimal_resolved=getattr(sr, "token_in_decimals_resolved", True),
+                amount_out_decimal_resolved=getattr(sr, "token_out_decimals_resolved", True),
                 slippage_source=slippage_source,
             )
 

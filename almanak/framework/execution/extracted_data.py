@@ -78,8 +78,10 @@ class SwapAmounts:
             computed from a resolved ``decimals`` value on the token
             resolver. ``False`` means the parser could not resolve
             decimals for ``token_in``; ``amount_in_decimal`` is then
-            ``None`` (the parser MUST NOT substitute a measured zero —
-            issue #1778, "Empty != zero" invariant).
+            either ``None`` OR a legacy 18-decimal estimate (uniswap_v3
+            fallback, VIB-3164) — downstream consumers MUST gate on this
+            flag rather than the value itself (issue #1778, "Empty != zero"
+            invariant).
             Defaults to ``True`` so existing parsers that do not populate
             the flag continue to behave as before.
         amount_out_decimal_resolved: Analogous flag for

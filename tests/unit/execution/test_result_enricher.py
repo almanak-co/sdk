@@ -1694,3 +1694,108 @@ class TestVib4805LpCloseFlatFieldSuppression:
             f"warning — UniswapV3ReceiptParser declares it in SUPPORTED_EXTRACTIONS. "
             f"Got: {enriched.extraction_warnings}"
         )
+
+
+class TestSwapAmountsDecimalResolutionWarning:
+    """VIB-3164: unresolved decimal flags surface as extraction_warnings."""
+
+    def test_swap_amounts_unresolved_decimals_appends_extraction_warning(self):
+        """When a parser stamps amount_in_decimal_resolved=False, an extraction
+        warning is added to the enriched result."""
+
+        class _UnresolvedDecimalsParser:
+            def __init__(self, **_kwargs):
+                pass
+
+            def parse_receipt(self, receipt):  # noqa: ARG002
+                class _Ok:
+                    success = True
+                    error = None
+
+                return _Ok()
+
+            def extract_swap_amounts_result(
+                self,
+                receipt,  # noqa: ARG002
+                *,
+                expected_out: Decimal | None = None,  # noqa: ARG002
+            ) -> Any:
+                from almanak.framework.execution.extract_result import ExtractOk
+
+                return ExtractOk(
+                    value=SwapAmounts(
+                        amount_in=100_000_000,
+                        amount_out=1_079_340_000_000_000_000_000,
+                        amount_in_decimal=Decimal("100000000") / Decimal(10**18),
+                        amount_out_decimal=Decimal("1079.34"),
+                        effective_price=Decimal("0"),
+                        slippage_bps=None,
+                        token_in="FAKE",
+                        token_out="WMATIC",
+                        amount_in_decimal_resolved=False,
+                        amount_out_decimal_resolved=True,
+                    )
+                )
+
+        tx_result = _FakeTxResult(success=True, receipt=_FakeReceipt(logs=[{}]))
+        result = _FakeExecResult(transaction_results=[tx_result])
+        intent = _FakeIntent(intent_type="SWAP", protocol="unresolved_dec")
+        context = _FakeContext(chain="arbitrum", protocol="unresolved_dec")
+
+        enricher = ResultEnricher(live_mode=False)
+        enricher.parser_registry.register("unresolved_dec", _UnresolvedDecimalsParser)
+
+        enriched = enricher.enrich(result, intent, context)
+
+        assert enriched.swap_amounts is not None
+        assert any("decimals unresolved" in w for w in enriched.extraction_warnings)
+
+    def test_resolved_decimals_add_no_warning(self):
+        """When both decimal flags are True, no 'decimals unresolved' warning appears."""
+
+        class _ResolvedDecimalsParser:
+            def __init__(self, **_kwargs):
+                pass
+
+            def parse_receipt(self, receipt):  # noqa: ARG002
+                class _Ok:
+                    success = True
+                    error = None
+
+                return _Ok()
+
+            def extract_swap_amounts_result(
+                self,
+                receipt,  # noqa: ARG002
+                *,
+                expected_out: Decimal | None = None,  # noqa: ARG002
+            ) -> Any:
+                from almanak.framework.execution.extract_result import ExtractOk
+
+                return ExtractOk(
+                    value=SwapAmounts(
+                        amount_in=100_000_000,
+                        amount_out=1_079_340_000_000_000_000_000,
+                        amount_in_decimal=Decimal("100"),
+                        amount_out_decimal=Decimal("1079.34"),
+                        effective_price=Decimal("0"),
+                        slippage_bps=None,
+                        token_in="USDC",
+                        token_out="WMATIC",
+                        amount_in_decimal_resolved=True,
+                        amount_out_decimal_resolved=True,
+                    )
+                )
+
+        tx_result = _FakeTxResult(success=True, receipt=_FakeReceipt(logs=[{}]))
+        result = _FakeExecResult(transaction_results=[tx_result])
+        intent = _FakeIntent(intent_type="SWAP", protocol="resolved_dec")
+        context = _FakeContext(chain="arbitrum", protocol="resolved_dec")
+
+        enricher = ResultEnricher(live_mode=False)
+        enricher.parser_registry.register("resolved_dec", _ResolvedDecimalsParser)
+
+        enriched = enricher.enrich(result, intent, context)
+
+        assert enriched.swap_amounts is not None
+        assert not any("decimals unresolved" in w for w in enriched.extraction_warnings)
