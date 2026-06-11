@@ -427,8 +427,18 @@ class TestStateViewCalldata:
         )
         calldata = build_get_slot0_calldata(key)
         assert calldata.startswith("0x")
-        # 4-byte selector + 5 * 32-byte params = 164 bytes = 328 hex chars + 2 for 0x
-        assert len(calldata) == 330
+        # The deployed StateView.getSlot0 takes a bytes32 PoolId, NOT the PoolKey
+        # tuple. Pin the exact selector + argument so a regression to the tuple-arg
+        # form (0xe924c4df, which reverts on-chain → silent estimated fallback) fails
+        # loudly here. See VIB-5038.
+        # 4-byte selector + 1 * 32-byte bytes32 = 36 bytes = 72 hex chars + 2 for 0x
+        assert len(calldata) == 74
+        # Selector: keccak256("getSlot0(bytes32)")[:4] == 0xc815641c
+        assert calldata[2:10] == "c815641c"
+        # Argument: the bytes32 PoolId == keccak256(abi.encode(PoolKey))
+        assert calldata[10:] == compute_pool_id(key).removeprefix("0x")
+        # Guard against an accidental return to the reverting tuple-arg selector.
+        assert not calldata.startswith("0xe924c4df")
 
     def test_decode_slot0_response_valid(self):
         """Decode a valid getSlot0 response."""

@@ -513,11 +513,19 @@ def compute_position_hash(
 
 
 def build_get_slot0_calldata(pool_key: PoolKey) -> str:
-    """Build calldata for StateView.getSlot0(PoolKey).
+    """Build calldata for StateView.getSlot0(bytes32 poolId).
 
     This can be used to query pool state via an RPC eth_call to the
     StateView contract. The return data contains (sqrtPriceX96, tick,
     protocolFee, lpFee).
+
+    The deployed Uniswap V4 ``StateView.getSlot0`` takes a ``bytes32 PoolId``
+    (``keccak256(abi.encode(PoolKey))``), selector ``getSlot0(bytes32)`` =
+    ``0xc815641c`` — NOT the PoolKey tuple. The tuple-arg selector
+    ``getSlot0((address,address,uint24,int24,address))`` = ``0xe924c4df`` does
+    not exist on-chain and reverts ("no data"), so a strategy would silently
+    fall back to an estimated sqrtPrice on every call (VIB-5038). Mirror of the
+    gateway-side fix in VIB-5024.
 
     Args:
         pool_key: The pool key to query.
@@ -525,20 +533,14 @@ def build_get_slot0_calldata(pool_key: PoolKey) -> str:
     Returns:
         Hex-encoded calldata with 0x prefix.
     """
-    # Selector: keccak256("getSlot0((address,address,uint24,int24,address))")[:4]
-    sig = "getSlot0((address,address,uint24,int24,address))"
-    selector = Web3.keccak(text=sig).hex()[:8]  # first 4 bytes (HexBytes.hex() has no 0x prefix)
+    # Selector: keccak256("getSlot0(bytes32)")[:4] == 0xc815641c
+    selector = Web3.keccak(text="getSlot0(bytes32)").hex()[:8]  # first 4 bytes (HexBytes.hex() has no 0x prefix)
 
-    # ABI-encode the PoolKey as a tuple
-    encoded = (
-        _pad_address(pool_key.currency0)
-        + _pad_address(pool_key.currency1)
-        + _pad_uint24(pool_key.fee)
-        + _pad_int24(pool_key.tick_spacing)
-        + _pad_address(pool_key.hooks)
-    )
+    # Argument: the bytes32 PoolId == keccak256(abi.encode(PoolKey)). compute_pool_id
+    # ABI-encodes the same 5 PoolKey words, so this is byte-identical to the on-chain id.
+    pool_id = compute_pool_id(pool_key).removeprefix("0x")
 
-    return "0x" + selector + encoded
+    return "0x" + selector + pool_id
 
 
 def decode_slot0_response(data: str) -> PoolState:
