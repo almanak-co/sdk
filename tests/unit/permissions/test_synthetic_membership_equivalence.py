@@ -49,6 +49,7 @@ _SNAPSHOT_SWAP_PROTOCOLS = frozenset(
         "pancakeswap_v3",
         "sushiswap_v3",
         "camelot",
+        "fluid",
         "aerodrome",
         "traderjoe_v2",
         "pendle",
@@ -104,7 +105,7 @@ def test_swap_protocols_equivalent() -> None:
     assert "aerodrome_slipstream" not in _SWAP_PROTOCOLS  # shares AerodromeCompiler
     assert "enso" not in _SWAP_PROTOCOLS  # in protocols_for_intent(SWAP), not opt-in
     assert "uniswap_v4" not in _SWAP_PROTOCOLS
-    assert "fluid" not in _SWAP_PROTOCOLS
+    # "fluid" joined the SWAP set in Phase 1 (VIB-5029) — kill-switch removed.
 
 
 def test_native_in_swap_protocols_equivalent() -> None:

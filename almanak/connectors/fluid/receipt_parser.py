@@ -1,17 +1,19 @@
-"""Fluid DEX Receipt Parser — extract position IDs and LP data from receipts.
+"""Fluid DEX Receipt Parser.
 
-Parses transaction receipts from Fluid DEX operate() calls to extract:
-- NFT position IDs (from LogOperate event)
-- Token amounts deposited/withdrawn
-- LP close data (amounts collected on withdrawal)
+The verified surface is SWAP extraction (Phase 1, VIB-5029): the pool's
+``Swap(bool,uint256,uint256,address)`` event carries direction and exact
+amounts (event topology verified on-chain at Phase 0 — VIB-5028 §V1.5:
+two ERC-20 Transfers + two Liquidity-layer LogOperate legs + the pool's
+Swap event). Fluid pools pair the chain's native token directly, so a swap
+may have only one ERC-20 Transfer leg — the missing leg is native and is
+reported with Fluid's ``0xEeee…`` sentinel.
 
-The LogOperate event is emitted by FluidDexT1 pools on every operate() call:
-    event LogOperate(
-        uint256 indexed nftId,
-        int256 token0Amt,
-        int256 token1Amt,
-        uint256 timestamp
-    )
+The LP/position extraction methods below are pre-Phase-0 scaffolding for a
+position model (DEX-pool ``operate()`` NFTs) that Phase 0 disproved —
+direct pool LP is whitelist-gated and vault NFTs live on the VaultFactory.
+They are retained only so existing enricher plumbing keeps degrading
+gracefully; Phase 4 (VIB-5032) replaces them with the SmartLending /
+smart-vault design. Do not build on them.
 """
 
 import logging
@@ -20,6 +22,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.connectors._strategy_base.base import HexDecoder
+from almanak.connectors.fluid.sdk import FLUID_ADDRESSES, FLUID_NATIVE_TOKEN
 from almanak.framework.execution.extracted_data import LPCloseData, SwapAmounts
 
 logger = logging.getLogger(__name__)
@@ -42,6 +45,12 @@ SWAP_TOPIC = "0xdc004dbca4ef9c966218431ee5d9133d337ad018dd5b5c5493722803f75c64f7
 
 # Zero address — indicates minting (new position)
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+# Fluid's native-token sentinel (pools pair raw native, not WETH).
+# Lowercased for receipt-side comparisons; 18 decimals on every
+# supported chain (ETH on arbitrum/base/ethereum, POL on polygon).
+_FLUID_NATIVE_SENTINEL = FLUID_NATIVE_TOKEN.lower()
+_NATIVE_DECIMALS = 18  # decimal-policy-exempt: native gas tokens (ETH/POL) are 18-decimal protocol invariants
 
 
 # =============================================================================
@@ -289,6 +298,19 @@ class FluidReceiptParser:
         # Resolve token decimals for human-readable amounts
         # Identify tokens from the Swap event's pool (log address)
         token_in_addr, token_out_addr = self._extract_swap_token_addresses(receipt, swap.swap0to1)
+
+        # Native-leg fallback: Fluid pools pair raw native (no WETH), so a
+        # native leg produces no ERC-20 Transfer. The Swap event still proves
+        # the swap, and Fluid pools are strictly per-pair, so when exactly one
+        # leg resolved as an ERC-20 the missing leg is guaranteed to be the
+        # chain's native token — symmetric on both sides, with no dependency
+        # on the receipt sender (under Zodiac Safe execution ``receipt.from``
+        # is the relayer EOA, not the swap recipient).
+        if token_in_addr is None and token_out_addr is not None:
+            token_in_addr = _FLUID_NATIVE_SENTINEL
+        if token_out_addr is None and token_in_addr is not None:
+            token_out_addr = _FLUID_NATIVE_SENTINEL
+
         decimals_in = self._resolve_decimals(token_in_addr) if token_in_addr else None
         decimals_out = self._resolve_decimals(token_out_addr) if token_out_addr else None
 
@@ -364,18 +386,30 @@ class FluidReceiptParser:
     # Helpers
     # =========================================================================
 
-    def _extract_swap_token_addresses(self, receipt: dict[str, Any], swap0to1: bool) -> tuple[str | None, str | None]:
-        """Extract token_in and token_out addresses from ERC-20 Transfer events.
-
-        Uses the same heuristic as the Enso parser: first Transfer FROM wallet
-        is token_in, last Transfer TO wallet is token_out.
-        """
+    @staticmethod
+    def _receipt_wallet(receipt: dict[str, Any]) -> str:
+        """Normalized lowercase wallet (tx sender) from a receipt dict."""
         wallet = receipt.get("from", "")
         if isinstance(wallet, bytes):
             wallet = "0x" + wallet.hex()
-        wallet = wallet.lower() if wallet else ""
-        if not wallet:
-            return None, None
+        return wallet.lower() if wallet else ""
+
+    def _extract_swap_token_addresses(self, receipt: dict[str, Any], swap0to1: bool) -> tuple[str | None, str | None]:
+        """Extract token_in and token_out addresses from ERC-20 Transfer events.
+
+        Fluid custodies all pool funds in the central Liquidity layer
+        (deterministic address on every supported chain), so a swap's ERC-20
+        legs are always ``payer -> Liquidity`` (input) and ``Liquidity ->
+        recipient`` (output) — verified on-chain in the Phase-0 report §V1
+        (VIB-5028). Matching on the Liquidity side identifies the tokens
+        without depending on who sent the transaction: under Zodiac Safe
+        execution ``receipt.from`` is the relayer EOA while the transfers
+        involve the Safe, so a wallet-keyed heuristic (Enso-style) would
+        miss both legs. The wallet-keyed match is kept as a secondary signal
+        for receipts that don't involve the canonical Liquidity address.
+        """
+        liquidity = FLUID_ADDRESSES.get(self.chain, {}).get("liquidity", "").lower()
+        wallet = self._receipt_wallet(receipt)
 
         token_in_addr = None
         token_out_addr = None
@@ -394,10 +428,22 @@ class FluidReceiptParser:
             if isinstance(token_address, bytes):
                 token_address = "0x" + token_address.hex()
 
-            if log_from == wallet and token_in_addr is None:
-                token_in_addr = token_address
-            if log_to == wallet:
-                token_out_addr = token_address
+            # Primary: Liquidity-layer counterparty (sender-independent).
+            # Both branches are first-write-guarded: a swap receipt has one
+            # leg per side (one swap per intent), so the first match is the
+            # swap leg and later Liquidity-touching transfers can't clobber.
+            if liquidity:
+                if log_to == liquidity and token_in_addr is None:
+                    token_in_addr = token_address
+                if log_from == liquidity and token_out_addr is None:
+                    token_out_addr = token_address
+
+            # Secondary: wallet-keyed heuristic (EOA execution only).
+            if wallet:
+                if log_from == wallet and token_in_addr is None:
+                    token_in_addr = token_address
+                if log_to == wallet and token_out_addr is None:
+                    token_out_addr = token_address
 
         return token_in_addr, token_out_addr
 
@@ -408,6 +454,9 @@ class FluidReceiptParser:
         """
         if not token_address:
             return None
+
+        if token_address.lower() == _FLUID_NATIVE_SENTINEL:
+            return _NATIVE_DECIMALS
 
         cache_key = f"{self.chain}:{token_address.lower()}"
         if cache_key in self._decimals_cache:

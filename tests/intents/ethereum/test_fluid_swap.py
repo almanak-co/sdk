@@ -1,4 +1,4 @@
-"""4-layer SwapIntent test for Fluid DEX on Arbitrum Anvil fork.
+"""4-layer SwapIntent test for Fluid DEX on Ethereum Anvil fork.
 
 Replaces the VIB-2822 kill-switch pin test: Phase-0 validation (VIB-5028,
 ``docs/internal/qa/fluid-protocol-validation-2026-06-10.md``) proved the
@@ -6,7 +6,7 @@ protocol works at every size — the disable was a quote-shim artifact — and
 Phase 1 (VIB-5029) re-enabled the connector with resolver-backed quoting.
 
 Fluid is routerless: ``FluidCompiler`` resolves the per-pair pool on-chain
-(USDC/USDT on arbitrum) and compiles approve + ``swapIn`` against the pool
+(USDC/USDT on ethereum) and compiles approve + ``swapIn`` against the pool
 contract directly. Quotes come from ``DexReservesResolver.estimateSwapIn``
 and match execution to the wei, so layer 4 additionally asserts
 quote-vs-execution parity, not just min-out.
@@ -26,7 +26,7 @@ NO MOCKING. All tests execute real on-chain swaps and verify state changes.
 
 To run::
 
-    uv run pytest tests/intents/arbitrum/test_fluid_swap.py -v -s
+    uv run pytest tests/intents/ethereum/test_fluid_swap.py -v -s
 """
 
 from decimal import Decimal
@@ -48,10 +48,10 @@ from tests.intents.conftest import (
     get_token_decimals,
 )
 
-CHAIN_NAME = "arbitrum"
+CHAIN_NAME = "ethereum"
 
 
-@pytest.mark.arbitrum
+@pytest.mark.ethereum
 @pytest.mark.swap
 class TestFluidSwapIntent:
     """Fluid DEX swaps via SwapIntent — full 4-layer verification."""
@@ -82,7 +82,7 @@ class TestFluidSwapIntent:
         assert usdc_before >= expected_usdc_in, (
             f"funded_wallet must hold at least {swap_amount} USDC for this test; "
             f"got {format_token_amount(usdc_before, in_decimals)}. "
-            f"Check the arbitrum conftest's wallet-funding fixture."
+            f"Check the ethereum conftest's wallet-funding fixture."
         )
 
         intent = SwapIntent(

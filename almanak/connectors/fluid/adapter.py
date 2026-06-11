@@ -1,8 +1,16 @@
-"""Fluid DEX Adapter — swaps + LP scaffolding for Arbitrum.
+"""Fluid DEX Adapter — swap-surface helpers.
 
-Provides swap and LP operations for Fluid DEX T1 pools on Arbitrum.
-Phase 1: swaps via swapIn() are fully functional. LP deposit reverts
-on-chain (Liquidity-layer routing — follow-up for phase 2).
+Thin high-level wrapper over :class:`FluidSDK` for operator tooling and
+scripts: token resolution, pool discovery, quoting, and approve/swap
+transaction building. The intent path does NOT go through this adapter —
+``FluidCompiler`` drives the SDK directly.
+
+LP scaffolding that previously lived here was removed in Phase 1
+(VIB-5029): it modelled the wrong contract family (Vault-style
+``operate(nftId, …)``, which does not exist on DEX pools) and direct pool
+LP deposits are whitelist-gated on-chain anyway (Phase-0 finding,
+VIB-5028 §V4). LP support returns via SmartLending / smart vaults in
+Phase 4 (VIB-5032).
 
 Example:
     from almanak.connectors.fluid import FluidAdapter, FluidConfig
@@ -17,13 +25,14 @@ Example:
 
 import logging
 from dataclasses import dataclass, field
-from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from web3 import Web3
 
 from almanak.connectors.fluid.sdk import (
     DEFAULT_GAS_ESTIMATES,
+    FLUID_ADDRESSES,
+    FLUID_NATIVE_TOKEN,
     DexPoolData,
     FluidSDK,
     FluidSDKError,
@@ -35,9 +44,6 @@ if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
-
-# Max int256 for full withdrawal
-MAX_INT256 = 2**255 - 1
 
 # Max uint256 for unlimited approvals
 MAX_UINT256 = 2**256 - 1
@@ -53,7 +59,7 @@ class FluidConfig:
     """Configuration for Fluid DEX adapter.
 
     Args:
-        chain: Chain name (must be "arbitrum" for phase 1)
+        chain: Chain name (any chain in ``FLUID_ADDRESSES``)
         wallet_address: Address of the wallet executing transactions
         rpc_url: DEPRECATED — direct RPC URL. Kept for ad-hoc script usage.
             Strategies running in isolated containers must use gateway_client.
@@ -74,36 +80,6 @@ class FluidConfig:
 
 
 @dataclass
-class FluidPositionDetails:
-    """Typed position details for Fluid DEX LP positions.
-
-    Stored in PositionInfo.details as a dict (via asdict()).
-    String NFT ID is consistent with Uniswap V3 / TraderJoe patterns.
-
-    Attributes:
-        fluid_nft_id: NFT token ID (string for consistency with other connectors)
-        dex_address: Pool contract address
-        token0: Token0 address
-        token1: Token1 address
-        swap_fee_apr: Swap fee APR (from exchange price data)
-        lending_yield_apr: Lending yield APR (from liquidity resolver)
-        combined_apr: Combined APR (swap_fee_apr + lending_yield_apr)
-        is_smart_collateral: Whether pool has smart collateral enabled
-        is_smart_debt: Whether pool has smart debt enabled
-    """
-
-    fluid_nft_id: str
-    dex_address: str
-    token0: str
-    token1: str
-    swap_fee_apr: float = 0.0
-    lending_yield_apr: float = 0.0
-    combined_apr: float = 0.0
-    is_smart_collateral: bool = False
-    is_smart_debt: bool = False
-
-
-@dataclass
 class TransactionData:
     """Transaction data for Fluid operations.
 
@@ -121,7 +97,7 @@ class TransactionData:
     value: int = 0
     gas: int = 0
     description: str = ""
-    tx_type: str = "fluid_operate"
+    tx_type: str = "fluid_swap"
 
     @property
     def gas_estimate(self) -> int:
@@ -144,13 +120,10 @@ class TransactionData:
 
 
 class FluidAdapter:
-    """High-level adapter for Fluid DEX LP operations.
-
-    Provides LP open/close with compile-time encumbrance guard.
-    Phase 1 operates only on unencumbered pools (no smart-debt/collateral).
+    """High-level adapter for Fluid DEX swap operations.
 
     Args:
-        config: FluidConfig with chain, wallet, and RPC settings
+        config: FluidConfig with chain, wallet, and transport settings
         token_resolver: Optional TokenResolver for symbol -> address resolution
     """
 
@@ -162,8 +135,10 @@ class FluidAdapter:
         self.config = config
         self.chain = config.chain.lower()
 
-        if self.chain != "arbitrum":
-            raise FluidSDKError(f"Fluid DEX phase 1 supports Arbitrum only. Got: {config.chain}")
+        if self.chain not in FLUID_ADDRESSES:
+            raise FluidSDKError(
+                f"Fluid DEX not supported on chain: {config.chain}. Supported: {list(FLUID_ADDRESSES.keys())}"
+            )
 
         self._sdk = FluidSDK(
             chain=self.chain,
@@ -215,11 +190,11 @@ class FluidAdapter:
         return self._token_resolver.get_decimals(self.chain, token)
 
     # =========================================================================
-    # Pool Discovery
+    # Pool Discovery + Quoting
     # =========================================================================
 
     def find_pool(self, token0: str, token1: str) -> str | None:
-        """Find a Fluid DEX pool for a token pair.
+        """Find a Fluid DEX pool for a token pair (order-insensitive).
 
         Args:
             token0: First token symbol or address
@@ -232,143 +207,99 @@ class FluidAdapter:
         addr1 = self.resolve_token_address(token1)
         return self._sdk.find_dex_by_tokens(addr0, addr1)
 
-    def get_pool_data(self, dex_address: str) -> DexPoolData:
-        """Get full pool data from the resolver.
+    def find_pool_for_pair(self, token_in: str, token_out: str) -> tuple[str, bool] | None:
+        """Find the pool and swap direction for an exact-input pair.
 
-        Args:
-            dex_address: Pool contract address
-
-        Returns:
-            DexPoolData with configs, reserves, and encumbrance flags
+        Returns ``(pool_address, swap0to1)`` or None.
         """
+        addr_in = self.resolve_token_address(token_in)
+        addr_out = self.resolve_token_address(token_out)
+        return self._sdk.find_pool_for_pair(addr_in, addr_out)
+
+    def get_pool_data(self, dex_address: str) -> DexPoolData:
+        """Get full pool data (tokens + smart-collateral/debt flags)."""
         return self._sdk.get_dex_data(dex_address)
 
-    # =========================================================================
-    # Encumbrance Guard (Phase 2)
-    # =========================================================================
-    # On-chain position-level debt verification is a phase-2 requirement.
-    # Phase 1 enforces newDebt=0 at the SDK layer (build_operate_tx),
-    # so positions created by this connector are always unencumbered.
-    # Phase 2 will add readFromStorage-based debt checks for arbitrary NFT IDs.
-
-    # =========================================================================
-    # LP Open
-    # =========================================================================
-
-    def build_add_liquidity_transaction(
-        self,
-        dex_address: str,
-        amount0: Decimal,
-        amount1: Decimal,
-        token0_decimals: int,
-        token1_decimals: int,
-    ) -> TransactionData:
-        """Build a transaction to open a new LP position.
-
-        Phase 1 limitation: Fluid DEX deposit() reverts on all pools due to complex
-        Liquidity-layer routing. LP open is wired but not functional on-chain.
-        Proper share calculation requires Liquidity-layer integration (follow-up).
-
-        Raises:
-            FluidSDKError: Always — LP deposit is not yet supported.
-        """
-        raise FluidSDKError(
-            "Fluid DEX LP deposit is not yet supported on-chain. "
-            "The Liquidity-layer routing causes reverts on all pools. "
-            "This is a known phase-1 limitation — LP support is a follow-up."
-        )
-
-    # =========================================================================
-    # LP Close
-    # =========================================================================
-
-    def build_remove_liquidity_transaction(
-        self,
-        dex_address: str,
-        nft_id: int,
-    ) -> TransactionData:
-        """Build a transaction to close an LP position (full withdrawal).
-
-        Calls operate(nftId, -MAX_INT256, 0, wallet) on the pool contract.
-        The negative max collateral delta means "withdraw everything".
-
-        ENCUMBRANCE GUARD: This method refuses to build the transaction if the
-        pool has smart-collateral or smart-debt enabled.
+    def get_swap_quote(self, token_in: str, token_out: str, amount_in: int) -> int:
+        """Quote an exact-input swap via the DexReservesResolver.
 
         Args:
-            dex_address: Pool contract address
-            nft_id: NFT position ID to close
+            token_in: Input token symbol or address
+            token_out: Output token symbol or address
+            amount_in: Input amount in the token's smallest unit
 
         Returns:
-            TransactionData with the operate() call
+            Expected output amount in the token's smallest unit
 
         Raises:
-            FluidSDKError: If the operation fails
+            FluidSDKError: If no pool exists or the quote fails
+            FluidMinAmountError: If the size is limit-gated (retryable)
         """
-        # Phase 1: positions are always opened with newDebt=0 (enforced by SDK),
-        # so they're safe to close. Phase 2 will add on-chain debt verification.
-        if self._sdk.is_position_encumbered(dex_address, nft_id=nft_id):
+        found = self.find_pool_for_pair(token_in, token_out)
+        if found is None:
+            raise FluidSDKError(f"No Fluid pool for {token_in}->{token_out} on {self.chain}")
+        pool_address, swap0to1 = found
+        return self._sdk.get_swap_quote(pool_address, swap0to1, amount_in)
+
+    # =========================================================================
+    # Transaction building
+    # =========================================================================
+
+    def build_swap_transaction(
+        self,
+        token_in: str,
+        token_out: str,
+        amount_in: int,
+        amount_out_min: int,
+        value: int | None = None,
+    ) -> TransactionData:
+        """Build a ``swapIn`` transaction for an exact-input swap.
+
+        Args:
+            token_in: Input token symbol or address
+            token_out: Output token symbol or address
+            amount_in: Input amount in the token's smallest unit
+            amount_out_min: Minimum acceptable output (slippage protection)
+            value: Native value. Defaults to ``amount_in`` for native inputs
+                and ``0`` for ERC-20 inputs; an explicit value that
+                contradicts the input leg raises (the pool enforces
+                ``msg.value == amountIn`` for native, ``0`` for ERC-20 —
+                a mismatched transaction would revert on-chain).
+
+        Returns:
+            TransactionData targeting the per-pair pool contract
+        """
+        found = self.find_pool_for_pair(token_in, token_out)
+        if found is None:
+            raise FluidSDKError(f"No Fluid pool for {token_in}->{token_out} on {self.chain}")
+        pool_address, swap0to1 = found
+
+        native_input = self.resolve_token_address(token_in).lower() == FLUID_NATIVE_TOKEN.lower()
+        required_value = amount_in if native_input else 0
+        if value is None:
+            value = required_value
+        elif value != required_value:
+            leg = "native" if native_input else "ERC-20"
             raise FluidSDKError(
-                f"Position #{nft_id} in {dex_address} has outstanding debt. Cannot close encumbered positions safely."
+                f"value={value} contradicts the {leg} input leg of {token_in}->{token_out}: "
+                f"Fluid pools require msg.value == {required_value} (got {value}); "
+                f"the transaction would revert on-chain"
             )
-
-        tx_data = self._sdk.build_operate_tx(
-            dex_address=dex_address,
-            nft_id=nft_id,
-            new_col=-MAX_INT256,  # Full withdrawal
-            new_debt=0,  # No debt changes
+        tx = self._sdk.build_swap_tx(
+            dex_address=pool_address,
+            swap0to1=swap0to1,
+            amount_in=amount_in,
+            amount_out_min=amount_out_min,
             to=self.config.wallet_address,
+            value=value,
         )
-
         return TransactionData(
-            to=tx_data["to"],
-            data=tx_data["data"],
-            value=tx_data["value"],
-            gas=tx_data.get("gas", DEFAULT_GAS_ESTIMATES["operate_close"]),
-            description=f"Close Fluid LP position #{nft_id} in {dex_address}",
-            tx_type="fluid_operate_close",
-        )
-
-    # =========================================================================
-    # Position Details
-    # =========================================================================
-
-    def get_position_details(
-        self,
-        nft_id: int,
-        dex_address: str,
-    ) -> FluidPositionDetails:
-        """Build FluidPositionDetails for a position.
-
-        Reads pool data from the resolver to populate APR fields.
-
-        Args:
-            nft_id: NFT position ID
-            dex_address: Pool contract address
-
-        Returns:
-            FluidPositionDetails with pool data and APR info
-        """
-        pool_data = self._sdk.get_dex_data(dex_address)
-
-        # Estimate swap fee APR from fee_bps and reserves
-        # This is a rough estimate — actual APR depends on volume
-        swap_fee_apr = pool_data.fee_bps / 10000.0 * 365  # Very rough annualized
-
-        # Lending yield APR from exchange price growth
-        # exchange prices use 1e12 precision
-        lending_yield_apr = 0.0  # Requires historical data to compute
-
-        return FluidPositionDetails(
-            fluid_nft_id=str(nft_id),
-            dex_address=dex_address,
-            token0=pool_data.token0,
-            token1=pool_data.token1,
-            swap_fee_apr=swap_fee_apr,
-            lending_yield_apr=lending_yield_apr,
-            combined_apr=swap_fee_apr + lending_yield_apr,
-            is_smart_collateral=pool_data.is_smart_collateral,
-            is_smart_debt=pool_data.is_smart_debt,
+            to=tx["to"],
+            data=tx["data"],
+            value=tx["value"],
+            gas=tx["gas"],
+            description=f"Swap {token_in} -> {token_out} via Fluid pool {pool_address}",
+            tx_type="swap",
         )
 
     # =========================================================================
@@ -423,23 +354,3 @@ class FluidAdapter:
             description=f"Approve {spender} to spend token {token_address}",
             tx_type="approve",
         )
-
-    # =========================================================================
-    # Result Enrichment - called by ResultEnricher
-    # =========================================================================
-
-    def extract_position_id(self, receipt: dict) -> int | None:
-        """Extract LP position NFT tokenId from operate() receipt.
-
-        Called by ResultEnricher for LP_OPEN intents.
-
-        Args:
-            receipt: Transaction receipt dict
-
-        Returns:
-            NFT position ID or None if not found
-        """
-        from almanak.connectors.fluid.receipt_parser import FluidReceiptParser
-
-        parser = FluidReceiptParser()
-        return parser.extract_position_id(receipt)

@@ -99,7 +99,6 @@ EXPECTED_LP_POSITION_MANAGERS: dict[str, dict[str, str]] = {
         "pancakeswap_v3": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
         "traderjoe_v2": "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30",
         "camelot": "0x00c7f3082833e796A5b3e4Bd59f6642FF44DCD15",
-        "fluid": "0x91716C4EDA1Fb55e84Bf8b4c7085f84285c19085",
     },
     "optimism": {
         "uniswap_v3": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
@@ -354,7 +353,6 @@ def _legacy_build_lp_position_managers() -> dict[str, dict[str, str]]:
     """Pre-PR-3a ``_build_lp_position_managers`` (verbatim)."""
     from almanak.connectors.aerodrome.addresses import AERODROME
     from almanak.connectors.camelot.addresses import CAMELOT
-    from almanak.connectors.fluid.addresses import FLUID
     from almanak.connectors.pancakeswap_v3.addresses import PANCAKESWAP_V3
     from almanak.connectors.sushiswap_v3.addresses import SUSHISWAP_V3
     from almanak.connectors.traderjoe_v2.addresses import TRADERJOE_V2
@@ -375,7 +373,6 @@ def _legacy_build_lp_position_managers() -> dict[str, dict[str, str]]:
         ("aerodrome_slipstream", AERODROME, "cl_nft"),
         ("traderjoe_v2", TRADERJOE_V2, "router"),
         ("camelot", CAMELOT, "position_manager"),
-        ("fluid", FLUID, "dex_factory"),
     )
     for protocol, table, kind in sources:
         for chain, kinds in table.items():

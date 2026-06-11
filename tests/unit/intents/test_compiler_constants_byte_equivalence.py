@@ -320,7 +320,8 @@ class TestLpPositionManagersDerivedView:
         ("ethereum", "uniswap_v4", "0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e".lower()),
         ("ethereum", "traderjoe_v2", "0x9A93a421b74F1c5755b83dD2C211614dC419C44b".lower()),
         ("arbitrum", "camelot", "0x00c7f3082833e796A5b3e4Bd59f6642FF44DCD15".lower()),
-        ("arbitrum", "fluid", "0x91716C4EDA1Fb55e84Bf8b4c7085f84285c19085".lower()),
+        # fluid was removed from LP_POSITION_MANAGERS in Phase 1 (VIB-5029):
+        # SWAP-only, routerless -- no framework role table applies.
         ("base", "aerodrome", "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43".lower()),
         ("base", "aerodrome_slipstream", "0x827922686190790b37229fd06084350E74485b72".lower()),
         ("avalanche", "traderjoe_v2", "0xb4315e873dBcf96Ffd0acd8EA43f689D8c20fB30".lower()),

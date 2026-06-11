@@ -1,19 +1,17 @@
-"""Fluid DEX Connector — Phase 1 (Arbitrum swap surface + LP scaffolding).
+"""Fluid DEX Connector — swap surface (Phase 1, VIB-5029).
 
-Provides the Fluid DEX T1 integration surface on Arbitrum. Swaps currently
-fail fast because all known T1 pools reject swaps at tested amounts; LP open
-also fails fast while Liquidity-layer routing remains unsupported. LP close
-uses the adapter encumbrance guard before building remove-liquidity calldata.
+Provides Fluid DEX exact-input swaps on arbitrum, base, ethereum, and
+polygon. Fluid is routerless: each pool is a per-pair contract; pool
+discovery and quoting go through the DexReservesResolver (quotes match
+on-chain execution to the wei — Phase-0 validation, VIB-5028).
 
-Scope (phase 1):
-- Arbitrum only
-- Swaps via swapIn() (compile path currently disabled)
-- LP deposit deferred (Liquidity-layer routing causes reverts)
-- LP close compile support for unencumbered positions
+Out of scope here (later phases): fToken lending SUPPLY/WITHDRAW
+(VIB-5030), vault BORROW/REPAY (VIB-5031), and LP via SmartLending /
+smart vaults (VIB-5032 — direct pool LP is whitelist-gated on-chain).
 
-Key contracts (Arbitrum):
+Key contracts (identical addresses on all supported chains):
 - DexFactory: 0x91716C4EDA1Fb55e84Bf8b4c7085f84285c19085
-- DexResolver: 0x11D80CfF056Cef4F9E6d23da8672fE9873e5cC07
+- DexReservesResolver: 0x05Bd8269A20C472b148246De20E6852091BF16Ff
 
 Example:
     from almanak.connectors.fluid import FluidAdapter, FluidConfig
@@ -34,7 +32,6 @@ if TYPE_CHECKING:
     from .adapter import (
         FluidAdapter,
         FluidConfig,
-        FluidPositionDetails,
     )
     from .compiler import FluidCompiler
     from .receipt_parser import FluidReceiptParser
@@ -44,7 +41,6 @@ __all__ = [
     "FluidAdapter",
     "FluidCompiler",
     "FluidConfig",
-    "FluidPositionDetails",
     "FluidReceiptParser",
     "FluidSDK",
 ]
@@ -53,7 +49,6 @@ _LAZY: dict[str, tuple[str, str]] = {
     "FluidAdapter": (".adapter", "FluidAdapter"),
     "FluidCompiler": (".compiler", "FluidCompiler"),
     "FluidConfig": (".adapter", "FluidConfig"),
-    "FluidPositionDetails": (".adapter", "FluidPositionDetails"),
     "FluidReceiptParser": (".receipt_parser", "FluidReceiptParser"),
     "FluidSDK": (".sdk", "FluidSDK"),
 }

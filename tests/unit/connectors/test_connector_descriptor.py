@@ -107,7 +107,7 @@ EXPECTED_CONNECTOR_KINDS = {
     "enso": ProtocolKind.SWAP,
     "ethena": ProtocolKind.LENDING,
     "euler_v2": ProtocolKind.LENDING,
-    "fluid": ProtocolKind.LP,
+    "fluid": ProtocolKind.SWAP,
     "gimo": ProtocolKind.LENDING,
     "gmx_v2": ProtocolKind.PERP,
     "hyperliquid": ProtocolKind.PERP,
@@ -166,7 +166,7 @@ MIGRATED_STRATEGY_REGISTRATION = {
     "enso": (("SWAP",), ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb")),
     "ethena": (("STAKE", "UNSTAKE"), ("ethereum",)),
     "euler_v2": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("ethereum", "avalanche")),
-    "fluid": (("SWAP", "LP_OPEN", "LP_CLOSE"), ("arbitrum",)),
+    "fluid": (("SWAP",), ("arbitrum", "base", "ethereum", "polygon")),
     "gimo": (("STAKE", "UNSTAKE"), ("zerog",)),
     "gmx_v2": (("PERP_OPEN", "PERP_CLOSE"), ("arbitrum", "avalanche")),
     "jupiter": (("SWAP",), ("solana",)),
@@ -638,6 +638,7 @@ EXPECTED_DEFERRED_REFRESH_MODULES = {
 EXPECTED_SWAP_QUOTE_MODULES = {
     "aerodrome": "almanak.connectors.aerodrome.swap_quote_provider",
     "curve": "almanak.connectors.curve.swap_quote_provider",
+    "fluid": "almanak.connectors.fluid.swap_quote_provider",
     "uniswap_v3": "almanak.connectors.uniswap_v3.swap_quote_provider",
     "uniswap_v4": "almanak.connectors.uniswap_v4.swap_quote_provider",
 }

@@ -33,7 +33,8 @@ class FluidPoolRate:
         dex_address: Pool contract address
         token0: Token0 address
         token1: Token1 address
-        fee_bps: Trading fee in basis points
+        fee_raw: Trading fee as reported by the reserves resolver
+            (protocol-internal units — do NOT assume basis points)
         is_smart_collateral: Whether smart collateral is enabled
         is_smart_debt: Whether smart debt is enabled
     """
@@ -41,7 +42,7 @@ class FluidPoolRate:
     dex_address: str
     token0: str
     token1: str
-    fee_bps: int
+    fee_raw: int
     is_smart_collateral: bool
     is_smart_debt: bool
 
@@ -105,27 +106,30 @@ class FluidRatesProvider:
         sdk = self._get_sdk()
         fresh_rates: list[FluidPoolRate] = []
 
+        # get_all_pools carries the resolver-reported fee; get_dex_data
+        # (per pool) carries the smart-collateral/debt flags but reports
+        # no fee — merge the two so neither field is fabricated.
         try:
-            addresses = sdk.get_all_dex_addresses()
+            pools = sdk.get_all_pools()
         except FluidSDKError as e:
             logger.warning(f"Failed to enumerate Fluid DEX pools: {e}")
             return []
 
-        for addr in addresses:
+        for pool in pools:
             try:
-                data = sdk.get_dex_data(addr)
+                data = sdk.get_dex_data(pool.dex_address)
                 fresh_rates.append(
                     FluidPoolRate(
                         dex_address=data.dex_address,
                         token0=data.token0,
                         token1=data.token1,
-                        fee_bps=data.fee_bps,
+                        fee_raw=pool.fee_raw,
                         is_smart_collateral=data.is_smart_collateral,
                         is_smart_debt=data.is_smart_debt,
                     )
                 )
             except FluidSDKError as e:
-                logger.debug(f"Skipping Fluid pool {addr}: {e}")
+                logger.debug(f"Skipping Fluid pool {pool.dex_address}: {e}")
                 continue
 
         self._cache[cache_key] = (fresh_rates, time.monotonic())

@@ -284,7 +284,7 @@ class TestPreviouslyMissingConnectors:
             ("pancakeswap_perps", "perps", {"bsc"}),
             ("gimo", "yield", {"zerog"}),
             ("polymarket", "prediction", {"polygon"}),
-            ("fluid", "swap", {"arbitrum"}),
+            ("fluid", "swap", {"arbitrum", "base", "ethereum", "polygon"}),
         ],
     )
     def test_connector_present(

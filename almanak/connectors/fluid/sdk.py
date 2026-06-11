@@ -1,12 +1,26 @@
-"""Fluid DEX T1 SDK — low-level contract interactions.
+"""Fluid DEX SDK — low-level contract interactions.
 
-Handles direct Web3 calls to Fluid DEX contracts on Arbitrum:
-- DexFactory: pool enumeration via ABI
-- DexResolver: pool address enumeration via ABI
-- FluidDexT1 pool contracts: constantsView() for token data (raw decoding),
-  readFromStorage() for dexVariables (encumbrance flags), operate() for LP
+Handles direct Web3 calls to Fluid DEX contracts on arbitrum, base,
+ethereum, and polygon:
 
-All calls are standard eth_call (no auth, no proprietary multicall).
+- DexReservesResolver: pool enumeration (``getAllPools``) and swap quotes
+  (``estimateSwapIn``). This is Fluid's official quoting surface — quotes
+  match on-chain execution to the wei (verified Phase 0, VIB-5028).
+- DexFactory / DexResolver: pool counts and address enumeration.
+- FluidDexT1 pool contracts: ``constantsView()`` raw decoding for token
+  pairs and smart-collateral/debt flags; ``swapIn()`` calldata building.
+
+All reads are standard eth_call routed through the gateway when a
+``gateway_client`` is provided (production path); a direct ``rpc_url``
+is supported for ad-hoc scripts and tests only.
+
+History: the original quote path simulated ``swapIn`` via eth_call with
+brute-forced ERC-20 balance/allowance storage overrides. That shim never
+produced a valid balance on proxy tokens (e.g. Arbitrum USDC), so
+``transferFrom`` failed inside the simulation with ``FluidSafeTransferError``
+(0xdee51a8a) — which was misread as "pool rejects swaps at any amount" and
+led to the connector being disabled (VIB-2822). Root cause documented in
+``docs/internal/qa/fluid-protocol-validation-2026-06-10.md`` §V1.7.
 """
 
 import logging
@@ -22,28 +36,40 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# Contract Addresses (Arbitrum)
+# Contract Addresses
 # =============================================================================
+
+# Fluid deploys deterministically — these addresses are identical on every
+# supported chain (verified on-chain per chain at Phase 0, VIB-5028, against
+# Instadapp/fluid-contracts-public deployments).
+_FLUID_CORE_CONTRACTS: dict[str, str] = {
+    "dex_factory": "0x91716C4EDA1Fb55e84Bf8b4c7085f84285c19085",
+    "dex_resolver": "0x11D80CfF056Cef4F9E6d23da8672fE9873e5cC07",
+    "dex_reserves_resolver": "0x05Bd8269A20C472b148246De20E6852091BF16Ff",
+    "liquidity": "0x52Aa899454998Be5b000Ad077a46Bbe360F4e497",
+    "liquidity_resolver": "0xca13A15de31235A37134B4717021C35A3CF25C60",
+    "vault_resolver": "0xA5C3E16523eeeDDcC34706b0E6bE88b4c6EA95cC",
+}
 
 FLUID_ADDRESSES: dict[str, dict[str, str]] = {
-    "arbitrum": {
-        "dex_factory": "0x91716C4EDA1Fb55e84Bf8b4c7085f84285c19085",
-        "dex_resolver": "0x11D80CfF056Cef4F9E6d23da8672fE9873e5cC07",
-        "dex_reserves_resolver": "0x05Bd8269A20C472b148246De20E6852091BF16Ff",
-        "liquidity_resolver": "0xca13A15de31235A37134B4717021C35A3CF25C60",
-        "vault_resolver": "0xA5C3E16523eeeDDcC34706b0E6bE88b4c6EA95cC",
-    },
+    "arbitrum": dict(_FLUID_CORE_CONTRACTS),
+    "base": dict(_FLUID_CORE_CONTRACTS),
+    "ethereum": dict(_FLUID_CORE_CONTRACTS),
+    "polygon": dict(_FLUID_CORE_CONTRACTS),
 }
 
-# Gas estimates for Fluid DEX operations
+# Fluid pools pair the chain's native gas token directly (no WETH wrapping).
+# This sentinel is the token0/token1 value pools report for the native leg.
+FLUID_NATIVE_TOKEN = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+
+# Gas estimates for Fluid DEX operations (Phase-0 measured: swapIn=190,067)
 DEFAULT_GAS_ESTIMATES: dict[str, int] = {
     "approve": 46_000,
-    "operate_open": 500_000,
-    "operate_close": 350_000,
+    "swap": 250_000,
 }
 
 # =============================================================================
-# Minimal ABIs (only simple functions that decode reliably)
+# Minimal ABIs
 # =============================================================================
 
 DEX_FACTORY_ABI = [
@@ -66,22 +92,37 @@ DEX_RESOLVER_ABI = [
     },
 ]
 
-# FluidDexT1 pool — operate() for LP open/close
-# Selector: keccak256("operate(uint256,int256,int256,address)") = 0x032d2276
-DEX_T1_ABI = [
+# DexReservesResolver — Fluid's official quoting/enumeration surface.
+# estimateSwapIn is declared nonpayable on-chain but is designed to be
+# consumed via eth_call (it simulates the swap and reverts internally with
+# the FluidDexSwapResult carrier, which the resolver decodes and returns).
+DEX_RESERVES_RESOLVER_ABI = [
+    {
+        "inputs": [],
+        "name": "getAllPools",
+        "outputs": [
+            {
+                "components": [
+                    {"name": "pool", "type": "address"},
+                    {"name": "token0", "type": "address"},
+                    {"name": "token1", "type": "address"},
+                    {"name": "fee", "type": "uint256"},
+                ],
+                "type": "tuple[]",
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
     {
         "inputs": [
-            {"name": "nftId_", "type": "uint256"},
-            {"name": "newCol_", "type": "int256"},
-            {"name": "newDebt_", "type": "int256"},
-            {"name": "to_", "type": "address"},
+            {"name": "dex_", "type": "address"},
+            {"name": "swap0to1_", "type": "bool"},
+            {"name": "amountIn_", "type": "uint256"},
+            {"name": "amountOutMin_", "type": "uint256"},
         ],
-        "name": "operate",
-        "outputs": [
-            {"name": "nftId", "type": "uint256"},
-            {"name": "r0", "type": "int256"},
-            {"name": "r1", "type": "int256"},
-        ],
+        "name": "estimateSwapIn",
+        "outputs": [{"name": "amountOut_", "type": "uint256"}],
         "stateMutability": "payable",
         "type": "function",
     },
@@ -123,109 +164,30 @@ DEX_SWAP_ABI = [
 
 @dataclass
 class DexPoolData:
-    """Data about a Fluid DEX pool read directly from the pool contract.
+    """Data about a Fluid DEX pool.
 
     Attributes:
         dex_address: Pool contract address
-        token0: Token0 address (from constantsView word[9])
-        token1: Token1 address (from constantsView word[10])
-        fee_bps: Trading fee in basis points (estimated from config)
-        is_smart_collateral: Whether smart collateral is enabled (dexVariables bit 1)
-        is_smart_debt: Whether smart debt is enabled (dexVariables bit 2)
+        token0: Token0 address (``FLUID_NATIVE_TOKEN`` for the native leg)
+        token1: Token1 address
+        fee_raw: Raw fee value as reported by the reserves resolver
+            (protocol-internal units — do not assume bps)
+        is_smart_collateral: Whether smart collateral is enabled
+            (only populated by ``get_dex_data``; LP deposits require it)
+        is_smart_debt: Whether smart debt is enabled
     """
 
     dex_address: str
     token0: str
     token1: str
-    fee_bps: int = 0
+    fee_raw: int = 0
     is_smart_collateral: bool = False
     is_smart_debt: bool = False
 
 
 # =============================================================================
-# FluidSDK
+# Errors
 # =============================================================================
-
-
-# =============================================================================
-# ERC20 State Override Helpers (for eth_call simulation)
-# =============================================================================
-
-# Maximum uint256 value — used to simulate unlimited balance/approval
-_MAX_UINT256_HEX = "0x" + "ff" * 32
-
-# Common ERC20 storage layout slots for balanceOf and allowance mappings.
-# Different token implementations use different slot indices:
-#   OpenZeppelin standard: balances=0, allowances=1
-#   FiatTokenV2 (USDC):   balances=9, allowances=10
-#   Some proxies:          balances=2, allowances=3
-#   Vyper/custom:          balances=51, allowances=52
-_BALANCE_MAPPING_SLOTS = [0, 2, 9, 51]
-_ALLOWANCE_MAPPING_SLOTS = [1, 3, 10, 52]
-
-
-def _compute_mapping_slot(key_address: str, mapping_slot: int) -> str:
-    """Compute keccak256(abi.encode(address, uint256)) for a Solidity mapping.
-
-    For `mapping(address => T)` at storage slot `p`, the value for key `k`
-    is at `keccak256(abi.encode(k, p))` where both are left-padded to 32 bytes.
-    """
-    addr_bytes = int(key_address, 16).to_bytes(32, "big")
-    slot_bytes = mapping_slot.to_bytes(32, "big")
-    return "0x" + Web3.keccak(addr_bytes + slot_bytes).hex()
-
-
-def _compute_nested_mapping_slot(key1: str, key2: str, mapping_slot: int) -> str:
-    """Compute storage slot for mapping(address => mapping(address => T)).
-
-    For allowances[owner][spender]:
-      inner = keccak256(abi.encode(owner, mapping_slot))
-      slot  = keccak256(abi.encode(spender, inner))
-    """
-    key1_bytes = int(key1, 16).to_bytes(32, "big")
-    slot_bytes = mapping_slot.to_bytes(32, "big")
-    inner_hash = Web3.keccak(key1_bytes + slot_bytes)
-
-    key2_bytes = int(key2, 16).to_bytes(32, "big")
-    return "0x" + Web3.keccak(key2_bytes + inner_hash).hex()
-
-
-def _build_erc20_state_override(
-    token_address: str,
-    holder: str,
-    spender: str,
-) -> dict:
-    """Build eth_call state overrides to simulate ERC20 balance + approval.
-
-    Sets the holder's balance and allowance to MAX_UINT256 across all common
-    ERC20 storage layouts. Since this only affects eth_call simulation (no
-    on-chain state change), writing extra slots is harmless.
-
-    Args:
-        token_address: ERC20 token contract address
-        holder: Address that needs a simulated balance
-        spender: Address that needs a simulated approval (the pool)
-
-    Returns:
-        State override dict for web3.py's call(state_override=...)
-    """
-    state_diff: dict[str, str] = {}
-
-    # Set balance slots across all common layouts
-    for bal_slot in _BALANCE_MAPPING_SLOTS:
-        slot = _compute_mapping_slot(holder, bal_slot)
-        state_diff[slot] = _MAX_UINT256_HEX
-
-    # Set allowance slots across all common layouts
-    for allow_slot in _ALLOWANCE_MAPPING_SLOTS:
-        slot = _compute_nested_mapping_slot(holder, spender, allow_slot)
-        state_diff[slot] = _MAX_UINT256_HEX
-
-    return {
-        token_address: {
-            "stateDiff": state_diff,
-        }
-    }
 
 
 class FluidSDKError(Exception):
@@ -233,20 +195,122 @@ class FluidSDKError(Exception):
 
 
 class FluidMinAmountError(FluidSDKError):
-    """Raised when a swap amount is below the pool's minimum threshold."""
+    """Raised when a swap is rejected by the pool's time-expanding limits.
+
+    Fluid's Liquidity layer enforces withdrawable/borrowable limits that
+    expand over time after large utilisation. A swap rejected for limits is
+    retryable later — distinct from a hard failure (no pool, bad params).
+    """
 
 
-# Known Fluid DEX custom error selectors (first 4 bytes of keccak256)
-# Decoded from on-chain reverts observed in production
-FLUID_ERROR_SELECTORS: dict[str, str] = {
-    "dee51a8a": "FluidDexSwapTooSmall",  # pool rejected swap — insufficient liquidity for amount
-    "2fee3e0e": "FluidDexLiquidityLimit",  # pool capacity exceeded — seen on wstETH/ETH, weETH/ETH
-    "4e487b71": "Panic",  # Solidity panic (overflow, division by zero, etc.)
+# Fluid uses one generic custom error per module, each wrapping a uint256
+# errorId (see ``contracts/protocols/*/errorTypes.sol`` in
+# Instadapp/fluid-contracts-public). Selectors verified Phase 0 (VIB-5028):
+FLUID_MODULE_ERROR_SELECTORS: dict[str, str] = {
+    "2fee3e0e": "FluidDexError",
+    "dee51a8a": "FluidSafeTransferError",
+    "60121cca": "FluidVaultError",
+    "dcab82e2": "FluidLiquidityError",
+    "d50d7512": "FluidLiquidityCalcsError",
+    "aeae7c0d": "FluidDexFactoryError",
 }
+
+# Revert-carrier "errors" that are actually return values from estimate
+# helpers — never surface these as failures.
+FLUID_RESULT_CARRIER_SELECTORS: dict[str, str] = {
+    "b3bfda99": "FluidDexSwapResult",
+    "1458577f": "FluidDexPerfectLiquidityOutput",
+}
+
+# DexT1 errorIds (contracts/protocols/dex/errorTypes.sol). Names matter for
+# diagnostics; ids absent here render numerically.
+DEX_T1_ERROR_IDS: dict[int, str] = {
+    51001: "DexT1__AlreadyEntered",
+    51002: "DexT1__NotAnAuth",
+    51003: "DexT1__SmartColNotEnabled",
+    51004: "DexT1__SmartDebtNotEnabled",
+    51005: "DexT1__PoolNotInitialized",
+    51006: "DexT1__TokenReservesTooLow",
+    51007: "DexT1__EthAndAmountInMisMatch",
+    51008: "DexT1__EthSentForNonNativeSwap",
+    51009: "DexT1__NoSwapRoute",
+    51010: "DexT1__NotEnoughAmountOut",
+    51011: "DexT1__LiquidityLayerTokenUtilizationCapReached",
+    51012: "DexT1__HookReturnedFalse",
+    51013: "DexT1__UserSupplyInNotOn",
+    51014: "DexT1__UserDebtInNotOn",
+    51015: "DexT1__AboveDepositMax",
+    51016: "DexT1__MsgValueLowOnDepositOrPayback",
+    51017: "DexT1__WithdrawLimitReached",
+    51018: "DexT1__BelowWithdrawMin",
+    51019: "DexT1__DebtLimitReached",
+    51020: "DexT1__BelowBorrowMin",
+    51021: "DexT1__AbovePaybackMax",
+    51022: "DexT1__InvalidDepositAmts",
+    51023: "DexT1__DepositAmtsZero",
+    51024: "DexT1__SharesMintedLess",
+    51025: "DexT1__WithdrawalNotEnough",
+    51026: "DexT1__InvalidWithdrawAmts",
+    51027: "DexT1__WithdrawAmtsZero",
+    51028: "DexT1__WithdrawExcessSharesBurn",
+    51029: "DexT1__InvalidBorrowAmts",
+    51030: "DexT1__BorrowAmtsZero",
+    51031: "DexT1__BorrowExcessSharesMinted",
+    51032: "DexT1__PaybackAmtTooHigh",
+    51033: "DexT1__InvalidPaybackAmts",
+    51034: "DexT1__PaybackAmtsZero",
+    51035: "DexT1__PaybackSharedBurnedLess",
+    51036: "DexT1__NothingToArbitrage",
+    51037: "DexT1__MsgSenderNotLiquidity",
+    51038: "DexT1__ReentrancyBitShouldBeOn",
+    51039: "DexT1__OraclePriceFetchAlreadyEntered",
+    51040: "DexT1__OracleUpdateHugeSwapDiff",
+    51041: "DexT1__Token0ShouldBeSmallerThanToken1",
+    51042: "DexT1__OracleMappingOverflow",
+    51043: "DexT1__SwapAndArbitragePaused",
+    51044: "DexT1__ExceedsAmountInMax",
+    51045: "DexT1__SwapInLimitingAmounts",
+    51046: "DexT1__SwapOutLimitingAmounts",
+    51047: "DexT1__MintAmtOverflow",
+    51048: "DexT1__BurnAmtOverflow",
+    51049: "DexT1__LimitingAmountsSwapAndNonPerfectActions",
+    51050: "DexT1__InsufficientOracleData",
+    51051: "DexT1__SharesAmountInsufficient",
+    51052: "DexT1__CenterPriceOutOfRange",
+    51053: "DexT1__DebtReservesTooLow",
+    51054: "DexT1__SwapAndDepositTooLowOrTooHigh",
+    51055: "DexT1__WithdrawAndSwapTooLowOrTooHigh",
+    51056: "DexT1__BorrowAndSwapTooLowOrTooHigh",
+    51057: "DexT1__SwapAndPaybackTooLowOrTooHigh",
+    51058: "DexT1__InvalidImplementation",
+    51059: "DexT1__OnlyDelegateCallAllowed",
+    51060: "DexT1__IncorrectDataLength",
+}
+
+# errorIds whose semantic is "the Liquidity layer's time-expanding limits
+# (or per-swap caps) currently reject this size" — retryable later or at a
+# smaller size, NOT a hard integration failure.
+_LIMIT_GATED_ERROR_IDS: frozenset[int] = frozenset(
+    {
+        51006,  # TokenReservesTooLow
+        51009,  # NoSwapRoute
+        51010,  # NotEnoughAmountOut
+        51011,  # LiquidityLayerTokenUtilizationCapReached
+        51017,  # WithdrawLimitReached
+        51019,  # DebtLimitReached
+        51045,  # SwapInLimitingAmounts
+        51046,  # SwapOutLimitingAmounts
+        51049,  # LimitingAmountsSwapAndNonPerfectActions
+    }
+)
 
 
 def decode_fluid_revert(raw_hex: str) -> str:
-    """Decode a Fluid DEX revert into a human-readable error message.
+    """Decode a Fluid revert into a human-readable error message.
+
+    Handles standard ``Error(string)`` / ``Panic(uint256)``, Fluid's
+    per-module ``<Module>Error(uint256 errorId)`` wrappers (with DexT1
+    errorId names), and the estimate result-carriers.
 
     Args:
         raw_hex: Raw hex revert data (with or without 0x prefix)
@@ -258,9 +322,9 @@ def decode_fluid_revert(raw_hex: str) -> str:
     if len(data) < 8:
         return f"Unknown revert: 0x{data}"
 
-    selector = data[:8]
+    selector = data[:8].lower()
 
-    # Handle standard Solidity Error(string) — preserve the human-readable reason
+    # Standard Solidity Error(string)
     if selector == "08c379a0" and len(data) >= 136:
         try:
             offset = int(data[8:72], 16)
@@ -271,71 +335,95 @@ def decode_fluid_revert(raw_hex: str) -> str:
         except (ValueError, IndexError):
             pass  # Fall through to unknown
 
-    error_name = FLUID_ERROR_SELECTORS.get(selector)
-
-    if error_name == "FluidDexSwapTooSmall":
-        # Despite the name, this error fires when the pool lacks sufficient
-        # liquidity for the requested swap size (not when the input is too small).
-        # Pools like USDC/USDT on Arbitrum reject swaps above ~$100.
-        if len(data) >= 72:
-            threshold = int(data[8:72], 16)
-            return (
-                f"FluidDexSwapTooSmall: the pool rejected this swap — insufficient "
-                f"liquidity for the requested amount (pool threshold: {threshold} wei). "
-                f"Fluid DEX pools have undocumented per-pool size limits. "
-                f"Try a smaller trade size or use a different protocol."
-            )
-        return (
-            "FluidDexSwapTooSmall: the pool rejected this swap — insufficient "
-            "liquidity for the requested amount. Try a smaller trade size."
-        )
-
-    if error_name == "FluidDexLiquidityLimit":
-        # Observed on wstETH/ETH and weETH/ETH pools — same root cause
-        # as FluidDexSwapTooSmall but different error selector.
-        if len(data) >= 72:
-            threshold = int(data[8:72], 16)
-            return (
-                f"FluidDexLiquidityLimit: pool capacity exceeded for this swap "
-                f"(pool threshold: {threshold} wei). "
-                f"Fluid DEX pools have per-pool swap size limits. "
-                f"Try a smaller trade size or use a different protocol."
-            )
-        return "FluidDexLiquidityLimit: pool capacity exceeded. Try a smaller trade size or use a different protocol."
-
-    if error_name == "Panic":
+    # Standard Solidity Panic(uint256)
+    if selector == "4e487b71":
         if len(data) >= 72:
             panic_code = int(data[8:72], 16)
             return f"Solidity Panic(0x{panic_code:02x})"
         return "Solidity Panic"
 
+    carrier = FLUID_RESULT_CARRIER_SELECTORS.get(selector)
+    if carrier is not None:
+        return f"{carrier} (estimate result carrier, not a failure)"
+
+    module_error = FLUID_MODULE_ERROR_SELECTORS.get(selector)
+    if module_error is not None and len(data) >= 72:
+        error_id = int(data[8:72], 16)
+        name = DEX_T1_ERROR_IDS.get(error_id)
+        if name is not None:
+            return f"{module_error}({error_id} {name})"
+        return f"{module_error}(errorId={error_id})"
+
     return f"Unknown revert (selector=0x{selector}): 0x{data[:40]}..."
 
 
-def _extract_revert_hex(error_str: str) -> str | None:
-    """Extract raw hex revert data from a Web3 error message.
+def fluid_error_id(raw_hex: str) -> int | None:
+    """Extract the uint256 errorId from a Fluid module-error revert.
 
-    Web3's ContractLogicError includes the raw hex in various formats:
-    - "execution reverted: 0xdee51a8a..."
-    - "0xdee51a8a..."
+    Returns None for non-Fluid reverts (Error(string), Panic, carriers,
+    unknown selectors).
+    """
+    data = raw_hex.removeprefix("0x")
+    if len(data) < 72:
+        return None
+    if data[:8].lower() not in FLUID_MODULE_ERROR_SELECTORS:
+        return None
+    try:
+        return int(data[8:72], 16)
+    except ValueError:
+        return None
+
+
+def fluid_error_module(raw_hex: str) -> str | None:
+    """Name of the Fluid module error wrapping this revert (or None).
+
+    Each Fluid module numbers its errorIds independently, so an errorId is
+    only meaningful TOGETHER with its module selector — e.g. DexT1 id 51049
+    (limit-gated swap) must not be conflated with a numerically equal id
+    from FluidVaultError/FluidLiquidityError.
+    """
+    data = raw_hex.removeprefix("0x")
+    if len(data) < 8:
+        return None
+    return FLUID_MODULE_ERROR_SELECTORS.get(data[:8].lower())
+
+
+def _extract_revert_hex(error: Exception) -> str | None:
+    """Extract raw hex revert data from a Web3 error.
+
+    Checks structured fields first (``error.data``, args dicts from
+    Alchemy/Infura-style providers), then falls back to regex extraction
+    from the error message text.
     """
     import re
 
-    match = re.search(r"(0x[0-9a-fA-F]{8,})", error_str)
+    data_attr = getattr(error, "data", None)
+    if isinstance(data_attr, str) and data_attr.startswith("0x"):
+        return data_attr
+    if error.args and isinstance(error.args[0], dict):
+        data = error.args[0].get("data")
+        if isinstance(data, str) and data.startswith("0x"):
+            return data
+    match = re.search(r"(0x[0-9a-fA-F]{8,})", str(error))
     if match:
         return match.group(1)
     return None
 
 
+# =============================================================================
+# FluidSDK
+# =============================================================================
+
+
 class FluidSDK:
     """Low-level Fluid DEX protocol SDK.
 
-    Reads pool data directly from pool contracts using raw eth_call:
-    - constantsView(): token addresses (words 9, 10 of 18-word response)
-    - readFromStorage(bytes32(0)): dexVariables with smart-collateral/debt flags
+    Pool enumeration and swap quoting go through the DexReservesResolver
+    (single eth_call each); token-pair / smart-flag verification reads the
+    pool's ``constantsView()`` raw words.
 
     Args:
-        chain: Chain name (must be "arbitrum" for phase 1)
+        chain: Chain name (one of ``FLUID_ADDRESSES``)
         rpc_url: DEPRECATED — direct RPC URL. Bypasses the gateway and is
             only used for ad-hoc scripts. Prefer gateway_client for any
             code path that runs in a strategy container.
@@ -375,10 +463,25 @@ class FluidSDK:
             address=Web3.to_checksum_address(self._addresses["dex_resolver"]),
             abi=DEX_RESOLVER_ABI,
         )
+        self._reserves_resolver = self.w3.eth.contract(
+            address=Web3.to_checksum_address(self._addresses["dex_reserves_resolver"]),
+            abi=DEX_RESERVES_RESOLVER_ABI,
+        )
 
-        # Cache function selectors
+        # Cache function selectors for raw pool reads
         self._constants_view_sel = self.w3.keccak(text="constantsView()")[:4].hex()
         self._read_storage_sel = self.w3.keccak(text="readFromStorage(bytes32)")[:4].hex()
+
+        # Pool list is instance-cached: SDK instances are short-lived (one per
+        # compile / quote), and pool discovery + quoting may enumerate more
+        # than once within that window. New pool deployments are rare enough
+        # that an instance-lifetime cache cannot serve a stale answer that
+        # matters; a fresh SDK always re-reads.
+        self._pools_cache: list[DexPoolData] | None = None
+
+    # =========================================================================
+    # Pool enumeration / discovery
+    # =========================================================================
 
     def get_all_dex_addresses(self) -> list[str]:
         """Get all Fluid DEX pool addresses from the resolver."""
@@ -395,8 +498,63 @@ class FluidSDK:
         except Exception as e:
             raise FluidSDKError(f"Failed to get total DEXes: {e}") from e
 
+    def get_all_pools(self) -> list[DexPoolData]:
+        """Enumerate all pools with token pairs in a single eth_call.
+
+        Uses ``DexReservesResolver.getAllPools()``. Smart-collateral/debt
+        flags are NOT populated here (use ``get_dex_data`` per pool when
+        needed); ``fee_raw`` is the resolver-reported raw fee value.
+        The result is cached for the lifetime of this SDK instance.
+        """
+        if self._pools_cache is not None:
+            return self._pools_cache
+        try:
+            rows = self._reserves_resolver.functions.getAllPools().call()
+        except Exception as e:
+            raise FluidSDKError(f"Failed to enumerate Fluid pools: {e}") from e
+        pools: list[DexPoolData] = []
+        for row in rows:
+            pool, token0, token1, fee = row
+            pools.append(
+                DexPoolData(
+                    dex_address=Web3.to_checksum_address(pool),
+                    token0=Web3.to_checksum_address(token0),
+                    token1=Web3.to_checksum_address(token1),
+                    fee_raw=int(fee),
+                )
+            )
+        self._pools_cache = pools
+        return pools
+
+    def find_pool_for_pair(self, token_in: str, token_out: str) -> tuple[str, bool] | None:
+        """Find the Fluid pool for a swap pair and the swap direction.
+
+        Args:
+            token_in: Input token address (``FLUID_NATIVE_TOKEN`` for native)
+            token_out: Output token address
+
+        Returns:
+            ``(pool_address, swap0to1)`` where ``swap0to1`` is True when
+            ``token_in`` is the pool's token0; None when no pool exists.
+        """
+        tin = token_in.lower()
+        tout = token_out.lower()
+        for pool in self.get_all_pools():
+            t0 = pool.token0.lower()
+            t1 = pool.token1.lower()
+            if t0 == tin and t1 == tout:
+                return pool.dex_address, True
+            if t0 == tout and t1 == tin:
+                return pool.dex_address, False
+        return None
+
+    def find_dex_by_tokens(self, token0: str, token1: str) -> str | None:
+        """Find a Fluid DEX pool for a token pair (order-insensitive)."""
+        found = self.find_pool_for_pair(token0, token1)
+        return found[0] if found is not None else None
+
     def get_dex_data(self, dex_address: str) -> DexPoolData:
-        """Get pool data by calling constantsView() and readFromStorage() directly.
+        """Get pool data by calling constantsView() and readFromStorage().
 
         Uses raw eth_call to avoid ABI decoding issues with the complex
         DexEntireData struct. constantsView() returns 18 words:
@@ -406,17 +564,10 @@ class FluidSDK:
         readFromStorage(bytes32(0)) returns dexVariables:
         - bit 1: isSmartCollateralEnabled
         - bit 2: isSmartDebtEnabled
-
-        Args:
-            dex_address: Pool contract address
-
-        Returns:
-            DexPoolData with token addresses and encumbrance flags
         """
         addr = Web3.to_checksum_address(dex_address)
 
         try:
-            # constantsView() — 18 words, tokens at word[9] and word[10]
             cv_data = self.w3.eth.call(
                 {
                     "to": addr,
@@ -430,7 +581,6 @@ class FluidSDK:
             token0 = Web3.to_checksum_address("0x" + cv_data[9 * 32 + 12 : 10 * 32].hex())
             token1 = Web3.to_checksum_address("0x" + cv_data[10 * 32 + 12 : 11 * 32].hex())
 
-            # readFromStorage(bytes32(0)) — dexVariables
             storage_data = self.w3.eth.call(
                 {
                     "to": addr,
@@ -448,7 +598,7 @@ class FluidSDK:
                 dex_address=addr,
                 token0=token0,
                 token1=token1,
-                fee_bps=0,  # Fee extraction deferred — not critical for phase 1
+                fee_raw=0,  # not exposed by constantsView; use get_all_pools
                 is_smart_collateral=is_smart_col,
                 is_smart_debt=is_smart_debt,
             )
@@ -457,128 +607,71 @@ class FluidSDK:
         except Exception as e:
             raise FluidSDKError(f"Failed to get DEX data for {dex_address}: {e}") from e
 
-    def is_position_encumbered(self, dex_address: str, nft_id: int = 0) -> bool:
-        """Check if a specific position has outstanding debt.
-
-        In Fluid DEX, ALL pools have smart-debt capability (that's the design).
-        The encumbrance check is at the POSITION level, not pool level:
-        - Positions we create with newDebt=0 have no debt, so they're safe to close.
-        - For safety, we verify the pool's smart-debt flag but don't block on it
-          for positions we know were opened without debt.
-
-        For phase 1, this always returns False for nft_id=0 (new position check)
-        since we enforce newDebt=0 in build_operate_tx().
-
-        Args:
-            dex_address: Pool contract address
-            nft_id: NFT position ID (0 = checking for new position)
-
-        Returns:
-            True if the position has outstanding debt
-        """
-        # For new positions (nft_id=0), never encumbered since we enforce newDebt=0
-        if nft_id == 0:
-            return False
-
-        # For existing positions in phase 1, we only close positions we opened
-        # with newDebt=0, so they should never have debt. Return False.
-        # Future phases can add on-chain debt verification here.
-        return False
-
-    def find_dex_by_tokens(self, token0: str, token1: str) -> str | None:
-        """Find a Fluid DEX pool for a given token pair.
-
-        Token order is automatically handled (tries both orderings).
-        """
-        token0_lower = token0.lower()
-        token1_lower = token1.lower()
-
-        try:
-            addresses = self.get_all_dex_addresses()
-        except FluidSDKError:
-            logger.warning("Failed to enumerate Fluid DEX pools")
-            return None
-
-        for dex_addr in addresses:
-            try:
-                data = self.get_dex_data(dex_addr)
-                pool_t0 = data.token0.lower()
-                pool_t1 = data.token1.lower()
-
-                if (pool_t0 == token0_lower and pool_t1 == token1_lower) or (
-                    pool_t0 == token1_lower and pool_t1 == token0_lower
-                ):
-                    return dex_addr
-            except FluidSDKError:
-                continue
-
-        return None
+    # =========================================================================
+    # Swap quote + calldata
+    # =========================================================================
 
     def get_swap_quote(
         self,
         dex_address: str,
         swap0to1: bool,
         amount_in: int,
-        to: str,
     ) -> int:
-        """Get a swap quote (estimate) from a Fluid DEX pool.
+        """Quote an exact-input swap via ``DexReservesResolver.estimateSwapIn``.
 
-        Calls swapIn via eth_call with state overrides to simulate token
-        approval and balance. Without overrides, swapIn() reverts because
-        it internally calls transferFrom() which requires prior approval.
+        This is Fluid's official quote path; Phase-0 validation showed the
+        quote matches real ``swapIn`` output to the wei.
 
         Args:
             dex_address: Pool contract address
             swap0to1: True to swap token0->token1, False for token1->token0
-            amount_in: Input amount in token's smallest unit
-            to: Recipient address
+            amount_in: Input amount in the token's smallest unit
 
         Returns:
-            Expected output amount in token's smallest unit
+            Expected output amount in the token's smallest unit
+
+        Raises:
+            FluidMinAmountError: The size is rejected by the pool's
+                time-expanding limits (retryable later / at smaller size).
+            FluidSDKError: Any other quote failure.
         """
         pool_addr = Web3.to_checksum_address(dex_address)
-        caller = Web3.to_checksum_address(to)
-
-        # Determine input token from pool data
-        pool_data = self.get_dex_data(dex_address)
-        input_token = Web3.to_checksum_address(pool_data.token0 if swap0to1 else pool_data.token1)
-
-        # Build state overrides: set caller's balance and allowance for the input token
-        state_override = _build_erc20_state_override(
-            token_address=input_token,
-            holder=caller,
-            spender=pool_addr,
-        )
-
-        dex_contract = self.w3.eth.contract(address=pool_addr, abi=DEX_SWAP_ABI)
         try:
-            amount_out = dex_contract.functions.swapIn(swap0to1, amount_in, 0, caller).call(
-                {"from": caller, "value": 0},  # type: ignore[arg-type]
-                state_override=state_override,
-            )
-            return amount_out
+            amount_out = self._reserves_resolver.functions.estimateSwapIn(pool_addr, swap0to1, amount_in, 0).call()
         except Exception as e:
-            # Try to decode Fluid-specific revert errors for better diagnostics
-            # First try structured error formats (Alchemy/Infura: error.args[0]["data"])
-            raw_hex = None
-            if hasattr(e, "data") and isinstance(e.data, str) and e.data.startswith("0x"):
-                raw_hex = e.data
-            elif e.args and isinstance(e.args[0], dict) and "data" in e.args[0]:
-                data = e.args[0]["data"]
-                if isinstance(data, str) and data.startswith("0x"):
-                    raw_hex = data
-            # Fall back to regex extraction from error message text
-            if not raw_hex:
-                raw_hex = _extract_revert_hex(str(e))
+            raw_hex = _extract_revert_hex(e)
             if raw_hex:
                 decoded = decode_fluid_revert(raw_hex)
-                if (
-                    any(s in decoded for s in ("FluidDexSwapTooSmall", "FluidDexLiquidityLimit", "pool capacity"))
-                    or "too small" in decoded.lower()
-                ):
-                    raise FluidMinAmountError(decoded) from e
+                error_id = fluid_error_id(raw_hex)
+                # _LIMIT_GATED_ERROR_IDS are DexT1 ids — only meaningful on a
+                # FluidDexError revert (modules number errorIds independently).
+                if error_id in _LIMIT_GATED_ERROR_IDS and fluid_error_module(raw_hex) == "FluidDexError":
+                    raise FluidMinAmountError(
+                        f"Fluid pool {pool_addr} rejected this swap size: {decoded}. "
+                        f"Fluid limits expand over time — retry later or reduce size."
+                    ) from e
                 raise FluidSDKError(f"Fluid swap quote failed: {decoded}") from e
             raise FluidSDKError(f"Failed to get swap quote: {e}") from e
+        if amount_out == 0:
+            # The resolver returns 0 (rather than reverting) for sizes beyond
+            # the current limits — observed at Phase 0 for a $50M quote.
+            raise FluidMinAmountError(
+                f"Fluid pool {pool_addr} returned a zero quote for amount_in={amount_in} — "
+                f"size exceeds current pool limits. Fluid limits expand over time — "
+                f"retry later or reduce size."
+            )
+        return int(amount_out)
+
+    def encode_swap_in_calldata(
+        self,
+        swap0to1: bool,
+        amount_in: int,
+        amount_out_min: int,
+        to: str,
+    ) -> str:
+        """ABI-encode ``swapIn`` calldata (offline — no RPC interaction)."""
+        contract = Web3().eth.contract(abi=DEX_SWAP_ABI)
+        return contract.encode_abi("swapIn", args=[swap0to1, amount_in, amount_out_min, Web3.to_checksum_address(to)])
 
     def build_swap_tx(
         self,
@@ -597,73 +690,15 @@ class FluidSDK:
             amount_in: Input amount in token's smallest unit
             amount_out_min: Minimum acceptable output (slippage protection)
             to: Recipient address
-            value: Native token value (for ETH-paired swaps)
+            value: Native token value (must equal amount_in for native-input
+                swaps; 0 for ERC-20 inputs)
 
         Returns:
             Transaction dict with 'to', 'data', 'value', 'gas'
         """
-        dex_contract = self.w3.eth.contract(
-            address=Web3.to_checksum_address(dex_address),
-            abi=DEX_SWAP_ABI,
-        )
-
-        tx = dex_contract.functions.swapIn(
-            swap0to1, amount_in, amount_out_min, Web3.to_checksum_address(to)
-        ).build_transaction(
-            {  # type: ignore[arg-type]
-                "from": Web3.to_checksum_address(to),
-                "value": value,
-                "gas": 200_000,
-            }
-        )
-
         return {
-            "to": tx["to"],
-            "data": tx["data"],
+            "to": Web3.to_checksum_address(dex_address),
+            "data": self.encode_swap_in_calldata(swap0to1, amount_in, amount_out_min, to),
             "value": value,
-            "gas": 200_000,
-        }
-
-    def build_operate_tx(
-        self,
-        dex_address: str,
-        nft_id: int,
-        new_col: int,
-        new_debt: int,
-        to: str,
-    ) -> dict[str, Any]:
-        """Build an operate() transaction for a Fluid DEX pool.
-
-        operate() is the main entry point for LP operations:
-        - Open position: nft_id=0, new_col>0, new_debt=0
-        - Close position: nft_id=X, new_col<0 (negative = withdraw), new_debt=0
-        """
-        if new_debt != 0:
-            raise FluidSDKError("Phase 1 Fluid connector does not support smart-debt operations. new_debt must be 0.")
-
-        dex_contract = self.w3.eth.contract(
-            address=Web3.to_checksum_address(dex_address),
-            abi=DEX_T1_ABI,
-        )
-
-        gas = DEFAULT_GAS_ESTIMATES["operate_open"] if nft_id == 0 else DEFAULT_GAS_ESTIMATES["operate_close"]
-
-        tx = dex_contract.functions.operate(
-            nft_id,
-            new_col,
-            new_debt,
-            Web3.to_checksum_address(to),
-        ).build_transaction(
-            {  # type: ignore[arg-type]
-                "from": Web3.to_checksum_address(to),
-                "value": 0,
-                "gas": gas,
-            }
-        )
-
-        return {
-            "to": tx["to"],
-            "data": tx["data"],
-            "value": tx.get("value", 0),
-            "gas": gas,
+            "gas": DEFAULT_GAS_ESTIMATES["swap"],
         }
