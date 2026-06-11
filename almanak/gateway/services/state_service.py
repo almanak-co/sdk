@@ -4398,6 +4398,34 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                             ledger.post_state_json or None,
                         )
 
+                    # 2a) Handle reuse after close (VIB-5051, mirrors the
+                    # SQLite branch): a reopen of the same logical slot mints
+                    # a NEW physical position, so the physical-identity
+                    # conflict key does not fire and the INSERT would trip
+                    # ``ix_registry_handle`` against the old TERMINAL row
+                    # still holding the handle. Release it inside this same
+                    # transaction so the handle tracks the CURRENT physical
+                    # position. A handle held by a still-OPEN row is NOT
+                    # released — that collision keeps failing loud below. The
+                    # physical-identity guard keeps an idempotent retry of
+                    # the same row from clearing its own handle.
+                    if effective_handle is not None:
+                        await conn.execute(
+                            """
+                            UPDATE position_registry
+                            SET handle = NULL
+                            WHERE deployment_id = $1
+                              AND accounting_category = $2
+                              AND handle = $3
+                              AND status IN ('closed', 'reorg_invalidated')
+                              AND physical_identity_hash != $4
+                            """,
+                            deployment_id,
+                            category_str,
+                            effective_handle,
+                            registry.physical_identity_hash,
+                        )
+
                     # 2) Registry row with priority-gated UPSERT. The
                     # CASE expression materializes the priority inline
                     # so the comparison is atomic with the existing row.

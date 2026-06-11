@@ -99,10 +99,18 @@ class _LendingSim:
             self.collateral_usd -= w
             self.wallet_collateral += w
         elif kind == "SwapIntent":
-            amt = self.wallet_collateral if intent.amount == "all" else Decimal(str(intent.amount))
-            assert amt <= self.wallet_collateral + _EPS, "swap exceeds wallet collateral"
-            self.wallet_collateral -= amt
-            self.wallet_borrow += amt * (Decimal("1") - self.realized_slippage)
+            if getattr(intent, "from_token", None) == "USDC":
+                # Residual-sweep direction: borrow -> collateral
+                # (consolidate_to=collateral_token).
+                amt = self.wallet_borrow if intent.amount == "all" else Decimal(str(intent.amount))
+                assert amt <= self.wallet_borrow + _EPS, "swap exceeds wallet borrow"
+                self.wallet_borrow -= amt
+                self.wallet_collateral += amt * (Decimal("1") - self.realized_slippage)
+            else:
+                amt = self.wallet_collateral if intent.amount == "all" else Decimal(str(intent.amount))
+                assert amt <= self.wallet_collateral + _EPS, "swap exceeds wallet collateral"
+                self.wallet_collateral -= amt
+                self.wallet_borrow += amt * (Decimal("1") - self.realized_slippage)
         elif kind == "RepayIntent":
             self._apply_repay(intent)
 
@@ -130,12 +138,13 @@ class _LendingSim:
         self.wallet_borrow -= pay
 
 
-def _run(sim: _LendingSim) -> list:
+def _run(sim: _LendingSim, consolidate_to: str | None = None) -> list:
     intents = generate_leverage_loop_teardown(
         market=sim,
         protocol=sim.protocol,
         collateral_token="WETH",
         borrow_token="USDC",
+        consolidate_to=consolidate_to,
         market_id=_MARKET_ID.get(sim.protocol),
         chain="arbitrum",
     )
@@ -269,3 +278,65 @@ def test_unhealthy_position_fails_loud(protocol: str) -> None:
             market_id=_MARKET_ID.get(protocol),
             chain="arbitrum",
         )
+
+
+# ---------------------------------------------------------------------------
+# consolidate_to — residual-sweep target (AccountingStrats.md D1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("protocol", _PROTOCOLS)
+def test_consolidate_to_collateral_sweeps_borrow_residue(protocol: str) -> None:
+    """consolidate_to=collateral flips the final sweep: residual borrow token is
+    swapped back into the collateral/base asset, the recovered collateral stack
+    is NOT converted into the debt token, and the unwind still completes."""
+    sim = _LendingSim(protocol, "10000", "6000")
+    intents = _run(sim, consolidate_to="WETH")
+
+    assert sim.debt_usd == 0, "debt must be fully repaid"
+    assert sim.collateral_usd == 0, "collateral must be fully withdrawn"
+
+    last = intents[-1]
+    assert type(last).__name__ == "SwapIntent"
+    assert last.from_token == "USDC" and last.to_token == "WETH"
+    assert last.amount == "all"
+    # Every residual borrow-token buffer leftover landed back in collateral.
+    assert sim.wallet_borrow == 0
+    assert sim.wallet_collateral > 0
+
+
+def test_consolidate_to_borrow_token_matches_default() -> None:
+    """Passing the borrow token explicitly is identical to the default sweep."""
+    default_intents = _run(_LendingSim("aave_v3", "10000", "6000"))
+    explicit_intents = _run(_LendingSim("aave_v3", "10000", "6000"), consolidate_to="USDC")
+
+    assert [type(i).__name__ for i in default_intents] == [type(i).__name__ for i in explicit_intents]
+    assert default_intents[-1].from_token == explicit_intents[-1].from_token == "WETH"
+    assert default_intents[-1].to_token == explicit_intents[-1].to_token == "USDC"
+
+
+def test_consolidate_to_invalid_token_raises() -> None:
+    sim = _LendingSim("aave_v3", "10000", "6000")
+    with pytest.raises(ValueError, match="consolidate_to"):
+        generate_leverage_loop_teardown(
+            market=sim,
+            protocol="aave_v3",
+            collateral_token="WETH",
+            borrow_token="USDC",
+            consolidate_to="DAI",
+        )
+
+
+def test_no_debt_consolidate_to_collateral_sweeps_only_held_borrow() -> None:
+    """Debt-free position with target=collateral: withdraw-all lands in the
+    target already, so a sweep is emitted only when the wallet actually holds
+    stray borrow token."""
+    sim = _LendingSim("aave_v3", "10000", "0", wallet_borrow="25")
+    intents = _run(sim, consolidate_to="WETH")
+    assert [type(i).__name__ for i in intents] == ["WithdrawIntent", "SwapIntent"]
+    assert intents[1].from_token == "USDC" and intents[1].to_token == "WETH"
+    assert sim.wallet_borrow == 0
+
+    sim_clean = _LendingSim("aave_v3", "10000", "0")
+    intents_clean = _run(sim_clean, consolidate_to="WETH")
+    assert [type(i).__name__ for i in intents_clean] == ["WithdrawIntent"]

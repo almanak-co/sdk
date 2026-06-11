@@ -42,9 +42,7 @@ def _market_with_balance(token: str, balance: Decimal | int | float):
 
     def _lookup(arg_token: str):
         if arg_token != token:
-            raise AssertionError(
-                f"market.balance() called with {arg_token!r}; expected {token!r}"
-            )
+            raise AssertionError(f"market.balance() called with {arg_token!r}; expected {token!r}")
         return bal
 
     market = MagicMock()
@@ -209,3 +207,66 @@ class TestZeroBalanceSkipHelperMarketErrors:
         market = MagicMock()
         market.balance = MagicMock(side_effect=RuntimeError("token not registered"))
         assert _zero_balance_swap_skip_reason(intent, market) is None
+
+
+class TestSkipReasonReadsLiveBalance:
+    """PR #2726 (Codex finding) — the skip check must read the LIVE balance.
+
+    Earlier intents in the same teardown sequence mutate the wallet after the
+    MarketSnapshot was built: a staircase REPAY consumes the wallet's debt
+    token before the residual sweep's skip check runs. With a stale positive
+    memo the no-op skip never fires and the zero-balance sweep falls through
+    to the slippage-escalation loop, failing a teardown whose risk is already
+    removed (also the VIB-5049 duplicate-consolidation loop mechanism).
+    """
+
+    def test_stale_positive_memo_is_evicted_and_skip_fires(self):
+        from almanak.framework.market import MarketSnapshot
+
+        live = {"USDT": Decimal("48.8")}
+
+        def provider(token: str) -> Decimal:
+            return live.get(token, Decimal("0"))
+
+        market = MarketSnapshot(
+            chain="arbitrum",
+            wallet_address="0x" + "11" * 20,
+            balance_provider=provider,
+        )
+        assert market.balance("USDT").balance == Decimal("48.8")  # memoized
+
+        # A REPAY consumed the whole wallet balance after the snapshot memo.
+        live["USDT"] = Decimal("0")
+
+        intent = SimpleNamespace(intent_type="SWAP", amount="all", from_token="USDT", withdraw_all=False)
+        reason = _zero_balance_swap_skip_reason(intent, market)
+        assert reason is not None and "USDT" in reason
+
+    def test_live_positive_balance_still_executes(self):
+        from almanak.framework.market import MarketSnapshot
+
+        live = {"USDT": Decimal("0")}
+
+        def provider(token: str) -> Decimal:
+            return live.get(token, Decimal("0"))
+
+        market = MarketSnapshot(
+            chain="arbitrum",
+            wallet_address="0x" + "11" * 20,
+            balance_provider=provider,
+        )
+        assert market.balance("USDT").balance == Decimal("0")  # memoized zero
+
+        # A WITHDRAW landed tokens in the wallet after the memo.
+        live["USDT"] = Decimal("5")
+
+        intent = SimpleNamespace(intent_type="SWAP", amount="all", from_token="USDT", withdraw_all=False)
+        assert _zero_balance_swap_skip_reason(intent, market) is None
+
+    def test_market_without_invalidate_balance_still_works(self):
+        market = _market_with_balance("USDT", 0)
+        # Plain mock: getattr guard must tolerate any shape.
+        del market.invalidate_balance  # force AttributeError path on MagicMock
+        intent = SimpleNamespace(intent_type="SWAP", amount="all", from_token="USDT", withdraw_all=False)
+        reason = _zero_balance_swap_skip_reason(intent, market)
+        assert reason is not None

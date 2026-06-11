@@ -3272,6 +3272,38 @@ class SQLiteStore:
                                 entry.post_state_json,
                             ),
                         )
+                    # 2a) Handle reuse after close (AccountingStrats.md D3 /
+                    # VIB-5051): a strategy that closes a handled position and
+                    # later reopens the SAME logical slot (e.g. an LP
+                    # rebalance) mints a NEW physical position, so the upsert's
+                    # physical-identity conflict key does not fire and the
+                    # plain INSERT would trip ``ix_registry_handle`` against
+                    # the old TERMINAL row still holding the handle. Release
+                    # the handle from terminal rows first — inside this same
+                    # transaction — so the handle always points at the CURRENT
+                    # physical position of the slot. A handle held by a row
+                    # that is still OPEN is NOT released: that collision is a
+                    # genuine strategy bug and must keep failing loud below.
+                    # The physical-identity guard keeps an idempotent retry of
+                    # the same row from clearing its own handle.
+                    if effective_handle is not None:
+                        conn.execute(
+                            """
+                            UPDATE position_registry
+                            SET handle = NULL
+                            WHERE deployment_id = ?
+                              AND accounting_category = ?
+                              AND handle = ?
+                              AND status IN ('closed', 'reorg_invalidated')
+                              AND physical_identity_hash != ?
+                            """,
+                            (
+                                registry.deployment_id,
+                                category_str,
+                                effective_handle,
+                                registry.physical_identity_hash,
+                            ),
+                        )
                     # 2) Registry row + handle column atomically.
                     #
                     # The ON CONFLICT clause's WHERE predicate enforces:

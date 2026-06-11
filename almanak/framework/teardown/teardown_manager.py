@@ -185,6 +185,19 @@ def _zero_balance_swap_skip_reason(intent: Any, market: Any) -> str | None:
     )
     if not from_token:
         return None
+    # Evict the memoized balance first: earlier intents in the same teardown
+    # sequence (a staircase REPAY consuming the wallet's debt token, or a
+    # prior sweep draining the residual) change the wallet AFTER this
+    # snapshot was built. A stale positive memo here means the no-op skip
+    # never fires and the zero-balance sweep falls through to the
+    # slippage-escalation loop, failing a teardown whose risk is already
+    # removed (Codex review of PR #2726; same mechanism as VIB-5049).
+    invalidate = getattr(market, "invalidate_balance", None)
+    if callable(invalidate):
+        try:
+            invalidate(from_token)
+        except Exception:  # noqa: BLE001 — fall back to the cached value
+            logger.debug("invalidate_balance(%s) failed in skip-check; using cached balance", from_token, exc_info=True)
     try:
         bal = market.balance(from_token)
     except Exception:  # noqa: BLE001 — market may not have this token registered yet
@@ -1259,6 +1272,22 @@ class TeardownManager:
                                 actual_slippage=Decimal("0"),
                                 error="Cannot resolve amount='all': missing from_token or market context",
                             )
+                        # Earlier intents in this teardown sequence (e.g. the
+                        # leverage staircase's REPAY) may have changed the
+                        # wallet since this snapshot was built; evict the
+                        # memoized balance so "all" resolves against the live
+                        # post-intent value instead of over-resolving by
+                        # exactly the amount the earlier intent consumed.
+                        _invalidate = getattr(market, "invalidate_balance", None)
+                        if callable(_invalidate):
+                            try:
+                                _invalidate(from_token)
+                            except Exception:  # noqa: BLE001
+                                logger.debug(
+                                    "invalidate_balance(%s) failed; falling back to cached balance",
+                                    from_token,
+                                    exc_info=True,
+                                )
                         try:
                             bal = market.balance(from_token)
                         except Exception as e:

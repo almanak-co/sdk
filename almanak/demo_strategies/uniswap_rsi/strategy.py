@@ -49,7 +49,7 @@ strategies/demo/uniswap_rsi/
 # The framework provides clean abstractions so you focus on strategy logic.
 
 import logging
-from datetime import UTC
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -78,9 +78,7 @@ SUPPORTED_PROTOCOL_CHAINS: dict[str, tuple[str, ...]] = {
 }
 
 SUPPORTED_SWAP_PROTOCOLS = tuple(SUPPORTED_PROTOCOL_CHAINS)
-SUPPORTED_SWAP_CHAINS = tuple(
-    sorted({chain for chains in SUPPORTED_PROTOCOL_CHAINS.values() for chain in chains})
-)
+SUPPORTED_SWAP_CHAINS = tuple(sorted({chain for chains in SUPPORTED_PROTOCOL_CHAINS.values() for chain in chains}))
 DEFAULT_PROTOCOL = "uniswap_v3"
 
 
@@ -137,6 +135,19 @@ class UniswapRSIStrategy(IntentStrategy):
     - rsi_period: Number of periods for RSI calculation (default: 14)
     - rsi_oversold: RSI level that triggers buy (default: 30)
     - rsi_overbought: RSI level that triggers sell (default: 70)
+    - rsi_rearm_band: RSI distance past the threshold required to re-arm the
+      signal after a confirmed trade (default: 10). After a buy at RSI < 30,
+      another buy is armed only once RSI recovers above 30 + 10; mirrored on
+      the sell side. This is the hysteresis that prevents threshold-noise
+      trade sprees (RSI flickering 29.9 / 30.1 / 29.8 firing on every dip).
+    - trade_cooldown_seconds: Minimum seconds between confirmed trades
+      (default: 0 = disabled). Measured on the market snapshot's timestamp,
+      so it is deterministic in tests and backtests. A time backstop on top
+      of the re-arm band — the two protections fail independently.
+    - max_position_usd: Cap on the strategy-acquired base-token inventory
+      (default: 3 x trade_size_usd; 0 disables). Buys are blocked once the
+      tracked position would exceed the cap, so repeated oversold episodes
+      cannot DCA without bound.
     - max_slippage_bps: Maximum allowed slippage in basis points (default: 50 = 0.5%)
     - protocol: Swap connector to route through (default: "uniswap_v3")
     - base_token: Token to trade (default: "WETH")
@@ -199,6 +210,13 @@ class UniswapRSIStrategy(IntentStrategy):
         self.rsi_oversold = Decimal(str(self.get_config("rsi_oversold", "30")))
         self.rsi_overbought = Decimal(str(self.get_config("rsi_overbought", "70")))
 
+        # Firing discipline (see class docstring): hysteresis re-arm band,
+        # optional time cooldown, and an exposure cap on strategy inventory.
+        self.rsi_rearm_band = Decimal(str(self.get_config("rsi_rearm_band", "10")))
+        self.trade_cooldown_seconds = int(self.get_config("trade_cooldown_seconds", 0))
+        default_cap = Decimal(str(self.get_config("trade_size_usd", "10"))) * Decimal("3")
+        self.max_position_usd = Decimal(str(self.get_config("max_position_usd", default_cap)))
+
         # Slippage protection
         # 50 bps = 0.5% slippage tolerance
         self.max_slippage_bps = int(self.get_config("max_slippage_bps", 50))
@@ -216,6 +234,24 @@ class UniswapRSIStrategy(IntentStrategy):
         # This can be useful for logging/debugging
         self._consecutive_holds = 0
         self._last_rsi_signal = "NEUTRAL"
+        # Timestamp (ISO, snapshot time) of the last CONFIRMED fill — drives the
+        # optional trade cooldown. Persisted so a restart can't reset the clock.
+        self._last_trade_at: datetime | None = None
+        # Strategy-acquired base-token inventory (NOT the raw wallet balance:
+        # pre-existing wallet holdings are the user's, not this strategy's
+        # position). Updated from confirmed fills; drives max_position_usd.
+        self._position_base_amount = Decimal("0")
+        # Fail-safe: set when a confirmed BUY could not be counted (no decoded
+        # amount AND no price estimate) — the cap can no longer be trusted to
+        # bound exposure, so further buys are blocked until a countable fill
+        # clears it. Uncounted SELLS only overcount inventory (cap engages
+        # early), which is already the safe direction. Persisted.
+        self._position_tracking_failed = False
+        # Latest snapshot context captured in decide(); used by the fill hook
+        # (which has no market access) for cooldown stamping and, when the
+        # execution result carries no decoded amounts, a position estimate.
+        self._last_seen_market_ts: datetime | None = None
+        self._last_base_price: Decimal | None = None
 
         # Log initialization for debugging
         logger.info(
@@ -273,6 +309,32 @@ class UniswapRSIStrategy(IntentStrategy):
                 field="rsi_oversold",
             )
 
+        rearm_band = Decimal(str(self.get_config("rsi_rearm_band", "10")))
+        if rearm_band < 0:
+            raise ConfigValidationError(f"rsi_rearm_band ({rearm_band}) must be >= 0", field="rsi_rearm_band")
+        # The re-arm levels must lie STRICTLY inside the neutral zone,
+        # otherwise a side can latch permanently: at exactly
+        # oversold + band == overbought, no RSI value in the (exclusive)
+        # neutral zone ever reaches the buy re-arm level, so the buy side
+        # never re-arms. band == 0 remains valid (re-arm levels collapse
+        # onto the thresholds themselves, which are reachable).
+        if oversold + rearm_band >= overbought or overbought - rearm_band <= oversold:
+            raise ConfigValidationError(
+                f"rsi_rearm_band ({rearm_band}) is too wide for the neutral zone "
+                f"[{oversold}, {overbought}]: re-arm levels must stay inside it",
+                field="rsi_rearm_band",
+            )
+
+        cooldown = int(self.get_config("trade_cooldown_seconds", 0))
+        if cooldown < 0:
+            raise ConfigValidationError(
+                f"trade_cooldown_seconds ({cooldown}) must be >= 0", field="trade_cooldown_seconds"
+            )
+
+        max_position = Decimal(str(self.get_config("max_position_usd", "0")))
+        if max_position < 0:
+            raise ConfigValidationError(f"max_position_usd ({max_position}) must be >= 0", field="max_position_usd")
+
     # =========================================================================
     # MAIN DECISION LOGIC
     # =========================================================================
@@ -318,6 +380,17 @@ class UniswapRSIStrategy(IntentStrategy):
 
         base_price = market.price(self.base_token)
         logger.debug(f"Current {self.base_token} price: ${base_price:,.2f}")
+
+        # Capture snapshot context for the fill hook, which has no market
+        # access: the snapshot timestamp stamps the trade cooldown (so it is
+        # deterministic in tests/backtests), and the price backs the position
+        # estimate when an execution result carries no decoded amounts.
+        # Store the snapshot's clock verbatim (or None for bare doubles) —
+        # injecting wall time HERE would leak it into persisted state and mix
+        # clocks in a backtest; the use-sites fall back to wall time only at
+        # the moment of comparison.
+        self._last_seen_market_ts = getattr(market, "timestamp", None)
+        self._last_base_price = Decimal(str(base_price)) if base_price else None
 
         # =================================================================
         # STEP 2: Get RSI indicator
@@ -380,6 +453,38 @@ class UniswapRSIStrategy(IntentStrategy):
                     f"(hold #{self._consecutive_holds})"
                 )
 
+            # Time backstop: a confirmed fill inside the cooldown window blocks
+            # further trades regardless of what the latch says. The signal is
+            # not lost — once the window expires, the still-pending transition
+            # fires on the next iteration.
+            cooldown_left = self._cooldown_remaining_seconds()
+            if cooldown_left > 0:
+                self._consecutive_holds += 1
+                return Intent.hold(
+                    reason=f"Oversold (RSI={rsi.value:.1f}) but trade cooldown active ({cooldown_left:.0f}s left)"
+                )
+
+            # Fail-safe: a previous buy fill could not be counted, so the cap
+            # cannot be trusted — block buys rather than trade with an
+            # under-counted position (CodeRabbit, PR #2726).
+            if self.max_position_usd > 0 and self._position_tracking_failed:
+                self._consecutive_holds += 1
+                return Intent.hold(
+                    reason=f"Oversold (RSI={rsi.value:.1f}) but position tracking failed on a prior fill; "
+                    "cap unenforceable — holding"
+                )
+
+            # Exposure cap: block the buy when the strategy-acquired inventory
+            # would exceed max_position_usd. Repeated oversold episodes in a
+            # downtrend must not DCA without bound.
+            position_usd = self._position_base_amount * Decimal(str(base_price))
+            if self.max_position_usd > 0 and position_usd + self.trade_size_usd > self.max_position_usd:
+                self._consecutive_holds += 1
+                return Intent.hold(
+                    reason=f"Oversold (RSI={rsi.value:.1f}) but position cap reached "
+                    f"(${position_usd:.2f} held + ${self.trade_size_usd} trade > ${self.max_position_usd} cap)"
+                )
+
             # First, check we have enough quote token (USDC) to buy
             if quote_balance.balance_usd < self.trade_size_usd:
                 return Intent.hold(
@@ -421,6 +526,14 @@ class UniswapRSIStrategy(IntentStrategy):
                     f"(hold #{self._consecutive_holds})"
                 )
 
+            # Time backstop — see the note on the OVERSOLD branch.
+            cooldown_left = self._cooldown_remaining_seconds()
+            if cooldown_left > 0:
+                self._consecutive_holds += 1
+                return Intent.hold(
+                    reason=f"Overbought (RSI={rsi.value:.1f}) but trade cooldown active ({cooldown_left:.0f}s left)"
+                )
+
             # Calculate how much base token we need to sell for our trade size
             min_base_to_sell = self.trade_size_usd / base_price
 
@@ -453,17 +566,27 @@ class UniswapRSIStrategy(IntentStrategy):
             )
 
         # -----------------------------------------------------------------
-        # CASE 3: NEUTRAL (30 < RSI < 70) -> HOLD
+        # CASE 3: NEUTRAL (30 < RSI < 70) -> HOLD (and maybe re-arm)
         # -----------------------------------------------------------------
-        # No clear signal. Stay on the sidelines.
+        # No clear signal. Stay on the sidelines. The latch only resets to
+        # NEUTRAL once RSI has crossed the re-arm level (threshold + band) —
+        # a bare tick past the threshold (29.9 -> 30.1 -> 29.8) must NOT
+        # re-arm, or threshold noise fires a trade on every dip.
 
         else:
             self._consecutive_holds += 1
-            self._last_rsi_signal = "NEUTRAL"
+            rearmed = self._update_rearm_latch(rsi.value)
+
+            if not rearmed and self._last_rsi_signal == "OVERSOLD":
+                detail = f"buy re-arms at RSI >= {self.rsi_oversold + self.rsi_rearm_band}"
+            elif not rearmed and self._last_rsi_signal == "OVERBOUGHT":
+                detail = f"sell re-arms at RSI <= {self.rsi_overbought - self.rsi_rearm_band}"
+            else:
+                detail = "signal armed"
 
             return Intent.hold(
                 reason=f"RSI={rsi.value:.2f} in neutral zone "
-                f"[{self.rsi_oversold}-{self.rsi_overbought}] "
+                f"[{self.rsi_oversold}-{self.rsi_overbought}], {detail} "
                 f"(hold #{self._consecutive_holds})"
             )
 
@@ -492,6 +615,9 @@ class UniswapRSIStrategy(IntentStrategy):
                 "rsi_period": self.rsi_period,
                 "rsi_oversold": str(self.rsi_oversold),
                 "rsi_overbought": str(self.rsi_overbought),
+                "rsi_rearm_band": str(self.rsi_rearm_band),
+                "trade_cooldown_seconds": self.trade_cooldown_seconds,
+                "max_position_usd": str(self.max_position_usd),
                 "max_slippage_bps": self.max_slippage_bps,
                 "protocol": self.protocol,
                 "pair": f"{self.base_token}/{self.quote_token}",
@@ -499,6 +625,8 @@ class UniswapRSIStrategy(IntentStrategy):
             "state": {
                 "consecutive_holds": self._consecutive_holds,
                 "last_rsi_signal": self._last_rsi_signal,
+                "last_trade_at": self._last_trade_at.isoformat() if self._last_trade_at else None,
+                "position_base_amount": str(self._position_base_amount),
             },
         }
 
@@ -509,8 +637,56 @@ class UniswapRSIStrategy(IntentStrategy):
             return "OVERBOUGHT"
         return "NEUTRAL"
 
+    def _update_rearm_latch(self, rsi_value: Decimal) -> bool:
+        """Reset the latch to NEUTRAL only past the re-arm level.
+
+        Hysteresis: after a buy latched OVERSOLD, the buy side re-arms only
+        when RSI recovers to ``rsi_oversold + rsi_rearm_band``; after a sell
+        latched OVERBOUGHT, only when RSI falls to ``rsi_overbought -
+        rsi_rearm_band``. Returns True when the signal is (now) armed.
+        """
+        if self._last_rsi_signal == "OVERSOLD" and rsi_value < self.rsi_oversold + self.rsi_rearm_band:
+            return False
+        if self._last_rsi_signal == "OVERBOUGHT" and rsi_value > self.rsi_overbought - self.rsi_rearm_band:
+            return False
+        self._last_rsi_signal = "NEUTRAL"
+        return True
+
+    def _cooldown_remaining_seconds(self) -> float:
+        """Seconds left in the trade cooldown window; 0 when free to trade.
+
+        Measured on the market snapshot's clock (``_last_seen_market_ts``)
+        rather than wall time, so backtests and tests that replay candles
+        quickly see the same behavior as a live run.
+        """
+        if self.trade_cooldown_seconds <= 0 or self._last_trade_at is None:
+            return 0.0
+        now = self._last_seen_market_ts or datetime.now(UTC)
+        elapsed = (now - self._last_trade_at).total_seconds()
+        return max(0.0, self.trade_cooldown_seconds - elapsed)
+
+    def _extract_swap_base_amount(self, result: Any, *, bought: bool) -> Decimal | None:
+        """Base-token amount moved by a confirmed swap, decoded from the result.
+
+        For a buy the base amount is the swap OUTPUT; for a sell it is the
+        INPUT. Returns None when the result carries no decoded amounts (the
+        caller falls back to a price-based estimate).
+        """
+        amounts = getattr(result, "swap_amounts", None)
+        if amounts is None:
+            return None
+        names = ("amount_out_decimal", "amount_out") if bought else ("amount_in_decimal", "amount_in")
+        for name in names:
+            value = getattr(amounts, name, None)
+            if value is not None:
+                try:
+                    return Decimal(str(value))
+                except Exception:  # noqa: BLE001
+                    return None
+        return None
+
     def on_intent_executed(self, intent: Any, success: bool, result: Any) -> None:
-        """Latch ``_last_rsi_signal`` only on a confirmed successful swap.
+        """Latch signal, stamp the cooldown, and track inventory on confirmed fills.
 
         Setting the latch inline in ``decide()`` (before the runner reports
         success) would mean a transient compile/RPC failure persists OVERSOLD
@@ -522,20 +698,70 @@ class UniswapRSIStrategy(IntentStrategy):
             return
         from_token = getattr(intent, "from_token", None)
         to_token = getattr(intent, "to_token", None)
+
+        # Price-based fallback when the execution result carries no decoded
+        # amounts: assume the configured trade size filled at the last seen
+        # price. An estimate beats silently not counting the fill — the cap
+        # exists to bound exposure, and uncounted fills would defeat it.
+        # Repeated estimate-only fills accumulate slippage/price drift, so
+        # the cap is approximate under fallback; decoded amounts (the normal
+        # live path) keep it exact.
+        estimate: Decimal | None = None
+        if self._last_base_price and self._last_base_price > 0:
+            estimate = self.trade_size_usd / self._last_base_price
+
         if from_token == self.quote_token and to_token == self.base_token:
             self._last_rsi_signal = "OVERSOLD"
+            self._last_trade_at = self._last_seen_market_ts or datetime.now(UTC)
+            bought_amount = self._extract_swap_base_amount(result, bought=True) or estimate
+            if bought_amount is not None:
+                self._position_base_amount += bought_amount
+                self._position_tracking_failed = False
+            else:
+                self._position_tracking_failed = True
+                logger.warning(
+                    "Buy confirmed but no decoded amount and no price estimate; "
+                    "position cap unenforceable — further buys blocked until a countable fill."
+                )
         elif from_token == self.base_token and to_token == self.quote_token:
             self._last_rsi_signal = "OVERBOUGHT"
+            self._last_trade_at = self._last_seen_market_ts or datetime.now(UTC)
+            sold_amount = self._extract_swap_base_amount(result, bought=False) or estimate
+            if sold_amount is not None:
+                self._position_base_amount = max(Decimal("0"), self._position_base_amount - sold_amount)
+                self._position_tracking_failed = False
+            else:
+                # Overcounting only engages the cap earlier — safe direction,
+                # no block needed.
+                logger.warning(
+                    "Sell confirmed but no decoded amount and no price estimate; position cap may overcount."
+                )
 
     def get_persistent_state(self) -> dict[str, Any]:
         return {
             "consecutive_holds": self._consecutive_holds,
             "last_rsi_signal": self._last_rsi_signal,
+            "last_trade_at": self._last_trade_at.isoformat() if self._last_trade_at else "",
+            "position_base_amount": str(self._position_base_amount),
+            "position_tracking_failed": self._position_tracking_failed,
         }
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
         self._consecutive_holds = int(state.get("consecutive_holds", 0) or 0)
         self._last_rsi_signal = str(state.get("last_rsi_signal", "NEUTRAL") or "NEUTRAL")
+        raw_trade_at = state.get("last_trade_at")
+        if raw_trade_at:
+            try:
+                self._last_trade_at = datetime.fromisoformat(str(raw_trade_at))
+            except ValueError:
+                self._last_trade_at = None
+        raw_position = state.get("position_base_amount")
+        if raw_position not in (None, ""):
+            try:
+                self._position_base_amount = Decimal(str(raw_position))
+            except Exception:  # noqa: BLE001
+                self._position_base_amount = Decimal("0")
+        self._position_tracking_failed = bool(state.get("position_tracking_failed", False))
 
     # =========================================================================
     # TEARDOWN SUPPORT

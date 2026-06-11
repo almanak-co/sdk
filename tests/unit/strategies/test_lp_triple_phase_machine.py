@@ -42,6 +42,15 @@ def _bare_strategy() -> AccountingQuantLPTripleStrategy:
     obj._phase = PHASE_INIT
     obj._position_ids = [None, None, None]
     obj._pool_addresses = [None, None, None]
+    # Tier-1 hardening state (AccountingStrats.md D3) — the handlers and
+    # persistence now read these unconditionally.
+    obj._range_lowers = [None, None, None]
+    obj._range_uppers = [None, None, None]
+    obj._rebalancing_slot = None
+    obj._oor_streaks = {0: 0, 1: 0, 2: 0}
+    obj._last_rebalance_at = None
+    obj._rebalance_day = ""
+    obj._rebalances_today = 0
     obj._initial_balance_usd = Decimal("100")
     obj._initial_balance_token = Decimal("100")
     obj.pool = "WETH/USDC/500"

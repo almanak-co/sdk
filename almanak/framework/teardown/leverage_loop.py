@@ -70,6 +70,7 @@ def generate_leverage_loop_teardown(
     max_slippage_hard: Decimal = Decimal("0.03"),
     max_rounds: int = 12,
     swap_protocol: str | None = None,
+    consolidate_to: str | None = None,
 ) -> list[BaseIntent]:
     """Build a health-factor-aware unwind for a leverage-loop position.
 
@@ -88,6 +89,13 @@ def generate_leverage_loop_teardown(
             through (e.g. "enso"). Required for exotic collateral with no direct
             DEX pool against the debt token (e.g. sUSDe/USDC, which has no
             Uniswap V3 pool); left None the swap uses the default router.
+        consolidate_to: Which leg token the teardown's residual sweep lands in.
+            Defaults to ``borrow_token`` (the historical behavior: the final
+            withdraw-all collateral is swapped into the debt token). Strategies
+            whose accounting/base asset IS the collateral (e.g. a USDC-collateral
+            loop that must finish in USDC) pass ``collateral_token``; the final
+            sweep then converts residual *borrow*-token buffer leftovers back
+            into collateral instead. Must be one of the two leg tokens.
 
     Returns:
         Ordered list of intents: N x (withdraw, swap, repay) then withdraw-all +
@@ -96,8 +104,16 @@ def generate_leverage_loop_teardown(
     Raises:
         LeverageUnwindError: Health factor too low to withdraw any collateral
             safely (needs flash-loan deleverage).
-        ValueError: Health or price data unavailable (cannot size the unwind).
+        ValueError: Health or price data unavailable (cannot size the unwind), or
+            ``consolidate_to`` is not one of the two leg tokens.
     """
+    if consolidate_to is not None and consolidate_to not in (collateral_token, borrow_token):
+        raise ValueError(
+            f"consolidate_to {consolidate_to!r} must be one of the position legs "
+            f"({collateral_token!r}, {borrow_token!r})"
+        )
+    sweep_to_collateral = consolidate_to == collateral_token and collateral_token != borrow_token
+
     is_hard = _is_hard_mode(mode)
     floor = hf_floor_hard if is_hard else hf_floor
     slippage = max_slippage_hard if is_hard else max_slippage
@@ -123,7 +139,13 @@ def generate_leverage_loop_teardown(
     if debt_usd <= _DUST_USD:
         if collateral_usd > _DUST_USD:
             intents.append(_withdraw(protocol, collateral_token, withdraw_all=True, market_id=market_id, chain=chain))
-            intents.append(_swap_all(collateral_token, borrow_token, slippage, chain, swap_protocol))
+            if sweep_to_collateral:
+                # Withdraw-all already lands in the target asset; only stray
+                # wallet borrow-token needs consolidating.
+                if _wallet_balance(market, borrow_token) > 0:
+                    intents.append(_swap_all(borrow_token, collateral_token, slippage, chain, swap_protocol))
+            else:
+                intents.append(_swap_all(collateral_token, borrow_token, slippage, chain, swap_protocol))
         return intents
 
     if lltv <= 0:
@@ -210,7 +232,14 @@ def generate_leverage_loop_teardown(
         )
 
     intents.append(_withdraw(protocol, collateral_token, withdraw_all=True, market_id=market_id, chain=chain))
-    intents.append(_swap_all(collateral_token, borrow_token, slippage, chain, swap_protocol))
+    if sweep_to_collateral:
+        # The staircase's buffers (settle + slippage) intentionally over-fund the
+        # final repay, so the wallet ends holding residual borrow token; sweep it
+        # back into the collateral/base asset rather than converting the whole
+        # recovered collateral stack into the debt token.
+        intents.append(_swap_all(borrow_token, collateral_token, slippage, chain, swap_protocol))
+    else:
+        intents.append(_swap_all(collateral_token, borrow_token, slippage, chain, swap_protocol))
     return intents
 
 

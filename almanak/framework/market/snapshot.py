@@ -1508,6 +1508,33 @@ class MarketSnapshot:
         self._record_critical_data_failure("ichimoku", str(cache_key), f"Ichimoku data not available for {token}")
         raise ValueError(f"Ichimoku data not available for {token}")
 
+    def invalidate_balance(self, token: str, protocol: str | None = None) -> None:
+        """Evict any memoized wallet balance for ``token`` so the next
+        :meth:`balance` call re-queries the provider.
+
+        Sequential execution lanes mutate wallet balances mid-snapshot: a
+        teardown staircase's REPAY consumes the debt token before a later
+        ``amount="all"`` sweep resolves against this same snapshot, and the
+        stale memo then over-resolves by exactly the repaid amount (compile
+        fails on insufficient balance). The gateway-level cache is already
+        invalidated by the commit pipeline after each intent — this clears the
+        snapshot-level memo so the fresh value is actually read.
+
+        No-op on provider-less snapshots (paper / dry-run inject simulated
+        balances directly into the memo maps): with no provider there is no
+        fresher source to re-query, so evicting would turn every subsequent
+        read into a ValueError instead of serving the (correct, simulated)
+        memo.
+        """
+        if self._balance_provider is None:
+            return
+        resolved = self._resolve_protocol_variant(token, protocol)
+        stale_keys = [key for key in self._balance_cache if key == resolved or key.startswith(f"{resolved}@")]
+        for key in stale_keys:
+            self._balance_cache.pop(key, None)
+            self._balance_usd_unmeasured.discard(key)
+        self._balances.pop(resolved, None)
+
     def balance(
         self,
         token: str,

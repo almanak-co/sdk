@@ -10,5 +10,12 @@
     "base_token": "WETH",
     "base_token_address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
     "quote_token": "USDC",
-    "quote_token_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+    "quote_token_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+    "rsi_rearm_band": 0,
+    "_rearm_comment": "rsi_rearm_band=0: the 0/1 force-trade thresholds leave no neutral zone for the default hysteresis band; the latch alone gates re-fires here.",
+    "anvil_funding": {
+        "ETH": 1,
+        "WETH": 0.1,
+        "USDC": 100
+    }
 }

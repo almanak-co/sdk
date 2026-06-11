@@ -10,5 +10,7 @@
     "base_token": "WPOL",
     "base_token_address": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
     "quote_token": "USDC",
-    "quote_token_address": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+    "quote_token_address": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+    "rsi_rearm_band": 0,
+    "_rearm_comment": "rsi_rearm_band=0: the 0/1 force-trade thresholds leave no neutral zone for the default hysteresis band; the latch alone gates re-fires here."
 }

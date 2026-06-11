@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -274,3 +275,83 @@ async def test_registry_reconciliation_raises_on_db_error(store):
     # The collision classifier must fire under registry_reconciliation too —
     # NOT just on the legacy 'commit' path. Validates UAT §D3.F9.
     assert "same_pool" in exc_info.value.semantic_grouping_key
+
+
+# ---------------------------------------------------------------------------
+# Handle reuse after close (AccountingStrats.md D3 / VIB-5051)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handle_reuse_after_close_moves_handle_to_new_row(store):
+    """A reopen of the same logical slot (new physical position, same
+    explicit handle) must succeed once the old row is terminal: the handle
+    moves to the new row, the old row keeps its history with handle=NULL.
+
+    This is the LP-rebalance shape: close leg -> reopen centered mints a new
+    NFT, so the physical-identity upsert key does not fire and the plain
+    INSERT used to trip ix_registry_handle against the closed row.
+    """
+    s, db_path = store
+
+    # Open position A with the handle, then close it (same physical row).
+    await s.save_ledger_and_registry_atomic(_ledger("ledger-1", "0xopen_a"), _registry("hash_a", handle="leg_narrow"), None)
+    closed_a = replace(
+        _registry("hash_a", handle="leg_narrow"), status="closed", closed_at_block=2000, closed_tx="0xclose_a"
+    )
+    await s.save_ledger_and_registry_atomic(_ledger("ledger-2", "0xclose_a"), closed_a, None)
+
+    # Reopen the SAME slot: new physical identity, same handle.
+    await s.save_ledger_and_registry_atomic(
+        _ledger("ledger-3", "0xopen_b"), _registry("hash_b", handle="leg_narrow", sgk="arbitrum:pool_a"), None
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT physical_identity_hash, status, handle FROM position_registry ORDER BY physical_identity_hash"
+        ).fetchall()
+        assert rows == [
+            ("hash_a", "closed", None),  # history kept, handle released
+            ("hash_b", "open", "leg_narrow"),  # handle tracks the current position
+        ]
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_handle_collision_with_open_row_still_fails_loud(store):
+    """A second OPEN claiming a handle that an OPEN row already holds is a
+    genuine strategy bug — the terminal-row release must NOT mask it."""
+    s, _db_path = store
+
+    await s.save_ledger_and_registry_atomic(_ledger("ledger-1", "0xopen_a"), _registry("hash_a", handle="leg_narrow"), None)
+
+    with pytest.raises(Exception, match="(?i)unique|handle|persistence"):
+        await s.save_ledger_and_registry_atomic(
+            _ledger("ledger-2", "0xopen_b"), _registry("hash_b", handle="leg_narrow", sgk="arbitrum:pool_b"), None
+        )
+
+
+@pytest.mark.asyncio
+async def test_idempotent_retry_does_not_release_own_handle(store):
+    """A retry of the same physical row (same hash, same handle) must keep
+    the handle — the physical-identity guard in the release UPDATE."""
+    s, db_path = store
+
+    row = _registry("hash_a", handle="leg_narrow")
+    await s.save_ledger_and_registry_atomic(_ledger("ledger-1", "0xopen_a"), row, None)
+
+    closed = replace(
+        _registry("hash_a", handle="leg_narrow"), status="closed", closed_at_block=2000, closed_tx="0xclose_a"
+    )
+    await s.save_ledger_and_registry_atomic(_ledger("ledger-2", "0xclose_a"), closed, None)
+    # Same-content retry (e.g. lost response): must not strip the handle.
+    await s.save_ledger_and_registry_atomic(_ledger("ledger-2", "0xclose_a"), closed, None)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute("SELECT physical_identity_hash, status, handle FROM position_registry").fetchall()
+        assert rows == [("hash_a", "closed", "leg_narrow")]
+    finally:
+        conn.close()
