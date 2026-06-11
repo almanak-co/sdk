@@ -376,8 +376,27 @@ class UniswapV4SDK:
         Returns:
             sqrtPriceX96 (int) if successful, None if query fails or no RPC available.
         """
+        # VIB-5052 — every return-None path below is a money-path on-chain read
+        # fallback: the caller (adapter.compile_lp_open_intent) substitutes an
+        # *estimated* sqrtPrice when this returns None, which is exactly how the
+        # VIB-5038 getSlot0 selector bug stayed invisible for ~2 months. Each
+        # fallback MUST be counted on ``onchain_read_fallback_total`` so an
+        # operator alert fires the day the read starts degrading, not when a
+        # downstream accounting drift report eventually surfaces it.
+        from almanak.framework.observability.metrics import (
+            OnchainReadFallbackReason,
+            record_onchain_read_fallback,
+        )
+
         state_view = self.addresses.get("state_view")
         if not state_view:
+            record_onchain_read_fallback(
+                protocol="uniswap_v4",
+                chain=self.chain,
+                call="getSlot0",
+                reason=OnchainReadFallbackReason.READER_UNAVAILABLE,
+            )
+            logger.warning("V4 StateView address unavailable on %s — falling back to estimated sqrtPrice", self.chain)
             return None
 
         from almanak.connectors.uniswap_v4.hooks import build_get_slot0_calldata, decode_slot0_response
@@ -394,6 +413,12 @@ class UniswapV4SDK:
                 timeout=10.0,
             )
         except Exception as e:
+            record_onchain_read_fallback(
+                protocol="uniswap_v4",
+                chain=self.chain,
+                call="getSlot0",
+                reason=OnchainReadFallbackReason.RPC_CALL_FAILED,
+            )
             logger.warning(
                 "V4 StateView.getSlot0 RPC call failed on %s: %s — falling back to estimated sqrtPrice",
                 self.chain,
@@ -402,6 +427,12 @@ class UniswapV4SDK:
             return None
 
         if hex_result is None:
+            record_onchain_read_fallback(
+                protocol="uniswap_v4",
+                chain=self.chain,
+                call="getSlot0",
+                reason=OnchainReadFallbackReason.EMPTY_RESULT,
+            )
             logger.warning(
                 "V4 StateView.getSlot0 returned no result on %s — falling back to estimated sqrtPrice",
                 self.chain,
@@ -411,10 +442,22 @@ class UniswapV4SDK:
         try:
             pool_state = decode_slot0_response(hex_result)
         except Exception:
+            record_onchain_read_fallback(
+                protocol="uniswap_v4",
+                chain=self.chain,
+                call="getSlot0",
+                reason=OnchainReadFallbackReason.DECODE_FAILED,
+            )
             logger.warning("V4 StateView.getSlot0 decode failed on %s, falling back to estimated sqrtPrice", self.chain)
             return None
 
         if not pool_state.exists or pool_state.sqrt_price_x96 == 0:
+            record_onchain_read_fallback(
+                protocol="uniswap_v4",
+                chain=self.chain,
+                call="getSlot0",
+                reason=OnchainReadFallbackReason.POOL_UNINITIALIZED,
+            )
             logger.warning("V4 pool not initialized on %s, falling back to estimated sqrtPrice", self.chain)
             return None
 

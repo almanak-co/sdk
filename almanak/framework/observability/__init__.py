@@ -13,8 +13,11 @@ from almanak.framework.observability.ledger import LedgerEntry, build_ledger_ent
 from almanak.framework.observability.metrics import (
     ACCOUNTING_RAW_WEI_SUSPECTED_TOTAL,
     FRAMEWORK_REGISTRY,
+    ONCHAIN_READ_FALLBACK_TOTAL,
     V4_LP_PARSER_DROPS_TOTAL,
+    OnchainReadFallbackReason,
     V4LPDropReason,
+    record_onchain_read_fallback,
     record_raw_wei_suspected,
     record_v4_lp_parser_drop,
 )
@@ -22,13 +25,16 @@ from almanak.framework.observability.metrics import (
 __all__ = [
     "ACCOUNTING_RAW_WEI_SUSPECTED_TOTAL",
     "FRAMEWORK_REGISTRY",
+    "ONCHAIN_READ_FALLBACK_TOTAL",
     "ForensicEvent",
     "LedgerEntry",
+    "OnchainReadFallbackReason",
     "StrategyPhase",
     "V4_LP_PARSER_DROPS_TOTAL",
     "V4LPDropReason",
     "build_ledger_entry",
     "get_cycle_id",
+    "record_onchain_read_fallback",
     "record_raw_wei_suspected",
     "record_v4_lp_parser_drop",
     "set_cycle_id",

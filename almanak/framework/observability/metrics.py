@@ -71,6 +71,100 @@ ACCOUNTING_RAW_WEI_SUSPECTED_TOTAL = Counter(
 )
 
 
+# VIB-5052 — money-path on-chain read fallback observability.
+#
+# The VIB-5038 getSlot0 selector bug survived ~2 months in production ONLY
+# because a hard on-chain read failure (StateView.getSlot0 reverting) was
+# silently converted to an estimated value with NO metric and NO operator
+# signal. The selector was the trigger; the defect *class* is "invisible
+# money-path fallback".
+#
+# Contract: any money-path on-chain read that can fall back to an
+# estimate / None MUST increment this counter on the fallback, labelled
+# ``{protocol, chain, call, reason}`` so the degradation is visible the day
+# it starts (an alert rule on ``rate(onchain_read_fallback_total[…]) > 0``
+# fires immediately instead of waiting for a downstream accounting-drift
+# report). Provenance is preserved separately downstream (e.g. the V4 LP
+# adapter stamps ``price_source`` / ``compile_time_current_tick_source`` into
+# bundle metadata) — the metric is the operator-visible half of the contract,
+# provenance is the reader-trust half. See
+# ``docs/internal/blueprints/27-accounting.md`` §7.5 (ValueConfidence —
+# degrade rather than fabricate) and §7.10 (the read-fallback observability
+# contract).
+#
+# Labels are an OPEN set across protocols (any connector adopts the helper),
+# but each label VALUE must be a short, bounded identifier — never a
+# user-supplied or unbounded string — or it spawns a divergent Prometheus
+# time-series. The ``reason`` token is a stable error code (mirrors
+# :class:`V4LPDropReason`'s discipline) so dashboards/alerts can filter on it.
+class OnchainReadFallbackReason(StrEnum):
+    """Stable error codes for money-path on-chain read fallback paths.
+
+    These string values are the ``reason=`` label on
+    ``onchain_read_fallback_total`` AND (by convention) the ``reason=`` token
+    in the structured WARNING that accompanies the fallback. They are part of
+    the observability contract and not safe to rename without a coordinated
+    dashboard/alert-rule update.
+    """
+
+    RPC_CALL_FAILED = "rpc_call_failed"
+    EMPTY_RESULT = "empty_result"
+    DECODE_FAILED = "decode_failed"
+    POOL_UNINITIALIZED = "pool_uninitialized"
+    READER_UNAVAILABLE = "reader_unavailable"
+
+
+ONCHAIN_READ_FALLBACK_TOTAL = Counter(
+    "onchain_read_fallback_total",
+    "Total money-path on-chain reads that fell back to an estimate/None, "
+    "by protocol, chain, call and reason (VIB-5052).",
+    ["protocol", "chain", "call", "reason"],
+    registry=FRAMEWORK_REGISTRY,
+)
+
+
+def record_onchain_read_fallback(
+    *,
+    protocol: str,
+    chain: str,
+    call: str,
+    reason: OnchainReadFallbackReason | str,
+) -> None:
+    """Increment ``onchain_read_fallback_total`` for a money-path read fallback.
+
+    Call this at the exact site where a money-path on-chain read fails and the
+    code falls back to an estimate or ``None`` (VIB-5052). The fallback may be
+    legitimate, but it MUST be visible: an operator alert on this counter is
+    what would have surfaced the VIB-5038 ``getSlot0`` selector regression on
+    day one instead of two months later.
+
+    Args:
+        protocol: Connector / protocol name (e.g. ``"uniswap_v4"``). Short,
+            bounded identifier — never user-supplied.
+        chain: Chain name (lowercased; e.g. ``"base"``, ``"arbitrum"``).
+        call: The on-chain call that fell back (e.g. ``"getSlot0"``). Stable
+            short identifier naming the read, not a free-form message.
+        reason: One of :class:`OnchainReadFallbackReason`. Strings are accepted
+            to keep call sites terse; the value is coerced via the enum so an
+            unknown string fails fast at test time rather than silently
+            polluting label cardinality in production.
+
+    Raises:
+        ValueError: if ``reason`` is not a recognised
+            :class:`OnchainReadFallbackReason` value (defence-in-depth for
+            callers that bypass the type-checker).
+    """
+    reason_value = (
+        reason.value if isinstance(reason, OnchainReadFallbackReason) else OnchainReadFallbackReason(reason).value
+    )
+    ONCHAIN_READ_FALLBACK_TOTAL.labels(
+        protocol=(protocol or "unknown").lower() or "unknown",
+        chain=(chain or "unknown").lower() or "unknown",
+        call=call or "unknown",
+        reason=reason_value,
+    ).inc()
+
+
 def record_v4_lp_parser_drop(*, chain: str, reason: V4LPDropReason | str, outcome: V4LPDropOutcome) -> None:
     """Increment the ``v4_lp_parser_drops_total`` counter.
 
@@ -121,9 +215,12 @@ def record_raw_wei_suspected(
 __all__ = [
     "ACCOUNTING_RAW_WEI_SUSPECTED_TOTAL",
     "FRAMEWORK_REGISTRY",
+    "ONCHAIN_READ_FALLBACK_TOTAL",
+    "OnchainReadFallbackReason",
     "V4_LP_PARSER_DROPS_TOTAL",
     "V4LPDropOutcome",
     "V4LPDropReason",
+    "record_onchain_read_fallback",
     "record_raw_wei_suspected",
     "record_v4_lp_parser_drop",
 ]
