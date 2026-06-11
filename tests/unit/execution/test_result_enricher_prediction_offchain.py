@@ -26,6 +26,12 @@ g. PREDICTION_BUY with BOTH prediction_fill and on-chain receipts: the
    on-chain pass does not overwrite them.
 h. PREDICTION_BUY where bundle_metadata lacks market_id but the intent
    carries it — falls back to the intent and succeeds.
+i. (Fix A) Setup tx with empty-string or None total_cost_wei: both gas
+   keys omitted, setup_tx_count still recorded, warning names the tx index.
+j. (Fix B) Intent with protocol=None + context.protocol set: context
+   fallback routes to the parser (prediction lane mirrors the main path).
+k. (boundary) setup_txs=() -> setup_tx_count and gas keys are NOT written
+   (empty tuple is not recorded — block is gated on truthiness of setup_txs).
 """
 
 from __future__ import annotations
@@ -34,7 +40,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from almanak.framework.execution.extracted_data import PredictionFill
+from almanak.connectors.polymarket.receipt_parser import TradeResult
+from almanak.framework.execution.extracted_data import PredictionFill, PredictionSetupTx
 from almanak.framework.execution.result_enricher import ResultEnricher
 
 
@@ -150,7 +157,7 @@ class _StubRegistry:
     def __init__(self, parser: object | None = None) -> None:
         self._parser = parser
 
-    def get(self, protocol: str, chain: str):  # noqa: ARG002
+    def get(self, protocol: str, **kwargs: object):  # noqa: ARG002
         if self._parser is None:
             raise ValueError(f"no parser for {protocol}")
         return self._parser
@@ -519,3 +526,308 @@ class TestMarketIdFallback:
         assert any(
             "market_id" in w for w in enriched.extraction_warnings
         ), f"Expected market_id warning, got: {enriched.extraction_warnings}"
+
+
+# ===========================================================================
+# Setup-tx gas summation honesty (blueprint 27: Empty != Zero)
+# ===========================================================================
+
+
+def _setup_tx(total_cost_wei: str, tx_hash: str = "0xsetup1") -> PredictionSetupTx:
+    return PredictionSetupTx(
+        tx_hash=tx_hash,
+        description="approve",
+        gas_used=50_000,
+        gas_price_wei="30000000000",
+        total_cost_wei=total_cost_wei,
+    )
+
+
+class TestSetupTxGasSummation:
+    def test_valid_setup_txs_sum_to_gas_cost_native_wei(self):
+        """All-valid setup_txs: aggregate is measured and stamped."""
+        fill = PredictionFill(
+            filled_shares=Decimal("5.45"),
+            requested_shares=Decimal("5.45"),
+            avg_fill_price=Decimal("0.55"),
+            order_id="clob-1",
+            status="matched",
+            setup_txs=(
+                _setup_tx("1500000000000000"),
+                _setup_tx("500000000000000", "0xsetup2"),
+            ),
+        )
+        result = _FakeExecResult(transaction_results=[], prediction_fill=fill)
+        intent = _FakePredictionIntent(intent_type="PREDICTION_BUY", market_id=MARKET_ID)
+        context = _FakeContext(chain="polygon", protocol="polymarket")
+
+        enricher = ResultEnricher()
+        enriched = enricher.enrich(result, intent, context, bundle_metadata=_bundle_meta())
+
+        assert enriched.extracted_data["setup_tx_count"] == 2
+        assert enriched.extracted_data["gas_cost_native_wei"] == Decimal("2000000000000000")
+
+    def test_malformed_setup_tx_omits_gas_keys_and_warns(self):
+        """One malformed total_cost_wei makes the whole sum unmeasured: both gas keys omitted."""
+        fill = PredictionFill(
+            filled_shares=Decimal("5.45"),
+            requested_shares=Decimal("5.45"),
+            avg_fill_price=Decimal("0.55"),
+            order_id="clob-1",
+            status="matched",
+            setup_txs=(
+                _setup_tx("1500000000000000"),
+                _setup_tx("not-a-number", "0xbadtx"),
+            ),
+        )
+        result = _FakeExecResult(transaction_results=[], prediction_fill=fill)
+        intent = _FakePredictionIntent(intent_type="PREDICTION_BUY", market_id=MARKET_ID)
+        context = _FakeContext(chain="polygon", protocol="polymarket")
+
+        # live_mode=True proves no raise on the auxiliary path even in live mode.
+        enricher = ResultEnricher(live_mode=True)
+        enriched = enricher.enrich(result, intent, context, bundle_metadata=_bundle_meta())
+
+        # setup_tx_count is always stamped; gas keys are omitted.
+        assert enriched.extracted_data["setup_tx_count"] == 2
+        assert "gas_cost_native_wei" not in enriched.extracted_data
+        assert "gas_cost_usd" not in enriched.extracted_data
+
+        # Warning names the bad tx index and hash.
+        assert any(
+            "setup_txs[1]" in w and "0xbadtx" in w
+            for w in enriched.extraction_warnings
+        ), f"Expected bad-tx warning, got: {enriched.extraction_warnings}"
+
+        # Primary fill fields still populated normally.
+        assert enriched.extracted_data["outcome_tokens_received"] == Decimal("5.45")
+        assert enriched.extracted_data["cost_basis"] == Decimal("2.9975")
+        assert enriched.extracted_data["market_id"] == MARKET_ID
+
+    def test_malformed_setup_tx_suppresses_gas_cost_usd_even_with_price(self):
+        """gas_cost_usd is omitted when gas_cost_native_wei is unmeasured, even if price is available."""
+        fill = PredictionFill(
+            filled_shares=Decimal("5.45"),
+            requested_shares=Decimal("5.45"),
+            avg_fill_price=Decimal("0.55"),
+            order_id="clob-1",
+            status="matched",
+            setup_txs=(
+                _setup_tx("1500000000000000"),
+                _setup_tx("not-a-number", "0xbadtx"),
+            ),
+        )
+        result = _FakeExecResult(transaction_results=[], prediction_fill=fill)
+        intent = _FakePredictionIntent(intent_type="PREDICTION_BUY", market_id=MARKET_ID)
+        context = _FakeContext(chain="polygon", protocol="polymarket")
+
+        enricher = ResultEnricher()
+        enriched = enricher.enrich(
+            result,
+            intent,
+            context,
+            bundle_metadata={**_bundle_meta(), "native_token_price_usd": "0.75"},
+        )
+
+        assert "gas_cost_usd" not in enriched.extracted_data
+
+
+# ===========================================================================
+# (i) Fix A: empty-string / None total_cost_wei treated as unmeasured
+# ===========================================================================
+
+
+class TestSetupTxEmptyOrNoneCost:
+    """Empty-string and absent total_cost_wei must be classified as malformed.
+
+    Blueprint 27: Empty != Zero.  Before Fix A, both were silently coerced
+    to 0 and the aggregate was stamped as measured.
+    """
+
+    def test_empty_string_total_cost_wei_omits_gas_keys_and_warns(self):
+        """A setup tx with total_cost_wei='' makes the whole aggregate unmeasured."""
+        fill = PredictionFill(
+            filled_shares=Decimal("5.45"),
+            requested_shares=Decimal("5.45"),
+            avg_fill_price=Decimal("0.55"),
+            order_id="clob-1",
+            status="matched",
+            setup_txs=(
+                _setup_tx("1500000000000000"),
+                _setup_tx("", "0xemptytx"),  # empty string -- unmeasured
+            ),
+        )
+        result = _FakeExecResult(transaction_results=[], prediction_fill=fill)
+        intent = _FakePredictionIntent(intent_type="PREDICTION_BUY", market_id=MARKET_ID)
+        context = _FakeContext(chain="polygon", protocol="polymarket")
+
+        enricher = ResultEnricher()
+        enriched = enricher.enrich(result, intent, context, bundle_metadata=_bundle_meta())
+
+        # setup_tx_count is always stamped; gas keys are omitted.
+        assert enriched.extracted_data["setup_tx_count"] == 2
+        assert "gas_cost_native_wei" not in enriched.extracted_data
+        assert "gas_cost_usd" not in enriched.extracted_data
+
+        # Warning names the bad tx index (1) and its hash.
+        assert any(
+            "setup_txs[1]" in w and "0xemptytx" in w
+            for w in enriched.extraction_warnings
+        ), f"Expected bad-tx warning for empty string, got: {enriched.extraction_warnings}"
+
+    def test_none_total_cost_wei_via_getattr_absent_omits_gas_keys_and_warns(self):
+        """A setup tx object where getattr returns None is treated as unmeasured.
+
+        PredictionSetupTx.total_cost_wei is a required str field, so a real
+        PredictionSetupTx can never carry None -- but the enricher uses
+        getattr(tx, 'total_cost_wei', None) for defensive robustness.  We
+        exercise that path using a plain object stub.
+        """
+
+        class _NoCostTx:
+            tx_hash = "0xnotx"
+            description = "approve"
+            gas_used = 50_000
+            gas_price_wei = "30000000000"
+            # total_cost_wei is deliberately absent -- getattr returns None
+
+        fill = PredictionFill(
+            filled_shares=Decimal("5.45"),
+            requested_shares=Decimal("5.45"),
+            avg_fill_price=Decimal("0.55"),
+            order_id="clob-1",
+            status="matched",
+            setup_txs=(_NoCostTx(),),  # type: ignore[arg-type]
+        )
+        result = _FakeExecResult(transaction_results=[], prediction_fill=fill)
+        intent = _FakePredictionIntent(intent_type="PREDICTION_BUY", market_id=MARKET_ID)
+        context = _FakeContext(chain="polygon", protocol="polymarket")
+
+        enricher = ResultEnricher()
+        enriched = enricher.enrich(result, intent, context, bundle_metadata=_bundle_meta())
+
+        # setup_tx_count is always stamped.
+        assert enriched.extracted_data["setup_tx_count"] == 1
+        assert "gas_cost_native_wei" not in enriched.extracted_data
+        assert "gas_cost_usd" not in enriched.extracted_data
+
+        # Warning names tx index 0 and its hash.
+        assert any(
+            "setup_txs[0]" in w and "0xnotx" in w
+            for w in enriched.extraction_warnings
+        ), f"Expected bad-tx warning for None cost, got: {enriched.extraction_warnings}"
+
+
+# ===========================================================================
+# (j) Fix B: context.protocol fallback on the prediction lane
+# ===========================================================================
+
+
+class _ParseOrderResponseSpy:
+    """Parser stub with parse_order_response; records calls and returns a successful fill."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def parse_order_response(self, order_dict: dict) -> TradeResult:
+        self.calls.append(order_dict)
+        return TradeResult(
+            success=True,
+            filled_size=Decimal("5.45"),
+            avg_price=Decimal("0.55"),
+        )
+
+    def parse_receipt(self, receipt: dict) -> dict:  # noqa: ARG002
+        return {}
+
+
+class TestContextProtocolFallbackOnPredictionLane:
+    """intent.protocol=None + context.protocol set -> parser IS routed (Fix B).
+
+    The main enrich() path mirrors this pattern:
+        protocol = intent_protocol or context_protocol
+    Before Fix B, _extract_offchain_prediction_fields did not receive
+    context, so a frozen intent with protocol=None would fail the registry
+    lookup and silently fall back to the direct-read path.
+    """
+
+    def test_context_protocol_routes_to_parser_when_intent_protocol_is_none(self):
+        result = _FakeExecResult(
+            transaction_results=[],
+            prediction_fill=BUY_FILL,
+        )
+        # Intent with no protocol set -- simulates a frozen intent where
+        # protocol was stripped before the enricher receives it.
+        intent = _FakePredictionIntent(
+            intent_type="PREDICTION_BUY",
+            protocol=None,
+            market_id=MARKET_ID,
+        )
+        # Context carries the protocol (the runner always knows the venue).
+        context = _FakeContext(chain="polygon", protocol="polymarket")
+
+        spy = _ParseOrderResponseSpy()
+        enricher = ResultEnricher(parser_registry=_StubRegistry(parser=spy))
+
+        # bundle_metadata intentionally omits "protocol" so the only source
+        # of protocol information is context.protocol.
+        bundle_no_protocol: dict = {
+            "intent_id": "intent-1",
+            "side": "BUY",
+            "chain": "polygon",
+            "market_id": MARKET_ID,
+        }
+        enriched = enricher.enrich(
+            result, intent, context, bundle_metadata=bundle_no_protocol
+        )
+
+        # The spy's parse_order_response must have been called -- proving the
+        # context fallback routed correctly on the prediction lane.
+        assert len(spy.calls) == 1, (
+            f"Expected parse_order_response to be called once, got {len(spy.calls)} calls"
+        )
+        # The parsed values from the spy flow through into extracted_data.
+        assert enriched.extracted_data["outcome_tokens_received"] == Decimal("5.45")
+        assert enriched.extracted_data["cost_basis"] == Decimal("2.9975")
+
+
+# ===========================================================================
+# (k) Boundary: setup_txs=() -> no setup_tx_count, no gas keys written
+#
+# The block is gated on `if setup_txs:` -- an empty tuple is falsy, so
+# no keys are written at all.  This test pins the current (intentional)
+# behavior so a future refactor cannot silently change it.
+# ===========================================================================
+
+
+class TestEmptySetupTxsNotRecorded:
+    def test_empty_setup_txs_writes_no_count_and_no_gas_keys(self):
+        """setup_txs=() (the default) results in no setup_tx_count entry.
+
+        The `if setup_txs:` guard means an empty tuple does not produce any
+        gas-related keys.  Accounting downstream distinguishes "no setup
+        txs occurred" (key absent) from "setup txs occurred but cost was
+        unmeasured" (key absent + warning).  This test is a regression pin
+        against accidentally removing or relaxing that guard.
+        """
+        fill = PredictionFill(
+            filled_shares=Decimal("5.45"),
+            requested_shares=Decimal("5.45"),
+            avg_fill_price=Decimal("0.55"),
+            order_id="clob-1",
+            status="matched",
+            setup_txs=(),
+        )
+        result = _FakeExecResult(transaction_results=[], prediction_fill=fill)
+        intent = _FakePredictionIntent(intent_type="PREDICTION_BUY", market_id=MARKET_ID)
+        context = _FakeContext(chain="polygon", protocol="polymarket")
+
+        enricher = ResultEnricher()
+        enriched = enricher.enrich(result, intent, context, bundle_metadata=_bundle_meta())
+
+        # When setup_txs is empty, no gas-related keys are written.
+        assert "setup_tx_count" not in enriched.extracted_data
+        assert "gas_cost_native_wei" not in enriched.extracted_data
+        assert "gas_cost_usd" not in enriched.extracted_data
+        # No warnings about setup txs either.
+        assert not any("setup_tx" in w for w in enriched.extraction_warnings)

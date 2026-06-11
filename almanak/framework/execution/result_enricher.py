@@ -561,7 +561,9 @@ class ResultEnricher:
         # redemption is an on-chain merge call.
         offchain_extracted: set[str] = set()
         if intent_type in ("PREDICTION_BUY", "PREDICTION_SELL"):
-            offchain_extracted = self._extract_offchain_prediction_fields(result, intent, intent_type, bundle_metadata)
+            offchain_extracted = self._extract_offchain_prediction_fields(
+                result, intent, intent_type, bundle_metadata, context
+            )
 
         # Get protocol from intent, falling back to context (intent may be frozen with protocol=None)
         intent_protocol = self._get_protocol(intent)
@@ -724,6 +726,7 @@ class ResultEnricher:
         intent: Any,
         intent_type: str,
         bundle_metadata: dict[str, Any] | None,
+        context: ExecutionContext | None = None,
     ) -> set[str]:
         """Extract Polymarket CLOB fill data for PREDICTION_BUY / PREDICTION_SELL.
 
@@ -747,19 +750,29 @@ class ResultEnricher:
         explicit fees, fee-adjusted cost basis) is handled inside the
         parser, not duplicated here.
 
-        Fallback: if the parser raises or returns an unsuccessful
-        ``TradeResult``, the method falls back to reading ``prediction_fill``
-        directly (the VIB-3706 behavior) and emits a warning. This
-        preserves VIB-3706's data-preservation guarantee — a parser bug
-        cannot silently drop the only fill data the strategy will ever see.
+        Fallback: if no parser is registered for the protocol, or if the
+        parser lacks ``parse_order_response``, the method falls back to
+        reading ``prediction_fill`` directly (the VIB-3706 behavior) in
+        ALL modes and emits a warning — protocol not yet covered is not a
+        parser bug.  If the parser is present but ``parse_order_response``
+        raises (a parser bug on data the framework is about to book), the
+        behavior is mode-aware: in live mode this raises
+        :class:`~almanak.framework.execution.extract_result.CriticalAccountingError`
+        (VIB-3159 fail-closed contract, same policy as
+        ``_handle_extract_error``); in paper / backtest mode it keeps
+        VIB-3706's warn-and-fallback so a parser bug cannot silently drop
+        the only fill data the strategy will ever see. A structured
+        ``TradeResult(success=False)`` from the parser (its deliberate
+        "could not parse" signal) still falls back in all modes — unchanged.
 
         When ``prediction_fill`` is missing or unfilled (rejected order or
         resting GTC), the method attaches ``market_id`` if available and
         emits a structured ``extraction_warnings`` entry so downstream
         accounting cannot silently mistake a no-op for a fill. The data
         flow is deliberately one-way: this method writes into
-        ``extracted_data`` and ``extraction_warnings`` only; it never
-        raises.
+        ``extracted_data`` and ``extraction_warnings`` only; it raises
+        ``CriticalAccountingError`` only for a live-mode parser crash, and
+        never raises in paper / backtest mode.
 
         Args:
             result: ExecutionResult to mutate.
@@ -829,26 +842,24 @@ class ResultEnricher:
             order_id_fallback=result.extracted_data.get("order_id"),
         )
 
-        # Try the parser-routed path first. Any failure (parser raises, or
-        # returns success=False) drops to the direct prediction_fill
-        # fallback below — VIB-3706's data-preservation guarantee must
-        # survive a parser bug.
-        trade_result = None
-        try:
-            # VIB-4989: route through the receipt-parser registry, keyed on the
-            # bundle's resolved protocol (the main path already does this) -- no
-            # direct connector import and no hardcoded venue name.
-            offchain_protocol = (bundle_metadata or {}).get("protocol") or self._get_protocol(intent) or ""
-            parser = self.parser_registry.get(offchain_protocol)
-            trade_result = parser.parse_order_response(order_dict)  # type: ignore[attr-defined]
-        except Exception as exc:
-            warning = (
-                f"Enrichment fallback: {intent_type} parser.parse_order_response "
-                f"raised ({type(exc).__name__}: {exc}); falling back to direct prediction_fill read"
-            )
-            logger.warning(warning)
-            result.extraction_warnings.append(warning)
-            trade_result = None
+        # VIB-4989: route through the receipt-parser registry, keyed on the
+        # bundle's resolved protocol (the main path already does this) -- no
+        # direct connector import and no hardcoded venue name.
+        offchain_protocol = (
+            (bundle_metadata or {}).get("protocol")
+            or self._get_protocol(intent)
+            or getattr(context, "protocol", None)
+            or ""
+        )
+        # Try the parser-routed path. Failure handling is class-aware — see
+        # _parse_prediction_order_response for the (a/a'/b) classification.
+        trade_result = self._parse_prediction_order_response(
+            result=result,
+            offchain_protocol=offchain_protocol,
+            order_dict=order_dict,
+            intent_type=intent_type,
+            value_field=value_field,
+        )
 
         if trade_result is None or not trade_result.success:
             if trade_result is not None and not trade_result.success:
@@ -924,6 +935,95 @@ class ResultEnricher:
 
         return extracted
 
+    def _parse_prediction_order_response(
+        self,
+        result: ExecutionResult,
+        offchain_protocol: str,
+        order_dict: dict[str, Any],
+        intent_type: str,
+        value_field: str,
+    ) -> Any:
+        """Acquire the receipt parser and call parse_order_response; return the TradeResult or None.
+
+        Failure handling is class-aware:
+          (a)  no parser registered for the protocol (ValueError from the
+               registry, including offchain_protocol == "") -> direct
+               prediction_fill fallback in ALL modes; the protocol may
+               legitimately have no parser yet. Mirrors the main on-chain
+               path's ValueError handling above.
+          (a') parser exists but exposes no parse_order_response -> same
+               fallback in ALL modes (capability missing, not a crash).
+          (b)  parse_order_response raised -> a parser bug on data the
+               framework is about to book. Live mode fails closed with
+               CriticalAccountingError (VIB-3159 contract, same policy as
+               _handle_extract_error); paper / backtest keeps the VIB-3706
+               warn-and-fallback so a parser bug cannot silently drop the
+               only fill data the strategy will ever see.
+
+        A structured TradeResult(success=False) from the parser (caller
+        handles it) still falls back in all modes — the parser deliberately
+        reported unparseable data rather than crashing.
+
+        Args:
+            result: ExecutionResult whose extraction_warnings list is appended.
+            offchain_protocol: Protocol key used to look up the parser.
+            order_dict: OrderResponse-shaped dict passed to parse_order_response.
+            intent_type: ``"PREDICTION_BUY"`` or ``"PREDICTION_SELL"`` (for warnings).
+            value_field: Field name for CriticalAccountingError in live mode.
+
+        Returns:
+            The TradeResult on success, None for every fallback-worthy class.
+
+        Raises:
+            CriticalAccountingError: live mode only, when parse_order_response raises.
+        """
+        parser = None
+        try:
+            parser = self.parser_registry.get(offchain_protocol)
+        except ValueError as exc:
+            warning = (
+                f"Enrichment fallback: {intent_type} has no receipt parser registered "
+                f"for protocol '{offchain_protocol}' ({exc}); falling back to direct prediction_fill read"
+            )
+            logger.warning(warning)
+            result.extraction_warnings.append(warning)
+
+        if parser is None:
+            return None
+
+        parse_method = getattr(parser, "parse_order_response", None)
+        if not callable(parse_method):
+            warning = (
+                f"Enrichment fallback: {intent_type} parser {type(parser).__name__} "
+                f"has no parse_order_response; falling back to direct prediction_fill read"
+            )
+            logger.warning(warning)
+            result.extraction_warnings.append(warning)
+            return None
+
+        try:
+            return parse_method(order_dict)
+        except Exception as exc:
+            message = (
+                f"Enrichment fallback: {intent_type} parser.parse_order_response "
+                f"raised ({type(exc).__name__}: {exc}); falling back to direct prediction_fill read"
+            )
+            if self.live_mode:
+                # Fail closed: a crashing parser on a live fill means
+                # the framework cannot certify what it is about to
+                # book. Mirrors _handle_extract_error's live branch.
+                logger.error(message)
+                raise CriticalAccountingError(
+                    message,
+                    field_name=value_field,
+                    intent_type=intent_type,
+                    protocol=offchain_protocol or None,
+                    original=exc,
+                ) from exc
+            logger.warning(message)
+            result.extraction_warnings.append(message)
+            return None
+
     def _extract_offchain_prediction_costs(
         self,
         *,
@@ -940,10 +1040,14 @@ class ResultEnricher:
           - ``setup_tx_count`` (int): number of approval / wrap txs the gateway
             submitted before this order.
           - ``gas_cost_native_wei`` (Decimal): aggregate MATIC wei spent on
-            setup transactions. Always present when ``setup_tx_count > 0``.
+            setup transactions. Present only when every ``setup_txs`` entry
+            carries a parseable ``total_cost_wei``; omitted (unmeasured)
+            otherwise (a structured warning is appended to
+            ``extraction_warnings``).
           - ``gas_cost_usd`` (Decimal | None): same value converted via the
-            compiler-resolved MATIC USD price. None when the price could not
-            be resolved (a structured warning is appended to
+            compiler-resolved MATIC USD price. Additionally omitted whenever
+            ``gas_cost_native_wei`` is omitted. None (omitted) when the price
+            could not be resolved (a structured warning is appended to
             ``extraction_warnings``).
           - ``fee_pusd`` (Decimal): operator fee. Only written when the fill
             carried a non-None ``fee_pusd``.
@@ -957,48 +1061,75 @@ class ResultEnricher:
 
         setup_txs = getattr(prediction_fill, "setup_txs", None) or ()
         if setup_txs:
-            total_wei = Decimal("0")
-            for tx in setup_txs:
-                try:
-                    total_wei += Decimal(str(getattr(tx, "total_cost_wei", "0") or "0"))
-                except (InvalidOperation, ValueError, ArithmeticError):
-                    continue
+            # setup_tx_count is measured independently of the per-tx cost
+            # fields — always stamp it.
             result.extracted_data["setup_tx_count"] = len(setup_txs)
-            result.extracted_data["gas_cost_native_wei"] = total_wei
             extracted.add("setup_tx_count")
-            extracted.add("gas_cost_native_wei")
 
-            # Resolve MATIC USD price from compiler bundle_metadata. Missing
-            # or unparseable price degrades gracefully — gas_cost_usd stays
-            # None, the basis row records gas_cost_usd=None, and the
-            # accounting handler can still record everything else without
-            # fabricating a USD figure from nothing.
-            matic_price: Decimal | None = None
-            if bundle_metadata:
-                raw_price = bundle_metadata.get("native_token_price_usd")
-                if raw_price not in (None, ""):
-                    try:
-                        candidate = Decimal(str(raw_price))
-                        if candidate > 0:
-                            matic_price = candidate
-                    except (InvalidOperation, ValueError, ArithmeticError):
-                        matic_price = None
+            total_wei = Decimal("0")
+            malformed_index: int | None = None
+            for idx, tx in enumerate(setup_txs):
+                raw_cost = getattr(tx, "total_cost_wei", None)
+                if raw_cost in (None, ""):
+                    malformed_index = idx
+                    break
+                try:
+                    total_wei += Decimal(str(raw_cost))
+                except (InvalidOperation, ValueError, ArithmeticError):
+                    malformed_index = idx
+                    break
 
-            if matic_price is not None:
-                gas_cost_usd = (total_wei / Decimal(10**18)) * matic_price
-                result.extracted_data["gas_cost_usd"] = gas_cost_usd
-                extracted.add("gas_cost_usd")
-            else:
-                # None signals "unknown" — distinct from Decimal("0") (which
-                # would mean "we measured zero gas"). The handler treats None
-                # as gas_cost_usd=0 in the basis sum but logs the gap.
+            if malformed_index is not None:
+                # Empty != Zero (blueprint 27): a partial sum stamped as
+                # measured is worse than an honest unmeasured marker. One
+                # malformed entry makes the whole aggregate unmeasured -
+                # omit gas_cost_native_wei AND gas_cost_usd (same
+                # key-omission representation as the unresolvable-price
+                # branch below) and warn once naming the bad tx.
+                bad_tx = setup_txs[malformed_index]
                 warning = (
-                    f"Enrichment incomplete: {intent_type} setup_tx gas attributed "
-                    f"to native units (gas_cost_native_wei={total_wei}) but "
-                    "MATIC USD price was not resolvable; gas_cost_usd omitted"
+                    f"Enrichment incomplete: {intent_type} setup_txs[{malformed_index}] "
+                    f"(tx_hash={getattr(bad_tx, 'tx_hash', None) or '<unknown>'}) has "
+                    f"malformed total_cost_wei={getattr(bad_tx, 'total_cost_wei', None)!r}; "
+                    f"gas_cost_native_wei and gas_cost_usd omitted (unmeasured)"
                 )
                 logger.warning(warning)
                 result.extraction_warnings.append(warning)
+            else:
+                result.extracted_data["gas_cost_native_wei"] = total_wei
+                extracted.add("gas_cost_native_wei")
+
+                # Resolve MATIC USD price from compiler bundle_metadata. Missing
+                # or unparseable price degrades gracefully — gas_cost_usd stays
+                # None, the basis row records gas_cost_usd=None, and the
+                # accounting handler can still record everything else without
+                # fabricating a USD figure from nothing.
+                matic_price: Decimal | None = None
+                if bundle_metadata:
+                    raw_price = bundle_metadata.get("native_token_price_usd")
+                    if raw_price not in (None, ""):
+                        try:
+                            candidate = Decimal(str(raw_price))
+                            if candidate > 0:
+                                matic_price = candidate
+                        except (InvalidOperation, ValueError, ArithmeticError):
+                            matic_price = None
+
+                if matic_price is not None:
+                    gas_cost_usd = (total_wei / Decimal(10**18)) * matic_price
+                    result.extracted_data["gas_cost_usd"] = gas_cost_usd
+                    extracted.add("gas_cost_usd")
+                else:
+                    # None signals "unknown" — distinct from Decimal("0") (which
+                    # would mean "we measured zero gas"). The handler treats None
+                    # as gas_cost_usd=0 in the basis sum but logs the gap.
+                    warning = (
+                        f"Enrichment incomplete: {intent_type} setup_tx gas attributed "
+                        f"to native units (gas_cost_native_wei={total_wei}) but "
+                        "MATIC USD price was not resolvable; gas_cost_usd omitted"
+                    )
+                    logger.warning(warning)
+                    result.extraction_warnings.append(warning)
 
         fee_pusd = getattr(prediction_fill, "fee_pusd", None)
         if fee_pusd is not None:

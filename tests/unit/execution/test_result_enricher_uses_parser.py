@@ -37,6 +37,7 @@ g. Smoke import: the parser's three off-chain methods
 
 from __future__ import annotations
 
+import pytest
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -47,6 +48,7 @@ from almanak.connectors.polymarket.receipt_parser import (
     PolymarketReceiptParser,
     TradeResult,
 )
+from almanak.framework.execution.extract_result import CriticalAccountingError
 from almanak.framework.execution.extracted_data import PredictionFill
 from almanak.framework.execution.result_enricher import ResultEnricher
 
@@ -384,7 +386,13 @@ class TestExtractedDataFromTradeResult:
 
 class TestParserExceptionFallback:
     def test_parser_raises_extracted_data_still_populated_from_prediction_fill(self):
-        """A parser bug must NOT silently lose fill data."""
+        """A parser bug must NOT silently lose fill data in paper/backtest mode.
+
+        This test pins the VIB-3706 data-preservation fallback for
+        paper / backtest mode (live_mode=False). In live mode a parser
+        crash now raises CriticalAccountingError — see
+        test_parser_crash_live_mode_raises_critical_accounting_error.
+        """
         result = _FakeExecResult(
             transaction_results=[],
             prediction_fill=BUY_FILL,  # 5.45 @ 0.55 -> cost_basis 2.9975
@@ -397,7 +405,10 @@ class TestParserExceptionFallback:
             "parse_order_response",
             side_effect=RuntimeError("simulated parser bug"),
         ):
-            enricher = ResultEnricher(parser_registry=_StubRegistry(parser=PolymarketReceiptParser()))
+            enricher = ResultEnricher(
+                parser_registry=_StubRegistry(parser=PolymarketReceiptParser()),
+                live_mode=False,
+            )
             enriched = enricher.enrich(
                 result, intent, context, bundle_metadata=_bundle_meta()
             )
@@ -439,6 +450,81 @@ class TestParserExceptionFallback:
             "unparseable response" in w
             for w in enriched.extraction_warnings
         ), f"Expected unsuccessful-TradeResult warning, got: {enriched.extraction_warnings}"
+
+    def test_parser_crash_live_mode_raises_critical_accounting_error(self):
+        """In live mode a crashing parser raises CriticalAccountingError (VIB-3159 contract)."""
+        result = _FakeExecResult(
+            transaction_results=[],
+            prediction_fill=BUY_FILL,  # 5.45 @ 0.55 -> cost_basis 2.9975
+        )
+        intent = _FakePredictionIntent(intent_type="PREDICTION_BUY", market_id=MARKET_ID)
+        context = _FakeContext(chain="polygon", protocol="polymarket")
+
+        with patch.object(
+            PolymarketReceiptParser,
+            "parse_order_response",
+            side_effect=RuntimeError("simulated parser bug"),
+        ):
+            enricher = ResultEnricher(
+                parser_registry=_StubRegistry(parser=PolymarketReceiptParser()),
+                live_mode=True,
+            )
+            with pytest.raises(CriticalAccountingError) as excinfo:
+                enricher.enrich(result, intent, context, bundle_metadata=_bundle_meta())
+
+        assert excinfo.value.intent_type == "PREDICTION_BUY"
+        assert excinfo.value.protocol == "polymarket"
+        assert excinfo.value.field_name == "cost_basis"
+        assert isinstance(excinfo.value.original, RuntimeError)
+        assert "parse_order_response" in str(excinfo.value)
+
+    def test_no_parser_registered_falls_back_even_in_live_mode(self):
+        """No-parser-registered is not a crash -- fallback in all modes including live."""
+        result = _FakeExecResult(
+            transaction_results=[],
+            prediction_fill=BUY_FILL,
+        )
+        intent = _FakePredictionIntent(intent_type="PREDICTION_BUY", market_id=MARKET_ID)
+        context = _FakeContext(chain="polygon", protocol="polymarket")
+
+        enricher = ResultEnricher(
+            parser_registry=_StubRegistry(parser=None),
+            live_mode=True,
+        )
+        # Must not raise even in live mode -- protocol not covered is not a parser bug.
+        enriched = enricher.enrich(result, intent, context, bundle_metadata=_bundle_meta())
+
+        # Fallback from direct prediction_fill read.
+        assert enriched.extracted_data["outcome_tokens_received"] == Decimal("5.45")
+        assert enriched.extracted_data["cost_basis"] == Decimal("2.9975")
+        assert any(
+            "no receipt parser registered" in w
+            for w in enriched.extraction_warnings
+        ), f"Expected no-parser warning, got: {enriched.extraction_warnings}"
+
+    def test_parser_without_parse_order_response_falls_back_in_live_mode(self):
+        """Parser missing parse_order_response is capability gap, not a crash -- fallback in all modes."""
+        result = _FakeExecResult(
+            transaction_results=[],
+            prediction_fill=BUY_FILL,
+        )
+        intent = _FakePredictionIntent(intent_type="PREDICTION_BUY", market_id=MARKET_ID)
+        context = _FakeContext(chain="polygon", protocol="polymarket")
+
+        enricher = ResultEnricher(
+            parser_registry=_StubRegistry(parser=object()),
+            live_mode=True,
+        )
+        # Must not raise -- missing method is a capability gap, not a parser crash.
+        enriched = enricher.enrich(result, intent, context, bundle_metadata=_bundle_meta())
+
+        # Fallback from direct prediction_fill read.
+        assert enriched.extracted_data["outcome_tokens_received"] == Decimal("5.45")
+        assert enriched.extracted_data["cost_basis"] == Decimal("2.9975")
+        assert any(
+            "has no parse_order_response" in w
+            for w in enriched.extraction_warnings
+        ), f"Expected no-method warning, got: {enriched.extraction_warnings}"
 
 
 # ===========================================================================
