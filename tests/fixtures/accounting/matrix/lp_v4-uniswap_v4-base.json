@@ -4,18 +4,17 @@
     "fixture": "lp_v4",
     "chain": "base",
     "primitive": "lp",
-    "captured_from": "docs/internal/notes/.tmp/v4538-rebaseline/lp_v4-uniswap_v4-base/accountant.json",
-    "captured_at": "2026-05-17T15:04:09+00:00",
-    "captured_at_commit": "43f6866da (main, post-PRs #2339/#2340/#2341/#2342/#2343)",
+    "captured_from": "docs/internal/notes/.tmp/accounting-matrix/lp_v4-uniswap_v4-base/accountant.json",
+    "captured_at": "2026-06-11T15:49:00+00:00",
+    "captured_at_commit": "4fbca8142 (main, post-PRs #2680 VIB-5024 + #2681 VIB-4583)",
     "post_fix_for": [
-      "VIB-4426 V0 scaffold (PR #2335 merged 2026-05-17)",
-      "VIB-4478 lp_v4 fixture + Anvil-Base E2E proof (PR #2339 merged 2026-05-17)",
-      "VIB-4534 canonical V4 PoolKey seed registry (PR #2342 merged 2026-05-17)",
-      "VIB-4535 LP_OPEN gateway PoolKey lookup (PR #2341 merged 2026-05-17)",
-      "VIB-4538 drop WETH from anvil_funding so closing SWAP realized_pnl_usd is non-null (this PR)"
+      "VIB-5018 + VIB-4586 identity-faithful V4 LP snapshot valuation (PR #2678 merged 2026-06-10) — killed the $289.6M corruption",
+      "VIB-5024 gateway V4 PositionManager reader → HIGH-confidence on-chain valuation + V3-parity uncollected fees (PR #2680 merged 2026-06-11)",
+      "VIB-4583 Uniswap V4 position_registry support (PR #2681 merged 2026-06-11)",
+      "VIB-4537 scrub-and-refreeze of the lp_v4 baseline DB + matrix cells (this PR)"
     ],
-    "note": "Real-Anvil-Base baseline for the lp_v4 fixture after the V0 closer. Movement vs the previous lp_v4 baseline (10/5/6/1 captured during PR #2339 review): G3 FAIL->PASS and G13 FAIL->PASS (VIB-4534 canonical PoolKey seed unblocked the historical-pool lookup so V4 LP_CLOSE now emits a yield event and pool_address carries the canonical 32-byte PoolId hash). LP4 FAIL->XFAIL (accountant_test reclassified IL_USD divergence as XFAIL once attribution wired through; V1 fee separation will flip it to PASS). G6 and LP3 remain FAIL: both require fee/principal separation from PoolManager.getPositionInfo (V1 work, VIB-4482 / P-V1-A) — see diagnostics: G6 'component buckets contain unmeasured nulls: Sigma_swaps_usd_null_count=2, Sigma_lp_fees_null_count=1'; LP3 'no fees_token0/1 on any position_event'. L5_22 remains XFAIL (registry mode not yet toggled on, independent of V4). These two cells are V0-honest non-PASSes locked in this baseline so V1 progress (VIB-4482) can demonstrate forward motion.",
-    "value_usd_artefact": "VIB-4537 (disposition Option 1-prime, 2026-06-09): this baseline carries two known value-magnitude artefacts that the matrix scorer tolerates because cell STATUS is unaffected (G4/G8/G9 PASS; G6/LP3 FAIL orthogonally to magnitude). (A) portfolio_snapshots.total_value_usd up to $289.6M from inflated V4-LP amount0/amount1 (~10^7; prices correct) -> tracked in VIB-5018 (V4-LP valuation). (B) framework_total_value_usd/available_cash_usd ~$218k uncorrelated with the row wallet_balances_json (~$95), constant across rows -> shared-wallet capture contamination, same family as VIB-4970. lp.db/looping.db baselines are clean (audited). VIB-5018 (the V4-LP valuation fix) merged 2026-06-10, so scrub-and-refreeze (Option 2) is now unblocked; the full diagnosis was folded into the VIB-5018 ticket and docs/internal/June9.md."
+    "note": "Real-Anvil-Base re-baseline for the lp_v4 fixture after the V4 valuation last-mile. Movement vs the previous baseline (12 PASS / 2 FAIL / 7 XFAIL / 1 SKIP, captured 2026-05-17 at 43f6866da): FIVE cells XFAIL->PASS, ZERO regressions (matrix scorer: status=PASS, regressions=[], 0 PASS->non-PASS). G14 and G15 (sdk-value === on-chain-value reconciliation) flipped XFAIL->PASS because VIB-5024 now reads live liquidity/ticks (StateView.getSlot0) and computes exact concentrated-liquidity amounts, so the snapshot mark is on-chain truth at HIGH confidence rather than an open-amount estimate. LP2/LP5/LP6 flipped XFAIL->PASS on the same HIGH-confidence valuation (LP reconciliation cells that depended on a trustworthy on-chain mark). G6 and LP3 remain FAIL: both require per-event fee/principal separation written onto position_events.fees_token0/1 (VIB-4482 / P-V1-A) — VIB-5024's fee read lives in the snapshot VALUATION path (portfolio_snapshots), not the accounting-EVENT path, so position_events still carry no fees and these cells are honestly non-PASS (fee0_set=0 on both OPEN and CLOSE). L5_22 remains XFAIL (registry mode not toggled on for this fixture row, independent of the VIB-4583 write path) and LP4 remains XFAIL (IL_USD divergence, flips to PASS with V1 fee separation). Verification matrix run: 257s on managed Anvil-Base.",
+    "value_usd_artefact": "VIB-4537 disposition (Option 2 scrub-and-refreeze, 2026-06-11): artefact (A) is RESOLVED. The prior baseline carried portfolio_snapshots.total_value_usd up to $289.6M from inflated V4-LP amount0/amount1 (~10^7); after VIB-5018 (identity-faithful valuation) + VIB-5024 (on-chain HIGH valuation) the V4 LP now marks correctly at $3.88 at value_confidence=HIGH (max total_value_usd=$3.88; was $289,600,000). Artefact (B) PERSISTS and is unrelated to V4: framework available_cash_usd ~$164.5k is uncorrelated with the row wallet_balances_json (~$95) and is constant across rows — shared-wallet capture contamination (same family as VIB-4970), orthogonal to cell STATUS (G4/G8/G9 PASS regardless). Not in scope for VIB-4537; tracked under the VIB-4970 family."
   },
   "cells": {
     "G1": "PASS",
@@ -23,8 +22,8 @@
     "G11": "SKIP",
     "G12": "PASS",
     "G13": "PASS",
-    "G14": "XFAIL",
-    "G15": "XFAIL",
+    "G14": "PASS",
+    "G15": "PASS",
     "G2": "PASS",
     "G3": "PASS",
     "G4": "PASS",
@@ -35,16 +34,16 @@
     "G9": "PASS",
     "L5_22": "XFAIL",
     "LP1": "PASS",
-    "LP2": "XFAIL",
+    "LP2": "PASS",
     "LP3": "FAIL",
     "LP4": "XFAIL",
-    "LP5": "XFAIL",
-    "LP6": "XFAIL"
+    "LP5": "PASS",
+    "LP6": "PASS"
   },
   "scores": {
-    "passed": 12,
+    "passed": 17,
     "failed": 2,
-    "xfailed": 7,
+    "xfailed": 2,
     "skipped": 1,
     "total": 22
   }
