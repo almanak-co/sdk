@@ -5,6 +5,7 @@ from __future__ import annotations
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
+    FeeModelDecl,
     FundingHistoryDecl,
     ImportRef,
 )
@@ -13,6 +14,11 @@ from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpe
 CONNECTOR = Connector(
     name="hyperliquid",
     kind=ProtocolKind.PERP,
+    fee_model=FeeModelDecl(
+        model=ImportRef(module="almanak.connectors.hyperliquid.fee_model", attribute="HyperliquidFeeModel"),
+        description="Hyperliquid perpetuals protocol fee model with maker/taker fees and volume tiers",
+        aliases=("hl", "hyper"),
+    ),
     gateway_connector=ImportRef(
         module="almanak.connectors.hyperliquid.gateway.provider",
         attribute="HyperliquidGatewayConnector",

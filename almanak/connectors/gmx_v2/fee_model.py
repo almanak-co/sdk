@@ -16,7 +16,7 @@ Key Components:
     - GMXFeeModel: Fee model for GMX V2 perpetual operations
 
 Example:
-    from almanak.framework.backtesting.pnl.fee_models.gmx import GMXFeeModel
+    from almanak.connectors.gmx_v2.fee_model import GMXFeeModel
 
     fee_model = GMXFeeModel(position_fee_pct=Decimal("0.001"))
 

@@ -27,6 +27,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `gmx_funding.GMX_API_FALLBACK_URLS`, `gmx_funding.GMX_MARKET_TOKENS`,
   `gmx_funding.SUPPORTED_CHAINS` (use `GMXFundingProvider.supported_chains`),
   `gmx_funding.GMXMarketInfo`, and `hyperliquid_funding.HYPERLIQUID_API_URL`.
+- Backtesting fee models moved into their owning connectors
+  (`almanak.connectors.<protocol>.fee_model`) and are declared on each
+  connector manifest via `FeeModelDecl` (VIB-4851 Phase D). The
+  `fee_models` package re-exports every model class lazily and the
+  `FeeModelRegistry` lookup behavior is byte-identical (all legacy keys and
+  aliases resolve; `register_fee_model` overlays still work), so existing
+  imports keep working. New: importing `fee_models` no longer imports the
+  protocol modules eagerly.
+- Multi-DEX volume routing and liquidity-depth family dispatch are
+  declaration-driven via each DEX connector's `DexVolumeDecl` (VIB-4851
+  Phase D). Removed framework-internal names:
+  `multi_dex_volume.PROTOCOL_PROVIDER_MAP` / `STRING_PROTOCOL_MAP` /
+  `PROTOCOL_CHAIN_SUPPORT` (use
+  `almanak.connectors._strategy_base.dex_volume_registry.DexVolumeRegistry`),
+  `liquidity_depth.V3_PROTOCOLS` / `V2_PROTOCOLS` /
+  `LIQUIDITY_BOOK_PROTOCOLS` / `WEIGHTED_POOL_PROTOCOLS` /
+  `STABLESWAP_PROTOCOLS` / `PROTOCOL_DATA_SOURCE` / `SUPPORTED_CHAINS` /
+  `DATA_SOURCE_<DEX>` constants (provenance derives as
+  `"<protocol>_subgraph"`). The legacy `Protocol` enum is no longer imported
+  at runtime by any backtesting module (duck-typed `.value` acceptance is
+  preserved). New `GatewayDexVolumeProvider` serves any declared DEX without
+  a per-DEX wrapper class; the existing per-DEX wrapper classes are
+  unchanged.
 
 ## [2.17.0] - 2026-06-05
 

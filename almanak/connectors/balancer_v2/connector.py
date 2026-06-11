@@ -5,6 +5,7 @@ from __future__ import annotations
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
+    DexVolumeDecl,
     ImportRef,
     StrategyMatrixEntry,
 )
@@ -13,6 +14,14 @@ from almanak.connectors._strategy_base.address_table import AddressTableSpec
 CONNECTOR = Connector(
     name="balancer_v2",
     kind=ProtocolKind.LP,
+    dex_volume=DexVolumeDecl(
+        chains=("ethereum", "arbitrum", "polygon"),
+        amm_family="weighted",
+        aliases=("bal",),
+        name="balancer",
+        dex="balancer_v2",
+        volume_data_source="balancer_v2_subgraph",
+    ),
     address_tables=(
         AddressTableSpec(
             protocol="balancer_v2",

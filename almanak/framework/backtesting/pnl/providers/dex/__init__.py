@@ -88,6 +88,7 @@ Example:
     )
 """
 
+from ._gateway_volume import GatewayDexVolumeProvider
 from .aerodrome_volume import (
     AERODROME_SUBGRAPH_IDS,
     AerodromeVolumeProvider,
@@ -118,6 +119,8 @@ from .uniswap_v3_volume import (
 )
 
 __all__ = [
+    # Generic declaration-driven provider (VIB-4851 Phase D)
+    "GatewayDexVolumeProvider",
     # Uniswap V3
     "UniswapV3VolumeProvider",
     "UNISWAP_V3_SUBGRAPH_IDS",

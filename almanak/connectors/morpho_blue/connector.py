@@ -5,6 +5,7 @@ from __future__ import annotations
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
+    FeeModelDecl,
     ImportRef,
     LendingReadDecl,
     StrategyMatrixEntry,
@@ -15,6 +16,12 @@ from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpe
 CONNECTOR = Connector(
     name="morpho_blue",
     kind=ProtocolKind.LENDING,
+    fee_model=FeeModelDecl(
+        model=ImportRef(module="almanak.connectors.morpho_blue.fee_model", attribute="MorphoFeeModel"),
+        name="morpho",
+        description="Morpho lending protocol fee model (fee-free operations)",
+        aliases=("morpho_blue", "morpho_optimizer"),
+    ),
     aliases=("morpho",),
     address_tables=(
         AddressTableSpec(

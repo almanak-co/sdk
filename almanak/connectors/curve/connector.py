@@ -5,6 +5,8 @@ from __future__ import annotations
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
+    DexVolumeDecl,
+    FeeModelDecl,
     ImportRef,
     MetadataAmountEncoding,
 )
@@ -12,6 +14,17 @@ from almanak.connectors._connector import (
 CONNECTOR = Connector(
     name="curve",
     kind=ProtocolKind.LP,
+    dex_volume=DexVolumeDecl(
+        chains=("ethereum", "optimism"),
+        amm_family="stableswap",
+        aliases=("crv",),
+        volume_data_source="curve_messari_subgraph",
+    ),
+    fee_model=FeeModelDecl(
+        model=ImportRef(module="almanak.connectors.curve.fee_model", attribute="CurveFeeModel"),
+        description="Curve Finance DEX fee model with dynamic fee calculation",
+        aliases=("curve_fi", "crv"),
+    ),
     gateway_connector=ImportRef(
         module="almanak.connectors.curve.gateway.provider",
         attribute="CurveGatewayConnector",

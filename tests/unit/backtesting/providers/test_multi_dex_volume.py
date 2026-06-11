@@ -16,11 +16,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from almanak.core.enums import Chain, Protocol
+from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
 from almanak.framework.backtesting.pnl.providers.multi_dex_volume import (
     FALLBACK_DATA_SOURCE,
-    PROTOCOL_CHAIN_SUPPORT,
-    PROTOCOL_PROVIDER_MAP,
-    STRING_PROTOCOL_MAP,
     MultiDEXVolumeProvider,
 )
 from almanak.framework.backtesting.pnl.types import DataConfidence, DataSourceInfo, VolumeResult
@@ -49,11 +47,10 @@ class TestMultiDEXVolumeProviderInitialization:
 
 
 class TestProtocolMappings:
-    """Tests for protocol to provider mappings."""
+    """Tests for the declaration-derived protocol dispatch (VIB-4851 Phase D)."""
 
-    def test_protocol_enum_mapping_covers_dex_protocols(self):
-        """Test Protocol enum mapping includes all DEX protocols."""
-        # These protocols should have providers
+    def test_protocol_enum_values_resolve(self):
+        """Legacy Protocol enum values resolve through the registry."""
         expected_protocols = [
             Protocol.UNISWAP_V3,
             Protocol.SUSHISWAP_V3,
@@ -62,10 +59,10 @@ class TestProtocolMappings:
             Protocol.TRADERJOE_V2,
         ]
         for protocol in expected_protocols:
-            assert protocol in PROTOCOL_PROVIDER_MAP
+            assert DexVolumeRegistry.canonical(protocol.value) == protocol.value.lower()
 
-    def test_string_mapping_includes_all_protocol_ids(self):
-        """Test string mapping includes all protocol identifiers."""
+    def test_all_protocol_ids_declared(self):
+        """Every legacy dispatch key is connector-declared."""
         expected_ids = [
             "uniswap_v3",
             "sushiswap_v3",
@@ -76,10 +73,10 @@ class TestProtocolMappings:
             "balancer",
         ]
         for protocol_id in expected_ids:
-            assert protocol_id in STRING_PROTOCOL_MAP
+            assert DexVolumeRegistry.has(protocol_id), protocol_id
 
-    def test_string_mapping_includes_aliases(self):
-        """Test string mapping includes common aliases."""
+    def test_aliases_resolve_to_canonical(self):
+        """Legacy aliases resolve to the same canonical key."""
         aliases = {
             "uni_v3": "uniswap_v3",
             "sushi_v3": "sushiswap_v3",
@@ -89,20 +86,13 @@ class TestProtocolMappings:
             "crv": "curve",
         }
         for alias, canonical in aliases.items():
-            assert alias in STRING_PROTOCOL_MAP
-            # Alias should map to same provider class as canonical
-            assert STRING_PROTOCOL_MAP[alias] == STRING_PROTOCOL_MAP[canonical]
+            assert DexVolumeRegistry.canonical(alias) == canonical
 
-    def test_protocol_chain_support_mapping(self):
-        """Test protocol chain support is properly configured."""
-        assert "uniswap_v3" in PROTOCOL_CHAIN_SUPPORT
-        assert "curve" in PROTOCOL_CHAIN_SUPPORT
-        assert "balancer" in PROTOCOL_CHAIN_SUPPORT
-
-        # Check some specific chain support
-        assert Chain.ETHEREUM in PROTOCOL_CHAIN_SUPPORT["uniswap_v3"]
-        assert Chain.BASE in PROTOCOL_CHAIN_SUPPORT["aerodrome"]
-        assert Chain.AVALANCHE in PROTOCOL_CHAIN_SUPPORT["traderjoe_v2"]
+    def test_protocol_chain_support_declared(self):
+        """Chain support derives from the connector declarations."""
+        assert "ethereum" in DexVolumeRegistry.entry_for("uniswap_v3").chains
+        assert "base" in DexVolumeRegistry.entry_for("aerodrome").chains
+        assert "avalanche" in DexVolumeRegistry.entry_for("traderjoe_v2").chains
 
 
 class TestProtocolNormalization:

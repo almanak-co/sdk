@@ -5,6 +5,7 @@ from __future__ import annotations
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
+    FeeModelDecl,
     ImportRef,
     LendingReadDecl,
 )
@@ -14,6 +15,11 @@ from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpe
 CONNECTOR = Connector(
     name="compound_v3",
     kind=ProtocolKind.LENDING,
+    fee_model=FeeModelDecl(
+        model=ImportRef(module="almanak.connectors.compound_v3.fee_model", attribute="CompoundV3FeeModel"),
+        description="Compound V3 (Comet) lending protocol fee model",
+        aliases=("compound", "comet"),
+    ),
     address_tables=(
         AddressTableSpec(
             protocol="compound_v3",

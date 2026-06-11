@@ -11,22 +11,10 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from almanak.core.enums import Chain, Protocol
+from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
 from almanak.framework.backtesting.pnl.providers.liquidity_depth import (
-    DATA_SOURCE_AERODROME,
-    DATA_SOURCE_BALANCER,
-    DATA_SOURCE_CURVE,
     DATA_SOURCE_FALLBACK,
-    DATA_SOURCE_PANCAKESWAP_V3,
-    DATA_SOURCE_SUSHISWAP_V3,
-    DATA_SOURCE_TRADERJOE_V2,
-    DATA_SOURCE_UNISWAP_V3,
     DEFAULT_TWAP_WINDOW_HOURS,
-    LIQUIDITY_BOOK_PROTOCOLS,
-    STABLESWAP_PROTOCOLS,
-    SUPPORTED_CHAINS,
-    V2_PROTOCOLS,
-    V3_PROTOCOLS,
-    WEIGHTED_POOL_PROTOCOLS,
     LiquidityDepthProvider,
 )
 from almanak.framework.backtesting.pnl.types import DataConfidence
@@ -72,38 +60,42 @@ def provider_with_twap(mock_subgraph_client):
 
 
 class TestConstants:
-    """Test provider constants."""
+    """Test the declaration-derived per-protocol facts (VIB-4851 Phase D)."""
 
-    def test_data_sources_defined(self):
-        """Test that data source constants are defined."""
-        assert DATA_SOURCE_UNISWAP_V3 == "uniswap_v3_subgraph"
-        assert DATA_SOURCE_SUSHISWAP_V3 == "sushiswap_v3_subgraph"
-        assert DATA_SOURCE_PANCAKESWAP_V3 == "pancakeswap_v3_subgraph"
-        assert DATA_SOURCE_AERODROME == "aerodrome_subgraph"
-        assert DATA_SOURCE_TRADERJOE_V2 == "traderjoe_v2_subgraph"
-        assert DATA_SOURCE_CURVE == "curve_subgraph"
-        assert DATA_SOURCE_BALANCER == "balancer_subgraph"
+    def test_data_sources_derived(self, mock_subgraph_client):
+        """Provenance strings derive as <protocol>_subgraph per declared DEX."""
+        provider = LiquidityDepthProvider(client=mock_subgraph_client)
+        assert provider._data_source_for("uniswap_v3") == "uniswap_v3_subgraph"
+        assert provider._data_source_for("sushiswap_v3") == "sushiswap_v3_subgraph"
+        assert provider._data_source_for("pancakeswap_v3") == "pancakeswap_v3_subgraph"
+        assert provider._data_source_for("aerodrome") == "aerodrome_subgraph"
+        assert provider._data_source_for("traderjoe_v2") == "traderjoe_v2_subgraph"
+        assert provider._data_source_for("curve") == "curve_subgraph"
+        assert provider._data_source_for("balancer") == "balancer_subgraph"
+        assert provider._data_source_for("unknown") == DATA_SOURCE_FALLBACK
         assert DATA_SOURCE_FALLBACK == "liquidity_fallback"
 
-    def test_protocol_lists_defined(self):
-        """Test that protocol lists are defined."""
-        assert "uniswap_v3" in V3_PROTOCOLS
-        assert "sushiswap_v3" in V3_PROTOCOLS
-        assert "pancakeswap_v3" in V3_PROTOCOLS
-        assert "aerodrome" in V2_PROTOCOLS
-        assert "traderjoe_v2" in LIQUIDITY_BOOK_PROTOCOLS
-        assert "balancer" in WEIGHTED_POOL_PROTOCOLS
-        assert "curve" in STABLESWAP_PROTOCOLS
+    def test_amm_families_declared(self):
+        """AMM families derive from the connector declarations."""
+        assert DexVolumeRegistry.entry_for("uniswap_v3").amm_family == "v3_concentrated"
+        assert DexVolumeRegistry.entry_for("sushiswap_v3").amm_family == "v3_concentrated"
+        assert DexVolumeRegistry.entry_for("pancakeswap_v3").amm_family == "v3_concentrated"
+        assert DexVolumeRegistry.entry_for("aerodrome").amm_family == "solidly_v2"
+        assert DexVolumeRegistry.entry_for("traderjoe_v2").amm_family == "liquidity_book"
+        assert DexVolumeRegistry.entry_for("balancer").amm_family == "weighted"
+        assert DexVolumeRegistry.entry_for("curve").amm_family == "stableswap"
 
-    def test_supported_chains(self):
-        """Test that supported chains include major EVM chains."""
-        assert Chain.ETHEREUM in SUPPORTED_CHAINS
-        assert Chain.ARBITRUM in SUPPORTED_CHAINS
-        assert Chain.BASE in SUPPORTED_CHAINS
-        assert Chain.OPTIMISM in SUPPORTED_CHAINS
-        assert Chain.POLYGON in SUPPORTED_CHAINS
-        assert Chain.AVALANCHE in SUPPORTED_CHAINS
-        assert Chain.BSC in SUPPORTED_CHAINS
+    def test_supported_chains(self, mock_subgraph_client):
+        """Supported chains derive from the declared DEX chain union."""
+        provider = LiquidityDepthProvider(client=mock_subgraph_client)
+        chains = provider.supported_chains
+        assert Chain.ETHEREUM in chains
+        assert Chain.ARBITRUM in chains
+        assert Chain.BASE in chains
+        assert Chain.OPTIMISM in chains
+        assert Chain.POLYGON in chains
+        assert Chain.AVALANCHE in chains
+        assert Chain.BSC in chains
 
     def test_default_twap_window(self):
         """Test default TWAP window."""
@@ -153,9 +145,10 @@ class TestInitialization:
         assert provider._twap_window_hours == 48
 
     def test_supported_chains_property(self, provider):
-        """Test supported_chains property returns copy."""
+        """Test supported_chains property derives from declared DEX chains."""
         chains = provider.supported_chains
-        assert chains == SUPPORTED_CHAINS
+        declared = DexVolumeRegistry.all_supported_chains()
+        assert chains == [c for c in Chain if c.value.lower() in declared]
         # Verify it's a copy
         chains.append(Chain.SONIC)
         assert Chain.SONIC not in provider.supported_chains
@@ -264,7 +257,7 @@ class TestV3LiquidityQuery:
 
         assert result.depth == Decimal("5000000")
         assert result.source_info.confidence == DataConfidence.HIGH
-        assert result.source_info.source == DATA_SOURCE_UNISWAP_V3
+        assert result.source_info.source == "uniswap_v3_subgraph"
 
     @pytest.mark.asyncio
     async def test_query_sushiswap_v3_liquidity(self, provider, mock_subgraph_client):
@@ -289,7 +282,7 @@ class TestV3LiquidityQuery:
         )
 
         assert result.depth == Decimal("2000000")
-        assert result.source_info.source == DATA_SOURCE_SUSHISWAP_V3
+        assert result.source_info.source == "sushiswap_v3_subgraph"
 
     @pytest.mark.asyncio
     async def test_query_pancakeswap_v3_liquidity(self, provider, mock_subgraph_client):
@@ -314,7 +307,7 @@ class TestV3LiquidityQuery:
         )
 
         assert result.depth == Decimal("10000000")
-        assert result.source_info.source == DATA_SOURCE_PANCAKESWAP_V3
+        assert result.source_info.source == "pancakeswap_v3_subgraph"
 
 
 # =============================================================================
@@ -348,7 +341,7 @@ class TestV2LiquidityQuery:
         )
 
         assert result.depth == Decimal("8000000")
-        assert result.source_info.source == DATA_SOURCE_AERODROME
+        assert result.source_info.source == "aerodrome_subgraph"
         assert result.source_info.confidence == DataConfidence.HIGH
 
 
@@ -383,7 +376,7 @@ class TestLiquidityBookQuery:
         )
 
         assert result.depth == Decimal("3000000")
-        assert result.source_info.source == DATA_SOURCE_TRADERJOE_V2
+        assert result.source_info.source == "traderjoe_v2_subgraph"
         assert result.source_info.confidence == DataConfidence.HIGH
 
 
@@ -419,7 +412,7 @@ class TestBalancerQuery:
         )
 
         assert result.depth == Decimal("15000000")
-        assert result.source_info.source == DATA_SOURCE_BALANCER
+        assert result.source_info.source == "balancer_subgraph"
         assert result.source_info.confidence == DataConfidence.HIGH
 
 
@@ -454,7 +447,7 @@ class TestCurveQuery:
         )
 
         assert result.depth == Decimal("100000000")
-        assert result.source_info.source == DATA_SOURCE_CURVE
+        assert result.source_info.source == "curve_subgraph"
         assert result.source_info.confidence == DataConfidence.HIGH
 
 
@@ -747,6 +740,42 @@ class TestProtocolNormalization:
     def test_none_returns_none(self, provider):
         """Test None protocol returns None."""
         assert provider._get_protocol_id(None) is None
+
+    def test_declared_aliases_resolve_to_canonical(self, provider):
+        """Decl aliases resolve so PROTOCOL_SUBGRAPH_IDS lookups succeed."""
+        assert provider._get_protocol_id("uni_v3") == "uniswap_v3"
+        assert provider._get_protocol_id("crv") == "curve"
+        assert provider._get_protocol_id("bal") == "balancer"
+
+    def test_unknown_protocol_keeps_raw_string(self, provider):
+        """Unknown identifiers stay raw — explicit unknowns must hit the
+        warning + fallback path, never chain auto-detection (None)."""
+        assert provider._get_protocol_id("not_a_dex") == "not_a_dex"
+
+    @pytest.mark.asyncio
+    async def test_alias_routes_to_family_query(self, provider, mock_subgraph_client):
+        """An alias takes the same query path as its canonical protocol."""
+        mock_subgraph_client.query.return_value = {
+            "poolDayDatas": [
+                {
+                    "id": "0x123-19723",
+                    "date": 1704067200,
+                    "tvlUSD": "5000000",
+                    "liquidity": "1000000000000000000",
+                },
+            ]
+        }
+
+        result = await provider.get_liquidity_depth(
+            pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
+            chain=Chain.ARBITRUM,
+            timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+            protocol="uni_v3",
+        )
+
+        assert result.depth == Decimal("5000000")
+        assert result.source_info.confidence == DataConfidence.HIGH
+        assert result.source_info.source == "uniswap_v3_subgraph"
 
 
 # =============================================================================

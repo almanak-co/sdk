@@ -25,7 +25,7 @@ Key Components:
     - HyperliquidFeeModel: Fee model for Hyperliquid perpetual operations
 
 Example:
-    from almanak.framework.backtesting.pnl.fee_models.hyperliquid import (
+    from almanak.connectors.hyperliquid.fee_model import (
         HyperliquidFeeModel,
         HyperliquidFeeTier,
     )

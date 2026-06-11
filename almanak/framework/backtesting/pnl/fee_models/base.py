@@ -146,15 +146,23 @@ class FeeModelMetadata:
 class FeeModelRegistry:
     """Registry for fee model discovery and lookup.
 
-    The registry maintains a mapping from protocol names to fee model
-    classes, allowing dynamic lookup and instantiation of fee models.
+    Built-in protocol fee models are declared on each connector's manifest
+    (``fee_model=FeeModelDecl(...)`` in ``almanak/connectors/<p>/connector.py``,
+    with the model class in the connector's ``fee_model`` module) and derived
+    here lazily — adding a connector adds its fee model with no edit to this
+    registry (VIB-4851 Phase D; previously the package ``__init__`` held a
+    hardcoded registration block).
 
-    Fee models are registered using the `register` method or the
-    `register_fee_model` decorator. They can then be looked up by
-    protocol name using `get` or `get_fee_model`.
+    Per-key lazy imports: ``get()`` imports only the connector module that
+    owns the requested protocol, so a broken sibling connector cannot poison
+    an unrelated lookup. ``list_all()`` / ``get_fee_model_registry()``
+    materialise every declared model (the exporter's use case).
+
+    Custom models registered at runtime via :meth:`register` (or the
+    ``register_fee_model`` decorator) overlay the manifest-derived entries.
 
     Example:
-        # Register via method
+        # Register a custom model
         FeeModelRegistry.register("my_protocol", MyFeeModel)
 
         # Look up and instantiate
@@ -165,8 +173,65 @@ class FeeModelRegistry:
         protocols = FeeModelRegistry.list_protocols()
     """
 
-    # Class-level registry storage
+    # Runtime (manual) registrations — overlay the manifest-derived entries.
     _registry: dict[str, FeeModelMetadata] = {}
+
+    # Manifest-derived ``lookup key -> (module, attribute, primary name,
+    # description, protocols)`` loader map, built lazily on first use
+    # (deferred ``CONNECTOR_REGISTRY`` import — never at module import), plus
+    # the per-key resolved-metadata cache.
+    _manifest_loader_map: dict[str, tuple[str, str, str, str, tuple[str, ...]]] | None = None
+    _manifest_resolved: dict[str, FeeModelMetadata] = {}
+
+    @classmethod
+    def _manifest_loaders(cls) -> dict[str, tuple[str, str, str, str, tuple[str, ...]]]:
+        """Return the manifest-derived loader map, building it on first use."""
+        if cls._manifest_loader_map is None:
+            # Deferred import: avoids a module-level cycle through the
+            # connector descriptor.
+            from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+            loaders: dict[str, tuple[str, str, str, str, tuple[str, ...]]] = {}
+            for connector_manifest in CONNECTOR_REGISTRY.with_fee_model():
+                decl = connector_manifest.fee_model
+                assert decl is not None
+                primary = decl.name or connector_manifest.name
+                protocols = (primary, *decl.aliases)
+                entry = (decl.model.module, decl.model.attribute, primary, decl.description, protocols)
+                for key in protocols:
+                    loaders[key.lower()] = entry
+            cls._manifest_loader_map = loaders
+        return cls._manifest_loader_map
+
+    @classmethod
+    def _resolve_manifest(cls, key: str) -> FeeModelMetadata | None:
+        """Materialise (and cache) one manifest-declared fee model.
+
+        Imports ONLY the connector module that owns ``key`` — a broken
+        sibling connector cannot block this lookup.
+        """
+        cached = cls._manifest_resolved.get(key)
+        if cached is not None:
+            return cached
+        entry = cls._manifest_loaders().get(key)
+        if entry is None:
+            return None
+        module_path, attribute, primary, description, protocols = entry
+        import importlib
+
+        module = importlib.import_module(module_path)
+        model_class = getattr(module, attribute)
+        metadata = FeeModelMetadata(
+            name=primary,
+            model_class=model_class,
+            description=description,
+            protocols=list(protocols),
+        )
+        # Cache under every lookup key of the owning declaration so aliases
+        # share the resolved metadata object (mirrors the legacy register()).
+        for proto_key in protocols:
+            cls._manifest_resolved[proto_key.lower()] = metadata
+        return metadata
 
     @classmethod
     def register(
@@ -213,7 +278,7 @@ class FeeModelRegistry:
         Returns:
             Fee model class or None if not found
         """
-        metadata = cls._registry.get(protocol.lower())
+        metadata = cls.get_metadata(protocol)
         if metadata:
             return metadata.model_class
         return None
@@ -228,45 +293,56 @@ class FeeModelRegistry:
         Returns:
             FeeModelMetadata or None if not found
         """
-        return cls._registry.get(protocol.lower())
+        key = protocol.lower()
+        manual = cls._registry.get(key)
+        if manual is not None:
+            return manual
+        return cls._resolve_manifest(key)
 
     @classmethod
     def list_protocols(cls) -> list[str]:
         """List all registered protocol names.
 
         Returns:
-            List of registered protocol identifiers
+            List of registered protocol identifiers (primary names, manifest
+            and manual combined)
         """
-        # Return unique primary names (not aliases)
         seen = set()
-        protocols = []
         for metadata in cls._registry.values():
-            if metadata.name not in seen:
-                seen.add(metadata.name)
-                protocols.append(metadata.name)
-        return sorted(protocols)
+            seen.add(metadata.name)
+        for _module, _attr, primary, _desc, _protocols in cls._manifest_loaders().values():
+            seen.add(primary)
+        return sorted(seen)
 
     @classmethod
     def list_all(cls) -> dict[str, FeeModelMetadata]:
         """Get all registered fee models with their metadata.
 
+        Materialises every manifest-declared model (imports the connector
+        modules); manual registrations overlay manifest ones on key clash.
+
         Returns:
-            Dictionary mapping protocol names to metadata
+            Dictionary mapping primary protocol names to metadata
         """
-        # Return only primary names
-        result = {}
-        for metadata in cls._registry.values():
-            if metadata.name not in result:
+        result: dict[str, FeeModelMetadata] = {}
+        for key in cls._manifest_loaders():
+            metadata = cls._resolve_manifest(key)
+            if metadata is not None and metadata.name not in result:
                 result[metadata.name] = metadata
+        for metadata in cls._registry.values():
+            result[metadata.name] = metadata
         return result
 
     @classmethod
     def clear(cls) -> None:
-        """Clear all registered fee models.
+        """Clear manual registrations and derived caches.
 
-        This is primarily useful for testing.
+        This is primarily useful for testing (mirrors the sibling
+        registries' ``reset_cache`` hooks).
         """
         cls._registry.clear()
+        cls._manifest_loader_map = None
+        cls._manifest_resolved.clear()
 
 
 def register_fee_model(

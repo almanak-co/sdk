@@ -16,7 +16,7 @@ Key Components:
     - AaveV3FeeModel: Fee model for Aave V3 lending operations
 
 Example:
-    from almanak.framework.backtesting.pnl.fee_models.aave_v3 import AaveV3FeeModel
+    from almanak.connectors.aave_v3.fee_model import AaveV3FeeModel
 
     fee_model = AaveV3FeeModel(borrow_origination_fee_pct=Decimal("0.0001"))
 

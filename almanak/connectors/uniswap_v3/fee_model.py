@@ -13,7 +13,7 @@ Key Components:
     - UniswapV3SlippageModel: Liquidity-aware slippage estimation
 
 Example:
-    from almanak.framework.backtesting.pnl.fee_models.uniswap_v3 import (
+    from almanak.connectors.uniswap_v3.fee_model import (
         UniswapV3FeeModel,
         UniswapV3SlippageModel,
         UniswapV3FeeTier,

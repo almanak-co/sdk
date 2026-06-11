@@ -185,45 +185,13 @@ from .lending_apy import (
     UnsupportedProtocolError as LendingUnsupportedProtocolError,
 )
 from .liquidity_depth import (
-    DATA_SOURCE_AERODROME as LIQUIDITY_DATA_SOURCE_AERODROME,
-)
-from .liquidity_depth import (
-    DATA_SOURCE_BALANCER as LIQUIDITY_DATA_SOURCE_BALANCER,
-)
-from .liquidity_depth import (
-    DATA_SOURCE_CURVE as LIQUIDITY_DATA_SOURCE_CURVE,
-)
-from .liquidity_depth import (
     DATA_SOURCE_FALLBACK as LIQUIDITY_DATA_SOURCE_FALLBACK,
 )
 from .liquidity_depth import (
-    DATA_SOURCE_PANCAKESWAP_V3 as LIQUIDITY_DATA_SOURCE_PANCAKESWAP_V3,
-)
-from .liquidity_depth import (
-    DATA_SOURCE_SUSHISWAP_V3 as LIQUIDITY_DATA_SOURCE_SUSHISWAP_V3,
-)
-from .liquidity_depth import (
-    DATA_SOURCE_TRADERJOE_V2 as LIQUIDITY_DATA_SOURCE_TRADERJOE_V2,
-)
-from .liquidity_depth import (
-    DATA_SOURCE_UNISWAP_V3 as LIQUIDITY_DATA_SOURCE_UNISWAP_V3,
-)
-from .liquidity_depth import (
     DEFAULT_TWAP_WINDOW_HOURS,
-    LIQUIDITY_BOOK_PROTOCOLS,
-    STABLESWAP_PROTOCOLS,
-    V2_PROTOCOLS,
-    V3_PROTOCOLS,
-    WEIGHTED_POOL_PROTOCOLS,
     LiquidityDepthProvider,
 )
-from .liquidity_depth import (
-    SUPPORTED_CHAINS as LIQUIDITY_SUPPORTED_CHAINS,
-)
 from .multi_dex_volume import (
-    PROTOCOL_CHAIN_SUPPORT,
-    PROTOCOL_PROVIDER_MAP,
-    STRING_PROTOCOL_MAP,
     MultiDEXVolumeProvider,
 )
 from .perp import (
@@ -318,9 +286,6 @@ __all__ = [
     "PoolNotFoundError",
     # Multi-DEX Volume Provider
     "MultiDEXVolumeProvider",
-    "PROTOCOL_PROVIDER_MAP",
-    "STRING_PROTOCOL_MAP",
-    "PROTOCOL_CHAIN_SUPPORT",
     # Funding Rate Provider
     "FundingRateProvider",
     "FundingRateData",
@@ -410,19 +375,6 @@ __all__ = [
     "SPARK_DATA_SOURCE",
     # Liquidity Depth Provider
     "LiquidityDepthProvider",
-    "LIQUIDITY_SUPPORTED_CHAINS",
-    "LIQUIDITY_DATA_SOURCE_UNISWAP_V3",
-    "LIQUIDITY_DATA_SOURCE_SUSHISWAP_V3",
-    "LIQUIDITY_DATA_SOURCE_PANCAKESWAP_V3",
-    "LIQUIDITY_DATA_SOURCE_AERODROME",
-    "LIQUIDITY_DATA_SOURCE_TRADERJOE_V2",
-    "LIQUIDITY_DATA_SOURCE_CURVE",
-    "LIQUIDITY_DATA_SOURCE_BALANCER",
     "LIQUIDITY_DATA_SOURCE_FALLBACK",
-    "V3_PROTOCOLS",
-    "V2_PROTOCOLS",
-    "LIQUIDITY_BOOK_PROTOCOLS",
-    "WEIGHTED_POOL_PROTOCOLS",
-    "STABLESWAP_PROTOCOLS",
     "DEFAULT_TWAP_WINDOW_HOURS",
 ]

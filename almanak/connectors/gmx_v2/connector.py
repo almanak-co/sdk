@@ -5,6 +5,7 @@ from __future__ import annotations
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
+    FeeModelDecl,
     FundingHistoryDecl,
     ImportRef,
     PerpsReadDecl,
@@ -15,6 +16,12 @@ from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpe
 CONNECTOR = Connector(
     name="gmx_v2",
     kind=ProtocolKind.PERP,
+    fee_model=FeeModelDecl(
+        model=ImportRef(module="almanak.connectors.gmx_v2.fee_model", attribute="GMXFeeModel"),
+        name="gmx",
+        description="GMX V2 perpetuals protocol fee model",
+        aliases=("gmx_v2",),
+    ),
     address_tables=(
         AddressTableSpec(
             protocol="gmx_v2",

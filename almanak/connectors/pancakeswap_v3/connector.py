@@ -5,6 +5,8 @@ from __future__ import annotations
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
+    DexVolumeDecl,
+    FeeModelDecl,
     ImportRef,
 )
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
@@ -13,6 +15,16 @@ from almanak.connectors._strategy_base.protocol_ownership import SupportedChains
 CONNECTOR = Connector(
     name="pancakeswap_v3",
     kind=ProtocolKind.LP,
+    dex_volume=DexVolumeDecl(
+        chains=("ethereum", "arbitrum", "bsc", "base"),
+        amm_family="v3_concentrated",
+        aliases=("pancake_v3",),
+    ),
+    fee_model=FeeModelDecl(
+        model=ImportRef(module="almanak.connectors.pancakeswap_v3.fee_model", attribute="PancakeSwapV3FeeModel"),
+        description="PancakeSwap V3 DEX fee model with tier-based fees (0.01%, 0.05%, 0.25%, 1%)",
+        aliases=("pancakeswap", "pancake_v3", "pcs_v3"),
+    ),
     address_tables=(
         AddressTableSpec(
             protocol="pancakeswap_v3",

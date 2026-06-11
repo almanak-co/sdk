@@ -20,6 +20,7 @@ from almanak.connectors._connector import (
     Connector,
     ConnectorDiscoveryError,
     ConnectorRegistry,
+    DexVolumeDecl,
     ImportRef,
     LendingReadDecl,
     PerpsReadDecl,
@@ -2590,3 +2591,80 @@ class TestDeclarationReachabilityGuards:
                 spec=ImportRef(module="almanak.connectors.gmx_v2.perps_read", attribute="PERPS_READ_SPEC"),
                 aliases=("gmx-v2",),
             )
+
+
+class TestDexVolumeDeclValidation:
+    """Each DexVolumeDecl.__post_init__ guard fails closed (VIB-4851 Phase D)."""
+
+    @staticmethod
+    def _decl(**overrides):
+        kwargs = {"chains": ("ethereum",), "amm_family": "v3_concentrated"}
+        kwargs.update(overrides)
+        return DexVolumeDecl(**kwargs)
+
+    def test_valid_declaration_accepts_all_fields(self):
+        decl = self._decl(
+            name="balancer",
+            dex="balancer_v2",
+            aliases=("bal",),
+            volume_data_source="balancer_v2_subgraph",
+            chain_default=("ethereum",),
+            generic_default=True,
+        )
+        assert decl.name == "balancer"
+        assert decl.chain_default == ("ethereum",)
+
+    @pytest.mark.parametrize("field", ["name", "dex"])
+    @pytest.mark.parametrize("bad", ["", "   ", 7])
+    def test_rejects_non_string_or_blank_keys(self, field, bad):
+        with pytest.raises(ValueError, match=f"{field} must be None or a non-empty string"):
+            self._decl(**{field: bad})
+
+    @pytest.mark.parametrize("field", ["name", "dex"])
+    @pytest.mark.parametrize("bad", ["Uniswap_V3", "uni-v3"])
+    def test_rejects_uppercase_or_hyphenated_keys(self, field, bad):
+        with pytest.raises(ValueError, match=f"{field} must be lowercase and hyphen-free"):
+            self._decl(**{field: bad})
+
+    @pytest.mark.parametrize("bad", [(), ["ethereum"], "ethereum"])
+    def test_rejects_non_tuple_or_empty_chains(self, bad):
+        with pytest.raises(ValueError, match="chains must be a non-empty tuple"):
+            self._decl(chains=bad)
+
+    @pytest.mark.parametrize("bad_chain", ["", "  ", "Ethereum", 7])
+    def test_rejects_malformed_chain_entries(self, bad_chain):
+        with pytest.raises(ValueError, match="chains must contain lowercase non-empty strings"):
+            self._decl(chains=("ethereum", bad_chain))
+
+    def test_rejects_duplicate_chains(self):
+        with pytest.raises(ValueError, match="chains contains duplicates"):
+            self._decl(chains=("ethereum", "ethereum"))
+
+    def test_rejects_unknown_amm_family(self):
+        with pytest.raises(ValueError, match="amm_family must be one of"):
+            self._decl(amm_family="constant_product")
+
+    @pytest.mark.parametrize("bad", ["", "   ", 7])
+    def test_rejects_blank_volume_data_source(self, bad):
+        with pytest.raises(ValueError, match="volume_data_source must be None or a non-empty string"):
+            self._decl(volume_data_source=bad)
+
+    def test_rejects_non_tuple_chain_default(self):
+        with pytest.raises(ValueError, match="chain_default must be a tuple"):
+            self._decl(chain_default=["ethereum"])
+
+    def test_rejects_chain_default_outside_declared_chains(self):
+        with pytest.raises(ValueError, match="chain_default chains must be declared in chains"):
+            self._decl(chain_default=("base",))
+
+    def test_rejects_non_bool_generic_default(self):
+        with pytest.raises(ValueError, match="generic_default must be a bool"):
+            self._decl(generic_default=1)
+
+    def test_rejects_hyphenated_alias(self):
+        with pytest.raises(ValueError, match="must not contain hyphens"):
+            self._decl(aliases=("uni-v3",))
+
+    def test_rejects_alias_shadowing_primary_name(self):
+        with pytest.raises(ValueError, match="aliases must not include the primary name"):
+            self._decl(name="uniswap_v3", aliases=("uniswap_v3",))

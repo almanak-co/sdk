@@ -230,6 +230,111 @@ class FundingHistoryDecl:
         _validate_decl_aliases("FundingHistoryDecl", self.aliases)
 
 
+_DEX_AMM_FAMILIES = ("v3_concentrated", "solidly_v2", "liquidity_book", "weighted", "stableswap")
+
+
+@dataclass(frozen=True)
+class DexVolumeDecl:
+    """Connector-owned DEX backtesting-data declaration (VIB-4851 Phase D).
+
+    Shared per-DEX facts for the two backtesting history consumers
+    (``multi_dex_volume`` routing and ``liquidity_depth`` family dispatch):
+
+    - ``name``: primary dispatch key; defaults to the connector name
+      (``balancer_v2`` declares ``"balancer"`` to preserve the legacy key).
+    - ``dex``: the gateway routing key — must equal the connector's
+      ``GatewayDexVolumeCapability.dex_name()`` (parity-tested); defaults to
+      the connector name.
+    - ``chains``: chains with volume/liquidity history support.
+    - ``aliases``: dispatch aliases (e.g. ``"uni_v3"``, ``"crv"``).
+    - ``volume_data_source``: provenance string stamped on volume results;
+      defaults to ``"<name>_subgraph"`` (curve/balancer override to preserve
+      their legacy fixture strings).
+    - ``amm_family``: liquidity-shape family driving the depth-query routing.
+    - ``chain_default``: chains where this DEX is the protocol-detection
+      default (aerodrome on base, traderjoe_v2 on avalanche).
+    - ``generic_default``: this DEX is the detection fallback for any other
+      chain it supports (uniswap_v3).
+    """
+
+    chains: tuple[str, ...]
+    amm_family: str
+    name: str | None = None
+    dex: str | None = None
+    aliases: tuple[str, ...] = ()
+    volume_data_source: str | None = None
+    chain_default: tuple[str, ...] = ()
+    generic_default: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate the declaration's keys, chains, and family."""
+        for label, value in (("name", self.name), ("dex", self.dex)):
+            if value is not None:
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"DexVolumeDecl.{label} must be None or a non-empty string, got {value!r}")
+                if value != value.lower() or "-" in value:
+                    raise ValueError(f"DexVolumeDecl.{label} must be lowercase and hyphen-free, got {value!r}")
+        if not isinstance(self.chains, tuple) or not self.chains:
+            raise ValueError(f"DexVolumeDecl.chains must be a non-empty tuple[str, ...], got {self.chains!r}")
+        bad_chains = [c for c in self.chains if not isinstance(c, str) or not c.strip() or c != c.lower()]
+        if bad_chains:
+            raise ValueError(f"DexVolumeDecl.chains must contain lowercase non-empty strings, got {bad_chains!r}")
+        if len(set(self.chains)) != len(self.chains):
+            raise ValueError(f"DexVolumeDecl.chains contains duplicates: {self.chains!r}")
+        if self.amm_family not in _DEX_AMM_FAMILIES:
+            raise ValueError(f"DexVolumeDecl.amm_family must be one of {_DEX_AMM_FAMILIES}, got {self.amm_family!r}")
+        if self.volume_data_source is not None and (
+            not isinstance(self.volume_data_source, str) or not self.volume_data_source.strip()
+        ):
+            raise ValueError(
+                f"DexVolumeDecl.volume_data_source must be None or a non-empty string, got {self.volume_data_source!r}"
+            )
+        if not isinstance(self.chain_default, tuple):
+            raise ValueError(f"DexVolumeDecl.chain_default must be a tuple[str, ...], got {self.chain_default!r}")
+        not_supported = [c for c in self.chain_default if c not in self.chains]
+        if not_supported:
+            raise ValueError(f"DexVolumeDecl.chain_default chains must be declared in chains, got {not_supported!r}")
+        if not isinstance(self.generic_default, bool):
+            raise ValueError(f"DexVolumeDecl.generic_default must be a bool, got {self.generic_default!r}")
+        _validate_decl_aliases("DexVolumeDecl", self.aliases)
+        if self.name is not None and self.name in self.aliases:
+            raise ValueError(f"DexVolumeDecl.aliases must not include the primary name {self.name!r}")
+
+
+@dataclass(frozen=True)
+class FeeModelDecl:
+    """Connector-owned backtesting fee-model declaration (VIB-4851 Phase D).
+
+    ``model`` names the connector's ``FeeModel`` subclass (a class in the
+    connector's ``fee_model`` module). ``name`` is the primary registry key —
+    it defaults to the connector name; connectors whose legacy registry key
+    differs declare it explicitly (``gmx_v2`` -> ``"gmx"``, ``morpho_blue`` ->
+    ``"morpho"``) so the framework registry and the backtest service's exported
+    protocol identifiers stay byte-identical. ``aliases`` are fee-model-scoped
+    lookup aliases (e.g. ``"velodrome"`` -> aerodrome).
+    """
+
+    model: ImportRef
+    name: str | None = None
+    description: str = ""
+    aliases: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the declaration's import reference, name, and aliases."""
+        if not isinstance(self.model, ImportRef):
+            raise ValueError(f"FeeModelDecl.model must be an ImportRef, got {self.model!r}")
+        if self.name is not None:
+            if not isinstance(self.name, str) or not self.name.strip():
+                raise ValueError(f"FeeModelDecl.name must be None or a non-empty string, got {self.name!r}")
+            if self.name != self.name.lower() or "-" in self.name:
+                raise ValueError(f"FeeModelDecl.name must be lowercase and hyphen-free, got {self.name!r}")
+        if not isinstance(self.description, str):
+            raise ValueError(f"FeeModelDecl.description must be a string, got {self.description!r}")
+        _validate_decl_aliases("FeeModelDecl", self.aliases)
+        if self.name is not None and self.name in self.aliases:
+            raise ValueError(f"FeeModelDecl.aliases must not include the primary name {self.name!r}")
+
+
 @dataclass(frozen=True)
 class Connector:
     """Lightweight connector-owned capability manifest.
@@ -264,6 +369,8 @@ class Connector:
     lending_read: LendingReadDecl | None = None
     perps_read: PerpsReadDecl | None = None
     funding_history: FundingHistoryDecl | None = None
+    fee_model: FeeModelDecl | None = None
+    dex_volume: DexVolumeDecl | None = None
     metadata_amount_encoding: MetadataAmountEncoding | None = None
     fungible_lp: bool = False
     prediction_read: ImportRef | None = None
@@ -333,6 +440,8 @@ class Connector:
         self._validate_lending_read()
         self._validate_perps_read()
         self._validate_funding_history()
+        self._validate_fee_model()
+        self._validate_dex_volume()
         self._validate_metadata_amount_encoding()
         self._validate_fungible_lp()
         self._validate_receipt_parser_kwargs()
@@ -559,6 +668,16 @@ class Connector:
             raise ValueError(
                 f"Connector.funding_history must be None or a FundingHistoryDecl, got {self.funding_history!r}"
             )
+
+    def _validate_fee_model(self) -> None:
+        """Validate the optional fee-model declaration."""
+        if self.fee_model is not None and not isinstance(self.fee_model, FeeModelDecl):
+            raise ValueError(f"Connector.fee_model must be None or a FeeModelDecl, got {self.fee_model!r}")
+
+    def _validate_dex_volume(self) -> None:
+        """Validate the optional DEX backtesting-data declaration."""
+        if self.dex_volume is not None and not isinstance(self.dex_volume, DexVolumeDecl):
+            raise ValueError(f"Connector.dex_volume must be None or a DexVolumeDecl, got {self.dex_volume!r}")
 
     def _validate_fungible_lp(self) -> None:
         """Validate the fungible-LP (ERC20 LP token, no NFT discriminator) flag."""
@@ -983,6 +1102,14 @@ class ConnectorRegistry:
         """Connectors declaring a perp funding-rate-history venue."""
         return tuple(d for d in self.all() if d.funding_history is not None)
 
+    def with_fee_model(self) -> tuple[Connector, ...]:
+        """Connectors declaring a backtesting fee model."""
+        return tuple(d for d in self.all() if d.fee_model is not None)
+
+    def with_dex_volume(self) -> tuple[Connector, ...]:
+        """Connectors declaring DEX backtesting volume/liquidity data."""
+        return tuple(d for d in self.all() if d.dex_volume is not None)
+
     def with_perps_read(self) -> tuple[Connector, ...]:
         """Return connectors that publish perps-read dispatch declarations."""
         return tuple(d for d in self.all() if d.perps_read is not None)
@@ -1083,6 +1210,8 @@ class ConnectorRegistry:
         seen_lending_read_keys: dict[str, str] = {}
         seen_perps_read_keys: dict[str, str] = {}
         seen_funding_history_keys: dict[str, str] = {}
+        seen_fee_model_keys: dict[str, str] = {}
+        seen_dex_volume_keys: dict[str, str] = {}
 
         for info in pkgutil.iter_modules(package.__path__):
             if not info.ispkg or info.name.startswith("_"):
@@ -1171,6 +1300,22 @@ class ConnectorRegistry:
                 capability="Funding-history",
                 keys=() if connector.funding_history is None else (connector.name, *connector.funding_history.aliases),
                 seen_keys=seen_funding_history_keys,
+            )
+            self._validate_unique_ownership_keys(
+                connector_name=connector.name,
+                capability="Fee-model",
+                keys=()
+                if connector.fee_model is None
+                else (connector.fee_model.name or connector.name, *connector.fee_model.aliases),
+                seen_keys=seen_fee_model_keys,
+            )
+            self._validate_unique_ownership_keys(
+                connector_name=connector.name,
+                capability="Dex-volume",
+                keys=()
+                if connector.dex_volume is None
+                else (connector.dex_volume.name or connector.name, *connector.dex_volume.aliases),
+                seen_keys=seen_dex_volume_keys,
             )
             connectors.append(connector)
 

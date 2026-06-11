@@ -24,7 +24,7 @@ Key Components:
     - CompoundV3Market: Enum of supported Compound V3 markets
 
 Example:
-    from almanak.framework.backtesting.pnl.fee_models.compound_v3 import (
+    from almanak.connectors.compound_v3.fee_model import (
         CompoundV3FeeModel,
         CompoundV3Market,
     )

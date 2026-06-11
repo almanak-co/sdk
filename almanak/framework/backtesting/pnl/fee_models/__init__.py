@@ -1,8 +1,15 @@
 """Protocol-specific fee and slippage models for PnL backtesting.
 
-This module provides fee and slippage model implementations tailored
-to specific DeFi protocols like Uniswap V3, PancakeSwap V3, Aerodrome,
-Curve, Aave V3, Morpho, Compound V3, GMX, and Hyperliquid.
+The protocol fee-model implementations live in their owning connectors
+(``almanak/connectors/<protocol>/fee_model.py``) and are declared on each
+connector manifest via ``fee_model=FeeModelDecl(...)`` — adding a connector
+adds its fee model with no edit here (VIB-4851 Phase D; previously this
+package held the per-protocol modules and a hardcoded registration block).
+
+This package keeps the protocol-agnostic surfaces eager (the ``FeeModel``
+base + registry, AMM math, pool-liquidity helpers, the slippage guard) and
+re-exports the connector-owned model classes lazily so importing the package
+never imports a connector module.
 
 Available Models:
     - FeeModel: Abstract base class for all fee models
@@ -27,14 +34,6 @@ Example:
     from almanak.framework.backtesting.pnl.fee_models import (
         FeeModel,
         UniswapV3FeeModel,
-        UniswapV3SlippageModel,
-        PancakeSwapV3FeeModel,
-        AerodromeFeeModel,
-        CurveFeeModel,
-        AaveV3FeeModel,
-        MorphoFeeModel,
-        CompoundV3FeeModel,
-        GMXFeeModel,
         get_fee_model,
     )
 
@@ -44,24 +43,10 @@ Example:
 
     # Or instantiate directly
     fee_model = UniswapV3FeeModel()
-    slippage_model = UniswapV3SlippageModel()
-    pancakeswap_fee_model = PancakeSwapV3FeeModel()
-    aerodrome_fee_model = AerodromeFeeModel()
-    curve_fee_model = CurveFeeModel()
-    aave_fee_model = AaveV3FeeModel()
-    morpho_fee_model = MorphoFeeModel()
-    compound_v3_fee_model = CompoundV3FeeModel()
-    gmx_fee_model = GMXFeeModel()
-    hyperliquid_fee_model = HyperliquidFeeModel()
 """
 
-# Base interface and registry
-# Protocol-specific implementations
-from almanak.framework.backtesting.pnl.fee_models.aave_v3 import AaveV3FeeModel
-from almanak.framework.backtesting.pnl.fee_models.aerodrome import (
-    AerodromeFeeModel,
-    AerodromePoolType,
-)
+import importlib
+
 from almanak.framework.backtesting.pnl.fee_models.amm_math import (
     MAX_TICK,
     MIN_TICK,
@@ -92,19 +77,6 @@ from almanak.framework.backtesting.pnl.fee_models.base import (
     get_fee_model_registry,
     register_fee_model,
 )
-from almanak.framework.backtesting.pnl.fee_models.compound_v3 import (
-    CompoundV3FeeModel,
-    CompoundV3Market,
-)
-from almanak.framework.backtesting.pnl.fee_models.curve import (
-    CurveFeeModel,
-    CurvePoolType,
-)
-from almanak.framework.backtesting.pnl.fee_models.gmx import GMXFeeModel
-from almanak.framework.backtesting.pnl.fee_models.hyperliquid import (
-    HyperliquidFeeModel,
-    HyperliquidFeeTier,
-)
 from almanak.framework.backtesting.pnl.fee_models.liquidity import (
     DEFAULT_LIQUIDITY_USD,
     KNOWN_POOLS,
@@ -113,11 +85,6 @@ from almanak.framework.backtesting.pnl.fee_models.liquidity import (
     get_pool_address,
     query_pool_liquidity,
     query_pool_liquidity_sync,
-)
-from almanak.framework.backtesting.pnl.fee_models.morpho import MorphoFeeModel
-from almanak.framework.backtesting.pnl.fee_models.pancakeswap_v3 import (
-    PancakeSwapV3FeeModel,
-    PancakeSwapV3FeeTier,
 )
 from almanak.framework.backtesting.pnl.fee_models.slippage_guard import (
     DEFAULT_CRITICAL_IMPACT_THRESHOLD,
@@ -141,67 +108,44 @@ from almanak.framework.backtesting.pnl.fee_models.slippage_guard import (
     cap_slippage,
     check_trade_slippage,
 )
-from almanak.framework.backtesting.pnl.fee_models.uniswap_v3 import (
-    UniswapV3FeeModel,
-    UniswapV3FeeTier,
-    UniswapV3SlippageModel,
-)
 
-# Register built-in fee models
-FeeModelRegistry.register(
-    "uniswap_v3",
-    UniswapV3FeeModel,
-    description="Uniswap V3 DEX fee model with tier-based fees",
-    aliases=["uniswap", "uni_v3"],
-)
-FeeModelRegistry.register(
-    "pancakeswap_v3",
-    PancakeSwapV3FeeModel,
-    description="PancakeSwap V3 DEX fee model with tier-based fees (0.01%, 0.05%, 0.25%, 1%)",
-    aliases=["pancakeswap", "pancake_v3", "pcs_v3"],
-)
-FeeModelRegistry.register(
-    "aerodrome",
-    AerodromeFeeModel,
-    description="Aerodrome DEX fee model with stable/volatile pool distinction",
-    aliases=["aero", "velodrome"],
-)
-FeeModelRegistry.register(
-    "curve",
-    CurveFeeModel,
-    description="Curve Finance DEX fee model with dynamic fee calculation",
-    aliases=["curve_fi", "crv"],
-)
-FeeModelRegistry.register(
-    "aave_v3",
-    AaveV3FeeModel,
-    description="Aave V3 lending protocol fee model",
-    aliases=["aave", "aave_v2"],
-)
-FeeModelRegistry.register(
-    "morpho",
-    MorphoFeeModel,
-    description="Morpho lending protocol fee model (fee-free operations)",
-    aliases=["morpho_blue", "morpho_optimizer"],
-)
-FeeModelRegistry.register(
-    "compound_v3",
-    CompoundV3FeeModel,
-    description="Compound V3 (Comet) lending protocol fee model",
-    aliases=["compound", "comet"],
-)
-FeeModelRegistry.register(
-    "gmx",
-    GMXFeeModel,
-    description="GMX V2 perpetuals protocol fee model",
-    aliases=["gmx_v2"],
-)
-FeeModelRegistry.register(
-    "hyperliquid",
-    HyperliquidFeeModel,
-    description="Hyperliquid perpetuals protocol fee model with maker/taker fees and volume tiers",
-    aliases=["hl", "hyper"],
-)
+# Connector-owned model classes (and their companion enums), re-exported
+# lazily by name. Keys are the public names this package historically
+# exported; values are the owning connector fee_model modules.
+_CONNECTOR_EXPORTS: dict[str, str] = {
+    "UniswapV3FeeModel": "almanak.connectors.uniswap_v3.fee_model",
+    "UniswapV3SlippageModel": "almanak.connectors.uniswap_v3.fee_model",
+    "UniswapV3FeeTier": "almanak.connectors.uniswap_v3.fee_model",
+    "PancakeSwapV3FeeModel": "almanak.connectors.pancakeswap_v3.fee_model",
+    "PancakeSwapV3FeeTier": "almanak.connectors.pancakeswap_v3.fee_model",
+    "AerodromeFeeModel": "almanak.connectors.aerodrome.fee_model",
+    "AerodromePoolType": "almanak.connectors.aerodrome.fee_model",
+    "CurveFeeModel": "almanak.connectors.curve.fee_model",
+    "CurvePoolType": "almanak.connectors.curve.fee_model",
+    "AaveV3FeeModel": "almanak.connectors.aave_v3.fee_model",
+    "MorphoFeeModel": "almanak.connectors.morpho_blue.fee_model",
+    "CompoundV3FeeModel": "almanak.connectors.compound_v3.fee_model",
+    "CompoundV3Market": "almanak.connectors.compound_v3.fee_model",
+    "GMXFeeModel": "almanak.connectors.gmx_v2.fee_model",
+    "HyperliquidFeeModel": "almanak.connectors.hyperliquid.fee_model",
+    "HyperliquidFeeTier": "almanak.connectors.hyperliquid.fee_model",
+}
+
+
+def __getattr__(name: str):  # noqa: ANN202 - PEP 562 lazy re-export hook
+    """Resolve connector-owned model classes on first attribute access."""
+    module_path = _CONNECTOR_EXPORTS.get(name)
+    if module_path is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(importlib.import_module(module_path), name)
+    globals()[name] = value  # cache for subsequent lookups
+    return value
+
+
+def __dir__() -> list[str]:
+    """Include the lazy connector exports in ``dir()`` output."""
+    return sorted(set(globals()) | set(_CONNECTOR_EXPORTS))
+
 
 __all__ = [
     # Base interface
@@ -213,7 +157,7 @@ __all__ = [
     "get_fee_model",
     "get_fee_model_registry",
     "register_fee_model",
-    # Protocol implementations
+    # Protocol implementations (lazy; connector-owned)
     "UniswapV3FeeModel",
     "UniswapV3SlippageModel",
     "UniswapV3FeeTier",

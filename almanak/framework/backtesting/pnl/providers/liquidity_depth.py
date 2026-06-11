@@ -14,7 +14,7 @@ Example:
     from almanak.framework.backtesting.pnl.providers.liquidity_depth import (
         LiquidityDepthProvider,
     )
-    from almanak.core.enums import Chain, Protocol
+    from almanak.core.enums import Chain
     from datetime import datetime, UTC
 
     provider = LiquidityDepthProvider()
@@ -24,17 +24,23 @@ Example:
             pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
             chain=Chain.ARBITRUM,
             timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
-            protocol=Protocol.UNISWAP_V3,
+            protocol="uniswap_v3",
         )
         print(f"Liquidity depth: ${liquidity.depth}")
 """
 
+from __future__ import annotations
+
 import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from almanak.core.enums import Chain, Protocol
+from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
+from almanak.core.enums import Chain
+
+if TYPE_CHECKING:
+    from almanak.core.enums import Protocol
 
 from ..types import DataConfidence, DataSourceInfo, LiquidityResult
 from .base import HistoricalLiquidityProvider
@@ -61,27 +67,21 @@ logger = logging.getLogger(__name__)
 # Constants
 # =============================================================================
 
-# Data source identifiers
-DATA_SOURCE_UNISWAP_V3 = "uniswap_v3_subgraph"
-DATA_SOURCE_SUSHISWAP_V3 = "sushiswap_v3_subgraph"
-DATA_SOURCE_PANCAKESWAP_V3 = "pancakeswap_v3_subgraph"
-DATA_SOURCE_AERODROME = "aerodrome_subgraph"
-DATA_SOURCE_TRADERJOE_V2 = "traderjoe_v2_subgraph"
-DATA_SOURCE_CURVE = "curve_subgraph"
-DATA_SOURCE_BALANCER = "balancer_subgraph"
+# Fallback data-source identifier. Per-protocol provenance derives as
+# "<protocol>_subgraph" from the connector-declared dispatch key (the legacy
+# DATA_SOURCE_* constants were exactly that pattern); AMM-family routing and
+# chain defaults derive from each connector's DexVolumeDecl via
+# DexVolumeRegistry (VIB-4851 Phase D).
 DATA_SOURCE_FALLBACK = "liquidity_fallback"
-
-# Protocol types for routing
-V3_PROTOCOLS = ["uniswap_v3", "sushiswap_v3", "pancakeswap_v3"]
-V2_PROTOCOLS = ["aerodrome"]  # Solidly-style AMMs
-LIQUIDITY_BOOK_PROTOCOLS = ["traderjoe_v2"]  # Bin-based liquidity
-WEIGHTED_POOL_PROTOCOLS = ["balancer"]
-STABLESWAP_PROTOCOLS = ["curve"]
 
 # Default window for time-weighted average (in hours)
 DEFAULT_TWAP_WINDOW_HOURS = 24
 
-# Protocol to subgraph IDs mapping
+# Protocol to subgraph IDs mapping. Load-bearing: this provider still
+# queries TheGraph client-side through SubgraphClient — a pre-W7
+# gateway-boundary hole. The liquidity-depth gateway lane (follow-up to
+# VIB-4851 Phase D) moves this egress into the gateway and deletes these
+# client-side deployment-ID copies.
 PROTOCOL_SUBGRAPH_IDS: dict[str, dict[Chain, str]] = {
     "uniswap_v3": UNISWAP_V3_SUBGRAPH_IDS,
     "sushiswap_v3": SUSHISWAP_V3_SUBGRAPH_IDS,
@@ -91,28 +91,6 @@ PROTOCOL_SUBGRAPH_IDS: dict[str, dict[Chain, str]] = {
     "curve": CURVE_SUBGRAPH_IDS,
     "balancer": BALANCER_SUBGRAPH_IDS,
 }
-
-# Protocol to data source mapping
-PROTOCOL_DATA_SOURCE: dict[str, str] = {
-    "uniswap_v3": DATA_SOURCE_UNISWAP_V3,
-    "sushiswap_v3": DATA_SOURCE_SUSHISWAP_V3,
-    "pancakeswap_v3": DATA_SOURCE_PANCAKESWAP_V3,
-    "aerodrome": DATA_SOURCE_AERODROME,
-    "traderjoe_v2": DATA_SOURCE_TRADERJOE_V2,
-    "curve": DATA_SOURCE_CURVE,
-    "balancer": DATA_SOURCE_BALANCER,
-}
-
-# Supported chains overall
-SUPPORTED_CHAINS: list[Chain] = [
-    Chain.ETHEREUM,
-    Chain.ARBITRUM,
-    Chain.BASE,
-    Chain.OPTIMISM,
-    Chain.POLYGON,
-    Chain.AVALANCHE,
-    Chain.BSC,
-]
 
 
 # =============================================================================
@@ -320,8 +298,9 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
 
     @property
     def supported_chains(self) -> list[Chain]:
-        """Get the list of supported chains."""
-        return SUPPORTED_CHAINS.copy()
+        """Chains any declared DEX serves liquidity data for (enum order)."""
+        declared = DexVolumeRegistry.all_supported_chains()
+        return [chain for chain in Chain if chain.value.lower() in declared]
 
     async def close(self) -> None:
         """Close the subgraph client and release resources."""
@@ -329,7 +308,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             await self._client.close()
         logger.debug("LiquidityDepthProvider closed")
 
-    async def __aenter__(self) -> "LiquidityDepthProvider":
+    async def __aenter__(self) -> LiquidityDepthProvider:
         """Async context manager entry."""
         return self
 
@@ -338,19 +317,39 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         await self.close()
 
     def _get_protocol_id(self, protocol: Protocol | str | None) -> str | None:
-        """Normalize protocol to string identifier.
+        """Normalize protocol to its canonical declared identifier.
 
         Args:
             protocol: Protocol enum, string identifier, or None
 
         Returns:
-            Lowercase string protocol identifier or None
+            The canonical declared protocol key when the identifier (or one
+            of its declared aliases, e.g. ``"uni_v3"``) is known; the raw
+            lowercase string for unknown identifiers; None for None.
         """
         if protocol is None:
             return None
-        if isinstance(protocol, Protocol):
-            return protocol.value.lower()
-        return protocol.lower()
+        # Duck-typed: accepts the legacy core Protocol enum (via .value)
+        # without importing it at runtime, so backtesting no longer depends
+        # on the enum (VIB-4851 Phase D, DEC-3).
+        value = getattr(protocol, "value", protocol)
+        proto_str = str(value).lower()
+        # Unknown identifiers keep the raw string rather than None: in this
+        # provider None means "auto-detect from chain", and an explicit but
+        # unknown protocol must hit the warning + fallback path instead of
+        # silently detecting a different DEX.
+        return DexVolumeRegistry.canonical(proto_str) or proto_str
+
+    def _data_source_for(self, protocol_id: str) -> str:
+        """Provenance string for a protocol's liquidity rows.
+
+        Derives "<protocol>_subgraph" for declared DEXes (byte-identical to
+        the legacy per-protocol DATA_SOURCE_* constants) and falls back to
+        :data:`DATA_SOURCE_FALLBACK` for unknown identifiers.
+        """
+        if DexVolumeRegistry.has(protocol_id):
+            return f"{DexVolumeRegistry.canonical(protocol_id)}_subgraph"
+        return DATA_SOURCE_FALLBACK
 
     def _get_subgraph_id(self, protocol_id: str, chain: Chain) -> str | None:
         """Get the subgraph ID for a protocol and chain.
@@ -378,20 +377,10 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         Returns:
             Best-guess protocol identifier or None
         """
-        # Chain-specific DEX defaults
-        chain_defaults: dict[Chain, str] = {
-            Chain.BASE: "aerodrome",
-            Chain.AVALANCHE: "traderjoe_v2",
-        }
-
-        if chain in chain_defaults:
-            return chain_defaults[chain]
-
-        # Default to Uniswap V3 for other chains
-        if chain in UNISWAP_V3_SUBGRAPH_IDS:
-            return "uniswap_v3"
-
-        return None
+        # Connector-declared defaults: chain_default declarations win
+        # (aerodrome on base, traderjoe_v2 on avalanche), then the
+        # generic_default DEX (uniswap_v3) for any chain it supports.
+        return DexVolumeRegistry.chain_default(chain.value)
 
     def _datetime_to_timestamp(self, dt: datetime) -> int:
         """Convert datetime to Unix timestamp.
@@ -512,7 +501,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             return None
 
         pool_address_lower = pool_address.lower()
-        data_source = PROTOCOL_DATA_SOURCE.get(protocol_id, DATA_SOURCE_FALLBACK)
+        data_source = self._data_source_for(protocol_id)
 
         # Calculate date range for query
         if self._use_twap:
@@ -610,7 +599,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             return None
 
         pool_address_lower = pool_address.lower()
-        data_source = PROTOCOL_DATA_SOURCE.get(protocol_id, DATA_SOURCE_FALLBACK)
+        data_source = self._data_source_for(protocol_id)
 
         # Calculate date range for query
         if self._use_twap:
@@ -706,7 +695,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             return None
 
         pool_address_lower = pool_address.lower()
-        data_source = PROTOCOL_DATA_SOURCE.get(protocol_id, DATA_SOURCE_FALLBACK)
+        data_source = self._data_source_for(protocol_id)
 
         # Calculate date range for query
         if self._use_twap:
@@ -802,7 +791,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             return None
 
         pool_address_lower = pool_address.lower()
-        data_source = PROTOCOL_DATA_SOURCE.get(protocol_id, DATA_SOURCE_FALLBACK)
+        data_source = self._data_source_for(protocol_id)
 
         # Balancer V2 subgraph expects full pool ID (64 hex chars = address + type)
         # Warn if bare address is provided
@@ -906,7 +895,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             return None
 
         pool_address_lower = pool_address.lower()
-        data_source = PROTOCOL_DATA_SOURCE.get(protocol_id, DATA_SOURCE_FALLBACK)
+        data_source = self._data_source_for(protocol_id)
 
         # Calculate day number range for Messari schema
         if self._use_twap:
@@ -1070,15 +1059,17 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         result: LiquidityResult | None = None
 
         try:
-            if protocol_id in V3_PROTOCOLS:
+            entry = DexVolumeRegistry.entry_for(protocol_id)
+            family = entry.amm_family if entry is not None else None
+            if family == "v3_concentrated":
                 result = await self._query_v3_liquidity(pool_address, chain, timestamp, protocol_id)
-            elif protocol_id in V2_PROTOCOLS:
+            elif family == "solidly_v2":
                 result = await self._query_v2_liquidity(pool_address, chain, timestamp, protocol_id)
-            elif protocol_id in LIQUIDITY_BOOK_PROTOCOLS:
+            elif family == "liquidity_book":
                 result = await self._query_liquidity_book(pool_address, chain, timestamp, protocol_id)
-            elif protocol_id in WEIGHTED_POOL_PROTOCOLS:
+            elif family == "weighted":
                 result = await self._query_balancer_liquidity(pool_address, chain, timestamp, protocol_id)
-            elif protocol_id in STABLESWAP_PROTOCOLS:
+            elif family == "stableswap":
                 result = await self._query_curve_liquidity(pool_address, chain, timestamp, protocol_id)
             else:
                 logger.warning(
@@ -1143,19 +1134,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
 
 __all__ = [
     "LiquidityDepthProvider",
-    "DATA_SOURCE_UNISWAP_V3",
-    "DATA_SOURCE_SUSHISWAP_V3",
-    "DATA_SOURCE_PANCAKESWAP_V3",
-    "DATA_SOURCE_AERODROME",
-    "DATA_SOURCE_TRADERJOE_V2",
-    "DATA_SOURCE_CURVE",
-    "DATA_SOURCE_BALANCER",
     "DATA_SOURCE_FALLBACK",
-    "V3_PROTOCOLS",
-    "V2_PROTOCOLS",
-    "LIQUIDITY_BOOK_PROTOCOLS",
-    "WEIGHTED_POOL_PROTOCOLS",
-    "STABLESWAP_PROTOCOLS",
-    "SUPPORTED_CHAINS",
     "DEFAULT_TWAP_WINDOW_HOURS",
+    "PROTOCOL_SUBGRAPH_IDS",
 ]

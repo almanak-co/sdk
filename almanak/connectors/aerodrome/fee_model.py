@@ -12,7 +12,7 @@ Key Components:
     - AerodromeFeeModel: Fee model with pool-type-based fees
 
 Example:
-    from almanak.framework.backtesting.pnl.fee_models.aerodrome import (
+    from almanak.connectors.aerodrome.fee_model import (
         AerodromeFeeModel,
         AerodromePoolType,
     )

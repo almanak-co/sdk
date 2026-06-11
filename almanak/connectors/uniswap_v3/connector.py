@@ -5,6 +5,8 @@ from __future__ import annotations
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
+    DexVolumeDecl,
+    FeeModelDecl,
     ImportRef,
 )
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
@@ -15,6 +17,17 @@ _V3_ABI_FAMILIES = (AbiFamily.V3_FACTORY, AbiFamily.V3_NPM)
 CONNECTOR = Connector(
     name="uniswap_v3",
     kind=ProtocolKind.LP,
+    dex_volume=DexVolumeDecl(
+        chains=("ethereum", "arbitrum", "base", "optimism", "polygon"),
+        amm_family="v3_concentrated",
+        aliases=("uni_v3",),
+        generic_default=True,
+    ),
+    fee_model=FeeModelDecl(
+        model=ImportRef(module="almanak.connectors.uniswap_v3.fee_model", attribute="UniswapV3FeeModel"),
+        description="Uniswap V3 DEX fee model with tier-based fees",
+        aliases=("uniswap", "uni_v3"),
+    ),
     aliases=("agni_finance",),
     address_tables=(
         AddressTableSpec(

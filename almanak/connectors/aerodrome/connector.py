@@ -5,6 +5,8 @@ from __future__ import annotations
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
+    DexVolumeDecl,
+    FeeModelDecl,
     ImportRef,
     MetadataAmountEncoding,
 )
@@ -13,6 +15,16 @@ from almanak.connectors._strategy_base.address_table import AddressTableSpec
 CONNECTOR = Connector(
     name="aerodrome",
     kind=ProtocolKind.LP,
+    dex_volume=DexVolumeDecl(
+        chains=("base",),
+        amm_family="solidly_v2",
+        chain_default=("base",),
+    ),
+    fee_model=FeeModelDecl(
+        model=ImportRef(module="almanak.connectors.aerodrome.fee_model", attribute="AerodromeFeeModel"),
+        description="Aerodrome DEX fee model with stable/volatile pool distinction",
+        aliases=("aero", "velodrome"),
+    ),
     aliases=("aerodrome_slipstream",),
     address_tables=(
         AddressTableSpec(

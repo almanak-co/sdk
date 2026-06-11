@@ -12,7 +12,7 @@ Key Components:
     - PancakeSwapV3FeeModel: Fee model using pool fee tiers
 
 Example:
-    from almanak.framework.backtesting.pnl.fee_models.pancakeswap_v3 import (
+    from almanak.connectors.pancakeswap_v3.fee_model import (
         PancakeSwapV3FeeModel,
         PancakeSwapV3FeeTier,
     )

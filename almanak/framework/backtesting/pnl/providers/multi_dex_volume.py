@@ -1,36 +1,34 @@
 """Multi-DEX volume provider aggregator.
 
 This module provides an aggregator that routes volume queries to the correct
-DEX-specific provider based on protocol or pool detection. It implements the
+DEX based on protocol or chain detection. It implements the
 HistoricalVolumeProvider interface and provides a unified entry point for
 fetching historical volume data across multiple DEX protocols.
 
-**VIB-4859 / W7 (VIB-4870)**: the per-DEX providers this aggregator routes
-to are now thin gRPC clients of ``RateHistoryService.GetDexVolumeHistory``.
-The aggregator therefore holds no subgraph HTTP client and opens no
-socket — all TheGraph egress lives gateway-side. Routing-level mismatches
-(unknown protocol / unsupported chain / undetectable protocol) still
-return LOW-confidence fallback rows: these are *configuration* mismatches
-that never reach a data source, so the "no silent zeros" rule (which
-governs empty/errored *subgraph* responses) does not apply to them. A
-genuine "subgraph returned nothing / errored" surfaces as
-:class:`DataSourceUnavailable` raised by the per-DEX provider and
-propagates to the caller (no silent zero-fill).
+**VIB-4851 Phase D**: routing is declaration-driven. Each DEX connector's
+``dex_volume=DexVolumeDecl(...)`` manifest declaration owns the dispatch keys,
+aliases, chain support, provenance string, and chain-detection defaults —
+this aggregator names no DEX and holds no dispatch table (previously:
+``PROTOCOL_PROVIDER_MAP`` keyed by the legacy ``Protocol`` enum +
+``STRING_PROTOCOL_MAP`` + ``PROTOCOL_CHAIN_SUPPORT``). Adding a DEX's volume
+lane is one connector folder, no edit here.
 
-Supported Protocols:
-    - Uniswap V3 (Ethereum, Arbitrum, Base, Optimism, Polygon)
-    - SushiSwap V3 (Ethereum)
-    - PancakeSwap V3 (Ethereum, Arbitrum, BSC, Base)
-    - Aerodrome (Base)
-    - TraderJoe V2 (Avalanche)
-    - Curve (Ethereum, Optimism)
-    - Balancer (Ethereum, Arbitrum, Polygon)
+**VIB-4859 / W7 (VIB-4870)**: the per-DEX fetch is a thin gRPC client of
+``RateHistoryService.GetDexVolumeHistory``. The aggregator therefore holds no
+subgraph HTTP client and opens no socket — all TheGraph egress lives
+gateway-side. Routing-level mismatches (unknown protocol / unsupported chain /
+undetectable protocol) still return LOW-confidence fallback rows: these are
+*configuration* mismatches that never reach a data source, so the "no silent
+zeros" rule (which governs empty/errored *subgraph* responses) does not apply
+to them. A genuine "subgraph returned nothing / errored" surfaces as
+:class:`DataSourceUnavailable` raised by the gateway-backed fetch and
+propagates to the caller (no silent zero-fill).
 
 Example:
     from almanak.framework.backtesting.pnl.providers.multi_dex_volume import (
         MultiDEXVolumeProvider,
     )
-    from almanak.core.enums import Chain, Protocol
+    from almanak.core.enums import Chain
     from datetime import date
 
     provider = MultiDEXVolumeProvider()
@@ -40,82 +38,29 @@ Example:
             chain=Chain.ARBITRUM,
             start_date=date(2024, 1, 1),
             end_date=date(2024, 1, 31),
-            protocol=Protocol.UNISWAP_V3,
+            protocol="uniswap_v3",
         )
 """
+
+from __future__ import annotations
 
 import logging
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from almanak.core.enums import Chain, Protocol
+from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
+from almanak.core.enums import Chain
 
 from ..types import DataConfidence, DataSourceInfo, VolumeResult
 from .base import HistoricalVolumeProvider
-from .dex import (
-    AERODROME_SUBGRAPH_IDS,
-    BALANCER_SUBGRAPH_IDS,
-    CURVE_SUBGRAPH_IDS,
-    PANCAKESWAP_V3_SUBGRAPH_IDS,
-    SUSHISWAP_V3_SUBGRAPH_IDS,
-    TRADERJOE_V2_SUBGRAPH_IDS,
-    UNISWAP_V3_SUBGRAPH_IDS,
-    AerodromeVolumeProvider,
-    BalancerVolumeProvider,
-    CurveVolumeProvider,
-    PancakeSwapV3VolumeProvider,
-    SushiSwapV3VolumeProvider,
-    TraderJoeV2VolumeProvider,
-    UniswapV3VolumeProvider,
-)
+from .dex import GatewayDexVolumeProvider
+
+if TYPE_CHECKING:
+    from almanak.core.enums import Protocol
 
 logger = logging.getLogger(__name__)
 
-
-# =============================================================================
-# Protocol to Provider Mapping
-# =============================================================================
-
-# Map Protocol enum values to provider info
-PROTOCOL_PROVIDER_MAP: dict[Protocol, type[HistoricalVolumeProvider]] = {
-    Protocol.UNISWAP_V3: UniswapV3VolumeProvider,
-    Protocol.SUSHISWAP_V3: SushiSwapV3VolumeProvider,
-    Protocol.PANCAKESWAP_V3: PancakeSwapV3VolumeProvider,
-    Protocol.AERODROME: AerodromeVolumeProvider,
-    Protocol.TRADERJOE_V2: TraderJoeV2VolumeProvider,
-}
-
-# Map string identifiers to Protocol enum (for protocols not in Protocol enum)
-STRING_PROTOCOL_MAP: dict[str, type[HistoricalVolumeProvider]] = {
-    # Protocol enum values (lowercase)
-    "uniswap_v3": UniswapV3VolumeProvider,
-    "sushiswap_v3": SushiSwapV3VolumeProvider,
-    "pancakeswap_v3": PancakeSwapV3VolumeProvider,
-    "aerodrome": AerodromeVolumeProvider,
-    "traderjoe_v2": TraderJoeV2VolumeProvider,
-    # Additional protocols not in Protocol enum
-    "curve": CurveVolumeProvider,
-    "balancer": BalancerVolumeProvider,
-    # Common aliases
-    "uni_v3": UniswapV3VolumeProvider,
-    "sushi_v3": SushiSwapV3VolumeProvider,
-    "pancake_v3": PancakeSwapV3VolumeProvider,
-    "joe_v2": TraderJoeV2VolumeProvider,
-    "bal": BalancerVolumeProvider,
-    "crv": CurveVolumeProvider,
-}
-
-# Map protocols to their supported chains via subgraph IDs
-PROTOCOL_CHAIN_SUPPORT: dict[str, dict[Chain, str]] = {
-    "uniswap_v3": UNISWAP_V3_SUBGRAPH_IDS,
-    "sushiswap_v3": SUSHISWAP_V3_SUBGRAPH_IDS,
-    "pancakeswap_v3": PANCAKESWAP_V3_SUBGRAPH_IDS,
-    "aerodrome": AERODROME_SUBGRAPH_IDS,
-    "traderjoe_v2": TRADERJOE_V2_SUBGRAPH_IDS,
-    "curve": CURVE_SUBGRAPH_IDS,
-    "balancer": BALANCER_SUBGRAPH_IDS,
-}
 
 # Data source identifier for fallback results
 FALLBACK_DATA_SOURCE = "multi_dex_fallback"
@@ -127,20 +72,16 @@ FALLBACK_DATA_SOURCE = "multi_dex_fallback"
 
 
 class MultiDEXVolumeProvider(HistoricalVolumeProvider):
-    """Aggregator that routes volume queries to DEX-specific providers.
+    """Aggregator that routes volume queries to declared DEX volume lanes.
 
-    Routes volume queries to the correct DEX-specific provider based on the
-    protocol parameter. Supports both Protocol enum and string identifiers
-    for flexibility.
+    Routes volume queries to the gateway-backed volume lane the protocol's
+    connector declares. Supports the legacy ``Protocol`` enum (duck-typed via
+    ``.value``) and string identifiers for flexibility.
 
-    When no protocol is specified, the provider will use chain-based heuristics
-    to attempt protocol detection (e.g., Base chain pools default to Aerodrome).
-
-    The DEX-specific providers are gateway-backed gRPC clients (VIB-4870);
-    this aggregator opens no socket and holds no subgraph client.
+    When no protocol is specified, the provider uses the connector-declared
+    chain defaults (e.g. Base chain pools default to Aerodrome).
 
     Attributes:
-        providers: Dictionary mapping protocol identifiers to provider instances
         fallback_volume: Volume to return for routing-level mismatches
 
     Example:
@@ -151,7 +92,7 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
                 chain=Chain.ARBITRUM,
                 start_date=date(2024, 1, 1),
                 end_date=date(2024, 1, 31),
-                protocol=Protocol.UNISWAP_V3,
+                protocol="uniswap_v3",
             )
     """
 
@@ -167,15 +108,15 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
                 (unknown protocol / unsupported chain / undetectable
                 protocol). Default is 0, indicating no data. NOTE: a genuine
                 empty/errored subgraph no longer falls back here — the
-                per-DEX provider raises :class:`DataSourceUnavailable`.
+                gateway-backed fetch raises :class:`DataSourceUnavailable`.
             requests_per_minute: Ignored (kept for back-compat). Rate
                 limiting now lives on the gateway side.
         """
         self._fallback_volume = fallback_volume
         self._requests_per_minute = requests_per_minute
 
-        # Lazy-initialized provider instances
-        self._providers: dict[str, HistoricalVolumeProvider] = {}
+        # Lazy-initialized provider instances, keyed by canonical protocol.
+        self._providers: dict[str, GatewayDexVolumeProvider] = {}
 
         logger.debug(
             "Initialized MultiDEXVolumeProvider (gateway-backed): fallback_volume=%s",
@@ -186,14 +127,13 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
         """Close all provider instances and release resources."""
         for protocol_id, provider in self._providers.items():
             try:
-                if hasattr(provider, "close"):
-                    await provider.close()
+                await provider.close()
             except Exception as e:
                 logger.warning("Error closing provider %s: %s", protocol_id, e)
 
         logger.debug("MultiDEXVolumeProvider closed")
 
-    async def __aenter__(self) -> "MultiDEXVolumeProvider":
+    async def __aenter__(self) -> MultiDEXVolumeProvider:
         """Async context manager entry."""
         return self
 
@@ -202,66 +142,26 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
         await self.close()
 
     def _get_protocol_id(self, protocol: Protocol | str | None) -> str | None:
-        """Normalize protocol to string identifier.
+        """Normalize protocol to its canonical declared identifier.
 
         Args:
-            protocol: Protocol enum, string identifier, or None
+            protocol: Legacy ``Protocol`` enum (duck-typed via ``.value``),
+                string identifier, or None
 
         Returns:
-            Lowercase string protocol identifier or None
+            Canonical declared protocol key, or None when unknown/None
         """
         if protocol is None:
             return None
-        if isinstance(protocol, Protocol):
-            return protocol.value.lower()
-        return protocol.lower()
-
-    def _get_provider(self, protocol_id: str) -> HistoricalVolumeProvider | None:
-        """Get or create a provider instance for the given protocol.
-
-        Args:
-            protocol_id: Lowercase protocol identifier
-
-        Returns:
-            Provider instance or None if protocol not supported
-        """
-        # Return cached provider if available
-        if protocol_id in self._providers:
-            return self._providers[protocol_id]
-
-        # Look up provider class
-        provider_class: type[HistoricalVolumeProvider] | None = None
-
-        # Try Protocol enum mapping first
-        try:
-            protocol_enum = Protocol(protocol_id.upper())
-            provider_class = PROTOCOL_PROVIDER_MAP.get(protocol_enum)
-        except ValueError:
-            pass
-
-        # Try string mapping if not found
-        if provider_class is None:
-            provider_class = STRING_PROTOCOL_MAP.get(protocol_id)
-
-        if provider_class is None:
-            logger.warning("No provider found for protocol: %s", protocol_id)
-            return None
-
-        # Create provider instance (gateway-backed — no shared subgraph client).
-        try:
-            provider = provider_class(fallback_volume=self._fallback_volume)  # type: ignore[call-arg]
-            self._providers[protocol_id] = provider
-            logger.debug("Created provider for protocol: %s", protocol_id)
-            return provider
-        except Exception as e:
-            logger.error("Failed to create provider for %s: %s", protocol_id, e)
-            return None
+        value = getattr(protocol, "value", protocol)
+        return DexVolumeRegistry.canonical(str(value))
 
     def _detect_protocol_from_chain(self, chain: Chain) -> str | None:
         """Attempt to detect protocol based on chain.
 
-        Uses heuristics based on chain-specific DEXs. This is a fallback
-        when no protocol is specified.
+        Connector-declared defaults: ``chain_default`` declarations win
+        (aerodrome on base, traderjoe_v2 on avalanche), then the
+        ``generic_default`` DEX (uniswap_v3) for any chain it supports.
 
         Args:
             chain: The blockchain chain
@@ -269,20 +169,27 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
         Returns:
             Best-guess protocol identifier or None
         """
-        # Chain-specific DEX defaults
-        chain_defaults: dict[Chain, str] = {
-            Chain.BASE: "aerodrome",  # Aerodrome is native to Base
-            Chain.AVALANCHE: "traderjoe_v2",  # TraderJoe is dominant on Avalanche
-        }
+        return DexVolumeRegistry.chain_default(chain.value)
 
-        if chain in chain_defaults:
-            return chain_defaults[chain]
+    def _get_provider(self, protocol_id: str) -> GatewayDexVolumeProvider | None:
+        """Get or create the gateway-backed provider for ``protocol_id``.
 
-        # Default to Uniswap V3 for other chains (most common)
-        if chain in UNISWAP_V3_SUBGRAPH_IDS:
-            return "uniswap_v3"
-
-        return None
+        Returns None for identifiers no connector declares (legacy contract;
+        ``get_volume`` treats that as a routing mismatch).
+        """
+        provider = self._providers.get(protocol_id)
+        if provider is not None:
+            return provider
+        if not DexVolumeRegistry.has(protocol_id):
+            logger.warning("No provider found for protocol: %s", protocol_id)
+            return None
+        provider = GatewayDexVolumeProvider(
+            protocol=protocol_id,
+            fallback_volume=self._fallback_volume,
+        )
+        self._providers[protocol_id] = provider
+        logger.debug("Created provider for protocol: %s", protocol_id)
+        return provider
 
     def _create_fallback_result(self, d: date) -> VolumeResult:
         """Create a fallback VolumeResult with LOW confidence.
@@ -335,11 +242,11 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
         end_date: date,
         protocol: Protocol | str | None = None,
     ) -> list[VolumeResult]:
-        """Fetch historical volume data by routing to the correct provider.
+        """Fetch historical volume data by routing to the declared DEX lane.
 
-        Routes the query to the appropriate DEX-specific (gateway-backed)
-        provider based on the protocol parameter. If no protocol is
-        specified, attempts to detect based on chain.
+        Routes the query to the connector-declared (gateway-backed) volume
+        lane based on the protocol parameter. If no protocol is specified,
+        attempts to detect based on the connector-declared chain defaults.
 
         Args:
             pool_address: The pool contract address (checksummed or lowercase).
@@ -355,13 +262,21 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
             mismatches (no protocol / unknown protocol / unsupported chain).
 
         Raises:
-            DataSourceUnavailable: when the resolved provider's gateway call
-                fails or the subgraph returned no / errored data. The
-                pre-W7 silent ``Decimal("0")`` LOW row for an empty/errored
-                subgraph is intentionally removed (VIB-4859 decision 4).
+            DataSourceUnavailable: when the gateway call fails or the
+                subgraph returned no / errored data. The pre-W7 silent
+                ``Decimal("0")`` LOW row for an empty/errored subgraph is
+                intentionally removed (VIB-4859 decision 4).
         """
-        # Normalize protocol identifier
+        # Normalize protocol identifier (canonical declared key or None)
         protocol_id = self._get_protocol_id(protocol)
+
+        if protocol is not None and protocol_id is None:
+            # An explicit-but-unknown protocol is a routing mismatch.
+            logger.warning(
+                "No provider found for protocol: %s",
+                getattr(protocol, "value", protocol),
+            )
+            return self._generate_fallback_results(start_date, end_date)
 
         # If no protocol specified, try to detect from chain
         if protocol_id is None:
@@ -382,19 +297,9 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
             )
             return self._generate_fallback_results(start_date, end_date)
 
-        # Get provider instance
-        provider = self._get_provider(protocol_id)
-        if provider is None:
-            logger.warning(
-                "No provider available for protocol=%s, chain=%s, returning fallback",
-                protocol_id,
-                chain.value,
-            )
-            return self._generate_fallback_results(start_date, end_date)
-
-        # Check if chain is supported by this protocol (routing mismatch)
-        chain_support = PROTOCOL_CHAIN_SUPPORT.get(protocol_id, {})
-        if chain not in chain_support:
+        # Check if chain is declared by this protocol (routing mismatch)
+        entry = DexVolumeRegistry.entry_for(protocol_id)
+        if entry is None or chain.value.lower() not in entry.chains:
             logger.warning(
                 "Chain %s not supported by protocol %s, returning fallback",
                 chain.value,
@@ -402,7 +307,7 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
             )
             return self._generate_fallback_results(start_date, end_date)
 
-        # Route to the specific (gateway-backed) provider. A gateway failure
+        # Route to the declared (gateway-backed) lane. A gateway failure
         # or an empty/errored subgraph raises DataSourceUnavailable, which
         # propagates to the caller — no silent zero-fill.
         logger.info(
@@ -411,6 +316,9 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
             chain.value,
             pool_address[:10],
         )
+        provider = self._get_provider(protocol_id)
+        if provider is None:  # pragma: no cover - canonical ids are declared
+            return self._generate_fallback_results(start_date, end_date)
         return await provider.get_volume(
             pool_address=pool_address,
             chain=chain,
@@ -422,9 +330,9 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
         """Get list of supported protocol identifiers.
 
         Returns:
-            List of supported protocol string identifiers
+            List of declared protocol string identifiers (sorted)
         """
-        return list(PROTOCOL_CHAIN_SUPPORT.keys())
+        return list(DexVolumeRegistry.supported_protocols())
 
     def get_supported_chains(self, protocol: Protocol | str) -> list[Chain]:
         """Get list of supported chains for a protocol.
@@ -433,19 +341,18 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
             protocol: Protocol enum or string identifier
 
         Returns:
-            List of supported Chain enums
+            List of supported Chain enums (declaration order)
         """
         protocol_id = self._get_protocol_id(protocol)
         if protocol_id is None:
             return []
-        chain_support = PROTOCOL_CHAIN_SUPPORT.get(protocol_id, {})
-        return list(chain_support.keys())
+        entry = DexVolumeRegistry.entry_for(protocol_id)
+        if entry is None:
+            return []
+        return [Chain(c.upper()) for c in entry.chains]
 
 
 __all__ = [
     "MultiDEXVolumeProvider",
-    "PROTOCOL_PROVIDER_MAP",
-    "STRING_PROTOCOL_MAP",
-    "PROTOCOL_CHAIN_SUPPORT",
     "FALLBACK_DATA_SOURCE",
 ]

@@ -179,4 +179,91 @@ async def fetch_volume_via_gateway(
     ]
 
 
-__all__ = ["fetch_volume_via_gateway"]
+__all__ = ["GatewayDexVolumeProvider", "fetch_volume_via_gateway"]
+
+
+class GatewayDexVolumeProvider:
+    """Generic gateway-backed volume provider for any declared DEX.
+
+    Parametrized by the connector-declared dispatch key: chain support, the
+    gateway routing key, and the provenance string all come from the DEX's
+    ``DexVolumeDecl`` via
+    :class:`~almanak.connectors._strategy_base.dex_volume_registry.DexVolumeRegistry`.
+    The aggregator (``multi_dex_volume``) constructs these directly, so a new
+    DEX's volume lane needs no framework wrapper class (VIB-4851 Phase D).
+    """
+
+    def __init__(
+        self,
+        protocol: str,
+        client: Any | None = None,
+        fallback_volume: Decimal = Decimal("0"),
+        requests_per_minute: int = 100,
+    ) -> None:
+        """Initialize for one declared DEX.
+
+        Args:
+            protocol: Declared dispatch key or alias (resolved on first use).
+            client: Ignored (kept for ctor parity with the legacy wrappers).
+            fallback_volume: Preserved for introspection; the pre-W7
+                silent-zero fallback row stays removed.
+            requests_per_minute: Ignored (gateway owns rate limiting).
+        """
+        self._protocol = protocol
+        self._fallback_volume = fallback_volume
+
+    def _entry(self):  # noqa: ANN202 - registry entry resolved lazily
+        """Resolve the connector-declared facts for this DEX."""
+        from almanak.connectors._strategy_base.dex_volume_registry import (
+            DexVolumeRegistry,
+        )
+
+        entry = DexVolumeRegistry.entry_for(self._protocol)
+        if entry is None:
+            raise ValueError(f"No DEX volume declaration for protocol: {self._protocol}")
+        return entry
+
+    @property
+    def supported_chains(self) -> list[Chain]:
+        """Chains the owning connector declares volume data for."""
+        return [Chain(c.upper()) for c in self._entry().chains]
+
+    async def close(self) -> None:
+        """No-op shutdown hook (no owned client to close)."""
+        return None
+
+    async def __aenter__(self) -> GatewayDexVolumeProvider:
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Async context manager exit."""
+        await self.close()
+
+    async def get_volume(
+        self,
+        pool_address: str,
+        chain: Chain,
+        start_date: date,
+        end_date: date,
+    ) -> list[VolumeResult]:
+        """Fetch historical daily volume for a pool via the gateway.
+
+        Raises:
+            ValueError: If the chain is outside the declared support set.
+            DataSourceUnavailable: gateway unreachable / RPC failed / the
+                subgraph returned no or errored data (no silent zero-fill).
+        """
+        entry = self._entry()
+        if chain.value.lower() not in entry.chains:
+            supported = [c.upper() for c in entry.chains]
+            raise ValueError(f"Unsupported chain: {chain}. Supported chains: {supported}")
+
+        return await fetch_volume_via_gateway(
+            dex=entry.dex,
+            chain=chain,
+            pool_address=pool_address,
+            start_date=start_date,
+            end_date=end_date,
+            data_source=entry.volume_data_source,
+        )

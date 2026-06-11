@@ -207,6 +207,194 @@ def test_funding_history_dispatch_equals_frozen_legacy_tables() -> None:
     assert FundingHistoryRegistry.all_declared_chains() == frozenset({"arbitrum", "avalanche"})
 
 
+def _frozen_keys_resolve(registry_canonical, frozen_map: dict[str, str]) -> None:
+    """Assert every frozen lookup key resolves to its frozen target."""
+    for key, want in frozen_map.items():
+        assert registry_canonical(key) == want, (key, registry_canonical(key))
+
+
+# almanak/framework/backtesting/pnl/fee_models/__init__.py registration block
+# as of 2026-06-10, frozen verbatim (VIB-4851 Phase D / D2): every legacy
+# lookup key -> (primary registry name, model class name).
+FROZEN_FEE_MODEL_LOOKUPS = {
+    "uniswap_v3": ("uniswap_v3", "UniswapV3FeeModel"),
+    "uniswap": ("uniswap_v3", "UniswapV3FeeModel"),
+    "uni_v3": ("uniswap_v3", "UniswapV3FeeModel"),
+    "pancakeswap_v3": ("pancakeswap_v3", "PancakeSwapV3FeeModel"),
+    "pancakeswap": ("pancakeswap_v3", "PancakeSwapV3FeeModel"),
+    "pancake_v3": ("pancakeswap_v3", "PancakeSwapV3FeeModel"),
+    "pcs_v3": ("pancakeswap_v3", "PancakeSwapV3FeeModel"),
+    "aerodrome": ("aerodrome", "AerodromeFeeModel"),
+    "aero": ("aerodrome", "AerodromeFeeModel"),
+    "velodrome": ("aerodrome", "AerodromeFeeModel"),
+    "curve": ("curve", "CurveFeeModel"),
+    "curve_fi": ("curve", "CurveFeeModel"),
+    "crv": ("curve", "CurveFeeModel"),
+    "aave_v3": ("aave_v3", "AaveV3FeeModel"),
+    "aave": ("aave_v3", "AaveV3FeeModel"),
+    "aave_v2": ("aave_v3", "AaveV3FeeModel"),
+    "morpho": ("morpho", "MorphoFeeModel"),
+    "morpho_blue": ("morpho", "MorphoFeeModel"),
+    "morpho_optimizer": ("morpho", "MorphoFeeModel"),
+    "compound_v3": ("compound_v3", "CompoundV3FeeModel"),
+    "compound": ("compound_v3", "CompoundV3FeeModel"),
+    "comet": ("compound_v3", "CompoundV3FeeModel"),
+    "gmx": ("gmx", "GMXFeeModel"),
+    "gmx_v2": ("gmx", "GMXFeeModel"),
+    "hyperliquid": ("hyperliquid", "HyperliquidFeeModel"),
+    "hl": ("hyperliquid", "HyperliquidFeeModel"),
+    "hyper": ("hyperliquid", "HyperliquidFeeModel"),
+}
+FROZEN_FEE_MODEL_PRIMARY_NAMES = [
+    "aave_v3",
+    "aerodrome",
+    "compound_v3",
+    "curve",
+    "gmx",
+    "hyperliquid",
+    "morpho",
+    "pancakeswap_v3",
+    "uniswap_v3",
+]
+
+
+def test_fee_model_registry_equals_frozen_legacy_registrations() -> None:
+    """Manifest-derived fee-model lookups == the legacy registration block."""
+    from almanak.framework.backtesting.pnl.fee_models.base import FeeModelRegistry
+
+    for key, (primary, class_name) in FROZEN_FEE_MODEL_LOOKUPS.items():
+        metadata = FeeModelRegistry.get_metadata(key)
+        assert metadata is not None, key
+        assert metadata.name == primary, (key, metadata.name)
+        assert metadata.model_class.__name__ == class_name, (key, metadata.model_class.__name__)
+    assert FeeModelRegistry.list_protocols() == FROZEN_FEE_MODEL_PRIMARY_NAMES
+
+
+# almanak/framework/backtesting/pnl/providers/multi_dex_volume.py +
+# liquidity_depth.py legacy tables as of 2026-06-10, frozen verbatim
+# (VIB-4851 Phase D / D3). Deliberate widening, acknowledged here: the
+# connector folder name "balancer_v2" now also resolves to "balancer"
+# (previously only "balancer"/"bal" resolved).
+FROZEN_DEX_VOLUME_LOOKUPS = {
+    # STRING_PROTOCOL_MAP keys
+    "uniswap_v3": "uniswap_v3",
+    "sushiswap_v3": "sushiswap_v3",
+    "pancakeswap_v3": "pancakeswap_v3",
+    "aerodrome": "aerodrome",
+    "traderjoe_v2": "traderjoe_v2",
+    "curve": "curve",
+    "balancer": "balancer",
+    "uni_v3": "uniswap_v3",
+    "sushi_v3": "sushiswap_v3",
+    "pancake_v3": "pancakeswap_v3",
+    "joe_v2": "traderjoe_v2",
+    "bal": "balancer",
+    "crv": "curve",
+    # PROTOCOL_PROVIDER_MAP keys (Protocol enum values, lowercased)
+    "UNISWAP_V3".lower(): "uniswap_v3",
+    # Phase D widening (connector folder name)
+    "balancer_v2": "balancer",
+}
+FROZEN_DEX_VOLUME_CHAINS = {
+    "uniswap_v3": ("ethereum", "arbitrum", "base", "optimism", "polygon"),
+    "sushiswap_v3": ("ethereum",),
+    "pancakeswap_v3": ("ethereum", "arbitrum", "bsc", "base"),
+    "aerodrome": ("base",),
+    "traderjoe_v2": ("avalanche",),
+    "curve": ("ethereum", "optimism"),
+    "balancer": ("ethereum", "arbitrum", "polygon"),
+}
+FROZEN_DEX_VOLUME_DATA_SOURCES = {
+    "uniswap_v3": "uniswap_v3_subgraph",
+    "sushiswap_v3": "sushiswap_v3_subgraph",
+    "pancakeswap_v3": "pancakeswap_v3_subgraph",
+    "aerodrome": "aerodrome_subgraph",
+    "traderjoe_v2": "traderjoe_v2_subgraph",
+    "curve": "curve_messari_subgraph",
+    "balancer": "balancer_v2_subgraph",
+}
+# liquidity_depth.py family lists, frozen verbatim ("balancer" was in
+# WEIGHTED_POOL_PROTOCOLS, "curve" in STABLESWAP_PROTOCOLS, ...).
+FROZEN_DEX_FAMILIES = {
+    "v3_concentrated": ("pancakeswap_v3", "sushiswap_v3", "uniswap_v3"),
+    "solidly_v2": ("aerodrome",),
+    "liquidity_book": ("traderjoe_v2",),
+    "weighted": ("balancer",),
+    "stableswap": ("curve",),
+}
+# multi_dex_volume / liquidity_depth chain-detection defaults.
+FROZEN_DEX_CHAIN_DEFAULTS = {"base": "aerodrome", "avalanche": "traderjoe_v2", "arbitrum": "uniswap_v3"}
+
+
+def test_dex_volume_dispatch_equals_frozen_legacy_tables() -> None:
+    """Manifest-derived DEX dispatch == the legacy hardcoded tables."""
+    from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
+
+    _frozen_keys_resolve(DexVolumeRegistry.canonical, FROZEN_DEX_VOLUME_LOOKUPS)
+    for key, chains in FROZEN_DEX_VOLUME_CHAINS.items():
+        entry = DexVolumeRegistry.entry_for(key)
+        assert entry is not None, key
+        assert entry.chains == chains, (key, entry.chains)
+        assert entry.volume_data_source == FROZEN_DEX_VOLUME_DATA_SOURCES[key]
+    for family, protocols in FROZEN_DEX_FAMILIES.items():
+        assert DexVolumeRegistry.protocols_by_family(family) == protocols, family
+    for chain, want in FROZEN_DEX_CHAIN_DEFAULTS.items():
+        assert DexVolumeRegistry.chain_default(chain) == want, chain
+    assert DexVolumeRegistry.chain_default("sonic") is None
+
+
+def test_dex_volume_decls_match_gateway_capability_implementers() -> None:
+    """Decl dex keys + chains == the GatewayDexVolumeCapability implementers.
+
+    Two-sources-of-truth guard (Phase D plan DEC-2): the manifest decl is the
+    strategy-side truth; the gateway capability is the gateway-side
+    implementation. Chains are compared as sets (the capability returns a
+    frozenset; the decl preserves declaration order).
+    """
+    from almanak.connectors._base.gateway_capabilities import GatewayDexVolumeCapability
+    from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+    from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
+
+    gateway_chains_by_dex = {
+        str(provider.dex_name()).lower(): {str(c).lower() for c in provider.volume_supported_chains()}
+        for provider in GATEWAY_REGISTRY.capability_providers(GatewayDexVolumeCapability)  # type: ignore[type-abstract]
+    }
+    decl_chains_by_dex = {
+        entry.dex: set(entry.chains)
+        for entry in (DexVolumeRegistry.entry_for(p) for p in DexVolumeRegistry.supported_protocols())
+        if entry is not None
+    }
+    assert decl_chains_by_dex == gateway_chains_by_dex
+
+
+def test_dex_volume_decls_match_wrapper_provider_chains() -> None:
+    """Decl chains == the legacy per-DEX wrapper SUPPORTED_CHAINS tables.
+
+    The wrapper modules keep their client-side subgraph-ID tables until the
+    liquidity-depth gateway lane lands; this parity test stops the two chain
+    vocabularies drifting in the meantime.
+    """
+    import importlib
+
+    from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
+
+    wrapper_modules = {
+        "uniswap_v3": "uniswap_v3_volume",
+        "sushiswap_v3": "sushiswap_v3_volume",
+        "pancakeswap_v3": "pancakeswap_v3_volume",
+        "aerodrome": "aerodrome_volume",
+        "traderjoe_v2": "traderjoe_v2_volume",
+        "curve": "curve_volume",
+        "balancer": "balancer_volume",
+    }
+    for key, module_name in wrapper_modules.items():
+        module = importlib.import_module(f"almanak.framework.backtesting.pnl.providers.dex.{module_name}")
+        wrapper_chains = [c.value.lower() for c in module.SUPPORTED_CHAINS]
+        entry = DexVolumeRegistry.entry_for(key)
+        assert entry is not None, key
+        assert list(entry.chains) == wrapper_chains, (key, entry.chains, wrapper_chains)
+
+
 def test_funding_history_venues_match_gateway_capability_implementers() -> None:
     """Decl venues == the GatewayFundingHistoryCapability implementer set.
 

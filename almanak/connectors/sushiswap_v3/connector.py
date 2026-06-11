@@ -5,6 +5,7 @@ from __future__ import annotations
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
+    DexVolumeDecl,
     ImportRef,
 )
 from almanak.connectors._strategy_base.address_table import AbiFamily, AddressTableSpec
@@ -13,6 +14,11 @@ from almanak.connectors._strategy_base.protocol_ownership import SupportedChains
 CONNECTOR = Connector(
     name="sushiswap_v3",
     kind=ProtocolKind.LP,
+    dex_volume=DexVolumeDecl(
+        chains=("ethereum",),
+        amm_family="v3_concentrated",
+        aliases=("sushi_v3",),
+    ),
     address_tables=(
         AddressTableSpec(
             protocol="sushiswap_v3",

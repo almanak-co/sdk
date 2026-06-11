@@ -23,7 +23,7 @@ Key Components:
     - MorphoFeeModel: Fee model for Morpho lending operations
 
 Example:
-    from almanak.framework.backtesting.pnl.fee_models.morpho import MorphoFeeModel
+    from almanak.connectors.morpho_blue.fee_model import MorphoFeeModel
 
     fee_model = MorphoFeeModel()
 

@@ -12,7 +12,7 @@ Key Components:
     - CurveFeeModel: Fee model with dynamic fee calculation
 
 Example:
-    from almanak.framework.backtesting.pnl.fee_models.curve import (
+    from almanak.connectors.curve.fee_model import (
         CurveFeeModel,
         CurvePoolType,
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
+    DexVolumeDecl,
     ImportRef,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
@@ -13,6 +14,12 @@ from almanak.connectors._strategy_base.protocol_ownership import SupportedChains
 CONNECTOR = Connector(
     name="traderjoe_v2",
     kind=ProtocolKind.LP,
+    dex_volume=DexVolumeDecl(
+        chains=("avalanche",),
+        amm_family="liquidity_book",
+        aliases=("joe_v2",),
+        chain_default=("avalanche",),
+    ),
     address_tables=(
         AddressTableSpec(
             protocol="traderjoe_v2",

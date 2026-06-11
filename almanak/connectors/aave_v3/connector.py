@@ -5,6 +5,7 @@ from __future__ import annotations
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
+    FeeModelDecl,
     ImportRef,
     LendingReadDecl,
     MetadataAmountEncoding,
@@ -16,6 +17,11 @@ from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpe
 CONNECTOR = Connector(
     name="aave_v3",
     kind=ProtocolKind.LENDING,
+    fee_model=FeeModelDecl(
+        model=ImportRef(module="almanak.connectors.aave_v3.fee_model", attribute="AaveV3FeeModel"),
+        description="Aave V3 lending protocol fee model",
+        aliases=("aave", "aave_v2"),
+    ),
     address_tables=(
         AddressTableSpec(
             protocol="aave_v3",
