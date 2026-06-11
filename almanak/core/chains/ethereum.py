@@ -29,6 +29,9 @@ DESCRIPTOR = register_chain(
             name="Ethereum",
             decimals=18,
             wrapped_address="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+            coingecko_id="ethereum",
+            wrapped_symbol="WETH",
+            wrapped_coingecko_id="weth",
         ),
         gas=GasProfile(
             buffer=1.1,
@@ -60,6 +63,7 @@ DESCRIPTOR = register_chain(
         explorer=Explorer(
             api_url="https://api.etherscan.io/api",
             api_key_env="ETHERSCAN_API_KEY",
+            browse_url="https://etherscan.io",
         ),
         # VIB-4872 (W6-followup): chain half of legacy CHAIN_TOKENS in
         # ``framework/intents/compiler_constants.py``. Lowercase symbol
@@ -76,6 +80,7 @@ DESCRIPTOR = register_chain(
         # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
         # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
         external_ids={
+            "tenderly": "mainnet",
             "coingecko": "ethereum",
             "dexscreener": "ethereum",
             "geckoterminal": "eth",

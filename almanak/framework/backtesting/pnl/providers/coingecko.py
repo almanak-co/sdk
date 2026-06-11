@@ -43,6 +43,8 @@ import aiohttp
 
 from almanak.config.backtest import backtest_config_from_env
 from almanak.core.chains import DEFAULT_CHAIN
+from almanak.core.chains._helpers import native_coingecko_ids, vendor_chain_map
+from almanak.core.chains._registry import ChainRegistry
 from almanak.framework.backtesting.config import BacktestDataConfig
 
 from ..data_provider import OHLCV, HistoricalDataConfig, MarketState
@@ -54,8 +56,11 @@ logger = logging.getLogger(__name__)
 # Token ID mappings for common tokens
 # CoinGecko uses specific IDs for each token
 TOKEN_IDS: dict[str, str] = {
-    "ETH": "ethereum",
-    "WETH": "weth",
+    # Native + wrapped-native coin ids derive from the chain registry
+    # (VIB-4851 CS-3b; the MATIC->POL id preference of VIB-3137 now lives
+    # on the polygon descriptor). Keys uppercased to match symbol
+    # normalization.
+    **{symbol.upper(): cg_id for symbol, cg_id in native_coingecko_ids().items()},
     "USDC": "usd-coin",
     "USDC.E": "usd-coin",
     "ARB": "arbitrum",
@@ -67,21 +72,14 @@ TOKEN_IDS: dict[str, str] = {
     "GMX": "gmx",
     "PENDLE": "pendle",
     "RDNT": "radiant-capital",
-    "SOL": "solana",
     "JOE": "trader-joe",
     "LDO": "lido-dao",
     "BTC": "bitcoin",
     "STETH": "lido-dao-wrapped-staked-eth",
     "CBETH": "coinbase-wrapped-staked-eth",
     "OP": "optimism",
-    "AVAX": "avalanche-2",
-    "BNB": "binancecoin",
-    # MATIC was renamed to POL (1:1) in Sep 2024; prefer the POL id so that
-    # ``matic-network`` (deprecated) doesn't diverge from live oracle prices
-    # (VIB-3137).
-    "MATIC": "polygon-ecosystem-token",
-    "POL": "polygon-ecosystem-token",
-    "WMATIC": "polygon-ecosystem-token",
+    # WPOL is the post-rename wrapper symbol; the registry projection
+    # carries WMATIC (the deployed contract symbol).
     "WPOL": "polygon-ecosystem-token",
     "AAVE": "aave",
     "CRV": "curve-dao-token",
@@ -564,7 +562,18 @@ class CoinGeckoDataProvider:
     _SUPPORTED_TOKENS = list(TOKEN_IDS.keys())
 
     # Supported chains
-    _SUPPORTED_CHAINS = ["arbitrum", "ethereum", "base", "optimism", "avalanche", "bnb", "bsc"]
+    # Chains declaring a CoinGecko platform id, plus their registered
+    # aliases (preserves the legacy "bnb" acceptance). Deliberate widening
+    # vs the legacy 7-entry literal (VIB-4851 CS-3b).
+    _SUPPORTED_CHAINS = sorted(
+        set(vendor_chain_map("coingecko"))
+        | {
+            alias
+            for d in ChainRegistry.all()
+            if (d.external_ids or {}).get("coingecko") is not None
+            for alias in d.aliases
+        }
+    )
 
     # Rate limits (requests per minute)
     # Free tier: ~10-30 calls/min, Pro tier: ~500 calls/min

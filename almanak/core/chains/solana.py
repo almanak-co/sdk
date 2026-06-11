@@ -9,7 +9,7 @@ compute-unit + priority-fee accounting, not gas multipliers).
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, GasProfile, NativeToken, RpcProfile, Timeouts
+from ._descriptor import ChainDescriptor, Explorer, GasProfile, NativeToken, RpcProfile, Timeouts
 from ._registry import register_chain
 
 # Solana cluster URLs. Solana names networks by *cluster* (mainnet-beta,
@@ -34,6 +34,9 @@ DESCRIPTOR = register_chain(
             decimals=9,
             # Wrapped SOL mint (SPL token, base58)
             wrapped_address="So11111111111111111111111111111111111111112",
+            coingecko_id="solana",
+            wrapped_symbol="WSOL",
+            wrapped_coingecko_id="solana",
         ),
         gas=GasProfile(
             buffer=None,
@@ -53,6 +56,7 @@ DESCRIPTOR = register_chain(
             anvil_port=8899,
             rate_limit_rpm=300,
         ),
+        explorer=Explorer(browse_url="https://solscan.io"),
         # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
         # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
         # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.

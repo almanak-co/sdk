@@ -24,6 +24,9 @@ DESCRIPTOR = register_chain(
             name="Ethereum",
             decimals=18,
             wrapped_address="0x4200000000000000000000000000000000000006",
+            coingecko_id="ethereum",
+            wrapped_symbol="WETH",
+            wrapped_coingecko_id="weth",
         ),
         gas=GasProfile(
             buffer=1.5,
@@ -47,6 +50,7 @@ DESCRIPTOR = register_chain(
         explorer=Explorer(
             api_url="https://api-optimistic.etherscan.io/api",
             api_key_env="OPTIMISTIC_ETHERSCAN_API_KEY",
+            browse_url="https://optimistic.etherscan.io",
         ),
         # VIB-4872 (W6-followup): chain half of legacy CHAIN_TOKENS.
         tokens={
@@ -59,6 +63,7 @@ DESCRIPTOR = register_chain(
         # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
         # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
         external_ids={
+            "tenderly": "optimism",
             "coingecko": "optimistic-ethereum",
             "dexscreener": "optimism",
             "geckoterminal": "optimism",

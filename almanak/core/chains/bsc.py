@@ -30,6 +30,9 @@ DESCRIPTOR = register_chain(
             name="BNB",
             decimals=18,
             wrapped_address="0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+            coingecko_id="binancecoin",
+            wrapped_symbol="WBNB",
+            wrapped_coingecko_id="binancecoin",
         ),
         gas=GasProfile(
             buffer=1.2,
@@ -64,6 +67,7 @@ DESCRIPTOR = register_chain(
         explorer=Explorer(
             api_url="https://api.bscscan.com/api",
             api_key_env="BSCSCAN_API_KEY",
+            browse_url="https://bscscan.com",
         ),
         # VIB-4872 (W6-followup): chain half of legacy CHAIN_TOKENS.
         tokens={
@@ -77,6 +81,7 @@ DESCRIPTOR = register_chain(
         # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
         # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
         external_ids={
+            "tenderly": "bsc",
             "coingecko": "binance-smart-chain",
             "dexscreener": "bsc",
             "geckoterminal": "bsc",

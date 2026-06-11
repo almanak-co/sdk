@@ -29,6 +29,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from almanak.core.chains._helpers import vendor_chain_map
+
 logger = logging.getLogger(__name__)
 
 
@@ -408,7 +410,10 @@ def _register_builtin_providers() -> None:
         priority=50,  # Lower priority than Chainlink
         metadata={
             "description": "CoinGecko API-based historical price data",
-            "supported_chains": ["ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche"],
+            # Chains declaring a CoinGecko platform id (VIB-4851 CS-3b).
+            # Deliberate widening vs the legacy 6-chain literal: the
+            # provider prices any chain CoinGecko itself supports.
+            "supported_chains": sorted(vendor_chain_map("coingecko")),
         },
     )
 

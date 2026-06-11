@@ -23,6 +23,9 @@ DESCRIPTOR = register_chain(
             name="Ethereum",
             decimals=18,
             wrapped_address="0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",
+            coingecko_id="ethereum",
+            wrapped_symbol="WETH",
+            wrapped_coingecko_id="weth",
         ),
         gas=GasProfile(
             buffer=1.5,

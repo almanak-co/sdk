@@ -36,6 +36,10 @@ DESCRIPTOR = register_chain(
             decimals=18,
             wrapped_address="0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
             accepted_symbols=("POL",),
+            # POL id preferred over deprecated matic-network (VIB-3137)
+            coingecko_id="polygon-ecosystem-token",
+            wrapped_symbol="WMATIC",
+            wrapped_coingecko_id="polygon-ecosystem-token",
         ),
         gas=GasProfile(
             buffer=1.2,
@@ -68,6 +72,7 @@ DESCRIPTOR = register_chain(
         explorer=Explorer(
             api_url="https://api.polygonscan.com/api",
             api_key_env="POLYGONSCAN_API_KEY",
+            browse_url="https://polygonscan.com",
         ),
         # VIB-4872 (W6-followup): chain half of legacy CHAIN_TOKENS.
         tokens={
@@ -80,6 +85,7 @@ DESCRIPTOR = register_chain(
         # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
         # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
         external_ids={
+            "tenderly": "polygon",
             "coingecko": "polygon-pos",
             "dexscreener": "polygon",
             "geckoterminal": "polygon_pos",

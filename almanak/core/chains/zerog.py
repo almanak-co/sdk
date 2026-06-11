@@ -16,6 +16,10 @@ DESCRIPTOR = register_chain(
             name="0G",
             decimals=18,
             wrapped_address="0x1Cd0690fF9a693f5EF2dD976660a8dAFc81A109c",
+            # W0G has its own CG listing
+            coingecko_id="zero-gravity",
+            wrapped_symbol="W0G",
+            wrapped_coingecko_id="wrapped-0g",
         ),
         gas=GasProfile(
             buffer=1.1,

@@ -2,7 +2,7 @@
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, GasProfile, NativeToken, SimulationProfile, Timeouts
+from ._descriptor import ChainDescriptor, Explorer, GasProfile, NativeToken, SimulationProfile, Timeouts
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -16,6 +16,9 @@ DESCRIPTOR = register_chain(
             name="Ethereum",
             decimals=18,
             wrapped_address="0x4300000000000000000000000000000000000004",
+            coingecko_id="ethereum",
+            wrapped_symbol="WETH",
+            wrapped_coingecko_id="weth",
         ),
         gas=GasProfile(
             buffer=1.5,
@@ -23,6 +26,7 @@ DESCRIPTOR = register_chain(
             price_cap_gwei=10,
             cost_cap_native=None,
         ),
+        explorer=Explorer(browse_url="https://blastscan.io"),
         timeouts=Timeouts(
             tx_confirmation=None,  # legacy: not in CHAIN_TX_TIMEOUTS
             grpc_execute=None,  # legacy: not in CHAIN_GRPC_EXECUTE_TIMEOUTS

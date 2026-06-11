@@ -34,7 +34,7 @@ from typing import Any
 
 import aiohttp
 
-from almanak.core.chains._helpers import vendor_chain_map
+from almanak.core.chains._helpers import native_coingecko_ids, vendor_chain_map
 from almanak.core.constants import STABLECOINS
 from almanak.framework.data.interfaces import (
     BasePriceSource,
@@ -66,8 +66,6 @@ COINGECKO_PLATFORM_IDS: Mapping[str, str] = MappingProxyType(vendor_chain_map("c
 # ``GatewayPriceIdCapability.coingecko_ids()`` and merges them back via
 # ``_REGISTRY_PRICE_IDS`` below.
 ARBITRUM_TOKEN_IDS: dict[str, str] = {
-    "ETH": "ethereum",
-    "WETH": "weth",
     "USDC": "usd-coin",
     "USDC.E": "usd-coin",
     "ARB": "arbitrum",
@@ -76,7 +74,6 @@ ARBITRUM_TOKEN_IDS: dict[str, str] = {
     "DAI": "dai",
     "LINK": "chainlink",
     "RDNT": "radiant-capital",
-    "SOL": "solana",
     "BTC": "bitcoin",
     "CBETH": "coinbase-wrapped-staked-eth",
 }
@@ -86,15 +83,12 @@ ARBITRUM_TOKEN_IDS: dict[str, str] = {
 # Protocol-token CoinGecko IDs (AAVE, JOE, QI) migrated to the
 # capability registry (VIB-4811 / Phase 3).
 AVALANCHE_TOKEN_IDS: dict[str, str] = {
-    "AVAX": "avalanche-2",
-    "WAVAX": "avalanche-2",  # Wrapped AVAX uses same price as AVAX
     "USDC": "usd-coin",
     "USDC.E": "usd-coin",
     "USDT": "tether",
     "USDT.E": "tether",
     "DAI": "dai",
     "DAI.E": "dai",
-    "WETH": "weth",
     "WETH.E": "weth",
     "WBTC": "wrapped-bitcoin",
     "WBTC.E": "wrapped-bitcoin",
@@ -108,8 +102,6 @@ AVALANCHE_TOKEN_IDS: dict[str, str] = {
 # Protocol-token CoinGecko IDs (AERO, WSTETH) migrated to the
 # capability registry (VIB-4811 / Phase 3).
 BASE_TOKEN_IDS: dict[str, str] = {
-    "ETH": "ethereum",
-    "WETH": "weth",
     "USDC": "usd-coin",
     "USDBC": "usd-coin",  # Bridged USDC on Base, pegged to $1
     "USDT": "tether",
@@ -125,12 +117,9 @@ BASE_TOKEN_IDS: dict[str, str] = {
 # Protocol-token CoinGecko IDs (CAKE) migrated to the capability
 # registry (VIB-4811 / Phase 3).
 BSC_TOKEN_IDS: dict[str, str] = {
-    "BNB": "binancecoin",
-    "WBNB": "binancecoin",  # Wrapped BNB uses same price as BNB
     "USDC": "usd-coin",
     "USDT": "tether",
     "DAI": "dai",
-    "WETH": "weth",  # Bridged ETH on BSC
     "BTCB": "bitcoin",
     # Legacy WBTC.bsc callers resolve to the same BTCB contract via alias;
     # bind them to the same CoinGecko feed ("bitcoin") so they don't fall
@@ -146,8 +135,6 @@ BSC_TOKEN_IDS: dict[str, str] = {
 # Protocol-token CoinGecko IDs (JUP, ORCA, RAY) migrated to the
 # capability registry (VIB-4811 / Phase 3).
 SOLANA_TOKEN_IDS: dict[str, str] = {
-    "SOL": "solana",
-    "WSOL": "solana",  # Wrapped SOL uses same price as SOL
     "USDC": "usd-coin",
     "USDT": "tether",
     "BONK": "bonk",
@@ -161,17 +148,11 @@ SOLANA_TOKEN_IDS: dict[str, str] = {
 # Combined token mappings (chain-agnostic fallback)
 # Used when chain-specific mapping not found
 MANTLE_TOKEN_IDS: dict[str, str] = {
-    "MNT": "mantle",
-    "WMNT": "mantle",  # Wrapped MNT uses same price as MNT
-    "WETH": "weth",
     "USDC": "usd-coin",
     "USDT": "tether",
 }
 
 XLAYER_TOKEN_IDS: dict[str, str] = {
-    "OKB": "okb",
-    "WOKB": "okb",  # Wrapped OKB uses same price as OKB
-    "WETH": "weth",
     "USDC": "usd-coin",
     "USDT0": "tether",  # USD₮0 is Stargate-bridged USDT
     "USDG": "usd-coin",  # Gravity USD stablecoin, pegged ~$1
@@ -182,8 +163,6 @@ XLAYER_TOKEN_IDS: dict[str, str] = {
 # Protocol-token CoinGecko IDs (AAVE, LDO, PENDLE, SUSDE, UNI, USDE,
 # WSTETH) migrated to the capability registry (VIB-4811 / Phase 3).
 ETHEREUM_TOKEN_IDS: dict[str, str] = {
-    "ETH": "ethereum",
-    "WETH": "weth",
     "USDC": "usd-coin",
     "USDT": "tether",
     "DAI": "dai",
@@ -211,10 +190,7 @@ ETHEREUM_TOKEN_IDS: dict[str, str] = {
 MONAD_TOKEN_IDS: dict[str, str] = {
     # MON (native) / WMON (wrapped) — Monad's gas token. Curvance markets use
     # WMON as the canonical collateral/debt asset.
-    "MON": "monad",
-    "WMON": "monad",
     # Monad-bridged WETH / WBTC / USDC — priced at the underlying asset's CG id.
-    "WETH": "weth",
     "USDC": "usd-coin",
     "WBTC": "wrapped-bitcoin",
     # LRT collateral supported by Curvance markets.
@@ -262,6 +238,12 @@ def _build_registry_price_ids() -> dict[str, str]:
 
 
 _CHAIN_TABLE_TOKEN_IDS: dict[str, str] = {
+    # Native + wrapped-native coin ids derive from the chain registry
+    # (VIB-4851 CS-3b): every registered chain's gas asset is priceable by
+    # declaring ``NativeToken.coingecko_id`` in its descriptor file. Keys
+    # uppercased to match get_price()'s symbol normalization. Placed first
+    # so any chain-variant static row below still wins on overlap.
+    **{symbol.upper(): cg_id for symbol, cg_id in native_coingecko_ids().items()},
     **ARBITRUM_TOKEN_IDS,
     **AVALANCHE_TOKEN_IDS,
     **BASE_TOKEN_IDS,
@@ -515,7 +497,7 @@ class CoinGeckoPriceSource(BasePriceSource):
     _PRO_API_BASE = "https://pro-api.coingecko.com/api/v3"
 
     # Supported tokens on Arbitrum
-    _SUPPORTED_TOKENS = list(ARBITRUM_TOKEN_IDS.keys())
+    _SUPPORTED_TOKENS = ["ETH", "WETH", "SOL", *ARBITRUM_TOKEN_IDS]
 
     def __init__(
         self,

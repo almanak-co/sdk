@@ -4,11 +4,14 @@ The ReproductionBundle captures all state and context needed to reproduce
 a failure locally, enabling developers to debug and fix issues efficiently.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any
+
+from almanak.core.chains._helpers import vendor_chain_map
 
 
 @dataclass
@@ -392,16 +395,11 @@ class FailureContext:
     tenderly_api_key: str | None = None
 
 
-# Tenderly chain mappings for trace URLs
-TENDERLY_CHAIN_SLUGS: dict[str, str] = {
-    "ethereum": "mainnet",
-    "arbitrum": "arbitrum",
-    "optimism": "optimism",
-    "polygon": "polygon",
-    "base": "base",
-    "avalanche": "avalanche",
-    "bsc": "bsc",
-}
+# Tenderly DASHBOARD slugs for trace URLs — derived from
+# ``ChainDescriptor.external_ids["tenderly"]`` (VIB-4851 CS-4). These are
+# the dashboard URL path slugs, NOT the simulation network id (which is
+# always ``str(chain_id)`` by SimulationProfile design).
+TENDERLY_CHAIN_SLUGS: Mapping[str, str] = MappingProxyType(vendor_chain_map("tenderly"))
 
 
 def _generate_tenderly_trace_url(

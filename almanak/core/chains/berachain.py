@@ -2,7 +2,7 @@
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, GasProfile, NativeToken, SimulationProfile, Timeouts
+from ._descriptor import ChainDescriptor, Explorer, GasProfile, NativeToken, SimulationProfile, Timeouts
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -16,6 +16,10 @@ DESCRIPTOR = register_chain(
             name="Berachain",
             decimals=18,
             wrapped_address="0x6969696969696969696969696969696969696969",
+            # wrapper aliases native
+            coingecko_id="berachain-bera",
+            wrapped_symbol="WBERA",
+            wrapped_coingecko_id="berachain-bera",
         ),
         gas=GasProfile(
             buffer=1.2,
@@ -23,6 +27,7 @@ DESCRIPTOR = register_chain(
             price_cap_gwei=50,
             cost_cap_native=10.0,
         ),
+        explorer=Explorer(browse_url="https://berascan.com"),
         timeouts=Timeouts(
             tx_confirmation=120,
             grpc_execute=300,

@@ -30,9 +30,14 @@ class TestMantleTokenIds:
         assert MANTLE_TOKEN_IDS["USDC"] == "usd-coin"
 
     def test_mantle_weth_mapped(self):
-        """WETH on Mantle resolves via MANTLE_TOKEN_IDS."""
-        assert "WETH" in MANTLE_TOKEN_IDS
-        assert MANTLE_TOKEN_IDS["WETH"] == "weth"
+        """WETH resolves for Mantle lookups.
+
+        Since VIB-4851 CS-3b the WETH row comes from the registry-derived
+        native/wrapped projection merged into the flat table — price
+        resolution reads GLOBAL_TOKEN_IDS (as this module's docstring
+        states), so that is the surface to pin.
+        """
+        assert GLOBAL_TOKEN_IDS["WETH"] == "weth"
 
     def test_mantle_ids_included_in_global(self):
         """MANTLE_TOKEN_IDS are merged into GLOBAL_TOKEN_IDS."""

@@ -12,6 +12,7 @@ from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
     ChainDescriptor,
+    Explorer,
     GasProfile,
     NativeToken,
     RpcProfile,
@@ -31,6 +32,10 @@ DESCRIPTOR = register_chain(
             name="Sonic",
             decimals=18,
             wrapped_address="0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",
+            # wrapper has no own CG listing; aliases native
+            coingecko_id="sonic-3",
+            wrapped_symbol="wS",
+            wrapped_coingecko_id="sonic-3",
         ),
         gas=GasProfile(
             buffer=None,  # legacy: not in CHAIN_GAS_BUFFERS (falls back to DEFAULT_GAS_BUFFER)
@@ -52,6 +57,7 @@ DESCRIPTOR = register_chain(
             anvil_port=8553,
             rate_limit_rpm=300,
         ),
+        explorer=Explorer(browse_url="https://sonicscan.org"),
         # VIB-4872 (W6-followup): chain half of legacy CHAIN_TOKENS.
         tokens={
             "usdc": "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",

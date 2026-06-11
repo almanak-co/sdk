@@ -16,6 +16,9 @@ DESCRIPTOR = register_chain(
             name="OKB",
             decimals=18,
             wrapped_address="0xe538905cf8410324e03A5A23C1c177a474D59b2b",
+            coingecko_id="okb",
+            wrapped_symbol="WOKB",
+            wrapped_coingecko_id="okb",
         ),
         gas=GasProfile(
             buffer=1.3,

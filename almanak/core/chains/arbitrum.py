@@ -24,6 +24,9 @@ DESCRIPTOR = register_chain(
             name="Ethereum",
             decimals=18,
             wrapped_address="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+            coingecko_id="ethereum",
+            wrapped_symbol="WETH",
+            wrapped_coingecko_id="weth",
         ),
         gas=GasProfile(
             buffer=1.5,
@@ -48,6 +51,7 @@ DESCRIPTOR = register_chain(
         explorer=Explorer(
             api_url="https://api.arbiscan.io/api",
             api_key_env="ARBISCAN_API_KEY",
+            browse_url="https://arbiscan.io",
         ),
         # VIB-4872 (W6-followup): chain half of legacy CHAIN_TOKENS in
         # ``framework/intents/compiler_constants.py``.
@@ -63,6 +67,7 @@ DESCRIPTOR = register_chain(
         # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
         # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
         external_ids={
+            "tenderly": "arbitrum",
             "coingecko": "arbitrum-one",
             "dexscreener": "arbitrum",
             "geckoterminal": "arbitrum",

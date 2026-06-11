@@ -24,6 +24,9 @@ DESCRIPTOR = register_chain(
             name="Avalanche",
             decimals=18,
             wrapped_address="0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+            coingecko_id="avalanche-2",
+            wrapped_symbol="WAVAX",
+            wrapped_coingecko_id="avalanche-2",
         ),
         gas=GasProfile(
             buffer=1.1,
@@ -58,6 +61,7 @@ DESCRIPTOR = register_chain(
         explorer=Explorer(
             api_url="https://api.snowtrace.io/api",
             api_key_env="SNOWTRACE_API_KEY",
+            browse_url="https://snowtrace.io",
         ),
         # VIB-4872 (W6-followup): chain half of legacy CHAIN_TOKENS.
         tokens={
@@ -70,6 +74,7 @@ DESCRIPTOR = register_chain(
         # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /
         # DeFiLlama / Zerion / Moralis / OKX). Values verbatim incl. case.
         external_ids={
+            "tenderly": "avalanche",
             "coingecko": "avalanche",
             "dexscreener": "avalanche",
             "geckoterminal": "avax",

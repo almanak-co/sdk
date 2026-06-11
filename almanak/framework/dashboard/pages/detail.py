@@ -15,7 +15,7 @@ import streamlit as st
 
 from almanak.config.framework import framework_config_from_env
 from almanak.framework.dashboard.components import render_operator_card
-from almanak.framework.dashboard.config import API_BASE_URL, API_TIMEOUT, check_system_health
+from almanak.framework.dashboard.config import API_BASE_URL, API_TIMEOUT, BLOCK_EXPLORER_URLS, check_system_health
 from almanak.framework.dashboard.data_source import execute_strategy_action
 from almanak.framework.dashboard.models import Strategy
 from almanak.framework.dashboard.pages._detail_render import (
@@ -476,15 +476,8 @@ def render_position_summary(strategy: Strategy) -> None:
 
 def get_explorer_url(chain: str, tx_hash: str) -> str:
     """Get block explorer URL for a transaction hash."""
-    explorers = {
-        "arbitrum": "https://arbiscan.io/tx/",
-        "ethereum": "https://etherscan.io/tx/",
-        "base": "https://basescan.org/tx/",
-        "optimism": "https://optimistic.etherscan.io/tx/",
-        "polygon": "https://polygonscan.com/tx/",
-        "avalanche": "https://snowtrace.io/tx/",
-    }
-    base_url = explorers.get(chain.lower(), "https://etherscan.io/tx/")
+    # Shared registry-derived map (VIB-4851 CS-4) — was a third literal copy.
+    base_url = BLOCK_EXPLORER_URLS.get(chain.lower(), "https://etherscan.io/tx/")
     # Ensure tx_hash has 0x prefix
     if not tx_hash.startswith("0x"):
         tx_hash = f"0x{tx_hash}"

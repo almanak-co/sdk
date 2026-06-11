@@ -4,6 +4,7 @@ from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
     ChainDescriptor,
+    Explorer,
     GasProfile,
     NativeToken,
     RpcProfile,
@@ -23,6 +24,9 @@ DESCRIPTOR = register_chain(
             name="Mantle",
             decimals=18,
             wrapped_address="0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",
+            coingecko_id="mantle",
+            wrapped_symbol="WMNT",
+            wrapped_coingecko_id="mantle",
         ),
         gas=GasProfile(
             buffer=1.5,
@@ -67,6 +71,7 @@ DESCRIPTOR = register_chain(
             alchemy_prefix="mantle",
             anvil_port=8556,
         ),
+        explorer=Explorer(browse_url="https://mantlescan.xyz"),
         # VIB-4872 (W6-followup): chain half of legacy CHAIN_TOKENS.
         tokens={
             "usdc": "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9",

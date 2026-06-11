@@ -217,6 +217,21 @@ FROZEN_MORALIS: dict[str, str] = {
 }
 
 # 11. OKX _CHAIN_IDS (carries the "bnb" alias; "solana": "501" is synthetic).
+# Legacy ``TENDERLY_CHAIN_SLUGS`` in framework/models/reproduction_bundle.py
+# (VIB-4851 CS-4). Tenderly DASHBOARD URL slugs — distinct from the Tenderly
+# simulation network id, which is always str(chain_id) by SimulationProfile
+# design and is deliberately not stored as an external id.
+FROZEN_TENDERLY: dict[str, str] = {
+    "ethereum": "mainnet",
+    "arbitrum": "arbitrum",
+    "optimism": "optimism",
+    "polygon": "polygon",
+    "base": "base",
+    "avalanche": "avalanche",
+    "bsc": "bsc",
+}
+
+
 FROZEN_OKX: dict[str, str] = {
     "ethereum": "1",
     "optimism": "10",
@@ -259,6 +274,8 @@ def _frozen_for(vendor: str) -> dict[str, str]:
         return dict(FROZEN_MORALIS)
     if vendor == "okx":
         return dict(FROZEN_OKX)
+    if vendor == "tenderly":
+        return dict(FROZEN_TENDERLY)
     raise AssertionError(f"no frozen map for vendor {vendor!r}")
 
 
@@ -271,6 +288,7 @@ ALL_VENDORS = (
     "zerion",
     "moralis",
     "okx",
+    "tenderly",
 )
 
 

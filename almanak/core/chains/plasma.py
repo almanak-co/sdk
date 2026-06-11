@@ -4,6 +4,7 @@ from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
     ChainDescriptor,
+    Explorer,
     GasProfile,
     NativeToken,
     RpcProfile,
@@ -23,6 +24,10 @@ DESCRIPTOR = register_chain(
             name="Plasma",
             decimals=18,
             wrapped_address="0x6100E367285b01F48D07953803A2d8dCA5D19873",
+            # wrapper aliases native
+            coingecko_id="plasma",
+            wrapped_symbol="WXPL",
+            wrapped_coingecko_id="plasma",
         ),
         gas=GasProfile(
             buffer=1.1,
@@ -41,6 +46,7 @@ DESCRIPTOR = register_chain(
             anvil_port=8554,
             rate_limit_rpm=300,
         ),
+        explorer=Explorer(browse_url="https://plasmascan.io"),
         simulation=SimulationProfile(tenderly_supported=True),
         # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
         # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /

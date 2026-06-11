@@ -4,6 +4,7 @@ from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
     ChainDescriptor,
+    Explorer,
     GasProfile,
     NativeToken,
     RpcProfile,
@@ -23,6 +24,9 @@ DESCRIPTOR = register_chain(
             name="Monad",
             decimals=18,
             wrapped_address="0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
+            coingecko_id="monad",
+            wrapped_symbol="WMON",
+            wrapped_coingecko_id="monad",
         ),
         gas=GasProfile(
             buffer=1.1,
@@ -39,6 +43,7 @@ DESCRIPTOR = register_chain(
             alchemy_prefix="monad",
             anvil_port=8555,
         ),
+        explorer=Explorer(browse_url="https://explorer.monad.xyz"),
         # VIB-4872 (W6-followup): chain half of legacy CHAIN_TOKENS.
         tokens={
             "usdc": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",

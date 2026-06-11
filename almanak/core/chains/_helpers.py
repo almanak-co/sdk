@@ -272,3 +272,61 @@ def rpc_rate_limit_map() -> Mapping[str, int]:
     return MappingProxyType(
         {d.name: d.rpc.rate_limit_rpm for d in ChainRegistry.all() if d.rpc.rate_limit_rpm is not None}
     )
+
+
+def native_coingecko_ids() -> Mapping[str, str]:
+    """Symbol → CoinGecko COIN id projection over every chain's native asset.
+
+    Covers, per registered chain: the native ``symbol`` and every
+    ``accepted_symbols`` entry (→ ``native.coingecko_id``), plus the
+    ``wrapped_symbol`` (→ ``native.wrapped_coingecko_id``). Chains with
+    ``None`` ids contribute nothing (legacy miss semantics). Keys are
+    verbatim case ("wS"); price-map consumers uppercase at merge to match
+    their symbol normalization. Replaces the hand-maintained native rows
+    of the per-chain ``*_TOKEN_IDS`` maps (VIB-4851 CS-3b; drift
+    precedent VIB-3805 — plasma gas priced as ETH).
+
+    A symbol claimed by two chains with DIFFERENT ids (e.g. a future
+    chain reusing "ETH" with a non-"ethereum" id) raises at derive time
+    rather than silently letting registration order pick a winner.
+    """
+    out: dict[str, str] = {}
+    upper_seen: dict[str, str] = {}
+    for d in ChainRegistry.all():
+        native = d.native
+        pairs: list[tuple[str, str]] = []
+        if native.coingecko_id is not None:
+            pairs.extend((s, native.coingecko_id) for s in (native.symbol, *native.accepted_symbols))
+        if native.wrapped_symbol is not None and native.wrapped_coingecko_id is not None:
+            pairs.append((native.wrapped_symbol, native.wrapped_coingecko_id))
+        for symbol, cg_id in pairs:
+            # Case-insensitive check: price-map consumers uppercase keys at
+            # merge, so "wS" and a hypothetical "WS" with a different id
+            # would silently overwrite each other there.
+            existing = upper_seen.get(symbol.upper())
+            if existing is not None and existing != cg_id:
+                raise ValueError(
+                    f"native_coingecko_ids: symbol {symbol!r} maps to both {existing!r} and {cg_id!r} across chains (case-insensitive)"
+                )
+            upper_seen[symbol.upper()] = cg_id
+            out[symbol] = cg_id
+    return MappingProxyType(out)
+
+
+def explorer_tx_prefix_map() -> Mapping[str, str]:
+    """Read-only ``{chain: "<browse_url>/tx/"}`` for chains with a web explorer.
+
+    Registry-derived back-compat view of the legacy dashboard / API
+    explorer-URL maps; membership == chains declaring
+    ``explorer.browse_url`` (VIB-4851 CS-4). Consumers keep their legacy
+    miss fallbacks for absent chains.
+    """
+    return MappingProxyType(
+        # rstrip: a descriptor declaring a trailing slash must not produce
+        # "https://host//tx/".
+        {
+            d.name: f"{d.explorer.browse_url.rstrip('/')}/tx/"
+            for d in ChainRegistry.all()
+            if d.explorer.browse_url is not None
+        }
+    )

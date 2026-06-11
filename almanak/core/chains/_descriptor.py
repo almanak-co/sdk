@@ -51,6 +51,11 @@ KNOWN_VENDORS: frozenset[str] = frozenset(
         "zerion",
         "moralis",
         "okx",
+        # Tenderly DASHBOARD slug for trace URLs
+        # (https://dashboard.tenderly.co/tx/{slug}/{hash}). NOT the Tenderly
+        # simulation network id — that is always str(chain_id) by
+        # SimulationProfile design and is deliberately not stored anywhere.
+        "tenderly",
     }
 )
 
@@ -74,6 +79,25 @@ class NativeToken:
             route to the native-balance path. The accepted set is derived as
             ``{symbol, *accepted_symbols}`` — see
             ``almanak.core.chains._helpers.native_symbols_for`` (VIB-4851 A1).
+        coingecko_id: CoinGecko COIN id of the native asset (e.g.
+            ``"ethereum"``, ``"avalanche-2"``, ``"sonic-3"``). Distinct from
+            ``ChainDescriptor.external_ids["coingecko"]``, which is the
+            vendor's PLATFORM id for the chain ("price a token by contract
+            address on this chain"); this field prices the gas asset itself.
+            ``None`` means "not yet verified against CoinGecko" — the asset
+            simply stays absent from derived price maps (legacy miss
+            semantics). Mirrors the native rows of the legacy per-chain
+            ``*_TOKEN_IDS`` maps (VIB-4851 Phase E, CS-3b; drift precedent
+            VIB-3805).
+        wrapped_symbol: The wrapped-native ERC-20's actual on-chain symbol
+            (``"WETH"``, ``"WMNT"``, ``"wS"``, ``"W0G"``). Stored verbatim,
+            including case — NEVER derived as ``"W" + symbol`` (zerog wraps
+            ``A0GI`` as ``W0G``; sonic's contract symbol is ``"wS"``).
+        wrapped_coingecko_id: CoinGecko COIN id used to price the wrapped
+            native. Chains whose wrapper has its own listing use it
+            (ethereum-family ``"weth"``, zerog ``"wrapped-0g"``); the rest
+            alias the native id (the established WAVAX/WBNB/WSOL/WMNT
+            pattern from the legacy maps). ``None`` == unverified/absent.
     """
 
     symbol: str
@@ -81,6 +105,9 @@ class NativeToken:
     decimals: int
     wrapped_address: str | None = None
     accepted_symbols: tuple[str, ...] = ()
+    coingecko_id: str | None = None
+    wrapped_symbol: str | None = None
+    wrapped_coingecko_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -251,10 +278,17 @@ class Explorer:
         api_key_env: Environment-variable name carrying the per-chain
             API key (e.g. ``"ARBISCAN_API_KEY"``). ``None`` for chains
             without an Etherscan-compatible API.
+        browse_url: Human-facing web explorer origin (e.g.
+            ``"https://arbiscan.io"``, no trailing slash, no path).
+            Consumers compose ``{browse_url}/tx/{hash}`` etc. Mirrors the
+            chain half of the legacy dashboard / API timeline explorer-URL
+            maps (VIB-4851 Phase E, CS-4). ``None`` means "no known web
+            explorer" — consumers keep their legacy miss fallbacks.
     """
 
     api_url: str | None = None
     api_key_env: str | None = None
+    browse_url: str | None = None
 
 
 @dataclass(frozen=True)

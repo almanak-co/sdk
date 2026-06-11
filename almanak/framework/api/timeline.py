@@ -35,14 +35,18 @@ this API or query `timeline_events`
 
 import json
 import logging
+from collections.abc import Mapping
 from copy import copy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from fastapi import APIRouter, Query
+
+from almanak.core.chains._helpers import explorer_tx_prefix_map
 
 logger = logging.getLogger(__name__)
 
@@ -120,16 +124,14 @@ class TimelineEventType(StrEnum):
     CUSTOM = "CUSTOM"
 
 
-# Block explorer URL templates by chain
-BLOCK_EXPLORER_URLS: dict[str, str] = {
-    "ethereum": "https://etherscan.io/tx/{tx_hash}",
-    "arbitrum": "https://arbiscan.io/tx/{tx_hash}",
-    "optimism": "https://optimistic.etherscan.io/tx/{tx_hash}",
-    "polygon": "https://polygonscan.com/tx/{tx_hash}",
-    "base": "https://basescan.org/tx/{tx_hash}",
-    "avalanche": "https://snowtrace.io/tx/{tx_hash}",
-    "bsc": "https://bscscan.com/tx/{tx_hash}",
-}
+# Block explorer URL templates by chain — derived from
+# ``Explorer.browse_url`` (VIB-4851 CS-4). Deliberate widening: the legacy
+# literal covered 7 chains, so e.g. mantle/sonic events rendered no link
+# (``get_block_explorer_url`` returned None); every chain with a declared
+# web explorer now gets one.
+BLOCK_EXPLORER_URLS: Mapping[str, str] = MappingProxyType(
+    {chain: prefix + "{tx_hash}" for chain, prefix in explorer_tx_prefix_map().items()}
+)
 
 
 def get_block_explorer_url(chain: str, tx_hash: str) -> str | None:

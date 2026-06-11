@@ -4,12 +4,15 @@ Centralizes all configuration values for easy modification.
 """
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Literal
 
 import requests
 import streamlit as st
+
+from almanak.core.chains._helpers import explorer_tx_prefix_map
 
 logger = logging.getLogger(__name__)
 
@@ -22,23 +25,11 @@ INITIAL_SIDEBAR_STATE: Literal["auto", "expanded", "collapsed"] = "collapsed"
 ITEMS_PER_PAGE = 20
 TIMELINE_PAGE_SIZE_OPTIONS = [10, 20, 50]
 
-# Block explorer URLs by chain
-BLOCK_EXPLORER_URLS: dict[str, str] = {
-    "ethereum": "https://etherscan.io/tx/",
-    "arbitrum": "https://arbiscan.io/tx/",
-    "optimism": "https://optimistic.etherscan.io/tx/",
-    "polygon": "https://polygonscan.com/tx/",
-    "base": "https://basescan.org/tx/",
-    "avalanche": "https://snowscan.xyz/tx/",
-    "bsc": "https://bscscan.com/tx/",
-    "sonic": "https://sonicscan.org/tx/",
-    "blast": "https://blastscan.io/tx/",
-    "mantle": "https://mantlescan.xyz/tx/",
-    "berachain": "https://berascan.com/tx/",
-    "solana": "https://solscan.io/tx/",
-    "monad": "https://explorer.monad.xyz/tx/",
-    "plasma": "https://plasmascan.io/tx/",
-}
+# Block explorer URLs by chain — derived from ``Explorer.browse_url``
+# (VIB-4851 CS-4). One value change vs the legacy literal: avalanche now
+# uses snowtrace.io (matching ``Explorer.api_url`` and the api/timeline +
+# detail-page maps) instead of snowscan.xyz.
+BLOCK_EXPLORER_URLS: Mapping[str, str] = explorer_tx_prefix_map()
 
 # API configuration
 API_BASE_URL = "http://localhost:8000"
