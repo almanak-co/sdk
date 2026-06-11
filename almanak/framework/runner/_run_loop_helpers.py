@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
+from almanak.core.chains._helpers import is_solana_chain
+
 from ..api.timeline import TimelineEvent, TimelineEventType, add_event
 from ..state.exceptions import AccountingPersistenceError
 
@@ -844,10 +846,11 @@ def _augment_intent_tokens_with_address_resolution(intent: Any, symbol_tokens: l
     _walk(intent, 0, raw_values)
 
     resolved: list[str] = []
+    chain_is_solana = is_solana_chain(chain_lower)
     for raw in raw_values:
         s_lower = raw.lower()
         looks_like_evm = s_lower.startswith("0x") and len(raw) == 42
-        looks_like_solana = chain_lower == "solana" and not s_lower.startswith("0x") and 32 <= len(raw) <= 44
+        looks_like_solana = chain_is_solana and not s_lower.startswith("0x") and 32 <= len(raw) <= 44
         if not (looks_like_evm or looks_like_solana):
             # Symbol-shaped — already covered by ``symbol_tokens``. Skip.
             continue

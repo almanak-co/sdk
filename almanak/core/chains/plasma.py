@@ -39,6 +39,7 @@ DESCRIPTOR = register_chain(
             alchemy_prefix="plasma",
             tenderly_subdomain="plasma",
             anvil_port=8554,
+            rate_limit_rpm=300,
         ),
         simulation=SimulationProfile(tenderly_supported=True),
         # VIB-4851 (B1): per-vendor external ids, transposed from the legacy

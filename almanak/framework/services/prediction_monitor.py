@@ -21,6 +21,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _polymarket_chain() -> str:
+    """Polymarket's home chain, read from its connector manifest.
+
+    The connector owns the "Polymarket lives on Polygon" fact
+    (``strategy_chains``); deriving it here keeps this monitor
+    chain-agnostic (VIB-4851 CS-3). The ``"polymarket"`` literal below is a
+    documented SELF-IDENTITY key (Phase D precedent): this monitor's
+    default venue IS Polymarket — naming the venue and deriving its chain
+    is the inversion; naming the chain was the coupling. Deferred import —
+    the connector registry must not load at module import time.
+    """
+    from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+    manifest = CONNECTOR_REGISTRY.get("polymarket")
+    if manifest is None or not manifest.strategy_chains:
+        # Manifest discovery is static — this is a registry regression, and
+        # failing loud beats silently monitoring the wrong chain.
+        raise RuntimeError("polymarket connector manifest is missing or declares no strategy_chains")
+    return manifest.strategy_chains[0]
+
+
 class PredictionEvent(StrEnum):
     """Events that can occur for prediction market positions."""
 
@@ -892,7 +913,7 @@ class PredictionPositionMonitor:
             event_type=timeline_type,
             description=description,
             deployment_id=self.deployment_id,
-            chain="polygon",  # Polymarket is on Polygon
+            chain=_polymarket_chain(),
             details={
                 "prediction_event": result.event.value,
                 "market_id": position.market_id,

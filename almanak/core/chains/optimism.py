@@ -42,6 +42,7 @@ DESCRIPTOR = register_chain(
             alchemy_prefix="opt",
             anvil_port=8550,
             block_time_seconds=2.0,
+            rate_limit_rpm=300,
         ),
         explorer=Explorer(
             api_url="https://api-optimistic.etherscan.io/api",

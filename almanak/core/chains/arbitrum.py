@@ -43,6 +43,7 @@ DESCRIPTOR = register_chain(
             tenderly_subdomain="arbitrum",
             anvil_port=8545,
             block_time_seconds=0.25,
+            rate_limit_rpm=300,
         ),
         explorer=Explorer(
             api_url="https://api.arbiscan.io/api",

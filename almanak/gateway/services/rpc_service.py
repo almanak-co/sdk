@@ -13,6 +13,7 @@ Key features:
 import asyncio
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -20,6 +21,7 @@ from typing import Any
 import aiohttp
 import grpc
 
+from almanak.core.chains._helpers import rpc_rate_limit_map
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.metrics import record_rpc_latency, record_rpc_request
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
@@ -36,19 +38,11 @@ from almanak.gateway.validation import (
 logger = logging.getLogger(__name__)
 
 
-# Rate limits per chain (requests per minute)
-CHAIN_RATE_LIMITS = {
-    "ethereum": 300,
-    "arbitrum": 300,
-    "base": 300,
-    "optimism": 300,
-    "polygon": 300,
-    "avalanche": 300,
-    "bsc": 300,
-    "sonic": 300,
-    "plasma": 300,
-    "solana": 300,
-}
+# Rate limits per chain (requests per minute). Derived from
+# ``ChainDescriptor.rpc.rate_limit_rpm`` (VIB-4851 CS-3); chains with no
+# declared budget keep falling back to the conservative default at the
+# lookup site, byte-equivalent to the legacy literal dict.
+CHAIN_RATE_LIMITS: Mapping[str, int] = rpc_rate_limit_map()
 
 
 @dataclass

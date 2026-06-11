@@ -207,6 +207,21 @@ class RpcProfile:
             ``block_times`` literal in ``framework/backtesting/pnl/
             providers/gas.py`` and the membership of ``ARCHIVE_RPC_CHAINS``.
             VIB-4857 (W5).
+        rate_limit_rpm: Gateway-side RPC rate-limit budget in requests per
+            minute. Mirrors the chain half of the legacy
+            ``gateway/services/rpc_service.py`` ``CHAIN_RATE_LIMITS`` dict.
+            ``None`` means "no declared budget" — the gateway lookup site
+            falls back to its own conservative default, preserving the
+            legacy ``CHAIN_RATE_LIMITS.get(chain, <default>)`` miss
+            semantics. VIB-4851 (Phase E, CS-3).
+        fork_requires_archive: ``True`` when free-tier public RPCs for this
+            chain lack archive state, so managed-Anvil fork operations
+            (``eth_getStorageAt`` for ERC-20 approvals, etc.) fail without
+            an archive-capable RPC (Alchemy key or chain-specific URL).
+            Mirrors the legacy ``gateway/managed.py``
+            ``ARCHIVE_RPC_REQUIRED_CHAINS`` membership (VIB-3971,
+            VIB-3973 Part B). Drives the pre-fork warning only — not a
+            hard gate. VIB-4851 (Phase E, CS-3).
     """
 
     public_rpc: str | None = None
@@ -215,6 +230,8 @@ class RpcProfile:
     anvil_port: int | None = None
     poa: bool = False
     block_time_seconds: float | None = None
+    rate_limit_rpm: int | None = None
+    fork_requires_archive: bool = False
 
 
 @dataclass(frozen=True)

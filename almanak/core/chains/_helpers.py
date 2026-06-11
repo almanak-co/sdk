@@ -204,3 +204,71 @@ def blocks_per_day_map() -> Mapping[str, int]:
             if d.rpc.block_time_seconds is not None and d.rpc.block_time_seconds > 0
         }
     )
+
+
+def is_solana_chain(chain: str | None) -> bool:
+    """True when *chain* resolves to a Solana-family chain (VIB-4851 CS-2).
+
+    Replaces scattered ``chain == "solana"`` / ``chain.lower() == "solana"``
+    family branches. Resolution goes through ``ChainRegistry.try_resolve``,
+    which lowercases, strips, and accepts registered aliases — so ``"SOLANA"``,
+    ``" solana "`` and the ``"sol"`` alias all dispatch to the Solana family
+    (the literal comparisons treated alias/cased inputs as EVM, a latent
+    mis-route). Unknown or empty chains return ``False``, preserving the
+    literal comparisons' behavior for arbitrary strings.
+    """
+    if not isinstance(chain, str) or not chain.strip():
+        # The literal comparisons this replaces were None-safe
+        # (``None == "solana"`` is False); keep that contract for call
+        # sites that pass ``chain=None`` before chain resolution.
+        return False
+    descriptor = ChainRegistry.try_resolve(chain)
+    return descriptor is not None and descriptor.family is ChainFamily.SOLANA
+
+
+def solana_chain_names() -> frozenset[str]:
+    """Canonical names of every registered Solana-family chain (VIB-4851 CS-2).
+
+    Registry-derived replacement for the literal ``frozenset({"solana"})``
+    membership sets. Canonical names only — no aliases — so ``name in
+    solana_chain_names()`` is byte-equivalent to the legacy sets for
+    canonical inputs.
+    """
+    return frozenset(d.name for d in ChainRegistry.all() if d.family is ChainFamily.SOLANA)
+
+
+def evm_chain_names() -> tuple[str, ...]:
+    """Canonical names of every registered EVM-family chain, in registration
+    order (VIB-4851 CS-3).
+
+    Registry-derived replacement for hand-maintained all-EVM chain tuples
+    (e.g. the CLI runtime's ``anvil_chains`` default). Order follows the
+    sorted side-effect imports in ``almanak/core/chains/__init__.py``;
+    consumers of the legacy tuples are order-insensitive (env-var reads /
+    set membership).
+    """
+    return tuple(d.name for d in ChainRegistry.all() if d.family is ChainFamily.EVM)
+
+
+def fork_archive_required_chains() -> frozenset[str]:
+    """Chains whose managed-Anvil fork needs an archive-capable RPC.
+
+    Membership == descriptors with ``rpc.fork_requires_archive=True``
+    (legacy ``gateway/managed.py`` ``ARCHIVE_RPC_REQUIRED_CHAINS``;
+    VIB-3971 / VIB-3973 Part B; inverted in VIB-4851 CS-3).
+    """
+    return frozenset(d.name for d in ChainRegistry.all() if d.rpc.fork_requires_archive)
+
+
+def rpc_rate_limit_map() -> Mapping[str, int]:
+    """Read-only ``{chain: requests_per_minute}`` gateway RPC budget map.
+
+    Registry-derived back-compat view of the legacy ``rpc_service.py``
+    ``CHAIN_RATE_LIMITS`` dict. Membership == chains declaring
+    ``rpc.rate_limit_rpm``; the gateway lookup keeps its own
+    ``.get(chain, <default>)`` miss fallback, so undeclared chains behave
+    exactly as before (VIB-4851 CS-3).
+    """
+    return MappingProxyType(
+        {d.name: d.rpc.rate_limit_rpm for d in ChainRegistry.all() if d.rpc.rate_limit_rpm is not None}
+    )

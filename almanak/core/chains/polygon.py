@@ -62,6 +62,8 @@ DESCRIPTOR = register_chain(
             anvil_port=8551,
             poa=True,
             block_time_seconds=2.0,
+            rate_limit_rpm=300,
+            fork_requires_archive=True,
         ),
         explorer=Explorer(
             api_url="https://api.polygonscan.com/api",

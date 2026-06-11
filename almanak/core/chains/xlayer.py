@@ -31,6 +31,7 @@ DESCRIPTOR = register_chain(
             public_rpc="https://rpc.xlayer.tech",
             alchemy_prefix="xlayer",
             anvil_port=8557,
+            fork_requires_archive=True,
         ),
         # VIB-4872 (W6-followup): chain half of legacy CHAIN_TOKENS.
         tokens={

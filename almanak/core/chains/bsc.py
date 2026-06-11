@@ -59,6 +59,7 @@ DESCRIPTOR = register_chain(
             alchemy_prefix="bnb",
             anvil_port=8546,
             poa=True,
+            rate_limit_rpm=300,
         ),
         explorer=Explorer(
             api_url="https://api.bscscan.com/api",

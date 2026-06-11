@@ -27,6 +27,8 @@ import warnings
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.chains._helpers import is_solana_chain
+
 from .extract_result import (
     CriticalAccountingError,
     ExtractError,
@@ -608,7 +610,7 @@ class ResultEnricher:
             # to EVM parsers (expecting dict logs with 'topics'), producing 40+ warnings like
             # "Failed to parse log: 'str' object has no attribute 'get'".
             chain_str = str(getattr(context, "chain", "")).lower()
-            is_solana = "solana" in chain_str
+            is_solana = is_solana_chain(chain_str)
 
             parser_kwargs = self._build_parser_kwargs(protocol, context.chain)
             try:

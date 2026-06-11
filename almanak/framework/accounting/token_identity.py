@@ -26,6 +26,8 @@ import logging
 import re
 from dataclasses import dataclass
 
+from almanak.core.chains._helpers import is_solana_chain
+
 logger = logging.getLogger(__name__)
 
 # EVM address pattern: 0x + 40 hex chars.
@@ -60,7 +62,7 @@ def _is_evm_address(token: str) -> bool:
 
 
 def _is_solana_address(token: str, chain: str) -> bool:
-    if chain.lower() == "solana":
+    if is_solana_chain(chain):
         return bool(_SOLANA_ADDRESS_RE.match(token))
     return False
 
@@ -144,7 +146,7 @@ def canonicalize_token_for_read(
     chain_lower = effective_chain.lower()
 
     # ── 4. Determine input form ────────────────────────────────────────────────
-    is_solana = chain_lower == "solana"
+    is_solana = is_solana_chain(chain_lower)
     is_evm_address = _is_evm_address(token)
     is_sol_address = _is_solana_address(token, chain_lower)
     is_address = is_evm_address or is_sol_address

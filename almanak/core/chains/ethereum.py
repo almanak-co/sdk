@@ -54,6 +54,8 @@ DESCRIPTOR = register_chain(
             tenderly_subdomain="mainnet",
             anvil_port=8549,
             block_time_seconds=12.0,
+            rate_limit_rpm=300,
+            fork_requires_archive=True,
         ),
         explorer=Explorer(
             api_url="https://api.etherscan.io/api",

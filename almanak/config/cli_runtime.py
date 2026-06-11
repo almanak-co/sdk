@@ -72,6 +72,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from almanak.config.env import _load_dotenv_once
+from almanak.core.chains._helpers import evm_chain_names
 
 logger = logging.getLogger(__name__)
 
@@ -387,24 +388,7 @@ class CliRuntimeConfig(BaseModel):
 def cli_runtime_config_from_env(
     *,
     dotenv_path: str | None = None,
-    anvil_chains: tuple[str, ...] = (
-        "ethereum",
-        "arbitrum",
-        "optimism",
-        "polygon",
-        "base",
-        "avalanche",
-        "bsc",
-        "linea",
-        "blast",
-        "mantle",
-        "berachain",
-        "sonic",
-        "monad",
-        "xlayer",
-        "zerog",
-        "plasma",
-    ),
+    anvil_chains: tuple[str, ...] | None = None,
 ) -> CliRuntimeConfig:
     """Construct a :class:`CliRuntimeConfig` from environment variables.
 
@@ -440,11 +424,17 @@ def cli_runtime_config_from_env(
         dotenv_path: Optional ``.env`` path; routed through the shared
             single-shot loader.
         anvil_chains: Override the chain list for the
-            ``ANVIL_<CHAIN>_PORT`` lookup. Defaults to the union of
-            chains the SDK supports today; tests pass a custom tuple
+            ``ANVIL_<CHAIN>_PORT`` lookup. ``None`` (the default)
+            resolves lazily to every registered EVM chain
+            (``evm_chain_names()`` — registration order, non-semantic;
+            a new chain file under almanak/core/chains/ joins
+            automatically, VIB-4851 CS-3); tests pass a custom tuple
             to exercise specific chains.
     """
     _load_dotenv_once(dotenv_path)
+
+    if anvil_chains is None:
+        anvil_chains = evm_chain_names()
 
     safe_mode_raw = os.environ.get("ALMANAK_GATEWAY_SAFE_MODE")
     execution_mode_raw = os.environ.get("ALMANAK_EXECUTION_MODE")

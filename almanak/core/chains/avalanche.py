@@ -52,6 +52,8 @@ DESCRIPTOR = register_chain(
             anvil_port=8547,
             poa=True,
             block_time_seconds=2.0,
+            rate_limit_rpm=300,
+            fork_requires_archive=True,
         ),
         explorer=Explorer(
             api_url="https://api.snowtrace.io/api",

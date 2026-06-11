@@ -45,7 +45,7 @@ from almanak.connectors._strategy_base.base.swap_adapter import DefaultSwapAdapt
 from almanak.connectors._strategy_base.compiler_registry import get_compiler as get_connector_compiler
 from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason
 from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
-from almanak.core.chains._helpers import native_symbols_for
+from almanak.core.chains._helpers import is_solana_chain, native_symbols_for
 
 from ..chain_family import ChainFamilyAdapter, all_families, family_for
 
@@ -661,7 +661,7 @@ class IntentCompiler:
         if not isinstance(chains, frozenset | set | tuple | list):
             return False
         chains_set = frozenset(chains)
-        return bool(chains_set) and chains_set <= frozenset({"solana"})
+        return bool(chains_set) and all(is_solana_chain(c) for c in chains_set)
 
     def _build_cl_compiler_context(
         self,
@@ -2216,7 +2216,7 @@ class IntentCompiler:
             # is_native=True for a raw SPL mint that resolves to symbol
             # "SOL", bypassing the SPL-token path.
             input_is_address = isinstance(token, str) and (
-                token.startswith("0x") or (target_chain.lower() == "solana" and _is_solana_mint(token))
+                token.startswith("0x") or (is_solana_chain(target_chain) and _is_solana_mint(token))
             )
             if not is_native and not input_is_address:
                 # Defense-in-depth: if the registry address for a chain's gas

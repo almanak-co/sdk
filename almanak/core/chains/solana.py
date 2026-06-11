@@ -51,6 +51,7 @@ DESCRIPTOR = register_chain(
             public_rpc="https://api.mainnet-beta.solana.com",
             alchemy_prefix="solana",
             anvil_port=8899,
+            rate_limit_rpm=300,
         ),
         # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
         # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /

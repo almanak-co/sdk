@@ -41,6 +41,8 @@ from dataclasses import dataclass
 
 import grpc
 
+from almanak.core.chains._helpers import solana_chain_names
+from almanak.core.chains._registry import ChainRegistry
 from almanak.gateway.proto import gateway_pb2
 
 # -----------------------------------------------------------------------------
@@ -73,21 +75,16 @@ _SOLANA_BASE58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 # string. The (chain, protocol) compatibility check is the gate; this
 # set is just "do we know how to normalize this chain's addresses?"
 
-_SOLANA_CHAINS: frozenset[str] = frozenset({"solana"})
+_SOLANA_CHAINS: frozenset[str] = solana_chain_names()
 
-SUPPORTED_NORMALIZATION_CHAINS: frozenset[str] = frozenset(
-    {
-        "ethereum",
-        "arbitrum",
-        "base",
-        "optimism",
-        "polygon",
-        "avalanche",
-        "bsc",
-        "sonic",
-    }
-    | _SOLANA_CHAINS
-)
+# Every registered chain has a family with a known address-normalization
+# rule (EVM hex checksum / Solana base58), so the set derives from the
+# registry. Deliberate widening (VIB-4851 CS-3): the legacy literal listed
+# only 8 EVM chains, so e.g. linea requests died here with the generic
+# "cannot normalize" error instead of reaching the meaningful
+# (chain, protocol) compatibility gate that the comment above names as the
+# real gate.
+SUPPORTED_NORMALIZATION_CHAINS: frozenset[str] = frozenset(ChainRegistry.names())
 
 
 def is_solana_chain(chain: str) -> bool:

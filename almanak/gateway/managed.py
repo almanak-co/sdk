@@ -29,6 +29,7 @@ from almanak.config.gateway_runtime import (
     set_env_value,
 )
 from almanak.config.runtime import private_key_from_env
+from almanak.core.chains._helpers import fork_archive_required_chains
 from almanak.gateway.core.settings import GatewaySettings
 
 logger = logging.getLogger(__name__)
@@ -206,7 +207,9 @@ class ManagedGateway:
     # non-archive full nodes that aggressively prune state and frequently
     # return DEADLINE_EXCEEDED — both stall LP teardown / lending repay
     # mid-run with `missing trie node` (VIB-3971, VIB-3973 Part B).
-    ARCHIVE_RPC_REQUIRED_CHAINS = frozenset({"polygon", "ethereum", "avalanche", "zerog", "xlayer"})
+    # Membership now derives from ``RpcProfile.fork_requires_archive`` so a
+    # new chain declares its own archive requirement (VIB-4851 CS-3).
+    ARCHIVE_RPC_REQUIRED_CHAINS = fork_archive_required_chains()
 
     def _check_archive_rpc_availability(self) -> None:
         """Warn if any target chain needs archive RPC but only has public RPCs.

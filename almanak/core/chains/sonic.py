@@ -50,6 +50,7 @@ DESCRIPTOR = register_chain(
             public_rpc="https://sonic-rpc.publicnode.com",
             alchemy_prefix="sonic",
             anvil_port=8553,
+            rate_limit_rpm=300,
         ),
         # VIB-4872 (W6-followup): chain half of legacy CHAIN_TOKENS.
         tokens={

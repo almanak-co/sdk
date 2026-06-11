@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 from almanak.core.chains import ChainRegistry
+from almanak.core.chains._helpers import solana_chain_names
 
 # Allowed chains for all gateway operations.
 #
@@ -135,7 +136,7 @@ ADDRESS_PATTERN = re.compile(r"^0x[a-fA-F0-9]{40}$")
 SOLANA_ADDRESS_PATTERN = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 # Chains that use the Solana address format (base58)
-_SOLANA_FAMILY_CHAINS = frozenset({"solana"})
+_SOLANA_FAMILY_CHAINS = solana_chain_names()
 DEPLOYMENT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_:-]{1,128}$")
 SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]{1,20}$")
 TOKEN_ID_PATTERN = re.compile(r"^[a-z0-9-]{1,64}$")

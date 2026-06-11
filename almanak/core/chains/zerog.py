@@ -31,6 +31,7 @@ DESCRIPTOR = register_chain(
             # zerog has no Alchemy / Tenderly route — public RPC + anvil only.
             public_rpc="https://rpc.ankr.com/0g_mainnet_evm",
             anvil_port=8558,
+            fork_requires_archive=True,
         ),
         # VIB-4851 (B1): per-vendor external ids, transposed from the legacy
         # standalone vendor maps (CoinGecko / DexScreener / GeckoTerminal /

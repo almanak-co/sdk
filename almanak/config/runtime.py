@@ -63,6 +63,7 @@ from eth_account import Account
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from almanak.config.env import _load_dotenv_once
+from almanak.core.chains._helpers import is_solana_chain
 
 if TYPE_CHECKING:
     from almanak.framework.execution.signer.safe import SafeSigner
@@ -378,7 +379,7 @@ def _resolve_private_key_from_env(
     """
     if private_key is not None:
         return private_key
-    if chain == "solana":
+    if is_solana_chain(chain):
         # Solana uses base58 Ed25519 instead of hex secp256k1 — separate env var.
         return os.environ.get("SOLANA_PRIVATE_KEY") or get_required("PRIVATE_KEY")
     if execution_mode == ExecutionMode.SAFE_ZODIAC:
@@ -514,7 +515,7 @@ def _derive_wallet_address(
         return ""
     if not private_key:
         raise ConfigurationError(field="private_key", reason="Private key cannot be empty")
-    if chain.lower() == "solana":
+    if is_solana_chain(chain):
         try:
             from almanak.framework.execution.solana.signer import SolanaSigner
 
@@ -1147,7 +1148,7 @@ def _normalise_multi_chains(chains: list[str]) -> tuple[list[str], dict[str, int
                 field="chains",
                 reason=f"Unsupported chain '{c}'. Valid chains: {valid_chains}",
             )
-        if cl == "solana":
+        if is_solana_chain(cl):
             # ``_build_multi_chain`` resolves wallets and RPC URLs through the
             # EVM path (``chain=None``-keyed env reads, ``_derive_wallet_address``
             # via private key). Letting Solana through here would surface as a
