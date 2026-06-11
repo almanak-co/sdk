@@ -1074,6 +1074,180 @@ class UniswapV4ReceiptParser:
             currency1=None,
         )
 
+    # -- Registry payload (VIB-4583) ------------------------------------------
+
+    def extract_registry_payload_open(
+        self,
+        receipt: dict[str, Any],
+        *,
+        fee_tier: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Build the V4 LP_OPEN ``position_registry.payload`` dict (VIB-4583).
+
+        Structural twin of the V3 parser's ``extract_registry_payload_open``,
+        with the V4 identity tuple: ``token_id`` (NFT tokenId), ``pool_id`` (the
+        32-byte PoolKey hash V4 reports as ``LPOpenData.pool_address``), and the
+        per-chain ``PositionManager`` address. Returns ``None`` — caller falls
+        back to plain ``save_ledger_entry`` — when any load-bearing identity
+        field is missing (Empty ≠ Zero: a zero-substituted ``token_id`` or
+        fabricated ``pool_id`` would silently corrupt ``physical_identity_hash``).
+
+        ``fee_tier`` is forwarded from the intent's compile-time metadata and is
+        carried opaquely (V4 keys identity on PoolManager+tokenId, not fee tier).
+        ``None`` ⇒ the key stays absent (never substitute ``0``).
+        """
+        lp_data = self.extract_lp_open_data(receipt)
+        if lp_data is None:
+            return None
+        if lp_data.position_id is None or lp_data.position_id <= 0:
+            # token_id is the physical identity anchor — refuse to build a row
+            # with a zero/negative tokenId.
+            return None
+        if not lp_data.pool_address:
+            # pool_id (reported as pool_address) is the semantic_grouping_key
+            # anchor — missing it would let two un-grouped rows in the same V4
+            # pool collide on ix_registry_auto_mode.
+            return None
+
+        position_manager = self.position_manager or None
+        if not position_manager:
+            # Fail-closed: no V4 PositionManager known for this chain. NEVER
+            # fabricate one (it would poison physical_identity_hash_univ4).
+            return None
+
+        payload: dict[str, Any] = {
+            "token_id": str(lp_data.position_id),
+            "pool_id": lp_data.pool_address.lower(),
+            "position_manager": position_manager,
+            "tick_lower": lp_data.tick_lower,
+            "tick_upper": lp_data.tick_upper,
+            "liquidity": str(lp_data.liquidity) if lp_data.liquidity is not None else None,
+            "amount0": str(lp_data.amount0) if lp_data.amount0 is not None else None,
+            "amount1": str(lp_data.amount1) if lp_data.amount1 is not None else None,
+            # V4 PoolKey-sorted currency addresses (Empty ≠ Zero — None stays None).
+            "currency0": lp_data.currency0,
+            "currency1": lp_data.currency1,
+        }
+        if fee_tier is not None and fee_tier > 0:
+            payload["fee_tier"] = int(fee_tier)
+        return payload
+
+    def extract_registry_payload_close(
+        self,
+        receipt: dict[str, Any],
+        *,
+        open_payload: dict[str, Any] | None = None,
+        fee_tier: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Build the V4 LP_CLOSE ``position_registry.payload`` dict (VIB-4583).
+
+        A V4 close burn emits ``ModifyLiquidity`` (carrying the ``pool_id``) and
+        Transfer logs (the withdrawn amounts) but NO NFT ``tokenId`` — V4, like
+        a V3 ``DecreaseLiquidity``-less burn, does not re-emit the tokenId on the
+        Transfer. The tokenId therefore comes from the matched OPEN-side registry
+        row (``open_payload``), which the runner threads through after resolving
+        the close intent's ``position_id`` against the prior open. Without an
+        ``open_payload`` carrying a tokenId we CANNOT build the
+        physical_identity_hash, so we return ``None`` (fall back to plain
+        ledger write) rather than fabricate one.
+
+        The close receipt's ``pool_id`` is cross-checked against the
+        ``open_payload`` pool_id — a disagreement means the wrong OPEN row was
+        threaded, so we refuse the close (the close must not overwrite anchors
+        with a mismatched identity).
+        """
+        lp_close = self.extract_lp_close_data(receipt)
+        if lp_close is None:
+            return None
+        pool_id = (lp_close.pool_address or "").lower()
+        if not pool_id:
+            return None
+
+        # token_id is not receipt-derivable for a V4 close — it MUST come from
+        # the threaded OPEN row. Empty ≠ Zero: refuse rather than fabricate.
+        token_id = self._open_payload_token_id_int(open_payload) if open_payload else None
+        if token_id is None or token_id <= 0:
+            return None
+
+        # Cross-check identity: the threaded OPEN row must be for THIS pool.
+        open_pool = str((open_payload or {}).get("pool_id") or "").lower()
+        if open_pool and open_pool != pool_id:
+            return None
+
+        position_manager = self.position_manager or str((open_payload or {}).get("position_manager") or "") or None
+        if not position_manager:
+            return None
+
+        payload: dict[str, Any] = {
+            "token_id": str(token_id),
+            "pool_id": pool_id,
+            "position_manager": position_manager,
+            "amount0_close": str(lp_close.amount0_collected),
+            "amount1_close": str(lp_close.amount1_collected),
+            # V4 bundles fees into the withdrawal Transfer in V0 — unmeasured
+            # (Empty ≠ Zero); separate fee measurement is VIB-4482.
+            "fee_owed_0": str(lp_close.fees0) if lp_close.fees0 is not None else None,
+            "fee_owed_1": str(lp_close.fees1) if lp_close.fees1 is not None else None,
+            "currency0": lp_close.currency0,
+            "currency1": lp_close.currency1,
+        }
+        if lp_close.liquidity_removed is not None:
+            payload["liquidity"] = str(lp_close.liquidity_removed)
+        # Merge OPEN-time fields the close receipt cannot re-derive (ticks,
+        # OPEN-time amounts, fee tier). OPEN-time liquidity wins for the row's
+        # ``liquidity`` (matches the V3 registry contract).
+        self._merge_open_payload_fields_v4(payload, open_payload, fee_tier=fee_tier)
+        return payload
+
+    @staticmethod
+    def _open_payload_token_id_int(open_payload: dict[str, Any]) -> int | None:
+        """Coerce ``open_payload['token_id']`` to ``int`` or ``None``.
+
+        Mirrors the V3 parser's helper. ``None`` for missing / empty /
+        non-integer values.
+        """
+        raw = open_payload.get("token_id")
+        if raw is None or raw == "":
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _merge_open_payload_fields_v4(
+        payload: dict[str, Any],
+        open_payload: dict[str, Any] | None,
+        *,
+        fee_tier: int | None,
+    ) -> None:
+        """Merge OPEN-time fields onto a V4 close ``payload`` in place (VIB-4583).
+
+        The close receipt cannot re-derive ticks, OPEN-time amounts, the original
+        mint liquidity, or the fee tier — those come from the OPEN-side registry
+        row threaded by the runner. ``open_payload=None`` ⇒ best-effort no-op
+        (only the incoming ``fee_tier`` kwarg is applied). OPEN-time liquidity
+        wins for the registry row's ``liquidity``.
+        """
+        if open_payload is None:
+            if fee_tier is not None and fee_tier > 0:
+                payload.setdefault("fee_tier", int(fee_tier))
+            return
+        for key in ("tick_lower", "tick_upper"):
+            if open_payload.get(key) is not None and key not in payload:
+                payload[key] = open_payload[key]
+        if open_payload.get("amount0") is not None:
+            payload.setdefault("amount0_open", open_payload["amount0"])
+        if open_payload.get("amount1") is not None:
+            payload.setdefault("amount1_open", open_payload["amount1"])
+        if open_payload.get("liquidity") is not None:
+            # OPEN-time liquidity wins (mint amount, not the burned amount).
+            payload["liquidity"] = open_payload["liquidity"]
+        if open_payload.get("fee_tier") is not None:
+            payload.setdefault("fee_tier", open_payload["fee_tier"])
+        elif fee_tier is not None and fee_tier > 0:
+            payload.setdefault("fee_tier", int(fee_tier))
+
     # -- Decoding helpers -----------------------------------------------------
 
     def _decode_modify_liquidity_event(self, log: dict[str, Any]) -> ModifyLiquidityEventData | None:

@@ -466,6 +466,27 @@ def _build_slipstream_nft_position_managers() -> dict[str, str]:
     )
 
 
+def _build_univ4_nft_position_managers() -> dict[str, str]:
+    """Uniswap V4 ``{chain: PositionManager}`` (lowercased) — VIB-4583.
+
+    Sourced from ``uniswap_v4/addresses.py`` (the ``position_manager`` slot per
+    chain) via the contract-role registry, exactly like the V3-family NPM views.
+    Lowercased to match the migration backfill's other fork views; casing is
+    hash-irrelevant downstream (``physical_identity_hash_univ4`` lowercases the
+    PositionManager before hashing). No ``bnb`` alias and no chain exclusions —
+    every chain the V4 connector publishes a ``position_manager`` for is
+    registry-eligible.
+    """
+    from almanak.connectors._strategy_contract_role_registry import NpmView
+
+    return _build_npm_view(
+        NpmView.UNIV4,
+        preserve_case=False,
+        chain_exclusions=frozenset(),
+        bnb_alias=False,
+    )
+
+
 # Backfill NPM ``{chain: NPM}`` views — lazy via PEP 562 ``__getattr__`` (see the
 # accessor map below), exactly like the six PR-3a address tables. They resolve
 # through ``CONTRACT_ROLE_REGISTRY`` (the boot file that imports every
@@ -492,6 +513,12 @@ def _slipstream_nft_position_managers() -> dict[str, str]:
     return _build_slipstream_nft_position_managers()
 
 
+@functools.cache
+def _univ4_nft_position_managers() -> dict[str, str]:
+    """Cached ``UNIV4_NFT_POSITION_MANAGERS`` (lazy — see the ``__getattr__`` note)."""
+    return _build_univ4_nft_position_managers()
+
+
 def _build_univ3_lp_grouping_protocols() -> frozenset[str]:
     """Union of every UniV3-shape DEX connector's LP-grouping membership.
 
@@ -514,6 +541,30 @@ def _build_univ3_lp_grouping_protocols() -> frozenset[str]:
 # Protocol slugs using the Uniswap-V3-shape LP grouping policy
 # (``univ3_lp@v1``) — NFT-position-manager-keyed concentrated liquidity.
 UNIV3_LP_GROUPING_PROTOCOLS: frozenset[str] = _build_univ3_lp_grouping_protocols()
+
+
+def _build_univ4_lp_grouping_protocols() -> frozenset[str]:
+    """Union of every UniV4-shape DEX connector's LP-grouping membership.
+
+    VIB-4583: fans out over the connector-self-registering
+    ``PROTOCOL_FAMILY_REGISTRY`` (``UNIV4_LP_GROUPING`` family) exactly like
+    :func:`_build_univ3_lp_grouping_protocols`. Each V4-shape connector declares
+    its ``univ4_lp@v1`` membership in its ``protocol_family.py``. The migration
+    backfill / runner registry dispatch key their ``protocol in
+    _UNIV4_LP_PROTOCOLS`` branch on this registry-derived union; no framework
+    module imports the connector directly.
+    """
+    from almanak.connectors._strategy_protocol_family_registry import (
+        PROTOCOL_FAMILY_REGISTRY,
+        ProtocolFamily,
+    )
+
+    return PROTOCOL_FAMILY_REGISTRY.members(ProtocolFamily.UNIV4_LP_GROUPING)
+
+
+# Protocol slugs using the Uniswap-V4 singleton-PoolManager LP grouping policy
+# (``univ4_lp@v1``) — grouped by ``chain:pool_id`` (VIB-4583).
+UNIV4_LP_GROUPING_PROTOCOLS: frozenset[str] = _build_univ4_lp_grouping_protocols()
 
 # Chain-specific known-tokens catalogue.
 #
@@ -941,6 +992,7 @@ _LAZY_TABLE_ACCESSORS: dict[str, Callable[[], dict[str, Any]]] = {
     "UNIV3_NFT_POSITION_MANAGERS": _univ3_nft_position_managers,
     "PANCAKESWAP_V3_NFT_POSITION_MANAGERS": _pancakeswap_v3_nft_position_managers,
     "SLIPSTREAM_NFT_POSITION_MANAGERS": _slipstream_nft_position_managers,
+    "UNIV4_NFT_POSITION_MANAGERS": _univ4_nft_position_managers,
 }
 
 

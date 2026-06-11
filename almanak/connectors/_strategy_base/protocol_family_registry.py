@@ -3,7 +3,7 @@
 Sibling of
 :class:`~almanak.connectors._strategy_base.contract_role_registry.ContractRoleRegistry`,
 scoped to named ABI/behaviour *family-membership* sets the framework surfaces as
-a single ``protocol in <family>`` test. Two families exist today:
+a single ``protocol in <family>`` test. Three families exist today:
 
 * :attr:`ProtocolFamily.AAVE_V3` -> ``AAVE_COMPATIBLE_PROTOCOLS`` (lending
   connectors sharing the Aave V3 ``supply`` / ``borrow`` / ``repay`` /
@@ -11,6 +11,9 @@ a single ``protocol in <family>`` test. Two families exist today:
 * :attr:`ProtocolFamily.UNIV3_LP_GROUPING` -> ``UNIV3_LP_GROUPING_PROTOCOLS``
   (DEX connectors using the Uniswap-V3-shape ``univ3_lp@v1``
   NFT-position-manager-keyed grouping policy).
+* :attr:`ProtocolFamily.UNIV4_LP_GROUPING` -> ``UNIV4_LP_GROUPING_PROTOCOLS``
+  (DEX connectors using the Uniswap-V4 singleton-PoolManager ``univ4_lp@v1``
+  grouping policy — grouped by ``chain:pool_id``, VIB-4583).
 
 Why a sibling registry keyed by a family enum
 ---------------------------------------------
@@ -50,6 +53,12 @@ class ProtocolFamily(StrEnum):
     #: DEX connectors using the ``univ3_lp@v1`` grouping policy ->
     #: ``UNIV3_LP_GROUPING_PROTOCOLS``.
     UNIV3_LP_GROUPING = "univ3_lp_grouping"
+    #: DEX connectors using the ``univ4_lp@v1`` grouping policy ->
+    #: ``UNIV4_LP_GROUPING_PROTOCOLS`` (V4 singleton-PoolManager LP grouped by
+    #: ``chain:pool_id`` rather than a per-pool contract address). Kept distinct
+    #: from :attr:`UNIV3_LP_GROUPING` so the two grouping-policy versions evolve
+    #: independently (VIB-4583).
+    UNIV4_LP_GROUPING = "univ4_lp_grouping"
 
 
 @dataclass(frozen=True)

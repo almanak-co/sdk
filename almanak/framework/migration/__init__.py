@@ -33,8 +33,11 @@ from almanak.framework.migration.backfill import (
     RegistryCutoverNotDeployedError,
     RegistryLookupInstallError,
     fold_position_events_for_univ3,
+    fold_position_events_for_univ4,
     physical_identity_hash_univ3,
+    physical_identity_hash_univ4,
     semantic_grouping_key_univ3,
+    semantic_grouping_key_univ4,
 )
 
 __all__ = [
@@ -47,6 +50,9 @@ __all__ = [
     "RegistryCutoverNotDeployedError",
     "RegistryLookupInstallError",
     "fold_position_events_for_univ3",
+    "fold_position_events_for_univ4",
     "physical_identity_hash_univ3",
+    "physical_identity_hash_univ4",
     "semantic_grouping_key_univ3",
+    "semantic_grouping_key_univ4",
 ]

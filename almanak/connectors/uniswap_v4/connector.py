@@ -58,6 +58,13 @@ CONNECTOR = Connector(
         module="almanak.connectors.uniswap_v4.primitive",
         attribute="PRIMITIVE",
     ),
+    # VIB-4583: declares membership in the ``UNIV4_LP_GROUPING`` family so the
+    # migration backfill / runner registry dispatch resolve V4 LP grouping
+    # through ``PROTOCOL_FAMILY_REGISTRY`` without naming this connector.
+    protocol_family=ImportRef(
+        module="almanak.connectors.uniswap_v4.protocol_family",
+        attribute="PROTOCOL_FAMILY",
+    ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
     strategy_chains=("ethereum", "arbitrum", "base"),
     # Matrix output covers deployed V4 chains for both swap and LP rows.

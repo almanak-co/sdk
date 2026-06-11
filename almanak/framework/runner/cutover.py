@@ -29,7 +29,7 @@ from almanak.framework.migration import (
     RegistryBackfillIncompleteError,
     RegistryCutoverNotDeployedError,
 )
-from almanak.framework.migration.backfill import UniV3LPCutoverReader
+from almanak.framework.migration.backfill import UniV3LPCutoverReader, UniV4LPCutoverReader
 from almanak.framework.primitives.types import Primitive
 
 if TYPE_CHECKING:
@@ -63,11 +63,20 @@ class CutoverSpec:
 
 # T12 (VIB-4198): UniV3 LP is the proof-case cutover. Subsequent cutovers
 # (T16 perp, T23 Pendle LP, T28 Aave) append entries here.
+#
+# VIB-4583: UniV4 LP is its own isolated cutover (Primitive.LP_V4 / 'lp_v4').
+# It is tracked by a SEPARATE migration_state row from the V3 'lp' cutover so
+# their backfill-complete flags and grouping-policy versions stay independent.
 ACTIVE_CUTOVERS: tuple[CutoverSpec, ...] = (
     CutoverSpec(
         primitive=Primitive.LP,
         cutover_key="lp",
         reader_factory=UniV3LPCutoverReader,
+    ),
+    CutoverSpec(
+        primitive=Primitive.LP_V4,
+        cutover_key="lp_v4",
+        reader_factory=UniV4LPCutoverReader,
     ),
 )
 

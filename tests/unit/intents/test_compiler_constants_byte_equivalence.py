@@ -529,3 +529,40 @@ class TestNftPositionManagerDerivedViews:
 
         sushi_eth_npm = "0x2214A42d8e2A1d20635c2cb0664422c528B6A432".lower()
         assert sushi_eth_npm not in {v.lower() for v in UNIV3_NFT_POSITION_MANAGERS.values()}
+
+    # VIB-4583: the V4 derived views feed physical_identity_hash_univ4 (PositionManager)
+    # and the registry grouping gate — pin them so a registry/address refactor can't
+    # silently change V4 position identity. Lowercased (address normalization).
+    EXPECTED_UNIV4 = {
+        "ethereum": "0xbd216513d74c8cf14cf4747e6aaa6420ff64ee9e",
+        "base": "0x7c5f5a4bbd8fd63184577525326123b519429bdc",
+        "arbitrum": "0xd88f38f930b7952f2db2432cb002e7abbf3dd869",
+        "optimism": "0x3c3ea4b57a46241e54610e5f022e5c45859a1017",
+        "polygon": "0x1ec2ebf4f37e7363fdfe3551602425af0b3ceef9",
+        "avalanche": "0xb74b1f14d2754acfcbbe1a221023a5cf50ab8acd",
+        "bsc": "0x7a4a5c919ae2541aed11041a1aeee68f1287f95b",
+    }
+
+    def test_univ4_npm(self) -> None:
+        from almanak.framework.intents.compiler_constants import UNIV4_NFT_POSITION_MANAGERS
+
+        assert UNIV4_NFT_POSITION_MANAGERS == self.EXPECTED_UNIV4
+        # All values lowercased — physical_identity_hash_univ4 lowercases the PM,
+        # so the source map must already be normalized for byte-fidelity.
+        assert all(v == v.lower() for v in UNIV4_NFT_POSITION_MANAGERS.values())
+
+    def test_univ4_npm_disjoint_from_univ3(self) -> None:
+        """V4 PositionManagers must not collide with V3 NPMs (distinct identity space)."""
+        from almanak.framework.intents.compiler_constants import (
+            UNIV3_NFT_POSITION_MANAGERS,
+            UNIV4_NFT_POSITION_MANAGERS,
+        )
+
+        v3 = {v.lower() for v in UNIV3_NFT_POSITION_MANAGERS.values()}
+        v4 = {v.lower() for v in UNIV4_NFT_POSITION_MANAGERS.values()}
+        assert v3.isdisjoint(v4)
+
+    def test_univ4_lp_grouping_protocols(self) -> None:
+        from almanak.framework.intents.compiler_constants import UNIV4_LP_GROUPING_PROTOCOLS
+
+        assert UNIV4_LP_GROUPING_PROTOCOLS == frozenset({"uniswap_v4"})

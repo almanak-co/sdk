@@ -2735,9 +2735,16 @@ class StrategyRunner:
         # the original default-to-UV3 behaviour (the registry would otherwise
         # raise ``ValueError`` on an unknown key).
         from almanak.framework.execution.receipt_registry import get_parser
+        from almanak.framework.migration.backfill import _UNIV4_LP_PROTOCOLS
 
         if protocol_norm == "velodrome_slipstream":
             parser_key = "aerodrome_slipstream"
+        elif protocol_norm in _UNIV4_LP_PROTOCOLS:
+            # VIB-4583: route V4 LP through the V4 receipt parser (it owns the
+            # PoolKey-driven token attribution + V4 registry payload methods).
+            # Membership-gated on the registry-derived family set; the parser
+            # registry key IS the protocol slug, so no name literal is needed.
+            parser_key = protocol_norm
         elif protocol_norm in ("aerodrome_slipstream", "sushiswap_v3", "pancakeswap_v3"):
             parser_key = protocol_norm
         else:
@@ -2894,6 +2901,227 @@ class StrategyRunner:
         )
         return registry_row, payload, token_id
 
+    def _build_lp_v4_open_registry_row(
+        self,
+        *,
+        strategy: StrategyProtocol,
+        intent: AnyIntent,
+        result: Any,
+        entry: Any,
+        chain: str,
+        position_manager: str,
+        receipt: dict,
+        parser: Any,
+        fee_tier: int | None,
+    ) -> tuple[Any, dict, int] | None:
+        """Build the V4 LP_OPEN ``RegistryRow`` from the receipt (VIB-4583).
+
+        Mirrors :meth:`_build_lp_open_registry_row` with the V4 identity split:
+        ``physical_identity_hash_univ4(chain, PositionManager, tokenId)`` and
+        ``semantic_grouping_key_univ4(chain, pool_id)``. Returns
+        ``(registry_row, payload, token_id)`` on success, or ``None`` when the
+        parser couldn't produce a valid payload (fall back to ``save_ledger_entry``).
+        """
+        from almanak.framework.migration.backfill import (
+            physical_identity_hash_univ4,
+            semantic_grouping_key_univ4,
+        )
+        from almanak.framework.primitives.types import Primitive
+
+        payload = parser.extract_registry_payload_open(receipt, fee_tier=fee_tier)
+        if payload is None:
+            logger.info(
+                "Registry-mode skip: V4 parser returned no LP_OPEN registry payload "
+                "(token_id / pool_id missing); falling back to save_ledger_entry",
+            )
+            return None
+        try:
+            token_id = int(payload["token_id"])
+        except (KeyError, TypeError, ValueError):
+            logger.info("Registry-mode skip: V4 parser payload missing valid token_id; falling back")
+            return None
+        pih = physical_identity_hash_univ4(
+            chain=chain,
+            position_manager_addr=position_manager,
+            token_id=token_id,
+        )
+        sgk = semantic_grouping_key_univ4(chain=chain, pool_id=str(payload["pool_id"]))
+        opened_at_block = self._extract_block_number_from_result(result)
+        registry_row = self._build_registry_row(
+            strategy=strategy,
+            primitive=Primitive.LP_V4,
+            physical_identity_hash=pih,
+            semantic_grouping_key=sgk,
+            payload=payload,
+            status="open",
+            opened_at_block=opened_at_block,
+            opened_tx=getattr(entry, "tx_hash", "") or None,
+            closed_at_block=None,
+            closed_tx=None,
+            handle=getattr(intent, "registry_handle", None),
+        )
+        return registry_row, payload, token_id
+
+    async def _build_lp_v4_close_registry_row(
+        self,
+        *,
+        strategy: StrategyProtocol,
+        intent: AnyIntent,
+        result: Any,
+        entry: Any,
+        chain: str,
+        position_manager: str,
+        receipt: dict,
+        parser: Any,
+        fee_tier: int | None,
+    ) -> tuple[Any, dict, int] | None:
+        """Build the V4 LP_CLOSE ``RegistryRow`` from the receipt (VIB-4583).
+
+        A V4 close burn carries no NFT tokenId, so the tokenId comes from the
+        close intent's ``position_id`` (the runner-threaded discriminator). The
+        matched OPEN-side row is looked up by that tokenId so OPEN-time fields
+        (ticks / liquidity / fee_tier) merge into the close payload. Returns
+        ``None`` on any path-miss (no intent tokenId, parser refuse, no OPEN row).
+        """
+        from almanak.framework.migration.backfill import (
+            physical_identity_hash_univ4,
+            semantic_grouping_key_univ4,
+        )
+        from almanak.framework.primitives.types import Primitive
+
+        intent_token_id = self._v4_close_intent_token_id(intent)
+        if intent_token_id is None:
+            logger.info(
+                "Registry-mode skip: V4 LP_CLOSE intent has no usable position_id "
+                "(token_id not receipt-derivable for V4); falling back to save_ledger_entry",
+            )
+            return None
+        open_payload = await self._lookup_open_v4_registry_payload(
+            deployment_id=strategy.deployment_id,
+            chain=chain,
+            token_id=intent_token_id,
+            position_manager=position_manager,
+        )
+        if open_payload is None:
+            # Operability signal (VIB-4583): a V4 close normally matches an OPEN
+            # row by (deployment, chain, token_id). Absence degrades lifecycle
+            # resolution (OPEN-time ticks/liquidity/fee won't merge, the OPEN row
+            # may stay open) but never corrupts — design §3.1 degrade-not-corrupt.
+            logger.info(
+                "v4_registry_close_no_open_row: no matching OPEN registry row for V4 "
+                "LP_CLOSE token_id=%s chain=%s deployment=%s; close lifecycle resolution "
+                "degraded (registry absence degrades, does not corrupt)",
+                intent_token_id,
+                chain,
+                strategy.deployment_id,
+            )
+        payload = parser.extract_registry_payload_close(
+            receipt,
+            open_payload=open_payload,
+            fee_tier=fee_tier,
+        )
+        if payload is None:
+            logger.info(
+                "Registry-mode skip: V4 parser returned no LP_CLOSE registry payload "
+                "(token_id / pool_id missing or pool mismatch); falling back to save_ledger_entry",
+            )
+            return None
+        try:
+            token_id = int(payload["token_id"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        pih = physical_identity_hash_univ4(
+            chain=chain,
+            position_manager_addr=position_manager,
+            token_id=token_id,
+        )
+        sgk = semantic_grouping_key_univ4(chain=chain, pool_id=str(payload["pool_id"]))
+        closed_at_block = self._extract_block_number_from_result(result)
+        opened_at_block = (open_payload or {}).get("opened_at_block") if isinstance(open_payload, dict) else None
+        opened_tx = (open_payload or {}).get("opened_tx") if isinstance(open_payload, dict) else None
+        registry_row = self._build_registry_row(
+            strategy=strategy,
+            primitive=Primitive.LP_V4,
+            physical_identity_hash=pih,
+            semantic_grouping_key=sgk,
+            payload=payload,
+            status="closed",
+            opened_at_block=opened_at_block,
+            opened_tx=opened_tx,
+            closed_at_block=closed_at_block,
+            closed_tx=getattr(entry, "tx_hash", "") or None,
+            handle=getattr(intent, "registry_handle", None),
+        )
+        return registry_row, payload, token_id
+
+    @staticmethod
+    def _v4_close_intent_token_id(intent: AnyIntent) -> int | None:
+        """Coerce a V4 LP_CLOSE intent's ``position_id`` (NFT tokenId) to ``int``.
+
+        V4 close receipts do not re-emit the tokenId, so the runner sources it
+        from the close intent's ``position_id`` (the strategy-threaded
+        discriminator). Returns ``None`` for missing / empty / non-positive /
+        non-int values (Empty ≠ Zero — never fabricate an identity anchor).
+        """
+        raw = getattr(intent, "position_id", None)
+        if raw is None or raw == "":
+            return None
+        try:
+            token_id = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return token_id if token_id > 0 else None
+
+    async def _lookup_open_v4_registry_payload(
+        self,
+        *,
+        deployment_id: str,
+        chain: str,
+        token_id: int,
+        position_manager: str,
+    ) -> dict | None:
+        """Find the V4 OPEN-side registry payload for a close-side write (VIB-4583).
+
+        Mirrors :meth:`_lookup_open_registry_payload` but reads the V4 stream
+        (``primitive='lp_v4'``) and matches on the full V4 physical identity —
+        ``(token_id, position_manager)`` on this ``chain`` — not tokenId alone
+        (V4 closes have no receipt tokenId). Matching the PositionManager too keeps
+        the lookup as strong as ``physical_identity_hash_univ4 =
+        sha256(chain:positionManager:tokenId)``: two V4 managers on one chain
+        reusing a tokenId can't merge the wrong OPEN payload. Returns the enriched
+        payload dict, or ``None`` when no matching OPEN row exists yet (close path
+        then uses ``open_payload=None`` and the ON CONFLICT merge preserves OPEN
+        anchors).
+        """
+        if self.state_manager is None:
+            return None
+        try:
+            rows = await self.state_manager.get_position_registry_open_rows(
+                deployment_id,
+                chain=chain,
+                primitive="lp_v4",
+                accounting_category="lp",
+            )
+        except Exception:  # noqa: BLE001 — best effort
+            return None
+        position_manager_norm = position_manager.lower()
+        for row in rows:
+            payload = row.get("payload") or {}
+            if not isinstance(payload, dict):
+                continue
+            try:
+                payload_pm = str(payload.get("position_manager") or "").lower()
+                if int(payload.get("token_id", 0)) == int(token_id) and payload_pm == position_manager_norm:
+                    enriched = dict(payload)
+                    if row.get("opened_at_block") is not None:
+                        enriched["opened_at_block"] = row["opened_at_block"]
+                    if row.get("opened_tx"):
+                        enriched["opened_tx"] = row["opened_tx"]
+                    return enriched
+            except (TypeError, ValueError):
+                continue
+        return None
+
     def _update_lp_registry_id_cache(
         self,
         *,
@@ -2986,26 +3214,45 @@ class StrategyRunner:
         unit-tested in isolation.
         """
         try:
-            from almanak.framework.migration.backfill import _UNIV3_LP_PROTOCOLS
+            from almanak.framework.migration.backfill import (
+                _UNIV3_LP_PROTOCOLS,
+                _UNIV4_LP_PROTOCOLS,
+            )
             from almanak.framework.primitives.types import Primitive
             from almanak.framework.runner.cutover import is_cutover_active
         except Exception:  # noqa: BLE001 — guard against optional import miss
             return False
 
-        # Path-applicability gate — boot guard, intent type, protocol family,
-        # chain truth (audit P1).
-        if not is_cutover_active(self, Primitive.LP, "lp"):
-            return False
         intent_type_str = self._registry_intent_type_str(intent)
         if intent_type_str not in ("LP_OPEN", "LP_CLOSE"):
-            return False
-        protocol = (getattr(intent, "protocol", "") or "").lower()
-        if protocol not in _UNIV3_LP_PROTOCOLS:
             return False
         if result is None or not bool(getattr(result, "success", False)):
             return False
         # ``success`` is forwarded only for telemetry; do NOT gate on it.
         _ = success
+        protocol = (getattr(intent, "protocol", "") or "").lower()
+
+        # VIB-4583: Uniswap V4 LP is its own isolated registry stream
+        # (Primitive.LP_V4 / 'lp_v4' cutover, V4 identity + grouping). Delegate
+        # to the dedicated V4 dispatch BEFORE the V3 protocol gate so the two
+        # families never cross-pollinate. Membership is checked against the
+        # registry-derived family set (capability-gated, not a name literal).
+        if protocol in _UNIV4_LP_PROTOCOLS:
+            return await self._maybe_save_ledger_with_registry_v4(
+                strategy=strategy,
+                intent=intent,
+                result=result,
+                entry=entry,
+                intent_type_str=intent_type_str,
+                protocol=protocol,
+            )
+
+        # Path-applicability gate — boot guard, protocol family, chain truth
+        # (audit P1). V3 LP family only past this point.
+        if not is_cutover_active(self, Primitive.LP, "lp"):
+            return False
+        if protocol not in _UNIV3_LP_PROTOCOLS:
+            return False
 
         # Resolve chain + NPM + receipt + parser. Each step short-circuits
         # to ``False`` on miss with an INFO log inside the helper. Protocol
@@ -3079,6 +3326,113 @@ class StrategyRunner:
         )
         return True
 
+    async def _maybe_save_ledger_with_registry_v4(
+        self,
+        *,
+        strategy: StrategyProtocol,
+        intent: AnyIntent,
+        result: Any,
+        entry: Any,
+        intent_type_str: str,
+        protocol: str,
+    ) -> bool:
+        """Route a Uniswap V4 LP_OPEN / LP_CLOSE through ``save_ledger_and_registry``.
+
+        VIB-4583 — the V4 sibling of :meth:`_maybe_save_ledger_with_registry`.
+        Structurally identical: gate on the V4 cutover (``Primitive.LP_V4`` /
+        ``'lp_v4'``), resolve chain + V4 ``PositionManager`` + receipt + V4
+        parser, build the V4 row (V4 identity hash + ``chain:pool_id`` grouping),
+        and atomic-write. Returns ``True`` iff the row routed through the atomic
+        primitive; ``False`` on any path-miss (caller falls back to plain
+        ``save_ledger_entry``). Per CLAUDE.md "Empty ≠ Zero": a missing
+        PositionManager / token_id / pool_id is a fail-closed skip — NEVER a
+        fabricated identity.
+
+        The missing-PositionManager fallback lives in
+        ``_registry_resolve_chain_and_nft_manager`` →
+        ``_nft_manager_for_protocol_chain`` (returns ``None`` for an unknown V4
+        chain), which short-circuits this method to ``False`` with a structured
+        ``v4_registry_no_position_manager`` WARN — never raising into the
+        success-path commit.
+        """
+        from almanak.framework.primitives.types import Primitive
+        from almanak.framework.runner.cutover import is_cutover_active
+
+        if not is_cutover_active(self, Primitive.LP_V4, "lp_v4"):
+            return False
+
+        # Resolve chain + V4 PositionManager. ``_nft_manager_for_protocol_chain``
+        # has a V4 branch (membership-gated) returning the per-chain
+        # PositionManager, or ``None`` (fail-closed) for an unknown chain.
+        chain_resolved = self._registry_resolve_chain_and_nft_manager(strategy, intent_type_str, protocol)
+        if chain_resolved is None:
+            # Missing-PositionManager fallback: skip the registry row, WARN, and
+            # continue (the helper already INFO-logged the (protocol, chain) miss;
+            # emit the V4-specific structured WARN for observability).
+            chain = (getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
+            logger.warning(
+                "v4_registry_no_position_manager: no V4 PositionManager known for "
+                "chain=%r (deployment_id=%s); skipping registry row, continuing on "
+                "save_ledger_entry (accounting unaffected)",
+                chain,
+                strategy.deployment_id,
+            )
+            return False
+        chain, position_manager = chain_resolved
+        receipt_resolved = self._registry_resolve_receipt_and_parser(
+            result=result, chain=chain, intent_type_str=intent_type_str, protocol=protocol
+        )
+        if receipt_resolved is None:
+            return False
+        receipt, parser = receipt_resolved
+        fee_tier = self._intent_fee_tier(intent)
+
+        if intent_type_str == "LP_OPEN":
+            built = self._build_lp_v4_open_registry_row(
+                strategy=strategy,
+                intent=intent,
+                result=result,
+                entry=entry,
+                chain=chain,
+                position_manager=position_manager,
+                receipt=receipt,
+                parser=parser,
+                fee_tier=fee_tier,
+            )
+        else:  # LP_CLOSE
+            built = await self._build_lp_v4_close_registry_row(
+                strategy=strategy,
+                intent=intent,
+                result=result,
+                entry=entry,
+                chain=chain,
+                position_manager=position_manager,
+                receipt=receipt,
+                parser=parser,
+                fee_tier=fee_tier,
+            )
+        if built is None:
+            return False
+        registry_row, payload, token_id = built
+
+        from almanak.framework.accounting.commit import save_ledger_and_registry
+
+        await save_ledger_and_registry(
+            self.state_manager,
+            ledger=entry,
+            registry=registry_row,
+            mode="registry",
+        )
+        logger.info(
+            "Registry-mode V4 write OK for %s on %s NFT=%s pool_id=%s pih=%s",
+            intent_type_str,
+            chain,
+            token_id,
+            str(payload.get("pool_id") or ""),
+            registry_row.physical_identity_hash,
+        )
+        return True
+
     def _build_registry_row(
         self,
         *,
@@ -3101,13 +3455,21 @@ class StrategyRunner:
         implementation. Stamps ``matching_policy_version`` from
         ``MatchingPolicy.for_primitive(primitive)`` (T09 contract — never
         hardcoded). Stamps ``grouping_policy_version`` from the per-primitive
-        constant.
+        constant — V4 (``Primitive.LP_V4``) gets ``univ4_lp@v1``; the V3 LP
+        family gets ``univ3_lp@v1`` (VIB-4583: the two versions stay independent
+        so a V4 grouping-rule change never re-baselines V3 rows).
         """
         from almanak.framework.accounting.commit import RegistryRow
         from almanak.framework.accounting.policy import MatchingPolicy
-        from almanak.framework.migration.backfill import _UNIV3_GROUPING_POLICY_VERSION
-        from almanak.framework.primitives.types import AccountingCategory
+        from almanak.framework.migration.backfill import (
+            _UNIV3_GROUPING_POLICY_VERSION,
+            _UNIV4_GROUPING_POLICY_VERSION,
+        )
+        from almanak.framework.primitives.types import AccountingCategory, Primitive
 
+        grouping_policy_version = (
+            _UNIV4_GROUPING_POLICY_VERSION if primitive == Primitive.LP_V4 else _UNIV3_GROUPING_POLICY_VERSION
+        )
         deployment_id = strategy.deployment_id
         chain = (getattr(strategy, "chain", "") or getattr(self.config, "chain", "") or "").lower()
         return RegistryRow(
@@ -3117,7 +3479,7 @@ class StrategyRunner:
             accounting_category=AccountingCategory.LP,
             physical_identity_hash=physical_identity_hash,
             semantic_grouping_key=semantic_grouping_key,
-            grouping_policy_version=_UNIV3_GROUPING_POLICY_VERSION,
+            grouping_policy_version=grouping_policy_version,
             handle=handle,
             status=status,
             payload=dict(payload),

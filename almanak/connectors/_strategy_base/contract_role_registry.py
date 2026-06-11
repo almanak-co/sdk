@@ -118,6 +118,10 @@ class NpmView(StrEnum):
     #: Aerodrome / Velodrome Slipstream ``cl_nft`` ->
     #: ``SLIPSTREAM_NFT_POSITION_MANAGERS`` (lowercased).
     SLIPSTREAM = "slipstream"
+    #: Uniswap V4's per-chain ``PositionManager`` ->
+    #: ``UNIV4_NFT_POSITION_MANAGERS`` (lowercased). V4 LP positions hash their
+    #: ``physical_identity_hash`` on this PositionManager + tokenId (VIB-4583).
+    UNIV4 = "univ4"
 
 
 @dataclass(frozen=True)

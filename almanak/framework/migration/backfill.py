@@ -55,6 +55,8 @@ from almanak.framework.intents.compiler_constants import (
     SLIPSTREAM_NFT_POSITION_MANAGERS,
     UNIV3_LP_GROUPING_PROTOCOLS,
     UNIV3_NFT_POSITION_MANAGERS,
+    UNIV4_LP_GROUPING_PROTOCOLS,
+    UNIV4_NFT_POSITION_MANAGERS,
 )
 from almanak.framework.primitives.types import AccountingCategory, Primitive
 
@@ -326,6 +328,75 @@ def semantic_grouping_key_univ3(*, chain: str, pool_address: str) -> str:
 
 
 # =============================================================================
+# UniV4 identity helpers — receipt-fact-only (VIB-4583)
+# =============================================================================
+
+
+def physical_identity_hash_univ4(*, chain: str, position_manager_addr: str, token_id: int | str) -> str:
+    """Compute the canonical UniV4 LP ``physical_identity_hash``.
+
+    Mirrors :func:`physical_identity_hash_univ3`'s seed-and-sha256 shape,
+    swapping the identity tuple to the V4 PositionManager + NFT tokenId
+    (VIB-4583 design §2.1):
+
+        seed = f"{chain}:{position_manager_addr.lower()}:{token_id}"
+        hash = "0x" + sha256(seed.encode()).hexdigest()
+
+    The tokenId is the 1:1 lifetime identity of *this* position (same tokenId on
+    OPEN and CLOSE). ``pool_id`` is shared by every position in a V4 pool, so it
+    belongs in the *semantic grouping key* (:func:`semantic_grouping_key_univ4`),
+    not the physical hash — exactly the V3 split.
+
+    Args:
+        chain: Lowercase chain name (``base``, ``ethereum``, …).
+        position_manager_addr: Hex address of the V4 ``PositionManager`` for the
+            chain. Folded to lowercase before hashing.
+        token_id: NFT tokenId — accepts ``int`` or stringified-int.
+
+    Returns:
+        ``0x``-prefixed lowercase 64-char hex digest.
+
+    Raises:
+        ValueError: ``chain`` empty, ``position_manager_addr`` empty, or
+            ``token_id`` not coercible to ``int`` / ``<=0``.
+    """
+    chain_norm = (chain or "").strip().lower()
+    if not chain_norm:
+        raise ValueError("physical_identity_hash_univ4: chain must be non-empty")
+    addr_norm = (position_manager_addr or "").strip().lower()
+    if not addr_norm:
+        raise ValueError("physical_identity_hash_univ4: position_manager_addr must be non-empty")
+    try:
+        token_id_int = int(token_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"physical_identity_hash_univ4: token_id must be int-coercible, got {token_id!r}") from exc
+    if token_id_int <= 0:
+        raise ValueError(f"physical_identity_hash_univ4: token_id must be >0, got {token_id_int}")
+    seed = f"{chain_norm}:{addr_norm}:{token_id_int}"
+    return "0x" + hashlib.sha256(seed.encode()).hexdigest()
+
+
+def semantic_grouping_key_univ4(*, chain: str, pool_id: str) -> str:
+    """Compute the UniV4 LP ``semantic_grouping_key`` (VIB-4583 design §2.2).
+
+        f"{chain}:{pool_id.lower()}"
+
+    ``pool_id`` (the 32-byte V4 PoolKey hash) is the natural V4 analogue of V3's
+    ``pool_address`` — V4 pools have no per-pool contract address (the
+    ``PoolManager`` is a singleton). Two positions in the same V4 pool group
+    here; the partial unique index ``ix_registry_auto_mode`` then forces handle
+    disambiguation, exactly as for V3.
+    """
+    chain_norm = (chain or "").strip().lower()
+    if not chain_norm:
+        raise ValueError("semantic_grouping_key_univ4: chain must be non-empty")
+    pool_norm = (pool_id or "").strip().lower()
+    if not pool_norm:
+        raise ValueError("semantic_grouping_key_univ4: pool_id must be non-empty")
+    return f"{chain_norm}:{pool_norm}"
+
+
+# =============================================================================
 # UniV3 OPEN/CLOSE fold over `position_events`
 # =============================================================================
 
@@ -504,6 +575,163 @@ def fold_position_events_for_univ3(  # noqa: C901 — explicit identity-anchor c
 
 
 # =============================================================================
+# UniV4 OPEN/CLOSE fold over `position_events` (VIB-4583)
+# =============================================================================
+
+
+def fold_position_events_for_univ4(  # noqa: C901 — explicit identity-anchor checks; the per-field skip-with-warning behavior is load-bearing (design §5), refactor would lose it
+    *, deployment_id: str, group: list[dict[str, Any]]
+) -> RegistryRow | None:
+    """Fold a ``(deployment_id, position_id)`` group of UniV4 LP
+    ``position_events`` rows into a single ``RegistryRow`` (VIB-4583 design §5).
+
+    Structural twin of :func:`fold_position_events_for_univ3`, with the V4
+    identity split: the physical hash keys on the per-chain V4
+    ``PositionManager`` + NFT tokenId, and the semantic grouping key on the
+    V4 ``pool_id`` (PoolKey hash) — V4 pools have no per-pool contract address.
+
+    Returns ``None`` (skip, with a structured WARN) for:
+
+    - Empty groups / groups missing an OPEN event (no phantom OPEN synthesis).
+    - Groups whose protocol is NOT in the UniV4 LP family (defense-in-depth —
+      the caller's ``matches_this_cutover`` already filters).
+    - Groups missing chain, a known V4 PositionManager for the chain
+      (``v4_registry_no_position_manager`` — fail-closed, never fabricate),
+      a positive int ``position_id`` (tokenId), or a derivable ``pool_id``.
+
+    Per CLAUDE.md "Empty ≠ Zero", a missing identity anchor stays missing; we
+    never substitute zero or a fabricated address (a fabricated PositionManager
+    or zero tokenId would corrupt ``physical_identity_hash_univ4``).
+    """
+    if not group:
+        return None
+
+    open_ev: dict[str, Any] | None = None
+    close_ev: dict[str, Any] | None = None
+    for ev in group:
+        et = (ev.get("event_type") or "").upper()
+        if et == "OPEN" and open_ev is None:
+            open_ev = ev
+        elif et == "CLOSE":
+            # Last CLOSE wins for close-side anchors (commutative fold; design §5).
+            close_ev = ev
+
+    if open_ev is None:
+        logger.warning(
+            "Backfill: UniV4 position_events group %s has no OPEN event; skipping (v4_backfill_no_open)",
+            group[0].get("position_id", "<unknown>"),
+        )
+        return None
+
+    protocol = (open_ev.get("protocol") or "").lower()
+    if protocol not in _UNIV4_LP_PROTOCOLS:
+        return None
+
+    chain = (open_ev.get("chain") or "").lower()
+    if not chain:
+        logger.warning(
+            "Backfill: UniV4 OPEN event %s missing chain; skipping (v4_backfill_incomplete_open)",
+            open_ev.get("position_id", "<unknown>"),
+        )
+        return None
+
+    position_manager_addr = _position_manager_for_univ4_chain(chain)
+    if not position_manager_addr:
+        # Fail-closed: no V4 PositionManager known for this chain. NEVER
+        # fabricate an address (it would poison physical_identity_hash_univ4).
+        logger.warning(
+            "Backfill: no V4 PositionManager known for chain %r; skipping group %s "
+            "(v4_registry_no_position_manager deployment_id=%s)",
+            chain,
+            open_ev.get("position_id", "<unknown>"),
+            deployment_id,
+        )
+        return None
+
+    # position_id on V4 LP rows IS the NFT tokenId (threaded verbatim by the
+    # strategy). Empty/zero/non-int means the parser couldn't identify the NFT.
+    raw_token_id = open_ev.get("position_id")
+    try:
+        token_id = int(raw_token_id) if raw_token_id is not None and raw_token_id != "" else 0
+    except (TypeError, ValueError):
+        logger.warning(
+            "Backfill: UniV4 OPEN event has non-int position_id %r; skipping (v4_backfill_incomplete_open)",
+            raw_token_id,
+        )
+        return None
+    if token_id <= 0:
+        logger.warning(
+            "Backfill: UniV4 OPEN event has non-positive position_id %r; skipping (v4_backfill_incomplete_open)",
+            token_id,
+        )
+        return None
+
+    # The V4 pool_id (66-char PoolKey hash) is what the V4 receipt parser
+    # persists under ``pool_address`` on the event. Missing it ⇒ we cannot
+    # compute the semantic_grouping_key; skip rather than emit a partial row.
+    pool_id = _extract_pool_address_from_legacy_event(open_ev)
+    if not pool_id:
+        logger.warning(
+            "Backfill: UniV4 OPEN event for token_id %s has no derivable pool_id "
+            "(legacy row predates pool capture); skipping (v4_backfill_incomplete_open)",
+            token_id,
+        )
+        return None
+
+    pih = physical_identity_hash_univ4(
+        chain=chain,
+        position_manager_addr=position_manager_addr,
+        token_id=token_id,
+    )
+    sgk = semantic_grouping_key_univ4(chain=chain, pool_id=pool_id)
+    status: Literal["open", "closed", "reorg_invalidated"] = "closed" if close_ev is not None else "open"
+
+    payload: dict[str, Any] = {
+        # V4 identity tuple — serialized into the existing opaque payload JSON
+        # column (NO new schema column; design §4). pool_id replaces V3's
+        # pool_address; position_manager replaces V3's nft_manager_addr.
+        "token_id": str(token_id),
+        "pool_id": pool_id.lower(),
+        "position_manager": position_manager_addr,
+        "legacy_position_id": str(raw_token_id),
+        "synthesized_handle": False,
+        "source": "backfill",
+    }
+    # Best-effort range / liquidity / amount carry (Empty ≠ Zero: only copy
+    # values the parser actually captured).
+    for src, dst in (("tick_lower", "tick_lower"), ("tick_upper", "tick_upper"), ("liquidity", "liquidity")):
+        v = open_ev.get(src)
+        if v is not None and v != "":
+            payload[dst] = v
+    for src, dst in (("amount0", "amount0"), ("amount1", "amount1")):
+        v = open_ev.get(src)
+        if v is not None and v != "":
+            payload[dst] = v
+
+    opened_tx = open_ev.get("tx_hash") or None
+    closed_tx = (close_ev or {}).get("tx_hash") if close_ev is not None else None
+
+    return RegistryRow(
+        deployment_id=deployment_id,
+        chain=chain,
+        primitive=Primitive.LP_V4,
+        accounting_category=AccountingCategory.LP,
+        physical_identity_hash=pih,
+        semantic_grouping_key=sgk,
+        grouping_policy_version=_UNIV4_GROUPING_POLICY_VERSION,
+        handle=None,
+        status=status,
+        payload=payload,
+        opened_at_block=None,
+        opened_tx=opened_tx,
+        closed_at_block=None,
+        closed_tx=closed_tx,
+        last_reconciled_at_block=None,
+        matching_policy_version=MatchingPolicy.for_primitive(Primitive.LP_V4),
+    )
+
+
+# =============================================================================
 # Module-level constants
 # =============================================================================
 
@@ -518,6 +746,16 @@ _UNIV3_LP_PROTOCOLS: frozenset[str] = UNIV3_LP_GROUPING_PROTOCOLS
 
 
 _UNIV3_GROUPING_POLICY_VERSION: str = "univ3_lp@v1"
+
+
+# VIB-4583: Uniswap-V4 singleton-PoolManager LP family. Derived from the
+# connector-self-registering ``PROTOCOL_FAMILY_REGISTRY`` (``UNIV4_LP_GROUPING``
+# family) — kept SEPARATE from ``_UNIV3_LP_PROTOCOLS`` so the two grouping-policy
+# versions stay independent (a V4 grouping-rule change never re-baselines V3).
+_UNIV4_LP_PROTOCOLS: frozenset[str] = UNIV4_LP_GROUPING_PROTOCOLS
+
+
+_UNIV4_GROUPING_POLICY_VERSION: str = "univ4_lp@v1"
 
 
 def _assign_synthesized_handles(rows: list[RegistryRow]) -> list[RegistryRow]:
@@ -654,6 +892,12 @@ def _nft_manager_for_protocol_chain(protocol: str, chain: str) -> str | None:
       :data:`_NPM_ADDRESSES_BY_PROTOCOL`, whose entries are the derived
       views in ``compiler_constants`` built from each connector's
       ``addresses.py`` (W1 / VIB-4853).
+    - Uniswap V4 (``protocol in _UNIV4_LP_PROTOCOLS``) → its own per-chain
+      singleton ``PositionManager`` from :func:`_position_manager_for_univ4_chain`
+      (VIB-4583). V4 LP positions hash on the PositionManager + tokenId, NOT a
+      V3 NPM, so this branch is required for the V4 ``physical_identity_hash`` to
+      match the on-chain emitter. Capability-gated on the registry-derived
+      family set — no protocol-name string literal.
     - Anything else (``uniswap_v3`` / ``sushiswap_v3`` / unrecognized /
       empty) → delegate to :func:`_nft_manager_for_chain` (UniV3 family
       lookup; Sushi V3 uses the same NPM as Uniswap V3 on the chains it
@@ -663,10 +907,31 @@ def _nft_manager_for_protocol_chain(protocol: str, chain: str) -> str | None:
     can distinguish "no NPM registered" from "NPM is the empty string".
     """
     chain_norm = (chain or "").strip().lower()
-    fork_map = _NPM_ADDRESSES_BY_PROTOCOL.get((protocol or "").strip().lower())
+    protocol_norm = (protocol or "").strip().lower()
+    # VIB-4583: V4 resolves through its own PositionManager view (membership
+    # checked against the registry-derived family set, not a name literal).
+    if protocol_norm in _UNIV4_LP_PROTOCOLS:
+        return _position_manager_for_univ4_chain(chain_norm)
+    fork_map = _NPM_ADDRESSES_BY_PROTOCOL.get(protocol_norm)
     if fork_map is not None:
         return fork_map.get(chain_norm) or None
     return _nft_manager_for_chain(chain_norm)
+
+
+def _position_manager_for_univ4_chain(chain: str) -> str | None:
+    """Look up the Uniswap V4 ``PositionManager`` address for ``chain`` (VIB-4583).
+
+    Sourced from the ``UNIV4_NFT_POSITION_MANAGERS`` derived view in
+    ``compiler_constants`` (built from ``uniswap_v4/addresses.py`` via the
+    contract-role registry). Returns ``None`` (NOT ``""``) when the chain is
+    absent from ``UNISWAP_V4`` or its entry lacks a ``position_manager`` — the
+    caller (live runner / backfill) treats that as a fail-closed skip: emit a
+    structured WARN and continue, NEVER fabricate a PositionManager (a fabricated
+    address would poison ``physical_identity_hash_univ4``). The chain becomes
+    registry-eligible the moment its address lands in ``addresses.py`` — no
+    migration, no backfill gate (design §3.1).
+    """
+    return UNIV4_NFT_POSITION_MANAGERS.get((chain or "").strip().lower()) or None
 
 
 def _extract_pool_address_from_legacy_event(ev: dict[str, Any]) -> str | None:
@@ -957,3 +1222,30 @@ class UniV3LPCutoverReader(BackfillReader):
 
     def fold_group_to_registry_row(self, *, deployment_id: str, group: list[dict[str, Any]]) -> RegistryRow | None:
         return fold_position_events_for_univ3(deployment_id=deployment_id, group=group)
+
+
+class UniV4LPCutoverReader(BackfillReader):
+    """VIB-4583 — UniV4 LP per-primitive cutover backfill reader.
+
+    Sibling of :class:`UniV3LPCutoverReader`. Both read ``position_type='LP'``
+    events but ``matches_this_cutover`` narrows on the UniV4 family, so a V4 row
+    NEVER folds through the V3 reader (and vice-versa) and the two
+    grouping-policy versions stay independent. The V4 reader keys its own
+    ``migration_state`` row (``primitive='lp_v4'``, ``cutover_key='lp_v4'``), so
+    its backfill-complete flag is tracked separately from the V3 cutover.
+    """
+
+    primitive = Primitive.LP_V4
+    accounting_category = AccountingCategory.LP
+    cutover_key = "lp_v4"
+    grouping_policy_version = _UNIV4_GROUPING_POLICY_VERSION
+    legacy_position_types = frozenset({"LP"})
+
+    def matches_this_cutover(self, ev: dict[str, Any]) -> bool:
+        if (ev.get("position_type") or "").upper() != "LP":
+            return False
+        protocol = (ev.get("protocol") or "").lower()
+        return protocol in _UNIV4_LP_PROTOCOLS
+
+    def fold_group_to_registry_row(self, *, deployment_id: str, group: list[dict[str, Any]]) -> RegistryRow | None:
+        return fold_position_events_for_univ4(deployment_id=deployment_id, group=group)
