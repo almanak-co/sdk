@@ -1415,3 +1415,115 @@ class TestHistoricalFundingRateIntegration:
             assert rate == Decimal("0.00015")
             assert confidence == "high"
             assert "historical:hyperliquid_api" in source
+
+    @staticmethod
+    def _legacy_adapter_with_provider(
+        rate: Decimal | None = None,
+        error: Exception | None = None,
+        default_funding_rate: Decimal = Decimal("0.0001"),
+    ) -> PerpBacktestAdapter:
+        """Adapter wired to a mocked legacy FundingRateProvider.
+
+        The provider mock either returns a gateway-sourced ``FundingRateData``
+        with ``rate`` or raises ``error``.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        from almanak.framework.backtesting.pnl.providers.funding_rates import FundingRateData
+
+        config = PerpBacktestConfig(
+            strategy_type="perp",
+            funding_rate_source="historical",
+            default_funding_rate=default_funding_rate,
+            protocol="gmx",
+        )
+        adapter = PerpBacktestAdapter(config)
+        mock_provider = MagicMock()
+        if error is not None:
+            mock_provider.get_historical_funding_rate = AsyncMock(side_effect=error)
+        else:
+            assert rate is not None
+            rate_data = FundingRateData(
+                protocol="gmx",
+                market="ETH-USD",
+                timestamp=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+                rate=rate,
+                source="gateway",
+            )
+            mock_provider.get_historical_funding_rate = AsyncMock(return_value=rate_data)
+        adapter._funding_rate_provider = mock_provider
+        return adapter
+
+    def test_legacy_historical_rate_success_no_event_loop(self) -> None:
+        """Legacy method returns the provider's rate via the asyncio.run branch."""
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        adapter = self._legacy_adapter_with_provider(rate=Decimal("0.0003"))
+        position = create_perp_long_position(entry_time=entry_time, protocol="gmx")
+
+        rate, source = adapter._get_historical_funding_rate(position=position, timestamp=entry_time)
+
+        assert rate == Decimal("0.0003")
+        assert source == "historical:gateway"
+        adapter._funding_rate_provider.get_historical_funding_rate.assert_awaited_once_with(
+            protocol="gmx",
+            market="ETH-USD",
+            timestamp=entry_time,
+        )
+
+    @pytest.mark.asyncio
+    async def test_legacy_historical_rate_success_inside_running_loop(self) -> None:
+        """With a running event loop the query routes through the thread pool."""
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        adapter = self._legacy_adapter_with_provider(rate=Decimal("0.0004"))
+        position = create_perp_long_position(entry_time=entry_time, protocol="gmx")
+
+        rate, source = adapter._get_historical_funding_rate(position=position, timestamp=entry_time)
+
+        assert rate == Decimal("0.0004")
+        assert source == "historical:gateway"
+
+    def test_legacy_historical_rate_error_falls_back_to_registry_default(self) -> None:
+        """Provider failure on a registry-known protocol uses DEFAULT_FUNDING_RATE."""
+        from almanak.framework.backtesting.pnl.providers.funding_rates import DEFAULT_FUNDING_RATE
+
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        adapter = self._legacy_adapter_with_provider(
+            error=ValueError("gateway exploded"),
+            default_funding_rate=Decimal("0.0009"),
+        )
+        position = create_perp_long_position(entry_time=entry_time, protocol="gmx")
+
+        rate, source = adapter._get_historical_funding_rate(position=position, timestamp=entry_time)
+
+        # "gmx" has a connector-owned funding venue, so the registry default
+        # wins over config.default_funding_rate.
+        assert rate == DEFAULT_FUNDING_RATE
+        assert source == "fallback:error"
+
+    def test_legacy_historical_rate_error_unknown_protocol_uses_config_default(self) -> None:
+        """Provider failure on an unknown protocol uses config.default_funding_rate."""
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        adapter = self._legacy_adapter_with_provider(
+            error=ValueError("gateway exploded"),
+            default_funding_rate=Decimal("0.00042"),
+        )
+        position = create_perp_long_position(entry_time=entry_time, protocol="vertex")
+
+        rate, source = adapter._get_historical_funding_rate(position=position, timestamp=entry_time)
+
+        assert rate == Decimal("0.00042")
+        assert source == "fallback:error"
+
+    def test_legacy_historical_rate_no_timestamp_unknown_protocol_uses_config_default(self) -> None:
+        """The early no-timestamp fallback also honors the registry split."""
+        adapter = self._legacy_adapter_with_provider(
+            rate=Decimal("0.0003"),
+            default_funding_rate=Decimal("0.00021"),
+        )
+        position = create_perp_long_position(protocol="vertex")
+
+        rate, source = adapter._get_historical_funding_rate(position=position, timestamp=None)
+
+        assert rate == Decimal("0.00021")
+        assert source == "fallback:no_timestamp"
+        adapter._funding_rate_provider.get_historical_funding_rate.assert_not_awaited()

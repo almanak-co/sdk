@@ -198,6 +198,39 @@ class PerpsReadDecl:
 
 
 @dataclass(frozen=True)
+class FundingHistoryDecl:
+    """Connector-owned perp funding-rate-history declaration (VIB-4851 Phase D).
+
+    ``venue`` is the identifier the gateway's ``RateHistoryService`` dispatches
+    on — it must equal the connector's
+    ``GatewayFundingHistoryCapability.funding_venue()`` (a parity test pins the
+    two). ``chains`` are the chains the venue serves funding data for; empty
+    means chain-agnostic (off-chain venues like Hyperliquid). ``aliases`` are
+    funding-scoped protocol aliases resolving to this connector's canonical key
+    (e.g. the legacy ``"gmx"`` -> ``gmx_v2``).
+    """
+
+    venue: str
+    chains: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the declaration's venue, chains, and aliases."""
+        if not isinstance(self.venue, str) or not self.venue.strip():
+            raise ValueError(f"FundingHistoryDecl.venue must be a non-empty string, got {self.venue!r}")
+        if self.venue != self.venue.lower() or "-" in self.venue:
+            raise ValueError(f"FundingHistoryDecl.venue must be lowercase and hyphen-free, got {self.venue!r}")
+        if not isinstance(self.chains, tuple):
+            raise ValueError(f"FundingHistoryDecl.chains must be a tuple[str, ...], got {self.chains!r}")
+        bad_chains = [c for c in self.chains if not isinstance(c, str) or not c.strip() or c != c.lower()]
+        if bad_chains:
+            raise ValueError(f"FundingHistoryDecl.chains must contain lowercase non-empty strings, got {bad_chains!r}")
+        if len(set(self.chains)) != len(self.chains):
+            raise ValueError(f"FundingHistoryDecl.chains contains duplicates: {self.chains!r}")
+        _validate_decl_aliases("FundingHistoryDecl", self.aliases)
+
+
+@dataclass(frozen=True)
 class Connector:
     """Lightweight connector-owned capability manifest.
 
@@ -230,6 +263,7 @@ class Connector:
     primitive: ImportRef | None = None
     lending_read: LendingReadDecl | None = None
     perps_read: PerpsReadDecl | None = None
+    funding_history: FundingHistoryDecl | None = None
     metadata_amount_encoding: MetadataAmountEncoding | None = None
     fungible_lp: bool = False
     prediction_read: ImportRef | None = None
@@ -298,6 +332,7 @@ class Connector:
         self._validate_primitive()
         self._validate_lending_read()
         self._validate_perps_read()
+        self._validate_funding_history()
         self._validate_metadata_amount_encoding()
         self._validate_fungible_lp()
         self._validate_receipt_parser_kwargs()
@@ -517,6 +552,13 @@ class Connector:
         """Validate the perps-read dispatch declaration."""
         if self.perps_read is not None and not isinstance(self.perps_read, PerpsReadDecl):
             raise ValueError(f"Connector.perps_read must be None or a PerpsReadDecl, got {self.perps_read!r}")
+
+    def _validate_funding_history(self) -> None:
+        """Validate the optional funding-history declaration."""
+        if self.funding_history is not None and not isinstance(self.funding_history, FundingHistoryDecl):
+            raise ValueError(
+                f"Connector.funding_history must be None or a FundingHistoryDecl, got {self.funding_history!r}"
+            )
 
     def _validate_fungible_lp(self) -> None:
         """Validate the fungible-LP (ERC20 LP token, no NFT discriminator) flag."""
@@ -937,6 +979,10 @@ class ConnectorRegistry:
         """Return connectors that publish lending-read dispatch declarations."""
         return tuple(d for d in self.all() if d.lending_read is not None)
 
+    def with_funding_history(self) -> tuple[Connector, ...]:
+        """Connectors declaring a perp funding-rate-history venue."""
+        return tuple(d for d in self.all() if d.funding_history is not None)
+
     def with_perps_read(self) -> tuple[Connector, ...]:
         """Return connectors that publish perps-read dispatch declarations."""
         return tuple(d for d in self.all() if d.perps_read is not None)
@@ -1036,6 +1082,7 @@ class ConnectorRegistry:
         seen_supported_chain_keys: dict[str, str] = {}
         seen_lending_read_keys: dict[str, str] = {}
         seen_perps_read_keys: dict[str, str] = {}
+        seen_funding_history_keys: dict[str, str] = {}
 
         for info in pkgutil.iter_modules(package.__path__):
             if not info.ispkg or info.name.startswith("_"):
@@ -1118,6 +1165,12 @@ class ConnectorRegistry:
                 capability="Perps-read",
                 keys=() if connector.perps_read is None else (connector.name, *connector.perps_read.aliases),
                 seen_keys=seen_perps_read_keys,
+            )
+            self._validate_unique_ownership_keys(
+                connector_name=connector.name,
+                capability="Funding-history",
+                keys=() if connector.funding_history is None else (connector.name, *connector.funding_history.aliases),
+                seen_keys=seen_funding_history_keys,
             )
             connectors.append(connector)
 

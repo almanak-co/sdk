@@ -34,34 +34,24 @@ from .gmx_funding import (
     DATA_SOURCE as GMX_DATA_SOURCE,
 )
 from .gmx_funding import (
-    GMX_API_URLS,
-    GMX_MARKET_TOKENS,
     GMXFundingProvider,
-)
-from .gmx_funding import (
-    SUPPORTED_CHAINS as GMX_SUPPORTED_CHAINS,
 )
 from .hyperliquid_funding import (
     DATA_SOURCE as HYPERLIQUID_DATA_SOURCE,
 )
 from .hyperliquid_funding import (
-    HYPERLIQUID_API_URL,
-    HyperliquidFundingProvider,
+    MAX_HOURS_PER_REQUEST as HYPERLIQUID_MAX_HOURS_PER_REQUEST,
 )
 from .hyperliquid_funding import (
-    MAX_HOURS_PER_REQUEST as HYPERLIQUID_MAX_HOURS_PER_REQUEST,
+    HyperliquidFundingProvider,
 )
 
 __all__ = [
     # GMX V2 Provider
     "GMXFundingProvider",
-    "GMX_API_URLS",
-    "GMX_MARKET_TOKENS",
-    "GMX_SUPPORTED_CHAINS",
     "GMX_DATA_SOURCE",
     # Hyperliquid Provider
     "HyperliquidFundingProvider",
-    "HYPERLIQUID_API_URL",
     "HYPERLIQUID_DATA_SOURCE",
     "HYPERLIQUID_MAX_HOURS_PER_REQUEST",
 ]

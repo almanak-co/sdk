@@ -113,16 +113,18 @@ class TestGMXFundingProvider:
             # Verify we got results
             assert len(rates) > 0, "Expected at least one funding rate result"
 
-            # GMX returns MEDIUM confidence since it uses current rates for historical
-            # (GMX doesn't have true historical funding API)
-            medium_confidence_count = sum(
-                1 for r in rates if r.source_info.confidence == DataConfidence.MEDIUM
+            # Since the VIB-4851 Phase D gateway cutover, GMX serves real
+            # measured history (HIGH confidence) through the gateway's
+            # Hyperliquid cross-venue fallback; without a reachable gateway
+            # the provider degrades to the LOW-confidence fallback fill.
+            high_confidence_count = sum(
+                1 for r in rates if r.source_info.confidence == DataConfidence.HIGH
             )
 
             logger.info(
-                "GMX: Fetched %d funding rates, %d MEDIUM confidence",
+                "GMX: Fetched %d funding rates, %d HIGH confidence",
                 len(rates),
-                medium_confidence_count,
+                high_confidence_count,
             )
 
             # Log sample rates

@@ -124,9 +124,7 @@ from .data_validation import (
     validate_price_data,
 )
 from .funding_rates import (
-    DEFAULT_FUNDING_RATES,
-    GMX_MARKETS,
-    HYPERLIQUID_MARKETS,
+    DEFAULT_FUNDING_RATE,
     CachedFundingRate,
     FundingRateData,
     FundingRateError,
@@ -134,9 +132,6 @@ from .funding_rates import (
     FundingRateProvider,
     FundingRateRateLimitError,
     UnsupportedProtocolError,
-)
-from .funding_rates import (
-    SUPPORTED_PROTOCOLS as FUNDING_SUPPORTED_PROTOCOLS,
 )
 from .funding_rates import (
     RateLimitState as FundingRateLimitState,
@@ -232,11 +227,7 @@ from .multi_dex_volume import (
     MultiDEXVolumeProvider,
 )
 from .perp import (
-    GMX_API_URLS,
     GMX_DATA_SOURCE,
-    GMX_MARKET_TOKENS,
-    GMX_SUPPORTED_CHAINS,
-    HYPERLIQUID_API_URL,
     HYPERLIQUID_DATA_SOURCE,
     HYPERLIQUID_MAX_HOURS_PER_REQUEST,
     GMXFundingProvider,
@@ -339,10 +330,7 @@ __all__ = [
     "FundingRateNotFoundError",
     "FundingRateRateLimitError",
     "UnsupportedProtocolError",
-    "FUNDING_SUPPORTED_PROTOCOLS",
-    "DEFAULT_FUNDING_RATES",
-    "GMX_MARKETS",
-    "HYPERLIQUID_MARKETS",
+    "DEFAULT_FUNDING_RATE",
     # Lending APY Provider
     "LendingAPYProvider",
     "LendingAPYData",
@@ -395,13 +383,9 @@ __all__ = [
     "HYPERLIQUID_CONFIG",
     # GMX V2 Historical Funding Provider
     "GMXFundingProvider",
-    "GMX_API_URLS",
-    "GMX_MARKET_TOKENS",
-    "GMX_SUPPORTED_CHAINS",
     "GMX_DATA_SOURCE",
     # Hyperliquid Historical Funding Provider
     "HyperliquidFundingProvider",
-    "HYPERLIQUID_API_URL",
     "HYPERLIQUID_DATA_SOURCE",
     "HYPERLIQUID_MAX_HOURS_PER_REQUEST",
     # Aave V3 Historical APY Provider

@@ -48,6 +48,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
+from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
 from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
 from almanak.framework.backtesting.adapters.base import (
     StrategyBacktestAdapter,
@@ -68,7 +69,7 @@ from almanak.framework.backtesting.pnl.calculators.margin import (
 )
 from almanak.framework.backtesting.pnl.portfolio import PositionType
 from almanak.framework.backtesting.pnl.providers.funding_rates import (
-    DEFAULT_FUNDING_RATES,
+    DEFAULT_FUNDING_RATE,
     FundingRateProvider,
 )
 
@@ -1280,9 +1281,10 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         """
         if self._funding_rate_provider is None or timestamp is None:
             # Fallback to default rate
-            default_rate = DEFAULT_FUNDING_RATES.get(
-                position.protocol.lower(),
-                self._config.default_funding_rate,
+            default_rate = (
+                DEFAULT_FUNDING_RATE
+                if FundingHistoryRegistry.has(position.protocol)
+                else self._config.default_funding_rate
             )
             logger.debug(
                 "Using default funding rate for %s %s: %.6f (no provider or timestamp)",
@@ -1337,9 +1339,10 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
 
         except Exception as e:
             # Fallback to default rate on any error
-            default_rate = DEFAULT_FUNDING_RATES.get(
-                position.protocol.lower(),
-                self._config.default_funding_rate,
+            default_rate = (
+                DEFAULT_FUNDING_RATE
+                if FundingHistoryRegistry.has(position.protocol)
+                else self._config.default_funding_rate
             )
             logger.warning(
                 "Failed to fetch historical funding rate for %s %s at %s, using default rate %.6f: %s",

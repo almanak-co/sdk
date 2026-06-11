@@ -1,18 +1,21 @@
 """Funding rate data provider for perpetual futures protocols.
 
-This module provides a client for fetching historical funding rate data
-from perpetual futures protocols. Accurate funding rates are essential
-for realistic perp position P&L calculation in backtesting.
+This module is a thin client of the gateway's ``RateHistoryService``
+(``GetFundingRateHistory``). All HTTP egress for funding data happens on the
+gateway side via each connector's ``GatewayFundingHistoryCapability``
+implementation — this provider holds no HTTP client, no API URLs, and no
+venue-specific market tables (VIB-4851 Phase D; previously this module opened
+its own ``aiohttp`` sessions against GMX / Hyperliquid endpoints).
 
-Supported Protocols:
-    - GMX V2: Via GMX stats API and subgraph
-    - Hyperliquid: Via public REST API
+Protocol identifiers, aliases, and chain support derive from connector
+manifests through
+:class:`~almanak.connectors._strategy_base.funding_history_registry.FundingHistoryRegistry`
+— adding a funding venue is one connector folder, no edit here.
 
 Key Features:
-    - Fetches historical funding rates by protocol, market, and timestamp
-    - Implements caching with 1-hour TTL
-    - Handles rate limits gracefully with exponential backoff
-    - Falls back to default rates when data unavailable
+    - Historical funding rates by protocol, market, and timestamp
+    - Caching with 1-hour TTL
+    - Falls back to a default rate when data is unavailable
 
 Example:
     from almanak.framework.backtesting.pnl.providers.funding_rates import (
@@ -40,41 +43,44 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-import aiohttp
+from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
+from almanak.framework.data.interfaces import DataSourceUnavailable
 
-from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
+from .perp._gateway_history import fetch_funding_points
 
 logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# API Endpoints
+# Constants
 # =============================================================================
-
-# GMX Stats API endpoints (https://stats.gmx.io)
-GMX_STATS_API: dict[str, str] = {
-    "arbitrum": "https://arbitrum-api.gmxinfra.io",
-    "avalanche": "https://avalanche-api.gmxinfra.io",
-}
-
-# GMX V2 Subgraph endpoints for funding rates
-GMX_V2_SUBGRAPHS: dict[str, str] = {
-    "arbitrum": "https://subgraph.satsuma-prod.com/3b2ced13c8d9/gmx/synthetics-arbitrum-stats/api",
-    "avalanche": "https://subgraph.satsuma-prod.com/3b2ced13c8d9/gmx/synthetics-avalanche-stats/api",
-}
-
-# Hyperliquid REST API endpoint
-HYPERLIQUID_API = "https://api.hyperliquid.xyz/info"
-
-# Supported protocols
-SUPPORTED_PROTOCOLS = ["gmx", "gmx_v2", "hyperliquid"]
 
 # Default cache TTL: 1 hour for historical data
 DEFAULT_CACHE_TTL_SECONDS = 3600
 
-# Rate limit settings
+# Rate limit settings (legacy ctor-signature compat; HTTP rate limiting is
+# gateway-owned since the Phase D cutover, so these only echo into to_dict()).
 DEFAULT_REQUESTS_PER_MINUTE = 30
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
+
+# Default hourly funding rate used when the gateway has no data for a query.
+# One scalar, not a per-protocol table: every supported venue used the same
+# fallback value, and the protocol set now lives on the connector manifests.
+DEFAULT_FUNDING_RATE = Decimal("0.0001")  # 0.01% per hour (~8.76% APR)
+
+# Lookback window for resolving "the rate at timestamp T" from the history
+# series: take the latest point in [T - lookback, T]. One day comfortably
+# covers hourly (Hyperliquid) and continuous (GMX) funding cadences.
+_POINT_LOOKBACK_SECONDS = 86_400
+
+
+def supported_protocols() -> list[str]:
+    """Accepted protocol identifiers (manifest-derived, includes aliases).
+
+    Lazy by design: deriving at module import would trigger connector
+    discovery on package import (the VIB-4928 hazard).
+    """
+    return list(FundingHistoryRegistry.supported_protocols())
 
 
 # =============================================================================
@@ -97,7 +103,11 @@ class FundingRateNotFoundError(FundingRateError):
 
 
 class FundingRateRateLimitError(FundingRateError):
-    """Raised when API rate limit is exceeded."""
+    """Raised when API rate limit is exceeded.
+
+    Retained for API compatibility: since the gateway cutover the gateway owns
+    rate limiting, so this provider no longer raises it on its own.
+    """
 
     def __init__(self, retry_after_seconds: float | None = None) -> None:
         self.retry_after_seconds = retry_after_seconds
@@ -112,7 +122,7 @@ class UnsupportedProtocolError(FundingRateError):
 
     def __init__(self, protocol: str) -> None:
         self.protocol = protocol
-        super().__init__(f"Unsupported protocol: {protocol}. Supported: {SUPPORTED_PROTOCOLS}")
+        super().__init__(f"Unsupported protocol: {protocol}. Supported: {supported_protocols()}")
 
 
 # =============================================================================
@@ -133,7 +143,7 @@ class FundingRateData:
         next_funding_time: When the next funding payment occurs (if available)
         open_interest_long: Long open interest in USD (if available)
         open_interest_short: Short open interest in USD (if available)
-        source: Data source (api, subgraph, fallback)
+        source: Data source (gateway, fallback)
     """
 
     protocol: str
@@ -144,7 +154,7 @@ class FundingRateData:
     next_funding_time: datetime | None = None
     open_interest_long: Decimal | None = None
     open_interest_short: Decimal | None = None
-    source: str = "api"
+    source: str = "gateway"
 
     def __post_init__(self) -> None:
         """Calculate annualized rate if not provided."""
@@ -180,7 +190,7 @@ class FundingRateData:
             else None,
             open_interest_long=Decimal(data["open_interest_long"]) if data.get("open_interest_long") else None,
             open_interest_short=Decimal(data["open_interest_short"]) if data.get("open_interest_short") else None,
-            source=data.get("source", "api"),
+            source=data.get("source", "gateway"),
         )
 
 
@@ -200,7 +210,11 @@ class CachedFundingRate:
 
 @dataclass
 class RateLimitState:
-    """Tracks rate limit state for exponential backoff."""
+    """Tracks rate limit state for exponential backoff.
+
+    Retained as exported API for callers that imported it; the provider itself
+    no longer rate-limits client-side (the gateway owns the budget).
+    """
 
     last_limit_time: float | None = None
     backoff_seconds: float = 1.0
@@ -239,56 +253,6 @@ class RateLimitState:
 
 
 # =============================================================================
-# Market Mappings
-# =============================================================================
-
-# GMX market symbols to contract addresses/identifiers
-GMX_MARKETS: dict[str, dict[str, str]] = {
-    "arbitrum": {
-        "ETH-USD": "ETH",
-        "BTC-USD": "BTC",
-        "LINK-USD": "LINK",
-        "ARB-USD": "ARB",
-        "SOL-USD": "SOL",
-        "UNI-USD": "UNI",
-        "DOGE-USD": "DOGE",
-        "LTC-USD": "LTC",
-        "XRP-USD": "XRP",
-    },
-    "avalanche": {
-        "ETH-USD": "ETH",
-        "BTC-USD": "BTC",
-        "AVAX-USD": "AVAX",
-    },
-}
-
-# Hyperliquid market symbols (they use their own format)
-HYPERLIQUID_MARKETS: dict[str, str] = {
-    "ETH-USD": "ETH",
-    "BTC-USD": "BTC",
-    "SOL-USD": "SOL",
-    "ARB-USD": "ARB",
-    "LINK-USD": "LINK",
-    "DOGE-USD": "DOGE",
-    "AVAX-USD": "AVAX",
-    "MATIC-USD": "MATIC",
-    "OP-USD": "OP",
-    "APT-USD": "APT",
-    "TIA-USD": "TIA",
-    "SEI-USD": "SEI",
-    "INJ-USD": "INJ",
-    "ATOM-USD": "ATOM",
-}
-
-# Default funding rates per protocol (hourly)
-DEFAULT_FUNDING_RATES: dict[str, Decimal] = {
-    "gmx": Decimal("0.0001"),  # 0.01% per hour (~8.76% APR)
-    "gmx_v2": Decimal("0.0001"),
-    "hyperliquid": Decimal("0.0001"),
-}
-
-
-# =============================================================================
 # Funding Rate Provider
 # =============================================================================
 
@@ -296,14 +260,19 @@ DEFAULT_FUNDING_RATES: dict[str, Decimal] = {
 class FundingRateProvider:
     """Provider for fetching historical funding rates from perp protocols.
 
-    This provider supports fetching funding rate data from GMX and Hyperliquid.
-    It implements caching with 1-hour TTL and handles rate limits gracefully.
+    Thin gateway client: each query is one ``GetFundingRateHistory`` RPC
+    resolved to the venue the protocol's connector manifest declares. Results
+    are cached with a 1-hour TTL; when the gateway has no data for a query the
+    provider falls back to :data:`DEFAULT_FUNDING_RATE` (source ``fallback``),
+    preserving the pre-cutover graceful-degradation contract.
 
     Attributes:
-        chain: The blockchain for GMX queries (arbitrum, avalanche)
+        chain: The chain forwarded to on-chain venues (arbitrum, avalanche)
         cache_ttl_seconds: Cache TTL in seconds (default: 1 hour)
-        request_timeout: HTTP request timeout in seconds
-        requests_per_minute: Maximum requests per minute
+        request_timeout: Legacy config echo (transport timeouts are
+            gateway-owned)
+        requests_per_minute: Legacy config echo (rate limiting is
+            gateway-owned)
 
     Example:
         provider = FundingRateProvider()
@@ -332,17 +301,19 @@ class FundingRateProvider:
         """Initialize the funding rate provider.
 
         Args:
-            chain: Blockchain for GMX queries (arbitrum, avalanche)
+            chain: Chain forwarded to on-chain venues (must be declared by at
+                least one funding-history connector manifest)
             cache_ttl_seconds: Cache TTL in seconds (default: 3600 = 1 hour)
-            request_timeout: HTTP request timeout in seconds
-            requests_per_minute: Maximum requests per minute
+            request_timeout: Legacy config echo (gateway owns transport)
+            requests_per_minute: Legacy config echo (gateway owns rate limits)
 
         Raises:
-            ValueError: If chain is not supported for GMX
+            ValueError: If no funding-history connector declares the chain
         """
         chain_lower = chain.lower()
-        if chain_lower not in GMX_STATS_API:
-            raise ValueError(f"Unsupported chain for GMX: {chain}. Supported: {list(GMX_STATS_API.keys())}")
+        declared_chains = FundingHistoryRegistry.all_declared_chains()
+        if chain_lower not in declared_chains:
+            raise ValueError(f"Unsupported chain for GMX: {chain}. Supported: {sorted(declared_chains)}")
 
         self._chain = chain_lower
         self._cache_ttl_seconds = cache_ttl_seconds
@@ -352,18 +323,9 @@ class FundingRateProvider:
         # Cache: (protocol, market, timestamp_hour) -> CachedFundingRate
         self._cache: dict[tuple[str, str, datetime], CachedFundingRate] = {}
 
-        # Rate limit state per protocol
-        self._rate_limit_states: dict[str, RateLimitState] = {
-            "gmx": RateLimitState(),
-            "hyperliquid": RateLimitState(),
-        }
-
-        # HTTP session (lazy initialized)
-        self._session: aiohttp.ClientSession | None = None
-
     @property
     def chain(self) -> str:
-        """Get the chain this provider queries for GMX."""
+        """Get the chain this provider forwards to on-chain venues."""
         return self._chain
 
     @property
@@ -371,17 +333,9 @@ class FundingRateProvider:
         """Get the provider name."""
         return f"funding_rates_{self._chain}"
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create HTTP session."""
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self._request_timeout))
-        return self._session
-
     async def close(self) -> None:
-        """Close the HTTP session."""
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
+        """Release resources (no-op; retained for API compatibility)."""
+        return None
 
     def _normalize_timestamp(self, timestamp: datetime) -> datetime:
         """Normalize timestamp to hourly boundary for caching."""
@@ -417,13 +371,64 @@ class FundingRateProvider:
             ttl_seconds=self._cache_ttl_seconds,
         )
 
-    async def _wait_for_rate_limit(self, protocol: str) -> None:
-        """Wait if rate limited."""
-        state = self._rate_limit_states.get(protocol, RateLimitState())
-        wait_time = state.get_wait_time()
-        if wait_time > 0:
-            logger.debug(f"Rate limited for {protocol}, waiting {wait_time:.1f}s")
-            await asyncio.sleep(wait_time)
+    def _fetch_point_via_gateway(
+        self,
+        protocol_lower: str,
+        market: str,
+        timestamp: datetime,
+    ) -> FundingRateData:
+        """Resolve "the rate at ``timestamp``" through the gateway history RPC.
+
+        Takes the latest point in ``[timestamp - lookback, timestamp]`` so a
+        backtest never reads a rate from its future (no look-ahead bias).
+
+        Raises:
+            FundingRateNotFoundError: When the gateway is unavailable or the
+                window holds no measured point — callers fall back to the
+                default rate, preserving the pre-cutover contract.
+        """
+        venue = FundingHistoryRegistry.venue_for(protocol_lower)
+        if venue is None:  # pragma: no cover - guarded by caller validation
+            raise UnsupportedProtocolError(protocol_lower)
+
+        # On-chain venues get the configured chain; chain-agnostic venues
+        # (empty declared chains) get "" per the RPC contract.
+        chain = self._chain if FundingHistoryRegistry.declared_chains(protocol_lower) else ""
+
+        # Naive timestamps are UTC by contract (same normalization as the
+        # venue providers' get_funding_rates) — bare .timestamp() would read
+        # them in the host timezone and shift the query window.
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=UTC)
+        end_ts = int(timestamp.timestamp())
+        try:
+            points = fetch_funding_points(
+                venue=venue,
+                market=market.upper(),
+                chain=chain,
+                start_ts=end_ts - _POINT_LOOKBACK_SECONDS,
+                end_ts=end_ts,
+            )
+        except DataSourceUnavailable as exc:
+            logger.warning(
+                "Gateway funding history unavailable for %s %s: %s",
+                protocol_lower,
+                market,
+                exc,
+            )
+            raise FundingRateNotFoundError(protocol_lower, market, timestamp) from exc
+
+        if not points:
+            raise FundingRateNotFoundError(protocol_lower, market, timestamp)
+
+        latest = points[-1]
+        return FundingRateData(
+            protocol=protocol_lower,
+            market=market.upper(),
+            timestamp=self._normalize_timestamp(timestamp),
+            rate=latest.rate_hourly,
+            source="gateway",
+        )
 
     async def get_historical_funding_rate(
         self,
@@ -443,13 +448,11 @@ class FundingRateProvider:
 
         Raises:
             UnsupportedProtocolError: If protocol is not supported
-            FundingRateNotFoundError: If data is not available for the query
-            FundingRateRateLimitError: If rate limit is exceeded
         """
         protocol_lower = protocol.lower()
 
-        # Validate protocol
-        if protocol_lower not in SUPPORTED_PROTOCOLS:
+        # Validate protocol against the manifest-derived identifier set
+        if not FundingHistoryRegistry.has(protocol_lower):
             raise UnsupportedProtocolError(protocol)
 
         # Check cache first
@@ -457,50 +460,16 @@ class FundingRateProvider:
         if cached is not None:
             return cached
 
-        # Wait for rate limit if needed
-        await self._wait_for_rate_limit(protocol_lower)
-
-        # Fetch from appropriate API
         try:
-            # "gmx" -> gmx_v2 resolves through the manifest-declared perps
-            # alias (VIB-4851 B3) instead of a local alias tuple.
-            if PerpsReadRegistry.canonical(protocol_lower) == "gmx_v2":
-                data = await self._fetch_gmx_funding_rate(market, timestamp)
-            elif protocol_lower == "hyperliquid":
-                data = await self._fetch_hyperliquid_funding_rate(market, timestamp)
-            else:
-                raise UnsupportedProtocolError(protocol)
-
-            # Update data with correct protocol
-            data = FundingRateData(
-                protocol=protocol_lower,
-                market=data.market,
-                timestamp=data.timestamp,
-                rate=data.rate,
-                annualized_rate_pct=data.annualized_rate_pct,
-                next_funding_time=data.next_funding_time,
-                open_interest_long=data.open_interest_long,
-                open_interest_short=data.open_interest_short,
-                source=data.source,
+            # The RPC stub is synchronous; keep the event loop responsive.
+            data = await asyncio.to_thread(
+                self._fetch_point_via_gateway,
+                protocol_lower,
+                market,
+                timestamp,
             )
-
-            # Cache the result
             self._add_to_cache(data)
-
-            # Record success
-            state = self._rate_limit_states.get(protocol_lower)
-            if state:
-                state.record_success()
-                state.record_request()
-
             return data
-
-        except FundingRateRateLimitError:
-            state = self._rate_limit_states.get(protocol_lower)
-            if state:
-                state.record_rate_limit()
-            raise
-
         except FundingRateNotFoundError:
             # Fall back to default rate
             logger.warning(f"Funding rate not found for {protocol} {market}, using default")
@@ -513,7 +482,10 @@ class FundingRateProvider:
     ) -> FundingRateData:
         """Get current funding rate for a market.
 
-        Convenience method that queries the current timestamp.
+        Convenience method that queries the current timestamp. For
+        live-quality current rates with next-funding metadata, prefer
+        ``almanak.framework.data.funding.GatewayFundingRateProvider`` (the
+        ``FundingRateService.GetFundingRate`` client).
 
         Args:
             protocol: The perpetual protocol
@@ -528,292 +500,13 @@ class FundingRateProvider:
             timestamp=datetime.now(UTC),
         )
 
-    async def _fetch_gmx_funding_rate(
-        self,
-        market: str,
-        timestamp: datetime,
-    ) -> FundingRateData:
-        """Fetch funding rate from GMX API.
-
-        GMX uses a borrowing fee model where the rate depends on:
-        - Open interest imbalance (longs vs shorts)
-        - Pool utilization
-
-        Args:
-            market: Market identifier (e.g., "ETH-USD")
-            timestamp: Timestamp to query
-
-        Returns:
-            FundingRateData from GMX API
-
-        Raises:
-            FundingRateNotFoundError: If market not found
-            FundingRateRateLimitError: If rate limited
-        """
-        # Map market to GMX symbol
-        markets = GMX_MARKETS.get(self._chain, {})
-        gmx_symbol = markets.get(market.upper())
-        if not gmx_symbol:
-            raise FundingRateNotFoundError("gmx", market, timestamp)
-
-        session = await self._get_session()
-
-        # Try the GMX stats API first
-        api_url = GMX_STATS_API.get(self._chain, "")
-        if not api_url:
-            raise FundingRateNotFoundError("gmx", market, timestamp)
-
-        try:
-            # GMX V2 funding rate endpoint
-            # The actual endpoint structure may vary - this is a common pattern
-            url = f"{api_url}/funding-rates/{gmx_symbol}"
-            params = {
-                "timestamp": int(timestamp.timestamp()),
-            }
-
-            async with session.get(url, params=params) as response:
-                if response.status == 429:
-                    retry_after = response.headers.get("Retry-After")
-                    raise FundingRateRateLimitError(float(retry_after) if retry_after else None)
-
-                if response.status == 404:
-                    raise FundingRateNotFoundError("gmx", market, timestamp)
-
-                if response.status != 200:
-                    logger.warning(f"GMX API returned {response.status}, falling back to subgraph")
-                    return await self._fetch_gmx_funding_rate_subgraph(market, timestamp, gmx_symbol)
-
-                data = await response.json()
-
-                # Parse GMX response
-                # GMX funding rates are typically expressed as hourly rates
-                hourly_rate = Decimal(str(data.get("fundingRate", "0.0001")))
-
-                return FundingRateData(
-                    protocol="gmx",
-                    market=market.upper(),
-                    timestamp=self._normalize_timestamp(timestamp),
-                    rate=hourly_rate,
-                    open_interest_long=Decimal(str(data.get("longOpenInterest", 0)))
-                    if data.get("longOpenInterest")
-                    else None,
-                    open_interest_short=Decimal(str(data.get("shortOpenInterest", 0)))
-                    if data.get("shortOpenInterest")
-                    else None,
-                    source="gmx_api",
-                )
-
-        except aiohttp.ClientError as e:
-            logger.warning(f"GMX API error: {e}, trying subgraph")
-            return await self._fetch_gmx_funding_rate_subgraph(market, timestamp, gmx_symbol)
-
-    async def _fetch_gmx_funding_rate_subgraph(
-        self,
-        market: str,
-        timestamp: datetime,
-        gmx_symbol: str,
-    ) -> FundingRateData:
-        """Fetch funding rate from GMX subgraph as fallback.
-
-        Args:
-            market: Market identifier
-            timestamp: Timestamp to query
-            gmx_symbol: GMX internal symbol
-
-        Returns:
-            FundingRateData from subgraph
-
-        Raises:
-            FundingRateNotFoundError: If data not available
-        """
-        subgraph_url = GMX_V2_SUBGRAPHS.get(self._chain)
-        if not subgraph_url:
-            raise FundingRateNotFoundError("gmx", market, timestamp)
-
-        session = await self._get_session()
-
-        # Query GMX subgraph for funding rate data
-        # This is a simplified query - actual GMX subgraph schema may differ
-        timestamp_int = int(timestamp.timestamp())
-        query = """
-        query FundingRate($market: String!, $timestamp: Int!) {
-            fundingRates(
-                where: {
-                    market: $market,
-                    timestamp_lte: $timestamp
-                }
-                orderBy: timestamp
-                orderDirection: desc
-                first: 1
-            ) {
-                market
-                timestamp
-                fundingRate
-                longOpenInterest
-                shortOpenInterest
-            }
-        }
-        """
-
-        try:
-            async with session.post(
-                subgraph_url,
-                json={
-                    "query": query,
-                    "variables": {
-                        "market": gmx_symbol,
-                        "timestamp": timestamp_int,
-                    },
-                },
-            ) as response:
-                if response.status == 429:
-                    raise FundingRateRateLimitError()
-
-                if response.status != 200:
-                    raise FundingRateNotFoundError("gmx", market, timestamp)
-
-                result = await response.json()
-
-                if "errors" in result:
-                    logger.warning(f"GMX subgraph errors: {result['errors']}")
-                    raise FundingRateNotFoundError("gmx", market, timestamp)
-
-                rates = result.get("data", {}).get("fundingRates", [])
-                if not rates:
-                    raise FundingRateNotFoundError("gmx", market, timestamp)
-
-                rate_data = rates[0]
-
-                # Parse subgraph response
-                # Rates are typically in wei-like format, need to convert
-                raw_rate = Decimal(str(rate_data.get("fundingRate", "0")))
-                # Convert from basis points or percentage to decimal rate
-                hourly_rate = raw_rate / Decimal("1000000")  # Adjust as needed
-
-                return FundingRateData(
-                    protocol="gmx",
-                    market=market.upper(),
-                    timestamp=datetime.fromtimestamp(rate_data.get("timestamp", timestamp_int), tz=UTC),
-                    rate=hourly_rate,
-                    open_interest_long=Decimal(str(rate_data.get("longOpenInterest", 0)))
-                    if rate_data.get("longOpenInterest")
-                    else None,
-                    open_interest_short=Decimal(str(rate_data.get("shortOpenInterest", 0)))
-                    if rate_data.get("shortOpenInterest")
-                    else None,
-                    source="gmx_subgraph",
-                )
-
-        except aiohttp.ClientError as e:
-            logger.warning(f"GMX subgraph error: {e}")
-            raise FundingRateNotFoundError("gmx", market, timestamp) from e
-
-    async def _fetch_hyperliquid_funding_rate(
-        self,
-        market: str,
-        timestamp: datetime,
-    ) -> FundingRateData:
-        """Fetch funding rate from Hyperliquid API.
-
-        Hyperliquid provides both current and historical funding rates
-        via their public REST API.
-
-        Args:
-            market: Market identifier (e.g., "ETH-USD")
-            timestamp: Timestamp to query
-
-        Returns:
-            FundingRateData from Hyperliquid API
-
-        Raises:
-            FundingRateNotFoundError: If market not found
-            FundingRateRateLimitError: If rate limited
-        """
-        # Map market to Hyperliquid symbol
-        hl_symbol = HYPERLIQUID_MARKETS.get(market.upper())
-        if not hl_symbol:
-            # Try direct symbol (Hyperliquid uses coin name)
-            hl_symbol = market.upper().replace("-USD", "")
-
-        session = await self._get_session()
-
-        try:
-            # Hyperliquid meta endpoint for funding rates
-            # POST to /info with type "metaAndAssetCtxs"
-            async with session.post(
-                HYPERLIQUID_API,
-                json={"type": "metaAndAssetCtxs"},
-            ) as response:
-                if response.status == 429:
-                    retry_after = response.headers.get("Retry-After")
-                    raise FundingRateRateLimitError(float(retry_after) if retry_after else None)
-
-                if response.status != 200:
-                    raise FundingRateNotFoundError("hyperliquid", market, timestamp)
-
-                result = await response.json()
-
-                # Parse Hyperliquid response
-                # Response is [meta_info, [asset_ctxs...]]
-                if not isinstance(result, list) or len(result) < 2:
-                    raise FundingRateNotFoundError("hyperliquid", market, timestamp)
-
-                asset_ctxs = result[1]
-                meta = result[0]
-
-                # Find the asset in the list
-                asset_names = [u["name"] for u in meta.get("universe", [])]
-
-                asset_index = None
-                for i, name in enumerate(asset_names):
-                    if name.upper() == hl_symbol.upper():
-                        asset_index = i
-                        break
-
-                if asset_index is None or asset_index >= len(asset_ctxs):
-                    raise FundingRateNotFoundError("hyperliquid", market, timestamp)
-
-                asset_ctx = asset_ctxs[asset_index]
-
-                # Parse funding rate from asset context
-                # Hyperliquid returns funding as a percentage rate per 8 hours
-                # Convert to hourly rate
-                funding_8h = Decimal(str(asset_ctx.get("funding", "0")))
-                hourly_rate = funding_8h / Decimal("8")
-
-                # Open interest is in coin units, need mark price for USD
-                mark_price = Decimal(str(asset_ctx.get("markPx", "1")))
-                oi_long = None
-                oi_short = None
-
-                if "openInterest" in asset_ctx:
-                    oi_total = Decimal(str(asset_ctx["openInterest"])) * mark_price
-                    # Hyperliquid doesn't split long/short in this endpoint
-                    # We could estimate based on funding rate direction
-                    oi_long = oi_total / Decimal("2")  # Rough estimate
-                    oi_short = oi_total / Decimal("2")
-
-                return FundingRateData(
-                    protocol="hyperliquid",
-                    market=market.upper(),
-                    timestamp=self._normalize_timestamp(timestamp),
-                    rate=hourly_rate,
-                    open_interest_long=oi_long,
-                    open_interest_short=oi_short,
-                    source="hyperliquid_api",
-                )
-
-        except aiohttp.ClientError as e:
-            logger.warning(f"Hyperliquid API error: {e}")
-            raise FundingRateNotFoundError("hyperliquid", market, timestamp) from e
-
     def _get_default_funding_rate(
         self,
         protocol: str,
         market: str,
         timestamp: datetime,
     ) -> FundingRateData:
-        """Get default funding rate when API data is unavailable.
+        """Get default funding rate when gateway data is unavailable.
 
         Args:
             protocol: The protocol
@@ -823,13 +516,11 @@ class FundingRateProvider:
         Returns:
             FundingRateData with default rate
         """
-        default_rate = DEFAULT_FUNDING_RATES.get(protocol, Decimal("0.0001"))
-
         return FundingRateData(
             protocol=protocol,
             market=market.upper(),
             timestamp=self._normalize_timestamp(timestamp),
-            rate=default_rate,
+            rate=DEFAULT_FUNDING_RATE,
             source="fallback",
         )
 
@@ -837,12 +528,14 @@ class FundingRateProvider:
         """Get the default funding rate for a protocol.
 
         Args:
-            protocol: Protocol name
+            protocol: Protocol name (unused since the per-protocol fallback
+                table collapsed to one scalar; kept for signature stability)
 
         Returns:
             Default hourly funding rate
         """
-        return DEFAULT_FUNDING_RATES.get(protocol.lower(), Decimal("0.0001"))
+        del protocol  # one fallback policy for every venue
+        return DEFAULT_FUNDING_RATE
 
     def clear_cache(self) -> None:
         """Clear all cached funding rates."""
@@ -870,7 +563,7 @@ class FundingRateProvider:
             "cache_ttl_seconds": self._cache_ttl_seconds,
             "request_timeout": self._request_timeout,
             "requests_per_minute": self._requests_per_minute,
-            "supported_protocols": SUPPORTED_PROTOCOLS,
+            "supported_protocols": supported_protocols(),
         }
 
 
@@ -886,9 +579,7 @@ __all__ = [
     "FundingRateNotFoundError",
     "FundingRateRateLimitError",
     "UnsupportedProtocolError",
-    # Constants
-    "SUPPORTED_PROTOCOLS",
-    "DEFAULT_FUNDING_RATES",
-    "GMX_MARKETS",
-    "HYPERLIQUID_MARKETS",
+    # Constants / accessors
+    "DEFAULT_FUNDING_RATE",
+    "supported_protocols",
 ]

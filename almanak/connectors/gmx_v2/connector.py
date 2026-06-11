@@ -5,6 +5,7 @@ from __future__ import annotations
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
+    FundingHistoryDecl,
     ImportRef,
     PerpsReadDecl,
 )
@@ -52,6 +53,11 @@ CONNECTOR = Connector(
     ),
     perps_read=PerpsReadDecl(
         spec=ImportRef(module="almanak.connectors.gmx_v2.perps_read", attribute="PERPS_READ_SPEC"),
+        aliases=("gmx",),
+    ),
+    funding_history=FundingHistoryDecl(
+        venue="gmx_v2",
+        chains=("arbitrum", "avalanche"),
         aliases=("gmx",),
     ),
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),

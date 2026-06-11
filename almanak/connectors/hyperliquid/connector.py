@@ -5,6 +5,7 @@ from __future__ import annotations
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
+    FundingHistoryDecl,
     ImportRef,
 )
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
@@ -32,6 +33,9 @@ CONNECTOR = Connector(
     primitive=ImportRef(
         module="almanak.connectors.hyperliquid.primitive",
         attribute="PRIMITIVE",
+    ),
+    funding_history=FundingHistoryDecl(
+        venue="hyperliquid",
     ),
 )
 

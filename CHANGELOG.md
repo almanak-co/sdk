@@ -12,6 +12,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   through CoinGecko Onchain API instead of GeckoTerminal. CoinGecko Onchain
   pool endpoints now require `COINGECKO_API_KEY` locally or
   `ALMANAK_GATEWAY_COINGECKO_API_KEY` in gateway environments.
+- Backtesting funding-rate providers (`backtesting/pnl/providers/funding_rates.py`
+  and `backtesting/pnl/providers/perp/`) are now thin clients of the gateway's
+  `RateHistoryService` instead of opening their own HTTP sessions against GMX /
+  Hyperliquid endpoints (VIB-4851 Phase D). Funding history is now real measured
+  data: the old GMX series path extrapolated the *current* rate backwards over
+  the whole range, and the old point-query Hyperliquid path returned current
+  funding for any historical timestamp. Protocol identifiers, aliases, and chain
+  support derive from connector-manifest `FundingHistoryDecl` declarations.
+  Removed framework-internal names: `funding_rates.GMX_MARKETS`,
+  `funding_rates.HYPERLIQUID_MARKETS`, `funding_rates.SUPPORTED_PROTOCOLS` (use
+  `funding_rates.supported_protocols()`), `funding_rates.DEFAULT_FUNDING_RATES`
+  (use `DEFAULT_FUNDING_RATE`), `gmx_funding.GMX_API_URLS`,
+  `gmx_funding.GMX_API_FALLBACK_URLS`, `gmx_funding.GMX_MARKET_TOKENS`,
+  `gmx_funding.SUPPORTED_CHAINS` (use `GMXFundingProvider.supported_chains`),
+  `gmx_funding.GMXMarketInfo`, and `hyperliquid_funding.HYPERLIQUID_API_URL`.
 
 ## [2.17.0] - 2026-06-05
 

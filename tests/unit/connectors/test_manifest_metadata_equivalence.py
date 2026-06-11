@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from almanak.connectors._connector import CONNECTOR_REGISTRY
 from almanak.connectors._strategy_base.capabilities_registry import CapabilitiesRegistry
+from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
 from almanak.connectors._strategy_base.gateway_stub_registry import GatewayStubRegistry
 from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
 from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
@@ -185,6 +186,45 @@ def test_perps_read_dispatch_equals_frozen_legacy_tables() -> None:
     """Manifest-derived perps dispatch == the legacy hardcoded tables."""
     assert PerpsReadRegistry._spec_loaders() == FROZEN_PERPS_SPEC_LOADERS
     assert PerpsReadRegistry._aliases() == FROZEN_PERPS_ALIASES
+
+
+# almanak/framework/backtesting/pnl/providers/funding_rates.py legacy tables as
+# of 2026-06-10, frozen verbatim (VIB-4851 Phase D / D1):
+#   SUPPORTED_PROTOCOLS = ["gmx", "gmx_v2", "hyperliquid"]
+#   chain ctor validation = GMX_STATS_API.keys() = {"arbitrum", "avalanche"}
+FROZEN_FUNDING_SUPPORTED_PROTOCOLS = ("gmx", "gmx_v2", "hyperliquid")
+FROZEN_FUNDING_VENUES = {"gmx_v2": "gmx_v2", "hyperliquid": "hyperliquid"}
+FROZEN_FUNDING_ALIASES = {"gmx": "gmx_v2"}
+FROZEN_FUNDING_CHAINS = {"gmx_v2": ("arbitrum", "avalanche"), "hyperliquid": ()}
+
+
+def test_funding_history_dispatch_equals_frozen_legacy_tables() -> None:
+    """Manifest-derived funding dispatch == the legacy hardcoded tables."""
+    assert FundingHistoryRegistry.supported_protocols() == FROZEN_FUNDING_SUPPORTED_PROTOCOLS
+    assert FundingHistoryRegistry._venues() == FROZEN_FUNDING_VENUES
+    assert FundingHistoryRegistry._aliases() == FROZEN_FUNDING_ALIASES
+    assert FundingHistoryRegistry._chains() == FROZEN_FUNDING_CHAINS
+    assert FundingHistoryRegistry.all_declared_chains() == frozenset({"arbitrum", "avalanche"})
+
+
+def test_funding_history_venues_match_gateway_capability_implementers() -> None:
+    """Decl venues == the GatewayFundingHistoryCapability implementer set.
+
+    Two-sources-of-truth guard (Phase D plan DEC-2): the manifest decl is the
+    strategy-side truth, the gateway capability the gateway-side
+    implementation. This parity test pins them to each other so neither can
+    drift silently.
+    """
+    from almanak.connectors._base.gateway_capabilities import (
+        GatewayFundingHistoryCapability,
+    )
+    from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+
+    gateway_venues = {
+        provider.funding_venue().lower()
+        for provider in GATEWAY_REGISTRY.capability_providers(GatewayFundingHistoryCapability)  # type: ignore[type-abstract]
+    }
+    assert set(FROZEN_FUNDING_VENUES.values()) == gateway_venues
 
 
 # almanak/connectors/_strategy_base/{prediction_read,prediction_execute,
