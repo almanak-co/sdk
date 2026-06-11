@@ -12,7 +12,7 @@ import logging
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from almanak.connectors.aave_v3.addresses import AAVE_V3
+from almanak.connectors._strategy_base.address_registry import AddressRegistry
 from almanak.framework.intents import compiler_constants
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
 from almanak.framework.intents.vocabulary import IntentType
@@ -203,15 +203,15 @@ def _resolve_pool_data_provider(chain: str, protocol: str) -> str | None:
     """Look up the PoolDataProvider address for (chain, protocol).
 
     Returns ``None`` when no PoolDataProvider is registered — caller fails-open.
-    Aave V3 still falls back to ``AAVE_V3[chain]["pool_data_provider"]`` so the
-    chain table remains the single source of truth for that protocol.
+    Aave V3 falls back to the connector-owned ``AAVE_V3`` table resolved through
+    ``AddressRegistry``, which remains the single source of truth for that protocol.
     """
     chain_map = compiler_constants.LENDING_POOL_DATA_PROVIDERS.get(chain, {})
     addr = chain_map.get(protocol)
     if addr:
         return addr
-    if protocol == "aave_v3" and chain in AAVE_V3:
-        return AAVE_V3[chain].get("pool_data_provider")
+    if protocol == "aave_v3":
+        return AddressRegistry.resolve_contract_address("aave_v3", chain, "pool_data_provider")
     return None
 
 
@@ -358,7 +358,7 @@ def _check_aave_v3_collateral_eligibility(compiler: Any, asset_address: str, ass
         A human-readable error string when the asset is conclusively
         ineligible (`usageAsCollateralEnabled == false` or `ltv == 0`).
     """
-    if compiler.chain not in AAVE_V3:
+    if not AddressRegistry.addresses_for("aave_v3", compiler.chain):
         return None
 
     # Use isinstance(dict) rather than `is None` so MagicMock-based test
@@ -626,7 +626,8 @@ def _check_lending_borrow_capacity_aave_v3(
         determinable.
     """
     chain = compiler.chain
-    if chain not in AAVE_V3:
+    aave_v3_contracts = AddressRegistry.addresses_for("aave_v3", chain)
+    if not aave_v3_contracts:
         return None, None
 
     # Cache: (chain, protocol, wallet, asset) → (reason, available)
@@ -647,8 +648,8 @@ def _check_lending_borrow_capacity_aave_v3(
             return None, prev_available
         # Recompute below — a tighter request may now exceed.
 
-    pool_address = AAVE_V3[chain].get("pool")
-    oracle_address = AAVE_V3[chain].get("oracle")
+    pool_address = aave_v3_contracts.get("pool")
+    oracle_address = aave_v3_contracts.get("oracle")
     if not pool_address or not oracle_address:
         return None, None
 
