@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
     default_chain="solana",
     supported_protocols=["meteora_dlmm"],
     intent_types=["LP_OPEN"],
+    quote_asset="USD",
 )
 class MeteoraDLMMLPStrategy(IntentStrategy):
     """Open a concentrated liquidity position on Meteora DLMM."""

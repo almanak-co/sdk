@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     supported_protocols=["compound_v3"],
     intent_types=["SUPPLY", "WITHDRAW", "HOLD"],
     default_chain="base",
+    quote_asset="USD",
 )
 class CompoundV3PnLBacktestBaseStrategy(IntentStrategy):
     """Compound V3 supply rate tracker strategy for PnL backtesting on Base.

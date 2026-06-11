@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     default_chain="base",
     supported_protocols=["aerodrome"],
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
+    quote_asset="USD",
 )
 class AerodromePaperTradeStrategy(IntentStrategy):
     """RSI-gated Aerodrome LP strategy for paper trading validation.

@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
     supported_protocols=["uniswap_v4"],
     intent_types=["SWAP", "HOLD"],
     default_chain="base",
+    quote_asset="USD",
 )
 class UniswapV4SwapStrategy(IntentStrategy):
     """Uniswap V4 swap demo: alternates BUY and SELL each iteration.

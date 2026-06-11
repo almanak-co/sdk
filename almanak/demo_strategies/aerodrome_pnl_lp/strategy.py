@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     supported_protocols=["aerodrome"],
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
     default_chain="base",
+    quote_asset="USD",
 )
 class AerodromePnLLPStrategy(IntentStrategy):
     """Aerodrome LP strategy for PnL backtesting on Base.

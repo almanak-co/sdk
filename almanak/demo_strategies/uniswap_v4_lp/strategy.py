@@ -95,6 +95,7 @@ class UniswapV4LPConfig:
     supported_protocols=["uniswap_v4"],
     intent_types=["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES", "SWAP", "HOLD"],
     default_chain="arbitrum",
+    quote_asset="USD",
 )
 class UniswapV4LPStrategy(IntentStrategy[UniswapV4LPConfig]):
     """Uniswap V4 concentrated liquidity strategy.

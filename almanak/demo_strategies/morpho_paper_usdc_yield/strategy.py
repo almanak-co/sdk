@@ -65,6 +65,7 @@ DEFAULT_MARKET_ID = "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baa
     supported_protocols=["morpho_blue"],
     intent_types=["SUPPLY", "WITHDRAW", "HOLD"],
     default_chain="ethereum",
+    quote_asset="USD",
 )
 class MorphoUSDCYieldPaperStrategy(IntentStrategy):
     """Morpho Blue USDC supply yield strategy for paper trading.

@@ -102,6 +102,7 @@ if TYPE_CHECKING:
     # HOLD: No action
     intent_types=["SUPPLY", "BORROW", "HOLD"],
     default_chain="arbitrum",
+    quote_asset="USD",
 )
 class AaveBorrowStrategy(IntentStrategy):
     """

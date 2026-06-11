@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
     default_chain="solana",
     supported_protocols=["orca_whirlpools"],
     intent_types=["LP_OPEN"],
+    quote_asset="USD",
 )
 class OrcaLPStrategy(IntentStrategy):
     """Open a concentrated liquidity position on Orca Whirlpools."""

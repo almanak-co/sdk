@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
     default_chain="solana",
     supported_protocols=["raydium_clmm"],
     intent_types=["LP_OPEN"],
+    quote_asset="USD",
 )
 class SolanaLPStrategy(IntentStrategy):
     """Open a concentrated liquidity position on Raydium CLMM."""

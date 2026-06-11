@@ -69,6 +69,7 @@ TRANSITIONAL_STATES = {BORROWING, SWAPPING, SWAPPING_BACK, REPAYING, WITHDRAWING
     supported_protocols=["aave_v3", "pancakeswap_v3"],
     intent_types=["BORROW", "SWAP", "REPAY", "WITHDRAW", "HOLD"],
     default_chain="bsc",
+    quote_asset="USD",
 )
 class PancakeswapAaveCarryBscStrategy(IntentStrategy):
     """T2 carry trade: Aave V3 lending + PancakeSwap V3 swap on BSC.

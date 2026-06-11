@@ -88,6 +88,7 @@ logger = logging.getLogger(__name__)
     # INTENT TYPES this strategy may emit
     intent_types=["SWAP", "HOLD"],
     default_chain="base",
+    quote_asset="USD",
 )
 class EnsoRSIStrategy(IntentStrategy):
     """Tutorial strategy demonstrating RSI trading via Enso aggregator.

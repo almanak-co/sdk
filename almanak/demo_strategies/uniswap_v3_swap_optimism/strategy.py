@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
     supported_protocols=["uniswap_v3"],
     intent_types=["SWAP", "HOLD"],
     default_chain="optimism",
+    quote_asset="USD",
 )
 class UniswapV3SwapOptimismStrategy(IntentStrategy):
     """Two-phase Uniswap V3 swap on Optimism.

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import click
 
-from almanak.core.chains import DEFAULT_CHAIN
+from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
 from almanak.framework.cli.chain_resolution import cli_chain_choices
 
 
@@ -356,6 +356,29 @@ def _generate_state_enum_definition(template: StrategyTemplate) -> str:
     for member_name, member_value in members:
         lines.append(f'    {member_name} = "{member_value}"')
     return "\n".join(lines) + "\n"
+
+
+def _quote_asset_decorator_line(template: StrategyTemplate, chain: str) -> str:
+    """Render the ``quote_asset=...,`` decorator line for a template.
+
+    Emitted explicitly for every template (USD is the framework default, but
+    an omitted field is invisible — an explicit one documents the decision).
+    Staking is the one template whose goal is to grow the staked asset rather
+    than USD value, so it quotes in the chain's wrapped native, resolved from
+    :class:`ChainRegistry` — the scaffold never invents an address. Chains
+    missing from the registry fall back to USD with a TODO.
+    """
+    if template is StrategyTemplate.STAKING:
+        descriptor = ChainRegistry.try_resolve(chain)
+        if descriptor is not None and descriptor.native.wrapped_address:
+            native = descriptor.native
+            return (
+                f"# PnL measured in {native.wrapped_symbol} (the staked asset), not USD\n"
+                f'    quote_asset={{"type": "token", "chain_id": {descriptor.chain_id}, '
+                f'"address": "{native.wrapped_address}"}},'
+            )
+        return 'quote_asset="USD",  # TODO: quote in the staked token (chain not in SDK registry)'
+    return 'quote_asset="USD",  # performance denomination; token form only for accumulators'
 
 
 def to_snake_case(name: str) -> str:
@@ -3002,6 +3025,8 @@ def _build_strategy_content(
 
     teardown_code = _get_template_teardown(template, config, strategy_name)
 
+    quote_asset_line = _quote_asset_decorator_line(template, chain)
+
     part1 = f'''"""
 {config.name} Strategy: {name}
 
@@ -3068,6 +3093,7 @@ def _safe(v: Any) -> Any:
     supported_protocols=["{config.default_protocol}"],
     intent_types={intent_types[template]},
     default_chain="{chain}",
+    {quote_asset_line}
 )
 class {class_name}(IntentStrategy):
     """

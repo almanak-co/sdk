@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     supported_protocols=["curve"],
     intent_types=["SWAP", "HOLD"],
     default_chain="ethereum",
+    quote_asset="USD",
 )
 class CurveCryptoSwapPnLStrategy(IntentStrategy):
     """RSI-based swap strategy using Curve CryptoSwap on Ethereum.

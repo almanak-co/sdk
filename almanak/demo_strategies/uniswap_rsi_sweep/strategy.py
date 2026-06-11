@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
     supported_protocols=["uniswap_v3"],
     intent_types=["SWAP", "HOLD"],
     default_chain="arbitrum",
+    quote_asset="USD",
 )
 class UniswapRSISweepStrategy(IntentStrategy):
     """RSI-based mean reversion strategy optimized for parameter sweep backtesting.

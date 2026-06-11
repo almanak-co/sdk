@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     supported_protocols=["curve"],
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
     default_chain="ethereum",
+    quote_asset="USD",
 )
 class CurvePaperTradeStrategy(IntentStrategy):
     """Curve 3pool StableSwap LP for paper trading.

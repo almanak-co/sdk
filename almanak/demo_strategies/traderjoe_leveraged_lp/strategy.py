@@ -61,6 +61,7 @@ logger = logging.getLogger(__name__)
     default_chain="avalanche",
     supported_protocols=["aave_v3", "traderjoe_v2"],
     intent_types=["SUPPLY", "BORROW", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES", "REPAY", "WITHDRAW", "HOLD"],
+    quote_asset="USD",
 )
 class TraderJoeLeveragedLPStrategy(IntentStrategy):
     """

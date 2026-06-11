@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
     supported_protocols=["aerodrome"],
     intent_types=["SWAP", "HOLD"],
     default_chain="optimism",
+    quote_asset="USD",
 )
 class VelodromeSwapOptimismStrategy(IntentStrategy):
     """Two-phase Velodrome V2 swap on Optimism.

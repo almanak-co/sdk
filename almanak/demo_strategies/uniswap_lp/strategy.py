@@ -179,6 +179,7 @@ class UniswapLPConfig:
     # HOLD: No action needed
     intent_types=["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"],
     default_chain="arbitrum",
+    quote_asset="USD",
 )
 class UniswapLPStrategy(IntentStrategy[UniswapLPConfig]):
     """

@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
     supported_chains=["arbitrum", "avalanche"],
     supported_protocols=["gmx_v2"],
     intent_types=["PERP_OPEN", "PERP_CLOSE", "HOLD"],
+    quote_asset="USD",
 )
 class GMXPerpLifecycleStrategy(IntentStrategy):
     """Lifecycle strategy for testing GMX V2 perp open/close on Anvil.

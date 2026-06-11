@@ -59,6 +59,7 @@ TRANSITIONAL_STATES = {SUPPLYING, WITHDRAWING}
     supported_protocols=["euler_v2"],
     intent_types=["SUPPLY", "WITHDRAW", "HOLD"],
     default_chain="ethereum",
+    quote_asset="USD",
 )
 class EulerV2SupplyEthereumStrategy(IntentStrategy):
     """Euler V2 supply lifecycle on Ethereum.

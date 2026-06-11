@@ -55,6 +55,7 @@ REBALANCE_OPEN_HEDGE = "REBALANCE_OPEN_HEDGE"
     default_chain="solana",
     supported_protocols=["raydium_clmm", "drift", "kamino", "jupiter"],
     intent_types=["LP_OPEN", "LP_CLOSE", "PERP_OPEN", "PERP_CLOSE", "SUPPLY", "WITHDRAW", "SWAP"],
+    quote_asset="USD",
 )
 class SolanaDeltaNeutralStrategy(IntentStrategy):
     """Delta-neutral yield farm across Raydium, Drift, and Kamino.

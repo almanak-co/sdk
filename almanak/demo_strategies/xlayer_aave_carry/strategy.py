@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     supported_protocols=["aave_v3", "uniswap_v3"],
     intent_types=["SUPPLY", "BORROW", "REPAY", "WITHDRAW", "SWAP", "HOLD"],
     default_chain="xlayer",
+    quote_asset="USD",
 )
 class XLayerAaveCarryStrategy(IntentStrategy):
     """Aave V3.6 supply+borrow carry on X-Layer.

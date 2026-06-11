@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
     default_chain="solana",
     supported_protocols=["drift"],
     intent_types=["PERP_OPEN", "PERP_CLOSE"],
+    quote_asset="USD",
 )
 class SolanaPerpFundingStrategy(IntentStrategy):
     """Trade SOL-PERP funding rate on Drift.

@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
     supported_protocols=["uniswap_v3"],
     intent_types=["SWAP", "HOLD"],
     default_chain="monad",
+    quote_asset="USD",
 )
 class MonadSwapStrategy(IntentStrategy):
     """Basic swap demo on Monad.

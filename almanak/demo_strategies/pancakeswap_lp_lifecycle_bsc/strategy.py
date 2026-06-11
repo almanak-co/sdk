@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
     default_chain="bsc",
     supported_protocols=["pancakeswap_v3"],
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
+    quote_asset="USD",
 )
 class PancakeSwapV3LPLifecycleBSCStrategy(IntentStrategy):
     """PancakeSwap V3 LP lifecycle on BSC: open, hold, close.

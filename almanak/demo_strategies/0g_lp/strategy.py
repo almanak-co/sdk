@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
     supported_protocols=["uniswap_v3"],
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
     default_chain="zerog",
+    quote_asset="USD",
 )
 class ZeroGLPStrategy(IntentStrategy):
     """Uniswap V3 LP strategy on 0G Chain (JAINE DEX).

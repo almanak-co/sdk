@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     supported_protocols=["morpho_blue"],
     intent_types=["SUPPLY", "WITHDRAW", "HOLD"],
     default_chain="ethereum",
+    quote_asset="USD",
 )
 class MorphoBlueCrisisEthereumStrategy(IntentStrategy):
     """Morpho Blue lending strategy tuned for crisis scenario backtesting on Ethereum.

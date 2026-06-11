@@ -58,6 +58,7 @@ _SUPPORTED_TEARDOWN_PROTOCOLS = frozenset({_ACTION_SWAP_PROTOCOL, _DEFAULT_TEARD
     default_chain="arbitrum",
     supported_protocols=["balancer", "enso", "uniswap_v3"],
     intent_types=["FLASH_LOAN", "SWAP", "HOLD"],
+    quote_asset="USD",
 )
 class BalancerFlashArbStrategy(IntentStrategy):
     """Demo strategy testing Balancer flash loan intent compilation.

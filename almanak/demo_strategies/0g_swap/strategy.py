@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
     supported_protocols=[],
     intent_types=["WRAP_NATIVE", "HOLD"],
     default_chain="zerog",
+    quote_asset="USD",
 )
 class ZeroGSwapStrategy(IntentStrategy):
     """0G Chain wrap strategy: A0GI -> W0G.

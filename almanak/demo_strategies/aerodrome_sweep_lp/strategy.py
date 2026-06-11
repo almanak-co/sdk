@@ -89,6 +89,7 @@ if TYPE_CHECKING:
     default_chain="base",
     supported_protocols=["aerodrome"],
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
+    quote_asset="USD",
 )
 class AerodromeSweepLPStrategy(IntentStrategy):
     """Aerodrome LP strategy with sweep-optimizable parameters.

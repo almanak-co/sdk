@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
     supported_protocols=["agni"],
     intent_types=["SWAP", "HOLD"],
     default_chain="mantle",
+    quote_asset="USD",
 )
 class MantleSwapStrategy(IntentStrategy):
     """Basic swap demo on Mantle.

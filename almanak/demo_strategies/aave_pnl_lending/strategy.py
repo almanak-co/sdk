@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     default_chain="arbitrum",
     supported_protocols=["aave_v3"],
     intent_types=["SUPPLY", "BORROW", "REPAY", "HOLD"],
+    quote_asset="USD",
 )
 class AavePnLLendingStrategy(IntentStrategy):
     """Aave V3 lending strategy that makes multi-tick decisions for PnL backtesting.

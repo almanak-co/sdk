@@ -58,6 +58,7 @@ logger = logging.getLogger(__name__)
     supported_protocols=["pendle"],
     intent_types=["SWAP", "HOLD"],
     default_chain="arbitrum",
+    quote_asset={"type": "token", "chain_id": 42161, "address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"},
 )
 class PendleYTYieldStrategy(IntentStrategy):
     """Pendle YT strategy -- buy YT-wstETH for leveraged yield exposure.

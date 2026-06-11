@@ -118,6 +118,7 @@ DEFAULT_PROTOCOL = "uniswap_v3"
     # HOLD: No action (wait for better conditions)
     intent_types=["SWAP", "HOLD"],
     default_chain="ethereum",
+    quote_asset="USD",
 )
 class UniswapRSIStrategy(IntentStrategy):
     """

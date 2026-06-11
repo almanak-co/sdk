@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
     default_chain="arbitrum",
     supported_protocols=["uniswap_v3"],
     intent_types=["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"],
+    quote_asset="USD",
 )
 class RSIMACDLPStrategy(IntentStrategy):
     """Uniswap V3 LP with dual-signal confluence entry (RSI + MACD)."""

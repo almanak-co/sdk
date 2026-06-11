@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     default_chain="base",
     supported_protocols=["sushiswap_v3"],
     intent_types=["SWAP", "HOLD"],
+    quote_asset="USD",
 )
 class SushiSwapV3PnLSwapBaseStrategy(IntentStrategy):
     """RSI-based swap strategy using SushiSwap V3 on Base.

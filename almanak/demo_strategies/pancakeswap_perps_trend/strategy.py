@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
     default_chain="bsc",
     supported_protocols=["pancakeswap_perps"],
     intent_types=["PERP_OPEN", "PERP_CLOSE", "HOLD"],
+    quote_asset="USD",
 )
 class PancakeSwapPerpsTrendStrategy(IntentStrategy):
     """Simple momentum-driven BTC/USD trend follower on PancakeSwap Perps."""

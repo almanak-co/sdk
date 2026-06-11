@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from almanak._version import __version__
+from almanak.core.chains import ChainRegistry
+from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.cli.new_strategy import (
     StrategyTemplate,
     generate_config_json,
@@ -266,8 +268,7 @@ def test_lp_scaffold_passes_api_client_to_render_lp_dashboard() -> None:
     assert calls, "LP scaffold emitted no render_lp_dashboard(...) call"
     for call in calls:
         assert "api_client=api_client" in call, (
-            "LP scaffold must emit render_lp_dashboard(..., api_client=api_client); "
-            f"got: {call!r}"
+            f"LP scaffold must emit render_lp_dashboard(..., api_client=api_client); got: {call!r}"
         )
 
 
@@ -294,9 +295,7 @@ def test_template_dashboard_scaffold_passes_ruff(
             text=True,
             timeout=60,
         )
-        assert result.returncode == 0, (
-            f"ruff failed for {template.value} scaffold:\n{result.stdout}\n{result.stderr}"
-        )
+        assert result.returncode == 0, f"ruff failed for {template.value} scaffold:\n{result.stdout}\n{result.stderr}"
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +369,65 @@ def test_strategy_file_has_teardown_methods(template: StrategyTemplate) -> None:
         method_names = [n.name for n in ast.walk(strategy_class) if isinstance(n, ast.FunctionDef)]
         for required in ("get_open_positions", "generate_teardown_intents"):
             assert required in method_names, f"{required}() missing from {strategy_class.name}"
+
+
+def _get_quote_asset_kwarg(code: str):
+    """Extract the literal ``quote_asset=`` value from the generated decorator."""
+    strategy_class = _get_strategy_class_def(ast.parse(code))
+    decorator = strategy_class.decorator_list[0]
+    assert isinstance(decorator, ast.Call), "expected @almanak_strategy(...) call decorator"
+    for keyword in decorator.keywords:
+        if keyword.arg == "quote_asset":
+            return ast.literal_eval(keyword.value)
+    pytest.fail("quote_asset= not emitted in @almanak_strategy decorator")
+
+
+@pytest.mark.parametrize("template", ALL_TEMPLATES, ids=lambda t: t.value)
+def test_strategy_file_declares_quote_asset_explicitly(template: StrategyTemplate) -> None:
+    """Every template must emit quote_asset= in the decorator.
+
+    The framework defaults to USD when the field is omitted, but an implicit
+    default is invisible to authors and AI builders — staking/accumulator
+    strategies were silently getting USD performance reporting. Staking is the
+    one template quoted in the staked (wrapped-native) token; everything else
+    is explicitly USD.
+    """
+    code = generate_strategy_file(
+        name="Smoke Test",
+        template=template,
+        chain="arbitrum",
+        output_dir=Path("."),
+    )
+    parsed = QuoteAsset.parse(_get_quote_asset_kwarg(code))
+    expected_kind = "token" if template is StrategyTemplate.STAKING else "fiat_usd"
+    assert parsed.kind == expected_kind, f"{template.value}: expected {expected_kind}, got {parsed.kind}"
+
+
+@pytest.mark.parametrize("chain", ["ethereum", "arbitrum", "mantle", "solana"], ids=lambda c: c)
+def test_staking_quote_asset_is_chain_wrapped_native(chain: str) -> None:
+    """Staking quotes PnL in the chain's wrapped native, resolved from ChainRegistry."""
+    code = generate_strategy_file(
+        name="Smoke Test",
+        template=StrategyTemplate.STAKING,
+        chain=chain,
+        output_dir=Path("."),
+    )
+    parsed = QuoteAsset.parse(_get_quote_asset_kwarg(code))
+    descriptor = ChainRegistry.resolve(chain)
+    assert parsed.chain_id == descriptor.chain_id
+    assert descriptor.native.wrapped_address is not None
+    assert parsed.address == QuoteAsset.token(descriptor.chain_id, descriptor.native.wrapped_address).address
+
+
+def test_staking_quote_asset_falls_back_to_usd_for_unknown_chain() -> None:
+    """A chain missing from ChainRegistry must fall back to USD, never a guessed address."""
+    code = generate_strategy_file(
+        name="Smoke Test",
+        template=StrategyTemplate.STAKING,
+        chain="notarealchain",
+        output_dir=Path("."),
+    )
+    assert QuoteAsset.parse(_get_quote_asset_kwarg(code)).kind == "fiat_usd"
 
 
 @pytest.mark.parametrize("template", ALL_TEMPLATES, ids=lambda t: t.value)
@@ -691,9 +749,7 @@ def test_lending_loop_borrow_transition() -> None:
 
     strat = _make_strategy()
     strat._loop_state = "supplied"
-    strat.on_intent_executed(
-        _make_mock_intent("BORROW", borrow_amount=Decimal("500")), success=True, result=None
-    )
+    strat.on_intent_executed(_make_mock_intent("BORROW", borrow_amount=Decimal("500")), success=True, result=None)
     assert strat._loop_state == "borrowed"
     assert strat._total_borrowed == Decimal("500")
 

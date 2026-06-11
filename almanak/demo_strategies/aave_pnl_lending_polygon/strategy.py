@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     supported_protocols=["aave_v3"],
     intent_types=["SUPPLY", "BORROW", "REPAY", "WITHDRAW", "HOLD"],
     default_chain="polygon",
+    quote_asset="USD",
 )
 class AavePnLLendingPolygonStrategy(IntentStrategy):
     """Aave V3 lending strategy for PnL backtesting on Polygon.

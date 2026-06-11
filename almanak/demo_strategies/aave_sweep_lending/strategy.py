@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     default_chain="arbitrum",
     supported_protocols=["aave_v3"],
     intent_types=["SUPPLY", "BORROW", "REPAY", "WITHDRAW", "HOLD"],
+    quote_asset="USD",
 )
 class AaveSweepLendingStrategy(IntentStrategy):
     """Aave V3 lending strategy with sweep-optimizable rate thresholds.

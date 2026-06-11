@@ -66,6 +66,7 @@ class AgniLPConfig:
     supported_protocols=["agni"],
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
     default_chain="mantle",
+    quote_asset="USD",
 )
 class AgniLPStrategy(IntentStrategy[AgniLPConfig]):
     """

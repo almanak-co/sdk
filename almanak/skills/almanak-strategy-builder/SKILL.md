@@ -224,7 +224,8 @@ to **USD** and is **definition-only** today: the hosted platform reads it for pe
 reporting, but the SDK does not change any valuation/accounting behaviour based on it — so
 adding it is always safe.
 
-- **USD (default):** omit it, or `quote_asset="USD"`.
+- **USD (default):** `quote_asset="USD"`. Declare it explicitly rather than omitting it —
+  the scaffold and packaged demos do, and an explicit value makes the choice reviewable.
 - **Token:** `quote_asset={"type": "token", "chain_id": <int>, "address": "0x..."}` (or
   `QuoteAsset.token(chain_id, address)` from `almanak.core.models.quote_asset`),
   identifying the token by its canonical `(chain_id, address)`. Use a **numeric `chain_id`

@@ -128,6 +128,7 @@ class MultiLPDualRangeConfig:
     supported_protocols=["uniswap_v3"],
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
     default_chain="arbitrum",
+    quote_asset="USD",
 )
 class MultiLPDualRangeStrategy(IntentStrategy[MultiLPDualRangeConfig]):
     def __init__(self, *args, **kwargs):

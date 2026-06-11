@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
     supported_protocols=["pancakeswap_v3"],
     intent_types=["SWAP", "HOLD"],
     default_chain="base",
+    quote_asset="USD",
 )
 class PancakeSwapV3SwapBaseStrategy(IntentStrategy):
     """Two-phase PancakeSwap V3 swap on Base.

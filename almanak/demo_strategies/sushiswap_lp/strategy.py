@@ -186,6 +186,7 @@ class SushiSwapLPConfig:
     # Types of intents this strategy may return
     intent_types=["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"],
     default_chain="arbitrum",
+    quote_asset="USD",
 )
 class SushiSwapLPStrategy(IntentStrategy[SushiSwapLPConfig]):
     """

@@ -88,6 +88,7 @@ if TYPE_CHECKING:
     default_chain="avalanche",
     supported_protocols=["traderjoe_v2"],
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
+    quote_asset="USD",
 )
 class TraderJoeSweepLPStrategy(IntentStrategy):
     """TraderJoe V2 Liquidity Book LP strategy with sweep-optimizable parameters.

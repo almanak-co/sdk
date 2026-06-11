@@ -189,6 +189,46 @@ class MyStrategy(IntentStrategy):
         return Intent.hold(reason="No opportunity")
 ```
 
+### Strategy Metadata (`@almanak_strategy`)
+
+The `@almanak_strategy` decorator attaches metadata used by the framework, CLI, and hosted platform:
+
+```python
+@almanak_strategy(
+    name="my_strategy",                  # Unique identifier
+    description="What it does",          # Human-readable description
+    version="1.0.0",
+    tags=["trading", "rsi"],             # Optional tags for discovery
+    supported_chains=["arbitrum"],
+    supported_protocols=["uniswap_v3"],
+    intent_types=["SWAP", "HOLD"],       # Every intent the strategy may return
+    default_chain="arbitrum",
+    quote_asset="USD",                   # Asset performance is measured in
+)
+class MyStrategy(IntentStrategy): ...
+```
+
+#### Quote asset (performance denomination)
+
+`quote_asset` declares the asset your strategy's performance (PnL / ROI) is measured in. It
+defaults to **USD** and is definition-only: the hosted platform reads it for performance
+reporting; it does not change valuation or execution behaviour. Declare it explicitly so the
+choice is visible.
+
+- **USD:** `quote_asset="USD"`. Correct for LP strategies (any pair), USD/stable lending and
+  vault yield, delta-neutral and basis trades, USD-collateral perps, and TA swaps that trade
+  for USD profit.
+- **Token:** `quote_asset={"type": "token", "chain_id": <int>, "address": "0x..."}`. Only for
+  strategies whose goal is to grow a quantity of that token — pure accumulators, native-asset
+  or liquid staking, same-asset-family leverage loops (e.g. wstETH collateral / WETH borrow),
+  and token-denominated yield (e.g. Pendle YT on wstETH). Use a **numeric `chain_id`**, never
+  a chain name, and represent native gas tokens by their wrapped ERC-20 (ETH→WETH, MNT→WMNT;
+  Solana uses `chain_id: 0` with WSOL).
+
+`quote_asset` is distinct from `quote_token` (a trading-pair leg in config). It can also be
+overridden per-deployment in `config.json` (`"quote_asset": "USD"` or the token object); the
+value is frozen at boot and is not hot-reloadable.
+
 ## Available Intents
 
 | Intent | Description |

@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     supported_protocols=["uniswap_v3"],
     intent_types=["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"],
     default_chain="xlayer",
+    quote_asset="USD",
 )
 class XLayerLPRebalanceStrategy(IntentStrategy):
     """Uniswap V3 concentrated LP lifecycle on X-Layer.

@@ -55,6 +55,7 @@ MIN_TEARDOWN_DUST_USD = Decimal("0.01")
     supported_protocols=["camelot"],
     intent_types=["SWAP", "HOLD"],
     default_chain="arbitrum",
+    quote_asset="USD",
 )
 class CamelotSwapStrategy(IntentStrategy):
     """Camelot swap demo: alternates BUY and SELL each iteration.

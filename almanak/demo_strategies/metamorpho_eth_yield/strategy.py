@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
     default_chain="ethereum",
     supported_protocols=["metamorpho"],
     intent_types=["VAULT_DEPOSIT", "VAULT_REDEEM", "HOLD"],
+    quote_asset="USD",
 )
 class MetaMorphoEthYield(IntentStrategy):
     """MetaMorpho yield strategy depositing USDC into Steakhouse vault.

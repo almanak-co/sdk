@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     supported_protocols=["uniswap_v3"],
     intent_types=["SWAP", "HOLD"],
     default_chain="arbitrum",
+    quote_asset="USD",
 )
 class UniswapV3RSISweepArbitrumStrategy(IntentStrategy):
     """RSI-based mean reversion strategy for parameter sweep on Arbitrum.

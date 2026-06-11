@@ -64,6 +64,7 @@ DEFAULT_MARKET_ID = "0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baa
     default_chain="ethereum",
     supported_protocols=["morpho_blue"],
     intent_types=["SUPPLY", "BORROW", "REPAY", "HOLD"],
+    quote_asset="USD",
 )
 class MorphoPaperTradeStrategy(IntentStrategy):
     """Morpho Blue lending strategy for paper trading validation.

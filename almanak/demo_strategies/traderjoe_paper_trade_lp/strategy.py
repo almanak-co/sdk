@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     supported_protocols=["traderjoe_v2"],
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
     default_chain="avalanche",
+    quote_asset="USD",
 )
 class TraderJoePaperTradeLPStrategy(IntentStrategy):
     """RSI-gated TraderJoe V2 LP strategy for paper trading validation.

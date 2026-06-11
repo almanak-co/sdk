@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     supported_protocols=["aave_v3"],
     intent_types=["SUPPLY", "BORROW", "REPAY", "WITHDRAW", "HOLD"],
     default_chain="ethereum",
+    quote_asset="USD",
 )
 class AaveV3PaperTradeEthereumStrategy(IntentStrategy):
     """Aave V3 lending lifecycle for paper trading on Ethereum.

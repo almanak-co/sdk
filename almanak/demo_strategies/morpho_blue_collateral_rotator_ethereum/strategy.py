@@ -70,6 +70,7 @@ MARKET_WSTETH_WETH = "0xc54d7acf14de29e0e5527cabd7a576506870346a78a11a6762e2cca6
     default_chain="ethereum",
     supported_protocols=["morpho_blue"],
     intent_types=["SUPPLY", "WITHDRAW", "HOLD"],
+    quote_asset="USD",
 )
 class MorphoBlueCollateralRotatorStrategy(IntentStrategy):
     """Morpho Blue collateral rotator for paper trading validation.

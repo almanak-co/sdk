@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
     default_chain="solana",
     supported_protocols=["jupiter"],
     intent_types=["SWAP"],
+    quote_asset={"type": "token", "chain_id": 0, "address": "So11111111111111111111111111111111111111112"},
 )
 class SolanaLstDepegArbStrategy(IntentStrategy):
     """Buy discounted LSTs during depeg events, sell on recovery."""

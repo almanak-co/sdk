@@ -104,6 +104,7 @@ class UniswapV4HooksConfig:
     supported_protocols=["uniswap_v4"],
     intent_types=["LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES", "SWAP", "HOLD"],
     default_chain="base",
+    quote_asset="USD",
 )
 class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
     """Hook-aware Uniswap V4 LP strategy (reference implementation).

@@ -68,6 +68,7 @@ WMON_USDC_MARKET = "0xa6A2A92F126b79Ee0804845ee6B52899b4491093"
     supported_protocols=["curvance"],
     intent_types=["BORROW", "REPAY", "WITHDRAW", "HOLD"],
     default_chain="monad",
+    quote_asset="USD",
 )
 class MonadCurvanceLendingStrategy(IntentStrategy):
     """Curvance lending lifecycle on Monad's WMON -> USDC isolated market."""

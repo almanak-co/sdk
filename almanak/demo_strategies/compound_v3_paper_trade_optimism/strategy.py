@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     default_chain="optimism",
     supported_protocols=["compound_v3"],
     intent_types=["SUPPLY", "WITHDRAW", "HOLD"],
+    quote_asset="USD",
 )
 class CompoundV3PaperTradeOptimismStrategy(IntentStrategy):
     """Price-gated Compound V3 USDC supply strategy for paper trading on Optimism.

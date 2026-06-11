@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     supported_protocols=["aerodrome"],
     intent_types=["SWAP", "HOLD"],
     default_chain="base",
+    quote_asset="USD",
 )
 class AerodromeRSIStrategy(IntentStrategy):
     """RSI-based swap strategy using Aerodrome on Base.

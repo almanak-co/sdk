@@ -55,6 +55,7 @@ logger = logging.getLogger(__name__)
     default_chain="bsc",
     supported_protocols=["aster_perps"],
     intent_types=["PERP_OPEN", "PERP_CLOSE", "HOLD"],
+    quote_asset="USD",
 )
 class AsterPerpsBasicStrategy(IntentStrategy):
     """Open-then-close BNB/USD long on Aster Perps via the canonical ``aster_perps`` route."""

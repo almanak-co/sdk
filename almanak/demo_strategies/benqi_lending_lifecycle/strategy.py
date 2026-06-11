@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     default_chain="avalanche",
     supported_protocols=["benqi"],
     intent_types=["BORROW", "REPAY", "WITHDRAW", "HOLD"],
+    quote_asset="USD",
 )
 class BenqiLendingLifecycleStrategy(IntentStrategy):
     """BENQI full lending lifecycle strategy on Avalanche.

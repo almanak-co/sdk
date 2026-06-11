@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     supported_protocols=["pancakeswap_v3"],
     intent_types=["SWAP", "HOLD"],
     default_chain="bsc",
+    quote_asset="USD",
 )
 class PancakeSwapPaperTradeBscStrategy(IntentStrategy):
     """RSI-gated PancakeSwap V3 swap strategy for paper trading on BSC.

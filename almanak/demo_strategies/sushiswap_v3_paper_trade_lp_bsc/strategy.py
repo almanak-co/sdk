@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     supported_protocols=["sushiswap_v3"],
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
     default_chain="bsc",
+    quote_asset="USD",
 )
 class SushiSwapV3PaperTradeLPBSCStrategy(IntentStrategy):
     """SushiSwap V3 LP lifecycle strategy for paper trading on BSC.

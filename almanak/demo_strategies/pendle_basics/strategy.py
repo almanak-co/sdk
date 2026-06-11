@@ -71,6 +71,7 @@ PENDLE_MARKETS = {
     supported_protocols=["pendle"],
     intent_types=["SWAP", "HOLD"],
     default_chain="arbitrum",
+    quote_asset="USD",
 )
 class PendleBasicsStrategy(IntentStrategy):
     """

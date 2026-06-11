@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     supported_protocols=["compound_v3"],
     intent_types=["SUPPLY", "WITHDRAW", "HOLD"],
     default_chain="polygon",
+    quote_asset="USD",
 )
 class CompoundV3CrisisPolygonStrategy(IntentStrategy):
     """Compound V3 lending strategy tuned for crisis scenario backtesting on Polygon.

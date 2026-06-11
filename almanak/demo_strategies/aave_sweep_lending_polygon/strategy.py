@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     supported_protocols=["aave_v3"],
     intent_types=["SUPPLY", "BORROW", "REPAY", "WITHDRAW", "HOLD"],
     default_chain="polygon",
+    quote_asset="USD",
 )
 class AaveSweepLendingPolygonStrategy(IntentStrategy):
     """Aave V3 lending strategy with sweep-optimizable rate thresholds on Polygon.

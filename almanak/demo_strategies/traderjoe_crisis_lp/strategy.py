@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     supported_protocols=["traderjoe_v2"],
     intent_types=["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"],
     default_chain="avalanche",
+    quote_asset="USD",
 )
 class TraderJoeCrisisLPStrategy(IntentStrategy):
     """TraderJoe V2 LP strategy tuned for crisis scenario backtesting.

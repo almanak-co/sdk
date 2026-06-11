@@ -101,6 +101,7 @@ logger = logging.getLogger(__name__)
     # HOLD: No action
     intent_types=["SWAP", "STAKE", "HOLD"],
     default_chain="ethereum",
+    quote_asset="USD",
 )
 class EthenaYieldStrategy(IntentStrategy):
     """

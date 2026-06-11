@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
     supported_protocols=["uniswap_v3"],
     intent_types=["SWAP", "HOLD"],
     default_chain="arbitrum",
+    quote_asset="USD",
 )
 class FluidSwapStrategy(IntentStrategy):
     """Simple USDC->USDT swap strategy on Arbitrum.

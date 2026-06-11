@@ -70,6 +70,7 @@ class LPLifecycleConfig:
     supported_protocols=["traderjoe_v2"],
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
     default_chain="avalanche",
+    quote_asset="USD",
 )
 class TraderJoeLPLifecycleStrategy(IntentStrategy[LPLifecycleConfig]):
     """TraderJoe V2 LP lifecycle: OPEN then CLOSE.

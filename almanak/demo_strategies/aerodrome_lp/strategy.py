@@ -134,6 +134,7 @@ class AerodromeLPConfig:
     # Types of intents this strategy may return
     intent_types=["LP_OPEN", "LP_CLOSE", "HOLD"],
     default_chain="base",
+    quote_asset="USD",
 )
 class AerodromeLPStrategy(IntentStrategy[AerodromeLPConfig]):
     """

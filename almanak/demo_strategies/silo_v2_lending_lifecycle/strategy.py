@@ -60,6 +60,7 @@ TRANSITIONAL_STATES = {SUPPLYING, WITHDRAWING}
     supported_protocols=["silo_v2"],
     intent_types=["SUPPLY", "WITHDRAW", "HOLD"],
     default_chain="avalanche",
+    quote_asset="USD",
 )
 class SiloV2LendingLifecycleAvalancheStrategy(IntentStrategy):
     """Silo V2 supply lifecycle on Avalanche.

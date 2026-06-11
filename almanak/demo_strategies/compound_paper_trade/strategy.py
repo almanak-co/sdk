@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     default_chain="base",
     supported_protocols=["compound_v3"],
     intent_types=["SUPPLY", "WITHDRAW", "HOLD"],
+    quote_asset="USD",
 )
 class CompoundPaperTradeStrategy(IntentStrategy):
     """Price-gated Compound V3 supply strategy for paper trading validation.

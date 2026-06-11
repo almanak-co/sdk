@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
     default_chain="solana",
     supported_protocols=["jupiter"],
     intent_types=["SWAP"],
+    quote_asset="USD",
 )
 class SolanaSwapStrategy(IntentStrategy):
     """Execute a single swap on Solana via Jupiter."""

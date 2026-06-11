@@ -175,6 +175,7 @@ logger = logging.getLogger(__name__)
     # Types of intents this strategy may return
     intent_types=["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"],
     default_chain="avalanche",
+    quote_asset="USD",
 )
 class TraderJoeLPStrategy(IntentStrategy[TraderJoeLPConfig]):
     """

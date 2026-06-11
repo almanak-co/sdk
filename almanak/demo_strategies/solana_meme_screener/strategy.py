@@ -83,6 +83,7 @@ def _score_meme_candidate(pair: DexPair) -> float:
     default_chain="solana",
     supported_protocols=["jupiter"],
     intent_types=["SWAP"],
+    quote_asset="USD",
 )
 class SolanaMemeScreenerStrategy(IntentStrategy):
     """Screen for trending Solana meme coins and trade the best one.

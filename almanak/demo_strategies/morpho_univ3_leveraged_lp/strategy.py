@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
     supported_protocols=["morpho_blue", "uniswap_v3"],
     intent_types=["SUPPLY", "BORROW", "SWAP", "LP_OPEN", "LP_CLOSE", "REPAY", "WITHDRAW", "HOLD"],
     default_chain="ethereum",
+    quote_asset="USD",
 )
 class MorphoUniV3LeveragedLPStrategy(IntentStrategy):
     """Leveraged LP: borrow against Morpho Blue collateral, LP on Uniswap V3."""

@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     supported_protocols=["spark"],
     intent_types=["SUPPLY", "BORROW", "REPAY", "WITHDRAW", "HOLD"],
     default_chain="ethereum",
+    quote_asset="USD",
 )
 class SparkLendingLifecycleStrategy(IntentStrategy):
     """Spark lending full lifecycle on Ethereum: supply wstETH -> borrow DAI -> repay -> withdraw.

@@ -220,6 +220,7 @@ class AerodromeSlipstreamLPConfig:
     supported_protocols=["aerodrome_slipstream"],
     intent_types=["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"],
     default_chain="base",
+    quote_asset="USD",
 )
 class AerodromeSlipstreamLPStrategy(IntentStrategy[AerodromeSlipstreamLPConfig]):
     """

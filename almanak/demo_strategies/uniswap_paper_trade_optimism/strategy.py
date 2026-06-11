@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     supported_protocols=["uniswap_v3"],
     intent_types=["SWAP", "HOLD"],
     default_chain="optimism",
+    quote_asset="USD",
 )
 class UniswapPaperTradeOptimismStrategy(IntentStrategy):
     """RSI-gated Uniswap V3 swap strategy for paper trading on Optimism.

@@ -100,6 +100,7 @@ def _score_pool_candidate(pair: DexPair, min_vol_tvl: float) -> float:
     default_chain="solana",
     supported_protocols=["meteora_dlmm", "raydium_clmm", "jupiter"],
     intent_types=["LP_OPEN", "LP_CLOSE", "SWAP"],
+    quote_asset="USD",
 )
 class SolanaNarrativeMomentumStrategy(IntentStrategy):
     """Screen for trending Solana pools and provide LP on the best one.

@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     supported_protocols=["aave_v3"],
     intent_types=["SUPPLY", "BORROW", "REPAY", "WITHDRAW", "HOLD"],
     default_chain="sonic",
+    quote_asset="USD",
 )
 class AaveV3LendingSonicStrategy(IntentStrategy):
     """Aave V3 lending full lifecycle on Sonic: supply -> borrow -> repay -> withdraw.

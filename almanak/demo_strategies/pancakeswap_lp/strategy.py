@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
     default_chain="arbitrum",
     supported_protocols=["pancakeswap_v3"],
     intent_types=["LP_OPEN", "LP_CLOSE", "SWAP", "HOLD"],
+    quote_asset="USD",
 )
 class PancakeSwapLPStrategy(IntentStrategy):
     """PancakeSwap V3 LP strategy for testing LP lifecycle on Arbitrum."""

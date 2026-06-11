@@ -121,6 +121,7 @@ _TERMINAL_PHASES = frozenset({PERP_OPEN_FAILED, LP_OPEN_FAILED, RECOVERY_REQUIRE
     default_chain="bsc",
     supported_protocols=["pancakeswap_v3", "pancakeswap_perps"],
     intent_types=["LP_OPEN", "LP_CLOSE", "PERP_OPEN", "PERP_CLOSE", "HOLD"],
+    quote_asset="USD",
 )
 class PancakeSwapDeltaNeutralLPStrategy(IntentStrategy):
     """PancakeSwap-only delta-neutral LP demo (BSC)."""

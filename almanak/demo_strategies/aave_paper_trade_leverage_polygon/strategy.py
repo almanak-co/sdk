@@ -68,6 +68,7 @@ TRANSITIONAL_STATES = {SUPPLYING, BORROWING, SWAPPING}
     supported_protocols=["aave_v3", "uniswap_v3"],
     intent_types=["SUPPLY", "BORROW", "SWAP", "REPAY", "WITHDRAW", "HOLD"],
     default_chain="polygon",
+    quote_asset="USD",
 )
 class AavePaperTradeLeveragePolygonStrategy(IntentStrategy):
     """Paper trading demo: Aave V3 + Uniswap V3 leverage loop on Polygon.

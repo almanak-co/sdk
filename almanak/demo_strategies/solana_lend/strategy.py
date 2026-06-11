@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
     default_chain="solana",
     supported_protocols=["kamino"],
     intent_types=["SUPPLY"],
+    quote_asset="USD",
 )
 class SolanaLendStrategy(IntentStrategy):
     """Supply tokens to Kamino Finance lending market."""

@@ -94,6 +94,7 @@ logger = logging.getLogger(__name__)
     # HOLD: No action
     intent_types=["SUPPLY", "HOLD"],
     default_chain="ethereum",
+    quote_asset="USD",
 )
 class SparkLenderStrategy(IntentStrategy):
     """
