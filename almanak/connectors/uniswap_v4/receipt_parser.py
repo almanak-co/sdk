@@ -434,6 +434,9 @@ class UniswapV4ReceiptParser:
 
         # Collect ERC-721 mint Transfer candidates as fallback
         fallback_candidates: list[tuple[int, str]] = []  # (token_id, emitting_address)
+        # Count ERC-721 *mints* (from == zero) seen in this receipt, to grade the
+        # terminal "no position ID found" diagnostic (VIB-2702, see below).
+        erc721_mint_count = 0
 
         for log in logs:
             topics = log.get("topics", [])
@@ -453,6 +456,9 @@ class UniswapV4ReceiptParser:
                     continue
             except (ValueError, TypeError):
                 continue
+
+            # Past this point the log is a genuine ERC-721 mint (from == zero).
+            erc721_mint_count += 1
 
             token_id_hex = topics[3] if isinstance(topics[3], str) else hex(topics[3])
             try:
@@ -496,18 +502,23 @@ class UniswapV4ReceiptParser:
             )
             return None
 
-        # Log diagnostic info when extraction fails completely
-        transfer_count = sum(
-            1
-            for log in logs
-            if len(log.get("topics", [])) >= 4
-            and (log["topics"][0].lower() if isinstance(log["topics"][0], str) else "") == TRANSFER_EVENT_TOPIC.lower()
-        )
-        logger.warning(
+        # Log diagnostic info when extraction fails completely.
+        #
+        # extract_position_id is called once per receipt in an LP_OPEN bundle, but
+        # only the final modifyLiquidities tx mints the position NFT — the leading
+        # ERC-20 approve + Permit2 txs legitimately carry no ERC-721 mint. Warning
+        # on those produces 4 spurious "no position ID found" lines per LP_OPEN
+        # (VIB-2702). Grade the diagnostic on whether this receipt contained any
+        # ERC-721 mint (from == zero) at all:
+        #   - zero ERC-721 mints  -> expected for approve/Permit2 txs -> DEBUG.
+        #   - one or more mints, but none from a known V4 PositionManager ->
+        #     genuine anomaly worth surfacing -> WARNING.
+        log_at = logger.warning if erc721_mint_count > 0 else logger.debug
+        log_at(
             "V4 extract_position_id: no position ID found. "
-            "total_logs=%d, erc721_transfer_events=%d, position_manager=%s, chain=%s, tx=%s",
+            "total_logs=%d, erc721_mint_events=%d, position_manager=%s, chain=%s, tx=%s",
             len(logs),
-            transfer_count,
+            erc721_mint_count,
             self.position_manager,
             self.chain,
             tx_hash,

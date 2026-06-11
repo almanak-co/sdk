@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 
 import pytest
 
 from almanak.connectors.uniswap_v4.receipt_parser import (
     EVENT_TOPICS,
-    ParseResult,
-    SwapEventData,
     UniswapV4EventType,
     UniswapV4ReceiptParser,
 )
-
 
 # =============================================================================
 # Helper: build mock receipts
@@ -711,6 +709,63 @@ class TestExtractPositionId:
 
         receipt = {"logs": [unknown_mint]}
         assert parser.extract_position_id(receipt) is None
+
+    def test_no_warning_when_receipt_has_no_erc721_mint(self, caplog: pytest.LogCaptureFixture):
+        """VIB-2702: approve / Permit2 txs in an LP_OPEN bundle carry no ERC-721
+        mint. extract_position_id is called on each, but a missing position id is
+        expected there — it must NOT emit a WARNING (only DEBUG), to avoid 4
+        spurious "no position ID found" lines per LP_OPEN."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        # An ERC-20 Transfer (3 topics) — not an ERC-721 mint; erc721_mint_count == 0.
+        erc20_transfer = _build_transfer_log(
+            token="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            from_addr="0x1111111111111111111111111111111111111111",
+            to_addr="0x2222222222222222222222222222222222222222",
+            amount=1000 * 10**6,
+        )
+        receipt = {"logs": [erc20_transfer]}
+        with caplog.at_level(logging.DEBUG, logger="almanak.connectors.uniswap_v4.receipt_parser"):
+            assert parser.extract_position_id(receipt) is None
+        records = [r for r in caplog.records if "no position ID found" in r.getMessage()]
+        assert records, "expected the diagnostic line to still be emitted (at DEBUG)"
+        assert all(r.levelno == logging.DEBUG for r in records), "must be DEBUG, not WARNING (VIB-2702)"
+
+    def test_no_warning_for_non_mint_erc721_transfer(self, caplog: pytest.LogCaptureFixture):
+        """VIB-2702: a non-mint ERC-721 Transfer (from != zero) is not a position
+        mint, so a missing position id is still expected -> DEBUG. Guards against
+        grading on "any 4-topic Transfer" instead of mints specifically."""
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
+
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        pm_addr = UNISWAP_V4["arbitrum"]["position_manager"]
+        # ERC-721 Transfer between two non-zero addresses (a transfer, not a mint).
+        non_mint = _build_erc721_transfer_log(
+            contract_address=pm_addr,
+            from_addr="0x1111111111111111111111111111111111111111",
+            to_addr="0x2222222222222222222222222222222222222222",
+            token_id=99,
+        )
+        receipt = {"logs": [non_mint]}
+        with caplog.at_level(logging.DEBUG, logger="almanak.connectors.uniswap_v4.receipt_parser"):
+            assert parser.extract_position_id(receipt) is None
+        records = [r for r in caplog.records if "no position ID found" in r.getMessage()]
+        assert records and all(r.levelno == logging.DEBUG for r in records)
+
+    def test_warns_when_erc721_mint_present_but_unmatched(self, caplog: pytest.LogCaptureFixture):
+        """VIB-2702: a receipt that DOES contain an ERC-721 mint but from no known
+        V4 PositionManager is a genuine anomaly — keep WARNING so it stays visible."""
+        parser = UniswapV4ReceiptParser(chain="arbitrum")
+        unknown_mint = _build_erc721_transfer_log(
+            contract_address="0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            from_addr="0x0000000000000000000000000000000000000000",
+            to_addr="0x1111111111111111111111111111111111111111",
+            token_id=111,
+        )
+        receipt = {"logs": [unknown_mint]}
+        with caplog.at_level(logging.DEBUG, logger="almanak.connectors.uniswap_v4.receipt_parser"):
+            assert parser.extract_position_id(receipt) is None
+        records = [r for r in caplog.records if "no position ID found" in r.getMessage()]
+        assert records and all(r.levelno == logging.WARNING for r in records)
 
 
 # =============================================================================
