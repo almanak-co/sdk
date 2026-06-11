@@ -23,6 +23,7 @@ __all__ = [
     "RunnerLPReceiptTopicCapability",
     "RunnerPoolKeyLookupCapability",
     "RunnerResultEnrichmentCapability",
+    "RunnerV4PositionStateCapability",
 ]
 
 
@@ -55,6 +56,20 @@ class RunnerPoolKeyLookupCapability(Protocol):
     def build_pool_key_lookup(self, gateway_client: Any) -> Any | None: ...
 
 
+@runtime_checkable
+class RunnerV4PositionStateCapability(Protocol):
+    """Connector builds a live V4 LP on-chain position-state reader (VIB-5024).
+
+    The returned callback maps ``(chain, token_id) → V4PositionState | None``,
+    resolving the connector-owned PositionManager / StateView addresses and
+    routing the read through the gateway ``QueryV4PositionState`` RPC. Keeps the
+    framework valuer free of any hard-coded V4 protocol addresses while the
+    on-chain read stays boundary-compliant.
+    """
+
+    def build_v4_position_state_reader(self, gateway_client: Any) -> Any | None: ...
+
+
 class RunnerHookConnector:
     """Base class for strategy-runner hook connector instances."""
 
@@ -84,6 +99,7 @@ class RunnerHookRegistry:
             isinstance(connector, RunnerLPReceiptTopicCapability)
             or isinstance(connector, RunnerResultEnrichmentCapability)
             or isinstance(connector, RunnerPoolKeyLookupCapability)
+            or isinstance(connector, RunnerV4PositionStateCapability)
         ):
             raise RunnerHookRegistryError(
                 "register() expects a connector implementing at least one runner hook capability; "
@@ -152,6 +168,16 @@ class RunnerHookRegistry:
                 return lookup
         return None
 
+    def build_v4_position_state_reader(self, gateway_client: Any) -> Any | None:
+        """Build the first connector-provided live V4 position-state reader (VIB-5024)."""
+        for connector in self._connectors.values():
+            if not isinstance(connector, RunnerV4PositionStateCapability):
+                continue
+            reader = connector.build_v4_position_state_reader(gateway_client)
+            if reader is not None:
+                return reader
+        return None
+
     def clear(self) -> None:
         """Test helper: clear registrations."""
         self._connectors.clear()
@@ -170,6 +196,8 @@ class RunnerHookRegistry:
             )
         if isinstance(connector, RunnerPoolKeyLookupCapability):
             cls._validate_method_signature(connector, "build_pool_key_lookup", positional_count=1)
+        if isinstance(connector, RunnerV4PositionStateCapability):
+            cls._validate_method_signature(connector, "build_v4_position_state_reader", positional_count=1)
 
     @classmethod
     def _validate_method_signature(

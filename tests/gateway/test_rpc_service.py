@@ -63,6 +63,45 @@ class TestChainRateLimiter:
         assert allowed is False
         assert wait_time > 0
 
+    @pytest.mark.asyncio
+    async def test_reserve_records_slots_atomically(self):
+        """reserve=True records the slots so the budget is consumed in one step."""
+        limiter = ChainRateLimiter(requests_per_minute=10)
+
+        allowed, wait_time = await limiter.check_rate_limit(5, reserve=True)
+        assert allowed is True
+        assert wait_time == 0.0
+        assert len(limiter.request_times) == 5  # reserved, not just checked
+
+        # A second 5-slot reservation now fits exactly (5 + 5 == 10).
+        allowed2, _ = await limiter.check_rate_limit(5, reserve=True)
+        assert allowed2 is True
+        assert len(limiter.request_times) == 10
+
+        # An 11th slot is over the cap.
+        allowed3, wait3 = await limiter.check_rate_limit(1)
+        assert allowed3 is False
+        assert wait3 > 0
+
+    @pytest.mark.asyncio
+    async def test_concurrent_reservations_cannot_oversubscribe(self):
+        """Two concurrent reserve(count) calls cannot both pass a near-full budget.
+
+        The check-then-record race (CodeRabbit): without atomic reservation, both
+        callers could pass an inspect-only check before either records. reserve=True
+        holds the lock across check+record, so at most the cap is consumed.
+        """
+        import asyncio
+
+        limiter = ChainRateLimiter(requests_per_minute=5)
+        results = await asyncio.gather(
+            limiter.check_rate_limit(5, reserve=True),
+            limiter.check_rate_limit(5, reserve=True),
+        )
+        allowed_count = sum(1 for ok, _ in results if ok)
+        assert allowed_count == 1  # exactly one reservation fits; the other is rejected
+        assert len(limiter.request_times) == 5  # never oversubscribed past the cap
+
 
 class TestRpcServiceCall:
     """Tests for RpcService.Call."""

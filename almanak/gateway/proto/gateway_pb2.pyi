@@ -4108,6 +4108,95 @@ class PositionTokensOwedResponse(_message.Message):
 Global___PositionTokensOwedResponse: _TypeAlias = PositionTokensOwedResponse  # noqa: Y015
 
 @_typing.final
+class V4PositionStateRequest(_message.Message):
+    """Live Uniswap V4 LP position state read (VIB-5024)."""
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    CHAIN_FIELD_NUMBER: _builtins.int
+    POSITION_MANAGER_FIELD_NUMBER: _builtins.int
+    STATE_VIEW_FIELD_NUMBER: _builtins.int
+    TOKEN_ID_FIELD_NUMBER: _builtins.int
+    chain: _builtins.str
+    """Chain identifier (e.g. "base")"""
+    position_manager: _builtins.str
+    """V4 PositionManager address (connector-resolved)"""
+    state_view: _builtins.str
+    """V4 StateView address (connector-resolved)"""
+    token_id: _builtins.int
+    """Position NFT token ID"""
+    def __init__(
+        self,
+        *,
+        chain: _builtins.str = ...,
+        position_manager: _builtins.str = ...,
+        state_view: _builtins.str = ...,
+        token_id: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "position_manager", b"position_manager", "state_view", b"state_view", "token_id", b"token_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___V4PositionStateRequest: _TypeAlias = V4PositionStateRequest  # noqa: Y015
+
+@_typing.final
+class V4PositionStateResponse(_message.Message):
+    """All numeric fields are decimal strings so the framework can distinguish
+    Empty (unmeasured: "") from a measured zero ("0"). ``success`` is true only
+    when liquidity AND ticks AND slot0 all read cleanly — a partial read is a
+    failure (the valuer falls back to the ESTIMATED OPEN-amount path) rather
+    than emitting a value at HIGH confidence from incomplete on-chain data.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    LIQUIDITY_FIELD_NUMBER: _builtins.int
+    TICK_LOWER_FIELD_NUMBER: _builtins.int
+    TICK_UPPER_FIELD_NUMBER: _builtins.int
+    CURRENT_TICK_FIELD_NUMBER: _builtins.int
+    SQRT_PRICE_X96_FIELD_NUMBER: _builtins.int
+    POOL_ID_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    TOKENS_OWED0_FIELD_NUMBER: _builtins.int
+    TOKENS_OWED1_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    liquidity: _builtins.str
+    """PositionManager.getPositionLiquidity (uint128) as decimal string"""
+    tick_lower: _builtins.int
+    """Position lower tick (int24)"""
+    tick_upper: _builtins.int
+    """Position upper tick (int24)"""
+    current_tick: _builtins.int
+    """Pool current tick from StateView.getSlot0 (int24)"""
+    sqrt_price_x96: _builtins.str
+    """Pool sqrtPriceX96 from StateView.getSlot0 as decimal string"""
+    pool_id: _builtins.str
+    """0x-prefixed 64-hex keccak of the PoolKey (identity cross-check)"""
+    error: _builtins.str
+    tokens_owed0: _builtins.str
+    """Uncollected fees token0 (uint128 raw) as decimal string; "" if unread"""
+    tokens_owed1: _builtins.str
+    """Uncollected fees token1 (uint128 raw) as decimal string; "" if unread"""
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        liquidity: _builtins.str = ...,
+        tick_lower: _builtins.int = ...,
+        tick_upper: _builtins.int = ...,
+        current_tick: _builtins.int = ...,
+        sqrt_price_x96: _builtins.str = ...,
+        pool_id: _builtins.str = ...,
+        error: _builtins.str = ...,
+        tokens_owed0: _builtins.str = ...,
+        tokens_owed1: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["current_tick", b"current_tick", "error", b"error", "liquidity", b"liquidity", "pool_id", b"pool_id", "sqrt_price_x96", b"sqrt_price_x96", "success", b"success", "tick_lower", b"tick_lower", "tick_upper", b"tick_upper", "tokens_owed0", b"tokens_owed0", "tokens_owed1", b"tokens_owed1"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___V4PositionStateResponse: _TypeAlias = V4PositionStateResponse  # noqa: Y015
+
+@_typing.final
 class BinanceTickerRequest(_message.Message):
     """=============================================================================
     Binance Integration Messages

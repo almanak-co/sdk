@@ -2286,6 +2286,11 @@ class RpcServiceStub(object):
                 request_serializer=gateway__pb2.PositionTokensOwedRequest.SerializeToString,
                 response_deserializer=gateway__pb2.PositionTokensOwedResponse.FromString,
                 _registered_method=True)
+        self.QueryV4PositionState = channel.unary_unary(
+                '/almanak.gateway.proto.RpcService/QueryV4PositionState',
+                request_serializer=gateway__pb2.V4PositionStateRequest.SerializeToString,
+                response_deserializer=gateway__pb2.V4PositionStateResponse.FromString,
+                _registered_method=True)
 
 
 class RpcServiceServicer(object):
@@ -2337,6 +2342,24 @@ class RpcServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def QueryV4PositionState(self, request, context):
+        """Query live Uniswap V4 LP position state on-chain (VIB-5024).
+
+        V4 LP positions do NOT live on the V3 NonfungiblePositionManager, so the
+        V3-shaped positions(uint256) read above corrupts a V4 tokenId. This RPC
+        reads the canonical V4 PositionManager + StateView state needed for an
+        exact (HIGH-confidence) concentrated-liquidity valuation:
+        liquidity ← PositionManager.getPositionLiquidity(tokenId)
+        poolKey + tickLower/tickUpper ← PositionManager.getPoolAndPositionInfo(tokenId)
+        sqrtPriceX96 + currentTick ← StateView.getSlot0(poolKey)
+        Addresses (position_manager, state_view) are supplied by the connector-owned
+        caller — the gateway stays addressing-agnostic, exactly like
+        QueryPositionLiquidity takes position_manager from the caller.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_RpcServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -2369,6 +2392,11 @@ def add_RpcServiceServicer_to_server(servicer, server):
                     servicer.QueryPositionTokensOwed,
                     request_deserializer=gateway__pb2.PositionTokensOwedRequest.FromString,
                     response_serializer=gateway__pb2.PositionTokensOwedResponse.SerializeToString,
+            ),
+            'QueryV4PositionState': grpc.unary_unary_rpc_method_handler(
+                    servicer.QueryV4PositionState,
+                    request_deserializer=gateway__pb2.V4PositionStateRequest.FromString,
+                    response_serializer=gateway__pb2.V4PositionStateResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -2537,6 +2565,33 @@ class RpcService(object):
             '/almanak.gateway.proto.RpcService/QueryPositionTokensOwed',
             gateway__pb2.PositionTokensOwedRequest.SerializeToString,
             gateway__pb2.PositionTokensOwedResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def QueryV4PositionState(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.RpcService/QueryV4PositionState',
+            gateway__pb2.V4PositionStateRequest.SerializeToString,
+            gateway__pb2.V4PositionStateResponse.FromString,
             options,
             channel_credentials,
             insecure,

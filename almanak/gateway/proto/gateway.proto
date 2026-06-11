@@ -1256,6 +1256,20 @@ service RpcService {
 
   // Query Uniswap V3 position tokens owed (fees + withdrawn liquidity).
   rpc QueryPositionTokensOwed(PositionTokensOwedRequest) returns (PositionTokensOwedResponse);
+
+  // Query live Uniswap V4 LP position state on-chain (VIB-5024).
+  //
+  // V4 LP positions do NOT live on the V3 NonfungiblePositionManager, so the
+  // V3-shaped positions(uint256) read above corrupts a V4 tokenId. This RPC
+  // reads the canonical V4 PositionManager + StateView state needed for an
+  // exact (HIGH-confidence) concentrated-liquidity valuation:
+  //   liquidity ← PositionManager.getPositionLiquidity(tokenId)
+  //   poolKey + tickLower/tickUpper ← PositionManager.getPoolAndPositionInfo(tokenId)
+  //   sqrtPriceX96 + currentTick ← StateView.getSlot0(poolKey)
+  // Addresses (position_manager, state_view) are supplied by the connector-owned
+  // caller — the gateway stays addressing-agnostic, exactly like
+  // QueryPositionLiquidity takes position_manager from the caller.
+  rpc QueryV4PositionState(V4PositionStateRequest) returns (V4PositionStateResponse);
 }
 
 message RpcRequest {
@@ -1331,6 +1345,32 @@ message PositionTokensOwedResponse {
   string tokens_owed0 = 2;        // tokensOwed0 as decimal string (wei)
   string tokens_owed1 = 3;        // tokensOwed1 as decimal string (wei)
   string error = 4;
+}
+
+// Live Uniswap V4 LP position state read (VIB-5024).
+message V4PositionStateRequest {
+  string chain = 1;               // Chain identifier (e.g. "base")
+  string position_manager = 2;    // V4 PositionManager address (connector-resolved)
+  string state_view = 3;          // V4 StateView address (connector-resolved)
+  uint64 token_id = 4;            // Position NFT token ID
+}
+
+// All numeric fields are decimal strings so the framework can distinguish
+// Empty (unmeasured: "") from a measured zero ("0"). ``success`` is true only
+// when liquidity AND ticks AND slot0 all read cleanly — a partial read is a
+// failure (the valuer falls back to the ESTIMATED OPEN-amount path) rather
+// than emitting a value at HIGH confidence from incomplete on-chain data.
+message V4PositionStateResponse {
+  bool success = 1;
+  string liquidity = 2;           // PositionManager.getPositionLiquidity (uint128) as decimal string
+  int32 tick_lower = 3;           // Position lower tick (int24)
+  int32 tick_upper = 4;           // Position upper tick (int24)
+  int32 current_tick = 5;         // Pool current tick from StateView.getSlot0 (int24)
+  string sqrt_price_x96 = 6;      // Pool sqrtPriceX96 from StateView.getSlot0 as decimal string
+  string pool_id = 7;             // 0x-prefixed 64-hex keccak of the PoolKey (identity cross-check)
+  string error = 8;
+  string tokens_owed0 = 9;        // Uncollected fees token0 (uint128 raw) as decimal string; "" if unread
+  string tokens_owed1 = 10;       // Uncollected fees token1 (uint128 raw) as decimal string; "" if unread
 }
 
 // =============================================================================

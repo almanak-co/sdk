@@ -21,6 +21,25 @@ logger = logging.getLogger(__name__)
 AUTH_METADATA_KEY = "authorization"
 
 
+@dataclass(frozen=True)
+class V4PositionState:
+    """Live on-chain state of a Uniswap V4 LP position (VIB-5024).
+
+    Read via the gateway ``QueryV4PositionState`` RPC. All amounts are integers
+    (wei / raw tick units) — exactly what ``value_lp_position`` consumes for an
+    exact, HIGH-confidence concentrated-liquidity valuation.
+    """
+
+    liquidity: int
+    tick_lower: int
+    tick_upper: int
+    current_tick: int
+    sqrt_price_x96: int
+    pool_id: str
+    tokens_owed0: int = 0
+    tokens_owed1: int = 0
+
+
 class _AuthClientInterceptor(
     grpc.UnaryUnaryClientInterceptor,
     grpc.UnaryStreamClientInterceptor,
@@ -1002,6 +1021,82 @@ class GatewayClient:
         except grpc.RpcError as e:
             logger.warning(f"QueryPositionTokensOwed RPC error: {e}")
             return None
+
+    def query_v4_position_state(
+        self,
+        chain: str,
+        position_manager: str,
+        state_view: str,
+        token_id: int,
+    ) -> "V4PositionState | None":
+        """Read live Uniswap V4 LP position state on-chain via the gateway (VIB-5024).
+
+        Args:
+            chain: Chain identifier (e.g. "base").
+            position_manager: V4 PositionManager address (connector-resolved).
+            state_view: V4 StateView address (connector-resolved).
+            token_id: Position NFT token ID.
+
+        Returns:
+            A :class:`V4PositionState` on a clean full read, or ``None`` when the
+            gateway reports failure / a partial read / the RPC errors. ``None``
+            means "no live on-chain truth" — the valuer falls back to the
+            ESTIMATED OPEN-amount path rather than ever valuing at HIGH from
+            incomplete data (the never-wrong-HIGH guarantee).
+        """
+        from almanak.gateway.proto import gateway_pb2
+
+        if self._rpc_stub is None:
+            logger.warning("Gateway client not connected")
+            return None
+
+        try:
+            response = self._rpc_stub.QueryV4PositionState(
+                gateway_pb2.V4PositionStateRequest(
+                    chain=chain,
+                    position_manager=position_manager,
+                    state_view=state_view,
+                    token_id=token_id,
+                ),
+                timeout=self.config.timeout,
+            )
+        except grpc.RpcError as e:
+            logger.warning(f"QueryV4PositionState RPC error: {e}")
+            return None
+
+        if not response.success:
+            logger.info(
+                "QueryV4PositionState did not return live state; valuer will fall back to ESTIMATED",
+                extra={"token_id": token_id, "chain": chain, "error": response.error or ""},
+            )
+            return None
+
+        # Empty ≠ Zero: the gateway emits "" only on failure (success=False,
+        # handled above). On success the numeric strings are always populated;
+        # a measured-zero liquidity ("0") is a valid closed-but-owned position.
+        try:
+            liquidity = int(response.liquidity) if response.liquidity != "" else None
+            sqrt_price_x96 = int(response.sqrt_price_x96) if response.sqrt_price_x96 != "" else None
+            # Fees are part of a complete HIGH read (V3 parity); the gateway fails
+            # closed if it cannot measure them, so on success they are populated.
+            tokens_owed0 = int(response.tokens_owed0) if response.tokens_owed0 != "" else None
+            tokens_owed1 = int(response.tokens_owed1) if response.tokens_owed1 != "" else None
+        except (ValueError, TypeError):
+            logger.warning("QueryV4PositionState returned unparseable numeric fields; treating as no live state")
+            return None
+        if liquidity is None or sqrt_price_x96 is None or tokens_owed0 is None or tokens_owed1 is None:
+            return None
+
+        return V4PositionState(
+            liquidity=liquidity,
+            tick_lower=int(response.tick_lower),
+            tick_upper=int(response.tick_upper),
+            current_tick=int(response.current_tick),
+            sqrt_price_x96=sqrt_price_x96,
+            pool_id=response.pool_id or "",
+            tokens_owed0=tokens_owed0,
+            tokens_owed1=tokens_owed1,
+        )
 
 
 # =============================================================================

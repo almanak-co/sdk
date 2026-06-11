@@ -578,3 +578,230 @@ class TestHostedHydrationPayload:
         absent = _open_event_payload({})
         assert absent["amount0"] == ""
         assert absent["amount1"] == ""
+
+
+# ===========================================================================
+# VIB-5024 — live on-chain read → HIGH confidence (ESTIMATED → HIGH upgrade)
+# ===========================================================================
+
+
+def _live_state(
+    *,
+    liquidity=1002136843936,
+    tick_lower=-887220,
+    tick_upper=887220,
+    current_tick=-50,
+    sqrt_price_x96=79228162514264337593543950336,
+    pool_id=_POOL_ID,
+    tokens_owed0=0,
+    tokens_owed1=0,
+):
+    """A real V4PositionState as the gateway_client.query_v4_position_state would return."""
+    from almanak.framework.gateway_client import V4PositionState
+
+    return V4PositionState(
+        liquidity=liquidity,
+        tick_lower=tick_lower,
+        tick_upper=tick_upper,
+        current_tick=current_tick,
+        sqrt_price_x96=sqrt_price_x96,
+        pool_id=pool_id,
+        tokens_owed0=tokens_owed0,
+        tokens_owed1=tokens_owed1,
+    )
+
+
+def _gateway_with_live_state(state):
+    """A gateway_client mock whose ``query_v4_position_state`` returns ``state``.
+
+    Crucially stubbed at the gateway_client boundary (NOT above the
+    ``_reprice_v4_lp_live`` seam) so the connector-backed registry reader and the
+    valuer's concentrated-liquidity math run end-to-end (the #2678 lesson:
+    a fix that is inert in the live path passes unit tests stubbed too high)."""
+    from unittest.mock import MagicMock
+
+    gw = MagicMock()
+    gw.query_v4_position_state.return_value = state
+    return gw
+
+
+class TestV4LiveOnChainHigh:
+    """VIB-5024 — a successful live gateway read values the position at HIGH."""
+
+    def test_live_read_drives_high_confidence(self):
+        state = _live_state()
+        gateway = _gateway_with_live_state(state)
+        valuer = _valuer_with_open_event(gateway_client=gateway)
+        position = _v4_position()
+        market = _market({"WETH": Decimal("2500"), "USDC": Decimal("1")})
+        resolver = {_WETH_ADDR: ("WETH", 18), _USDC_ADDR: ("USDC", 6)}
+
+        with (
+            _patch_resolver(resolver),
+            patch.object(valuer, "_resolve_v4_pool_key", return_value=_pool_key()),
+        ):
+            value_usd, details, repriced = valuer._reprice_position_enriched(position, "base", market)
+
+        # The live boundary read actually fired (end-to-end, not stubbed above it).
+        gateway.query_v4_position_state.assert_called_once()
+        assert details["valuation_source"] == "v4_on_chain"
+        assert details["valuation_status"] == "onchain"  # NOT "estimated"
+        assert repriced is True
+        # Amounts come from live liquidity + tick math, not the OPEN amounts.
+        assert details["token0_symbol"] == "WETH"
+        assert details["token1_symbol"] == "USDC"
+        assert "liquidity" in details and details["liquidity"] == str(state.liquidity)
+        assert value_usd > 0
+
+        conf = valuer._determine_value_confidence(
+            positions=[MagicMock(details=details)],
+            wallet_balances=[],
+            positions_unavailable=False,
+            wallet_data_incomplete=False,
+        )
+        assert conf == ValueConfidence.HIGH
+
+    def test_high_value_includes_uncollected_fees(self):
+        """V3 parity: HIGH value = principal + uncollected fees (tokens_owed0/1)."""
+        # 1 WETH owed (1e18 @ $2500) + 1000 USDC owed (1e9 @ $1) = $3500 in fees.
+        owed0, owed1 = 10**18, 1000 * 10**6
+        state_no_fees = _live_state(tokens_owed0=0, tokens_owed1=0)
+        state_fees = _live_state(tokens_owed0=owed0, tokens_owed1=owed1)
+        market = _market({"WETH": Decimal("2500"), "USDC": Decimal("1")})
+        resolver = {_WETH_ADDR: ("WETH", 18), _USDC_ADDR: ("USDC", 6)}
+
+        def _value(state):
+            valuer = _valuer_with_open_event(gateway_client=_gateway_with_live_state(state))
+            with (
+                _patch_resolver(resolver),
+                patch.object(valuer, "_resolve_v4_pool_key", return_value=_pool_key()),
+            ):
+                v, details, _ = valuer._reprice_position_enriched(_v4_position(), "base", market)
+            return v, details
+
+        base_value, base_details = _value(state_no_fees)
+        fee_value, fee_details = _value(state_fees)
+
+        assert base_details["fees_usd"] == "0"
+        assert fee_details["tokens_owed0"] == str(owed0)
+        assert fee_details["tokens_owed1"] == str(owed1)
+        # principal identical; the delta is exactly the fee component ($3500).
+        assert Decimal(fee_details["fees_usd"]) == Decimal("3500")
+        assert fee_value - base_value == Decimal("3500")
+
+    def test_live_read_uses_exact_tick_math(self):
+        """A narrow in-range position values via sqrtPriceX96 tick math (exact)."""
+        # current_tick=0 in [-100, 100] → in range, mix of both tokens.
+        state = _live_state(
+            liquidity=10**18,
+            tick_lower=-100,
+            tick_upper=100,
+            current_tick=0,
+            sqrt_price_x96=79228162514264337593543950336,  # tick≈0
+        )
+        gateway = _gateway_with_live_state(state)
+        valuer = _valuer_with_open_event(gateway_client=gateway)
+        position = _v4_position()
+        market = _market({"WETH": Decimal("2500"), "USDC": Decimal("1")})
+        resolver = {_WETH_ADDR: ("WETH", 18), _USDC_ADDR: ("USDC", 6)}
+
+        with (
+            _patch_resolver(resolver),
+            patch.object(valuer, "_resolve_v4_pool_key", return_value=_pool_key()),
+        ):
+            _value, details, _repriced = valuer._reprice_position_enriched(position, "base", market)
+
+        assert details["in_range"] is True
+        assert Decimal(details["amount0"]) > 0
+        assert Decimal(details["amount1"]) > 0
+
+
+class TestV4LiveReadFallsBackToEstimated:
+    """When the live read is unavailable, fall back to the ESTIMATED OPEN-amount path."""
+
+    def test_live_read_failure_falls_back_to_estimated(self):
+        # Gateway returns None (partial / failed on-chain read).
+        gateway = _gateway_with_live_state(None)
+        valuer = _valuer_with_open_event(gateway_client=gateway)
+        position = _v4_position()
+        market = _market({"WETH": Decimal("2500"), "USDC": Decimal("1")})
+        resolver = {_WETH_ADDR: ("WETH", 18), _USDC_ADDR: ("USDC", 6)}
+
+        with (
+            _patch_resolver(resolver),
+            patch.object(valuer, "_resolve_v4_pool_key", return_value=_pool_key()),
+        ):
+            value_usd, details, repriced = valuer._reprice_position_enriched(position, "base", market)
+
+        gateway.query_v4_position_state.assert_called_once()
+        assert repriced is True
+        # Fell back to the ESTIMATED OPEN-amount re-mark — still correct, still ESTIMATED.
+        assert details["valuation_source"] == "v4_open_amounts"
+        assert details["valuation_status"] == "estimated"
+        assert Decimal("0.5") < value_usd < Decimal("50")
+
+    def test_onchain_poolid_mismatch_falls_back_to_estimated(self):
+        """Stored pool_id != on-chain pool_id → never value at HIGH (identity guard).
+
+        The gateway returns the AUTHORITATIVE pool_id (keccak of the tokenId's
+        PoolKey); symbols are resolved from the position's STORED pool_id. A
+        divergence means live amounts would pair with wrong-pool symbols — the
+        $289M identity-bug class — so the live tier must decline and fall back to
+        ESTIMATED rather than emit HIGH.
+        """
+        # Live read succeeds but reports a DIFFERENT pool than the stored one.
+        state = _live_state(pool_id="0x" + "ab" * 32)
+        gateway = _gateway_with_live_state(state)
+        valuer = _valuer_with_open_event(gateway_client=gateway)
+        position = _v4_position()  # stored pool_id == _POOL_ID (≠ the live state's)
+        market = _market({"WETH": Decimal("2500"), "USDC": Decimal("1")})
+        resolver = {_WETH_ADDR: ("WETH", 18), _USDC_ADDR: ("USDC", 6)}
+
+        with (
+            _patch_resolver(resolver),
+            patch.object(valuer, "_resolve_v4_pool_key", return_value=_pool_key()),
+        ):
+            value_usd, details, repriced = valuer._reprice_position_enriched(position, "base", market)
+
+        gateway.query_v4_position_state.assert_called_once()  # live read fired
+        assert repriced is True
+        # Declined HIGH on the identity divergence; used the ESTIMATED path instead.
+        assert details["valuation_status"] == "estimated"
+        assert details["valuation_source"] == "v4_open_amounts"
+        assert value_usd > 0
+
+    def test_live_read_failure_no_open_event_is_unavailable(self):
+        """Neither live read nor OPEN amounts → no_path → UNAVAILABLE (never wrong-HIGH)."""
+        gateway = _gateway_with_live_state(None)
+        valuer = _valuer_with_open_event(gateway_client=gateway, has_open=False)
+        position = _v4_position()
+        market = _market({"WETH": Decimal("2500"), "USDC": Decimal("1")})
+
+        with (
+            _patch_resolver({}),
+            patch.object(valuer, "_resolve_v4_pool_key", return_value=None),
+        ):
+            value_usd, details, repriced = valuer._reprice_position_enriched(position, "base", market)
+
+        assert repriced is False
+        assert value_usd == Decimal("0")
+        conf = valuer._determine_value_confidence(
+            positions=[MagicMock(details={**details, "valuation_status": "no_path"})],
+            wallet_balances=[],
+            positions_unavailable=True,
+            wallet_data_incomplete=False,
+        )
+        assert conf == ValueConfidence.UNAVAILABLE
+
+    def test_no_gateway_client_uses_estimated(self):
+        """No gateway → live tier short-circuits → ESTIMATED OPEN-amount path."""
+        valuer = _valuer_with_open_event(gateway_client=None)
+        position = _v4_position()
+        market = _market({"WETH": Decimal("2500"), "USDC": Decimal("1")})
+        resolver = {_WETH_ADDR: ("WETH", 18), _USDC_ADDR: ("USDC", 6)}
+
+        with _patch_resolver(resolver):
+            _value, details, repriced = valuer._reprice_position_enriched(position, "base", market)
+
+        assert repriced is True
+        assert details["valuation_status"] == "estimated"

@@ -11,7 +11,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | StateService | 29 | Strategy state persistence, portfolio snapshots/metrics, transaction ledger, accounting events, position events, accounting outbox, atomic ledger+registry writes, and cutover migration state |
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
-| RpcService | 6 | JSON-RPC proxy to blockchains with typed queries |
+| RpcService | 7 | JSON-RPC proxy to blockchains with typed queries |
 | IntegrationService | 13 | Third-party data (Binance, CoinGecko, TheGraph, CoinGecko Onchain, Zerion) |
 | DashboardService | 22 | Operator dashboard data, actions, transaction ledger, PnL/cost stack, audit posture, trade tape, activity feed, positions, reconciliation report, and operator reconciliation actions |
 | FundingRateService | 2 | Perpetual funding rates and spreads |
@@ -785,6 +785,22 @@ Query tokens owed to an LP position (typed convenience method).
 
 ```protobuf
 rpc QueryPositionTokensOwed(PositionTokensOwedRequest) returns (PositionTokensOwedResponse)
+```
+
+**Solana:** Returns "not applicable for Solana".
+
+### QueryV4PositionState
+
+Read live Uniswap V4 LP position state on-chain for HIGH-confidence valuation
+(VIB-5024). Performs read-only `eth_call`s against connector-supplied addresses:
+`PositionManager.getPositionLiquidity` / `getPoolAndPositionInfo`,
+`StateView.getSlot0`, and — for V3-parity uncollected fees —
+`StateView.getPositionInfo` / `getFeeGrowthInside`. Returns `success=False` on any
+partial / inconsistent read so the valuer falls back to the ESTIMATED tier rather
+than ever emitting an incomplete HIGH value (the never-wrong-HIGH guarantee).
+
+```protobuf
+rpc QueryV4PositionState(V4PositionStateRequest) returns (V4PositionStateResponse)
 ```
 
 **Solana:** Returns "not applicable for Solana".

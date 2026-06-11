@@ -1683,34 +1683,40 @@ class PortfolioValuer:
         chain: str,
         market: MarketDataSource,
     ) -> tuple[Decimal, dict[str, Any], bool]:
-        """Identity-faithful Uniswap V4 LP valuation (VIB-5018 / VIB-4586).
+        """Identity-faithful Uniswap V4 LP valuation (VIB-5018 / VIB-4586 / VIB-5024).
 
         V4 LP positions do NOT live on the V3 NonfungiblePositionManager, so the
         V3-shaped ``LPPositionReader.read_position`` cannot value them — routing a
         V4 tokenId there reads an unrelated NFT and corrupts both token identity
         and amount scaling (the $289M bug).
 
-        The gateway exposes ``LookupV4PoolKey`` (pool_id → PoolKey identity) but
-        no boundary-compliant V4 PositionManager liquidity/tick reader, and the
-        V4 strategy reports no liquidity/ticks on its open positions. So this path
-        values the position from the **receipt-parsed OPEN amounts** persisted on
-        the Layer-3 ``position_events`` row (``token0`` / ``token1`` / ``amount0``
-        / ``amount1`` in wei) re-marked at current prices:
+        Two valuation tiers, in confidence order:
 
-        1. Identity comes from the OPEN event's token symbols, cross-checked
-           against the canonical ``PoolKey`` resolved from the V4 ``pool_id`` via
-           the gateway (``LookupV4PoolKey`` — boundary compliant; no direct RPC).
-        2. Amounts are the actual opened token amounts (authoritative, identity-
-           faithful), re-priced at the current oracle price.
-        3. Confidence is ``ESTIMATED`` (``valuation_status="estimated"``): re-
-           marking the opening amounts ignores subsequent in-range drift /
-           fee accrual, so a reader must not treat it as HIGH on-chain truth.
+        - **HIGH (VIB-5024)**: read the *live* position liquidity + tick range +
+          pool slot0 on-chain through the gateway ``QueryV4PositionState`` RPC
+          (boundary-compliant; addresses resolved connector-side), then compute
+          exact amount0/amount1 via the shared concentrated-liquidity math
+          (``value_lp_position`` — the same helper V3 uses). This reflects
+          in-range drift, so it is true on-chain value.
+        - **ESTIMATED (VIB-5018 fallback)**: when the live read is unavailable,
+          value the position from the **receipt-parsed OPEN amounts** persisted on
+          the Layer-3 ``position_events`` row re-marked at current prices.
+          Identity comes from the OPEN event's token symbols, cross-checked
+          against the canonical ``PoolKey`` resolved via the gateway
+          (``LookupV4PoolKey``). Re-marking the opening amounts ignores subsequent
+          drift / fee accrual, so a reader must not treat it as HIGH.
 
         Returns ``(value_usd, enriched_details, repriced)``. ``repriced`` is
-        ``False`` only when the V4 path genuinely cannot produce a value (no
+        ``False`` only when neither tier can produce a value (no live read, no
         OPEN event, no identity, no price) — driving the snapshot to UNAVAILABLE
         (VIB-4584) rather than ever emitting a wrong value at HIGH confidence.
         """
+        # Tier 1 — live on-chain read (HIGH). Never wrong-HIGH: any miss returns
+        # None and falls through to the ESTIMATED OPEN-amount path below.
+        live = self._reprice_v4_lp_live(position, chain, market)
+        if live is not None:
+            return live
+
         try:
             open_amounts = self._v4_open_amounts(position)
             if open_amounts is None:
@@ -1761,6 +1767,160 @@ class PortfolioValuer:
         except Exception:
             logger.debug("V4 LP enriched re-pricing failed for %s", position.position_id, exc_info=True)
             return self._v4_no_path(position)
+
+    def _reprice_v4_lp_live(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, dict[str, Any], bool] | None:
+        """Tier-1 HIGH-confidence V4 LP valuation from a live on-chain read (VIB-5024).
+
+        Reads live liquidity + tick range + pool slot0 via the gateway
+        ``QueryV4PositionState`` RPC (boundary-compliant; addresses connector-
+        resolved), resolves identity-faithful token symbols (same path the
+        ESTIMATED tier uses — canonical PoolKey first, OPEN-event symbols as the
+        fallback pair), and computes exact amount0/amount1 with the shared
+        concentrated-liquidity math ``value_lp_position``.
+
+        Returns ``(value_usd, enriched_details, True)`` with
+        ``valuation_status="onchain"`` on success, or ``None`` when ANY input is
+        missing / unmeasured (no gateway, no live read, no identity, no price, no
+        decimals). ``None`` makes the caller fall back to the ESTIMATED OPEN-amount
+        path — never a wrong HIGH (VIB-4584 / never-wrong-HIGH guarantee).
+        """
+        try:
+            state = self._v4_live_state(position, chain)
+            if state is None:
+                return None
+
+            # Identity integrity (never-wrong-HIGH): the gateway returns the
+            # AUTHORITATIVE pool_id — keccak of the *tokenId's* on-chain PoolKey —
+            # while symbols below are resolved from the position's STORED pool_id.
+            # If a corrupt stored pool_id disagrees with the tokenId's real pool,
+            # live on-chain amounts would pair with wrong-pool symbols at HIGH
+            # confidence (the $289M identity-bug class). When both are present and
+            # diverge, fall back to ESTIMATED rather than value at HIGH.
+            stored_pool_id = self._extract_v4_pool_id(position)
+            state_pool_id = (getattr(state, "pool_id", "") or "").lower().removeprefix("0x")
+            if stored_pool_id and state_pool_id and stored_pool_id != state_pool_id:
+                logger.warning(
+                    "V4 live re-pricing: stored pool_id 0x%s != on-chain pool_id 0x%s for "
+                    "position %s; falling back to ESTIMATED (never wrong-HIGH)",
+                    stored_pool_id,
+                    state_pool_id,
+                    position.position_id,
+                )
+                return None
+
+            # Identity: prefer the canonical PoolKey, fall back to the OPEN
+            # event's (already canonically-sorted) symbol pair. The receipt parser
+            # emits the OPEN amounts in canonical currency0<currency1 order, the
+            # same order the live on-chain amounts use — so reusing the OPEN-event
+            # symbols as the identity source keeps amount↔symbol alignment intact.
+            # We reuse the OPEN-event symbols only as the identity source — the
+            # AMOUNTS here are the live on-chain amounts, not the opening amounts.
+            open_amounts = self._v4_open_amounts(position)
+            token0_open = open_amounts[0] if open_amounts else ""
+            token1_open = open_amounts[1] if open_amounts else ""
+            token0_symbol, token1_symbol = self._resolve_v4_symbols(position, chain, token0_open, token1_open)
+            if not token0_symbol or not token1_symbol:
+                return None
+
+            try:
+                token0_price = Decimal(str(market.price(token0_symbol)))
+                token1_price = Decimal(str(market.price(token1_symbol)))
+            except Exception:
+                return None
+            if token0_price <= 0 or token1_price <= 0:
+                return None
+
+            token0_decimals = self._get_token_decimals(token0_symbol, chain)
+            token1_decimals = self._get_token_decimals(token1_symbol, chain)
+            if token0_decimals is None or token1_decimals is None:
+                return None
+
+            lp_value = value_lp_position(
+                liquidity=state.liquidity,
+                tick_lower=state.tick_lower,
+                tick_upper=state.tick_upper,
+                current_tick=state.current_tick,
+                token0_price_usd=token0_price,
+                token1_price_usd=token1_price,
+                token0_decimals=token0_decimals,
+                token1_decimals=token1_decimals,
+                sqrt_price_x96=state.sqrt_price_x96,
+            )
+
+            # V3 parity (VIB-5024): a HIGH valuation includes uncollected fees.
+            # ``state`` duck-types as ``LPPositionOnChain`` (tokens_owed0/1); the
+            # gateway fails closed if it cannot measure them, so on a live read
+            # they are present (measured 0 stays 0 — Empty≠Zero).
+            fees_usd = self._compute_lp_uncollected_fees_usd(
+                state,
+                token0_price,
+                token1_price,
+                token0_decimals,
+                token1_decimals,
+            )
+            total_value_usd = lp_value.value_usd + fees_usd
+
+            enriched = {
+                "position_id": str(position.position_id or ""),
+                "amount0": str(lp_value.amount0),
+                "amount1": str(lp_value.amount1),
+                "token0_value_usd": str(lp_value.token0_value_usd),
+                "token1_value_usd": str(lp_value.token1_value_usd),
+                "tokens_owed0": str(state.tokens_owed0),
+                "tokens_owed1": str(state.tokens_owed1),
+                "fees_usd": str(fees_usd),
+                "in_range": lp_value.in_range,
+                "tick_lower": state.tick_lower,
+                "tick_upper": state.tick_upper,
+                "liquidity": str(state.liquidity),
+                "token0_symbol": token0_symbol,
+                "token1_symbol": token1_symbol,
+                "valuation_source": "v4_on_chain",
+                "valuation_status": "onchain",
+            }
+            return total_value_usd, enriched, True
+        except Exception:
+            logger.debug("V4 live LP re-pricing failed for %s", position.position_id, exc_info=True)
+            return None
+
+    def _v4_live_state(self, position: "PositionInfo", chain: str) -> Any | None:
+        """Read live V4 position state via the connector-backed gateway reader (VIB-5024).
+
+        Boundary-compliant AND connector-self-contained: routes through the
+        protocol-agnostic ``STRATEGY_RUNNER_HOOK_REGISTRY.build_v4_position_state_reader``
+        capability seam, which the V4 connector backs with the gateway
+        ``QueryV4PositionState`` RPC (PositionManager + StateView addresses
+        resolved connector-side). Returns ``None`` on any miss (no gateway, no
+        token_id, no reader capability, gateway failure) so the caller falls back
+        to the ESTIMATED OPEN-amount path.
+        """
+        if self._gateway_client is None:
+            return None
+        token_id = self._extract_token_id(position)
+        if token_id is None:
+            return None
+        try:
+            from almanak.connectors._strategy_runner_hook_registry import (
+                STRATEGY_RUNNER_HOOK_REGISTRY,
+            )
+
+            reader = STRATEGY_RUNNER_HOOK_REGISTRY.build_v4_position_state_reader(self._gateway_client)
+            if reader is None:
+                return None
+            return reader(chain, token_id)
+        except Exception:
+            logger.debug(
+                "V4 live position-state read failed for position=%s token_id=%s",
+                position.position_id,
+                token_id,
+                exc_info=True,
+            )
+            return None
 
     def _v4_open_amounts(self, position: "PositionInfo") -> tuple[str, str, int, int] | None:
         """Read the OPEN ``position_events`` row for a V4 LP position.
