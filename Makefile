@@ -1,4 +1,4 @@
-.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline check-accounting-ratchet scan-coupling scan-coupling-report scan-coupling-baseline
+.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet scan-coupling scan-coupling-report scan-coupling-baseline
 
 # Load .env file if it exists
 -include .env
@@ -105,6 +105,12 @@ check-decimal-policy:
 
 check-decimal-policy-baseline:
 	uv run python scripts/ci/check_decimal_policy.py --baseline
+
+# Content-keyed contract-gate baselines (bifurcation / private-cache /
+# direct-constructor). Regenerate after legitimately adding or removing a
+# tracked site — pure line moves no longer require any baseline change.
+regen-contract-baselines:
+	uv run python scripts/ci/contract_gate_baselines.py
 
 # Accountant-Test ratchet gate (VIB-3836). Runs the 21-cell Accountant Test
 # against the committed frozen fixtures (tests/fixtures/accounting/{lp,looping,
