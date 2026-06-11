@@ -160,8 +160,13 @@ scan-coupling-baseline:
 # Also runs the strategy-egress guard (plans/003): unmarked direct-egress
 # imports/calls in ``strategies/incubating/**`` and ``strategies/experiments/**``
 # fail here and in the tests/ CI sweep.
+# Also runs the framework→gateway import ratchet (plan 013): freezes the
+# 53 existing (path, import) sites in a content-keyed baseline and fails
+# on any NEW ``almanak.gateway.*`` import from ``almanak/framework/``;
+# ``almanak.gateway.proto`` (the sanctioned gRPC channel) is exempt;
+# the baseline only shrinks — stale entries fail until removed.
 check-gateway-isolation:
-	uv run pytest tests/static/test_gateway_protocol_isolation.py tests/static/test_strategy_egress_guard.py --import-mode=importlib
+	uv run pytest tests/static/test_gateway_protocol_isolation.py tests/static/test_strategy_egress_guard.py tests/static/test_framework_gateway_import_ratchet.py --import-mode=importlib
 
 # Run security checks (bandit for Python security issues)
 security:
