@@ -38,6 +38,7 @@ from almanak.core.chainlink import (
     TOKEN_TO_ETH_PAIR,
     TOKEN_TO_PAIR,
 )
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.data.interfaces import (
     BasePriceSource,
     DataSourceUnavailable,
@@ -98,7 +99,7 @@ class OnChainPriceSource(BasePriceSource):
 
     def __init__(
         self,
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
         network: str = "mainnet",
         cache_ttl: float = 10.0,
         request_timeout: float = 5.0,

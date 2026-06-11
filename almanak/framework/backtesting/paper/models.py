@@ -16,6 +16,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
+from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
+
 
 class PaperTradeErrorType(StrEnum):
     """Types of errors that can occur during paper trading.
@@ -389,7 +391,7 @@ class PaperTradingSummary:
     total_trades: int
     successful_trades: int
     failed_trades: int
-    chain: str = "arbitrum"
+    chain: str = DEFAULT_CHAIN
     initial_balances: dict[str, Decimal] = field(default_factory=dict)
     final_balances: dict[str, Decimal] = field(default_factory=dict)
     total_gas_used: int = 0
@@ -591,7 +593,7 @@ class PaperTradingSummary:
             total_trades=data["total_trades"],
             successful_trades=data["successful_trades"],
             failed_trades=data["failed_trades"],
-            chain=data.get("chain", "arbitrum"),
+            chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
             initial_balances={k: Decimal(v) for k, v in data.get("initial_balances", {}).items()},
             final_balances={k: Decimal(v) for k, v in data.get("final_balances", {}).items()},
             total_gas_used=data.get("total_gas_used", 0),

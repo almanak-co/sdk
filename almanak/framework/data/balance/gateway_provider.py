@@ -14,6 +14,7 @@ import time
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.accounting.gas_pricing import native_token_for_chain
 from almanak.framework.data.interfaces import BalanceProvider, BalanceResult
 from almanak.framework.gateway_client import GatewayClient
@@ -75,7 +76,7 @@ class GatewayBalanceProvider(BalanceProvider):
         self,
         client: GatewayClient,
         wallet_address: str,
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
         timeout: float = 30.0,
         cache_ttl: float = 30.0,
     ):

@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
 from almanak.framework.backtesting.paper.models import (
     PaperTrade,
     PaperTradeError,
@@ -75,7 +76,7 @@ class PaperPortfolioTracker:
     """
 
     deployment_id: str
-    chain: str = "arbitrum"
+    chain: str = DEFAULT_CHAIN
     initial_balances: dict[str, Decimal] = field(default_factory=dict)
     current_balances: dict[str, Decimal] = field(default_factory=dict)
     trades: list[PaperTrade] = field(default_factory=list)
@@ -87,7 +88,7 @@ class PaperPortfolioTracker:
     def start_session(
         self,
         initial_balances: dict[str, Decimal],
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
     ) -> None:
         """Start a new paper trading session.
 
@@ -427,7 +428,7 @@ class PaperPortfolioTracker:
         """
         tracker = cls(
             deployment_id=data["deployment_id"],
-            chain=data.get("chain", "arbitrum"),
+            chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
         )
 
         # Restore session state

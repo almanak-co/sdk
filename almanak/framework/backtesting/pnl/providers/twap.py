@@ -27,6 +27,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.data.interfaces import DataSourceUnavailable
 
 if TYPE_CHECKING:
@@ -273,7 +274,7 @@ class TWAPDataProvider:
 
     def __init__(
         self,
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
         rpc_url: str = "",
         observation_window_seconds: int | None = None,
         cache_ttl_seconds: int = 60,

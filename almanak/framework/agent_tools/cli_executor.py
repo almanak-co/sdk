@@ -18,6 +18,7 @@ import click
 logger = logging.getLogger(__name__)
 
 from almanak.config.runtime import private_key_from_env
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.agent_tools.executor import ToolExecutor
 from almanak.framework.agent_tools.policy import AgentPolicy
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
@@ -38,7 +39,7 @@ def create_cli_executor(
     *,
     gateway_host: str = "localhost",
     gateway_port: int = 50051,
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
     wallet_address: str = "",
     max_single_trade_usd: float = 10000,
     max_daily_spend_usd: float = 50000,

@@ -44,7 +44,7 @@ from almanak.connectors._strategy_base.base.compiler import (
 from almanak.connectors._strategy_base.base.swap_adapter import DefaultSwapAdapter
 from almanak.connectors._strategy_base.compiler_registry import get_compiler as get_connector_compiler
 from almanak.connectors._strategy_base.pool_validation_base import PoolValidationReason
-from almanak.core.chains import ChainRegistry
+from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
 from almanak.core.chains._helpers import native_symbols_for
 
 from ..chain_family import ChainFamilyAdapter, all_families, family_for
@@ -413,7 +413,7 @@ class IntentCompiler:
 
     def __init__(
         self,
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
         wallet_address: str = "0x0000000000000000000000000000000000000000",
         default_protocol: str = "uniswap_v3",
         price_oracle: dict[str, Decimal] | None = None,

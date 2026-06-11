@@ -49,6 +49,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
+from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
 from almanak.core.constants import STABLECOINS
 from almanak.core.enums import Chain
 from almanak.framework.backtesting.adapters.base import (
@@ -259,7 +260,7 @@ class LPBacktestConfig(StrategyBacktestConfig):
     accept a rough, order-of-magnitude-uncertain fee estimate (e.g. quick
     parameter sweeps), and understand the result is LOW confidence."""
 
-    chain: str = "arbitrum"
+    chain: str = DEFAULT_CHAIN
     """Chain for subgraph queries. Options: ethereum, arbitrum, base, optimism, polygon."""
 
     subgraph_api_key: str | None = None
@@ -353,7 +354,7 @@ class LPBacktestConfig(StrategyBacktestConfig):
                 else None
             ),
             allow_volume_fallback=data.get("allow_volume_fallback", False),
-            chain=data.get("chain", "arbitrum"),
+            chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
             subgraph_api_key=data.get("subgraph_api_key"),
         )
 

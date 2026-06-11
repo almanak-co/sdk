@@ -37,6 +37,8 @@ from typing import Any
 
 import aiohttp
 
+from almanak.core.chains import DEFAULT_CHAIN
+
 logger = logging.getLogger(__name__)
 
 
@@ -233,7 +235,7 @@ class SubgraphVolumeProvider:
 
     def __init__(
         self,
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
         api_key: str | None = None,
         cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,

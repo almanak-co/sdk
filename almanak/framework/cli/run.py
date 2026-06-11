@@ -37,6 +37,7 @@ import click
 
 from almanak.config.cli_options import gateway_client_options
 from almanak.config.cli_runtime import CliRuntimeConfig
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.gateway.data.balance import Web3BalanceProvider
 from almanak.gateway.data.price import CoinGeckoPriceSource, PriceAggregator
 
@@ -1064,7 +1065,7 @@ def get_strategy_chains(strategy_class: type) -> list[str]:
         return metadata.supported_chains
 
     # Fall back to legacy SUPPORTED_CHAINS attribute
-    return getattr(strategy_class, "SUPPORTED_CHAINS", ["arbitrum"])
+    return getattr(strategy_class, "SUPPORTED_CHAINS", [DEFAULT_CHAIN])
 
 
 def get_strategy_protocols(strategy_class: type) -> dict[str, list[str]]:

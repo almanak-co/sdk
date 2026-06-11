@@ -19,6 +19,7 @@ from pathlib import Path
 import click
 
 from almanak.config import load_config
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.core.chains._helpers import alchemy_rpc_url_template_for
 
 from .intent_debug import load_strategy_from_file
@@ -60,6 +61,9 @@ def _resolve_rpc_url(explicit_url: str | None, chain: str) -> str | None:
     return template.replace("{key}", alchemy_key)
 
 
+# crap-allowlist: VIB-4851 CS-1 — metadata-fallback literal becomes DEFAULT_CHAIN; the
+# pre-existing cc=36 CLI entrypoint (noqa: C901 since inception) is untouched otherwise;
+# decomposition tracked in VIB-4139.
 @click.command("permissions")
 @click.option(
     "--working-dir",
@@ -148,7 +152,7 @@ def permissions(  # noqa: C901
     elif metadata.default_chain:
         chains = [metadata.default_chain]
     else:
-        chains = ["arbitrum"]
+        chains = [DEFAULT_CHAIN]
 
     # Load config.json for token extraction
     from ..permissions.generator import discover_teardown_protocols, load_strategy_config

@@ -21,7 +21,7 @@ Example:
         end_time=datetime(2024, 6, 1),
         interval_seconds=3600,  # 1 hour
         tokens=["WETH", "USDC", "ARB"],
-        chains=["arbitrum"],
+        chains=[DEFAULT_CHAIN],
     )
 
     async for timestamp, market_state in data_provider.iterate(config):
@@ -35,6 +35,8 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
+
+from almanak.core.chains import DEFAULT_CHAIN
 
 
 class HistoricalDataCapability(StrEnum):
@@ -141,7 +143,7 @@ class MarketState:
     timestamp: datetime
     prices: dict[str, Decimal] = field(default_factory=dict)
     ohlcv: dict[str, OHLCV] = field(default_factory=dict)
-    chain: str = "arbitrum"
+    chain: str = DEFAULT_CHAIN
     block_number: int | None = None
     gas_price_gwei: Decimal | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -223,7 +225,7 @@ class HistoricalDataConfig:
         end_time: End of the historical period (inclusive)
         interval_seconds: Time between data points in seconds (default: 3600 = 1 hour)
         tokens: List of token symbols to fetch prices for
-        chains: List of chain identifiers to fetch data for (default: ["arbitrum"])
+        chains: List of chain identifiers to fetch data for (default: [DEFAULT_CHAIN])
         include_ohlcv: Whether to fetch OHLCV data (default: True)
         include_gas_prices: Whether to fetch historical gas prices (default: False)
     """
@@ -232,7 +234,7 @@ class HistoricalDataConfig:
     end_time: datetime
     interval_seconds: int = 3600  # 1 hour default
     tokens: list[str] = field(default_factory=lambda: ["WETH", "USDC"])
-    chains: list[str] = field(default_factory=lambda: ["arbitrum"])
+    chains: list[str] = field(default_factory=lambda: [DEFAULT_CHAIN])
     include_ohlcv: bool = True
     include_gas_prices: bool = False
 

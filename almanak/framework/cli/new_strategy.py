@@ -16,6 +16,7 @@ from pathlib import Path
 
 import click
 
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.cli.chain_resolution import cli_chain_choices
 
 
@@ -4925,7 +4926,7 @@ def list_strategies() -> list[str]:
     "--chain",
     "-c",
     type=click.Choice(cli_chain_choices()),
-    default="arbitrum",
+    default=DEFAULT_CHAIN,
     help="Target blockchain network",
 )
 @click.option(

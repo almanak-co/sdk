@@ -64,6 +64,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
+
 
 @dataclass
 class PnLBacktestConfig:
@@ -127,7 +129,7 @@ class PnLBacktestConfig:
     inclusion_delay_blocks: int = 1
 
     # Chain and token configuration
-    chain: str = "arbitrum"
+    chain: str = DEFAULT_CHAIN
     tokens: list[str] = field(default_factory=lambda: ["WETH", "USDC"])
 
     # Metrics configuration
@@ -732,7 +734,7 @@ class PnLBacktestConfig:
             include_gas_costs=data.get("include_gas_costs", True),
             gas_price_gwei=gas_price,
             inclusion_delay_blocks=data.get("inclusion_delay_blocks", 1),
-            chain=data.get("chain", "arbitrum"),
+            chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
             tokens=data.get("tokens", ["WETH", "USDC"]),
             benchmark_token=data.get("benchmark_token", "WETH"),
             risk_free_rate=risk_free_rate,

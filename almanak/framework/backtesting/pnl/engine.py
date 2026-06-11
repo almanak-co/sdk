@@ -70,6 +70,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol, runtime_checkable
 
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.backtesting.adapters.base import StrategyBacktestAdapter
 
 # Import adapter registry for strategy type detection
@@ -395,7 +396,7 @@ class BacktestableStrategy(Protocol):
 
 def create_market_snapshot_from_state(
     market_state: MarketState,
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
     wallet_address: str = "",
     portfolio: SimulatedPortfolio | None = None,
 ) -> MarketSnapshot:

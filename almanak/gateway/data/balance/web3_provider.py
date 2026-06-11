@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 from web3 import AsyncHTTPProvider, AsyncWeb3
 from web3.exceptions import ContractLogicError, Web3Exception
 
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.data.interfaces import (
     BalanceResult,
     DataSourceError,
@@ -360,7 +361,7 @@ class Web3BalanceProvider:
         self,
         rpc_url: str,
         wallet_address: str,
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
         cache_ttl: int = 5,
         request_timeout: float = 10.0,
         max_retries: int = 3,

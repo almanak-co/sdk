@@ -21,6 +21,8 @@ from typing import Any
 
 import click
 
+from almanak.core.chains import DEFAULT_CHAIN
+
 from ..intents import (
     CompilationStatus,
     Intent,
@@ -362,7 +364,7 @@ def create_example_intent(intent_type: str, params: dict[str, Any] | None = None
 
 def compile_example_intent(
     intent: AnyIntent,
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
     wallet_address: str = "0x" + "1" * 40,
 ) -> dict[str, Any]:
     """Compile an intent and return the result as a dict.
@@ -406,9 +408,12 @@ def compile_example_intent(
         }
 
 
+# crap-allowlist: VIB-4851 CS-1 — single default-chain literal swap (DEFAULT_CHAIN) in
+# pre-existing high-CRAP CLI helper (cc=14, cov=3% on main); refactor + coverage backfill
+# tracked in VIB-4139.
 def inspect_strategy(
     file_path: Path,
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
 ) -> IntentInspectionResult:
     """Inspect a strategy file and extract intent information.
 
@@ -509,7 +514,7 @@ def inspect_strategy(
 
 def create_market_snapshot_from_scenario(
     scenario: dict[str, Any],
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
     wallet_address: str = "0x" + "1" * 40,
 ) -> MarketSnapshot:
     """Create a MarketSnapshot from scenario data.
@@ -816,7 +821,7 @@ def trace_strategy(
     file_path: Path,
     scenario: dict[str, Any],
     scenario_file: str | None = None,
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
 ) -> TraceResult:
     """Trace strategy execution with a given scenario.
 
@@ -1152,8 +1157,8 @@ def intent_group() -> None:
     "--chain",
     "-c",
     type=click.Choice(cli_chain_choices(evm_only=True)),
-    default="arbitrum",
-    help="Chain for ActionBundle compilation (default: arbitrum)",
+    default=DEFAULT_CHAIN,
+    help=f"Chain for ActionBundle compilation (default: {DEFAULT_CHAIN})",
 )
 @click.option(
     "--verbose",
@@ -1239,8 +1244,8 @@ def inspect(
     "--chain",
     "-c",
     type=click.Choice(cli_chain_choices(evm_only=True)),
-    default="arbitrum",
-    help="Chain for execution (default: arbitrum)",
+    default=DEFAULT_CHAIN,
+    help=f"Chain for execution (default: {DEFAULT_CHAIN})",
 )
 @click.option(
     "--verbose",

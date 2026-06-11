@@ -42,6 +42,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.config.backtest import backtest_config_from_env
+from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
 from almanak.framework.backtesting.models import BacktestResult, CrisisMetrics
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.engine import BacktestableStrategy, PnLBacktester
@@ -84,7 +85,7 @@ class CrisisBacktestConfig:
     scenario: CrisisScenario
     initial_capital_usd: Decimal = Decimal("10000")
     interval_seconds: int = 3600
-    chain: str = "arbitrum"
+    chain: str = DEFAULT_CHAIN
     tokens: list[str] = field(default_factory=lambda: ["WETH", "USDC"])
     fee_model: str = "realistic"
     slippage_model: str = "realistic"
@@ -152,7 +153,7 @@ class CrisisBacktestConfig:
             scenario=CrisisScenario.from_dict(data["scenario"]),
             initial_capital_usd=Decimal(data.get("initial_capital_usd", "10000")),
             interval_seconds=data.get("interval_seconds", 3600),
-            chain=data.get("chain", "arbitrum"),
+            chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
             tokens=data.get("tokens", ["WETH", "USDC"]),
             fee_model=data.get("fee_model", "realistic"),
             slippage_model=data.get("slippage_model", "realistic"),
@@ -316,7 +317,7 @@ async def run_crisis_backtest(
     backtester: PnLBacktester,
     initial_capital_usd: Decimal = Decimal("10000"),
     interval_seconds: int = 3600,
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
     tokens: list[str] | None = None,
     fee_model: str = "realistic",
     slippage_model: str = "realistic",
@@ -455,7 +456,7 @@ def run_crisis_backtest_sync(
     backtester: PnLBacktester,
     initial_capital_usd: Decimal = Decimal("10000"),
     interval_seconds: int = 3600,
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
     tokens: list[str] | None = None,
     fee_model: str = "realistic",
     slippage_model: str = "realistic",

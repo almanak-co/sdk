@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import ValidationError
 
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.agent_tools.approval import (
     ApprovalConfig,
     ApprovalStatus,
@@ -246,7 +247,7 @@ class ToolExecutor:
         catalog: ToolCatalog | None = None,
         wallet_address: str = "",
         deployment_id: str = "",
-        default_chain: str = "arbitrum",
+        default_chain: str = DEFAULT_CHAIN,
         alert_manager: Any | None = None,
         safe_addresses: set[str] | None = None,
         tracer: DecisionTracer | None = None,

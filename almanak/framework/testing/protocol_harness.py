@@ -40,6 +40,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Protocol, TypeVar
 
+from almanak.core.chains import DEFAULT_CHAIN
+
 logger = logging.getLogger(__name__)
 
 
@@ -714,7 +716,7 @@ class ProtocolTestSuite[AdapterT: AdapterProtocol, ConfigT](ABC):
         self._context: TestContext | None = None
 
     @abstractmethod
-    def create_test_config(self, chain: str = "arbitrum") -> ConfigT:
+    def create_test_config(self, chain: str = DEFAULT_CHAIN) -> ConfigT:
         """Create a test configuration for the adapter.
 
         Args:
@@ -837,7 +839,7 @@ def generate_config_validation_tests[ConfigT](
         tracker.assert_raises(
             ValueError,
             config_class,
-            chain=valid_chains[0] if valid_chains else "arbitrum",
+            chain=valid_chains[0] if valid_chains else DEFAULT_CHAIN,
             wallet_address="invalid_address",
             message="Should raise ValueError for invalid wallet address",
         )
@@ -1027,7 +1029,7 @@ class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
 
     def create_adapter(
         self,
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
         wallet_address: str = "0x1234567890123456789012345678901234567890",
         **kwargs: Any,
     ) -> AdapterT:
@@ -1050,7 +1052,7 @@ class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
 
     def setup_fork(
         self,
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
         fork_block: int | None = None,
         rpc_url: str = "http://localhost:8545",
     ) -> bool:
@@ -1201,7 +1203,7 @@ class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
 
     def run_fork_tests(
         self,
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
         fork_block: int | None = None,
         rpc_url: str = "http://localhost:8545",
     ) -> TestSuiteResult:

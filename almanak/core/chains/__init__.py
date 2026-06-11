@@ -60,6 +60,7 @@ from ._descriptor import (
     Timeouts,
 )
 from ._registry import ChainRegistry, register_chain
+from .defaults import DEFAULT_CHAIN, DEFAULT_VAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
 
 # Runtime cross-check: every Chain enum member must have a descriptor.
 # This catches the recurring "added a chain to the enum but forgot the
@@ -88,6 +89,9 @@ del _missing, _chain, _family
 
 
 __all__ = [
+    "DEFAULT_CHAIN",
+    "DEFAULT_VAULT_CHAIN",
+    "LEGACY_SERIALIZED_CHAIN",
     "ChainDescriptor",
     "ChainRegistry",
     "GasProfile",

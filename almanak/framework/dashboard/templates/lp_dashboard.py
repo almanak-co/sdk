@@ -44,6 +44,7 @@ import streamlit as st
 
 logger = logging.getLogger(__name__)
 
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.dashboard.plots import (
     plot_fee_accumulation,
     plot_impermanent_loss,
@@ -88,7 +89,7 @@ class LPDashboardConfig:
     token0: str = "WETH"
     token1: str = "USDC"
     fee_tier: str = "0.30%"
-    chain: str = "arbitrum"
+    chain: str = DEFAULT_CHAIN
     show_liquidity_distribution: bool = True
     show_position_history: bool = True
     show_impermanent_loss: bool = True

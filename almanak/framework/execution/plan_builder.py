@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, cast
 
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.execution.plan import (
     PlanBundle,
     PlanStep,
@@ -60,7 +61,7 @@ def is_cross_chain_intent(intent: AnyIntent) -> bool:
     return dest_chain is not None and dest_chain != src_chain
 
 
-def get_intent_chain(intent: AnyIntent, default_chain: str = "arbitrum") -> str:
+def get_intent_chain(intent: AnyIntent, default_chain: str = DEFAULT_CHAIN) -> str:
     """Get the execution chain for an intent.
 
     Args:
@@ -234,7 +235,7 @@ class PlanBuilder:
     def __init__(
         self,
         deployment_id: str | None = None,
-        default_chain: str = "arbitrum",
+        default_chain: str = DEFAULT_CHAIN,
         max_retries: int = 3,
     ) -> None:
         """Initialize the plan builder.
@@ -391,7 +392,7 @@ class PlanBuilder:
 def build_plan_from_decide_result(
     decide_result: AnyIntent | IntentSequence | list | None,
     deployment_id: str | None = None,
-    default_chain: str = "arbitrum",
+    default_chain: str = DEFAULT_CHAIN,
 ) -> PlanBundle | None:
     """Build a plan from a strategy's decide() result.
 

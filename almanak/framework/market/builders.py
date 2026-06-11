@@ -22,6 +22,8 @@ from collections.abc import Mapping
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.chains import DEFAULT_CHAIN
+
 from .snapshot import MarketSnapshot
 
 if TYPE_CHECKING:
@@ -409,7 +411,7 @@ class MarketSnapshotBuilder:
     def seeded(
         cls,
         *,
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
         wallet_address: str = "0x" + "0" * 40,
         prices: Mapping[str, Decimal] | None = None,
         price_data: Mapping[str, PriceData] | None = None,

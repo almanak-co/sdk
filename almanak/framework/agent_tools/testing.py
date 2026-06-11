@@ -29,6 +29,8 @@ from typing import Any
 
 import grpc
 
+from almanak.core.chains import DEFAULT_CHAIN
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,7 +54,7 @@ class MockCall:
 class MockGatewayConfig:
     """Configuration for mock gateway defaults."""
 
-    default_chain: str = "arbitrum"
+    default_chain: str = DEFAULT_CHAIN
     default_compile_success: bool = True
     default_execute_success: bool = True
 

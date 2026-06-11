@@ -36,6 +36,7 @@ from typing import Any
 
 import streamlit as st
 
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.dashboard.plots import (
     plot_funding_rate_history,
     plot_leverage_gauge,
@@ -69,7 +70,7 @@ class PerpDashboardConfig:
     protocol: str = "gmx_v2"
     market: str = "ETH/USD"
     collateral_token: str = "WETH"
-    chain: str = "arbitrum"
+    chain: str = DEFAULT_CHAIN
     max_leverage: float = 50.0
     safe_leverage: float = 10.0
     show_position_dashboard: bool = True
@@ -284,7 +285,7 @@ def _render_performance_summary(session_state: dict[str, Any]) -> None:
 def get_gmx_v2_config(
     market: str = "ETH/USD",
     collateral_token: str = "WETH",
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
 ) -> PerpDashboardConfig:
     """Get pre-configured GMX V2 perpetuals dashboard config."""
     return PerpDashboardConfig(

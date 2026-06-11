@@ -16,6 +16,7 @@ from pathlib import Path
 
 import click
 
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.cli.chain_resolution import cli_chain_choices
 
 
@@ -2018,7 +2019,7 @@ Generated: {datetime.now().isoformat()}
     "chains",
     type=click.Choice(cli_chain_choices(evm_only=True)),
     multiple=True,
-    default=["arbitrum"],
+    default=[DEFAULT_CHAIN],
     help="Target chain(s) (can specify multiple)",
 )
 @click.option(

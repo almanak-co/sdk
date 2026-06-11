@@ -37,6 +37,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
+from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
+
 if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.calculators.monte_carlo_runner import (
         MonteCarloSimulationResult,
@@ -1919,7 +1921,7 @@ class BacktestResult:
     equity_curve: list[EquityPoint] = field(default_factory=list)
     initial_capital_usd: Decimal = Decimal("10000")
     final_capital_usd: Decimal = Decimal("10000")
-    chain: str = "arbitrum"
+    chain: str = DEFAULT_CHAIN
     run_started_at: datetime | None = None
     run_ended_at: datetime | None = None
     run_duration_seconds: float = 0.0
@@ -2517,7 +2519,7 @@ class BacktestResult:
             equity_curve=cls._parse_equity_curve(data.get("equity_curve")),
             initial_capital_usd=Decimal(data.get("initial_capital_usd", "10000")),
             final_capital_usd=Decimal(data.get("final_capital_usd", "10000")),
-            chain=data.get("chain", "arbitrum"),
+            chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
             run_started_at=cls._optional_datetime(data.get("run_started_at")),
             run_ended_at=cls._optional_datetime(data.get("run_ended_at")),
             run_duration_seconds=data.get("run_duration_seconds", 0.0),

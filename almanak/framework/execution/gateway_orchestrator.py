@@ -22,7 +22,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from almanak.core.chains import ChainRegistry
+from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
 from almanak.framework.execution.gas.constants import (
     DEFAULT_GRPC_EXECUTE_TIMEOUT_SECONDS,
     DEFAULT_TX_TIMEOUT_SECONDS,
@@ -312,7 +312,7 @@ class GatewayExecutionOrchestrator:
     def __init__(
         self,
         client: GatewayClient,
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
         wallet_address: str | None = None,
         timeout: float | None = None,
         execute_timeout: float | None = None,

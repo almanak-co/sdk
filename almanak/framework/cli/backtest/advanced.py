@@ -14,6 +14,8 @@ from typing import Any
 
 import click
 
+from almanak.core.chains import DEFAULT_CHAIN
+
 from ...backtesting import (
     CoinGeckoDataProvider,
     PnLBacktestConfig,
@@ -386,7 +388,7 @@ def print_crisis_backtest_results(result: CrisisBacktestResult) -> None:
 @click.option(
     "--initial-capital", type=float, default=10000.0, help="Initial portfolio balance in USD (default: 10000)"
 )
-@click.option("--chain", "-c", type=str, default="arbitrum", help="Target blockchain (default: arbitrum)")
+@click.option("--chain", "-c", type=str, default=DEFAULT_CHAIN, help=f"Target blockchain (default: {DEFAULT_CHAIN})")
 @click.option(
     "--tokens", type=str, default="WETH,USDC", help="Comma-separated list of tokens to track (default: WETH,USDC)"
 )
@@ -717,7 +719,7 @@ def walk_forward_backtest(  # noqa: C901
 @click.option(
     "--initial-capital", type=float, default=10000.0, help="Initial portfolio balance in USD (default: 10000)"
 )
-@click.option("--chain", "-c", type=str, default="arbitrum", help="Target blockchain (default: arbitrum)")
+@click.option("--chain", "-c", type=str, default=DEFAULT_CHAIN, help=f"Target blockchain (default: {DEFAULT_CHAIN})")
 @click.option(
     "--tokens", type=str, default="WETH,USDC", help="Comma-separated list of tokens to track (default: WETH,USDC)"
 )
@@ -1043,7 +1045,7 @@ def monte_carlo_backtest(  # noqa: C901
 @click.option(
     "--initial-capital", type=float, default=10000.0, help="Initial portfolio balance in USD (default: 10000)"
 )
-@click.option("--chain", "-c", type=str, default="arbitrum", help="Target blockchain (default: arbitrum)")
+@click.option("--chain", "-c", type=str, default=DEFAULT_CHAIN, help=f"Target blockchain (default: {DEFAULT_CHAIN})")
 @click.option(
     "--tokens", type=str, default="WETH,USDC", help="Comma-separated list of tokens to track (default: WETH,USDC)"
 )

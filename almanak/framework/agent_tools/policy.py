@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.agent_tools.catalog import RiskTier, ToolDefinition
 from almanak.framework.agent_tools.errors import RiskBlockedError
 
@@ -124,7 +125,7 @@ class AgentPolicy:
 
     # ── Scope constraints ───────────────────────────────────────────────
     allowed_tools: set[str] | None = None  # None = all tools allowed
-    allowed_chains: set[str] | None = field(default_factory=lambda: {"arbitrum"})
+    allowed_chains: set[str] | None = field(default_factory=lambda: {DEFAULT_CHAIN})
     allowed_protocols: set[str] | None = None  # None = all protocols
     allowed_tokens: set[str] | None = None  # None = all tokens
     allowed_intent_types: set[str] | None = None  # None = all intent types

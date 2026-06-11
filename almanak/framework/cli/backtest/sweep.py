@@ -16,6 +16,8 @@ from typing import Any
 
 import click
 
+from almanak.core.chains import DEFAULT_CHAIN
+
 
 def _coerce_sweep_value(
     name: str,
@@ -718,7 +720,7 @@ class _SweepTask:
     pnl_config_dict: dict[str, Any]
     params: dict[str, str]
     task_index: int
-    default_chain: str = "arbitrum"
+    default_chain: str = DEFAULT_CHAIN
     # Names marked via `--numeric-param`; forwarded through the pickle
     # boundary so workers apply the same strict coercion as the parent
     # process would (#1702).
@@ -1478,8 +1480,8 @@ def _generate_sweep_report(
     "--chain",
     "-c",
     type=str,
-    default="arbitrum",
-    help="Target blockchain (default: arbitrum)",
+    default=DEFAULT_CHAIN,
+    help=f"Target blockchain (default: {DEFAULT_CHAIN})",
 )
 @click.option(
     "--tokens",
@@ -1786,8 +1788,8 @@ def sweep_backtest(
     "--chain",
     "-c",
     type=str,
-    default="arbitrum",
-    help="Target blockchain (default: arbitrum)",
+    default=DEFAULT_CHAIN,
+    help=f"Target blockchain (default: {DEFAULT_CHAIN})",
 )
 @click.option(
     "--tokens",

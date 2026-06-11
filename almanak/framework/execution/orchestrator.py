@@ -100,6 +100,8 @@ logger = logging.getLogger(__name__)
 
 
 # Import ExecutionEventType from events module (canonical source)
+from almanak.core.chains import DEFAULT_CHAIN
+
 from .events import ExecutionEventType, build_tx_reverted_payload
 
 
@@ -348,7 +350,7 @@ class ExecutionContext:
 
     deployment_id: str = "unknown"
     intent_id: str = ""
-    chain: str = "arbitrum"
+    chain: str = DEFAULT_CHAIN
     wallet_address: str = ""
     correlation_id: str = ""
     cycle_id: str = ""  # Forensic correlation ID for the decide->execute cycle
@@ -1173,7 +1175,7 @@ class ExecutionOrchestrator:
         signer: Signer,
         submitter: Submitter,
         simulator: Simulator,
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
         rpc_url: str | None = None,
         risk_guard: RiskGuard | None = None,
         event_callback: EventCallback | None = None,

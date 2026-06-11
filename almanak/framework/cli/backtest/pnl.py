@@ -16,6 +16,8 @@ from typing import Any
 import aiohttp
 import click
 
+from almanak.core.chains import DEFAULT_CHAIN
+
 from ...backtesting import (
     CoinGeckoDataProvider,
     PnLBacktestConfig,
@@ -796,8 +798,8 @@ def _generate_html_report(
     "--chain",
     "-c",
     type=str,
-    default="arbitrum",
-    help="Target blockchain (default: arbitrum)",
+    default=DEFAULT_CHAIN,
+    help=f"Target blockchain (default: {DEFAULT_CHAIN})",
 )
 @click.option(
     "--tokens",

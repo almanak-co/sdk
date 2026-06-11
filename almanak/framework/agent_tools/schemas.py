@@ -15,6 +15,8 @@ from decimal import Decimal, InvalidOperation
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from almanak.core.chains import DEFAULT_CHAIN, DEFAULT_VAULT_CHAIN
+
 
 def _validate_positive_decimal(v: str, field_name: str) -> str:
     """Validate that a string represents a positive decimal number."""
@@ -108,7 +110,7 @@ class GetPriceRequest(BaseModel):
     """Get the current USD price of a token."""
 
     token: str = Field(description="Token symbol (e.g. 'ETH', 'USDC') or contract address")
-    chain: str = Field(default="arbitrum", description="Blockchain name (e.g. 'arbitrum', 'base', 'ethereum')")
+    chain: str = Field(default=DEFAULT_CHAIN, description="Blockchain name (e.g. 'arbitrum', 'base', 'ethereum')")
 
 
 class GetPriceResponse(BaseModel):
@@ -125,7 +127,7 @@ class GetBalanceRequest(BaseModel):
     """Get the balance of a single token in a wallet."""
 
     token: str = Field(description="Token symbol or address")
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     wallet_address: str = Field(default="", description="Wallet to query. Defaults to strategy wallet.")
 
 
@@ -138,7 +140,7 @@ class GetBalanceResponse(BaseModel):
 class BatchGetBalancesRequest(BaseModel):
     """Get token balances for a wallet."""
 
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     tokens: list[str] = Field(description="Token symbols to query (e.g. ['ETH', 'USDC'])")
     wallet_address: str = Field(default="", description="Wallet to query. Defaults to strategy wallet.")
 
@@ -154,7 +156,7 @@ class GetIndicatorRequest(BaseModel):
     token: str = Field(description="Token symbol")
     indicator: str = Field(description="One of: rsi, sma, ema, macd, bollinger, atr")
     period: int = Field(default=14, description="Look-back period")
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
 
 
 class GetIndicatorResponse(BaseModel):
@@ -170,7 +172,7 @@ class GetPoolStateRequest(BaseModel):
     token_a: str = Field(description="First token symbol")
     token_b: str = Field(description="Second token symbol")
     fee_tier: int = Field(default=3000, description="Pool fee tier in hundredths of a bip (e.g. 500, 3000, 10000)")
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     protocol: str = Field(default="uniswap_v3")
     pool_address: str = Field(default="", description="Explicit pool contract address (bypasses computed address)")
 
@@ -189,7 +191,7 @@ class GetLPPositionRequest(BaseModel):
     """Get details about an existing LP position."""
 
     position_id: str = Field(description="NFT token ID of the LP position")
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     protocol: str = Field(default="uniswap_v3")
 
 
@@ -218,7 +220,7 @@ class ListLPPositionsRequest(BaseModel):
     operators can pick a tokenId without drilling into `get_lp_position`.
     """
 
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     protocol: str = Field(default="uniswap_v3", description="LP protocol (uniswap_v3 only for v1).")
     wallet_address: str = Field(default="", description="Wallet to query. Defaults to strategy wallet.")
     network: str = Field(default="", description="'mainnet' or 'anvil'; empty means gateway default.")
@@ -254,7 +256,7 @@ class ListLendingPositionsRequest(BaseModel):
     extension.
     """
 
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     protocol: str = Field(default="aave_v3", description="Lending protocol (aave_v3 only for v1).")
     wallet_address: str = Field(default="", description="Wallet to query. Defaults to strategy wallet.")
     network: str = Field(default="", description="'mainnet' or 'anvil'; empty means gateway default.")
@@ -283,7 +285,7 @@ class ListLendingReservesRequest(BaseModel):
     curated table) and reads each reserve's live ``getReserveConfigurationData``.
     """
 
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     protocol: str = Field(default="aave_v3", description="Lending protocol (aave_v3 / Aave-V2-fork shaped for v1).")
     asset: str = Field(default="", description="Optional single reserve symbol to filter to (e.g. 'WMATIC').")
     network: str = Field(default="", description="'mainnet' or 'anvil'; empty means gateway default.")
@@ -331,7 +333,7 @@ class GetPortfolioRequest(BaseModel):
     positions.
     """
 
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     wallet_address: str = Field(default="", description="Wallet to query. Defaults to strategy wallet.")
     tokens: list[str] = Field(
         default_factory=list,
@@ -357,7 +359,7 @@ class ResolveTokenRequest(BaseModel):
     """Resolve a token symbol or address to full metadata."""
 
     token: str = Field(description="Token symbol (e.g. 'USDC') or contract address")
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
 
 
 class ResolveTokenResponse(BaseModel):
@@ -371,7 +373,7 @@ class ResolveTokenResponse(BaseModel):
 class GetRiskMetricsRequest(BaseModel):
     """Get portfolio risk metrics."""
 
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     window_days: int = Field(default=30, description="Look-back window for risk calculations")
 
 
@@ -396,7 +398,7 @@ class CompileIntentRequest(BaseModel):
 
     intent_type: str = Field(description="Intent type: swap, lp_open, lp_close, supply, borrow, repay, etc.")
     params: dict = Field(description="Intent parameters (token_in, token_out, amount, etc.)")
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
 
 
 class CompileIntentResponse(BaseModel):
@@ -412,7 +414,7 @@ class SimulateIntentRequest(BaseModel):
     bundle_id: str | None = Field(default=None, description="ID of a previously compiled bundle")
     intent_type: str | None = Field(default=None, description="Or specify intent directly for ad-hoc simulation")
     params: dict | None = Field(default=None, description="Intent params if intent_type is provided")
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
 
 
 class SimulateIntentResponse(BaseModel):
@@ -428,7 +430,7 @@ class ValidateRiskRequest(BaseModel):
 
     intent_type: str = Field(description="Intent type to validate")
     params: dict = Field(description="Intent parameters")
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
 
 
 class ValidateRiskResponse(BaseModel):
@@ -442,7 +444,7 @@ class EstimateGasRequest(BaseModel):
 
     intent_type: str = Field(description="Intent type")
     params: dict = Field(description="Intent parameters")
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
 
 
 class EstimateGasResponse(BaseModel):
@@ -457,7 +459,7 @@ class ComputeRebalanceCandidateRequest(BaseModel):
 
     position_id: str = Field(description="Current LP position NFT token ID")
     fee_tier: int = Field(default=3000, description="Pool fee tier")
-    chain: str = Field(default="base")
+    chain: str = Field(default=DEFAULT_VAULT_CHAIN)
     estimated_daily_volume: str = Field(default="5000", description="Estimated daily pool volume in USD")
     our_liquidity_share: str = Field(default="0.1", description="Our share of pool liquidity (0-1)")
 
@@ -482,7 +484,7 @@ class SwapTokensRequest(BaseModel):
     slippage_bps: int = Field(
         default=50, ge=1, le=1000, description="Max slippage in basis points (1-1000, i.e. 0.01%-10%)"
     )
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     destination_chain: str | None = Field(
         default=None,
         description="Destination chain for cross-chain swaps (None for same-chain). Falls back to default aggregator if protocol is not specified.",
@@ -518,7 +520,7 @@ class OpenLPPositionRequest(BaseModel):
     fee_tier: int = Field(default=3000, ge=100, le=100000, description="Pool fee tier (100-100000)")
     price_lower: str = Field(description="Lower price bound (required; use tick-min for full range)")
     price_upper: str = Field(description="Upper price bound (required; use tick-max for full range)")
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     protocol: str = Field(default="uniswap_v3")
     dry_run: bool = Field(default=False)
     execution_wallet: str | None = Field(
@@ -557,7 +559,7 @@ class CloseLPPositionRequest(BaseModel):
     position_id: str = Field(description="NFT token ID of the LP position")
     amount: str = Field(default="all", description="Must be 'all' (partial close is not supported)")
     collect_fees: bool = Field(default=True, description="Collect accrued fees during close")
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     protocol: str = Field(default="uniswap_v3")
     dry_run: bool = Field(default=False)
 
@@ -582,7 +584,7 @@ class SupplyLendingRequest(BaseModel):
         default=None,
         description="Required for isolated-market protocols (Morpho Blue); ignored for unified-pool protocols",
     )
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     dry_run: bool = Field(default=False)
 
     @field_validator("amount")
@@ -614,7 +616,7 @@ class BorrowLendingRequest(BaseModel):
         default=None,
         description="Required for isolated-market protocols (Morpho Blue); ignored for unified-pool protocols",
     )
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     dry_run: bool = Field(default=False)
 
     @field_validator("amount")
@@ -649,7 +651,7 @@ class RepayLendingRequest(BaseModel):
         default=None,
         description="Required for isolated-market protocols (Morpho Blue); ignored for unified-pool protocols",
     )
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     dry_run: bool = Field(default=False)
 
     @field_validator("amount")
@@ -683,7 +685,7 @@ class WithdrawLendingRequest(BaseModel):
         default=True,
         description="Morpho Blue only: True withdraws collateral, False withdraws loan token",
     )
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     dry_run: bool = Field(default=False)
 
     @field_validator("amount")
@@ -748,7 +750,7 @@ class UnwrapNativeRequest(BaseModel):
 
     token: str = Field(description="Wrapped token symbol (e.g. 'WETH', 'WMATIC', 'WAVAX')")
     amount: str = Field(description="Amount to unwrap as a decimal string, or 'all'")
-    chain: str = Field(default="arbitrum", description="Blockchain name")
+    chain: str = Field(default=DEFAULT_CHAIN, description="Blockchain name")
     dry_run: bool = Field(default=False, description="If true, simulate only")
     execution_wallet: str | None = Field(default=None, description="Override wallet for execution")
 
@@ -771,7 +773,7 @@ class ExecuteCompiledBundleRequest(BaseModel):
 
     bundle_id: str = Field(description="ID returned by compile_intent")
     require_simulation: bool = Field(default=True, description="Require successful simulation before execution")
-    chain: str = Field(default="arbitrum")
+    chain: str = Field(default=DEFAULT_CHAIN)
     dry_run: bool = Field(default=False)
 
 
@@ -878,7 +880,7 @@ class GetVaultStateRequest(BaseModel):
     """Read current state of a Lagoon vault."""
 
     vault_address: str = Field(description="Vault contract address")
-    chain: str = Field(default="base", description="Chain where vault is deployed")
+    chain: str = Field(default=DEFAULT_VAULT_CHAIN, description="Chain where vault is deployed")
 
 
 class GetVaultStateResponse(BaseModel):
@@ -893,7 +895,7 @@ class SettleVaultRequest(BaseModel):
     """Run a vault settlement cycle (propose + settle deposits/redeems)."""
 
     vault_address: str = Field(description="Vault contract address")
-    chain: str = Field(default="base", description="Chain where vault is deployed")
+    chain: str = Field(default=DEFAULT_VAULT_CHAIN, description="Chain where vault is deployed")
     new_total_assets: str | None = Field(
         default=None, description="Override NAV in raw underlying units; auto-computed if omitted"
     )
@@ -923,7 +925,7 @@ class ApproveVaultUnderlyingRequest(BaseModel):
     vault_address: str = Field(description="Vault contract address")
     underlying_token: str = Field(description="Address of the underlying ERC20 token")
     safe_address: str = Field(description="Safe wallet address that holds the underlying tokens")
-    chain: str = Field(default="base", description="Chain where vault is deployed")
+    chain: str = Field(default=DEFAULT_VAULT_CHAIN, description="Chain where vault is deployed")
     dry_run: bool = Field(default=False, description="If true, simulate only")
 
 
@@ -939,7 +941,7 @@ class DepositVaultRequest(BaseModel):
     vault_address: str = Field(description="Vault contract address")
     underlying_token: str = Field(description="Address of the vault's underlying token (e.g. USDC address)")
     amount: str = Field(description="Amount to deposit in raw underlying units (e.g. '10000000' for 10 USDC)")
-    chain: str = Field(default="base", description="Chain where vault is deployed")
+    chain: str = Field(default=DEFAULT_VAULT_CHAIN, description="Chain where vault is deployed")
     depositor_address: str = Field(default="", description="Depositor address (defaults to strategy wallet if empty)")
     dry_run: bool = Field(default=False, description="If true, simulate only")
 
@@ -965,7 +967,7 @@ class TeardownVaultRequest(BaseModel):
     vault_address: str = Field(description="Vault contract address")
     safe_address: str = Field(description="Safe wallet address (vault owner)")
     valuator_address: str = Field(description="Address authorized to propose valuations")
-    chain: str = Field(default="base", description="Chain where vault is deployed")
+    chain: str = Field(default=DEFAULT_VAULT_CHAIN, description="Chain where vault is deployed")
     dry_run: bool = Field(default=False, description="If true, simulate only")
 
 
@@ -986,7 +988,7 @@ class WrapNativeRequest(BaseModel):
 
     token: str = Field(description="Wrapped token symbol to receive (e.g. 'WETH', 'WMATIC', 'WAVAX')")
     amount: str = Field(description="Amount of native token to wrap as a decimal string, or 'all'")
-    chain: str = Field(default="arbitrum", description="Blockchain name")
+    chain: str = Field(default=DEFAULT_CHAIN, description="Blockchain name")
     dry_run: bool = Field(default=False, description="If true, simulate only")
     execution_wallet: str | None = Field(default=None, description="Override wallet for execution")
 
@@ -1014,7 +1016,7 @@ class GetWalletOverviewRequest(BaseModel):
     plus any additional tokens specified. Filters out dust balances below min_balance_usd.
     """
 
-    chain: str = Field(default="arbitrum", description="Blockchain name")
+    chain: str = Field(default=DEFAULT_CHAIN, description="Blockchain name")
     wallet_address: str = Field(default="", description="Wallet to query. Defaults to strategy wallet.")
     min_balance_usd: float = Field(default=0.01, ge=0, description="Minimum USD balance to include (filters dust)")
     extra_tokens: list[str] = Field(

@@ -16,6 +16,7 @@ Three-phase pipeline:
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
 from almanak.framework.teardown.models import TeardownAssetPolicy
 
 
@@ -74,7 +75,7 @@ class ChainConsolidationConfig:
     """
 
     enabled: bool = False  # OFF by default - bridges add risk
-    target_chain: str = "arbitrum"  # Default target chain
+    target_chain: str = DEFAULT_CHAIN  # Default target chain
     max_bridge_fee_percent: Decimal = field(default_factory=lambda: Decimal("0.01"))  # 1% max
     min_bridge_amount_usd: Decimal = field(default_factory=lambda: Decimal("100"))  # Min to bridge
 
@@ -99,7 +100,7 @@ class ChainConsolidationConfig:
         """Deserialize from dictionary."""
         return cls(
             enabled=data.get("enabled", False),
-            target_chain=data.get("target_chain", "arbitrum"),
+            target_chain=data.get("target_chain", LEGACY_SERIALIZED_CHAIN),
             max_bridge_fee_percent=Decimal(data.get("max_bridge_fee_percent", "0.01")),
             min_bridge_amount_usd=Decimal(data.get("min_bridge_amount_usd", "100")),
         )
@@ -445,7 +446,7 @@ class TeardownConfig:
         )
 
     @classmethod
-    def full_consolidation(cls, target_chain: str = "arbitrum") -> "TeardownConfig":
+    def full_consolidation(cls, target_chain: str = DEFAULT_CHAIN) -> "TeardownConfig":
         """Full consolidation to single token on single chain.
 
         Use when:

@@ -42,6 +42,7 @@ from typing import Any
 import aiohttp
 
 from almanak.config.backtest import backtest_config_from_env
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.backtesting.config import BacktestDataConfig
 
 from ..data_provider import OHLCV, HistoricalDataConfig, MarketState
@@ -1070,7 +1071,7 @@ class CoinGeckoDataProvider:
                 timestamp=current_time,
                 prices=prices,
                 ohlcv=ohlcv_data if config.include_ohlcv else {},
-                chain=config.chains[0] if config.chains else "arbitrum",
+                chain=config.chains[0] if config.chains else DEFAULT_CHAIN,
                 block_number=None,  # Not available from CoinGecko
                 gas_price_gwei=None,  # Not available from CoinGecko
             )

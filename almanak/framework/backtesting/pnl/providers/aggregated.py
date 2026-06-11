@@ -46,6 +46,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.config.backtest import backtest_config_from_env
+from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
 
 from ..data_provider import OHLCV, HistoricalDataConfig, MarketState
 from ..types import DataConfidence, DataSourceInfo
@@ -101,7 +102,7 @@ class ProviderConfig:
     """
 
     provider_type: str
-    chain: str = "arbitrum"
+    chain: str = DEFAULT_CHAIN
     rpc_url: str = ""
     api_key: str = ""
     cache_ttl_seconds: int = 60
@@ -125,7 +126,7 @@ class ProviderConfig:
         """Create from dictionary."""
         return cls(
             provider_type=data.get("provider_type", ""),
-            chain=data.get("chain", "arbitrum"),
+            chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
             rpc_url=data.get("rpc_url", ""),
             api_key=data.get("api_key", ""),
             cache_ttl_seconds=data.get("cache_ttl_seconds", 60),
@@ -281,7 +282,7 @@ class AggregatedDataProvider:
         self,
         providers: list[Any],
         provider_names: list[str] | None = None,
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
     ) -> None:
         """Initialize the aggregated data provider.
 
@@ -326,11 +327,14 @@ class AggregatedDataProvider:
             self._provider_names,
         )
 
+    # crap-allowlist: VIB-4851 CS-1 — single default-chain literal swap (DEFAULT_CHAIN) in
+    # pre-existing high-CRAP factory (cc=8, cov=4% on main); refactor + coverage backfill
+    # tracked in VIB-4139.
     @classmethod
     def create_from_config(
         cls,
         configs: list[ProviderConfig],
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
     ) -> "AggregatedDataProvider":
         """Create an AggregatedDataProvider from configuration objects.
 
@@ -435,7 +439,7 @@ class AggregatedDataProvider:
     async def create_with_data_config(
         cls,
         data_config: "BacktestDataConfig",
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
         rpc_url: str | None = None,
     ) -> "AggregatedDataProvider":
         """Create an AggregatedDataProvider from BacktestDataConfig.
@@ -976,7 +980,7 @@ class AggregatedDataProvider:
                 timestamp=current_time,
                 prices=prices,
                 ohlcv={},
-                chain=config.chains[0] if config.chains else "arbitrum",
+                chain=config.chains[0] if config.chains else DEFAULT_CHAIN,
             )
 
             yield (current_time, market_state)

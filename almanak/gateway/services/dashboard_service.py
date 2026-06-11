@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from almanak.framework.portfolio.models import PortfolioSnapshot
     from almanak.framework.state.state_manager import StateManager
 
+from almanak.core.chains import LEGACY_SERIALIZED_CHAIN
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.integrations.portfolio_chain import PortfolioProviderChain, build_portfolio_chain
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
@@ -664,7 +665,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                         display_name += f" ({category.title()})"
 
                     # Determine chain and protocol from config
-                    chain = config.get("chain", "arbitrum")
+                    raw_chain = config.get("chain")
+                    chain = raw_chain if isinstance(raw_chain, str) and raw_chain else LEGACY_SERIALIZED_CHAIN
                     protocol = self._derive_protocol_from_config(config, deployment_id)
 
                     strategies.append(
@@ -737,7 +739,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # in ``ListStrategies``, proto string field population) would crash on
         # one bad ``.state.json`` and take down the whole response path.
         raw_chain = config.get("chain")
-        chain = raw_chain if isinstance(raw_chain, str) and raw_chain else "arbitrum"
+        chain = raw_chain if isinstance(raw_chain, str) and raw_chain else LEGACY_SERIALIZED_CHAIN
         raw_protocol = config.get("protocol")
         protocol = (
             raw_protocol

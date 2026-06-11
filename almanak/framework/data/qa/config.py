@@ -22,6 +22,8 @@ from typing import Any
 
 import yaml
 
+from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,7 +59,7 @@ class QAConfig:
         dex_tokens: List of tokens to test with DEX price sources
     """
 
-    chain: str = "arbitrum"
+    chain: str = DEFAULT_CHAIN
     historical_days: int = 30
     timeframe: str = "4h"
     rsi_period: int = 14
@@ -135,7 +137,7 @@ def load_config(config_path: str | Path | None = None) -> QAConfig:
 
     # Build config
     config = QAConfig(
-        chain=data.get("chain", "arbitrum"),
+        chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
         historical_days=data.get("historical_days", 30),
         timeframe=data.get("timeframe", "4h"),
         rsi_period=data.get("rsi_period", 14),

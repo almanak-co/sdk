@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from almanak.core.chains import LEGACY_SERIALIZED_CHAIN
 from almanak.framework.services.copy_intent_builder import CopyIntentBuilder
 from almanak.framework.services.copy_ledger import CopyLedger
 from almanak.framework.services.copy_policy_engine import CopyPolicyEngine
@@ -160,7 +161,7 @@ class CopyReplayRunner:
             signal_id=row.get("signal_id"),
             action_type=action_type,
             protocol=str(row.get("protocol", "unknown")),
-            chain=str(row.get("chain", "arbitrum")),
+            chain=str(row.get("chain", LEGACY_SERIALIZED_CHAIN)),
             tokens=[str(t) for t in row.get("tokens", [])],
             amounts={k: Decimal(str(v)) for k, v in row.get("amounts", {}).items()},
             amounts_usd={k: Decimal(str(v)) for k, v in row.get("amounts_usd", {}).items()},

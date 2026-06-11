@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
 from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
+from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
 from almanak.framework.backtesting.adapters.base import (
     StrategyBacktestAdapter,
     StrategyBacktestConfig,
@@ -167,7 +168,7 @@ class PerpBacktestConfig(StrategyBacktestConfig):
     protocol: str = "gmx"
     """Default protocol for margin/funding lookups."""
 
-    chain: str = "arbitrum"
+    chain: str = DEFAULT_CHAIN
     """Blockchain for funding rate lookups (arbitrum, avalanche)."""
 
     def __post_init__(self) -> None:
@@ -258,7 +259,7 @@ class PerpBacktestConfig(StrategyBacktestConfig):
             liquidation_critical_threshold=Decimal(str(data.get("liquidation_critical_threshold", "0.05"))),
             liquidation_penalty=Decimal(str(data.get("liquidation_penalty", "0.05"))),
             protocol=data.get("protocol", "gmx"),
-            chain=data.get("chain", "arbitrum"),
+            chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
         )
 
 

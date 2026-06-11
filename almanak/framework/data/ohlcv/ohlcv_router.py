@@ -48,6 +48,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.data.interfaces import (
     DataSourceRateLimited,
     DataSourceTimeout,
@@ -481,7 +482,7 @@ class OHLCVRouter:
         disk_cache_dir: Optional disk cache directory override.
     """
 
-    default_chain: str = "arbitrum"
+    default_chain: str = DEFAULT_CHAIN
     disk_cache_dir: Path | None = None
     _providers: dict[str, DataProvider] = field(default_factory=dict, init=False, repr=False)
     _disk_cache: _OHLCVDiskCache = field(init=False, repr=False)

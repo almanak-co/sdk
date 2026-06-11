@@ -44,6 +44,7 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.data.interfaces import DataSourceUnavailable
 
 from .perp._gateway_history import fetch_funding_points
@@ -293,7 +294,7 @@ class FundingRateProvider:
 
     def __init__(
         self,
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
         cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         requests_per_minute: int = DEFAULT_REQUESTS_PER_MINUTE,

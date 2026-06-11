@@ -34,6 +34,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.chains import DEFAULT_CHAIN
+
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
 
@@ -189,7 +191,7 @@ class IntentExecutionService:
         self,
         gateway_client: GatewayClient,
         *,
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
         wallet_address: str = "",
         deployment_id: str = "",
         retry_policy: RetryPolicy | None = None,

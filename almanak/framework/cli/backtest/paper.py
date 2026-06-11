@@ -17,6 +17,7 @@ from typing import Any
 import click
 
 from almanak.config.cli_runtime import cli_runtime_config_from_env
+from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
 
 from ...anvil.fork_manager import CHAIN_IDS
 from ...backtesting import (
@@ -115,8 +116,8 @@ def paper() -> None:
     "--chain",
     "-c",
     type=click.Choice(list(CHAIN_IDS.keys())),
-    default="arbitrum",
-    help="Target blockchain (default: arbitrum)",
+    default=DEFAULT_CHAIN,
+    help=f"Target blockchain (default: {DEFAULT_CHAIN})",
 )
 @click.option("--initial-eth", type=float, default=10.0, help="Initial ETH balance for paper wallet (default: 10)")
 @click.option(
@@ -589,7 +590,7 @@ def paper_resume(strategy: str, duration: str | None, max_ticks: int | None) -> 
         click.echo("Error: Saved state has no config. Cannot resume.", err=True)
         raise click.Abort()
 
-    chain = saved_config.get("chain", "arbitrum")
+    chain = saved_config.get("chain", LEGACY_SERIALIZED_CHAIN)
     tick_interval = saved_config.get("tick_interval_seconds", 60) or 60
     rpc_url = resolve_resume_rpc_url(saved_config.get("rpc_url"), chain)
     new_max_ticks = compute_resume_max_ticks(

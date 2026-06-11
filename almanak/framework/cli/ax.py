@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import click
 
 from almanak.config.cli_options import gateway_client_options
-from almanak.core.chains import ChainRegistry
+from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
 from almanak.framework.data.models import _NATIVE_TO_WRAPPED
 
 if TYPE_CHECKING:
@@ -50,9 +50,9 @@ def _merge_flags(ctx, sub_yes=False, sub_dry_run=False, sub_json_output=False):
 @click.option(
     "--chain",
     "-c",
-    default="arbitrum",
+    default=DEFAULT_CHAIN,
     envvar="ALMANAK_CHAIN",
-    help="Default chain (default: arbitrum).",
+    help=f"Default chain (default: {DEFAULT_CHAIN}).",
 )
 @click.option(
     "--wallet",

@@ -37,6 +37,7 @@ from typing import Any
 
 import streamlit as st
 
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.dashboard.plots import (
     plot_collateral_breakdown,
     plot_health_factor_gauge,
@@ -72,7 +73,7 @@ class LendingDashboardConfig:
     protocol: str = "aave_v3"
     collateral_token: str = "WETH"
     borrow_token: str = "USDC"
-    chain: str = "arbitrum"
+    chain: str = DEFAULT_CHAIN
     liquidation_threshold: float = 1.0
     safe_threshold: float = 1.5
     max_ltv: float = 0.8
@@ -436,7 +437,7 @@ def _render_performance_summary(session_state: dict[str, Any]) -> None:
 def get_aave_v3_config(
     collateral_token: str = "WETH",
     borrow_token: str = "USDC",
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
 ) -> LendingDashboardConfig:
     """Get pre-configured Aave V3 lending dashboard config."""
     return LendingDashboardConfig(

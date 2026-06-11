@@ -13,6 +13,7 @@ from almanak import __version__
 from almanak.cli.agent import agent as agent_group
 from almanak.config.cli_options import gateway_client_options
 from almanak.config.cli_runtime import subprocess_env_with_overrides
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.core.redaction import install_redaction
 
 # V2 Framework CLI commands
@@ -421,7 +422,7 @@ def mcp():
 @click.option(
     "--allowed-chains",
     multiple=True,
-    default=("arbitrum",),
+    default=(DEFAULT_CHAIN,),
     help="Restrict to specific chains (can be repeated). Default: arbitrum.",
 )
 @click.option(
@@ -1149,7 +1150,7 @@ def dashboard(port, gateway_host, gateway_port, no_browser):
     "--chain",
     "-c",
     type=click.Choice(cli_chain_choices()),
-    default="arbitrum",
+    default=DEFAULT_CHAIN,
     help="Target blockchain network (default: arbitrum)",
 )
 @click.pass_context

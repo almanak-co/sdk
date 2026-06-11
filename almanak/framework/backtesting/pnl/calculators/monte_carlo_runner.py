@@ -40,6 +40,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.backtesting.models import BacktestMetrics, BacktestResult
 from almanak.framework.backtesting.pnl.calculators._monte_carlo_helpers import (
     _calculate_percentile as _helper_percentile,
@@ -406,7 +407,7 @@ class SimulatedPricePathProvider:
             market_state = MarketState(
                 timestamp=current_time,
                 prices=prices,
-                chain=config.chains[0] if config.chains else "arbitrum",
+                chain=config.chains[0] if config.chains else DEFAULT_CHAIN,
             )
 
             yield current_time, market_state

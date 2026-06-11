@@ -43,6 +43,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
+
 if TYPE_CHECKING:
     from almanak.framework.backtesting.models import ReconciliationEvent
     from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
@@ -267,7 +269,7 @@ class PositionReconciler:
         discrepancies = await reconciler.reconcile(web3, wallet_address)
     """
 
-    chain: str = "arbitrum"
+    chain: str = DEFAULT_CHAIN
     positions: dict[str, TrackedPosition] = field(default_factory=dict)
     closed_positions: list[str] = field(default_factory=list)
     reconciliation_history: list[dict[str, Any]] = field(default_factory=list)
@@ -1076,7 +1078,7 @@ class PositionReconciler:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PositionReconciler":
         """Deserialize reconciler state from dictionary."""
-        reconciler = cls(chain=data.get("chain", "arbitrum"))
+        reconciler = cls(chain=data.get("chain", LEGACY_SERIALIZED_CHAIN))
         reconciler.positions = {
             pid: TrackedPosition.from_dict(pos_data) for pid, pos_data in data.get("positions", {}).items()
         }

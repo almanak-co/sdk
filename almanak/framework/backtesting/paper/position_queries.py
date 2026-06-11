@@ -27,6 +27,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from almanak.core.chains import DEFAULT_CHAIN
+
 logger = logging.getLogger(__name__)
 
 
@@ -160,7 +162,7 @@ class UniswapV3Position:
 async def query_uniswap_v3_positions(
     wallet: str,
     web3: Any,
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
     position_manager: str | None = None,
 ) -> list[UniswapV3Position]:
     """Query all Uniswap V3 LP positions for a wallet.
@@ -243,7 +245,7 @@ async def query_uniswap_v3_positions(
 def query_uniswap_v3_positions_sync(
     wallet: str,
     web3: Any,
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
     position_manager: str | None = None,
 ) -> list[UniswapV3Position]:
     """Synchronous version of query_uniswap_v3_positions.
@@ -651,7 +653,7 @@ def _compute_position_key(account: str, market: str, collateral_token: str, is_l
 async def query_gmx_positions(
     wallet: str,
     web3: Any,
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
     markets: list[str] | None = None,
     collateral_tokens: list[str] | None = None,
 ) -> list[GMXv2Position]:
@@ -737,7 +739,7 @@ async def query_gmx_positions(
 def query_gmx_positions_sync(
     wallet: str,
     web3: Any,
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
     markets: list[str] | None = None,
     collateral_tokens: list[str] | None = None,
 ) -> list[GMXv2Position]:
@@ -882,7 +884,7 @@ async def _query_gmx_position(
     market: str,
     collateral_token: str,
     is_long: bool,
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
 ) -> GMXv2Position | None:
     """Query a single GMX V2 position from DataStore.
 
@@ -948,7 +950,7 @@ def _query_gmx_position_sync(
     market: str,
     collateral_token: str,
     is_long: bool,
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
 ) -> GMXv2Position | None:
     """Synchronous version of _query_gmx_position.
 
@@ -1321,7 +1323,7 @@ class AaveV3LendingPosition:
 async def query_aave_positions(
     wallet: str,
     web3: Any,
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
     assets: list[str] | None = None,
 ) -> list[AaveV3LendingPosition]:
     """Query all Aave V3 lending positions for a wallet.
@@ -1394,7 +1396,7 @@ async def query_aave_positions(
 def query_aave_positions_sync(
     wallet: str,
     web3: Any,
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
     assets: list[str] | None = None,
 ) -> list[AaveV3LendingPosition]:
     """Synchronous version of query_aave_positions.

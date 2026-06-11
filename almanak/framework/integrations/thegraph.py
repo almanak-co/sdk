@@ -38,6 +38,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.gateway_client import get_gateway_client
 from almanak.gateway.proto import gateway_pb2
 
@@ -164,7 +165,7 @@ def list_subgraphs() -> list[str]:
 
 
 def get_uniswap_pools(
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
     first: int = 10,
     order_by: str = "totalValueLockedUSD",
 ) -> list[dict[str, Any]]:
@@ -214,7 +215,7 @@ def get_uniswap_pools(
 
 
 def get_aave_reserves(
-    chain: str = "arbitrum",
+    chain: str = DEFAULT_CHAIN,
     first: int = 20,
 ) -> list[dict[str, Any]]:
     """Get Aave V3 reserves/markets.

@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from almanak.config.framework import framework_config_from_env
+from almanak.core.chains import LEGACY_SERIALIZED_CHAIN
 
 from ..models.actions import AvailableAction, SuggestedAction
 from ..models.hot_reload_config import HotReloadableConfig
@@ -295,7 +296,7 @@ def _load_strategy_state_from_db(deployment_id: str) -> StrategyState | None:
                 pass
 
         # Extract chain and protocol from state or config
-        chain = state_data.get("chain", "arbitrum")
+        chain = state_data.get("chain", LEGACY_SERIALIZED_CHAIN)
         protocol = state_data.get("protocol", "unknown")
 
         # Extract portfolio value

@@ -26,6 +26,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from almanak.core.chains import DEFAULT_CHAIN
+
 from .models import (
     DEFAULT_CACHE_TTL_SECONDS,
     HOURS_PER_YEAR,
@@ -72,7 +74,7 @@ class GatewayFundingRateProvider:
     def __init__(
         self,
         gateway_client: GatewayClient,
-        chain: str = "arbitrum",
+        chain: str = DEFAULT_CHAIN,
         cache_ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
     ) -> None:
         self._gateway_client = gateway_client
