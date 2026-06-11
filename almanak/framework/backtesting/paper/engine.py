@@ -75,8 +75,8 @@ if TYPE_CHECKING:
     from almanak.framework.data.indicators.rsi import RSICalculator
     from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
-from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import chain_name_for_id as _chain_name_for_id
+from almanak.core.chains._helpers import chainlink_usd_feeds_map
 from almanak.framework.anvil.fork_manager import TOKEN_ADDRESSES, RollingForkManager
 from almanak.framework.backtesting.models import (
     BacktestMetrics,
@@ -107,7 +107,11 @@ from almanak.framework.backtesting.pnl.receipt_utils import (
     extract_token_flows as extract_receipt_token_flows,
 )
 from almanak.framework.data.interfaces import AllDataSourcesFailed, BasePriceSource
-from almanak.framework.data.price.dex_twap import DEXTWAPDataProvider, LowLiquidityWarning
+from almanak.framework.data.price.dex_twap import (
+    UNISWAP_V3_POOLS,
+    DEXTWAPDataProvider,
+    LowLiquidityWarning,
+)
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionOrchestrator,
@@ -149,11 +153,15 @@ CHAIN_ID_BASE = 8453
 # VIB-4861 collapsed two duplicated inline identity-map dicts (one per provider)
 # into this single named constant; the membership semantics are byte-for-byte
 # the same as the former per-provider ``identity_map.get(config.chain)`` lookup.
-# The names are resolved through ChainRegistry at import so a typo / rename
-# fails loudly at startup instead of silently disabling a price source.
-_PRICE_SOURCE_CHAINS: frozenset[str] = frozenset(
-    ChainRegistry.resolve(_name).name for _name in ("ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche")
-)
+# Chains where BOTH paper-mode price sources exist: a Chainlink feed set
+# (ChainDescriptor.chainlink) AND a DEX TWAP pool table. The same set gates
+# the Chainlink provider, the TWAP provider, and the oracle-divergence
+# check — all of which need the two sources together — so membership is
+# the intersection, not a hand-kept list (VIB-4851 CS-7). This stays a
+# deliberate SUBSET of ChainlinkDataProvider._SUPPORTED_CHAINS: bsc/linea/
+# sonic have feeds but no TWAP pools, exactly as the legacy 6-chain
+# allowlist encoded.
+_PRICE_SOURCE_CHAINS: frozenset[str] = frozenset(chainlink_usd_feeds_map()) & frozenset(UNISWAP_V3_POOLS)
 
 
 def _get_resolver():
@@ -2902,11 +2910,9 @@ class PaperTrader:
                 # instead of a duplicated inline chain-name dict. Unsupported
                 # chains yield None and skip to the next source, as before.
                 #
-                # NOTE: this is the historical 6-chain allowlist, which is a
-                # deliberate *subset* of ChainlinkDataProvider._SUPPORTED_CHAINS
-                # (the provider also has feeds for bsc/linea/sonic). Gating on
-                # the provider's full set would change paper-mode price-source
-                # selection on those chains, so the engine keeps its own subset.
+                # NOTE: _PRICE_SOURCE_CHAINS == feeds ∩ TWAP pools (see its
+                # definition) — still a deliberate subset of the provider's
+                # full feed coverage.
                 # Branch-free membership gate (set intersection) keeps this hot
                 # init path's cyclomatic complexity at its pre-VIB-4861 level.
                 chainlink_chain = next(iter({self.config.chain} & _PRICE_SOURCE_CHAINS), None)

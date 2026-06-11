@@ -24,6 +24,7 @@ for the byte-for-byte pinning tests.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -641,16 +642,21 @@ async def cache_run_loop_teardown_valuation(trader: PaperTrader) -> CachedTeardo
 # ---------------------------------------------------------------------------
 
 
-# Chains for which on-fork Chainlink oracle divergence is checked. A chain
-# absent from this map skips the divergence check entirely.
-_CHAINLINK_DIVERGENCE_CHAINS: dict[str, str] = {
-    "ethereum": "ethereum",
-    "arbitrum": "arbitrum",
-    "base": "base",
-    "optimism": "optimism",
-    "polygon": "polygon",
-    "avalanche": "avalanche",
-}
+@functools.cache
+def _chainlink_divergence_chains() -> frozenset[str]:
+    """Chains where the on-fork Chainlink-vs-TWAP divergence check runs.
+
+    The check compares a Chainlink feed against a DEX TWAP pool, so
+    membership is exactly "chains that have BOTH" — the same intersection
+    the engine's ``_PRICE_SOURCE_CHAINS`` uses (VIB-4851 CS-7; replaces a
+    hand-kept 6-chain identity map). Deferred imports: dex_twap and
+    paper.engine have a known order-dependent import cycle.
+    """
+    from almanak.core.chains._helpers import chainlink_usd_feeds_map
+    from almanak.framework.data.price.dex_twap import UNISWAP_V3_POOLS
+
+    return frozenset(chainlink_usd_feeds_map()) & frozenset(UNISWAP_V3_POOLS)
+
 
 # Per-token info logging threshold: any individual divergence above this gets
 # a per-token info line (separate from the hard threshold gate which raises).
@@ -659,7 +665,7 @@ _DIVERGENCE_INFO_LOG_THRESHOLD = Decimal("0.02")
 
 def resolve_chainlink_divergence_chain(chain: str) -> str | None:
     """Return the Chainlink chain key for ``chain``, or ``None`` if unsupported."""
-    return _CHAINLINK_DIVERGENCE_CHAINS.get(chain)
+    return chain if chain in _chainlink_divergence_chains() else None
 
 
 async def compute_max_oracle_divergence(
