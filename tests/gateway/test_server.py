@@ -15,10 +15,12 @@ from almanak.gateway.server import _AIOHTTP_SHUTDOWN_GRACE_SECONDS, GatewayServe
 @pytest_asyncio.fixture
 async def gateway_server():
     """Start a gateway server for testing."""
-    # Use different port for tests to avoid conflicts
+    # grpc_port=0 binds an OS-assigned ephemeral port (read back via
+    # server.bound_port) so tests never collide with parallel CI jobs or
+    # TIME_WAIT leftovers on shared runners
     # Disable metrics and audit to avoid port conflicts and log spam
     # Enable allow_insecure for testing without auth token
-    settings = GatewaySettings(grpc_port=50052, metrics_enabled=False, audit_enabled=False, allow_insecure=True)
+    settings = GatewaySettings(grpc_port=0, metrics_enabled=False, audit_enabled=False, allow_insecure=True)
     server = GatewayServer(settings)
     await server.start()
     yield server
@@ -28,7 +30,7 @@ async def gateway_server():
 @pytest.mark.asyncio
 async def test_server_starts_and_stops():
     """Server can start and stop cleanly."""
-    settings = GatewaySettings(grpc_port=50053, metrics_enabled=False, audit_enabled=False, allow_insecure=True)
+    settings = GatewaySettings(grpc_port=0, metrics_enabled=False, audit_enabled=False, allow_insecure=True)
     server = GatewayServer(settings)
 
     await server.start()
@@ -45,7 +47,7 @@ async def test_server_health_check(gateway_server):
     await asyncio.sleep(0.1)
 
     # Use async gRPC channel to avoid blocking the event loop
-    channel = grpc.aio.insecure_channel("localhost:50052")
+    channel = grpc.aio.insecure_channel(f"localhost:{gateway_server.bound_port}")
     stub = health_pb2_grpc.HealthStub(channel)
 
     response = await stub.Check(health_pb2.HealthCheckRequest(service=""))
@@ -57,9 +59,10 @@ async def test_server_health_check(gateway_server):
 @pytest.mark.asyncio
 async def test_server_health_check_after_stop():
     """Server health check fails after stop."""
-    settings = GatewaySettings(grpc_port=50054, metrics_enabled=False, audit_enabled=False, allow_insecure=True)
+    settings = GatewaySettings(grpc_port=0, metrics_enabled=False, audit_enabled=False, allow_insecure=True)
     server = GatewayServer(settings)
     await server.start()
+    port = server.bound_port
     await asyncio.sleep(0.1)
 
     # Stop the server
@@ -67,7 +70,7 @@ async def test_server_health_check_after_stop():
     await asyncio.sleep(0.1)
 
     # Use async gRPC channel to avoid blocking the event loop
-    channel = grpc.aio.insecure_channel("localhost:50054")
+    channel = grpc.aio.insecure_channel(f"localhost:{port}")
     stub = health_pb2_grpc.HealthStub(channel)
 
     with pytest.raises(grpc.aio.AioRpcError):
@@ -80,7 +83,7 @@ async def test_server_health_check_after_stop():
 async def test_allow_insecure_disables_auth_even_with_configured_token():
     """allow_insecure=True must win for local test harnesses on test networks."""
     settings = GatewaySettings(
-        grpc_port=50059,
+        grpc_port=0,
         metrics_enabled=False,
         audit_enabled=False,
         allow_insecure=True,
@@ -100,7 +103,7 @@ async def test_allow_insecure_disables_auth_even_with_configured_token():
             "AuthInterceptor should not be constructed when allow_insecure=True"
         )
 
-        channel = grpc.aio.insecure_channel("localhost:50059")
+        channel = grpc.aio.insecure_channel(f"localhost:{server.bound_port}")
         stub = health_pb2_grpc.HealthStub(channel)
         response = await stub.Check(health_pb2.HealthCheckRequest(service=""))
         assert response.status == health_pb2.HealthCheckResponse.SERVING
@@ -113,7 +116,7 @@ async def test_allow_insecure_disables_auth_even_with_configured_token():
 async def test_allow_insecure_with_auth_token_on_mainnet_is_rejected():
     """Contradictory config on a production network must hard-fail at start()."""
     settings = GatewaySettings(
-        grpc_port=50060,
+        grpc_port=0,
         metrics_enabled=False,
         audit_enabled=False,
         allow_insecure=True,
@@ -129,7 +132,7 @@ async def test_allow_insecure_with_auth_token_on_mainnet_is_rejected():
 @pytest.mark.asyncio
 async def test_heartbeat_ttl_task_lifecycle():
     """GatewayServer starts the heartbeat TTL task on start() and cancels it on stop() (VIB-1280)."""
-    settings = GatewaySettings(grpc_port=50056, metrics_enabled=False, audit_enabled=False, allow_insecure=True)
+    settings = GatewaySettings(grpc_port=0, metrics_enabled=False, audit_enabled=False, allow_insecure=True)
     server = GatewayServer(settings)
 
     assert server._heartbeat_ttl_task is None
@@ -145,7 +148,7 @@ async def test_heartbeat_ttl_task_lifecycle():
 @pytest.mark.asyncio
 async def test_stop_awaits_aiohttp_grace_period():
     """stop() sleeps for _AIOHTTP_SHUTDOWN_GRACE_SECONDS to let aiohttp connectors drain (VIB-1832)."""
-    settings = GatewaySettings(grpc_port=50057, metrics_enabled=False, audit_enabled=False, allow_insecure=True)
+    settings = GatewaySettings(grpc_port=0, metrics_enabled=False, audit_enabled=False, allow_insecure=True)
     server = GatewayServer(settings)
     await server.start()
 
@@ -172,7 +175,7 @@ async def test_serving_deferred_until_after_warmup():
     clients to call balance/price endpoints before providers were initialized.
     """
     settings = GatewaySettings(
-        grpc_port=50058,
+        grpc_port=0,
         metrics_enabled=False,
         audit_enabled=False,
         allow_insecure=True,

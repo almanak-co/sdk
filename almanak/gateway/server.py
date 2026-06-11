@@ -205,6 +205,10 @@ class GatewayServer:
         """
         self.settings = settings
         self.server: grpc.aio.Server | None = None
+        # Actual port the gRPC server bound, set during ``start``. Equals
+        # ``settings.grpc_port`` unless that is 0 (ephemeral bind — the OS
+        # picks a free port; tests use this to avoid fixed-port collisions).
+        self.bound_port: int | None = None
         self._executor: futures.ThreadPoolExecutor | None = None
         self._health_servicer = health_aio.HealthServicer()
         self._metrics_server: MetricsServer | None = None
@@ -340,7 +344,7 @@ class GatewayServer:
         # race warmup and hit uninitialized providers.
         await self._health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
         listen_addr = f"{self.settings.grpc_host}:{self.settings.grpc_port}"
-        self.server.add_insecure_port(listen_addr)
+        self.bound_port = self.server.add_insecure_port(listen_addr)
 
         # Phase 9: optional metrics HTTP server
         if self.settings.metrics_enabled:
@@ -349,7 +353,7 @@ class GatewayServer:
 
         # Phase 10: serve + heartbeat TTL enforcer
         await self.server.start()
-        logger.info(f"Gateway gRPC server started on {listen_addr}")
+        logger.info(f"Gateway gRPC server started on {self.settings.grpc_host}:{self.bound_port}")
         self._heartbeat_ttl_task = asyncio.create_task(
             self._heartbeat_ttl_loop(interval_seconds=60, stale_threshold_seconds=300),
             name="heartbeat-ttl-enforcer",
