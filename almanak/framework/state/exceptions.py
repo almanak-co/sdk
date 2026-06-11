@@ -23,12 +23,14 @@ class AccountingWriteKind(StrEnum):
     METRICS = "metrics"
     ACCOUNTING = "accounting"
     OUTBOX = "outbox"
+    STATE = "state"
 
 
 class AccountingPersistenceError(Exception):
     """Raised when a mandatory accounting write fails.
 
-    Covers ledger entries, portfolio snapshots, and portfolio metrics. In live
+    Covers ledger entries, portfolio snapshots, portfolio metrics, and
+    iteration-state writes. In live
     mode these writes are the durable record of what happened on-chain --
     silently swallowing failures would leave the books out of sync with the
     chain ("silent accounting loss").

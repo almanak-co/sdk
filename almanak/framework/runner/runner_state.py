@@ -16,7 +16,7 @@ import structlog
 from ..intents.vocabulary import AnyIntent, HoldIntent
 from ..portfolio import PortfolioMetrics, PortfolioSnapshot, ValueConfidence
 from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind
-from ..state.state_manager import StateData, StateNotFoundError
+from ..state.state_manager import StateConflictError, StateData, StateNotFoundError
 from .reconciliation import BalanceSnapshot, build_reconciliation_report
 from .runner_models import IterationStatus
 
@@ -174,7 +174,30 @@ async def update_state(
     result: IterationResult,
     strategy: object | None = None,
 ) -> None:
-    """Update persisted state after an iteration."""
+    """Update persisted state after an iteration.
+
+    Mode-aware persistence (blueprint 27 failure-mode table): in live mode a
+    failed durable state write raises ``AccountingPersistenceError`` with
+    ``write_kind="state"`` so the run loop escalates to ACCOUNTING_FAILED;
+    paper / dry_run log ERROR and continue. CAS conflicts
+    (``StateConflictError``) additionally log a distinct identity-collision
+    message in ALL modes: under the 1 gateway : 1 strategy model
+    (blueprint 06) this runner is effectively the sole writer of its state
+    row, so a version conflict is either the in-process
+    ``strategy.save_state()`` fire-and-forget race or a deployment-identity
+    collision (two runners sharing one gateway/state row).
+    """
+    # Mode derivation — same defensive pattern as
+    # _persist_position_state_snapshots; the import stays lazy because
+    # strategy_runner imports this module at load time.
+    from almanak.framework.runner.strategy_runner import derive_execution_mode_from_config
+
+    try:
+        execution_mode = derive_execution_mode_from_config(runner.config) if runner is not None else None
+    except Exception:  # noqa: BLE001
+        execution_mode = None
+    is_live = bool(execution_mode and str(execution_mode).lower() == "live")
+
     try:
         # Try to load current state, create new if not found
         try:
@@ -224,8 +247,49 @@ async def update_state(
 
         logger.debug(f"State updated for {deployment_id}")
 
+    except StateConflictError as e:
+        # Distinct, loud CAS signal in ALL modes: a version conflict on this
+        # row is either the in-process strategy.save_state() race (benign,
+        # self-heals next iteration) or a deployment-identity collision —
+        # the failure the 1 gateway : 1 strategy invariant exists to prevent.
+        logger.error(
+            "State version conflict persisting iteration state for %s "
+            "(expected v%s, found v%s) — possible deployment-identity "
+            "collision: check that no second runner shares this gateway/"
+            "state row (1 gateway : 1 strategy, blueprint 06).",
+            deployment_id,
+            e.expected_version,
+            e.actual_version,
+        )
+        if is_live:
+            raise AccountingPersistenceError(
+                AccountingWriteKind.STATE,
+                deployment_id=deployment_id,
+                message=(
+                    f"iteration-state CAS write failed for {deployment_id} "
+                    f"(expected v{e.expected_version}, found v{e.actual_version})"
+                ),
+                cause=e,
+            ) from e
+    except AccountingPersistenceError:
+        # Already typed — propagate untouched in live mode (mirrors
+        # _persist_position_state_snapshots).
+        if is_live:
+            raise
+        logger.error(
+            "Failed to update state for %s (typed accounting error, non-live, continuing)",
+            deployment_id,
+            exc_info=True,
+        )
     except Exception as e:
-        logger.error(f"Failed to update state for {deployment_id}: {e}")
+        if is_live:
+            raise AccountingPersistenceError(
+                AccountingWriteKind.STATE,
+                deployment_id=deployment_id,
+                message=f"iteration-state write failed for {deployment_id}",
+                cause=e,
+            ) from e
+        logger.error(f"Failed to update state for {deployment_id}: {e}", exc_info=True)
 
 
 async def persist_copy_trading_state(

@@ -1982,12 +1982,39 @@ class StrategyRunner:
                     iteration_start_monotonic=iteration_start_monotonic,
                 )
 
-                # Emit structured iteration summary for JSONL log analysis
-                self._emit_iteration_summary(result, chain=getattr(strategy, "chain", None))
-
-                # Update state
+                # Update state. update_state raises AccountingPersistenceError
+                # only in live mode (blueprint 27 failure-mode table); rebuild
+                # the result into ACCOUNTING_FAILED so the failure branch
+                # (circuit breaker, consecutive-errors alert, lifecycle ERROR
+                # write) fires — mirroring capture_snapshot_with_accounting.
                 if self.config.enable_state_persistence:
-                    await self._update_state(deployment_id, result, strategy=strategy)
+                    try:
+                        await self._update_state(deployment_id, result, strategy=strategy)
+                    except AccountingPersistenceError as acc_err:
+                        # Snapshot duration BEFORE alert I/O so Slack/PagerDuty
+                        # latency does not skew duration_ms (issue #1782).
+                        duration_ms = (time.monotonic() - iteration_start_monotonic) * 1000.0
+                        logger.exception(
+                            f"Iteration-state persistence failed in live mode for "
+                            f"{deployment_id} (write_kind={acc_err.write_kind})"
+                        )
+                        await self._alert_accounting_failure(strategy, acc_err)
+                        result = IterationResult(
+                            status=IterationStatus.ACCOUNTING_FAILED,
+                            error=f"State persistence failed ({acc_err.write_kind}): {acc_err}",
+                            deployment_id=deployment_id,
+                            duration_ms=duration_ms,
+                            intent=result.intent,
+                            execution_result=result.execution_result,
+                            balance_reconciliation=result.balance_reconciliation,
+                            timestamp=result.timestamp,
+                        )
+
+                # Emit structured iteration summary for JSONL log analysis
+                # (sequenced AFTER state persistence so the JSONL row reflects
+                # the FINAL status, including a state-lane ACCOUNTING_FAILED
+                # rebuild — same invariant as issue #1782 for the snapshot lane).
+                self._emit_iteration_summary(result, chain=getattr(strategy, "chain", None))
 
                 # Persist copy trading cursor state (if configured)
                 if activity_provider is not None and self.config.enable_state_persistence:

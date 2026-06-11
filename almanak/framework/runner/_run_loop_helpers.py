@@ -666,6 +666,7 @@ async def capture_snapshot_with_accounting(
                 intent=result.intent,
                 execution_result=result.execution_result,
                 balance_reconciliation=result.balance_reconciliation,
+                timestamp=result.timestamp,
             )
         logger.error(
             "Snapshot accounting persistence failed in non-live mode for %s "

@@ -1244,6 +1244,51 @@ class TestAccountingFailedSnapshot:
         assert state_calls[0] is captured[0]
 
     @pytest.mark.asyncio
+    async def test_accounting_failed_preserves_original_timestamp(self):
+        """The rebuilt ACCOUNTING_FAILED result must carry the original
+        iteration's ``timestamp``, not the construction time of the rebuild.
+
+        Before the fix, ``IterationResult(...)`` in ``capture_snapshot_with_accounting``
+        omitted ``timestamp=``, so the field defaulted to ``datetime.now(UTC)``
+        at rebuild time -- recording the persistence-failure time instead of when
+        the iteration actually ran. JSONL summaries and state rows therefore showed
+        a timestamp shifted forward by however long the snapshot phase took.
+        """
+        runner, strategy, captured = _setup_accounting_failure_runner(live_mode=True)
+
+        original_ts_holder: list[datetime] = []
+
+        async def mock_iter(s):
+            result = IterationResult(
+                status=IterationStatus.SUCCESS,
+                deployment_id="test-strategy",
+                duration_ms=10.0,
+            )
+            original_ts_holder.append(result.timestamp)
+            return result
+
+        runner.run_iteration = mock_iter
+
+        await asyncio.wait_for(
+            runner.run_loop(
+                strategy,
+                interval_seconds=0,
+                iteration_callback=captured.append,
+                max_iterations=1,
+            ),
+            timeout=5,
+        )
+
+        assert len(captured) == 1
+        rebuilt = captured[0]
+        assert rebuilt.status == IterationStatus.ACCOUNTING_FAILED
+        assert len(original_ts_holder) == 1
+        assert rebuilt.timestamp == original_ts_holder[0], (
+            f"rebuilt timestamp ({rebuilt.timestamp!r}) must equal the original "
+            f"iteration timestamp ({original_ts_holder[0]!r}), not the rebuild time"
+        )
+
+    @pytest.mark.asyncio
     async def test_non_live_mode_snapshot_failure_is_logged_only(self):
         runner, strategy, captured = _setup_accounting_failure_runner(live_mode=False)
 
