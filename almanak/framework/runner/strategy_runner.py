@@ -462,6 +462,18 @@ class SingleChainExecutionState:
     # is the single capture point — see the `_init_single_chain_state`
     # caller and `_capture_lending_pre_state_safe`.
     lending_pre_state: Any | None = None
+    # VIB-4482 (P-V1-A) — Uniswap V4 uncollected fees (tokens_owed0/1) read
+    # ON-CHAIN *before* an LP_CLOSE / LP_COLLECT_FEES burn submits. V4's
+    # ``ModifyLiquidity`` event carries no amounts and bundles fees into the
+    # single withdrawal Transfer, so fees are unrecoverable from the close
+    # receipt (unlike V3's Collect−Burn diff). A POST-close read is useless —
+    # the position is burnt and ``getPositionInfo`` returns zero liquidity — so
+    # the capture has to happen here, pre-submission, keyed on the close
+    # intent's NFT tokenId. ``(tokens_owed0, tokens_owed1)`` raw ints in
+    # PoolKey-currency0/1 order on a clean gateway read; ``None`` (unmeasured,
+    # Empty ≠ Zero) when the read is unavailable / fails. Stamped onto
+    # ``LPCloseData.fees0/fees1`` at ledger-build time (observability/ledger.py).
+    v4_lp_close_fees: tuple[int, int] | None = None
     # --- Running bookkeeping (updated by state-machine loop) ---
     last_execution_result: Any | None = None
     last_execution_context: Any | None = None
@@ -2486,6 +2498,7 @@ class StrategyRunner:
         pre_state: dict | None = None,
         post_state: dict | None = None,
         emit_position_event: bool = True,
+        v4_lp_close_fees: tuple[int, int] | None = None,
     ) -> str | None:
         """Returns the persisted LedgerEntry.id on success, None on non-live failure."""
         """Write a structured trade record to the transaction ledger.
@@ -2543,6 +2556,7 @@ class StrategyRunner:
                 price_oracle=price_oracle,
                 pre_state=pre_state,
                 post_state=post_state,
+                v4_lp_close_fees=v4_lp_close_fees,
             )
 
             # Phase 4: stamp deployment_id and execution_mode onto the entry (VIB-2835/2837).
@@ -4074,6 +4088,7 @@ class StrategyRunner:
         pre_snapshot: Any | None = None,
         recon: dict[str, Any] | None = None,
         lending_pre_state: Any | None = None,
+        v4_lp_close_fees: tuple[int, int] | None = None,
     ) -> "TeardownCommitOutcome":
         """Run the per-intent teardown commit pipeline (VIB-3773 Phase 0).
 
@@ -4098,6 +4113,7 @@ class StrategyRunner:
             pre_snapshot=pre_snapshot,
             recon=recon,
             lending_pre_state=lending_pre_state,
+            v4_lp_close_fees=v4_lp_close_fees,
         )
 
     # Pre-T4 this function was cc=37; VIB-4164 (T4) extracted the BRIDGE and
@@ -4545,6 +4561,119 @@ class StrategyRunner:
             price_oracle=state.price_oracle,
             phase="pre",
         )
+
+        # VIB-4482 (P-V1-A): capture Uniswap V4 uncollected fees (tokens_owed0/1)
+        # BEFORE an LP_CLOSE / LP_COLLECT_FEES burn submits. The post-burn
+        # position read returns zero liquidity, so this is the only point where
+        # the on-chain fee split is still observable. Stamped onto
+        # ``LPCloseData.fees0/fees1`` at ledger-build time so the LP accounting
+        # handler emits measured fees (Empty ≠ Zero), lighting LP3 / LP4 / G6
+        # on the Accountant Test instead of the honest-but-blank None deferral.
+        state.v4_lp_close_fees = self._capture_v4_lp_close_fees_safe(
+            intent=intent,
+            chain=strategy.chain,
+            gateway_client=state.gateway_client,
+        )
+
+    @staticmethod
+    def _capture_v4_lp_close_fees_safe(
+        *,
+        intent: Any,
+        chain: str,
+        gateway_client: Any | None,
+    ) -> tuple[int, int] | None:
+        """Best-effort PRE-close read of V4 uncollected fees (VIB-4482).
+
+        Reads ``tokens_owed0/tokens_owed1`` for the closing V4 LP position via
+        the connector-owned ``build_v4_position_state_reader`` hook (which routes
+        through the gateway ``QueryV4PositionState`` RPC — boundary-compliant, no
+        new egress). Scoped to ``uniswap_v4`` ``LP_CLOSE`` / ``LP_COLLECT_FEES``
+        intents whose ``position_id`` is a usable NFT tokenId.
+
+        Returns ``(tokens_owed0, tokens_owed1)`` raw ints (PoolKey-currency0/1
+        order — the same order ``LPCloseData.currency0/amount0_collected`` use)
+        on a clean read, or ``None`` when:
+          - ``gateway_client`` is missing (local-without-gateway / paper),
+          - the intent isn't a V4 LP close (SWAP, lending, V3, …),
+          - the close intent has no usable tokenId,
+          - the connector reader is unavailable (V4 not deployed on the chain /
+            no StateView address),
+          - the on-chain read fails / returns partial state.
+
+        Returning ``None`` is the honest "unmeasured" signal (Empty ≠ Zero):
+        the ledger stamp leaves ``fees0/fees1 = None`` and the LP handler keeps
+        the pre-VIB-4482 deferral rather than fabricating a zero. ``Decimal("0")``
+        / ``0`` is only ever written when the gateway *measured* zero owed fees.
+
+        The narrow except mirrors ``_capture_lending_state_safe``: the connector
+        reader already swallows broad gateway errors internally and returns
+        ``None``, so this outer guard only fires on a network-class fault in the
+        registry / dispatch path — a programming error (ImportError /
+        AttributeError / TypeError) propagates loudly.
+        """
+        if gateway_client is None:
+            return None
+        # Capability-gate, not a protocol-string match (blueprint 22 / scan-coupling):
+        # only attempt the pre-burn fee read when the intent's connector advertises
+        # the V4 position-state capability. Keeps framework code free of hard-coded
+        # protocol names and auto-extends to any future connector providing the same
+        # on-chain reader.
+        from almanak.connectors._base.types import ProtocolName
+        from almanak.connectors._strategy_base.runner_hook_registry import (
+            RunnerV4PositionStateCapability,
+        )
+        from almanak.connectors._strategy_runner_hook_registry import (
+            STRATEGY_RUNNER_HOOK_REGISTRY,
+        )
+
+        protocol = str(getattr(intent, "protocol", "") or "").lower()
+        if not protocol:
+            return None
+        connector = STRATEGY_RUNNER_HOOK_REGISTRY.get(ProtocolName(protocol))
+        if not isinstance(connector, RunnerV4PositionStateCapability):
+            return None
+        intent_type = getattr(intent, "intent_type", None)
+        intent_type_value = getattr(intent_type, "value", None)
+        if intent_type_value is not None:
+            intent_type_str = str(intent_type_value).upper()
+        else:
+            intent_type_str = str(intent_type or "").upper()
+        if intent_type_str not in {"LP_CLOSE", "LP_COLLECT_FEES"}:
+            return None
+        token_id = StrategyRunner._v4_close_intent_token_id(intent)
+        if token_id is None:
+            return None
+        try:
+            from almanak.connectors._strategy_runner_hook_registry import (
+                STRATEGY_RUNNER_HOOK_REGISTRY,
+            )
+
+            reader = STRATEGY_RUNNER_HOOK_REGISTRY.build_v4_position_state_reader(gateway_client)
+            if reader is None:
+                return None
+            state_obj = reader(chain, token_id)
+        except (ConnectionError, TimeoutError, OSError):
+            logger.debug(
+                "V4 LP close pre-fee capture failed (transient/non-fatal) token_id=%s chain=%s",
+                token_id,
+                chain,
+                exc_info=True,
+            )
+            return None
+        if state_obj is None:
+            return None
+        owed0 = getattr(state_obj, "tokens_owed0", None)
+        owed1 = getattr(state_obj, "tokens_owed1", None)
+        # The reader only returns a fully-populated ``V4PositionState`` (it fails
+        # closed to ``None`` on partial reads), so both fields are present here;
+        # guard anyway and treat any missing leg as "unmeasured" rather than
+        # stamping a half-pair.
+        if owed0 is None or owed1 is None:
+            return None
+        try:
+            return int(owed0), int(owed1)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _capture_lending_state_safe(
@@ -5332,6 +5461,7 @@ class StrategyRunner:
             price_oracle=ledger_price_oracle,
             pre_state=pre_state,
             post_state=post_state,
+            v4_lp_close_fees=state.v4_lp_close_fees,
         )
         # VIB-4043 / PR4: emit the UX timeline breadcrumb now, threading the
         # ledger_entry_id so the renderer can navigate from the card back to

@@ -282,6 +282,7 @@ async def commit_teardown_intent(
     pre_snapshot: Any | None = None,
     recon: dict[str, Any] | None = None,
     lending_pre_state: Any | None = None,
+    v4_lp_close_fees: tuple[int, int] | None = None,
 ) -> TeardownCommitOutcome:
     """Run the full success-path commit pipeline for one teardown intent.
 
@@ -513,6 +514,11 @@ async def commit_teardown_intent(
                     pre_state=pre_state_dict,
                     post_state=post_state_dict,
                     emit_position_event=False,
+                    # VIB-4482 — PRE-close-measured V4 uncollected fees, captured
+                    # by the teardown manager BEFORE ``orchestrator.execute`` (the
+                    # post-burn read returns zero liquidity). Stamped onto
+                    # ``lp_close_data.fees0/1`` inside ``build_ledger_entry``.
+                    v4_lp_close_fees=v4_lp_close_fees,
                 )
             except Exception as exc:  # noqa: BLE001 — never propagate
                 logger.error(

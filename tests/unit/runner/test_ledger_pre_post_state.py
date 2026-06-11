@@ -398,3 +398,187 @@ def test_lending_handler_reads_runner_serialized_post_state():
     assert event.health_factor_after == Decimal("1.882")
     assert event.liquidation_threshold == Decimal("8500") / Decimal("10000")
     assert event.unavailable_reason == ""
+
+
+# ---------------------------------------------------------------------------
+# VIB-4482 (P-V1-A) — _capture_v4_lp_close_fees_safe: PRE-close V4 fee read.
+#
+# Uniswap V4 bundles fees into the withdrawal Transfer, so the close receipt
+# cannot separate them; the runner reads tokens_owed0/1 on-chain BEFORE the burn
+# (a post-burn read returns zero liquidity) via the connector-owned reader hook
+# (gateway QueryV4PositionState RPC). Returns the raw-int pair or None — never
+# fabricates a zero (Empty != Zero).
+# ---------------------------------------------------------------------------
+
+
+def _v4_close_intent(intent_type="LP_CLOSE", protocol="uniswap_v4", position_id="12345"):
+    return SimpleNamespace(
+        intent_type=SimpleNamespace(value=intent_type),
+        protocol=protocol,
+        position_id=position_id,
+    )
+
+
+def test_capture_v4_lp_close_fees_returns_none_without_gateway():
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    out = StrategyRunner._capture_v4_lp_close_fees_safe(
+        intent=_v4_close_intent(),
+        chain="base",
+        gateway_client=None,
+    )
+    assert out is None
+
+
+def test_capture_v4_lp_close_fees_skips_non_v4_protocol():
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _GatewayProbe:
+        def __init__(self):
+            self.calls = 0
+
+        def query_v4_position_state(self, *_, **__):
+            self.calls += 1
+            return None
+
+    gateway = _GatewayProbe()
+    out = StrategyRunner._capture_v4_lp_close_fees_safe(
+        intent=_v4_close_intent(protocol="uniswap_v3"),
+        chain="base",
+        gateway_client=gateway,
+    )
+    assert out is None
+    assert gateway.calls == 0
+
+
+def test_capture_v4_lp_close_fees_skips_non_close_intents():
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _GatewayProbe:
+        def __init__(self):
+            self.calls = 0
+
+        def query_v4_position_state(self, *_, **__):
+            self.calls += 1
+            return None
+
+    gateway = _GatewayProbe()
+    for intent_type in ("LP_OPEN", "SWAP", "SUPPLY", "PERP_OPEN"):
+        out = StrategyRunner._capture_v4_lp_close_fees_safe(
+            intent=_v4_close_intent(intent_type=intent_type),
+            chain="base",
+            gateway_client=gateway,
+        )
+        assert out is None
+    assert gateway.calls == 0
+
+
+def test_capture_v4_lp_close_fees_skips_missing_token_id():
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _GatewayProbe:
+        def __init__(self):
+            self.calls = 0
+
+        def query_v4_position_state(self, *_, **__):
+            self.calls += 1
+            return None
+
+    gateway = _GatewayProbe()
+    # None / "" / 0 / non-positive are not usable NFT tokenIds.
+    for pid in (None, "", "0", "-5", "abc"):
+        out = StrategyRunner._capture_v4_lp_close_fees_safe(
+            intent=_v4_close_intent(position_id=pid),
+            chain="base",
+            gateway_client=gateway,
+        )
+        assert out is None
+    assert gateway.calls == 0
+
+
+def test_capture_v4_lp_close_fees_reads_owed_pair_on_clean_read():
+    """A clean gateway read returns (tokens_owed0, tokens_owed1) as ints."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _Gateway:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def query_v4_position_state(self, *, chain, position_manager, state_view, token_id):
+            self.calls.append(
+                {
+                    "chain": chain,
+                    "position_manager": position_manager,
+                    "state_view": state_view,
+                    "token_id": token_id,
+                }
+            )
+            return SimpleNamespace(tokens_owed0=4242, tokens_owed1=2424)
+
+    gateway = _Gateway()
+    out = StrategyRunner._capture_v4_lp_close_fees_safe(
+        intent=_v4_close_intent(position_id="12345"),
+        chain="base",
+        gateway_client=gateway,
+    )
+    assert out == (4242, 2424)
+    # The real reader hook resolved base's PositionManager + StateView and
+    # threaded the tokenId through.
+    assert len(gateway.calls) == 1
+    assert gateway.calls[0]["chain"] == "base"
+    assert gateway.calls[0]["token_id"] == 12345
+    assert gateway.calls[0]["state_view"]  # connector-resolved, non-empty
+
+
+def test_capture_v4_lp_close_fees_measured_zero_preserved():
+    """tokens_owed == 0 is a MEASURED zero (Empty != Zero) — returned as 0, not None."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _Gateway:
+        def query_v4_position_state(self, **__):
+            return SimpleNamespace(tokens_owed0=0, tokens_owed1=0)
+
+    out = StrategyRunner._capture_v4_lp_close_fees_safe(
+        intent=_v4_close_intent(),
+        chain="base",
+        gateway_client=_Gateway(),
+    )
+    assert out == (0, 0)
+
+
+def test_capture_v4_lp_close_fees_none_state_returns_none():
+    """A failed / partial gateway read (reader returns None) => None (unmeasured)."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _Gateway:
+        def query_v4_position_state(self, **__):
+            return None  # reader fails closed → None
+
+    out = StrategyRunner._capture_v4_lp_close_fees_safe(
+        intent=_v4_close_intent(),
+        chain="base",
+        gateway_client=_Gateway(),
+    )
+    assert out is None
+
+
+def test_capture_v4_lp_close_fees_undeployed_chain_returns_none():
+    """A chain with no V4 StateView address => reader returns None => None."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _Gateway:
+        def __init__(self):
+            self.calls = 0
+
+        def query_v4_position_state(self, **__):
+            self.calls += 1
+            return SimpleNamespace(tokens_owed0=1, tokens_owed1=2)
+
+    gateway = _Gateway()
+    out = StrategyRunner._capture_v4_lp_close_fees_safe(
+        intent=_v4_close_intent(),
+        chain="zzz_nonexistent_chain",
+        gateway_client=gateway,
+    )
+    assert out is None
+    assert gateway.calls == 0  # reader short-circuits before the RPC

@@ -36,6 +36,7 @@ from almanak.framework.execution.extracted_data import (
 from almanak.framework.observability.ledger import (
     LedgerEntry,
     _stamp_lp_close_discriminator,
+    _stamp_v4_lp_close_fees,
     build_ledger_entry,
     deserialize_extracted_data,
 )
@@ -1652,3 +1653,175 @@ class TestStampLpCloseDiscriminator:
         _stamp_lp_close_discriminator(intent, result, "LP_CLOSE")
         assert result.extracted_data["lp_close_data"] is stub
         assert result.extracted_data["lp_close_data"].position_id is None
+
+
+# ---------------------------------------------------------------------------
+# VIB-4482 (P-V1-A) — _stamp_v4_lp_close_fees branch coverage.
+#
+# Uniswap V4's ModifyLiquidity burn carries no amounts and bundles fees into the
+# single withdrawal Transfer, so the receipt parser emits fees0=fees1=None
+# ("BUNDLED" taxonomy). The runner reads tokens_owed0/1 on-chain BEFORE the burn
+# (a post-burn read returns zero liquidity) and threads the pair here; the helper
+# stamps it onto the frozen LPCloseData so the LP accounting handler emits
+# MEASURED fees. Empty != Zero throughout: a failed/absent read leaves None.
+# ---------------------------------------------------------------------------
+
+
+def _v4_close_result(*, fees0=None, fees1=None, extracted="dict"):
+    """Build a result whose extracted_data carries a V4-shaped LPCloseData."""
+    if extracted == "dict":
+        close = LPCloseData(
+            amount0_collected=480_000,
+            amount1_collected=170_000,
+            fees0=fees0,
+            fees1=fees1,
+            liquidity_removed=1_000_000,
+            pool_address="0x" + "a" * 64,  # 32-byte V4 PoolId shape
+            source="modify_liquidity",
+            currency0="0x" + "1" * 40,
+            currency1="0x" + "2" * 40,
+        )
+        return SimpleNamespace(extracted_data={"lp_close_data": close})
+    return SimpleNamespace(extracted_data=extracted)
+
+
+class TestStampV4LpCloseFees:
+    """Direct branch coverage for ``_stamp_v4_lp_close_fees`` (VIB-4482)."""
+
+    @pytest.mark.parametrize("intent_type", ["LP_CLOSE", "LP_COLLECT_FEES"])
+    def test_measured_fees_stamped_and_taxonomy_flips(self, intent_type):
+        result = _v4_close_result(fees0=None, fees1=None)
+        _stamp_v4_lp_close_fees(result, intent_type, (1234, 5678))
+        close = result.extracted_data["lp_close_data"]
+        assert close.fees0 == 1234
+        assert close.fees1 == 5678
+        # Re-derived from the now-measured fees — an on-chain tokens_owed read
+        # IS a separated, exact fee value (not the parser's BUNDLED default).
+        assert close.fee_separation_method == "SEPARATE"
+        assert close.fee_confidence == "EXACT"
+
+    def test_currency_ordering_is_positional(self):
+        # fees0 <- tokens_owed0 (currency0 leg); fees1 <- tokens_owed1. Guards a
+        # future accidental transpose; both gateway read and parser derive order
+        # from the same canonical PoolKey, so positional mapping is correct.
+        result = _v4_close_result()
+        _stamp_v4_lp_close_fees(result, "LP_CLOSE", (7, 9))
+        close = result.extracted_data["lp_close_data"]
+        assert (close.fees0, close.fees1) == (7, 9)
+
+    def test_measured_zero_is_honored(self):
+        # 0 = the gateway MEASURED zero owed fees — distinct from None
+        # (unmeasured). Empty != Zero.
+        result = _v4_close_result(fees0=None, fees1=None)
+        _stamp_v4_lp_close_fees(result, "LP_CLOSE", (0, 0))
+        close = result.extracted_data["lp_close_data"]
+        assert close.fees0 == 0
+        assert close.fees1 == 0
+        assert close.fee_separation_method == "SEPARATE"
+
+    def test_none_read_preserves_none(self):
+        # A failed / unavailable on-chain read => fees stay None (unmeasured) and
+        # the parser's honest BUNDLED taxonomy is preserved. Never fabricate 0.
+        result = _v4_close_result(fees0=None, fees1=None)
+        _stamp_v4_lp_close_fees(result, "LP_CLOSE", None)
+        close = result.extracted_data["lp_close_data"]
+        assert close.fees0 is None
+        assert close.fees1 is None
+        assert close.fee_separation_method == "BUNDLED"
+
+    def test_parser_measured_fees_not_clobbered(self):
+        # If a parser somehow already measured fees, the gateway read must NOT
+        # overwrite them (idempotent, Empty != Zero).
+        result = _v4_close_result(fees0=99, fees1=88)
+        _stamp_v4_lp_close_fees(result, "LP_CLOSE", (1, 2))
+        close = result.extracted_data["lp_close_data"]
+        assert close.fees0 == 99
+        assert close.fees1 == 88
+
+    def test_partial_parser_fee_not_clobbered(self):
+        # Even a single measured leg (fees0 set, fees1 None) blocks the stamp —
+        # we never half-overwrite a parser that emitted something.
+        result = _v4_close_result(fees0=99, fees1=None)
+        _stamp_v4_lp_close_fees(result, "LP_CLOSE", (1, 2))
+        close = result.extracted_data["lp_close_data"]
+        assert close.fees0 == 99
+        assert close.fees1 is None
+
+    def test_non_v4_shaped_close_is_noop(self):
+        # A non-V4 close (e.g. V3, which separates fees from its Collect log) leaves
+        # ``currency0`` unset on LPCloseData — the capability signal this stamp gates
+        # on. No protocol string involved; the data shape alone discriminates.
+        close = LPCloseData(
+            amount0_collected=480_000,
+            amount1_collected=170_000,
+            fees0=None,
+            fees1=None,
+            liquidity_removed=1_000_000,
+            pool_address="0x" + "a" * 40,
+            source="decrease_liquidity",
+            # currency0 / currency1 left at their None default → not V4-shaped.
+        )
+        result = SimpleNamespace(extracted_data={"lp_close_data": close})
+        _stamp_v4_lp_close_fees(result, "LP_CLOSE", (1, 2))
+        assert result.extracted_data["lp_close_data"].fees0 is None
+
+    @pytest.mark.parametrize("intent_type", ["LP_OPEN", "SWAP", "SUPPLY"])
+    def test_non_close_intent_type_is_noop(self, intent_type):
+        result = _v4_close_result(fees0=None, fees1=None)
+        _stamp_v4_lp_close_fees(result, intent_type, (1, 2))
+        assert result.extracted_data["lp_close_data"].fees0 is None
+
+    def test_none_fees_pair_is_noop_short_circuit(self):
+        # Earliest guard: fees is None => return immediately.
+        result = _v4_close_result(fees0=None, fees1=None)
+        _stamp_v4_lp_close_fees(result, "LP_CLOSE", None)
+        assert result.extracted_data["lp_close_data"].fees0 is None
+
+    def test_none_result_is_noop(self):
+        # Must not raise when there is no result to stamp onto.
+        _stamp_v4_lp_close_fees(None, "LP_CLOSE", (1, 2))
+
+    def test_non_dict_extracted_data_is_noop(self):
+        result = _v4_close_result(extracted=["not", "a", "dict"])
+        _stamp_v4_lp_close_fees(result, "LP_CLOSE", (1, 2))
+        assert result.extracted_data == ["not", "a", "dict"]
+
+    def test_absent_lp_close_data_is_noop(self):
+        result = _v4_close_result(extracted={})
+        _stamp_v4_lp_close_fees(result, "LP_CLOSE", (1, 2))
+        assert result.extracted_data == {}
+
+    def test_close_data_without_fees0_attr_is_noop(self):
+        stub = SimpleNamespace(amount0_collected=1)  # no fees0 attribute
+        result = SimpleNamespace(extracted_data={"lp_close_data": stub})
+        _stamp_v4_lp_close_fees(result, "LP_CLOSE", (1, 2))
+        assert result.extracted_data["lp_close_data"] is stub
+
+    def test_non_dataclass_close_data_replace_failure_is_noop(self):
+        # A duck-typed stub with fees0/fees1 = None and a V4-shaped currency0
+        # (passes guards) but is not a dataclass — dataclasses.replace raises
+        # TypeError, swallowed rather than crashing the ledger-write path.
+        stub = SimpleNamespace(fees0=None, fees1=None, currency0="0x" + "1" * 40)
+        result = SimpleNamespace(extracted_data={"lp_close_data": stub})
+        _stamp_v4_lp_close_fees(result, "LP_CLOSE", (1, 2))
+        assert result.extracted_data["lp_close_data"] is stub
+        assert result.extracted_data["lp_close_data"].fees0 is None
+
+    def test_build_ledger_entry_threads_v4_fees_end_to_end(self):
+        # Integration through the public entrypoint: a V4 LP_CLOSE with a
+        # gateway-read fee pair lands measured fees on the serialized row.
+        intent = _make_intent("LP_CLOSE", protocol="uniswap_v4", position_id="5467895")
+        result = _v4_close_result(fees0=None, fees1=None)
+        entry = build_ledger_entry(
+            deployment_id="d",
+            cycle_id="c",
+            intent=intent,
+            result=result,
+            chain="base",
+            success=True,
+            v4_lp_close_fees=(4242, 2424),
+        )
+        extracted = json.loads(entry.extracted_data_json)
+        close = extracted["lp_close_data"]
+        assert close["fees0"] == "4242"
+        assert close["fees1"] == "2424"

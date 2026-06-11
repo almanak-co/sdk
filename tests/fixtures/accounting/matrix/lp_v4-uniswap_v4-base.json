@@ -4,16 +4,17 @@
     "fixture": "lp_v4",
     "chain": "base",
     "primitive": "lp",
-    "captured_from": "docs/internal/notes/.tmp/accounting-matrix/lp_v4-uniswap_v4-base/accountant.json",
-    "captured_at": "2026-06-11T15:49:00+00:00",
-    "captured_at_commit": "4fbca8142 (main, post-PRs #2680 VIB-5024 + #2681 VIB-4583)",
+    "captured_from": "/private/tmp/vib4482-matrix-after/lp_v4-uniswap_v4-base/accountant.json",
+    "captured_at": "2026-06-11T18:00:00+00:00",
+    "captured_at_commit": "21818650b (origin/main base) + feat/vib-4482-v4-lp-event-path-fees",
     "post_fix_for": [
       "VIB-5018 + VIB-4586 identity-faithful V4 LP snapshot valuation (PR #2678 merged 2026-06-10) — killed the $289.6M corruption",
       "VIB-5024 gateway V4 PositionManager reader → HIGH-confidence on-chain valuation + V3-parity uncollected fees (PR #2680 merged 2026-06-11)",
       "VIB-4583 Uniswap V4 position_registry support (PR #2681 merged 2026-06-11)",
-      "VIB-4537 scrub-and-refreeze of the lp_v4 baseline DB + matrix cells (this PR)"
+      "VIB-4537 scrub-and-refreeze of the lp_v4 baseline DB + matrix cells (PR merged 2026-06-11)",
+      "VIB-4482 (P-V1-A) V4 LP event-path fee separation (this PR): runner reads V4 tokens_owed0/1 PRE-close via the gateway QueryV4PositionState RPC (reused from VIB-5024) and stamps them onto LPCloseData.fees0/1 at ledger-build time. Movement vs the prior baseline (17 PASS / 2 FAIL / 2 XFAIL / 1 SKIP at 4fbca8142): TWO cells moved forward, ZERO regressions (scorer status=PASS, regressions=[]). LP3 FAIL->PASS (position_events.fees_token0/1 now carry measured V4 fees) and LP4 XFAIL->PASS (the LP_CLOSE handler now has a measurable fees_total_usd, so il_usd is emitted within the sanity bound). G6 REMAINS FAIL but for an unrelated pre-existing cause — its decomposition now shows Σ_lp_fees_null_count=0 (the fee hole VIB-4482 closed) with the residual gap driven by Σ_swaps_usd_null_count=1 (the shared-wallet / FIFO swap-lot family tracked under VIB-4970 / VIB-5010), orthogonal to fee separation. L5_22 remains XFAIL (registry mode not toggled for this row). Verification matrix run: 249s on managed Anvil-Base."
     ],
-    "note": "Real-Anvil-Base re-baseline for the lp_v4 fixture after the V4 valuation last-mile. Movement vs the previous baseline (12 PASS / 2 FAIL / 7 XFAIL / 1 SKIP, captured 2026-05-17 at 43f6866da): FIVE cells XFAIL->PASS, ZERO regressions (matrix scorer: status=PASS, regressions=[], 0 PASS->non-PASS). G14 and G15 (sdk-value === on-chain-value reconciliation) flipped XFAIL->PASS because VIB-5024 now reads live liquidity/ticks (StateView.getSlot0) and computes exact concentrated-liquidity amounts, so the snapshot mark is on-chain truth at HIGH confidence rather than an open-amount estimate. LP2/LP5/LP6 flipped XFAIL->PASS on the same HIGH-confidence valuation (LP reconciliation cells that depended on a trustworthy on-chain mark). G6 and LP3 remain FAIL: both require per-event fee/principal separation written onto position_events.fees_token0/1 (VIB-4482 / P-V1-A) — VIB-5024's fee read lives in the snapshot VALUATION path (portfolio_snapshots), not the accounting-EVENT path, so position_events still carry no fees and these cells are honestly non-PASS (fee0_set=0 on both OPEN and CLOSE). L5_22 remains XFAIL (registry mode not toggled on for this fixture row, independent of the VIB-4583 write path) and LP4 remains XFAIL (IL_USD divergence, flips to PASS with V1 fee separation). Verification matrix run: 257s on managed Anvil-Base.",
+    "note": "Real-Anvil-Base re-baseline for the lp_v4 fixture after VIB-4482 (P-V1-A) V4 LP event-path fee separation. Movement vs the prior baseline (17 PASS / 2 FAIL / 2 XFAIL / 1 SKIP at 4fbca8142): TWO cells moved forward, ZERO regressions (matrix scorer: status=PASS, regressions=[], 0 PASS->non-PASS). LP3 flipped FAIL->PASS and LP4 flipped XFAIL->PASS. The mechanism: the runner now reads V4 uncollected fees (tokens_owed0/1) ON-CHAIN BEFORE the LP_CLOSE / LP_COLLECT_FEES burn submits — via the connector-owned build_v4_position_state_reader hook which routes through the SAME gateway QueryV4PositionState RPC VIB-5024 already shipped (a post-burn read returns zero liquidity, so the read is taken pre-execute keyed on the close intent's NFT tokenId) — and stamps the pair onto LPCloseData.fees0/1 at ledger-build time (observability/ledger._stamp_v4_lp_close_fees). With measured fees, position_events.fees_token0/1 are now populated (LP3) and the LP_CLOSE handler has a measurable fees_total_usd, so it emits il_usd within the LP4 sanity bound (LP4). Empty != Zero throughout: a failed/unavailable read leaves fees0/1=None (the parser's honest BUNDLED deferral), and a gateway-measured zero writes Decimal('0'). G6 REMAINS FAIL for an unrelated pre-existing cause: its decomposition now shows Σ_lp_fees_null_count=0 (the fee hole VIB-4482 closed) — the residual reconciliation gap is driven by Σ_swaps_usd_null_count=1 (the shared-wallet capture / FIFO swap-lot family tracked under VIB-4970 / VIB-5010), orthogonal to fee separation. L5_22 remains XFAIL (registry mode not toggled on for this fixture row, independent of the VIB-4583 write path). Verification matrix run: 249s on managed Anvil-Base.",
     "value_usd_artefact": "VIB-4537 disposition (Option 2 scrub-and-refreeze, 2026-06-11): artefact (A) is RESOLVED. The prior baseline carried portfolio_snapshots.total_value_usd up to $289.6M from inflated V4-LP amount0/amount1 (~10^7); after VIB-5018 (identity-faithful valuation) + VIB-5024 (on-chain HIGH valuation) the V4 LP now marks correctly at $3.88 at value_confidence=HIGH (max total_value_usd=$3.88; was $289,600,000). Artefact (B) PERSISTS and is unrelated to V4: framework available_cash_usd ~$164.5k is uncorrelated with the row wallet_balances_json (~$95) and is constant across rows — shared-wallet capture contamination (same family as VIB-4970), orthogonal to cell STATUS (G4/G8/G9 PASS regardless). Not in scope for VIB-4537; tracked under the VIB-4970 family."
   },
   "cells": {
@@ -35,15 +36,15 @@
     "L5_22": "XFAIL",
     "LP1": "PASS",
     "LP2": "PASS",
-    "LP3": "FAIL",
-    "LP4": "XFAIL",
+    "LP3": "PASS",
+    "LP4": "PASS",
     "LP5": "PASS",
     "LP6": "PASS"
   },
   "scores": {
-    "passed": 17,
-    "failed": 2,
-    "xfailed": 2,
+    "passed": 19,
+    "failed": 1,
+    "xfailed": 1,
     "skipped": 1,
     "total": 22
   }

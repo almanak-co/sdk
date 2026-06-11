@@ -830,6 +830,100 @@ def _stamp_lp_close_discriminator(intent: Any, result: Any, intent_type: str, pr
         return
 
 
+def _stamp_v4_lp_close_fees(
+    result: Any,
+    intent_type: str,
+    fees: tuple[int, int] | None,
+) -> None:
+    """Stamp PRE-close-measured V4 uncollected fees onto ``LPCloseData`` (VIB-4482).
+
+    Uniswap V4's ``ModifyLiquidity`` burn event carries no amounts and bundles
+    fees into the single withdrawal Transfer, so the close RECEIPT cannot
+    separate fees from principal (unlike V3, which differences Collect−Burn
+    legs in the same receipt). The receipt parser therefore leaves
+    ``LPCloseData.fees0/fees1 = None`` (honest "unmeasured", Empty ≠ Zero).
+
+    The runner reads ``tokens_owed0/tokens_owed1`` on-chain *before* the burn
+    submits (a post-burn read returns zero liquidity → zero fees) via the
+    gateway ``QueryV4PositionState`` RPC and threads the raw-int pair here. This
+    is the single correct stamp point: the runner holds the enriched result just
+    before it is serialized into ``transaction_ledger.extracted_data_json``, and
+    every downstream LP consumer (the accounting handler's ``_resolve_lp_amounts``
+    and the ``position_events`` builder) already reads ``lp_close_data.fees0/1``.
+
+    ``fees`` is ``(tokens_owed0, tokens_owed1)`` in PoolKey-currency0/1 order —
+    the same order ``LPCloseData.currency0`` / ``amount0_collected`` use, because
+    both the gateway read and the parser derive ordering from the same canonical
+    PoolKey — so ``fees0 ↔ tokens_owed0 ↔ currency0`` align with no transpose.
+
+    Precision bound (inherent, accepted): ``tokens_owed0/1`` is read at the
+    pre-execute block while ``amount0_collected`` is measured at the burn block.
+    If the pool accrues additional fees in the gap (intervening swaps before the
+    burn lands), the stamped fees slightly UNDER-state the fee subset actually
+    inside ``amount0_collected``, so a downstream ``il_usd = cost_basis −
+    fees_total`` marginally over-states principal-only LP value. Unavoidable
+    without a same-block read; small in practice; never violates Empty ≠ Zero
+    and never double-counts.
+
+    No-op unless this is an ``LP_CLOSE`` / ``LP_COLLECT_FEES`` carrying a usable
+    ``(int, int)`` pair and a V4-shaped ``LPCloseData`` (``currency0`` populated —
+    the connector-agnostic capability signal, not a protocol-string match). Like
+    :func:`_stamp_lp_close_discriminator`, the frozen dataclass is replaced via
+    :func:`dataclasses.replace` (which re-runs ``__post_init__``, correctly
+    deriving ``fee_separation_method="SEPARATE"`` / ``fee_confidence="EXACT"`` —
+    honest, since the fees are exact on-chain reads). ``fees = None`` (the read
+    was unavailable / failed) leaves ``fees0/fees1 = None`` untouched — never
+    fabricates a zero. ``Decimal("0")`` / ``0`` is only written when the gateway
+    *measured* zero owed fees. Idempotent: a parser that somehow emitted measured
+    fees is preserved (no clobber).
+    """
+    if fees is None:
+        return
+    if intent_type not in ("LP_CLOSE", "LP_COLLECT_FEES"):
+        return
+    extracted = getattr(result, "extracted_data", None) if result else None
+    if not isinstance(extracted, dict):
+        return
+    # Re-read AFTER ``_stamp_lp_close_discriminator`` (which also replaces
+    # ``extracted["lp_close_data"]``) so this stamp operates on the latest copy.
+    close_data = extracted.get("lp_close_data")
+    if close_data is None or not hasattr(close_data, "fees0"):
+        return
+    # Capability-gate on the V4 PoolKey data shape rather than a hard-coded
+    # protocol string (blueprint 22 / scan-coupling): only the V4 receipt parser
+    # populates ``currency0``/``currency1`` on ``LPCloseData`` (V3 leaves them
+    # None), and the ``(tokens_owed0, tokens_owed1)`` pair only exists for a V4
+    # position — so currency0 presence is the precise "this is a V4 close" signal.
+    if getattr(close_data, "currency0", None) is None:
+        return
+    # Preserve a parser-measured fee pair (Empty ≠ Zero — do not clobber a real
+    # parser-emitted value with the gateway read).
+    if getattr(close_data, "fees0", None) is not None or getattr(close_data, "fees1", None) is not None:
+        return
+    raw0, raw1 = fees
+    import dataclasses
+
+    try:
+        # Reset the fee taxonomy to the ``"UNKNOWN"`` sentinel alongside the new
+        # fee pair so ``__post_init__`` RE-DERIVES it: the parser stamped
+        # ``BUNDLED`` (its honest "couldn't separate" verdict) when it emitted
+        # ``fees0=None``, and ``replace`` would otherwise carry that stale
+        # ``BUNDLED`` forward. The gateway-measured fees ARE separated and exact,
+        # so re-deriving correctly yields ``SEPARATE`` / ``EXACT`` — the honest
+        # taxonomy for an on-chain ``tokens_owed`` read.
+        extracted["lp_close_data"] = dataclasses.replace(
+            close_data,
+            fees0=int(raw0),
+            fees1=int(raw1),
+            fee_separation_method="UNKNOWN",
+            fee_confidence="UNKNOWN",
+        )
+    except (TypeError, ValueError):
+        # Defensive: a non-dataclass duck-typed close-data stub (tests) — leave
+        # it untouched rather than raise on the ledger-write path.
+        return
+
+
 def build_ledger_entry(
     *,
     deployment_id: str,
@@ -842,6 +936,7 @@ def build_ledger_entry(
     price_oracle: dict[str, Any] | None = None,
     pre_state: dict[str, Any] | None = None,
     post_state: dict[str, Any] | None = None,
+    v4_lp_close_fees: tuple[int, int] | None = None,
 ) -> LedgerEntry:
     """Build a LedgerEntry from an intent and its execution result.
 
@@ -926,6 +1021,12 @@ def build_ledger_entry(
     # to attribute a co-pool close to its OWN prior open.
     protocol = getattr(intent, "protocol", "") or ""
     _stamp_lp_close_discriminator(intent, result, intent_type, protocol)
+    # VIB-4482 (P-V1-A) — stamp PRE-close-measured V4 uncollected fees onto
+    # ``lp_close_data`` so the LP accounting handler emits measured fees instead
+    # of the receipt-parser's honest-but-blank ``None`` (V4 bundles fees into the
+    # withdrawal Transfer; they are unrecoverable from the receipt). The runner
+    # reads them on-chain before the burn submits and threads the raw-int pair.
+    _stamp_v4_lp_close_fees(result, intent_type, v4_lp_close_fees)
     extracted_data_json = _build_extracted_data_json(result)
 
     # ─── VIB-3480 columns finally populated (Accounting-AttemptNo17 §3 D3) ──

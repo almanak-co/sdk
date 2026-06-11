@@ -1411,6 +1411,26 @@ class TeardownManager:
                                 exc,
                             )
 
+                    # VIB-4482 — capture Uniswap V4 uncollected fees on the same
+                    # pre-execute boundary so LP_CLOSE / LP_COLLECT_FEES teardown
+                    # rows carry measured ``fees0/1`` lane-symmetric with the
+                    # iteration lane's ``state.v4_lp_close_fees``. The read MUST
+                    # happen before ``orchestrator.execute`` — a post-burn read
+                    # returns zero liquidity. Returns ``None`` for non-V4-LP-close
+                    # intents and never raises.
+                    v4_lp_close_fees_for_intent: tuple[int, int] | None = None
+                    if self.runner_helpers.has_v4_lp_close_fees:
+                        try:
+                            v4_lp_close_fees_for_intent = await self.runner_helpers.snapshot_intent_v4_lp_close_fees(  # type: ignore[misc]
+                                strategy, intent_to_exec
+                            )
+                        except Exception as exc:  # noqa: BLE001 — best-effort
+                            logger.debug(
+                                "teardown V4 LP-close pre-fee snapshot failed for %s: %s",
+                                strategy.deployment_id,
+                                exc,
+                            )
+
                     # Execute via orchestrator
                     exec_result = await self.orchestrator.execute(
                         compilation_result.action_bundle,
@@ -1469,6 +1489,7 @@ class TeardownManager:
                                 pre_snapshot=pre_intent_snapshot,
                                 recon=post_intent_recon,
                                 lending_pre_state=lending_pre_state_for_intent,
+                                v4_lp_close_fees=v4_lp_close_fees_for_intent,
                             )
                             if commit_outcome.accounting_degraded:
                                 accounting_degraded_records.extend(commit_outcome.degraded_writes)
