@@ -145,8 +145,11 @@ scan-coupling-baseline:
 #   * module-level ``_PROTOCOL_TO_X = {"uniswap_v3": ...}`` dispatch dicts
 # Phase 3 (VIB-4811) migrates the remaining dispatch tables; the
 # allowlist inside the test file shrinks to empty once that lands.
+# Also runs the strategy-egress guard (plans/003): unmarked direct-egress
+# imports/calls in ``strategies/incubating/**`` and ``strategies/experiments/**``
+# fail here and in the tests/ CI sweep.
 check-gateway-isolation:
-	uv run pytest tests/static/test_gateway_protocol_isolation.py --import-mode=importlib
+	uv run pytest tests/static/test_gateway_protocol_isolation.py tests/static/test_strategy_egress_guard.py --import-mode=importlib
 
 # Run security checks (bandit for Python security issues)
 security:
