@@ -1,24 +1,30 @@
-.PHONY: all clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline check-accounting-ratchet scan-coupling scan-coupling-report scan-coupling-baseline
+.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline check-accounting-ratchet scan-coupling scan-coupling-report scan-coupling-baseline
 
 # Load .env file if it exists
 -include .env
 export
 
 # Default target
-all: install lint
+all: install lint ## Install deps and lint (default target)
+
+# Show annotated targets. Greps only the Makefile itself (firstword) —
+# MAKEFILE_LIST also contains .env via `-include .env`, and .env must
+# never be echoed into help output.
+help: ## Show this help
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(firstword $(MAKEFILE_LIST)) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-28s\033[0m %s\n", $$1, $$2}'
 
 # Run linting with auto-fix (local development)
-lint:
+lint: ## Ruff check + format with auto-fix (local dev)
 	uv run ruff check almanak --fix
 	uv run ruff format almanak
 
 # Run linting without auto-fix - fails on errors (CI)
-lint-check:
+lint-check: ## Ruff check + format, no fixes (CI)
 	uv run ruff check almanak
 	uv run ruff format almanak --check
 
 # Format code
-format:
+format: ## Format code with ruff
 	uv run ruff format almanak
 
 # Check formatting without changes (CI)
@@ -26,7 +32,7 @@ format-check:
 	uv run ruff format almanak --check
 
 # Run mypy type checks (CI)
-typecheck:
+typecheck: ## Run mypy type checks
 	uv run mypy almanak
 
 # Run mypy and generate a summary report (local development)
@@ -55,7 +61,7 @@ check-config-boundary:
 # in ConnectorRegistry (VIB-4298 PR 1; lazy registration shape from VIB-4835).
 # The registry is the source of truth for the (connector, intent, chain)
 # universe consumed by PR 2's intent-test coverage gate and future tooling.
-check-connector-registry:
+check-connector-registry: ## Validate connector manifests against the registry
 	uv run python scripts/ci/check_connector_registry.py --verbose
 
 # Intent-coverage gate (VIB-4298 PR 2 / VIB-4303). Two-in-one:
@@ -158,11 +164,11 @@ security:
 
 # Run local pre-push test suite. Requires Anvil (Foundry) for tests/framework.
 # Excludes intent tests (separate target) and visual/nightly.
-test-unit:
+test-unit: ## Unit suite (excludes intents and visual/nightly); needs Anvil
 	uv run pytest tests/ --ignore=tests/intents --ignore=tests/visual/nightly -m "not integration" -v --import-mode=importlib
 
 # Alias for test-unit
-test: test-unit
+test: test-unit ## Alias for test-unit
 
 # VIB-4728 POOL-9 (VIB-4757) acceptance pack — 9 gateway tests + 2 framework
 # mirror tests aggregated under @pytest.mark.acceptance_pack. The frozen
@@ -195,7 +201,7 @@ test-connectors:
 # Run intent tests (Anvil is auto-managed by pytest fixtures)
 # Usage: make test-intents                    # all chains (one at a time)
 #        make test-intents CHAIN=base         # single chain
-test-intents:
+test-intents: ## Intent tests; all chains, or scope with the CHAIN variable
 	@if [ -n "$(CHAIN)" ]; then \
 		echo "Running intent tests for $(CHAIN)..."; \
 		uv run pytest tests/intents/$(CHAIN)/ -v -s -n0 --import-mode=importlib; \
@@ -222,7 +228,7 @@ export COVERAGE_CORE := sysmon
 # Run all tests for CI (with JUnit XML + coverage report; coverage gate via fail_under).
 # Phase 0 (2026-05-04): coverage now runs on every CI invocation. See
 # docs/internal/coverage-improvement-plan.md §8 Phase 0 for the ratchet policy.
-test-ci:
+test-ci: ## CI test run with coverage (writes .coverage/coverage.xml)
 	uv run pytest tests/ --ignore=tests/intents --ignore=tests/visual/nightly -m "not integration" -v --import-mode=importlib \
 		--cov=almanak --cov-report=xml:coverage.xml --cov-report=term \
 		--junitxml=test-results.xml
@@ -274,7 +280,7 @@ BASE ?= origin/main
 # No positional path arg — diff-quality treats those as pre-generated input
 # reports (`Could not load report 'almanak/'`). Scope is enforced by
 # [tool.crap-diff].package_root in pyproject.toml.
-crap-diff:
+crap-diff: ## Diff-scoped CRAP gate (needs .coverage from test-ci)
 	@test -f .coverage || (echo "crap-diff: .coverage missing — run 'make test-ci' or 'make test-coverage' first (or use 'make crap-diff-fresh' for a full CI-parity run)" && exit 1)
 	uv run diff-quality --violations crap --fail-under 100 \
 		--compare-branch=$(BASE)
@@ -321,12 +327,12 @@ docs-cli:
 # gitignored — they exist only after this target runs. Anything that builds
 # the docs site (``docs``, ``docs-serve``, the deploy workflow) must depend
 # on this first.
-docs-generated: docs-cli
+docs-generated: docs-cli ## Regenerate machine-generated docs pages
 	uv run python scripts/docs/generate_connector_matrix.py --apply
 	uv run python scripts/docs/generate_chain_table.py --apply
 
 # Build documentation site (includes llms.txt generation)
-docs: docs-generated
+docs: docs-generated ## Build the full docs site (incl. llms.txt)
 	uv run mkdocs build
 	@$(MAKE) docs-llms
 
@@ -351,11 +357,11 @@ docs-clean:
 	rm -rf site/ site-llms/
 
 # Install production dependencies
-install:
+install: ## Install production deps (uv sync)
 	uv sync
 
 # Install development dependencies
-install-dev:
+install-dev: ## Install dev deps (uv sync --all-extras)
 	uv sync --all-extras
 
 # Version bumping commands
@@ -429,7 +435,7 @@ build-upload-gcp: build-platform-wheels
 # longer names individual connectors. The connector-owned proto keeps the
 # same ``package = almanak.gateway.proto`` declaration so the wire-level
 # service name is byte-identical to the pre-move version.
-proto:
+proto: ## Regenerate gateway gRPC stubs from proto files
 	uv run python -m grpc_tools.protoc -I./almanak/gateway/proto --python_out=./almanak/gateway/proto --grpc_python_out=./almanak/gateway/proto --mypy_out=./almanak/gateway/proto ./almanak/gateway/proto/*.proto
 	# Fix imports in generated grpc file (grpc_tools generates relative imports that break in packages)
 	sed -i.bak 's/import gateway_pb2 as gateway__pb2/from almanak.gateway.proto import gateway_pb2 as gateway__pb2/' ./almanak/gateway/proto/gateway_pb2_grpc.py && rm -f ./almanak/gateway/proto/gateway_pb2_grpc.py.bak
@@ -442,7 +448,7 @@ proto-check:
 	uv run python scripts/ci/check_deployment_id_proto_surface.py
 
 # Start gateway server (required for strategy execution)
-gateway:
+gateway: ## Start the gateway server
 	@echo "Starting gateway server..."
 	@echo "Press Ctrl+C to stop"
 	uv run python -m almanak.gateway.server

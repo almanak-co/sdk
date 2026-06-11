@@ -175,7 +175,6 @@ dependencies = [
     { name = "pytz" },
     { name = "pyyaml" },
     { name = "requests" },
-    { name = "retry" },
     { name = "simple-term-menu" },
     { name = "solders" },
     { name = "streamlit" },
@@ -186,22 +185,12 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
-    { name = "asgi-lifespan" },
-    { name = "diff-cover" },
     { name = "md-click-2" },
     { name = "mkdocs" },
-    { name = "mkdocs-llmstxt" },
     { name = "mkdocs-material" },
     { name = "mkdocs-static-i18n" },
     { name = "mkdocstrings", extra = ["python"] },
     { name = "mypy" },
-    { name = "mypy-protobuf" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "pytest-timeout" },
-    { name = "pytest-xdist" },
-    { name = "radon" },
     { name = "ruff" },
     { name = "setuptools" },
     { name = "twine" },
@@ -209,9 +198,7 @@ dev = [
     { name = "types-pytz" },
     { name = "types-pyyaml" },
     { name = "types-requests" },
-    { name = "types-retry" },
     { name = "wheel" },
-    { name = "xenon" },
 ]
 test-controller = [
     { name = "uvicorn", extra = ["standard"] },
@@ -235,11 +222,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.11.11,<4.0.0" },
-    { name = "asgi-lifespan", marker = "extra == 'dev'", specifier = ">=2.1.0" },
     { name = "asyncpg", specifier = ">=0.29.0" },
     { name = "certifi", specifier = ">=2024.2.2" },
     { name = "click", specifier = ">=8.1.8,<9.0.0" },
-    { name = "diff-cover", marker = "extra == 'dev'", specifier = ">=10.2.0" },
     { name = "eth-abi", specifier = ">=5.0.0" },
     { name = "eth-account", specifier = ">=0.13.7,<0.14.0" },
     { name = "fastapi", specifier = ">=0.128.0" },
@@ -252,12 +237,10 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "md-click-2", marker = "extra == 'dev'", specifier = ">=0.0.1,<0.0.2" },
     { name = "mkdocs", marker = "extra == 'dev'", specifier = ">=1.6.1" },
-    { name = "mkdocs-llmstxt", marker = "extra == 'dev'", specifier = ">=0.5.0" },
     { name = "mkdocs-material", marker = "extra == 'dev'", specifier = ">=9.7.0" },
     { name = "mkdocs-static-i18n", marker = "extra == 'dev'", specifier = ">=1.2.0" },
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'dev'", specifier = ">=0.29.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.19.1,<2.0.0" },
-    { name = "mypy-protobuf", marker = "extra == 'dev'", specifier = ">=5.0.0" },
     { name = "nest-asyncio", specifier = ">=1.6.0" },
     { name = "optuna", specifier = ">=3.5.0" },
     { name = "pandas", specifier = ">=2.2.3,<4.0.0" },
@@ -267,18 +250,11 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.10.6,<3.0.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
     { name = "pyright", specifier = ">=1.1.390" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.1" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.25.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.1.0" },
-    { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.3.1" },
-    { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.5.0" },
     { name = "python-dotenv", specifier = ">=1.0.1,<2.0.0" },
     { name = "python-kraken-sdk", specifier = ">=3.2.7" },
     { name = "pytz", specifier = ">=2023.4" },
     { name = "pyyaml", specifier = ">=6.0.1" },
-    { name = "radon", marker = "extra == 'dev'", specifier = ">=6.0.1" },
     { name = "requests", specifier = ">=2.32.3,<3.0.0" },
-    { name = "retry", specifier = ">=0.9.2,<0.10.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9.10,<0.15.0" },
     { name = "setuptools", marker = "extra == 'dev'", specifier = ">=61" },
     { name = "simple-term-menu", specifier = ">=1.6.4,<2.0.0" },
@@ -291,11 +267,9 @@ requires-dist = [
     { name = "types-pytz", marker = "extra == 'dev'", specifier = ">=2024.1.0" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "types-requests", marker = "extra == 'dev'", specifier = ">=2.32.0" },
-    { name = "types-retry", marker = "extra == 'dev'", specifier = ">=0.9.0" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'test-controller'", specifier = ">=0.30.0" },
     { name = "web3", specifier = ">=6.15.1,<8.0.0" },
     { name = "wheel", marker = "extra == 'dev'", specifier = "==0.46.3" },
-    { name = "xenon", marker = "extra == 'dev'", specifier = ">=0.9.1" },
 ]
 provides-extras = ["dev", "test-controller"]
 
@@ -960,15 +934,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/d8/03/dbb9d47556ee54337e7e0ac209d17ceff2d2a197c34de08005abc7a7449b/cytoolz-1.0.1-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:738b2350f340ff8af883eb301054eb724997f795d20d90daec7911c389d61581", size = 2069785, upload-time = "2024-12-13T05:46:10.122Z" },
     { url = "https://files.pythonhosted.org/packages/ea/f8/11bb7b8947002231faae3ec2342df5896afbc19eb783a332cce6d219ff79/cytoolz-1.0.1-cp313-cp313-win32.whl", hash = "sha256:9cbd9c103df54fcca42be55ef40e7baea624ac30ee0b8bf1149f21146d1078d9", size = 320685, upload-time = "2024-12-13T05:46:11.553Z" },
     { url = "https://files.pythonhosted.org/packages/40/eb/dde173cf2357084ca9423950be1f2f11ab11d65d8bd30165bfb8fd4213e9/cytoolz-1.0.1-cp313-cp313-win_amd64.whl", hash = "sha256:90e577e08d3a4308186d9e1ec06876d4756b1e8164b92971c69739ea17e15297", size = 362898, upload-time = "2024-12-13T05:46:12.771Z" },
-]
-
-[[package]]
-name = "decorator"
-version = "5.2.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/43/fa/6d96a0978d19e17b68d634497769987b16c8f4cd0a7a05048bec693caa6b/decorator-5.2.1.tar.gz", hash = "sha256:65f266143752f734b0a7cc83c46f4618af75b8c5911b00ccb61d0ac9b6da0360", size = 56711, upload-time = "2025-02-24T04:41:34.073Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/4e/8c/f3147f5c4b73e7550fe5f9352eaa956ae838d5c51eb58e7a25b9f3e2643b/decorator-5.2.1-py3-none-any.whl", hash = "sha256:d316bb415a2d9e2d2b3abcc4084c6502fc09240e292cd76a76afc106a1c8e04a", size = 9190, upload-time = "2025-02-24T04:41:32.565Z" },
 ]
 
 [[package]]
@@ -2755,15 +2720,6 @@ wheels = [
 ]
 
 [[package]]
-name = "py"
-version = "1.11.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/98/ff/fec109ceb715d2a6b4c4a85a61af3b40c723a961e8828319fbcb15b868dc/py-1.11.0.tar.gz", hash = "sha256:51c75c4126074b472f746a24399ad32f6053d1b34b68d2fa41e558e6f4a98719", size = 207796, upload-time = "2021-11-04T17:17:01.377Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f6/f0/10642828a8dfb741e5f3fbaac830550a518a775c7fff6f04a007259b0548/py-1.11.0-py2.py3-none-any.whl", hash = "sha256:607c53218732647dff4acdfcd50cb62615cedf612e72d1724fb1a0cc6405b378", size = 98708, upload-time = "2021-11-04T17:17:00.152Z" },
-]
-
-[[package]]
 name = "py-clob-client-v2"
 version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3292,19 +3248,6 @@ wheels = [
 ]
 
 [[package]]
-name = "retry"
-version = "0.9.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "decorator" },
-    { name = "py" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/9d/72/75d0b85443fbc8d9f38d08d2b1b67cc184ce35280e4a3813cda2f445f3a4/retry-0.9.2.tar.gz", hash = "sha256:f8bfa8b99b69c4506d6f5bd3b0aabf77f98cdb17f3c9fc3f5ca820033336fba4", size = 6448, upload-time = "2016-05-11T13:58:51.541Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/4b/0d/53aea75710af4528a25ed6837d71d117602b01946b307a3912cb3cfcbcba/retry-0.9.2-py2.py3-none-any.whl", hash = "sha256:ccddf89761fa2c726ab29391837d4327f819ea14d244c232a1d24c67a2f98606", size = 7986, upload-time = "2016-05-11T13:58:39.925Z" },
-]
-
-[[package]]
 name = "rfc3986"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3703,15 +3646,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/0f/f3/a0663907082280664d745929205a89d41dffb29e89a50f753af7d57d0a96/types_requests-2.32.4.20260107.tar.gz", hash = "sha256:018a11ac158f801bfa84857ddec1650750e393df8a004a8a9ae2a9bec6fcb24f", size = 23165, upload-time = "2026-01-07T03:20:54.091Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1c/12/709ea261f2bf91ef0a26a9eed20f2623227a8ed85610c1e54c5805692ecb/types_requests-2.32.4.20260107-py3-none-any.whl", hash = "sha256:b703fe72f8ce5b31ef031264fe9395cac8f46a04661a79f7ed31a80fb308730d", size = 20676, upload-time = "2026-01-07T03:20:52.929Z" },
-]
-
-[[package]]
-name = "types-retry"
-version = "0.9.9.20250322"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/4b/02/d2183adcbf136d314fd45214357f7b8d85f5a43f3ad05455b7a0932296ae/types_retry-0.9.9.20250322.tar.gz", hash = "sha256:2eaa6f4b832c187121056988bbe6d2d0b6f4eb03631fdc9752e2ac2802f7b726", size = 7741, upload-time = "2025-03-22T02:48:34.916Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/df/52/d7be523dafd0b4b54ce7678981092ef3c9235f659f5f1c0b72d37eb00355/types_retry-0.9.9.20250322-py3-none-any.whl", hash = "sha256:77cf8dbbe1640c6c471eafd5b9a4ce206f30b7faa6dac41a16cbcb18b1cc8ec2", size = 7718, upload-time = "2025-03-22T02:48:33.829Z" },
 ]
 
 [[package]]

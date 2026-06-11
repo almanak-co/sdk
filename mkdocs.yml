@@ -227,6 +227,11 @@ nav:
       - api/connectors/lifi.md
       - api/connectors/across.md
       - api/connectors/stargate.md
+      - api/connectors/beefy.md
+      - api/connectors/hyperliquid.md
+      - api/connectors/joelend.md
+      - api/connectors/jupiter_lend.md
+      - api/connectors/yearn.md
       - api/connectors/base.md
     - api/services.md
     - api/alerting.md

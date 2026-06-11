@@ -17,7 +17,7 @@ import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -299,7 +299,7 @@ class DataCache:
             return False
 
         created_at = datetime.fromisoformat(created_at_str)
-        age = datetime.utcnow() - created_at
+        age = datetime.now(UTC).replace(tzinfo=None) - created_at
         return age.total_seconds() > self._ttl_seconds
 
     def get(self, key: CacheKey) -> OHLCVData | None:
@@ -374,7 +374,7 @@ class DataCache:
                     str(data.low),
                     str(data.close),
                     str(data.volume) if data.volume is not None else None,
-                    datetime.utcnow().isoformat(),
+                    datetime.now(UTC).replace(tzinfo=None).isoformat(),
                 ),
             )
             conn.commit()
@@ -444,7 +444,7 @@ class DataCache:
         if not items:
             return 0
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(UTC).replace(tzinfo=None).isoformat()
         with self._connection() as conn:
             conn.executemany(
                 """
@@ -605,7 +605,7 @@ class DataCache:
                 INSERT OR REPLACE INTO kv_cache (key, value, created_at)
                 VALUES (?, ?, ?)
                 """,
-                (key, value, datetime.utcnow().isoformat()),
+                (key, value, datetime.now(UTC).replace(tzinfo=None).isoformat()),
             )
             conn.commit()
 
@@ -646,7 +646,7 @@ class DataCache:
         if self._ttl_seconds <= 0:
             return 0
 
-        cutoff = datetime.utcnow() - timedelta(seconds=self._ttl_seconds)
+        cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=self._ttl_seconds)
         cutoff_str = cutoff.isoformat()
 
         with self._connection() as conn:
@@ -684,7 +684,7 @@ class DataCache:
         if self._ttl_seconds <= 0:
             return 0
 
-        cutoff = datetime.utcnow() - timedelta(seconds=self._ttl_seconds)
+        cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=self._ttl_seconds)
         cutoff_str = cutoff.isoformat()
 
         with self._connection() as conn:

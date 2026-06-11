@@ -32,6 +32,20 @@ make typecheck
 make test
 ```
 
+### Dependency management
+
+`make install-dev` (= `uv sync --all-extras`) is the canonical dev setup; it
+installs both dependency surfaces:
+
+- `[dependency-groups] dev` in `pyproject.toml` — the test/quality toolchain
+  (pytest, radon, diff-cover, ...). Installed by any `uv sync`; CI's
+  diff-quality job installs only this via `uv sync --group dev`.
+- `[project.optional-dependencies] dev` — the docs/build/typing toolchain
+  (mkdocs, ruff, mypy, twine, ...), published as the `dev` extra.
+
+Each tool lives in exactly one of the two lists — do not add a package to
+both.
+
 ### Running Tests
 
 The project uses `pytest` with several Makefile targets:
