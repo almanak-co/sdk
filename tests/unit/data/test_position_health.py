@@ -15,7 +15,6 @@ from almanak.framework.data.position_health import (
     _normalize_protocol,
     _PositionHealthProviderAdapter,
     get_health_factor,
-    register_health_factor_provider,
 )
 
 # =========================================================================
@@ -1153,34 +1152,8 @@ class TestUnsupportedProtocol:
             get_health_factor(chain="ethereum", protocol="unknown_proto", wallet="0xabc", market="m")
 
 
-class TestProviderRegistry:
-    """Users can register custom protocol providers without forking."""
-
-    def test_register_custom_provider(self):
-        calls = []
-
-        class _FakeProvider:
-            def __init__(self, **kw):
-                calls.append(kw)
-
-            def get_health_factor(self, wallet, market):
-                return Decimal("3.14")
-
-        register_health_factor_provider("my_custom_lender", _FakeProvider)
-        try:
-            hf = get_health_factor(
-                chain="ethereum",
-                protocol="my_custom_lender",
-                wallet="0xabc",
-                market="m",
-            )
-        finally:
-            # Clean up the registry so other tests see a pristine state.
-            from almanak.framework.data.position_health import _HF_FACTORIES
-
-            _HF_FACTORIES.pop("my_custom_lender", None)
-        assert hf == Decimal("3.14")
-        assert len(calls) == 1
+class TestProviderAdapter:
+    """The built-in adapter binds PositionHealthProvider to a protocol."""
 
     def test_adapter_wraps_provider_by_protocol(self):
         inner = MagicMock()

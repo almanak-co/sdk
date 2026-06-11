@@ -28,43 +28,40 @@ logic, making it easy to add new protocols without modifying PlanExecutor:
 USAGE
 =====
 
-Basic setup:
+Handler construction is connector-owned: a venue that exposes off-chain
+order execution publishes a ``PREDICTION_EXECUTE_SPEC`` in its connector
+folder and declares ``prediction_execute=ImportRef(...)`` on its
+``CONNECTOR`` manifest. The runner asks
+``almanak.connectors._strategy_base.prediction_execute_registry.PredictionExecuteRegistry``
+to build the handler — no framework module names a concrete venue class.
 
-    # Create registry
+Wiring a registry into the executor:
+
     registry = ExecutionHandlerRegistry()
 
-    # Register handlers
-    polymarket_handler = PolymarketClobHandler(clob_client)
-    registry.register(polymarket_handler)
+    # Handler built from the owning connector's manifest declaration
+    handler = PredictionExecuteRegistry.build_handler(
+        protocol, gateway_client=gateway_client
+    )
+    if handler is not None:
+        registry.register(handler)
 
-    onchain_handler = OnChainHandler(orchestrator)
-    registry.register(onchain_handler)
-
-    # Use in executor
     executor = PlanExecutor(config, handler_registry=registry)
 
-Adding new protocols:
+Adding a new venue is one connector folder plus one manifest declaration —
+no edit to this module, the registry, or PlanExecutor.
 
-    # Just register a new handler - no PlanExecutor changes needed
-    hyperliquid_handler = HyperliquidClobHandler(client)
-    registry.register(hyperliquid_handler)
+ROUTING
+=======
 
-MIGRATION FROM STRING-BASED DETECTION
-======================================
-
-Before (string-based):
-    if bundle.metadata.get("protocol") == "polymarket":
-        result = await clob_handler.execute(bundle)
-    else:
-        result = await orchestrator.execute(bundle)
-
-After (registry-based):
     handler = registry.get_handler(bundle)
-    result = await handler.execute(bundle)
+    if handler is not None:
+        result = await handler.execute(bundle)
+    # else: bundle takes the on-chain execution path
 
 See Also:
-    - docs/internal/notes/tech-debt/string-based-protocol-detection.md
-    - almanak/framework/execution/clob_handler.py
+    - almanak/connectors/_strategy_base/prediction_execute_registry.py
+    - almanak/framework/execution/clob_handler.py (venue-neutral result types)
     - almanak/framework/execution/plan_executor.py
 """
 
@@ -171,20 +168,20 @@ class ExecutionHandlerRegistry:
     The fast path is used when bundle.metadata["protocol"] is set.
     The slow path is used for complex detection logic or fallback handlers.
 
+    Handlers are connector-owned: build them via
+    ``PredictionExecuteRegistry.build_handler(protocol, ...)`` (driven by each
+    connector's ``prediction_execute`` manifest declaration) rather than
+    naming concrete venue classes in framework code.
+
     Example:
         registry = ExecutionHandlerRegistry()
 
-        # Register CLOB handler
-        clob_handler = PolymarketClobHandler(client)
-        registry.register(clob_handler)  # Claims "polymarket" protocol
-
-        # Register on-chain fallback
-        onchain_handler = OnChainHandler(orchestrator)
-        registry.register(onchain_handler)  # Claims no specific protocols
+        # Handler claims its venue's protocol slug(s) via
+        # ``supported_protocols``; registration indexes them for fast lookup.
+        registry.register(handler)
 
         # Route bundles
-        handler = registry.get_handler(polymarket_bundle)  # Returns clob_handler
-        handler = registry.get_handler(swap_bundle)  # Returns onchain_handler
+        handler = registry.get_handler(bundle)  # None -> on-chain path
     """
 
     def __init__(self) -> None:

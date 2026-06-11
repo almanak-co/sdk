@@ -45,8 +45,13 @@ class TeardownPostCondition(Protocol):
 _REGISTRY: dict[str, TeardownPostCondition] = {}
 
 
-def register_teardown_post_condition(protocol: str, hook: TeardownPostCondition) -> None:
-    """Register a post-condition for a protocol.
+def _register_teardown_post_condition(protocol: str, hook: TeardownPostCondition) -> None:
+    """Register a post-condition for a protocol (framework-internal).
+
+    Not a connector-facing API: connectors publish post-conditions through
+    ``CONNECTOR.teardown_post_condition`` (an ``ImportRef`` on the manifest);
+    the framework hydrates them into this registry at import time
+    (``almanak.framework.teardown.post_conditions``).
 
     Re-registering the same hook is idempotent. Replacing an existing hook logs
     a warning so accidental shadowing is visible in logs.
@@ -76,5 +81,4 @@ __all__ = [
     "TeardownPostCondition",
     "get_teardown_post_condition",
     "has_teardown_post_condition",
-    "register_teardown_post_condition",
 ]

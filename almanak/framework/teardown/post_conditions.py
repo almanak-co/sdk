@@ -43,9 +43,9 @@ from almanak.connectors._strategy_base.address_registry import AbiFamily, Addres
 from almanak.connectors._strategy_base.teardown_post_condition import (
     ClosureCheckResult,
     TeardownPostCondition,
+    _register_teardown_post_condition,
     get_teardown_post_condition,
     has_teardown_post_condition,
-    register_teardown_post_condition,
 )
 
 
@@ -61,7 +61,7 @@ def _register_manifest_teardown_post_conditions() -> None:
                 f"{connector_manifest.teardown_post_condition.attribute} must be callable, "
                 f"got {type(hook).__qualname__}"
             )
-        register_teardown_post_condition(connector_manifest.name, hook)
+        _register_teardown_post_condition(connector_manifest.name, hook)
 
 
 _register_manifest_teardown_post_conditions()
@@ -375,7 +375,7 @@ def _register_default_v3_post_conditions() -> None:
     """
     for v3_slug in sorted(_V3_NPM_PROTOCOLS):
         if not has_teardown_post_condition(v3_slug):
-            register_teardown_post_condition(v3_slug, _uniswap_v3_post_condition)
+            _register_teardown_post_condition(v3_slug, _uniswap_v3_post_condition)
 
 
 _register_default_v3_post_conditions()
@@ -386,5 +386,4 @@ __all__ = [
     "TeardownPostCondition",
     "get_teardown_post_condition",
     "has_teardown_post_condition",
-    "register_teardown_post_condition",
 ]

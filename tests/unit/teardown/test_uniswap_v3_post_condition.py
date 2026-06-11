@@ -40,6 +40,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.connectors._strategy_base.teardown_post_condition import (
+    # Registration is framework-internal (manifest-driven via
+    # CONNECTOR.teardown_post_condition); tests reach the private seam to
+    # swap/restore hooks without building a whole connector manifest.
+    _register_teardown_post_condition,
+)
 from almanak.framework.teardown.models import (
     PositionInfo,
     PositionType,
@@ -50,7 +56,6 @@ from almanak.framework.teardown.post_conditions import (
     _uniswap_v3_post_condition,
     get_teardown_post_condition,
     has_teardown_post_condition,
-    register_teardown_post_condition,
 )
 from almanak.framework.teardown.teardown_manager import TeardownManager
 
@@ -629,7 +634,7 @@ def _restore_uniswap_v3_hook():
     original = get_teardown_post_condition("uniswap_v3")
     yield
     if original is not None:
-        register_teardown_post_condition("uniswap_v3", original)
+        _register_teardown_post_condition("uniswap_v3", original)
 
 
 def _make_lp_position_summary(position_id: str = "5460223") -> TeardownPositionSummary:

@@ -21,6 +21,7 @@ from almanak.framework.execution.clob_handler import (
     ClobExecutionResult,
     ClobOrderStatus,
 )
+from almanak.framework.execution.handler_registry import ExecutionHandlerRegistry
 from almanak.framework.execution.plan_executor import (
     ExecutionPath,
     PlanExecutor,
@@ -65,16 +66,18 @@ def mock_clob_handler(mock_clob_client):
 
 @pytest.fixture
 def executor_with_clob(mock_clob_handler):
-    """Create a PlanExecutor with CLOB handler."""
+    """Create a PlanExecutor with a registry-registered CLOB handler."""
+    registry = ExecutionHandlerRegistry()
+    registry.register(mock_clob_handler)
     return PlanExecutor(
         config=PlanExecutorConfig(),
-        clob_handler=mock_clob_handler,
+        handler_registry=registry,
     )
 
 
 @pytest.fixture
 def executor_no_clob():
-    """Create a PlanExecutor without CLOB handler."""
+    """Create a PlanExecutor without any registered CLOB handler."""
     return PlanExecutor(config=PlanExecutorConfig())
 
 
@@ -278,11 +281,25 @@ class TestExecuteBundleRouting:
 
         The shape gate in `execute_bundle` routes empty-transactions /
         `order_request` bundles into the CLOB path even when the registry has
-        no matching handler. `_execute_clob_bundle` then sees `_clob_handler
-        is None` and reports failure -- preventing silent on-chain simulation
-        of an off-chain order on a misconfigured executor.
+        no matching handler, and fails the result before dispatch --
+        preventing silent on-chain simulation of an off-chain order on a
+        misconfigured executor.
         """
         result = asyncio.run(executor_no_clob.execute_bundle(clob_buy_bundle))
+
+        assert result.success is False
+        assert result.execution_path == ExecutionPath.CLOB
+
+    def test_clob_handler_returning_none_fails(self, executor_with_clob, mock_clob_handler, clob_buy_bundle):
+        """A handler violating the protocol by returning None fails cleanly.
+
+        `ExecutionHandler.execute` must return a result object; a None return
+        is reported as a precise protocol-violation failure rather than the
+        generic caught-AttributeError the except path would log.
+        """
+        mock_clob_handler.execute = AsyncMock(return_value=None)
+
+        result = asyncio.run(executor_with_clob.execute_bundle(clob_buy_bundle))
 
         assert result.success is False
         assert result.execution_path == ExecutionPath.CLOB

@@ -12,6 +12,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from almanak.connectors._strategy_base.teardown_post_condition import (
+    # Registration is framework-internal (manifest-driven via
+    # CONNECTOR.teardown_post_condition); tests reach the private seam to
+    # swap/restore hooks without building a whole connector manifest.
+    _register_teardown_post_condition,
+)
 from almanak.connectors.traderjoe_v2.teardown_post_condition import (
     traderjoe_v2_post_condition,
 )
@@ -19,7 +25,6 @@ from almanak.framework.teardown.post_conditions import (
     ClosureCheckResult,
     get_teardown_post_condition,
     has_teardown_post_condition,
-    register_teardown_post_condition,
 )
 
 WALLET = "0x1111111111111111111111111111111111111111"
@@ -61,12 +66,12 @@ class TestRegistry:
         try:
             with caplog.at_level("WARNING"):
                 replacement = lambda **_: ClosureCheckResult(closed=True)  # noqa: E731
-                register_teardown_post_condition("traderjoe_v2", replacement)
+                _register_teardown_post_condition("traderjoe_v2", replacement)
             assert any("Replacing existing teardown post-condition" in r.message for r in caplog.records)
         finally:
             # Restore the default so other tests aren't affected.
             if original is not None:
-                register_teardown_post_condition("traderjoe_v2", original)
+                _register_teardown_post_condition("traderjoe_v2", original)
 
     def test_v3_default_does_not_clobber_connector_owned_hook(self) -> None:
         """The V3 NPM default registration must not overwrite a connector that
@@ -82,14 +87,14 @@ class TestRegistry:
         original = get_teardown_post_condition(slug)
         sentinel = lambda **_: ClosureCheckResult(closed=True)  # noqa: E731
         try:
-            register_teardown_post_condition(slug, sentinel)
+            _register_teardown_post_condition(slug, sentinel)
             pc._register_default_v3_post_conditions()
             # Re-running default registration must leave the connector-owned hook
             # in place rather than swapping in the generic V3 default.
             assert get_teardown_post_condition(slug) is sentinel
         finally:
             if original is not None:
-                register_teardown_post_condition(slug, original)
+                _register_teardown_post_condition(slug, original)
 
 
 # ---------------------------------------------------------------------------

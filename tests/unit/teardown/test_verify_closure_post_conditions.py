@@ -13,10 +13,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.connectors._strategy_base.teardown_post_condition import (
+    # Registration is framework-internal (manifest-driven via
+    # CONNECTOR.teardown_post_condition); tests reach the private seam to
+    # swap/restore hooks without building a whole connector manifest.
+    _register_teardown_post_condition,
+)
 from almanak.framework.teardown.post_conditions import (
     ClosureCheckResult,
     get_teardown_post_condition,
-    register_teardown_post_condition,
 )
 from almanak.framework.teardown.teardown_manager import TeardownManager
 
@@ -27,7 +32,7 @@ def _restore_traderjoe_v2_hook():
     original = get_teardown_post_condition("traderjoe_v2")
     yield
     if original is not None:
-        register_teardown_post_condition("traderjoe_v2", original)
+        _register_teardown_post_condition("traderjoe_v2", original)
 
 
 def _make_position_snapshot(*positions) -> SimpleNamespace:
@@ -48,7 +53,7 @@ async def test_verify_closure_passes_when_post_condition_returns_closed(
     _restore_traderjoe_v2_hook,
 ):
     hook = MagicMock(return_value=ClosureCheckResult(closed=True, protocol="traderjoe_v2"))
-    register_teardown_post_condition("traderjoe_v2", hook)
+    _register_teardown_post_condition("traderjoe_v2", hook)
 
     mgr = TeardownManager()
     snapshot = _make_position_snapshot(
@@ -81,7 +86,7 @@ async def test_verify_closure_fails_when_post_condition_returns_residual(
             residual={"bin_balances": {100: 4567}, "total_lb_tokens": 4567},
         )
     )
-    register_teardown_post_condition("traderjoe_v2", hook)
+    _register_teardown_post_condition("traderjoe_v2", hook)
 
     mgr = TeardownManager()
     snapshot = _make_position_snapshot(
@@ -106,7 +111,7 @@ async def test_verify_closure_fails_closed_when_post_condition_raises(
     _restore_traderjoe_v2_hook,
 ):
     hook = MagicMock(side_effect=RuntimeError("boom"))
-    register_teardown_post_condition("traderjoe_v2", hook)
+    _register_teardown_post_condition("traderjoe_v2", hook)
 
     mgr = TeardownManager()
     snapshot = _make_position_snapshot(
@@ -186,7 +191,7 @@ async def test_verify_closure_aggregates_multiple_position_failures(
             residual={"bin_balances": {1: 1}},
         )
 
-    register_teardown_post_condition("traderjoe_v2", hook)
+    _register_teardown_post_condition("traderjoe_v2", hook)
 
     mgr = TeardownManager()
     snapshot = _make_position_snapshot(

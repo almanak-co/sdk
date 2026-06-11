@@ -60,7 +60,6 @@ from almanak.framework.teardown.post_conditions import (
     TeardownPostCondition,
     get_teardown_post_condition,
     has_teardown_post_condition,
-    register_teardown_post_condition,
 )
 from almanak.framework.teardown.safety_guard import SafetyGuard
 from almanak.framework.teardown.slippage_manager import EscalatingSlippageManager
@@ -118,12 +117,12 @@ __all__ = [
     "create_teardown_state_adapter",
     "create_teardown_state_adapter_for_runtime",
     "reset_teardown_state_manager",
-    # Post-conditions (VIB-3742)
+    # Post-conditions (VIB-3742). Registration is manifest-driven
+    # (CONNECTOR.teardown_post_condition); only lookups are public.
     "ClosureCheckResult",
     "TeardownPostCondition",
     "get_teardown_post_condition",
     "has_teardown_post_condition",
-    "register_teardown_post_condition",
 ]
 
 

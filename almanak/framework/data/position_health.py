@@ -831,26 +831,6 @@ class HealthFactorProvider(Protocol):
         ...
 
 
-# Registry of provider factories keyed by normalized protocol name.
-# Strategies can register custom providers without forking the SDK.
-_HF_FACTORIES: dict[str, Any] = {}
-
-
-def register_health_factor_provider(protocol: str, factory: Any) -> None:
-    """Register a ``HealthFactorProvider`` factory for a protocol.
-
-    The factory is called as ``factory(chain=..., rpc_url=..., gateway_client=...,
-    price_oracle=...)`` and must return an object implementing
-    :class:`HealthFactorProvider`. Factories are looked up by the normalized
-    protocol name (see :func:`_normalize_protocol`).
-
-    Args:
-        protocol: Protocol name (e.g. "aave_v3", "morpho_blue", "compound_v3").
-        factory: Callable returning a :class:`HealthFactorProvider`.
-    """
-    _HF_FACTORIES[_normalize_protocol(protocol)] = factory
-
-
 class _PositionHealthProviderAdapter:
     """Wraps :class:`PositionHealthProvider` so it implements the Protocol.
 
@@ -908,21 +888,9 @@ def get_health_factor(
         ``Decimal`` health factor (``Infinity`` if no debt).
 
     Raises:
-        ValueError: If the protocol is unsupported or no registered factory
-            can handle it.
+        ValueError: If the protocol is unsupported.
     """
     protocol_n = _normalize_protocol(protocol)
-    factory = _HF_FACTORIES.get(protocol_n)
-    if factory is not None:
-        provider = factory(
-            chain=chain,
-            rpc_url=rpc_url,
-            gateway_client=gateway_client,
-            price_oracle=price_oracle,
-        )
-        return provider.get_health_factor(wallet, market)
-
-    # Default: use the built-in PositionHealthProvider.
     inner = PositionHealthProvider(
         rpc_url=rpc_url,
         chain=chain,
@@ -940,5 +908,4 @@ __all__ = [
     "PositionHealth",
     "PositionHealthProvider",
     "get_health_factor",
-    "register_health_factor_provider",
 ]

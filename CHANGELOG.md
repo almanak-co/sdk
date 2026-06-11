@@ -92,6 +92,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `GMX_V2_READER`, `GMX_V2_DATA_STORE`, `AAVE_V3_POOL_DATA_PROVIDER`
   (market/token metadata tables are unchanged).
 
+### Removed
+
+- **BREAKING**: pruned the imperative `register()` surface superseded by the
+  connector-manifest model (VIB-4851). No known users; no migration needed.
+  - `register_health_factor_provider` and its `_HF_FACTORIES` hook were
+    removed from `almanak.framework.data.position_health`. There were no
+    registrants anywhere; `get_health_factor()` behaviour for the built-in
+    protocols (Aave V3, Morpho Blue, Compound V3 and manifest-declared
+    lending reads) is unchanged.
+  - `register_teardown_post_condition` is no longer re-exported from
+    `almanak.framework.teardown` / `almanak.framework.teardown.post_conditions`
+    and is now framework-internal. Connectors publish teardown post-conditions
+    declaratively via `CONNECTOR.teardown_post_condition` (an `ImportRef` on
+    the connector manifest); the lookup helpers
+    (`get_teardown_post_condition`, `has_teardown_post_condition`,
+    `ClosureCheckResult`, `TeardownPostCondition`) remain public.
+  - `PlanExecutor` no longer accepts the deprecated `clob_handler`
+    constructor parameter. Pass a populated `handler_registry`
+    (`ExecutionHandlerRegistry`) instead; handlers are built from connector
+    manifests via `PredictionExecuteRegistry.build_handler(...)`.
+
 ## [2.17.0] - 2026-06-05
 
 ### BREAKING — Removed retired Radiant V2 lending connector

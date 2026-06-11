@@ -470,7 +470,6 @@ class PlanExecutor:
         config: PlanExecutorConfig | None = None,
         quote_provider: BridgeQuoteProvider | None = None,
         state_provider: OnChainStateProvider | None = None,
-        clob_handler: "ExecutionHandler | None" = None,
         handler_registry: "ExecutionHandlerRegistry | None" = None,
     ) -> None:
         """Initialize the plan executor.
@@ -479,39 +478,27 @@ class PlanExecutor:
             config: Executor configuration
             quote_provider: Provider for bridge quotes
             state_provider: Provider for on-chain state
-            clob_handler: (Deprecated) Handler for off-chain CLOB order execution.
-                         Use handler_registry instead.
-            handler_registry: Registry for routing bundles to execution handlers.
-                             If not provided, a default registry will be created
-                             and clob_handler will be registered if provided.
+            handler_registry: Registry for routing bundles to execution
+                              handlers (e.g. connector-owned CLOB handlers).
+                              If not provided, an empty registry is created
+                              and every bundle takes the on-chain path.
         """
         self._config = config or PlanExecutorConfig()
         self._quote_provider = quote_provider
         self._state_provider = state_provider
 
-        # Setup handler registry
         if handler_registry is not None:
             self._handler_registry = handler_registry
         else:
-            # Create default registry for backward compatibility
             from almanak.framework.execution.handler_registry import ExecutionHandlerRegistry
 
             self._handler_registry = ExecutionHandlerRegistry()
-
-            # Register clob_handler if provided (backward compatibility)
-            if clob_handler is not None:
-                self._handler_registry.register(clob_handler)
-
-        # Keep reference to clob_handler for backward compatibility
-        # This is used in _execute_clob_bundle for now
-        self._clob_handler = clob_handler
 
         logger.info(
             "PlanExecutor initialized",
             extra={
                 "stale_threshold_seconds": self._config.stale_quote_threshold_seconds,
                 "auto_requote": self._config.auto_requote_stale,
-                "has_clob_handler": clob_handler is not None,
                 "has_registry": handler_registry is not None,
                 "registered_protocols": self._handler_registry.get_registered_protocols(),
             },
@@ -1328,9 +1315,7 @@ class PlanExecutor:
         Returns:
             True if handler registry finds a CLOB handler for this bundle
         """
-        # Use registry to determine if there's a handler
-        handler = self._handler_registry.get_handler(bundle)
-        return handler is not None and handler == self._clob_handler
+        return self._handler_registry.get_handler(bundle) is not None
 
     @staticmethod
     def _has_clob_shape(bundle: "ActionBundle") -> bool:
@@ -1371,7 +1356,7 @@ class PlanExecutor:
         # Use handler registry for routing
         handler = self._handler_registry.get_handler(bundle)
 
-        if handler is not None and handler == self._clob_handler:
+        if handler is not None:
             # CLOB handler found (e.g., Polymarket off-chain orders)
             logger.info(
                 "Routing bundle to CLOB handler via registry",
@@ -1383,15 +1368,14 @@ class PlanExecutor:
                 },
             )
             result.execution_path = ExecutionPath.CLOB
-            return await self._execute_clob_bundle(bundle, result)
+            return await self._execute_clob_bundle(bundle, result, handler)
 
         # Refuse to silently fall through to the on-chain simulator for a
-        # CLOB-shaped bundle when no handler is configured. _execute_clob_bundle
-        # will mark the result as failed because self._clob_handler is None,
-        # which is the correct outcome for a misconfigured executor.
+        # CLOB-shaped bundle when the registry has no matching handler —
+        # failing here is the correct outcome for a misconfigured executor.
         if self._has_clob_shape(bundle):
             logger.error(
-                "CLOB-shaped bundle received but no CLOB handler is configured",
+                "CLOB-shaped bundle received but no CLOB handler is registered",
                 extra={
                     "intent_type": bundle.intent_type,
                     "protocol": bundle.metadata.get("protocol"),
@@ -1399,7 +1383,8 @@ class PlanExecutor:
                 },
             )
             result.execution_path = ExecutionPath.CLOB
-            return await self._execute_clob_bundle(bundle, result)
+            result.success = False
+            return result
 
         # Standard on-chain execution (including Polymarket redemptions)
         # This is the fallback path when no specialized handler is found
@@ -1418,27 +1403,37 @@ class PlanExecutor:
         self,
         bundle: "ActionBundle",
         result: StepExecutionResult,
+        handler: "ExecutionHandler",
     ) -> StepExecutionResult:
-        """Execute a CLOB order bundle via the registered CLOB handler.
+        """Execute a CLOB order bundle via a registry-resolved CLOB handler.
 
         Args:
             bundle: ActionBundle with CLOB order payload
             result: StepExecutionResult to populate
+            handler: Handler resolved from ``self._handler_registry`` by the
+                caller (``execute_bundle`` fails the result before dispatch
+                when the registry has no match)
 
         Returns:
             Updated StepExecutionResult
         """
-        if self._clob_handler is None:
-            logger.error(
-                "CLOB handler not configured but bundle requires CLOB execution",
-                extra={"intent_id": bundle.metadata.get("intent_id")},
-            )
-            result.success = False
-            return result
-
         try:
             # Execute via CLOB handler
-            clob_result = await self._clob_handler.execute(bundle)
+            clob_result = await handler.execute(bundle)
+
+            if clob_result is None:
+                # ExecutionHandler protocol violation — execute() must return
+                # a result object; fail with a precise diagnostic instead of
+                # the generic AttributeError the except below would log.
+                logger.error(
+                    "CLOB handler returned no result (ExecutionHandler protocol violation)",
+                    extra={
+                        "handler": handler.__class__.__name__,
+                        "intent_id": bundle.metadata.get("intent_id"),
+                    },
+                )
+                result.success = False
+                return result
 
             result.success = clob_result.success
             result.order_id = clob_result.order_id
