@@ -1092,9 +1092,21 @@ def _apply_lending(event: PositionEvent, ctx: IntentEventContext) -> None:
     # Absent (Aave-style) ⇒ None ⇒ no extra segment ⇒ key unchanged.
     market_id = getattr(intent, "market_id", None)
 
+    # VIB-5030 — canonicalize lending-scoped protocol aliases (the platform
+    # spec's ``"fluid_lending"`` → ``fluid``) before deriving the L3 join key.
+    # ``event.protocol`` carries the RAW intent string (``_seed_event``), and
+    # this writer does NOT flow through ``lending_accounting``, so without
+    # this call the L3 ``position_id`` would diverge from the L5
+    # ``position_key`` (canonicalized inside ``_derive_position_key``) and
+    # the ``_backfill_lending_position_pnl`` join would silently miss
+    # (VIB-4981 class). Deferred import: registry dispatch must not run at
+    # module import (same idiom as the lending_accounting consumers).
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    raw_protocol = event.protocol or getattr(intent, "protocol", "") or ""
     event.position_id = lending_position_id(
         chain=ctx.chain,
-        protocol=event.protocol or getattr(intent, "protocol", "") or "",
+        protocol=LendingReadRegistry.normalize_protocol(raw_protocol) or str(raw_protocol),
         wallet=ctx.wallet_address,
         asset=asset,
         market_id=market_id,

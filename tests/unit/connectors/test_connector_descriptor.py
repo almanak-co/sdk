@@ -141,6 +141,7 @@ EXPECTED_CONNECTOR_KINDS = {
 
 EXPECTED_ALIASES = {
     "aerodrome": ("aerodrome_slipstream",),
+    "fluid": ("fluid_lending",),
     "kamino": ("kamino_klend",),
     "meteora": ("meteora_dlmm",),
     "morpho_blue": ("morpho",),
@@ -167,7 +168,7 @@ MIGRATED_STRATEGY_REGISTRATION = {
     "enso": (("SWAP",), ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb")),
     "ethena": (("STAKE", "UNSTAKE"), ("ethereum",)),
     "euler_v2": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("ethereum", "avalanche")),
-    "fluid": (("SWAP",), ("arbitrum", "base", "ethereum", "polygon")),
+    "fluid": (("SWAP", "SUPPLY", "WITHDRAW"), ("arbitrum", "base", "ethereum", "polygon")),
     "gimo": (("STAKE", "UNSTAKE"), ("zerog",)),
     "gmx_v2": (("PERP_OPEN", "PERP_CLOSE"), ("arbitrum", "avalanche")),
     "jupiter": (("SWAP",), ("solana",)),
@@ -281,6 +282,18 @@ EXPECTED_STRATEGY_MATRIX_ENTRIES = {
             matrix_name="pendle",
             category="yield",
             chains=frozenset(("arbitrum", "ethereum", "plasma", "sonic", "base", "mantle", "bsc")),
+        ),
+    ),
+    "fluid": (
+        StrategyMatrixEntry(
+            matrix_name="fluid",
+            category="swap",
+            chains=frozenset(("arbitrum", "base", "ethereum", "polygon")),
+        ),
+        StrategyMatrixEntry(
+            matrix_name="fluid",
+            category="lending",
+            chains=frozenset(("arbitrum", "base")),
         ),
     ),
     "uniswap_v4": (
@@ -510,7 +523,7 @@ EXPECTED_COMPILER_PROTOCOLS = {
     "enso": ("enso",),
     "ethena": ("ethena",),
     "euler_v2": ("euler_v2",),
-    "fluid": ("fluid",),
+    "fluid": ("fluid", "fluid_lending"),
     "gimo": ("gimo",),
     "gmx_v2": ("gmx_v2",),
     "hyperliquid": ("hyperliquid",),

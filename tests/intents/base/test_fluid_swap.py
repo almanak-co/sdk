@@ -30,7 +30,11 @@ from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
-from tests.intents._fluid_quote_helpers import assert_min_out_quote_derived, fluid_resolver_quote
+from tests.intents._fluid_quote_helpers import (
+    assert_execution_matches_quote,
+    assert_min_out_quote_derived,
+    fluid_resolver_quote,
+)
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     SWAP_MAX_SLIPPAGE,
@@ -132,10 +136,7 @@ class TestFluidSwapIntent:
                 assert swap_event.amount_in == expected_in
                 assert swap_event.amount_out >= min_amount_out
                 # "Quotes match execution to the wei" (Phase-0 contract).
-                assert swap_event.amount_out == independent_quote, (
-                    f"Executed output drifted from the resolver quote: "
-                    f"{swap_event.amount_out} != {independent_quote}"
-                )
+                assert_execution_matches_quote(swap_event.amount_out, independent_quote, label="swap-event output")
         assert saw_swap_event, "Fluid pool must emit Swap event on native-out swaps"
 
         # Layer 4: bilateral conservation. Under default-on Zodiac the
@@ -159,9 +160,7 @@ class TestFluidSwapIntent:
         )
         # Under default-on Zodiac the Safe pays no gas, so the native delta
         # is the swap output alone — it must equal the resolver quote.
-        assert eth_received == independent_quote, (
-            f"Native balance delta drifted from the resolver quote: {eth_received} != {independent_quote}"
-        )
+        assert_execution_matches_quote(eth_received, independent_quote, label="native balance delta")
 
 
 if __name__ == "__main__":

@@ -120,8 +120,15 @@ def _decode_word(hex_data: str, word_index: int) -> int:
 # the injected valuation seam, like Compound/Morpho/Silo/Euler). Fork-verified on
 # avalanche by the Layer-5 BENQI intent tests (HIGH-confidence before/after collateral /
 # debt / HF). See benqi/lending_read.py.
+# VIB-5030: ``fluid`` joined — a market-scoped ERC-4626 fToken reader (share
+# balance × convertToAssets probe; single supply leg, debt is a measured zero,
+# health_factor None — no liquidation surface on a pure supply). Not USD-native
+# (priced via the injected valuation seam, like Compound/Morpho/Silo/Euler).
+# Fork-verified on base + arbitrum by the Layer-5 ``test_fluid_lending`` intent
+# tests (HIGH-confidence before/after collateral on the SUPPLY/WITHDRAW path).
+# See fluid/lending_read.py.
 _GENERIC_PRE_STATE_PROTOCOLS: frozenset[str] = frozenset(
-    {"aave_v3", "aave", "morpho_blue", "compound_v3", "spark", "silo_v2", "euler_v2", "benqi"}
+    {"aave_v3", "aave", "morpho_blue", "compound_v3", "spark", "silo_v2", "euler_v2", "benqi", "fluid"}
 )
 
 
@@ -199,7 +206,14 @@ def capture_lending_pre_state(
     if _intent_type_value(intent) not in _LENDING_INTENT_TYPES:
         return None
 
-    protocol = str(getattr(intent, "protocol", "") or "").lower()
+    # Canonicalize lending-scoped protocol aliases at the accounting boundary
+    # (VIB-5030: the platform spec emits ``protocol: "fluid_lending"``, which
+    # must resolve to the connector's canonical ``fluid`` key BEFORE the
+    # ``_GENERIC_PRE_STATE_PROTOCOLS`` gate — otherwise alias-spelled intents
+    # silently degrade to ESTIMATED). ``normalize_protocol`` folds case /
+    # hyphens and applies manifest-declared ``LendingReadDecl.aliases``;
+    # unknown spellings pass through folded and fail the gate closed.
+    protocol = LendingReadRegistry.normalize_protocol(getattr(intent, "protocol", None))
 
     # Generic path — gated to the explicitly-enabled, fork-verified protocols
     # (``_GENERIC_PRE_STATE_PROTOCOLS``). A spec-capable-but-unverified connector
@@ -355,8 +369,22 @@ def lending_state_to_dict(
 
 
 def _derive_position_key(protocol: str, chain: str, wallet: str, market_id: str | None, asset: str) -> str:
-    """Canonical position key for a lending position."""
-    parts = ["lending", chain.lower(), protocol.lower(), wallet.lower()]
+    """Canonical position key for a lending position.
+
+    ``protocol`` is canonicalized through the manifest-declared lending
+    aliases (``LendingReadRegistry.normalize_protocol``) so an alias-spelled
+    intent (e.g. the platform spec's ``"fluid_lending"``) derives the SAME
+    key as the canonical spelling (``lending:{chain}:fluid:...``). Every
+    caller (this module's event builder, the runner's outbox derivation,
+    and ``category_handlers/lending_handler``) flows through here, so the
+    normalization lives inside the deriver — keys can never diverge by
+    call site. Unknown spellings fold (lower / hyphen→underscore) and pass
+    through, preserving the legacy ``protocol.lower()`` behaviour.
+    """
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    canonical_protocol = LendingReadRegistry.normalize_protocol(protocol) or str(protocol).lower()
+    parts = ["lending", chain.lower(), canonical_protocol, wallet.lower()]
     if market_id:
         parts.append(market_id.lower())
     parts.append(asset.lower())
@@ -512,7 +540,18 @@ def build_lending_accounting_event(  # noqa: C901
         return None
 
     now = datetime.now(UTC)
-    protocol = getattr(intent, "protocol", "") or ""
+    # Canonicalize lending-scoped protocol aliases once, at the boundary
+    # (mirrors ``capture_lending_pre_state``): the platform spec's
+    # ``"fluid_lending"`` must resolve to ``fluid`` BEFORE the
+    # ``_GENERIC_PRE_STATE_PROTOCOLS`` gate (else the after-state read is
+    # skipped → ESTIMATED) and before position-key derivation / the
+    # persisted ``AccountingIdentity.protocol``. Unknown spellings pass
+    # through folded; the empty-string fallback preserves the legacy raw
+    # value for non-str protocols (never observed on real intents).
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    raw_protocol = getattr(intent, "protocol", "") or ""
+    protocol = LendingReadRegistry.normalize_protocol(raw_protocol) or str(raw_protocol)
     asset = _intent_asset(intent)
     market_id = _intent_market_id(intent)
     position_key = _derive_position_key(protocol, chain, wallet_address, market_id, asset)
@@ -719,8 +758,8 @@ def build_lending_accounting_event(  # noqa: C901
     # fork/byte-equivalence-verified in ``_GENERIC_PRE_STATE_PROTOCOLS``. A
     # spec-capable-but-unverified connector (e.g. Spark, which opted into
     # ``_ACCOUNT_STATE_LOADERS``) is NOT auto-read here (→ ESTIMATED; VIB-4963).
-    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
-
+    # (``LendingReadRegistry`` was imported above where ``protocol`` is
+    # canonicalized.)
     generic_state: LendingAccountState | None = None
     morpho_unavailable_reason: str = ""
 

@@ -43,6 +43,14 @@ ERC721_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55
 # keccak256("Swap(bool,uint256,uint256,address)")
 SWAP_TOPIC = "0xdc004dbca4ef9c966218431ee5d9133d337ad018dd5b5c5493722803f75c64f7"
 
+# ERC-4626 fToken lending events (VIB-5030). Standard vault events — same
+# topics the morpho_vault (MetaMorpho) parser pins:
+# Deposit(address indexed sender, address indexed owner, uint256 assets, uint256 shares)
+DEPOSIT_4626_TOPIC = "0xdcbc1c05240f31ff3ad067ef1ee35ce4997762752e3a095284754544f4c709d7"
+# Withdraw(address indexed sender, address indexed receiver, address indexed owner,
+#          uint256 assets, uint256 shares)
+WITHDRAW_4626_TOPIC = "0xfbde797d201c681b91056529119e0b02407c7bb96a4a2c75c01fc9667232c8db"
+
 # Zero address — indicates minting (new position)
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
@@ -117,6 +125,8 @@ class FluidReceiptParser:
             "liquidity",
             "lp_close_data",
             "swap_amounts",
+            "supply_amount",
+            "withdraw_amount",
         }
     )
 
@@ -333,6 +343,61 @@ class FluidReceiptParser:
             token_in=token_in_addr,
             token_out=token_out_addr,
         )
+
+    def _extract_4626_assets(self, receipt: dict[str, Any], topic0: str) -> int | None:
+        """Decode ``assets`` (data word 0) from an ERC-4626 Deposit/Withdraw log.
+
+        Fail-closed: a receipt without the event (or with malformed data)
+        returns ``None`` — never a zero-filled or fabricated amount. A
+        receipt with MORE THAN ONE matching event is ambiguous attribution
+        (a Fluid lending intent compiles exactly one deposit/withdraw, so
+        multiple events mean a bundler/multicall receipt this parser cannot
+        attribute) — also ``None``, never the first event's amount.
+        """
+        if receipt.get("status", 1) != 1:
+            return None
+        matches = [
+            log
+            for log in receipt.get("logs", [])
+            if (topics := log.get("topics", [])) and self._normalize_topic(topics[0]) == topic0
+        ]
+        if not matches:
+            return None
+        if len(matches) > 1:
+            logger.warning(
+                "Ambiguous Fluid lending receipt: %d ERC-4626 events match topic %s — "
+                "returning None (fail closed, ambiguous attribution)",
+                len(matches),
+                topic0,
+            )
+            return None
+        data = HexDecoder.normalize_hex(matches[0].get("data", "0x"))
+        # Deposit and Withdraw both ABI-encode TWO non-indexed uint256 words
+        # (assets, shares) — a one-word/truncated payload is malformed, and
+        # decoding word 0 from it would fabricate an amount. Require both.
+        if len(data) < 128:
+            logger.warning("Malformed ERC-4626 event data in Fluid lending receipt — returning None")
+            return None
+        try:
+            return int(data[0:64], 16)
+        except ValueError:
+            logger.warning("Undecodable ERC-4626 event data in Fluid lending receipt — returning None")
+            return None
+
+    def extract_supply_amount(self, receipt: dict[str, Any]) -> int | None:
+        """Exact ``assets`` supplied, from the fToken's ERC-4626 ``Deposit`` event.
+
+        Called by ResultEnricher for SUPPLY intents (VIB-5030).
+        """
+        return self._extract_4626_assets(receipt, DEPOSIT_4626_TOPIC)
+
+    def extract_withdraw_amount(self, receipt: dict[str, Any]) -> int | None:
+        """Exact ``assets`` withdrawn, from the fToken's ERC-4626 ``Withdraw`` event.
+
+        Both ``withdraw(assets, ...)`` and full-exit ``redeem(shares, ...)``
+        emit the same event; ``assets`` is the underlying amount either way.
+        """
+        return self._extract_4626_assets(receipt, WITHDRAW_4626_TOPIC)
 
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> LPCloseData | None:
         """Extract LP close data from receipt.

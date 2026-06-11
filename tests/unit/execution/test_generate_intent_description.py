@@ -884,5 +884,7 @@ class TestAmountEncodingDerivation:
             _wei_lending_protocols,
         )
 
-        assert _wei_lending_protocols() == frozenset({"aave_v3", "spark"})
+        # VIB-5030 added "fluid" (ERC-4626 asset base units in
+        # supply_amount / withdraw_amount) to the legacy aave_v3 + spark set.
+        assert _wei_lending_protocols() == frozenset({"aave_v3", "spark", "fluid"})
         assert _human_amount_swap_protocols() == frozenset({"curve", "aerodrome"})

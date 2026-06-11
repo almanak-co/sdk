@@ -137,6 +137,9 @@ FROZEN_LENDING_ACCOUNT_STATE_LOADERS = {
     "silo_v2": ("almanak.connectors.silo_v2.lending_read", "ACCOUNT_STATE_READ_SPEC"),
     "euler_v2": ("almanak.connectors.euler_v2.lending_read", "ACCOUNT_STATE_READ_SPEC"),
     "benqi": ("almanak.connectors.benqi.lending_read", "ACCOUNT_STATE_READ_SPEC"),
+    # VIB-5030: fToken (ERC-4626) aggregate read — market-scoped on the
+    # per-underlying fToken (Compound V3 / Silo V2 shape).
+    "fluid": ("almanak.connectors.fluid.lending_read", "ACCOUNT_STATE_READ_SPEC"),
 }
 FROZEN_LENDING_MARKET_HEALTH_LOADERS = {
     "compound_v3": ("almanak.connectors.compound_v3.lending_read", "read_compound_v3_market_health"),
@@ -147,6 +150,8 @@ FROZEN_LENDING_MARKET_TABLE_LOADERS = {
     "silo_v2": ("almanak.connectors.silo_v2.lending_read", "SILO_V2_ACCOUNT_STATE_MARKETS"),
     "euler_v2": ("almanak.connectors.euler_v2.lending_read", "EULER_V2_ACCOUNT_STATE_MARKETS"),
     "benqi": ("almanak.connectors.benqi.lending_read", "BENQI_ACCOUNT_STATE_MARKETS"),
+    # VIB-5030: per-chain underlying-symbol -> fToken catalogue.
+    "fluid": ("almanak.connectors.fluid.lending_read", "FLUID_FTOKEN_MARKETS"),
 }
 # B3 (VIB-4851) deliberately WIDENED the lending aliases beyond the legacy
 # registry table: the spellings previously private to
@@ -161,6 +166,10 @@ FROZEN_LENDING_ALIASES = {
     "comet": "compound_v3",
     "compound": "compound_v3",
     "compoundv3": "compound_v3",
+    # VIB-5030: the platform spec emits ``protocol: "fluid_lending"``; the
+    # accounting boundary canonicalizes it through this lending-scoped alias
+    # (gate + position-key parity — see lending_accounting / position_events).
+    "fluid_lending": "fluid",
 }
 
 # almanak/connectors/_strategy_base/perps_read_registry.py tables as of
@@ -579,7 +588,9 @@ def test_prediction_and_stub_dispatch_equals_frozen_legacy_tables() -> None:
 
 # almanak/framework/execution/orchestrator.py amount-encoding frozensets as of
 # 2026-06-10, frozen verbatim (VIB-3747; manifest-derived in VIB-4851 C1).
-FROZEN_WEI_LENDING_PROTOCOLS = frozenset({"aave_v3", "spark"})
+# VIB-5030 added "fluid": its lending compiler emits ERC-4626 asset base
+# units (wei) in ``supply_amount`` / ``withdraw_amount``.
+FROZEN_WEI_LENDING_PROTOCOLS = frozenset({"aave_v3", "spark", "fluid"})
 FROZEN_HUMAN_AMOUNT_SWAP_PROTOCOLS = frozenset({"curve", "aerodrome"})
 
 

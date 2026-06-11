@@ -234,8 +234,11 @@ class TestCompileDispatch:
         result = FluidCompiler().compile(_ctx(services), intent)
         assert result.status is CompilationStatus.FAILED
 
-    def test_class_shape_is_swap_only_four_chains(self):
+    def test_class_shape_swap_and_lending(self):
         from almanak.framework.intents.vocabulary import IntentType
 
-        assert FluidCompiler.intents == frozenset({IntentType.SWAP})
+        # SWAP (Phase 1, VIB-5029) + fToken SUPPLY/WITHDRAW (Phase 2, VIB-5030).
+        assert FluidCompiler.intents == frozenset({IntentType.SWAP, IntentType.SUPPLY, IntentType.WITHDRAW})
         assert FluidCompiler.chains == frozenset({"arbitrum", "base", "ethereum", "polygon"})
+        # Lending is scoped to the Phase-0-validated chains.
+        assert FluidCompiler.LENDING_CHAINS == frozenset({"arbitrum", "base"})

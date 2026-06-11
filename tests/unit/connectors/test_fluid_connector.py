@@ -11,16 +11,48 @@ from almanak.connectors.fluid.receipt_parser import FluidReceiptParser
 
 
 class TestFluidManifest:
-    def test_swap_only_intents(self):
-        # LP intents were removed in Phase 1 (VIB-5029): direct pool LP is
+    def test_swap_and_lending_intents(self):
+        # LP intents stay removed (Phase 1, VIB-5029): direct pool LP is
         # whitelist-gated on-chain (VIB-5028 §V4); LP returns in Phase 4.
-        assert CONNECTOR.strategy_intents == ("SWAP",)
+        # SUPPLY/WITHDRAW are the Phase-2 fToken lending surface (VIB-5030).
+        assert CONNECTOR.strategy_intents == ("SWAP", "SUPPLY", "WITHDRAW")
 
-    def test_four_chains(self):
-        assert CONNECTOR.strategy_chains == ("arbitrum", "base", "ethereum", "polygon")
+    def test_matrix_chains(self):
+        entries = {e.category: e.chains for e in CONNECTOR.strategy_matrix_entries}
+        assert entries["swap"] == frozenset(("arbitrum", "base", "ethereum", "polygon"))
+        # Lending scoped to the Phase-0-validated chains (VIB-5030).
+        assert entries["lending"] == frozenset(("arbitrum", "base"))
+
+    def test_fluid_lending_alias(self):
+        # The platform spec emits protocol="fluid_lending" — must resolve to
+        # this connector both via the manifest alias and the global registry.
+        assert "fluid_lending" in CONNECTOR.aliases
+        from almanak.connectors._strategy_base.protocol_aliases import normalize_protocol
+
+        assert normalize_protocol("base", "fluid_lending") == "fluid"
+        assert normalize_protocol("arbitrum", "fluid_lending") == "fluid"
 
     def test_kind_is_swap(self):
         assert CONNECTOR.kind is ProtocolKind.SWAP
+
+    def test_lending_chain_sets_in_sync(self):
+        # pr-auditor 2026-06-11: the lending chain universe lives in FOUR
+        # places — the compiler gate, the manifest matrix row, the valuation
+        # market table, and the permission-hints synthetic gate. They are
+        # hand-maintained copies today (single-source derivation is a
+        # follow-up); this pin prevents silent drift, where e.g. a chain
+        # compiles supplies that valuation cannot mark or discovery never
+        # authorises.
+        from almanak.connectors.fluid.compiler import FluidCompiler
+        from almanak.connectors.fluid.lending_read import FLUID_FTOKEN_MARKETS
+        from almanak.connectors.fluid.permission_hints import _LENDING_CHAINS
+
+        manifest_lending_chains = next(
+            e.chains for e in CONNECTOR.strategy_matrix_entries if e.category == "lending"
+        )
+        assert FluidCompiler.LENDING_CHAINS == manifest_lending_chains
+        assert FluidCompiler.LENDING_CHAINS == frozenset(FLUID_FTOKEN_MARKETS.keys())
+        assert FluidCompiler.LENDING_CHAINS == _LENDING_CHAINS
 
     def test_swap_quote_connector_declared(self):
         ref = CONNECTOR.swap_quote_connector

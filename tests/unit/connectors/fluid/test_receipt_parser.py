@@ -18,8 +18,10 @@ from unittest.mock import patch
 
 from almanak.connectors.fluid.receipt_parser import (
     _FLUID_NATIVE_SENTINEL,
+    DEPOSIT_4626_TOPIC,
     ERC721_TRANSFER_TOPIC,
     SWAP_TOPIC,
+    WITHDRAW_4626_TOPIC,
     FluidReceiptParser,
 )
 
@@ -163,3 +165,99 @@ class TestSwapAmountsFailClosed:
         parser = FluidReceiptParser(chain="arbitrum")  # cache NOT seeded
         with patch("almanak.framework.data.tokens.get_token_resolver", side_effect=RuntimeError("offline")):
             assert parser.extract_swap_amounts(receipt) is None
+
+
+# =============================================================================
+# fToken lending (ERC-4626) — VIB-5030
+# =============================================================================
+
+FTOKEN = "0xf42f5795D9ac7e9D757dB633D693cD548Cfd9169"  # base fUSDC
+SUPPLY_ASSETS = 50_000_000  # 50 USDC (6 dp)
+SUPPLY_SHARES = 49_990_000
+WITHDRAW_ASSETS = 20_000_000  # 20 USDC (6 dp)
+WITHDRAW_SHARES = 19_996_000
+
+
+def _deposit_log(assets: int = SUPPLY_ASSETS, shares: int = SUPPLY_SHARES) -> dict:
+    # Deposit(address indexed sender, address indexed owner, uint256 assets, uint256 shares)
+    return {
+        "address": FTOKEN,
+        "topics": [DEPOSIT_4626_TOPIC, _addr_topic(SAFE), _addr_topic(SAFE)],
+        "data": "0x" + _word(assets) + _word(shares),
+    }
+
+
+def _withdraw_log(assets: int = WITHDRAW_ASSETS, shares: int = WITHDRAW_SHARES) -> dict:
+    # Withdraw(address indexed sender, address indexed receiver,
+    #          address indexed owner, uint256 assets, uint256 shares)
+    return {
+        "address": FTOKEN,
+        "topics": [WITHDRAW_4626_TOPIC, _addr_topic(SAFE), _addr_topic(SAFE), _addr_topic(SAFE)],
+        "data": "0x" + _word(assets) + _word(shares),
+    }
+
+
+class TestLending4626Events:
+    """D3.F4 — exact ``assets`` extraction; parse failures NEVER fabricate amounts."""
+
+    def test_supply_deposit_event_exact_assets(self):
+        receipt = _receipt(
+            SAFE,
+            [
+                _transfer_log(USDC, SAFE, FTOKEN, SUPPLY_ASSETS),
+                _deposit_log(),
+            ],
+        )
+        assert _parser().extract_supply_amount(receipt) == SUPPLY_ASSETS
+
+    def test_lending_withdraw_event_exact_assets(self):
+        receipt = _receipt(
+            SAFE,
+            [
+                _withdraw_log(),
+                _transfer_log(USDC, FTOKEN, SAFE, WITHDRAW_ASSETS),
+            ],
+        )
+        assert _parser().extract_withdraw_amount(receipt) == WITHDRAW_ASSETS
+
+    def test_supply_missing_deposit_event_returns_none(self):
+        # A bare ERC-20 transfer is not proof of a supply — fail closed.
+        receipt = _receipt(SAFE, [_transfer_log(USDC, SAFE, FTOKEN, SUPPLY_ASSETS)])
+        assert _parser().extract_supply_amount(receipt) is None
+
+    def test_lending_withdraw_missing_event_returns_none(self):
+        # A Deposit log must never satisfy a withdraw extraction (and vice versa).
+        receipt = _receipt(SAFE, [_deposit_log()])
+        assert _parser().extract_withdraw_amount(receipt) is None
+
+    def test_supply_withdraw_event_returns_none(self):
+        # The vice-versa direction: a Withdraw log must never satisfy a
+        # supply extraction (CodeRabbit 2026-06-11 — bidirectional guard).
+        receipt = _receipt(SAFE, [_withdraw_log()])
+        assert _parser().extract_supply_amount(receipt) is None
+
+    def test_supply_multiple_deposit_events_ambiguous_returns_none(self):
+        # MORE THAN ONE matching ERC-4626 event = ambiguous attribution
+        # (bundler/multicall receipt) — fail closed, never the first amount.
+        receipt = _receipt(SAFE, [_deposit_log(), _deposit_log(assets=1_000_000, shares=999_000)])
+        assert _parser().extract_supply_amount(receipt) is None
+
+    def test_withdraw_multiple_events_ambiguous_returns_none(self):
+        receipt = _receipt(SAFE, [_withdraw_log(), _withdraw_log(assets=1_000_000, shares=999_000)])
+        assert _parser().extract_withdraw_amount(receipt) is None
+
+    def test_supply_malformed_short_data_returns_none(self):
+        malformed = {
+            "address": FTOKEN,
+            "topics": [DEPOSIT_4626_TOPIC, _addr_topic(SAFE), _addr_topic(SAFE)],
+            "data": "0x1234",  # < one 32-byte word — undecodable assets
+        }
+        receipt = _receipt(SAFE, [malformed])
+        assert _parser().extract_supply_amount(receipt) is None
+
+    def test_lending_reverted_receipt_returns_none(self):
+        receipt = _receipt(SAFE, [_deposit_log(), _withdraw_log()])
+        receipt["status"] = 0
+        parser = _parser()
+        assert parser.extract_supply_amount(receipt) is None
+        assert parser.extract_withdraw_amount(receipt) is None

@@ -22,7 +22,10 @@ class FluidReceiptParserConnector(ReceiptParserConnector, ReceiptParserCapabilit
     kind: ClassVar[ProtocolKind] = ProtocolKind.LP
 
     def receipt_parser_keys(self) -> frozenset[str]:
-        return frozenset({"fluid"})
+        # "fluid_lending" is the platform-spec alias (VIB-5030) — same
+        # parser; mirrors the "morpho" -> morpho_blue alias precedent so a
+        # receipt enriched under the alias never misses its parser.
+        return frozenset({"fluid", "fluid_lending"})
 
     def receipt_parser_class(self, key: str) -> type:
         from almanak.connectors.fluid.receipt_parser import FluidReceiptParser

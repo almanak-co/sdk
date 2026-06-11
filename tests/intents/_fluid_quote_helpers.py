@@ -82,3 +82,22 @@ def assert_min_out_quote_derived(
         f"min_amount_out ({min_amount_out}) is far below the slippage-bounded resolver quote "
         f"({quote_floor}; allowed floor {lower_bound}) — not derived from the on-chain quote"
     )
+
+
+def assert_execution_matches_quote(executed: int, independent_quote: int, label: str = "output") -> None:
+    """Assert executed output matches the resolver quote to within dust.
+
+    Phase-0 established "quotes match execution to the wei" on a frozen
+    fork state, but the independent re-quote and the swap execute in
+    DIFFERENT blocks: Fluid's Liquidity layer accrues yield per second, so
+    the pool's internal exchange rate can round one wei differently between
+    the quote block and the execution block (observed: 1-wei drift on the
+    base wstETH/ETH native leg in CI). A 1-ppb tolerance (floor 2 wei) is
+    economically zero while still failing loudly on any real quote-source
+    or rounding-direction bug (those land at basis points, ~1e6x larger).
+    """
+    tolerance = max(2, independent_quote // 10**9)
+    assert abs(executed - independent_quote) <= tolerance, (
+        f"Executed {label} drifted from the resolver quote beyond dust tolerance "
+        f"({tolerance} wei): {executed} != {independent_quote}"
+    )

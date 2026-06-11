@@ -39,7 +39,11 @@ from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
-from tests.intents._fluid_quote_helpers import assert_min_out_quote_derived, fluid_resolver_quote
+from tests.intents._fluid_quote_helpers import (
+    assert_execution_matches_quote,
+    assert_min_out_quote_derived,
+    fluid_resolver_quote,
+)
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     SWAP_MAX_SLIPPAGE,
@@ -142,8 +146,7 @@ class TestFluidSwapIntent:
             for swap_event in parse_result.swap_events:
                 saw_swap_event = True
                 assert swap_event.amount_in == expected_usdc_in, (
-                    f"Swap event amount_in must equal the exact input: "
-                    f"{swap_event.amount_in} != {expected_usdc_in}"
+                    f"Swap event amount_in must equal the exact input: {swap_event.amount_in} != {expected_usdc_in}"
                 )
                 assert swap_event.amount_out >= min_amount_out
                 # "Quotes match execution to the wei" (Phase-0 contract):
@@ -151,10 +154,7 @@ class TestFluidSwapIntent:
                 # quote taken on the same fork state — catches a compiler
                 # quoting through the wrong source/rounding even when the
                 # min-out floor still passes.
-                assert swap_event.amount_out == independent_quote, (
-                    f"Executed output drifted from the resolver quote: "
-                    f"{swap_event.amount_out} != {independent_quote}"
-                )
+                assert_execution_matches_quote(swap_event.amount_out, independent_quote, label="swap-event output")
 
         assert saw_swap_event, (
             "Layer 3 contract: the Fluid pool must emit Swap(bool,uint256,uint256,address) "
@@ -178,9 +178,7 @@ class TestFluidSwapIntent:
         assert usdt_received >= min_amount_out, (
             f"USDT received ({usdt_received}) below compiled min_amount_out ({min_amount_out})"
         )
-        assert usdt_received == independent_quote, (
-            f"Balance delta drifted from the resolver quote: {usdt_received} != {independent_quote}"
-        )
+        assert_execution_matches_quote(usdt_received, independent_quote, label="balance delta")
 
 
 if __name__ == "__main__":

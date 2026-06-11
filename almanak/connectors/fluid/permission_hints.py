@@ -27,7 +27,7 @@ from decimal import Decimal
 from almanak.framework.permissions.hints import DiscoveryContext, PermissionHints
 
 PERMISSION_HINTS = PermissionHints(
-    synthetic_discovery_intents=frozenset({"SWAP"}),
+    synthetic_discovery_intents=frozenset({"SWAP", "SUPPLY", "WITHDRAW"}),
     needs_rpc_discovery=True,
     synthetic_swap_pair={
         "arbitrum": ("USDC", "USDT"),
@@ -37,8 +37,19 @@ PERMISSION_HINTS = PermissionHints(
     },
     selector_labels={
         "0x2668dfaa": "Fluid pool swapIn",
+        "0x6e553f65": "Fluid fToken deposit (ERC-4626)",
+        "0xb460af94": "Fluid fToken withdraw (ERC-4626)",
+        "0xba087652": "Fluid fToken redeem (ERC-4626)",
     },
 )
+
+# fToken lending synthetics (VIB-5030): targets are the per-underlying
+# ERC-4626 fToken contracts, resolved on-chain like the swap pools. USDC is
+# the validated market on both lending chains. The withdraw_all vector
+# covers the redeem selector (full exits burn shares); the exact-amount
+# vector covers withdraw.
+_LENDING_CHAINS: frozenset[str] = frozenset({"arbitrum", "base"})
+_LENDING_SYNTHETIC_TOKEN = "USDC"
 
 # Synthetic SWAP vectors per chain. Each (from, to) pair compiles (with RPC)
 # to the concrete pool target + swapIn selector; pairs with a native "from"
@@ -60,27 +71,69 @@ def build_discovery_vectors(
     chain: str,
     ctx: DiscoveryContext,
 ):
-    """Emit synthetic SWAP intents covering Fluid's per-pool swap targets.
+    """Emit synthetic intents covering Fluid's per-pool / per-fToken targets.
 
-    Returns ``None`` for non-SWAP intent types and unsupported chains so the
-    framework default applies (which emits nothing for Fluid — LP/lending
-    surfaces are later phases).
+    SWAP vectors target the per-pair pools; SUPPLY/WITHDRAW vectors target
+    the per-underlying fToken (deposit/withdraw/redeem + approve). Lending
+    vectors return ``[]`` (not ``None``) on non-lending chains so the
+    framework default — which would gate on lending-pool tables Fluid is
+    not in — never emits a doomed synthetic there.
     """
-    if intent_type != "SWAP":
-        return None
-    vectors = _SWAP_VECTORS_BY_CHAIN.get(chain)
-    if not vectors:
-        return None
+    if intent_type == "SWAP":
+        vectors = _SWAP_VECTORS_BY_CHAIN.get(chain)
+        if not vectors:
+            return None
 
-    from almanak.framework.intents.vocabulary import SwapIntent
+        from almanak.framework.intents.vocabulary import SwapIntent
 
-    return [
-        SwapIntent(
-            from_token=from_token,
-            to_token=to_token,
-            amount=amount,
-            protocol=protocol,
-            chain=chain,
-        )
-        for from_token, to_token, amount in vectors
-    ]
+        return [
+            SwapIntent(
+                from_token=from_token,
+                to_token=to_token,
+                amount=amount,
+                protocol=protocol,
+                chain=chain,
+            )
+            for from_token, to_token, amount in vectors
+        ]
+
+    if intent_type == "SUPPLY":
+        if chain not in _LENDING_CHAINS:
+            return []
+
+        from almanak.framework.intents.vocabulary import SupplyIntent
+
+        return [
+            SupplyIntent(
+                protocol=protocol,
+                token=_LENDING_SYNTHETIC_TOKEN,
+                amount=Decimal("100"),
+                chain=chain,
+            )
+        ]
+
+    if intent_type == "WITHDRAW":
+        if chain not in _LENDING_CHAINS:
+            return []
+
+        from almanak.framework.intents.vocabulary import WithdrawIntent
+
+        return [
+            # Exact amount → withdraw(assets, receiver, owner) selector.
+            WithdrawIntent(
+                protocol=protocol,
+                token=_LENDING_SYNTHETIC_TOKEN,
+                amount=Decimal("50"),
+                chain=chain,
+            ),
+            # Full exit → redeem(shares, receiver, owner) selector.
+            WithdrawIntent(
+                protocol=protocol,
+                token=_LENDING_SYNTHETIC_TOKEN,
+                amount=Decimal("1"),
+                withdraw_all=True,
+                chain=chain,
+            ),
+        ]
+
+    return None

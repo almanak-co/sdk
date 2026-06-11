@@ -242,13 +242,17 @@ def get_protocol_intent_matrix() -> dict[str, frozenset[IntentType]]:
         if get_permission_hints(proto).supports_standalone_fee_collection:
             matrix[proto].add(IntentType.LP_COLLECT_FEES)
     for proto in _lending_protocols():
+        # Grant only the lending intents the connector's hints actually
+        # declare. Historically every lending protocol supported the full
+        # quartet, so the blanket update was equivalent — fluid (VIB-5030)
+        # is supply-only (ERC-4626 fTokens, no borrow surface), and an
+        # over-claimed BORROW/REPAY row would demand on-chain coverage for
+        # intents the compiler rejects.
+        declared = get_permission_hints(proto).synthetic_discovery_intents
         matrix[proto].update(
-            {
-                IntentType.SUPPLY,
-                IntentType.WITHDRAW,
-                IntentType.BORROW,
-                IntentType.REPAY,
-            }
+            it
+            for it in (IntentType.SUPPLY, IntentType.WITHDRAW, IntentType.BORROW, IntentType.REPAY)
+            if it.value in declared
         )
     for proto in _perp_protocols():
         matrix[proto].update({IntentType.PERP_OPEN, IntentType.PERP_CLOSE})

@@ -80,6 +80,8 @@ _SNAPSHOT_LENDING_PROTOCOLS = frozenset(
         "morpho_blue",
         "spark",
         "compound_v3",
+        # VIB-5030: fluid fToken SUPPLY/WITHDRAW joins lending discovery.
+        "fluid",
     }
 )
 _SNAPSHOT_PERP_PROTOCOLS = frozenset(

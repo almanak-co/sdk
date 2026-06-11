@@ -68,6 +68,10 @@ _GLOBAL_ALIASES: dict[str, str] = {
     # ``supply_collateral_amount`` collateral leg is never surfaced.
     "compound": "compound_v3",
     "comet": "compound_v3",
+    # VIB-5030: the platform spec emits ``protocol: "fluid_lending"`` for
+    # fToken supply strategies; the connector is the single "fluid" dir
+    # (1 dir = 1 connector — lending and DEX swaps share the manifest).
+    "fluid_lending": "fluid",
 }
 
 # =============================================================================

@@ -49,6 +49,7 @@ _FLUID_CORE_CONTRACTS: dict[str, str] = {
     "liquidity": "0x52Aa899454998Be5b000Ad077a46Bbe360F4e497",
     "liquidity_resolver": "0xca13A15de31235A37134B4717021C35A3CF25C60",
     "vault_resolver": "0xA5C3E16523eeeDDcC34706b0E6bE88b4c6EA95cC",
+    "lending_resolver": "0x48D32f49aFeAEC7AE66ad7B9264f446fc11a1569",
 }
 
 FLUID_ADDRESSES: dict[str, dict[str, str]] = {
@@ -62,10 +63,14 @@ FLUID_ADDRESSES: dict[str, dict[str, str]] = {
 # This sentinel is the token0/token1 value pools report for the native leg.
 FLUID_NATIVE_TOKEN = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
-# Gas estimates for Fluid DEX operations (Phase-0 measured: swapIn=190,067)
+# Gas estimates for Fluid operations (Phase-0 measured: swapIn=190,067;
+# fToken deposit/withdraw route through the Liquidity layer — conservative
+# ceilings, the execution pipeline re-estimates before submission)
 DEFAULT_GAS_ESTIMATES: dict[str, int] = {
     "approve": 46_000,
     "swap": 250_000,
+    "supply": 500_000,
+    "withdraw": 500_000,
 }
 
 # =============================================================================
@@ -152,6 +157,91 @@ DEX_SWAP_ABI = [
         "name": "swapOut",
         "outputs": [{"name": "amountIn_", "type": "uint256"}],
         "stateMutability": "payable",
+        "type": "function",
+    },
+]
+
+# LendingResolver — fToken enumeration (verified live on arbitrum: 9 fTokens
+# incl. fUSDC 0x1A99…6096). Fluid lists exactly one fToken per underlying
+# per chain.
+LENDING_RESOLVER_ABI = [
+    {
+        "inputs": [],
+        "name": "getAllFTokens",
+        "outputs": [{"type": "address[]"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+# fTokens are standard ERC-4626 vaults (Phase-0 suite V2). Minimal surface:
+# reads for resolution/pre-flight, writes for deposit/withdraw/redeem.
+ERC4626_ABI = [
+    {
+        "inputs": [],
+        "name": "asset",
+        "outputs": [{"type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"name": "owner", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"name": "owner", "type": "address"}],
+        "name": "maxWithdraw",
+        "outputs": [{"type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"name": "owner", "type": "address"}],
+        "name": "maxRedeem",
+        "outputs": [{"type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"name": "shares", "type": "uint256"}],
+        "name": "convertToAssets",
+        "outputs": [{"type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"name": "assets", "type": "uint256"},
+            {"name": "receiver", "type": "address"},
+        ],
+        "name": "deposit",
+        "outputs": [{"name": "shares", "type": "uint256"}],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"name": "assets", "type": "uint256"},
+            {"name": "receiver", "type": "address"},
+            {"name": "owner", "type": "address"},
+        ],
+        "name": "withdraw",
+        "outputs": [{"name": "shares", "type": "uint256"}],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"name": "shares", "type": "uint256"},
+            {"name": "receiver", "type": "address"},
+            {"name": "owner", "type": "address"},
+        ],
+        "name": "redeem",
+        "outputs": [{"name": "assets", "type": "uint256"}],
+        "stateMutability": "nonpayable",
         "type": "function",
     },
 ]
@@ -478,6 +568,9 @@ class FluidSDK:
         # that an instance-lifetime cache cannot serve a stale answer that
         # matters; a fresh SDK always re-reads.
         self._pools_cache: list[DexPoolData] | None = None
+        # fToken enumeration + underlying->fToken map (same lifetime rationale).
+        self._ftokens_cache: list[str] | None = None
+        self._ftoken_by_underlying_cache: dict[str, str] | None = None
 
     # =========================================================================
     # Pool enumeration / discovery
@@ -701,4 +794,126 @@ class FluidSDK:
             "data": self.encode_swap_in_calldata(swap0to1, amount_in, amount_out_min, to),
             "value": value,
             "gas": DEFAULT_GAS_ESTIMATES["swap"],
+        }
+
+    # =========================================================================
+    # fToken lending (ERC-4626) — VIB-5030
+    # =========================================================================
+
+    def _ftoken_contract(self, ftoken_address: str):
+        return self.w3.eth.contract(address=Web3.to_checksum_address(ftoken_address), abi=ERC4626_ABI)
+
+    def get_all_ftokens(self) -> list[str]:
+        """Enumerate the chain's Fluid fTokens via the LendingResolver.
+
+        The result is cached for the lifetime of this SDK instance (fToken
+        listings change rarely; SDK instances are per-compile).
+        """
+        if self._ftokens_cache is not None:
+            return self._ftokens_cache
+        resolver = self.w3.eth.contract(
+            address=Web3.to_checksum_address(self._addresses["lending_resolver"]),
+            abi=LENDING_RESOLVER_ABI,
+        )
+        try:
+            addresses = resolver.functions.getAllFTokens().call()
+        except Exception as e:
+            raise FluidSDKError(f"Failed to enumerate Fluid fTokens: {e}") from e
+        self._ftokens_cache = [Web3.to_checksum_address(a) for a in addresses]
+        return self._ftokens_cache
+
+    def find_ftoken_for_underlying(self, underlying: str) -> str | None:
+        """Resolve the fToken whose ERC-4626 ``asset()`` is ``underlying``.
+
+        Fluid lists exactly one fToken per underlying per chain, so the
+        first match is THE market. Returns None when Fluid has no market
+        for the asset on this chain.
+        """
+        target = underlying.lower()
+        if self._ftoken_by_underlying_cache is None:
+            mapping: dict[str, str] = {}
+            for ftoken in self.get_all_ftokens():
+                try:
+                    asset = self._ftoken_contract(ftoken).functions.asset().call()
+                except Exception as e:
+                    raise FluidSDKError(f"Failed to read asset() of Fluid fToken {ftoken}: {e}") from e
+                mapping[str(asset).lower()] = ftoken
+            self._ftoken_by_underlying_cache = mapping
+        return self._ftoken_by_underlying_cache.get(target)
+
+    def get_max_withdraw(self, ftoken_address: str, owner: str) -> int:
+        """ERC-4626 ``maxWithdraw(owner)`` — reflects Fluid's time-expanding
+        withdrawal limits, NOT just the owner's balance. The compile-time
+        pre-flight reads this to distinguish "limit-gated, retry later" from
+        a hard failure."""
+        try:
+            return int(
+                self._ftoken_contract(ftoken_address).functions.maxWithdraw(Web3.to_checksum_address(owner)).call()
+            )
+        except Exception as e:
+            raise FluidSDKError(f"Failed to read maxWithdraw on Fluid fToken {ftoken_address}: {e}") from e
+
+    def get_max_redeem(self, ftoken_address: str, owner: str) -> int:
+        """ERC-4626 ``maxRedeem(owner)`` in shares (limit-aware)."""
+        try:
+            return int(
+                self._ftoken_contract(ftoken_address).functions.maxRedeem(Web3.to_checksum_address(owner)).call()
+            )
+        except Exception as e:
+            raise FluidSDKError(f"Failed to read maxRedeem on Fluid fToken {ftoken_address}: {e}") from e
+
+    def get_ftoken_share_balance(self, ftoken_address: str, owner: str) -> int:
+        """fToken share balance of ``owner`` (ERC-20 balanceOf on the vault)."""
+        try:
+            return int(
+                self._ftoken_contract(ftoken_address).functions.balanceOf(Web3.to_checksum_address(owner)).call()
+            )
+        except Exception as e:
+            raise FluidSDKError(f"Failed to read fToken balance on {ftoken_address}: {e}") from e
+
+    def convert_to_assets(self, ftoken_address: str, shares: int) -> int:
+        """ERC-4626 ``convertToAssets(shares)`` — underlying value of shares."""
+        try:
+            return int(self._ftoken_contract(ftoken_address).functions.convertToAssets(shares).call())
+        except Exception as e:
+            raise FluidSDKError(f"Failed to read convertToAssets on {ftoken_address}: {e}") from e
+
+    def build_deposit_tx(self, ftoken_address: str, assets: int, receiver: str) -> dict[str, Any]:
+        """Build an ERC-4626 ``deposit(assets, receiver)`` transaction."""
+        contract = Web3().eth.contract(abi=ERC4626_ABI)
+        return {
+            "to": Web3.to_checksum_address(ftoken_address),
+            "data": contract.encode_abi("deposit", args=[assets, Web3.to_checksum_address(receiver)]),
+            "value": 0,
+            "gas": DEFAULT_GAS_ESTIMATES["supply"],
+        }
+
+    def build_withdraw_tx(self, ftoken_address: str, assets: int, receiver: str, owner: str) -> dict[str, Any]:
+        """Build an ERC-4626 ``withdraw(assets, receiver, owner)`` transaction."""
+        contract = Web3().eth.contract(abi=ERC4626_ABI)
+        return {
+            "to": Web3.to_checksum_address(ftoken_address),
+            "data": contract.encode_abi(
+                "withdraw",
+                args=[assets, Web3.to_checksum_address(receiver), Web3.to_checksum_address(owner)],
+            ),
+            "value": 0,
+            "gas": DEFAULT_GAS_ESTIMATES["withdraw"],
+        }
+
+    def build_redeem_tx(self, ftoken_address: str, shares: int, receiver: str, owner: str) -> dict[str, Any]:
+        """Build an ERC-4626 ``redeem(shares, receiver, owner)`` transaction.
+
+        Full exits go through redeem-by-shares (never withdraw-by-assets):
+        burning the exact share balance cannot strand rounding dust.
+        """
+        contract = Web3().eth.contract(abi=ERC4626_ABI)
+        return {
+            "to": Web3.to_checksum_address(ftoken_address),
+            "data": contract.encode_abi(
+                "redeem",
+                args=[shares, Web3.to_checksum_address(receiver), Web3.to_checksum_address(owner)],
+            ),
+            "value": 0,
+            "gas": DEFAULT_GAS_ESTIMATES["withdraw"],
         }
