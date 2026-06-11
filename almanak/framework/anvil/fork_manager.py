@@ -36,6 +36,13 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.config.framework import framework_config_from_env
+from almanak.core.chains._helpers import (
+    anvil_balance_slots_map,
+    anvil_block_gas_limit_map,
+    anvil_funding_tokens_map,
+    anvil_whale_tokens_map,
+    wrapped_native_deposit_symbol_map,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,118 +146,13 @@ CHAIN_IDS: Mapping[str, int] = _build_chain_ids()
 # Mantle uses a non-standard gas accounting system (L1 calldata overhead
 # included in tx.gasLimit), so the per-chain override is required; mainstream
 # EVM chains do not need an entry here.
-_CHAIN_BLOCK_GAS_LIMITS: dict[str, int] = {
-    "mantle": 3_000_000_000,  # 3B — Mantle L2 non-standard gas accounting (VIB-3666/VIB-3746/#2103)
-}
+_CHAIN_BLOCK_GAS_LIMITS: Mapping[str, int] = anvil_block_gas_limit_map()
 
 
 # Common ERC-20 token addresses per chain
-TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
-    "arbitrum": {
-        "WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-        "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-        "USDC.e": "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",
-        "USDT": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
-        "DAI": "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1",
-        "WBTC": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
-        "ARB": "0x912CE59144191C1204E64559FE8253a0e49E6548",
-        "GMX": "0xfc5A1A6EB076a2C7aD06eD22C90d7E710E35ad0a",
-        "wstETH": "0x5979D7b546E38E414F7E9822514be443A4800529",
-    },
-    "ethereum": {
-        "WETH": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-        "USDC": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-        "USDT": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
-        "DAI": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
-        "WBTC": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
-        "wstETH": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
-        "stETH": "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84",
-        "rETH": "0xae78736Cd615f374D3085123A210448E74Fc6393",
-        "cbETH": "0xBe9895146f7AF43049ca1c1AE358B0541Ea49704",
-        "swETH": "0xf951E335afb289353dc249e82926178EaC7DEd78",
-        "ankrETH": "0xE95A203B1a91a908F9B9CE46459d101078c2c3cb",
-        "pufETH": "0xD9A442856C234a39a81a089C06451EBAa4306a72",
-    },
-    "optimism": {
-        "WETH": "0x4200000000000000000000000000000000000006",
-        "USDC": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
-        "USDC.e": "0x7F5c764cBc14f9669B88837ca1490cCa17c31607",
-        "USDT": "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58",
-        "DAI": "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1",
-        "OP": "0x4200000000000000000000000000000000000042",
-    },
-    "base": {
-        "WETH": "0x4200000000000000000000000000000000000006",
-        "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        "USDbC": "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",
-        "DAI": "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb",
-        "wstETH": "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452",
-    },
-    "polygon": {
-        "WMATIC": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
-        "WETH": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
-        "USDC": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
-        "USDC.e": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
-        "USDT": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
-        "DAI": "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",
-    },
-    "avalanche": {
-        "WAVAX": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
-        "WETH.e": "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB",
-        "USDC": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
-        "USDC.e": "0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664",
-        "USDT": "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7",
-        "BTC.b": "0x152b9d0FdC40C096757F570A51E494bd4b943E50",
-        "sAVAX": "0x2b2C81e08f1Af8835a78Bb2A90AE924ACE0eA4bE",
-    },
-    "bsc": {
-        "WBNB": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
-        "BUSD": "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56",
-        "USDC": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
-        "USDT": "0x55d398326f99059fF775485246999027B3197955",
-    },
-    "linea": {
-        "USDC": "0x176211869cA2b568f2A7D4EE941E073a821EE1ff",
-        "WETH": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",
-        "USDT": "0xA219439258ca9da29E9Cc4cE5596924745e12B93",
-    },
-    "plasma": {
-        "WXPL": "0x6100E367285b01F48D07953803A2d8dCA5D19873",
-        "USDT0": "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb",
-        "FUSDT0": "0x1DD4b13fcAE900C60a350589BE8052959D2Ed27B",
-        "PENDLE": "0x17Bac5F906c9A0282aC06a59958D85796c831f24",
-    },
-    "berachain": {
-        "WBERA": "0x6969696969696969696969696969696969696969",
-        "HONEY": "0xFCBD14DC51f0A4d49d5E53C2E0950e0bC26d0Dce",
-        "USDC.e": "0x549943e04f40284185054145c6E4e9568C1D3241",
-        "WETH": "0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590",
-        "WBTC": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
-        "USDT0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
-    },
-    "sonic": {
-        "wS": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",
-        "WETH": "0x50c42dEAcD8Fc9773493ED674b675bE577f2634b",
-        "USDC": "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",
-        "USDT": "0x6047828dc181963ba44974801FF68e538dA5eaF9",
-    },
-    "monad": {
-        "WMON": "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
-        "WETH": "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",
-        "USDC": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
-        "USDT0": "0xe7cd86e13AC4309349F30B3435a9d337750fC82D",
-        "WBTC": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
-    },
-    "xlayer": {
-        "WOKB": "0xe538905cf8410324e03A5A23C1c177a474D59b2b",
-        "WETH": "0x5A77f1443D16ee5761d310e38b62f77f726bC71c",
-        "xETH": "0xE7B000003A45145decf8a28FC755aD5eC5EA025A",
-        "USDC": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
-        "USDT": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USD₮0 (Aave V3.6 reserve)
-        "USDT0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",  # USD₮0 (Aave V3.6 reserve)
-        "WBTC": "0xEA034fb02eB1808C2cc3adbC15f447B93CbE08e1",
-    },
-}
+TOKEN_ADDRESSES: Mapping[str, Mapping[str, str]] = anvil_funding_tokens_map()
+# (Per-chain rows live on ``ChainDescriptor.anvil.funding_tokens`` —
+# one file per chain under almanak/core/chains/. VIB-4851 CS-6.)
 
 
 # Token decimals
@@ -297,64 +199,21 @@ TOKEN_DECIMALS: dict[str, int] = {
 # Known ERC-20 balanceOf storage slots per chain.
 # Sourced from verified intent tests (tests/intents/conftest.py CHAIN_CONFIGS).
 # Using known slots avoids slow brute-force probing and is 100% reliable.
-KNOWN_BALANCE_SLOTS: dict[str, dict[str, int]] = {
-    "arbitrum": {
-        "USDC": 9,
-        "WETH": 51,
-        "USDC.e": 51,
-        "USDT": 51,
-        "DAI": 2,
-        "WBTC": 51,
-        "ARB": 51,
-        "GMX": 0,
-        "wstETH": 1,
-    },
-    "ethereum": {"USDC": 9, "WETH": 3, "USDT": 2, "DAI": 2, "WBTC": 0, "wstETH": 0},
-    "base": {"USDC": 9, "WETH": 3, "USDbC": 9, "DAI": 0, "wstETH": 1},
-    "avalanche": {"USDC": 9, "WAVAX": 3, "USDT": 2, "USDC.e": 0, "WETH.e": 0, "BTC.b": 0, "sAVAX": 0},
-    "optimism": {"USDC": 9, "WETH": 3, "USDT": 0, "USDC.e": 0, "OP": 0},
-    "polygon": {"USDC": 9, "WETH": 3, "USDT": 2, "WMATIC": 3, "USDC.e": 0},
-    "bsc": {"USDC": 1, "WBNB": 3, "USDT": 1, "BUSD": 0},
-    "linea": {"USDC": 9, "WETH": 3, "USDT": 51},  # verified on-chain 2026-04-12 (VIB-2724)
-    "sonic": {"USDC": 9, "WETH": 0},  # USDC: confirmed iter-100. WETH: bridged, try slot 0
-    "xlayer": {"USDT0": 51},  # confirmed: USD₮0 (0x779Ded...) uses OZ upgradeable slot 51
-}
+KNOWN_BALANCE_SLOTS: Mapping[str, Mapping[str, int]] = anvil_balance_slots_map()
 
 # Tokens where storage slot manipulation produces a valid balanceOf() but
 # transferFrom() reverts (proxy implementation mismatch).  For these tokens,
 # whale impersonation is used instead of slot patching.
 # Format: { chain: { token_symbol_upper: whale_address } }
-WHALE_FUNDED_TOKENS: dict[str, dict[str, str]] = {
-    "ethereum": {
-        # USDC FiatTokenProxy: slot 9 sets balanceOf but transferFrom reverts
-        # because implementation contract's internal state is inconsistent.
-        # Circle: Treasury is a reliable large holder.
-        "USDC": "0x37305B1cD40574E4C5Ce33f8e8306Be057fD7341",
-    },
-    "base": {
-        # cbBTC (Coinbase Wrapped BTC) FiatTokenProxy-style upgradeable proxy:
-        # brute-force slot 9 produces a valid balanceOf() but approve()/transfer
-        # revert because the implementation's internal state is inconsistent.
-        # aBasCbBTC (Aave V3 cbBTC reserve) holds ~2000 cbBTC and is auto-impersonatable.
-        "CBBTC": "0xBdb9300b7CDE636d9cD4AFF00f6F009fFBBc8EE6",
-    },
-}
+WHALE_FUNDED_TOKENS: Mapping[str, Mapping[str, str]] = anvil_whale_tokens_map()
 
 # Wrapped native tokens that can be funded via deposit() instead of storage
 # slot manipulation.  deposit() is more reliable for these contracts because
 # it uses the contract's own logic (no proxy/slot mismatch risk).
-WRAPPED_NATIVE_TOKENS: dict[str, str] = {
-    "ethereum": "WETH",
-    "arbitrum": "WETH",
-    "base": "WETH",
-    "optimism": "WETH",
-    "polygon": "WMATIC",
-    "linea": "WETH",
-    "avalanche": "WAVAX",
-    "bsc": "WBNB",
-    "sonic": "WS",
-    "mantle": "WMNT",
-}
+WRAPPED_NATIVE_TOKENS: Mapping[str, str] = wrapped_native_deposit_symbol_map()
+# (Membership == ``anvil.wrapped_native_deposit`` chains; symbol comes from
+# ``NativeToken.wrapped_symbol`` verbatim — sonic is "wS"; the deposit-funding
+# comparison below uppercases both sides. VIB-4851 CS-6.)
 
 
 # =============================================================================

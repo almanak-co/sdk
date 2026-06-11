@@ -377,3 +377,82 @@ def contract_address_map(key: str) -> Mapping[str, str]:
     return MappingProxyType(
         {d.name: d.contracts[key] for d in ChainRegistry.all() if d.contracts is not None and key in d.contracts}
     )
+
+
+def anvil_funding_tokens_map() -> Mapping[str, Mapping[str, str]]:
+    """Read-only ``{chain: {SYMBOL: address}}`` Anvil funding catalogue.
+
+    Back-compat view of the legacy ``fork_manager.TOKEN_ADDRESSES``;
+    membership == chains declaring ``anvil.funding_tokens``. Keys keep
+    their verbatim display case (``"USDC.e"``) — consumers case-normalize
+    at lookup. VIB-4851 (CS-6).
+    """
+    return MappingProxyType(
+        {d.name: d.anvil.funding_tokens for d in ChainRegistry.all() if d.anvil.funding_tokens is not None}
+    )
+
+
+def anvil_balance_slots_map() -> Mapping[str, Mapping[str, int]]:
+    """Read-only ``{chain: {SYMBOL: storage_slot}}`` for slot-patch funding.
+
+    Back-compat view of the legacy ``fork_manager.KNOWN_BALANCE_SLOTS``.
+    VIB-4851 (CS-6).
+    """
+    return MappingProxyType(
+        {d.name: d.anvil.balance_slots for d in ChainRegistry.all() if d.anvil.balance_slots is not None}
+    )
+
+
+def anvil_whale_tokens_map() -> Mapping[str, Mapping[str, str]]:
+    """Read-only ``{chain: {SYMBOL: whale_address}}`` impersonation fallbacks.
+
+    Back-compat view of the legacy ``fork_manager.WHALE_FUNDED_TOKENS``.
+    VIB-4851 (CS-6).
+    """
+    return MappingProxyType(
+        {d.name: d.anvil.whale_funded_tokens for d in ChainRegistry.all() if d.anvil.whale_funded_tokens is not None}
+    )
+
+
+def anvil_block_gas_limit_map() -> Mapping[str, int]:
+    """Read-only ``{chain: anvil --gas-limit override}``.
+
+    Back-compat view of the legacy ``fork_manager._CHAIN_BLOCK_GAS_LIMITS``
+    (Mantle's non-standard gas accounting). VIB-4851 (CS-6).
+    """
+    return MappingProxyType(
+        {d.name: d.anvil.block_gas_limit for d in ChainRegistry.all() if d.anvil.block_gas_limit is not None}
+    )
+
+
+def wrapped_native_deposit_symbol_map() -> Mapping[str, str]:
+    """Read-only ``{chain: wrapped-native SYMBOL}`` for deposit()-funding.
+
+    Membership == chains declaring ``anvil.wrapped_native_deposit`` (the
+    legacy ``fork_manager.WRAPPED_NATIVE_TOKENS`` ten — deliberately NOT
+    every chain with a ``wrapped_symbol``, whose wrappers are unverified
+    for fork deposit-funding). Values come from
+    ``NativeToken.wrapped_symbol`` verbatim (sonic is ``"wS"``; the legacy
+    map stored ``"WS"`` — the only consumer uppercases both sides).
+    VIB-4851 (CS-6).
+    """
+    return MappingProxyType(
+        {
+            d.name: d.native.wrapped_symbol
+            for d in ChainRegistry.all()
+            if d.anvil.wrapped_native_deposit and d.native.wrapped_symbol is not None
+        }
+    )
+
+
+def bridged_stablecoin_map() -> Mapping[str, tuple[str, ...]]:
+    """Read-only ``{chain: bridged-stable symbols}`` for teardown pricing.
+
+    Back-compat view of the legacy
+    ``runner_teardown._CHAIN_BRIDGED_STABLECOINS``; membership == chains
+    with a non-empty ``bridged_stablecoin_variants`` (absence is
+    load-bearing — VIB-3814). VIB-4851 (CS-6).
+    """
+    return MappingProxyType(
+        {d.name: d.bridged_stablecoin_variants for d in ChainRegistry.all() if d.bridged_stablecoin_variants}
+    )

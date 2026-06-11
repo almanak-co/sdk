@@ -2,7 +2,7 @@
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, Explorer, GasProfile, NativeToken, SimulationProfile, Timeouts
+from ._descriptor import AnvilProfile, ChainDescriptor, Explorer, GasProfile, NativeToken, SimulationProfile, Timeouts
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -40,6 +40,19 @@ DESCRIPTOR = register_chain(
             "coingecko": "berachain",
             "dexscreener": "berachain",
         },
+        # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
+        # verbatim from framework/anvil/fork_manager.py (display-case keys).
+        anvil=AnvilProfile(
+            funding_tokens={
+                "WBERA": "0x6969696969696969696969696969696969696969",
+                "HONEY": "0xFCBD14DC51f0A4d49d5E53C2E0950e0bC26d0Dce",
+                "USDC.e": "0x549943e04f40284185054145c6E4e9568C1D3241",
+                "WETH": "0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590",
+                "WBTC": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
+                "USDT0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
+            },
+        ),
+        bridged_stablecoin_variants=("USDC.e",),
         aliases=("bera",),
     )
 )

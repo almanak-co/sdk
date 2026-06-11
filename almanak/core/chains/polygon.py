@@ -3,6 +3,7 @@
 from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
+    AnvilProfile,
     ChainDescriptor,
     ChainlinkFeeds,
     Explorer,
@@ -118,6 +119,27 @@ DESCRIPTOR = register_chain(
         # chain Safe deploys to; presence here == deployment-verified
         # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).
         contracts={"safe_multisend": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"},
+        # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
+        # verbatim from framework/anvil/fork_manager.py (display-case keys).
+        anvil=AnvilProfile(
+            funding_tokens={
+                "WMATIC": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+                "WETH": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+                "USDC": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+                "USDC.e": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+                "USDT": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+                "DAI": "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063",
+            },
+            balance_slots={
+                "USDC": 9,
+                "WETH": 3,
+                "USDT": 2,
+                "WMATIC": 3,
+                "USDC.e": 0,
+            },
+            wrapped_native_deposit=True,
+        ),
+        bridged_stablecoin_variants=("USDC.e",),
         aliases=("matic",),
     )
 )

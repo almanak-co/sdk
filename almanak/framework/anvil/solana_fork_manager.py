@@ -41,6 +41,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
 from almanak.framework.anvil.solana_program_registry import (
     JUPITER_V6_PROGRAM_ID,
     get_protocol_program_ids,
@@ -48,7 +50,6 @@ from almanak.framework.anvil.solana_program_registry import (
 from almanak.framework.data.tokens.defaults import JUP as _JUP
 from almanak.framework.data.tokens.defaults import USDC as _USDC
 from almanak.framework.data.tokens.defaults import USDT as _USDT
-from almanak.framework.data.tokens.defaults import WRAPPED_NATIVE
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +72,20 @@ COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111"
 # Canonical source: ``solana_program_registry.JUPITER_V6_PROGRAM_ID``.
 JUPITER_PROGRAM = JUPITER_V6_PROGRAM_ID
 
-# WSOL mint address - sourced from central token registry
-WSOL_MINT = WRAPPED_NATIVE["solana"]
+# The Solana-family descriptor (exactly one chain registered today). Keyed
+# reads below use its canonical name so this module never spells the chain
+# (VIB-4851 CS-6).
+_SVM = next(d for d in ChainRegistry.all() if d.family is ChainFamily.SOLANA)
+
+# WSOL mint address — descriptor-owned (cross-checked against the central
+# token registry's WRAPPED_NATIVE at import by the inversion test).
+# wrapped_address is Optional on NativeToken; per its docstring every
+# registered chain declares one, so absence is a registration bug worth
+# failing loud on (and this narrows the type for mypy).
+_wsol_mint = _SVM.native.wrapped_address
+if _wsol_mint is None:  # pragma: no cover — registration invariant
+    raise RuntimeError(f"{_SVM.name} descriptor declares no native.wrapped_address (WSOL mint)")
+WSOL_MINT: str = _wsol_mint
 
 # Common Solana token mints
 # Addresses for SOL, WSOL, USDC, USDT, JUP are sourced from the central token registry
@@ -81,9 +94,9 @@ WSOL_MINT = WRAPPED_NATIVE["solana"]
 SOLANA_TOKEN_MINTS: dict[str, str] = {
     "SOL": WSOL_MINT,
     "WSOL": WSOL_MINT,
-    "USDC": _USDC.addresses["solana"],
-    "USDT": _USDT.addresses["solana"],
-    "JUP": _JUP.addresses["solana"],
+    "USDC": _USDC.addresses[_SVM.name],
+    "USDT": _USDT.addresses[_SVM.name],
+    "JUP": _JUP.addresses[_SVM.name],
     # Tokens not yet in central registry
     "RAY": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
     "ORCA": "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE",

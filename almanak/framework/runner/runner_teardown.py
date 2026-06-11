@@ -11,9 +11,12 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
+
+from almanak.core.chains._helpers import bridged_stablecoin_map
 
 from ..intents.compiler import IntentCompiler, IntentCompilerConfig
 from ..intents.vocabulary import Intent
@@ -1213,14 +1216,10 @@ def prefetch_teardown_prices(market: Any, intents: list) -> None:
 # previously caused the swap-fee-tier heuristic and other downstream consumers
 # to probe the resolver for ``USDC.e`` on BSC and burn the 240s harness window
 # (VIB-3814 / BUG-30 residual).
-_CHAIN_BRIDGED_STABLECOINS: dict[str, tuple[str, ...]] = {
-    "arbitrum": ("USDC.e",),
-    "optimism": ("USDC.e",),
-    "polygon": ("USDC.e",),
-    "avalanche": ("USDC.e", "DAI.e", "USDT.e"),
-    "base": ("USDbC",),
-    "berachain": ("USDC.e",),
-}
+# Derived from ``ChainDescriptor.bridged_stablecoin_variants`` (VIB-4851
+# CS-6); membership and tuple order preserved verbatim, and absence stays
+# load-bearing exactly as described above.
+_CHAIN_BRIDGED_STABLECOINS: Mapping[str, tuple[str, ...]] = bridged_stablecoin_map()
 
 
 def get_fallback_teardown_prices(market: Any) -> dict[str, Decimal] | None:

@@ -41,6 +41,7 @@ from enum import Enum
 from typing import Any, Protocol, TypeVar
 
 from almanak.core.chains import DEFAULT_CHAIN
+from almanak.core.chains._helpers import anvil_funding_tokens_map
 
 logger = logging.getLogger(__name__)
 
@@ -509,34 +510,13 @@ class TestContext:
             ]
 
         if not self.test_tokens:
-            self.test_tokens = {
-                "arbitrum": {
-                    "WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-                    "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-                    "USDT": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
-                },
-                "ethereum": {
-                    "WETH": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-                    "USDC": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-                    "USDT": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
-                },
-                "optimism": {
-                    "WETH": "0x4200000000000000000000000000000000000006",
-                    "USDC": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
-                },
-                "polygon": {
-                    "WMATIC": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
-                    "USDC": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
-                },
-                "base": {
-                    "WETH": "0x4200000000000000000000000000000000000006",
-                    "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-                },
-                "avalanche": {
-                    "WAVAX": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
-                    "USDC": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
-                },
-            }
+            # Derived from the descriptor-owned Anvil funding catalogue
+            # (VIB-4851 CS-6). Deliberate widening vs the legacy 6-chain
+            # literal: ProtocolTestContext has zero external constructors,
+            # every legacy (chain, symbol) entry is address-identical in
+            # the catalogue, and the legacy membership followed no
+            # derivable rule.
+            self.test_tokens = {chain: dict(tokens) for chain, tokens in anvil_funding_tokens_map().items()}
 
 
 # =============================================================================

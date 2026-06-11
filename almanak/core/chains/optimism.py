@@ -3,6 +3,7 @@
 from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
+    AnvilProfile,
     ChainDescriptor,
     ChainlinkFeeds,
     Explorer,
@@ -95,6 +96,27 @@ DESCRIPTOR = register_chain(
         # chain Safe deploys to; presence here == deployment-verified
         # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).
         contracts={"safe_multisend": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"},
+        # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
+        # verbatim from framework/anvil/fork_manager.py (display-case keys).
+        anvil=AnvilProfile(
+            funding_tokens={
+                "WETH": "0x4200000000000000000000000000000000000006",
+                "USDC": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+                "USDC.e": "0x7F5c764cBc14f9669B88837ca1490cCa17c31607",
+                "USDT": "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58",
+                "DAI": "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1",
+                "OP": "0x4200000000000000000000000000000000000042",
+            },
+            balance_slots={
+                "USDC": 9,
+                "WETH": 3,
+                "USDT": 0,
+                "USDC.e": 0,
+                "OP": 0,
+            },
+            wrapped_native_deposit=True,
+        ),
+        bridged_stablecoin_variants=("USDC.e",),
         aliases=("op",),
     )
 )

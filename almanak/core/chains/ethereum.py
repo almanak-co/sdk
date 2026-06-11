@@ -8,6 +8,7 @@ chain_id is the on-the-wire identifier owned by ``metrics-database``.
 from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
+    AnvilProfile,
     ChainDescriptor,
     ChainlinkFeeds,
     Explorer,
@@ -124,6 +125,36 @@ DESCRIPTOR = register_chain(
         # chain Safe deploys to; presence here == deployment-verified
         # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).
         contracts={"safe_multisend": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"},
+        # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
+        # verbatim from framework/anvil/fork_manager.py (display-case keys).
+        anvil=AnvilProfile(
+            funding_tokens={
+                "WETH": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                "USDC": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                "USDT": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+                "DAI": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+                "WBTC": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
+                "wstETH": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
+                "stETH": "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84",
+                "rETH": "0xae78736Cd615f374D3085123A210448E74Fc6393",
+                "cbETH": "0xBe9895146f7AF43049ca1c1AE358B0541Ea49704",
+                "swETH": "0xf951E335afb289353dc249e82926178EaC7DEd78",
+                "ankrETH": "0xE95A203B1a91a908F9B9CE46459d101078c2c3cb",
+                "pufETH": "0xD9A442856C234a39a81a089C06451EBAa4306a72",
+            },
+            balance_slots={
+                "USDC": 9,
+                "WETH": 3,
+                "USDT": 2,
+                "DAI": 2,
+                "WBTC": 0,
+                "wstETH": 0,
+            },
+            whale_funded_tokens={
+                "USDC": "0x37305B1cD40574E4C5Ce33f8e8306Be057fD7341",
+            },
+            wrapped_native_deposit=True,
+        ),
         aliases=("eth", "mainnet"),
     )
 )

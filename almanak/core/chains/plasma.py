@@ -3,6 +3,7 @@
 from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
+    AnvilProfile,
     ChainDescriptor,
     Explorer,
     GasProfile,
@@ -56,6 +57,16 @@ DESCRIPTOR = register_chain(
             "dexscreener": "plasma",
             "zerion": "plasma",
         },
+        # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
+        # verbatim from framework/anvil/fork_manager.py (display-case keys).
+        anvil=AnvilProfile(
+            funding_tokens={
+                "WXPL": "0x6100E367285b01F48D07953803A2d8dCA5D19873",
+                "USDT0": "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb",
+                "FUSDT0": "0x1DD4b13fcAE900C60a350589BE8052959D2Ed27B",
+                "PENDLE": "0x17Bac5F906c9A0282aC06a59958D85796c831f24",
+            },
+        ),
         aliases=(),
     )
 )

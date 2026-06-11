@@ -2,7 +2,7 @@
 
 from almanak.core.enums import Chain, ChainFamily
 
-from ._descriptor import ChainDescriptor, GasProfile, NativeToken, RpcProfile, Timeouts
+from ._descriptor import AnvilProfile, ChainDescriptor, GasProfile, NativeToken, RpcProfile, Timeouts
 from ._registry import register_chain
 
 DESCRIPTOR = register_chain(
@@ -61,6 +61,22 @@ DESCRIPTOR = register_chain(
         # chain Safe deploys to; presence here == deployment-verified
         # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).
         contracts={"safe_multisend": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"},
+        # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
+        # verbatim from framework/anvil/fork_manager.py (display-case keys).
+        anvil=AnvilProfile(
+            funding_tokens={
+                "WOKB": "0xe538905cf8410324e03A5A23C1c177a474D59b2b",
+                "WETH": "0x5A77f1443D16ee5761d310e38b62f77f726bC71c",
+                "xETH": "0xE7B000003A45145decf8a28FC755aD5eC5EA025A",
+                "USDC": "0x74b7F16337b8972027F6196A17a631aC6dE26d22",
+                "USDT": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
+                "USDT0": "0x779Ded0c9e1022225f8E0630b35a9b54bE713736",
+                "WBTC": "0xEA034fb02eB1808C2cc3adbC15f447B93CbE08e1",
+            },
+            balance_slots={
+                "USDT0": 51,
+            },
+        ),
         aliases=(),
     )
 )

@@ -3,6 +3,7 @@
 from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
+    AnvilProfile,
     ChainDescriptor,
     ChainlinkFeeds,
     Explorer,
@@ -106,6 +107,30 @@ DESCRIPTOR = register_chain(
         # chain Safe deploys to; presence here == deployment-verified
         # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).
         contracts={"safe_multisend": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"},
+        # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
+        # verbatim from framework/anvil/fork_manager.py (display-case keys).
+        anvil=AnvilProfile(
+            funding_tokens={
+                "WAVAX": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+                "WETH.e": "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB",
+                "USDC": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
+                "USDC.e": "0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664",
+                "USDT": "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7",
+                "BTC.b": "0x152b9d0FdC40C096757F570A51E494bd4b943E50",
+                "sAVAX": "0x2b2C81e08f1Af8835a78Bb2A90AE924ACE0eA4bE",
+            },
+            balance_slots={
+                "USDC": 9,
+                "WAVAX": 3,
+                "USDT": 2,
+                "USDC.e": 0,
+                "WETH.e": 0,
+                "BTC.b": 0,
+                "sAVAX": 0,
+            },
+            wrapped_native_deposit=True,
+        ),
+        bridged_stablecoin_variants=("USDC.e", "DAI.e", "USDT.e"),
         aliases=("avax",),
     )
 )

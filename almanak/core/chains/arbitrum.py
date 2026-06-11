@@ -3,6 +3,7 @@
 from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
+    AnvilProfile,
     ChainDescriptor,
     ChainlinkFeeds,
     Explorer,
@@ -107,6 +108,34 @@ DESCRIPTOR = register_chain(
         # chain Safe deploys to; presence here == deployment-verified
         # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).
         contracts={"safe_multisend": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"},
+        # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
+        # verbatim from framework/anvil/fork_manager.py (display-case keys).
+        anvil=AnvilProfile(
+            funding_tokens={
+                "WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+                "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+                "USDC.e": "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",
+                "USDT": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
+                "DAI": "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1",
+                "WBTC": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
+                "ARB": "0x912CE59144191C1204E64559FE8253a0e49E6548",
+                "GMX": "0xfc5A1A6EB076a2C7aD06eD22C90d7E710E35ad0a",
+                "wstETH": "0x5979D7b546E38E414F7E9822514be443A4800529",
+            },
+            balance_slots={
+                "USDC": 9,
+                "WETH": 51,
+                "USDC.e": 51,
+                "USDT": 51,
+                "DAI": 2,
+                "WBTC": 51,
+                "ARB": 51,
+                "GMX": 0,
+                "wstETH": 1,
+            },
+            wrapped_native_deposit=True,
+        ),
+        bridged_stablecoin_variants=("USDC.e",),
         aliases=("arb",),
     )
 )

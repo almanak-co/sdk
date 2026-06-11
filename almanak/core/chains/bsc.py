@@ -9,6 +9,7 @@ still picks up the framework default.
 from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
+    AnvilProfile,
     ChainDescriptor,
     ChainlinkFeeds,
     Explorer,
@@ -112,6 +113,23 @@ DESCRIPTOR = register_chain(
         # chain Safe deploys to; presence here == deployment-verified
         # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).
         contracts={"safe_multisend": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"},
+        # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
+        # verbatim from framework/anvil/fork_manager.py (display-case keys).
+        anvil=AnvilProfile(
+            funding_tokens={
+                "WBNB": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+                "BUSD": "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56",
+                "USDC": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+                "USDT": "0x55d398326f99059fF775485246999027B3197955",
+            },
+            balance_slots={
+                "USDC": 1,
+                "WBNB": 3,
+                "USDT": 1,
+                "BUSD": 0,
+            },
+            wrapped_native_deposit=True,
+        ),
         aliases=("bnb", "binance"),
     )
 )

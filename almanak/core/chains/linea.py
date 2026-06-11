@@ -3,6 +3,7 @@
 from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
+    AnvilProfile,
     ChainDescriptor,
     ChainlinkFeeds,
     GasProfile,
@@ -68,6 +69,21 @@ DESCRIPTOR = register_chain(
                 "USDT/USD": "0xefCA2bbe0EdD0E22b2e0d2F8248E99F4bEf4A7dB",
                 "DAI/USD": "0x5133D67c38AFbdd02997c14Abd8d83676B4e309A",
             },
+        ),
+        # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
+        # verbatim from framework/anvil/fork_manager.py (display-case keys).
+        anvil=AnvilProfile(
+            funding_tokens={
+                "USDC": "0x176211869cA2b568f2A7D4EE941E073a821EE1ff",
+                "WETH": "0xe5D7C2a44FfDDf6b295A15c148167daaAf5Cf34f",
+                "USDT": "0xA219439258ca9da29E9Cc4cE5596924745e12B93",
+            },
+            balance_slots={
+                "USDC": 9,
+                "WETH": 3,
+                "USDT": 51,
+            },
+            wrapped_native_deposit=True,
         ),
         aliases=(),
     )

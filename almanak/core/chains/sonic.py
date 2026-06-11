@@ -11,6 +11,7 @@ the dict now formally contains an entry.
 from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
+    AnvilProfile,
     ChainDescriptor,
     ChainlinkFeeds,
     Explorer,
@@ -88,6 +89,21 @@ DESCRIPTOR = register_chain(
                 "USDC/USD": "0x7A8443a2a5D772db7f1E40DeFe32db485108F128",
                 "S/USD": "0xc76dFb89fF298145b417d221B2c747d84952e01d",
             },
+        ),
+        # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
+        # verbatim from framework/anvil/fork_manager.py (display-case keys).
+        anvil=AnvilProfile(
+            funding_tokens={
+                "wS": "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",
+                "WETH": "0x50c42dEAcD8Fc9773493ED674b675bE577f2634b",
+                "USDC": "0x29219dd400f2Bf60E5a23d13Be72B486D4038894",
+                "USDT": "0x6047828dc181963ba44974801FF68e538dA5eaF9",
+            },
+            balance_slots={
+                "USDC": 9,
+                "WETH": 0,
+            },
+            wrapped_native_deposit=True,
         ),
         aliases=(),
     )

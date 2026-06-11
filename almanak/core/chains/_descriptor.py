@@ -262,6 +262,51 @@ class RpcProfile:
 
 
 @dataclass(frozen=True)
+class AnvilProfile:
+    """Anvil fork-TEST funding facts (VIB-4851 Phase E, CS-6).
+
+    Test-infrastructure data deliberately kept OUT of the production
+    structures (``GasProfile`` / ``RpcProfile`` / ``tokens``): the funding
+    catalogue here is a superset of the production token catalogue and
+    must never widen intent compilation or Zodiac permission discovery.
+
+    Keys are stored VERBATIM, never lowercased — display case is
+    load-bearing (``"USDC.e"``, ``"wstETH"``): the cross-table invariant
+    tests compare case-sensitively, and every runtime lookup is already
+    case-normalized by the consumer (fork_manager builds ``*_ci`` maps).
+
+    Attributes:
+        funding_tokens: Display-cased symbol → ERC-20 address for managed
+            Anvil funding (legacy ``fork_manager.TOKEN_ADDRESSES``).
+        balance_slots: Display-cased symbol → ``balanceOf`` storage slot
+            for slot-patch funding (legacy ``KNOWN_BALANCE_SLOTS``).
+        whale_funded_tokens: UPPERCASE symbol → whale address fallback for
+            impersonation funding when slot-patching fails (legacy
+            ``WHALE_FUNDED_TOKENS``).
+        wrapped_native_deposit: ``True`` when the chain's wrapped-native
+            contract is verified WETH9-style deposit()-fundable on a fork
+            (legacy ``WRAPPED_NATIVE_TOKENS`` membership). Deliberately a
+            separate gate from ``NativeToken.wrapped_symbol`` — gating on
+            the production field would silently widen the deposit path to
+            chains whose wrappers are unverified.
+        block_gas_limit: ``anvil --gas-limit`` override. Only Mantle —
+            non-standard gas accounting (VIB-3666/VIB-3746).
+    """
+
+    funding_tokens: Mapping[str, str] | None = None
+    balance_slots: Mapping[str, int] | None = None
+    whale_funded_tokens: Mapping[str, str] | None = None
+    wrapped_native_deposit: bool = False
+    block_gas_limit: int | None = None
+
+    def __post_init__(self) -> None:
+        for attr in ("funding_tokens", "balance_slots", "whale_funded_tokens"):
+            value = getattr(self, attr)
+            if value is not None:
+                object.__setattr__(self, attr, MappingProxyType(dict(value)))
+
+
+@dataclass(frozen=True)
 class ChainlinkFeeds:
     """Chainlink aggregator addresses for this chain (VIB-4851 Phase E, CS-5).
 
@@ -401,6 +446,16 @@ class ChainDescriptor:
             vendor *key* is lowercased, never the value. An unknown vendor key
             raises ``ValueError`` at construction. Frozen at construction;
             mutating after returns has no effect. VIB-4851 (B1).
+        anvil: ``AnvilProfile`` — managed-Anvil fork-test funding facts
+            (token addresses, balance slots, whale fallbacks, gas-limit
+            quirk). Default-empty; test infra only. VIB-4851 (CS-6).
+        bridged_stablecoin_variants: Display-cased bridged-stable symbols
+            (``"USDC.e"``, ``"USDbC"``) seeded at $1 by the teardown
+            fallback pricer (legacy ``runner_teardown.
+            _CHAIN_BRIDGED_STABLECOINS``). PRODUCTION teardown surface,
+            hence top-level, not AnvilProfile. Empty tuple == no variants
+            (legacy ``.get(chain, ())`` miss; absence is load-bearing —
+            VIB-3814). VIB-4851 (CS-6).
         aliases: Extra alternative names that resolve to this chain
             (e.g. ``("bnb", "binance")`` for BSC). The canonical ``name``
             is always implicit and need not be repeated here.
@@ -420,6 +475,8 @@ class ChainDescriptor:
     external_ids: Mapping[str, str] | None = None
     chainlink: ChainlinkFeeds | None = None
     contracts: Mapping[str, str] | None = None
+    anvil: AnvilProfile = field(default_factory=AnvilProfile)
+    bridged_stablecoin_variants: tuple[str, ...] = ()
     aliases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
