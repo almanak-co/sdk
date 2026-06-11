@@ -295,8 +295,17 @@ class TestHappyPathsPerIntentType:
         assert entry.amount_in == "500"
         assert entry.amount_out == ""
 
-    def test_withdraw_happy_path(self):
-        """WITHDRAW: falls back to intent.supply_token + intent.amount_usd."""
+    def test_withdraw_usd_only_sizing_leaves_amount_unmeasured(self):
+        """WITHDRAW sized only by ``amount_usd``: token amount stays ``""``.
+
+        This test previously asserted ``amount_in == "250.50"`` — it ENCODED
+        the VIB-5060 units bug. ``transaction_ledger.amount_in`` is human
+        units of ``token_in`` (VIB-5036 contract); ``amount_usd`` only
+        coincides with that for stables (USDC here), and the same chain wrote
+        a $2 clip as ``amount_in="2.00" / token_in="WBTC"`` (~$126k notional)
+        on failed swaps. USD-only sizing means the token amount is
+        unmeasured: Empty != Zero.
+        """
         result = SimpleNamespace(
             swap_amounts=None,
             transaction_results=[_make_tx_result("0xwd")],
@@ -313,7 +322,59 @@ class TestHappyPathsPerIntentType:
         entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.intent_type == "WITHDRAW"
         assert entry.token_in == "USDC"
-        assert entry.amount_in == "250.50"
+        assert entry.amount_in == ""
+
+    def test_failed_swap_usd_clip_not_written_as_token_amount(self):
+        """VIB-5060: a failed USD-sized swap must not stamp the USD clip as
+        ``amount_in`` under the input token's symbol.
+
+        Live repro (stage deployment 33a657c4): a failed $2 WBTC→USDC sell
+        rendered as ``2.00 WBTC → — USDC`` (~$126k notional) because the
+        intent-attr fallback chained ``amount_usd`` into the token-units
+        column. The amounts are unmeasured for a never-executed swap.
+        """
+        result = SimpleNamespace(
+            swap_amounts=None,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={},
+        )
+        intent = _make_intent(
+            "SWAP",
+            protocol="uniswap_v3",
+            from_token="WBTC",
+            to_token="USDC",
+            amount_usd=Decimal("2.00"),
+        )
+        entry = build_ledger_entry(
+            deployment_id="s", cycle_id="c", intent=intent, result=result, success=False
+        )
+        assert entry.token_in == "WBTC"
+        assert entry.token_out == "USDC"
+        assert entry.amount_in == ""
+        assert entry.amount_out == ""
+
+    def test_token_sized_swap_fallback_still_writes_amount(self):
+        """The ``intent.amount`` link (token units by contract) is preserved."""
+        result = SimpleNamespace(
+            swap_amounts=None,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={},
+        )
+        intent = _make_intent(
+            "SWAP",
+            protocol="uniswap_v3",
+            from_token="WBTC",
+            to_token="USDC",
+            amount=Decimal("0.0001"),
+        )
+        entry = build_ledger_entry(
+            deployment_id="s", cycle_id="c", intent=intent, result=result, success=False
+        )
+        assert entry.amount_in == "0.0001"
 
     def test_borrow_happy_path(self):
         """BORROW: falls back to intent.borrow_token + intent.borrow_amount."""
@@ -819,7 +880,10 @@ class TestFallbackExtraction:
             ("amount", Decimal("100"), "100"),
             ("borrow_amount", Decimal("200"), "200"),
             ("supply_amount", Decimal("300"), "300"),
-            ("amount_usd", Decimal("400.50"), "400.50"),
+            # amount_usd is deliberately NOT a link (VIB-5060): USD is the
+            # wrong unit for the token-units amount_in column; USD-only
+            # sizing means the token amount is unmeasured (Empty != Zero).
+            ("amount_usd", Decimal("400.50"), ""),
         ],
     )
     def test_amount_in_fallback_chain(self, attr, value, expected):
@@ -1825,3 +1889,112 @@ class TestStampV4LpCloseFees:
         close = extracted["lp_close_data"]
         assert close["fees0"] == "4242"
         assert close["fees1"] == "2424"
+
+
+class TestFailedSwapRowRoundTrip:
+    """VIB-5060 end-to-end at the PERSISTED row, not just the builder.
+
+    Phase 1 spec critique (Codex): the ticket contract is on
+    ``transaction_ledger.amount_in`` — a regression in the writer, DB adapter,
+    or serialization layer that stores "0" or the USD clip would pass the
+    builder-level tests while still violating the contract. Pin the round
+    trip: build → save through the real SQLite store → read the raw row back.
+    """
+
+    def test_failed_swap_row_roundtrip_persists_empty_amount(self, tmp_path):
+        import asyncio
+        import sqlite3
+
+        from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
+
+        result = SimpleNamespace(
+            swap_amounts=None,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={},
+        )
+        intent = _make_intent(
+            "SWAP",
+            protocol="uniswap_v3",
+            from_token="WBTC",
+            to_token="USDC",
+            amount_usd=Decimal("2.00"),
+        )
+        entry = build_ledger_entry(
+            deployment_id="dep-roundtrip", cycle_id="c1", intent=intent, result=result, success=False
+        )
+
+        db_path = str(tmp_path / "roundtrip.db")
+
+        async def _persist() -> None:
+            store = SQLiteStore(SQLiteConfig(db_path=db_path))
+            await store.initialize()
+            try:
+                await store.save_ledger_entry(entry)
+            finally:
+                await store.close()
+
+        asyncio.run(_persist())
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT token_in, amount_in, token_out, amount_out, success "
+                "FROM transaction_ledger WHERE deployment_id = ?",
+                ("dep-roundtrip",),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert row is not None, "the failed intent must still produce a ledger row"
+        token_in, amount_in, token_out, amount_out, success = row
+        assert token_in == "WBTC"
+        assert token_out == "USDC"
+        assert amount_in == "", f"persisted amount_in must be unmeasured-empty, got {amount_in!r}"
+        assert amount_out == ""
+        assert not success
+
+
+class TestMeasuredZeroPreservation:
+    """Empty != Zero in the intent-attr fallback (Phase 1 spec critique, round 2).
+
+    The chain used ``or``-truthiness, which collapsed a measured
+    ``Decimal("0")`` token amount into the unmeasured ``""`` sentinel — the
+    same masking issue #1768 fixed on the swap_amounts path. The first
+    NON-None link must win and a measured zero must persist as ``"0"``.
+    """
+
+    def test_measured_zero_amount_is_preserved_not_emptied(self):
+        result = SimpleNamespace(
+            swap_amounts=None,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={},
+        )
+        intent = _make_intent(
+            "SWAP",
+            protocol="uniswap_v3",
+            from_token="WBTC",
+            to_token="USDC",
+            amount=Decimal("0"),
+        )
+        entry = build_ledger_entry(
+            deployment_id="s", cycle_id="c", intent=intent, result=result, success=False
+        )
+        assert entry.amount_in == "0", "measured zero must persist as '0', never collapse to ''"
+
+    def test_unmeasured_amount_still_empty(self):
+        result = SimpleNamespace(
+            swap_amounts=None,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={},
+        )
+        intent = _make_intent("SWAP", protocol="uniswap_v3", from_token="WBTC", to_token="USDC")
+        entry = build_ledger_entry(
+            deployment_id="s", cycle_id="c", intent=intent, result=result, success=False
+        )
+        assert entry.amount_in == ""

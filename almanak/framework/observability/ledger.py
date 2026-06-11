@@ -24,7 +24,8 @@ because none of the helpers depend on output of earlier phases:
                                                from_token > borrow_token >
                                                supply_token > token;
                                                amount > borrow_amount >
-                                               supply_amount > amount_usd).
+                                               supply_amount — amount_usd is
+                                               deliberately excluded, VIB-5060).
     gamma  _extract_tx_and_gas           : first tx_hash + total gas + gas USD
     delta  _coalesce_error               : failure + empty-error -> result.error
     epsilon _build_extracted_data_json   : serialize + multi-tx augmentation
@@ -209,10 +210,18 @@ def _extract_from_intent_fallback(intent: Any) -> _TokensAndAmounts:
     Token precedence:
         ``from_token > borrow_token > supply_token > token``
     Amount precedence:
-        ``amount > borrow_amount > supply_amount > amount_usd``
+        ``amount > borrow_amount > supply_amount``
 
     Supports swap-style (from_token/to_token), lending
     (borrow_token/supply_token) and generic (token/amount) intents.
+
+    ``intent.amount_usd`` is deliberately NOT in the amount chain (VIB-5060):
+    ``transaction_ledger.amount_in`` is human units of ``token_in`` (the
+    VIB-5036 contract), and a USD clip size is the wrong unit for that column
+    — a failed $2 WBTC sell used to land as ``amount_in="2.00"`` /
+    ``token_in="WBTC"`` (~$126k notional on the trade tape). When only USD
+    sizing is known the token amount is unmeasured: leave ``""``
+    (Empty != Zero).
     """
     token_in = (
         getattr(intent, "from_token", "")
@@ -222,12 +231,16 @@ def _extract_from_intent_fallback(intent: Any) -> _TokensAndAmounts:
         or ""
     )
     token_out = getattr(intent, "to_token", "") or ""
-    amt = (
-        getattr(intent, "amount", None)
-        or getattr(intent, "borrow_amount", None)
-        or getattr(intent, "supply_amount", None)
-        or getattr(intent, "amount_usd", None)
-    )
+    # First NON-None link wins — ``or``-truthiness would collapse a measured
+    # ``Decimal("0")`` into the unmeasured ``""`` sentinel (Empty != Zero;
+    # the same measured-zero preservation the swap_amounts path got in
+    # issue #1768).
+    amt = None
+    for attr in ("amount", "borrow_amount", "supply_amount"):
+        value = getattr(intent, attr, None)
+        if value is not None:
+            amt = value
+            break
     amount_in = str(amt) if amt is not None else ""
     return (token_in, token_out, amount_in, "", "", None)
 

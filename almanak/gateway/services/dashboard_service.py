@@ -7,9 +7,11 @@ receive the formatted data.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -51,6 +53,15 @@ PORTFOLIO_STALE_THRESHOLD_SECONDS = 300
 # busy strategy's full lifetime under the dashboard's expected refresh cadence.
 # A warning is logged when reached so the gap can be closed via SQL aggregation.
 _QUANT_HEADER_LEDGER_CAP = 100_000
+
+# VIB-5059 Phase 1: one dashboard render fans out to GetPnLSummary +
+# GetCostStack + GetAuditPosture, each of which previously re-fetched the full
+# quant input set (up to _QUANT_HEADER_LEDGER_CAP ledger rows + every
+# accounting event + the recent snapshot window). The inputs change at
+# snapshot/iteration cadence (minutes), so this short TTL coalesces a render
+# burst into ONE load without any tile becoming observably stale. 0 disables
+# the cache entirely (sequential RPCs always reload).
+_QUANT_INPUTS_CACHE_TTL_SECONDS = 5.0
 
 
 # Composite cursor-key encoding for ActivityFeed items (CodeRabbit review).
@@ -551,6 +562,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         self._strategies_root: Path | None = None
         # In-memory cache of strategy positions reported via heartbeat
         self._cached_positions: dict[str, list[gateway_pb2.StrategyPosition]] = {}
+        # VIB-5059: per-deployment quant-input cache + single-flight locks.
+        # The constructor is authoritative; _get_quant_inputs keeps a lazy
+        # re-init guard only because unit tests build the servicer via
+        # __new__ (the established _make_servicer pattern).
+        self._quant_inputs_cache: dict[str, tuple[float, Any]] = {}
+        self._quant_inputs_locks: dict[str, asyncio.Lock] = {}
         self._portfolio_chain: PortfolioProviderChain | None = None
 
         # VIB-4493 Phase 1C/D: cross-servicer reference to PositionService for
@@ -1965,6 +1982,61 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         return portfolio_metrics, snapshots, ledger_entries, accounting_events, position_summary
 
+    async def _get_quant_inputs(
+        self, deployment_id: str
+    ) -> tuple[Any, list[Any], list[Any], list[dict[str, Any]], Any]:
+        """TTL-cached, single-flight wrapper around :meth:`_load_quant_inputs`.
+
+        VIB-5059 Phase 1: a single dashboard render fans out to
+        ``GetPnLSummary`` / ``GetCostStack`` / ``GetAuditPosture``, which all
+        need the same inputs — previously three independent full loads per
+        render. A per-deployment entry expires after
+        ``_QUANT_INPUTS_CACHE_TTL_SECONDS``; concurrent callers for the same
+        deployment coalesce behind one lock so only the first runs the load.
+
+        The returned objects are SHARED across RPCs — consumers (the
+        ``compute_*`` aggregations) treat them as read-only and must keep
+        doing so. A TTL of 0 disables caching for sequential calls (the
+        kill-switch semantic pinned by tests).
+        """
+        # Lazy attribute re-init guard: unit tests build the servicer via
+        # __new__ (skipping __init__) — mirror the established _make_servicer
+        # pattern rather than requiring every harness to know about cache
+        # internals. __init__ owns the authoritative (annotated) definitions.
+        if not hasattr(self, "_quant_inputs_cache"):
+            self._quant_inputs_cache = {}
+            self._quant_inputs_locks = {}
+        ttl = getattr(self, "_quant_inputs_ttl_seconds", _QUANT_INPUTS_CACHE_TTL_SECONDS)
+
+        cached = self._quant_inputs_cache.get(deployment_id)
+        if cached is not None and time.monotonic() - cached[0] < ttl:
+            return cached[1]
+
+        lock = self._quant_inputs_locks.setdefault(deployment_id, asyncio.Lock())
+        async with lock:
+            cached = self._quant_inputs_cache.get(deployment_id)
+            if cached is not None and time.monotonic() - cached[0] < ttl:
+                return cached[1]
+            inputs = await self._load_quant_inputs(deployment_id)
+            now = time.monotonic()
+            # Evict expired entries so the cache cannot grow unbounded. With
+            # the 1 Gateway : 1 Strategy invariant this is a single-entry
+            # dict in practice; the sweep is O(deployments seen in the TTL).
+            self._quant_inputs_cache = {
+                key: value for key, value in self._quant_inputs_cache.items() if now - value[0] < ttl
+            }
+            self._quant_inputs_cache[deployment_id] = (now, inputs)
+            # Prune locks alongside the cache so the lock dict cannot grow
+            # unbounded either. Never drop a lock that is currently held —
+            # a waiter would otherwise race a newcomer's fresh lock (worst
+            # case is reduced coalescing, but there is no reason to allow it).
+            self._quant_inputs_locks = {
+                key: existing
+                for key, existing in self._quant_inputs_locks.items()
+                if key in self._quant_inputs_cache or existing.locked()
+            }
+            return inputs
+
     async def GetPnLSummary(
         self,
         request: gateway_pb2.GetPnLSummaryRequest,
@@ -1995,7 +2067,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             ledger_entries,
             accounting_events,
             position_summary,
-        ) = await self._load_quant_inputs(deployment_id)
+        ) = await self._get_quant_inputs(deployment_id)
 
         pnl = compute_pnl_summary(
             portfolio_metrics=portfolio_metrics,
@@ -2050,7 +2122,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             compute_inventory_unrealized,
         )
 
-        _, _, ledger_entries, accounting_events, _ = await self._load_quant_inputs(deployment_id)
+        _, _, ledger_entries, accounting_events, _ = await self._get_quant_inputs(deployment_id)
 
         cs = compute_cost_stack(ledger_entries, accounting_events)
 
@@ -2117,7 +2189,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             ledger_entries,
             accounting_events,
             position_summary,
-        ) = await self._load_quant_inputs(deployment_id)
+        ) = await self._get_quant_inputs(deployment_id)
 
         # Reconciliation needs deployed/NAV anchored the same way the PnL
         # surface anchors them — so the dashboard and accountant test

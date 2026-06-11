@@ -1101,6 +1101,72 @@ def render_ta_dashboard(
     render_trade_tape_section(deployment_id)
 
 
+def _series_as_utc(series: pd.Series) -> pd.Series:
+    """Datetime series normalised to tz-aware UTC (naive values treated as UTC).
+
+    ``utc=True`` in the parse itself (not localize-after) — a mixed-offset
+    input (e.g. ISO rows spanning DST, or ``Z`` mixed with ``-05:00``) would
+    otherwise come back as an object-dtype Series whose ``.dt`` accessor
+    raises, crashing every chart render path that clips markers.
+
+    A mixed aware/NAIVE object input is nastier still: the vectorized parse
+    coerces the minority shape to ``NaT``, which would silently drop that
+    marker from the chart. Recover such positions element-wise — each value
+    parses fine on its own.
+    """
+    s = pd.to_datetime(series, errors="coerce", utc=True)
+    dropped = s.isna() & series.notna()
+    if dropped.any():
+        s = s.copy()
+        s.loc[dropped] = series[dropped].map(lambda v: pd.to_datetime(v, errors="coerce", utc=True))
+    return s
+
+
+def _clip_signals_to_price_window(signals: pd.DataFrame | None, price_df: pd.DataFrame) -> pd.DataFrame | None:
+    """Drop buy/sell markers that fall outside the plotted price window (VIB-5058).
+
+    Markers come from the trade tape (newest N intents, reaching arbitrarily
+    far back) while the price/indicator series is capped to a recent candle
+    window (VIB-4969). A marker with no price line near it floats in empty
+    space, so it is clipped here — one site, ahead of every render path (RSI
+    subplot, dedicated renderers, generic, multi-indicator).
+
+    The clip is asymmetric by design. Left edge: anything strictly before the
+    first plotted candle is dropped (no line exists there at all). Right edge:
+    a trade can legitimately post after the newest candle (the tape is fresher
+    than the OHLCV snapshot), so markers within ONE candle interval past the
+    newest candle stay visible — the line ends immediately adjacent. Beyond
+    that bound (a stalled price feed while trading continues) markers are
+    dropped: they would float just like the pre-window case. The interval is
+    measured from the plotted axis itself (median candle spacing), so the
+    bound is deterministic; a single-candle axis has no measurable spacing
+    and skips the right-edge clip.
+
+    Either side may carry tz-naive timestamps (caller-supplied frames);
+    naive values are compared as UTC. An unusable window (no parseable
+    price timestamps) passes signals through unchanged rather than silently
+    eating every marker.
+    """
+    if signals is None or signals.empty or "time" not in signals.columns:
+        return signals
+    if price_df.empty or "time" not in price_df.columns:
+        return signals
+    price_times = _series_as_utc(price_df["time"]).dropna().sort_values()
+    if price_times.empty:
+        return signals
+    window_start = price_times.iloc[0]
+    signal_times = _series_as_utc(signals["time"])
+    keep = signal_times >= window_start
+    if len(price_times) >= 2:
+        candle_interval = price_times.diff().dropna().median()
+        if pd.notna(candle_interval) and candle_interval > pd.Timedelta(0):
+            keep &= signal_times <= price_times.iloc[-1] + candle_interval
+    clipped = signals.loc[keep]
+    if clipped.empty:
+        return None
+    return clipped
+
+
 def _render_charts_section(  # noqa: C901
     session_state: dict[str, Any],
     strategy_config: dict[str, Any],
@@ -1159,8 +1225,8 @@ def _render_charts_section(  # noqa: C901
             df["time"] = pd.to_datetime(df["time"], utc=True, errors="coerce")
         return df
 
-    buy_df = _coerce_signals(buy_signals)
-    sell_df = _coerce_signals(sell_signals)
+    buy_df = _clip_signals_to_price_window(_coerce_signals(buy_signals), price_df)
+    sell_df = _clip_signals_to_price_window(_coerce_signals(sell_signals), price_df)
     strategy_start_time = session_state.get("strategy_start_time")
 
     # Multi-signal layout (VIB-4897): render price once, then one dedicated
