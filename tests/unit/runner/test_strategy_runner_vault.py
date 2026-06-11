@@ -1,6 +1,5 @@
 """Tests for vault lifecycle integration in StrategyRunner."""
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,10 +10,15 @@ from almanak.framework.vault.config import SettlementResult, VaultAction
 
 def _make_runner(vault_lifecycle=None):
     """Create a StrategyRunner with mocked dependencies."""
+    from almanak.framework.state.state_manager import StateData
+
     state_manager = MagicMock()
     state_manager.load_state = AsyncMock(
-        return_value=SimpleNamespace(state={"is_paused": False})
+        return_value=StateData(
+            deployment_id="test_vault_strategy", version=1, state={"is_paused": False}
+        )
     )
+    state_manager.save_state = AsyncMock()
     return StrategyRunner(
         price_oracle=MagicMock(),
         balance_provider=MagicMock(),

@@ -297,7 +297,23 @@ async def persist_copy_trading_state(
     deployment_id: str,
     activity_provider: StatefulActivityProviderProtocol,
 ) -> None:
-    """Persist copy trading cursor state into the strategy state dict."""
+    """Persist copy trading cursor state into the strategy state dict.
+
+    Mode-aware persistence (blueprint 27 failure-mode table): in live mode a
+    failed durable write raises ``AccountingPersistenceError`` with
+    ``write_kind="copy_state"`` so the run loop escalates to
+    ACCOUNTING_FAILED; paper / dry_run log ERROR and continue. The cursor is
+    the only cross-restart dedup for leader-wallet activity -- a silently
+    stale cursor replays already-copied trades after a restart.
+    """
+    from almanak.framework.runner.strategy_runner import derive_execution_mode_from_config
+
+    try:
+        execution_mode = derive_execution_mode_from_config(runner.config) if runner is not None else None
+    except Exception:  # noqa: BLE001
+        execution_mode = None
+    is_live = bool(execution_mode and str(execution_mode).lower() == "live")
+
     try:
         state = await runner.state_manager.load_state(deployment_id)
         if state is None:
@@ -306,8 +322,43 @@ async def persist_copy_trading_state(
         state.state["copy_trading_state"] = activity_provider.get_state()
         await runner.state_manager.save_state(state, expected_version=expected_version)
         logger.debug("Copy trading state persisted")
+    except StateConflictError as e:
+        logger.error(
+            "State version conflict persisting copy-trading cursor for %s "
+            "(expected v%s, found v%s) — possible deployment-identity "
+            "collision: check that no second runner shares this gateway/"
+            "state row (1 gateway : 1 strategy, blueprint 06).",
+            deployment_id,
+            e.expected_version,
+            e.actual_version,
+        )
+        if is_live:
+            raise AccountingPersistenceError(
+                AccountingWriteKind.COPY_STATE,
+                deployment_id=deployment_id,
+                message=(
+                    f"copy-trading cursor CAS write failed for {deployment_id} "
+                    f"(expected v{e.expected_version}, found v{e.actual_version})"
+                ),
+                cause=e,
+            ) from e
+    except AccountingPersistenceError:
+        if is_live:
+            raise
+        logger.error(
+            "Failed to persist copy trading state for %s (typed accounting error, non-live, continuing)",
+            deployment_id,
+            exc_info=True,
+        )
     except Exception as e:
-        logger.warning(f"Failed to persist copy trading state: {e}")
+        if is_live:
+            raise AccountingPersistenceError(
+                AccountingWriteKind.COPY_STATE,
+                deployment_id=deployment_id,
+                message=f"copy-trading cursor write failed for {deployment_id}",
+                cause=e,
+            ) from e
+        logger.error(f"Failed to persist copy trading state for {deployment_id}: {e}", exc_info=True)
 
 
 async def persist_vault_state(
@@ -316,7 +367,23 @@ async def persist_vault_state(
     vault_state_dict: dict,
     vault_state_key: str,
 ) -> None:
-    """Persist vault lifecycle state into the strategy state dict."""
+    """Persist vault lifecycle state into the strategy state dict.
+
+    Mode-aware persistence (blueprint 27 failure-mode table): in live mode a
+    failed durable write raises ``AccountingPersistenceError`` with
+    ``write_kind="vault_state"`` so run_iteration escalates to
+    ACCOUNTING_FAILED; paper / dry_run log ERROR and continue. The vault state
+    carries settlement_phase / last_settlement_epoch / settlement_nonce -- a
+    silently stale phase/epoch risks duplicate on-chain settlement of an epoch.
+    """
+    from almanak.framework.runner.strategy_runner import derive_execution_mode_from_config
+
+    try:
+        execution_mode = derive_execution_mode_from_config(runner.config) if runner is not None else None
+    except Exception:  # noqa: BLE001
+        execution_mode = None
+    is_live = bool(execution_mode and str(execution_mode).lower() == "live")
+
     try:
         state = await runner.state_manager.load_state(deployment_id)
         if state is None:
@@ -332,8 +399,43 @@ async def persist_vault_state(
         state.state[vault_state_key] = vault_state_dict
         await runner.state_manager.save_state(state, expected_version=expected_version)
         logger.debug("Vault state persisted (phase=%s)", vault_state_dict.get("settlement_phase", "?"))
+    except StateConflictError as e:
+        logger.error(
+            "State version conflict persisting vault state for %s "
+            "(expected v%s, found v%s) — possible deployment-identity "
+            "collision: check that no second runner shares this gateway/"
+            "state row (1 gateway : 1 strategy, blueprint 06).",
+            deployment_id,
+            e.expected_version,
+            e.actual_version,
+        )
+        if is_live:
+            raise AccountingPersistenceError(
+                AccountingWriteKind.VAULT_STATE,
+                deployment_id=deployment_id,
+                message=(
+                    f"vault state CAS write failed for {deployment_id} "
+                    f"(expected v{e.expected_version}, found v{e.actual_version})"
+                ),
+                cause=e,
+            ) from e
+    except AccountingPersistenceError:
+        if is_live:
+            raise
+        logger.error(
+            "Failed to persist vault state for %s (typed accounting error, non-live, continuing)",
+            deployment_id,
+            exc_info=True,
+        )
     except Exception as e:
-        logger.warning(f"Failed to persist vault state: {e}")
+        if is_live:
+            raise AccountingPersistenceError(
+                AccountingWriteKind.VAULT_STATE,
+                deployment_id=deployment_id,
+                message=f"vault state write failed for {deployment_id}",
+                cause=e,
+            ) from e
+        logger.error(f"Failed to persist vault state for {deployment_id}: {e}", exc_info=True)
 
 
 # -------------------------------------------------------------------------

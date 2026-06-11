@@ -31,6 +31,7 @@ Example:
 import asyncio
 import logging
 import signal
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -1131,7 +1132,11 @@ class StrategyRunner:
     async def _step_periodic_hooks(self, state: RunIterationState) -> None:
         """Copy trading polling + vault settlement hook.
 
-        Never early-exits: errors are logged and iteration continues.
+        Data-fetch and settlement errors are logged and the iteration
+        continues. Exception: a live-mode vault state PERSISTENCE failure
+        raises AccountingPersistenceError (blueprint 27), which run_iteration
+        converts to ACCOUNTING_FAILED — unless an exception is already
+        unwinding, in which case it is logged and never masks the original.
         """
         strategy = state.strategy
         deployment_id = state.deployment_id
@@ -1176,13 +1181,34 @@ class StrategyRunner:
                 # Re-import here because the Exception branch above may have
                 # triggered before VAULT_STATE_KEY was bound in the try scope.
                 if self.config.enable_state_persistence:
+                    # Only BaseExceptions (asyncio.CancelledError on shutdown,
+                    # KeyboardInterrupt) can be unwinding through this finally —
+                    # the `except Exception` above consumed everything else.
+                    # Raising a NEW exception here would suppress the in-flight
+                    # one (finally semantics), turning a clean cancellation into
+                    # an ACCOUNTING_FAILED iteration. Never mask it.
+                    unwinding = sys.exc_info()[0] is not None
                     try:
                         from ..vault.lifecycle import VAULT_STATE_KEY
 
                         vault_state_dict = self._vault_lifecycle.get_vault_state_dict()
                         if vault_state_dict is not None:
                             await self._persist_vault_state(deployment_id, vault_state_dict, VAULT_STATE_KEY)
+                    except AccountingPersistenceError:
+                        if not unwinding:
+                            # Live mode, clean path: propagate to run_iteration's
+                            # AccountingPersistenceError handler → ACCOUNTING_FAILED
+                            # + operator alert (blueprint 27 failure-mode table).
+                            raise
+                        logger.error(
+                            "Vault state persistence failed while an exception was "
+                            "unwinding through _step_periodic_hooks — not masking it; "
+                            "vault state will be re-persisted next iteration",
+                            exc_info=True,
+                        )
                     except Exception as persist_err:
+                        # Read-side failure (get_vault_state_dict) — vault
+                        # internals surface, unchanged semantics.
                         logger.warning("Failed to persist vault state: %s", persist_err)
 
     async def _step_build_snapshot(self, state: RunIterationState) -> IterationResult | None:
@@ -1982,11 +2008,43 @@ class StrategyRunner:
                     iteration_start_monotonic=iteration_start_monotonic,
                 )
 
-                # Update state. update_state raises AccountingPersistenceError
-                # only in live mode (blueprint 27 failure-mode table); rebuild
-                # the result into ACCOUNTING_FAILED so the failure branch
-                # (circuit breaker, consecutive-errors alert, lifecycle ERROR
-                # write) fires — mirroring capture_snapshot_with_accounting.
+                # Persist copy trading cursor state (if configured). Sequenced
+                # BEFORE _update_state so that if the copy-lane write fails and
+                # rebuilds `result` into ACCOUNTING_FAILED, the iteration-state
+                # row persists the FINAL status — not a pre-failure SUCCESS.
+                # persist_copy_trading_state raises AccountingPersistenceError
+                # only in live mode (blueprint 27 failure-mode table).
+                if activity_provider is not None and self.config.enable_state_persistence:
+                    try:
+                        await self._persist_copy_trading_state(deployment_id, activity_provider)
+                    except AccountingPersistenceError as acc_err:
+                        # Snapshot duration BEFORE alert I/O so Slack/PagerDuty
+                        # latency does not skew duration_ms (issue #1782).
+                        duration_ms = (time.monotonic() - iteration_start_monotonic) * 1000.0
+                        logger.exception(
+                            f"Copy-trading cursor persistence failed in live mode for "
+                            f"{deployment_id} (write_kind={acc_err.write_kind})"
+                        )
+                        await self._alert_accounting_failure(strategy, acc_err)
+                        result = IterationResult(
+                            status=IterationStatus.ACCOUNTING_FAILED,
+                            error=f"State persistence failed ({acc_err.write_kind}): {acc_err}",
+                            deployment_id=deployment_id,
+                            duration_ms=duration_ms,
+                            intent=result.intent,
+                            execution_result=result.execution_result,
+                            balance_reconciliation=result.balance_reconciliation,
+                            timestamp=result.timestamp,
+                        )
+
+                # Update state. Sequenced AFTER the copy-trading persist so
+                # the state row reflects the FINAL result (including any
+                # copy-lane ACCOUNTING_FAILED rebuild above). update_state
+                # raises AccountingPersistenceError only in live mode
+                # (blueprint 27 failure-mode table); rebuild the result into
+                # ACCOUNTING_FAILED so the failure branch (circuit breaker,
+                # consecutive-errors alert, lifecycle ERROR write) fires —
+                # mirroring capture_snapshot_with_accounting.
                 if self.config.enable_state_persistence:
                     try:
                         await self._update_state(deployment_id, result, strategy=strategy)
@@ -2011,17 +2069,11 @@ class StrategyRunner:
                         )
 
                 # Emit structured iteration summary for JSONL log analysis
-                # (sequenced AFTER state persistence so the JSONL row reflects
-                # the FINAL status, including a state-lane ACCOUNTING_FAILED
-                # rebuild — same invariant as issue #1782 for the snapshot lane).
+                # (sequenced AFTER all persistence so the JSONL row reflects
+                # the FINAL status, including any ACCOUNTING_FAILED rebuild
+                # from the copy-trading or state-persistence lanes — same
+                # invariant as issue #1782 for the snapshot lane).
                 self._emit_iteration_summary(result, chain=getattr(strategy, "chain", None))
-
-                # Persist copy trading cursor state (if configured)
-                if activity_provider is not None and self.config.enable_state_persistence:
-                    try:
-                        await self._persist_copy_trading_state(deployment_id, activity_provider)
-                    except Exception as e:
-                        logger.warning(f"Failed to persist copy trading state: {e}")
 
                 # Call callback if provided
                 if iteration_callback:

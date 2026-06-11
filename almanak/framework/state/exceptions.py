@@ -24,6 +24,8 @@ class AccountingWriteKind(StrEnum):
     ACCOUNTING = "accounting"
     OUTBOX = "outbox"
     STATE = "state"
+    COPY_STATE = "copy_state"
+    VAULT_STATE = "vault_state"
 
 
 class AccountingPersistenceError(Exception):
