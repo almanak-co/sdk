@@ -23,6 +23,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 from .addresses import UNISWAP_V3 as UNISWAP_V3_ADDRESSES
@@ -1055,21 +1056,27 @@ class UniswapV3Adapter:
         return "uniswap_v3" in SWAP_ROUTER_V1_PROTOCOLS
 
     def _is_native_token(self, token: str) -> bool:
-        """Check if token is the native token (ETH, MATIC, AVAX, BNB, MNT, A0GI, etc.).
+        """Check if ``token`` denotes the CURRENT chain's native gas coin.
 
-        "0G" is intentionally NOT in this set: the canonical native symbol for
-        0G Chain is A0GI (matches the token registry). Accepting "0G" here
-        would make _is_native_token advertise a symbol that resolve_for_swap
-        cannot resolve, causing a TokenNotFoundError at the wrap step.
+        Per-chain set derived from ``ChainDescriptor.native`` via
+        ``native_symbols_for`` (VIB-4851 A1) so it cannot drift from the
+        registry. The legacy chain-blind set missed MON (monad), OKB (xlayer)
+        and POL (polygon post-rename), and accepted foreign natives — e.g.
+        "MATIC" on ethereum, where MATIC resolves to a real ERC-20, so the
+        swap was built with msg.value attached and no approval.
+
+        Every symbol the registry advertises must resolve through
+        ``resolve_for_swap`` on its chain (a native-sentinel entry in the
+        static token registry), or the wrap step raises TokenNotFoundError.
+        That is why e.g. "0G" must NOT be added to zerog's accepted_symbols:
+        only A0GI has a registry entry. Pinned by
+        tests/unit/data/tokens/test_native_symbols_resolvable.py.
         """
-        native_tokens = {"ETH", "MATIC", "AVAX", "BNB", "MNT", "A0GI"}
-        if token.upper() in native_tokens:
+        if token.upper() in native_symbols_for(self.chain):
             return True
         # Check native placeholder address
         native_placeholder = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".lower()
-        if token.lower() == native_placeholder:
-            return True
-        return False
+        return token.lower() == native_placeholder
 
     def _get_default_price_oracle(self) -> dict[str, Decimal]:
         """Get price oracle data (uses instance price provider).

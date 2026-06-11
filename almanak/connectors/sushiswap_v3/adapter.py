@@ -33,6 +33,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 from .sdk import (
@@ -1153,15 +1154,20 @@ class SushiSwapV3Adapter:
             ) from e
 
     def _is_native_token(self, token: str) -> bool:
-        """Check if token is the native token (ETH, MATIC, AVAX, BNB, etc.)."""
-        native_tokens = {"ETH", "MATIC", "AVAX", "BNB"}
-        if token.upper() in native_tokens:
+        """Check if ``token`` denotes the CURRENT chain's native gas coin.
+
+        Per-chain set derived from ``ChainDescriptor.native`` via
+        ``native_symbols_for`` (VIB-4851 A1). The legacy chain-blind set
+        {ETH, MATIC, AVAX, BNB} missed POL (polygon post-rename) and accepted
+        foreign natives — e.g. "MATIC" on ethereum, where MATIC resolves to a
+        real ERC-20, so the swap was built with msg.value attached and no
+        approval.
+        """
+        if token.upper() in native_symbols_for(self.chain):
             return True
         # Check native placeholder address
         native_placeholder = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".lower()
-        if token.lower() == native_placeholder:
-            return True
-        return False
+        return token.lower() == native_placeholder
 
     def _get_placeholder_prices(self) -> dict[str, Decimal]:
         """Get placeholder price data for testing only."""

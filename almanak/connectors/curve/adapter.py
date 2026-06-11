@@ -28,6 +28,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.rpc import eth_call_uint256
+from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
 if TYPE_CHECKING:
@@ -1792,13 +1793,18 @@ class CurveAdapter:
             ) from e
 
     def _is_native_token(self, token: str) -> bool:
-        """Check if token is native ETH."""
+        """Check if ``token`` denotes the CURRENT chain's native coin.
+
+        Callers pass pool coin ADDRESSES, where Curve marks raw native with the
+        0xEeee placeholder — that arm does the real work. The symbol arm is
+        derived per-chain from ``ChainDescriptor.native`` via
+        ``native_symbols_for`` (VIB-4851 A1) instead of the legacy hardcoded
+        "ETH", so a symbol caller on polygon gets MATIC/POL right.
+        """
+        if token.upper() in native_symbols_for(self.chain):
+            return True
         native_address = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".lower()
-        if token.upper() == "ETH":
-            return True
-        if token.lower() == native_address:
-            return True
-        return False
+        return token.lower() == native_address
 
     @staticmethod
     def _pad_address(addr: str) -> str:

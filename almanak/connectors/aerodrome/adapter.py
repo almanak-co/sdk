@@ -38,6 +38,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 from almanak.framework.intents.vocabulary import IntentType, SwapIntent
 from almanak.framework.models.reproduction_bundle import ActionBundle
@@ -1830,13 +1831,18 @@ class AerodromeAdapter:
             ) from e
 
     def _is_native_token(self, token: str) -> bool:
-        """Check if token is the native token (ETH)."""
-        if token.upper() == "ETH":
+        """Check if ``token`` denotes the CURRENT chain's native gas coin.
+
+        Derived per-chain from ``ChainDescriptor.native`` via
+        ``native_symbols_for`` (VIB-4851 A1) instead of the legacy hardcoded
+        "ETH". Behaviour-neutral today — both supported chains (base,
+        optimism) are ETH-native — but the gate can no longer drift if the
+        chain set grows.
+        """
+        if token.upper() in native_symbols_for(self.chain):
             return True
         native_placeholder = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".lower()
-        if token.lower() == native_placeholder:
-            return True
-        return False
+        return token.lower() == native_placeholder
 
     def _get_placeholder_prices(self) -> dict[str, Decimal]:
         """Get placeholder price data for testing only.

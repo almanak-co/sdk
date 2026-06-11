@@ -2286,11 +2286,6 @@ class IntentCompiler:
         """
         return self._token_resolver.get_decimals(self.chain, symbol)
 
-    def _is_native_token(self, symbol: str) -> bool:
-        """Check if token is the native token."""
-        native_tokens = {"ETH", "MATIC", "AVAX", "XPL", "OKB"}
-        return symbol.upper() in native_tokens
-
     def _get_wrapped_native_address(self) -> str | None:
         """Return the wrapped native token address for the current chain.
 

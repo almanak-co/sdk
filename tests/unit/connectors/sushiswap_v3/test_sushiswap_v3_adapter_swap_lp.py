@@ -220,9 +220,42 @@ class TestPadHelpers:
 
 
 class TestIsNativeToken:
-    @pytest.mark.parametrize("token", ["ETH", "MATIC", "AVAX", "BNB", "eth", "Eth"])
-    def test_native_symbols(self, adapter, token):
+    """Per-chain registry-derived native gate (VIB-4851 A1).
+
+    Deliberate behavior change: the legacy chain-blind set {ETH, MATIC, AVAX,
+    BNB} accepted foreign natives (e.g. MATIC on arbitrum, a resolvable ERC-20
+    on ethereum) — mis-routing them to the msg.value-no-approval path — and
+    missed POL (polygon post-rename).
+    """
+
+    @pytest.mark.parametrize("token", ["ETH", "eth", "Eth"])
+    def test_native_symbols_arbitrum(self, adapter, token):
         assert adapter._is_native_token(token) is True
+
+    @pytest.mark.parametrize("token", ["MATIC", "POL", "AVAX", "BNB", "MNT"])
+    def test_foreign_natives_rejected_on_arbitrum(self, adapter, token):
+        assert adapter._is_native_token(token) is False
+
+    @pytest.mark.parametrize(
+        ("chain", "native_true", "native_false"),
+        [
+            ("ethereum", ("ETH",), ("MATIC", "POL", "AVAX", "BNB")),
+            ("polygon", ("MATIC", "POL"), ("ETH", "AVAX", "BNB")),
+            ("avalanche", ("AVAX",), ("ETH", "MATIC", "BNB")),
+            ("bsc", ("BNB",), ("ETH", "MATIC", "AVAX")),
+        ],
+    )
+    def test_per_chain_truth_table(self, resolver, chain, native_true, native_false):
+        config = SushiSwapV3Config(
+            chain=chain,
+            wallet_address=WALLET,
+            allow_placeholder_prices=True,
+        )
+        chain_adapter = SushiSwapV3Adapter(config, token_resolver=resolver)
+        for token in native_true:
+            assert chain_adapter._is_native_token(token) is True, (chain, token)
+        for token in native_false:
+            assert chain_adapter._is_native_token(token) is False, (chain, token)
 
     def test_native_placeholder_address(self, adapter):
         assert adapter._is_native_token(NATIVE_PLACEHOLDER) is True

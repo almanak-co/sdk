@@ -42,6 +42,8 @@ from almanak.connectors.uniswap_v4.sdk import (
     SwapTransaction,
     UniswapV4SDK,
 )
+from almanak.core.chains import ChainRegistry
+from almanak.core.chains._helpers import native_symbols_for
 from almanak.framework.data.tokens import TokenNotFoundError
 
 from .addresses import UNISWAP_V4
@@ -955,17 +957,20 @@ class UniswapV4Adapter:
 
         Args:
             token: Token symbol (e.g. "USDC") or address.
-            for_v4_pool: If True, remap native tokens (ETH/AVAX/MATIC) to
+            for_v4_pool: If True, remap the CURRENT chain's native symbols to
                 V4's zero address instead of their wrapped equivalents.
-                V4 pools support native ETH directly via address(0).
+                V4 pools support the native currency directly via address(0).
 
         Returns:
             Tuple of (address, decimals).
         """
-        # Check for native token symbols — V4 supports native ETH as address(0)
-        native_symbols = {"ETH", "AVAX", "MATIC", "BNB"}
-        if for_v4_pool and token.upper() in native_symbols:
-            return NATIVE_CURRENCY, 18
+        # Check for native token symbols — V4 supports the native currency as
+        # address(0). Per-chain set derived from ``ChainDescriptor.native``
+        # (VIB-4851 A1); the legacy chain-blind {ETH, AVAX, MATIC, BNB} remapped
+        # e.g. "MATIC" on ethereum — a real ERC-20 there — to address(0).
+        if for_v4_pool and token.upper() in native_symbols_for(self.chain):
+            # Non-empty symbol set implies the chain is registered.
+            return NATIVE_CURRENCY, ChainRegistry.resolve(self.chain).native.decimals
 
         # If already an address, resolve decimals (never assume 18)
         if token.startswith("0x") and len(token) == 42:

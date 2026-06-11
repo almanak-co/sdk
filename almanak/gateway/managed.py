@@ -350,10 +350,14 @@ class ManagedGateway:
             await self._stop_anvil_forks(force=True)
             raise
 
-    # Native gas tokens that are funded via anvil_setBalance (not ERC-20 transfer)
-    NATIVE_TOKEN_SYMBOLS = frozenset(
-        {"ETH", "AVAX", "MATIC", "BNB", "S", "POL", "MNT", "BERA", "MON", "OKB", "XPL", "A0GI"}
-    )
+    # Native gas tokens that are funded via anvil_setBalance (not ERC-20
+    # transfer). Deliberately the chain-BLIND union across all EVM chains:
+    # funding configs may fund a foreign native symbol on another chain's fork
+    # (e.g. ``{"ETH": 10}`` on a polygon fork) and rely on the setBalance
+    # path, so this must not be narrowed per-chain. Populated below via
+    # _populate_chain_native_symbol_from_registry; frozen-verbatim equivalence
+    # pinned in tests/unit/gateway/test_managed_native_symbols.py.
+    NATIVE_TOKEN_SYMBOLS: frozenset[str] = frozenset()
     # Per-chain native symbols. Derived from :class:`ChainRegistry`
     # (VIB-4801) — only EVM chains, matches legacy coverage.
     CHAIN_NATIVE_SYMBOL: dict[str, str] = {  # noqa: RUF012
@@ -756,18 +760,24 @@ class ManagedGateway:
 
 
 def _populate_chain_native_symbol_from_registry() -> None:
-    """Populate ``ManagedGateway.CHAIN_NATIVE_SYMBOL`` from the registry.
+    """Populate ``ManagedGateway``'s native-symbol class attrs from the registry.
 
     Done at module import time after the class is fully defined. VIB-4801:
-    keeps the legacy class-attribute shape but sources values from the
-    single source of truth.
+    keeps the legacy class-attribute shapes but sources values from the
+    single source of truth. ``NATIVE_TOKEN_SYMBOLS`` is the union of
+    ``native_symbols_for`` over EVM chains (includes accepted_symbols, e.g.
+    polygon's POL) — byte-identical to the legacy hand-maintained set.
     """
     from almanak.core.chains import ChainRegistry
+    from almanak.core.chains._helpers import native_symbols_for
     from almanak.core.enums import ChainFamily
 
+    native_union: set[str] = set()
     for descriptor in ChainRegistry.all():
         if descriptor.family is ChainFamily.EVM:
             ManagedGateway.CHAIN_NATIVE_SYMBOL[descriptor.name] = descriptor.native.symbol
+            native_union.update(native_symbols_for(descriptor.name))
+    ManagedGateway.NATIVE_TOKEN_SYMBOLS = frozenset(native_union)
 
 
 _populate_chain_native_symbol_from_registry()

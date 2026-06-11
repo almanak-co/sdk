@@ -170,6 +170,34 @@ class TestSwapExactInput:
 
 
 class TestTokenResolution:
+    def test_resolve_native_symbol_for_v4_pool(self):
+        """Native symbols remap to address(0) for v4 pool keys, per chain."""
+        from almanak.connectors.uniswap_v4.sdk import NATIVE_CURRENCY
+
+        for chain in ("ethereum", "arbitrum", "base"):
+            adapter = UniswapV4Adapter(chain=chain)
+            addr, dec = adapter._resolve_token("ETH", for_v4_pool=True)
+            assert addr == NATIVE_CURRENCY, chain
+            assert dec == 18, chain
+
+    def test_foreign_native_not_remapped_for_v4_pool(self):
+        """Deliberate behavior change (VIB-4851 A1): the legacy chain-blind set
+        {ETH, AVAX, MATIC, BNB} remapped e.g. "MATIC" on ethereum — a real
+        ERC-20 there — to address(0). The per-chain gate falls through to the
+        resolver instead."""
+        matic_erc20 = "0x7D1AfA7B718fb893dB30A3aBc0Cfc608AaCfeBB0"
+        resolver = MagicMock()
+        resolved = MagicMock()
+        resolved.address = matic_erc20
+        resolved.decimals = 18
+        resolver.resolve_for_swap.return_value = resolved
+
+        adapter = UniswapV4Adapter(chain="ethereum", token_resolver=resolver)
+        addr, dec = adapter._resolve_token("MATIC", for_v4_pool=True)
+        assert addr == matic_erc20
+        assert dec == 18
+        resolver.resolve_for_swap.assert_called_once_with("MATIC", "ethereum")
+
     def test_resolve_by_address(self):
         adapter = UniswapV4Adapter(chain="arbitrum", token_resolver=_make_resolver())
         addr, dec = adapter._resolve_token("0xaf88d065e77c8cC2239327C5EDb3A432268e5831")

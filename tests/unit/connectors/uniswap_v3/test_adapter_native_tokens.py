@@ -41,6 +41,49 @@ def test_is_native_token_zerog() -> None:
     assert adapter._is_native_token("0G") is False
 
 
+def test_is_native_token_monad() -> None:
+    """MON was missing from the legacy hardcoded set — native swaps on monad
+    were routed down the ERC-20 path against the 0xEeee sentinel address."""
+    adapter = _make_adapter("monad")
+    assert adapter._is_native_token("MON") is True
+    assert adapter._is_native_token("WMON") is False
+    assert adapter._is_native_token("ETH") is False
+
+
+def test_is_native_token_xlayer() -> None:
+    """OKB was missing from the legacy hardcoded set."""
+    adapter = _make_adapter("xlayer")
+    assert adapter._is_native_token("OKB") is True
+    assert adapter._is_native_token("ETH") is False
+
+
+def test_is_native_token_polygon_rename_dual() -> None:
+    """Polygon's descriptor accepts both the legacy and post-rename symbol."""
+    adapter = _make_adapter("polygon")
+    assert adapter._is_native_token("MATIC") is True
+    assert adapter._is_native_token("POL") is True
+    assert adapter._is_native_token("ETH") is False
+
+
+def test_is_native_token_mantle_avalanche_bsc() -> None:
+    adapter = _make_adapter("mantle")
+    assert adapter._is_native_token("MNT") is True
+    assert _make_adapter("avalanche")._is_native_token("AVAX") is True
+    assert _make_adapter("bsc")._is_native_token("BNB") is True
+
+
+def test_foreign_natives_rejected_per_chain() -> None:
+    """Deliberate behavior change vs the legacy chain-blind set.
+
+    "MATIC" resolves to a real ERC-20 on ethereum; the legacy set called it
+    native, so the swap was built with msg.value attached and no approval.
+    The per-chain gate routes it down the ERC-20 path instead.
+    """
+    adapter = _make_adapter("ethereum")
+    for foreign in ("MATIC", "POL", "AVAX", "BNB", "MNT", "MON", "OKB", "A0GI"):
+        assert adapter._is_native_token(foreign) is False, foreign
+
+
 def test_uses_v1_router_zerog() -> None:
     """Jaine on 0G only speaks the V1 8-arg router ABI."""
     assert _make_adapter("zerog")._uses_v1_router() is True

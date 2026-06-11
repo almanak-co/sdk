@@ -542,6 +542,22 @@ class TestNativeTokenDetection:
         assert adapter._is_native_token("USDC") is False
         assert adapter._is_native_token(USDC_ADDRESS) is False
 
+    def test_foreign_native_symbols_not_native(self, adapter: AerodromeAdapter) -> None:
+        """Registry-derived per-chain gate (VIB-4851 A1): base is ETH-native,
+        other chains' gas symbols stay on the ERC-20 path."""
+        for foreign in ("MATIC", "POL", "AVAX", "BNB", "MNT"):
+            assert adapter._is_native_token(foreign) is False, foreign
+
+    def test_optimism_is_eth_native(self, usdc_weth_resolver: MagicMock) -> None:
+        cfg = AerodromeConfig(
+            chain="optimism",
+            wallet_address=TEST_WALLET,
+            allow_placeholder_prices=True,
+        )
+        op_adapter = AerodromeAdapter(cfg, token_resolver=usdc_weth_resolver)
+        assert op_adapter._is_native_token("ETH") is True
+        assert op_adapter._is_native_token("MATIC") is False
+
 
 class TestEncodeRoute:
     def test_encode_route_volatile(self, adapter: AerodromeAdapter) -> None:
