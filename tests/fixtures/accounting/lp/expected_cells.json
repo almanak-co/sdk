@@ -25,5 +25,5 @@
     "LP6": "XFAIL"
   },
   "ledger_row_count": 4,
-  "matching_policy_version": 4
+  "matching_policy_version": 6
 }
