@@ -24,6 +24,12 @@ Example:
     print(result.summary())
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from almanak._lazy import LazySpec, build_lazy_module_dispatch
+
 # Data provider interface and models
 # Configuration
 # Monte Carlo price path generation
@@ -113,23 +119,44 @@ from .mev_simulator import (
     simulate_mev_cost,
 )
 
-# Bayesian optimization with Optuna
-from .optuna_tuner import (
-    METRIC_DIRECTIONS,
-    OBJECTIVE_METRICS,
-    OptimizationResult,
-    OptunaParamRanges,
-    OptunaTuner,
-    OptunaTunerConfig,
-    # Parameter types and factory functions
-    ParamRange,
-    ParamType,
-    TypedParamRanges,
-    categorical,
-    continuous,
-    discrete,
-    log_uniform,
-)
+if TYPE_CHECKING:
+    from .optuna_tuner import (
+        METRIC_DIRECTIONS,
+        OBJECTIVE_METRICS,
+        OptimizationResult,
+        OptunaParamRanges,
+        OptunaTuner,
+        OptunaTunerConfig,
+        ParamRange,
+        ParamType,
+        TypedParamRanges,
+        categorical,
+        continuous,
+        discrete,
+        log_uniform,
+    )
+
+# Bayesian optimization with Optuna. Resolved lazily so importing the pnl
+# package (and therefore ``almanak.framework.backtesting``) does not require
+# the optional ``optuna`` dependency (``pip install 'almanak[backtest]'``).
+# Pattern: almanak/_lazy.py; exemplar: almanak/framework/dashboard/__init__.py.
+_LAZY_IMPORTS: dict[str, LazySpec] = {
+    "METRIC_DIRECTIONS": ".optuna_tuner",
+    "OBJECTIVE_METRICS": ".optuna_tuner",
+    "OptimizationResult": ".optuna_tuner",
+    "OptunaParamRanges": ".optuna_tuner",
+    "OptunaTuner": ".optuna_tuner",
+    "OptunaTunerConfig": ".optuna_tuner",
+    "ParamRange": ".optuna_tuner",
+    "ParamType": ".optuna_tuner",
+    "TypedParamRanges": ".optuna_tuner",
+    "categorical": ".optuna_tuner",
+    "continuous": ".optuna_tuner",
+    "discrete": ".optuna_tuner",
+    "log_uniform": ".optuna_tuner",
+}
+
+__getattr__, __dir__ = build_lazy_module_dispatch(_LAZY_IMPORTS, package=__name__, namespace=globals())
 
 # Parallel execution and parameter search
 from .parallel import (

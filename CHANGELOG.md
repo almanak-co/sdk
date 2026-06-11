@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Action required for dashboard/backtest users**: heavy optional
+  dependencies moved out of the default install into extras. `streamlit` and
+  `plotly` now live in `almanak[dashboard]`; `matplotlib`, `plotly`, and
+  `optuna` in `almanak[backtest]`; `pyright` in `almanak[code]`;
+  `grpcio-tools` moved to the dev dependency-group. A default
+  `pip install almanak` is ~111 MB of wheels lighter. `almanak dashboard`,
+  `almanak strat backtest dashboard|optimize|sweep`, and backtest chart
+  export now fail fast with a message naming the extra when it is missing.
+  Install `pip install 'almanak[dashboard,backtest]'` to keep the previous
+  behavior. Hosted dashboard base images and the backtest service install
+  their extras explicitly.
 - Route gateway Onchain DEX pool analytics, pool history, and DEX-native OHLCV
   through CoinGecko Onchain API instead of GeckoTerminal. CoinGecko Onchain
   pool endpoints now require `COINGECKO_API_KEY` locally or

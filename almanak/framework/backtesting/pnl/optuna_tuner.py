@@ -73,9 +73,23 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-import optuna
-from optuna.samplers import TPESampler
-from optuna.trial import FrozenTrial, Trial
+
+def _actionable_optuna_import_error(exc: ImportError) -> ImportError:
+    """Map a missing-optuna ImportError to an actionable message; re-raise others."""
+    if exc.name and exc.name.startswith("optuna"):
+        return ImportError(
+            "Backtest parameter optimization requires the optional 'optuna' "
+            "dependency. Install it with: pip install 'almanak[backtest]'"
+        )
+    raise exc
+
+
+try:
+    import optuna
+    from optuna.samplers import TPESampler
+    from optuna.trial import FrozenTrial, Trial
+except ImportError as exc:
+    raise _actionable_optuna_import_error(exc) from exc
 
 from almanak.framework.backtesting.models import BacktestResult
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig

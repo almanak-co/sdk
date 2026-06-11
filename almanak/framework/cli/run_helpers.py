@@ -3116,7 +3116,7 @@ def _start_dashboard_background(
     import subprocess
 
     if importlib.util.find_spec("streamlit") is None:
-        click.echo("Error: streamlit not found. Install with: pip install streamlit", err=True)
+        click.echo("Error: streamlit not found. Install with: pip install 'almanak[dashboard]'", err=True)
         return None
 
     def is_port_available(p: int) -> bool:

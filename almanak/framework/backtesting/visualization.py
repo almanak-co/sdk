@@ -482,12 +482,12 @@ def plot_equity_curve(  # noqa: C901
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        logger.error("matplotlib not installed. Run: uv add matplotlib")
+        logger.error("matplotlib not installed. Run: pip install 'almanak[backtest]'")
         return ChartResult(
             chart_type="equity_curve",
             file_path=None,
             success=False,
-            error="matplotlib not installed. Run: uv add matplotlib",
+            error="matplotlib not installed. Run: pip install 'almanak[backtest]'",
         )
 
     # Validate input
@@ -744,12 +744,12 @@ def plot_equity_curve_interactive(  # noqa: C901
     try:
         import plotly.graph_objects as go
     except ImportError:
-        logger.error("plotly not installed. Run: uv add plotly")
+        logger.error("plotly not installed. Run: pip install 'almanak[backtest]'")
         return ChartResult(
             chart_type="equity_curve",
             file_path=None,
             success=False,
-            error="plotly not installed. Run: uv add plotly",
+            error="plotly not installed. Run: pip install 'almanak[backtest]'",
             format="html",
         )
 
@@ -1003,12 +1003,12 @@ def plot_pnl_histogram(
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        logger.error("matplotlib not installed. Run: uv add matplotlib")
+        logger.error("matplotlib not installed. Run: pip install 'almanak[backtest]'")
         return ChartResult(
             chart_type="pnl_histogram",
             file_path=None,
             success=False,
-            error="matplotlib not installed. Run: uv add matplotlib",
+            error="matplotlib not installed. Run: pip install 'almanak[backtest]'",
         )
 
     # Validate input
@@ -1190,12 +1190,12 @@ def plot_pnl_histogram_interactive(  # noqa: C901
     try:
         import plotly.graph_objects as go
     except ImportError:
-        logger.error("plotly not installed. Run: uv add plotly")
+        logger.error("plotly not installed. Run: pip install 'almanak[backtest]'")
         return ChartResult(
             chart_type="pnl_histogram",
             file_path=None,
             success=False,
-            error="plotly not installed. Run: uv add plotly",
+            error="plotly not installed. Run: pip install 'almanak[backtest]'",
             format="html",
         )
 
@@ -1429,12 +1429,12 @@ def plot_duration_scatter(
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        logger.error("matplotlib not installed. Run: uv add matplotlib")
+        logger.error("matplotlib not installed. Run: pip install 'almanak[backtest]'")
         return ChartResult(
             chart_type="duration_scatter",
             file_path=None,
             success=False,
-            error="matplotlib not installed. Run: uv add matplotlib",
+            error="matplotlib not installed. Run: pip install 'almanak[backtest]'",
         )
 
     # Validate input
@@ -1595,12 +1595,12 @@ def plot_intent_pie(
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        logger.error("matplotlib not installed. Run: uv add matplotlib")
+        logger.error("matplotlib not installed. Run: pip install 'almanak[backtest]'")
         return ChartResult(
             chart_type="intent_pie",
             file_path=None,
             success=False,
-            error="matplotlib not installed. Run: uv add matplotlib",
+            error="matplotlib not installed. Run: pip install 'almanak[backtest]'",
         )
 
     # Validate input
@@ -1726,6 +1726,7 @@ def plot_intent_pie(
         )
 
 
+# crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~2%)
 def generate_equity_chart_html(
     result: "BacktestResult",
     title: str | None = None,
@@ -1756,7 +1757,7 @@ def generate_equity_chart_html(
     try:
         import plotly.graph_objects as go
     except ImportError:
-        logger.warning("plotly not installed - cannot generate equity chart")
+        logger.warning("plotly not installed (pip install 'almanak[backtest]') - cannot generate equity chart")
         return ""
 
     if not result.equity_curve:
@@ -1874,6 +1875,7 @@ def generate_equity_chart_html(
         return ""
 
 
+# crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~3%)
 def generate_pnl_distribution_html(
     result: "BacktestResult",
     title: str | None = None,
@@ -1901,7 +1903,9 @@ def generate_pnl_distribution_html(
     try:
         import plotly.graph_objects as go
     except ImportError:
-        logger.warning("plotly not installed - cannot generate PnL distribution chart")
+        logger.warning(
+            "plotly not installed (pip install 'almanak[backtest]') - cannot generate PnL distribution chart"
+        )
         return ""
 
     if not hasattr(result, "trades") or not result.trades:
@@ -2010,6 +2014,7 @@ def generate_pnl_distribution_html(
         return ""
 
 
+# crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~4%)
 def generate_drawdown_chart_html(
     result: "BacktestResult",
     title: str | None = None,
@@ -2035,7 +2040,7 @@ def generate_drawdown_chart_html(
     try:
         import plotly.graph_objects as go
     except ImportError:
-        logger.warning("plotly not installed - cannot generate drawdown chart")
+        logger.warning("plotly not installed (pip install 'almanak[backtest]') - cannot generate drawdown chart")
         return ""
 
     if not result.equity_curve:
@@ -2199,7 +2204,7 @@ def generate_attribution_pie_chart_html(
     try:
         import plotly.graph_objects as go
     except ImportError:
-        logger.warning("plotly not installed - cannot generate attribution pie chart")
+        logger.warning("plotly not installed (pip install 'almanak[backtest]') - cannot generate attribution pie chart")
         return ""
 
     if not attribution_data:
@@ -2278,7 +2283,7 @@ def generate_attribution_bar_chart_html(
     try:
         import plotly.graph_objects as go
     except ImportError:
-        logger.warning("plotly not installed - cannot generate attribution bar chart")
+        logger.warning("plotly not installed (pip install 'almanak[backtest]') - cannot generate attribution bar chart")
         return ""
 
     if not attribution_data:

@@ -119,6 +119,7 @@ class PlotGenerator:
         ax.tick_params(labelsize=self.config.font_size)
         ax.grid(True, alpha=0.3)
 
+    # crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~16%)
     def create_price_plot(
         self,
         token: str,
@@ -140,7 +141,7 @@ class PlotGenerator:
         try:
             import matplotlib.pyplot as plt
         except ImportError:
-            logger.error("matplotlib not installed. Run: uv add matplotlib")
+            logger.error("matplotlib not installed. Run: pip install 'almanak[backtest]'")
             return PlotResult(
                 token=token,
                 plot_type="price",
@@ -217,6 +218,7 @@ class PlotGenerator:
                 error=str(e),
             )
 
+    # crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~14%)
     def create_rsi_plot(
         self,
         token: str,
@@ -236,7 +238,7 @@ class PlotGenerator:
         try:
             import matplotlib.pyplot as plt
         except ImportError:
-            logger.error("matplotlib not installed. Run: uv add matplotlib")
+            logger.error("matplotlib not installed. Run: pip install 'almanak[backtest]'")
             return PlotResult(
                 token=token,
                 plot_type="rsi",
@@ -362,6 +364,7 @@ class PlotGenerator:
                 error=str(e),
             )
 
+    # crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~16%)
     def create_weth_price_plot(
         self,
         token: str,
@@ -381,7 +384,7 @@ class PlotGenerator:
         try:
             import matplotlib.pyplot as plt
         except ImportError:
-            logger.error("matplotlib not installed. Run: uv add matplotlib")
+            logger.error("matplotlib not installed. Run: pip install 'almanak[backtest]'")
             return PlotResult(
                 token=token,
                 plot_type="weth_price",
@@ -458,6 +461,7 @@ class PlotGenerator:
                 error=str(e),
             )
 
+    # crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~12%)
     def create_summary_grid(
         self,
         plots: list[tuple[str, list, str]],
@@ -480,7 +484,7 @@ class PlotGenerator:
         try:
             import matplotlib.pyplot as plt
         except ImportError:
-            logger.error("matplotlib not installed. Run: uv add matplotlib")
+            logger.error("matplotlib not installed. Run: pip install 'almanak[backtest]'")
             return PlotResult(
                 token="summary",
                 plot_type="grid",

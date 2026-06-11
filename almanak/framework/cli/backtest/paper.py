@@ -798,6 +798,7 @@ def paper_logs(strategy: str, lines: int, follow: bool, show_all: bool) -> None:
 # =============================================================================
 
 
+# crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~2%)
 @backtest.command("dashboard")
 @click.option("--port", "-p", type=int, default=8501, help="Port to run the Streamlit dashboard (default: 8501)")
 @click.option("--no-browser", is_flag=True, default=False, help="Don't automatically open the browser")
@@ -848,7 +849,7 @@ def dashboard_cmd(port: int, no_browser: bool, host: str) -> None:
         cmd.append(str(dashboard_path))
     except ImportError as e:
         click.echo("Error: Could not find dashboard module.", err=True)
-        click.echo("Make sure Streamlit is installed: pip install streamlit", err=True)
+        click.echo("Make sure Streamlit is installed: pip install 'almanak[dashboard]'", err=True)
         raise click.Abort() from e
 
     click.echo("=" * 60)
@@ -882,7 +883,7 @@ def dashboard_cmd(port: int, no_browser: bool, host: str) -> None:
         click.echo(f"Error: Streamlit failed to start (exit code {e.returncode})", err=True)
         raise click.Abort() from e
     except FileNotFoundError as e:
-        click.echo("Error: Streamlit not found. Install it with: pip install streamlit", err=True)
+        click.echo("Error: Streamlit not found. Install it with: pip install 'almanak[dashboard]'", err=True)
         raise click.Abort() from e
     except KeyboardInterrupt:
         click.echo("\nDashboard stopped.")

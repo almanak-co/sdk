@@ -1004,6 +1004,23 @@ def dashboard(port, gateway_host, gateway_port, no_browser):
         # Connect to remote gateway
         almanak dashboard --gateway-host 192.168.1.100 --gateway-port 50051
     """
+    # Fail fast: check that the dashboard extra is installed before doing any
+    # gateway connectivity work. A missing streamlit produces a clear install
+    # hint; probing the gateway first only adds noise for users who haven't
+    # yet run `pip install 'almanak[dashboard]'`.
+    import importlib.util
+
+    if importlib.util.find_spec("streamlit") is None:
+        format_output(
+            status="error",
+            title="Dashboard Requires Streamlit",
+            key_value_pairs={
+                "Error": "streamlit is not installed",
+                "Solution": "pip install 'almanak[dashboard]'",
+            },
+        )
+        sys.exit(1)
+
     import subprocess
 
     from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig

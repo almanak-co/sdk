@@ -158,18 +158,13 @@ dependencies = [
     { name = "grpcio" },
     { name = "grpcio-health-checking" },
     { name = "grpcio-reflection" },
-    { name = "grpcio-tools" },
     { name = "httpx" },
-    { name = "matplotlib" },
     { name = "nest-asyncio" },
-    { name = "optuna" },
     { name = "pandas" },
-    { name = "plotly" },
     { name = "prometheus-client" },
     { name = "py-clob-client-v2" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
-    { name = "pyright" },
     { name = "python-dotenv" },
     { name = "python-kraken-sdk" },
     { name = "pytz" },
@@ -177,13 +172,24 @@ dependencies = [
     { name = "requests" },
     { name = "simple-term-menu" },
     { name = "solders" },
-    { name = "streamlit" },
     { name = "structlog" },
     { name = "tqdm" },
     { name = "web3" },
 ]
 
 [package.optional-dependencies]
+backtest = [
+    { name = "matplotlib" },
+    { name = "optuna" },
+    { name = "plotly" },
+]
+code = [
+    { name = "pyright" },
+]
+dashboard = [
+    { name = "plotly" },
+    { name = "streamlit" },
+]
 dev = [
     { name = "md-click-2" },
     { name = "mkdocs" },
@@ -208,14 +214,19 @@ test-controller = [
 dev = [
     { name = "asgi-lifespan" },
     { name = "diff-cover" },
+    { name = "grpcio-tools" },
+    { name = "matplotlib" },
     { name = "mkdocs-llmstxt" },
     { name = "mypy-protobuf" },
+    { name = "optuna" },
+    { name = "plotly" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
     { name = "radon" },
+    { name = "streamlit" },
     { name = "xenon" },
 ]
 
@@ -232,9 +243,8 @@ requires-dist = [
     { name = "grpcio", specifier = ">=1.76.0" },
     { name = "grpcio-health-checking", specifier = ">=1.76.0" },
     { name = "grpcio-reflection", specifier = ">=1.76.0" },
-    { name = "grpcio-tools", specifier = ">=1.76.0" },
     { name = "httpx", specifier = ">=0.28.1,<0.29.0" },
-    { name = "matplotlib", specifier = ">=3.10.8" },
+    { name = "matplotlib", marker = "extra == 'backtest'", specifier = ">=3.10.8" },
     { name = "md-click-2", marker = "extra == 'dev'", specifier = ">=0.0.1,<0.0.2" },
     { name = "mkdocs", marker = "extra == 'dev'", specifier = ">=1.6.1" },
     { name = "mkdocs-material", marker = "extra == 'dev'", specifier = ">=9.7.0" },
@@ -242,14 +252,15 @@ requires-dist = [
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'dev'", specifier = ">=0.29.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.19.1,<2.0.0" },
     { name = "nest-asyncio", specifier = ">=1.6.0" },
-    { name = "optuna", specifier = ">=3.5.0" },
+    { name = "optuna", marker = "extra == 'backtest'", specifier = ">=3.5.0" },
     { name = "pandas", specifier = ">=2.2.3,<4.0.0" },
-    { name = "plotly", specifier = ">=5.18.0" },
+    { name = "plotly", marker = "extra == 'backtest'", specifier = ">=5.18.0" },
+    { name = "plotly", marker = "extra == 'dashboard'", specifier = ">=5.18.0" },
     { name = "prometheus-client", specifier = ">=0.25.0" },
     { name = "py-clob-client-v2", specifier = "==1.0.0" },
     { name = "pydantic", specifier = ">=2.10.6,<3.0.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
-    { name = "pyright", specifier = ">=1.1.390" },
+    { name = "pyright", marker = "extra == 'code'", specifier = ">=1.1.390" },
     { name = "python-dotenv", specifier = ">=1.0.1,<2.0.0" },
     { name = "python-kraken-sdk", specifier = ">=3.2.7" },
     { name = "pytz", specifier = ">=2023.4" },
@@ -259,7 +270,7 @@ requires-dist = [
     { name = "setuptools", marker = "extra == 'dev'", specifier = ">=61" },
     { name = "simple-term-menu", specifier = ">=1.6.4,<2.0.0" },
     { name = "solders", specifier = ">=0.27.1" },
-    { name = "streamlit", specifier = ">=1.44.1,<2.0.0" },
+    { name = "streamlit", marker = "extra == 'dashboard'", specifier = ">=1.44.1,<2.0.0" },
     { name = "structlog", specifier = ">=24.1.0" },
     { name = "tqdm", specifier = ">=4.66.0" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=6.1.0,<7.0.0" },
@@ -271,20 +282,25 @@ requires-dist = [
     { name = "web3", specifier = ">=6.15.1,<8.0.0" },
     { name = "wheel", marker = "extra == 'dev'", specifier = "==0.46.3" },
 ]
-provides-extras = ["dev", "test-controller"]
+provides-extras = ["dev", "test-controller", "dashboard", "backtest", "code"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "asgi-lifespan", specifier = ">=2.1.0" },
     { name = "diff-cover", specifier = ">=10.2.0" },
+    { name = "grpcio-tools", specifier = ">=1.76.0" },
+    { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "mkdocs-llmstxt", specifier = ">=0.5.0" },
     { name = "mypy-protobuf", specifier = ">=5.0.0" },
+    { name = "optuna", specifier = ">=3.5.0" },
+    { name = "plotly", specifier = ">=5.18.0" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-timeout", specifier = ">=2.3.1" },
     { name = "pytest-xdist", specifier = ">=3.5.0" },
     { name = "radon", specifier = ">=6.0.1" },
+    { name = "streamlit", specifier = ">=1.44.1,<2.0.0" },
     { name = "xenon", specifier = ">=0.9.1" },
 ]
 

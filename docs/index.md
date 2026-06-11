@@ -42,6 +42,9 @@ The Almanak SDK provides a comprehensive framework for developing, testing, and 
 pipx install almanak
 ```
 
+Need the web dashboard or backtest charts/optimization? Install the extras:
+`pipx install 'almanak[dashboard,backtest]'`.
+
 Anvil fork testing (below) requires [Foundry](https://book.getfoundry.sh/getting-started/installation):
 
 ```bash

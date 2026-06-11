@@ -53,6 +53,18 @@ Almanak is an intent-based Python framework for developing, testing, and deployi
 pipx install almanak
 ```
 
+Optional features ship as extras:
+
+```bash
+pipx install 'almanak[dashboard,backtest]'   # web dashboard + backtest charts/optimization
+```
+
+| Extra | Enables |
+|---|---|
+| `dashboard` | `almanak dashboard` and the strategy/backtest web dashboards (streamlit, plotly) |
+| `backtest` | backtest chart export and `almanak strat backtest optimize` (matplotlib, plotly, optuna) |
+| `code` | Python LSP for `almanak code` (pyright) |
+
 **Using an AI coding agent?** Teach it the SDK in one command:
 
 ```bash

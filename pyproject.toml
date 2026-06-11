@@ -23,7 +23,6 @@ dependencies = [
     "python-dotenv>=1.0.1,<2.0.0",
     "pydantic>=2.10.6,<3.0.0",
     "web3>=6.15.1,<8.0.0",
-    "streamlit>=1.44.1,<2.0.0",
     # Framework dependencies
     "pytz>=2023.4",
     "PyYAML>=6.0.1",
@@ -35,12 +34,10 @@ dependencies = [
     "solders>=0.27.1",
     "structlog>=24.1.0",
     "nest_asyncio>=1.6.0",
-    "matplotlib>=3.10.8",
     "python-kraken-sdk>=3.2.7",
     "asyncpg>=0.29.0", # PostgreSQL async driver for state management
     # Gateway dependencies (gRPC)
     "grpcio>=1.76.0",
-    "grpcio-tools>=1.76.0",
     "grpcio-health-checking>=1.76.0",
     "grpcio-reflection>=1.76.0",
     "googleapis-common-protos>=1.69.0", # google.rpc.{status_pb2, error_details_pb2} for VIB-3800 typed gRPC errors
@@ -48,12 +45,8 @@ dependencies = [
     "prometheus-client>=0.25.0", # For gateway metrics
     # Backtesting dependencies
     "tqdm>=4.66.0", # Progress bar for backtest sweeps
-    "optuna>=3.5.0", # Bayesian optimization for parameter tuning
-    "plotly>=5.18.0", # Interactive charts for backtest visualization
     # Interactive terminal menus (used by almanak strat demo)
     "simple-term-menu>=1.6.4,<2.0.0",
-    # LSP / editor tooling (used by almanak-code)
-    "pyright>=1.1.390",
     # Polymarket V2 building blocks (typed-data structs, amount math, signing helpers).
     # Used by the polymarket connector — we keep our own ClobClient (rate limit, error
     # handling, credential management) but borrow V2 reference helpers from this dep.
@@ -84,6 +77,34 @@ dev = [
 # installs this group only when iterating on the controller itself.
 test-controller = [
     "uvicorn[standard]>=0.30.0",
+]
+
+# Heavy optional feature sets (plan 007). Version specifiers must stay in
+# sync with the re-listed copies in [dependency-groups].dev below, which keep
+# the unit-test environment (CI `uv sync --group dev`) complete.
+
+# Local + hosted dashboards: `almanak dashboard`, the dashboard spawned by
+# `almanak strat run`, `almanak strat backtest dashboard`, and the hosted
+# dashboard images (deploy/docker/Dockerfile.{base,runtime}-dashboard).
+dashboard = [
+    "streamlit>=1.44.1,<2.0.0",
+    "plotly>=5.18.0",
+]
+
+# Backtest chart export (matplotlib + plotly figures in
+# framework/backtesting/visualization.py and data/qa/reporting/plots.py) and
+# Bayesian parameter optimization (`almanak strat backtest optimize` /
+# `sweep` / walk-forward, via optuna).
+backtest = [
+    "matplotlib>=3.10.8",
+    "plotly>=5.18.0",
+    "optuna>=3.5.0",
+]
+
+# Python LSP for the `almanak code` native binary, which spawns
+# `pyright-langserver` from PATH (falls back to npx when absent).
+code = [
+    "pyright>=1.1.390",
 ]
 
 [tool.poetry]
@@ -130,6 +151,16 @@ dev = [
     "xenon>=0.9.1",
     "diff-cover>=10.2.0",
     "mypy-protobuf>=5.0.0",
+    # Heavy packages moved from [project].dependencies to extras (plan 007),
+    # re-listed so PR CI (`uv sync --group dev`) still installs them:
+    # tests/framework/test_runtime_import_coverage.py imports every framework
+    # module, and the dashboard/backtest unit tests import these directly.
+    "streamlit>=1.44.1,<2.0.0",
+    "plotly>=5.18.0",
+    "matplotlib>=3.10.8",
+    "optuna>=3.5.0",
+    # protoc toolchain for `make proto` (pairs with mypy-protobuf above)
+    "grpcio-tools>=1.76.0",
 ]
 
 [tool.ruff.lint]

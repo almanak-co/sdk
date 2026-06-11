@@ -24,6 +24,9 @@ foundryup
 pipx install almanak
 ```
 
+Need the web dashboard or backtest charts/optimization? Install the extras:
+`pipx install 'almanak[dashboard,backtest]'`.
+
 Or with [uv](https://docs.astral.sh/uv/):
 
 ```bash
