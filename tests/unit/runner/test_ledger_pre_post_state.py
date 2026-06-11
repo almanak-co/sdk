@@ -66,6 +66,37 @@ def test_post_state_pulls_from_recon():
     assert out["incident"] is False
 
 
+def test_post_state_persists_block_anchoring_provenance():
+    """VIB-3350: the block-anchoring flags reach post_state_json so the audit
+    trail can prove a reconciliation was pinned to the receipt block."""
+    recon = {
+        "post_balances": {"USDC": "20.5", "WETH": "0.001"},
+        "incident": False,
+        "reconciliation_block": 472432523,
+        "reconciliation_degraded": False,
+        "reconciliation_pre_anchored": False,
+        "reconciliation_confirmed": None,  # no wait ran — None preserved (Empty != Zero)
+        "reconciliation_confirmation_depth": 0,
+        "reconciliation_head_block": None,
+    }
+    out = _build_post_state_for_ledger(recon)
+    assert out is not None
+    assert out["reconciliation_block"] == 472432523
+    assert out["reconciliation_degraded"] is False
+    assert out["reconciliation_pre_anchored"] is False
+    assert "reconciliation_confirmed" in out and out["reconciliation_confirmed"] is None
+    assert out["reconciliation_confirmation_depth"] == 0
+
+
+def test_post_state_omits_block_anchoring_flags_for_legacy_recon():
+    """A legacy recon dict without the VIB-3350 flags gains no spurious keys."""
+    recon = {"post_balances": {"USDC": "1"}, "incident": False}
+    out = _build_post_state_for_ledger(recon)
+    assert out is not None
+    assert "reconciliation_block" not in out
+    assert "reconciliation_degraded" not in out
+
+
 def test_post_state_threads_incident_flag_for_recon_failure_path():
     # VIB-3480 use case: an incident row should still carry post-state so
     # auditors can see the on-chain state at the time of the breach.

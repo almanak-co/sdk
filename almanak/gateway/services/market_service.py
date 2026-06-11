@@ -111,6 +111,25 @@ def _is_native_symbol(token: str, chain: str) -> bool:
     return token.upper() in native_symbols_for(chain)
 
 
+def _block_pin_unsupported_reason(chain: str, block_tag: int | None) -> str | None:
+    """Return an error string iff a block-pinned read was requested on a chain
+    whose balance provider cannot honour it, else ``None``.
+
+    VIB-3350: block-anchored reads (``block_tag > 0``) are an EVM read-after-write
+    construct served by ``Web3BalanceProvider``'s block-keyed cache. The Solana
+    balance provider has no historical-block semantics and its ``get_balance`` /
+    ``get_native_balance`` accept no ``block`` kwarg — passing one raises
+    ``TypeError`` and surfaces as an opaque ``INTERNAL`` on the gateway (the
+    production perimeter). Reject the request loudly with ``INVALID_ARGUMENT`` so
+    the caller gets a clear contract violation instead of a 500. Guarding on
+    ``is_solana_chain`` mirrors the existing non-EVM routing branches in this file
+    (the only non-EVM provider is Solana; every EVM provider accepts ``block``).
+    """
+    if block_tag is not None and is_solana_chain(chain):
+        return f"block-pinned balance reads (block_tag={block_tag}) are not supported on non-EVM chain '{chain}'"
+    return None
+
+
 class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
     """Implements MarketService gRPC interface.
 
@@ -758,16 +777,35 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
 
         try:
             provider = await self._get_balance_provider(chain, wallet_address)
-            if request.force_refresh and hasattr(provider, "invalidate_cache"):
+
+            # VIB-3350: a block-pinned read (block_tag > 0) is read-after-write
+            # correct by construction and uses the immutable block-keyed cache,
+            # so it must NOT be perturbed by force_refresh. Only unpinned reads
+            # honour force_refresh's cache eviction.
+            block_tag = request.block_tag if request.block_tag > 0 else None
+            pin_unsupported = _block_pin_unsupported_reason(chain, block_tag)
+            if pin_unsupported is not None:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(pin_unsupported)
+                return gateway_pb2.BalanceResponse()
+            if block_tag is None and request.force_refresh and hasattr(provider, "invalidate_cache"):
                 provider.invalidate_cache(token)
 
             # Chain-scoped native check: only route to get_native_balance when
             # the symbol is actually native to THIS chain. Prevents POL on
             # Ethereum from returning ETH balance, etc.
             if _is_native_symbol(token, chain):
-                result = await provider.get_native_balance()
+                result = (
+                    await provider.get_native_balance(block=block_tag)
+                    if block_tag is not None
+                    else await provider.get_native_balance()
+                )
             else:
-                result = await provider.get_balance(token)
+                result = (
+                    await provider.get_balance(token, block=block_tag)
+                    if block_tag is not None
+                    else await provider.get_balance(token)
+                )
 
             # Get USD value if available
             balance_usd = ""
@@ -794,6 +832,10 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 raw_balance=str(result.raw_balance),
                 timestamp=int(result.timestamp.timestamp()),
                 stale=result.stale,
+                # VIB-3350: echo the block this balance was read at. A pinned
+                # read at block N returns state at N by construction; 0 for
+                # unpinned "latest" reads.
+                block_number=block_tag or 0,
             )
         except AmbiguousTokenError as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -844,13 +886,33 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             try:
                 provider = await self._get_balance_provider(chain, wallet_address)
 
+                # VIB-3350 (audit M3): honour per-request block_tag in batch too —
+                # a batched pinned read must NOT silently return "latest" while the
+                # wire message claims pinning. Mirrors the unary GetBalance path:
+                # a pinned read uses the immutable block-keyed cache and is not
+                # perturbed by force_refresh; only unpinned reads evict the cache.
+                block_tag = req.block_tag if req.block_tag > 0 else None
+                pin_unsupported = _block_pin_unsupported_reason(chain, block_tag)
+                if pin_unsupported is not None:
+                    return gateway_pb2.BalanceResponse(error=pin_unsupported)
+                if block_tag is None and req.force_refresh and hasattr(provider, "invalidate_cache"):
+                    provider.invalidate_cache(token)
+
                 # Chain-scoped native check: only route to get_native_balance when
                 # the symbol is actually native to THIS chain. Prevents POL on
                 # Ethereum from returning ETH balance, etc.
                 if _is_native_symbol(token, chain):
-                    result = await provider.get_native_balance()
+                    result = (
+                        await provider.get_native_balance(block=block_tag)
+                        if block_tag is not None
+                        else await provider.get_native_balance()
+                    )
                 else:
-                    result = await provider.get_balance(token)
+                    result = (
+                        await provider.get_balance(token, block=block_tag)
+                        if block_tag is not None
+                        else await provider.get_balance(token)
+                    )
 
                 balance_usd = ""
                 try:
@@ -874,6 +936,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                     raw_balance=str(result.raw_balance),
                     timestamp=int(result.timestamp.timestamp()),
                     stale=result.stale,
+                    block_number=block_tag or 0,  # VIB-3350 (M3): echo the pinned block
                 )
             except Exception as e:
                 # Log at DEBUG for batch context — individual token failures (e.g. USDT not

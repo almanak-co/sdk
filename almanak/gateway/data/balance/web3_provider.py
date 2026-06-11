@@ -37,6 +37,7 @@ import asyncio
 import logging
 import re
 import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -60,6 +61,7 @@ from almanak.framework.data.tokens.exceptions import (
     TokenNotFoundError as FrameworkTokenNotFoundError,
 )
 from almanak.gateway.services.onchain_lookup import OnChainLookup
+from almanak.gateway.utils.indexer_lag import is_indexer_lag_error
 
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver
@@ -216,6 +218,10 @@ class ProviderHealthMetrics:
     total_latency_ms: float = 0.0
     last_error: str | None = None
     last_error_time: datetime | None = None
+    # VIB-3350: number of times a block-pinned read was retried because the
+    # replica had not yet indexed the receipt block (receipt-indexer lag,
+    # VIB-4985 error class). Distinct from generic ``errors`` so lag is visible.
+    indexer_lag_retries: int = 0
 
     @property
     def success_rate(self) -> float:
@@ -239,6 +245,7 @@ class ProviderHealthMetrics:
             "cache_hits": self.cache_hits,
             "timeouts": self.timeouts,
             "errors": self.errors,
+            "indexer_lag_retries": self.indexer_lag_retries,
             "success_rate": round(self.success_rate, 2),
             "average_latency_ms": round(self.average_latency_ms, 2),
             "last_error": self.last_error,
@@ -322,6 +329,17 @@ class NonEvmChainError(ValueError):
         )
 
 
+def _lag_error_text(exc: BaseException) -> str:
+    """Best message to classify ``exc`` against the indexer-lag markers.
+
+    The inner retry methods wrap the upstream failure in ``RPCError`` and keep
+    the original exception on ``original_error``; the lag marker (e.g. "Unknown
+    block") lives on that inner exception, so prefer it when present.
+    """
+    original = getattr(exc, "original_error", None)
+    return str(original) if original is not None else str(exc)
+
+
 # =============================================================================
 # Web3 Balance Provider
 # =============================================================================
@@ -368,6 +386,8 @@ class Web3BalanceProvider:
         retry_delay: float = 0.5,
         token_resolver: "TokenResolver | None" = None,
         dynamic_symbol_resolver: Any | None = None,
+        block_cache_max: int = 512,
+        block_lag_max_retries: int = 3,
     ) -> None:
         """Initialize the Web3 balance provider.
 
@@ -395,6 +415,12 @@ class Web3BalanceProvider:
         self._request_timeout = request_timeout
         self._max_retries = max_retries
         self._retry_delay = retry_delay
+        # VIB-3350: a block-pinned read can race a read-replica that has not yet
+        # indexed the receipt block. That lag clears on its own, so a pinned read
+        # gets its OWN bounded retry budget on top of the inner transient retries
+        # (and is explicitly classified + metered) instead of failing closed on
+        # the first generic budget. Non-lag errors are never retried by it.
+        self._block_lag_max_retries = block_lag_max_retries
 
         # Initialize Web3 with async HTTP provider
         # Use certifi SSL context to avoid macOS system-cert issues (e.g. xlayer public RPC)
@@ -423,8 +449,30 @@ class Web3BalanceProvider:
         _descriptor = ChainRegistry.try_resolve(self._chain)
         self._native_symbol = _descriptor.native.symbol if _descriptor is not None else "ETH"
 
-        # Balance cache: token_symbol -> BalanceCacheEntry
+        # Balance cache: token_symbol -> BalanceCacheEntry (TTL'd "latest" reads).
         self._cache: dict[str, BalanceCacheEntry] = {}
+
+        # VIB-3350: block-pinned reads are cached SEPARATELY, keyed by
+        # (token_symbol, block_number). A balance read AS OF a final block is
+        # immutable, so these entries never TTL-expire; the map is bounded by an
+        # LRU cap to keep memory flat. Keeping it a distinct map from
+        # ``self._cache`` structurally enforces the never-cross invariant: a
+        # "latest" cache entry can never satisfy a block-pinned request, nor the
+        # reverse. Per-instance (one provider per (chain, wallet)) gives
+        # multi-tenant isolation for free (PRD FR-13).
+        self._block_cache: OrderedDict[tuple[str, int], BalanceCacheEntry] = OrderedDict()
+        # VIB-3350: the cap must be a positive capacity. A non-positive value
+        # would make the LRU eviction loop (``while len > max: popitem()``)
+        # overrun the cache and ``popitem()`` an empty OrderedDict — a KeyError
+        # crash deep in the first pinned write. Fail fast at construction with a
+        # clear message instead (mirrors the ChainDescriptor.reorg_safe_depth
+        # negative-rejection guard).
+        if block_cache_max < 1:
+            raise ValueError(
+                f"block_cache_max must be >= 1 (got {block_cache_max}); a non-positive "
+                "cap would make the block-cache eviction loop popitem() an empty cache."
+            )
+        self._block_cache_max = block_cache_max
 
         # Lazy on-chain ERC20 metadata lookup (built on first miss for an address)
         self._onchain_lookup: OnChainLookup | None = None
@@ -451,7 +499,7 @@ class Web3BalanceProvider:
             return parts[0].split("//")[0] + "//***@" + parts[1]
         return url
 
-    async def get_balance(self, token: str) -> BalanceResult:
+    async def get_balance(self, token: str, *, block: int | None = None) -> BalanceResult:
         """Get the balance of a token for the configured wallet.
 
         This method handles:
@@ -464,6 +512,13 @@ class Web3BalanceProvider:
         Args:
             token: Token symbol (e.g., "WETH", "USDC") or "ETH" for native.
                    Can also be a token contract address starting with "0x".
+            block: VIB-3350. When set (> 0), read the balance AS OF that block
+                   instead of "latest". Used by reconciliation post-reads so the
+                   delta observes the just-landed transaction's state and is not
+                   served pre-tx state by a lagging RPC/replica. Block-pinned
+                   reads use the immutable block-keyed cache (never the TTL
+                   "latest" cache) and do NOT fall back to a stale read on error
+                   — correctness over availability; the caller degrades.
 
         Returns:
             BalanceResult with balance in human-readable units
@@ -474,6 +529,10 @@ class Web3BalanceProvider:
         """
         self._metrics.total_requests += 1
         token_key = token.upper()
+
+        # VIB-3350: block-pinned read path (read-after-write correctness).
+        if block is not None and block > 0:
+            return await self._get_balance_at_block(token, token_key, block)
 
         # Check cache first
         cached = self._get_cached(token_key)
@@ -572,15 +631,112 @@ class Web3BalanceProvider:
                 reason=f"RPC error: {str(e)}",
             ) from e
 
-    async def get_native_balance(self) -> BalanceResult:
+    async def get_native_balance(self, *, block: int | None = None) -> BalanceResult:
         """Get the native token balance (ETH, MATIC, etc.).
 
         Convenience method for getting the chain's native token balance.
 
+        Args:
+            block: VIB-3350. When set, read the native balance AS OF that block.
+
         Returns:
             BalanceResult for native token
         """
-        return await self.get_balance(self._native_symbol)
+        return await self.get_balance(self._native_symbol, block=block)
+
+    async def _get_balance_at_block(self, token: str, token_key: str, block: int) -> BalanceResult:
+        """VIB-3350: read a token balance pinned to a specific block.
+
+        Distinct from the "latest" path: uses the immutable block-keyed cache,
+        never the TTL cache, and never returns a stale fallback on error — a
+        reconciliation post-read must be correct at the requested block or fail
+        loudly so the caller can degrade. A not-yet-indexed block on a lagging
+        replica surfaces as a retry-then-raise (VIB-4985 indexer-lag class),
+        which is the point: anchoring makes lag *detectable* instead of silently
+        returning pre-tx "latest" state.
+        """
+        cached = self._get_block_cached(token_key, block)
+        if cached is not None:
+            self._metrics.cache_hits += 1
+            self._metrics.successful_requests += 1
+            return cached.result
+
+        token_meta = await self._resolve_token(token)
+        if token_meta is None:
+            raise TokenNotFoundError(token, self._chain)
+
+        start_time = time.time()
+        try:
+            raw_balance = await self._read_pinned_balance_with_lag_retry(token_meta, block)
+
+            latency_ms = (time.time() - start_time) * 1000
+            balance = Decimal(raw_balance) / Decimal(10**token_meta.decimals)
+            result = BalanceResult(
+                balance=balance,
+                token=token_meta.symbol,
+                address=token_meta.address,
+                decimals=token_meta.decimals,
+                raw_balance=raw_balance,
+                timestamp=datetime.now(UTC),
+                stale=False,
+            )
+            self._update_block_cache(token_key, block, result, latency_ms)
+            self._metrics.successful_requests += 1
+            self._metrics.total_latency_ms += latency_ms
+            return result
+        except Exception as e:
+            self._metrics.errors += 1
+            self._metrics.last_error = str(e)
+            self._metrics.last_error_time = datetime.now(UTC)
+            logger.error(
+                "Failed to fetch block-pinned balance for %s @ block %d: %s",
+                token_key,
+                block,
+                str(e),
+                extra={"token": token_key, "block": block, "error": str(e)},
+            )
+            # No stale fallback for pinned reads: correctness over availability.
+            raise DataSourceUnavailable(
+                source="web3_balance_provider",
+                reason=f"block-pinned RPC error @ {block}: {str(e)}",
+            ) from e
+
+    async def _read_pinned_balance_with_lag_retry(self, token_meta: TokenMetadata, block: int) -> int:
+        """Read a raw balance at ``block`` with a dedicated receipt-indexer-lag budget.
+
+        VIB-3350 (Item 3): unlike a generic RPC failure, a "block not available
+        yet" error on a *pinned* read is expected to clear on its own once the
+        replica catches up to the receipt block. Classify it with the SAME
+        marker set the gateway's ``RpcService`` uses (``is_indexer_lag_error``,
+        VIB-4985) and give it its own bounded retry budget on top of the inner
+        transient retries, recording an ``indexer_lag_retries`` metric. Any
+        non-lag error propagates immediately — it is not retried here.
+        """
+        attempts = max(1, self._block_lag_max_retries)
+        last_exc: BaseException | None = None
+        for lag_attempt in range(attempts):
+            try:
+                if token_meta.is_native:
+                    return await self._get_native_balance_with_retry(block=block)
+                return await self._get_erc20_balance_with_retry(token_meta.address, block=block)
+            except Exception as exc:
+                if not is_indexer_lag_error(_lag_error_text(exc)):
+                    raise  # not lag — fail fast, do not consume the lag budget
+                last_exc = exc
+                self._metrics.indexer_lag_retries += 1
+                logger.warning(
+                    "Block-pinned read indexer lag @ block %d (lag-retry %d/%d): %s",
+                    block,
+                    lag_attempt + 1,
+                    attempts,
+                    _lag_error_text(exc),
+                )
+                if lag_attempt < attempts - 1:
+                    await asyncio.sleep(self._retry_delay * (2**lag_attempt))
+        # Budget exhausted: re-raise the last lag error so _get_balance_at_block
+        # converts it to DataSourceUnavailable (the caller then degrades).
+        assert last_exc is not None  # loop ran ≥1 time and only lag reaches here
+        raise last_exc
 
     def invalidate_cache(self, token: str | None = None) -> None:
         """Invalidate cached balances.
@@ -835,8 +991,40 @@ class Web3BalanceProvider:
             fetch_latency_ms=latency_ms,
         )
 
-    async def _get_native_balance_with_retry(self) -> int:
+    def _get_block_cached(self, token: str, block: int) -> BalanceCacheEntry | None:
+        """VIB-3350: look up a block-pinned entry (immutable; no TTL check).
+
+        Distinct map from the TTL ``_cache`` — a "latest" entry can never be
+        returned here, enforcing the never-cross invariant structurally.
+        """
+        entry = self._block_cache.get((token, block))
+        if entry is not None:
+            self._block_cache.move_to_end((token, block))  # LRU touch
+        return entry
+
+    def _update_block_cache(self, token: str, block: int, result: BalanceResult, latency_ms: float) -> None:
+        """VIB-3350: store a block-pinned entry with LRU eviction.
+
+        Pinned reads are immutable, so entries never TTL-expire; bound memory
+        with an LRU cap instead.
+        """
+        self._block_cache[(token, block)] = BalanceCacheEntry(
+            result=result,
+            cached_at=datetime.now(UTC),
+            fetch_latency_ms=latency_ms,
+        )
+        self._block_cache.move_to_end((token, block))
+        while len(self._block_cache) > self._block_cache_max:
+            self._block_cache.popitem(last=False)
+
+    async def _get_native_balance_with_retry(self, block: int | None = None) -> int:
         """Get native token balance with retry logic.
+
+        Args:
+            block: VIB-3350. When set, read AS OF that block (``eth_getBalance``
+                at ``block_identifier``). A lagging replica that has not yet
+                indexed the block raises (e.g. "Unknown block"); the retry loop
+                below absorbs that as transient indexer lag (VIB-4985 class).
 
         Returns:
             Raw balance in wei
@@ -849,7 +1037,9 @@ class Web3BalanceProvider:
         for attempt in range(self._max_retries):
             try:
                 balance = await asyncio.wait_for(
-                    self._w3.eth.get_balance(self._wallet_address),
+                    self._w3.eth.get_balance(self._wallet_address, block_identifier=block)
+                    if block is not None
+                    else self._w3.eth.get_balance(self._wallet_address),
                     timeout=self._request_timeout,
                 )
                 return balance
@@ -881,6 +1071,14 @@ class Web3BalanceProvider:
                     self._max_retries,
                 )
 
+            # VIB-3350 (audit I1): on a PINNED read, indexer lag is owned by the
+            # dedicated OUTER lag-retry budget (_read_pinned_balance_with_lag_retry).
+            # Do not also burn this inner transient-retry budget on it — break now
+            # so a persistently lagging replica costs block_lag_max_retries attempts
+            # total, not max_retries × block_lag_max_retries.
+            if block is not None and last_error is not None and is_indexer_lag_error(str(last_error)):
+                break
+
             # Wait before retry (exponential backoff)
             if attempt < self._max_retries - 1:
                 wait_time = self._retry_delay * (2**attempt)
@@ -893,11 +1091,15 @@ class Web3BalanceProvider:
             original_error=last_error,
         )
 
-    async def _get_erc20_balance_with_retry(self, token_address: str) -> int:
+    async def _get_erc20_balance_with_retry(self, token_address: str, block: int | None = None) -> int:
         """Get ERC-20 token balance with retry logic.
 
         Args:
             token_address: Token contract address
+            block: VIB-3350. When set, read AS OF that block
+                (``balanceOf`` called at ``block_identifier``). A lagging
+                replica raises on a not-yet-indexed block; the retry loop
+                absorbs that as transient indexer lag (VIB-4985 class).
 
         Returns:
             Raw balance in smallest units
@@ -913,8 +1115,9 @@ class Web3BalanceProvider:
 
         for attempt in range(self._max_retries):
             try:
+                call = contract.functions.balanceOf(self._wallet_address)
                 balance = await asyncio.wait_for(
-                    contract.functions.balanceOf(self._wallet_address).call(),
+                    call.call(block_identifier=block) if block is not None else call.call(),
                     timeout=self._request_timeout,
                 )
                 return balance
@@ -958,6 +1161,13 @@ class Web3BalanceProvider:
                     self._max_retries,
                 )
 
+            # VIB-3350 (audit I1): a PINNED read delegates indexer-lag retries to
+            # the dedicated OUTER budget (_read_pinned_balance_with_lag_retry); do
+            # not also burn the inner transient budget on lag — break immediately
+            # so total cost is block_lag_max_retries, not the inner×outer product.
+            if block is not None and last_error is not None and is_indexer_lag_error(str(last_error)):
+                break
+
             # Wait before retry (exponential backoff)
             if attempt < self._max_retries - 1:
                 wait_time = self._retry_delay * (2**attempt)
@@ -975,6 +1185,7 @@ class Web3BalanceProvider:
         # AsyncWeb3 doesn't require explicit closing in most cases
         # but we clear the cache on close
         self._cache.clear()
+        self._block_cache.clear()
         logger.info("Closed Web3BalanceProvider")
 
     async def __aenter__(self) -> "Web3BalanceProvider":

@@ -338,6 +338,21 @@ class TestRegistryStructure:
                 timeouts=Timeouts(),
             )
 
+    def test_descriptor_post_init_rejects_negative_reorg_safe_depth(self) -> None:
+        """VIB-3350 (audit M2): a negative reorg_safe_depth fails loudly at
+        registration like the sibling field validations."""
+        with pytest.raises(ValueError, match="reorg_safe_depth must be non-negative"):
+            ChainDescriptor(
+                enum=Chain.ETHEREUM,
+                name="ethereum",
+                chain_id=1,
+                family=ChainFamily.EVM,
+                native=NativeToken(symbol="ETH", name="Ethereum", decimals=18),
+                gas=GasProfile(),
+                timeouts=Timeouts(),
+                reorg_safe_depth=-1,
+            )
+
     def test_register_rejects_canonical_name_collision_with_existing_alias(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -481,8 +496,7 @@ class TestLegacyDictByteIdentity:
 
         for chain_name, expected_info in HISTORICAL_NATIVE_TOKEN_INFO.items():
             assert chain_name in NATIVE_TOKEN_INFO, (
-                f"Historical NATIVE_TOKEN_INFO entry {chain_name!r} disappeared from "
-                f"the registry-derived view."
+                f"Historical NATIVE_TOKEN_INFO entry {chain_name!r} disappeared from the registry-derived view."
             )
             assert NATIVE_TOKEN_INFO[chain_name] == expected_info, (
                 f"NATIVE_TOKEN_INFO[{chain_name!r}] drifted from the historical literal."
@@ -535,17 +549,14 @@ class TestImportGraphIsolation:
                     continue
                 ok = False
                 for prefix in allowed_prefixes:
-                    if stripped.startswith(f"from {prefix}") or stripped.startswith(
-                        f"import {prefix}"
-                    ):
+                    if stripped.startswith(f"from {prefix}") or stripped.startswith(f"import {prefix}"):
                         ok = True
                         break
                 if not ok:
                     offenders.append((str(py_file.name), f"L{lineno}: {stripped}"))
         assert not offenders, (
             "almanak.core.chains may only import from almanak.core.enums "
-            "(or relative siblings). Offending lines:\n"
-            + "\n".join(f"  {fn}: {line}" for fn, line in offenders)
+            "(or relative siblings). Offending lines:\n" + "\n".join(f"  {fn}: {line}" for fn, line in offenders)
         )
 
     def test_registry_loads_without_framework_or_gateway(self) -> None:

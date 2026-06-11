@@ -27,6 +27,7 @@ from almanak.core.chains._helpers import rpc_rate_limit_map
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.metrics import record_rpc_latency, record_rpc_request
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+from almanak.gateway.utils.indexer_lag import INDEXER_LAG_ERROR_MARKERS, is_indexer_lag_error
 from almanak.gateway.validation import (
     ALLOWED_CHAINS,
     ValidationError,
@@ -434,21 +435,11 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
     #
     # These markers describe exactly one condition — "the block/state you asked
     # for is not available on this node right now" — which for a just-confirmed
-    # block means transient lag and is SAFE to retry. They deliberately do NOT
-    # overlap with execution reverts ("execution reverted", "out of gas"), auth
-    # ("unauthorized", "invalid api key"), or malformed params ("invalid
-    # argument") — those must keep failing fast. Matched case-insensitively as
-    # substrings against the upstream error message. JSON-RPC error CODE is not
-    # used: providers reuse -32000 for reverts too, so code alone is too broad.
-    _INDEXER_LAG_ERROR_MARKERS: frozenset[str] = frozenset(
-        {
-            "unknown block",  # geth / erigon / alchemy — block not yet on this node
-            "header not found",  # geth — block header not yet available
-            "missing trie node",  # geth archival — state for the block not yet available
-            "block not found",  # erigon / nethermind / various providers
-            "no state available for block",  # alchemy / erigon — state not yet indexed
-        }
-    )
+    # block means transient lag and is SAFE to retry. The marker set + classifier
+    # are owned by ``almanak.gateway.utils.indexer_lag`` so the block-pinned
+    # balance-read path (VIB-3350, Web3BalanceProvider) recognises the same error
+    # class identically — one source of truth, no drift.
+    _INDEXER_LAG_ERROR_MARKERS: frozenset[str] = INDEXER_LAG_ERROR_MARKERS
 
     # Transaction-submission methods are NOT idempotent at the upstream layer.
     # Even if we get a 5xx back, the node may have already accepted and propagated
@@ -601,18 +592,11 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
     def _is_indexer_lag_error(cls, message: str | None) -> bool:
         """True if ``message`` is an upstream "block not available yet" error.
 
-        VIB-4985 / ALM-2777. Matches the narrow lag-marker set case-insensitively
-        as substrings. Deliberately conservative: a non-string / empty / None
-        message is NOT lag (returns False → fail fast), and the markers do not
-        overlap with execution reverts, auth failures, or malformed-param errors.
-        The ``isinstance`` guard tolerates a non-compliant provider that returns
-        a non-string ``message`` field in its JSON-RPC error object — never crash
-        the proxy on a malformed upstream response.
+        VIB-4985 / ALM-2777. Thin wrapper over the shared classifier so callers
+        that already hold an ``RpcService`` keep the historical class API; the
+        logic and marker set live in ``almanak.gateway.utils.indexer_lag``.
         """
-        if not isinstance(message, str) or not message:
-            return False
-        lowered = message.lower()
-        return any(marker in lowered for marker in cls._INDEXER_LAG_ERROR_MARKERS)
+        return is_indexer_lag_error(message)
 
     def _record_indexer_lag_retry(
         self, method: str, chain: str | None, attempt: int, max_attempts: int, message: str

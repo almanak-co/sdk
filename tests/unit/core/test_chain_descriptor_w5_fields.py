@@ -24,7 +24,6 @@ import pytest
 
 from almanak.core.chains import ChainRegistry
 
-
 # =============================================================================
 # Frozen historical snapshots — the legacy values these descriptors mirror.
 # Kept inline so a future regression diff against ``main`` is obvious.
@@ -129,9 +128,7 @@ class TestPopulatedFields:
         expected: dict[str, int],
     ) -> None:
         d = ChainRegistry.resolve(chain_name)
-        assert d.gas.operation_overrides is not None, (
-            f"{chain_name} lost its operation_overrides entry"
-        )
+        assert d.gas.operation_overrides is not None, f"{chain_name} lost its operation_overrides entry"
         assert dict(d.gas.operation_overrides) == expected, (
             f"{chain_name} operation_overrides diverged from the legacy CHAIN_GAS_OVERRIDES value"
         )
@@ -206,8 +203,7 @@ class TestNoneFieldFallbackSemantics:
             if d.name in HISTORICAL_OPERATION_OVERRIDES:
                 continue
             assert d.gas.operation_overrides is None, (
-                f"{d.name} should have operation_overrides=None (no legacy entry); "
-                f"got {d.gas.operation_overrides!r}"
+                f"{d.name} should have operation_overrides=None (no legacy entry); got {d.gas.operation_overrides!r}"
             )
 
     def test_chains_without_legacy_receipt_polling_have_none(self) -> None:
@@ -215,39 +211,28 @@ class TestNoneFieldFallbackSemantics:
             if d.name in HISTORICAL_RECEIPT_POLLING:
                 continue
             assert d.timeouts.receipt_polling is None, (
-                f"{d.name} should have receipt_polling=None (no legacy entry); "
-                f"got {d.timeouts.receipt_polling!r}"
+                f"{d.name} should have receipt_polling=None (no legacy entry); got {d.timeouts.receipt_polling!r}"
             )
 
     def test_chains_without_legacy_fallback_gas_prices_have_none(self) -> None:
         for d in ChainRegistry.all():
             if d.name in HISTORICAL_FALLBACK_GAS_PRICES:
                 continue
-            assert d.gas.fallback_base_fee_gwei is None, (
-                f"{d.name} fallback_base_fee_gwei should be None"
-            )
-            assert d.gas.fallback_priority_fee_gwei is None, (
-                f"{d.name} fallback_priority_fee_gwei should be None"
-            )
+            assert d.gas.fallback_base_fee_gwei is None, f"{d.name} fallback_base_fee_gwei should be None"
+            assert d.gas.fallback_priority_fee_gwei is None, f"{d.name} fallback_priority_fee_gwei should be None"
 
     def test_chains_without_legacy_block_time_have_none(self) -> None:
         for d in ChainRegistry.all():
             if d.name in HISTORICAL_BLOCK_TIMES:
                 continue
-            assert d.rpc.block_time_seconds is None, (
-                f"{d.name} block_time_seconds should be None"
-            )
+            assert d.rpc.block_time_seconds is None, f"{d.name} block_time_seconds should be None"
 
     def test_chains_without_legacy_explorer_have_none(self) -> None:
         for d in ChainRegistry.all():
             if d.name in HISTORICAL_EXPLORER_URLS:
                 continue
-            assert d.explorer.api_url is None, (
-                f"{d.name} explorer.api_url should be None"
-            )
-            assert d.explorer.api_key_env is None, (
-                f"{d.name} explorer.api_key_env should be None"
-            )
+            assert d.explorer.api_url is None, f"{d.name} explorer.api_url should be None"
+            assert d.explorer.api_key_env is None, f"{d.name} explorer.api_key_env should be None"
 
 
 # =============================================================================
@@ -283,6 +268,34 @@ class TestConsumerFallbackSemantics:
 
         assert receipt_timeout_for("bsc") == 300
         assert receipt_timeout_for("avalanche") == 180
+
+    def test_reorg_safe_depth_for_unknown_chain_returns_default(self) -> None:
+        from almanak.core.chains._helpers import (
+            DEFAULT_REORG_SAFE_DEPTH,
+            reorg_safe_depth_for,
+        )
+
+        assert reorg_safe_depth_for("not-a-real-chain") == DEFAULT_REORG_SAFE_DEPTH
+        assert reorg_safe_depth_for("") == DEFAULT_REORG_SAFE_DEPTH
+
+    def test_reorg_safe_depth_for_chain_without_entry_returns_default(self) -> None:
+        from almanak.core.chains._helpers import (
+            DEFAULT_REORG_SAFE_DEPTH,
+            reorg_safe_depth_for,
+        )
+
+        # base / arbitrum declare no reorg_safe_depth → generic-L2 default.
+        assert reorg_safe_depth_for("base") == DEFAULT_REORG_SAFE_DEPTH
+        assert reorg_safe_depth_for("arbitrum") == DEFAULT_REORG_SAFE_DEPTH
+
+    def test_reorg_safe_depth_for_chain_with_entry_returns_override(self) -> None:
+        from almanak.core.chains._helpers import reorg_safe_depth_for
+
+        assert reorg_safe_depth_for("ethereum") == 12
+        assert reorg_safe_depth_for("polygon") == 10
+        assert reorg_safe_depth_for("avalanche") == 5
+        # alias resolves through the registry
+        assert reorg_safe_depth_for("avax") == 5
 
     def test_get_gas_estimate_unknown_chain_returns_default(self) -> None:
         from almanak.framework.intents.compiler_constants import (

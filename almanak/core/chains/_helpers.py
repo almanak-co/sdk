@@ -25,6 +25,30 @@ from almanak.core.enums import ChainFamily
 DEFAULT_RECEIPT_TIMEOUT: int = 120
 
 
+# Default reorg-safe confirmation depth (blocks) used when the per-chain
+# descriptor declares none. Generic L2 value — fast chains where a few
+# confirmations make a recently-mined block unlikely to be re-orged (VIB-3350).
+DEFAULT_REORG_SAFE_DEPTH: int = 3
+
+
+def reorg_safe_depth_for(chain: str) -> int:
+    """Return the per-chain reorg-safe confirmation depth (blocks).
+
+    How far the chain head should advance past a tx's receipt block before a
+    block-pinned reconciliation read is safe against a lagging replica
+    (VIB-3350). Per-chain overrides live on ``ChainDescriptor.reorg_safe_depth``
+    (Ethereum 12, Polygon 10, Avalanche 5); ``None`` / unknown / unregistered
+    chain falls back to :data:`DEFAULT_REORG_SAFE_DEPTH` (generic L2). Keeps the
+    chain-name knowledge on the descriptor, not in framework code (blueprint 22).
+    """
+    if not chain:
+        return DEFAULT_REORG_SAFE_DEPTH
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None or descriptor.reorg_safe_depth is None:
+        return DEFAULT_REORG_SAFE_DEPTH
+    return descriptor.reorg_safe_depth
+
+
 def receipt_timeout_for(chain: str) -> int:
     """Return the per-chain receipt-polling timeout (seconds).
 

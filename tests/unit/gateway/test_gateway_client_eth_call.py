@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, PropertyMock
+from unittest.mock import MagicMock
 
 import grpc
-import pytest
 
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
 
@@ -99,3 +98,80 @@ class TestEthCallGrpcError:
         result = client.eth_call(chain="base", to="0xfactory", data="0xcalldata")
 
         assert result is None
+
+
+class TestBlockNumber:
+    """VIB-3350: GatewayClient.block_number(chain) via the RpcService proxy."""
+
+    def test_decodes_hex_head(self):
+        """A 0x-prefixed hex quantity is decoded to an int block number."""
+        client = _make_client()
+        response = MagicMock()
+        response.success = True
+        response.result = json.dumps(hex(21_000_000))  # "0x1406f40"
+        client._rpc_stub.Call.return_value = response
+
+        assert client.block_number("base") == 21_000_000
+        req = client._rpc_stub.Call.call_args[0][0]
+        assert req.method == "eth_blockNumber"
+        assert req.chain == "base"
+        # default: no explicit timeout -> falls back to the client's configured timeout
+        assert client._rpc_stub.Call.call_args[1]["timeout"] == 10.0
+
+    def test_explicit_timeout_bounds_the_rpc_call(self):
+        """VIB-3350 (CodeRabbit): the confirmation-wait poll passes its remaining
+        budget so one stalled eth_blockNumber cannot outlive the caller deadline."""
+        client = _make_client()
+        response = MagicMock()
+        response.success = True
+        response.result = json.dumps(hex(21_000_000))
+        client._rpc_stub.Call.return_value = response
+
+        assert client.block_number("base", timeout=0.25) == 21_000_000
+        assert client._rpc_stub.Call.call_args[1]["timeout"] == 0.25
+
+    def test_accepts_plain_int_result(self):
+        """A non-string numeric result is coerced to int (defensive)."""
+        client = _make_client()
+        response = MagicMock()
+        response.success = True
+        response.result = json.dumps(123)
+        client._rpc_stub.Call.return_value = response
+
+        assert client.block_number("base") == 123
+
+    def test_returns_none_when_not_connected(self):
+        config = GatewayClientConfig(host="localhost", port=50051, timeout=10.0)
+        client = GatewayClient(config)
+        client._rpc_stub = None
+        assert client.block_number("base") is None
+
+    def test_returns_none_on_rpc_failure(self):
+        client = _make_client()
+        response = MagicMock()
+        response.success = False
+        response.error = "boom"
+        client._rpc_stub.Call.return_value = response
+        assert client.block_number("base") is None
+
+    def test_returns_none_on_empty_result(self):
+        client = _make_client()
+        response = MagicMock()
+        response.success = True
+        response.result = ""
+        client._rpc_stub.Call.return_value = response
+        assert client.block_number("base") is None
+
+    def test_returns_none_on_grpc_error(self):
+        client = _make_client()
+        client._rpc_stub.Call.side_effect = grpc.RpcError()
+        assert client.block_number("base") is None
+
+    def test_returns_none_on_malformed_hex(self):
+        """A non-numeric string result fails the int() decode -> None, no crash."""
+        client = _make_client()
+        response = MagicMock()
+        response.success = True
+        response.result = json.dumps("not-a-number")
+        client._rpc_stub.Call.return_value = response
+        assert client.block_number("base") is None

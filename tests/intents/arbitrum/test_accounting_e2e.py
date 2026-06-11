@@ -38,19 +38,16 @@ import pytest
 from eth_utils import keccak, to_hex
 from web3 import Web3
 
+from almanak.connectors.pendle.receipt_parser import EVENT_TOPICS
+from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
 from almanak.framework.accounting.basis import FIFOBasisStore
 from almanak.framework.accounting.models import (
     AccountingConfidence,
     AccountingIdentity,
     LendingAccountingEvent,
     LendingEventType,
-    PendleAccountingEvent,
-    PendleEventType,
 )
 from almanak.framework.accounting.writer import AccountingWriter
-from almanak.framework.state.exceptions import AccountingPersistenceError
-from almanak.connectors.pendle.receipt_parser import EVENT_TOPICS, PendleReceiptParser
-from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import (
     BorrowIntent,
@@ -58,8 +55,6 @@ from almanak.framework.intents import (
     LPCloseIntent,
     LPOpenIntent,
     RepayIntent,
-    SwapIntent,
-    WithdrawIntent,
 )
 from almanak.framework.intents.vocabulary import IntentType
 from almanak.framework.observability.pnl_attributor import (
@@ -69,9 +64,9 @@ from almanak.framework.observability.pnl_attributor import (
 from almanak.framework.observability.position_events import PositionEvent, PositionEventType, PositionType
 from almanak.framework.portfolio.models import PortfolioSnapshot
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
+from almanak.framework.state.exceptions import AccountingPersistenceError
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
-    TEST_PRIVATE_KEY,
     TEST_WALLET,
     get_token_balance,
     get_token_decimals,
@@ -172,18 +167,18 @@ class TestAccountingModels:
             asset="USDC",
             collateral_value_before_usd=Decimal("10000"),
             collateral_value_after_usd=Decimal("10000"),
-            debt_value_before_usd=Decimal("0"),      # measured zero — actual 0 debt before borrow
+            debt_value_before_usd=Decimal("0"),  # measured zero — actual 0 debt before borrow
             debt_value_after_usd=Decimal("5000"),
             net_equity_before_usd=Decimal("10000"),
             net_equity_after_usd=Decimal("5000"),
-            health_factor_before=None,               # unavailable — HF not fetched before action
+            health_factor_before=None,  # unavailable — HF not fetched before action
             health_factor_after=Decimal("1.85"),
             liquidation_threshold=Decimal("0.915"),
             lltv=Decimal("0.86"),
-            supply_apr_bps=None,                     # unavailable — not a supply action
+            supply_apr_bps=None,  # unavailable — not a supply action
             borrow_apr_bps=842,
             principal_delta_usd=Decimal("5000"),
-            interest_delta_usd=None,                 # unavailable — first borrow, no interest yet
+            interest_delta_usd=None,  # unavailable — first borrow, no interest yet
             gas_usd=Decimal("2.50"),
             confidence=AccountingConfidence.HIGH,
         )
@@ -224,7 +219,7 @@ class TestAccountingModels:
             supply_apr_bps=None,
             borrow_apr_bps=842,
             principal_delta_usd=Decimal("-5000"),
-            interest_delta_usd=Decimal("42.10"),   # measured interest
+            interest_delta_usd=Decimal("42.10"),  # measured interest
             gas_usd=Decimal("1.80"),
             confidence=AccountingConfidence.HIGH,
             schema_version=1,
@@ -329,9 +324,7 @@ class TestAccountingModels:
             )
             await store.save_accounting_event(event2)
 
-            history = await store.get_accounting_history(
-                "deploy-abc", "lending:arbitrum:morpho:0xabc:market1:USDC"
-            )
+            history = await store.get_accounting_history("deploy-abc", "lending:arbitrum:morpho:0xabc:market1:USDC")
             assert len(history) == 2
             assert history[0]["event_type"] == "BORROW"
             assert history[1]["event_type"] == "REPAY"
@@ -544,33 +537,21 @@ class TestPendleTopicHashFix:
         """MintPY corrected hash = keccak256('MintPY(address,address,uint256,uint256)')."""
         expected = to_hex(keccak(text="MintPY(address,address,uint256,uint256)"))
         actual = EVENT_TOPICS["MintPY"]
-        assert actual == expected, (
-            f"MintPY hash mismatch.\n"
-            f"  In file: {actual}\n"
-            f"  Expected: {expected}"
-        )
+        assert actual == expected, f"MintPY hash mismatch.\n  In file: {actual}\n  Expected: {expected}"
 
     @pytest.mark.intent(IntentType.LP_OPEN)
     def test_corrected_mintsy_hash_matches_abi(self):  # noqa: layers
         """MintSY corrected hash = keccak256('Deposit(address,address,address,uint256,uint256)')."""
         expected = to_hex(keccak(text="Deposit(address,address,address,uint256,uint256)"))
         actual = EVENT_TOPICS["MintSY"]
-        assert actual == expected, (
-            f"MintSY hash mismatch.\n"
-            f"  In file: {actual}\n"
-            f"  Expected: {expected}"
-        )
+        assert actual == expected, f"MintSY hash mismatch.\n  In file: {actual}\n  Expected: {expected}"
 
     @pytest.mark.intent(IntentType.LP_CLOSE)
     def test_corrected_redeemsy_hash_matches_abi(self):  # noqa: layers
         """RedeemSY corrected hash = keccak256('Redeem(address,address,address,uint256,uint256)')."""
         expected = to_hex(keccak(text="Redeem(address,address,address,uint256,uint256)"))
         actual = EVENT_TOPICS["RedeemSY"]
-        assert actual == expected, (
-            f"RedeemSY hash mismatch.\n"
-            f"  In file: {actual}\n"
-            f"  Expected: {expected}"
-        )
+        assert actual == expected, f"RedeemSY hash mismatch.\n  In file: {actual}\n  Expected: {expected}"
 
     @pytest.mark.intent(IntentType.SWAP)
     def test_swap_mint_burn_transfer_unchanged_and_correct(self):  # noqa: layers
@@ -781,9 +762,7 @@ class TestLPAccountingE2E:
                 "price0 is None in entry_state — IL will be permanently null for this position. "
                 "This proves VIB-3420 (IL null on first iteration) is NOT fixed."
             )
-            assert entry_state.get("price1") is not None, (
-                "price1 is None in entry_state — same as above."
-            )
+            assert entry_state.get("price1") is not None, "price1 is None in entry_state — same as above."
 
             # Amounts must also be present
             assert entry_state.get("amount0") is not None and entry_state["amount0"] != "0"
@@ -901,10 +880,7 @@ class TestLPAccountingE2E:
                 token1=token1_addr,
                 amount0=actual_open_amount0,
                 amount1=actual_open_amount1,
-                value_usd=str(
-                    Decimal(actual_open_amount0) * weth_price
-                    + Decimal(actual_open_amount1) * usdc_price
-                ),
+                value_usd=str(Decimal(actual_open_amount0) * weth_price + Decimal(actual_open_amount1) * usdc_price),
                 tx_hash=open_exec.transaction_results[0].tx_hash or "0x",
                 gas_usd=open_gas_usd,
                 attribution_json="{}",
@@ -945,9 +921,7 @@ class TestLPAccountingE2E:
             close_amount0 = str(Decimal(max(raw_delta0, 0)) / Decimal(10**token0_dec))
             close_amount1 = str(Decimal(max(raw_delta1, 0)) / Decimal(10**token1_dec))
             close_gas_usd = "1.80"
-            close_value_usd = str(
-                Decimal(close_amount0) * weth_price + Decimal(close_amount1) * usdc_price
-            )
+            close_value_usd = str(Decimal(close_amount0) * weth_price + Decimal(close_amount1) * usdc_price)
 
             close_event = PositionEvent(
                 id=str(uuid.uuid4()),
@@ -1011,9 +985,7 @@ class TestLPAccountingE2E:
             assert attribution.get("principal_recovered_usd") is not None, (
                 "principal_recovered_usd is None — close value not captured"
             )
-            assert attribution.get("net_pnl_usd") is not None, (
-                "net_pnl_usd is None — PnL not computable"
-            )
+            assert attribution.get("net_pnl_usd") is not None, "net_pnl_usd is None — PnL not computable"
             assert attribution.get("gas_usd") is not None, "gas_usd must be present"
 
             # IL: should be non-None because we seeded a snapshot with prices
@@ -1090,7 +1062,7 @@ class TestLendingAccountingE2E:
                 pytest.skip(f"Token addresses not found for {collateral_token}/{loan_token}")
 
             supply_amount = Decimal("0.01")  # small wstETH collateral
-            borrow_amount = Decimal("10")    # small USDC borrow
+            borrow_amount = Decimal("10")  # small USDC borrow
 
             supply_price = price_oracle.get(collateral_token.upper(), Decimal("3500"))
             supply_usd = supply_amount * supply_price
@@ -1113,6 +1085,7 @@ class TestLendingAccountingE2E:
 
             # === SUPPLY ===
             from almanak.framework.intents import SupplyIntent
+
             supply_intent = SupplyIntent(
                 protocol="morpho_blue",
                 chain=CHAIN_NAME,
@@ -1293,14 +1266,14 @@ class TestLendingAccountingE2E:
                 debt_value_after_usd=Decimal("10000"),
                 net_equity_before_usd=Decimal("35000"),
                 net_equity_after_usd=Decimal("25000"),
-                health_factor_before=None,   # not yet fetched before action
-                health_factor_after=Decimal("3.20"),   # fetched after borrow via VIB-3418
+                health_factor_before=None,  # not yet fetched before action
+                health_factor_after=Decimal("3.20"),  # fetched after borrow via VIB-3418
                 liquidation_threshold=Decimal("0.915"),
                 lltv=Decimal("0.86"),
                 supply_apr_bps=None,
-                borrow_apr_bps=712,          # fetched from adapter at execution time
+                borrow_apr_bps=712,  # fetched from adapter at execution time
                 principal_delta_usd=Decimal("10000"),
-                interest_delta_usd=None,     # first borrow — no interest yet
+                interest_delta_usd=None,  # first borrow — no interest yet
                 gas_usd=Decimal("3.20"),
                 confidence=AccountingConfidence.HIGH,
             )
@@ -1462,8 +1435,8 @@ class TestLendingAccountingVIB3418:
         """Swap intents must be silently skipped."""
         from types import SimpleNamespace
 
-        from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
         from almanak.framework.accounting.basis import FIFOBasisStore
+        from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
         from almanak.framework.intents.vocabulary import IntentType
 
         intent = SimpleNamespace(intent_type=IntentType.SWAP)
@@ -1672,7 +1645,7 @@ class TestLendingAccountingVIB3418:
         from almanak.framework.accounting.lending_accounting import _decode_word
 
         collateral_raw = 100_000_000_000  # $1000
-        debt_raw = 50_000_000_000         # $500
+        debt_raw = 50_000_000_000  # $500
         liq_threshold = 8500
         hf_raw = 1_500_000_000_000_000_000  # 1.5 * 1e18
 
@@ -1680,12 +1653,12 @@ class TestLendingAccountingVIB3418:
             return format(val, "064x")
 
         hex_data = (
-            _word(collateral_raw)   # [0]
-            + _word(debt_raw)       # [1]
-            + _word(0)              # [2] availableBorrows (unused)
+            _word(collateral_raw)  # [0]
+            + _word(debt_raw)  # [1]
+            + _word(0)  # [2] availableBorrows (unused)
             + _word(liq_threshold)  # [3]
-            + _word(8000)           # [4] ltv (unused)
-            + _word(hf_raw)         # [5]
+            + _word(8000)  # [4] ltv (unused)
+            + _word(hf_raw)  # [5]
         )
 
         assert len(hex_data) == 384, f"Expected 384 hex chars, got {len(hex_data)}"
@@ -1722,8 +1695,7 @@ class TestLendingAccountingVIB3418:
 
         expected = "0x" + keccak(text="getUserAccountData(address)").hex()[:8]
         assert _AAVE_GET_ACCOUNT_DATA_SELECTOR == expected, (
-            f"Selector mismatch: stored={_AAVE_GET_ACCOUNT_DATA_SELECTOR}, "
-            f"computed={expected}"
+            f"Selector mismatch: stored={_AAVE_GET_ACCOUNT_DATA_SELECTOR}, computed={expected}"
         )
 
     @pytest.mark.intent(IntentType.SUPPLY, IntentType.BORROW)
@@ -1814,18 +1786,14 @@ class TestLendingAccountingVIB3418:
         )
 
         assert state.collateral_usd > Decimal("0"), (
-            f"collateral_usd must be >$0 after supplying 1000 USDC. "
-            f"Got: {state.collateral_usd}"
+            f"collateral_usd must be >$0 after supplying 1000 USDC. Got: {state.collateral_usd}"
         )
-        assert state.debt_usd == Decimal("0"), (
-            f"debt_usd must be $0 (no borrows yet). Got: {state.debt_usd}"
-        )
+        assert state.debt_usd == Decimal("0"), f"debt_usd must be $0 (no borrows yet). Got: {state.debt_usd}"
         assert state.health_factor >= Decimal("999"), (
             f"health_factor must be capped at max (no debt). Got: {state.health_factor}"
         )
         assert 6000 <= state.liquidation_threshold_bps <= 9500, (
-            f"USDC liquidation threshold must be in Aave V3 range [60%,95%]. "
-            f"Got: {state.liquidation_threshold_bps} bps"
+            f"USDC liquidation threshold must be in Aave V3 range [60%,95%]. Got: {state.liquidation_threshold_bps} bps"
         )
 
         # USDC is ~$1 — collateral should be close to $1000
@@ -1876,16 +1844,12 @@ class TestLendingAccountingVIB3418:
         from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 
         USDC = CHAIN_CONFIG["tokens"]["USDC"]
-        borrow_principal = Decimal("200")    # 200 USDC principal
-        repay_total = Decimal("200.5")       # 200.5 USDC = principal + 0.5 interest
+        borrow_principal = Decimal("200")  # 200 USDC principal
+        repay_total = Decimal("200.5")  # 200.5 USDC = principal + 0.5 interest
 
         # ── USDC supply to create real Aave V3 state ──────────────────────────
-        compiler = IntentCompiler(
-            chain=CHAIN_NAME, wallet_address=funded_wallet, price_oracle=price_oracle
-        )
-        supply_intent = SupplyIntent(
-            protocol="aave_v3", token="USDC", amount=Decimal("500"), chain=CHAIN_NAME
-        )
+        compiler = IntentCompiler(chain=CHAIN_NAME, wallet_address=funded_wallet, price_oracle=price_oracle)
+        supply_intent = SupplyIntent(protocol="aave_v3", token="USDC", amount=Decimal("500"), chain=CHAIN_NAME)
         supply_compile = compiler.compile(supply_intent)
         assert supply_compile.status.value == "SUCCESS"
         supply_exec = await orchestrator.execute(supply_compile.action_bundle)
@@ -1915,7 +1879,7 @@ class TestLendingAccountingVIB3418:
         SYNTHETIC_BORROW_RATE_RAY = 50_000_000_000_000_000_000_000_000
         borrow_result = self._make_result(
             "BORROW",
-            raw_amount=200_000_000,       # 200 USDC in 6-decimal units
+            raw_amount=200_000_000,  # 200 USDC in 6-decimal units
             borrow_rate=SYNTHETIC_BORROW_RATE_RAY,
             tx_hash="0xsimulated_borrow_" + "0" * 24,
         )
@@ -1955,9 +1919,7 @@ class TestLendingAccountingVIB3418:
         )
         print(f"[GAP-3 CLOSED] borrow_apr_bps = {borrow_event.borrow_apr_bps}")
         # principal_delta_usd should be ~$200 (200 USDC at $1)
-        assert borrow_event.principal_delta_usd is not None, (
-            "principal_delta_usd must be populated for BORROW"
-        )
+        assert borrow_event.principal_delta_usd is not None, "principal_delta_usd must be populated for BORROW"
         assert abs(borrow_event.principal_delta_usd - Decimal("200")) < Decimal("1"), (
             f"principal_delta_usd should be ~$200. Got: {borrow_event.principal_delta_usd}"
         )
@@ -1966,7 +1928,7 @@ class TestLendingAccountingVIB3418:
         repay_intent = self._make_intent("REPAY", protocol="aave_v3", asset="USDC")
         repay_result = self._make_result(
             "REPAY",
-            raw_amount=200_500_000,       # 200.5 USDC in 6-decimal units
+            raw_amount=200_500_000,  # 200.5 USDC in 6-decimal units
             tx_hash="0xsimulated_repay_" + "0" * 24,
         )
 
@@ -2138,7 +2100,9 @@ class TestPositionPnLVIB3424:
 
         events = [
             self._event_row("BORROW", principal_usd="200.00", ts="2026-01-01T00:00:00+00:00", ledger_id="led-b"),
-            self._event_row("REPAY", principal_usd="200.00", interest_usd="0.75", ts="2026-01-02T00:00:00+00:00", ledger_id="led-r"),
+            self._event_row(
+                "REPAY", principal_usd="200.00", interest_usd="0.75", ts="2026-01-02T00:00:00+00:00", ledger_id="led-r"
+            ),
         ]
         pnl = compute_position_pnl(events)
         assert pnl is not None
@@ -2161,9 +2125,7 @@ class TestPositionPnLVIB3424:
         ]
         pnl = compute_position_pnl(events)
         assert pnl is not None
-        assert pnl.realized_pnl_usd == Decimal("0"), (
-            "realized_pnl must stay 0 when interest_delta_usd is UNAVAILABLE"
-        )
+        assert pnl.realized_pnl_usd == Decimal("0"), "realized_pnl must stay 0 when interest_delta_usd is UNAVAILABLE"
 
     @pytest.mark.intent(IntentType.BORROW, IntentType.REPAY)
     def test_repay_positive_magnitude_reduces_cost_basis(self):  # noqa: layers
@@ -2188,8 +2150,13 @@ class TestPositionPnLVIB3424:
         from almanak.framework.accounting.position_pnl import compute_position_pnl
 
         events = [
-            {"id": "x", "event_type": "SUPPLY", "timestamp": "2026-01-01T00:00:00+00:00",
-             "ledger_entry_id": "led-1", "payload_json": "{bad json"},
+            {
+                "id": "x",
+                "event_type": "SUPPLY",
+                "timestamp": "2026-01-01T00:00:00+00:00",
+                "ledger_entry_id": "led-1",
+                "payload_json": "{bad json",
+            },
             self._event_row("SUPPLY", principal_usd="500.00", ts="2026-01-02T00:00:00+00:00"),
         ]
         pnl = compute_position_pnl(events)
@@ -2200,8 +2167,7 @@ class TestPositionPnLVIB3424:
 
     @pytest.mark.intent(IntentType.SUPPLY)
     def test_try_derive_lending_position_key_supply(self):  # noqa: layers
-        from almanak.framework.teardown.models import PositionType
-        from almanak.framework.teardown.models import PositionInfo
+        from almanak.framework.teardown.models import PositionInfo, PositionType
         from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
         p = PositionInfo(
@@ -2220,8 +2186,7 @@ class TestPositionPnLVIB3424:
 
     @pytest.mark.intent(IntentType.SUPPLY)
     def test_try_derive_lending_position_key_with_market_id(self):  # noqa: layers
-        from almanak.framework.teardown.models import PositionType
-        from almanak.framework.teardown.models import PositionInfo
+        from almanak.framework.teardown.models import PositionInfo, PositionType
         from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
         p = PositionInfo(
@@ -2242,8 +2207,7 @@ class TestPositionPnLVIB3424:
     @pytest.mark.intent(IntentType.LP_OPEN)
     def test_try_derive_lending_position_key_lp_returns_none(self):  # noqa: layers
         """LP position type must return None — only lending types are supported."""
-        from almanak.framework.teardown.models import PositionType
-        from almanak.framework.teardown.models import PositionInfo
+        from almanak.framework.teardown.models import PositionInfo, PositionType
         from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
         p = PositionInfo(
@@ -2258,8 +2222,7 @@ class TestPositionPnLVIB3424:
 
     @pytest.mark.intent(IntentType.SUPPLY)
     def test_try_derive_lending_position_key_missing_asset_returns_none(self):  # noqa: layers
-        from almanak.framework.teardown.models import PositionType
-        from almanak.framework.teardown.models import PositionInfo
+        from almanak.framework.teardown.models import PositionInfo, PositionType
         from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
         p = PositionInfo(
@@ -2355,9 +2318,8 @@ class TestPositionPnLVIB3424:
         are populated on the PositionValue built by _enrich_position_pnl.
         """
         from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
-        from almanak.framework.teardown.models import PositionType
         from almanak.framework.portfolio.models import PositionValue
-        from almanak.framework.teardown.models import PositionInfo
+        from almanak.framework.teardown.models import PositionInfo, PositionType
         from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
         f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -2451,9 +2413,7 @@ class TestPositionPnLVIB3424:
             assert p_value.unrealized_pnl_usd == Decimal("10"), (
                 f"unrealized_pnl_usd = value($760) - cost_basis($750) = $10. Got: {p_value.unrealized_pnl_usd}"
             )
-            assert p_value.realized_pnl_usd == Decimal("0"), (
-                "No REPAY events → realized_pnl must be 0"
-            )
+            assert p_value.realized_pnl_usd == Decimal("0"), "No REPAY events → realized_pnl must be 0"
             assert p_value.entry_timestamp != "", "entry_timestamp must be populated"
             assert p_value.last_update_timestamp != "", "last_update_timestamp must be populated"
 
@@ -2468,9 +2428,8 @@ class TestPositionPnLVIB3424:
     @pytest.mark.intent(IntentType.SUPPLY)
     def test_enrich_position_pnl_no_store_is_noop(self):  # noqa: layers
         """_enrich_position_pnl must silently skip when no accounting store is set."""
-        from almanak.framework.teardown.models import PositionType
         from almanak.framework.portfolio.models import PositionValue
-        from almanak.framework.teardown.models import PositionInfo
+        from almanak.framework.teardown.models import PositionInfo, PositionType
         from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
         p_info = PositionInfo(
@@ -2513,7 +2472,6 @@ class TestPositionPnLVIB3424:
           correct:   unrealized_pnl = -104 + 100 = -4   (the $4 accrued interest cost)
           wrong (old): unrealized_pnl = -104 - 100 = -204  (double-counts principal)
         """
-        from almanak.framework.accounting.position_pnl import compute_position_pnl
         from almanak.framework.portfolio.models import PositionValue
         from almanak.framework.teardown.models import PositionInfo, PositionType
         from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
@@ -2570,12 +2528,13 @@ class TestPositionPnLVIB3424:
         Both positions share the same accounting position_key. The fix filters events
         by relevant event types before computing the summary for each side.
         """
+        from types import SimpleNamespace
+
         from almanak.framework.accounting.lending_accounting import build_lending_accounting_event
+        from almanak.framework.intents.vocabulary import IntentType
         from almanak.framework.portfolio.models import PositionValue
         from almanak.framework.teardown.models import PositionInfo, PositionType
         from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
-        from types import SimpleNamespace
-        from almanak.framework.intents.vocabulary import IntentType
 
         f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         f.close()
@@ -2594,20 +2553,27 @@ class TestPositionPnLVIB3424:
 
             # Write a SUPPLY event (500 USDC supplied)
             supply_intent = SimpleNamespace(
-                intent_type=IntentType.SUPPLY, protocol=protocol,
-                token=asset, borrow_token=None, market_id=None,
+                intent_type=IntentType.SUPPLY,
+                protocol=protocol,
+                token=asset,
+                borrow_token=None,
+                market_id=None,
             )
             supply_result = SimpleNamespace(
                 extracted_data={"supply_amount": 500_000_000},
-                tx_hash="0xsupply", gas_cost_eth=None,
+                tx_hash="0xsupply",
+                gas_cost_eth=None,
             )
             supply_ev = build_lending_accounting_event(
                 intent=supply_intent,
                 result=supply_result,
                 deployment_id=deploy_id,
                 cycle_id="c",
-                execution_mode="live", chain=chain, wallet_address=wallet,
-                gateway_client=None, basis_store=basis_store,
+                execution_mode="live",
+                chain=chain,
+                wallet_address=wallet,
+                gateway_client=None,
+                basis_store=basis_store,
                 price_oracle={"USDC": Decimal("1.0")},
             )
             assert supply_ev is not None
@@ -2615,20 +2581,27 @@ class TestPositionPnLVIB3424:
 
             # Write a BORROW event (200 USDC borrowed — same asset, same key)
             borrow_intent = SimpleNamespace(
-                intent_type=IntentType.BORROW, protocol=protocol,
-                token=None, borrow_token=asset, market_id=None,
+                intent_type=IntentType.BORROW,
+                protocol=protocol,
+                token=None,
+                borrow_token=asset,
+                market_id=None,
             )
             borrow_result = SimpleNamespace(
                 extracted_data={"borrow_amount": 200_000_000},
-                tx_hash="0xborrow", gas_cost_eth=None,
+                tx_hash="0xborrow",
+                gas_cost_eth=None,
             )
             borrow_ev = build_lending_accounting_event(
                 intent=borrow_intent,
                 result=borrow_result,
                 deployment_id=deploy_id,
                 cycle_id="c",
-                execution_mode="live", chain=chain, wallet_address=wallet,
-                gateway_client=None, basis_store=basis_store,
+                execution_mode="live",
+                chain=chain,
+                wallet_address=wallet,
+                gateway_client=None,
+                basis_store=basis_store,
                 price_oracle={"USDC": Decimal("1.0")},
             )
             assert borrow_ev is not None
@@ -2644,14 +2617,17 @@ class TestPositionPnLVIB3424:
             supply_p_info = PositionInfo(
                 position_type=PositionType.SUPPLY,
                 position_id="supply_xyz",
-                chain=chain, protocol=protocol,
+                chain=chain,
+                protocol=protocol,
                 value_usd=Decimal("505"),
                 details={"wallet": wallet, "asset": asset},
             )
             supply_p_value = PositionValue(
                 position_type=PositionType.SUPPLY,
-                protocol=protocol, chain=chain,
-                value_usd=Decimal("505"), label="supply",
+                protocol=protocol,
+                chain=chain,
+                value_usd=Decimal("505"),
+                label="supply",
             )
             valuer = PortfolioValuer()
             valuer.set_accounting_context(store, deploy_id)
@@ -2665,14 +2641,17 @@ class TestPositionPnLVIB3424:
             borrow_p_info = PositionInfo(
                 position_type=PositionType.BORROW,
                 position_id="borrow_xyz",
-                chain=chain, protocol=protocol,
+                chain=chain,
+                protocol=protocol,
                 value_usd=Decimal("-202"),  # current debt (slight interest)
                 details={"wallet": wallet, "asset": asset},
             )
             borrow_p_value = PositionValue(
                 position_type=PositionType.BORROW,
-                protocol=protocol, chain=chain,
-                value_usd=Decimal("-202"), label="borrow",
+                protocol=protocol,
+                chain=chain,
+                value_usd=Decimal("-202"),
+                label="borrow",
             )
             valuer._enrich_position_pnl(borrow_p_value, borrow_p_info, chain)
 
@@ -2683,8 +2662,87 @@ class TestPositionPnLVIB3424:
                 f"P1+P2: BORROW unrealized_pnl = -202 + 200 = -$2. Got: {borrow_p_value.unrealized_pnl_usd}"
             )
 
-            print(f"\n[PASS] P2 fix: SUPPLY cost_basis=${supply_p_value.cost_basis_usd}, "
-                  f"BORROW cost_basis=${borrow_p_value.cost_basis_usd} (no cross-contamination)")
+            print(
+                f"\n[PASS] P2 fix: SUPPLY cost_basis=${supply_p_value.cost_basis_usd}, "
+                f"BORROW cost_basis=${borrow_p_value.cost_basis_usd} (no cross-contamination)"
+            )
             print(f"[PASS] P1 fix: BORROW unrealized_pnl=${borrow_p_value.unrealized_pnl_usd}")
         finally:
             os.unlink(db_path)
+
+
+# =============================================================================
+# Section N: VIB-3350 block-anchored balance reads — real Arbitrum Anvil fork
+# =============================================================================
+
+
+class TestBlockAnchoredBalanceReadsOnFork:
+    """PROOF on a real fork: a block-pinned balance read returns HISTORICAL state.
+
+    This is the integration coverage the unit tests (which mock the RPC) cannot
+    give — it exercises the real ``eth_getBalance`` / ``balanceOf`` calls at a
+    pinned ``block_identifier`` end-to-end through ``Web3BalanceProvider``. Anvil
+    cannot reproduce *replica lag* (single RPC), but it directly proves the
+    mechanism the fix relies on: pinning to block N returns the state AT block N
+    even after the chain advances and the balance changes (VIB-3350).
+    """
+
+    @pytest.mark.intent(IntentType.SWAP)
+    @pytest.mark.asyncio
+    async def test_native_pinned_read_is_historical(  # noqa: layers
+        self, web3: Web3, anvil_rpc_url: str, funded_wallet: str
+    ):
+        """A native read pinned to block N is stable after the balance changes.
+
+        Block-anchored read integration test (not a 4-layer intent-flow test):
+        it exercises the gateway/provider block-pinning path on a live fork, not
+        the compile/execute/receipt/delta intent pipeline — hence ``noqa: layers``.
+        """
+        from almanak.gateway.data.balance.web3_provider import Web3BalanceProvider
+
+        provider = Web3BalanceProvider(rpc_url=anvil_rpc_url, wallet_address=funded_wallet, chain=CHAIN_NAME)
+        try:
+            block_n = web3.eth.block_number
+            before = await provider.get_native_balance(block=block_n)
+
+            # Mutate the wallet's native balance on-chain, then mine.
+            new_wei = int(before.raw_balance) + 5 * 10**18
+            web3.provider.make_request("anvil_setBalance", [funded_wallet, hex(new_wei)])  # type: ignore[attr-defined]
+            _mine_blocks(web3, 1)
+
+            latest = await provider.get_native_balance()
+            pinned_again = await provider.get_native_balance(block=block_n)
+
+            # latest reflects the change; the pinned read at block N is HISTORICAL.
+            assert latest.raw_balance == new_wei, "latest must reflect the on-chain change"
+            assert pinned_again.raw_balance == before.raw_balance, (
+                "pinned read at block N must return the historical balance, not latest"
+            )
+            assert latest.raw_balance != before.raw_balance, "sanity: the balance actually changed"
+        finally:
+            await provider.close()
+
+    @pytest.mark.intent(IntentType.SWAP)
+    @pytest.mark.asyncio
+    async def test_erc20_pinned_read_matches_chain_at_block(  # noqa: layers
+        self, web3: Web3, anvil_rpc_url: str, funded_wallet: str
+    ):
+        """A USDC read pinned to the current block matches a direct on-chain
+        ``balanceOf`` — proves the ERC-20 ``balanceOf(block_identifier=N)`` path.
+
+        Block-anchored read integration test (not a 4-layer intent-flow test) —
+        see the sibling native test for why ``noqa: layers`` applies."""
+        from almanak.gateway.data.balance.web3_provider import Web3BalanceProvider
+
+        usdc_addr = (CHAIN_CONFIG.get("tokens", {}).get("USDC") or "").lower()
+        raw_on_chain = get_token_balance(web3, usdc_addr, funded_wallet)
+
+        provider = Web3BalanceProvider(rpc_url=anvil_rpc_url, wallet_address=funded_wallet, chain=CHAIN_NAME)
+        try:
+            block_n = web3.eth.block_number
+            pinned = await provider.get_balance("USDC", block=block_n)
+            assert pinned.raw_balance == raw_on_chain, (
+                f"pinned balanceOf@{block_n} ({pinned.raw_balance}) must match direct read ({raw_on_chain})"
+            )
+        finally:
+            await provider.close()

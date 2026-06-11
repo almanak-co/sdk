@@ -2785,6 +2785,20 @@ def _reconciliation_enforcement_from_env() -> bool:
     return _cli_cfg().reconciliation_enforcement
 
 
+def _reconciliation_confirmation_from_env() -> tuple[int | None, float]:
+    """Return ``(depth, timeout_seconds)`` for the VIB-3350 confirmation-depth
+    wait from the typed CLI-runtime config.
+
+    Depth is ``None`` (wait OFF) unless ``ALMANAK_RECONCILIATION_CONFIRMATION_DEPTH``
+    is set; timeout defaults to 12.0s. Both are validated (and raise loudly) at
+    config-parse time.
+    """
+    from almanak.config import cli_runtime_config_from_env as _cli_cfg
+
+    cfg = _cli_cfg()
+    return cfg.reconciliation_confirmation_depth, cfg.reconciliation_confirmation_timeout_seconds
+
+
 def _build_runner(
     *,
     interval: int,
@@ -2808,12 +2822,15 @@ def _build_runner(
     from ..services.stuck_detector import StuckDetector
 
     # Create runner config
+    _confirmation_depth, _confirmation_timeout = _reconciliation_confirmation_from_env()
     runner_config = RunnerConfig(
         default_interval_seconds=interval,
         dry_run=effective_dry_run,
         enable_state_persistence=True,
         enable_alerting=False,  # No alert manager configured
         reconciliation_enforcement=_reconciliation_enforcement_from_env(),
+        reconciliation_confirmation_depth=_confirmation_depth,
+        reconciliation_confirmation_timeout_seconds=_confirmation_timeout,
     )
 
     # Create safety components for fail-closed execution

@@ -228,6 +228,20 @@ Strategy-process-side flags that govern how the SDK locates state and what guard
 | `ALMANAK_TOKEN_NEGATIVE_CACHE_TTL_S` | TTL (seconds) for the token-resolution negative cache (unknown-token responses). | `300` |
 | `ALMANAK_TOKEN_NEGATIVE_CACHE_MAX` | Max entries in the token-resolution negative cache. | `1000` |
 
+### Post-execution reconciliation
+
+Controls the post-execution balance reconciliation that verifies a confirmed swap's
+on-chain deltas match the intent (VIB-3158 / VIB-3348 / VIB-3350). Reconciliation reads
+are **block-anchored** — the post-execution balance is read as of the confirmed receipt
+block, not unanchored `"latest"` (which a lagging RPC replica could answer with pre-tx
+state, producing a false zero-delta incident on a successful swap).
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ALMANAK_RECONCILIATION_ENFORCEMENT` | When truthy (`1` / `true` / `yes`), a reconciliation incident flips the iteration to failure (circuit breaker + alert). Default is **observation mode** (incidents logged + attached to the result, never blocking) until the block-anchored read work has baked. A *degraded* report (no receipt block, or a post-read that fell back to unpinned `"latest"`) is **never** enforced even when this is on. | `false` |
+| `ALMANAK_RECONCILIATION_CONFIRMATION_DEPTH` | Proactive confirmation-depth wait (blocks) before the block-pinned post-read, so a lagging replica has indexed the receipt block. **Opt-in, default OFF.** Unset / `0` → no wait; a positive int → that many confirmations on every chain; `-1` → the per-chain recommended depth from `ChainDescriptor.reorg_safe_depth` (Ethereum 12, Polygon 10, Avalanche 5; generic-L2 default 3). **Warning:** a depth larger than the strategy cycle interval serializes cycles (Ethereum @ 12 ≈ 2.5 min). A non-integer value fails at boot. | unset (OFF) |
+| `ALMANAK_RECONCILIATION_CONFIRMATION_TIMEOUT_SECONDS` | Upper bound (seconds) on the confirmation-depth wait above; on timeout the read proceeds anyway (still pinned) and the report is flagged unconfirmed. Ignored when the wait is OFF. Must be `> 0`. | `12.0` |
+
 ### Gas cost caps
 
 VIB-4879 made gas-cost caps **chain-safe by default**. The deprecated global `ALMANAK_MAX_GAS_PRICE_GWEI` is the wrong unit for multi-chain (gwei is per-chain — see the [Migration](#migration-vib-4879) note below).

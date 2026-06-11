@@ -542,6 +542,48 @@ class TestSingleChainHandleSuccess:
             result = await runner._single_chain_handle_success(state)
         assert result.status == IterationStatus.RECONCILIATION_FAILED
 
+    @pytest.mark.asyncio
+    async def test_degraded_recon_incident_is_not_enforced(self) -> None:
+        """VIB-3350 (H1): an incident on a DEGRADED report must NOT be enforced
+        even with enforcement ON — an unpinned/no-receipt read cannot tell a real
+        breach from the lagging-read race, so halting would punish a healthy
+        strategy. It passes through to SUCCESS (logged loudly), handler not called.
+        """
+        runner = _make_runner(reconciliation_enforcement=True)
+        runner._emit_execution_timeline_event = MagicMock()
+        runner._write_ledger_entry = AsyncMock()
+        runner._reconcile_post_execution_balances = AsyncMock(
+            return_value={"incident": True, "breach": 1000, "reconciliation_degraded": True}
+        )
+        runner._format_reconciliation_error = MagicMock(return_value="recon failure (degraded)")
+        runner._handle_execution_error = AsyncMock()
+        # Spy: the enforcement finalizer must NOT be called for a degraded incident.
+        runner._single_chain_handle_recon_incident = AsyncMock()  # type: ignore[method-assign]
+
+        strategy = _make_strategy()
+        intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("100"))
+        state = _make_state(strategy, intent=intent)
+        state.state_machine = MagicMock()
+        state.state_machine.retry_count = 0
+        state.last_execution_result = ExecutionResult(
+            success=True, phase=ExecutionPhase.COMPLETE, completed_at=datetime.now(UTC)
+        )
+        state.last_execution_context = ExecutionContext(deployment_id=strategy.deployment_id)
+
+        with patch("almanak.framework.runner.strategy_runner.ResultEnricher") as MockEnricher:
+            MockEnricher.return_value.enrich.return_value = state.last_execution_result
+            result = await runner._single_chain_handle_success(state)
+
+        assert result.status == IterationStatus.SUCCESS
+        runner._single_chain_handle_recon_incident.assert_not_called()
+        # The degraded incident is NOT enforced, but it MUST remain observable on
+        # the result so dashboards/logs still surface it (degraded != silent).
+        assert result.balance_reconciliation == {
+            "incident": True,
+            "breach": 1000,
+            "reconciliation_degraded": True,
+        }
+
 
 # =============================================================================
 # _single_chain_handle_failure

@@ -456,6 +456,14 @@ class ChainDescriptor:
             hence top-level, not AnvilProfile. Empty tuple == no variants
             (legacy ``.get(chain, ())`` miss; absence is load-bearing —
             VIB-3814). VIB-4851 (CS-6).
+        reorg_safe_depth: Number of block confirmations past a tx's receipt
+            block after which that block is unlikely to be re-orged away on
+            this chain — i.e. how far the chain head should advance before a
+            block-pinned reconciliation read is safe against a lagging replica
+            (VIB-3350). ``None`` means "use the framework default" (generic L2,
+            3 blocks). Chains with deeper reorg windows override it (Ethereum
+            12, Polygon 10, Avalanche 5). This is chain physics, owned by the
+            descriptor, not hardcoded in framework code (blueprint 22).
         aliases: Extra alternative names that resolve to this chain
             (e.g. ``("bnb", "binance")`` for BSC). The canonical ``name``
             is always implicit and need not be repeated here.
@@ -477,6 +485,7 @@ class ChainDescriptor:
     contracts: Mapping[str, str] | None = None
     anvil: AnvilProfile = field(default_factory=AnvilProfile)
     bridged_stablecoin_variants: tuple[str, ...] = ()
+    reorg_safe_depth: int | None = None
     aliases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -486,6 +495,14 @@ class ChainDescriptor:
             raise ValueError(
                 f"ChainDescriptor.name {self.name!r} must equal enum name "
                 f"{self.enum.name.lower()!r} (enum: {self.enum.name})"
+            )
+        # VIB-3350: a confirmation depth is a non-negative block count. A negative
+        # value would make ``receipt_block + depth`` nonsensical and the
+        # confirmation-wait would treat the target as trivially already-reached.
+        # Fail loudly at registration like the sibling field validations.
+        if self.reorg_safe_depth is not None and self.reorg_safe_depth < 0:
+            raise ValueError(
+                f"ChainDescriptor {self.name!r} reorg_safe_depth must be non-negative, got {self.reorg_safe_depth}"
             )
         # Freeze the optional tokens mapping the same way GasProfile freezes
         # its operation_overrides — wrap a defensive snapshot in

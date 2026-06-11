@@ -350,6 +350,22 @@ class CliRuntimeConfig(BaseModel):
     ``1``, ``true``, ``yes`` (case-insensitive, whitespace-tolerant).
     """
 
+    reconciliation_confirmation_depth: int | None = None
+    """VIB-3350 proactive confirmation-depth wait before the block-pinned
+    reconciliation post-read (``ALMANAK_RECONCILIATION_CONFIRMATION_DEPTH``).
+
+    Opt-in, default OFF. ``None`` (unset) / ``0`` → no wait; a positive int →
+    that many confirmations on every chain; ``-1`` → the per-chain recommended
+    depth from ``ChainDescriptor.reorg_safe_depth``. A non-integer value raises
+    at boot rather than silently disabling the wait.
+    """
+
+    reconciliation_confirmation_timeout_seconds: float = 12.0
+    """Upper bound (seconds) on the confirmation-depth wait above
+    (``ALMANAK_RECONCILIATION_CONFIRMATION_TIMEOUT_SECONDS``). Ignored when the
+    wait is OFF. Must be > 0; a non-positive / malformed value raises at boot.
+    """
+
     allow_hardcoded_prices: bool = False
     """Whether paper-trading accepts hardcoded prices for tokens
     without price feeds (``ALMANAK_ALLOW_HARDCODED_PRICES``).
@@ -416,6 +432,10 @@ def cli_runtime_config_from_env(
       surface immediately (PR #2152 review).
     * ``ALMANAK_RECONCILIATION_ENFORCEMENT`` → ``reconciliation_enforcement``
       (truthy ladder).
+    * ``ALMANAK_RECONCILIATION_CONFIRMATION_DEPTH`` →
+      ``reconciliation_confirmation_depth`` (signed int; ``None`` when unset).
+    * ``ALMANAK_RECONCILIATION_CONFIRMATION_TIMEOUT_SECONDS`` →
+      ``reconciliation_confirmation_timeout_seconds`` (positive float; default 12.0).
     * ``ALMANAK_ALLOW_HARDCODED_PRICES`` → ``allow_hardcoded_prices``
       (``"1"`` only, mirrors the legacy callsite).
     * ``CI`` → ``is_ci`` (any non-empty value).
@@ -488,6 +508,17 @@ def cli_runtime_config_from_env(
         ),
         "anvil_ports": anvil_ports,
         "reconciliation_enforcement": _parse_truthy(os.environ.get("ALMANAK_RECONCILIATION_ENFORCEMENT")),
+        "reconciliation_confirmation_depth": _parse_optional_signed_int(
+            "ALMANAK_RECONCILIATION_CONFIRMATION_DEPTH",
+            os.environ.get("ALMANAK_RECONCILIATION_CONFIRMATION_DEPTH"),
+        ),
+        "reconciliation_confirmation_timeout_seconds": (
+            _parse_optional_positive_float_or_none(
+                "ALMANAK_RECONCILIATION_CONFIRMATION_TIMEOUT_SECONDS",
+                os.environ.get("ALMANAK_RECONCILIATION_CONFIRMATION_TIMEOUT_SECONDS"),
+            )
+            or 12.0
+        ),
         # Legacy callsite tested ``== "1"`` exactly — preserve that strictness.
         "allow_hardcoded_prices": (os.environ.get("ALMANAK_ALLOW_HARDCODED_PRICES") or "").strip() == "1",
         "is_ci": bool(os.environ.get("CI")),
@@ -518,6 +549,30 @@ def _require_int_env(env_var: str, raw: str) -> int:
         return int(raw.strip())
     except ValueError as exc:
         raise ValueError(f"Invalid integer for env var {env_var}={raw!r}: must be an integer port number") from exc
+
+
+def _parse_optional_signed_int(env_var: str, value: str | None) -> int | None:
+    """Parse an optional signed int env value for ``reconciliation_confirmation_depth``.
+
+    ``None`` for missing/whitespace; raise loudly on malformed (VIB-3350: a
+    misconfigured confirmation depth must fail at boot, not silently disable the
+    wait). The only valid negative value is ``-1`` — the "use per-chain
+    descriptor depth" sentinel; other negatives (``-2``, ``-999``, …) are
+    nonsensical for a confirmation depth and are rejected rather than silently
+    coerced to the sentinel's behaviour.
+    """
+    if value is None or not value.strip():
+        return None
+    try:
+        parsed = int(value.strip())
+    except ValueError as exc:
+        raise ValueError(f"Invalid integer for env var {env_var}={value!r}") from exc
+    if parsed < -1:
+        raise ValueError(
+            f"Invalid value for env var {env_var}={value!r}: the only valid negative value "
+            "is -1 (the 'use per-chain descriptor depth' sentinel)."
+        )
+    return parsed
 
 
 def _require_float_env(env_var: str, raw: str) -> float:

@@ -108,7 +108,9 @@ class GatewayBalanceProvider(BalanceProvider):
         """Get the chain name."""
         return self._chain
 
-    async def get_balance(self, token: str, *, force_refresh: bool = False) -> BalanceResult:
+    async def get_balance(
+        self, token: str, *, force_refresh: bool = False, as_of_block: int | None = None
+    ) -> BalanceResult:
         """Get token balance from gateway with retry and cached fallback.
 
         On transient RPC errors (rate-limit 429, timeouts, connection errors)
@@ -119,6 +121,12 @@ class GatewayBalanceProvider(BalanceProvider):
             token: Token symbol (e.g., "WETH", "USDC")
             force_refresh: Ask the gateway to bypass its server-side balance
                 cache. Use for read-after-write checks such as reconciliation.
+            as_of_block: VIB-3350. When set (> 0), read the balance AS OF that
+                block instead of "latest". Used by reconciliation post-reads so
+                the delta observes the just-landed tx and is not served pre-tx
+                state by a lagging RPC/replica. Pinned reads bypass the local
+                stale-fallback cache entirely (they are not written to it, and
+                do not fall back to it on error — correctness over availability).
 
         Returns:
             BalanceResult with balance in human-readable units.
@@ -129,6 +137,10 @@ class GatewayBalanceProvider(BalanceProvider):
         """
         from almanak.framework.data.interfaces import DataSourceUnavailable
 
+        pinned = as_of_block is not None and as_of_block > 0
+        # Narrow to int for the proto field (block_tag=0 ≡ "latest"). The inline
+        # check (not the `pinned` local) is what lets mypy prove non-None here.
+        block_tag = as_of_block if (as_of_block is not None and as_of_block > 0) else 0
         last_error: Exception | None = None
 
         for attempt in range(_MAX_RETRIES):
@@ -138,8 +150,32 @@ class GatewayBalanceProvider(BalanceProvider):
                     chain=self._chain,
                     wallet_address=self._wallet_address,
                     force_refresh=force_refresh,
+                    block_tag=block_tag,
                 )
                 response = self._client.market.GetBalance(request, timeout=self._timeout)
+
+                # VIB-3350 (audit I2 + Codex follow-up): close the read-after-write
+                # loop the response.block_number field exists for. On a pinned read
+                # the gateway MUST echo the EXACT requested block. The SDK and
+                # gateway ship together (no backward compat — version-pinned per
+                # the PRD), so a co-shipped gateway always echoes `block_tag`.
+                # Anything else — a different block, OR 0 (the gateway ignored
+                # block_tag / a legacy gateway that does not populate the field) —
+                # means the read was NOT proven to be pinned. Reject it as a failed
+                # pinned read (non-retryable) so the runner degrades the report
+                # rather than treat an unverified/unpinned "latest" as a clean pin.
+                if pinned and response.block_number != as_of_block:
+                    logger.warning(
+                        "Pinned balance read for %s requested block %s but gateway echoed block %s "
+                        "(0 = pin not honored); rejecting as a failed pinned read.",
+                        token,
+                        as_of_block,
+                        response.block_number,
+                    )
+                    raise DataSourceUnavailable(
+                        source="gateway",
+                        reason=f"pinned-read not honored: requested {as_of_block}, gateway echoed {response.block_number}",
+                    )
 
                 result = BalanceResult(
                     balance=Decimal(response.balance) if response.balance else Decimal(0),
@@ -153,8 +189,11 @@ class GatewayBalanceProvider(BalanceProvider):
                     stale=response.stale,
                 )
 
-                # Cache the successful result
-                self._cache[token] = (result, time.monotonic())
+                # Cache the successful result -- but NOT for block-pinned reads,
+                # which are historical/immutable and must never poison the
+                # "latest" stale-fallback cache.
+                if not pinned:
+                    self._cache[token] = (result, time.monotonic())
 
                 return result
 
@@ -184,7 +223,9 @@ class GatewayBalanceProvider(BalanceProvider):
             raise DataSourceUnavailable(source="gateway", reason="unknown error after retry loop")
         error_msg = str(last_error)
 
-        cached_result = self._get_cached(token)
+        # VIB-3350: pinned reads must be correct at the requested block or fail
+        # loudly so the caller degrades -- never fall back to a stale "latest".
+        cached_result = None if pinned else self._get_cached(token)
         if cached_result is not None:
             from dataclasses import replace
 
@@ -219,6 +260,23 @@ class GatewayBalanceProvider(BalanceProvider):
         # longer fall back to "ETH" but request their real native (VIB-4851 A1).
         native_token = native_token_for_chain(self._chain)
         return await self.get_balance(native_token)
+
+    async def get_block_number(self, timeout: float | None = None) -> int | None:
+        """Return the current chain head block number via the gateway.
+
+        VIB-3350: the reconciliation confirmation-depth wait polls this to learn
+        how far the chain has advanced past the receipt block before issuing a
+        block-pinned post-read. Returns ``None`` on any failure so the caller
+        treats an unavailable head as "cannot confirm" (and never blocks
+        forever). The gRPC call is synchronous on the stub; offload it to a
+        thread so the runner's event loop is not blocked while polling.
+
+        ``timeout`` bounds the underlying ``eth_blockNumber`` gRPC call: the
+        polling loop passes its remaining wait budget so one stalled RPC cannot
+        outlive the caller's deadline (the loop only checks the deadline between
+        polls, so an unbounded call would otherwise hang past it).
+        """
+        return await asyncio.to_thread(self._client.block_number, self._chain, timeout=timeout)
 
     def _get_cached(self, token: str) -> BalanceResult | None:
         """Return a cached balance if it exists and is within TTL, else None."""

@@ -436,6 +436,24 @@ class RunnerConfig:
             real accounting breaches. CLI users can opt in early by setting
             ``ALMANAK_RECONCILIATION_ENFORCEMENT=1``; flip the default back to True
             once the cache race is closed.
+        reconciliation_confirmation_depth: VIB-3350 — how many blocks past the
+            confirmed receipt block the chain head must advance before the
+            block-pinned post-execution reconciliation read runs. This is a
+            *proactive* guard against a lagging RPC/replica that has not yet
+            indexed the receipt block (which would otherwise force the read into
+            the reactive Unknown-block lag-retry). **Opt-in, default OFF.**
+            ``None`` (default) or ``0`` → no wait. A positive int → wait that many
+            confirmations on every chain. ``-1`` → use the per-chain recommended
+            depth from ``ChainDescriptor.reorg_safe_depth`` (Ethereum 12,
+            Polygon 10, Avalanche 5; generic-L2 default 3 otherwise).
+            **Operational warning:** a depth larger than the strategy cycle
+            interval serializes cycles (Ethereum @ 12 ≈ 2.5 min); async
+            reconciliation is a separate design. The wait is always bounded by
+            ``reconciliation_confirmation_timeout_seconds`` — on timeout the read
+            proceeds anyway (still pinned to the receipt block) and the report is
+            flagged ``reconciliation_confirmed=False``.
+        reconciliation_confirmation_timeout_seconds: Upper bound (seconds) on the
+            confirmation-depth wait above. Ignored when the wait is OFF.
     """
 
     default_interval_seconds: int = 60
@@ -450,6 +468,8 @@ class RunnerConfig:
     decide_timeout_seconds: float = 30.0
     allow_unsafe_teardown_fallback: bool = False
     reconciliation_enforcement: bool = False
+    reconciliation_confirmation_depth: int | None = None
+    reconciliation_confirmation_timeout_seconds: float = 12.0
 
 
 # =============================================================================

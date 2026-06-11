@@ -915,6 +915,57 @@ class GatewayClient:
             logger.warning(f"eth_call RPC error: {e}")
             return None
 
+    def block_number(self, chain: str, *, timeout: float | None = None) -> int | None:
+        """Return the current chain head block number via the gateway RPC proxy.
+
+        VIB-3350 — the confirmation-depth wait before a block-pinned
+        reconciliation read polls this to learn how far the chain has advanced
+        past the receipt block. Routed through the gateway's ``RpcService``
+        (``eth_blockNumber``) so the strategy container holds no RPC URL.
+
+        Args:
+            chain: Chain identifier (e.g., "base", "arbitrum").
+            timeout: Optional per-call gRPC deadline in seconds. The polling
+                caller passes its remaining wait budget so a single stalled
+                ``eth_blockNumber`` cannot outlive the caller's deadline; when
+                ``None`` the client's configured timeout is used.
+
+        Returns:
+            The head block number, or ``None`` on any failure (caller treats a
+            missing head as "cannot confirm" rather than blocking forever).
+        """
+        import json
+
+        from almanak.gateway.proto import gateway_pb2
+
+        if self._rpc_stub is None:
+            logger.warning("Gateway client not connected")
+            return None
+
+        try:
+            response = self._rpc_stub.Call(
+                gateway_pb2.RpcRequest(
+                    chain=chain,
+                    method="eth_blockNumber",
+                    params="[]",
+                ),
+                timeout=timeout if timeout is not None else self.config.timeout,
+            )
+            if not response.success:
+                logger.warning("eth_blockNumber failed: %s", response.error)
+                return None
+            if not response.result:
+                return None
+            raw = json.loads(response.result)
+            # JSON-RPC returns the head as a 0x-prefixed hex quantity.
+            return int(raw, 16) if isinstance(raw, str) else int(raw)
+        except grpc.RpcError as e:
+            logger.warning("eth_blockNumber RPC error: %s", e)
+            return None
+        except (ValueError, TypeError) as e:
+            logger.warning("eth_blockNumber decode error: %s", e)
+            return None
+
     def query_position_liquidity(
         self,
         chain: str,

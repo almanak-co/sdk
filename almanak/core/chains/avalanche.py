@@ -131,6 +131,7 @@ DESCRIPTOR = register_chain(
             wrapped_native_deposit=True,
         ),
         bridged_stablecoin_variants=("USDC.e", "DAI.e", "USDT.e"),
+        reorg_safe_depth=5,  # VIB-3350: subnet finality window
         aliases=("avax",),
     )
 )

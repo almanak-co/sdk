@@ -151,6 +151,58 @@ class TestGatewayBalanceProvider:
         request = mock_client.market.GetBalance.call_args.args[0]
         assert request.force_refresh is True
 
+    def test_pinned_read_threads_block_tag_and_accepts_echoed_block(self, mock_client):
+        """VIB-3350: as_of_block sets block_tag; a response echoing that block is accepted."""
+        from almanak.framework.data.balance.gateway_provider import GatewayBalanceProvider
+
+        mock_client.market.GetBalance.return_value = gateway_pb2.BalanceResponse(
+            balance="5.0",
+            decimals=18,
+            raw_balance="5000000000000000000",
+            timestamp=int(datetime.now(UTC).timestamp()),
+            block_number=21_000_000,
+        )
+        provider = GatewayBalanceProvider(client=mock_client, wallet_address="0x1234", chain="arbitrum")
+        import asyncio
+
+        result = asyncio.run(provider.get_balance("WETH", as_of_block=21_000_000))
+        assert result.balance == Decimal("5.0")
+        request = mock_client.market.GetBalance.call_args.args[0]
+        assert request.block_tag == 21_000_000
+
+    def test_pinned_read_rejects_unhonored_zero_block(self, mock_client):
+        """VIB-3350 (Codex follow-up): block_number=0 on a pinned read means the
+        gateway did NOT honor block_tag (ignored it / legacy). The SDK + gateway
+        ship together, so 0 is NOT proof of a pin — reject it as a failed pinned
+        read so the runner degrades, rather than accept an unverified 'latest'."""
+        from almanak.framework.data.balance.gateway_provider import GatewayBalanceProvider
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+
+        mock_client.market.GetBalance.return_value = gateway_pb2.BalanceResponse(
+            balance="5.0", decimals=18, raw_balance="5000000000000000000", block_number=0
+        )
+        provider = GatewayBalanceProvider(client=mock_client, wallet_address="0x1234", chain="arbitrum")
+        import asyncio
+
+        with pytest.raises(DataSourceUnavailable):
+            asyncio.run(provider.get_balance("WETH", as_of_block=21_000_000))
+
+    def test_pinned_read_rejects_wrong_echoed_block(self, mock_client):
+        """VIB-3350 (audit I2): if the gateway serves a DIFFERENT block than
+        requested on a pinned read, reject it (no stale fallback) rather than
+        accept a wrong-block balance as if it were pinned."""
+        from almanak.framework.data.balance.gateway_provider import GatewayBalanceProvider
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+
+        mock_client.market.GetBalance.return_value = gateway_pb2.BalanceResponse(
+            balance="999.0", decimals=18, raw_balance="999000000000000000000", block_number=20_999_000
+        )
+        provider = GatewayBalanceProvider(client=mock_client, wallet_address="0x1234", chain="arbitrum")
+        import asyncio
+
+        with pytest.raises(DataSourceUnavailable):
+            asyncio.run(provider.get_balance("WETH", as_of_block=21_000_000))
+
     def test_get_balance_retries_then_returns_stale_cache(self, mock_client):
         """All retries exhausted on retryable errors falls back to stale cache."""
         from almanak.framework.data.balance.gateway_provider import GatewayBalanceProvider

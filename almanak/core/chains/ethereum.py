@@ -155,6 +155,7 @@ DESCRIPTOR = register_chain(
             },
             wrapped_native_deposit=True,
         ),
+        reorg_safe_depth=12,  # VIB-3350: deep reorg window on L1
         aliases=("eth", "mainnet"),
     )
 )

@@ -107,7 +107,16 @@ message BalanceRequest {
   // Bypass the gateway-side balance cache for read-after-write paths such
   // as post-execution reconciliation. Normal strategy reads should leave
   // this false so the gateway can absorb repeated UI/decide-cycle queries.
+  // Legacy/unpinned reads only; ignored when block_tag > 0 (a block-pinned
+  // read is already read-after-write correct and uses the block-keyed cache).
   bool force_refresh = 4;
+  // VIB-3350: pin the read to a specific block number. 0 = "latest"
+  // (unchanged behaviour). > 0 = read the balance AS OF that block, so
+  // reconciliation post-reads observe the just-landed transaction's state
+  // instead of an unanchored "latest" that a lagging RPC/replica may answer
+  // with pre-tx state. Block-pinned reads are immutable and cached separately
+  // (keyed by block); a "latest" cache entry never satisfies a pinned request.
+  int64 block_tag = 5;
 }
 
 message BalanceResponse {
@@ -119,6 +128,10 @@ message BalanceResponse {
   int64 timestamp = 6;
   bool stale = 7;
   string error = 8;  // Per-response error for batch calls
+  // VIB-3350: the block number this balance was actually read at. 0 when the
+  // read was unpinned ("latest") and the provider did not resolve a block.
+  // Lets callers/audit confirm a pinned read hit the intended block.
+  int64 block_number = 9;
 }
 
 message BatchBalanceRequest {

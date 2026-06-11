@@ -355,6 +355,25 @@ def _build_post_state_for_ledger(
                 "source": "balance_provider",
                 "incident": bool(recon.get("incident", False)),
             }
+            # VIB-3350: persist the block-anchoring provenance so the audit trail
+            # / dashboard / forensics can prove a reconciliation was pinned to the
+            # receipt block (vs degraded to "latest"). These flags live only on the
+            # in-memory recon dict; without this they were dropped at the ledger
+            # boundary (found in the VIB-3350 E2E). Each key is copied only when
+            # present so legacy recon dicts gain no spurious fields, and None is
+            # preserved verbatim (Empty != Zero — e.g. reconciliation_block=None
+            # means "no receipt block to pin to", reconciliation_confirmed=None
+            # means "no confirmation wait ran").
+            for _key in (
+                "reconciliation_block",
+                "reconciliation_degraded",
+                "reconciliation_pre_anchored",
+                "reconciliation_confirmed",
+                "reconciliation_confirmation_depth",
+                "reconciliation_head_block",
+            ):
+                if _key in recon:
+                    base[_key] = recon[_key]
     if lending_post_state is not None:
         from almanak.framework.accounting.lending_accounting import lending_state_to_dict
 
@@ -5215,24 +5234,39 @@ class StrategyRunner:
             strategy, intent, state.last_execution_result, pre_snapshot=state.pre_snapshot
         )
         recon_incident = bool(recon and recon.get("incident"))
+        recon_degraded = bool(recon and recon.get("reconciliation_degraded"))
 
         if recon_incident:
-            if self.config.reconciliation_enforcement:
+            # VIB-3350 (H1): a DEGRADED report (no usable receipt block, or a
+            # post-read that fell back to unpinned "latest") cannot tell a real
+            # balance breach apart from the unanchored-read lag race this fix
+            # targets. Enforcing against it would halt a healthy strategy on the
+            # very race we are closing — so a degraded incident is NEVER enforced,
+            # only logged loudly. It still flows onto ``balance_reconciliation``
+            # for dashboards/metrics.
+            if self.config.reconciliation_enforcement and recon_degraded:
+                logger.error(
+                    "Reconciliation incident on a DEGRADED report for %s — NOT enforcing "
+                    "(unpinned/no-receipt read cannot distinguish a real breach from a lagging "
+                    "read). Investigate the missing receipt block / legacy provider: %s",
+                    strategy.deployment_id,
+                    self._format_reconciliation_error(recon),
+                )
+            elif self.config.reconciliation_enforcement:
                 return await self._single_chain_handle_recon_incident(state, recon)
-            # Observation mode (default until VIB-3348 block-anchored
-            # balance reads land): the dual-layer balance cache produces
-            # false-positive incidents on confirmed-on-chain swaps, so
-            # enforcement is gated off and incidents are surfaced via logs
-            # + IterationResult only. The recon dict still flows onto
-            # ``balance_reconciliation`` in the success path below, so
-            # dashboards and metrics keep full visibility. Flip
-            # ``RunnerConfig.reconciliation_enforcement`` to True
-            # per-strategy (or change the default) once the block-anchored
-            # read work ships and the race is closed.
-            logger.warning(
-                "Reconciliation incident detected (observation mode, enforcement disabled): %s",
-                self._format_reconciliation_error(recon),
-            )
+            else:
+                # Observation mode (default until VIB-3348 block-anchored
+                # balance reads land + the 48h hosted bake): incidents are
+                # surfaced via logs + IterationResult only. The recon dict still
+                # flows onto ``balance_reconciliation`` in the success path
+                # below, so dashboards and metrics keep full visibility. Flip
+                # ``RunnerConfig.reconciliation_enforcement`` to True
+                # per-strategy (or change the default) once the block-anchored
+                # read work ships and the race is closed.
+                logger.warning(
+                    "Reconciliation incident detected (observation mode, enforcement disabled): %s",
+                    self._format_reconciliation_error(recon),
+                )
 
         # Clean reconciliation (or observation-mode pass-through) -> commit the success path.
         # NOTE (VIB-4043 / PR4): the timeline event is now emitted AFTER the

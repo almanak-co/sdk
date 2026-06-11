@@ -4,7 +4,6 @@ Tests concurrent balance queries across multiple tokens/chains with
 partial success handling.
 """
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -90,6 +89,43 @@ class TestBatchGetBalances:
         assert response.responses[0].balance == "1000.5"
 
     @pytest.mark.asyncio
+    async def test_batch_honors_block_tag_and_echoes_block_number(self, market_service, mock_context):
+        """VIB-3350 (audit M3): a batched pinned read threads block_tag to the
+        provider and echoes block_number — it must not silently return 'latest'."""
+        mock_provider = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.balance = 5.0
+        mock_result.address = "0xUsdc"
+        mock_result.decimals = 6
+        mock_result.raw_balance = 5000000
+        mock_result.timestamp = MagicMock()
+        mock_result.timestamp.timestamp.return_value = 1234567890
+        mock_result.stale = False
+        mock_provider.get_balance = AsyncMock(return_value=mock_result)
+
+        mock_aggregator = AsyncMock()
+        mock_aggregator.get_aggregated_price = AsyncMock(side_effect=Exception("no price"))
+        market_service._initialized = True
+        market_service._price_aggregator = mock_aggregator
+
+        with patch.object(market_service, "_get_balance_provider", return_value=mock_provider):
+            request = gateway_pb2.BatchBalanceRequest(
+                requests=[
+                    gateway_pb2.BalanceRequest(
+                        token="USDC",
+                        chain="arbitrum",
+                        wallet_address="0x1234567890abcdef1234567890abcdef12345678",
+                        block_tag=21_000_000,
+                    )
+                ]
+            )
+            response = await market_service.BatchGetBalances(request, mock_context)
+
+        # provider was called pinned to the requested block
+        mock_provider.get_balance.assert_awaited_once_with("USDC", block=21_000_000)
+        assert response.responses[0].block_number == 21_000_000
+
+    @pytest.mark.asyncio
     async def test_invalid_chain_returns_per_response_error(self, market_service, mock_context):
         """Invalid chain returns error in the individual response, not overall failure."""
         market_service._initialized = True
@@ -126,6 +162,100 @@ class TestBatchGetBalances:
 
         assert len(response.responses) == 1
         assert response.responses[0].error != ""
+
+
+# Valid base58 Solana wallet (USDC mint address — passes address validation).
+_SOLANA_WALLET = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+
+class TestBlockPinRejectedForNonEvm:
+    """VIB-3350 (CodeRabbit Critical): a block-pinned read (block_tag > 0) on a
+    non-EVM chain whose provider has no ``block`` kwarg must be rejected loudly
+    with INVALID_ARGUMENT, not let through to raise TypeError -> opaque INTERNAL.
+    The Solana provider's get_balance/get_native_balance accept no ``block``."""
+
+    @pytest.mark.asyncio
+    async def test_unary_get_balance_rejects_pinned_solana_read(self, market_service, mock_context):
+        import grpc
+
+        market_service._initialized = True
+        # Provider whose pinned calls would TypeError if ever reached.
+        mock_provider = AsyncMock()
+        mock_provider.get_balance = AsyncMock(side_effect=AssertionError("provider must not be called"))
+        mock_provider.get_native_balance = AsyncMock(side_effect=AssertionError("provider must not be called"))
+
+        with patch.object(market_service, "_get_balance_provider", return_value=mock_provider):
+            request = gateway_pb2.BalanceRequest(
+                token="USDC",
+                chain="solana",
+                wallet_address=_SOLANA_WALLET,
+                block_tag=21_000_000,
+            )
+            response = await market_service.GetBalance(request, mock_context)
+
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+        assert "block-pinned" in mock_context.set_details.call_args.args[0]
+        assert response.balance == ""  # empty response, no balance returned
+        mock_provider.get_balance.assert_not_awaited()
+        mock_provider.get_native_balance.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_batch_get_balances_rejects_pinned_solana_read(self, market_service, mock_context):
+        market_service._initialized = True
+        mock_provider = AsyncMock()
+        mock_provider.get_balance = AsyncMock(side_effect=AssertionError("provider must not be called"))
+        mock_provider.get_native_balance = AsyncMock(side_effect=AssertionError("provider must not be called"))
+
+        with patch.object(market_service, "_get_balance_provider", return_value=mock_provider):
+            request = gateway_pb2.BatchBalanceRequest(
+                requests=[
+                    gateway_pb2.BalanceRequest(
+                        token="USDC",
+                        chain="solana",
+                        wallet_address=_SOLANA_WALLET,
+                        block_tag=21_000_000,
+                    )
+                ]
+            )
+            response = await market_service.BatchGetBalances(request, mock_context)
+
+        assert len(response.responses) == 1
+        assert "block-pinned" in response.responses[0].error
+        assert response.responses[0].balance == ""
+        mock_provider.get_balance.assert_not_awaited()
+        mock_provider.get_native_balance.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unpinned_solana_read_still_allowed(self, market_service, mock_context):
+        """Sanity: an UNPINNED Solana balance read (no block_tag) must still work —
+        the guard only rejects block_tag > 0, never ordinary 'latest' reads."""
+        mock_provider = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.balance = 42.0
+        mock_result.address = _SOLANA_WALLET
+        mock_result.decimals = 6
+        mock_result.raw_balance = 42_000_000
+        mock_result.timestamp = MagicMock()
+        mock_result.timestamp.timestamp.return_value = 1234567890
+        mock_result.stale = False
+        mock_provider.get_balance = AsyncMock(return_value=mock_result)
+
+        mock_aggregator = AsyncMock()
+        mock_aggregator.get_aggregated_price = AsyncMock(side_effect=Exception("no price"))
+        market_service._initialized = True
+        market_service._price_aggregator = mock_aggregator
+
+        with patch.object(market_service, "_get_balance_provider", return_value=mock_provider):
+            request = gateway_pb2.BalanceRequest(
+                token="USDC",
+                chain="solana",
+                wallet_address=_SOLANA_WALLET,
+            )
+            response = await market_service.GetBalance(request, mock_context)
+
+        mock_provider.get_balance.assert_awaited_once_with("USDC")  # no block= kwarg
+        assert response.balance == "42.0"
+        assert response.block_number == 0  # unpinned -> 0
 
 
 class TestMNTNativeBalance:

@@ -158,6 +158,62 @@ class TestExtractIntentTokens:
         tokens = StrategyRunner._extract_intent_tokens(intent)
         assert tokens == ["WETH", "USDC"]
 
+    def test_borrow_intent_extracts_collateral_and_borrow(self):
+        """VIB-3350: ``BorrowIntent`` has no ``token`` attr — it carries
+        ``collateral_token`` + ``borrow_token``. The prior ``token``-only
+        fallback returned [], so reconciliation read neither leg. Both legs
+        move the wallet (collateral out, borrowed token in)."""
+        from almanak.framework.intents.lending_intents import BorrowIntent
+
+        intent = BorrowIntent(
+            protocol="aave_v3",
+            collateral_token="WETH",
+            collateral_amount=Decimal("1"),
+            borrow_token="USDC",
+            borrow_amount=Decimal("1000"),
+        )
+        tokens = StrategyRunner._extract_intent_tokens(intent)
+        assert tokens == ["WETH", "USDC"]
+
+    def test_perp_open_intent_extracts_collateral(self):
+        """VIB-3350: ``PerpOpenIntent`` carries ``collateral_token`` (no
+        ``token``/``borrow_token``). ``size_usd`` is notional, not a wallet
+        token, so only the collateral leg is reconciled."""
+        from almanak.framework.intents.perp_intents import PerpOpenIntent
+
+        intent = PerpOpenIntent(
+            market="ETH/USD",
+            collateral_token="USDC",
+            collateral_amount=Decimal("500"),
+            size_usd=Decimal("1000"),
+            is_long=True,
+            leverage=Decimal("2"),
+        )
+        tokens = StrategyRunner._extract_intent_tokens(intent)
+        assert tokens == ["USDC"]
+
+    def test_perp_close_intent_extracts_collateral(self):
+        """VIB-3350: ``PerpCloseIntent`` settles PnL + returns collateral in
+        the collateral token, so that is the leg to reconcile."""
+        from almanak.framework.intents.perp_intents import PerpCloseIntent
+
+        intent = PerpCloseIntent(
+            market="ETH/USD",
+            collateral_token="USDC",
+            is_long=True,
+        )
+        tokens = StrategyRunner._extract_intent_tokens(intent)
+        assert tokens == ["USDC"]
+
+    def test_supply_intent_real_class_still_single_token(self):
+        """Regression guard: the multi-leg branches must not steal SupplyIntent
+        (which has a single ``token`` and no ``collateral_token``)."""
+        from almanak.framework.intents.lending_intents import SupplyIntent
+
+        intent = SupplyIntent(protocol="aave_v3", token="USDC", amount=Decimal("100"))
+        tokens = StrategyRunner._extract_intent_tokens(intent)
+        assert tokens == ["USDC"]
+
 
 # =============================================================================
 # Tests: _reconcile_post_execution_balances

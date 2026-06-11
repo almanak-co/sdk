@@ -7,13 +7,15 @@ via a thin delegation stub in StrategyRunner.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from ..intents.vocabulary import AnyIntent, HoldIntent
+from ..intents.vocabulary import AnyIntent, BorrowIntent, HoldIntent, PerpCloseIntent, PerpOpenIntent
 from ..portfolio import PortfolioMetrics, PortfolioSnapshot, ValueConfidence
 from ..state.exceptions import AccountingPersistenceError, AccountingWriteKind
 from ..state.state_manager import StateConflictError, StateData, StateNotFoundError
@@ -1330,7 +1332,16 @@ async def snapshot_balances_for_intent(
     balances: dict[str, Decimal] = {}
     for token_symbol in tokens:
         try:
-            bal = await runner.balance_provider.get_balance(token_symbol)
+            # VIB-3350 (M5): force-refresh the pre-read so the reconciliation
+            # baseline is a fresh on-chain "latest" — NOT a value served from the
+            # SDK 30s / gateway 5s "latest" cache, which could predate the prior
+            # cycle's settled state and skew the delta (post is pinned to the
+            # receipt block, so a stale pre would mis-attribute earlier changes to
+            # this intent). Legacy providers that reject force_refresh fall back
+            # to the prior call shape via _read_balance_for_reconciliation.
+            bal, _pinned = await _read_balance_for_reconciliation(
+                runner.balance_provider, token_symbol, force_refresh=True
+            )
             balances[token_symbol] = bal.balance
         except Exception as exc:  # noqa: BLE001
             logger.debug("Balance snapshot: failed to fetch %s balance: %s", token_symbol, exc)
@@ -1343,29 +1354,222 @@ async def snapshot_balances_for_intent(
     return BalanceSnapshot(timestamp=datetime.now(UTC), balances=balances)
 
 
+def _resolve_confirmation_depth(chain: str | None, override: int | None) -> int:
+    """Resolve the effective confirmation depth for a chain.
+
+    ``override`` is ``RunnerConfig.reconciliation_confirmation_depth``:
+
+    - ``None`` or ``0`` → wait disabled (opt-in default OFF).
+    - positive ``int`` → that depth on every chain.
+    - ``-1`` (or any negative) → the per-chain recommended depth, read from
+      ``ChainDescriptor.reorg_safe_depth`` via :func:`reorg_safe_depth_for`
+      (Ethereum 12, Polygon 10, Avalanche 5; generic-L2 default otherwise).
+      The chain-name knowledge lives on the descriptor, not here (blueprint 22).
+    """
+    if override is None or override == 0:
+        return 0
+    if override > 0:
+        return override
+    from almanak.core.chains._helpers import reorg_safe_depth_for
+
+    return reorg_safe_depth_for(chain or "")
+
+
+async def _wait_for_confirmation_depth(
+    balance_provider: Any,
+    receipt_block: int,
+    depth: int,
+    *,
+    timeout_seconds: float,
+    poll_interval_seconds: float = 0.5,
+) -> tuple[bool, int | None]:
+    """Wait until the chain head reaches ``receipt_block + depth`` (bounded).
+
+    VIB-3350: a proactive guard so the subsequent block-pinned read does not hit
+    a replica that has not yet indexed the receipt block. Returns
+    ``(confirmed, last_head)``:
+
+    - ``depth <= 0`` → no wait, ``(True, None)``.
+    - provider exposes no ``get_block_number`` → cannot poll, ``(True, None)``
+      (the pinned read + reactive lag-retry still cover correctness).
+    - head reaches the target before the timeout → ``(True, head)``.
+    - timeout, or the head read fails → ``(False, last_head)``; the caller
+      proceeds with the pinned read anyway and flags the report unconfirmed.
+
+    The read is *always still pinned* to ``receipt_block`` regardless of the
+    outcome — this only governs whether we wait first.
+    """
+    if depth <= 0:
+        return True, None
+    reader = getattr(balance_provider, "get_block_number", None)
+    if reader is None:
+        return True, None
+
+    target = receipt_block + depth
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    last_head: int | None = None
+    while True:
+        # Bound each head poll by the remaining wait budget: the deadline is only
+        # checked between polls, so an unbounded ``get_block_number`` that stalls
+        # would otherwise outlive the caller's timeout. A provider whose
+        # ``get_block_number`` predates the ``timeout`` kwarg falls back to a
+        # no-arg call (mirrors the legacy ``as_of_block`` fallback in this file).
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            try:
+                last_head = await reader(timeout=remaining)
+            except TypeError as exc:
+                msg = str(exc)
+                if "timeout" not in msg or "keyword argument" not in msg:
+                    raise
+                last_head = await reader()
+        except Exception as exc:  # noqa: BLE001 — a head-read failure must not block reconciliation
+            logger.debug("Confirmation-depth wait: head read failed: %s", exc)
+            return False, last_head
+        if last_head is not None and last_head >= target:
+            return True, last_head
+        if time.monotonic() >= deadline:
+            return False, last_head
+        await asyncio.sleep(poll_interval_seconds)
+
+
+async def _confirmation_wait_outcome(
+    runner: Any,
+    strategy: StrategyProtocol,
+    intent: AnyIntent,
+    post_block: int | None,
+) -> tuple[int, bool | None, int | None]:
+    """Run the optional VIB-3350 confirmation-depth wait for one reconciliation.
+
+    Resolves the effective depth from ``RunnerConfig`` (opt-in, default OFF),
+    waits if enabled, and returns ``(depth, confirmed, head)`` for the report:
+
+    - ``depth`` — the effective depth (0 when disabled or no receipt block).
+    - ``confirmed`` — ``None`` when no wait ran, else the wait outcome.
+    - ``head`` — the last observed chain head (``None`` when no wait ran).
+
+    The subsequent read stays pinned to ``post_block`` regardless of the outcome.
+    """
+    if post_block is None:
+        return 0, None, None
+    config = getattr(runner, "config", None)
+    override = getattr(config, "reconciliation_confirmation_depth", None)
+    chain = getattr(intent, "chain", None) or getattr(strategy, "chain", None)
+    depth = _resolve_confirmation_depth(chain, override)
+    if depth <= 0:
+        return depth, None, None
+    timeout_seconds = getattr(config, "reconciliation_confirmation_timeout_seconds", 12.0)
+    confirmed, head = await _wait_for_confirmation_depth(
+        runner.balance_provider, post_block, depth, timeout_seconds=timeout_seconds
+    )
+    if not confirmed:
+        logger.warning(
+            "Balance reconciliation: confirmation-depth wait timed out for %s "
+            "(receipt_block=%s depth=%s head=%s) — proceeding with pinned read",
+            strategy.deployment_id,
+            post_block,
+            depth,
+            head,
+        )
+    return depth, confirmed, head
+
+
 async def _read_balance_for_reconciliation(
     balance_provider: Any,
     token_symbol: str,
     *,
     force_refresh: bool,
-) -> Any:
-    """Read a token balance, forcing freshness when the provider supports it.
+    as_of_block: int | None = None,
+) -> tuple[Any, bool]:
+    """Read a token balance for reconciliation. Returns ``(result, pinned)``.
 
-    Default path (``force_refresh=False``) never touches the kwarg, so legacy
-    providers see the same call shape they always have. The ``force_refresh=True``
-    branch attempts the kwarg call and falls back narrowly when the provider
-    raises ``TypeError("...unexpected keyword argument 'force_refresh'...")``
-    so unrelated ``TypeError``s inside ``get_balance`` still surface.
+    VIB-3350: when ``as_of_block`` is set, the read is PINNED to that block —
+    the read-after-write correct path. The post-execution balance is read as of
+    the confirmed receipt block, so a lagging RPC/replica answering "latest"
+    with pre-tx state can no longer produce a false zero-delta incident. Pinning
+    takes precedence over ``force_refresh`` (a pinned read is already fresh and
+    bypasses the cache). Both kwargs fall back narrowly when the provider is too
+    old to accept them (``TypeError(...unexpected keyword argument...)``), so
+    unrelated ``TypeError``s inside ``get_balance`` still surface.
+
+    ``pinned`` is ``True`` ONLY when the read was actually served AS OF
+    ``as_of_block``. A legacy provider that rejects ``as_of_block`` falls back to
+    latest/force-refresh and returns ``pinned=False`` so the caller degrades the
+    report instead of silently claiming a pin that never happened (the read
+    would be the very unanchored "latest" the fix exists to avoid).
+
+    Default path (no pin, ``force_refresh=False``) never touches either kwarg,
+    so legacy providers see the same call shape they always have.
     """
+    if as_of_block is not None and as_of_block > 0:
+        try:
+            return await balance_provider.get_balance(token_symbol, as_of_block=as_of_block), True
+        except TypeError as exc:
+            msg = str(exc)
+            if "as_of_block" not in msg or "keyword argument" not in msg:
+                raise
+            # Provider predates block-pinning — fall through to refresh/latest (UNPINNED).
     if not force_refresh:
-        return await balance_provider.get_balance(token_symbol)
+        return await balance_provider.get_balance(token_symbol), False
     try:
-        return await balance_provider.get_balance(token_symbol, force_refresh=True)
+        return await balance_provider.get_balance(token_symbol, force_refresh=True), False
     except TypeError as exc:
         msg = str(exc)
         if "force_refresh" not in msg or "keyword argument" not in msg:
             raise
-        return await balance_provider.get_balance(token_symbol)
+        return await balance_provider.get_balance(token_symbol), False
+
+
+async def _read_post_balances(
+    runner: Any,
+    tokens: list[str],
+    post_block: int | None,
+    *,
+    force_refresh: bool,
+) -> tuple[dict[str, Decimal], bool]:
+    """Read post-execution balances for ``tokens``. Returns ``(balances, degrade)``.
+
+    ``degrade`` is True iff we intended to pin (``post_block`` is set) AND at least
+    one intent-token post-read either fell back to unpinned "latest" (legacy
+    provider) OR failed entirely. In both cases the report cannot prove every
+    intent-token balance was read AT the receipt block, so the caller degrades it
+    (VIB-3350 H2 + Codex follow-up: a pinned reconciliation is clean only when
+    ALL intent-token reads were both pinned and available — a partial/unpinned
+    read must never masquerade as a clean block-anchored reconciliation).
+
+    Per-token failures are still non-fatal to the *read loop* (one flaky token
+    does not blind the others), but on a pinned reconciliation a failure flips
+    ``degrade`` so enforcement refuses to enforce against partial evidence.
+    """
+    post_balances: dict[str, Decimal] = {}
+    intended_pin = post_block is not None
+    degrade = False
+    failed: list[str] = []
+    for token_symbol in tokens:
+        try:
+            bal, pinned = await _read_balance_for_reconciliation(
+                runner.balance_provider,
+                token_symbol,
+                force_refresh=force_refresh,
+                as_of_block=post_block,
+            )
+            post_balances[token_symbol] = bal.balance
+            if intended_pin and not pinned:
+                degrade = True
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Balance reconciliation: failed to fetch %s balance: %s", token_symbol, exc)
+            if intended_pin:
+                degrade = True
+                failed.append(token_symbol)
+            continue
+    if failed:
+        logger.warning(
+            "Balance reconciliation: %d pinned post-read(s) failed (%s) — marking report degraded "
+            "(cannot prove every intent-token balance was read at the receipt block).",
+            len(failed),
+            ", ".join(failed),
+        )
+    return post_balances, degrade
 
 
 async def reconcile_post_execution_balances(
@@ -1391,22 +1595,47 @@ async def reconcile_post_execution_balances(
         if not tokens:
             return None
 
-        post_balances: dict[str, Decimal] = {}
-        for token_symbol in tokens:
-            try:
-                bal = await _read_balance_for_reconciliation(
-                    runner.balance_provider,
-                    token_symbol,
-                    force_refresh=pre_snapshot is not None,
-                )
-                post_balances[token_symbol] = bal.balance
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(
-                    "Balance reconciliation: failed to fetch %s balance: %s",
-                    token_symbol,
-                    exc,
-                )
-                continue
+        # VIB-3350: in real-delta mode, pin the post-execution reads to the
+        # confirmed receipt block so they observe the just-landed tx instead of
+        # a "latest" view a lagging replica may answer with pre-tx state. When no
+        # receipt block is available we cannot pin — fall back to force-refresh
+        # "latest" (legacy behaviour) and flag the report as degraded so a future
+        # fail-closed enforcement gate does NOT enforce against an unpinned read.
+        post_block: int | None = None
+        reconciliation_degraded = False
+        if pre_snapshot is not None:
+            from almanak.framework.runner.strategy_runner import _last_receipt_block
+
+            post_block = _last_receipt_block(execution_result)
+            reconciliation_degraded = post_block is None
+
+        # VIB-3350: optional proactive confirmation-depth wait (opt-in, default
+        # OFF via RunnerConfig.reconciliation_confirmation_depth). When enabled,
+        # wait for the chain head to advance past the receipt block before the
+        # pinned reads, so a lagging replica has indexed the receipt block. The
+        # read stays pinned to ``post_block`` regardless; on timeout we proceed
+        # anyway and flag the report unconfirmed. ``reconciliation_confirmed`` is
+        # None when no wait ran (Empty != Zero: not-measured vs measured).
+        confirmation_depth, confirmation_confirmed, confirmation_head = await _confirmation_wait_outcome(
+            runner, strategy, intent, post_block
+        )
+
+        post_balances, post_read_degraded = await _read_post_balances(
+            runner, tokens, post_block, force_refresh=pre_snapshot is not None
+        )
+
+        # VIB-3350 (H2 + Codex follow-up): if we intended to pin to the receipt
+        # block but a read fell back to unpinned "latest" (legacy provider) OR a
+        # pinned read failed, the report MUST NOT claim it was a clean pin —
+        # degrade it so the enforcement gate refuses to enforce against an
+        # unanchored / partial read.
+        if post_read_degraded:
+            reconciliation_degraded = True
+            logger.warning(
+                "Balance reconciliation for %s: a pinned post-read fell back to 'latest' or failed; "
+                "marking report degraded.",
+                strategy.deployment_id,
+            )
         # Capture the post-query timestamp immediately after the loop so the
         # reported pre/post timestamps reflect when the balances were
         # actually read, not when the report is materialised.
@@ -1435,6 +1664,26 @@ async def reconcile_post_execution_balances(
                 gas_cost_native=gas_cost_native,
             )
             recon = report.to_dict()
+            # VIB-3350: expose the block the post-reads were pinned to (None when
+            # unavailable) and whether the result is degraded (unpinned) so the
+            # enforcement gate and dashboards can distinguish a clean pinned
+            # reconciliation from a best-effort "latest" one.
+            recon["reconciliation_block"] = post_block
+            recon["reconciliation_degraded"] = reconciliation_degraded
+            # VIB-3350 (M5): the pre-snapshot is force-refreshed (no stale cache)
+            # but NOT yet block-anchored — the delta baseline is a fresh "latest"
+            # read, not a read pinned to a sampled pre-block. Under the
+            # 1-gateway:1-strategy invariant the wallet is quiescent before
+            # broadcast so this is correct for the post-read lag class this PR
+            # closes; full pre-block-anchoring is required before fail-closed
+            # enforcement is flipped on by default (tracked separately).
+            recon["reconciliation_pre_anchored"] = False
+            # VIB-3350: confirmation-depth wait outcome (depth 0 = wait disabled;
+            # confirmed None = no wait ran, True = head reached target, False =
+            # timed out / head unreadable but read still pinned to the receipt block).
+            recon["reconciliation_confirmation_depth"] = confirmation_depth
+            recon["reconciliation_confirmed"] = confirmation_confirmed
+            recon["reconciliation_head_block"] = confirmation_head
 
             if report.incident:
                 logger.error(
@@ -1514,7 +1763,23 @@ def extract_intent_tokens(intent: AnyIntent) -> list[str]:
         if len(parts) >= 2:
             tokens.extend(parts[:2])
             return tokens
-    # Supply/Borrow intents
+    # BorrowIntent (VIB-3350): both legs move the wallet — collateral leaves
+    # and the borrowed token arrives. The prior `token`-only fallback below
+    # missed BorrowIntent entirely (it has no `token` attr), so a reconciliation
+    # read covered neither leg. Audit M1: use isinstance (the concrete classes
+    # are importable) rather than attribute-sniffing on a money path, so a future
+    # intent that happens to grow a `collateral_token` attr cannot be silently
+    # mis-routed here.
+    if isinstance(intent, BorrowIntent):
+        tokens.extend([intent.collateral_token, intent.borrow_token])
+        return tokens
+    # PerpOpenIntent / PerpCloseIntent (VIB-3350): only the collateral token
+    # moves the wallet (`size_usd` is notional, not a wallet token; PnL settles
+    # in the collateral token on supported venues). Same miss as Borrow above.
+    if isinstance(intent, PerpOpenIntent | PerpCloseIntent):
+        tokens.append(intent.collateral_token)
+        return tokens
+    # Supply / Repay / Withdraw intents carry a single `token`.
     if hasattr(intent, "token"):
         tokens.append(intent.token)
     return tokens

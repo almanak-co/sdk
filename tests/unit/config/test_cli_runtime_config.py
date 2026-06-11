@@ -62,6 +62,8 @@ _CLI_RUNTIME_ENV_VARS: tuple[str, ...] = (
     "SOLANA_VALIDATOR_PORT",
     # Boolean toggles.
     "ALMANAK_RECONCILIATION_ENFORCEMENT",
+    "ALMANAK_RECONCILIATION_CONFIRMATION_DEPTH",
+    "ALMANAK_RECONCILIATION_CONFIRMATION_TIMEOUT_SECONDS",
     "ALMANAK_ALLOW_HARDCODED_PRICES",
     # CI hint.
     "CI",
@@ -170,6 +172,43 @@ class TestDefaults:
         assert cfg.reconciliation_enforcement is False
         assert cfg.allow_hardcoded_prices is False
         assert cfg.is_ci is False
+
+    def test_confirmation_depth_defaults_off(self):
+        """VIB-3350: confirmation-depth wait is OFF by default (depth None, 12s)."""
+        cfg = cli_runtime_config_from_env()
+        assert cfg.reconciliation_confirmation_depth is None
+        assert cfg.reconciliation_confirmation_timeout_seconds == 12.0
+
+    def test_confirmation_depth_parses_signed_int(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("ALMANAK_RECONCILIATION_CONFIRMATION_DEPTH", "-1")  # per-chain sentinel
+        cfg = cli_runtime_config_from_env()
+        assert cfg.reconciliation_confirmation_depth == -1
+
+    def test_confirmation_depth_parses_positive_and_timeout(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("ALMANAK_RECONCILIATION_CONFIRMATION_DEPTH", "5")
+        monkeypatch.setenv("ALMANAK_RECONCILIATION_CONFIRMATION_TIMEOUT_SECONDS", "30")
+        cfg = cli_runtime_config_from_env()
+        assert cfg.reconciliation_confirmation_depth == 5
+        assert cfg.reconciliation_confirmation_timeout_seconds == 30.0
+
+    def test_confirmation_depth_malformed_raises(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("ALMANAK_RECONCILIATION_CONFIRMATION_DEPTH", "not-an-int")
+        with pytest.raises(ValueError, match="ALMANAK_RECONCILIATION_CONFIRMATION_DEPTH"):
+            cli_runtime_config_from_env()
+
+    @pytest.mark.parametrize("bad", ["-2", "-3", "-999"])
+    def test_confirmation_depth_negative_below_sentinel_raises(self, monkeypatch, bad):
+        """VIB-3350 (CodeRabbit): -1 is the only valid negative (per-chain
+        descriptor sentinel); other negatives are misconfig and must fail at boot
+        rather than silently behaving like -1."""
+        monkeypatch.setenv("ALMANAK_RECONCILIATION_CONFIRMATION_DEPTH", bad)
+        with pytest.raises(ValueError, match="only valid negative value"):
+            cli_runtime_config_from_env()
+
+    def test_confirmation_timeout_nonpositive_raises(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("ALMANAK_RECONCILIATION_CONFIRMATION_TIMEOUT_SECONDS", "0")
+        with pytest.raises(ValueError, match="must be > 0"):
+            cli_runtime_config_from_env()
 
 
 # =============================================================================

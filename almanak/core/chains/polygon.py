@@ -140,6 +140,7 @@ DESCRIPTOR = register_chain(
             wrapped_native_deposit=True,
         ),
         bridged_stablecoin_variants=("USDC.e",),
+        reorg_safe_depth=10,  # VIB-3350: PoS reorg window
         aliases=("matic",),
     )
 )

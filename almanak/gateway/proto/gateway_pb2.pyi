@@ -522,6 +522,7 @@ class BalanceRequest(_message.Message):
     CHAIN_FIELD_NUMBER: _builtins.int
     WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
     FORCE_REFRESH_FIELD_NUMBER: _builtins.int
+    BLOCK_TAG_FIELD_NUMBER: _builtins.int
     token: _builtins.str
     chain: _builtins.str
     wallet_address: _builtins.str
@@ -529,6 +530,16 @@ class BalanceRequest(_message.Message):
     """Bypass the gateway-side balance cache for read-after-write paths such
     as post-execution reconciliation. Normal strategy reads should leave
     this false so the gateway can absorb repeated UI/decide-cycle queries.
+    Legacy/unpinned reads only; ignored when block_tag > 0 (a block-pinned
+    read is already read-after-write correct and uses the block-keyed cache).
+    """
+    block_tag: _builtins.int
+    """VIB-3350: pin the read to a specific block number. 0 = "latest"
+    (unchanged behaviour). > 0 = read the balance AS OF that block, so
+    reconciliation post-reads observe the just-landed transaction's state
+    instead of an unanchored "latest" that a lagging RPC/replica may answer
+    with pre-tx state. Block-pinned reads are immutable and cached separately
+    (keyed by block); a "latest" cache entry never satisfies a pinned request.
     """
     def __init__(
         self,
@@ -537,8 +548,9 @@ class BalanceRequest(_message.Message):
         chain: _builtins.str = ...,
         wallet_address: _builtins.str = ...,
         force_refresh: _builtins.bool = ...,
+        block_tag: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "force_refresh", b"force_refresh", "token", b"token", "wallet_address", b"wallet_address"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["block_tag", b"block_tag", "chain", b"chain", "force_refresh", b"force_refresh", "token", b"token", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___BalanceRequest: _TypeAlias = BalanceRequest  # noqa: Y015
@@ -555,6 +567,7 @@ class BalanceResponse(_message.Message):
     TIMESTAMP_FIELD_NUMBER: _builtins.int
     STALE_FIELD_NUMBER: _builtins.int
     ERROR_FIELD_NUMBER: _builtins.int
+    BLOCK_NUMBER_FIELD_NUMBER: _builtins.int
     balance: _builtins.str
     """Decimal as string (human-readable units)"""
     balance_usd: _builtins.str
@@ -566,6 +579,11 @@ class BalanceResponse(_message.Message):
     stale: _builtins.bool
     error: _builtins.str
     """Per-response error for batch calls"""
+    block_number: _builtins.int
+    """VIB-3350: the block number this balance was actually read at. 0 when the
+    read was unpinned ("latest") and the provider did not resolve a block.
+    Lets callers/audit confirm a pinned read hit the intended block.
+    """
     def __init__(
         self,
         *,
@@ -577,8 +595,9 @@ class BalanceResponse(_message.Message):
         timestamp: _builtins.int = ...,
         stale: _builtins.bool = ...,
         error: _builtins.str = ...,
+        block_number: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["address", b"address", "balance", b"balance", "balance_usd", b"balance_usd", "decimals", b"decimals", "error", b"error", "raw_balance", b"raw_balance", "stale", b"stale", "timestamp", b"timestamp"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["address", b"address", "balance", b"balance", "balance_usd", b"balance_usd", "block_number", b"block_number", "decimals", b"decimals", "error", b"error", "raw_balance", b"raw_balance", "stale", b"stale", "timestamp", b"timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___BalanceResponse: _TypeAlias = BalanceResponse  # noqa: Y015
