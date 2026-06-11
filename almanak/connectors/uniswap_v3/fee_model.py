@@ -39,6 +39,19 @@ from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.fee_models.base import FeeModel
 
+# Backtest-service export metadata (consumed by
+# almanak/services/backtest/services/fee_model_exporter.py — VIB-4851 Phase D:
+# the service derives its FeeModelDetail standard fields from the owning
+# connector instead of a central per-protocol table).
+BACKTEST_EXPORT_METADATA: dict[str, Any] = {
+    "fee_tiers": [0.0001, 0.0005, 0.003, 0.01],
+    "default_fee": 0.003,
+    "slippage_model": "sqrt_impact",
+    "supported_intent_types": ["SWAP", "LP_OPEN", "LP_CLOSE"],
+    "supported_chains": ["ethereum", "arbitrum", "optimism", "base", "polygon", "bsc", "avalanche"],
+    "gas_estimates": {"swap": 150_000, "lp_open": 350_000, "lp_close": 250_000},
+}
+
 
 class UniswapV3FeeTier(StrEnum):
     """Uniswap V3 fee tiers.

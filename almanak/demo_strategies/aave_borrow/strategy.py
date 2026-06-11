@@ -548,8 +548,8 @@ class AaveBorrowStrategy(IntentStrategy):
         """
         import json
 
+        from almanak.connectors._strategy_base.address_registry import AddressRegistry
         from almanak.framework.backtesting.paper.position_queries import (
-            AAVE_V3_POOL_DATA_PROVIDER,
             GET_USER_RESERVE_DATA_SELECTOR,
             _pad_address,
             _parse_aave_user_reserve_data,
@@ -558,11 +558,10 @@ class AaveBorrowStrategy(IntentStrategy):
         from almanak.framework.teardown import PositionInfo, PositionType
         from almanak.gateway.proto import gateway_pb2
 
-        if self.chain not in AAVE_V3_POOL_DATA_PROVIDER:
+        data_provider = AddressRegistry.resolve_contract_address("aave_v3", self.chain, "pool_data_provider")
+        if data_provider is None:
             logger.debug(f"Chain {self.chain} not supported for Aave V3 position queries")
             return None
-
-        data_provider = AAVE_V3_POOL_DATA_PROVIDER[self.chain]
 
         # Resolve token addresses via the canonical TokenResolver
         resolver = get_token_resolver()

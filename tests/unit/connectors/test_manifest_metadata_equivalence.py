@@ -17,6 +17,8 @@ and be acknowledged by editing the frozen dict in the same PR.
 
 from __future__ import annotations
 
+import pytest
+
 from almanak.connectors._connector import CONNECTOR_REGISTRY
 from almanak.connectors._strategy_base.capabilities_registry import CapabilitiesRegistry
 from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
@@ -395,6 +397,146 @@ def test_dex_volume_decls_match_wrapper_provider_chains() -> None:
         assert list(entry.chains) == wrapper_chains, (key, entry.chains, wrapper_chains)
 
 
+# almanak/framework/data/rates/monitor.py + backtesting/pnl/providers/
+# lending_apy.py legacy tables as of 2026-06-10, frozen verbatim (VIB-4851
+# Phase D / D5). Deliberate widening, acknowledged here: lending_apy's
+# legacy SUPPORTED_PROTOCOLS was ["aave_v3", "compound_v3"]; morpho_blue
+# joins because its gateway rate lane has existed since W7 — the client
+# gate was the only thing excluding it.
+FROZEN_LENDING_RATE_PROTOCOLS = ("aave_v3", "compound_v3", "morpho_blue")
+FROZEN_LENDING_RATE_CHAINS = {
+    "aave_v3": ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche"),
+    "compound_v3": ("ethereum", "arbitrum", "optimism", "polygon", "base"),
+    "morpho_blue": ("ethereum", "base"),
+}
+# monitor.py PROTOCOL_CHAINS rows (values now sorted; legacy insertion order
+# ["aave_v3", "morpho_blue", "compound_v3"] carried no semantics).
+FROZEN_LENDING_PROTOCOL_CHAINS = {
+    "ethereum": ["aave_v3", "compound_v3", "morpho_blue"],
+    "arbitrum": ["aave_v3", "compound_v3"],
+    "optimism": ["aave_v3", "compound_v3"],
+    "polygon": ["aave_v3", "compound_v3"],
+    "base": ["aave_v3", "compound_v3", "morpho_blue"],
+    "avalanche": ["aave_v3"],
+}
+FROZEN_LENDING_DEFAULT_APYS = {
+    "aave_v3": ("0.03", "0.05"),
+    "compound_v3": ("0.025", "0.045"),
+    "morpho_blue": (None, None),
+}
+
+
+def test_lending_rate_lane_equals_frozen_legacy_tables() -> None:
+    """Manifest-derived lending rate lane == the legacy hardcoded tables."""
+    assert LendingReadRegistry.rate_history_protocols() == FROZEN_LENDING_RATE_PROTOCOLS
+    for protocol, chains in FROZEN_LENDING_RATE_CHAINS.items():
+        assert LendingReadRegistry.rate_history_chains(protocol) == chains, protocol
+    for chain, protocols in FROZEN_LENDING_PROTOCOL_CHAINS.items():
+        assert list(LendingReadRegistry.rate_history_protocols_for_chain(chain)) == protocols, chain
+    for protocol, apys in FROZEN_LENDING_DEFAULT_APYS.items():
+        assert LendingReadRegistry.backtest_default_apys(protocol) == apys, protocol
+
+
+def test_lending_rate_chains_subset_of_gateway_capability() -> None:
+    """Each declared rate-lane chain set ⊆ the gateway-side servable set.
+
+    Subset (not equality) is the contract: the gateway sets derive from
+    address registries and may serve more chains than the framework
+    consumers declare; everything declared must be servable.
+    """
+    from almanak.connectors._base.gateway_capabilities import (
+        GatewayLendingRateHistoryCapability,
+    )
+    from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+
+    gateway_chains: dict[str, frozenset[str]] = {}
+    for provider in GATEWAY_REGISTRY.capability_providers(GatewayLendingRateHistoryCapability):  # type: ignore[type-abstract]
+        name = type(provider).__name__.replace("GatewayConnector", "")
+        key = {"AaveV3": "aave_v3", "CompoundV3": "compound_v3", "MorphoBlue": "morpho_blue"}.get(name)
+        if key is not None:
+            gateway_chains[key] = frozenset(provider.lending_supported_chains())
+    assert set(gateway_chains) == set(FROZEN_LENDING_RATE_PROTOCOLS)
+    for protocol in FROZEN_LENDING_RATE_PROTOCOLS:
+        declared = set(LendingReadRegistry.rate_history_chains(protocol))
+        assert declared <= gateway_chains[protocol], (protocol, declared - gateway_chains[protocol])
+
+
+# backtesting/pnl/providers/twap.py legacy tables as of 2026-06-10, frozen
+# verbatim (VIB-4851 Phase D / D5); the connector copy is
+# almanak/connectors/uniswap_v3/backtest_pools.py.
+FROZEN_TWAP_POOLS = {
+    "ethereum": {
+        "WETH/USDC-500": "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
+        # EIP-55 case normalization vs the legacy lowercase literal —
+        # case-only, non-semantic (test_all_production_addresses_are_eip55).
+        "WETH/USDC-3000": "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8",
+        "WBTC/WETH-3000": "0xCBCdF9626bC03E24f779434178A73a0B4bad62eD",
+    },
+    "arbitrum": {
+        "WETH/USDC-500": "0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
+        "WETH/USDC-3000": "0xC6962004f452bE9203591991D15f6b388e09E8D0",
+        "WBTC/WETH-500": "0x2f5e87C9312fa29aed5c179E456625D79015299c",
+    },
+    "base": {"WETH/USDC-500": "0xd0b53D9277642d899DF5C87A3966A349A798F224"},
+    "optimism": {"WETH/USDC-500": "0x85149247691df622eaF1a8Bd0CaFd40BC45154a9"},
+    "polygon": {"WMATIC/USDC-500": "0xA374094527e1673A86dE625aa59517c5dE346d32"},
+}
+FROZEN_TWAP_TOKEN_TO_POOL = {
+    "ETH": {"ethereum": "WETH/USDC-500", "arbitrum": "WETH/USDC-500", "base": "WETH/USDC-500", "optimism": "WETH/USDC-500"},
+    "WETH": {"ethereum": "WETH/USDC-500", "arbitrum": "WETH/USDC-500", "base": "WETH/USDC-500", "optimism": "WETH/USDC-500"},
+    "BTC": {"ethereum": "WBTC/WETH-3000", "arbitrum": "WBTC/WETH-500"},
+    "WBTC": {"ethereum": "WBTC/WETH-3000", "arbitrum": "WBTC/WETH-500"},
+    "MATIC": {"polygon": "WMATIC/USDC-500"},
+    "WMATIC": {"polygon": "WMATIC/USDC-500"},
+}
+
+
+def test_twap_reference_pools_equal_frozen_legacy_tables() -> None:
+    """Connector-declared TWAP reference tables == the legacy twap.py tables."""
+    from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
+
+    merged = DexVolumeRegistry.twap_reference_pools()
+    assert merged["pools"] == FROZEN_TWAP_POOLS
+    assert merged["token_to_pool"] == FROZEN_TWAP_TOKEN_TO_POOL
+
+
+# backtesting/paper/position_queries.py legacy contract tables as of
+# 2026-06-10, frozen verbatim (VIB-4851 Phase D / D5, plan DEC-6): the
+# runtime now resolves these through AddressRegistry; this test pins the
+# registry-derived values to the deleted local copies so a connector-side
+# address change is a conscious decision, not silent drift (VIB-4874).
+FROZEN_POSITION_QUERY_ADDRESSES = {
+    ("uniswap_v3", "position_manager"): {
+        "ethereum": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+        "arbitrum": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+        "optimism": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+        "polygon": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+        "base": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
+        "zerog": "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72",
+    },
+    ("gmx_v2", "reader"): {"arbitrum": "0x470fbC46bcC0f16532691Df360A07d8Bf5ee0789"},
+    ("gmx_v2", "data_store"): {"arbitrum": "0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8"},
+    ("aave_v3", "pool_data_provider"): {
+        "ethereum": "0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3",
+        "arbitrum": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
+        "optimism": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
+        "polygon": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
+        "base": "0x2d8A3C5677189723C4cB8873CfC9C8976FDF38Ac",
+        "avalanche": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
+    },
+}
+
+
+def test_position_query_addresses_match_connector_tables() -> None:
+    """AddressRegistry serves the exact addresses position_queries hardcoded."""
+    from almanak.connectors._strategy_base.address_registry import AddressRegistry
+
+    for (protocol, role), per_chain in FROZEN_POSITION_QUERY_ADDRESSES.items():
+        for chain, want in per_chain.items():
+            got = AddressRegistry.resolve_contract_address(protocol, chain, role)
+            assert got == want, (protocol, role, chain, got)
+
+
 def test_funding_history_venues_match_gateway_capability_implementers() -> None:
     """Decl venues == the GatewayFundingHistoryCapability implementer set.
 
@@ -480,3 +622,24 @@ def test_pool_key_lookup_kwarg_equals_frozen_legacy_carveout() -> None:
         for key in connector.receipt_parser_keys
     )
     assert derived == FROZEN_POOL_KEY_LOOKUP_PROTOCOLS
+
+
+def test_twap_reference_pools_rejects_non_dict_table(monkeypatch) -> None:
+    """A twap_reference_pools ref resolving to a non-dict fails loud, not empty."""
+    from types import SimpleNamespace
+
+    from almanak.connectors._connector import CONNECTOR_REGISTRY, ImportRef
+    from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
+
+    bad_manifest = SimpleNamespace(
+        name="fake_dex",
+        dex_volume=SimpleNamespace(
+            twap_reference_pools=ImportRef(
+                module="almanak.connectors._strategy_base.dex_volume_registry",
+                attribute="logger",  # importable, but not a dict
+            )
+        ),
+    )
+    monkeypatch.setattr(CONNECTOR_REGISTRY, "with_dex_volume", lambda: [bad_manifest])
+    with pytest.raises(TypeError, match="fake_dex.*must resolve to a dict"):
+        DexVolumeRegistry.twap_reference_pools()

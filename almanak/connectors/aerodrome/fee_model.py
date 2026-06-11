@@ -41,6 +41,16 @@ from typing import Any
 from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl.fee_models.base import FeeModel
 
+# Backtest-service export metadata (see fee_model_exporter.py — VIB-4851 Phase D).
+BACKTEST_EXPORT_METADATA: dict[str, Any] = {
+    "fee_tiers": [0.0001, 0.003],
+    "default_fee": 0.003,
+    "slippage_model": "constant_product",
+    "supported_intent_types": ["SWAP", "LP_OPEN", "LP_CLOSE"],
+    "supported_chains": ["base"],
+    "gas_estimates": {"swap": 180_000, "lp_open": 300_000, "lp_close": 200_000},
+}
+
 
 class AerodromePoolType(StrEnum):
     """Aerodrome pool types.

@@ -67,6 +67,7 @@ CONNECTOR = Connector(
     ),
     # Market-scoped account state (VIB-4929 PR-3a): non-USD-native; market params inject lltv.
     lending_read=LendingReadDecl(
+        rate_history_chains=("ethereum", "base"),
         account_state=ImportRef(
             module="almanak.connectors.morpho_blue.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"
         ),

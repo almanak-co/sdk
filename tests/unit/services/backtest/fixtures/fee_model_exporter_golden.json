@@ -1,0 +1,409 @@
+{
+  "details": {
+    "aave_v3": {
+      "default_fee": 0.0001,
+      "fee_tiers": [
+        0.0001
+      ],
+      "gas_estimates": {
+        "borrow": 300000,
+        "repay": 250000,
+        "supply": 200000,
+        "withdraw": 200000
+      },
+      "model_name": "AaveV3FeeModel",
+      "protocol": "aave_v3",
+      "raw_config": {
+        "asset_fees": {},
+        "borrow_origination_fee_pct": "0.0001",
+        "flash_loan_fee_pct": "0.0005",
+        "model_name": "aave_v3"
+      },
+      "slippage_model": "none",
+      "supported_chains": [
+        "ethereum",
+        "arbitrum",
+        "optimism",
+        "base",
+        "polygon",
+        "avalanche"
+      ],
+      "supported_intent_types": [
+        "SUPPLY",
+        "BORROW",
+        "WITHDRAW",
+        "REPAY"
+      ]
+    },
+    "aerodrome": {
+      "default_fee": 0.003,
+      "fee_tiers": [
+        0.0001,
+        0.003
+      ],
+      "gas_estimates": {
+        "lp_close": 200000,
+        "lp_open": 300000,
+        "swap": 180000
+      },
+      "model_name": "AerodromeFeeModel",
+      "protocol": "aerodrome",
+      "raw_config": {
+        "model_name": "aerodrome",
+        "protocol_fee_share": "0",
+        "stable_fee_pct": "0.0001",
+        "token_pair_pool_types": {},
+        "volatile_fee_pct": "0.003"
+      },
+      "slippage_model": "constant_product",
+      "supported_chains": [
+        "base"
+      ],
+      "supported_intent_types": [
+        "SWAP",
+        "LP_OPEN",
+        "LP_CLOSE"
+      ]
+    },
+    "compound_v3": {
+      "default_fee": 0.0,
+      "fee_tiers": [],
+      "gas_estimates": {
+        "borrow": 250000,
+        "repay": 200000,
+        "supply": 150000,
+        "withdraw": 150000
+      },
+      "model_name": "CompoundV3FeeModel",
+      "protocol": "compound_v3",
+      "raw_config": {
+        "absorb_fee_pct": "0",
+        "default_liquidation_discount": "0.08",
+        "liquidation_discounts": {
+          "ARB": "0.10",
+          "CBETH": "0.07",
+          "COMP": "0.08",
+          "DAI": "0.03",
+          "LINK": "0.08",
+          "OP": "0.10",
+          "RETH": "0.07",
+          "UNI": "0.10",
+          "USDC": "0.03",
+          "USDT": "0.03",
+          "WBTC": "0.05",
+          "WETH": "0.05",
+          "WSTETH": "0.07"
+        },
+        "market": null,
+        "model_name": "compound_v3"
+      },
+      "slippage_model": "none",
+      "supported_chains": [
+        "ethereum",
+        "arbitrum",
+        "optimism",
+        "base",
+        "polygon"
+      ],
+      "supported_intent_types": [
+        "SUPPLY",
+        "BORROW",
+        "WITHDRAW",
+        "REPAY"
+      ]
+    },
+    "curve": {
+      "default_fee": 0.0004,
+      "fee_tiers": [
+        0.0001,
+        0.0004,
+        0.0013
+      ],
+      "gas_estimates": {
+        "swap": 250000
+      },
+      "model_name": "CurveFeeModel",
+      "protocol": "curve",
+      "raw_config": {
+        "admin_fee_share": "0.5",
+        "base_fees": {
+          "crvusd": "0.0001",
+          "factory": "0.0004",
+          "metapool": "0.0004",
+          "stable": "0.0004",
+          "tricrypto": "0.0013"
+        },
+        "imbalance_sensitivity": "2",
+        "max_fee_multiplier": "3",
+        "model_name": "curve"
+      },
+      "slippage_model": "stableswap",
+      "supported_chains": [
+        "ethereum",
+        "arbitrum",
+        "optimism",
+        "base",
+        "polygon",
+        "avalanche"
+      ],
+      "supported_intent_types": [
+        "SWAP"
+      ]
+    },
+    "gmx": {
+      "default_fee": 0.001,
+      "fee_tiers": [
+        0.0005,
+        0.001
+      ],
+      "gas_estimates": {
+        "perp_close": 600000,
+        "perp_open": 800000,
+        "swap": 400000
+      },
+      "model_name": "GMXFeeModel",
+      "protocol": "gmx",
+      "raw_config": {
+        "asset_fees": {},
+        "execution_fee_usd": "0.50",
+        "model_name": "gmx",
+        "position_fee_pct": "0.001",
+        "swap_fee_pct": "0.0005"
+      },
+      "slippage_model": "price_impact",
+      "supported_chains": [
+        "arbitrum",
+        "avalanche"
+      ],
+      "supported_intent_types": [
+        "PERP_OPEN",
+        "PERP_CLOSE",
+        "SWAP"
+      ]
+    },
+    "hyperliquid": {
+      "default_fee": 0.00045,
+      "fee_tiers": [
+        0.00026,
+        0.00027,
+        0.00028,
+        0.0003,
+        0.00035,
+        0.0004,
+        0.00045
+      ],
+      "gas_estimates": {},
+      "model_name": "HyperliquidFeeModel",
+      "protocol": "hyperliquid",
+      "raw_config": {
+        "custom_maker_fee": null,
+        "custom_taker_fee": null,
+        "fee_tier": "vip_0",
+        "is_hip3_market": false,
+        "maker_fee": "0.00015",
+        "model_name": "hyperliquid",
+        "staked_hype": "0",
+        "taker_fee": "0.00045",
+        "volume_14d": null
+      },
+      "slippage_model": "orderbook",
+      "supported_chains": [
+        "hyperliquid"
+      ],
+      "supported_intent_types": [
+        "PERP_OPEN",
+        "PERP_CLOSE"
+      ]
+    },
+    "morpho": {
+      "default_fee": 0.0,
+      "fee_tiers": [],
+      "gas_estimates": {
+        "borrow": 280000,
+        "repay": 230000,
+        "supply": 180000,
+        "withdraw": 180000
+      },
+      "model_name": "MorphoFeeModel",
+      "protocol": "morpho",
+      "raw_config": {
+        "asset_liquidation_incentives": {},
+        "liquidation_incentive_factor": "1.05",
+        "model_name": "morpho",
+        "performance_fee_pct": "0"
+      },
+      "slippage_model": "none",
+      "supported_chains": [
+        "ethereum",
+        "base"
+      ],
+      "supported_intent_types": [
+        "SUPPLY",
+        "BORROW",
+        "WITHDRAW",
+        "REPAY"
+      ]
+    },
+    "pancakeswap_v3": {
+      "default_fee": 0.0025,
+      "fee_tiers": [
+        0.0001,
+        0.0005,
+        0.0025,
+        0.01
+      ],
+      "gas_estimates": {
+        "lp_close": 260000,
+        "lp_open": 360000,
+        "swap": 160000
+      },
+      "model_name": "PancakeSwapV3FeeModel",
+      "protocol": "pancakeswap_v3",
+      "raw_config": {
+        "default_fee_pct": "0.0025",
+        "default_fee_tier": "2500",
+        "model_name": "pancakeswap_v3",
+        "token_pair_tiers": {}
+      },
+      "slippage_model": "sqrt_impact",
+      "supported_chains": [
+        "bsc",
+        "ethereum",
+        "arbitrum",
+        "base"
+      ],
+      "supported_intent_types": [
+        "SWAP",
+        "LP_OPEN",
+        "LP_CLOSE"
+      ]
+    },
+    "uniswap_v3": {
+      "default_fee": 0.003,
+      "fee_tiers": [
+        0.0001,
+        0.0005,
+        0.003,
+        0.01
+      ],
+      "gas_estimates": {
+        "lp_close": 250000,
+        "lp_open": 350000,
+        "swap": 150000
+      },
+      "model_name": "UniswapV3FeeModel",
+      "protocol": "uniswap_v3",
+      "raw_config": {
+        "default_fee_pct": "0.003",
+        "default_fee_tier": "3000",
+        "model_name": "uniswap_v3",
+        "token_pair_tiers": {}
+      },
+      "slippage_model": "sqrt_impact",
+      "supported_chains": [
+        "ethereum",
+        "arbitrum",
+        "optimism",
+        "base",
+        "polygon",
+        "bsc",
+        "avalanche"
+      ],
+      "supported_intent_types": [
+        "SWAP",
+        "LP_OPEN",
+        "LP_CLOSE"
+      ]
+    }
+  },
+  "summaries": [
+    {
+      "model_name": "AaveV3FeeModel",
+      "protocol": "aave_v3",
+      "supported_chains": [
+        "ethereum",
+        "arbitrum",
+        "optimism",
+        "base",
+        "polygon",
+        "avalanche"
+      ]
+    },
+    {
+      "model_name": "AerodromeFeeModel",
+      "protocol": "aerodrome",
+      "supported_chains": [
+        "base"
+      ]
+    },
+    {
+      "model_name": "CompoundV3FeeModel",
+      "protocol": "compound_v3",
+      "supported_chains": [
+        "ethereum",
+        "arbitrum",
+        "optimism",
+        "base",
+        "polygon"
+      ]
+    },
+    {
+      "model_name": "CurveFeeModel",
+      "protocol": "curve",
+      "supported_chains": [
+        "ethereum",
+        "arbitrum",
+        "optimism",
+        "base",
+        "polygon",
+        "avalanche"
+      ]
+    },
+    {
+      "model_name": "GMXFeeModel",
+      "protocol": "gmx",
+      "supported_chains": [
+        "arbitrum",
+        "avalanche"
+      ]
+    },
+    {
+      "model_name": "HyperliquidFeeModel",
+      "protocol": "hyperliquid",
+      "supported_chains": [
+        "hyperliquid"
+      ]
+    },
+    {
+      "model_name": "MorphoFeeModel",
+      "protocol": "morpho",
+      "supported_chains": [
+        "ethereum",
+        "base"
+      ]
+    },
+    {
+      "model_name": "PancakeSwapV3FeeModel",
+      "protocol": "pancakeswap_v3",
+      "supported_chains": [
+        "bsc",
+        "ethereum",
+        "arbitrum",
+        "base"
+      ]
+    },
+    {
+      "model_name": "UniswapV3FeeModel",
+      "protocol": "uniswap_v3",
+      "supported_chains": [
+        "ethereum",
+        "arbitrum",
+        "optimism",
+        "base",
+        "polygon",
+        "bsc",
+        "avalanche"
+      ]
+    }
+  ]
+}

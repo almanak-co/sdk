@@ -17,12 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from almanak.framework.backtesting.pnl.providers.lending_apy import (
-    AAVE_V3_MARKETS,
-    COMPOUND_V3_MARKETS,
-    DEFAULT_BORROW_APYS,
     DEFAULT_CACHE_TTL_SECONDS,
-    DEFAULT_SUPPLY_APYS,
-    SUPPORTED_PROTOCOLS,
     CachedLendingAPY,
     LendingAPYData,
     LendingAPYNotFoundError,
@@ -30,7 +25,9 @@ from almanak.framework.backtesting.pnl.providers.lending_apy import (
     LendingAPYRateLimitError,
     RateLimitState,
     UnsupportedProtocolError,
+    supported_protocols,
 )
+from almanak.framework.data.interfaces import DataSourceUnavailable
 
 
 class TestLendingAPYProviderInitialization:
@@ -440,12 +437,13 @@ class TestLendingAPYProviderAaveV3:
         assert exc_info.value.protocol == "aave_v3"
         assert exc_info.value.market == "UNKNOWN"
 
-    def test_aave_v3_markets_defined(self):
-        """Test Aave V3 markets are defined."""
-        assert "USDC" in AAVE_V3_MARKETS["ethereum"]
-        assert "WETH" in AAVE_V3_MARKETS["ethereum"]
-        assert "USDC" in AAVE_V3_MARKETS["arbitrum"]
-        assert "WETH" in AAVE_V3_MARKETS["arbitrum"]
+    def test_aave_v3_rate_lane_declared(self):
+        """Aave V3 declares its gateway rate lane via the connector manifest."""
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        assert "aave_v3" in supported_protocols()
+        assert "ethereum" in LendingReadRegistry.rate_history_chains("aave_v3")
+        assert "arbitrum" in LendingReadRegistry.rate_history_chains("aave_v3")
 
 
 @pytest.mark.skip(
@@ -516,10 +514,12 @@ class TestLendingAPYProviderCompoundV3:
         assert exc_info.value.protocol == "compound_v3"
         assert exc_info.value.market == "UNKNOWN"
 
-    def test_compound_v3_markets_defined(self):
-        """Test Compound V3 markets are defined."""
-        assert "USDC" in COMPOUND_V3_MARKETS["ethereum"]
-        assert "WETH" in COMPOUND_V3_MARKETS["ethereum"]
+    def test_compound_v3_rate_lane_declared(self):
+        """Compound V3 declares its gateway rate lane via the connector manifest."""
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        assert "compound_v3" in supported_protocols()
+        assert "ethereum" in LendingReadRegistry.rate_history_chains("compound_v3")
 
 
 @pytest.mark.skip(
@@ -599,8 +599,8 @@ class TestLendingAPYProviderErrors:
         )
 
         assert data.source == "fallback"
-        assert data.supply_apy == DEFAULT_SUPPLY_APYS["aave_v3"]
-        assert data.borrow_apy == DEFAULT_BORROW_APYS["aave_v3"]
+        assert data.supply_apy == Decimal("0.03")  # aave_v3 manifest default
+        assert data.borrow_apy == Decimal("0.05")  # aave_v3 manifest default
 
 
 class TestLendingAPYProviderDefaults:
@@ -630,19 +630,66 @@ class TestLendingAPYProviderDefaults:
         rate = provider.get_default_borrow_apy("compound_v3")
         assert rate == Decimal("0.045")
 
-    def test_get_default_apy_unknown_protocol(self):
-        """Test getting default APY for unknown protocol returns fallback."""
+    def test_get_default_apy_undeclared_protocol_raises(self):
+        """A venue with no manifest-declared default has no fabricated fallback."""
         provider = LendingAPYProvider()
-        supply = provider.get_default_supply_apy("unknown")
-        borrow = provider.get_default_borrow_apy("unknown")
-        assert supply == Decimal("0.03")  # Default fallback
-        assert borrow == Decimal("0.05")  # Default fallback
+        with pytest.raises(DataSourceUnavailable, match="no manifest-declared offline default"):
+            provider.get_default_supply_apy("unknown")
+        with pytest.raises(DataSourceUnavailable, match="no manifest-declared offline default"):
+            provider.get_default_borrow_apy("unknown")
 
-    def test_default_apys_defined(self):
-        """Test default APYs are defined for all protocols."""
-        for protocol in SUPPORTED_PROTOCOLS:
-            assert protocol in DEFAULT_SUPPLY_APYS
-            assert protocol in DEFAULT_BORROW_APYS
+    def test_declared_protocols_resolve_defaults(self):
+        """Venues that declare offline defaults resolve them; morpho declares none."""
+        provider = LendingAPYProvider(chain="ethereum")
+        for protocol in ("aave_v3", "compound_v3"):
+            assert provider.get_default_supply_apy(protocol) > 0
+            assert provider.get_default_borrow_apy(protocol) > 0
+        # morpho_blue passes protocol validation (gateway capability exists)
+        # but declares backtest_default_*_apy=None — no sanctioned number.
+        assert "morpho_blue" in supported_protocols()
+        with pytest.raises(DataSourceUnavailable):
+            provider.get_default_supply_apy("morpho_blue")
+
+    @pytest.mark.asyncio
+    async def test_gateway_failure_without_declared_default_propagates(self):
+        """Gateway success=False for a no-default venue raises, never fabricates.
+
+        Pre-D4 a morpho request raised UnsupportedProtocolError; admitting it
+        to supported_protocols() must not downgrade that loud failure into a
+        silent generic 3%/5% row.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        provider = LendingAPYProvider(chain="ethereum")
+        failure = DataSourceUnavailable(source="morpho_blue", reason="on-chain rate not implemented")
+        with (
+            patch.object(provider, "_fetch_apy_via_gateway", AsyncMock(side_effect=failure)),
+            pytest.raises(DataSourceUnavailable, match="on-chain rate not implemented"),
+        ):
+            await provider.get_historical_apy(
+                protocol="morpho_blue",
+                market="USDC",
+                timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+            )
+        # Nothing fabricated, nothing cached.
+        assert provider._get_from_cache("morpho_blue", "USDC", datetime(2024, 1, 15, 12, 0, tzinfo=UTC)) is None
+
+    @pytest.mark.asyncio
+    async def test_gateway_failure_with_declared_default_falls_back(self):
+        """Venues with manifest-declared defaults keep the fallback row."""
+        from unittest.mock import AsyncMock, patch
+
+        provider = LendingAPYProvider(chain="ethereum")
+        failure = DataSourceUnavailable(source="aave_v3", reason="gateway down")
+        with patch.object(provider, "_fetch_apy_via_gateway", AsyncMock(side_effect=failure)):
+            data = await provider.get_historical_apy(
+                protocol="aave_v3",
+                market="USDC",
+                timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+            )
+        assert data.source == "fallback"
+        assert data.supply_apy == Decimal("0.03")
+        assert data.borrow_apy == Decimal("0.05")
 
 
 class TestLendingAPYProviderSerialization:
@@ -663,7 +710,7 @@ class TestLendingAPYProviderSerialization:
         assert d["cache_ttl_seconds"] == 7200
         assert d["request_timeout"] == 60
         assert d["requests_per_minute"] == 20
-        assert d["supported_protocols"] == SUPPORTED_PROTOCOLS
+        assert d["supported_protocols"] == supported_protocols()
 
 
 class TestLendingAPYProviderIntegration:

@@ -116,62 +116,40 @@ DEFAULT_TWAP_WINDOW_SECONDS = 1800
 ARCHIVE_RPC_URL_ENV_PATTERN = "ARCHIVE_RPC_URL_{CHAIN}"
 ARCHIVE_RPC_CHAINS = ("ethereum", "arbitrum", "base", "optimism", "polygon")
 
-# Per-chain pool address tables. Preserved verbatim from pre-W7 for
-# back-compat; the gateway connector owns the authoritative addresses
-# via ``GatewayAddressCapability``.
-ETHEREUM_POOLS: dict[str, str] = {
-    "WETH/USDC-500": "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
-    "WETH/USDC-3000": "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8",
-    "WBTC/WETH-3000": "0xCBCdF9626bC03E24f779434178A73a0B4bad62eD",
-}
-ARBITRUM_POOLS: dict[str, str] = {
-    "WETH/USDC-500": "0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
-    "WETH/USDC-3000": "0xc6962004f452bE9203591991D15f6b388e09E8D0",
-    "WBTC/WETH-500": "0x2f5e87C9312fa29aed5c179E456625D79015299c",
-}
-BASE_POOLS: dict[str, str] = {
-    "WETH/USDC-500": "0xd0b53D9277642d899DF5C87A3966A349A798F224",
-}
-OPTIMISM_POOLS: dict[str, str] = {
-    "WETH/USDC-500": "0x85149247691df622eaF1a8Bd0CaFd40BC45154a9",
-}
-POLYGON_POOLS: dict[str, str] = {
-    "WMATIC/USDC-500": "0xA374094527e1673A86dE625aa59517c5dE346d32",
+# The per-chain pool address tables and the token -> pool-key resolution are
+# connector-owned reference data (``almanak/connectors/uniswap_v3/
+# backtest_pools.py``), declared via ``DexVolumeDecl.twap_reference_pools``
+# and merged through ``DexVolumeRegistry.twap_reference_pools()`` — VIB-4851
+# Phase D. The legacy module names (``UNISWAP_V3_POOLS``, ``TOKEN_TO_POOL``)
+# stay importable via ``__getattr__`` below.
+
+
+def _reference_pools() -> dict[str, dict]:
+    """Connector-declared TWAP reference tables (lazy; never at import)."""
+    from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
+
+    return DexVolumeRegistry.twap_reference_pools()
+
+
+_PER_CHAIN_TABLE_NAMES = {
+    "ETHEREUM_POOLS": "ethereum",
+    "ARBITRUM_POOLS": "arbitrum",
+    "BASE_POOLS": "base",
+    "OPTIMISM_POOLS": "optimism",
+    "POLYGON_POOLS": "polygon",
 }
 
-UNISWAP_V3_POOLS: dict[str, dict[str, str]] = {
-    "ethereum": ETHEREUM_POOLS,
-    "arbitrum": ARBITRUM_POOLS,
-    "base": BASE_POOLS,
-    "optimism": OPTIMISM_POOLS,
-    "polygon": POLYGON_POOLS,
-}
 
-# Default token → pool key mapping per chain (pre-W7 had this inline).
-TOKEN_TO_POOL: dict[str, dict[str, str]] = {
-    "ETH": {
-        "ethereum": "WETH/USDC-500",
-        "arbitrum": "WETH/USDC-500",
-        "base": "WETH/USDC-500",
-        "optimism": "WETH/USDC-500",
-    },
-    "WETH": {
-        "ethereum": "WETH/USDC-500",
-        "arbitrum": "WETH/USDC-500",
-        "base": "WETH/USDC-500",
-        "optimism": "WETH/USDC-500",
-    },
-    "BTC": {
-        "ethereum": "WBTC/WETH-3000",
-        "arbitrum": "WBTC/WETH-500",
-    },
-    "WBTC": {
-        "ethereum": "WBTC/WETH-3000",
-        "arbitrum": "WBTC/WETH-500",
-    },
-    "MATIC": {"polygon": "WMATIC/USDC-500"},
-    "WMATIC": {"polygon": "WMATIC/USDC-500"},
-}
+def __getattr__(name: str):  # noqa: ANN202 - PEP 562 lazy back-compat hook
+    """Serve the legacy table names without import-time discovery."""
+    if name == "UNISWAP_V3_POOLS":
+        return _reference_pools()["pools"]
+    if name == "TOKEN_TO_POOL":
+        return _reference_pools()["token_to_pool"]
+    chain = _PER_CHAIN_TABLE_NAMES.get(name)
+    if chain is not None:
+        return _reference_pools()["pools"].get(chain, {})
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # =============================================================================
@@ -291,7 +269,6 @@ class TWAPDataProvider:
         priority: Provider priority for registry selection (lower = higher).
     """
 
-    _SUPPORTED_CHAINS = list(UNISWAP_V3_POOLS.keys())
     DEFAULT_PRIORITY = 20
 
     def __init__(
@@ -303,8 +280,9 @@ class TWAPDataProvider:
         priority: int | None = None,
     ) -> None:
         self._chain = chain.lower()
-        if self._chain not in UNISWAP_V3_POOLS:
-            available = ", ".join(UNISWAP_V3_POOLS.keys())
+        pools_by_chain = _reference_pools()["pools"]
+        if self._chain not in pools_by_chain:
+            available = ", ".join(pools_by_chain.keys())
             raise ValueError(f"Unsupported chain {chain!r}. Available: {available}")
         self._observation_window_seconds = (
             observation_window_seconds if observation_window_seconds is not None else DEFAULT_TWAP_WINDOW_SECONDS
@@ -314,7 +292,7 @@ class TWAPDataProvider:
         # Preserved for back-compat with pre-W7 callers — the gateway
         # client ignores it (RPC egress lives gateway-side now).
         self._rpc_url = rpc_url
-        self._pools = UNISWAP_V3_POOLS[self._chain]
+        self._pools = pools_by_chain[self._chain]
         self._cache: dict[str, CachedTWAP] = {}
 
     @property
@@ -336,7 +314,7 @@ class TWAPDataProvider:
     def get_pool_address(self, token: str) -> str | None:
         """Resolve a token symbol to a Uniswap V3 pool address on this chain."""
         token_upper = token.upper()
-        chain_pools = TOKEN_TO_POOL.get(token_upper, {})
+        chain_pools = _reference_pools()["token_to_pool"].get(token_upper, {})
         pool_key = chain_pools.get(self._chain)
         if pool_key is None:
             return None
@@ -345,12 +323,13 @@ class TWAPDataProvider:
     def get_pool_key(self, token: str) -> str | None:
         """Resolve a token symbol to the pool key (e.g. "WETH/USDC-500")."""
         token_upper = token.upper()
-        chain_pools = TOKEN_TO_POOL.get(token_upper, {})
+        chain_pools = _reference_pools()["token_to_pool"].get(token_upper, {})
         return chain_pools.get(self._chain)
 
     def supported_tokens(self) -> list[str]:
         """List of tokens supported on the configured chain."""
-        return [token for token, chain_pools in TOKEN_TO_POOL.items() if self._chain in chain_pools]
+        token_to_pool = _reference_pools()["token_to_pool"]
+        return [token for token, chain_pools in token_to_pool.items() if self._chain in chain_pools]
 
     def _cached_price_if_fresh(self, token: str, token_upper: str) -> Decimal | None:
         """Return the cached TWAP price for ``token_upper`` if non-expired, else ``None``."""
@@ -513,7 +492,7 @@ class TWAPDataProvider:
 
     async def _fetch_eth_usd_price(self) -> Decimal:
         """Two-hop convenience: ask the gateway for WETH/USDC TWAP on this chain."""
-        pool_key = TOKEN_TO_POOL.get("WETH", {}).get(self._chain)
+        pool_key = _reference_pools()["token_to_pool"].get("WETH", {}).get(self._chain)
         if pool_key is None:
             raise DataSourceUnavailable(
                 source="gateway",
@@ -611,23 +590,20 @@ class TWAPDataProvider:
         await self.close()
 
 
+# NOTE: the legacy table names (UNISWAP_V3_POOLS, TOKEN_TO_POOL, and the
+# per-chain *_POOLS dicts) remain importable via the module __getattr__
+# above but are deliberately absent from __all__ — ruff/mypy can't see
+# PEP 562 names, and star-imports shouldn't pull derived views anyway.
 __all__ = [
-    "ARBITRUM_POOLS",
     "ARCHIVE_RPC_CHAINS",
     "ARCHIVE_RPC_URL_ENV_PATTERN",
-    "BASE_POOLS",
     "CachedTWAP",
     "DEFAULT_TWAP_WINDOW_SECONDS",
-    "ETHEREUM_POOLS",
     "OBSERVE_SELECTOR",
-    "OPTIMISM_POOLS",
-    "POLYGON_POOLS",
     "SLOT0_SELECTOR",
-    "TOKEN_TO_POOL",
     "TWAPDataProvider",
     "TWAPInsufficientHistoryError",
     "TWAPObservation",
     "TWAPPoolNotFoundError",
     "TWAPResult",
-    "UNISWAP_V3_POOLS",
 ]

@@ -35,6 +35,16 @@ from typing import Any
 from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl.fee_models.base import FeeModel
 
+# Backtest-service export metadata (see fee_model_exporter.py — VIB-4851 Phase D).
+BACKTEST_EXPORT_METADATA: dict[str, Any] = {
+    "fee_tiers": [0.0005, 0.001],
+    "default_fee": 0.001,
+    "slippage_model": "price_impact",
+    "supported_intent_types": ["PERP_OPEN", "PERP_CLOSE", "SWAP"],
+    "supported_chains": ["arbitrum", "avalanche"],
+    "gas_estimates": {"perp_open": 800_000, "perp_close": 600_000, "swap": 400_000},
+}
+
 
 @dataclass
 class GMXFeeModel(FeeModel):

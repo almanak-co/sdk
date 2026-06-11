@@ -709,6 +709,84 @@ class LendingReadRegistry:
         )
 
     @classmethod
+    def rate_history_chains(cls, protocol: str | None) -> tuple[str, ...]:
+        """Chains the framework rate consumers offer ``protocol``'s rates on.
+
+        Manifest-derived (``LendingReadDecl.rate_history_chains``, VIB-4851
+        Phase D); empty tuple for venues without a declared rate lane. A
+        parity test pins each declaration as a subset of the connector's
+        gateway-side ``lending_supported_chains()``.
+        """
+        key = cls.normalize_protocol(protocol)
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+        for connector_manifest in CONNECTOR_REGISTRY.with_lending_read():
+            if connector_manifest.name == key:
+                decl = connector_manifest.lending_read
+                assert decl is not None
+                return decl.rate_history_chains
+        return ()
+
+    @classmethod
+    def rate_history_protocols(cls) -> tuple[str, ...]:
+        """Lending venues with a declared gateway rate lane, sorted."""
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+        return tuple(
+            sorted(
+                c.name
+                for c in CONNECTOR_REGISTRY.with_lending_read()
+                if c.lending_read is not None and c.lending_read.rate_history_chains
+            )
+        )
+
+    @classmethod
+    def rate_history_protocols_for_chain(cls, chain: str | None) -> tuple[str, ...]:
+        """Rate-lane venues declaring ``chain``, sorted (legacy PROTOCOL_CHAINS rows)."""
+        if not isinstance(chain, str) or not chain:
+            return ()
+        chain_lower = chain.strip().lower()
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+        return tuple(
+            sorted(
+                c.name
+                for c in CONNECTOR_REGISTRY.with_lending_read()
+                if c.lending_read is not None and chain_lower in c.lending_read.rate_history_chains
+            )
+        )
+
+    @classmethod
+    def all_rate_history_chains(cls) -> frozenset[str]:
+        """Union of every declared rate-lane chain across lending venues."""
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+        return frozenset(
+            chain
+            for c in CONNECTOR_REGISTRY.with_lending_read()
+            if c.lending_read is not None
+            for chain in c.lending_read.rate_history_chains
+        )
+
+    @classmethod
+    def backtest_default_apys(cls, protocol: str | None) -> tuple[str | None, str | None]:
+        """``(supply, borrow)`` offline-backtest fallback APYs for ``protocol``.
+
+        Decimal strings from the manifest declaration; ``(None, None)`` when
+        the venue declares none (consumers fail loud — there is no generic
+        fabricated fallback rate).
+        """
+        key = cls.normalize_protocol(protocol)
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+        for connector_manifest in CONNECTOR_REGISTRY.with_lending_read():
+            if connector_manifest.name == key:
+                decl = connector_manifest.lending_read
+                assert decl is not None
+                return (decl.backtest_default_supply_apy, decl.backtest_default_borrow_apy)
+        return (None, None)
+
+    @classmethod
     def reset_cache(cls) -> None:
         """Test helper: drop the resolved-spec caches so the next call re-imports.
 

@@ -22,6 +22,10 @@ CONNECTOR = Connector(
         amm_family="v3_concentrated",
         aliases=("uni_v3",),
         generic_default=True,
+        twap_reference_pools=ImportRef(
+            module="almanak.connectors.uniswap_v3.backtest_pools",
+            attribute="TWAP_REFERENCE_POOLS",
+        ),
     ),
     fee_model=FeeModelDecl(
         model=ImportRef(module="almanak.connectors.uniswap_v3.fee_model", attribute="UniswapV3FeeModel"),

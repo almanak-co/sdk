@@ -48,6 +48,16 @@ from typing import Any
 from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl.fee_models.base import FeeModel
 
+# Backtest-service export metadata (see fee_model_exporter.py — VIB-4851 Phase D).
+BACKTEST_EXPORT_METADATA: dict[str, Any] = {
+    "fee_tiers": [],
+    "default_fee": 0.0,
+    "slippage_model": "none",
+    "supported_intent_types": ["SUPPLY", "BORROW", "WITHDRAW", "REPAY"],
+    "supported_chains": ["ethereum", "base"],
+    "gas_estimates": {"supply": 180_000, "borrow": 280_000, "repay": 230_000, "withdraw": 180_000},
+}
+
 
 @dataclass
 class MorphoFeeModel(FeeModel):

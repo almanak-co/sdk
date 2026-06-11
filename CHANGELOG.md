@@ -50,6 +50,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   preserved). New `GatewayDexVolumeProvider` serves any declared DEX without
   a per-DEX wrapper class; the existing per-DEX wrapper classes are
   unchanged.
+- The backtest service's fee-model exporter derives its per-protocol standard
+  fields (fee tiers, default fee, slippage-model id, supported intents/chains,
+  gas estimates) from each connector's `fee_model.BACKTEST_EXPORT_METADATA`
+  module attribute instead of a central table (VIB-4851 Phase D). HTTP
+  responses are byte-identical (golden-fixture pinned).
+- Lending rate-lane facts derive from connector manifests
+  (`LendingReadDecl.rate_history_chains` + `backtest_default_*_apy`).
+  Deliberate widening: `LendingAPYProvider` now accepts `morpho_blue` (its
+  gateway rate lane has existed since W7; the client-side gate was the only
+  exclusion). Removed framework-internal names: `rates.monitor.Protocol`
+  (StrEnum), `lending_apy.SUPPORTED_PROTOCOLS` (use
+  `lending_apy.supported_protocols()`), `lending_apy.AAVE_V3_MARKETS` /
+  `COMPOUND_V3_MARKETS` / `AAVE_V3_SUBGRAPHS` / `COMPOUND_V3_SUBGRAPHS`
+  (unused legacy tables), `lending_apy.DEFAULT_SUPPLY_APYS` /
+  `DEFAULT_BORROW_APYS` (use `GENERIC_DEFAULT_*_APY` + the manifest decls).
+  `rates.monitor.SUPPORTED_PROTOCOLS` / `PROTOCOL_CHAINS` remain importable
+  from the module (lazily derived) but are no longer re-exported eagerly by
+  `almanak.framework.data.rates`; `PROTOCOL_CHAINS` values are now sorted.
+- TWAP reference pools (`UNISWAP_V3_POOLS`, `TOKEN_TO_POOL`, per-chain
+  `*_POOLS`) moved to `almanak.connectors.uniswap_v3.backtest_pools`,
+  declared via `DexVolumeDecl.twap_reference_pools`; the legacy
+  `providers.twap` names remain importable (lazily derived) but left
+  `twap.__all__`.
+- `backtesting/paper/position_queries.py` resolves Uniswap V3 / GMX V2 /
+  Aave V3 contract addresses through the strategy-side `AddressRegistry`
+  (W1 seam) instead of local per-chain dicts — the duplicated copies were a
+  drift hazard; an equivalence test pins the registry-derived values to the
+  removed tables. Removed names: `UNISWAP_V3_POSITION_MANAGER`,
+  `GMX_V2_READER`, `GMX_V2_DATA_STORE`, `AAVE_V3_POOL_DATA_PROVIDER`
+  (market/token metadata tables are unchanged).
 
 ## [2.17.0] - 2026-06-05
 

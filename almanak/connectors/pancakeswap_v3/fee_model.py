@@ -34,6 +34,16 @@ from typing import Any
 from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl.fee_models.base import FeeModel
 
+# Backtest-service export metadata (see fee_model_exporter.py — VIB-4851 Phase D).
+BACKTEST_EXPORT_METADATA: dict[str, Any] = {
+    "fee_tiers": [0.0001, 0.0005, 0.0025, 0.01],
+    "default_fee": 0.0025,
+    "slippage_model": "sqrt_impact",
+    "supported_intent_types": ["SWAP", "LP_OPEN", "LP_CLOSE"],
+    "supported_chains": ["bsc", "ethereum", "arbitrum", "base"],
+    "gas_estimates": {"swap": 160_000, "lp_open": 360_000, "lp_close": 260_000},
+}
+
 
 class PancakeSwapV3FeeTier(StrEnum):
     """PancakeSwap V3 fee tiers.

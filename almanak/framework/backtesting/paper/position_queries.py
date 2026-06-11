@@ -34,15 +34,28 @@ logger = logging.getLogger(__name__)
 # Constants
 # =============================================================================
 
-# NonfungiblePositionManager addresses per chain
-UNISWAP_V3_POSITION_MANAGER: dict[str, str] = {
-    "ethereum": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-    "arbitrum": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-    "optimism": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-    "polygon": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-    "base": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
-    "zerog": "0x8F67A30Ed186e3E1f6504c6dE3239Ef43A2e0d72",  # Jaine DEX (Uniswap V3 fork)
-}
+# Contract addresses resolve through the strategy-side AddressRegistry
+# (the W1 / VIB-4853 seam) instead of local per-chain dicts — VIB-4851
+# Phase D, DEC-6: the local copies were duplicates of the connector-owned
+# tables (a VIB-4874-class drift hazard).
+
+
+def _contract_address(protocol: str, chain: str, kinds: tuple[str, ...] | str, *, hint: str = "") -> str:
+    """Resolve a connector-owned contract address, raising on unsupported chains.
+
+    Single registry lookup: the resolved address doubles as the chain-support
+    check, so callers never pair a separate "is the chain supported?" probe
+    with a second resolution the two could drift apart from.
+    """
+    from almanak.connectors._strategy_base.address_registry import AddressRegistry
+
+    address = AddressRegistry.resolve_contract_address(protocol, chain, kinds)
+    if address is None:
+        supported = sorted(AddressRegistry.address_supported_chains(protocol))
+        message = f"Unsupported chain: {chain}. Supported chains: {supported}"
+        raise ValueError(f"{message}. {hint}" if hint else message)
+    return address
+
 
 # Function selectors for NonfungiblePositionManager
 BALANCE_OF_SELECTOR = "0x70a08231"  # balanceOf(address)
@@ -187,13 +200,12 @@ async def query_uniswap_v3_positions(
     """
     # Get position manager address
     if position_manager is None:
-        if chain not in UNISWAP_V3_POSITION_MANAGER:
-            raise ValueError(
-                f"Unsupported chain: {chain}. "
-                f"Supported chains: {list(UNISWAP_V3_POSITION_MANAGER.keys())}. "
-                "Provide position_manager address for other chains."
-            )
-        position_manager = UNISWAP_V3_POSITION_MANAGER[chain]
+        position_manager = _contract_address(
+            "uniswap_v3",
+            chain,
+            ("position_manager", "nft"),
+            hint="Provide position_manager address for other chains.",
+        )
 
     # Normalize addresses
     wallet_checksum = web3.to_checksum_address(wallet)
@@ -249,13 +261,12 @@ def query_uniswap_v3_positions_sync(
     """
     # Get position manager address
     if position_manager is None:
-        if chain not in UNISWAP_V3_POSITION_MANAGER:
-            raise ValueError(
-                f"Unsupported chain: {chain}. "
-                f"Supported chains: {list(UNISWAP_V3_POSITION_MANAGER.keys())}. "
-                "Provide position_manager address for other chains."
-            )
-        position_manager = UNISWAP_V3_POSITION_MANAGER[chain]
+        position_manager = _contract_address(
+            "uniswap_v3",
+            chain,
+            ("position_manager", "nft"),
+            hint="Provide position_manager address for other chains.",
+        )
 
     # Normalize addresses
     wallet_checksum = web3.to_checksum_address(wallet)
@@ -462,15 +473,8 @@ def _parse_position_result(result: bytes, token_id: int) -> UniswapV3Position | 
 # GMX V2 Position Querying
 # =============================================================================
 
-# GMX V2 contract addresses per chain
-# Source: https://github.com/gmx-io/gmx-interface/blob/master/sdk/src/configs/contracts.ts
-GMX_V2_READER: dict[str, str] = {
-    "arbitrum": "0x470fbC46bcC0f16532691Df360A07d8Bf5ee0789",  # SyntheticsReader
-}
-
-GMX_V2_DATA_STORE: dict[str, str] = {
-    "arbitrum": "0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8",
-}
+# GMX V2 reader / data-store addresses resolve through AddressRegistry
+# (roles "reader" / "data_store" on the gmx_v2 connector).
 
 # GMX V2 markets (index token -> market address)
 GMX_V2_MARKETS: dict[str, dict[str, str]] = {
@@ -685,8 +689,7 @@ async def query_gmx_positions(
             print(f"  Entry Price: ${pos.entry_price_decimal:.2f}")
             print(f"  Long: {pos.is_long}")
     """
-    if chain not in GMX_V2_READER:
-        raise ValueError(f"Unsupported chain: {chain}. Supported chains: {list(GMX_V2_READER.keys())}")
+    data_store_address = _contract_address("gmx_v2", chain, "data_store")
 
     # Use default markets if not specified
     if markets is None:
@@ -698,7 +701,7 @@ async def query_gmx_positions(
 
     positions: list[GMXv2Position] = []
     wallet_checksum = web3.to_checksum_address(wallet)
-    data_store = web3.to_checksum_address(GMX_V2_DATA_STORE[chain])
+    data_store = web3.to_checksum_address(data_store_address)
 
     logger.debug(
         f"Querying GMX V2 positions for {wallet} on {chain}: "
@@ -752,8 +755,7 @@ def query_gmx_positions_sync(
     Returns:
         List of GMXv2Position objects
     """
-    if chain not in GMX_V2_READER:
-        raise ValueError(f"Unsupported chain: {chain}. Supported chains: {list(GMX_V2_READER.keys())}")
+    data_store_address = _contract_address("gmx_v2", chain, "data_store")
 
     # Use default markets if not specified
     if markets is None:
@@ -765,7 +767,7 @@ def query_gmx_positions_sync(
 
     positions: list[GMXv2Position] = []
     wallet_checksum = web3.to_checksum_address(wallet)
-    data_store = web3.to_checksum_address(GMX_V2_DATA_STORE[chain])
+    data_store = web3.to_checksum_address(data_store_address)
 
     logger.debug(
         f"Querying GMX V2 positions for {wallet} on {chain}: "
@@ -1108,16 +1110,8 @@ def _compute_position_storage_key(position_key: str, field_name: str) -> str:
 # Aave V3 Position Querying
 # =============================================================================
 
-# Aave V3 Pool Data Provider addresses per chain
-# Source: https://docs.aave.com/developers/deployed-contracts/v3-mainnet
-AAVE_V3_POOL_DATA_PROVIDER: dict[str, str] = {
-    "ethereum": "0x7B4EB56E7CD4b454BA8ff71E4518426369a138a3",
-    "arbitrum": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
-    "optimism": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
-    "polygon": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
-    "base": "0x2d8A3C5677189723C4cB8873CfC9C8976FDF38Ac",
-    "avalanche": "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654",
-}
+# Aave V3 pool-data-provider addresses resolve through AddressRegistry
+# (role "pool_data_provider" on the aave_v3 connector).
 
 # Common tokens supported by Aave V3 per chain (asset address -> symbol)
 AAVE_V3_TOKENS: dict[str, dict[str, str]] = {
@@ -1363,10 +1357,7 @@ async def query_aave_positions(
             print(f"  Debt: {pos.total_debt_decimal:.4f}")
             print(f"  Collateral enabled: {pos.usage_as_collateral_enabled}")
     """
-    if chain not in AAVE_V3_POOL_DATA_PROVIDER:
-        raise ValueError(f"Unsupported chain: {chain}. Supported chains: {list(AAVE_V3_POOL_DATA_PROVIDER.keys())}")
-
-    data_provider = web3.to_checksum_address(AAVE_V3_POOL_DATA_PROVIDER[chain])
+    data_provider = web3.to_checksum_address(_contract_address("aave_v3", chain, "pool_data_provider"))
     wallet_checksum = web3.to_checksum_address(wallet)
 
     # Use provided assets or default to all known tokens for this chain
@@ -1419,10 +1410,7 @@ def query_aave_positions_sync(
     Returns:
         List of AaveV3LendingPosition objects
     """
-    if chain not in AAVE_V3_POOL_DATA_PROVIDER:
-        raise ValueError(f"Unsupported chain: {chain}. Supported chains: {list(AAVE_V3_POOL_DATA_PROVIDER.keys())}")
-
-    data_provider = web3.to_checksum_address(AAVE_V3_POOL_DATA_PROVIDER[chain])
+    data_provider = web3.to_checksum_address(_contract_address("aave_v3", chain, "pool_data_provider"))
     wallet_checksum = web3.to_checksum_address(wallet)
 
     # Use provided assets or default to all known tokens for this chain
@@ -1609,13 +1597,9 @@ __all__ = [
     "query_aave_positions",
     "query_aave_positions_sync",
     # Constants
-    "UNISWAP_V3_POSITION_MANAGER",
-    "GMX_V2_READER",
-    "GMX_V2_DATA_STORE",
     "GMX_V2_MARKETS",
     "GMX_V2_COLLATERAL_TOKENS",
     "GMX_V2_INDEX_TOKEN_DECIMALS",
-    "AAVE_V3_POOL_DATA_PROVIDER",
     "AAVE_V3_TOKENS",
     "AAVE_V3_TOKEN_DECIMALS",
 ]

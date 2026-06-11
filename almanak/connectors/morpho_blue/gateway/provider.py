@@ -23,7 +23,7 @@ W7 (VIB-4859) adds:
   returned hard-coded placeholder constants). The capability is declared
   so the registry dispatcher routes Morpho lending requests through this
   connector; the live path raises ``RateHistoryUnavailable`` until a real
-  on-chain integration ships (tracked in VIB-4870). The framework client
+  on-chain integration ships (tracked in VIB-5040). The framework client
   surfaces the failure envelope and falls back to its placeholder layer
   for parity with pre-W7 behaviour.
 """
@@ -73,7 +73,7 @@ class MorphoBlueGatewayConnector(
         """Chains where Morpho Blue lending rates are surfaceable.
 
         Currently equal to the address registry — when an on-chain live
-        rate fetcher lands (VIB-4870), it will use the
+        rate fetcher lands (VIB-5040), it will use the
         ``MorphoBlue`` market-state contract on these chains.
         """
         return frozenset(MORPHO_BLUE.keys())
@@ -93,13 +93,13 @@ class MorphoBlueGatewayConnector(
         implemented yet. The framework client side preserves the placeholder
         layer for parity; this capability raises so the dispatcher returns
         a typed ``success=False`` envelope rather than fabricating data.
-        Tracked for real on-chain wiring in VIB-4870.
+        Tracked for real on-chain wiring in VIB-5040.
         """
         from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
 
         raise RateHistoryUnavailable(
             "morpho_blue",
-            "Morpho Blue on-chain live rate not implemented; framework client falls back to placeholder. Tracked in VIB-4870.",
+            "Morpho Blue on-chain live rate not implemented; framework client falls back to placeholder. Tracked in VIB-5040.",
         )
 
     async def fetch_lending_history(

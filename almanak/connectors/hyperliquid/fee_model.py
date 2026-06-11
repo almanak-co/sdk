@@ -53,6 +53,16 @@ from typing import Any
 
 from almanak.framework.backtesting.pnl.fee_models.base import FeeModel
 
+# Backtest-service export metadata (see fee_model_exporter.py — VIB-4851 Phase D).
+BACKTEST_EXPORT_METADATA: dict[str, Any] = {
+    "fee_tiers": [0.00026, 0.00027, 0.00028, 0.0003, 0.00035, 0.0004, 0.00045],
+    "default_fee": 0.00045,
+    "slippage_model": "orderbook",
+    "supported_intent_types": ["PERP_OPEN", "PERP_CLOSE"],
+    "supported_chains": ["hyperliquid"],
+    "gas_estimates": {},
+}
+
 
 class HyperliquidFeeTier(Enum):
     """Volume-based fee tiers for Hyperliquid.

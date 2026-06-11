@@ -44,15 +44,12 @@ from .history import (
     RateHistoryReader,
 )
 from .monitor import (
-    PROTOCOL_CHAINS,
     # Constants
-    SUPPORTED_PROTOCOLS,
     SUPPORTED_TOKENS,
     BestRateResult,
     # Data classes
     LendingRate,
     LendingRateResult,
-    Protocol,
     ProtocolNotSupportedError,
     ProtocolRates,
     # Main service
@@ -79,14 +76,11 @@ __all__ = [
     "FundingRateSnapshot",
     # Enums
     "RateSide",
-    "Protocol",
     # Exceptions
     "RateMonitorError",
     "RateUnavailableError",
     "ProtocolNotSupportedError",
     "TokenNotSupportedError",
     # Constants
-    "SUPPORTED_PROTOCOLS",
-    "PROTOCOL_CHAINS",
     "SUPPORTED_TOKENS",
 ]

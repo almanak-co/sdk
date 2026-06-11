@@ -161,3 +161,30 @@ class TestGetIntentProtocol:
             pass
 
         assert trader._get_intent_protocol(UniswapV3SwapIntent()) == "default"
+
+
+class TestContractAddressResolution:
+    """_contract_address resolves once and fails closed on unsupported chains."""
+
+    def test_supported_chain_returns_address(self) -> None:
+        from almanak.framework.backtesting.paper.position_queries import _contract_address
+
+        address = _contract_address("uniswap_v3", "ethereum", ("position_manager", "nft"))
+        assert address.startswith("0x")
+
+    def test_unsupported_chain_raises_with_supported_list(self) -> None:
+        from almanak.framework.backtesting.paper.position_queries import _contract_address
+
+        with pytest.raises(ValueError, match=r"Unsupported chain: notachain\. Supported chains: \["):
+            _contract_address("gmx_v2", "notachain", "data_store")
+
+    def test_hint_is_appended_to_the_message(self) -> None:
+        from almanak.framework.backtesting.paper.position_queries import _contract_address
+
+        with pytest.raises(ValueError, match=r"Provide position_manager address for other chains\.$"):
+            _contract_address(
+                "uniswap_v3",
+                "notachain",
+                ("position_manager", "nft"),
+                hint="Provide position_manager address for other chains.",
+            )

@@ -43,6 +43,16 @@ from typing import Any
 from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl.fee_models.base import FeeModel
 
+# Backtest-service export metadata (see fee_model_exporter.py — VIB-4851 Phase D).
+BACKTEST_EXPORT_METADATA: dict[str, Any] = {
+    "fee_tiers": [0.0001, 0.0004, 0.0013],
+    "default_fee": 0.0004,
+    "slippage_model": "stableswap",
+    "supported_intent_types": ["SWAP"],
+    "supported_chains": ["ethereum", "arbitrum", "optimism", "base", "polygon", "avalanche"],
+    "gas_estimates": {"swap": 250_000},
+}
+
 
 class CurvePoolType(StrEnum):
     """Curve pool types with different fee structures.

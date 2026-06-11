@@ -164,19 +164,12 @@ from .lending import (
     SparkAPYProvider,
 )
 from .lending_apy import (
-    AAVE_V3_MARKETS,
-    COMPOUND_V3_MARKETS,
-    DEFAULT_BORROW_APYS,
-    DEFAULT_SUPPLY_APYS,
     CachedLendingAPY,
     LendingAPYData,
     LendingAPYError,
     LendingAPYNotFoundError,
     LendingAPYProvider,
     LendingAPYRateLimitError,
-)
-from .lending_apy import (
-    SUPPORTED_PROTOCOLS as LENDING_SUPPORTED_PROTOCOLS,
 )
 from .lending_apy import (
     RateLimitState as LendingAPYRateLimitState,
@@ -305,11 +298,6 @@ __all__ = [
     "LendingAPYNotFoundError",
     "LendingAPYRateLimitError",
     "LendingUnsupportedProtocolError",
-    "LENDING_SUPPORTED_PROTOCOLS",
-    "DEFAULT_SUPPLY_APYS",
-    "DEFAULT_BORROW_APYS",
-    "AAVE_V3_MARKETS",
-    "COMPOUND_V3_MARKETS",
     # Rate Limiter
     "TokenBucketRateLimiter",
     "RateLimiterStats",

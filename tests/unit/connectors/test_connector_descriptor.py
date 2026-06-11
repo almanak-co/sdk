@@ -2668,3 +2668,61 @@ class TestDexVolumeDeclValidation:
     def test_rejects_alias_shadowing_primary_name(self):
         with pytest.raises(ValueError, match="aliases must not include the primary name"):
             self._decl(name="uniswap_v3", aliases=("uniswap_v3",))
+
+    def test_accepts_twap_reference_pools_import_ref(self):
+        decl = self._decl(
+            twap_reference_pools=ImportRef(
+                module="almanak.connectors.uniswap_v3.backtest_pools",
+                attribute="TWAP_REFERENCE_POOLS",
+            )
+        )
+        assert decl.twap_reference_pools is not None
+
+    @pytest.mark.parametrize("bad", ["not-a-ref", 123, {}])
+    def test_rejects_non_import_ref_twap_reference_pools(self, bad):
+        with pytest.raises(ValueError, match="twap_reference_pools must be None or an ImportRef"):
+            self._decl(twap_reference_pools=bad)
+
+
+class TestLendingReadDeclRateLaneValidation:
+    """Phase D LendingReadDecl rate-lane guards fail closed (VIB-4851 D4+D5)."""
+
+    @staticmethod
+    def _decl(**overrides):
+        kwargs = {
+            "spec": ImportRef(module="almanak.connectors.aave_v3.lending_read", attribute="LENDING_READ_SPEC"),
+        }
+        kwargs.update(overrides)
+        return LendingReadDecl(**kwargs)
+
+    def test_valid_rate_lane_declaration(self):
+        decl = self._decl(
+            rate_history_chains=("ethereum", "base"),
+            backtest_default_supply_apy="0.03",
+            backtest_default_borrow_apy="0.05",
+        )
+        assert decl.rate_history_chains == ("ethereum", "base")
+
+    @pytest.mark.parametrize("bad", [["ethereum"], "ethereum"])
+    def test_rejects_non_tuple_rate_history_chains(self, bad):
+        with pytest.raises(ValueError, match="rate_history_chains must be a tuple"):
+            self._decl(rate_history_chains=bad)
+
+    @pytest.mark.parametrize("bad_chain", ["", "  ", "Ethereum", 7])
+    def test_rejects_malformed_rate_history_chain_entries(self, bad_chain):
+        with pytest.raises(ValueError, match="rate_history_chains must contain lowercase non-empty strings"):
+            self._decl(rate_history_chains=("ethereum", bad_chain))
+
+    def test_rejects_duplicate_rate_history_chains(self):
+        with pytest.raises(ValueError, match="rate_history_chains contains duplicates"):
+            self._decl(rate_history_chains=("ethereum", "ethereum"))
+
+    @pytest.mark.parametrize("field", ["backtest_default_supply_apy", "backtest_default_borrow_apy"])
+    def test_rejects_non_string_default_apy(self, field):
+        with pytest.raises(ValueError, match=f"{field} must be None or a decimal string"):
+            self._decl(**{field: 0.03})
+
+    @pytest.mark.parametrize("field", ["backtest_default_supply_apy", "backtest_default_borrow_apy"])
+    def test_rejects_non_decimal_default_apy(self, field):
+        with pytest.raises(ValueError, match=f"{field} must parse as a Decimal"):
+            self._decl(**{field: "three percent"})

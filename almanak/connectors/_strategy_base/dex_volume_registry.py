@@ -169,6 +169,39 @@ class DexVolumeRegistry:
         return frozenset(chain for entry in cls._entries().values() for chain in entry.chains)
 
     @classmethod
+    def twap_reference_pools(cls) -> dict[str, dict]:
+        """Merged TWAP reference tables from every declaring connector.
+
+        Returns ``{"pools": {chain: {pool_key: address}}, "token_to_pool":
+        {TOKEN: {chain: pool_key}}}`` — today only uniswap_v3 declares one;
+        merging keeps the consumer connector-blind. Lazy per declaration
+        (ImportRef resolved on first call).
+        """
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+        merged: dict[str, dict] = {"pools": {}, "token_to_pool": {}}
+        for connector_manifest in CONNECTOR_REGISTRY.with_dex_volume():
+            decl = connector_manifest.dex_volume
+            assert decl is not None
+            ref = decl.twap_reference_pools
+            if ref is None:
+                continue
+            tables = ref.load()
+            if not isinstance(tables, dict):
+                # Fail loud: silently skipping a malformed declaration would
+                # hide a connector bug behind an empty reference table.
+                raise TypeError(
+                    f"{connector_manifest.name}: dex_volume.twap_reference_pools "
+                    f"({ref.module}.{ref.attribute}) must resolve to a dict, "
+                    f"got {type(tables).__name__}"
+                )
+            for chain, pools in tables.get("pools", {}).items():
+                merged["pools"].setdefault(chain, {}).update(pools)
+            for token, chain_map in tables.get("token_to_pool", {}).items():
+                merged["token_to_pool"].setdefault(token, {}).update(chain_map)
+        return merged
+
+    @classmethod
     def reset_cache(cls) -> None:
         """Clear derived maps (test hook, mirrors sibling registries)."""
         cls._entry_map = None

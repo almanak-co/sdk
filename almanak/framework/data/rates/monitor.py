@@ -145,15 +145,6 @@ async def _monitor_call_lending_rate_current(
 # =============================================================================
 
 
-# Protocol identifiers
-class Protocol(StrEnum):
-    """Supported lending protocols."""
-
-    AAVE_V3 = "aave_v3"
-    MORPHO_BLUE = "morpho_blue"
-    COMPOUND_V3 = "compound_v3"
-
-
 # Rate side (supply or borrow)
 class RateSide(StrEnum):
     """Lending rate side."""
@@ -162,18 +153,40 @@ class RateSide(StrEnum):
     BORROW = "borrow"
 
 
-# Supported protocols list
-SUPPORTED_PROTOCOLS: list[str] = [p.value for p in Protocol]
+def _supported_protocols() -> list[str]:
+    """Lending venues with a declared gateway rate lane.
 
-# Protocols available per chain
-PROTOCOL_CHAINS: dict[str, list[str]] = {
-    "ethereum": ["aave_v3", "morpho_blue", "compound_v3"],
-    "arbitrum": ["aave_v3", "compound_v3"],
-    "optimism": ["aave_v3", "compound_v3"],
-    "polygon": ["aave_v3", "compound_v3"],
-    "base": ["aave_v3", "morpho_blue", "compound_v3"],
-    "avalanche": ["aave_v3"],
-}
+    Manifest-derived (``LendingReadDecl.rate_history_chains``, VIB-4851
+    Phase D); the module-level ``SUPPORTED_PROTOCOLS`` / ``PROTOCOL_CHAINS``
+    names stay importable via ``__getattr__`` below.
+    """
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    return list(LendingReadRegistry.rate_history_protocols())
+
+
+def _protocols_for_chain(chain: str) -> list[str]:
+    """Rate-lane venues declaring ``chain`` (legacy PROTOCOL_CHAINS rows)."""
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    return list(LendingReadRegistry.rate_history_protocols_for_chain(chain))
+
+
+def _protocol_chains() -> dict[str, list[str]]:
+    """Legacy ``PROTOCOL_CHAINS`` view, derived per declared chain."""
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    return {chain: _protocols_for_chain(chain) for chain in sorted(LendingReadRegistry.all_rate_history_chains())}
+
+
+def __getattr__(name: str):  # noqa: ANN202 - PEP 562 lazy back-compat hook
+    """Serve the legacy derived constants without import-time discovery."""
+    if name == "SUPPORTED_PROTOCOLS":
+        return _supported_protocols()
+    if name == "PROTOCOL_CHAINS":
+        return _protocol_chains()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # Common tokens supported by lending protocols
 SUPPORTED_TOKENS: dict[str, list[str]] = {
@@ -223,7 +236,7 @@ class ProtocolNotSupportedError(RateMonitorError):
     def __init__(self, protocol: str, chain: str) -> None:
         self.protocol = protocol
         self.chain = chain
-        supported = PROTOCOL_CHAINS.get(chain, [])
+        supported = _protocols_for_chain(chain)
         super().__init__(f"Protocol '{protocol}' not supported on {chain}. Supported protocols: {supported}")
 
 
@@ -627,7 +640,7 @@ class RateMonitor:
         self._rpc_url = rpc_url
 
         # Determine available protocols for this chain
-        available = PROTOCOL_CHAINS.get(chain, [])
+        available = _protocols_for_chain(chain)
         if protocols:
             self._protocols = [p for p in protocols if p in available]
         else:
@@ -946,15 +959,12 @@ __all__ = [
     "ProtocolRates",
     # Enums
     "RateSide",
-    "Protocol",
     # Exceptions
     "RateMonitorError",
     "RateUnavailableError",
     "ProtocolNotSupportedError",
     "TokenNotSupportedError",
     # Constants
-    "SUPPORTED_PROTOCOLS",
-    "PROTOCOL_CHAINS",
     "SUPPORTED_TOKENS",
     "DEFAULT_CACHE_TTL_SECONDS",
     "RAY",

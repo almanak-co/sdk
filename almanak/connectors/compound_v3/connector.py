@@ -50,6 +50,9 @@ CONNECTOR = Connector(
     ),
     # Market-scoped Comet reads (VIB-4929 PR-3b) + summed multi-collateral health (VIB-4851 PR-2).
     lending_read=LendingReadDecl(
+        rate_history_chains=("ethereum", "arbitrum", "optimism", "polygon", "base"),
+        backtest_default_supply_apy="0.025",
+        backtest_default_borrow_apy="0.045",
         account_state=ImportRef(
             module="almanak.connectors.compound_v3.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"
         ),

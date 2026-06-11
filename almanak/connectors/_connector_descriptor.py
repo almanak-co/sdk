@@ -16,6 +16,7 @@ import importlib
 import importlib.util
 import pkgutil
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -133,6 +134,16 @@ class LendingReadDecl:
     connector's canonical key (e.g. ``"aave"`` -> ``aave_v3``) — they join the
     lending dispatch namespace only, NOT the manifest discovery/compiler
     alias namespaces.
+
+    Phase D (VIB-4851) additions: ``rate_history_chains`` are the chains the
+    framework rate consumers (``data/rates/monitor.py``,
+    ``backtesting/pnl/providers/lending_apy.py``) offer this venue's lending
+    rates on — a parity test pins it as a subset of the connector's
+    gateway-side ``GatewayLendingRateHistoryCapability.lending_supported_chains()``.
+    ``backtest_default_supply_apy`` / ``backtest_default_borrow_apy`` are the
+    offline-backtest fallback APYs (decimal strings, e.g. ``"0.03"`` = 3%)
+    used when the gateway is unreachable; ``None`` means the venue has no
+    sanctioned offline default and consumers fail loud (VIB-5040).
     """
 
     spec: ImportRef | None = None
@@ -140,6 +151,9 @@ class LendingReadDecl:
     market_table: ImportRef | None = None
     market_health: ImportRef | None = None
     aliases: tuple[str, ...] = ()
+    rate_history_chains: tuple[str, ...] = ()
+    backtest_default_supply_apy: str | None = None
+    backtest_default_borrow_apy: str | None = None
 
     def __post_init__(self) -> None:
         """Validate the declaration's import references and aliases."""
@@ -150,6 +164,27 @@ class LendingReadDecl:
         if self.spec is None and self.account_state is None:
             raise ValueError("LendingReadDecl must set at least one of spec / account_state")
         _validate_decl_aliases("LendingReadDecl", self.aliases)
+        if not isinstance(self.rate_history_chains, tuple):
+            raise ValueError(
+                f"LendingReadDecl.rate_history_chains must be a tuple[str, ...], got {self.rate_history_chains!r}"
+            )
+        bad_chains = [c for c in self.rate_history_chains if not isinstance(c, str) or not c.strip() or c != c.lower()]
+        if bad_chains:
+            raise ValueError(
+                f"LendingReadDecl.rate_history_chains must contain lowercase non-empty strings, got {bad_chains!r}"
+            )
+        if len(set(self.rate_history_chains)) != len(self.rate_history_chains):
+            raise ValueError(f"LendingReadDecl.rate_history_chains contains duplicates: {self.rate_history_chains!r}")
+        for field_name in ("backtest_default_supply_apy", "backtest_default_borrow_apy"):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                raise ValueError(f"LendingReadDecl.{field_name} must be None or a decimal string, got {value!r}")
+            try:
+                Decimal(value)
+            except (InvalidOperation, ValueError) as exc:
+                raise ValueError(f"LendingReadDecl.{field_name} must parse as a Decimal, got {value!r}") from exc
 
 
 @dataclass(frozen=True)
@@ -265,6 +300,7 @@ class DexVolumeDecl:
     volume_data_source: str | None = None
     chain_default: tuple[str, ...] = ()
     generic_default: bool = False
+    twap_reference_pools: ImportRef | None = None
 
     def __post_init__(self) -> None:
         """Validate the declaration's keys, chains, and family."""
@@ -296,6 +332,10 @@ class DexVolumeDecl:
             raise ValueError(f"DexVolumeDecl.chain_default chains must be declared in chains, got {not_supported!r}")
         if not isinstance(self.generic_default, bool):
             raise ValueError(f"DexVolumeDecl.generic_default must be a bool, got {self.generic_default!r}")
+        if self.twap_reference_pools is not None and not isinstance(self.twap_reference_pools, ImportRef):
+            raise ValueError(
+                f"DexVolumeDecl.twap_reference_pools must be None or an ImportRef, got {self.twap_reference_pools!r}"
+            )
         _validate_decl_aliases("DexVolumeDecl", self.aliases)
         if self.name is not None and self.name in self.aliases:
             raise ValueError(f"DexVolumeDecl.aliases must not include the primary name {self.name!r}")

@@ -120,8 +120,20 @@ def _fetch_lending_rate_side(
 # Constants (preserved API surface)
 # =============================================================================
 
-# Supported protocols
-SUPPORTED_PROTOCOLS = ["aave_v3", "compound_v3"]
+
+def supported_protocols() -> list[str]:
+    """Lending venues with a declared gateway rate lane.
+
+    Manifest-derived (``LendingReadDecl.rate_history_chains``, VIB-4851
+    Phase D — deliberate widening: ``morpho_blue`` joins the legacy
+    ``["aave_v3", "compound_v3"]`` pair because its gateway rate lane has
+    existed since W7; the client gate was the only thing excluding it).
+    Lazy by design (module-import derivation is the VIB-4928 hazard).
+    """
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    return list(LendingReadRegistry.rate_history_protocols())
+
 
 # Default cache TTL: 1 hour for historical data
 DEFAULT_CACHE_TTL_SECONDS = 3600
@@ -133,64 +145,23 @@ DEFAULT_REQUESTS_PER_MINUTE = 30
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
 
 
-# Default APYs per protocol (as decimal, 0.03 = 3%) — used when the
-# gateway is unreachable so offline backtests don't crash.
-DEFAULT_SUPPLY_APYS: dict[str, Decimal] = {
-    "aave_v3": Decimal("0.03"),  # 3% supply
-    "compound_v3": Decimal("0.025"),  # 2.5% supply
-}
+def _default_apys(protocol: str) -> tuple[Decimal, Decimal] | None:
+    """Manifest-declared ``(supply, borrow)`` fallback APYs, or None.
 
-DEFAULT_BORROW_APYS: dict[str, Decimal] = {
-    "aave_v3": Decimal("0.05"),  # 5% borrow
-    "compound_v3": Decimal("0.045"),  # 4.5% borrow
-}
+    The connector manifest (``LendingReadDecl.backtest_default_supply_apy`` /
+    ``backtest_default_borrow_apy``) is the only sanctioned offline fallback.
+    ``None`` means the venue declares no offline number — Empty ≠ Zero applies
+    to declarations too, so consumers fail loud instead of substituting a
+    generic fabricated rate (a venue with a rate-capability stub, e.g.
+    morpho_blue pre-on-chain-fetcher, must not silently backtest at an
+    invented APY).
+    """
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
 
-
-# Legacy address tables — preserved for back-compat with strategy code
-# that imported the dicts directly (e.g. for ad-hoc subgraph queries).
-# The gateway-side capability bodies own their own asset → address
-# resolution via ``GatewayAddressCapability`` so these tables are no
-# longer load-bearing for the W7 dispatch.
-AAVE_V3_MARKETS: dict[str, dict[str, str]] = {
-    "ethereum": {
-        "USDC": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-        "USDT": "0xdac17f958d2ee523a2206206994597c13d831ec7",
-        "DAI": "0x6b175474e89094c44da98b954eedeac495271d0f",
-        "WETH": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "WBTC": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
-        "LINK": "0x514910771af9ca656af840dff83e8264ecf986ca",
-    },
-    "arbitrum": {
-        "USDC": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
-        "USDC.e": "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8",
-    },
-    "polygon": {},
-    "base": {},
-    "optimism": {},
-    "avalanche": {},
-}
-
-COMPOUND_V3_MARKETS: dict[str, dict[str, str]] = {
-    "ethereum": {
-        "USDC": "0xc3d688b66703497daa19211eedff47f25384cdc3",
-        "WETH": "0xa17581a9e3356d9a858b789d68b4d866e593ae94",
-    },
-    "arbitrum": {
-        "USDC": "0xa5edbdd9646f8dff606d7448e414884c7d905dca",
-        "USDC.e": "0x9c4ec768c28520b50860ea7a15bd7213a9ff58bf",
-    },
-    "polygon": {"USDC": "0xf25212e676d1f7f89cd72ffee66158f541246445"},
-    "base": {
-        "USDC": "0xb125e6687d4313864e53df431d5425969c15eb2f",
-        "WETH": "0x46e6b214b524310239732d51387075e0e70970bf",
-    },
-}
-
-# Empty legacy subgraph-URL dicts — preserved so callers that imported
-# them by name don't break at import. The gateway-side capability owns
-# the real URLs via ``GatewaySubgraphCapability``.
-AAVE_V3_SUBGRAPHS: dict[str, str] = {}
-COMPOUND_V3_SUBGRAPHS: dict[str, str] = {}
+    supply, borrow = LendingReadRegistry.backtest_default_apys(protocol)
+    if supply is None or borrow is None:
+        return None
+    return (Decimal(supply), Decimal(borrow))
 
 
 # =============================================================================
@@ -239,7 +210,7 @@ class UnsupportedProtocolError(LendingAPYError):
 
     def __init__(self, protocol: str) -> None:
         self.protocol = protocol
-        super().__init__(f"Unsupported protocol: {protocol}. Supported: {SUPPORTED_PROTOCOLS}")
+        super().__init__(f"Unsupported protocol: {protocol}. Supported: {supported_protocols()}")
 
 
 # =============================================================================
@@ -410,12 +381,13 @@ class LendingAPYProvider:
         requests_per_minute: int = DEFAULT_REQUESTS_PER_MINUTE,
     ) -> None:
         chain_lower = chain.lower()
-        # Preserve pre-W7 chain validation surface (tests in
-        # tests/unit/backtesting/pnl/test_lending_apy_provider.py rely on
-        # the ValueError). Supported chains are the union of the
-        # back-compat market tables; the gateway is the authority at
-        # request time.
-        supported_chains = set(AAVE_V3_MARKETS.keys()) | set(COMPOUND_V3_MARKETS.keys())
+        # Preserve the pre-W7 chain-validation surface (the ValueError is a
+        # tested contract); the accepted set derives from the lending decls'
+        # rate_history_chains union. The gateway is the authority at request
+        # time.
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        supported_chains = LendingReadRegistry.all_rate_history_chains()
         if chain_lower not in supported_chains:
             raise ValueError(f"Unsupported chain: {chain}. Supported: {sorted(supported_chains)}")
 
@@ -501,7 +473,7 @@ class LendingAPYProvider:
         """
         protocol_lower = protocol.lower()
 
-        if protocol_lower not in SUPPORTED_PROTOCOLS:
+        if protocol_lower not in supported_protocols():
             raise UnsupportedProtocolError(protocol)
 
         cached = self._get_from_cache(protocol_lower, market, timestamp)
@@ -511,6 +483,11 @@ class LendingAPYProvider:
         try:
             data = await self._fetch_apy_via_gateway(protocol_lower, market, timestamp)
         except DataSourceUnavailable as exc:
+            default = self._get_default_apy(protocol_lower, market, timestamp)
+            if default is None:
+                # No manifest-declared offline default — propagate the typed
+                # failure instead of fabricating a rate.
+                raise
             logger.warning(
                 "Gateway lending-APY lookup unavailable for %s/%s on %s: %s; using default.",
                 protocol_lower,
@@ -518,7 +495,7 @@ class LendingAPYProvider:
                 self._chain,
                 exc,
             )
-            data = self._get_default_apy(protocol_lower, market, timestamp)
+            data = default
 
         self._add_to_cache(data)
 
@@ -604,10 +581,12 @@ class LendingAPYProvider:
         protocol: str,
         market: str,
         timestamp: datetime,
-    ) -> LendingAPYData:
-        """Return default APY when the gateway is unreachable."""
-        supply_apy = DEFAULT_SUPPLY_APYS.get(protocol, Decimal("0.03"))
-        borrow_apy = DEFAULT_BORROW_APYS.get(protocol, Decimal("0.05"))
+    ) -> LendingAPYData | None:
+        """Manifest-declared default APY row, or None when the venue declares none."""
+        defaults = _default_apys(protocol)
+        if defaults is None:
+            return None
+        supply_apy, borrow_apy = defaults
         return LendingAPYData(
             protocol=protocol,
             market=market.upper(),
@@ -618,12 +597,22 @@ class LendingAPYProvider:
         )
 
     def get_default_supply_apy(self, protocol: str) -> Decimal:
-        """Get the default supply APY for a protocol."""
-        return DEFAULT_SUPPLY_APYS.get(protocol.lower(), Decimal("0.03"))
+        """Manifest-declared default supply APY; raises when the venue declares none."""
+        return self._require_default_apys(protocol)[0]
 
     def get_default_borrow_apy(self, protocol: str) -> Decimal:
-        """Get the default borrow APY for a protocol."""
-        return DEFAULT_BORROW_APYS.get(protocol.lower(), Decimal("0.05"))
+        """Manifest-declared default borrow APY; raises when the venue declares none."""
+        return self._require_default_apys(protocol)[1]
+
+    @staticmethod
+    def _require_default_apys(protocol: str) -> tuple[Decimal, Decimal]:
+        defaults = _default_apys(protocol.lower())
+        if defaults is None:
+            raise DataSourceUnavailable(
+                source=protocol.lower(),
+                reason="no manifest-declared offline default APY (backtest_default_supply_apy/_borrow_apy)",
+            )
+        return defaults
 
     def clear_cache(self) -> None:
         """Clear all cached APY data."""
@@ -647,24 +636,18 @@ class LendingAPYProvider:
             "cache_ttl_seconds": self._cache_ttl_seconds,
             "request_timeout": self._request_timeout,
             "requests_per_minute": self._requests_per_minute,
-            "supported_protocols": SUPPORTED_PROTOCOLS,
+            "supported_protocols": supported_protocols(),
         }
 
 
 __all__ = [
-    "AAVE_V3_MARKETS",
-    "AAVE_V3_SUBGRAPHS",
-    "COMPOUND_V3_MARKETS",
-    "COMPOUND_V3_SUBGRAPHS",
     "CachedLendingAPY",
-    "DEFAULT_BORROW_APYS",
-    "DEFAULT_SUPPLY_APYS",
     "LendingAPYData",
     "LendingAPYError",
     "LendingAPYNotFoundError",
     "LendingAPYProvider",
     "LendingAPYRateLimitError",
     "RateLimitState",
-    "SUPPORTED_PROTOCOLS",
+    "supported_protocols",
     "UnsupportedProtocolError",
 ]

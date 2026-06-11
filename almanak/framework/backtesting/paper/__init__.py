@@ -80,16 +80,11 @@ from almanak.framework.backtesting.paper.models import (
 from almanak.framework.backtesting.paper.portfolio_tracker import PaperPortfolioTracker
 from almanak.framework.backtesting.paper.position_queries import (
     # Aave V3
-    AAVE_V3_POOL_DATA_PROVIDER,
     AAVE_V3_TOKEN_DECIMALS,
     AAVE_V3_TOKENS,
     # GMX V2
     GMX_V2_COLLATERAL_TOKENS,
-    GMX_V2_DATA_STORE,
     GMX_V2_MARKETS,
-    GMX_V2_READER,
-    # Uniswap V3
-    UNISWAP_V3_POSITION_MANAGER,
     AaveV3LendingPosition,
     GMXv2Position,
     UniswapV3Position,
@@ -145,20 +140,16 @@ __all__ = [
     "UniswapV3Position",
     "query_uniswap_v3_positions",
     "query_uniswap_v3_positions_sync",
-    "UNISWAP_V3_POSITION_MANAGER",
     # Position queries - GMX V2
     "GMXv2Position",
     "query_gmx_positions",
     "query_gmx_positions_sync",
-    "GMX_V2_READER",
-    "GMX_V2_DATA_STORE",
     "GMX_V2_MARKETS",
     "GMX_V2_COLLATERAL_TOKENS",
     # Position queries - Aave V3
     "AaveV3LendingPosition",
     "query_aave_positions",
     "query_aave_positions_sync",
-    "AAVE_V3_POOL_DATA_PROVIDER",
     "AAVE_V3_TOKENS",
     "AAVE_V3_TOKEN_DECIMALS",
     # Position reconciliation
