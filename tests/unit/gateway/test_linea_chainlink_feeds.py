@@ -14,14 +14,18 @@ Verifies:
 3. Linea chain ID (59144) is in CHAINLINK_CHAIN_IDS
 """
 
+from collections.abc import Mapping
+
 import pytest
 
 from almanak.core.chainlink import (
     CHAINLINK_CHAIN_IDS,
     CHAINLINK_PRICE_FEEDS,
-    LINEA_PRICE_FEEDS,
     TOKEN_TO_PAIR,
 )
+
+# Per-chain feed dicts moved onto ChainDescriptor.chainlink (VIB-4851 CS-5).
+LINEA_PRICE_FEEDS = CHAINLINK_PRICE_FEEDS["linea"]
 
 # Linea Chainlink feed addresses verified on-chain 2026-04-29.
 # Each address responded to description() with the expected pair name and
@@ -41,7 +45,7 @@ class TestLineaPriceFeedsConfig:
     """LINEA_PRICE_FEEDS dict structure and content."""
 
     def test_linea_price_feeds_exists(self):
-        assert isinstance(LINEA_PRICE_FEEDS, dict)
+        assert isinstance(LINEA_PRICE_FEEDS, Mapping)  # frozen registry view (VIB-4851 CS-5)
         assert len(LINEA_PRICE_FEEDS) >= 5
 
     @pytest.mark.parametrize("pair", sorted(EXPECTED_LINEA_FEEDS))

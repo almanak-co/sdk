@@ -4,6 +4,7 @@ from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
     ChainDescriptor,
+    ChainlinkFeeds,
     Explorer,
     GasProfile,
     NativeToken,
@@ -73,6 +74,26 @@ DESCRIPTOR = register_chain(
             "moralis": "base",
             "okx": "8453",
         },
+        # Chainlink aggregator addresses (VIB-4851 CS-5) — moved verbatim
+        # from the legacy almanak/core/chainlink.py per-chain dicts.
+        # Reference: https://docs.chain.link/data-feeds/price-feeds/addresses
+        chainlink=ChainlinkFeeds(
+            usd_feeds={
+                "ETH/USD": "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70",
+                "BTC/USD": "0x64c911996d3C6Ac71e9B8934F4e4f21B9C3bD7d1",
+                "LINK/USD": "0x17CAb8FE31E32f08326e5E27412894e49B0f9D65",
+                "USDC/USD": "0x7e860098F58bBFC8648a4311b374B1D669a2bc6B",
+                "DAI/USD": "0x591e79239a7d679378eC8c847e5038150364C78F",
+                "CBETH/USD": "0xd7818272B9e248357d13057AAb0B417aF31E817d",
+            },
+            eth_denominated={
+                "WSTETH/ETH": "0x43a5C292A453A3bF3606fa856197f09D7B74251a",
+            },
+        ),
+        # Safe MultiSendCallOnly v1.4.1 — CREATE2, same address on every
+        # chain Safe deploys to; presence here == deployment-verified
+        # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).
+        contracts={"safe_multisend": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"},
         aliases=(),
     )
 )

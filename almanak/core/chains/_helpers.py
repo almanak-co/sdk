@@ -330,3 +330,50 @@ def explorer_tx_prefix_map() -> Mapping[str, str]:
             if d.explorer.browse_url is not None
         }
     )
+
+
+def chainlink_usd_feeds_map() -> Mapping[str, Mapping[str, str]]:
+    """Read-only ``{chain: {"TOKEN/USD": aggregator}}`` view (VIB-4851 CS-5).
+
+    Membership == chains declaring ``ChainDescriptor.chainlink`` — the
+    legacy ``CHAINLINK_PRICE_FEEDS`` nine, byte-for-byte.
+    """
+    return MappingProxyType({d.name: d.chainlink.usd_feeds for d in ChainRegistry.all() if d.chainlink is not None})
+
+
+def chainlink_eth_denominated_map() -> Mapping[str, Mapping[str, str]]:
+    """Read-only ``{chain: {"TOKEN/ETH": aggregator}}`` view (VIB-4851 CS-5).
+
+    Membership == chains with a non-empty ``chainlink.eth_denominated`` —
+    the legacy ``ETH_DENOMINATED_FEEDS`` three; consumers keep their
+    ``.get(chain, {})`` miss semantics.
+    """
+    return MappingProxyType(
+        {
+            d.name: d.chainlink.eth_denominated
+            for d in ChainRegistry.all()
+            if d.chainlink is not None and d.chainlink.eth_denominated
+        }
+    )
+
+
+def chainlink_chain_ids_map() -> Mapping[str, int]:
+    """Read-only ``{chain: chain_id}`` for Chainlink-supported chains.
+
+    The legacy ``CHAINLINK_CHAIN_IDS`` dict duplicated
+    ``ChainDescriptor.chain_id`` for exactly the chains with feeds; this
+    derives the same membership from ``chainlink`` presence so the id can
+    never drift from the descriptor again (VIB-4851 CS-5).
+    """
+    return MappingProxyType({d.name: d.chain_id for d in ChainRegistry.all() if d.chainlink is not None})
+
+
+def contract_address_map(key: str) -> Mapping[str, str]:
+    """Read-only ``{chain: address}`` for one ``ChainDescriptor.contracts`` key.
+
+    Membership == chains declaring *key* (sparse, like ``vendor_chain_map``).
+    VIB-4851 CS-5.
+    """
+    return MappingProxyType(
+        {d.name: d.contracts[key] for d in ChainRegistry.all() if d.contracts is not None and key in d.contracts}
+    )

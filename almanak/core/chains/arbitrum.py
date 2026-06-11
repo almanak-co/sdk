@@ -4,6 +4,7 @@ from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
     ChainDescriptor,
+    ChainlinkFeeds,
     Explorer,
     GasProfile,
     NativeToken,
@@ -77,6 +78,35 @@ DESCRIPTOR = register_chain(
             "moralis": "arbitrum",
             "okx": "42161",
         },
+        # Chainlink aggregator addresses (VIB-4851 CS-5) — moved verbatim
+        # from the legacy almanak/core/chainlink.py per-chain dicts.
+        # Reference: https://docs.chain.link/data-feeds/price-feeds/addresses
+        chainlink=ChainlinkFeeds(
+            usd_feeds={
+                "ETH/USD": "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612",
+                "BTC/USD": "0x6CE185860A4963106506C203335A2910F5E5E8CC",
+                "LINK/USD": "0x86E53CF1B870786351Da77A57575e79CB55812CB",
+                "USDC/USD": "0x50834F3163758fcC1Df9973b6e91f0F0F0434aD3",
+                "USDT/USD": "0x3f3f5dF88dC9F13eac63DF89EC16ef6e7E25DdE7",
+                "DAI/USD": "0xc5C8E77B397E531B8EC06BFb0048328B30E9eCfB",
+                "ARB/USD": "0xb2A824043730FE05F3DA2efaFa1CBbe83fa548D6",
+                "GMX/USD": "0xDB98056FecFff59D032aB628337A4887110df3dB",
+                "UNI/USD": "0x9C917083fDb403ab5ADbEC26Ee294f6EcAda2720",
+                "AAVE/USD": "0xaD1d5344AaDE45F43E596773Bcc4c423EAbdD034",
+                "PENDLE/USD": "0x66853E19D73C0F9301fE099c324A1e9726953C89",
+                "RDNT/USD": "0x20d0Fcab0ECFD078B036b6CAf1FaC69A6453b352",
+                "MAGIC/USD": "0x47E55cCec6582838E173f252D08Afd8116c2202d",
+                "WOO/USD": "0x5d5Ab15fb857De6FA209B6B41C7375F1C4BD9B90",
+                "SOL/USD": "0x24ceA4b8ce57cdA5058b924B9B9987992450590c",
+            },
+            eth_denominated={
+                "WSTETH/ETH": "0xb523AE262D20A936BC152e6023996e46FDC2A95D",
+            },
+        ),
+        # Safe MultiSendCallOnly v1.4.1 — CREATE2, same address on every
+        # chain Safe deploys to; presence here == deployment-verified
+        # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).
+        contracts={"safe_multisend": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"},
         aliases=("arb",),
     )
 )

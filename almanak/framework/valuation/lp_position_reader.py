@@ -12,38 +12,22 @@ import logging
 from dataclasses import dataclass
 from decimal import Decimal
 
+from almanak.connectors._strategy_base.address_registry import AddressRegistry
+from almanak.core.chains import ChainRegistry
+
 logger = logging.getLogger(__name__)
 
-# Uniswap V3 NonfungiblePositionManager addresses per chain
-# Same address on most chains (deployed via CREATE2)
-POSITION_MANAGER_ADDRESSES: dict[str, str] = {
-    "ethereum": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-    "arbitrum": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-    "optimism": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-    "polygon": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-    "base": "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1",
-    "avalanche": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-    "bnb": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-}
-
-# Protocol-specific position managers (forks with different addresses)
-PROTOCOL_POSITION_MANAGERS: dict[str, dict[str, str]] = {
-    "sushiswap_v3": {
-        "ethereum": "0x2214A42d8e2A1d20635c2cb0664422c528B6A432",
-        "arbitrum": "0xf0cbCe1942A68BEb3d1B73f0Dd86C8Dcc643EF99",
-        "optimism": "0x1af415a1EbA07a4986a52B6f2e7dE7003D82231e",
-        "polygon": "0xb7402ee99F0A008e461098AC3A27F4957Df89a40",
-        "base": "0x80C7DD17B01855a6D2347444a0FCC36136a314de",
-        "avalanche": "0x18350b048AB366ed601fFDbC669110Ecb36016f3",
-        "bnb": "0xF70c086618dcf2b1A461311275e00D6B722ef914",
-    },
-    "pancakeswap_v3": {
-        "ethereum": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
-        "arbitrum": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
-        "base": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
-        "bnb": "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
-    },
-}
+# Position-manager addresses are PROTOCOL facts owned by each connector's
+# address tables and resolved through ``AddressRegistry`` (the Phase D5
+# precedent — VIB-4851 CS-5). The two literal dicts that previously lived
+# here had drifted from the connector tables on THREE money-path entries,
+# all verified empty on-chain (eth_getCode == "0x") on 2026-06-11:
+#   sushiswap_v3/arbitrum  0xf0cb...3EF99 (real NPM: 0xF0cB...eF49)
+#   uniswap_v3/avalanche   0xC364...FE88  (real NPM: 0x655C...4f8B)
+#   uniswap_v3/bsc         0xC364...FE88  (real NPM: 0x7b8A...0613)
+# Reading an empty address returned no data, silently degrading LP
+# valuation on those (protocol, chain) pairs. The registry values are the
+# deployment-verified connector tables.
 
 # Function selectors
 POSITIONS_SELECTOR = "0x99fbab88"  # positions(uint256)
@@ -198,15 +182,23 @@ class LPPositionReader:
             return None
 
     def _resolve_position_manager(self, chain: str, protocol: str) -> str | None:
-        """Resolve the position manager address for a protocol/chain."""
-        # Check protocol-specific addresses first
-        if protocol in PROTOCOL_POSITION_MANAGERS:
-            addr = PROTOCOL_POSITION_MANAGERS[protocol].get(chain)
-            if addr:
-                return addr
+        """Resolve the position manager address for a protocol/chain.
 
-        # Fall back to Uniswap V3 addresses (most forks use the same interface)
-        return POSITION_MANAGER_ADDRESSES.get(chain)
+        Connector-owned via ``AddressRegistry`` (kinds ``position_manager``
+        / ``nft`` — PancakeSwap records its NonfungiblePositionManager
+        under ``nft``). The chain is alias-normalized first: the legacy
+        dicts here were keyed ``"bnb"`` while callers and connector tables
+        use canonical ``"bsc"``. Unknown protocols fall back to the
+        Uniswap V3 manager (most forks share the interface), preserving
+        the legacy fallback; misses stay ``None`` (fail-closed).
+        """
+        descriptor = ChainRegistry.try_resolve(chain)
+        canonical = descriptor.name if descriptor is not None else chain.lower()
+        kinds = ("position_manager", "nft")
+        addr = AddressRegistry.resolve_contract_address(protocol, canonical, kinds)
+        if addr:
+            return addr
+        return AddressRegistry.resolve_contract_address("uniswap_v3", canonical, kinds)
 
 
 # ---------------------------------------------------------------------------

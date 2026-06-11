@@ -7,14 +7,18 @@ Verifies that Sonic chain is correctly configured in the Chainlink registry:
 4. S/WS tokens are mapped in TOKEN_TO_PAIR
 """
 
+from collections.abc import Mapping
+
 import pytest
 
 from almanak.core.chainlink import (
     CHAINLINK_CHAIN_IDS,
     CHAINLINK_PRICE_FEEDS,
-    SONIC_PRICE_FEEDS,
     TOKEN_TO_PAIR,
 )
+
+# Per-chain feed dicts moved onto ChainDescriptor.chainlink (VIB-4851 CS-5).
+SONIC_PRICE_FEEDS = CHAINLINK_PRICE_FEEDS["sonic"]
 
 # Expected Sonic Chainlink feed addresses (sourced from bgd-labs/aave-address-book AaveV3Sonic.sol)
 EXPECTED_SONIC_FEEDS = {
@@ -31,7 +35,7 @@ class TestSonicPriceFeedsConfig:
 
     def test_sonic_price_feeds_exists(self):
         """SONIC_PRICE_FEEDS must be a non-empty dict."""
-        assert isinstance(SONIC_PRICE_FEEDS, dict)
+        assert isinstance(SONIC_PRICE_FEEDS, Mapping)  # frozen registry view (VIB-4851 CS-5)
         assert len(SONIC_PRICE_FEEDS) > 0
 
     def test_eth_usd_feed_present(self):

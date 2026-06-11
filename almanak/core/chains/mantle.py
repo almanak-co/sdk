@@ -88,6 +88,10 @@ DESCRIPTOR = register_chain(
             "dexscreener": "mantle",
             "geckoterminal": "mantle",
         },
+        # Safe MultiSendCallOnly v1.4.1 — CREATE2, same address on every
+        # chain Safe deploys to; presence here == deployment-verified
+        # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).
+        contracts={"safe_multisend": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"},
         aliases=(),
     )
 )

@@ -12,6 +12,7 @@ from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
     ChainDescriptor,
+    ChainlinkFeeds,
     Explorer,
     GasProfile,
     NativeToken,
@@ -78,6 +79,16 @@ DESCRIPTOR = register_chain(
             "moralis": "sonic",
             "okx": "146",
         },
+        # Chainlink aggregator addresses (VIB-4851 CS-5) — moved verbatim
+        # from the legacy almanak/core/chainlink.py per-chain dicts.
+        # Reference: https://docs.chain.link/data-feeds/price-feeds/addresses
+        chainlink=ChainlinkFeeds(
+            usd_feeds={
+                "ETH/USD": "0x824364077993847f71293B24ccA8567c00c2de11",
+                "USDC/USD": "0x7A8443a2a5D772db7f1E40DeFe32db485108F128",
+                "S/USD": "0xc76dFb89fF298145b417d221B2c747d84952e01d",
+            },
+        ),
         aliases=(),
     )
 )

@@ -266,9 +266,11 @@ class TestChainlinkFeedConfig:
 
     def test_base_wsteth_not_in_usd_feeds(self):
         """Base should NOT have a WSTETH/USD entry (it's an ETH-denominated feed)."""
-        from almanak.core.chainlink import BASE_PRICE_FEEDS
+        # Per-chain constants moved onto ChainDescriptor.chainlink
+        # (VIB-4851 CS-5); the aggregate view is the public surface.
+        from almanak.core.chainlink import CHAINLINK_PRICE_FEEDS
 
-        assert "WSTETH/USD" not in BASE_PRICE_FEEDS
+        assert "WSTETH/USD" not in CHAINLINK_PRICE_FEEDS["base"]
 
     def test_base_wsteth_in_eth_denominated_feeds(self):
         """Base should have WSTETH/ETH in the ETH-denominated feeds."""
@@ -306,9 +308,9 @@ class TestChainlinkFeedConfig:
         """The B1 derived feed is ADDITIVE — Ethereum keeps the direct
         WSTETH/USD entry so the OnChain source has both paths and median
         consensus is computed from independent Chainlink aggregators."""
-        from almanak.core.chainlink import ETHEREUM_PRICE_FEEDS
+        from almanak.core.chainlink import CHAINLINK_PRICE_FEEDS
 
-        assert "WSTETH/USD" in ETHEREUM_PRICE_FEEDS, (
+        assert "WSTETH/USD" in CHAINLINK_PRICE_FEEDS["ethereum"], (
             "Ethereum WSTETH/USD direct feed must remain. B1 added the "
             "ETH-denominated derived path as a SECOND independent oracle, "
             "not a replacement."

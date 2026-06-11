@@ -262,6 +262,40 @@ class RpcProfile:
 
 
 @dataclass(frozen=True)
+class ChainlinkFeeds:
+    """Chainlink aggregator addresses for this chain (VIB-4851 Phase E, CS-5).
+
+    A dumb frozen pair→aggregator map — feed-SELECTION policy (USD-first,
+    ETH-denominated fallback, staleness thresholds) stays with the
+    consumers in ``almanak/core/chainlink.py`` and the price sources; only
+    the per-chain ADDRESSES live here. Mirrors the chain half of the
+    legacy ``CHAINLINK_PRICE_FEEDS`` / ``ETH_DENOMINATED_FEEDS`` dicts.
+
+    Attributes:
+        usd_feeds: ``"TOKEN/USD"`` pair → aggregator address.
+        eth_denominated: ``"TOKEN/ETH"`` pair → aggregator address, for
+            tokens whose USD price is derived as TOKEN/ETH × ETH/USD.
+            Empty for chains without such feeds.
+    """
+
+    usd_feeds: Mapping[str, str]
+    eth_denominated: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "usd_feeds", MappingProxyType(dict(self.usd_feeds)))
+        object.__setattr__(self, "eth_denominated", MappingProxyType(dict(self.eth_denominated)))
+
+
+# Recognised keys for ``ChainDescriptor.contracts`` (VIB-4851 CS-5). Same
+# fail-loudly contract as KNOWN_VENDORS: a typo'd key raises at
+# registration. Protocol-owned contract addresses (position managers,
+# routers, …) do NOT belong here — they live on the owning connector's
+# address tables (AddressRegistry); this map is only for chain-level
+# infrastructure contracts the framework itself signs against.
+KNOWN_CONTRACT_KEYS: frozenset[str] = frozenset({"safe_multisend"})
+
+
+@dataclass(frozen=True)
 class Explorer:
     """Per-chain block-explorer (Etherscan-compatible) API metadata.
 
@@ -384,6 +418,8 @@ class ChainDescriptor:
     simulation: SimulationProfile = field(default_factory=SimulationProfile)
     tokens: Mapping[str, str] | None = None
     external_ids: Mapping[str, str] | None = None
+    chainlink: ChainlinkFeeds | None = None
+    contracts: Mapping[str, str] | None = None
     aliases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -423,3 +459,15 @@ class ChainDescriptor:
                 "external_ids",
                 MappingProxyType(frozen_external_ids),
             )
+        # Freeze + validate the optional chain-infrastructure contracts map
+        # (VIB-4851 CS-5). Unknown keys fail loudly at registration.
+        if self.contracts is not None:
+            frozen_contracts = dict(self.contracts)
+            unknown_keys = sorted(frozen_contracts.keys() - KNOWN_CONTRACT_KEYS)
+            if unknown_keys:
+                raise ValueError(
+                    f"ChainDescriptor {self.name!r} declares unknown contracts "
+                    f"key(s) {unknown_keys}; known keys are "
+                    f"{sorted(KNOWN_CONTRACT_KEYS)}"
+                )
+            object.__setattr__(self, "contracts", MappingProxyType(frozen_contracts))

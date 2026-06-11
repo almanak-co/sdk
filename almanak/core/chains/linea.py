@@ -4,6 +4,7 @@ from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
     ChainDescriptor,
+    ChainlinkFeeds,
     GasProfile,
     NativeToken,
     RpcProfile,
@@ -56,6 +57,18 @@ DESCRIPTOR = register_chain(
             "coingecko": "linea",
             "dexscreener": "linea",
         },
+        # Chainlink aggregator addresses (VIB-4851 CS-5) — moved verbatim
+        # from the legacy almanak/core/chainlink.py per-chain dicts.
+        # Reference: https://docs.chain.link/data-feeds/price-feeds/addresses
+        chainlink=ChainlinkFeeds(
+            usd_feeds={
+                "ETH/USD": "0x3c6Cd9Cc7c7a4c2Cf5a82734CD249D7D593354dA",
+                "BTC/USD": "0x7A99092816C8BD5ec8ba229e3a6E6Da1E628E1F9",
+                "USDC/USD": "0xAADAa473C1bDF7317ec07c915680Af29DeBfdCb5",
+                "USDT/USD": "0xefCA2bbe0EdD0E22b2e0d2F8248E99F4bEf4A7dB",
+                "DAI/USD": "0x5133D67c38AFbdd02997c14Abd8d83676B4e309A",
+            },
+        ),
         aliases=(),
     )
 )

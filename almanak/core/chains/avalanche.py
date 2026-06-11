@@ -4,6 +4,7 @@ from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
     ChainDescriptor,
+    ChainlinkFeeds,
     Explorer,
     GasProfile,
     NativeToken,
@@ -84,6 +85,27 @@ DESCRIPTOR = register_chain(
             "moralis": "avalanche",
             "okx": "43114",
         },
+        # Chainlink aggregator addresses (VIB-4851 CS-5) — moved verbatim
+        # from the legacy almanak/core/chainlink.py per-chain dicts.
+        # Reference: https://docs.chain.link/data-feeds/price-feeds/addresses
+        chainlink=ChainlinkFeeds(
+            usd_feeds={
+                "AVAX/USD": "0x0A77230d17318075983913bC2145DB16C7366156",
+                "ETH/USD": "0x976B3D034E162d8bD72D6b9C989d545b839003b0",
+                "BTC/USD": "0x2779D32d5166BAaa2B2b658333bA7e6Ec0C65743",
+                "LINK/USD": "0x49cCd9Ca821efeAb2B98C60Dc60f518e765EdADc",
+                "USDC/USD": "0xF096872672F44d6EBA71458D74fe67F9a77a23B9",
+                "USDT/USD": "0xEBE676ee90Fe1112671f19b6B7459bC678B67e8a",
+                "DAI/USD": "0x51D7180edA2260cc4F6e4EebB82FEF5c3c2B8300",
+                "AAVE/USD": "0x3CA13391E9fb38a75330fb28f8cc2eB3D9ceceED",
+                "JOE/USD": "0x02D35d3a8aC3e1626d3eE09A78Dd87286F5E8e3a",
+                "WAVAX/USD": "0x0A77230d17318075983913bC2145DB16C7366156",
+            },
+        ),
+        # Safe MultiSendCallOnly v1.4.1 — CREATE2, same address on every
+        # chain Safe deploys to; presence here == deployment-verified
+        # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).
+        contracts={"safe_multisend": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"},
         aliases=("avax",),
     )
 )

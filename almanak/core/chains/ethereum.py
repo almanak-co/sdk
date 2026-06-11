@@ -9,6 +9,7 @@ from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
     ChainDescriptor,
+    ChainlinkFeeds,
     Explorer,
     GasProfile,
     NativeToken,
@@ -90,6 +91,39 @@ DESCRIPTOR = register_chain(
             "moralis": "eth",
             "okx": "1",
         },
+        # Chainlink aggregator addresses (VIB-4851 CS-5) — moved verbatim
+        # from the legacy almanak/core/chainlink.py per-chain dicts.
+        # Reference: https://docs.chain.link/data-feeds/price-feeds/addresses
+        chainlink=ChainlinkFeeds(
+            usd_feeds={
+                "ETH/USD": "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419",
+                "BTC/USD": "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c",
+                "LINK/USD": "0x2c1d072e956AFFC0D435Cb7AC38EF18d24d9127c",
+                "USDC/USD": "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6",
+                "USDT/USD": "0x3E7d1eAB13ad0104d2750B8863b489D65364e32D",
+                "DAI/USD": "0xAed0c38402a5d19df6E4c03F4E2DceD6e29c1ee9",
+                "AAVE/USD": "0x547a514d5e3769680Ce22B2361c10Ea13619e8a9",
+                "UNI/USD": "0x553303d460EE0afB37EdFf9bE42922D8FF63220e",
+                "CRV/USD": "0xcD627aa160A6fA45Eb793D19286F3879d5cdCe0a",
+                "COMP/USD": "0xdBD020CAef83eFd542f4de03864E8c5D2d9bc6CA",
+                "MKR/USD": "0xEC1D1b3b0443256Cc3860E24a46f108E699cF2b4",
+                "SNX/USD": "0xDC3EA94CD0AC27d9A86C180091e7f78C683d3699",
+                "MATIC/USD": "0x7bAC85A8a13A4BcD8abb3eB7d6b4d632c5a57676",
+                "ARB/USD": "0x31697852a68433DBcC2FF612A4c1C919a0254678",
+                "LDO/USD": "0x4e844125952d32acdF339be976C98FE6D1F5F8bE",
+                "WSTETH/USD": "0x164b276057258D81941072Eb5f9D7F71C3Dd94b8",
+                "CBETH/USD": "0xF017fcB346A1885194689bA23Eff2fE6fA5C483b",
+                "RETH/USD": "0x536218f9E9Eb48863970252233c8F271f554C2d0",
+                "SOL/USD": "0x4ffC43a60e009B551865A93d232E33Fce9f01507",
+            },
+            eth_denominated={
+                "WSTETH/ETH": "0x86392dC19c0b719886221c78AB11eb8Cf5c52812",
+            },
+        ),
+        # Safe MultiSendCallOnly v1.4.1 — CREATE2, same address on every
+        # chain Safe deploys to; presence here == deployment-verified
+        # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).
+        contracts={"safe_multisend": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"},
         aliases=("eth", "mainnet"),
     )
 )

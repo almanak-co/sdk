@@ -34,6 +34,8 @@ from web3 import Web3
 from web3.exceptions import Web3Exception
 from web3.types import HexStr
 
+from almanak.core.chains import ChainRegistry
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,29 +50,36 @@ ERC20_BALANCE_ABI = [
     }
 ]
 
-# Common token addresses per chain
-TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
-    "base": {
-        "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        "WETH": "0x4200000000000000000000000000000000000006",
-        "ETH": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
-    },
-    "arbitrum": {
-        "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-        "WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-        "ETH": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
-    },
-    "ethereum": {
-        "USDC": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-        "WETH": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-        "ETH": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
-    },
-    "optimism": {
-        "USDC": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
-        "WETH": "0x4200000000000000000000000000000000000006",
-        "ETH": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
-    },
-}
+# EIP-7528-style sentinel the bridge state-reader uses to mean "the chain's
+# native coin" — balance reads detect it and call eth_getBalance instead of
+# balanceOf.
+NATIVE_TOKEN_SENTINEL = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+
+
+def _token_addresses() -> dict[str, dict[str, str]]:
+    """Per-chain USDC / WETH / ETH addresses for bridge balance reads.
+
+    Derived from ``ChainDescriptor.tokens`` (VIB-4851 CS-5) — the legacy
+    literal covered base/arbitrum/ethereum/optimism with values verified
+    identical to the descriptor catalogue. Membership now follows the
+    descriptor: any chain whose ``tokens`` declares both ``usdc`` and
+    ``weth`` is readable (documented widening; previously-supported
+    chains are byte-identical, misses still raise at the lookup site).
+    """
+    out: dict[str, dict[str, str]] = {}
+    for descriptor in ChainRegistry.all():
+        tokens = descriptor.tokens or {}
+        if "usdc" in tokens and "weth" in tokens:
+            out[descriptor.name] = {
+                "USDC": tokens["usdc"],
+                "WETH": tokens["weth"],
+                "ETH": NATIVE_TOKEN_SENTINEL,
+            }
+    return out
+
+
+# Common token addresses per chain (registry-derived view; see _token_addresses)
+TOKEN_ADDRESSES: dict[str, dict[str, str]] = _token_addresses()
 
 
 @dataclass

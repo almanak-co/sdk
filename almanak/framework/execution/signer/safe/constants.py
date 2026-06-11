@@ -19,8 +19,11 @@ Key Components:
     - ENSO_DELEGATE_ADDRESSES: Known Enso delegates requiring DELEGATECALL
 """
 
+from collections.abc import Mapping
 from enum import IntEnum
 from typing import Final
+
+from almanak.core.chains._helpers import contract_address_map
 
 # =============================================================================
 # Enums
@@ -338,18 +341,14 @@ MULTISEND_SELECTOR: Final[str] = "0x8d80ff0a"
 
 # MultiSend contract addresses (deployed via CREATE2, same address on all chains)
 # Reference: https://github.com/safe-global/safe-deployments
-MULTISEND_ADDRESSES: Final[dict[str, str]] = {
-    "ethereum": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
-    "arbitrum": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
-    "optimism": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
-    "polygon": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
-    "base": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
-    "avalanche": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
-    "gnosis": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
-    "bsc": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
-    "mantle": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
-    "xlayer": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
-}
+#
+# Derived from ``ChainDescriptor.contracts["safe_multisend"]`` (VIB-4851
+# CS-5): membership == registered chains where the Safe stack is
+# deployment-verified. The legacy literal also carried a "gnosis" entry —
+# unreachable, since gnosis is not a registered chain and every consumer
+# resolves through registered-chain names (verified: zero almanak/ callers
+# pass "gnosis" to these lookups).
+MULTISEND_ADDRESSES: Final[Mapping[str, str]] = contract_address_map("safe_multisend")
 
 
 # =============================================================================

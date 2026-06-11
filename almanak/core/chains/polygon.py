@@ -4,6 +4,7 @@ from almanak.core.enums import Chain, ChainFamily
 
 from ._descriptor import (
     ChainDescriptor,
+    ChainlinkFeeds,
     Explorer,
     GasProfile,
     NativeToken,
@@ -95,6 +96,28 @@ DESCRIPTOR = register_chain(
             "moralis": "polygon",
             "okx": "137",
         },
+        # Chainlink aggregator addresses (VIB-4851 CS-5) — moved verbatim
+        # from the legacy almanak/core/chainlink.py per-chain dicts.
+        # Reference: https://docs.chain.link/data-feeds/price-feeds/addresses
+        chainlink=ChainlinkFeeds(
+            usd_feeds={
+                "ETH/USD": "0xF9680D99D6C9589e2a93a78A04A279e509205945",
+                "BTC/USD": "0xc907E116054Ad103354f2D350FD2514433D57F6f",
+                "MATIC/USD": "0xAB594600376Ec9fD91F8e885dADF0CE036862dE0",
+                "LINK/USD": "0xd9FFdb71EbE7496cC440152d43986Aae0AB76665",
+                "USDC/USD": "0xfE4A8cc5b5B2366C1B58Bea3858e81843581b2F7",
+                "USDT/USD": "0x0A6513e40db6EB1b165753AD52E80663aeA50545",
+                "DAI/USD": "0x4746DeC9e833A82EC7C2C1356372CcF2cfcD2F3D",
+                "AAVE/USD": "0x72484B12719E23115761D5DA1646945632979bB6",
+                "UNI/USD": "0xdf0Fb4e4F928d2dCB76f438575fDD8682386e13C",
+                "CRV/USD": "0x336584C8E6Dc19637A5b36206B1c79923111b405",
+                "WSTETH/USD": "0x10f964234cae09cB6a9854B56FF7D4F38Cda5E6a",
+            },
+        ),
+        # Safe MultiSendCallOnly v1.4.1 — CREATE2, same address on every
+        # chain Safe deploys to; presence here == deployment-verified
+        # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).
+        contracts={"safe_multisend": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"},
         aliases=("matic",),
     )
 )

@@ -78,18 +78,12 @@ DATA_STALENESS_THRESHOLD_SECONDS = 3600
 # =============================================================================
 
 from almanak.core.chainlink import (  # noqa: F401
-    ARBITRUM_PRICE_FEEDS,
-    AVALANCHE_PRICE_FEEDS,
-    BASE_PRICE_FEEDS,
     CHAINLINK_DEVIATION_THRESHOLDS,
     CHAINLINK_HEARTBEATS,
     CHAINLINK_PRICE_FEEDS,
     DECIMALS_SELECTOR,
-    ETHEREUM_PRICE_FEEDS,
     GET_ROUND_DATA_SELECTOR,
     LATEST_ROUND_DATA_SELECTOR,
-    OPTIMISM_PRICE_FEEDS,
-    POLYGON_PRICE_FEEDS,
     TOKEN_TO_PAIR,
 )
 
@@ -2111,14 +2105,9 @@ __all__ = [
     "PriceCache",
     # Exceptions
     "ChainlinkStaleDataError",
-    # Price feed addresses by chain
+    # Price feed addresses by chain (per-chain dicts moved onto
+    # ChainDescriptor.chainlink — VIB-4851 CS-5)
     "CHAINLINK_PRICE_FEEDS",
-    "ETHEREUM_PRICE_FEEDS",
-    "ARBITRUM_PRICE_FEEDS",
-    "BASE_PRICE_FEEDS",
-    "OPTIMISM_PRICE_FEEDS",
-    "POLYGON_PRICE_FEEDS",
-    "AVALANCHE_PRICE_FEEDS",
     # Configuration constants
     "CHAINLINK_HEARTBEATS",
     "CHAINLINK_DEVIATION_THRESHOLDS",
