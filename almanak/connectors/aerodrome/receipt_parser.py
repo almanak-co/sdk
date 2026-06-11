@@ -1137,6 +1137,70 @@ class AerodromeReceiptParser:
     # Extraction Methods (for Result Enrichment)
     # =============================================================================
 
+    def build_extract_kwargs(
+        self,
+        *,
+        field: str,
+        bundle_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return Aerodrome-owned kwargs for ResultEnricher extraction calls.
+
+        VIB-3164: the compiler records full token identity
+        (``from_token`` / ``to_token`` dicts with address, symbol, decimals —
+        see ``compile_swap_aerodrome``) in ``ActionBundle.metadata``.
+        Threading it here lets ``_resolve_swap_decimals`` resolve decimals when
+        the TokenResolver misses or Transfer events cannot be classified,
+        instead of dropping the whole SwapAmounts row.
+
+        Native-token entries are skipped: the receipt's Transfer events carry
+        the wrapped token's address, so a native entry can never match by
+        address, and its decimals (18) equal the fallback anyway.
+        """
+        if field != "swap_amounts":
+            return {}
+        meta: dict[str, dict[str, Any]] = {}
+        for metadata_key, slot in (("from_token", "token_in"), ("to_token", "token_out")):
+            raw = bundle_metadata.get(metadata_key)
+            if not isinstance(raw, dict) or raw.get("is_native"):
+                continue
+            address = raw.get("address")
+            decimals = raw.get("decimals")
+            if not address or decimals is None:
+                continue
+            try:
+                decimals_int = int(decimals)
+            except (TypeError, ValueError):
+                logger.debug("Could not coerce %s.decimals=%r to int; skipping hint", metadata_key, decimals)
+                continue
+            meta[slot] = {
+                "address": str(address).lower(),
+                "symbol": str(raw.get("symbol") or ""),
+                "decimals": decimals_int,
+            }
+        return {"swap_token_meta": meta} if meta else {}
+
+    @staticmethod
+    def _build_hint_map(
+        swap_token_meta: dict[str, dict[str, Any]] | None,
+    ) -> dict[str, tuple[str, int]]:
+        """Map compiler token metadata to ``{address: (symbol, decimals)}``."""
+        hints: dict[str, tuple[str, int]] = {}
+        if not swap_token_meta:
+            return hints
+        for slot in ("token_in", "token_out"):
+            entry = swap_token_meta.get(slot)
+            if not isinstance(entry, dict):
+                continue
+            address = entry.get("address")
+            decimals = entry.get("decimals")
+            if not address or decimals is None:
+                continue
+            try:
+                hints[str(address).lower()] = (str(entry.get("symbol") or ""), int(decimals))
+            except (TypeError, ValueError):
+                logger.debug("Ignoring malformed token hint: %r", entry)
+        return hints
+
     # ---- VIB-3159: tagged-variant wrappers ------------------------------------
     # See uniswap_v3/receipt_parser.py for the rationale. The raw methods
     # preserve their legacy return types so direct callers keep working.
@@ -1157,17 +1221,24 @@ class AerodromeReceiptParser:
         receipt: dict[str, Any],
         *,
         expected_out: Decimal | None = None,
+        swap_token_meta: dict[str, dict[str, Any]] | None = None,
     ) -> ExtractResult["SwapAmounts"]:
         """Fail-closed variant of :meth:`extract_swap_amounts` — see VIB-3159.
 
         VIB-3203: ``expected_out`` is forwarded to :meth:`extract_swap_amounts`
         for realized slippage_bps computation.
+
+        VIB-3164: ``swap_token_meta`` is forwarded to :meth:`extract_swap_amounts`
+        so compiler-supplied token hints can resolve decimals on resolver misses.
+        **This is the method the ResultEnricher calls** — the kwarg MUST be here;
+        omitting it would cause the enricher's TypeError fallback to silently drop
+        ``expected_out`` too (see result_enricher.py §_invoke_extract).
         """
         err = self._strict_parse(receipt)
         if err is not None:
             return err
         try:
-            value = self.extract_swap_amounts(receipt, expected_out=expected_out)
+            value = self.extract_swap_amounts(receipt, expected_out=expected_out, swap_token_meta=swap_token_meta)
         except Exception as exc:  # noqa: BLE001
             return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
         if value is None:
@@ -1218,6 +1289,7 @@ class AerodromeReceiptParser:
         receipt: dict[str, Any],
         *,
         expected_out: Decimal | None = None,
+        swap_token_meta: dict[str, dict[str, Any]] | None = None,
     ) -> "SwapAmounts | None":
         """Extract swap amounts from a transaction receipt.
 
@@ -1231,6 +1303,12 @@ class AerodromeReceiptParser:
                 (Decimal) units from ``ActionBundle.metadata["expected_output_human"]``.
                 When provided, realized ``slippage_bps`` is computed as
                 ``(expected_out - amount_out_decimal) / expected_out * 10_000``.
+            swap_token_meta: VIB-3164 — compiler-supplied token metadata threaded
+                from ``build_extract_kwargs`` via the ResultEnricher hook.
+                Shape: ``{"token_in": {"address": ..., "symbol": ..., "decimals": ...},
+                "token_out": {...}}``. Hints win over the TokenResolver per address;
+                a single-swap-gated direction fallback fills still-empty addresses;
+                fail-closed semantics (return None on unresolved decimals) preserved.
 
         Returns:
             SwapAmounts dataclass if swap event found, None otherwise
@@ -1252,9 +1330,13 @@ class AerodromeReceiptParser:
             if seed is None:
                 return None
 
-            token_in_addr, token_out_addr = self._resolve_swap_token_addresses(receipt, parse_result, seed)
+            hint_by_addr = self._build_hint_map(swap_token_meta)
 
-            decimals = self._resolve_swap_decimals(token_in_addr, token_out_addr)
+            token_in_addr, token_out_addr = self._resolve_swap_token_addresses(
+                receipt, parse_result, seed, swap_token_meta=swap_token_meta
+            )
+
+            decimals = self._resolve_swap_decimals(token_in_addr, token_out_addr, hint_by_addr=hint_by_addr)
             if decimals is None:
                 return None
             in_decimals, out_decimals = decimals
@@ -1343,18 +1425,25 @@ class AerodromeReceiptParser:
         receipt: dict[str, Any],
         parse_result: ParseResult,
         seed: "_SwapSeed",
+        *,
+        swap_token_meta: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[str, str]:
         """Resolve ``(token_in_addr, token_out_addr)`` for the swap.
 
-        Resolution order (same behaviour as the pre-refactor monolith):
+        Resolution order:
         1. ``_extract_swap_tokens_from_transfers`` — wallet<->pool Transfers.
         2. Pool fallback via ``_extract_tokens_by_pool`` — only when there is
            exactly ONE Swap event (multi-hop would pick the intermediate).
+        2.5. VIB-3164 direction fallback: when a side is still empty AND there is
+           exactly ONE Swap event AND the matching compiler-hint slot exists, take
+           the hint address. Multi-hop receipts skip this (same gate as stage 2).
         3. Hints carried on the seed (token0/token1 metadata from constructor).
         """
         token_in_addr, token_out_addr, _, _ = self._extract_swap_tokens_from_transfers(receipt)
 
-        if (not token_in_addr or not token_out_addr) and len(parse_result.swap_events) == 1:
+        single_swap = len(parse_result.swap_events) == 1
+
+        if (not token_in_addr or not token_out_addr) and single_swap:
             pool_addr = parse_result.swap_events[0].pool_address
             if pool_addr:
                 p_in, p_out = self._extract_tokens_by_pool(receipt, pool_addr)
@@ -1362,6 +1451,17 @@ class AerodromeReceiptParser:
                     token_in_addr = p_in
                 if not token_out_addr and p_out:
                     token_out_addr = p_out
+
+        # Stage 2.5: direction fallback from compiler hints (single-swap only)
+        if single_swap and swap_token_meta:
+            if not token_in_addr:
+                in_slot = swap_token_meta.get("token_in")
+                if isinstance(in_slot, dict) and in_slot.get("address"):
+                    token_in_addr = str(in_slot["address"]).lower()
+            if not token_out_addr:
+                out_slot = swap_token_meta.get("token_out")
+                if isinstance(out_slot, dict) and out_slot.get("address"):
+                    token_out_addr = str(out_slot["address"]).lower()
 
         if not token_in_addr:
             token_in_addr = seed.token_in_hint
@@ -1374,14 +1474,31 @@ class AerodromeReceiptParser:
         self,
         token_in_addr: str,
         token_out_addr: str,
+        *,
+        hint_by_addr: dict[str, tuple[str, int]] | None = None,
     ) -> tuple[int, int] | None:
         """Resolve ``(in_decimals, out_decimals)`` or return None when unknown.
+
+        VIB-3164: ``hint_by_addr`` (address -> (symbol, decimals)) is consulted
+        per side before the TokenResolver.  Compiler hints are intent-specific
+        compile-time facts and win over the resolver for the same address.
 
         Fails closed with a WARNING log when either side can't be resolved —
         silent zero-decimal output would corrupt PnL calculations downstream.
         """
-        in_decimals = self._resolve_decimals(token_in_addr) if token_in_addr else None
-        out_decimals = self._resolve_decimals(token_out_addr) if token_out_addr else None
+        addr_in = token_in_addr.lower() if token_in_addr else ""
+        addr_out = token_out_addr.lower() if token_out_addr else ""
+
+        if hint_by_addr and addr_in in hint_by_addr:
+            in_decimals: int | None = hint_by_addr[addr_in][1]
+        else:
+            in_decimals = self._resolve_decimals(token_in_addr) if token_in_addr else None
+
+        if hint_by_addr and addr_out in hint_by_addr:
+            out_decimals: int | None = hint_by_addr[addr_out][1]
+        else:
+            out_decimals = self._resolve_decimals(token_out_addr) if token_out_addr else None
+
         if in_decimals is None or out_decimals is None:
             logger.warning(
                 f"Cannot compute swap amounts: token decimals unknown "

@@ -398,11 +398,76 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
     # Extraction Methods (for Result Enrichment)
     # =============================================================================
 
+    def build_extract_kwargs(
+        self,
+        *,
+        field: str,
+        bundle_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return PancakeSwapV3-owned kwargs for ResultEnricher extraction calls.
+
+        VIB-3164: the compiler records full token identity
+        (``from_token`` / ``to_token`` dicts with address, symbol, decimals —
+        see ``UniswapV3Compiler.compile_swap``) in ``ActionBundle.metadata``.
+        Threading it here lets ``_resolve_swap_decimals`` resolve decimals when
+        the TokenResolver misses, instead of dropping the row or emitting an
+        unresolved-input row.
+
+        Native-token entries are skipped: the receipt's Transfer events carry
+        the wrapped token's address, so a native entry can never match by
+        address, and its decimals (18) equal the fallback anyway.
+        """
+        if field != "swap_amounts":
+            return {}
+        meta: dict[str, dict[str, Any]] = {}
+        for metadata_key, slot in (("from_token", "token_in"), ("to_token", "token_out")):
+            raw = bundle_metadata.get(metadata_key)
+            if not isinstance(raw, dict) or raw.get("is_native"):
+                continue
+            address = raw.get("address")
+            decimals = raw.get("decimals")
+            if not address or decimals is None:
+                continue
+            try:
+                decimals_int = int(decimals)
+            except (TypeError, ValueError):
+                logger.debug("Could not coerce %s.decimals=%r to int; skipping hint", metadata_key, decimals)
+                continue
+            meta[slot] = {
+                "address": str(address).lower(),
+                "symbol": str(raw.get("symbol") or ""),
+                "decimals": decimals_int,
+            }
+        return {"swap_token_meta": meta} if meta else {}
+
+    @staticmethod
+    def _build_hint_map(
+        swap_token_meta: dict[str, dict[str, Any]] | None,
+    ) -> dict[str, tuple[str, int]]:
+        """Map compiler token metadata to ``{address: (symbol, decimals)}``."""
+        hints: dict[str, tuple[str, int]] = {}
+        if not swap_token_meta:
+            return hints
+        for slot in ("token_in", "token_out"):
+            entry = swap_token_meta.get(slot)
+            if not isinstance(entry, dict):
+                continue
+            address = entry.get("address")
+            decimals = entry.get("decimals")
+            if not address or decimals is None:
+                continue
+            try:
+                hints[str(address).lower()] = (str(entry.get("symbol") or ""), int(decimals))
+            except (TypeError, ValueError):
+                logger.debug("Ignoring malformed token hint: %r", entry)
+        return hints
+
     def extract_swap_amounts(
         self,
         receipt: dict[str, Any],
         *,
         expected_out: Decimal | None = None,
+        swap_token_meta: dict[str, dict[str, Any]] | None = None,
     ) -> "SwapAmounts | None":
         """Extract swap amounts from a transaction receipt.
 
@@ -417,6 +482,13 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
                 ResultEnricher. When provided and positive, realized
                 ``slippage_bps`` is computed. When absent, ``slippage_bps``
                 stays ``None``.
+            swap_token_meta: VIB-3164 — compiler-supplied token metadata threaded
+                from ``build_extract_kwargs`` via the ResultEnricher hook.
+                Shape: ``{"token_in": {"address": ..., "symbol": ..., "decimals": ...},
+                "token_out": {...}}``. Hints win over the TokenResolver per address
+                (address-keyed only — no direction fallback, because when
+                ``_pick_swap_raw_amounts`` returns None there are no raw amounts to
+                scale, so hints have nothing to rescue in that path).
 
         Returns:
             SwapAmounts dataclass if swap event found, None otherwise
@@ -455,7 +527,8 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
             if seed is None:
                 return None
 
-            decimals = self._resolve_swap_decimals(seed)
+            hint_by_addr = self._build_hint_map(swap_token_meta)
+            decimals = self._resolve_swap_decimals(seed, hint_by_addr)
             if decimals is None:
                 return None
 
@@ -600,10 +673,18 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
     def _resolve_swap_decimals(
         self,
         seed: "_SwapSeed",
+        hint_by_addr: "dict[str, tuple[str, int]] | None" = None,
     ) -> "_SwapDecimals | None":
         """Resolve (in, out) decimals; fail closed only when OUT is unknown.
 
-        Historical invariant (preserved for Phase 8.4):
+        VIB-3164: ``hint_by_addr`` (address -> (symbol, decimals)) is consulted
+        per side before the TokenResolver. Compiler hints are intent-specific
+        compile-time facts and win over the resolver for the same address.
+        Address-keyed only — no direction fallback (if ``_pick_swap_raw_amounts``
+        returned a seed we already have addresses from wallet Transfers, so
+        directional hints are moot).
+
+        Historical invariant (preserved):
         - Output decimals unknown -> return None (would corrupt PnL).
         - Input decimals unknown  -> proceed with ``decimals_in = None``;
           ``_build_swap_amounts`` emits ``None`` (NOT ``Decimal(0)``) for
@@ -612,8 +693,19 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
           (the "Empty != zero" invariant from docs/internal/blueprints/27-accounting.md).
           ``amount_in_decimal_resolved=False`` continues to mark the row.
         """
-        decimals_in = self._resolve_decimals(seed.token_in)
-        decimals_out = self._resolve_decimals(seed.token_out)
+        addr_in = seed.token_in.lower() if seed.token_in else ""
+        addr_out = seed.token_out.lower() if seed.token_out else ""
+
+        if hint_by_addr and addr_in in hint_by_addr:
+            decimals_in: int | None = hint_by_addr[addr_in][1]
+        else:
+            decimals_in = self._resolve_decimals(seed.token_in)
+
+        if hint_by_addr and addr_out in hint_by_addr:
+            decimals_out: int | None = hint_by_addr[addr_out][1]
+        else:
+            decimals_out = self._resolve_decimals(seed.token_out)
+
         if decimals_out is None:
             logger.warning("Cannot compute swap amounts: output token decimals unknown")
             return None

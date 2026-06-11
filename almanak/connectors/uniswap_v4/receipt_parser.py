@@ -301,12 +301,17 @@ class UniswapV4ReceiptParser:
         self,
         receipt: dict[str, Any],
         quoted_amount_out: int | None = None,
+        *,
+        swap_token_meta: dict[str, dict[str, Any]] | None = None,
     ) -> ParseResult:
         """Parse a transaction receipt for V4 events.
 
         Args:
             receipt: Transaction receipt dict with 'logs' field.
             quoted_amount_out: Expected output for slippage calculation.
+            swap_token_meta: VIB-3164 — compiler-supplied token metadata.
+                Forwarded to ``_build_swap_result`` so hints can resolve
+                decimals when the TokenResolver misses.
 
         Returns:
             ParseResult with decoded events and swap summary.
@@ -342,6 +347,7 @@ class UniswapV4ReceiptParser:
                 result.swap_events,
                 result.transfer_events,
                 quoted_amount_out,
+                swap_token_meta=swap_token_meta,
             )
 
         return result
@@ -351,6 +357,7 @@ class UniswapV4ReceiptParser:
         receipt: dict[str, Any],
         *,
         expected_out: Decimal | None = None,
+        swap_token_meta: dict[str, dict[str, Any]] | None = None,
     ) -> SwapAmounts | None:
         """Extract swap amounts for ResultEnricher integration.
 
@@ -361,13 +368,19 @@ class UniswapV4ReceiptParser:
                 Overrides the parser's internal ``slippage_bps`` when provided,
                 since the enrichment path does not supply constructor-level
                 quote data.
+            swap_token_meta: VIB-3164 — compiler-supplied token metadata
+                threaded from ``build_extract_kwargs`` via the ResultEnricher
+                hook. Forwarded to ``parse_receipt`` -> ``_build_swap_result``
+                so hints resolve decimals when the TokenResolver misses.
+                Shape: ``{"token_in": {"address": ..., "symbol": ...,
+                "decimals": ...}, "token_out": {...}}``.
 
         Returns:
             SwapAmounts or None if no swap event found.
         """
         from almanak.framework.execution.extracted_data import SwapAmounts
 
-        parsed = self.parse_receipt(receipt)
+        parsed = self.parse_receipt(receipt, swap_token_meta=swap_token_meta)
         if not parsed.swap_result:
             return None
 
@@ -1614,28 +1627,147 @@ class UniswapV4ReceiptParser:
             effective_price = amount_out_decimal / amount_in_decimal
         return amount_in_decimal, amount_out_decimal, effective_price
 
+    def build_extract_kwargs(
+        self,
+        *,
+        field: str,
+        bundle_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return UniswapV4-owned kwargs for ResultEnricher extraction calls.
+
+        VIB-3164: the adapter records full token identity
+        (``from_token`` / ``to_token`` dicts with address, symbol, decimals —
+        see ``uniswap_v4/adapter.py``) in ``ActionBundle.metadata``.
+        Threading it here lets ``_build_swap_result`` resolve decimals when the
+        TokenResolver misses or Transfer events cannot classify token addresses.
+
+        Native-token entries are skipped: the receipt's Transfer events carry
+        the wrapped token's address, so a native entry can never match by
+        address, and its decimals (18) equal the fallback anyway.
+        Note: ``decimals`` may be ``None`` in the adapter when it missed during
+        compilation; such entries are skipped by the ``decimals is None`` guard.
+        """
+        if field != "swap_amounts":
+            return {}
+        meta: dict[str, dict[str, Any]] = {}
+        for metadata_key, slot in (("from_token", "token_in"), ("to_token", "token_out")):
+            raw = bundle_metadata.get(metadata_key)
+            if not isinstance(raw, dict) or raw.get("is_native"):
+                continue
+            address = raw.get("address")
+            decimals = raw.get("decimals")
+            if not address or decimals is None:
+                continue
+            try:
+                decimals_int = int(decimals)
+            except (TypeError, ValueError):
+                logger.debug("Could not coerce %s.decimals=%r to int; skipping hint", metadata_key, decimals)
+                continue
+            meta[slot] = {
+                "address": str(address).lower(),
+                "symbol": str(raw.get("symbol") or ""),
+                "decimals": decimals_int,
+            }
+        return {"swap_token_meta": meta} if meta else {}
+
+    @staticmethod
+    def _build_hint_map(
+        swap_token_meta: dict[str, dict[str, Any]] | None,
+    ) -> dict[str, tuple[str, int]]:
+        """Map compiler token metadata to ``{address: (symbol, decimals)}``."""
+        hints: dict[str, tuple[str, int]] = {}
+        if not swap_token_meta:
+            return hints
+        for slot in ("token_in", "token_out"):
+            entry = swap_token_meta.get(slot)
+            if not isinstance(entry, dict):
+                continue
+            address = entry.get("address")
+            decimals = entry.get("decimals")
+            if not address or decimals is None:
+                continue
+            try:
+                hints[str(address).lower()] = (str(entry.get("symbol") or ""), int(decimals))
+            except (TypeError, ValueError):
+                logger.debug("Ignoring malformed token hint: %r", entry)
+        return hints
+
+    @staticmethod
+    def _apply_token_meta_addresses(
+        token_in_addr: str | None,
+        token_out_addr: str | None,
+        swap_token_meta: dict[str, dict[str, Any]] | None,
+        single_swap: bool,
+    ) -> tuple[str | None, str | None]:
+        """Fill None sides from compiler hint slots (single-swap only).
+
+        VIB-3164 direction fallback: applied ONLY when there is exactly one Swap
+        event in the receipt. In a multi-hop receipt the first Swap event's
+        output is an intermediate token — the same gate as the uniswap_v3
+        template's Branch 3. Never overwrites a non-None address (the hint for
+        a different address is simply irrelevant to the identified address).
+        """
+        if not single_swap or not swap_token_meta:
+            return token_in_addr, token_out_addr
+        if not token_in_addr:
+            in_slot = swap_token_meta.get("token_in")
+            if isinstance(in_slot, dict) and in_slot.get("address"):
+                token_in_addr = str(in_slot["address"]).lower()
+        if not token_out_addr:
+            out_slot = swap_token_meta.get("token_out")
+            if isinstance(out_slot, dict) and out_slot.get("address"):
+                token_out_addr = str(out_slot["address"]).lower()
+        return token_in_addr, token_out_addr
+
+    def _resolve_token_decimals_with_hints(
+        self,
+        token_in_addr: str | None,
+        token_out_addr: str | None,
+        hint_by_addr: dict[str, tuple[str, int]],
+    ) -> tuple[int | None, int | None]:
+        """Resolve decimals per side; compiler hints win over TokenResolver.
+
+        VIB-3164: calls the existing ``_resolve_token_decimals`` first, then
+        overrides either side from the hint map if the address (lowercased)
+        is present. Simplest correct shape: delegate then override.
+        """
+        token_in_decimals, token_out_decimals = self._resolve_token_decimals(token_in_addr, token_out_addr)
+        if hint_by_addr:
+            addr_in = token_in_addr.lower() if token_in_addr else ""
+            addr_out = token_out_addr.lower() if token_out_addr else ""
+            if addr_in in hint_by_addr:
+                token_in_decimals = hint_by_addr[addr_in][1]
+            if addr_out in hint_by_addr:
+                token_out_decimals = hint_by_addr[addr_out][1]
+        return token_in_decimals, token_out_decimals
+
     def _build_swap_result(
         self,
         swap_events: list[SwapEventData],
         transfer_events: list[TransferEventData],
         quoted_amount_out: int | None,
+        swap_token_meta: dict[str, dict[str, Any]] | None = None,
     ) -> ParsedSwapResult:
         """Build a high-level swap result from decoded events.
 
-        Orchestrates five pure phase helpers:
-          1. _compute_swap_amounts       — sign convention
-          2. _calculate_slippage_bps     — realized slippage vs quote
-          3. _identify_swap_tokens       — pool_mgr / amount / direction passes
-          4. _resolve_token_decimals     — lazy resolver lookup
-          5. _compute_decimal_amounts    — human-readable amounts + price
+        Orchestrates five pure phase helpers (VIB-3164 inserts stage 3.5 and
+        replaces stage 4 with a hint-aware variant):
+          1. _compute_swap_amounts               — sign convention
+          2. _calculate_slippage_bps             — realized slippage vs quote
+          3. _identify_swap_tokens               — pool_mgr / amount / direction
+          3.5 _apply_token_meta_addresses        — direction fallback from hints
+          4. _resolve_token_decimals_with_hints  — hints win over resolver
+          5. _compute_decimal_amounts            — human-readable amounts + price
 
-        ``_compute_decimal_amounts`` now returns ``Decimal | None`` per side
-        to distinguish "decimals unresolvable" from "measured zero"
-        (#1778). ``ParsedSwapResult`` still carries ``Decimal`` fields for
-        backward compatibility — the unresolvable case is coerced back to
-        ``Decimal(0)`` here and flagged via ``*_decimal_resolved=False`` so
-        downstream consumers that care about the distinction (ledger) can
-        see it without a type change to the dataclass.
+        ``_compute_decimal_amounts`` returns ``Decimal | None`` per side to
+        distinguish "decimals unresolvable" from "measured zero" (#1778).
+        ``ParsedSwapResult`` still carries ``Decimal`` fields for backward
+        compatibility — the unresolvable case is coerced back to ``Decimal(0)``
+        here and flagged via ``*_decimal_resolved=False`` so downstream consumers
+        that care about the distinction (ledger) can see it without a type change
+        to the dataclass.
+
+        Do NOT convert the ``Decimal(0)`` coercion — issue #1778 guardrail.
         """
         # Use the first swap event (single-hop; multi-hop receipts may emit
         # several Swap events but the first carries the user's input side).
@@ -1643,7 +1775,15 @@ class UniswapV4ReceiptParser:
         amount_in, amount_out = self._compute_swap_amounts(swap)
         slippage_bps = self._calculate_slippage_bps(amount_out, quoted_amount_out)
         token_in_addr, token_out_addr = self._identify_swap_tokens(transfer_events, amount_in, amount_out)
-        token_in_decimals, token_out_decimals = self._resolve_token_decimals(token_in_addr, token_out_addr)
+        # VIB-3164 stage 3.5: fill None sides from compiler hints (single-swap gate)
+        token_in_addr, token_out_addr = self._apply_token_meta_addresses(
+            token_in_addr, token_out_addr, swap_token_meta, single_swap=len(swap_events) == 1
+        )
+        # VIB-3164 stage 4: hint-aware decimal resolution (hints win per address)
+        hint_by_addr = self._build_hint_map(swap_token_meta)
+        token_in_decimals, token_out_decimals = self._resolve_token_decimals_with_hints(
+            token_in_addr, token_out_addr, hint_by_addr
+        )
         amount_in_decimal_opt, amount_out_decimal_opt, effective_price = self._compute_decimal_amounts(
             amount_in, amount_out, token_in_decimals, token_out_decimals
         )

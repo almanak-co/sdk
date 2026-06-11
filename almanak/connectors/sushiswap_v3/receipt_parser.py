@@ -1116,11 +1116,151 @@ class SushiSwapV3ReceiptParser:
     # Swap Amounts Extraction (for Result Enrichment)
     # =============================================================================
 
+    def build_extract_kwargs(
+        self,
+        *,
+        field: str,
+        bundle_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return SushiSwapV3-owned kwargs for ResultEnricher extraction calls.
+
+        VIB-3164: the compiler records full token identity
+        (``from_token`` / ``to_token`` dicts with address, symbol, decimals —
+        see ``UniswapV3Compiler.compile_swap``) in ``ActionBundle.metadata``.
+        Threading it here lets ``_resolve_swap_decimals_with_hints`` resolve
+        decimals when the TokenResolver misses or Transfer events cannot be
+        classified, instead of dropping the whole SwapAmounts row.
+
+        Native-token entries are skipped: the receipt's Transfer events carry
+        the wrapped token's address, so a native entry can never match by
+        address, and its decimals (18) equal the fallback anyway.
+        """
+        if field != "swap_amounts":
+            return {}
+        meta: dict[str, dict[str, Any]] = {}
+        for metadata_key, slot in (("from_token", "token_in"), ("to_token", "token_out")):
+            raw = bundle_metadata.get(metadata_key)
+            if not isinstance(raw, dict) or raw.get("is_native"):
+                continue
+            address = raw.get("address")
+            decimals = raw.get("decimals")
+            if not address or decimals is None:
+                continue
+            try:
+                decimals_int = int(decimals)
+            except (TypeError, ValueError):
+                logger.debug("Could not coerce %s.decimals=%r to int; skipping hint", metadata_key, decimals)
+                continue
+            meta[slot] = {
+                "address": str(address).lower(),
+                "symbol": str(raw.get("symbol") or ""),
+                "decimals": decimals_int,
+            }
+        return {"swap_token_meta": meta} if meta else {}
+
+    @staticmethod
+    def _build_hint_map(
+        swap_token_meta: dict[str, dict[str, Any]] | None,
+    ) -> dict[str, tuple[str, int]]:
+        """Map compiler token metadata to ``{address: (symbol, decimals)}``."""
+        hints: dict[str, tuple[str, int]] = {}
+        if not swap_token_meta:
+            return hints
+        for slot in ("token_in", "token_out"):
+            entry = swap_token_meta.get(slot)
+            if not isinstance(entry, dict):
+                continue
+            address = entry.get("address")
+            decimals = entry.get("decimals")
+            if not address or decimals is None:
+                continue
+            try:
+                hints[str(address).lower()] = (str(entry.get("symbol") or ""), int(decimals))
+            except (TypeError, ValueError):
+                logger.debug("Ignoring malformed token hint: %r", entry)
+        return hints
+
+    def _resolve_swap_decimals_with_hints(
+        self,
+        receipt: dict[str, Any],
+        *,
+        token_in_hint: str,
+        token_out_hint: str,
+        swap_token_meta: dict[str, dict[str, Any]] | None,
+        single_swap: bool,
+    ) -> tuple[str, str, int, int, dict[str, str]] | None:
+        """Resolve (token_in_addr, token_out_addr, in_decimals, out_decimals, hint_symbols).
+
+        Resolution order (per side):
+          1. Transfer events classify wallet-matched addresses.
+          2. Constructor hints fill any still-empty side.
+          3. Direction fallback: when a side is still empty AND single_swap=True
+             AND the matching compiler-hint slot exists, take the hint address.
+             Multi-swap receipts skip this (the first Swap event's output is an
+             intermediate token — same rationale as the uniswap_v3 template).
+          4. Per-address decimals: hint_by_addr wins over TokenResolver.
+
+        Preserves fail-closed: returns None when either side's decimals remain
+        unresolved, emitting a WARNING with the same message as before VIB-3164.
+        """
+        token_in_addr, token_out_addr, _, _ = self._extract_swap_tokens_from_transfers(receipt)
+
+        if not token_in_addr:
+            token_in_addr = token_in_hint
+        if not token_out_addr:
+            token_out_addr = token_out_hint
+
+        hint_by_addr = self._build_hint_map(swap_token_meta)
+
+        # Direction fallback: fill still-empty sides from hint slots (single-swap only)
+        if single_swap and swap_token_meta:
+            if not token_in_addr:
+                in_slot = swap_token_meta.get("token_in")
+                if isinstance(in_slot, dict) and in_slot.get("address"):
+                    token_in_addr = str(in_slot["address"]).lower()
+            if not token_out_addr:
+                out_slot = swap_token_meta.get("token_out")
+                if isinstance(out_slot, dict) and out_slot.get("address"):
+                    token_out_addr = str(out_slot["address"]).lower()
+
+        # Per-address resolution: hints win over TokenResolver
+        in_decimals: int | None
+        out_decimals: int | None
+        addr_in = token_in_addr.lower() if token_in_addr else ""
+        addr_out = token_out_addr.lower() if token_out_addr else ""
+
+        if addr_in in hint_by_addr:
+            in_decimals = hint_by_addr[addr_in][1]
+        else:
+            in_decimals = self._resolve_decimals(token_in_addr) if token_in_addr else None
+
+        if addr_out in hint_by_addr:
+            out_decimals = hint_by_addr[addr_out][1]
+        else:
+            out_decimals = self._resolve_decimals(token_out_addr) if token_out_addr else None
+
+        if in_decimals is None or out_decimals is None:
+            logger.warning(
+                f"Cannot compute swap amounts: token decimals unknown "
+                f"(in={token_in_addr}:{in_decimals}, out={token_out_addr}:{out_decimals})"
+            )
+            return None
+
+        # Collect any hint-supplied symbols for backfilling
+        hint_symbols: dict[str, str] = {}
+        if addr_in in hint_by_addr:
+            hint_symbols["token_in"] = hint_by_addr[addr_in][0]
+        if addr_out in hint_by_addr:
+            hint_symbols["token_out"] = hint_by_addr[addr_out][0]
+
+        return token_in_addr, token_out_addr, in_decimals, out_decimals, hint_symbols
+
     def extract_swap_amounts(
         self,
         receipt: dict[str, Any],
         *,
         expected_out: Decimal | None = None,
+        swap_token_meta: dict[str, dict[str, Any]] | None = None,
     ) -> SwapAmounts | None:
         """Extract swap amounts from a transaction receipt.
 
@@ -1137,6 +1277,12 @@ class SushiSwapV3ReceiptParser:
                 (Decimal) units from ``ActionBundle.metadata["expected_output_human"]``.
                 When provided, realized ``slippage_bps`` is computed as
                 ``(expected_out - amount_out_decimal) / expected_out * 10_000``.
+            swap_token_meta: VIB-3164 — compiler-supplied token metadata threaded
+                from ``build_extract_kwargs`` via the ResultEnricher hook.
+                Shape: ``{"token_in": {"address": ..., "symbol": ..., "decimals": ...},
+                "token_out": {...}}``. Hints win over the TokenResolver per address;
+                never changes fail-closed semantics (None is still returned when
+                decimals remain unresolved after hints).
 
         Returns:
             SwapAmounts dataclass if swap event found, None otherwise
@@ -1170,23 +1316,18 @@ class SushiSwapV3ReceiptParser:
             else:
                 return None
 
-            # Resolve decimals independently from Transfer events in the receipt.
-            token_in_addr, token_out_addr, _, _ = self._extract_swap_tokens_from_transfers(receipt)
-
-            if not token_in_addr:
-                token_in_addr = token_in_hint
-            if not token_out_addr:
-                token_out_addr = token_out_hint
-
-            in_decimals = self._resolve_decimals(token_in_addr) if token_in_addr else None
-            out_decimals = self._resolve_decimals(token_out_addr) if token_out_addr else None
-
-            if in_decimals is None or out_decimals is None:
-                logger.warning(
-                    f"Cannot compute swap amounts: token decimals unknown "
-                    f"(in={token_in_addr}:{in_decimals}, out={token_out_addr}:{out_decimals})"
-                )
+            # VIB-3164: resolve decimals with compiler hints, then fail-closed.
+            single_swap = len(parse_result.swap_events) == 1
+            resolved = self._resolve_swap_decimals_with_hints(
+                receipt,
+                token_in_hint=token_in_hint,
+                token_out_hint=token_out_hint,
+                swap_token_meta=swap_token_meta,
+                single_swap=single_swap,
+            )
+            if resolved is None:
                 return None
+            token_in_addr, token_out_addr, in_decimals, out_decimals, hint_symbols = resolved
 
             amount_in_decimal = Decimal(str(raw_in)) / Decimal(10**in_decimals)
             amount_out_decimal = Decimal(str(raw_out)) / Decimal(10**out_decimals)
@@ -1199,6 +1340,10 @@ class SushiSwapV3ReceiptParser:
                 realized_slippage = (expected_out - amount_out_decimal) / expected_out
                 slippage_bps = int(realized_slippage * Decimal(10_000))
 
+            # Backfill symbols from hints when the existing symbol is empty
+            effective_token_in_symbol = token_in_symbol or hint_symbols.get("token_in", "")
+            effective_token_out_symbol = token_out_symbol or hint_symbols.get("token_out", "")
+
             return SwapAmounts(
                 amount_in=raw_in,
                 amount_out=raw_out,
@@ -1207,8 +1352,8 @@ class SushiSwapV3ReceiptParser:
                 effective_price=effective_price,
                 slippage_bps=slippage_bps,
                 expected_out_decimal=expected_out,
-                token_in=token_in_symbol or token_in_addr or token_in_hint,
-                token_out=token_out_symbol or token_out_addr or token_out_hint,
+                token_in=effective_token_in_symbol or token_in_addr or token_in_hint,
+                token_out=effective_token_out_symbol or token_out_addr or token_out_hint,
             )
 
         except Exception as e:
