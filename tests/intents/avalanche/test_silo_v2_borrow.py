@@ -10,12 +10,11 @@ Tests the full Intent -> Compile -> Execute -> Parse -> Verify flow for Silo V2 
    pipeline (ledger -> outbox -> AccountingProcessor.drain_one) into a
    throwaway SQLite and assert the typed LendingAccountingEvent is correct.
 
-NOTE: The borrow/repay happy-path tests are currently skipped when the
-WAVAX/USDC Silo V2 market on Avalanche has zero borrowable USDC at the mainnet
-fork block. Silo V2's isolated architecture means there is no USDC to borrow
-until other users deposit USDC into the silo. The tests are correctly
-structured (including the Layer-5 assertions, which run only when liquidity is
-present) and will pass once the market has USDC liquidity.
+NOTE: Silo V2's isolated architecture means the WAVAX/USDC market has no
+borrowable USDC at the mainnet fork block (only Protected-type deposits).
+The borrow/repay tests therefore seed Collateral-type USDC liquidity from a
+throwaway LP account first (``_seed_usdc_silo_liquidity``, VIB-4830) and then
+REQUIRE it — they never skip on missing liquidity.
 
 Layer 5 (epic VIB-4591 / ticket VIB-4606): mirrors the merged Spark lending
 gold (``tests/intents/ethereum/test_spark_lending.py``). The lending category
@@ -51,8 +50,13 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from eth_account import Account
 from web3 import Web3
 
+from almanak.connectors.silo_v2.adapter import (
+    COLLATERAL_TYPE_COLLATERAL,
+    SILO_V2_FUNCTION_SELECTORS,
+)
 from almanak.connectors.silo_v2.receipt_parser import SiloV2ReceiptParser
 from almanak.framework.accounting.lending_accounting import (
     capture_lending_post_state,
@@ -68,11 +72,15 @@ from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents import BorrowIntent, RepayIntent, SupplyIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
+from tests.intents._zodiac_helpers import _send_eoa_tx
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
+    ZODIAC_OWNER_PRIVATE_KEY,
     assert_accounting_persisted,
     assert_no_accounting_on_failure,
     format_token_amount,
+    fund_erc20_token,
+    fund_native_token,
     get_token_balance,
     get_token_decimals,
 )
@@ -90,12 +98,16 @@ PROTOCOL = "silo_v2"
 SILO_V2_WAVAX_SILO = "0xDa4b05e351696296060e6a1245C55e32DF8bFC84"  # WAVAX vault (silo0)
 SILO_V2_USDC_SILO = "0xfA5f7d5BcD70dC2F031eE906fc692a9e19584CB0"  # USDC vault (silo1)
 
-# Skip reason for borrow/repay tests that require USDC liquidity
-SKIP_NO_LIQUIDITY = (
-    "Silo V2 WAVAX/USDC market has insufficient borrowable USDC at fork block — "
-    "borrow tests require USDC liquidity from other depositors. "
-    "Ticket: VIB-2643"
-)
+# Throwaway liquidity-provider EOA: reuse the shared Anvil dev account #1 from
+# the intent-test conftest (no raw key literal here — Betterleaks). Distinct
+# from TEST_WALLET (dev account #0) so seeding the silo never touches the
+# balances the tests assert exact deltas on. This module is ``no_zodiac``, so
+# the account's Safe-owner role is unused here and there is no conflict.
+LP_PRIVATE_KEY = ZODIAC_OWNER_PRIVATE_KEY
+
+# 1,000 USDC of borrowable liquidity — the tests borrow 1 USDC, so this gives
+# enormous headroom while staying far below any plausible silo deposit cap.
+SEED_LIQUIDITY_USDC = Decimal("1000")
 
 
 def _silo_borrowable_liquidity(web3: Web3, silo_address: str) -> int:
@@ -110,6 +122,41 @@ def _silo_borrowable_liquidity(web3: Web3, silo_address: str) -> int:
     selector = Web3.keccak(text="getLiquidity()")[:4]
     raw = web3.eth.call({"to": silo_address, "data": "0x" + selector.hex()})
     return int.from_bytes(raw, "big") if raw else 0
+
+
+def _seed_usdc_silo_liquidity(web3: Web3, rpc_url: str) -> None:
+    """Deposit borrowable USDC into the USDC silo from a throwaway LP EOA.
+
+    The pinned fork block leaves the WAVAX/USDC market with no borrowable
+    USDC — ``getLiquidity()`` is ~0 because the silo holds only Protected-type
+    deposits (VIB-4830). The borrow tests need Collateral-type liquidity, so
+    an LP account deposits with ``CollateralType.Collateral`` first. Runs
+    inside the per-test Anvil snapshot window, so the deposit reverts with the
+    rest of the test's state.
+    """
+    config = CHAIN_CONFIGS[CHAIN_NAME]
+    usdc = config["tokens"]["USDC"]
+    decimals = get_token_decimals(web3, usdc)
+    amount_wei = int(SEED_LIQUIDITY_USDC * Decimal(10**decimals))
+
+    lp = Account.from_key(LP_PRIVATE_KEY)
+    fund_native_token(lp.address, 10 * 10**18, rpc_url)
+    fund_erc20_token(lp.address, usdc, amount_wei, config["balance_slots"]["USDC"], rpc_url)
+
+    # approve(usdc_silo, amount) on the USDC token
+    approve_data = bytes.fromhex("095ea7b3" + f"{int(SILO_V2_USDC_SILO, 16):064x}" + f"{amount_wei:064x}")
+    _send_eoa_tx(web3, usdc, approve_data, lp.address, LP_PRIVATE_KEY)
+
+    # deposit(amount, lp, CollateralType.Collateral) — Collateral-type is the
+    # borrowable kind; a Protected deposit would leave getLiquidity() at zero,
+    # which is the exact trap this helper exists to avoid.
+    deposit_data = bytes.fromhex(
+        SILO_V2_FUNCTION_SELECTORS["deposit"].removeprefix("0x")
+        + f"{amount_wei:064x}"
+        + f"{int(lp.address, 16):064x}"
+        + f"{COLLATERAL_TYPE_COLLATERAL:064x}"
+    )
+    _send_eoa_tx(web3, SILO_V2_USDC_SILO, deposit_data, lp.address, LP_PRIVATE_KEY)
 
 
 # =============================================================================
@@ -282,12 +329,15 @@ class TestSiloV2BorrowIntent:
         supply_amount = Decimal("5")  # 5 WAVAX as collateral
         borrow_amount = Decimal("1")  # 1 USDC (very low LTV, well under 30%)
 
-        # Skip if the silo doesn't have enough borrowable USDC for this test —
-        # getLiquidity() excludes Protected (non-borrowable) deposits, unlike
-        # totalAssets().
+        # The fork block leaves the USDC silo without borrowable liquidity, so
+        # seed it first (VIB-4830) and then REQUIRE it — a shortfall after
+        # seeding is a real regression, not an environment condition.
         borrow_amount_wei = int(borrow_amount * Decimal(10**usdc_decimals))
-        if _silo_borrowable_liquidity(web3, SILO_V2_USDC_SILO) < borrow_amount_wei:
-            pytest.skip(SKIP_NO_LIQUIDITY)
+        _seed_usdc_silo_liquidity(web3, anvil_rpc_url)
+        liquidity = _silo_borrowable_liquidity(web3, SILO_V2_USDC_SILO)
+        assert liquidity >= borrow_amount_wei, (
+            f"USDC silo borrowable liquidity {liquidity} still below borrow amount {borrow_amount_wei} after seeding"
+        )
 
         print(f"\n{'=' * 80}")
         print(f"Test: Supply {supply_amount} WAVAX, then Borrow {borrow_amount} USDC from Silo V2")
@@ -452,12 +502,16 @@ class TestSiloV2BorrowIntent:
         usdc = tokens["USDC"]
         usdc_decimals = get_token_decimals(web3, usdc)
 
-        # Skip if the silo doesn't have enough borrowable USDC for the 1 USDC
-        # setup-borrow required by this repay test.
+        # Seed borrowable USDC for the 1 USDC setup-borrow this repay test
+        # needs (VIB-4830), then require it — never silently skip.
         setup_borrow = Decimal("1")
         setup_borrow_wei = int(setup_borrow * Decimal(10**usdc_decimals))
-        if _silo_borrowable_liquidity(web3, SILO_V2_USDC_SILO) < setup_borrow_wei:
-            pytest.skip(SKIP_NO_LIQUIDITY)
+        _seed_usdc_silo_liquidity(web3, anvil_rpc_url)
+        liquidity = _silo_borrowable_liquidity(web3, SILO_V2_USDC_SILO)
+        assert liquidity >= setup_borrow_wei, (
+            f"USDC silo borrowable liquidity {liquidity} still below "
+            f"setup-borrow amount {setup_borrow_wei} after seeding"
+        )
 
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
@@ -666,6 +720,19 @@ class TestSiloV2BorrowIntent:
         print("Test: BorrowIntent without Collateral (Silo V2)")
         print(f"{'=' * 80}")
 
+        # Seed borrowable USDC (VIB-4830) so this test can only fail for the
+        # RIGHT reason — missing collateral. Against the empty fork state the
+        # borrow would also revert on zero liquidity, which would keep this
+        # test green even if the no-collateral rejection regressed.
+        borrow_amount = Decimal("100")
+        borrow_amount_wei = int(borrow_amount * Decimal(10**usdc_decimals))
+        _seed_usdc_silo_liquidity(web3, anvil_rpc_url)
+        liquidity = _silo_borrowable_liquidity(web3, SILO_V2_USDC_SILO)
+        assert liquidity >= borrow_amount_wei, (
+            f"USDC silo borrowable liquidity {liquidity} below borrow amount "
+            f"{borrow_amount_wei} after seeding — cannot attribute failure to collateral"
+        )
+
         # Record balances BEFORE
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
         print(f"USDC before: {format_token_amount(usdc_before, usdc_decimals)}")
@@ -676,7 +743,7 @@ class TestSiloV2BorrowIntent:
             collateral_token="WAVAX",
             collateral_amount=Decimal("0"),
             borrow_token="USDC",
-            borrow_amount=Decimal("100"),
+            borrow_amount=borrow_amount,
             chain=CHAIN_NAME,
         )
 

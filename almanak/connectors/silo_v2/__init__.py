@@ -7,7 +7,7 @@ Key concepts:
 - Each market is a pair of two Silo vaults (silo0 + silo1)
 - Depositing into one silo enables borrowing from the paired silo
 - No shared pool — bad debt is isolated per market
-- CollateralType: 0=Collateral (borrowable), 1=Protected (non-borrowable)
+- CollateralType: 0=Protected (non-borrowable), 1=Collateral (borrowable)
 """
 
 from __future__ import annotations
