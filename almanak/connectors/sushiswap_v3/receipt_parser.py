@@ -38,7 +38,11 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
+from almanak.connectors._strategy_base.base import (
+    EventRegistry,
+    HexDecoder,
+    resolve_swap_token_symbol_with_fallback,
+)
 from almanak.framework.execution.events import SwapResultPayload
 from almanak.framework.execution.extract_result import (
     ExtractError,
@@ -1352,8 +1356,14 @@ class SushiSwapV3ReceiptParser:
                 effective_price=effective_price,
                 slippage_bps=slippage_bps,
                 expected_out_decimal=expected_out,
-                token_in=effective_token_in_symbol or token_in_addr or token_in_hint,
-                token_out=effective_token_out_symbol or token_out_addr or token_out_hint,
+                # VIB-4978: canonicalise the (symbol, addr, hint) trio to a symbol
+                # so the ledger/Trade Tape never shows a raw contract address.
+                token_in=resolve_swap_token_symbol_with_fallback(
+                    effective_token_in_symbol, token_in_addr, token_in_hint, self.chain
+                ),
+                token_out=resolve_swap_token_symbol_with_fallback(
+                    effective_token_out_symbol, token_out_addr, token_out_hint, self.chain
+                ),
             )
 
         except Exception as e:

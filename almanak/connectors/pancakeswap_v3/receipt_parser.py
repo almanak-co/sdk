@@ -10,7 +10,12 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from almanak.connectors._strategy_base.base import BaseReceiptParser, EventRegistry, HexDecoder
+from almanak.connectors._strategy_base.base import (
+    BaseReceiptParser,
+    EventRegistry,
+    HexDecoder,
+    resolve_swap_token_symbol,
+)
 from almanak.framework.execution.extract_result import (
     ExtractError,
     ExtractMissing,
@@ -532,7 +537,7 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
             if decimals is None:
                 return None
 
-            return self._build_swap_amounts(seed, decimals, expected_out)
+            return self._build_swap_amounts(seed, decimals, expected_out, self.chain)
 
         except Exception as e:
             logger.warning(f"Failed to extract swap amounts: {e}")
@@ -716,6 +721,7 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
         seed: "_SwapSeed",
         decimals: "_SwapDecimals",
         expected_out: Decimal | None,
+        chain: str,
     ) -> "SwapAmounts":
         """Assemble the final SwapAmounts, including realized slippage."""
         from almanak.framework.execution.extracted_data import SwapAmounts
@@ -762,8 +768,9 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
             effective_price=effective_price,
             slippage_bps=slippage_bps,
             expected_out_decimal=expected_out,
-            token_in=seed.token_in or None,
-            token_out=seed.token_out or None,
+            # VIB-4978: canonical symbol into the ledger, not the raw address.
+            token_in=resolve_swap_token_symbol(seed.token_in, chain) or None,
+            token_out=resolve_swap_token_symbol(seed.token_out, chain) or None,
             amount_in_decimal_resolved=decimals.decimals_in is not None,
             amount_out_decimal_resolved=True,
         )

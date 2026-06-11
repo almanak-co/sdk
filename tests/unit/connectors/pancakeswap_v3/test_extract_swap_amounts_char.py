@@ -158,8 +158,9 @@ class TestHappyPath:
         # Effective price = out/in
         assert sa.effective_price == Decimal("0.01") / Decimal("3")
         # token addresses flow through
-        assert (sa.token_in or "").lower() == USDC_BSC.lower()
-        assert (sa.token_out or "").lower() == WBNB_BSC.lower()
+        # VIB-4978: ledger token identity is the canonical symbol, not the raw address.
+        assert sa.token_in == "USDC"
+        assert sa.token_out == "WBNB"
 
 
 # ---------------------------------------------------------------------------
@@ -260,9 +261,9 @@ class TestMultiHopSemantics:
         # Pin wallet-level amounts (NOT first-hop amounts)
         assert sa.amount_in == 5 * 10**18  # USDC the wallet paid
         assert sa.amount_out == 9 * 10**18  # CAKE the wallet received
-        # And wallet-level tokens
-        assert (sa.token_in or "").lower() == USDC_BSC.lower()
-        assert (sa.token_out or "").lower() == CAKE_BSC.lower()
+        # And wallet-level tokens (VIB-4978: canonical symbols)
+        assert sa.token_in == "USDC"
+        assert sa.token_out == "CAKE"
 
     def test_multiple_swap_events_do_not_affect_wallet_level_amounts(self):
         """Even with N Swap events, wallet-level in/out Transfers drive amounts.

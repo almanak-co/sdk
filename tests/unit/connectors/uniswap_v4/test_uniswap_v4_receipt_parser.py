@@ -296,8 +296,9 @@ class TestExtractSwapAmounts:
         assert amounts is not None
         assert amounts.amount_in == 5 * 10**17
         assert amounts.amount_out == 1000 * 10**6
-        assert amounts.token_in == "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
-        assert amounts.token_out == "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        # VIB-4978: enrichment path stamps the canonical symbol, not the raw address.
+        assert amounts.token_in == "WETH"
+        assert amounts.token_out == "USDC"
 
     def test_extract_with_transfer_events_amount_fallback(self):
         """When Transfers go via UniversalRouter (not directly to PoolManager),
@@ -328,9 +329,9 @@ class TestExtractSwapAmounts:
         assert amounts is not None
         assert amounts.amount_in == 5 * 10**17
         assert amounts.amount_out == 1000 * 10**6
-        # Amount-based fallback should identify tokens
-        assert amounts.token_in == "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
-        assert amounts.token_out == "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        # Amount-based fallback should identify tokens (VIB-4978: as symbols)
+        assert amounts.token_in == "WETH"
+        assert amounts.token_out == "USDC"
 
     def test_extract_reverse_direction(self):
         """Reverse direction: token0 is paid, token1 is received."""
@@ -379,9 +380,9 @@ class TestExtractSwapAmounts:
         assert amounts is not None
         assert amounts.amount_in == amount
         assert amounts.amount_out == amount
-        # Both tokens must be identified despite equal amounts
-        assert amounts.token_in == "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"
-        assert amounts.token_out == "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        # Both tokens must be identified despite equal amounts (VIB-4978: as symbols)
+        assert amounts.token_in == "USDT"
+        assert amounts.token_out == "USDC"
 
     def test_extract_amount_fallback_duplicate_transfers(self):
         """With multiple transfers of the same amount (Permit2 relay chain),
@@ -418,8 +419,9 @@ class TestExtractSwapAmounts:
         amounts = parser.extract_swap_amounts(receipt)
 
         assert amounts is not None
-        assert amounts.token_in == "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
-        assert amounts.token_out == "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        # VIB-4978: canonical symbols, not raw addresses.
+        assert amounts.token_in == "WETH"
+        assert amounts.token_out == "USDC"
 
     def test_extract_single_transfer_event(self):
         """When only one Transfer event exists, only one side gets identified."""
@@ -440,7 +442,7 @@ class TestExtractSwapAmounts:
         amounts = parser.extract_swap_amounts(receipt)
 
         assert amounts is not None
-        assert amounts.token_in == "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+        assert amounts.token_in == "WETH"  # VIB-4978: canonical symbol
         assert amounts.token_out is None  # Only one Transfer, cannot identify output
 
 

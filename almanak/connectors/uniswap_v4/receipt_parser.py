@@ -38,7 +38,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from almanak.connectors._strategy_base.base import HexDecoder
+from almanak.connectors._strategy_base.base import HexDecoder, resolve_swap_token_symbol
 from almanak.framework.observability.metrics import (
     V4LPDropOutcome,
     V4LPDropReason,
@@ -400,8 +400,10 @@ class UniswapV4ReceiptParser:
             effective_price=sr.effective_price or Decimal(0),
             slippage_bps=slippage_bps,
             expected_out_decimal=expected_out,
-            token_in=sr.token_in,
-            token_out=sr.token_out,
+            # VIB-4978: stamp the canonical symbol (not the raw contract address)
+            # into the ledger so the Trade Tape and downstream FIFO basis key agree.
+            token_in=resolve_swap_token_symbol(sr.token_in, self.chain),
+            token_out=resolve_swap_token_symbol(sr.token_out, self.chain),
             amount_in_decimal_resolved=sr.amount_in_decimal_resolved,
             amount_out_decimal_resolved=sr.amount_out_decimal_resolved,
         )

@@ -88,6 +88,34 @@ def resolve_swap_token_symbol(addr: str | None, chain: str) -> str | None:
     return info.symbol.upper()
 
 
+def resolve_swap_token_symbol_with_fallback(
+    symbol: str | None,
+    address: str | None,
+    hint: str | None,
+    chain: str,
+) -> str | None:
+    """Canonical symbol for a swap token from a (symbol, address, hint) trio (VIB-4978).
+
+    The Shape-B SWAP parsers (Aerodrome, SushiSwap V3) historically stamped the
+    ledger token as ``token_symbol or token_addr or token_hint`` — a raw contract
+    address whenever the parser's own ``_symbol`` field was empty. This helper
+    folds that ``or``-chain into the shared resolver so the chosen identifier is
+    always canonicalised to a symbol (and the four-way duplication + per-connector
+    cyclomatic cost stays in one place).
+
+    Precedence is preserved: the first non-empty of ``(symbol, address, hint)`` is
+    selected, then passed through :func:`resolve_swap_token_symbol`, so
+
+    * a real symbol (e.g. ``"WETH"``) is upper-cased and returned verbatim,
+    * an address that resolves becomes its canonical symbol,
+    * an address the resolver cannot map falls back to the lower-cased address
+      (Solana base58 case preserved),
+    * an all-empty trio returns ``""`` (caller keeps its own None/empty handling).
+    """
+    candidate = symbol or address or hint or ""
+    return resolve_swap_token_symbol(candidate, chain)
+
+
 @dataclass
 class ParseResult[TResult]:
     """Generic parse result wrapper.

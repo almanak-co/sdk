@@ -47,6 +47,7 @@ from almanak.connectors._strategy_base.base.receipt_parser import (
     BaseReceiptParser,
     ParseResult,
     resolve_swap_token_symbol,
+    resolve_swap_token_symbol_with_fallback,
 )
 from almanak.connectors._strategy_base.base.registry import EventRegistry
 from almanak.connectors._strategy_base.base.swap_adapter import DefaultSwapAdapter
@@ -65,4 +66,5 @@ __all__ = [
     "HexDecoder",
     "ParseResult",
     "resolve_swap_token_symbol",
+    "resolve_swap_token_symbol_with_fallback",
 ]
