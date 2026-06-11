@@ -172,6 +172,44 @@ class TestPoolAddressComputation:
         assert address.startswith("0x")
         assert len(address) == 42
 
+    def test_compute_pool_address_matches_onchain_arbitrum(self) -> None:
+        """Pin the real on-chain Arbitrum WETH/USDC 0.05% pool address.
+
+        Verified against factory.getPool on Arbitrum mainnet
+        (factory 0x1F98431c8aD98523631AE4a59f267346ea31F984). Guards against
+        using NIST SHA3-256 (hashlib.sha3_256) instead of Ethereum keccak256:
+        the two differ in padding byte and produce entirely different
+        CREATE2 addresses.
+        """
+        address = compute_pool_address(
+            factory=FACTORY_ADDRESSES["arbitrum"],
+            token0=WETH_ADDRESS,
+            token1=USDC_ADDRESS,
+            fee=500,
+        )
+
+        assert address.lower() == "0xc6962004f452be9203591991d15f6b388e09e8d0"
+
+    def test_compute_pool_address_matches_onchain_ethereum(self) -> None:
+        """Pin the real on-chain Ethereum USDC/WETH 0.05% pool address.
+
+        Verified against factory.getPool on Ethereum mainnet.
+        """
+        address = compute_pool_address(
+            factory=FACTORY_ADDRESSES["ethereum"],
+            token0="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",  # WETH
+            token1="0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",  # USDC
+            fee=500,
+        )
+
+        assert address.lower() == "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"
+
+    def test_get_pool_address_matches_onchain(self, sdk: UniswapV3SDK) -> None:
+        """The SDK wrapper must return the real on-chain pool address."""
+        pool = sdk.get_pool_address(WETH_ADDRESS, USDC_ADDRESS, fee_tier=500)
+
+        assert pool.address.lower() == "0xc6962004f452be9203591991d15f6b388e09e8d0"
+
     def test_compute_pool_address_deterministic(self) -> None:
         """Test that pool address computation is deterministic."""
         addr1 = compute_pool_address(

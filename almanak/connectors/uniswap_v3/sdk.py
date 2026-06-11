@@ -33,7 +33,6 @@ Example:
     )
 """
 
-import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -42,6 +41,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
+
+from eth_hash.auto import keccak as keccak256
 
 from almanak.connectors._strategy_base import concentrated_liquidity_math as cl_math
 
@@ -517,11 +518,11 @@ def compute_pool_address(
     fee_padded = fee.to_bytes(32, byteorder="big")
 
     salt_input = token0_padded + token1_padded + fee_padded
-    salt = hashlib.sha3_256(salt_input).digest()
+    salt = keccak256(salt_input)
 
     # CREATE2 address: keccak256(0xff ++ factory ++ salt ++ init_code_hash)
     create2_input = b"\xff" + factory_bytes + salt + init_code_bytes
-    address_bytes = hashlib.sha3_256(create2_input).digest()
+    address_bytes = keccak256(create2_input)
 
     # Take last 20 bytes as address
     pool_address = "0x" + address_bytes[-20:].hex()
