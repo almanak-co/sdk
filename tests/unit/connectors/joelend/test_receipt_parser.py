@@ -1,12 +1,15 @@
 """Characterization tests for JoeLendReceiptParser.
 
 These tests pin CURRENT behavior. They are the regression contract for any future
-refactor of the parser. Do not change parser source in this PR.
+refactor of the parser.
 
-KNOWN_BUG: extract_supply_amount (and borrow/withdraw/repay counterparts) return
-int(human_scaled_decimal) rather than raw smallest-unit integers. This is
-inconsistent with euler_v2 and silo_v2 which return raw units from the same
-ResultEnricher hook. See test_KNOWN_BUG_extract_supply_amount_returns_truncated_human_units.
+The former KNOWN_BUG pins (extract_supply_amount and borrow/withdraw/repay
+counterparts returning int(human_scaled_decimal)) were intentionally updated
+alongside the parser fix: the hooks now return RAW smallest-unit integers
+(token wei), matching the euler_v2 / silo_v2 / benqi convention for the same
+ResultEnricher hook. Downstream accounting
+(``lending_accounting._select_lending_raw_amount``) expects raw ints and
+scales to human units via the token resolver. See TestExtractAmountsRawUnits.
 """
 
 from decimal import Decimal
@@ -14,13 +17,10 @@ from decimal import Decimal
 import pytest
 
 from almanak.connectors.joelend.receipt_parser import (
-    CTOKEN_DECIMALS,
     EVENT_TOPICS,
     JoeLendEventType,
     JoeLendReceiptParser,
-    ParseResult,
 )
-
 
 # ---------------------------------------------------------------------------
 # Hex helpers
@@ -295,57 +295,113 @@ class TestMalformed:
 
 
 # ---------------------------------------------------------------------------
-# KNOWN_BUG: extract_* returns truncated human-scaled int, not raw smallest units
+# extract_* hooks return RAW smallest units (euler_v2 / silo_v2 / benqi convention)
 # ---------------------------------------------------------------------------
 
 
-class TestKnownBugExtractAmounts:
-    def test_KNOWN_BUG_extract_supply_amount_returns_truncated_human_units(self, parser):
-        """KNOWN_BUG: extract_supply_amount returns int(human_decimal).
-        For a Mint of 1.5 tokens (15 * 10**17 raw), supply_amount = Decimal('1.5'),
-        and extract_supply_amount returns int(Decimal('1.5')) == 1.
+class TestExtractAmountsRawUnits:
+    def test_extract_supply_amount_returns_raw_smallest_units(self, parser):
+        """extract_supply_amount returns the raw Mint ``mintAmount`` (token wei).
 
-        Sibling parsers (euler_v2, silo_v2) return raw smallest units from the
-        same ResultEnricher hook. This is an inconsistency that corrupts accounting
-        when the amount is not a whole number.
+        For a Mint of 1.5 tokens (15 * 10**17 raw at 18 decimals), the human
+        ParseResult aggregate stays Decimal('1.5'), while the enricher hook
+        returns the raw 1_500_000_000_000_000_000 — downstream accounting
+        scales raw ints via the token resolver.
         """
-        # 1.5 tokens at 18 decimals = 15 * 10**17
         raw_amount = 15 * 10**17
         receipt = make_receipt([make_mint_log(raw_amount, 100 * 10**8)])
         result = parser.parse_receipt(receipt)
 
-        # The parsed Decimal is correct
         assert result.supply_amount == Decimal("1.5")
-        # But extract_supply_amount truncates: int(Decimal("1.5")) == 1
-        extracted = parser.extract_supply_amount(receipt)
-        assert extracted == 1  # NOT 1_500_000_000_000_000_000
+        assert parser.extract_supply_amount(receipt) == raw_amount
 
-    def test_KNOWN_BUG_extract_borrow_amount_returns_truncated_human_units(self, parser):
-        """Same truncation bug on extract_borrow_amount."""
+    def test_extract_borrow_amount_returns_raw_smallest_units(self, parser):
         raw_amount = 25 * 10**17  # 2.5 tokens
         receipt = make_receipt([make_borrow_log(raw_amount)])
         result = parser.parse_receipt(receipt)
 
         assert result.borrow_amount == Decimal("2.5")
-        extracted = parser.extract_borrow_amount(receipt)
-        assert extracted == 2  # NOT 2_500_000_000_000_000_000
+        assert parser.extract_borrow_amount(receipt) == raw_amount
 
-    def test_KNOWN_BUG_extract_withdraw_amount_returns_truncated_human_units(self, parser):
-        """Same truncation bug on extract_withdraw_amount."""
+    def test_extract_withdraw_amount_returns_raw_smallest_units(self, parser):
         raw_amount = 35 * 10**17  # 3.5 tokens
         receipt = make_receipt([make_redeem_log(raw_amount, 300 * 10**8)])
         result = parser.parse_receipt(receipt)
 
         assert result.withdraw_amount == Decimal("3.5")
-        extracted = parser.extract_withdraw_amount(receipt)
-        assert extracted == 3  # NOT 3_500_000_000_000_000_000
+        assert parser.extract_withdraw_amount(receipt) == raw_amount
 
-    def test_KNOWN_BUG_extract_repay_amount_returns_truncated_human_units(self, parser):
-        """Same truncation bug on extract_repay_amount."""
+    def test_extract_repay_amount_returns_raw_smallest_units(self, parser):
         raw_amount = 45 * 10**17  # 4.5 tokens
         receipt = make_receipt([make_repay_log(raw_amount)])
         result = parser.parse_receipt(receipt)
 
         assert result.repay_amount == Decimal("4.5")
-        extracted = parser.extract_repay_amount(receipt)
-        assert extracted == 4  # NOT 4_500_000_000_000_000_000
+        assert parser.extract_repay_amount(receipt) == raw_amount
+
+    def test_extract_is_decimals_agnostic(self):
+        """The raw extraction must not depend on ``underlying_decimals`` — the
+        ResultEnricher constructs parsers without it (only ``chain=`` is
+        threaded through), so the default would silently apply to 6-decimal
+        underlyings."""
+        raw_amount = 15 * 10**5  # 1.5 USDC at 6 decimals
+        receipt = make_receipt([make_mint_log(raw_amount, 100 * 10**8)])
+
+        for decimals in (6, 8, 18):
+            parser = JoeLendReceiptParser(underlying_decimals=decimals)
+            assert parser.extract_supply_amount(receipt) == raw_amount
+
+    def test_extract_sums_multiple_matching_events(self, parser):
+        """Two Mint logs in one receipt sum their raw amounts."""
+        receipt = make_receipt(
+            [
+                make_mint_log(1 * 10**18, 50 * 10**8),
+                make_mint_log(5 * 10**17, 25 * 10**8),
+            ]
+        )
+        assert parser.extract_supply_amount(receipt) == 15 * 10**17
+
+    def test_extract_returns_none_when_no_matching_event(self, parser):
+        """Empty ≠ Zero: a receipt with no matching event is unmeasured (None),
+        never a fabricated 0. A Mint-only receipt has no Borrow to extract."""
+        receipt = make_receipt([make_mint_log(2 * 10**18, 100 * 10**8)])
+
+        assert parser.extract_borrow_amount(receipt) is None
+        assert parser.extract_repay_amount(receipt) is None
+        assert parser.extract_withdraw_amount(receipt) is None
+
+    def test_extract_measured_zero_returns_zero(self, parser):
+        """A zero-value Mint is a MEASURED zero (0), distinct from None."""
+        receipt = make_receipt([make_mint_log(0, 0)])
+
+        assert parser.extract_supply_amount(receipt) == 0
+
+    def test_extract_truncated_event_data_returns_none(self, parser):
+        """A matching topic with a too-short data field is a broken receipt —
+        the raw-word decode fails closed and the hook returns None (logged),
+        rather than under-counting."""
+        truncated_log = {
+            "address": JTOKEN,
+            "topics": [MINT_TOPIC],
+            "data": "0x" + word(10**18),  # only 1 word; mintAmount is word 1
+            "logIndex": 0,
+        }
+        receipt = make_receipt([truncated_log])
+
+        assert parser.extract_supply_amount(receipt) is None
+
+    def test_extract_handles_bytes_topics_and_data(self, parser):
+        """web3 providers may return topics and ``data`` as bytes/HexBytes
+        rather than hex strings; the raw extraction normalizes both forms
+        (HexDecoder.normalize_hex) instead of TypeError-ing into None."""
+        raw_amount = 15 * 10**17
+        str_log = make_mint_log(raw_amount, 100 * 10**8)
+        bytes_log = {
+            "address": JTOKEN,
+            "topics": [bytes.fromhex(MINT_TOPIC[2:])],
+            "data": bytes.fromhex(str_log["data"][2:]),
+            "logIndex": 0,
+        }
+        receipt = make_receipt([bytes_log])
+
+        assert parser.extract_supply_amount(receipt) == raw_amount

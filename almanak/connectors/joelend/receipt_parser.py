@@ -356,60 +356,112 @@ class JoeLendReceiptParser:
     #
     # Method names MUST match the enricher's EXTRACTION_SPECS field names:
     #   extract_{field}(receipt) -> value | None
+    #
+    # Amounts are RAW smallest units (token wei) — the cross-connector
+    # enricher convention (euler_v2, silo_v2, benqi, spark, aave_v3):
+    # downstream accounting (``lending_accounting._select_lending_raw_amount``)
+    # expects raw ints and scales to human units via the token resolver.
+    # The methods read the raw uint directly from the Compound-V2 event data
+    # words — decimals-agnostic, which matters because the enricher constructs
+    # parsers without ``underlying_decimals`` — summing every matching event
+    # in the receipt, mirroring benqi's ``_sum_raw_amount`` (VIB-4967).
+    #
+    # Empty ≠ Zero (AGENTS.md §Accounting): a receipt with no matching event
+    # returns ``None`` (unmeasured), never a fabricated ``0``; a measured
+    # zero-value event returns ``0``.
     # =========================================================================
 
+    # Word index of the raw amount within each Compound-V2 event's non-indexed
+    # data field (each word = 64 hex chars). Mint/Redeem: minter/redeemer is
+    # word 0, the amount is word 1. Borrow: borrower word 0, borrowAmount is
+    # word 1. RepayBorrow: payer word 0, borrower word 1, repayAmount word 2.
+    _RAW_AMOUNT_WORD: dict[str, int] = {
+        "Mint": 1,
+        "Redeem": 1,
+        "Borrow": 1,
+        "RepayBorrow": 2,
+    }
+
+    def _sum_raw_amount(self, receipt: dict[str, Any], event_name: str) -> int | None:
+        """Sum the RAW underlying amount across every ``event_name`` log in a receipt.
+
+        Returns the summed raw uint (token wei), or ``None`` when no log of that
+        event type is present (Empty ≠ Zero — never a fabricated ``0``). Reads the
+        amount word directly from the non-indexed data field so the result is
+        independent of ``self.underlying_decimals`` (the enricher scales later).
+        """
+        if not isinstance(receipt, dict):
+            return None
+        logs = receipt.get("logs")
+        if not isinstance(logs, list) or not logs:
+            return None
+        target_topic = EVENT_TOPICS[event_name]
+        word_index = self._RAW_AMOUNT_WORD[event_name]
+        total: int | None = None
+        for log in logs:
+            if not isinstance(log, dict):
+                continue
+            topics = log.get("topics")
+            if not isinstance(topics, list) or not topics:
+                continue
+            topic0 = topics[0]
+            if isinstance(topic0, bytes):
+                topic0 = "0x" + topic0.hex()
+            if str(topic0).lower() != target_topic:
+                continue
+            raw_data = log.get("data") or "0x"
+            # normalize_hex handles str and bytes/HexBytes log data (mirrors benqi)
+            hex_data = HexDecoder.normalize_hex(raw_data)
+            start = word_index * 64
+            if len(hex_data) < start + 64:
+                # A log of the right topic but a malformed/short data field is a
+                # broken receipt — fail closed rather than under-counting
+                # (Empty ≠ Zero).
+                raise ValueError(f"{event_name} log data too short to decode amount word {word_index}")
+            amount = HexDecoder.decode_uint256(hex_data[start : start + 64])
+            total = amount if total is None else total + amount
+        return total
+
     def extract_supply_amount(self, receipt: dict[str, Any]) -> int | None:
-        """Extract supply amount from receipt for ResultEnricher.
+        """Extract the raw SUPPLY (Mint ``mintAmount``) amount in token wei, or None.
 
         Called by ResultEnricher for SUPPLY intents (field: supply_amount).
         """
         try:
-            parsed = self.parse_receipt(receipt)
-            if not parsed.success or parsed.supply_amount == Decimal("0"):
-                return None
-            return int(parsed.supply_amount)
+            return self._sum_raw_amount(receipt, "Mint")
         except Exception as e:
             logger.warning("Failed to extract supply amount: %s", e)
             return None
 
     def extract_borrow_amount(self, receipt: dict[str, Any]) -> int | None:
-        """Extract borrow amount from receipt for ResultEnricher.
+        """Extract the raw BORROW (Borrow ``borrowAmount``) amount in token wei, or None.
 
         Called by ResultEnricher for BORROW intents (field: borrow_amount).
         """
         try:
-            parsed = self.parse_receipt(receipt)
-            if not parsed.success or parsed.borrow_amount == Decimal("0"):
-                return None
-            return int(parsed.borrow_amount)
+            return self._sum_raw_amount(receipt, "Borrow")
         except Exception as e:
             logger.warning("Failed to extract borrow amount: %s", e)
             return None
 
     def extract_withdraw_amount(self, receipt: dict[str, Any]) -> int | None:
-        """Extract withdraw amount from receipt for ResultEnricher.
+        """Extract the raw WITHDRAW (Redeem ``redeemAmount``) amount in token wei, or None.
 
         Called by ResultEnricher for WITHDRAW intents (field: withdraw_amount).
         """
         try:
-            parsed = self.parse_receipt(receipt)
-            if not parsed.success or parsed.withdraw_amount == Decimal("0"):
-                return None
-            return int(parsed.withdraw_amount)
+            return self._sum_raw_amount(receipt, "Redeem")
         except Exception as e:
             logger.warning("Failed to extract withdraw amount: %s", e)
             return None
 
     def extract_repay_amount(self, receipt: dict[str, Any]) -> int | None:
-        """Extract repay amount from receipt for ResultEnricher.
+        """Extract the raw REPAY (RepayBorrow ``repayAmount``) amount in token wei, or None.
 
         Called by ResultEnricher for REPAY intents (field: repay_amount).
         """
         try:
-            parsed = self.parse_receipt(receipt)
-            if not parsed.success or parsed.repay_amount == Decimal("0"):
-                return None
-            return int(parsed.repay_amount)
+            return self._sum_raw_amount(receipt, "RepayBorrow")
         except Exception as e:
             logger.warning("Failed to extract repay amount: %s", e)
             return None
