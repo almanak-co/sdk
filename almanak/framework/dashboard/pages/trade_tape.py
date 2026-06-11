@@ -103,9 +103,14 @@ def _format_lp_ledger_amount(amount: str, symbol: str, chain: str) -> str:
     The ledger ``amount_in/out`` field can land in one of THREE shapes
     depending on which fallback path in ``observability/ledger.py`` fired:
 
-    1. **Raw on-chain integer** — ``LPOpenData.amount0/amount1`` from
-       ``_extract_from_lp_open`` when the receipt parser succeeded.
-       Always integral; for 18-dec WETH a 1-token position is ``10^18``.
+    1. **Human Decimal from ``LPOpenData`` (post-VIB-5036)** —
+       ``_extract_from_lp_open`` now SCALES ``LPOpenData.amount0/amount1`` to
+       human units at write time (mirroring SWAP / lending), so a 1-token WETH
+       position is ``"1"``, not ``10^18``. PRE-VIB-5036 rows on this path are
+       still raw integers — the magnitude heuristic below is the back-compat
+       shim that scales those legacy rows. New whole-number human values
+       ``< 10^6`` pass through untouched; the ``>= 10^6`` residual edge in the
+       False-NEGATIVE note now applies to this path too.
     2. **Human Decimal from SwapAmounts** —
        ``_extract_from_swap_amounts`` stores ``amount_in_decimal`` /
        ``amount_out_decimal``; LP_CLOSE rides this route when the close
@@ -135,15 +140,15 @@ def _format_lp_ledger_amount(amount: str, symbol: str, chain: str) -> str:
     because it crosses writer / schema / metrics-database boundaries):
 
     - **False NEGATIVE** (human mis-scaled as raw): a whole-million
-      human position from path (2) / (3) — e.g. ``2_000_000`` USDC LP
-      stored as ``Decimal("2000000")`` — would be re-scaled by 6 dec
-      and render as ``"2.00 USDC"``. Bounded to (a) LP_CLOSE rows
-      whose receipt populated ``SwapAmounts`` instead of ``LPCloseData``
-      AND (b) the payload was missing from the accounting event
-      (rare — only when the accounting writer hasn't run yet).
-      ``_format_lp_direction`` short-circuits to ``_format_human_amount``
-      when the typed payload's ``amount0/amount1`` are present, so this
-      window only fires on payload-absent fallback rows.
+      human position from path (1, post-VIB-5036) / (2) / (3) — e.g.
+      ``2_000_000`` USDC LP stored as ``Decimal("2000000")`` — would be
+      re-scaled by 6 dec and render as ``"2.00 USDC"``. Bounded to
+      payload-absent fallback rows: ``_format_lp_direction`` short-circuits
+      to ``_format_human_amount`` when the typed accounting payload's
+      ``amount0/amount1`` are present, so this window only fires when the
+      accounting writer hasn't run yet. The same residual edge lives in
+      ``cli/strat_pnl.py:_human_amount`` — both are magnitude-heuristic
+      back-compat shims that VIB-4641's ``units_kind`` discriminator retires.
 
     The operator-trust invariant ("operator never sees a 10**decimals
     scale lie on a normal-sized position") is preserved by both branches

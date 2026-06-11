@@ -192,13 +192,23 @@ def _resolve_symbol(token: str, chain: str = "") -> str:
     return sym.strip().upper() or upper
 
 
-# Intent types whose ``transaction_ledger.amount_in`` / ``amount_out`` columns
-# carry **raw on-chain integer** amounts (smallest unit). The ledger writer for
-# these intents does not scale by decimals (see ``observability/ledger.py``
-# ``_extract_from_lp_open``); read-side consumers MUST scale via the token's
-# decimals before treating the value as human-form. Adding a new intent type
-# whose writer emits raw-wei requires an entry here — otherwise the read side
-# will treat the raw integer as a human number and overstate by 10^decimals.
+# Back-compat shim for PRE-VIB-5036 ``transaction_ledger`` rows.
+#
+# As of VIB-5036 the ledger writer (``observability/ledger.py``
+# ``_extract_from_lp_open``) scales LP_OPEN ``amount_in`` / ``amount_out`` to
+# HUMAN units at write time, matching SWAP / lending. Rows written by that
+# version onward are therefore already human and flow through ``_human_amount``
+# untouched (a human ``"0.0015"`` carries a decimal point; a small whole-number
+# intent-fallback like ``"100"`` is ``< 10^6``). This set is retained ONLY so
+# the read side still correctly scales LEGACY rows persisted as raw wei before
+# the fix — dropping LP_OPEN here would regress those historical rows. The
+# magnitude/decimal-point disambiguation in ``_human_amount`` makes the two
+# vintages co-exist safely in one DB. Residual edge: a >= 10^6 whole-number
+# new-row deposit (e.g. a 3,000,000 USDC leg written human as "3000000")
+# would be re-scaled and under-report — rare but real for institutional LP
+# sizes. The same shim lives in ``dashboard/pages/trade_tape.py``; both are
+# retired by VIB-4641's writer-side ``units_kind`` discriminator, after which
+# LP_OPEN drops out of this set entirely.
 #
 # Intent types NOT listed here (SWAP, LP_CLOSE, LP_COLLECT_FEES, REPAY,
 # WITHDRAW, ...) flow through ``SwapAmounts``/intent-attribute fallbacks that

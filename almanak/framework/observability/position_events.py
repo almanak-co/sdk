@@ -72,45 +72,20 @@ from almanak.framework.primitives.taxonomy import (  # noqa: F401 — taxonomy d
 logger = logging.getLogger(__name__)
 
 
-# Lazy import to avoid circular-dependency issues at module load time.
-# _check_decimal_unit_soft_fail is called only inside build_position_event_from_intent.
-def _decimal_unit_soft_fail(event: "PositionEvent") -> None:  # noqa: F821
-    """Run the W1-5 decimal-unit soft-fail guard over the LP fee fields.
-
-    Threads ``chain`` plus token symbol + decimals through to the guard so
-    the decimals-aware rule can catch the production-bug magnitudes from
-    Appendix B LP-2 (e.g. WETH 18-dp ``75817134186`` and USDC 6-dp ``148``).
-    Token resolution is best-effort: unknown tokens fall back to the
-    magnitude rule.
-    """
-    from almanak.framework.accounting.decimal_guards import _check_decimal_unit_soft_fail
-
-    payload = {
-        "fees_token0": event.fees_token0,
-        "fees_token1": event.fees_token1,
-    }
-
-    token_symbols_map: dict[str, str] = {}
-    token_decimals_map: dict[str, int] = {}
-    chain_lc = (event.chain or "").lower()
-    for side, sym in (("token0", event.token0), ("token1", event.token1)):
-        if not sym:
-            continue
-        token_symbols_map[side] = sym
-        # Lookup via the existing resolver helper used elsewhere in this
-        # module — best-effort, returns ``None`` on miss.  We never raise.
-        dec = _resolve_token_decimals(sym, chain_lc)
-        if dec is not None:
-            token_decimals_map[side] = dec
-
-    _check_decimal_unit_soft_fail(
-        payload,
-        event_id=event.id,
-        event_type=event.event_type,
-        chain=chain_lc or None,
-        token_decimals_map=token_decimals_map or None,
-        token_symbols_map=token_symbols_map or None,
-    )
+# VIB-5036: the W1-5 decimal-unit soft-fail guard is intentionally NOT wired
+# over position_events.  Its sibling on ``transaction_ledger``
+# (``build_ledger_entry``) guards a HUMAN-units column and remains in place.
+# But ``position_events`` ``amount0`` / ``amount1`` / ``fees_token0`` /
+# ``fees_token1`` are RAW-by-contract (smallest unit): NAV valuation
+# (``portfolio_valuer`` ``amount0_wei``), post-restart hydration
+# (``_run_loop_helpers`` "amount0/amount1 (wei)"), and the attribution lane
+# (``pnl_attributor`` "raw token-denominated") all read them as raw and scale
+# at point-of-use.  Running the human-form guard here therefore produced a
+# guaranteed FALSE WARNING on every LP fee write (the original field report on
+# deployment a9e54a85), eroding the guard's signal.  The fix for that report
+# is the writer-side ``transaction_ledger`` normalization (LP_OPEN amount_in)
+# plus scaling the raw columns at their genuine consumers (IL, display) — not
+# flagging the raw-by-contract columns as suspect.
 
 
 class PositionEventType(StrEnum):
@@ -1319,11 +1294,11 @@ def build_position_event_from_intent(
     if not event.position_id:
         return None
 
-    # ν — W1-5 decimal-unit soft-fail guard (VIB-4780).  Runs after all
-    # enrichment phases so fees_token0/1 are fully populated.  Soft-fail
-    # only: logs a WARNING, never raises.
-    _decimal_unit_soft_fail(event)
-
+    # VIB-5036: the W1-5 decimal-unit soft-fail guard is deliberately NOT run
+    # here — position_events amount/fee columns are raw-by-contract, so the
+    # human-form guard only produced false warnings (see the module note above
+    # the removed ``_decimal_unit_soft_fail`` helper). The guard stays active
+    # on the human-units ``transaction_ledger`` via ``build_ledger_entry``.
     return event
 
 

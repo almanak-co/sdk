@@ -13,8 +13,8 @@ Validates:
 """
 
 import asyncio
-from decimal import Decimal
 import json
+from decimal import Decimal
 
 import pytest
 
@@ -32,7 +32,6 @@ from almanak.framework.observability.pnl_attributor import (
 )
 from almanak.framework.observability.position_events import PositionEvent
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
-
 
 # --- LP attribution tests ---
 
@@ -210,9 +209,7 @@ class TestRunAttributionOnClose:
         asyncio.get_event_loop().run_until_complete(store.save_position_event(close_event))
 
         # Run attribution
-        attribution = asyncio.get_event_loop().run_until_complete(
-            run_attribution_on_close(store, close_event)
-        )
+        attribution = asyncio.get_event_loop().run_until_complete(run_attribution_on_close(store, close_event))
 
         assert attribution != "{}"
         data = json.loads(attribution)
@@ -239,9 +236,7 @@ class TestRunAttributionOnClose:
         )
         asyncio.get_event_loop().run_until_complete(store.save_position_event(close_event))
 
-        attribution = asyncio.get_event_loop().run_until_complete(
-            run_attribution_on_close(store, close_event)
-        )
+        attribution = asyncio.get_event_loop().run_until_complete(run_attribution_on_close(store, close_event))
         assert attribution == "{}"
 
     def test_attribution_on_reopen_pairs_with_latest_open(self, store):
@@ -280,9 +275,7 @@ class TestRunAttributionOnClose:
         # Attribute the SECOND close (c2). With the fix, it must pair with
         # the second open (o2 @ 7000), so net = 6500 - 7000 = -500.
         close2 = saved[3]
-        attribution = asyncio.get_event_loop().run_until_complete(
-            run_attribution_on_close(store, close2)
-        )
+        attribution = asyncio.get_event_loop().run_until_complete(run_attribution_on_close(store, close2))
 
         data = json.loads(attribution)
         assert data["principal_deposited_usd"] == "7000", (
@@ -353,14 +346,18 @@ class TestRecomputeAttribution:
 
 def _entry_state_json(*, token0, token1, amount0, amount1, price0=None, price1=None):
     """Helper: serialise an attribution_json containing entry_state."""
-    return json.dumps({"entry_state": build_entry_state(
-        token0=token0,
-        token1=token1,
-        amount0=amount0,
-        amount1=amount1,
-        price0=price0,
-        price1=price1,
-    )})
+    return json.dumps(
+        {
+            "entry_state": build_entry_state(
+                token0=token0,
+                token1=token1,
+                amount0=amount0,
+                amount1=amount1,
+                price0=price0,
+                price1=price1,
+            )
+        }
+    )
 
 
 def _close_attr_with_prices(prices):
@@ -474,13 +471,9 @@ class TestPerpFundingAttribution:
         }
         result = attribute_perp(open_evt, close_evt)
 
-        assert result["funding_pnl_usd"] == "-12.50", (
-            "funding_pnl_usd must be -funding_fee_usd (cost is negative)"
-        )
+        assert result["funding_pnl_usd"] == "-12.50", "funding_pnl_usd must be -funding_fee_usd (cost is negative)"
         # net = 500 + 0 (fee unknown) + (-12.50) - 2.00 = 485.50
-        assert result["net_pnl_usd"] == "485.50", (
-            "net_pnl_usd must include funding cost"
-        )
+        assert result["net_pnl_usd"] == "485.50", "net_pnl_usd must include funding cost"
         assert result["price_pnl_usd"] == "500"
 
     def test_attribute_perp_funding_none_when_unavailable(self):
@@ -504,8 +497,7 @@ class TestPerpFundingAttribution:
         result = attribute_perp(open_evt, close_evt)
 
         assert result["funding_pnl_usd"] is None, (
-            "Missing funding data must propagate as None, not 0. "
-            "None = unavailable; Decimal('0') = measured zero."
+            "Missing funding data must propagate as None, not 0. None = unavailable; Decimal('0') = measured zero."
         )
         # net excludes the unknown funding term
         assert result["net_pnl_usd"] == "498.00"  # 500 - 2.00
@@ -551,9 +543,7 @@ class TestVIB3519FundingFeePreservation:
             "VIB-3519: funding_fee_usd must be stored in the attribution dict "
             "so that _funding_fee_from_close() can read it back on recompute"
         )
-        assert result["funding_fee_usd"] == "12.50", (
-            "funding_fee_usd must be the raw cost value (not negated)"
-        )
+        assert result["funding_fee_usd"] == "12.50", "funding_fee_usd must be the raw cost value (not negated)"
         # funding_pnl_usd is still the derived/signed field
         assert result["funding_pnl_usd"] == "-12.50"
 
@@ -605,13 +595,9 @@ class TestVIB3519FundingFeePreservation:
         asyncio.get_event_loop().run_until_complete(store.save_position_event(close_evt))
 
         # First attribution run
-        first_attribution = asyncio.get_event_loop().run_until_complete(
-            run_attribution_on_close(store, close_evt)
-        )
+        first_attribution = asyncio.get_event_loop().run_until_complete(run_attribution_on_close(store, close_evt))
         first_data = json.loads(first_attribution)
-        assert first_data["funding_pnl_usd"] == "-25.00", (
-            "First attribution must capture funding_pnl_usd"
-        )
+        assert first_data["funding_pnl_usd"] == "-25.00", "First attribution must capture funding_pnl_usd"
         assert first_data["funding_fee_usd"] == "25.00", (
             "VIB-3519: first attribution must persist funding_fee_usd raw value"
         )
@@ -719,9 +705,12 @@ class TestImpermanentLoss:
         # IL = 4350 - 4400 = -50 (LP lost $50 vs HODL)
         open_evt = {
             "attribution_json": _entry_state_json(
-                token0="WETH", token1="USDC",
-                amount0="1", amount1="2000",
-                price0="2000", price1="1",
+                token0="WETH",
+                token1="USDC",
+                amount0="1",
+                amount1="2000",
+                price0="2000",
+                price1="1",
             ),
             "token0": "WETH",
             "token1": "USDC",
@@ -737,9 +726,12 @@ class TestImpermanentLoss:
         """Same prices at open and close -> IL ≈ 0 (when V_lp matches hodl)."""
         open_evt = {
             "attribution_json": _entry_state_json(
-                token0="WETH", token1="USDC",
-                amount0="2", amount1="4000",
-                price0="2000", price1="1",
+                token0="WETH",
+                token1="USDC",
+                amount0="2",
+                amount1="4000",
+                price0="2000",
+                price1="1",
             ),
             "token0": "WETH",
             "token1": "USDC",
@@ -769,9 +761,12 @@ class TestImpermanentLoss:
         """Close event lacks current_prices -> None."""
         open_evt = {
             "attribution_json": _entry_state_json(
-                token0="WETH", token1="USDC",
-                amount0="1", amount1="2000",
-                price0="2000", price1="1",
+                token0="WETH",
+                token1="USDC",
+                amount0="1",
+                amount1="2000",
+                price0="2000",
+                price1="1",
             ),
             "token0": "WETH",
             "token1": "USDC",
@@ -786,9 +781,12 @@ class TestImpermanentLoss:
             "gas_usd": "1.00",
             "protocol_fees_usd": "0",
             "attribution_json": _entry_state_json(
-                token0="WETH", token1="USDC",
-                amount0="1", amount1="2000",
-                price0="2000", price1="1",
+                token0="WETH",
+                token1="USDC",
+                amount0="1",
+                amount1="2000",
+                price0="2000",
+                price1="1",
             ),
             "token0": "WETH",
             "token1": "USDC",
@@ -857,6 +855,64 @@ class TestStampEntryStateOnOpen:
         assert es["price0"] is None
         assert es["price1"] is None
 
+    def test_stamp_entry_state_scales_raw_amounts_to_human(self, store):
+        """VIB-5036: the OPEN event's raw-by-contract amount0/amount1 are scaled
+        to HUMAN units in the IL-only entry_state sidecar.
+
+        Before the fix, the stamp stored raw wei, so compute_impermanent_loss
+        multiplied raw x USD price into ~1e18 nonsense. The stamp now resolves
+        token decimals (WETH 18, USDC 6) and stores human amounts.
+        """
+        open_event = PositionEvent(
+            id="open-vib5036-1",
+            deployment_id="strat:vib5036",
+            position_id="77",
+            position_type="LP",
+            event_type="OPEN",
+            value_usd="4000",
+            chain="arbitrum",
+            token0="WETH",
+            token1="USDC",
+            amount0="1000000000000000000",  # raw 1 WETH (18 dp)
+            amount1="2000000000",  # raw 2000 USDC (6 dp)
+            gas_usd="1.00",
+        )
+        asyncio.get_event_loop().run_until_complete(store.save_position_event(open_event))
+        asyncio.get_event_loop().run_until_complete(stamp_entry_state_on_open(store, open_event))
+
+        events = asyncio.get_event_loop().run_until_complete(
+            store.get_position_events("strat:vib5036", position_id="77", event_type="OPEN")
+        )
+        es = json.loads(events[0]["attribution_json"])["entry_state"]
+        # HUMAN units stored, NOT the raw integers.
+        assert es["amount0"] == "1"
+        assert es["amount1"] == "2000"
+
+    def test_stamp_entry_state_unmeasured_amount_is_null_not_zero(self, store):
+        """VIB-5036 / Empty != Zero: an unmeasured open amount is stamped as
+        null in entry_state, NOT coerced to a measured '0'."""
+        open_event = PositionEvent(
+            id="open-vib5036-empty",
+            deployment_id="strat:vib5036e",
+            position_id="88",
+            position_type="LP",
+            event_type="OPEN",
+            value_usd="4000",
+            chain="arbitrum",
+            token0="WETH",
+            token1="USDC",
+            amount0="",  # unmeasured
+            amount1="2000000000",  # raw 2000 USDC
+        )
+        asyncio.get_event_loop().run_until_complete(store.save_position_event(open_event))
+        asyncio.get_event_loop().run_until_complete(stamp_entry_state_on_open(store, open_event))
+        events = asyncio.get_event_loop().run_until_complete(
+            store.get_position_events("strat:vib5036e", position_id="88", event_type="OPEN")
+        )
+        es = json.loads(events[0]["attribution_json"])["entry_state"]
+        assert es["amount0"] is None  # unmeasured -> null, NOT "0"
+        assert es["amount1"] == "2000"  # measured side still scales
+
 
 class TestProtocolFeesRoundTrip:
     """Verify protocol_fees_usd round-trips through SQLite persistence."""
@@ -924,8 +980,12 @@ class TestAttributeLPStrategy:
 
     def test_non_lp_events_filtered_out(self):
         events = [
-            _lp_event(event_id=1, timestamp="2026-05-01T00:00:00", event_type="OPEN", gas_usd="5", position_type="PERP"),
-            _lp_event(event_id=2, timestamp="2026-05-01T00:00:01", event_type="CLOSE", gas_usd="3", position_type="LENDING"),
+            _lp_event(
+                event_id=1, timestamp="2026-05-01T00:00:00", event_type="OPEN", gas_usd="5", position_type="PERP"
+            ),
+            _lp_event(
+                event_id=2, timestamp="2026-05-01T00:00:01", event_type="CLOSE", gas_usd="3", position_type="LENDING"
+            ),
         ]
         result = attribute_lp_strategy(events)
         assert result["total_gas_usd"] == "0"
@@ -977,7 +1037,9 @@ class TestAttributeLPStrategy:
         ]
         result = attribute_lp_strategy(events)
         assert result["total_gas_usd"] == "15"  # 5 + 2 + 3 + 5
-        assert result["close_open_pairs"] == 1  # CLOSE -> OPEN counts despite COLLECT_FEES in the middle of an earlier cycle
+        assert (
+            result["close_open_pairs"] == 1
+        )  # CLOSE -> OPEN counts despite COLLECT_FEES in the middle of an earlier cycle
         assert result["open_count"] == 2
         assert result["close_count"] == 1
 

@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -25,7 +24,6 @@ from almanak.framework.accounting.decimal_guards import (
     _RAW_WEI_THRESHOLD,
     _check_decimal_unit_soft_fail,
 )
-
 
 # ---------------------------------------------------------------------------
 # Unit tests for _check_decimal_unit_soft_fail
@@ -140,14 +138,22 @@ def test_negative_raw_wei_also_flagged(caplog: pytest.LogCaptureFixture) -> None
 # ---------------------------------------------------------------------------
 
 
-def test_build_position_event_raw_wei_fees_warns_but_returns_event(
+def test_build_position_event_raw_wei_fees_does_not_warn(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """build_position_event_from_intent with raw-wei fees → warning + event returned.
+    """build_position_event_from_intent must NOT warn on raw-wei LP fees (VIB-5036).
+
+    position_events ``fees_token0`` / ``fees_token1`` (and ``amount0`` /
+    ``amount1``) are RAW-by-contract — NAV valuation, hydration, and the
+    attribution lane all read them as raw and scale at point-of-use. The W1-5
+    decimal-unit guard, which assumes a human-units column, therefore produced
+    a guaranteed FALSE WARNING on every LP fee write (the original field report
+    on deployment a9e54a85). VIB-5036 removes the guard wiring here; it stays
+    active on the genuinely-human ``transaction_ledger`` via build_ledger_entry.
 
     The integration test verifies:
     1. The position event is still returned (write not blocked).
-    2. The decimal-unit guard fires a WARNING for the suspicious fee field.
+    2. The decimal-unit guard does NOT fire on the raw-by-contract fee fields.
     """
     from almanak.framework.observability.position_events import build_position_event_from_intent
 
@@ -182,11 +188,10 @@ def test_build_position_event_raw_wei_fees_warns_but_returns_event(
             chain="arbitrum",
         )
 
-    # Soft-fail contract: event must be returned AND the guard must have
-    # logged a WARNING for the raw-wei fee field.  Both conditions are
-    # required — neither alone proves the soft-fail behaviour.
+    # VIB-5036: the event is returned AND the guard must NOT warn — these are
+    # raw-by-contract columns, not a unit-normalization bug.
     assert event is not None
-    assert "decimal_unit_guard" in caplog.text
+    assert "decimal_unit_guard" not in caplog.text
 
 
 # ---------------------------------------------------------------------------

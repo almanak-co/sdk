@@ -185,8 +185,8 @@ class TestHappyPathsPerIntentType:
                     tick_lower=-60,
                     tick_upper=60,
                     liquidity=1_000_000,
-                    amount0=10_000,
-                    amount1=20_000,
+                    amount0=1_000_000_000_000_000_000,  # raw 1 WETH (18 dp)
+                    amount1=20_000_000,  # raw 20 USDC (6 dp)
                 )
             },
         )
@@ -208,9 +208,10 @@ class TestHappyPathsPerIntentType:
         assert entry.protocol == "uniswap_v3"
         assert entry.token_in == "WETH"
         assert entry.token_out == "USDC"
-        # VIB-3450: amount_in/amount_out now come from LPOpenData on-chain actuals.
-        assert entry.amount_in == "10000"
-        assert entry.amount_out == "20000"
+        # VIB-3450: amount_in/amount_out come from LPOpenData on-chain actuals.
+        # VIB-5036: scaled to human units via token decimals (WETH 18, USDC 6).
+        assert entry.amount_in == "1"
+        assert entry.amount_out == "20"
         assert entry.tx_hash == "0xlpo"
         assert entry.gas_used == 300_000
         assert entry.gas_usd == "1.25"
@@ -378,7 +379,8 @@ class TestLPOpenExtraction:
     """
 
     def test_amounts_from_lp_open_data(self):
-        """On-chain LPOpenData.amount0/amount1 populate amount_in/amount_out."""
+        """On-chain LPOpenData.amount0/amount1 populate amount_in/amount_out,
+        SCALED to human units via the token decimals (VIB-5036)."""
         result = SimpleNamespace(
             swap_amounts=None,
             transaction_results=[_make_tx_result("0xlpo")],
@@ -388,15 +390,16 @@ class TestLPOpenExtraction:
                 "lp_open_data": LPOpenData(
                     position_id=999,
                     liquidity=500_000,
-                    amount0=1_000_000,  # raw token0 deposited
-                    amount1=2_500_000,  # raw token1 deposited
+                    amount0=1_000_000_000_000_000_000,  # raw 1 WETH (18 dp)
+                    amount1=2_500_000,  # raw 2.5 USDC (6 dp)
                 )
             },
         )
-        intent = _make_intent("LP_OPEN", protocol="uniswap_v3")
-        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
-        assert entry.amount_in == "1000000"
-        assert entry.amount_out == "2500000"
+        intent = _make_intent("LP_OPEN", protocol="uniswap_v3", from_token="WETH", to_token="USDC")
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result, chain="arbitrum")
+        # VIB-5036: raw on-chain integers are scaled to human units at write.
+        assert entry.amount_in == "1"
+        assert entry.amount_out == "2.5"
 
     def test_tokens_from_intent_token0_token1(self):
         """intent.token0/token1 populate token_in/token_out."""
@@ -482,7 +485,9 @@ class TestLPOpenExtraction:
         assert entry.amount_out == ""
 
     def test_lp_open_zero_amounts_record_as_zero_not_empty(self):
-        """LPOpenData.amount0 = 0 is a measured zero and must record as '0'."""
+        """LPOpenData.amount0 = 0 is a measured zero and must record as '0'
+        (Empty != Zero), even without resolvable decimals (0 scaled is 0).
+        The non-zero side is scaled to human units (VIB-5036)."""
         result = SimpleNamespace(
             swap_amounts=None,
             transaction_results=[],
@@ -492,12 +497,12 @@ class TestLPOpenExtraction:
                 "lp_open_data": LPOpenData(
                     position_id=3,
                     amount0=0,
-                    amount1=500,
+                    amount1=500_000_000,  # raw 500 USDC (6 dp)
                 )
             },
         )
-        intent = _make_intent("LP_OPEN", protocol="uniswap_v3")
-        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
+        intent = _make_intent("LP_OPEN", protocol="uniswap_v3", from_token="WETH", to_token="USDC")
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result, chain="arbitrum")
         assert entry.amount_in == "0"
         assert entry.amount_out == "500"
 
@@ -532,20 +537,22 @@ class TestLPOpenExtraction:
                 "lp_open_data": LPOpenData(
                     position_id=42,
                     amount0=None,  # missing on-chain actual for token0
-                    amount1=250,   # on-chain actual for token1 present
+                    amount1=250_000_000,  # raw 250 USDC (6 dp) on-chain actual
                 )
             },
         )
         intent = _make_intent(
             "LP_OPEN",
             protocol="uniswap_v3",
-            amount0=Decimal("3.5"),   # fallback for the missing side
-            amount1=Decimal("999"),   # should NOT win; lp_open_data.amount1 = 250
+            from_token="WETH",
+            to_token="USDC",
+            amount0=Decimal("3.5"),  # fallback for the missing side (already human)
+            amount1=Decimal("999"),  # should NOT win; lp_open_data.amount1 = 250 USDC
         )
-        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
-        # token0 side: lp_open_data.amount0 is None → fallback to intent.amount0
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result, chain="arbitrum")
+        # token0 side: lp_open_data.amount0 is None → fallback to intent.amount0 (human)
         assert entry.amount_in == "3.5"
-        # token1 side: lp_open_data.amount1 is 250 → on-chain value wins
+        # token1 side: lp_open_data.amount1 is 250 USDC raw → scaled, on-chain wins
         assert entry.amount_out == "250"
 
 

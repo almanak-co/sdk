@@ -31,7 +31,6 @@ from almanak.framework.observability.metrics import (
     ACCOUNTING_RAW_WEI_SUSPECTED_TOTAL,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -834,91 +833,16 @@ def test_build_ledger_entry_resolver_failure_falls_back_to_magnitude(
     assert "rule=magnitude" in caplog.text
 
 
-def test_position_events_decimal_unit_soft_fail_wiring(
-    caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``position_events._decimal_unit_soft_fail`` threads decimals + symbols.
+def test_position_events_guard_wiring_removed() -> None:
+    """VIB-5036: the decimal-unit guard is no longer wired over position_events.
 
-    Calls the wiring function directly with a duck-typed PositionEvent and
-    verifies the guard receives token-side mappings.  Pins CodeRabbit's
-    "test the new wiring path" review comment.
+    position_events ``amount0`` / ``amount1`` / ``fees_token0`` / ``fees_token1``
+    are RAW-by-contract (NAV valuation, hydration, and the attribution lane read
+    them as raw and scale at point-of-use), so the human-form guard only ever
+    produced false warnings there. The ``_decimal_unit_soft_fail`` wiring helper
+    was removed; the guard stays active on the genuinely-human
+    ``transaction_ledger`` via ``build_ledger_entry`` (covered above).
     """
     from almanak.framework.observability import position_events as pe_mod
 
-    class _FakeInfo:
-        def __init__(self, decimals: int) -> None:
-            self.decimals = decimals
-
-    class _FakeResolver:
-        def resolve(self, symbol: str, chain: str | None = None):  # noqa: ARG002
-            return _FakeInfo(18) if symbol == "WETH" else _FakeInfo(6)
-
-    import almanak.framework.data.tokens.resolver as resolver_mod
-
-    monkeypatch.setattr(resolver_mod, "get_token_resolver", lambda: _FakeResolver())
-
-    # Duck-typed PositionEvent surface — only the fields the function reads.
-    from types import SimpleNamespace
-
-    event = SimpleNamespace(
-        id="pe-001",
-        event_type="LP_CLOSE",
-        chain="arbitrum",
-        token0="WETH",
-        token1="USDC",
-        fees_token0="75817134186",  # canonical raw-wei WETH
-        fees_token1="148",  # canonical raw-wei USDC
-    )
-
-    with caplog.at_level(logging.WARNING):
-        pe_mod._decimal_unit_soft_fail(event)  # must NOT raise
-
-    # Both fields flagged with their decimals-aware rule.
-    assert "fees_token0" in caplog.text
-    assert "fees_token1" in caplog.text
-    assert "WETH" in caplog.text
-    assert "USDC" in caplog.text
-    assert caplog.text.count("decimal_unit_guard") >= 2
-
-
-def test_position_events_decimal_unit_soft_fail_resolver_degraded(
-    caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Resolver raise -> wiring falls back to magnitude rule, no exception escapes.
-
-    ``_resolve_token_decimals`` wraps the resolver call in try/except and
-    returns ``None`` on any failure.  The chokepoint must still run the
-    guard with empty decimals_map, which falls through to the magnitude
-    rule for any value >= 10^12.
-    """
-    from types import SimpleNamespace
-
-    from almanak.framework.observability import position_events as pe_mod
-
-    class _BrokenResolver:
-        def resolve(self, symbol: str, chain: str | None = None):  # noqa: ARG002
-            raise RuntimeError("token registry unavailable")
-
-    import almanak.framework.data.tokens.resolver as resolver_mod
-
-    monkeypatch.setattr(resolver_mod, "get_token_resolver", lambda: _BrokenResolver())
-
-    # Use a WETH-scale magnitude value (≥ 10^12) that the magnitude fallback
-    # rule catches regardless of decimals plumbing.
-    event = SimpleNamespace(
-        id="pe-degraded-1",
-        event_type="LP_CLOSE",
-        chain="arbitrum",
-        token0="WETH",
-        token1="USDC",
-        fees_token0="75817134186000000000",  # 7.58e19 — caught by magnitude
-        fees_token1="",
-    )
-    with caplog.at_level(logging.WARNING):
-        pe_mod._decimal_unit_soft_fail(event)  # must NOT raise
-
-    # Magnitude-rule warning still fires even with degraded resolver.
-    assert "rule=magnitude" in caplog.text
-    assert "fees_token0" in caplog.text
+    assert not hasattr(pe_mod, "_decimal_unit_soft_fail")

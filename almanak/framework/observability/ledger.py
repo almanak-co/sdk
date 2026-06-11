@@ -40,7 +40,7 @@ import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
@@ -232,7 +232,56 @@ def _extract_from_intent_fallback(intent: Any) -> _TokensAndAmounts:
     return (token_in, token_out, amount_in, "", "", None)
 
 
-def _extract_from_lp_open(intent: Any, result: Any) -> _TokensAndAmounts:
+def _lp_amount_to_human(raw: Any, token: str, chain: str) -> str | None:
+    """Scale a raw on-chain LP amount (smallest unit) to a human Decimal string.
+
+    Mirrors the canonical resolver pattern in :func:`_extract_from_lending`
+    (resolve token decimals, divide by ``10 ** decimals``).  Returns ``None``
+    when the value is missing or a NON-ZERO amount's token / chain / decimals
+    cannot be resolved, so the caller can fall back to the intent's
+    (already-human) amount.  A raw integer is therefore NEVER persisted to
+    ``transaction_ledger.amount_in/out`` (VIB-5036 — the contract is human
+    units, matching SWAP / lending / the L2 golden-fixture ``amount_in_human``).
+
+    A measured zero is returned as ``"0"`` without resolving decimals (0 scaled
+    is 0) so Empty != Zero is preserved even when tokens are unknown.
+    """
+    if raw is None:
+        return None
+    try:
+        d = Decimal(str(raw))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    if d == 0:
+        return "0"
+    if not token or not chain:
+        return None
+    try:
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        resolver = get_token_resolver()
+        # skip_gateway/log_errors: this is the accounting write hot path —
+        # never risk a gateway round-trip stall on a best-effort scale; we pass
+        # a symbol (not an address), so the gateway lookup is a no-op anyway.
+        token_info = resolver.resolve(token, chain, log_errors=False, skip_gateway=True)
+        # Validate decimals explicitly (mirrors _scale_fee /
+        # _scale_raw_amount_to_human) rather than relying on the except below.
+        decimals = getattr(token_info, "decimals", None)
+        if decimals is None or decimals < 0:
+            return None
+        return str(d / Decimal(10**decimals))
+    except Exception as exc:
+        logger.debug(
+            "ledger LP_OPEN: failed to scale raw amount=%s token=%s chain=%s: %s",
+            raw,
+            token,
+            chain,
+            exc,
+        )
+        return None
+
+
+def _extract_from_lp_open(intent: Any, result: Any, chain: str = "") -> _TokensAndAmounts:
     """Phase beta-lp-open -- LP_OPEN has no swap_amounts; pull amounts from
     ``LPOpenData`` in ``result.extracted_data`` and tokens from the intent.
 
@@ -240,14 +289,18 @@ def _extract_from_lp_open(intent: Any, result: Any) -> _TokensAndAmounts:
     - ``token_in``  : ``intent.token0`` -> ``intent.from_token`` -> ``""``
     - ``token_out`` : ``intent.token1`` -> ``intent.to_token``  -> ``""``
     - ``amount_in`` : ``LPOpenData.amount0`` (raw int) is the on-chain actual
-                      deposit for token0; falls back to ``intent.amount0``
-                      (Decimal from the intent, the user-requested amount).
+                      deposit for token0, **scaled to human units** via the
+                      token resolver; falls back to ``intent.amount0`` (an
+                      already-human ``Decimal``) when the on-chain actual is
+                      absent or its decimals cannot be resolved.
     - ``amount_out``: same logic for ``amount1``.
 
     ``LPOpenData.amount0`` / ``amount1`` are raw integer values (smallest
-    unit).  We store them as strings directly so that accounting consumers
-    see the on-chain amount.  When only the intent amounts are available the
-    human-readable Decimal string is more useful.
+    unit).  VIB-5036: we scale them to human units before persistence so
+    ``transaction_ledger`` carries the same human-form contract as SWAP and
+    lending rows (and the parallel ``accounting_events``).  A raw integer is
+    never written; on a decimals-resolve miss we prefer the intent's human
+    amount, else leave ``""`` (Empty != Zero).
     """
     # Token resolution: prefer explicit token0/token1 attrs (test/legacy callers),
     # then parse symbols from the pool string (e.g. "WETH/USDC"), then fallback.
@@ -267,16 +320,20 @@ def _extract_from_lp_open(intent: Any, result: Any) -> _TokensAndAmounts:
     lp_open_data = extracted_data.get("lp_open_data") if isinstance(extracted_data, dict) else None
 
     if lp_open_data is not None:
-        # Per-side fallback: if one side is missing from LPOpenData, fall back
-        # to the corresponding intent amount rather than leaving it empty.
+        # On-chain actuals are raw integers (smallest unit) -> scale to human.
+        # Per-side fallback to the intent's (already-human) amount when the
+        # on-chain actual is absent OR its decimals cannot be resolved, so a
+        # raw integer is never persisted (VIB-5036).
         raw0 = getattr(lp_open_data, "amount0", None)
         raw1 = getattr(lp_open_data, "amount1", None)
-        if raw0 is None:
-            raw0 = getattr(intent, "amount0", None)
-        if raw1 is None:
-            raw1 = getattr(intent, "amount1", None)
-        amount_in = str(raw0) if raw0 is not None else ""
-        amount_out = str(raw1) if raw1 is not None else ""
+        amount_in = _lp_amount_to_human(raw0, token_in, chain)
+        if amount_in is None:
+            intent_amt0 = getattr(intent, "amount0", None)
+            amount_in = str(intent_amt0) if intent_amt0 is not None else ""
+        amount_out = _lp_amount_to_human(raw1, token_out, chain)
+        if amount_out is None:
+            intent_amt1 = getattr(intent, "amount1", None)
+            amount_out = str(intent_amt1) if intent_amt1 is not None else ""
     else:
         intent_amt0 = getattr(intent, "amount0", None)
         intent_amt1 = getattr(intent, "amount1", None)
@@ -405,7 +462,7 @@ def _extract_tokens_and_amounts(
         return _extract_from_swap_amounts(swap_amounts, intent)
     intent_type = _extract_intent_type(intent)
     if intent_type == "LP_OPEN":
-        return _extract_from_lp_open(intent, result)
+        return _extract_from_lp_open(intent, result, chain)
     if intent_type == "PERP_OPEN":
         token_in = getattr(intent, "collateral_token", "") or ""
         collateral_amount = getattr(intent, "collateral_amount", None)

@@ -354,6 +354,66 @@ def _price_for_token(prices: dict, token: str) -> Decimal | None:
     return None
 
 
+def _scale_raw_amount_to_human(raw: Decimal, token: str, chain: str) -> Decimal | None:
+    """Scale a raw on-chain LP amount (smallest unit) to human units.
+
+    The position_events ``amount0`` / ``amount1`` columns are raw-by-contract
+    (NAV valuation, hydration, and this attribution lane all read them as raw
+    and scale at use). Mirrors that pattern: resolve the token's decimals and
+    divide by ``10 ** decimals``.
+
+    Empty != Zero / fail-closed:
+
+    * ``raw == 0`` → ``Decimal(0)`` WITHOUT resolving decimals — a zero leg
+      contributes zero regardless of decimals, so a single-sided LP whose
+      empty leg carries no resolvable token still prices correctly.
+    * token / chain / decimals unresolvable → ``None`` so the caller skips the
+      computation rather than guessing decimals (no silent 10**18 error).
+    """
+    if raw == 0:
+        return Decimal(0)
+    if not token or not chain:
+        return None
+    try:
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        # skip_gateway/log_errors: best-effort scale on the OPEN-stamp path —
+        # a symbol input never reaches the gateway lookup, but pin it anyway.
+        resolved = get_token_resolver().resolve(token, chain, log_errors=False, skip_gateway=True)
+    except Exception:
+        return None
+    decimals = getattr(resolved, "decimals", None)
+    if decimals is None or decimals < 0:
+        return None
+    return raw / (Decimal(10) ** decimals)
+
+
+def _stamp_amount_to_human(raw_str: Any, token: str, chain: str) -> str | None:
+    """Return the human-units string for a raw ``position_events`` amount.
+
+    Used by ``stamp_entry_state_on_open`` to persist HUMAN amounts in the
+    IL-only ``entry_state`` sidecar.
+
+    Empty != Zero: an unmeasured amount (``None`` / ``""``) or an unparseable
+    one returns ``None`` — it is NOT coerced to ``"0"`` (a measured zero), so a
+    missing open-event amount is stored as ``null`` in entry_state rather than a
+    fabricated zero. A genuine measured ``"0"`` is preserved as ``"0"``. On a
+    token-decimals resolve miss the original (raw) string is returned (no worse
+    than the pre-VIB-5036 raw stamp), so a rare unresolvable token never
+    crashes the OPEN-stamp path.
+    """
+    if raw_str is None or raw_str == "":
+        return None
+    try:
+        d = Decimal(str(raw_str))
+    except (ArithmeticError, ValueError, TypeError):
+        return None
+    if not d.is_finite():
+        return None
+    scaled = _scale_raw_amount_to_human(d, token, chain)
+    return str(scaled) if scaled is not None else str(raw_str)
+
+
 def compute_impermanent_loss(
     open_event: dict,
     close_event: dict,
@@ -405,6 +465,12 @@ def compute_impermanent_loss(
     if prices is None:
         return None
 
+    # VIB-5036: entry_state ``amount0`` / ``amount1`` are stamped in HUMAN
+    # units by ``stamp_entry_state_on_open`` (it scales the raw position_events
+    # column before persisting the sidecar), so IL math reads them directly —
+    # no scaling here. Pre-VIB-5036 the stamp stored raw wei and this ``hodl``
+    # multiplied raw × USD price into ~1e18 nonsense; the fix lives at the
+    # stamp so the sidecar is self-describing and this hot path stays pure.
     amount0_open = _dec(entry.get("amount0"))
     amount1_open = _dec(entry.get("amount1"))
     if amount0_open == 0 and amount1_open == 0:
@@ -1134,8 +1200,10 @@ def build_entry_state(
     return {
         "token0": token0 or "",
         "token1": token1 or "",
-        "amount0": _s(amount0) or "0",
-        "amount1": _s(amount1) or "0",
+        # Empty != Zero: an unmeasured amount stays null, NOT a fabricated "0".
+        # A measured zero (``_s(Decimal(0))`` / ``_s("0")`` -> "0") is preserved.
+        "amount0": _s(amount0),
+        "amount1": _s(amount1),
         "price0": _s(price0),
         "price1": _s(price1),
     }
@@ -1221,15 +1289,25 @@ async def stamp_entry_state_on_open(
     try:
         token0 = getattr(open_event, "token0", "") or ""
         token1 = getattr(open_event, "token1", "") or ""
-        amount0 = getattr(open_event, "amount0", "") or "0"
-        amount1 = getattr(open_event, "amount1", "") or "0"
+        # VIB-5036: the OPEN event's amount0/amount1 columns are raw-by-contract
+        # (smallest unit). entry_state is an IL-only sidecar — store HUMAN
+        # amounts here so compute_impermanent_loss can price them directly
+        # (raw × USD price was ~1e18 nonsense pre-fix). Falls back to the raw
+        # string only when decimals can't be resolved (no worse than pre-fix).
+        chain = getattr(open_event, "chain", "") or ""
+        # Empty != Zero: pass the raw value straight through (NO ``or "0"``
+        # coercion) so an unmeasured amount is stamped as null, not a
+        # fabricated measured zero. _stamp_amount_to_human returns None for
+        # unmeasured/unparseable input.
+        amount0 = _stamp_amount_to_human(getattr(open_event, "amount0", "") or None, token0, chain)
+        amount1 = _stamp_amount_to_human(getattr(open_event, "amount1", "") or None, token1, chain)
 
         prices = await _fetch_latest_token_prices(
             store,
             open_event.deployment_id,
             token0=token0,
             token1=token1,
-            chain=getattr(open_event, "chain", "") or "",
+            chain=chain,
             price_oracle=price_oracle,
         )
         price0 = _price_for_token(prices, token0) if prices else None

@@ -7,11 +7,14 @@ fees, protocol fees, gas, and net PnL from attribution_json.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .loader import AccountingData
+
+logger = logging.getLogger(__name__)
 
 
 def _dec(v: Any) -> Decimal | None:
@@ -25,6 +28,42 @@ def _dec(v: Any) -> Decimal | None:
 
 def _dec0(v: Any) -> Decimal:
     return _dec(v) or Decimal("0")
+
+
+def _scale_fee(raw: Any, token: str, chain: str) -> Decimal:
+    """Scale a raw on-chain ``position_events`` fee column to human units.
+
+    ``position_events.fees_token0`` / ``fees_token1`` are raw-by-contract
+    (smallest unit); the attribution lane scales them at point-of-use. This
+    report must do the same before summing/displaying, else it renders e.g.
+    ``75817134186 WETH`` instead of ``7.58e-8 WETH`` (the VIB-4780 symptom).
+
+    Empty != Zero: missing / unmeasured → ``Decimal(0)`` contribution. On a
+    decimals-resolve miss the leg is DROPPED (``Decimal(0)``) and logged, NOT
+    returned raw — summing an unscaled ~1e18 raw value into a fee total would
+    poison the whole report, which is worse than under-reporting one
+    unresolvable leg (and consistent with the money-path helpers
+    ``_lp_amount_to_human`` / ``_scale_raw_amount_to_human`` that skip on miss).
+    """
+    d = _dec(raw)
+    if d is None or d == 0:
+        return Decimal("0")
+    sym = (token or "").strip()
+    if not sym or not chain:
+        logger.debug("lp_report._scale_fee: no token/chain for fee=%s — dropping leg", raw)
+        return Decimal("0")
+    try:
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        resolved = get_token_resolver().resolve(sym, chain, log_errors=False, skip_gateway=True)
+    except Exception:
+        logger.debug("lp_report._scale_fee: resolver miss for %s on %s — dropping leg", sym, chain)
+        return Decimal("0")
+    decimals = getattr(resolved, "decimals", None)
+    if decimals is None or decimals < 0:
+        logger.debug("lp_report._scale_fee: no decimals for %s on %s — dropping leg", sym, chain)
+        return Decimal("0")
+    return d / (Decimal(10) ** decimals)
 
 
 def _parse_attribution(raw: str | None) -> dict:
@@ -132,8 +171,10 @@ def build_lp_report(data: AccountingData) -> LPSection:
                     summary.il_usd = _dec(il) if il is not None else None
 
             if event_type in ("COLLECT_FEES", "CLOSE"):
-                summary.fees_token0 += _dec0(ev.get("fees_token0"))
-                summary.fees_token1 += _dec0(ev.get("fees_token1"))
+                # VIB-5036: fees_token0/1 are raw-by-contract — scale to human
+                # before summing so the report shows human token amounts.
+                summary.fees_token0 += _scale_fee(ev.get("fees_token0"), summary.token0, summary.chain)
+                summary.fees_token1 += _scale_fee(ev.get("fees_token1"), summary.token1, summary.chain)
                 summary.protocol_fees_usd += _dec0(ev.get("protocol_fees_usd"))
 
             if event_type == "SNAPSHOT":
