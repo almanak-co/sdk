@@ -271,8 +271,8 @@ class LPBacktestConfig(StrategyBacktestConfig):
         """Validate LP-specific configuration.
 
         Raises:
-            ValueError: If strategy_type is not "lp" or il_calculation_method
-                is invalid.
+            ValueError: If strategy_type is not "lp", il_calculation_method
+                is invalid, or explicit_pool_liquidity_usd is non-positive.
         """
         # Call parent validation
         super().__post_init__()
@@ -286,6 +286,13 @@ class LPBacktestConfig(StrategyBacktestConfig):
         valid_methods = {"standard", "concentrated", "simplified"}
         if self.il_calculation_method not in valid_methods:
             msg = f"il_calculation_method must be one of {valid_methods}, got '{self.il_calculation_method}'"
+            raise ValueError(msg)
+
+        # A non-positive TVL is a nonsensical liquidity-share denominator; fail
+        # at construction rather than silently degrading to the 0.5-share
+        # fallback in fee accrual. Mirrors BacktestDataConfig's validation.
+        if self.explicit_pool_liquidity_usd is not None and self.explicit_pool_liquidity_usd <= 0:
+            msg = f"explicit_pool_liquidity_usd must be positive when provided, got {self.explicit_pool_liquidity_usd}"
             raise ValueError(msg)
 
     def to_dict(self) -> dict[str, Any]:
@@ -561,6 +568,50 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         if self._data_config is not None:
             return self._data_config.volume_fallback_multiplier
         return self._config.volume_multiplier
+
+    def _explicit_pool_volume_usd_daily(self) -> Decimal | None:
+        """Get the caller-provided daily pool volume, if any.
+
+        BacktestDataConfig.explicit_pool_volume_usd_daily takes precedence when
+        set; otherwise falls back to LPBacktestConfig.explicit_pool_volume_usd_daily.
+        Empty != Zero: ``None`` means "not provided" on either surface and falls
+        through; ``Decimal("0")`` is a measured zero and is returned as-is.
+
+        Returns:
+            Daily pool volume in USD, or None when neither config provides one.
+        """
+        if self._data_config is not None and self._data_config.explicit_pool_volume_usd_daily is not None:
+            return self._data_config.explicit_pool_volume_usd_daily
+        return self._config.explicit_pool_volume_usd_daily
+
+    def _explicit_pool_liquidity_usd(self) -> Decimal | None:
+        """Get the caller-provided pool TVL for the liquidity-share denominator.
+
+        BacktestDataConfig.explicit_pool_liquidity_usd takes precedence when set;
+        otherwise falls back to LPBacktestConfig.explicit_pool_liquidity_usd.
+
+        Returns:
+            Pool TVL in USD, or None when neither config provides one.
+        """
+        if self._data_config is not None and self._data_config.explicit_pool_liquidity_usd is not None:
+            return self._data_config.explicit_pool_liquidity_usd
+        return self._config.explicit_pool_liquidity_usd
+
+    def _allow_volume_fallback(self) -> bool:
+        """Check whether the caller opted in to the volume_multiplier heuristic.
+
+        The opt-in is OR-ed across both config surfaces: either
+        BacktestDataConfig.allow_volume_fallback or
+        LPBacktestConfig.allow_volume_fallback enables it. A data_config left at
+        its default (False) never silently revokes an opt-in made on the adapter
+        config -- the opt-in can only be granted, not implicitly withdrawn.
+
+        Returns:
+            True when the LOW-confidence heuristic fallback is permitted.
+        """
+        if self._data_config is not None and self._data_config.allow_volume_fallback:
+            return True
+        return self._config.allow_volume_fallback
 
     def _use_historical_liquidity(self) -> bool:
         """Check if historical liquidity depth should be used.
@@ -1835,14 +1886,15 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
 
         Source precedence (highest-trust first):
 
-        1. **Explicit** -- ``config.explicit_pool_volume_usd_daily`` provided by the
-           caller. Used directly; HIGH confidence.
+        1. **Explicit** -- ``explicit_pool_volume_usd_daily`` provided by the
+           caller (``BacktestDataConfig`` takes precedence over
+           ``LPBacktestConfig``). Used directly; HIGH confidence.
         2. **Historical** -- fetched from the DEX subgraph via
            ``_get_historical_volume`` when ``use_historical_volume`` is enabled and a
            pool address + timestamp are available. Uses the provider's confidence.
         3. **Fallback heuristic** -- ``position_value_usd * volume_multiplier`` --
            ONLY when the caller explicitly opted in via
-           ``config.allow_volume_fallback=True``. LOW confidence.
+           ``allow_volume_fallback=True`` on either config surface. LOW confidence.
 
         When none of the above yields a usable number, this raises
         :class:`DataSourceUnavailableError` rather than silently fabricating a value
@@ -1867,7 +1919,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         # ``Decimal("0")`` is a measured/intended zero-volume day and is a valid,
         # trusted value -- use it directly (it simply yields zero fees). A negative
         # value is nonsensical and is rejected as a configuration error.
-        explicit_volume = self._config.explicit_pool_volume_usd_daily
+        explicit_volume = self._explicit_pool_volume_usd_daily()
         if explicit_volume is not None:
             if explicit_volume < 0:
                 msg = (
@@ -1900,7 +1952,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 )
 
         # 3. Heuristic fallback -- only if the caller explicitly opted in.
-        if self._config.allow_volume_fallback:
+        if self._allow_volume_fallback():
             multiplier = self._get_volume_fallback_multiplier()
             estimated_daily_volume = position_value_usd * multiplier
             logger.warning(
@@ -1990,11 +2042,8 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         # denominators are USD figures, so the numerator must be the
         # position's USD value — position.liquidity holds V3 L-units
         # (VIB-5096) and dividing L by a USD TVL is unit nonsense.
-        pool_liquidity = (
-            self._config.explicit_pool_liquidity_usd
-            if self._config.explicit_pool_liquidity_usd is not None
-            else self._config.base_liquidity
-        )
+        explicit_pool_liquidity = self._explicit_pool_liquidity_usd()
+        pool_liquidity = explicit_pool_liquidity if explicit_pool_liquidity is not None else self._config.base_liquidity
         if pool_liquidity > 0:
             liquidity_share = min(Decimal("1"), position_value_usd / pool_liquidity)
         else:

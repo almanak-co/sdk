@@ -68,6 +68,12 @@ class TestDecimalCoercionThroughUnions:
         config = coerce_strategy_config(_UnionStrategy, {"plain": "not-a-number"})
         assert config.plain == "not-a-number"
 
+    def test_bool_for_decimal_field_passes_through_unconverted(self) -> None:
+        """bool subclasses int but Decimal(str(True)) raises; it must skip
+        the coercion branch and land unchanged, not via the exception path."""
+        config = coerce_strategy_config(_UnionStrategy, {"pep604_optional": True})
+        assert config.pep604_optional is True
+
 
 class TestInjectedKeyFiltering:
     """Runtime/framework keys are dropped before dataclass construction.

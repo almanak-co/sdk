@@ -151,8 +151,15 @@ def coerce_strategy_config(strategy_class: type, strategy_config: dict[str, Any]
                 unknown_fields = []
                 for k, v in strategy_config.items():
                     if k in config_class.__dataclass_fields__:
-                        # Convert int/float/str to Decimal for Decimal fields
-                        if _accepts_decimal(type_hints.get(k)) and isinstance(v, int | float | str):
+                        # Convert int/float/str to Decimal for Decimal fields.
+                        # bool is excluded: it subclasses int, but Decimal(str(True))
+                        # raises InvalidOperation, so a bool would only ever take
+                        # the exception path to land unchanged anyway.
+                        if (
+                            _accepts_decimal(type_hints.get(k))
+                            and isinstance(v, int | float | str)
+                            and not isinstance(v, bool)
+                        ):
                             try:
                                 converted_config[k] = Decimal(str(v))
                             except Exception:

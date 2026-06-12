@@ -23,6 +23,8 @@ from ...backtesting import (
     PnLBacktestConfig,
     PnLBacktester,
 )
+from ...backtesting.config import BacktestDataConfig
+from ...backtesting.exceptions import DataSourceUnavailableError
 from ...backtesting.models import BacktestResult
 from ...backtesting.pnl.config_loader import ConfigLoadError, load_config_from_result
 from ...backtesting.pnl.logging_utils import configure_backtest_logging
@@ -50,6 +52,19 @@ logger = logging.getLogger(__name__)
 # A dedicated constant keeps the CI/reproducibility contract visible — if we
 # ever want this tunable it becomes a flag rather than a magic number.
 _WARM_CACHE_SUCCESS_RATIO_WARN_THRESHOLD = 0.5
+
+# CLI-flag remediation for the LP adapter's missing-volume fail-loud
+# (VIB-4849). The engine-level error speaks in config-field terms; this hint
+# names the `backtest pnl` flags that map onto them. Emitted both when the
+# error propagates out of `backtester.backtest(...)` and when the engine's
+# error handler captures it into a partial result.
+_MISSING_VOLUME_HINT = (
+    "Hint: the engine refuses to fabricate LP volume by default. Re-run with "
+    "--pool-volume-usd-daily <usd> (and ideally --pool-liquidity-usd <usd>) to "
+    "supply real pool numbers, or --allow-volume-fallback to accept the "
+    "LOW-confidence volume_multiplier heuristic. --historical-volume requires a "
+    "pool address on the position and a reachable gateway DEX-volume lane."
+)
 
 
 @dataclass
@@ -261,6 +276,57 @@ def _print_pnl_configuration(
     click.echo("=" * 60)
 
 
+def _build_volume_data_config(
+    historical_volume: bool | None,
+    pool_volume_usd_daily: float | None,
+    pool_liquidity_usd: float | None,
+    allow_volume_fallback: bool,
+) -> BacktestDataConfig | None:
+    """Phase 5b: map the LP volume-source flags onto a `BacktestDataConfig`.
+
+    Returns None when no volume flag was provided so the backtester keeps the
+    historical no-`data_config` behaviour on every other invocation path. The
+    refuse-to-fabricate default (VIB-4849) is preserved: nothing here opts in
+    to the LOW-confidence heuristic unless `--allow-volume-fallback` was passed
+    explicitly, in which case a prominent warning is emitted on stderr.
+
+    Also echoes the chosen volume-source settings on stdout so the run record
+    shows where LP fee numbers came from.
+    """
+    if (
+        historical_volume is None
+        and pool_volume_usd_daily is None
+        and pool_liquidity_usd is None
+        and not allow_volume_fallback
+    ):
+        return None
+
+    if historical_volume is not None:
+        click.echo(f"LP Historical Volume: {'enabled' if historical_volume else 'disabled'}")
+    if pool_volume_usd_daily is not None:
+        click.echo(f"LP Pool Volume (explicit): ${pool_volume_usd_daily:,.2f}/day")
+    if pool_liquidity_usd is not None:
+        click.echo(f"LP Pool Liquidity (explicit): ${pool_liquidity_usd:,.2f}")
+    if allow_volume_fallback:
+        click.echo("LP Volume Fallback: enabled (LOW confidence)")
+        click.echo(
+            "Warning: --allow-volume-fallback accepts the LOW-confidence "
+            "volume_multiplier heuristic (position value x multiplier) when no "
+            "real volume data is available. LP fee estimates can be off by an "
+            "order of magnitude.",
+            err=True,
+        )
+
+    kwargs: dict[str, Any] = {"allow_volume_fallback": allow_volume_fallback}
+    if historical_volume is not None:
+        kwargs["use_historical_volume"] = historical_volume
+    if pool_volume_usd_daily is not None:
+        kwargs["explicit_pool_volume_usd_daily"] = Decimal(str(pool_volume_usd_daily))
+    if pool_liquidity_usd is not None:
+        kwargs["explicit_pool_liquidity_usd"] = Decimal(str(pool_liquidity_usd))
+    return BacktestDataConfig(**kwargs)
+
+
 # =============================================================================
 # Phase 5B.2 extractions: execution + output helpers
 # =============================================================================
@@ -459,12 +525,49 @@ def _run_backtest(
     `sys.exit(1)` exit code from the original inline block. Any exception from
     `asyncio.run(backtester.backtest(...))` is surfaced via stderr and ends
     the process.
+
+    A missing-volume `DataSourceUnavailableError` (the VIB-4849 fail-loud) is
+    additionally followed by a hint pointing at the CLI flags that resolve it,
+    since the engine-level remediation speaks in config-field terms.
     """
     try:
         return asyncio.run(backtester.backtest(strategy_instance, pnl_config))
+    except DataSourceUnavailableError as e:
+        click.echo(f"Error running backtest: {e}", err=True)
+        if e.data_type == "volume":
+            click.echo(_MISSING_VOLUME_HINT, err=True)
+        sys.exit(1)
     except Exception as e:
         click.echo(f"Error running backtest: {e}", err=True)
         sys.exit(1)
+
+
+def _emit_missing_volume_hint_for_result(result: BacktestResult) -> None:
+    """Surface the CLI-flag hint when a result carries a missing-volume error.
+
+    The engine's `BacktestErrorHandler` classifies the LP adapter's
+    `DataSourceUnavailableError` as fatal and *stops* the simulation, but
+    `backtester.backtest(...)` then returns the partial result (with the error
+    recorded in `result.error` / `result.errors`) instead of raising. Without
+    this check the CLI would print an empty results block and exit 0 with the
+    remediation buried in the JSON output.
+    """
+    candidates: list[str] = []
+    if result.error:
+        candidates.append(result.error)
+    for record in result.errors:
+        if record.get("error_type") == "DataSourceUnavailableError":
+            candidates.append(str(record.get("error_message", "")))
+
+    if not any("volume data source" in message for message in candidates):
+        return
+
+    click.echo()
+    click.echo(
+        "Error: the backtest stopped early because no acceptable LP volume source was available (see results above).",
+        err=True,
+    )
+    click.echo(_MISSING_VOLUME_HINT, err=True)
 
 
 def _compute_strategy_returns(equity_curve: list[Any]) -> list[Decimal]:
@@ -884,6 +987,46 @@ def _generate_html_report(
     default=None,
     help="Load backtest config from a previous result JSON file. Overrides --start, --end, etc.",
 )
+@click.option(
+    "--historical-volume/--no-historical-volume",
+    "historical_volume",
+    default=None,
+    help=(
+        "Fetch historical pool volume for LP fee accrual (gateway-backed DEX volume "
+        "lane; requires a pool address on the position). Defaults to the engine "
+        "default (enabled). When the lookup yields nothing the engine still refuses "
+        "to fabricate volume unless --pool-volume-usd-daily or "
+        "--allow-volume-fallback is provided."
+    ),
+)
+@click.option(
+    "--pool-volume-usd-daily",
+    type=click.FloatRange(min=0),
+    default=None,
+    help=(
+        "Explicit daily pool volume in USD for LP fee accrual (HIGH confidence, no "
+        "subgraph or gateway dependency). 0 is a valid measured zero."
+    ),
+)
+@click.option(
+    "--pool-liquidity-usd",
+    type=click.FloatRange(min=0, min_open=True),
+    default=None,
+    help=(
+        "Explicit pool TVL in USD used as the LP liquidity-share denominator. Pair "
+        "with --pool-volume-usd-daily for a fully user-specified fee estimate."
+    ),
+)
+@click.option(
+    "--allow-volume-fallback",
+    is_flag=True,
+    default=False,
+    help=(
+        "Opt in to the LOW-confidence volume_multiplier heuristic when no real LP "
+        "volume data is available. Off by default: the engine refuses to fabricate "
+        "volume and fails loud instead (VIB-4849)."
+    ),
+)
 def pnl_backtest(
     strategy: str | None,
     start: datetime | None,
@@ -905,6 +1048,10 @@ def pnl_backtest(
     report: bool,
     benchmark: str,
     from_result: str | None,
+    historical_volume: bool | None,
+    pool_volume_usd_daily: float | None,
+    pool_liquidity_usd: float | None,
+    allow_volume_fallback: bool,
 ) -> None:
     """
     Run a PnL backtest using historical price data.
@@ -943,6 +1090,14 @@ def pnl_backtest(
         # Re-run a backtest from a previous result (reproducibility)
         almanak backtest pnl -s my_strategy --from-result results/previous_run.json
 
+        # LP backtest with explicit pool volume + TVL (no subgraph dependency)
+        almanak backtest pnl -s my_lp_strategy --start 2025-11-01 --end 2025-11-15 \\
+            --pool-volume-usd-daily 5000000 --pool-liquidity-usd 2000000
+
+        # LP backtest accepting the LOW-confidence volume heuristic
+        almanak backtest pnl -s my_lp_strategy --start 2025-11-01 --end 2025-11-15 \\
+            --allow-volume-fallback
+
         # List available strategies
         almanak backtest pnl --list-strategies
     """
@@ -977,6 +1132,17 @@ def pnl_backtest(
 
     # Phase 5: display configuration banner
     _print_pnl_configuration(ctx, from_result, warm_cache)
+
+    # Phase 5b: LP volume-source flags -> BacktestDataConfig (None when no flag
+    # was passed, preserving the historical no-data_config behaviour). Runs
+    # before the dry-run early return so flag echo + the LOW-confidence
+    # fallback warning appear on every invocation path.
+    volume_data_config = _build_volume_data_config(
+        historical_volume=historical_volume,
+        pool_volume_usd_daily=pool_volume_usd_daily,
+        pool_liquidity_usd=pool_liquidity_usd,
+        allow_volume_fallback=allow_volume_fallback,
+    )
 
     # `--strict-warm` without `--warm-cache` is inert — surface it on every
     # invocation path (including `--dry-run`) so the contract is uniform.
@@ -1041,6 +1207,7 @@ def pnl_backtest(
         data_provider=data_provider,
         fee_models={},
         slippage_models={},
+        data_config=volume_data_config,
     )
 
     click.echo()
@@ -1057,6 +1224,10 @@ def pnl_backtest(
     click.echo("BACKTEST RESULTS")
     click.echo("=" * 60)
     click.echo(result.summary())
+
+    # Missing-volume fail-loud captured into the result by the engine's error
+    # handler (rather than raised) still gets the CLI-flag hint.
+    _emit_missing_volume_hint_for_result(result)
 
     # Phases 12-14: print benchmark, cache, verbose-trade sections
     _print_benchmark_comparison(ctx, result, benchmark, start, end, interval)

@@ -65,6 +65,23 @@ class BacktestDataConfig:
         use_historical_volume: Whether to fetch historical pool volume from
             subgraphs for LP fee calculations.
 
+        explicit_pool_volume_usd_daily: Caller-provided daily pool volume in
+            USD for LP fee accrual. When set, the LP adapter uses this value
+            directly (HIGH confidence) instead of fetching historical volume
+            or fabricating one. ``Decimal("0")`` is a valid measured zero;
+            ``None`` means "not provided" (Empty != Zero).
+
+        explicit_pool_liquidity_usd: Caller-provided pool TVL in USD used as
+            the liquidity-share denominator for LP fee accrual. Grounds the
+            position's share in a real number instead of the adapter's
+            placeholder. Must be positive when provided.
+
+        allow_volume_fallback: Explicit opt-in to the LOW-confidence
+            ``volume_fallback_multiplier`` heuristic when no real volume data
+            is available. Defaults to False: the LP adapter fails loud
+            (``DataSourceUnavailableError``) rather than silently fabricating
+            ``position_value_usd * multiplier`` (VIB-4849).
+
         use_historical_funding: Whether to fetch historical funding rates
             from perp protocol APIs for accurate funding P&L.
 
@@ -120,6 +137,12 @@ class BacktestDataConfig:
     use_historical_apy: bool = True
     use_historical_liquidity: bool = True
 
+    # LP volume policy (VIB-4849 honesty guard knobs)
+    # Empty != Zero: None means "not provided"; Decimal("0") is a measured zero.
+    explicit_pool_volume_usd_daily: Decimal | None = None
+    explicit_pool_liquidity_usd: Decimal | None = None
+    allow_volume_fallback: bool = False
+
     # Strict mode - fail instead of fallback when historical data unavailable
     strict_historical_mode: bool = False
 
@@ -156,6 +179,14 @@ class BacktestDataConfig:
             raise ValueError("borrow_apy_fallback cannot be negative")
         if self.gas_fallback_gwei < Decimal("0"):
             raise ValueError("gas_fallback_gwei cannot be negative")
+
+        # Validate LP volume policy fields
+        if self.explicit_pool_volume_usd_daily is not None and self.explicit_pool_volume_usd_daily < Decimal("0"):
+            raise ValueError(
+                "explicit_pool_volume_usd_daily must be >= 0 (a measured zero is valid, a negative value is not)"
+            )
+        if self.explicit_pool_liquidity_usd is not None and self.explicit_pool_liquidity_usd <= Decimal("0"):
+            raise ValueError("explicit_pool_liquidity_usd must be positive when provided")
 
         # Validate rate limits are positive
         if self.coingecko_rate_limit_per_minute <= 0:

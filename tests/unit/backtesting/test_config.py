@@ -496,3 +496,54 @@ class TestBacktestDataConfigDataclass:
         assert config.strict_historical_mode is False
         assert config_copy.strict_historical_mode is True
         assert config != config_copy
+
+
+class TestBacktestDataConfigVolumePolicy:
+    """LP volume policy fields (VIB-4849 honesty-guard knobs).
+
+    These mirror LPBacktestConfig's explicit-volume / fallback opt-in fields so
+    the `almanak backtest pnl` CLI can reach the LP adapter's volume resolution
+    through the data_config channel.
+    """
+
+    def test_default_explicit_pool_volume_is_none(self):
+        """Empty != Zero: the default is 'not provided', not a zero volume."""
+        config = BacktestDataConfig()
+        assert config.explicit_pool_volume_usd_daily is None
+
+    def test_default_explicit_pool_liquidity_is_none(self):
+        config = BacktestDataConfig()
+        assert config.explicit_pool_liquidity_usd is None
+
+    def test_default_allow_volume_fallback_is_false(self):
+        """Refuse-to-fabricate must stay the default."""
+        config = BacktestDataConfig()
+        assert config.allow_volume_fallback is False
+
+    def test_custom_volume_policy_values_accessible(self):
+        config = BacktestDataConfig(
+            explicit_pool_volume_usd_daily=Decimal("5000000"),
+            explicit_pool_liquidity_usd=Decimal("2000000"),
+            allow_volume_fallback=True,
+        )
+        assert config.explicit_pool_volume_usd_daily == Decimal("5000000")
+        assert config.explicit_pool_liquidity_usd == Decimal("2000000")
+        assert config.allow_volume_fallback is True
+
+    def test_zero_explicit_volume_is_valid_measured_zero(self):
+        """Decimal('0') is a measured zero-volume day, not an error."""
+        config = BacktestDataConfig(explicit_pool_volume_usd_daily=Decimal("0"))
+        assert config.explicit_pool_volume_usd_daily == Decimal("0")
+
+    def test_negative_explicit_volume_raises_value_error(self):
+        with pytest.raises(ValueError, match="explicit_pool_volume_usd_daily must be >= 0"):
+            BacktestDataConfig(explicit_pool_volume_usd_daily=Decimal("-1"))
+
+    def test_zero_explicit_liquidity_raises_value_error(self):
+        """A zero TVL denominator is nonsensical for a liquidity share."""
+        with pytest.raises(ValueError, match="explicit_pool_liquidity_usd must be positive"):
+            BacktestDataConfig(explicit_pool_liquidity_usd=Decimal("0"))
+
+    def test_negative_explicit_liquidity_raises_value_error(self):
+        with pytest.raises(ValueError, match="explicit_pool_liquidity_usd must be positive"):
+            BacktestDataConfig(explicit_pool_liquidity_usd=Decimal("-100"))

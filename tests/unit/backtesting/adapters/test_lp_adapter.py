@@ -112,6 +112,20 @@ class TestLPBacktestConfig:
         assert config.volume_multiplier == Decimal("20")
         assert config.base_liquidity == Decimal("5000000")
 
+    def test_zero_explicit_pool_liquidity_raises(self) -> None:
+        """A zero TVL is a nonsensical share denominator: fail at construction
+        instead of silently degrading to the 0.5-share fallback in fee accrual."""
+        with pytest.raises(ValueError, match="explicit_pool_liquidity_usd must be positive"):
+            LPBacktestConfig(strategy_type="lp", explicit_pool_liquidity_usd=Decimal("0"))
+
+    def test_negative_explicit_pool_liquidity_raises(self) -> None:
+        with pytest.raises(ValueError, match="explicit_pool_liquidity_usd must be positive"):
+            LPBacktestConfig(strategy_type="lp", explicit_pool_liquidity_usd=Decimal("-100"))
+
+    def test_positive_explicit_pool_liquidity_accepted(self) -> None:
+        config = LPBacktestConfig(strategy_type="lp", explicit_pool_liquidity_usd=Decimal("2000000"))
+        assert config.explicit_pool_liquidity_usd == Decimal("2000000")
+
     def test_invalid_strategy_type(self) -> None:
         """Test validation rejects non-LP strategy type."""
         with pytest.raises(ValueError, match="requires strategy_type='lp'"):
@@ -1922,3 +1936,204 @@ class TestMeasuredZeroVolume:
                 pool_address=position.metadata["pool_address"],
                 protocol="uniswap_v3",
             )
+
+
+class TestVolumePolicyViaDataConfig:
+    """BacktestDataConfig-driven volume policy (the CLI flag wiring path).
+
+    `almanak backtest pnl` cannot construct an LPBacktestConfig (the adapter
+    registry builds the adapter with defaults), so the volume honesty-guard
+    knobs are also exposed on BacktestDataConfig. These tests pin the
+    precedence contract: data_config wins when set, falls through to the
+    adapter config when absent, and the refuse-to-fabricate default survives
+    an otherwise-default data_config.
+    """
+
+    def test_explicit_volume_via_data_config_resolves_high_confidence(self) -> None:
+        """data_config explicit volume is used directly: 'explicit' + HIGH."""
+        from almanak.framework.backtesting.config import BacktestDataConfig
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        adapter = LPBacktestAdapter(
+            config=LPBacktestConfig(strategy_type="lp", use_historical_volume=False),
+            data_config=BacktestDataConfig(
+                use_historical_volume=False,
+                explicit_pool_volume_usd_daily=Decimal("5000000"),
+            ),
+        )
+        position = create_lp_position()
+
+        resolution = adapter._resolve_pool_volume(
+            position=position,
+            position_value_usd=Decimal("10000"),
+            timestamp=None,
+            pool_address=None,
+            protocol="uniswap_v3",
+        )
+
+        assert resolution.source == "explicit"
+        assert resolution.volume_usd == Decimal("5000000")
+        assert resolution.confidence == DataConfidence.HIGH
+
+    def test_data_config_explicit_volume_takes_precedence_over_adapter_config(self) -> None:
+        """When both surfaces provide a volume, data_config wins."""
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        adapter = LPBacktestAdapter(
+            config=LPBacktestConfig(
+                strategy_type="lp",
+                use_historical_volume=False,
+                explicit_pool_volume_usd_daily=Decimal("111"),
+            ),
+            data_config=BacktestDataConfig(
+                use_historical_volume=False,
+                explicit_pool_volume_usd_daily=Decimal("999"),
+            ),
+        )
+        position = create_lp_position()
+
+        resolution = adapter._resolve_pool_volume(
+            position=position,
+            position_value_usd=Decimal("10000"),
+            timestamp=None,
+            pool_address=None,
+            protocol="uniswap_v3",
+        )
+
+        assert resolution.volume_usd == Decimal("999")
+
+    def test_adapter_config_volume_survives_default_data_config(self) -> None:
+        """A data_config that doesn't set a volume falls through to the adapter config."""
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        adapter = LPBacktestAdapter(
+            config=LPBacktestConfig(
+                strategy_type="lp",
+                use_historical_volume=False,
+                explicit_pool_volume_usd_daily=Decimal("1234567"),
+            ),
+            data_config=BacktestDataConfig(use_historical_volume=False),
+        )
+        position = create_lp_position()
+
+        resolution = adapter._resolve_pool_volume(
+            position=position,
+            position_value_usd=Decimal("10000"),
+            timestamp=None,
+            pool_address=None,
+            protocol="uniswap_v3",
+        )
+
+        assert resolution.source == "explicit"
+        assert resolution.volume_usd == Decimal("1234567")
+
+    def test_data_config_allow_fallback_enables_heuristic(self) -> None:
+        """data_config opt-in alone enables the LOW-confidence heuristic."""
+        from almanak.framework.backtesting.config import BacktestDataConfig
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        adapter = LPBacktestAdapter(
+            config=LPBacktestConfig(strategy_type="lp", use_historical_volume=False),
+            data_config=BacktestDataConfig(
+                use_historical_volume=False,
+                allow_volume_fallback=True,
+            ),
+        )
+        position = create_lp_position()
+
+        resolution = adapter._resolve_pool_volume(
+            position=position,
+            position_value_usd=Decimal("10000"),
+            timestamp=None,
+            pool_address=None,
+            protocol="uniswap_v3",
+        )
+
+        assert resolution.source == "fallback"
+        assert resolution.confidence == DataConfidence.LOW
+        # position_value * volume_fallback_multiplier (data_config default 10)
+        assert resolution.volume_usd == Decimal("100000")
+
+    def test_default_data_config_does_not_revoke_adapter_optin(self) -> None:
+        """OR semantics: a default data_config never withdraws a config-level opt-in."""
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        adapter = LPBacktestAdapter(
+            config=LPBacktestConfig(
+                strategy_type="lp",
+                use_historical_volume=False,
+                allow_volume_fallback=True,
+            ),
+            data_config=BacktestDataConfig(use_historical_volume=False),
+        )
+        position = create_lp_position()
+
+        resolution = adapter._resolve_pool_volume(
+            position=position,
+            position_value_usd=Decimal("10000"),
+            timestamp=None,
+            pool_address=None,
+            protocol="uniswap_v3",
+        )
+
+        assert resolution.source == "fallback"
+
+    def test_default_data_config_preserves_refuse_to_fabricate(self) -> None:
+        """An otherwise-default data_config must not weaken the honesty guard."""
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        adapter = LPBacktestAdapter(
+            config=LPBacktestConfig(strategy_type="lp", use_historical_volume=False),
+            data_config=BacktestDataConfig(use_historical_volume=False),
+        )
+        position = create_lp_position()
+
+        with pytest.raises(DataSourceUnavailableError):
+            adapter._resolve_pool_volume(
+                position=position,
+                position_value_usd=Decimal("10000"),
+                timestamp=None,
+                pool_address=None,
+                protocol="uniswap_v3",
+            )
+
+    def test_data_config_explicit_liquidity_grounds_fee_accrual(self) -> None:
+        """Explicit volume + TVL via data_config produce HIGH-confidence fees."""
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        adapter = LPBacktestAdapter(
+            config=LPBacktestConfig(
+                strategy_type="lp",
+                use_historical_volume=False,
+                fee_tracking_enabled=True,
+            ),
+            data_config=BacktestDataConfig(
+                use_historical_volume=False,
+                explicit_pool_volume_usd_daily=Decimal("5000000"),
+                explicit_pool_liquidity_usd=Decimal("2000000"),
+            ),
+        )
+        position = create_lp_position()
+        market = MockMarketStateWithTimestamp(
+            prices={"ETH": Decimal("2000"), "USDC": Decimal("1")},
+            timestamp=datetime.now(),
+        )
+
+        adapter.update_position(position, market, elapsed_seconds=86400)
+
+        assert position.accumulated_fees_usd > Decimal("0")
+        assert position.fee_confidence == "high"
+
+    def test_data_config_explicit_liquidity_takes_precedence(self) -> None:
+        """The liquidity-share denominator prefers the data_config TVL."""
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        adapter = LPBacktestAdapter(
+            config=LPBacktestConfig(
+                strategy_type="lp",
+                explicit_pool_liquidity_usd=Decimal("111"),
+            ),
+            data_config=BacktestDataConfig(explicit_pool_liquidity_usd=Decimal("999")),
+        )
+
+        assert adapter._explicit_pool_liquidity_usd() == Decimal("999")
