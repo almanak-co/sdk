@@ -110,6 +110,25 @@ class NativeToken:
     wrapped_coingecko_id: str | None = None
 
 
+# Recognised L1 fee-oracle mechanism kinds (Plan 026). Each string names the
+# on-chain precompile/predeploy mechanism used to fetch L1 data-cost for an L2
+# chain. ``GasProfile.__post_init__`` rejects any kind not in this set so a
+# typo'd value fails loudly at registration. Idiom mirrors ``KNOWN_CONTRACT_KEYS``
+# (:340) and the ``KNOWN_VENDORS`` check (:522-535).
+#
+# Supported values:
+#   "arbitrum_nodeinterface" — Arbitrum ArbGasInfo precompile
+#                             (0x000000000000000000000000000000000000006C)
+#   "op_gaspriceoracle"     — OP-stack GasPriceOracle predeploy
+#                             (0x420000000000000000000000000000000000000F)
+KNOWN_L1_FEE_ORACLE_KINDS: frozenset[str] = frozenset(
+    {
+        "arbitrum_nodeinterface",
+        "op_gaspriceoracle",
+    }
+)
+
+
 @dataclass(frozen=True)
 class GasProfile:
     """Per-chain gas knobs.
@@ -146,6 +165,19 @@ class GasProfile:
         fallback_priority_fee_gwei: Typical priority fee (tip) in gwei for
             backtesting fallback estimation — mirrors
             ``DEFAULT_GAS_PRICES[chain]["priority_fee"]``.  VIB-4857 (W5).
+        l1_fee_oracle_kind: L1 fee-oracle mechanism this chain uses for L2
+            data-cost estimation. One of ``KNOWN_L1_FEE_ORACLE_KINDS``
+            (``"arbitrum_nodeinterface"`` or ``"op_gaspriceoracle"``).
+            ``None`` means this chain has no L1 data-cost oracle (i.e. it
+            is not an L2 that posts calldata to Ethereum mainnet). Plan 026.
+        l1_fee_oracle_address: Address of the precompile / predeploy
+            contract corresponding to ``l1_fee_oracle_kind``. Must be set
+            iff ``l1_fee_oracle_kind`` is set; must be a ``0x``-prefixed
+            40-hex-char string, case-insensitive — EIP-55 checksum is NOT
+            enforced here (``almanak.core`` deliberately carries no
+            eth-ecosystem imports); consumers canonicalize at the call
+            site via ``web3.to_checksum_address`` (see
+            ``framework/data/defi/gas.py`` fetchers). Plan 026.
     """
 
     buffer: float | None = None
@@ -155,6 +187,8 @@ class GasProfile:
     operation_overrides: Mapping[str, int] | None = None
     fallback_base_fee_gwei: float | None = None
     fallback_priority_fee_gwei: float | None = None
+    l1_fee_oracle_kind: str | None = None
+    l1_fee_oracle_address: str | None = None
 
     def __post_init__(self) -> None:
         # Freeze the optional operation-overrides mapping so descriptors
@@ -172,6 +206,40 @@ class GasProfile:
                 "operation_overrides",
                 MappingProxyType(dict(self.operation_overrides)),
             )
+        # Validate l1_fee_oracle_kind / l1_fee_oracle_address pairing (Plan 026).
+        # Kind must be in KNOWN_L1_FEE_ORACLE_KINDS; address must be set iff kind
+        # is set and must be a 0x-prefixed 40-hex-char string. Idiom mirrors the
+        # KNOWN_VENDORS check in ChainDescriptor.__post_init__ (:522-535).
+        if self.l1_fee_oracle_kind is not None:
+            if self.l1_fee_oracle_kind not in KNOWN_L1_FEE_ORACLE_KINDS:
+                raise ValueError(
+                    f"GasProfile declares unknown l1_fee_oracle_kind "
+                    f"{self.l1_fee_oracle_kind!r}; known kinds are "
+                    f"{sorted(KNOWN_L1_FEE_ORACLE_KINDS)}"
+                )
+            if self.l1_fee_oracle_address is None:
+                raise ValueError(
+                    f"GasProfile sets l1_fee_oracle_kind={self.l1_fee_oracle_kind!r} "
+                    f"but l1_fee_oracle_address is None — address is required when "
+                    f"kind is set"
+                )
+        if self.l1_fee_oracle_address is not None:
+            addr = self.l1_fee_oracle_address
+            if not (
+                isinstance(addr, str)
+                and addr.startswith("0x")
+                and len(addr) == 42
+                and all(c in "0123456789abcdefABCDEF" for c in addr[2:])
+            ):
+                raise ValueError(
+                    f"GasProfile l1_fee_oracle_address {addr!r} must be a 0x-prefixed 40-hex-character string"
+                )
+            if self.l1_fee_oracle_kind is None:
+                raise ValueError(
+                    f"GasProfile sets l1_fee_oracle_address={addr!r} "
+                    f"but l1_fee_oracle_kind is None — kind is required when "
+                    f"address is set"
+                )
 
 
 @dataclass(frozen=True)

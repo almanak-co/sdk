@@ -37,6 +37,9 @@ DESCRIPTOR = register_chain(
             cost_cap_native=0.01,
             fallback_base_fee_gwei=0.1,
             fallback_priority_fee_gwei=0.0,
+            # Arbitrum ArbGasInfo precompile for L1 data-cost estimation (Plan 026).
+            l1_fee_oracle_kind="arbitrum_nodeinterface",
+            l1_fee_oracle_address="0x000000000000000000000000000000000000006C",
         ),
         timeouts=Timeouts(
             tx_confirmation=120,

@@ -37,6 +37,10 @@ DESCRIPTOR = register_chain(
             cost_cap_native=0.01,
             fallback_base_fee_gwei=0.001,
             fallback_priority_fee_gwei=0.001,
+            # OP-stack GasPriceOracle predeploy for L1 data-cost estimation (Plan 026).
+            # Same predeploy address as Optimism — OP Stack standard.
+            l1_fee_oracle_kind="op_gaspriceoracle",
+            l1_fee_oracle_address="0x420000000000000000000000000000000000000F",
         ),
         timeouts=Timeouts(
             tx_confirmation=120,

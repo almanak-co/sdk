@@ -283,15 +283,18 @@ ARBITRUM_GAS_INFO_ABI = [
     },
 ]
 
-# Contract addresses per chain
+# L2 chains that need special handling, and their L1 fee-oracle contract addresses.
+# Derived eagerly from ChainRegistry at import time (Plan 026). The public names
+# are kept for backwards compatibility — they are re-exported by
+# almanak/framework/data/defi/__init__.py and listed in both __all__ lists.
+# Same-package import precedent: almanak/framework/data/pools/analytics.py:38.
+from almanak.core.chains import ChainRegistry as _ChainRegistry
+
 L2_GAS_ORACLE_ADDRESSES: dict[str, str] = {
-    "optimism": "0x420000000000000000000000000000000000000F",
-    "base": "0x420000000000000000000000000000000000000F",
-    "arbitrum": "0x000000000000000000000000000000000000006C",
+    d.name: d.gas.l1_fee_oracle_address for d in _ChainRegistry.all() if d.gas.l1_fee_oracle_address is not None
 }
 
-# L2 chains that need special handling
-L2_CHAINS = {"arbitrum", "optimism", "base"}
+L2_CHAINS: set[str] = {d.name for d in _ChainRegistry.all() if d.gas.l1_fee_oracle_kind is not None}
 
 # Standard gas for a simple transfer (used for cost estimation)
 STANDARD_GAS_UNITS = 21000
@@ -530,18 +533,31 @@ class Web3GasOracle:
     async def _fetch_l1_data_cost(self, web3: AsyncWeb3, chain: str) -> tuple[Decimal | None, Decimal | None]:
         """Fetch L1 data cost components for L2 chains.
 
+        Dispatches to the appropriate fetcher based on the chain's registered
+        ``l1_fee_oracle_kind`` in the ``ChainDescriptor.GasProfile`` (Plan 026).
+
         Args:
             web3: AsyncWeb3 instance
-            chain: Chain name (arbitrum, optimism, base)
+            chain: Chain name (e.g. "arbitrum", "optimism", "base")
 
         Returns:
             Tuple of (l1_base_fee_gwei, l1_data_cost_gwei)
         """
         try:
-            if chain == "arbitrum":
-                return await self._fetch_arbitrum_l1_cost(web3)
-            elif chain in ("optimism", "base"):
-                return await self._fetch_optimism_l1_cost(web3)
+            descriptor = _ChainRegistry.try_resolve(chain)
+            if descriptor is None or descriptor.gas is None:
+                return None, None
+            kind = descriptor.gas.l1_fee_oracle_kind
+            address = descriptor.gas.l1_fee_oracle_address
+            if kind is None or address is None:
+                # GasProfile validation guarantees address iff kind, so this
+                # branch is the non-L2 fallback; the explicit address check
+                # also narrows the Optional for the fetcher signatures.
+                return None, None
+            if kind == "arbitrum_nodeinterface":
+                return await self._fetch_arbitrum_l1_cost(web3, address)
+            elif kind == "op_gaspriceoracle":
+                return await self._fetch_optimism_l1_cost(web3, address)
             else:
                 return None, None
         except Exception as e:
@@ -553,16 +569,19 @@ class Web3GasOracle:
             # Return None for L1 costs on error - the L2 gas price is still valid
             return None, None
 
-    async def _fetch_arbitrum_l1_cost(self, web3: AsyncWeb3) -> tuple[Decimal | None, Decimal | None]:
+    async def _fetch_arbitrum_l1_cost(
+        self, web3: AsyncWeb3, oracle_address: str
+    ) -> tuple[Decimal | None, Decimal | None]:
         """Fetch L1 data cost from Arbitrum ArbGasInfo precompile.
 
         Args:
             web3: AsyncWeb3 instance
+            oracle_address: ArbGasInfo precompile address (any case; canonicalized below).
 
         Returns:
             Tuple of (l1_base_fee_gwei, l1_data_cost_gwei)
         """
-        contract_address = L2_GAS_ORACLE_ADDRESSES["arbitrum"]
+        contract_address = oracle_address
         contract = web3.eth.contract(
             address=web3.to_checksum_address(contract_address),
             abi=ARBITRUM_GAS_INFO_ABI,
@@ -591,17 +610,19 @@ class Web3GasOracle:
 
         return l1_base_fee_gwei, l1_data_cost_gwei
 
-    async def _fetch_optimism_l1_cost(self, web3: AsyncWeb3) -> tuple[Decimal | None, Decimal | None]:
+    async def _fetch_optimism_l1_cost(
+        self, web3: AsyncWeb3, oracle_address: str
+    ) -> tuple[Decimal | None, Decimal | None]:
         """Fetch L1 data cost from Optimism GasPriceOracle.
 
         Args:
             web3: AsyncWeb3 instance
+            oracle_address: OP-stack GasPriceOracle predeploy address (any case; canonicalized below).
 
         Returns:
             Tuple of (l1_base_fee_gwei, l1_data_cost_gwei)
         """
-        # Use optimism address (same for base - OP Stack standard)
-        contract_address = L2_GAS_ORACLE_ADDRESSES["optimism"]
+        contract_address = oracle_address
         contract = web3.eth.contract(
             address=web3.to_checksum_address(contract_address),
             abi=OPTIMISM_GAS_PRICE_ORACLE_ABI,
