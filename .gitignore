@@ -109,3 +109,7 @@ secrets.yaml
 .env.nightly
 platform-plugins/almanak_platform_plugins.egg-info/
 .claude/scheduled_tasks.lock
+
+# Quant User evidence bundles (run artifacts; README tracked)
+docs/internal/quant-user-runs/*
+!docs/internal/quant-user-runs/README.md
