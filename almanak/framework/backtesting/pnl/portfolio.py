@@ -65,6 +65,20 @@ CASH_EQUIVALENT_STABLECOINS: frozenset[str] = frozenset({"USDC", "USDT", "DAI"})
 #: meaningful overdrafts.
 _DEBIT_DUST_RELATIVE_TOLERANCE = Decimal("1e-9")
 
+#: Intent types whose venue fee is already netted into the fill's token
+#: flows (``_calculate_swap_flows`` haircuts ``tokens_in`` by fee and
+#: slippage), so charging ``fee_usd`` against cash would double-count.
+_FEE_EMBEDDED_IN_FLOWS: frozenset[IntentType] = frozenset({IntentType.SWAP})
+
+#: Intent types whose slippage is already embodied in portfolio value:
+#: SWAP nets it out of ``tokens_in``; perp intents carry it in
+#: ``executed_price`` (adverse per side, see ``get_executed_price``), which
+#: flows into the position's entry price and realized PnL. Debiting
+#: ``slippage_usd`` from cash for these would double-count.
+_SLIPPAGE_EMBEDDED_IN_PRICE: frozenset[IntentType] = frozenset(
+    {IntentType.SWAP, IntentType.PERP_OPEN, IntentType.PERP_CLOSE}
+)
+
 
 # PositionType, SimulatedPosition, and SimulatedFill are now imported from position_models.py above.
 
@@ -165,8 +179,15 @@ class SimulatedPortfolio:
         On success this method updates:
         - Token balances (tokens_in adds, tokens_out subtracts)
         - Positions (opens new or closes existing)
-        - Cash balance (deducts gas costs, adjusts for stablecoin trades)
+        - Cash balance (deducts gas and non-embedded venue costs, adjusts
+          for stablecoin trades)
         - Trades list (records the trade)
+
+        Venue costs (``fee_usd`` / ``slippage_usd``) are debited from cash
+        exactly when nothing else in the fill embodies them (see
+        :meth:`_venue_cash_costs`): SWAP nets both into ``tokens_in``,
+        perps embody slippage in ``executed_price`` but pay fees in cash,
+        and every other intent type pays both from cash.
 
         Perp positions have no token flows; their cash movement follows the
         position lifecycle instead: opening debits the collateral from
@@ -284,7 +305,8 @@ class SimulatedPortfolio:
         token_debits: dict[str, Decimal],
         cash_debit: Decimal,
     ) -> None:
-        """Commit the planned token debits, credits, stablecoin sweep, and gas.
+        """Commit the planned token debits, credits, stablecoin sweep, gas,
+        and non-embedded venue costs.
 
         Runs only after ``_plan_token_debits`` validated affordability, so
         every debit is covered by the held balance.
@@ -308,8 +330,8 @@ class SimulatedPortfolio:
             if stable in self.tokens:
                 self.cash_usd += self.tokens.pop(stable)
 
-        # Deduct gas costs from cash
-        self.cash_usd -= fill.gas_cost_usd
+        # Deduct gas and non-embedded venue costs (fee/slippage) from cash
+        self.cash_usd -= fill.gas_cost_usd + self._venue_cash_costs(fill)
 
     def _plan_token_debits(
         self,
@@ -399,31 +421,52 @@ class SimulatedPortfolio:
         """True if ``token`` is a stablecoin the portfolio holds as ``cash_usd``."""
         return isinstance(token, str) and token.upper() in CASH_EQUIVALENT_STABLECOINS
 
+    def _venue_cash_costs(self, fill: SimulatedFill) -> Decimal:
+        """Fee and slippage payable from cash for this fill (VIB-5079).
+
+        A venue cost is debited from cash exactly when nothing else in the
+        fill embodies it. SWAP nets both costs into ``tokens_in``; perps
+        embody slippage in ``executed_price`` but pay their fee in cash;
+        every other intent type's flows are sized at oracle price for the
+        full notional, so both costs are debited. Without this debit those
+        costs exist only on the TradeRecord and the backtest overstates
+        PnL by exactly the venue costs of every non-SWAP trade.
+        """
+        costs = Decimal("0")
+        if fill.intent_type not in _FEE_EMBEDDED_IN_FLOWS:
+            costs += fill.fee_usd
+        if fill.intent_type not in _SLIPPAGE_EMBEDDED_IN_PRICE:
+            costs += fill.slippage_usd
+        return costs
+
     def _cash_funding_failure(self, fill: SimulatedFill, cash_debit: Decimal) -> str | None:
         """Reason this fill cannot fund its cash legs, or None if it can.
 
         Aggregates every cash draw the fill will make -- the planned
         stablecoin-outflow / implicit-conversion debit plus perp-open
-        collateral -- and requires gas on top, so two partial checks cannot
-        each pass while their sum overdraws ``cash_usd``.
+        collateral -- and requires gas and non-embedded venue costs
+        (:meth:`_venue_cash_costs`) on top, so partial checks cannot each
+        pass while their sum overdraws ``cash_usd``.
 
         Fills that draw nothing from cash (sells, closes, inflow-only
-        fills) are exempt: gas stays charged unconditionally there so a
-        risk-reducing close is never blocked for being low on cash (the
-        close itself replenishes it). That gas debit may transiently drive
-        ``cash_usd`` negative -- an accepted modeling choice, since a debit
-        cannot mint value.
+        fills) are exempt: gas and venue costs stay charged unconditionally
+        there so a risk-reducing close is never blocked for being low on
+        cash (the close itself replenishes it). Those debits may
+        transiently drive ``cash_usd`` negative -- an accepted modeling
+        choice, since a debit cannot mint value.
         """
         required_cash = cash_debit
         if fill.position_delta is not None and fill.position_delta.is_perp:
             required_cash += fill.position_delta.collateral_usd
         if required_cash <= Decimal("0"):
             return None
-        required_with_gas = required_cash + fill.gas_cost_usd
-        if required_with_gas > self.cash_usd:
+        venue_costs = self._venue_cash_costs(fill)
+        required_with_costs = required_cash + fill.gas_cost_usd + venue_costs
+        if required_with_costs > self.cash_usd:
             return (
-                f"insufficient cash for fill: required {required_with_gas} "
-                f"(cash legs {required_cash} + gas {fill.gas_cost_usd}), cash {self.cash_usd}"
+                f"insufficient cash for fill: required {required_with_costs} "
+                f"(cash legs {required_cash} + gas {fill.gas_cost_usd} + venue costs {venue_costs}), "
+                f"cash {self.cash_usd}"
             )
         return None
 
