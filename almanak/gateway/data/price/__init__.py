@@ -21,9 +21,6 @@ from .multi_dex import (
     QuoteUnavailableError,
 )
 from .multi_dex import (
-    SUPPORTED_TOKENS as DEX_SUPPORTED_TOKENS,
-)
-from .multi_dex import (
     TokenNotSupportedError as DexTokenNotSupportedError,
 )
 from .onchain import OnChainPriceSource
@@ -49,5 +46,4 @@ __all__ = [
     "DexTokenNotSupportedError",
     "SUPPORTED_DEXS",
     "DEX_CHAINS",
-    "DEX_SUPPORTED_TOKENS",
 ]

@@ -6,6 +6,7 @@ import pytest
 
 from almanak.config.env import gateway_config_from_env
 from almanak.config.gateway_runtime import (
+    _rpc_variants,
     gateway_wallets_configured,
     manual_price_override_keys,
     manual_price_override_raw,
@@ -107,6 +108,26 @@ def test_parse_gateway_wallets_json_validates_shape(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("ALMANAK_GATEWAY_WALLETS", '["not", "a", "dict"]')
     with pytest.raises(ValueError, match="must be a JSON object keyed by chain"):
         parse_gateway_wallets_json()
+
+
+class TestRpcVariantsPin:
+    """Behavior-contract pin for _rpc_variants (hand-rolled BSC/BNB ladder).
+
+    Documents that the function is intentionally NOT wired to ChainRegistry
+    aliases — see the function docstring for the rationale.
+    """
+
+    def test_bsc_upper_returns_bsc_bnb(self) -> None:
+        assert _rpc_variants("BSC") == ("BSC", "BNB")
+
+    def test_bnb_upper_returns_bnb_bsc(self) -> None:
+        assert _rpc_variants("bnb") == ("BNB", "BSC")
+
+    def test_ethereum_returns_single_variant(self) -> None:
+        assert _rpc_variants("ethereum") == ("ETHEREUM",)
+
+    def test_unknown_chain_returns_uppercased_single(self) -> None:
+        assert _rpc_variants("notachain") == ("NOTACHAIN",)
 
 
 def test_dynamic_gateway_helpers_reflect_live_env(monkeypatch: pytest.MonkeyPatch) -> None:

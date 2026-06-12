@@ -32,7 +32,7 @@ from urllib.parse import urlencode
 
 import aiohttp
 
-from almanak.core.chains._helpers import external_id_for
+from almanak.core.chains._helpers import external_id_for, is_solana_chain
 from almanak.gateway.integrations.base import BaseIntegration, IntegrationError, IntegrationRateLimitError
 from almanak.gateway.integrations.models import WalletPortfolioSnapshot, WalletPosition
 from almanak.gateway.utils.rpc_provider import _get_gateway_api_key
@@ -650,8 +650,13 @@ class OkxIntegration(BaseIntegration):
 
     @staticmethod
     def _cache_address(wallet_address: str, chain: str) -> str:
-        """Normalize wallet address for cache keys. Preserves case for Solana (base58)."""
-        if chain.lower() in {"solana", "501"}:
+        """Normalize wallet address for cache keys. Preserves case for Solana (base58).
+
+        Uses ``is_solana_chain`` for alias-aware Solana detection and falls back
+        to comparing against OKX's numeric chain id ("501") to handle callers
+        that pass the OKX external id directly before chain resolution.
+        """
+        if is_solana_chain(chain) or chain == external_id_for("solana", "okx"):
             return wallet_address
         return wallet_address.lower()
 

@@ -252,15 +252,6 @@ class _LazySupportedDexs(list[str]):
 SUPPORTED_DEXS: list[str] = _LazySupportedDexs()
 DEX_CHAINS: dict[str, list[str]] = _LazyDexChains()
 
-# Common tokens supported by DEXs
-SUPPORTED_TOKENS: dict[str, list[str]] = {
-    "ethereum": ["USDC", "USDT", "DAI", "WETH", "WBTC", "ETH", "FRAX", "stETH", "CRV"],
-    "arbitrum": ["USDC", "USDC.e", "USDT", "DAI", "WETH", "WBTC", "ARB", "ETH"],
-    "optimism": ["USDC", "USDC.e", "USDT", "DAI", "WETH", "OP", "ETH"],
-    "polygon": ["USDC", "USDC.e", "USDT", "DAI", "WETH", "WBTC", "WMATIC", "MATIC"],
-    "base": ["USDC", "WETH", "cbETH", "ETH"],
-}
-
 # Default cache TTL in seconds (12s = ~1 block)
 DEFAULT_CACHE_TTL_SECONDS = 12.0
 

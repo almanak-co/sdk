@@ -477,10 +477,8 @@ class MultiChainOrchestrator:
 
         if chain_lower not in self._compilers:
             rpc_url = self._config.get_rpc_url(chain_lower)
-            # Determine default protocol based on chain
+            # Compiler default DEX; per-chain overrides belong on ChainDescriptor if ever needed.
             default_protocol = "uniswap_v3"
-            if chain_lower == "arbitrum":
-                default_protocol = "uniswap_v3"  # or could be gmx for perps
 
             # Use execution_address so that Enso/protocols see the correct sender
             # (Safe address in Safe mode, EOA otherwise)

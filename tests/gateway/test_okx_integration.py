@@ -2191,3 +2191,27 @@ class TestDedupeRewardRows:
         net_uni = self._reward(source="network", platform_id="123")
         result = _dedupe_reward_rows([pos_aave, net_uni])
         assert len(result) == 2
+
+
+class TestCacheAddress:
+    """Behavior-contract tests for OkxIntegration._cache_address.
+
+    Verifies that Solana addresses preserve case (base58) and EVM addresses
+    are lowercased, including the OKX numeric chain id ("501") path.
+    """
+
+    _SOLANA_ADDR = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+    _EVM_ADDR = "0xAbCdEf1234567890AbCdEf1234567890AbCdEf12"
+
+    def test_solana_canonical_preserves_case(self):
+        assert OkxIntegration._cache_address(self._SOLANA_ADDR, "solana") == self._SOLANA_ADDR
+
+    def test_solana_okx_numeric_id_preserves_case(self):
+        """OKX passes "501" as chain id for Solana before name resolution."""
+        assert OkxIntegration._cache_address(self._SOLANA_ADDR, "501") == self._SOLANA_ADDR
+
+    def test_evm_chain_lowercases_address(self):
+        assert OkxIntegration._cache_address(self._EVM_ADDR, "ethereum") == self._EVM_ADDR.lower()
+
+    def test_unknown_chain_lowercases_address(self):
+        assert OkxIntegration._cache_address(self._EVM_ADDR, "notachain") == self._EVM_ADDR.lower()

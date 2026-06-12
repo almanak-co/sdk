@@ -36,6 +36,8 @@ from typing import Any
 
 import click
 
+from almanak.core.chains import ChainRegistry
+
 # ---------------------------------------------------------------------------
 # Action categories for organizing protocols
 # ---------------------------------------------------------------------------
@@ -77,10 +79,12 @@ def _matrix_chain(chain: str) -> str:
     The strategy-side :data:`KNOWN_VENUES` uses ``"bnb"`` (the historical
     strategy registry key for BNB Chain), but the matrix has rendered
     ``"bsc"`` since inception so downstream Edge / CI consumers match on
-    that string. Normalising at the matrix boundary keeps both surfaces
-    consistent without changing the strategy-side contract.
+    that string. Normalising via :class:`~almanak.core.chains.ChainRegistry`
+    keeps both surfaces consistent without changing the strategy-side contract,
+    and ensures new aliases flow automatically. Unknown chains pass through.
     """
-    return "bsc" if chain == "bnb" else chain
+    descriptor = ChainRegistry.try_resolve(chain)
+    return descriptor.name if descriptor is not None else chain
 
 
 def _normalize_entry_chains(chains: frozenset[str]) -> frozenset[str]:

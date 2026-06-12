@@ -44,18 +44,13 @@ BASE_URL = "https://api.dexscreener.com"
 # Chain name mapping to DexScreener platform slugs.
 # DexScreener uses specific platform identifiers in its API URLs.
 # Derived from ``ChainDescriptor.external_ids`` per VIB-4851 B1 (canonical-only;
-# the "bnb" alias resolves through the registry, not as a map key — see
-# ``_CHAIN_ALIASES`` and ``external_id_for``).
+# the "bnb" alias resolves through ChainRegistry.try_resolve, not as a map key).
 CHAIN_TO_DEXSCREENER_PLATFORM: Mapping[str, str] = MappingProxyType(vendor_chain_map("dexscreener"))
 
-# Canonicalize accepted aliases to the internal chain name used by
-# _KNOWN_TOKEN_ADDRESSES and TokenResolver. Without this, passing
-# default_chain_id="bnb" stores "bnb" while the rest of the codebase
-# keys by "bsc" — resolver lookups miss and requests fall back to
-# symbol-search.
-_CHAIN_ALIASES: dict[str, str] = {
-    "bnb": "bsc",
-}
+# Chain alias normalization is performed via ChainRegistry.try_resolve so that
+# all registered aliases (e.g. "bnb" → "bsc") flow from the single source of
+# truth. Unknown chains pass through unchanged (same semantics as the previous
+# dict.get(x, x) pattern).
 
 # Well-known token addresses for direct lookup (faster than search).
 # Keyed by DexScreener platform slug.
@@ -277,12 +272,13 @@ class DexScreenerPriceSource(BasePriceSource):
         # compatibility. Passing neither makes the source fully multi-chain.
         chosen = default_chain_id if default_chain_id is not None else chain_id
         if chosen is not None:
-            # Canonicalize accepted aliases (e.g., "bnb" -> "bsc") so that
-            # internal lookups against _KNOWN_TOKEN_ADDRESSES and the
-            # TokenResolver use the canonical chain name rather than the
-            # caller-supplied alias.
+            # Canonicalize accepted aliases (e.g., "bnb" -> "bsc") via the
+            # registry so that internal lookups against _KNOWN_TOKEN_ADDRESSES
+            # and the TokenResolver use the canonical chain name rather than
+            # the caller-supplied alias. Unknown chains pass through unchanged.
             raw_lower = chosen.lower()
-            chosen_lower = _CHAIN_ALIASES.get(raw_lower, raw_lower)
+            _descriptor = ChainRegistry.try_resolve(raw_lower)
+            chosen_lower = _descriptor.name if _descriptor is not None else raw_lower
             if chosen_lower not in CHAIN_TO_DEXSCREENER_PLATFORM:
                 raise ValueError(f"No DexScreener platform mapping for chain: {chosen}")
             self._default_chain_name: str | None = chosen_lower
@@ -324,10 +320,12 @@ class DexScreenerPriceSource(BasePriceSource):
             # ResolvedToken.chain is a Chain enum; accept str for safety.
             chain_key = getattr(raw_chain, "value", raw_chain)
             if isinstance(chain_key, str) and chain_key:
-                # Canonicalize aliases so "bnb" -> "bsc" before all downstream
-                # lookups (cache keys, platform resolution, TokenResolver).
+                # Canonicalize aliases (e.g. "bnb" -> "bsc") via the registry
+                # before all downstream lookups (cache keys, platform
+                # resolution, TokenResolver). Unknown chains pass through.
                 raw_lower = chain_key.lower()
-                chain_name = _CHAIN_ALIASES.get(raw_lower, raw_lower)
+                _desc = ChainRegistry.try_resolve(raw_lower)
+                chain_name = _desc.name if _desc is not None else raw_lower
 
         if chain_name is None:
             chain_name = self._default_chain_name

@@ -39,7 +39,14 @@ def gateway_prefixed_or_bare(name: str) -> str | None:
 
 
 def _rpc_variants(chain: str) -> tuple[str, ...]:
-    """Return the env-var chain variants that preserve the legacy BSC/BNB ladder."""
+    """Return the env-var chain variants that preserve the legacy BSC/BNB ladder.
+
+    Hand-rolled on purpose: ChainRegistry aliases include ETH/MAINNET/MATIC/BINANCE
+    etc., and expanding the env-var ladder to them is an operator-facing behavior
+    change (e.g. it would newly consult BINANCE_RPC_URL, ETH_RPC_URL, MAINNET_RPC_URL,
+    MATIC_RPC_URL ... for RPC selection). Revisit only as a deliberate product decision,
+    not as a byte-parity refactor.
+    """
     chain_upper = chain.upper()
     if chain_upper == "BSC":
         return ("BSC", "BNB")
