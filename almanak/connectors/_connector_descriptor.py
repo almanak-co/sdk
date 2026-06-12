@@ -375,6 +375,33 @@ class FeeModelDecl:
             raise ValueError(f"FeeModelDecl.aliases must not include the primary name {self.name!r}")
 
 
+@dataclass(frozen=True)
+class YieldPokeDecl:
+    """Connector-owned Anvil-fork yield-poke declaration (plan 021).
+
+    ``chains`` lists the chains for which the connector's poke function should
+    be called; ``poke`` names the async ``PokeFunction`` callable that sends the
+    accrual transaction. The connector registers this on ``CONNECTOR.yield_poke``
+    so ``YieldPoker`` can derive its ``CHAIN_PROTOCOL_MAP`` from the registry
+    instead of maintaining a separate hand-written table.
+    """
+
+    chains: tuple[str, ...]
+    poke: ImportRef
+
+    def __post_init__(self) -> None:
+        """Validate the declaration's chains and poke import reference."""
+        if not isinstance(self.chains, tuple) or not self.chains:
+            raise ValueError(f"YieldPokeDecl.chains must be a non-empty tuple[str, ...], got {self.chains!r}")
+        bad_chains = [c for c in self.chains if not isinstance(c, str) or not c.strip() or c != c.lower()]
+        if bad_chains:
+            raise ValueError(f"YieldPokeDecl.chains must contain only lowercase non-empty strings, got {bad_chains!r}")
+        if len(set(self.chains)) != len(self.chains):
+            raise ValueError(f"YieldPokeDecl.chains contains duplicates: {self.chains!r}")
+        if not isinstance(self.poke, ImportRef):
+            raise ValueError(f"YieldPokeDecl.poke must be an ImportRef, got {self.poke!r}")
+
+
 # Canonical backtest adapter types — mirrors ``KNOWN_STRATEGY_TYPES`` in
 # ``almanak/framework/backtesting/adapters/registry.py`` (the descriptor stays
 # strategy-safe, so the vocabulary is restated here; an equivalence test pins
@@ -457,6 +484,7 @@ class Connector:
     perps_read: PerpsReadDecl | None = None
     funding_history: FundingHistoryDecl | None = None
     fee_model: FeeModelDecl | None = None
+    yield_poke: YieldPokeDecl | None = None
     dex_volume: DexVolumeDecl | None = None
     backtest_strategy_type: BacktestStrategyTypeDecl | None = None
     metadata_amount_encoding: MetadataAmountEncoding | None = None
@@ -529,6 +557,7 @@ class Connector:
         self._validate_perps_read()
         self._validate_funding_history()
         self._validate_fee_model()
+        self._validate_yield_poke()
         self._validate_dex_volume()
         self._validate_backtest_strategy_type()
         self._validate_metadata_amount_encoding()
@@ -762,6 +791,11 @@ class Connector:
         """Validate the optional fee-model declaration."""
         if self.fee_model is not None and not isinstance(self.fee_model, FeeModelDecl):
             raise ValueError(f"Connector.fee_model must be None or a FeeModelDecl, got {self.fee_model!r}")
+
+    def _validate_yield_poke(self) -> None:
+        """Validate the optional yield-poke declaration."""
+        if self.yield_poke is not None and not isinstance(self.yield_poke, YieldPokeDecl):
+            raise ValueError(f"Connector.yield_poke must be None or a YieldPokeDecl, got {self.yield_poke!r}")
 
     def _validate_dex_volume(self) -> None:
         """Validate the optional DEX backtesting-data declaration."""
@@ -1168,6 +1202,10 @@ class ConnectorRegistry:
     def with_protocol_metadata(self) -> tuple[Connector, ...]:
         """Return connectors that publish protocol metadata providers."""
         return tuple(d for d in self.all() if d.protocol_metadata is not None)
+
+    def with_yield_poke(self) -> tuple[Connector, ...]:
+        """Return connectors that publish Anvil-fork yield-poke declarations."""
+        return tuple(d for d in self.all() if d.yield_poke is not None)
 
     def with_principal_token_market_reader(self) -> tuple[Connector, ...]:
         """Return connectors that publish principal-token market readers."""

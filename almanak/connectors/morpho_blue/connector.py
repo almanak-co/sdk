@@ -10,6 +10,7 @@ from almanak.connectors._connector import (
     ImportRef,
     LendingReadDecl,
     StrategyMatrixEntry,
+    YieldPokeDecl,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
@@ -75,6 +76,10 @@ CONNECTOR = Connector(
         ),
         market_table=ImportRef(module="almanak.connectors.morpho_blue.addresses", attribute="MORPHO_MARKETS"),
         aliases=("morpho", "morphoblue"),
+    ),
+    yield_poke=YieldPokeDecl(
+        chains=("ethereum",),
+        poke=ImportRef(module="almanak.connectors.morpho_blue.backtest_poke", attribute="poke_morpho_blue"),
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
     strategy_chains=("ethereum", "base", "arbitrum", "polygon", "monad"),

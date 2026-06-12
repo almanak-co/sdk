@@ -100,7 +100,11 @@ def _patch_query(
 
 
 def _run(coro: Any) -> Any:
-    return asyncio.new_event_loop().run_until_complete(coro)
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 # ---------------------------------------------------------------------------
@@ -340,3 +344,66 @@ class TestUntrackedAddressNormalisation:
         assert diffs == []
 
 
+# ---------------------------------------------------------------------------
+# Registry-derived lending filter (plan 021)
+# ---------------------------------------------------------------------------
+
+
+class TestLendingFilterDerivedFromRegistry:
+    """_tracked_lending_by_type() uses LENDING_RECONCILER_PROTOCOLS derived from LendingReadRegistry."""
+
+    def test_lending_reconciler_protocols_equals_default_protocol_singleton(self) -> None:
+        """LENDING_RECONCILER_PROTOCOLS must be exactly {LendingReadRegistry.default_protocol()}."""
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+        from almanak.framework.backtesting.paper.position_queries import LENDING_RECONCILER_PROTOCOLS
+
+        expected = frozenset({LendingReadRegistry.default_protocol()})
+        assert LENDING_RECONCILER_PROTOCOLS == expected
+
+    def test_lending_reconciler_protocols_is_frozenset(self) -> None:
+        from almanak.framework.backtesting.paper.position_queries import LENDING_RECONCILER_PROTOCOLS
+
+        assert isinstance(LENDING_RECONCILER_PROTOCOLS, frozenset)
+
+    def test_tracked_lending_by_type_excludes_non_default_protocol(self) -> None:
+        """Positions from non-default lending protocols are excluded from reconciliation.
+
+        Uses a sentinel protocol name so the test stays valid even if the
+        registry's default protocol ever changes.
+        """
+        reconciler = PositionReconciler(chain="ethereum")
+        supply = TrackedPosition(
+            position_id="__non_default_lending___0xUSDC_supply",
+            position_type=PositionType.SUPPLY,
+            protocol="__non_default_lending__",
+            asset="USDC",
+            asset_address="0xUSDC",
+            atoken_balance=1_000_000,
+        )
+        reconciler.positions[supply.position_id] = supply
+
+        result = reconciler._tracked_lending_by_type(PositionType.SUPPLY)
+        assert supply.position_id not in result, (
+            "non-default-protocol supply should not be tracked by the default-protocol lending reader"
+        )
+
+    def test_tracked_lending_by_type_includes_default_protocol(self) -> None:
+        """Positions from the default lending protocol ARE included in reconciliation."""
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        default_proto = LendingReadRegistry.default_protocol()
+        reconciler = PositionReconciler(chain="arbitrum")
+        supply = TrackedPosition(
+            position_id=f"{default_proto}_0xUSDC_supply",
+            position_type=PositionType.SUPPLY,
+            protocol=default_proto,
+            asset="USDC",
+            asset_address="0xUSDC",
+            atoken_balance=1_000_000,
+        )
+        reconciler.positions[supply.position_id] = supply
+
+        result = reconciler._tracked_lending_by_type(PositionType.SUPPLY)
+        assert supply.position_id in result, (
+            f"{default_proto} supply should be included in lending reconciliation"
+        )

@@ -155,6 +155,42 @@ class UniswapV3Position:
 
 
 # =============================================================================
+# Reconciler coverage constants
+# =============================================================================
+
+# The set of protocols each reader lane can actually verify on-chain.
+# The reconciler filters tracked positions to these sets so it never flags
+# positions from other LP/perp/lending protocols as MISSING_ON_CHAIN.
+# Matches the reader implementation exactly — do not broaden without a
+# corresponding reader change.
+
+LP_RECONCILER_PROTOCOLS: frozenset[str] = frozenset({"uniswap_v3"})
+"""The set of protocols this reader can actually verify; the reconciler
+filters tracked positions to this set."""
+
+PERP_RECONCILER_PROTOCOLS: frozenset[str] = frozenset({"gmx_v2"})
+"""The set of protocols this reader can actually verify; the reconciler
+filters tracked positions to this set."""
+
+
+def _lending_reconciler_protocols() -> frozenset[str]:
+    """Derive the lending reconciler protocol set from the registry constant.
+
+    Lazy so the registry import does not happen at module load time.
+    """
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    return frozenset({LendingReadRegistry.default_protocol()})
+
+
+def __getattr__(name: str):  # noqa: ANN202 - PEP 562 lazy back-compat hook
+    """Serve the derived lending coverage constant without import-time discovery."""
+    if name == "LENDING_RECONCILER_PROTOCOLS":
+        return _lending_reconciler_protocols()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# =============================================================================
 # Position Querying Functions
 # =============================================================================
 

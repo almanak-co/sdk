@@ -636,11 +636,13 @@ class PositionReconciler:
         # Build lookup of on-chain positions by token ID
         on_chain_by_id = {str(pos.token_id): pos for pos in on_chain_positions}
 
-        # Check tracked LP positions
+        # Check tracked LP positions (filter to protocols the on-chain reader covers)
+        from almanak.framework.backtesting.paper.position_queries import LP_RECONCILER_PROTOCOLS
+
         tracked_lp = {
             pid: pos
             for pid, pos in self.positions.items()
-            if pos.position_type == PositionType.LP and pos.protocol == "uniswap_v3"
+            if pos.position_type == PositionType.LP and pos.protocol in LP_RECONCILER_PROTOCOLS
         }
 
         for position_id, tracked in tracked_lp.items():
@@ -741,11 +743,14 @@ class PositionReconciler:
         # Build lookup of on-chain positions by key
         on_chain_by_key = {pos.position_key: pos for pos in on_chain_positions}
 
-        # Check tracked perp positions
+        # Check tracked perp positions (filter to protocols the on-chain reader covers)
+        from almanak.framework.backtesting.paper.position_queries import PERP_RECONCILER_PROTOCOLS
+
         tracked_perps = {
             pid: pos
             for pid, pos in self.positions.items()
-            if pos.position_type in (PositionType.PERP_LONG, PositionType.PERP_SHORT) and pos.protocol == "gmx_v2"
+            if pos.position_type in (PositionType.PERP_LONG, PositionType.PERP_SHORT)
+            and pos.protocol in PERP_RECONCILER_PROTOCOLS
         }
 
         for position_id, tracked in tracked_perps.items():
@@ -862,11 +867,19 @@ class PositionReconciler:
             return None
 
     def _tracked_lending_by_type(self, position_type: PositionType) -> dict[str, "TrackedPosition"]:
-        """Return tracked Aave V3 positions filtered by supply/borrow type."""
+        """Return tracked positions for the lending protocols the on-chain reader covers,
+        filtered by supply/borrow type.
+
+        The covered set is derived from ``LendingReadRegistry.default_protocol()`` so
+        it stays in sync with the connector registry constant rather than being a
+        separately maintained literal.
+        """
+        from almanak.framework.backtesting.paper.position_queries import LENDING_RECONCILER_PROTOCOLS
+
         return {
             pid: pos
             for pid, pos in self.positions.items()
-            if pos.position_type == position_type and pos.protocol == "aave_v3"
+            if pos.position_type == position_type and pos.protocol in LENDING_RECONCILER_PROTOCOLS
         }
 
     def _check_supply_drift(

@@ -9,6 +9,7 @@ from almanak.connectors._connector import (
     FeeModelDecl,
     ImportRef,
     LendingReadDecl,
+    YieldPokeDecl,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
@@ -65,6 +66,10 @@ CONNECTOR = Connector(
             module="almanak.connectors.compound_v3.lending_read", attribute="read_compound_v3_market_health"
         ),
         aliases=("comet", "compound", "compoundv3"),
+    ),
+    yield_poke=YieldPokeDecl(
+        chains=("arbitrum",),
+        poke=ImportRef(module="almanak.connectors.compound_v3.backtest_poke", attribute="poke_compound_v3"),
     ),
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("ethereum", "arbitrum", "base", "optimism", "polygon"),

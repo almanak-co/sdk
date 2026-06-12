@@ -21,6 +21,7 @@ from almanak.connectors._connector_descriptor import (
     PerpsReadDecl,
     StrategyMatrixEntry,
     SupportedChainsSpec,
+    YieldPokeDecl,
 )
 
 __all__ = [
@@ -42,4 +43,5 @@ __all__ = [
     "PerpsReadDecl",
     "StrategyMatrixEntry",
     "SupportedChainsSpec",
+    "YieldPokeDecl",
 ]
