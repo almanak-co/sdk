@@ -36,7 +36,16 @@ Key design points (blueprint 14 §Token Consolidation):
   ``token_consolidation.enabled=false`` opt out.
 * **Double-swap safety is structural**: planning happens AFTER closure from
   live wallet balances (``market.balance(token)``); a strategy that already
-  swept leaves ~0 residual and the planner emits nothing.
+  swept leaves ~0 residual and the planner emits nothing. "Live" is enforced,
+  not assumed (VIB-5074): the snapshot handed to the planner was built BEFORE
+  the closing intents executed, and ``MarketSnapshot.balance`` memoizes — so
+  the planner evicts the per-token memo (``market.invalidate_balance``)
+  before each read, exactly like the execution lane's zero-balance skip
+  (``_zero_balance_swap_skip_reason``, PR #2726). A stale memo here reasons
+  about tokens that no longer exist (mainnet: WETH "skip below_dust
+  value_usd=3.58" logged AFTER the closing swap had already sold that WETH)
+  — or, worse, sees a stale zero and strands a real residual (the VIB-5011
+  $18-WETH mechanism).
 * **HARD (emergency) mode appends no swaps** — speed-first exits skip the
   phase with a loud warning.
 * **Never guess a trade**: ``entry_token`` policy degrades to "no
@@ -79,8 +88,9 @@ class ConsolidationDecision:
     balance: Decimal
     value_usd: Decimal | None
     action: Literal["swap", "skip"]
-    # Examples: "consolidate", "below_dust", "native_gas", "target",
-    # "keep_token", "not_in_universe", "no_price", "balance_unavailable".
+    # Examples: "consolidate", "below_dust", "zero_balance", "native_gas",
+    # "target", "keep_token", "not_in_universe", "no_price",
+    # "balance_unavailable".
     reason: str
 
 
@@ -360,14 +370,52 @@ def _decide_token(
         warnings.append(f"no market snapshot — cannot read {token} balance; skipping")
         return _skip(token, "balance_unavailable")
 
+    # VIB-5074: evict the snapshot-level balance memo BEFORE deciding. This
+    # decision pass runs AFTER the closing intents executed against the same
+    # snapshot — a memoized pre-closure balance makes the planner reason
+    # about tokens the closure already sold (field: WETH "skip below_dust
+    # value_usd=3.58" two seconds after the swap that emptied it), or see a
+    # stale zero and strand a real residual (the VIB-5011 mechanism). Same
+    # eviction the execution lane performs (_zero_balance_swap_skip_reason).
+    # Best-effort: a failed eviction falls back to the cached value rather
+    # than blocking the phase — but LOUDLY (warning in the plan's audit
+    # trail), because a decision made on a possibly-stale cache is exactly
+    # the incident class this eviction exists to prevent. No-op on
+    # provider-less (paper) snapshots.
+    # NOTE: eviction must stay symbol/protocol-symmetric with the read below —
+    # both use the bare symbol (protocol=None). If a future change passes
+    # protocol= into market.balance() here, mirror it in the eviction or the
+    # protocol-variant memo key survives and re-introduces the stale read.
+    invalidate = getattr(market, "invalidate_balance", None)
+    if callable(invalidate):
+        try:
+            invalidate(token)
+        except Exception as exc:  # noqa: BLE001 — fall back to the cached value
+            warnings.append(
+                f"could not refresh {token} balance (invalidate_balance failed: {exc}) — "
+                f"deciding on the possibly-stale cached value"
+            )
+            logger.warning(
+                "invalidate_balance(%s) failed in consolidation planner; deciding on cached balance",
+                token,
+                exc_info=True,
+            )
+
     try:
         bal = market.balance(token, chain=chain) if chain else market.balance(token)
     except Exception as exc:  # noqa: BLE001 — planner is best-effort per token
         warnings.append(f"could not read {token} balance ({exc}) — skipping consolidation for it")
         return _skip(token, "balance_unavailable")
     balance = _coerce_decimal(bal.balance if hasattr(bal, "balance") else bal)
-    if balance is None or balance <= 0:
-        return _skip(token, "below_dust", balance=balance, value_usd=Decimal("0"))
+    if balance is None:
+        # Empty ≠ Zero: an unparseable read is UNMEASURED, not a zero balance.
+        warnings.append(f"unparseable {token} balance — skipping consolidation for it")
+        return _skip(token, "balance_unavailable")
+    if balance <= 0:
+        # Measured zero — nothing to consolidate. Labelled distinctly from
+        # below_dust: a zero balance is not "a residual under the dust
+        # floor", it is no residual at all (VIB-5074 secondary defect).
+        return _skip(token, "zero_balance", balance=balance, value_usd=Decimal("0"))
 
     price: Decimal | None
     try:

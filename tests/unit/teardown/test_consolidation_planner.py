@@ -180,7 +180,11 @@ class TestTargetPolicyPlanning:
         )
         plan = _plan(market=market, universe={"WETH"})
         assert plan.intents == []
-        assert _decision(plan, "WETH").reason == "below_dust"
+        # VIB-5074 secondary defect: a measured zero is "zero_balance", not
+        # "below_dust" — there is no residual at all, not a sub-floor one.
+        weth = _decision(plan, "WETH")
+        assert weth.reason == "zero_balance"
+        assert weth.value_usd == Decimal("0")
 
     def test_no_price_token_skipped_with_warning(self):
         """Empty ≠ Zero: an unmeasured price means skip, never assume."""
@@ -422,6 +426,165 @@ class TestFoldOutcome:
         folded = fold_consolidation_outcome(self._result(), outcome)
         assert folded.accounting_degraded is True
         assert folded.accounting_degraded_count == 2
+
+
+class MemoMarket(FakeMarket):
+    """Snapshot double with a memoized balance layer mirroring MarketSnapshot:
+    ``balance()`` serves the stale memo until ``invalidate_balance`` evicts
+    it, after which reads hit the live provider truth (the constructor's
+    ``balances``)."""
+
+    def __init__(
+        self,
+        memo: dict[str, Decimal],
+        live: dict[str, Decimal],
+        prices: dict[str, Decimal],
+        *,
+        invalidate_raises: bool = False,
+    ):
+        super().__init__(balances=live, prices=prices)
+        self._memo = dict(memo)
+        self._invalidate_raises = invalidate_raises
+        self.invalidate_calls: list[str] = []
+
+    def balance(self, token: str, chain: str | None = None):
+        if token in self._memo:
+            self.balance_calls.append(token)
+            return SimpleNamespace(balance=self._memo[token])
+        return super().balance(token, chain=chain)
+
+    def invalidate_balance(self, token: str, protocol: str | None = None) -> None:  # noqa: ARG002
+        self.invalidate_calls.append(token)
+        if self._invalidate_raises:
+            raise RuntimeError("eviction failed")
+        self._memo.pop(token, None)
+
+
+class TestStaleBalanceMemoVIB5074:
+    """VIB-5074: the decision pass runs AFTER closing intents executed against
+    the SAME market snapshot, whose ``balance()`` memoizes. Field incident
+    (deployment:78fc633158d7, Base, td_7f3c209d7b6a): the closing swap sold
+    0.002136918204775968 WETH at 23:56:13Z, then the decision pass logged
+    ``skip WETH (reason=below_dust, value_usd=3.575...)`` from the memoized
+    pre-swap balance. The planner must evict the per-token memo before
+    reading — the same discipline as the execution lane's zero-balance skip."""
+
+    FIELD_WETH = Decimal("0.002136918204775968")
+
+    def test_field_repro_stale_weth_memo_decides_zero_balance_after_eviction(self):
+        market = MemoMarket(
+            memo={"WETH": self.FIELD_WETH},  # stale: pre-closure
+            live={"WETH": Decimal("0")},  # truth: closing swap sold it all
+            prices={"WETH": Decimal("1673.10")},
+        )
+        plan = _plan(market=market, universe={"WETH"})
+
+        assert plan.intents == []
+        weth = _decision(plan, "WETH")
+        assert weth.action == "skip"
+        # Without eviction this is the field log line: below_dust at the
+        # stale ~$3.58 valuation of WETH that no longer exists.
+        assert weth.reason == "zero_balance"
+        assert weth.balance == Decimal("0")
+        assert weth.value_usd == Decimal("0")
+        # The memo was evicted before the read.
+        assert market.invalidate_calls == ["WETH"]
+
+    def test_stale_zero_memo_does_not_strand_live_residual(self):
+        """The money-losing direction (the VIB-5011 $18-WETH mechanism): a
+        stale zero memo while the wallet really holds a material residual
+        must still plan the consolidation swap."""
+        market = MemoMarket(
+            memo={"WETH": Decimal("0")},  # stale: pre-closure
+            live={"WETH": Decimal("0.011")},  # truth: LP_CLOSE returned WETH
+            prices={"WETH": Decimal("1650")},
+        )
+        plan = _plan(market=market, universe={"WETH"})
+
+        assert _swap_tokens(plan) == [("WETH", "USDC")]
+        weth = _decision(plan, "WETH")
+        assert weth.action == "swap"
+        assert weth.value_usd == Decimal("0.011") * Decimal("1650")
+
+    def test_invalidate_failure_falls_back_to_cached_balance(self):
+        """Eviction is best-effort: a raising invalidate_balance must not
+        block the phase — the planner proceeds on the cached value, but
+        LOUDLY: the possibly-stale decision must surface in the plan's
+        warning audit trail (Phase 1 spec critique: a silent fallback would
+        recreate the incident class under an eviction-failure path)."""
+        market = MemoMarket(
+            memo={"WETH": Decimal("0.011")},
+            live={"WETH": Decimal("0.011")},
+            prices={"WETH": Decimal("1650")},
+            invalidate_raises=True,
+        )
+        plan = _plan(market=market, universe={"WETH"})
+
+        assert market.invalidate_calls == ["WETH"]
+        assert _swap_tokens(plan) == [("WETH", "USDC")]
+        # Loud-but-non-blocking: the stale-cache fallback names the token and
+        # the condition in the plan warnings — never a silent degrade.
+        stale = [w for w in plan.warnings if "WETH" in w and "stale" in w.lower()]
+        assert stale, f"expected a loud stale-cache warning, got {plan.warnings}"
+
+    def test_multi_token_universe_evicts_every_token_memo(self):
+        """Eviction is per-token across the WHOLE universe — not special-cased
+        to WETH/wrapped-native (Phase 1 spec critique round 2). Three
+        non-WETH tokens, including a mixed-case canonical symbol, each with a
+        stale memo in one of both directions: every memo is evicted and every
+        decision is made from the LIVE balance."""
+        market = MemoMarket(
+            memo={
+                "DAI": Decimal("100"),  # stale positive — closure sold it
+                "USDC.e": Decimal("0"),  # stale zero — closure returned it
+                "ARB": Decimal("3"),  # stale undervalue — live is larger
+            },
+            live={
+                "DAI": Decimal("0"),
+                "USDC.e": Decimal("25"),
+                "ARB": Decimal("50"),
+            },
+            prices={"DAI": Decimal("1"), "USDC.e": Decimal("1"), "ARB": Decimal("0.40")},
+        )
+        plan = _plan(market=market, universe={"DAI", "USDC.e", "ARB"})
+
+        # Every universe token's memo was evicted (original casing preserved).
+        assert sorted(market.invalidate_calls) == ["ARB", "DAI", "USDC.e"]
+        # Sold token: measured zero from live truth, never the stale $100.
+        dai = _decision(plan, "DAI")
+        assert (dai.action, dai.reason, dai.value_usd) == ("skip", "zero_balance", Decimal("0"))
+        # Returned token: stale zero must not strand the live $25 residual.
+        usdce = _decision(plan, "USDC.e")
+        assert usdce.action == "swap"
+        assert usdce.value_usd == Decimal("25")
+        # Re-valued token: decision priced from live 50, not stale 3.
+        arb = _decision(plan, "ARB")
+        assert arb.action == "swap"
+        assert arb.value_usd == Decimal("50") * Decimal("0.40")
+        assert sorted(_swap_tokens(plan)) == [("ARB", "USDC"), ("USDC.e", "USDC")]
+
+    def test_market_without_invalidate_still_plans(self):
+        """Provider-less / legacy snapshots without invalidate_balance keep
+        working — the eviction is capability-gated."""
+        market = FakeMarket(
+            balances={"WETH": Decimal("0.011")},
+            prices={"WETH": Decimal("1650")},
+        )
+        plan = _plan(market=market, universe={"WETH"})
+        assert _swap_tokens(plan) == [("WETH", "USDC")]
+
+    def test_unparseable_balance_is_unmeasured_not_zero(self):
+        """Empty ≠ Zero: a read that cannot be coerced to Decimal is
+        UNMEASURED → balance_unavailable (value_usd None), never a zero
+        balance and never below_dust."""
+        market = FakeMarket(balances={"WETH": "not-a-number"}, prices={"WETH": Decimal("1650")})  # type: ignore[dict-item]
+        plan = _plan(market=market, universe={"WETH"})
+
+        assert plan.intents == []
+        weth = _decision(plan, "WETH")
+        assert weth.reason == "balance_unavailable"
+        assert weth.value_usd is None
+        assert any("WETH" in w for w in plan.warnings)
 
 
 class TestCanonicalCasing:
