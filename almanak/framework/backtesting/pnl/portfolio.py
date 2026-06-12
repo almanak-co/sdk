@@ -50,6 +50,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+#: Stablecoins the portfolio holds as ``cash_usd`` at $1. Inflows of these
+#: are swept into ``cash_usd`` and outflows debit the token balance first,
+#: then ``cash_usd``. The engine exposes ``cash_usd`` to strategies under
+#: these same symbols (see ``engine.market_snapshot_from_state``).
+#: Deliberately narrower than :data:`almanak.core.constants.STABLECOINS`,
+#: which also lists yield-bearing tokens (sDAI, sUSDe, ...) whose price is
+#: not $1 -- treating those as cash would itself violate conservation.
+CASH_EQUIVALENT_STABLECOINS: frozenset[str] = frozenset({"USDC", "USDT", "DAI"})
+
+#: Relative shortfall below which a debit is treated as spend-all instead of
+#: failing the fill. Absorbs Decimal round-trip error from flow computations
+#: (``amount_usd / price`` on both legs) without permitting economically
+#: meaningful overdrafts.
+_DEBIT_DUST_RELATIVE_TOLERANCE = Decimal("1e-9")
+
+
 # PositionType, SimulatedPosition, and SimulatedFill are now imported from position_models.py above.
 
 
@@ -123,10 +139,30 @@ class SimulatedPortfolio:
         logger.warning("Price unavailable for %s, falling back to $1 stablecoin assumption in %s", token, context)
         return Decimal("1")
 
-    def apply_fill(self, fill: SimulatedFill) -> None:
+    def apply_fill(self, fill: SimulatedFill, market_state: MarketState | None = None) -> bool:
         """Apply a simulated fill to update portfolio state.
 
-        This method updates:
+        Conservation contract: a fill may only spend value the portfolio
+        actually holds. ``tokens_out`` entries for cash-equivalent
+        stablecoins (:data:`CASH_EQUIVALENT_STABLECOINS`) debit the token
+        balance first and ``cash_usd`` for the remainder at $1, mirroring
+        the inflow sweep that moves those stables into ``cash_usd``.
+
+        Other tokens debit the ``tokens`` balance. For USD-notional
+        position-funding intents (everything except SWAP) a shortfall is
+        implicitly converted from ``cash_usd`` at the ``market_state``
+        price -- a value-conserving, zero-fee zap recorded under
+        ``metadata["implicit_conversions"]`` -- because the engine's flow
+        producers size those legs from USD notional, not held balances
+        (e.g. LP_OPEN splits ``amount_usd`` 50/50). SWAP outflows are
+        strict: selling a token the portfolio does not hold is
+        short-from-nothing and fails.
+
+        A fill that cannot be covered -- or that arrives with
+        ``success=False`` from an adapter validation failure -- is recorded
+        as a failed trade and mutates no balance, cash, or position state.
+
+        On success this method updates:
         - Token balances (tokens_in adds, tokens_out subtracts)
         - Positions (opens new or closes existing)
         - Cash balance (deducts gas costs, adjusts for stablecoin trades)
@@ -147,38 +183,49 @@ class SimulatedPortfolio:
 
         Args:
             fill: The simulated fill to apply
+            market_state: Current market prices, used to price implicit
+                cash conversions for non-SWAP token outflows. Without it,
+                only held balances (and cash for stablecoins) can be spent.
+
+        Returns:
+            True if the fill was applied. False if it was rejected: the
+            trade is recorded with ``success=False`` and a
+            ``failure_reason`` in ``metadata``, and portfolio state is
+            unchanged.
+
+            Contract: a False return always implies ``fill.success`` has
+            been set to False (every rejection path goes through
+            ``_record_failed_fill``), so ``fill.to_trade_record()`` carries
+            the rejection and callers may safely ignore the return value
+            when they consume ``trade_record.success`` downstream instead.
         """
-        # Perp conservation: collateral is funded from cash_usd (the perp
-        # lane has no token flows), so an open the portfolio cannot cover
-        # must be rejected before any state mutation.
-        funding_failure = self._perp_open_funding_failure(fill)
+        if not fill.success:
+            self._record_failed_fill(
+                fill,
+                fill.metadata.get("failure_reason", "fill marked failed by producer"),
+            )
+            return False
+
+        token_debits, cash_debit, conversions, failure_reason = self._plan_token_debits(
+            fill.tokens_out, fill.intent_type, market_state
+        )
+        if failure_reason is not None:
+            self._record_failed_fill(fill, failure_reason)
+            return False
+
+        # Aggregate cash check: planned stablecoin/conversion debits and
+        # perp-open collateral draw from the same cash_usd, so they must be
+        # validated as one sum (each passing individually could still
+        # overdraw) before any state mutation.
+        funding_failure = self._cash_funding_failure(fill, cash_debit)
         if funding_failure is not None:
             self._record_failed_fill(fill, funding_failure)
-            return
+            return False
 
-        # Update token balances - subtract tokens_out
-        for token, amount in fill.tokens_out.items():
-            current = self.tokens.get(token, Decimal("0"))
-            new_amount = current - amount
-            if new_amount <= Decimal("0"):
-                # Remove token if balance is zero or negative
-                self.tokens.pop(token, None)
-            else:
-                self.tokens[token] = new_amount
+        if conversions:
+            fill.metadata["implicit_conversions"] = {token: str(amount) for token, amount in conversions.items()}
 
-        # Update token balances - add tokens_in
-        for token, amount in fill.tokens_in.items():
-            current = self.tokens.get(token, Decimal("0"))
-            self.tokens[token] = current + amount
-
-        # Handle stablecoin as cash (USDC, USDT, DAI)
-        stablecoins = {"USDC", "USDT", "DAI"}
-        for stable in stablecoins:
-            if stable in self.tokens:
-                self.cash_usd += self.tokens.pop(stable)
-
-        # Deduct gas costs from cash
-        self.cash_usd -= fill.gas_cost_usd
+        self._apply_token_flows(fill, token_debits, cash_debit)
 
         # Initialize LP PnL breakdown fields
         il_loss_usd: Decimal | None = None
@@ -229,18 +276,155 @@ class SimulatedPortfolio:
         if fill.position_close_id and pnl_usd != Decimal("0"):
             self._realized_pnl += pnl_usd
 
-    def _perp_open_funding_failure(self, fill: SimulatedFill) -> str | None:
-        """Reason a perp-open fill cannot be funded from cash, or None if it can.
+        return True
 
-        Gas is deducted from cash within the same fill, so it counts toward
-        the required amount: a fill that covers collateral but not gas would
-        still drive ``cash_usd`` negative.
+    def _apply_token_flows(
+        self,
+        fill: SimulatedFill,
+        token_debits: dict[str, Decimal],
+        cash_debit: Decimal,
+    ) -> None:
+        """Commit the planned token debits, credits, stablecoin sweep, and gas.
+
+        Runs only after ``_plan_token_debits`` validated affordability, so
+        every debit is covered by the held balance.
         """
-        if not (fill.success and fill.position_delta is not None and fill.position_delta.is_perp):
+        # Update token balances - subtract tokens_out
+        for token, debit in token_debits.items():
+            new_amount = self.tokens.get(token, Decimal("0")) - debit
+            if new_amount <= Decimal("0"):
+                self.tokens.pop(token, None)
+            else:
+                self.tokens[token] = new_amount
+        self.cash_usd -= cash_debit
+
+        # Update token balances - add tokens_in
+        for token, amount in fill.tokens_in.items():
+            current = self.tokens.get(token, Decimal("0"))
+            self.tokens[token] = current + amount
+
+        # Handle cash-equivalent stablecoins as cash
+        for stable in CASH_EQUIVALENT_STABLECOINS:
+            if stable in self.tokens:
+                self.cash_usd += self.tokens.pop(stable)
+
+        # Deduct gas costs from cash
+        self.cash_usd -= fill.gas_cost_usd
+
+    def _plan_token_debits(
+        self,
+        tokens_out: dict[str, Decimal],
+        intent_type: IntentType,
+        market_state: MarketState | None,
+    ) -> tuple[dict[str, Decimal], Decimal, dict[str, Decimal], str | None]:
+        """Validate ``tokens_out`` against held balances without mutating state.
+
+        Cash-equivalent stablecoins draw from the token balance first and
+        then from ``cash_usd`` at $1. Other tokens draw from the ``tokens``
+        balance; for non-SWAP intents a shortfall is planned as an implicit
+        cash conversion at the ``market_state`` price (the engine's flow
+        producers size those legs from USD notional, not held balances).
+        A relative shortfall within :data:`_DEBIT_DUST_RELATIVE_TOLERANCE`
+        is treated as spend-all rather than a failure. Non-positive amounts
+        are ignored.
+
+        Returns:
+            ``(token_debits, cash_debit, conversions, failure_reason)``
+            where ``conversions`` maps token -> implicitly converted token
+            amount. When ``failure_reason`` is not None the fill must be
+            rejected and the other values ignored.
+        """
+        no_plan: tuple[dict[str, Decimal], Decimal, dict[str, Decimal]] = ({}, Decimal("0"), {})
+        token_debits: dict[str, Decimal] = {}
+        conversions: dict[str, Decimal] = {}
+        cash_needed = Decimal("0")
+
+        for token, amount in tokens_out.items():
+            if amount <= Decimal("0"):
+                continue
+            held = self.tokens.get(token, Decimal("0"))
+            from_tokens = min(held, amount)
+            shortfall = amount - from_tokens
+            token_debits[token] = from_tokens
+            if shortfall <= amount * _DEBIT_DUST_RELATIVE_TOLERANCE:
+                continue  # Fully covered (spend-all within dust tolerance)
+            if self._is_cash_equivalent(token):
+                cash_needed += shortfall
+            elif intent_type == IntentType.SWAP:
+                # Selling a token the portfolio does not hold is
+                # short-from-nothing; never fund a SWAP leg from cash.
+                return (*no_plan, f"insufficient {token} balance: required {amount}, held {held}")
+            else:
+                price = self._conversion_price(token, market_state)
+                if price is None:
+                    return (
+                        *no_plan,
+                        f"insufficient {token} balance (required {amount}, held {held}) "
+                        "and no market price available for implicit cash conversion",
+                    )
+                cash_needed += shortfall * price
+                conversions[token] = shortfall
+
+        cash_shortfall = cash_needed - self.cash_usd
+        if cash_shortfall > Decimal("0"):
+            if cash_shortfall > cash_needed * _DEBIT_DUST_RELATIVE_TOLERANCE:
+                return (
+                    *no_plan,
+                    "insufficient cash for stablecoin outflow and implicit conversions: "
+                    f"required {cash_needed}, cash {self.cash_usd}",
+                )
+            # Spend-all within dust tolerance
+            cash_needed = self.cash_usd
+
+        return token_debits, cash_needed, conversions, None
+
+    @staticmethod
+    def _conversion_price(token: str, market_state: MarketState | None) -> Decimal | None:
+        """Market price for an implicit cash conversion, or None if unavailable.
+
+        No $1 fallback here: under-pricing a non-stablecoin leg would mint
+        value, which is exactly what this debit path exists to prevent.
+        """
+        if market_state is None:
             return None
-        required_cash = fill.position_delta.collateral_usd + fill.gas_cost_usd
-        if required_cash > self.cash_usd:
-            return f"insufficient cash for perp collateral + gas: required {required_cash}, cash {self.cash_usd}"
+        try:
+            price = market_state.get_price(token)
+        except KeyError:
+            return None
+        if price <= Decimal("0"):
+            return None
+        return price
+
+    def _is_cash_equivalent(self, token: Any) -> bool:
+        """True if ``token`` is a stablecoin the portfolio holds as ``cash_usd``."""
+        return isinstance(token, str) and token.upper() in CASH_EQUIVALENT_STABLECOINS
+
+    def _cash_funding_failure(self, fill: SimulatedFill, cash_debit: Decimal) -> str | None:
+        """Reason this fill cannot fund its cash legs, or None if it can.
+
+        Aggregates every cash draw the fill will make -- the planned
+        stablecoin-outflow / implicit-conversion debit plus perp-open
+        collateral -- and requires gas on top, so two partial checks cannot
+        each pass while their sum overdraws ``cash_usd``.
+
+        Fills that draw nothing from cash (sells, closes, inflow-only
+        fills) are exempt: gas stays charged unconditionally there so a
+        risk-reducing close is never blocked for being low on cash (the
+        close itself replenishes it). That gas debit may transiently drive
+        ``cash_usd`` negative -- an accepted modeling choice, since a debit
+        cannot mint value.
+        """
+        required_cash = cash_debit
+        if fill.position_delta is not None and fill.position_delta.is_perp:
+            required_cash += fill.position_delta.collateral_usd
+        if required_cash <= Decimal("0"):
+            return None
+        required_with_gas = required_cash + fill.gas_cost_usd
+        if required_with_gas > self.cash_usd:
+            return (
+                f"insufficient cash for fill: required {required_with_gas} "
+                f"(cash legs {required_cash} + gas {fill.gas_cost_usd}), cash {self.cash_usd}"
+            )
         return None
 
     def _apply_perp_close_credit(

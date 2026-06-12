@@ -49,6 +49,7 @@ from almanak.framework.backtesting.models import (
     IntentType,
     ParameterSourceTracker,
     PreflightReport,
+    TradeRecord,
 )
 from almanak.framework.backtesting.pnl.data_provider import (
     HistoricalDataCapability,
@@ -454,6 +455,31 @@ def _invoke_strategy_decide(
         return None
 
 
+def notify_intent_outcome(
+    backtester: PnLBacktester,
+    strategy: Any,
+    intent: Any,
+    trade_record: TradeRecord,
+    log: Any,
+) -> None:
+    """Invoke ``strategy.on_intent_executed`` with the fill's real outcome.
+
+    ``trade_record.success`` is authoritative: the portfolio records
+    rejected fills (insufficient balance, producer-failed) as failed trades
+    without mutating state, and the strategy must observe that outcome or
+    its state machine advances past a trade that never applied.
+    """
+    if strategy is None or not hasattr(strategy, "on_intent_executed"):
+        return
+    applied = trade_record.success
+    failure_reason = None if applied else trade_record.metadata.get("failure_reason", "fill rejected")
+    try:
+        callback_result = backtester._build_callback_result(intent, trade_record, success=applied, error=failure_reason)
+        strategy.on_intent_executed(intent, applied, callback_result)
+    except Exception as notify_err:
+        log.debug(f"on_intent_executed raised: {notify_err}")
+
+
 async def _drain_pending_intents_at_end(
     *,
     backtester: PnLBacktester,
@@ -485,22 +511,26 @@ async def _drain_pending_intents_at_end(
                     data_quality_tracker=state.data_quality_tracker,
                 )
                 state.execution_delayed_at_end += 1
-                # Record successful execution in error handler
-                if backtester._error_handler:
-                    backtester._error_handler.record_success()
-                bt_logger.debug(
-                    f"Executed pending intent at simulation end "
-                    f"(decided at {decision_time}): "
-                    f"type={trade_record.intent_type.value}, "
-                    f"amount=${trade_record.amount_usd:,.2f}"
-                )
-                # Notify strategy of successful execution
-                if hasattr(strategy, "on_intent_executed"):
-                    try:
-                        callback_result = backtester._build_callback_result(intent, trade_record, success=True)
-                        strategy.on_intent_executed(intent, True, callback_result)
-                    except Exception as notify_err:
-                        bt_logger.debug(f"on_intent_executed raised: {notify_err}")
+                # The portfolio may reject a fill (insufficient balance,
+                # producer-failed) — trade_record.success is authoritative.
+                if trade_record.success:
+                    # Record successful execution in error handler
+                    if backtester._error_handler:
+                        backtester._error_handler.record_success()
+                    bt_logger.debug(
+                        f"Executed pending intent at simulation end "
+                        f"(decided at {decision_time}): "
+                        f"type={trade_record.intent_type.value}, "
+                        f"amount=${trade_record.amount_usd:,.2f}"
+                    )
+                else:
+                    bt_logger.warning(
+                        f"Pending intent rejected by portfolio at simulation end "
+                        f"(decided at {decision_time}): "
+                        f"type={trade_record.intent_type.value}, "
+                        f"reason={trade_record.metadata.get('failure_reason', 'fill rejected')}"
+                    )
+                notify_intent_outcome(backtester, strategy, intent, trade_record, bt_logger)
             except Exception as e:
                 # Notify strategy of execution failure
                 if hasattr(strategy, "on_intent_executed"):

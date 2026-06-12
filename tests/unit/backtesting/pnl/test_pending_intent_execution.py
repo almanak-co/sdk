@@ -702,3 +702,194 @@ async def test_metrics_correctly_track_delayed_executions():
     assert len(normal_trades) + len(delayed_trades) == len(result.trades), (
         "Normal + delayed should equal total trades"
     )
+
+
+# =============================================================================
+# Tests: Rejected fills propagate success=False to on_intent_executed
+# =============================================================================
+
+
+class RecordingStrategy(MockStrategy):
+    """MockStrategy that records every on_intent_executed callback."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.executed_callbacks: list[tuple[Any, bool, Any]] = []
+
+    def on_intent_executed(self, intent: Any, success: bool, result: Any) -> None:
+        self.executed_callbacks.append((intent, success, result))
+
+
+def _market_state(timestamp: datetime) -> MarketState:
+    return MarketState(
+        timestamp=timestamp,
+        prices={"ETH": Decimal("3000"), "WETH": Decimal("3000"), "USDC": Decimal("1")},
+        chain="arbitrum",
+        block_number=1000,
+    )
+
+
+def _make_backtester() -> PnLBacktester:
+    return PnLBacktester(
+        data_provider=MockDataProviderWithTicks(num_ticks=1),
+        fee_models={"default": DefaultFeeModel()},
+        slippage_models={"default": DefaultSlippageModel()},
+    )
+
+
+@pytest.mark.asyncio
+async def test_rejected_fill_notifies_strategy_with_failure():
+    """A portfolio-rejected fill must reach on_intent_executed as success=False.
+
+    Selling WETH the portfolio does not hold is short-from-nothing: apply_fill
+    records a failed trade and mutates nothing. The engine must not tell the
+    strategy the trade succeeded, or state machines advance past a trade that
+    never applied.
+    """
+    from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+    backtester = _make_backtester()
+    portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+    now = datetime.now(UTC)
+    config = PnLBacktestConfig(
+        start_time=now,
+        end_time=now + timedelta(hours=1),
+        initial_capital_usd=Decimal("10000"),
+        tokens=["WETH", "USDC"],
+        include_gas_costs=False,
+    )
+    strategy = RecordingStrategy()
+    sell_unheld = MockSwapIntent(from_token="WETH", to_token="USDC", amount=Decimal("3000"))
+
+    remaining = await backtester._process_pending_intents(
+        pending_intents=[(sell_unheld, now, 0)],
+        portfolio=portfolio,
+        market_state=_market_state(now),
+        config=config,
+        strategy=strategy,
+    )
+
+    assert remaining == []
+    assert len(strategy.executed_callbacks) == 1
+    intent, success, result = strategy.executed_callbacks[0]
+    assert intent is sell_unheld
+    assert success is False
+    assert result.success is False
+    assert "insufficient" in (result.error or "")
+    # The rejection mutated nothing
+    assert portfolio.cash_usd == Decimal("10000")
+    assert portfolio.tokens == {}
+    # The failed trade is still on the books, marked failed
+    assert len(portfolio.trades) == 1
+    assert portfolio.trades[0].success is False
+
+
+@pytest.mark.asyncio
+async def test_applied_fill_notifies_strategy_with_success():
+    """The happy path still reports success=True with the trade record."""
+    from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+    backtester = _make_backtester()
+    portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+    now = datetime.now(UTC)
+    config = PnLBacktestConfig(
+        start_time=now,
+        end_time=now + timedelta(hours=1),
+        initial_capital_usd=Decimal("10000"),
+        tokens=["WETH", "USDC"],
+        include_gas_costs=False,
+    )
+    strategy = RecordingStrategy()
+    buy = MockSwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("100"))
+
+    await backtester._process_pending_intents(
+        pending_intents=[(buy, now, 0)],
+        portfolio=portfolio,
+        market_state=_market_state(now),
+        config=config,
+        strategy=strategy,
+    )
+
+    assert len(strategy.executed_callbacks) == 1
+    _, success, result = strategy.executed_callbacks[0]
+    assert success is True
+    assert result.success is True
+    assert result.trade_record is not None
+
+
+@pytest.mark.asyncio
+async def test_rejected_fill_at_simulation_end_notifies_failure():
+    """Drain-at-end lane: a rejected pending fill also reports success=False."""
+    start_time = datetime.now(UTC)
+    data_provider = MockDataProviderWithTicks(num_ticks=2, start_time=start_time)
+    backtester = PnLBacktester(
+        data_provider=data_provider,
+        fee_models={"default": DefaultFeeModel()},
+        slippage_models={"default": DefaultSlippageModel()},
+    )
+    config = PnLBacktestConfig(
+        start_time=start_time,
+        end_time=start_time + timedelta(hours=2),
+        initial_capital_usd=Decimal("10000"),
+        tokens=["WETH", "USDC"],
+        include_gas_costs=False,
+        inclusion_delay_blocks=10,  # never executes in-loop; drains at end
+    )
+    sell_unheld = MockSwapIntent(from_token="WETH", to_token="USDC", amount=Decimal("3000"))
+    strategy = RecordingStrategy(intents_to_return=[sell_unheld])
+
+    result = await backtester.backtest(strategy, config)
+
+    assert result.error is None, f"Backtest failed: {result.error}"
+    rejected = [(i, s, r) for i, s, r in strategy.executed_callbacks if i is sell_unheld]
+    assert len(rejected) == 1
+    _, success, callback_result = rejected[0]
+    assert success is False
+    assert callback_result.success is False
+    # Nothing applied, nothing charged: final equity equals initial capital
+    assert result.equity_curve[-1].value_usd == Decimal("10000")
+
+
+@pytest.mark.asyncio
+async def test_drain_at_end_execution_error_notifies_failure(monkeypatch):
+    """Drain-at-end lane: an exception during execution reports success=False.
+
+    Distinct from a portfolio rejection (which returns a failed TradeRecord):
+    here _execute_intent itself raises. The engine must notify the strategy
+    with the error BEFORE the error handler decides whether to stop -- an
+    unknown RuntimeError classifies as fatal, so the run itself surfaces the
+    error too.
+    """
+    start_time = datetime.now(UTC)
+    data_provider = MockDataProviderWithTicks(num_ticks=2, start_time=start_time)
+    backtester = PnLBacktester(
+        data_provider=data_provider,
+        fee_models={"default": DefaultFeeModel()},
+        slippage_models={"default": DefaultSlippageModel()},
+    )
+    config = PnLBacktestConfig(
+        start_time=start_time,
+        end_time=start_time + timedelta(hours=2),
+        initial_capital_usd=Decimal("10000"),
+        tokens=["WETH", "USDC"],
+        include_gas_costs=False,
+        inclusion_delay_blocks=10,  # never executes in-loop; drains at end
+    )
+    buy = MockSwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("100"))
+    strategy = RecordingStrategy(intents_to_return=[buy])
+
+    async def boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("simulated execution failure")
+
+    monkeypatch.setattr(backtester, "_execute_intent", boom)
+
+    result = await backtester.backtest(strategy, config)
+
+    # Unknown errors classify as fatal: the run surfaces the error...
+    assert "simulated execution failure" in (result.error or "")
+    # ...but the strategy was notified of the failure first
+    failures = [(i, s, r) for i, s, r in strategy.executed_callbacks if s is False]
+    assert len(failures) >= 1
+    _, _, callback_result = failures[0]
+    assert callback_result.success is False
+    assert "simulated execution failure" in (callback_result.error or "")

@@ -461,8 +461,12 @@ def create_market_snapshot_from_state(
         snapshot.set_balance("USD", cash_balance)
 
         # Expose cash under stablecoin symbols so strategies calling
-        # market.balance("USDC") get the cash balance instead of ValueError
-        stablecoin_aliases = frozenset(["USDC", "USDT", "DAI"])
+        # market.balance("USDC") get the cash balance instead of ValueError.
+        # Must stay in lockstep with the apply_fill cash model: these are the
+        # symbols whose outflows debit cash_usd.
+        from almanak.framework.backtesting.pnl.portfolio import CASH_EQUIVALENT_STABLECOINS
+
+        stablecoin_aliases = CASH_EQUIVALENT_STABLECOINS
         for stable in stablecoin_aliases:
             if stable not in portfolio.tokens:
                 stable_balance = TokenBalance(
@@ -1599,23 +1603,29 @@ class PnLBacktester:
                         config=config,
                         data_quality_tracker=data_quality_tracker,
                     )
-                    # Record successful execution in error handler
-                    if self._error_handler:
-                        self._error_handler.record_success()
-                    logger.debug(
-                        f"Executed intent at {market_state.timestamp} "
-                        f"(decided at {decision_time}): "
-                        f"type={trade_record.intent_type.value}, "
-                        f"amount=${trade_record.amount_usd:,.2f}, "
-                        f"fee=${trade_record.fee_usd:,.2f}"
-                    )
-                    # Notify strategy of successful execution so state machines can advance
-                    if strategy is not None and hasattr(strategy, "on_intent_executed"):
-                        try:
-                            callback_result = self._build_callback_result(intent, trade_record, success=True)
-                            strategy.on_intent_executed(intent, True, callback_result)
-                        except Exception as notify_err:
-                            logger.debug(f"on_intent_executed raised: {notify_err}")
+                    # The portfolio may reject a fill (insufficient balance,
+                    # producer-failed) — trade_record.success is authoritative.
+                    if trade_record.success:
+                        # Record successful execution in error handler
+                        if self._error_handler:
+                            self._error_handler.record_success()
+                        logger.debug(
+                            f"Executed intent at {market_state.timestamp} "
+                            f"(decided at {decision_time}): "
+                            f"type={trade_record.intent_type.value}, "
+                            f"amount=${trade_record.amount_usd:,.2f}, "
+                            f"fee=${trade_record.fee_usd:,.2f}"
+                        )
+                    else:
+                        logger.warning(
+                            f"Intent rejected by portfolio at {market_state.timestamp} "
+                            f"(decided at {decision_time}): "
+                            f"type={trade_record.intent_type.value}, "
+                            f"reason={trade_record.metadata.get('failure_reason', 'fill rejected')}"
+                        )
+                    # Notify strategy with the real outcome so state machines
+                    # do not advance past a trade that never applied
+                    _engine_helpers.notify_intent_outcome(self, strategy, intent, trade_record, logger)
                 except Exception as e:
                     # Notify strategy of execution failure
                     if strategy is not None and hasattr(strategy, "on_intent_executed"):
@@ -1665,6 +1675,9 @@ class PnLBacktester:
         """
         return self.slippage_models.get(protocol, self.slippage_models["default"])
 
+    # crap-allowlist: VIB-5095 — pre-existing cc=30 dispatcher (already noqa: C901); this PR
+    # touched 2 lines (pass market_state to apply_fill). Refactor is blocked on the backtesting
+    # blueprint (VIB-5080) per .claude/rules/crap-refactor.md step 1; extraction plan in VIB-5095.
     async def _execute_intent(  # noqa: C901
         self,
         intent: Any,
@@ -1712,7 +1725,7 @@ class PnLBacktester:
                 # Set delayed_at_end flag on adapter fill
                 adapter_fill.delayed_at_end = delayed_at_end
                 # Apply the adapter's fill to the portfolio
-                portfolio.apply_fill(adapter_fill)
+                portfolio.apply_fill(adapter_fill, market_state=market_state)
 
                 # Log detailed trade execution
                 log_trade_execution(
@@ -2020,7 +2033,7 @@ class PnLBacktester:
         )
 
         # Apply fill to portfolio
-        portfolio.apply_fill(fill)
+        portfolio.apply_fill(fill, market_state=market_state)
 
         # Log detailed trade execution (DEBUG level - visible in verbose mode)
         log_trade_execution(

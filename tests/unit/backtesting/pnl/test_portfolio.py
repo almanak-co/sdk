@@ -308,6 +308,8 @@ class TestPortfolioApplyFill:
         self, portfolio: SimulatedPortfolio, base_timestamp: datetime
     ) -> None:
         """Test that stablecoins are automatically converted to cash."""
+        # Fund the WETH being sold -- fills may only spend held balances
+        portfolio.tokens["WETH"] = Decimal("1.0")
         fill = SimulatedFill(
             timestamp=base_timestamp,
             intent_type=IntentType.SWAP,
