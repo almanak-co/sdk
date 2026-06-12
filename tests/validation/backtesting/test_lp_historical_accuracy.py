@@ -38,6 +38,10 @@ from almanak.framework.backtesting.pnl.portfolio import (
     SimulatedPosition,
 )
 
+# Keyed/nightly validation tier (VIB-5081): the keyless PR tier excludes this
+# module via `-m "not validation"`. See tests/validation/backtesting/README.md.
+pytestmark = pytest.mark.validation
+
 # =============================================================================
 # Known Historical Position Data
 # =============================================================================
