@@ -1074,6 +1074,14 @@ def pnl_backtest(
     Use --from-result to re-run a backtest with the exact same configuration
     as a previous run. This loads the config from a saved result JSON file.
 
+    Exit codes:
+    - 0: backtest completed (recoverable data errors may still be recorded
+      in the result's error summary)
+    - 1: backtest failed -- the engine raised, or it stopped on a fatal
+      error and returned a partial result; results and JSON output are
+      still printed/written before exiting
+    - 2: usage error (invalid flags or arguments)
+
     Examples:
 
         # Basic backtest for 6 months
@@ -1241,7 +1249,20 @@ def pnl_backtest(
     if report:
         _generate_html_report(result, ctx.strategy, ctx.output_path)
 
-    # Phase 18: post-backtest tip
+    # Phase 18: exit-code contract. The engine converts fatal simulation
+    # errors into a partial result with `error` set instead of raising
+    # (`build_error_result`, pnl/_engine_helpers.py), so without this gate
+    # scripts/CI would see exit 0 for a backtest that processed zero ticks.
+    # All artifacts above (results block, JSON output, chart, report) are
+    # still produced first — the JSON carries the diagnostic detail, the
+    # exit code carries the verdict. Recoverable errors in `result.errors`
+    # with no fatal `result.error` keep exit 0: the simulation completed.
+    if not result.success:
+        click.echo()
+        click.echo(f"Error: backtest failed: {result.error}", err=True)
+        sys.exit(1)
+
+    # Phase 19: post-backtest tip
     click.echo()
     click.echo("Tip: Try 'almanak backtest sweep' to test multiple parameter combinations,")
     click.echo("     or 'almanak backtest optimize' for Bayesian hyperparameter tuning.")
