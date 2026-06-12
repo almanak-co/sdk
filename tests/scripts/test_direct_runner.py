@@ -261,3 +261,59 @@ def test_extract_tx_hashes_dedupes_in_order(direct_runner):
     raw = f"tx_hash={h1} ... tx_hash={h2} ... tx_hash={h1}"
     hashes = direct_runner.extract_tx_hashes(raw)
     assert hashes == ["0x" + h1, "0x" + h2]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Timestamped Status lines + ACCOUNTING_FAILED (June 12 mainnet probe run)
+# ──────────────────────────────────────────────────────────────────────────
+
+# Real shape from the arbitrum_full_cycle failure: the CLI timestamps the
+# Status line, and the anchored ^Status: pattern missed it — the harness then
+# reported an unrelated stderr deprecation warning as the failure reason.
+_TIMESTAMPED_ACCOUNTING_FAILED = (
+    "[2026-06-12 06:09:52] Status: ACCOUNTING_FAILED | Intent: BRIDGE | "
+    "Error: Accounting persistence failed (snapshot): native-gas append failed "
+    "in live mode (gas_native_status='price_missing') | Duration: 8078ms\n"
+)
+
+
+def test_timestamped_status_line_is_parsed(direct_runner):
+    keyword, error = direct_runner._parse_status_line(_TIMESTAMPED_ACCOUNTING_FAILED)
+    assert keyword == "ACCOUNTING_FAILED"
+    assert "native-gas append failed" in error
+
+
+def test_accounting_failed_keyword_is_a_failure(direct_runner):
+    status, outcome = direct_runner.determine_status(
+        exit_code=1,
+        tx_hashes=[],
+        stdout=_TIMESTAMPED_ACCOUNTING_FAILED,
+        stderr="",
+        timed_out=False,
+    )
+    assert (status, outcome) == ("FAIL", "ERROR")
+
+
+def test_extract_error_prefers_status_line_over_stderr_warnings(direct_runner):
+    stderr = (
+        "/app/almanak/cli/cli.py:151: UserWarning: GATEWAY_HOST is deprecated. "
+        "Use ALMANAK_GATEWAY_HOST instead. Legacy unprefixed gateway env vars "
+        "will be removed in a future release.\n"
+        "  warn_legacy_gateway_envvars()\n"
+    )
+    error = direct_runner.extract_error(_TIMESTAMPED_ACCOUNTING_FAILED, stderr)
+    assert "native-gas append failed" in error
+    assert "deprecated" not in error
+
+
+def test_extract_error_filters_deprecation_warnings_as_noise(direct_runner):
+    # No Status line at all: the stderr fallback must not surface the
+    # deprecation warnings as the failure reason.
+    stderr = (
+        "/app/almanak/cli/cli.py:151: UserWarning: GATEWAY_PORT is deprecated. "
+        "Use ALMANAK_GATEWAY_PORT instead. Legacy unprefixed gateway env vars "
+        "will be removed in a future release.\n"
+        "  warn_legacy_gateway_envvars()\n"
+    )
+    error = direct_runner.extract_error("", stderr)
+    assert error == "No error output"

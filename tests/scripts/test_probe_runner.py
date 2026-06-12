@@ -233,6 +233,8 @@ def _fail_result(probe_runner, **overrides) -> dict:
         ({"outcome": "PARTIAL"}, "stranded_funds"),
         ({"outcome": "TIMEOUT"}, "timeout"),
         ({"stderr": "Transaction reverted: tx_hash=abc"}, "execution_revert"),
+        ({"stdout": "Simulation failed: JS Tracer is not enabled"}, "execution_revert"),
+        ({"stdout": "Simulator alchemy shows transaction would revert"}, "execution_revert"),
         ({"stdout": "BridgeError: relay request failed"}, "bridge_failure"),
         ({"stderr": "keeper did not execute order"}, "keeper_timeout"),
         ({"stderr": "grpc StatusCode.UNAVAILABLE: failed to connect to all addresses"}, "gateway_error"),
