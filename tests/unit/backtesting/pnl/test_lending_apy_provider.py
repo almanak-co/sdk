@@ -639,40 +639,45 @@ class TestLendingAPYProviderDefaults:
             provider.get_default_borrow_apy("unknown")
 
     def test_declared_protocols_resolve_defaults(self):
-        """Venues that declare offline defaults resolve them; morpho declares none."""
+        """Venues that declare offline defaults resolve them.
+
+        Plan 022 added backtest_default_supply_apy/borrow_apy to morpho_blue and spark,
+        overturning the VIB-5040 deliberate omission.  morpho_blue now resolves a default
+        (0.035 supply, 0.04 borrow) instead of raising DataSourceUnavailable.
+        """
         provider = LendingAPYProvider(chain="ethereum")
-        for protocol in ("aave_v3", "compound_v3"):
-            assert provider.get_default_supply_apy(protocol) > 0
-            assert provider.get_default_borrow_apy(protocol) > 0
-        # morpho_blue passes protocol validation (gateway capability exists)
-        # but declares backtest_default_*_apy=None — no sanctioned number.
+        for protocol in ("aave_v3", "compound_v3", "morpho_blue", "spark"):
+            assert provider.get_default_supply_apy(protocol) > 0, (
+                f"{protocol}: expected a positive default supply APY"
+            )
+            assert provider.get_default_borrow_apy(protocol) > 0, (
+                f"{protocol}: expected a positive default borrow APY"
+            )
         assert "morpho_blue" in supported_protocols()
-        with pytest.raises(DataSourceUnavailable):
-            provider.get_default_supply_apy("morpho_blue")
 
     @pytest.mark.asyncio
-    async def test_gateway_failure_without_declared_default_propagates(self):
-        """Gateway success=False for a no-default venue raises, never fabricates.
+    async def test_gateway_failure_with_morpho_default_falls_back(self):
+        """Plan 022: morpho_blue now declares a default so gateway failure falls back.
 
-        Pre-D4 a morpho request raised UnsupportedProtocolError; admitting it
-        to supported_protocols() must not downgrade that loud failure into a
-        silent generic 3%/5% row.
+        VIB-5040 deliberately omitted a morpho default so failures propagated.
+        Plan 022 adds supply=0.035/borrow=0.04 to the manifest, so a gateway
+        DataSourceUnavailable now falls back to the declared default row rather
+        than propagating, matching the behavior of aave_v3/compound_v3.
         """
         from unittest.mock import AsyncMock, patch
 
         provider = LendingAPYProvider(chain="ethereum")
         failure = DataSourceUnavailable(source="morpho_blue", reason="on-chain rate not implemented")
-        with (
-            patch.object(provider, "_fetch_apy_via_gateway", AsyncMock(side_effect=failure)),
-            pytest.raises(DataSourceUnavailable, match="on-chain rate not implemented"),
-        ):
-            await provider.get_historical_apy(
+        with patch.object(provider, "_fetch_apy_via_gateway", AsyncMock(side_effect=failure)):
+            result = await provider.get_historical_apy(
                 protocol="morpho_blue",
                 market="USDC",
                 timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
             )
-        # Nothing fabricated, nothing cached.
-        assert provider._get_from_cache("morpho_blue", "USDC", datetime(2024, 1, 15, 12, 0, tzinfo=UTC)) is None
+        # Default row is returned (0.035 supply is the manifest-declared value).
+        assert result is not None
+        assert result.supply_apy == Decimal("0.035")
+        assert result.borrow_apy == Decimal("0.04")
 
     @pytest.mark.asyncio
     async def test_gateway_failure_with_declared_default_falls_back(self):

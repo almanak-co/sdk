@@ -38,7 +38,10 @@ import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from almanak.connectors._connector_descriptor import BacktestRiskDecl
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +115,56 @@ class LiquidationParams:
         )
 
 
+def _legacy_keys_for_manifest(manifest_name: str, decl: "BacktestRiskDecl") -> tuple[str, ...]:
+    """Return the ``LiquidationParamRegistry`` protocol key(s) for ``manifest_name``.
+
+    Most connectors use their own name as the sole key.  Two connectors carry
+    historical aliases declared on their ``BacktestRiskDecl.legacy_param_keys``:
+    - morpho_blue -> ``("morpho",)``
+    - gmx_v2     -> ``("gmx", "gmx_v2")``
+
+    The alias data lives on the connector decl so this helper is generic
+    iteration with zero protocol literals.
+    """
+    return decl.legacy_param_keys if decl.legacy_param_keys else (manifest_name,)
+
+
+## Sanctioned residual: off-platform venues with no connector
+#
+# These venues have no Almanak connector and therefore no manifest where
+# liquidation defaults can be declared. This table is the ONLY permitted
+# location for such entries. Any venue that gains a connector MUST move its
+# row to that connector's ``BacktestRiskDecl`` and remove it from here.
+# The literal dict keys intentionally remain in the literal-dispatch-scan
+# baseline as a sanctioned entry (see plan-022 commit message).
+OFF_PLATFORM_VENUE_DEFAULTS: dict[str, "LiquidationParams"] = {
+    "binance_perp": LiquidationParams(
+        protocol="binance_perp",
+        asset=None,
+        liquidation_threshold=Decimal("0"),
+        maintenance_margin=Decimal("0.04"),  # 4% maintenance margin
+        liquidation_penalty=Decimal("0.05"),
+        source=LiquidationParamSource.PROTOCOL_DEFAULT,
+    ),
+    "bybit": LiquidationParams(
+        protocol="bybit",
+        asset=None,
+        liquidation_threshold=Decimal("0"),
+        maintenance_margin=Decimal("0.05"),  # 5% maintenance margin
+        liquidation_penalty=Decimal("0.05"),
+        source=LiquidationParamSource.PROTOCOL_DEFAULT,
+    ),
+    "dydx": LiquidationParams(
+        protocol="dydx",
+        asset=None,
+        liquidation_threshold=Decimal("0"),
+        maintenance_margin=Decimal("0.03"),  # 3% maintenance margin
+        liquidation_penalty=Decimal("0.05"),
+        source=LiquidationParamSource.PROTOCOL_DEFAULT,
+    ),
+}
+
+
 @dataclass
 class LiquidationParamRegistry:
     """Registry for liquidation parameters with per-asset lookup and fallback.
@@ -167,176 +220,65 @@ class LiquidationParamRegistry:
             self._initialize_defaults()
 
     def _initialize_defaults(self) -> None:
-        """Initialize protocol-level default parameters.
+        """Initialize protocol-level default parameters from connector manifests.
 
-        These are general defaults for each protocol. Asset-specific values
-        should be registered separately for more accurate simulations.
+        Protocol-owned connectors are queried via ``BacktestRiskRegistry`` (plan 022).
+        Off-platform venues (no connector) are populated from ``OFF_PLATFORM_VENUE_DEFAULTS``.
+
+        Legacy keys are preserved verbatim so that callers using historical strings
+        (``"morpho"``, ``"gmx"``) continue to resolve.  The alias rules live on each
+        connector's ``BacktestRiskDecl.legacy_param_keys``; this helper is generic
+        iteration with zero protocol literals.
         """
-        # Lending protocols
-        self.protocol_defaults["aave_v3"] = LiquidationParams(
-            protocol="aave_v3",
-            asset=None,
-            liquidation_threshold=Decimal("0.825"),  # Average across assets
-            maintenance_margin=Decimal("0"),  # N/A for lending
-            liquidation_penalty=Decimal("0.05"),  # 5% penalty
-            source=LiquidationParamSource.PROTOCOL_DEFAULT,
-        )
+        # Lazy import avoids pulling the connector registry walk onto the hot path.
+        from almanak.connectors._strategy_backtest_risk_registry import BACKTEST_RISK_REGISTRY
 
-        self.protocol_defaults["compound_v3"] = LiquidationParams(
-            protocol="compound_v3",
-            asset=None,
-            liquidation_threshold=Decimal("0.85"),
-            maintenance_margin=Decimal("0"),
-            liquidation_penalty=Decimal("0.05"),
-            source=LiquidationParamSource.PROTOCOL_DEFAULT,
-        )
+        for manifest_name, decl in BACKTEST_RISK_REGISTRY.liquidation_params().items():
+            if decl.liquidation_default is None:
+                continue
+            ld = decl.liquidation_default
+            for key in _legacy_keys_for_manifest(manifest_name, decl):
+                self.protocol_defaults[key] = LiquidationParams(
+                    protocol=key,
+                    asset=None,
+                    liquidation_threshold=ld.liquidation_threshold,
+                    maintenance_margin=ld.maintenance_margin,
+                    liquidation_penalty=ld.liquidation_penalty,
+                    source=LiquidationParamSource.PROTOCOL_DEFAULT,
+                )
 
-        self.protocol_defaults["morpho"] = LiquidationParams(
-            protocol="morpho",
-            asset=None,
-            liquidation_threshold=Decimal("0.825"),  # Uses Aave thresholds
-            maintenance_margin=Decimal("0"),
-            liquidation_penalty=Decimal("0.05"),
-            source=LiquidationParamSource.PROTOCOL_DEFAULT,
-        )
-
-        self.protocol_defaults["spark"] = LiquidationParams(
-            protocol="spark",
-            asset=None,
-            liquidation_threshold=Decimal("0.80"),
-            maintenance_margin=Decimal("0"),
-            liquidation_penalty=Decimal("0.08"),  # 8% penalty
-            source=LiquidationParamSource.PROTOCOL_DEFAULT,
-        )
-
-        # Perpetual protocols
-        self.protocol_defaults["gmx"] = LiquidationParams(
-            protocol="gmx",
-            asset=None,
-            liquidation_threshold=Decimal("0"),  # N/A for perps
-            maintenance_margin=Decimal("0.01"),  # 1% maintenance margin
-            liquidation_penalty=Decimal("0.05"),
-            source=LiquidationParamSource.PROTOCOL_DEFAULT,
-        )
-
-        self.protocol_defaults["gmx_v2"] = LiquidationParams(
-            protocol="gmx_v2",
-            asset=None,
-            liquidation_threshold=Decimal("0"),
-            maintenance_margin=Decimal("0.01"),
-            liquidation_penalty=Decimal("0.05"),
-            source=LiquidationParamSource.PROTOCOL_DEFAULT,
-        )
-
-        self.protocol_defaults["hyperliquid"] = LiquidationParams(
-            protocol="hyperliquid",
-            asset=None,
-            liquidation_threshold=Decimal("0"),
-            maintenance_margin=Decimal("0.005"),  # 0.5% maintenance margin
-            liquidation_penalty=Decimal("0.05"),
-            source=LiquidationParamSource.PROTOCOL_DEFAULT,
-        )
-
-        self.protocol_defaults["binance_perp"] = LiquidationParams(
-            protocol="binance_perp",
-            asset=None,
-            liquidation_threshold=Decimal("0"),
-            maintenance_margin=Decimal("0.04"),  # 4% maintenance margin
-            liquidation_penalty=Decimal("0.05"),
-            source=LiquidationParamSource.PROTOCOL_DEFAULT,
-        )
-
-        self.protocol_defaults["bybit"] = LiquidationParams(
-            protocol="bybit",
-            asset=None,
-            liquidation_threshold=Decimal("0"),
-            maintenance_margin=Decimal("0.05"),  # 5% maintenance margin
-            liquidation_penalty=Decimal("0.05"),
-            source=LiquidationParamSource.PROTOCOL_DEFAULT,
-        )
-
-        self.protocol_defaults["dydx"] = LiquidationParams(
-            protocol="dydx",
-            asset=None,
-            liquidation_threshold=Decimal("0"),
-            maintenance_margin=Decimal("0.03"),  # 3% maintenance margin
-            liquidation_penalty=Decimal("0.05"),
-            source=LiquidationParamSource.PROTOCOL_DEFAULT,
-        )
+        # Off-platform venues (no connector) — sanctioned residual table.
+        # Any venue that gains a connector must move its row to the manifest.
+        for key, params in OFF_PLATFORM_VENUE_DEFAULTS.items():
+            self.protocol_defaults[key] = params
 
         # Initialize common asset-specific parameters for lending protocols
         self._initialize_asset_defaults()
 
     def _initialize_asset_defaults(self) -> None:
-        """Initialize common asset-specific parameters.
+        """Initialize common asset-specific parameters from connector manifests.
 
-        These are well-known parameters for popular assets. More accurate than
-        protocol defaults but may not reflect current on-chain values.
+        Asset keys are UPPER-cased to match the historical convention.
+        The protocol key for asset rows equals the connector name directly
+        (aave_v3, compound_v3, gmx_v2); every historical asset_params protocol
+        key equals the connector name, so no alias translation is needed here.
         """
-        # Aave V3 asset-specific liquidation thresholds (approximate)
-        aave_v3_assets = {
-            "ETH": (Decimal("0.86"), Decimal("0.05")),  # (liq_threshold, penalty)
-            "WETH": (Decimal("0.86"), Decimal("0.05")),
-            "WBTC": (Decimal("0.80"), Decimal("0.065")),
-            "USDC": (Decimal("0.88"), Decimal("0.045")),
-            "USDT": (Decimal("0.80"), Decimal("0.05")),
-            "DAI": (Decimal("0.80"), Decimal("0.05")),
-            "LINK": (Decimal("0.75"), Decimal("0.075")),
-            "AAVE": (Decimal("0.73"), Decimal("0.075")),
-            "UNI": (Decimal("0.77"), Decimal("0.10")),
-            "wstETH": (Decimal("0.84"), Decimal("0.05")),
-            "cbETH": (Decimal("0.80"), Decimal("0.075")),
-            "rETH": (Decimal("0.79"), Decimal("0.075")),
-        }
+        # Lazy import avoids pulling the connector registry walk onto the hot path.
+        from almanak.connectors._strategy_backtest_risk_registry import BACKTEST_RISK_REGISTRY
 
-        for asset, (threshold, penalty) in aave_v3_assets.items():
-            self.asset_params[("aave_v3", asset.upper())] = LiquidationParams(
-                protocol="aave_v3",
-                asset=asset.upper(),
-                liquidation_threshold=threshold,
-                maintenance_margin=Decimal("0"),
-                liquidation_penalty=penalty,
-                source=LiquidationParamSource.ASSET_SPECIFIC,
-            )
-
-        # Compound V3 asset-specific parameters
-        compound_v3_assets = {
-            "ETH": (Decimal("0.90"), Decimal("0.05")),
-            "WETH": (Decimal("0.90"), Decimal("0.05")),
-            "WBTC": (Decimal("0.80"), Decimal("0.05")),
-            "wstETH": (Decimal("0.90"), Decimal("0.05")),
-            "cbETH": (Decimal("0.90"), Decimal("0.05")),
-        }
-
-        for asset, (threshold, penalty) in compound_v3_assets.items():
-            self.asset_params[("compound_v3", asset.upper())] = LiquidationParams(
-                protocol="compound_v3",
-                asset=asset.upper(),
-                liquidation_threshold=threshold,
-                maintenance_margin=Decimal("0"),
-                liquidation_penalty=penalty,
-                source=LiquidationParamSource.ASSET_SPECIFIC,
-            )
-
-        # GMX V2 asset-specific maintenance margins (varies by asset volatility)
-        gmx_v2_assets = {
-            "ETH": Decimal("0.01"),  # 1%
-            "BTC": Decimal("0.01"),  # 1%
-            "LINK": Decimal("0.015"),  # 1.5% (more volatile)
-            "ARB": Decimal("0.02"),  # 2% (more volatile)
-            "UNI": Decimal("0.02"),
-            "SOL": Decimal("0.015"),
-        }
-
-        for asset, margin in gmx_v2_assets.items():
-            self.asset_params[("gmx_v2", asset.upper())] = LiquidationParams(
-                protocol="gmx_v2",
-                asset=asset.upper(),
-                liquidation_threshold=Decimal("0"),
-                maintenance_margin=margin,
-                liquidation_penalty=Decimal("0.05"),
-                source=LiquidationParamSource.ASSET_SPECIFIC,
-            )
+        for manifest_name, decl in BACKTEST_RISK_REGISTRY.liquidation_params().items():
+            if not decl.liquidation_asset_params:
+                continue
+            for asset, (threshold, margin, penalty) in decl.liquidation_asset_params.items():
+                # Asset keys are already UPPER-cased on the manifest (validated by BacktestRiskDecl).
+                self.asset_params[(manifest_name, asset)] = LiquidationParams(
+                    protocol=manifest_name,
+                    asset=asset,
+                    liquidation_threshold=threshold,
+                    maintenance_margin=margin,
+                    liquidation_penalty=penalty,
+                    source=LiquidationParamSource.ASSET_SPECIFIC,
+                )
 
     def get_params(
         self,
@@ -603,4 +545,5 @@ __all__ = [
     "LiquidationParamRegistry",
     "LiquidationParams",
     "LiquidationParamSource",
+    "OFF_PLATFORM_VENUE_DEFAULTS",
 ]

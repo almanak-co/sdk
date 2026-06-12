@@ -13,6 +13,7 @@ from almanak.connectors._connector import (
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
+from almanak.connectors.compound_v3.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
 
 CONNECTOR = Connector(
     name="compound_v3",
@@ -71,6 +72,7 @@ CONNECTOR = Connector(
         chains=("arbitrum",),
         poke=ImportRef(module="almanak.connectors.compound_v3.backtest_poke", attribute="poke_compound_v3"),
     ),
+    backtest_risk=_BACKTEST_RISK,
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
     strategy_chains=("ethereum", "arbitrum", "base", "optimism", "polygon"),
 )

@@ -431,7 +431,10 @@ FROZEN_LENDING_PROTOCOL_CHAINS = {
 FROZEN_LENDING_DEFAULT_APYS = {
     "aave_v3": ("0.03", "0.05"),
     "compound_v3": ("0.025", "0.045"),
-    "morpho_blue": (None, None),
+    # Plan 022 (PR #2762): morpho_blue now declares the APY defaults that
+    # InterestCalculator had hardcoded all along, consciously overturning
+    # VIB-5040's deliberate omission — see the PR body for the rationale.
+    "morpho_blue": ("0.035", "0.04"),
 }
 
 

@@ -11,6 +11,7 @@ from almanak.connectors._connector import (
     ImportRef,
 )
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
+from almanak.connectors.hyperliquid.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
 
 CONNECTOR = Connector(
     name="hyperliquid",
@@ -45,6 +46,7 @@ CONNECTOR = Connector(
     funding_history=FundingHistoryDecl(
         venue="hyperliquid",
     ),
+    backtest_risk=_BACKTEST_RISK,
 )
 
 __all__ = ["CONNECTOR"]

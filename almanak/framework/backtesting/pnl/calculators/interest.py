@@ -165,24 +165,53 @@ class InterestCalculator:
 
     def __post_init__(self) -> None:
         """Initialize protocol-specific APYs and optional APY provider."""
-        if not self.protocol_supply_apys:
-            self.protocol_supply_apys = {
-                "aave_v3": Decimal("0.03"),  # 3% supply
-                "compound_v3": Decimal("0.025"),  # 2.5% supply
-                "morpho": Decimal("0.035"),  # 3.5% supply
-                "spark": Decimal("0.05"),  # 5% supply (DSR)
-            }
-        if not self.protocol_borrow_apys:
-            self.protocol_borrow_apys = {
-                "aave_v3": Decimal("0.05"),  # 5% borrow
-                "compound_v3": Decimal("0.045"),  # 4.5% borrow
-                "morpho": Decimal("0.04"),  # 4% borrow
-                "spark": Decimal("0.055"),  # 5.5% borrow
-            }
+        if not self.protocol_supply_apys or not self.protocol_borrow_apys:
+            # Build both dicts in one registry walk; only assign the missing ones.
+            supply_defaults, borrow_defaults = self._build_default_apys()
+            if not self.protocol_supply_apys:
+                self.protocol_supply_apys = supply_defaults
+            if not self.protocol_borrow_apys:
+                self.protocol_borrow_apys = borrow_defaults
 
         # Initialize APY provider for historical lookups if source is HISTORICAL
         if self.interest_rate_source == InterestRateSource.HISTORICAL and self._apy_provider is None:
             self._init_apy_provider()
+
+    @staticmethod
+    def _build_default_apys() -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+        """Build the default protocol APY dicts from connector manifests (plan 022).
+
+        Reads ``LendingReadDecl.backtest_default_supply_apy`` and
+        ``backtest_default_borrow_apy`` from each connector that declares them,
+        publishing under EVERY element of ``BacktestRiskDecl.legacy_param_keys``
+        when set (e.g. morpho_blue -> "morpho"), otherwise the connector name —
+        the same fan-out semantics ``LiquidationParamRegistry`` uses for
+        protocol defaults. The alias data lives on the decl so this helper
+        contains zero protocol literals.
+
+        Returns ``(supply_apys, borrow_apys)`` — only connectors that declare
+        both are included; connectors that declare neither are skipped.
+        """
+        # Lazy import — keeps the connector registry walk off the hot path.
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+        supply: dict[str, Decimal] = {}
+        borrow: dict[str, Decimal] = {}
+        for connector in CONNECTOR_REGISTRY.with_lending_read():
+            lr = connector.lending_read
+            if lr is None:
+                continue
+            if lr.backtest_default_supply_apy is None and lr.backtest_default_borrow_apy is None:
+                continue
+            # Publish under every declared legacy key, else the connector name.
+            br = connector.backtest_risk
+            legacy_keys = br.legacy_param_keys if br and br.legacy_param_keys else (connector.name,)
+            for legacy_key in legacy_keys:
+                if lr.backtest_default_supply_apy is not None:
+                    supply[legacy_key] = Decimal(lr.backtest_default_supply_apy)
+                if lr.backtest_default_borrow_apy is not None:
+                    borrow[legacy_key] = Decimal(lr.backtest_default_borrow_apy)
+        return supply, borrow
 
     def _init_apy_provider(self) -> None:
         """Initialize the LendingAPYProvider for historical lookups."""

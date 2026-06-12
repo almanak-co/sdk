@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import pkgutil
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -28,6 +29,7 @@ from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
 __all__ = [
     "CONNECTOR_REGISTRY",
     "CONNECTOR_DESCRIPTOR_REGISTRY",
+    "BacktestRiskDecl",
     "CapabilitiesSpec",
     "Connector",
     "ConnectorDescriptor",
@@ -36,6 +38,7 @@ __all__ = [
     "ConnectorDiscoveryError",
     "ImportRef",
     "LendingReadDecl",
+    "LiquidationDefault",
     "MetadataAmountEncoding",
     "PerpsReadDecl",
     "StrategyMatrixEntry",
@@ -402,6 +405,103 @@ class YieldPokeDecl:
             raise ValueError(f"YieldPokeDecl.poke must be an ImportRef, got {self.poke!r}")
 
 
+@dataclass(frozen=True)
+class LiquidationDefault:
+    """Per-protocol liquidation parameter triple (plan 022).
+
+    Carries the three numbers that describe liquidation behavior for a venue:
+    ``liquidation_threshold`` for lending (LTV at which liquidation fires),
+    ``maintenance_margin`` for perps (minimum collateral ratio), and
+    ``liquidation_penalty`` (fee charged during liquidation). One of the first
+    two fields is 0 depending on venue type; the plan deliberately keeps a
+    single shape for both venue classes rather than introducing a union type.
+    """
+
+    liquidation_threshold: Decimal
+    maintenance_margin: Decimal
+    liquidation_penalty: Decimal
+
+    def __post_init__(self) -> None:
+        """Reject non-Decimal fields so float/Decimal mixing fails at declaration."""
+        for field_name in ("liquidation_threshold", "maintenance_margin", "liquidation_penalty"):
+            value = getattr(self, field_name)
+            if not isinstance(value, Decimal):
+                raise ValueError(
+                    f"LiquidationDefault.{field_name} must be a Decimal, got {type(value).__qualname__}: {value!r}"
+                )
+
+
+@dataclass(frozen=True)
+class BacktestRiskDecl:
+    """Connector-owned backtesting risk-parameter declaration (plan 022).
+
+    ``liquidation_default`` is the protocol-level default triple (asset=None
+    lookup). ``liquidation_asset_params`` carries per-asset overrides as
+    ``{UPPER_ASSET: (threshold, maintenance_margin, penalty)}`` triples —
+    a 3-tuple rather than a 2-tuple so that both lending (margin=0) and perps
+    (threshold=0) rows fit the same shape.
+
+    ``legacy_param_keys`` lists the historical ``LiquidationParamRegistry`` /
+    ``InterestCalculator`` protocol keys this connector's rows are published under.
+    Empty means the connector name is the sole key.  Exists for byte-parity with
+    the pre-plan-022 hand-maintained tables; new connectors should never set it.
+    Examples: morpho_blue -> ``("morpho",)``; gmx_v2 -> ``("gmx", "gmx_v2")``.
+
+    APY defaults are NOT carried here — they reuse the existing VIB-5040 seam
+    (``LendingReadDecl.backtest_default_supply_apy`` / ``borrow_apy``).
+
+    Registry key is the connector NAME (not the PerpsReadRegistry canonical —
+    hyperliquid declares no perps_read and would be unreachable via that path).
+    """
+
+    liquidation_default: LiquidationDefault | None = None
+    # per-asset triples (threshold, maintenance_margin, penalty)
+    # keys must be UPPER-cased asset symbols; None means no asset overrides
+    liquidation_asset_params: Mapping[str, tuple[Decimal, Decimal, Decimal]] | None = None
+    legacy_param_keys: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the declaration's fields."""
+        if self.liquidation_default is not None and not isinstance(self.liquidation_default, LiquidationDefault):
+            raise ValueError(
+                f"BacktestRiskDecl.liquidation_default must be None or a LiquidationDefault, "
+                f"got {self.liquidation_default!r}"
+            )
+        if self.liquidation_asset_params is not None:
+            if not isinstance(self.liquidation_asset_params, Mapping):
+                raise ValueError(
+                    f"BacktestRiskDecl.liquidation_asset_params must be None or a Mapping, "
+                    f"got {self.liquidation_asset_params!r}"
+                )
+            for asset_key, triple in self.liquidation_asset_params.items():
+                if not isinstance(asset_key, str) or asset_key != asset_key.upper():
+                    raise ValueError(
+                        f"BacktestRiskDecl.liquidation_asset_params keys must be UPPER-cased strings, got {asset_key!r}"
+                    )
+                if not isinstance(triple, tuple) or len(triple) != 3:
+                    raise ValueError(
+                        f"BacktestRiskDecl.liquidation_asset_params[{asset_key!r}] must be a "
+                        f"3-tuple (threshold, maintenance_margin, penalty), got {triple!r}"
+                    )
+                if not all(isinstance(element, Decimal) for element in triple):
+                    raise ValueError(
+                        f"BacktestRiskDecl.liquidation_asset_params[{asset_key!r}] elements must all be "
+                        f"Decimal, got {triple!r}"
+                    )
+        if not isinstance(self.legacy_param_keys, tuple):
+            raise ValueError(
+                f"BacktestRiskDecl.legacy_param_keys must be a tuple[str, ...], got {self.legacy_param_keys!r}"
+            )
+        bad = [k for k in self.legacy_param_keys if not isinstance(k, str) or not k.strip()]
+        if bad:
+            raise ValueError(f"BacktestRiskDecl.legacy_param_keys must contain only non-empty strings, got {bad!r}")
+        non_lowercase = [k for k in self.legacy_param_keys if k != k.lower()]
+        if non_lowercase:
+            raise ValueError(f"BacktestRiskDecl.legacy_param_keys must be lowercase, got {non_lowercase!r}")
+        if len(set(self.legacy_param_keys)) != len(self.legacy_param_keys):
+            raise ValueError(f"BacktestRiskDecl.legacy_param_keys contains duplicates: {self.legacy_param_keys!r}")
+
+
 # Canonical backtest adapter types — mirrors ``KNOWN_STRATEGY_TYPES`` in
 # ``almanak/framework/backtesting/adapters/registry.py`` (the descriptor stays
 # strategy-safe, so the vocabulary is restated here; an equivalence test pins
@@ -487,6 +587,7 @@ class Connector:
     yield_poke: YieldPokeDecl | None = None
     dex_volume: DexVolumeDecl | None = None
     backtest_strategy_type: BacktestStrategyTypeDecl | None = None
+    backtest_risk: BacktestRiskDecl | None = None
     metadata_amount_encoding: MetadataAmountEncoding | None = None
     fungible_lp: bool = False
     prediction_read: ImportRef | None = None
@@ -560,6 +661,7 @@ class Connector:
         self._validate_yield_poke()
         self._validate_dex_volume()
         self._validate_backtest_strategy_type()
+        self._validate_backtest_risk()
         self._validate_metadata_amount_encoding()
         self._validate_fungible_lp()
         self._validate_receipt_parser_kwargs()
@@ -819,6 +921,11 @@ class Connector:
             raise ValueError(
                 f"BacktestStrategyTypeDecl.aliases must not include the effective primary name {effective_name!r}"
             )
+
+    def _validate_backtest_risk(self) -> None:
+        """Validate the optional backtest-risk declaration."""
+        if self.backtest_risk is not None and not isinstance(self.backtest_risk, BacktestRiskDecl):
+            raise ValueError(f"Connector.backtest_risk must be None or a BacktestRiskDecl, got {self.backtest_risk!r}")
 
     def _validate_fungible_lp(self) -> None:
         """Validate the fungible-LP (ERC20 LP token, no NFT discriminator) flag."""
@@ -1206,6 +1313,10 @@ class ConnectorRegistry:
     def with_yield_poke(self) -> tuple[Connector, ...]:
         """Return connectors that publish Anvil-fork yield-poke declarations."""
         return tuple(d for d in self.all() if d.yield_poke is not None)
+
+    def with_backtest_risk(self) -> tuple[Connector, ...]:
+        """Return connectors that publish backtest risk-parameter declarations (plan 022)."""
+        return tuple(d for d in self.all() if d.backtest_risk is not None)
 
     def with_principal_token_market_reader(self) -> tuple[Connector, ...]:
         """Return connectors that publish principal-token market readers."""

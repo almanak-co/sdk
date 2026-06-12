@@ -14,6 +14,7 @@ from almanak.connectors._connector import (
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec
+from almanak.connectors.morpho_blue.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
 
 CONNECTOR = Connector(
     name="morpho_blue",
@@ -69,8 +70,13 @@ CONNECTOR = Connector(
         attribute="PRIMITIVE",
     ),
     # Market-scoped account state (VIB-4929 PR-3a): non-USD-native; market params inject lltv.
+    # backtest_default_supply_apy / borrow_apy override the VIB-5040 deliberate omission;
+    # values come from interest.py's existing hardcoded behavior (0.035 / 0.04) so net
+    # simulation behavior is unchanged — this merely moves the literals to the manifest.
     lending_read=LendingReadDecl(
         rate_history_chains=("ethereum", "base"),
+        backtest_default_supply_apy="0.035",
+        backtest_default_borrow_apy="0.04",
         account_state=ImportRef(
             module="almanak.connectors.morpho_blue.lending_read", attribute="ACCOUNT_STATE_READ_SPEC"
         ),
@@ -81,6 +87,7 @@ CONNECTOR = Connector(
         chains=("ethereum",),
         poke=ImportRef(module="almanak.connectors.morpho_blue.backtest_poke", attribute="poke_morpho_blue"),
     ),
+    backtest_risk=_BACKTEST_RISK,
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
     strategy_chains=("ethereum", "base", "arbitrum", "polygon", "monad"),
     # Matrix output stays lending-only even though flash-loan intent is registered.

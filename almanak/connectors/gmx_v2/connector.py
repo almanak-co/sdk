@@ -13,6 +13,7 @@ from almanak.connectors._connector import (
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
+from almanak.connectors.gmx_v2.backtest_risk import BACKTEST_RISK as _BACKTEST_RISK
 
 CONNECTOR = Connector(
     name="gmx_v2",
@@ -69,6 +70,7 @@ CONNECTOR = Connector(
         chains=("arbitrum", "avalanche"),
         aliases=("gmx",),
     ),
+    backtest_risk=_BACKTEST_RISK,
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),
     strategy_chains=("arbitrum", "avalanche"),
 )
