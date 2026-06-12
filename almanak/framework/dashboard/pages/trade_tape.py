@@ -40,6 +40,7 @@ from almanak.framework.dashboard.utils import (
     get_block_explorer_url,
     is_approval_tx,
     pick_action_tx,
+    registry_handle_from_payload,
 )
 
 
@@ -610,28 +611,14 @@ def _format_lp_direction(row: TradeTapeRow, *, is_close: bool) -> tuple[str, str
     )
 
 
-def _registry_handle_from_payload(payload_json: str) -> str:
-    """Extract ``position_reference.registry_handle`` from a typed payload, or ''.
-
-    Multi-position strategies (``lp_dual`` / ``lp_triple``) stamp an explicit
-    handle (``leg_narrow`` / ``leg_wide``) on every accounting event so the
-    operator can tell which leg an LP_OPEN belongs to. Surfacing it on the
-    headline (Bug 6) replaces "row 1" / "row 2" guesswork with the strategy's
-    own naming.
-    """
-    if not payload_json:
-        return ""
-    try:
-        payload = json.loads(payload_json)
-    except (json.JSONDecodeError, TypeError):
-        return ""
-    if not isinstance(payload, dict):
-        return ""
-    ref = payload.get("position_reference")
-    if not isinstance(ref, dict):
-        return ""
-    handle = ref.get("registry_handle")
-    return str(handle) if handle else ""
+# Multi-position strategies (``lp_dual`` / ``lp_triple``) stamp an explicit
+# handle (``leg_narrow`` / ``leg_wide``) on every accounting event so the
+# operator can tell which leg an LP_OPEN belongs to. Surfacing it on the
+# headline (Bug 6) replaces "row 1" / "row 2" guesswork with the strategy's
+# own naming. The parser moved to ``dashboard.utils`` so the LP template's
+# multi-position leg labels share the exact same provenance (VIB-5073);
+# the private alias keeps this module's call sites and tests stable.
+_registry_handle_from_payload = registry_handle_from_payload
 
 
 def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:

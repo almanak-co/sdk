@@ -60,6 +60,7 @@ from almanak.framework.dashboard.templates._ohlcv_window import (
     normalize_timeframe,
     ohlcv_limit_for_timeframe,
 )
+from almanak.framework.dashboard.utils import registry_handle_from_payload
 
 
 @dataclass
@@ -918,6 +919,48 @@ def _render_lp_position_panels(deployment_id: str, api_client: Any) -> None:
         # data" (UAT card §A).
         logger.exception("render_position_lifecycle_section unexpected failure for %s", deployment_id)
         st.warning("Position lifecycle panel failed to render — check logs.")
+
+
+def registry_handles_from_trade_tape(api_client: Any, *, limit: int = 200) -> dict[str, str]:
+    """Map ``position_id`` (e.g. UniV3 NFT tokenId) → the strategy's actual registry handle.
+
+    Source: the trade-tape join (ledger × accounting × position event). Every
+    accounting OPEN/CLOSE row carries ``position_reference.registry_handle`` —
+    the handle the strategy itself stamped on the intent — alongside the
+    joined ``position_id``. This is the SAME provenance the Trade Tape
+    headline chip and the registry table surface, so the Position Status
+    cards and the Liquidity Distribution legend can never disagree with them
+    (VIB-5073: the lp_dual dashboard used to label the Nth distinct
+    position_id ``leg_<N>``, so a rebalanced leg — same handle, new tokenId —
+    rendered as a phantom ``leg_3`` that exists nowhere in the strategy
+    config).
+
+    Never synthesizes a handle: positions whose events carry no
+    ``registry_handle`` are simply absent from the map. Callers must fall
+    back to a clearly-non-handle label (the tokenId / a generic placeholder).
+
+    Rows arrive newest-first (gateway sorts timestamp DESC) and the first
+    handle seen per ``position_id`` wins, so a re-bound handle reflects the
+    most recent accounting write.
+
+    Returns ``{}`` on any failure — never raises (dashboard render path).
+    """
+    if api_client is None or not hasattr(api_client, "get_trade_tape"):
+        return {}
+    try:
+        response = api_client.get_trade_tape(limit=limit)
+    except Exception:  # noqa: BLE001 — render path must not take the panel down
+        logger.warning("registry_handles_from_trade_tape: get_trade_tape failed", exc_info=True)
+        return {}
+    handles: dict[str, str] = {}
+    for row in getattr(response, "rows", None) or []:
+        position_id = str(getattr(row, "position_id", "") or "")
+        if not position_id or position_id in handles:
+            continue
+        handle = registry_handle_from_payload(getattr(row, "accounting_payload_json", "") or "")
+        if handle:
+            handles[position_id] = handle
+    return handles
 
 
 def _liquidity_position_bounds(session_state: dict[str, Any]) -> list[dict[str, Any]]:

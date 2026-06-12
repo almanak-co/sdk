@@ -58,6 +58,7 @@ from almanak.framework.dashboard.templates.lp_dashboard import (
     get_traderjoe_v2_config,
     get_uniswap_v3_config,
     prepare_lp_session_state,
+    registry_handles_from_trade_tape,
     render_lp_dashboard,
 )
 
@@ -109,6 +110,7 @@ __all__ = [
     "LP_CRITICAL_KEYS",
     "render_lp_dashboard",
     "prepare_lp_session_state",
+    "registry_handles_from_trade_tape",
     "get_uniswap_v3_config",
     "get_aerodrome_config",
     "get_traderjoe_v2_config",

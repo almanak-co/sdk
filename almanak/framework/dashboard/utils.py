@@ -4,6 +4,7 @@ Contains formatting helpers and other utility functions.
 """
 
 import html
+import json
 import logging
 import re
 from decimal import Decimal
@@ -22,6 +23,36 @@ from almanak.framework.dashboard.models import (
     StrategyStatus,
     TimelineEventType,
 )
+
+
+def registry_handle_from_payload(payload_json: str) -> str:
+    """Extract ``position_reference.registry_handle`` from a typed accounting payload, or ``''``.
+
+    Multi-position strategies (``lp_dual`` / ``lp_triple``) stamp an explicit
+    handle (``leg_narrow`` / ``leg_wide``) on every accounting OPEN/CLOSE event
+    via :class:`almanak.framework.accounting.position_reference.PositionReference`.
+    This is the strategy's OWN per-leg naming — the only legitimate source for
+    a ``leg_*`` label on any dashboard surface. Shared by the Trade Tape
+    headline chip (Bug 6) and the LP template's multi-position leg labels
+    (VIB-5073): renderers must never synthesize a handle from a position
+    ordinal.
+
+    Returns ``''`` on missing / malformed payloads — never raises (dashboard
+    render path).
+    """
+    if not payload_json:
+        return ""
+    try:
+        payload = json.loads(payload_json)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    ref = payload.get("position_reference")
+    if not isinstance(ref, dict):
+        return ""
+    handle = ref.get("registry_handle")
+    return str(handle) if handle else ""
 
 
 def format_usd(value: Decimal, *, precise_small: bool = False) -> str:
