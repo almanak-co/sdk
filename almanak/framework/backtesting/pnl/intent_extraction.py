@@ -11,7 +11,7 @@ Extracted from pnl/engine.py for module size management.
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from decimal import Decimal
 from typing import Any
 
@@ -19,6 +19,54 @@ from almanak.framework.backtesting.models import IntentType
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 
 logger = logging.getLogger(__name__)
+
+# Separators seen in perp market identifiers: "ETH/USD" (GMX), "ETH-USD",
+# "SOL-PERP" (Drift); bare symbols ("ETH", Hyperliquid) have no separator.
+_PERP_MARKET_SEPARATORS = ("/", "-", ":", "_")
+
+
+def _perp_market_base_token(market: str) -> str | None:
+    """Parse the base token symbol from a perp market identifier.
+
+    Returns None for address-style identifiers (0x...), which cannot be
+    mapped to a priceable symbol without chain data.
+    """
+    candidate = market.strip()
+    if not candidate or candidate.lower().startswith("0x"):
+        return None
+    for separator in _PERP_MARKET_SEPARATORS:
+        if separator in candidate:
+            candidate = candidate.split(separator)[0].strip()
+            break
+    if not candidate:
+        return None
+    return candidate.upper()
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    """Convert ``value`` to Decimal, returning None when not numeric.
+
+    ``Decimal(str(value))`` round-trips Decimal inputs exactly, so no
+    type-dispatch is needed (VIB-4062: no caller-bifurcation on Decimal).
+    """
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def intent_is_long(intent: Any) -> bool:
+    """Resolve the directional side of a perp intent.
+
+    An explicit ``side`` string ("short") overrides the boolean ``is_long``
+    attribute; defaults to long, matching the engine's historical behaviour.
+    """
+    side = getattr(intent, "side", None)
+    if isinstance(side, str) and side.lower() == "short":
+        return False
+    return bool(getattr(intent, "is_long", True))
 
 
 def extract_intent(decide_result: Any) -> Any:
@@ -176,6 +224,13 @@ def get_intent_protocol(intent: Any) -> str:
 def get_intent_tokens(intent: Any) -> list[str]:
     """Extract the tokens involved in an intent.
 
+    Perp intents carry a market identifier ("ETH/USD") instead of token
+    attributes; the base symbol goes first so price lookups and the simulated
+    position track the traded asset, with the collateral token after it.
+    Address-style markets return the UNKNOWN sentinel (the position falls
+    back to its entry price) rather than letting the collateral token become
+    the priced token, which would hide all price PnL.
+
     Args:
         intent: Intent object
 
@@ -183,6 +238,20 @@ def get_intent_tokens(intent: Any) -> list[str]:
         List of token symbols
     """
     tokens: list[str] = []
+
+    market = getattr(intent, "market", None)
+    if isinstance(market, str) and market:
+        base_token = _perp_market_base_token(market)
+        if base_token is None:
+            logger.warning(
+                "Cannot resolve a token symbol from perp market %r; the simulated position will not be price-tracked",
+                market,
+            )
+            return ["UNKNOWN"]
+        tokens.append(base_token)
+        collateral_token = getattr(intent, "collateral_token", None)
+        if isinstance(collateral_token, str) and collateral_token and collateral_token.upper() not in tokens:
+            tokens.append(collateral_token.upper())
 
     # Common attribute names for tokens
     for attr in [
@@ -235,8 +304,10 @@ def get_intent_amount_usd(  # noqa: C901
         ValueError: If strict_reproducibility is True and USD amount cannot be
             determined (no USD field, no price available, or no amount field).
     """
-    # Check for direct USD amount
-    for attr in ["amount_usd", "notional_usd", "value_usd", "collateral_usd"]:
+    # Check for direct USD amount. size_usd is the perp notional
+    # (PerpOpenIntent / PerpCloseIntent) — the fee and slippage base — and
+    # must rank above collateral_usd so collateral never shadows notional.
+    for attr in ["amount_usd", "notional_usd", "size_usd", "value_usd", "collateral_usd"]:
         if hasattr(intent, attr):
             value = getattr(intent, attr)
             if value is not None:
@@ -316,6 +387,157 @@ def get_intent_amount_usd(  # noqa: C901
     return Decimal("0")
 
 
+def _collateral_usd_from_intent(
+    intent: Any,
+    market_state: MarketState,
+    strict_reproducibility: bool,
+    track_fallback: Callable[[str], None] | None,
+) -> Decimal | None:
+    """Price a perp intent's declared collateral, or None when unresolvable.
+
+    A chained ``"all"`` amount has no value in the generic lane (there is no
+    previous-step output to consume), so it resolves to None and the caller
+    falls back to ``size_usd / leverage``.
+    """
+    collateral_amount = getattr(intent, "collateral_amount", None)
+    if collateral_amount is None or str(collateral_amount).lower() == "all":
+        return None
+    amount = _decimal_or_none(collateral_amount)
+    if amount is None:
+        return None
+    collateral_token = getattr(intent, "collateral_token", None)
+    if not isinstance(collateral_token, str) or not collateral_token:
+        return None
+    try:
+        return amount * market_state.get_price(collateral_token)
+    except KeyError as err:
+        if strict_reproducibility:
+            msg = (
+                f"Cannot price perp collateral: no price available for {collateral_token!r}. "
+                "Set strict_reproducibility=False to fall back to size_usd / leverage."
+            )
+            raise ValueError(msg) from err
+        logger.warning(
+            "No price for perp collateral token %r; deriving collateral from size_usd / leverage",
+            collateral_token,
+        )
+        if track_fallback:
+            track_fallback("default_usd_amount")
+        return None
+
+
+def get_perp_open_params(
+    intent: Any,
+    market_state: MarketState,
+    fallback_amount_usd: Decimal,
+    strict_reproducibility: bool = False,
+    track_fallback: Callable[[str], None] | None = None,
+) -> tuple[Decimal, Decimal]:
+    """Resolve ``(collateral_usd, leverage)`` for a PERP_OPEN intent.
+
+    Collateral comes from ``collateral_amount * price(collateral_token)``;
+    a chained ``"all"`` amount or an unpriceable collateral token falls back
+    to ``size_usd / leverage``. Intents without perp fields (duck-typed test
+    intents) keep the legacy semantics: ``fallback_amount_usd`` is the
+    collateral and the declared leverage is used as-is.
+
+    When ``size_usd`` is present, the returned leverage is derived as
+    ``size_usd / collateral_usd`` so the simulated position's notional
+    (``collateral_usd * leverage``) equals the intent's size exactly.
+    """
+    size_usd = _decimal_or_none(getattr(intent, "size_usd", None))
+    leverage = _decimal_or_none(getattr(intent, "leverage", None)) or Decimal("1")
+    if leverage <= 0:
+        leverage = Decimal("1")
+
+    collateral_usd = _collateral_usd_from_intent(intent, market_state, strict_reproducibility, track_fallback)
+    if collateral_usd is None and size_usd is not None:
+        collateral_usd = size_usd / leverage
+    if collateral_usd is None:
+        collateral_usd = fallback_amount_usd
+    if size_usd is not None and collateral_usd > 0:
+        leverage = size_usd / collateral_usd
+    return collateral_usd, leverage
+
+
+def find_perp_close_position_id(intent: Any, positions: Sequence[Any]) -> str | None:
+    """Resolve the simulated position a PERP_CLOSE intent targets.
+
+    Venue position ids (e.g. PancakeSwap Perps' 0x tradeHash) never equal
+    simulated ids ("PERP_LONG_gmx_v2_ETH_<ts>"), so after an exact-id check
+    the match falls back to (base token from market, side, protocol) — the
+    way real venues key perp positions. The oldest matching position wins
+    (FIFO) when several are open.
+
+    Args:
+        intent: PERP_CLOSE intent object
+        positions: Open positions to match against
+
+    Returns:
+        The matched simulated position id, or None when nothing matches
+    """
+    from almanak.framework.backtesting.pnl.position_models import PositionType
+
+    explicit_id = getattr(intent, "position_id", None)
+    if isinstance(explicit_id, str) and explicit_id:
+        for position in positions:
+            if position.position_id == explicit_id:
+                return explicit_id
+
+    market = getattr(intent, "market", None)
+    base_token = None
+    if isinstance(market, str) and market:
+        base_token = _perp_market_base_token(market)
+        if base_token is None:
+            # Fail closed: an unparseable (address-style) market cannot
+            # discriminate between open positions, and closing the wrong
+            # position silently corrupts the books.
+            logger.warning(
+                "PERP_CLOSE market %r cannot be resolved to a base token; refusing ambiguous close matching",
+                market,
+            )
+            return None
+    is_long = intent_is_long(intent)
+    # Resolve protocol with the same resolver the open path used to stamp the
+    # position, so protocol_name / connector / adapter spellings match too.
+    protocol: str | None = get_intent_protocol(intent)
+    if protocol == "default":
+        protocol = None
+
+    candidates = []
+    for position in positions:
+        if not getattr(position, "is_perp", False):
+            continue
+        if (position.position_type == PositionType.PERP_LONG) != is_long:
+            continue
+        if base_token is not None:
+            position_token = position.tokens[0].upper() if position.tokens else ""
+            if position_token != base_token:
+                continue
+        if protocol and position.protocol and position.protocol.lower() != protocol:
+            continue
+        candidates.append(position)
+
+    if not candidates:
+        logger.warning(
+            "PERP_CLOSE matched no open simulated perp position (market=%s, is_long=%s, protocol=%s)",
+            market,
+            is_long,
+            protocol,
+        )
+        return None
+    candidates.sort(key=lambda position: position.entry_time)
+    if len(candidates) > 1:
+        logger.warning(
+            "PERP_CLOSE matched %d open perp positions for market=%s is_long=%s; closing the oldest (%s)",
+            len(candidates),
+            market,
+            is_long,
+            candidates[0].position_id,
+        )
+    return candidates[0].position_id
+
+
 def estimate_gas_for_intent(intent_type: IntentType) -> int:
     """Estimate gas usage for an intent type.
 
@@ -383,7 +605,17 @@ def get_executed_price(
         market_price = Decimal("1")
 
     # Apply slippage for market orders
-    if intent_type in (IntentType.SWAP, IntentType.PERP_OPEN, IntentType.PERP_CLOSE):
+    if intent_type in (IntentType.PERP_OPEN, IntentType.PERP_CLOSE):
+        # Adverse slippage per side: open long / close short are buys
+        # (higher price); open short / close long are sells (lower price).
+        # Perp intents carry no to_token, so direction comes from the side.
+        is_long = intent_is_long(intent)
+        is_buy = is_long if intent_type == IntentType.PERP_OPEN else not is_long
+        if is_buy:
+            return market_price * (Decimal("1") + slippage_pct)
+        return market_price * (Decimal("1") - slippage_pct)
+
+    if intent_type == IntentType.SWAP:
         # Slippage is adverse: buying gets a higher price, selling gets a lower price.
         # primary_token = tokens[0], which for swaps is from_token (the token being sold).
         # Determine direction by checking to_token: if the intent has a to_token that

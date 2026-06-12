@@ -1675,9 +1675,11 @@ class PnLBacktester:
         """
         return self.slippage_models.get(protocol, self.slippage_models["default"])
 
-    # crap-allowlist: VIB-5095 — pre-existing cc=30 dispatcher (already noqa: C901); this PR
-    # touched 2 lines (pass market_state to apply_fill). Refactor is blocked on the backtesting
-    # blueprint (VIB-5080) per .claude/rules/crap-refactor.md step 1; extraction plan in VIB-5095.
+    # crap-allowlist: VIB-5095 — pre-existing cc=30 dispatcher (already noqa: C901); narrow
+    # touches only: #2744 passes market_state to apply_fill, the perp-intent work adds one
+    # dispatch line routing close resolution through A-grade, test-covered helpers. Refactor is
+    # blocked on the backtesting blueprint (VIB-5080) per .claude/rules/crap-refactor.md step 1;
+    # extraction plan in VIB-5095.
     async def _execute_intent(  # noqa: C901
         self,
         intent: Any,
@@ -1757,6 +1759,10 @@ class PnLBacktester:
         amount_usd = self._get_intent_amount_usd(
             intent, market_state, strict_reproducibility=config.strict_reproducibility
         )
+
+        # Close targets resolve before fee/slippage: a perp full close
+        # (size_usd=None) takes its fee notional from the matched position.
+        position_close_id, amount_usd = self._resolve_position_close(intent, intent_type, portfolio, amount_usd)
 
         # Get fee and slippage models for this protocol
         fee_model = self.get_fee_model(protocol)
@@ -2003,9 +2009,6 @@ class PnLBacktester:
             strict_reproducibility=config.strict_reproducibility,
         )
 
-        # Get position to close if applicable
-        position_close_id = self._get_position_close_id(intent)
-
         # Create the simulated fill
         fill = SimulatedFill(
             timestamp=timestamp,
@@ -2146,6 +2149,9 @@ class PnLBacktester:
             market_state=market_state,
         )
 
+    # crap-allowlist: VIB-5079 — pre-existing complexity, reduced by this PR (cc 30 -> 25:
+    # the PERP_OPEN branch moved to the test-covered _perp_open_delta helper); the per-type
+    # dispatch decomposition (mirroring _engine_helpers.calculate_token_flows) is tracked in VIB-5079.
     def _create_position_delta(  # noqa: C901
         self,
         intent: Any,
@@ -2318,43 +2324,117 @@ class PnLBacktester:
             )
 
         elif intent_type == IntentType.PERP_OPEN:
-            # Create perp position
-            token = tokens[0] if tokens else "WETH"
-            amount_usd = self._get_intent_amount_usd(
-                intent, market_state, strict_reproducibility=strict_reproducibility
+            return self._perp_open_delta(
+                intent, protocol, tokens, executed_price, timestamp, market_state, strict_reproducibility
             )
 
-            # Get leverage
-            leverage = getattr(intent, "leverage", Decimal("1"))
-            if isinstance(leverage, int | float):
-                leverage = Decimal(str(leverage))
-
-            # Determine if long or short
-            is_long = getattr(intent, "is_long", True)
-            side = getattr(intent, "side", "long")
-            if isinstance(side, str) and side.lower() == "short":
-                is_long = False
-
-            if is_long:
-                return SimulatedPosition.perp_long(
-                    token=token,
-                    collateral_usd=amount_usd,
-                    leverage=leverage,
-                    entry_price=executed_price,
-                    entry_time=timestamp,
-                    protocol=protocol,
-                )
-            else:
-                return SimulatedPosition.perp_short(
-                    token=token,
-                    collateral_usd=amount_usd,
-                    leverage=leverage,
-                    entry_price=executed_price,
-                    entry_time=timestamp,
-                    protocol=protocol,
-                )
-
         return None
+
+    def _perp_open_delta(
+        self,
+        intent: Any,
+        protocol: str,
+        tokens: list[str],
+        executed_price: Decimal,
+        timestamp: datetime,
+        market_state: MarketState,
+        strict_reproducibility: bool,
+    ) -> SimulatedPosition:
+        """Create the simulated position for a PERP_OPEN intent.
+
+        The position's collateral comes from the intent's declared collateral
+        (or size_usd / leverage), NOT from amount_usd — amount_usd is the
+        notional and is only the legacy fallback for duck-typed intents
+        without perp fields.
+        """
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
+
+        from .intent_extraction import get_perp_open_params, intent_is_long
+
+        token = tokens[0] if tokens else "WETH"
+        amount_usd = self._get_intent_amount_usd(intent, market_state, strict_reproducibility=strict_reproducibility)
+        collateral_usd, leverage = get_perp_open_params(
+            intent,
+            market_state,
+            fallback_amount_usd=amount_usd,
+            strict_reproducibility=strict_reproducibility,
+            track_fallback=self._track_fallback,
+        )
+
+        factory = SimulatedPosition.perp_long if intent_is_long(intent) else SimulatedPosition.perp_short
+        return factory(
+            token=token,
+            collateral_usd=collateral_usd,
+            leverage=leverage,
+            entry_price=executed_price,
+            entry_time=timestamp,
+            protocol=protocol,
+        )
+
+    def _resolve_position_close(
+        self,
+        intent: Any,
+        intent_type: IntentType,
+        portfolio: SimulatedPortfolio,
+        amount_usd: Decimal,
+    ) -> tuple[str | None, Decimal]:
+        """Resolve the position a closing intent targets and its notional.
+
+        Perp closes match against the portfolio's open positions (venue
+        position ids never equal simulated ids); every other intent type
+        keeps the attribute-based id lookup and its extracted notional.
+        """
+        if intent_type == IntentType.PERP_CLOSE:
+            return self._resolve_perp_close(intent, portfolio, amount_usd)
+        return self._get_position_close_id(intent), amount_usd
+
+    def _resolve_perp_close(
+        self,
+        intent: Any,
+        portfolio: SimulatedPortfolio,
+        amount_usd: Decimal,
+    ) -> tuple[str | None, Decimal]:
+        """Resolve the simulated position a PERP_CLOSE targets and its notional.
+
+        The simulated close machinery is all-or-nothing: a matched position is
+        closed in full. A partial ``size_usd`` is honoured as the fee notional
+        but logged, since the position itself still closes entirely.
+
+        Args:
+            intent: PERP_CLOSE intent object
+            portfolio: Portfolio whose open positions are matched against
+            amount_usd: Notional extracted from the intent (0 for full closes)
+
+        Returns:
+            Tuple of (matched position id or None, effective close notional)
+        """
+        from .intent_extraction import find_perp_close_position_id
+
+        position_close_id = find_perp_close_position_id(intent, portfolio.positions)
+        if position_close_id is None:
+            return None, amount_usd
+        position = portfolio.get_position(position_close_id)
+        if position is None:
+            return position_close_id, amount_usd
+        if amount_usd <= 0:
+            amount_usd = position.notional_usd
+        elif amount_usd < position.notional_usd:
+            logger.warning(
+                "PERP_CLOSE size_usd=%s is below position notional %s; the simulated close "
+                "is all-or-nothing and closes the full position",
+                amount_usd,
+                position.notional_usd,
+            )
+        elif amount_usd > position.notional_usd:
+            # Fees/slippage cannot be charged on notional that does not exist.
+            logger.warning(
+                "PERP_CLOSE size_usd=%s exceeds matched position notional %s; "
+                "capping the close notional to the position",
+                amount_usd,
+                position.notional_usd,
+            )
+            amount_usd = position.notional_usd
+        return position_close_id, amount_usd
 
     def _get_position_close_id(self, intent: Any) -> str | None:
         """Get the position ID to close for closing intents.
