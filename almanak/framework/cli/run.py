@@ -80,84 +80,15 @@ from ..execution.submitter.public import PublicMempoolSubmitter
 from ..runner import IterationResult
 from ..strategies.intent_strategy import IndicatorProvider
 
+# Moved to _strategy_config so the backtest CLI can use it without importing
+# this (heavy) module; re-exported here for existing importers.
+from ._strategy_config import DictConfigWrapper  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 # Well-known Anvil default account #0 (used when no private key is configured)
 ANVIL_DEFAULT_ADDRESS = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 ANVIL_DEFAULT_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"  # gitleaks:allow
-
-
-# =============================================================================
-# Dict Config Wrapper
-# =============================================================================
-
-
-class DictConfigWrapper:
-    """Wrapper for dict configs to provide required methods.
-
-    StrategyBase expects config objects to have:
-    - to_dict(): Serialize to dictionary
-    - update(**kwargs): Update config values
-
-    This wrapper makes plain dicts compatible.
-    """
-
-    def __init__(self, data: dict[str, Any]):
-        """Initialize with dictionary data."""
-        self._data = data
-        # Copy all keys as attributes for getattr access
-        for key, value in data.items():
-            setattr(self, key, value)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
-        return dict(self._data)
-
-    def __getattr__(self, name: str) -> Any:
-        """Provide a clearer missing-key error for strategy authors."""
-        available_keys = ", ".join(sorted(self._data.keys())) if self._data else "(empty config)"
-        raise AttributeError(f"Config key '{name}' not found in DictConfigWrapper. Available keys: {available_keys}")
-
-    def update(self, **kwargs) -> Any:
-        """Update config values.
-
-        Returns a result object compatible with StrategyBase expectations.
-        """
-        from dataclasses import dataclass
-
-        @dataclass
-        class UpdateResult:
-            success: bool = True
-            error: str | None = None
-            updated_fields: list[Any] | None = None
-            previous_values: dict[Any, Any] | None = None
-
-            def __post_init__(self):
-                if self.updated_fields is None:
-                    self.updated_fields = []
-                if self.previous_values is None:
-                    self.previous_values = {}
-
-        previous = {}
-        for key, value in kwargs.items():
-            if key in self._data:
-                previous[key] = self._data[key]
-            self._data[key] = value
-            setattr(self, key, value)
-
-        return UpdateResult(
-            success=True,
-            updated_fields=list(kwargs.keys()),
-            previous_values=previous,
-        )
-
-    def __getitem__(self, key: str) -> Any:
-        """Support dict-like access."""
-        return self._data[key]
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """Support dict-like .get() access."""
-        return self._data.get(key, default)
 
 
 # =============================================================================

@@ -180,11 +180,11 @@ def _instantiate_strategy(  # noqa: C901
     Two call conventions are supported:
 
     1. ``IntentStrategy`` subclasses: discovered via ``issubclass`` check.
-       The helper tries to resolve a dataclass config type from
-       ``__orig_bases__``, converts numeric fields to ``Decimal`` as needed,
-       wraps plain dicts in ``DictConfigWrapper``, then introspects
-       ``__init__`` to filter optional kwargs (``chains`` / ``chain_wallets``)
-       so older strategies without ``**kwargs`` don't TypeError.
+       The config dict is coerced into the strategy's declared config
+       dataclass via ``_strategy_config.coerce_strategy_config`` (shared
+       with ``strat backtest``), then the helper introspects ``__init__``
+       to filter optional kwargs (``chains`` / ``chain_wallets``) so older
+       strategies without ``**kwargs`` don't TypeError.
     2. Other classes (``StrategyBase`` subclasses, test doubles): try the
        config-dict convention first, fall back to the no-arg constructor
        on TypeError.
@@ -209,10 +209,7 @@ def _instantiate_strategy(  # noqa: C901
     Returns:
         The constructed strategy instance.
     """
-    from decimal import Decimal
-    from typing import get_args, get_type_hints
-
-    from .run import DictConfigWrapper
+    from ._strategy_config import coerce_strategy_config
 
     IntentStrategyRuntime = _intent_strategy_runtime()
 
@@ -221,59 +218,9 @@ def _instantiate_strategy(  # noqa: C901
             # IntentStrategy requires specific parameters
             primary_chain = strategy_chains[0] if multi_chain else runtime_config.chain
 
-            # Check if strategy has a config class (generic parameter)
-            # Try to get the config type from __orig_bases__
-            config_instance: Any = strategy_config
-            try:
-                bases = getattr(strategy_class, "__orig_bases__", [])
-                for base in bases:
-                    args = get_args(base)
-                    if args and hasattr(args[0], "__dataclass_fields__"):
-                        # Found dataclass config type - create instance with defaults
-                        config_class = args[0]
-
-                        # Convert numeric values to Decimal where needed
-                        type_hints = get_type_hints(config_class)
-                        converted_config: dict[str, Any] = {}
-                        # Track fields that are NOT in the dataclass (excluding runtime + framework meta-keys)
-                        runtime_fields = {"deployment_id", "chain", "wallet_address"}
-                        # Meta-keys consumed by the CLI/framework, not by strategy config classes
-                        framework_meta_keys = {"anvil_funding", "strategy_display_name"}
-                        unknown_fields = []
-                        for k, v in strategy_config.items():
-                            if k in config_class.__dataclass_fields__:
-                                field_type = type_hints.get(k)
-                                # Convert int/float/str to Decimal for Decimal fields
-                                if field_type == Decimal and isinstance(v, int | float | str):
-                                    try:
-                                        converted_config[k] = Decimal(str(v))
-                                    except Exception:
-                                        converted_config[k] = v
-                                else:
-                                    converted_config[k] = v
-                            elif k not in runtime_fields and k not in framework_meta_keys:
-                                unknown_fields.append(k)
-
-                        # Use dataclass config, filtering out unknown fields
-                        # (runtime fields like deployment_id/chain are handled separately)
-                        if unknown_fields:
-                            logger.debug(
-                                f"Config class {config_class.__name__} ignoring unknown fields: {unknown_fields}"
-                            )
-                            click.echo(f"  Config class: {config_class.__name__} (ignored: {unknown_fields})")
-                        else:
-                            click.echo(f"  Config class: {config_class.__name__}")
-                        config_instance = config_class(**converted_config) if converted_config else config_class()
-                        break
-            except Exception as e:
-                logger.debug(f"Could not infer config class: {e}")
-                # Fall back to using dict or default config
-                pass
-
-            # Wrap dict config in DictConfigWrapper for compatibility
-            if isinstance(config_instance, dict):
-                config_instance = DictConfigWrapper(config_instance)
-                click.echo("  Config wrapped in DictConfigWrapper")
+            # Resolve the dataclass config type (or DictConfigWrapper fallback)
+            # through the coercion path shared with `strat backtest`.
+            config_instance = coerce_strategy_config(strategy_class, strategy_config)
 
             # Resolve wallet for strategy construction
             strat_wallet = runtime_config.execution_address

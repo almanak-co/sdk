@@ -23,7 +23,8 @@ from ...backtesting import (
     BacktestResult,
     PaperTraderConfig,
 )
-from ...strategies import list_strategies
+from ...strategies import IntentStrategy, list_strategies
+from .._strategy_config import coerce_strategy_config
 
 # =============================================================================
 # Configuration
@@ -65,9 +66,16 @@ def _create_backtest_strategy(
 ) -> Any:
     """Instantiate a strategy for backtesting.
 
-    IntentStrategy subclasses require (config, chain, wallet_address).
-    Simpler classes may accept only (config,) or no arguments.
-    This helper tries each signature in order.
+    IntentStrategy subclasses are typed against a per-strategy config
+    dataclass (``IntentStrategy[ConfigT]``) and read ``self.config.<field>``
+    in ``__init__``, so the raw config dict is coerced through the same
+    path the runner uses (``_strategy_config.coerce_strategy_config``)
+    before construction. Construction errors propagate -- a strategy that
+    cannot be built must fail the backtest loudly, not fall through to a
+    wrong signature.
+
+    Other classes (test doubles, duck-typed strategies) keep the legacy
+    signature ladder: (config, chain, wallet), then (config,), then ().
 
     Args:
         strategy_class: The strategy class to instantiate.
@@ -77,7 +85,11 @@ def _create_backtest_strategy(
     Returns:
         An instantiated strategy object.
     """
-    # 1. Try IntentStrategy signature: (config, chain, wallet_address)
+    if isinstance(strategy_class, type) and issubclass(strategy_class, IntentStrategy):
+        config_instance = coerce_strategy_config(strategy_class, config)
+        return strategy_class(config_instance, chain, _BACKTEST_WALLET)
+
+    # 1. Try IntentStrategy-shaped signature: (config, chain, wallet_address)
     try:
         return strategy_class(config, chain, _BACKTEST_WALLET)
     except TypeError:
