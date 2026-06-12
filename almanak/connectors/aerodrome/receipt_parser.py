@@ -11,6 +11,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors._strategy_base import v3_registry_payload
 from almanak.connectors._strategy_base.base import (
     EventRegistry,
     HexDecoder,
@@ -2604,13 +2605,14 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
     # implementation in
     # ``almanak/connectors/uniswap_v3/receipt_parser.py``
     # (PR #1869 / T08 / T12). The dict-shape helpers
-    # (``_open_payload_disagrees`` / ``_build_close_receipt_payload`` /
-    # ``_merge_open_payload_fields``) are reused from
-    # ``UniswapV3ReceiptParser`` — they operate on plain dicts with no
-    # UniV3-specific assumptions, and re-implementing them here would be
-    # drift. The receipt-decoding (token_id from DecreaseLiquidity, pool from
-    # Pool Burn, NPM address) is Slipstream-specific because the emitter
-    # addresses and event signatures differ from canonical UniV3.
+    # (``open_payload_disagrees`` / ``build_close_receipt_payload`` /
+    # ``merge_open_payload_fields``) are shared via
+    # ``almanak.connectors._strategy_base.v3_registry_payload`` — they
+    # operate on plain dicts with no UniV3-specific assumptions, and
+    # re-implementing them here would be drift. The receipt-decoding
+    # (token_id from DecreaseLiquidity, pool from Pool Burn, NPM address)
+    # is Slipstream-specific because the emitter addresses and event
+    # signatures differ from canonical UniV3.
 
     def _nft_manager_address(self) -> str:
         """Return the canonical Slipstream NPM address for ``self.chain``.
@@ -2844,35 +2846,28 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
         2. Decode the DecreaseLiquidity log (``_decreaseliquidity_token_id``).
         3. Decode the Pool Burn log (``_pool_address_from_burn``).
         4. Verify receipt-derived identity anchors are present and non-zero.
-        5. Cross-check against ``open_payload`` (``_open_payload_disagrees``)
+        5. Cross-check against ``open_payload``
+           (``v3_registry_payload.open_payload_disagrees``)
            — refuse on disagreement.
         6. Compose the receipt-only payload
-           (``_build_close_receipt_payload``).
-        7. Merge OPEN-time fields (``_merge_open_payload_fields``) — ticks,
+           (``v3_registry_payload.build_close_receipt_payload``).
+        7. Merge OPEN-time fields (``v3_registry_payload.merge_open_payload_fields``) — ticks,
            OPEN-time amounts, original mint liquidity, fee tier, token
            labels (close receipt cannot re-derive these).
         8. Apply the ``fee_tier`` argument if ``open_payload`` didn't carry
            one (setdefault — OPEN-side wins).
 
-        Helpers ``_open_payload_disagrees`` / ``_build_close_receipt_payload``
-        / ``_merge_open_payload_fields`` are reused from
-        :class:`UniswapV3ReceiptParser` — they operate on plain dicts with
-        no UV3-specific assumptions and are the single source of truth for
-        the merge / cross-check semantics.
+        Helpers ``open_payload_disagrees`` / ``build_close_receipt_payload``
+        / ``merge_open_payload_fields`` are shared via
+        ``almanak.connectors._strategy_base.v3_registry_payload`` — they
+        operate on plain dicts with no UV3-specific assumptions and are the
+        single source of truth for the merge / cross-check semantics.
 
         Returns ``None`` when the close-side identity anchors (token_id +
         pool_address) cannot be derived OR cross-checks fail. The caller
         treats that as "fall back to ``accounting_only``" with an ERROR
         log (no zero substitution).
         """
-        # Local import keeps the module-load order independent — both
-        # parsers import each other's helpers only in the registry-payload
-        # path. The helpers are static / classmethod and require no UV3
-        # parser state.
-        from almanak.connectors.uniswap_v3.receipt_parser import (
-            UniswapV3ReceiptParser,
-        )
-
         lp_close = self.extract_lp_close_data(receipt)
         if lp_close is None:
             return None
@@ -2885,7 +2880,7 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
         pool_address = self._pool_address_from_burn(receipt)
         if not pool_address:
             return None
-        if UniswapV3ReceiptParser._open_payload_disagrees(
+        if v3_registry_payload.open_payload_disagrees(
             open_payload=open_payload,
             token_id=token_id,
             pool_address=pool_address,
@@ -2896,13 +2891,13 @@ class AerodromeSlipstreamReceiptParser(AerodromeReceiptParser):
         if not nft_manager_addr:
             return None
 
-        payload = UniswapV3ReceiptParser._build_close_receipt_payload(
+        payload = v3_registry_payload.build_close_receipt_payload(
             token_id=token_id,
             pool_address=pool_address,
             lp_close=lp_close,
             nft_manager_addr=nft_manager_addr,
         )
-        UniswapV3ReceiptParser._merge_open_payload_fields(payload, open_payload)
+        v3_registry_payload.merge_open_payload_fields(payload, open_payload)
         if fee_tier is not None and fee_tier > 0:
             payload.setdefault("fee_tier", int(fee_tier))
         if self.token0_symbol:

@@ -38,6 +38,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors._strategy_base import v3_receipt_parser_helpers, v3_registry_payload
 from almanak.connectors._strategy_base.base import (
     EventRegistry,
     HexDecoder,
@@ -533,22 +534,8 @@ class SushiSwapV3ReceiptParser:
             logger.debug(f"token1 decimals unresolved for chain={self.chain} (address={self.token1_address})")
 
     def _resolve_token_info(self, token: str) -> tuple[str, int | None]:
-        """Resolve token symbol and decimals via TokenResolver.
-
-        Args:
-            token: Token address or symbol
-
-        Returns:
-            Tuple of (symbol, decimals) or ("", None) if not found
-        """
-        try:
-            from almanak.framework.data.tokens.resolver import get_token_resolver
-
-            resolver = get_token_resolver()
-            resolved = resolver.resolve(token, self.chain)
-            return resolved.symbol, resolved.decimals
-        except Exception:
-            return "", None
+        """Back-compat delegate - see ``v3_receipt_parser_helpers.resolve_token_info``."""
+        return v3_receipt_parser_helpers.resolve_token_info(token, self.chain)
 
     def _resolve_decimals(self, token_address: str) -> int | None:
         """Resolve token decimals via the token resolver.
@@ -791,83 +778,13 @@ class SushiSwapV3ReceiptParser:
         else:
             return {"raw_data": data}
 
-    def _decode_swap_data(
-        self,
-        topics: list[Any],
-        data: str,
-        address: str,
-    ) -> dict[str, Any]:
-        """Decode Swap event data.
+    def _decode_swap_data(self, topics: list[Any], data: str, address: str) -> dict[str, Any]:
+        """Back-compat delegate - see ``v3_receipt_parser_helpers.decode_swap_data``."""
+        return v3_receipt_parser_helpers.decode_swap_data(topics, data, address, log=logger)
 
-        Swap event structure:
-        - topic1: sender (indexed)
-        - topic2: recipient (indexed)
-        - data: amount0 (int256), amount1 (int256), sqrtPriceX96 (uint160), liquidity (uint128), tick (int24)
-        """
-        try:
-            # Indexed: sender, recipient
-            sender = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
-            recipient = HexDecoder.topic_to_address(topics[2]) if len(topics) > 2 else ""
-
-            # Non-indexed: amount0, amount1, sqrtPriceX96, liquidity, tick
-            amount0 = HexDecoder.decode_int256(data, 0)
-            amount1 = HexDecoder.decode_int256(data, 32)
-            sqrt_price_x96 = HexDecoder.decode_uint160(data, 64)
-            liquidity = HexDecoder.decode_uint128(data, 96)
-            tick = HexDecoder.decode_int24(data, 128)
-
-            # Normalize address
-            pool_address = address.lower() if isinstance(address, str) else ""
-            if isinstance(address, bytes):
-                pool_address = "0x" + address.hex()
-
-            return {
-                "sender": sender,
-                "recipient": recipient,
-                "amount0": amount0,
-                "amount1": amount1,
-                "sqrt_price_x96": sqrt_price_x96,
-                "liquidity": liquidity,
-                "tick": tick,
-                "pool_address": pool_address,
-            }
-
-        except Exception as e:
-            logger.warning(f"Failed to decode Swap data: {e}")
-            return {"raw_data": data}
-
-    def _decode_transfer_data(
-        self,
-        topics: list[Any],
-        data: str,
-        address: str,
-    ) -> dict[str, Any]:
-        """Decode Transfer event data.
-
-        Transfer event structure:
-        - topic1: from (indexed)
-        - topic2: to (indexed)
-        - data: value (uint256)
-        """
-        try:
-            from_addr = HexDecoder.topic_to_address(topics[1]) if len(topics) > 1 else ""
-            to_addr = HexDecoder.topic_to_address(topics[2]) if len(topics) > 2 else ""
-            value = HexDecoder.decode_uint256(data, 0)
-
-            token_address = address.lower() if isinstance(address, str) else ""
-            if isinstance(address, bytes):
-                token_address = "0x" + address.hex()
-
-            return {
-                "from_addr": from_addr,
-                "to_addr": to_addr,
-                "value": value,
-                "token_address": token_address,
-            }
-
-        except Exception as e:
-            logger.warning(f"Failed to decode Transfer data: {e}")
-            return {"raw_data": data}
+    def _decode_transfer_data(self, topics: list[Any], data: str, address: str) -> dict[str, Any]:
+        """Back-compat delegate - see ``v3_receipt_parser_helpers.decode_transfer_data``."""
+        return v3_receipt_parser_helpers.decode_transfer_data(topics, data, address, log=logger)
 
     def _parse_swap_event(self, event: SushiSwapV3Event) -> SwapEventData | None:
         """Parse a Swap event into typed data."""
@@ -1166,23 +1083,8 @@ class SushiSwapV3ReceiptParser:
     def _build_hint_map(
         swap_token_meta: dict[str, dict[str, Any]] | None,
     ) -> dict[str, tuple[str, int]]:
-        """Map compiler token metadata to ``{address: (symbol, decimals)}``."""
-        hints: dict[str, tuple[str, int]] = {}
-        if not swap_token_meta:
-            return hints
-        for slot in ("token_in", "token_out"):
-            entry = swap_token_meta.get(slot)
-            if not isinstance(entry, dict):
-                continue
-            address = entry.get("address")
-            decimals = entry.get("decimals")
-            if not address or decimals is None:
-                continue
-            try:
-                hints[str(address).lower()] = (str(entry.get("symbol") or ""), int(decimals))
-            except (TypeError, ValueError):
-                logger.debug("Ignoring malformed token hint: %r", entry)
-        return hints
+        """Back-compat delegate - see ``v3_receipt_parser_helpers.build_hint_map``."""
+        return v3_receipt_parser_helpers.build_hint_map(swap_token_meta, log=logger)
 
     def _resolve_swap_decimals_with_hints(
         self,
@@ -2021,10 +1923,10 @@ class SushiSwapV3ReceiptParser:
     # SushiSwap V3 is a clean Uniswap V3 fork. The registry payload shape is
     # identical to the UniV3 baseline (PRD §Registry Data Shape + T08 golden
     # contract), and so are the shape-only helpers
-    # (``_open_payload_disagrees``, ``_build_close_receipt_payload``,
-    # ``_merge_open_payload_fields``). We import-and-reuse those helpers from
-    # ``almanak.connectors.uniswap_v3.receipt_parser`` rather than
-    # duplicating ~150 LoC of data-shape glue across forks — duplication
+    # (``open_payload_disagrees``, ``build_close_receipt_payload``,
+    # ``merge_open_payload_fields``). These helpers live in the shared module
+    # ``almanak.connectors._strategy_base.v3_registry_payload`` rather than
+    # being duplicated across forks — duplication
     # would let the two forks drift on Audit M1 cross-check semantics and on
     # the T08 contract.
     #
@@ -2213,11 +2115,11 @@ class SushiSwapV3ReceiptParser:
         2. Verify the receipt-derived identity anchors are present and
            non-zero.
         3. Cross-check against ``open_payload`` if supplied — refuse on
-           any disagreement (Uniswap V3's ``_open_payload_disagrees``).
-        4. Compose the receipt-only payload (Uniswap V3's
-           ``_build_close_receipt_payload``).
+           any disagreement (``v3_registry_payload.open_payload_disagrees``).
+        4. Compose the receipt-only payload
+           (``v3_registry_payload.build_close_receipt_payload``).
         5. Merge OPEN-time fields the close receipt cannot re-derive
-           (Uniswap V3's ``_merge_open_payload_fields``) — ticks,
+           (``v3_registry_payload.merge_open_payload_fields``) — ticks,
            OPEN-time amounts, original mint liquidity, fee tier, token
            labels.
         6. Apply the ``fee_tier`` argument if ``open_payload`` didn't
@@ -2228,14 +2130,6 @@ class SushiSwapV3ReceiptParser:
         treats that as "fall back to accounting_only" with an INFO log
         (no zero substitution).
         """
-        # Import the shape-only helpers from the Uniswap V3 baseline.
-        # Sushi V3 is a clean fork — the data-shape contract is identical,
-        # and duplicating these helpers would let Sushi drift from the
-        # T08 golden and Audit M1 semantics on every Uniswap V3 update.
-        from almanak.connectors.uniswap_v3.receipt_parser import (
-            UniswapV3ReceiptParser,
-        )
-
         lp_close = self.extract_lp_close_data(receipt)
         if lp_close is None:
             return None
@@ -2245,7 +2139,7 @@ class SushiSwapV3ReceiptParser:
         pool_address = (lp_close.pool_address or "").lower()
         if not pool_address:
             return None
-        if UniswapV3ReceiptParser._open_payload_disagrees(
+        if v3_registry_payload.open_payload_disagrees(
             open_payload=open_payload,
             token_id=token_id,
             pool_address=pool_address,
@@ -2259,13 +2153,13 @@ class SushiSwapV3ReceiptParser:
             # the NPM to match an emitted log, so this is defensive only.
             return None
 
-        payload = UniswapV3ReceiptParser._build_close_receipt_payload(
+        payload = v3_registry_payload.build_close_receipt_payload(
             token_id=token_id,
             pool_address=pool_address,
             lp_close=lp_close,
             nft_manager_addr=nft_manager_addr,
         )
-        UniswapV3ReceiptParser._merge_open_payload_fields(payload, open_payload)
+        v3_registry_payload.merge_open_payload_fields(payload, open_payload)
         if fee_tier is not None and fee_tier > 0:
             payload.setdefault("fee_tier", int(fee_tier))
         return payload
@@ -2275,22 +2169,8 @@ class SushiSwapV3ReceiptParser:
     # =============================================================================
 
     def _strict_parse(self, receipt: dict[str, Any]) -> ExtractResult[Any] | None:
-        """Run ``parse_receipt`` and short-circuit with ``ExtractError`` if it
-        reports a crash.
-
-        Returns ``None`` when parsing succeeded (caller should proceed), or an
-        ``ExtractError`` variant when it did not. This is the strict
-        counterpart to the legacy ``extract_*`` methods, which silently
-        swallow exceptions and return ``None`` — making the "benign missing"
-        and "crashed parsing" cases indistinguishable (VIB-3159).
-        """
-        try:
-            parsed = self.parse_receipt(receipt)
-        except Exception as exc:  # noqa: BLE001 — malformed receipt shape
-            return ExtractError(error=f"{type(exc).__name__}: {exc}", exception=exc)
-        if not parsed.success:
-            return ExtractError(error=parsed.error or "parse_receipt reported failure")
-        return None
+        """Back-compat delegate - see ``v3_receipt_parser_helpers.strict_parse``."""
+        return v3_receipt_parser_helpers.strict_parse(self, receipt)
 
     def extract_lp_open_data_result(self, receipt: dict[str, Any]) -> ExtractResult[LPOpenData]:
         """Fail-closed variant of :meth:`extract_lp_open_data` — see VIB-3159.

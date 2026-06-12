@@ -10,6 +10,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from almanak.connectors._strategy_base import v3_registry_payload
 from almanak.connectors._strategy_base.base import (
     BaseReceiptParser,
     EventRegistry,
@@ -1500,9 +1501,9 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
     # The Uniswap V3 implementation is the canonical template (PancakeSwap V3
     # is a direct UV3 fork at the NPM contract level — same IncreaseLiquidity
     # / DecreaseLiquidity / Burn / Collect / Mint event signatures). Helpers
-    # ``_open_payload_disagrees`` / ``_build_close_receipt_payload`` /
-    # ``_merge_open_payload_fields`` are imported from
-    # ``almanak.connectors.uniswap_v3.receipt_parser`` rather than
+    # ``open_payload_disagrees`` / ``build_close_receipt_payload`` /
+    # ``merge_open_payload_fields`` are shared via
+    # ``almanak.connectors._strategy_base.v3_registry_payload`` rather than
     # duplicated — they operate on the receipt-only payload dict, which is
     # the same shape across V3 forks.
     # =============================================================================
@@ -1693,11 +1694,11 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
         2. Verify the receipt-derived identity anchors are present and
            non-zero.
         3. Cross-check against ``open_payload`` if supplied — refuse on
-           any disagreement (``_open_payload_disagrees``).
+           any disagreement (``v3_registry_payload.open_payload_disagrees``).
         4. Compose the receipt-only payload
-           (``_build_close_receipt_payload``).
+           (``v3_registry_payload.build_close_receipt_payload``).
         5. Merge OPEN-time fields the close receipt cannot re-derive
-           (``_merge_open_payload_fields``) — ticks, OPEN-time amounts,
+           (``v3_registry_payload.merge_open_payload_fields``) — ticks, OPEN-time amounts,
            original mint liquidity, fee tier, token labels.
         6. Apply the ``fee_tier`` argument if open_payload didn't carry one.
 
@@ -1706,15 +1707,6 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
         treats that as "fall back to accounting_only" with an INFO log
         (no zero substitution).
         """
-        # Reuse the V3-fork-shared helpers directly from uniswap_v3 so we
-        # don't duplicate ~50 lines of payload composition / cross-check
-        # logic. PancakeSwap V3 produces a receipt-only close payload of
-        # identical shape (same Burn/Collect events, same NPM ABI) so the
-        # helpers' inputs are shape-compatible.
-        from almanak.connectors.uniswap_v3.receipt_parser import (
-            UniswapV3ReceiptParser,
-        )
-
         lp_close = self.extract_lp_close_data(receipt)
         if lp_close is None:
             return None
@@ -1724,7 +1716,7 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
         pool_address = (lp_close.pool_address or "").lower()
         if not pool_address:
             return None
-        if UniswapV3ReceiptParser._open_payload_disagrees(
+        if v3_registry_payload.open_payload_disagrees(
             open_payload=open_payload,
             token_id=token_id,
             pool_address=pool_address,
@@ -1735,13 +1727,13 @@ class PancakeSwapV3ReceiptParser(BaseReceiptParser[SwapEventData, ParseResult]):
         if not nft_manager_addr:
             return None
 
-        payload = UniswapV3ReceiptParser._build_close_receipt_payload(
+        payload = v3_registry_payload.build_close_receipt_payload(
             token_id=token_id,
             pool_address=pool_address,
             lp_close=lp_close,
             nft_manager_addr=nft_manager_addr,
         )
-        UniswapV3ReceiptParser._merge_open_payload_fields(payload, open_payload)
+        v3_registry_payload.merge_open_payload_fields(payload, open_payload)
         if fee_tier is not None and fee_tier > 0:
             payload.setdefault("fee_tier", int(fee_tier))
         return payload
