@@ -84,6 +84,14 @@ class DexVolumeSubgraphSpec:
     * ``source`` — the ``DataSourceInfo.source`` string the pre-W7
       provider stamped (preserved for byte-equivalence of the migrated
       lane's provenance).
+    * ``resolve_bare_address_pool_id`` — when ``True``, a bare 42-char
+      ``0x`` pool *address* is first resolved to the subgraph's full
+      pool ID via a ``pools(where: {address: $address}) { id }`` lookup
+      before the volume query runs (VIB-5090). Needed for Balancer V2,
+      whose ``poolSnapshots`` are keyed by the 32-byte pool ID (address
+      + pool-type/index suffix) — a bare address matches no rows.
+      Identifiers that are not a bare 42-char address (e.g. a full
+      66-char pool ID) pass through unchanged.
     """
 
     dex_name: str
@@ -94,6 +102,7 @@ class DexVolumeSubgraphSpec:
     source: str
     time_field: str = "date"
     time_unit: str = "seconds"
+    resolve_bare_address_pool_id: bool = False
 
     def __post_init__(self) -> None:
         if self.time_unit not in ("seconds", "days"):
@@ -197,6 +206,104 @@ def _resolve_subgraph_id(spec: DexVolumeSubgraphSpec, chain: str) -> str:
     return subgraph_id
 
 
+# Length of a bare EVM address: ``0x`` + 20 bytes hex. A Balancer V2
+# full pool ID is ``0x`` + 32 bytes hex (66 chars) and passes through
+# the bare-address check unchanged.
+_BARE_ADDRESS_LEN = 42
+
+# Pool-ID lookup for ``resolve_bare_address_pool_id`` specs (VIB-5090).
+# ``first: 2`` so an (impossible-for-Balancer-V2, but guarded) ambiguous
+# address — two pools sharing one address — is detectable without
+# paging. Matches the Balancer V2 subgraph schema: ``pools`` keyed by
+# full pool ID, filterable by the pool contract ``address``.
+_POOL_ID_LOOKUP_QUERY = """
+query ResolvePoolId($address: String!) {
+    pools(first: 2, where: { address: $address }) {
+        id
+    }
+}
+"""
+
+
+def _is_bare_pool_address(identifier: str) -> bool:
+    """True when ``identifier`` is a bare 42-char ``0x`` hex address.
+
+    Per-character check rather than ``int(..., 16)``: ``int`` tolerates
+    signs and whitespace ("+1", " 1"), which are not valid address bytes.
+    """
+    if len(identifier) != _BARE_ADDRESS_LEN or not identifier.lower().startswith("0x"):
+        return False
+    return all(c in "0123456789abcdefABCDEF" for c in identifier[2:])
+
+
+async def _resolve_pool_id_from_address(
+    servicer: RateHistoryServiceServicer,
+    spec: DexVolumeSubgraphSpec,
+    *,
+    chain: str,
+    url: str,
+    headers: dict[str, str],
+    pool_address: str,
+) -> str:
+    """Resolve a bare pool address to the subgraph's full pool ID (VIB-5090).
+
+    The mapping is immutable (a Balancer V2 pool ID is the pool address
+    plus a fixed pool-type/index suffix assigned at registration), so
+    hits are served from the servicer's in-process
+    ``_dex_pool_id_cache`` — a plain unbounded dict, same idiom as the
+    servicer's ``_web3_cache`` for other immutable per-process
+    resources. No lock: a concurrent double-miss merely duplicates one
+    idempotent lookup and last-write-wins with an identical value.
+
+    Raises :class:`RateHistoryUnavailable` (→ ``DataSourceUnavailable``
+    framework-side) when the address matches no pool or — guarded even
+    though Balancer V2 makes it impossible — more than one pool.
+    """
+    from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
+
+    address = pool_address.lower()
+    cache_key = (spec.dex_name, chain, address)
+    cached = servicer._dex_pool_id_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    payload = {
+        "query": _POOL_ID_LOOKUP_QUERY,
+        "variables": {"address": address},
+    }
+    data = await _post_subgraph_query(servicer, spec, url=url, headers=headers, payload=payload)
+
+    rows = (data.get("data") or {}).get("pools") or []
+    if not rows:
+        raise RateHistoryUnavailable(
+            spec.dex_name,
+            f"no {spec.dex_name} pool found for address {pool_address!r} on {chain}; "
+            "if the pool exists, pass its full pool ID instead of the bare address",
+        )
+    if len(rows) > 1:
+        raise RateHistoryUnavailable(
+            spec.dex_name,
+            f"ambiguous pool address {pool_address!r} on {chain}: multiple pools share it; "
+            "pass the full pool ID instead of the bare address",
+        )
+    row = rows[0]
+    if not isinstance(row, dict):
+        raise RateHistoryUnavailable(
+            spec.dex_name,
+            f"pool-ID lookup for address {pool_address!r} on {chain} returned a malformed row: {row!r}",
+        )
+    pool_id = row.get("id")
+    if not isinstance(pool_id, str) or not pool_id:
+        raise RateHistoryUnavailable(
+            spec.dex_name,
+            f"pool-ID lookup for address {pool_address!r} on {chain} returned a malformed id: {pool_id!r}",
+        )
+
+    pool_id = pool_id.lower()
+    servicer._dex_pool_id_cache[cache_key] = pool_id
+    return pool_id
+
+
 def _parse_retry_after(raw: str | None) -> float | None:
     """Parse a ``Retry-After`` header value to seconds, or ``None``.
 
@@ -213,79 +320,24 @@ def _parse_retry_after(raw: str | None) -> float | None:
         return None
 
 
-async def fetch_dex_volume_history(
+async def _post_subgraph_query(
     servicer: RateHistoryServiceServicer,
     spec: DexVolumeSubgraphSpec,
     *,
-    chain: str,
-    pool_address: str,
-    start_ts: int,
-    end_ts: int,
-    interval_secs: int,
-) -> list[DexVolumePoint]:
-    """Fetch daily DEX trading volume from ``spec``'s subgraph.
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """POST one GraphQL ``payload`` and return the decoded JSON object.
 
-    Shared body for every ``GatewayDexVolumeCapability.fetch_volume_history``.
-    Egress runs on the servicer's shared aiohttp session + the gateway's
-    ``thegraph_api_key`` setting — no per-connector session, no
-    strategy-side egress.
-
-    **Daily granularity only.** The underlying subgraphs serve *daily*
-    rows (``*DayDatas`` / Messari day snapshots), which is the resolution
-    the pre-W7 providers returned and the resolution the migrated lane's
-    consumers expect. ``interval_secs`` MUST therefore be ``86400`` (one
-    UTC day); any other value is rejected with ``RateHistoryUnavailable``
-    rather than silently returning daily rows mislabelled as a different
-    cadence (``DexVolumePoint.timestamp`` is documented as aligned to the
-    requested interval). Resampling to coarser/finer buckets is not in
-    scope for the migrated lane. (Codex PR #2493.)
-
-    The single ``first: 1000`` page covers ~2.7 years of daily rows; a
-    requested window wider than that would return a partial series that
-    still looks successful. Such windows are rejected fail-fast rather
-    than silently truncated. (CodeRabbit PR #2493.)
-
-    Raises :class:`RateHistoryUnavailable` for every "no data" path
-    (chain not configured, interval mismatch, window too wide, rate-limit,
-    GraphQL error, empty window, malformed row) — never a silent-zero
-    fallback.
+    Shared transport + error handling for the daily-volume query and the
+    VIB-5090 pool-ID lookup: rate-limit (429 → ``retry_after`` hint),
+    non-200, client/JSON failures, non-object bodies, and GraphQL
+    ``errors`` all raise :class:`RateHistoryUnavailable` — never a
+    silent fallback. Behaviour is byte-identical to the pre-VIB-5090
+    inline block in :func:`fetch_dex_volume_history`.
     """
     from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
-
-    if interval_secs != _SECONDS_PER_DAY:
-        raise RateHistoryUnavailable(
-            spec.dex_name,
-            f"only daily volume (interval_secs={_SECONDS_PER_DAY}) is served; got {interval_secs}",
-        )
-
-    requested_days = (end_ts // _SECONDS_PER_DAY) - (start_ts // _SECONDS_PER_DAY) + 1
-    if requested_days > _PAGE_FIRST:
-        raise RateHistoryUnavailable(
-            spec.dex_name,
-            f"requested window spans {requested_days} daily points, exceeds single-page limit {_PAGE_FIRST}",
-        )
-
-    subgraph_id = _resolve_subgraph_id(spec, chain)
-    api_key = servicer.settings.thegraph_api_key
-    if not api_key:
-        raise RateHistoryUnavailable(
-            spec.dex_name,
-            "gateway thegraph_api_key is not configured",
-        )
-
-    url = f"{_THEGRAPH_GATEWAY_URL}/{subgraph_id}"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
-    payload = {
-        "query": _build_query(spec),
-        "variables": {
-            "poolAddress": pool_address.lower(),
-            "startTime": spec.to_filter_value(start_ts),
-            "endTime": spec.to_filter_value(end_ts),
-        },
-    }
 
     session = await servicer._get_http_session()
     try:
@@ -322,15 +374,129 @@ async def fetch_dex_volume_history(
         )
 
     errors = data.get("errors")
+    if errors is not None and not isinstance(errors, list):
+        raise RateHistoryUnavailable(
+            spec.dex_name,
+            f"subgraph returned malformed GraphQL errors payload: {type(errors).__name__}",
+        )
     if errors:
-        messages = "; ".join(e.get("message", str(e)) for e in errors)
+        messages = "; ".join(e.get("message", str(e)) if isinstance(e, dict) else str(e) for e in errors)
         raise RateHistoryUnavailable(spec.dex_name, f"subgraph GraphQL errors: {messages}")
+
+    payload_data = data.get("data")
+    if payload_data is not None and not isinstance(payload_data, dict):
+        raise RateHistoryUnavailable(
+            spec.dex_name,
+            f"subgraph returned malformed data payload: {type(payload_data).__name__}",
+        )
+
+    return data
+
+
+async def fetch_dex_volume_history(
+    servicer: RateHistoryServiceServicer,
+    spec: DexVolumeSubgraphSpec,
+    *,
+    chain: str,
+    pool_address: str,
+    start_ts: int,
+    end_ts: int,
+    interval_secs: int,
+) -> list[DexVolumePoint]:
+    """Fetch daily DEX trading volume from ``spec``'s subgraph.
+
+    Shared body for every ``GatewayDexVolumeCapability.fetch_volume_history``.
+    Egress runs on the servicer's shared aiohttp session + the gateway's
+    ``thegraph_api_key`` setting — no per-connector session, no
+    strategy-side egress.
+
+    **Daily granularity only.** The underlying subgraphs serve *daily*
+    rows (``*DayDatas`` / Messari day snapshots), which is the resolution
+    the pre-W7 providers returned and the resolution the migrated lane's
+    consumers expect. ``interval_secs`` MUST therefore be ``86400`` (one
+    UTC day); any other value is rejected with ``RateHistoryUnavailable``
+    rather than silently returning daily rows mislabelled as a different
+    cadence (``DexVolumePoint.timestamp`` is documented as aligned to the
+    requested interval). Resampling to coarser/finer buckets is not in
+    scope for the migrated lane. (Codex PR #2493.)
+
+    The single ``first: 1000`` page covers ~2.7 years of daily rows; a
+    requested window wider than that would return a partial series that
+    still looks successful. Such windows are rejected fail-fast rather
+    than silently truncated. (CodeRabbit PR #2493.)
+
+    When ``spec.resolve_bare_address_pool_id`` is set and
+    ``pool_address`` is a bare 42-char ``0x`` address, the address is
+    first resolved to the subgraph's full pool ID (VIB-5090, Balancer
+    V2 — ``poolSnapshots`` are keyed by the 32-byte pool ID). Resolved
+    mappings are cached on the servicer for the process lifetime.
+
+    Raises :class:`RateHistoryUnavailable` for every "no data" path
+    (chain not configured, interval mismatch, window too wide, rate-limit,
+    GraphQL error, empty window, malformed row, pool-ID resolution
+    no-match / ambiguity) — never a silent-zero fallback.
+    """
+    from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
+
+    if interval_secs != _SECONDS_PER_DAY:
+        raise RateHistoryUnavailable(
+            spec.dex_name,
+            f"only daily volume (interval_secs={_SECONDS_PER_DAY}) is served; got {interval_secs}",
+        )
+
+    requested_days = (end_ts // _SECONDS_PER_DAY) - (start_ts // _SECONDS_PER_DAY) + 1
+    if requested_days > _PAGE_FIRST:
+        raise RateHistoryUnavailable(
+            spec.dex_name,
+            f"requested window spans {requested_days} daily points, exceeds single-page limit {_PAGE_FIRST}",
+        )
+
+    subgraph_id = _resolve_subgraph_id(spec, chain)
+    api_key = servicer.settings.thegraph_api_key
+    if not api_key:
+        raise RateHistoryUnavailable(
+            spec.dex_name,
+            "gateway thegraph_api_key is not configured",
+        )
+
+    url = f"{_THEGRAPH_GATEWAY_URL}/{subgraph_id}"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    # VIB-5090: Balancer V2 ``poolSnapshots`` are keyed by the full
+    # 32-byte pool ID, not the pool address — resolve a bare 42-char
+    # address to the full ID first (cached; full IDs pass through).
+    identifier = pool_address.lower()
+    if spec.resolve_bare_address_pool_id and _is_bare_pool_address(identifier):
+        identifier = await _resolve_pool_id_from_address(
+            servicer,
+            spec,
+            chain=chain,
+            url=url,
+            headers=headers,
+            pool_address=pool_address,
+        )
+
+    payload = {
+        "query": _build_query(spec),
+        "variables": {
+            "poolAddress": identifier,
+            "startTime": spec.to_filter_value(start_ts),
+            "endTime": spec.to_filter_value(end_ts),
+        },
+    }
+
+    data = await _post_subgraph_query(servicer, spec, url=url, headers=headers, payload=payload)
 
     rows = (data.get("data") or {}).get(spec.entity) or []
     if not rows:
+        resolved_note = f" (resolved pool ID {identifier!r})" if identifier != pool_address.lower() else ""
         raise RateHistoryUnavailable(
             spec.dex_name,
-            f"subgraph returned no {spec.entity} for pool {pool_address!r} on {chain} ({start_ts}..{end_ts})",
+            f"subgraph returned no {spec.entity} for pool {pool_address!r}{resolved_note} "
+            f"on {chain} ({start_ts}..{end_ts})",
         )
 
     try:

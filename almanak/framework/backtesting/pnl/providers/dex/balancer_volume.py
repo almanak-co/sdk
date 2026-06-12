@@ -122,14 +122,21 @@ class BalancerVolumeProvider(HistoricalVolumeProvider):
 
         Note:
             Balancer V2 subgraphs key snapshots by the full pool ID (address
-            + pool-type suffix, 64 hex chars). A bare 42-char address may
-            return no rows — the gateway surfaces that as
-            :class:`DataSourceUnavailable` rather than a silent-zero row.
+            + pool-type suffix, 64 hex chars). ``pool_address`` accepts
+            either form: a full pool ID is used as-is, while a bare 42-char
+            ``0x`` address is auto-resolved gateway-side to the full pool ID
+            via a ``pools(where: {address})`` subgraph lookup before the
+            snapshot query runs (VIB-5090; the address → pool-ID mapping is
+            cached in the gateway process). An address that matches no pool
+            (or, defensively, more than one) still surfaces loudly as
+            :class:`DataSourceUnavailable` naming the address — never a
+            silent-zero row.
 
         Raises:
             ValueError: If chain is not supported.
             DataSourceUnavailable: gateway unreachable / RPC failed / the
-                subgraph returned no or errored data (no silent zero-fill).
+                subgraph returned no or errored data, or the bare address
+                could not be resolved to a pool ID (no silent zero-fill).
         """
         if chain not in BALANCER_SUBGRAPH_IDS:
             raise ValueError(f"Unsupported chain: {chain}. Supported chains: {[c.value for c in SUPPORTED_CHAINS]}")

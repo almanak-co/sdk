@@ -296,6 +296,16 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
         # leaking sockets. CodeRabbit PR-review feedback (PR #2474).
         self._resource_init_lock = asyncio.Lock()
 
+        # VIB-5090: bare pool address → full subgraph pool ID, resolved
+        # by ``_dex_volume_subgraph`` for specs that opt in (Balancer V2,
+        # whose ``poolSnapshots`` key on the 32-byte pool ID). The
+        # mapping is immutable for a pool's lifetime, so a plain
+        # unbounded per-process dict — same idiom as ``_web3_cache`` —
+        # with no TTL and no lock (a concurrent double-miss only
+        # duplicates one idempotent read-only lookup).
+        # Key: ``(dex_name, chain, address.lower())``.
+        self._dex_pool_id_cache: dict[tuple[str, str, str], str] = {}
+
         # Resolve capability providers once at construction; same O(1)
         # dispatcher pattern as ``FundingRateService``. Each provider
         # map is keyed by the lowercase identifier the strategy submits

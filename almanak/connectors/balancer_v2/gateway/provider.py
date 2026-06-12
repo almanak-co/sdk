@@ -19,7 +19,9 @@ W7-followup (VIB-4870) adds:
   the gateway routes on the canonical ``"balancer_v2"`` ``dex_name`` and
   the framework consumer aliases ``"balancer"`` → ``"balancer_v2"``.
   Balancer V2 weighted pools have no Uniswap-style ``observe()`` TWAP,
-  so it implements volume only.
+  so it implements volume only. Since VIB-5090 a bare 42-char pool
+  address is auto-resolved to the full 32-byte pool ID the subgraph
+  keys ``poolSnapshots`` by (see ``fetch_volume_history``).
 
 Strategy-side Balancer code (intents, connectors, receipt parsing)
 remains unchanged and continues to live wherever it lived previously —
@@ -104,6 +106,13 @@ class BalancerV2GatewayConnector(
         ``framework/backtesting/pnl/providers/dex/balancer_volume.py``.
         ``poolSnapshots`` keys daily rows by a unix-second ``timestamp``
         (start of day UTC) and exposes ``swapVolume``.
+
+        VIB-5090: ``poolSnapshots.pool`` is the FULL 32-byte pool ID
+        (pool address + pool-type/index suffix), so
+        ``resolve_bare_address_pool_id`` is set — a bare 42-char pool
+        address is auto-resolved to the full ID via a
+        ``pools(where: {address})`` lookup (cached per process); full
+        IDs pass through unchanged.
         """
         from almanak.gateway.services._dex_volume_subgraph import (
             DexVolumeSubgraphSpec,
@@ -120,6 +129,7 @@ class BalancerV2GatewayConnector(
                 volume_field="swapVolume",
                 source="balancer_v2_subgraph",
                 time_field="timestamp",
+                resolve_bare_address_pool_id=True,
             ),
             chain=chain,
             pool_address=pool_address,
