@@ -696,6 +696,97 @@ def find_perp_close_position_id(intent: Any, positions: Sequence[Any]) -> str | 
     return candidates[0].position_id
 
 
+def find_lending_close_position_id(intent: Any, positions: Sequence[Any]) -> str | None:
+    """Resolve the simulated SUPPLY position a WITHDRAW intent targets.
+
+    Mirrors :func:`find_perp_close_position_id` (PR #2751): an exact-id
+    check first (``position_id`` / ``position_to_close`` /
+    ``close_position_id`` attributes), then a (token, protocol) match the
+    way lending venues key supply balances. The oldest matching position
+    wins (FIFO) when several are open.
+
+    Fail-closed rules (CodeRabbit, PR #2758):
+
+    - An explicit id naming a non-SUPPLY position (e.g. a BORROW) is
+      refused outright -- a withdraw must never target debt.
+    - An intent carrying no token/asset is refused rather than falling
+      back to protocol-only matching; every production WithdrawIntent
+      carries ``token``, so a token-less intent is malformed input.
+
+    Args:
+        intent: WITHDRAW intent object
+        positions: Open positions to match against
+
+    Returns:
+        The matched simulated position id, or None when no open SUPPLY
+        position matches (a withdraw with nothing supplied must fail, not
+        mint the inflow)
+    """
+    from almanak.framework.backtesting.pnl.position_models import PositionType
+
+    for attr in ("position_id", "position_to_close", "close_position_id"):
+        explicit_id = getattr(intent, attr, None)
+        if isinstance(explicit_id, str) and explicit_id:
+            for position in positions:
+                if position.position_id == explicit_id:
+                    if position.position_type != PositionType.SUPPLY:
+                        logger.warning(
+                            "WITHDRAW names position %s explicitly, but it is %s, not SUPPLY; "
+                            "refusing the withdraw target (fail closed)",
+                            explicit_id,
+                            position.position_type.value,
+                        )
+                        return None
+                    return explicit_id
+
+    token = getattr(intent, "token", getattr(intent, "asset", None))
+    token = token.upper() if isinstance(token, str) and token else None
+    if token is None:
+        logger.warning(
+            "WITHDRAW carries no token/asset and no explicit supply position id; "
+            "refusing protocol-only matching (fail closed)"
+        )
+        return None
+    # Resolve protocol with the same resolver the open path used to stamp
+    # the position, so protocol_name / connector / adapter spellings match.
+    protocol: str | None = get_intent_protocol(intent)
+    if protocol == "default":
+        protocol = None
+
+    candidates = []
+    for position in positions:
+        if position.position_type != PositionType.SUPPLY:
+            continue
+        position_token = position.tokens[0].upper() if position.tokens else ""
+        if position_token != token:
+            continue
+        # A protocol-specific WITHDRAW must not drain a position whose
+        # protocol is unknown: skip on missing OR mismatched stamp. (Every
+        # production producer stamps protocol; None arises in hand-built
+        # fixtures, which should not satisfy a protocol-scoped match.)
+        if protocol and (not position.protocol or position.protocol.lower() != protocol):
+            continue
+        candidates.append(position)
+
+    if not candidates:
+        logger.warning(
+            "WITHDRAW matched no open simulated supply position (token=%s, protocol=%s)",
+            token,
+            protocol,
+        )
+        return None
+    candidates.sort(key=lambda position: position.entry_time)
+    if len(candidates) > 1:
+        logger.warning(
+            "WITHDRAW matched %d open supply positions for token=%s protocol=%s; targeting the oldest (%s)",
+            len(candidates),
+            token,
+            protocol,
+            candidates[0].position_id,
+        )
+    return candidates[0].position_id
+
+
 def estimate_gas_for_intent(intent_type: IntentType) -> int:
     """Estimate gas usage for an intent type.
 

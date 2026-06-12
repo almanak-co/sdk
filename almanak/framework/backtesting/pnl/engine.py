@@ -503,6 +503,36 @@ def create_market_snapshot_from_state(
 # =============================================================================
 
 
+@dataclass(frozen=True)
+class _CloseResolution:
+    """How a closing intent maps onto the portfolio's open positions.
+
+    Produced by ``PnLBacktester._resolve_position_close``: exactly one of
+    ``position_close_id`` (full close) or ``position_reduce_id`` (partial
+    reduction, e.g. a partial lending WITHDRAW) is set on success; both are
+    None with ``failure_reason`` set when a close-type intent matches no
+    open position and the fill must be rejected (crediting the inflow
+    without removing the position would mint value).
+
+    Attributes:
+        amount_usd: Effective notional for fees, slippage, and token flows.
+            Full lending closes resolve this to principal + accrued
+            interest so the close credit is value-neutral at the close
+            instant (mirroring the perp close credit).
+        position_close_id: Position to close in full, if any.
+        position_reduce_id: Position to partially reduce, if any.
+        interest_usd: Accrued interest realized by a full lending close;
+            recorded as the trade's realized PnL via metadata.
+        failure_reason: Set when the fill must be rejected unapplied.
+    """
+
+    amount_usd: Decimal
+    position_close_id: str | None = None
+    position_reduce_id: str | None = None
+    interest_usd: Decimal = Decimal("0")
+    failure_reason: str | None = None
+
+
 @dataclass
 class PnLBacktester:
     """Main PnL backtesting engine for historical strategy simulation.
@@ -1518,8 +1548,22 @@ class PnLBacktester:
         # Update each position via the adapter
         # Pass simulation timestamp for deterministic, reproducible updates
         for position in portfolio.positions:
+            # Per-position clamp: a position accrued mid-tick (a partial
+            # WITHDRAW accrues lending interest through the fill instant via
+            # apply_fill) carries last_updated == this tick's timestamp; the
+            # equity-curve basis would re-accrue that same interval on the
+            # reduced principal. min() is a no-op for every other position:
+            # adapters stamp last_updated with the tick timestamp on each
+            # update (equal to the equity point), and positions never
+            # updated carry None or a stale value (where the equity basis
+            # is already the smaller elapsed).
+            per_position_elapsed = elapsed_seconds
+            if position.last_updated is not None:
+                position_elapsed = (timestamp - position.last_updated).total_seconds()
+                if position_elapsed >= 0:
+                    per_position_elapsed = min(per_position_elapsed, position_elapsed)
             try:
-                self._adapter.update_position(position, market_state, elapsed_seconds, timestamp)
+                self._adapter.update_position(position, market_state, per_position_elapsed, timestamp)
             except DataSourceUnavailableError as e:
                 # VIB-4849: a missing-data signal is a *deliberate fail-loud* from the
                 # adapter -- it refused to fabricate a number. It must NEVER be
@@ -1721,8 +1765,10 @@ class PnLBacktester:
                 logger.debug(f"Using adapter '{self._adapter.adapter_name}' execution for intent")
                 # Set delayed_at_end flag on adapter fill
                 adapter_fill.delayed_at_end = delayed_at_end
-                # Apply the adapter's fill to the portfolio
-                portfolio.apply_fill(adapter_fill, market_state=market_state)
+                # Apply the adapter's fill to the portfolio (the adapter is
+                # threaded through so a partial position reduction accrues
+                # lending interest through the fill instant).
+                portfolio.apply_fill(adapter_fill, market_state=market_state, adapter=self._adapter)
 
                 # Log detailed trade execution
                 log_trade_execution(
@@ -1756,8 +1802,11 @@ class PnLBacktester:
         )
 
         # Close targets resolve before fee/slippage: a perp full close
-        # (size_usd=None) takes its fee notional from the matched position.
-        position_close_id, amount_usd = self._resolve_position_close(intent, intent_type, portfolio, amount_usd)
+        # (size_usd=None) and a lending withdraw_all take their fee
+        # notional from the matched position.
+        close_resolution = self._resolve_position_close(intent, intent_type, portfolio, amount_usd, market_state)
+        position_close_id = close_resolution.position_close_id
+        amount_usd = close_resolution.amount_usd
 
         # Get fee and slippage models for this protocol
         fee_model = self.get_fee_model(protocol)
@@ -1825,7 +1874,22 @@ class PnLBacktester:
             strict_reproducibility=config.strict_reproducibility,
         )
 
-        # Create the simulated fill
+        # Create the simulated fill. A failed close resolution (e.g. a
+        # WITHDRAW with no matching open supply position) is marked
+        # success=False so apply_fill records it as a rejected trade with
+        # zero state mutation -- crediting the inflow without a position
+        # to debit would mint value.
+        metadata: dict[str, Any] = {
+            "intent": str(intent),
+            "slippage_pct": str(slippage_pct),
+            "gas_price_source": gas_gwei_source,
+        }
+        if close_resolution.failure_reason is not None:
+            metadata["failure_reason"] = close_resolution.failure_reason
+        if close_resolution.interest_usd != Decimal("0"):
+            # str() round-trips Decimal losslessly; _calculate_trade_pnl
+            # reads this back as the trade's realized interest PnL.
+            metadata["interest_usd"] = str(close_resolution.interest_usd)
         fill = SimulatedFill(
             timestamp=timestamp,
             intent_type=intent_type,
@@ -1838,21 +1902,24 @@ class PnLBacktester:
             gas_cost_usd=gas_cost_usd,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
-            success=True,
+            success=close_resolution.failure_reason is None,
             position_delta=position_delta,
             position_close_id=position_close_id,
-            metadata={
-                "intent": str(intent),
-                "slippage_pct": str(slippage_pct),
-                "gas_price_source": gas_gwei_source,
-            },
+            position_reduce_id=close_resolution.position_reduce_id,
+            # Partial reductions debit the position by exactly the fill's
+            # inflow token amounts, keeping the reduction value-conserving
+            # by construction.
+            position_reduce_amounts=dict(tokens_in) if close_resolution.position_reduce_id else {},
+            metadata=metadata,
             gas_price_gwei=gas_price_gwei,
             estimated_mev_cost_usd=estimated_mev_cost_usd,
             delayed_at_end=delayed_at_end,
         )
 
-        # Apply fill to portfolio
-        portfolio.apply_fill(fill, market_state=market_state)
+        # Apply fill to portfolio. The adapter is threaded through so a
+        # partial position reduction can accrue lending interest through the
+        # fill instant with the adapter lane's own rate sources.
+        portfolio.apply_fill(fill, market_state=market_state, adapter=self._adapter)
 
         # Log detailed trade execution (DEBUG level - visible in verbose mode)
         log_trade_execution(
@@ -2568,16 +2635,88 @@ class PnLBacktester:
         intent_type: IntentType,
         portfolio: SimulatedPortfolio,
         amount_usd: Decimal,
-    ) -> tuple[str | None, Decimal]:
+        market_state: MarketState,
+    ) -> _CloseResolution:
         """Resolve the position a closing intent targets and its notional.
 
-        Perp closes match against the portfolio's open positions (venue
-        position ids never equal simulated ids); every other intent type
-        keeps the attribute-based id lookup and its extracted notional.
+        Perp closes and lending withdraws match against the portfolio's
+        open positions (venue position ids never equal simulated ids);
+        every other intent type keeps the attribute-based id lookup and
+        its extracted notional.
         """
         if intent_type == IntentType.PERP_CLOSE:
-            return self._resolve_perp_close(intent, portfolio, amount_usd)
-        return self._get_position_close_id(intent), amount_usd
+            position_close_id, amount_usd = self._resolve_perp_close(intent, portfolio, amount_usd)
+            return _CloseResolution(amount_usd=amount_usd, position_close_id=position_close_id)
+        if intent_type == IntentType.WITHDRAW:
+            return self._resolve_withdraw_close(intent, portfolio, amount_usd, market_state)
+        return _CloseResolution(amount_usd=amount_usd, position_close_id=self._get_position_close_id(intent))
+
+    def _resolve_withdraw_close(
+        self,
+        intent: Any,
+        portfolio: SimulatedPortfolio,
+        amount_usd: Decimal,
+        market_state: MarketState,
+    ) -> _CloseResolution:
+        """Resolve the SUPPLY position a WITHDRAW intent closes or reduces.
+
+        The withdrawn principal must come OUT of the matched supply
+        position (VIB-5097): without this linkage the inflow double-counts
+        against the still-open position. Matching follows the perp-close
+        pattern (exact-id precedence, then FIFO by (token, protocol) via
+        :func:`find_lending_close_position_id`).
+
+        Semantics:
+
+        - No open supply position matches -> the fill is rejected
+          (``failure_reason``), zero state mutation.
+        - ``withdraw_all`` / unresolvable amount / amount >= principal ->
+          full close: notional = principal value + accrued interest, the
+          interest is realized PnL (mirroring the perp close credit).
+        - amount < principal -> partial: the position's principal is
+          reduced by the withdrawn token amount; accrued interest stays on
+          the position and is realized when it eventually closes in full.
+        """
+        from .intent_extraction import find_lending_close_position_id
+
+        position_close_id = find_lending_close_position_id(intent, portfolio.positions)
+        position = portfolio.get_position(position_close_id) if position_close_id else None
+        if position is None:
+            return _CloseResolution(
+                amount_usd=amount_usd,
+                failure_reason="WITHDRAW matched no open supply position to withdraw from",
+            )
+
+        # Price the principal the way every valuation path does
+        # (entry-price fallback when the market price is unavailable).
+        try:
+            price = market_state.get_price(position.primary_token)
+        except KeyError:
+            price = position.entry_price
+        if price <= Decimal("0"):
+            price = position.entry_price
+        principal_value = position.total_amount * price
+
+        # Relative dust tolerance: an amount within Decimal round-trip
+        # error of the full principal is a full close, not a partial that
+        # strands dust principal (same rationale as the portfolio's
+        # _DEBIT_DUST_RELATIVE_TOLERANCE).
+        full_close_floor = principal_value * (Decimal("1") - Decimal("1E-9"))
+        withdraw_all = bool(getattr(intent, "withdraw_all", False))
+        if withdraw_all or amount_usd <= Decimal("0") or amount_usd >= full_close_floor:
+            if amount_usd > principal_value:
+                logger.warning(
+                    "WITHDRAW amount $%s exceeds matched supply principal $%s; "
+                    "capping the withdrawal to principal + accrued interest",
+                    amount_usd,
+                    principal_value,
+                )
+            return _CloseResolution(
+                amount_usd=principal_value + position.interest_accrued,
+                position_close_id=position.position_id,
+                interest_usd=position.interest_accrued,
+            )
+        return _CloseResolution(amount_usd=amount_usd, position_reduce_id=position.position_id)
 
     def _resolve_perp_close(
         self,

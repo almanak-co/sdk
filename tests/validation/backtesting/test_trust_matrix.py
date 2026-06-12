@@ -22,10 +22,10 @@ Candidate stop-the-line findings encoded as strict xfails by this module
    ~$131K-$452K. Producers now convert deposits into true L-units via
    ``ImpermanentLossCalculator.liquidity_for_target_value``; the three LP
    cells pass with their assertions unchanged.
-2. Lending WITHDRAW never closes the supply position (generic WITHDRAW
-   flows carry no position_close_id and the lending adapter's
-   ``_execute_withdraw`` defers to them), so a SUPPLY -> WITHDRAW round
-   trip double-counts the principal (+$5K on a $5K supply). VIB-5097.
+2. FIXED (VIB-5097): Lending WITHDRAW used to never close the supply
+   position, double-counting the principal on a SUPPLY -> WITHDRAW round
+   trip; WITHDRAW now closes (or partially reduces) the matched SUPPLY
+   position and realizes accrued interest as PnL.
 """
 
 from __future__ import annotations
@@ -72,13 +72,6 @@ from tests.validation.backtesting.trust_matrix import (
     SwapDuck,
     flat_series,
     run_backtest,
-)
-
-_LENDING_DOUBLE_COUNT_REASON = (
-    "CANDIDATE STOP-THE-LINE (ticket pending under VIB-5079): WITHDRAW never "
-    "closes the supply position (no position_close_id in generic flows; the "
-    "lending adapter defers to them), so a supply round trip mints the "
-    "principal. See VIB-5081 PR body."
 )
 
 
@@ -506,14 +499,13 @@ def test_supply_equity_growth_ties_to_interest_accrual() -> None:
 
 
 @pytest.mark.trust_cell("lending:round_trip_conservation")
-@pytest.mark.xfail(strict=True, reason=_LENDING_DOUBLE_COUNT_REASON)
 def test_supply_withdraw_round_trip_conserves_value() -> None:
     """SUPPLY then WITHDRAW must return initial capital plus accrued interest.
 
     Real lending-lane intents through the real engine loop. The withdrawn
-    principal must come OUT of the supply position - on current main the
-    position stays open and the round trip mints the full principal
-    (final equity ~$15,000 on a $10,000 portfolio).
+    principal comes OUT of the supply position (VIB-5097): the WITHDRAW
+    resolves the matched SUPPLY position via position_close_id, credits
+    principal + accrued interest, and realizes the interest as PnL.
     """
     intents = [
         SupplyIntent(protocol="aave_v3", token="USDC", amount=Decimal("5000")),

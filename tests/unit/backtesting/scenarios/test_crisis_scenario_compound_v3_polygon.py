@@ -818,7 +818,13 @@ class TestCrisisResultPolygon:
             fee_models={"default": DefaultFeeModel(fee_pct=Decimal("0.001"))},
             slippage_models={"default": DefaultSlippageModel(slippage_pct=Decimal("0.0005"))},
         )
-        strategy = CompoundV3CrisisLendingStrategy()
+        # Supply less than the full capital: with include_gas_costs=True a
+        # $10,000 SUPPLY on a $10,000 portfolio cannot fund its gas and is
+        # rejected. Before VIB-5097 this test still saw positive costs
+        # because the subsequent WITHDRAW minted tokens with no matching
+        # supply position; now that withdraw is correctly rejected, the
+        # SUPPLY itself must succeed for costs to be real.
+        strategy = CompoundV3CrisisLendingStrategy(supply_amount=Decimal("9000"))
 
         result = await run_crisis_backtest(
             strategy=strategy,

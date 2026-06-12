@@ -153,7 +153,12 @@ class SimulatedPortfolio:
         logger.warning("Price unavailable for %s, falling back to $1 stablecoin assumption in %s", token, context)
         return Decimal("1")
 
-    def apply_fill(self, fill: SimulatedFill, market_state: MarketState | None = None) -> bool:
+    def apply_fill(
+        self,
+        fill: SimulatedFill,
+        market_state: MarketState | None = None,
+        adapter: "StrategyBacktestAdapter | None" = None,
+    ) -> bool:
         """Apply a simulated fill to update portfolio state.
 
         Conservation contract: a fill may only spend value the portfolio
@@ -207,6 +212,10 @@ class SimulatedPortfolio:
             market_state: Current market prices, used to price implicit
                 cash conversions for non-SWAP token outflows. Without it,
                 only held balances (and cash for stablecoins) can be spent.
+            adapter: Optional strategy-specific adapter (same object
+                ``mark_to_market`` receives). Used only to accrue lending
+                interest through the fill instant before a partial position
+                reduction, with the adapter lane's own rate sources.
 
         Returns:
             True if the fill was applied. False if it was rejected: the
@@ -243,6 +252,11 @@ class SimulatedPortfolio:
             self._record_failed_fill(fill, funding_failure)
             return False
 
+        reduce_failure = self._position_reduce_failure(fill)
+        if reduce_failure is not None:
+            self._record_failed_fill(fill, reduce_failure)
+            return False
+
         if conversions:
             fill.metadata["implicit_conversions"] = {token: str(amount) for token, amount in conversions.items()}
 
@@ -258,6 +272,15 @@ class SimulatedPortfolio:
         if fill.position_close_id:
             # Close an existing position and capture it for LP PnL calculation
             closed_position = self._close_position(fill.position_close_id, fill.timestamp)
+        elif fill.position_reduce_id:
+            # Partially reduce a position (validated in _position_reduce_failure).
+            # Accrue interest through the fill instant FIRST: pending intents
+            # execute before the per-tick adapter update / mark, so without
+            # this the interval since the previous mark would accrue on the
+            # post-reduction principal -- under-accruing the interest the
+            # withdrawn slice earned before the withdraw.
+            self._accrue_interest_through_fill(fill, market_state, adapter)
+            self._reduce_position(fill.position_reduce_id, fill.position_reduce_amounts)
 
         if fill.position_delta:
             # Open a new position. Perp collateral moves from cash into the
@@ -558,6 +581,133 @@ class SimulatedPortfolio:
                 self._closed_positions.append(closed)
                 return closed
         return None
+
+    def _position_reduce_failure(self, fill: SimulatedFill) -> str | None:
+        """Reason this fill's partial position reduction cannot apply, or None.
+
+        Part of apply_fill's validate-then-commit stage: a reduce targeting
+        a missing position, or removing more of a token than the position
+        holds (beyond dust tolerance), rejects the whole fill before any
+        state mutation -- crediting the inflow without debiting the
+        position would mint value.
+
+        The reduce map must also tie exactly to the credited inflow
+        (CodeRabbit, PR #2758): an empty map, or per-token amounts that do
+        not match the fill's positive ``tokens_in`` within dust tolerance,
+        is under-reduction -- the same minting class, just smaller. The
+        only producer (engine ``_execute_intent``) builds
+        ``position_reduce_amounts`` from ``tokens_in`` directly, so this is
+        defense-in-depth at the conservation boundary.
+        """
+        if fill.position_reduce_id is None:
+            return None
+        credited = {token: amount for token, amount in fill.tokens_in.items() if amount > Decimal("0")}
+        reduced = {token: amount for token, amount in fill.position_reduce_amounts.items() if amount > Decimal("0")}
+        if not reduced:
+            return f"position {fill.position_reduce_id} missing positive partial-reduction amounts"
+        if credited.keys() != reduced.keys():
+            return (
+                f"position {fill.position_reduce_id} partial reduction tokens {sorted(reduced)} "
+                f"do not match credited inflow tokens {sorted(credited)}"
+            )
+        for token, credited_amount in credited.items():
+            reduced_amount = reduced[token]
+            if abs(credited_amount - reduced_amount) > max(credited_amount, reduced_amount) * (
+                _DEBIT_DUST_RELATIVE_TOLERANCE
+            ):
+                return (
+                    f"position {fill.position_reduce_id} credits {credited_amount} {token} but reduces {reduced_amount}"
+                )
+        position = self.get_position(fill.position_reduce_id)
+        if position is None:
+            return f"position {fill.position_reduce_id} not found for partial reduction"
+        for token, amount in reduced.items():
+            held = position.get_amount(token)
+            shortfall = amount - held
+            if shortfall > amount * _DEBIT_DUST_RELATIVE_TOLERANCE:
+                return f"position {fill.position_reduce_id} holds {held} {token}, cannot reduce by {amount}"
+        return None
+
+    def _accrue_interest_through_fill(
+        self,
+        fill: SimulatedFill,
+        market_state: MarketState | None,
+        adapter: "StrategyBacktestAdapter | None",
+    ) -> None:
+        """Accrue lending interest on the reduce target up to the fill instant.
+
+        Pending intents execute BEFORE the per-tick adapter update and
+        ``mark_to_market`` (``pnl/_engine_helpers.execute_iteration_loop``),
+        so without this the interval since the previous mark would accrue on
+        the POST-reduction principal -- under-accruing the interest earned
+        by the withdrawn slice before the withdraw (CodeRabbit, PR #2758).
+
+        Each lane accrues with its own math, so no rate logic is duplicated:
+        the adapter lane calls ``adapter.update_position`` (the adapter's
+        own APY sources), the generic lane calls
+        :meth:`_mark_lending_position` (entry APY / protocol default). Both
+        advance ``position.last_updated`` to ``fill.timestamp``, which makes
+        the same-tick follow-up accrual a no-op: the generic mark's elapsed
+        basis is ``last_updated`` already, and the engine clamps the adapter
+        lane's per-position elapsed to ``last_updated``
+        (``PnLBacktester._update_positions_via_adapter``).
+
+        Accrual failures are non-fatal: the fill still applies under the
+        status-quo timing semantics (a one-tick bounded interest error)
+        rather than leaving the fill half-committed.
+        """
+        if market_state is None or fill.position_reduce_id is None:
+            return
+        position = self.get_position(fill.position_reduce_id)
+        if position is None or not position.is_lending:
+            return
+        try:
+            if adapter is not None:
+                basis = position.last_updated or position.entry_time
+                elapsed_seconds = (fill.timestamp - basis).total_seconds()
+                if elapsed_seconds > 0:
+                    adapter.update_position(position, market_state, elapsed_seconds, fill.timestamp)
+            else:
+                self._mark_lending_position(position, market_state, fill.timestamp)
+        except Exception:
+            logger.warning(
+                "Interest accrual before partial reduce of %s failed; "
+                "the reduce proceeds with mark-owned accrual timing",
+                fill.position_reduce_id,
+                exc_info=True,
+            )
+
+    def _reduce_position(self, position_id: str, reduce_amounts: dict[str, Decimal]) -> None:
+        """Commit a validated partial reduction of a position's principal.
+
+        Runs only after :meth:`_position_reduce_failure` validated coverage,
+        so every debit is held (a sub-dust shortfall clamps to zero).
+        Accrued interest stays on the position -- it is realized when the
+        position eventually closes in full. Interest through the fill
+        instant has already been accrued by
+        :meth:`_accrue_interest_through_fill`, which also advanced
+        ``last_updated``; the mark/update paths own accrual from there on.
+        """
+        position = self.get_position(position_id)
+        if position is None:  # pragma: no cover - guarded by the plan stage
+            return
+        for token, amount in reduce_amounts.items():
+            if amount <= Decimal("0"):
+                continue
+            remaining = position.get_amount(token) - amount
+            position.amounts[token] = remaining if remaining > Decimal("0") else Decimal("0")
+        if position.total_amount <= Decimal("0"):
+            # Reachable only through the sub-dust clamp (the withdraw router
+            # sends amount >= principal to a FULL close). Deliberately NOT
+            # auto-closed here: _close_position would drop the position's
+            # accrued interest from equity without realizing it. The empty
+            # position stays open carrying its interest; the next WITHDRAW
+            # full-closes it (principal 0 + interest), which conserves value.
+            logger.warning(
+                "Partial reduce clamped position %s principal to zero; "
+                "position remains open until a full close realizes its accrued interest",
+                position_id,
+            )
 
     def validate_margin_for_perp(
         self,

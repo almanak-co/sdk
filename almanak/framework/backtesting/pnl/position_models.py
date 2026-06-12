@@ -631,6 +631,12 @@ class SimulatedFill:
         success: Whether the fill succeeded
         position_delta: Position to add/update (optional)
         position_close_id: ID of position being closed (optional)
+        position_reduce_id: ID of position being partially reduced (optional;
+            e.g. a partial lending WITHDRAW shrinks the matched SUPPLY
+            position's principal instead of closing it)
+        position_reduce_amounts: Token -> amount (token units) to remove from
+            the reduced position's ``amounts``. Producers must size these to
+            match the fill's inflow so the reduction is value-conserving.
         metadata: Additional fill-specific metadata
         gas_price_gwei: Gas price in gwei used for this trade (for gas cost analysis)
         estimated_mev_cost_usd: Estimated MEV (sandwich attack) cost in USD (None if MEV simulation disabled)
@@ -651,6 +657,8 @@ class SimulatedFill:
     success: bool = True
     position_delta: SimulatedPosition | None = None
     position_close_id: str | None = None
+    position_reduce_id: str | None = None
+    position_reduce_amounts: dict[str, Decimal] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     gas_price_gwei: Decimal | None = None
     estimated_mev_cost_usd: Decimal | None = None
@@ -684,9 +692,14 @@ class SimulatedFill:
         """
         # Use fill's delayed_at_end if not overridden
         actual_delayed_at_end = delayed_at_end if delayed_at_end is not None else self.delayed_at_end
-        # VIB-2916: surface the simulated position_id (open) or the close-target id
-        # so on_intent_executed receives the same id the engine actually tracks.
-        position_id = self.position_delta.position_id if self.position_delta else self.position_close_id
+        # VIB-2916: surface the simulated position_id (open), the close-target
+        # id, or the partial-reduce target id so on_intent_executed receives
+        # the same id the engine actually tracks.
+        position_id = (
+            self.position_delta.position_id
+            if self.position_delta
+            else self.position_close_id or self.position_reduce_id
+        )
         return TradeRecord(
             timestamp=self.timestamp,
             intent_type=self.intent_type,
@@ -726,6 +739,8 @@ class SimulatedFill:
             "success": self.success,
             "position_delta": self.position_delta.to_dict() if self.position_delta else None,
             "position_close_id": self.position_close_id,
+            "position_reduce_id": self.position_reduce_id,
+            "position_reduce_amounts": {k: str(v) for k, v in self.position_reduce_amounts.items()},
             "metadata": self.metadata,
             "gas_price_gwei": str(self.gas_price_gwei) if self.gas_price_gwei is not None else None,
             "estimated_mev_cost_usd": str(self.estimated_mev_cost_usd)

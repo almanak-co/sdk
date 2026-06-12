@@ -191,10 +191,6 @@ CELLS: tuple[TrustCell, ...] = (
         "round_trip_conservation",
         "lending",
         "SUPPLY then WITHDRAW returns initial capital plus accrued interest - principal must not double-count.",
-        # Candidate stop-the-line finding (VIB-5081 PR): WITHDRAW never closes
-        # the supply position (generic flows carry no position_close_id and the
-        # lending adapter defers to them), so a round trip mints the principal.
-        xfail_ticket="VIB-5097",
     ),
     _cell(
         "rejection_no_state_change",
