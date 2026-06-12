@@ -619,8 +619,8 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
             fee_usd=fee_usd,
             slippage_usd=slippage_usd,
             gas_cost_usd=Decimal("0"),  # Gas handled separately by simulator
-            tokens_in={token_in: amount_in_tokens},  # Tokens sent TO the pool
-            tokens_out={token_out: actual_amount_out},  # Tokens received FROM the pool
+            tokens_in={token_out: actual_amount_out},  # Tokens received from the pool
+            tokens_out={token_in: amount_in_tokens},  # Tokens sent to the pool
             success=True,
             estimated_mev_cost_usd=total_mev_cost_usd if self._config.mev_simulation_enabled else None,
             metadata={

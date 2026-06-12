@@ -23,8 +23,10 @@ from almanak.framework.backtesting.adapters.arbitrage_adapter import (
 )
 from almanak.framework.backtesting.pnl.portfolio import (
     PositionType,
+    SimulatedPortfolio,
     SimulatedPosition,
 )
+from almanak.framework.intents.vocabulary import SwapIntent
 
 # =============================================================================
 # Mock Classes
@@ -36,6 +38,7 @@ class MockMarketState:
     """Mock market state for testing."""
 
     prices: dict[str, Decimal] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=datetime.now)
 
     def get_price(self, token: str) -> Decimal:
         """Get price for a token.
@@ -1093,3 +1096,174 @@ class TestArbitrageExecutionResult:
         assert d["is_profitable"] is False
         assert d["execution_model"] == "multiplicative"
         assert len(d["steps"]) == 1
+
+
+# =============================================================================
+# Fill Token-Flow Semantics Tests (Conservation of Value)
+# =============================================================================
+
+
+class TestFillTokenFlowSemantics:
+    """Successful arbitrage fills must honour the SimulatedFill contract.
+
+    SimulatedFill defines tokens_in as tokens RECEIVED and tokens_out as
+    tokens PAID (position_models.py). SimulatedPortfolio.apply_fill credits
+    tokens_in and debits tokens_out, so an inverted fill mints the spent
+    token and erases the received one - violating the Conservation of Value
+    invariant (docs/internal/notes/backtesting/Backtesting-TrustTest.md).
+    """
+
+    def _zero_cost_adapter(self) -> ArbitrageBacktestAdapter:
+        """Adapter with zero slippage/fees/MEV so flow math is exact."""
+        return ArbitrageBacktestAdapter(
+            ArbitrageBacktestConfig(
+                strategy_type="arbitrage",
+                base_slippage_per_hop_pct=Decimal("0"),
+                base_fee_per_hop_pct=Decimal("0"),
+                mev_simulation_enabled=False,
+            )
+        )
+
+    def test_successful_fill_reports_spent_token_as_tokens_out(self) -> None:
+        """Spent token belongs in tokens_out, received token in tokens_in."""
+        adapter = self._zero_cost_adapter()
+        market_state = MockMarketState(prices={"WETH": Decimal("2000"), "USDC": Decimal("1")})
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        portfolio.tokens["WETH"] = Decimal("5")
+        intent = SwapIntent(from_token="WETH", to_token="USDC", amount=Decimal("1"))
+
+        fill = adapter.execute_intent(intent, portfolio, market_state)
+
+        assert fill is not None
+        assert fill.success is True
+        assert fill.tokens_out == {"WETH": Decimal("1")}
+        assert fill.tokens_in == {"USDC": Decimal("2000")}
+
+    def test_apply_fill_conserves_portfolio_value(self) -> None:
+        """Applying an arbitrage fill must not create or destroy value."""
+        adapter = self._zero_cost_adapter()
+        market_state = MockMarketState(prices={"WETH": Decimal("2000"), "USDC": Decimal("1")})
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        portfolio.tokens["WETH"] = Decimal("5")
+        initial_value = portfolio.tokens["WETH"] * market_state.get_price("WETH") + portfolio.cash_usd
+        intent = SwapIntent(from_token="WETH", to_token="USDC", amount=Decimal("1"))
+
+        fill = adapter.execute_intent(intent, portfolio, market_state)
+        assert fill is not None and fill.success is True
+        portfolio.apply_fill(fill)
+
+        # 1 WETH spent, 2000 USDC received (swept to cash as a stablecoin).
+        assert portfolio.tokens["WETH"] == Decimal("4")
+        assert portfolio.cash_usd == Decimal("2000")
+        final_value = portfolio.tokens["WETH"] * market_state.get_price("WETH") + portfolio.cash_usd
+        assert final_value == initial_value
+
+
+class RoutedSwapIntent(SwapIntent):
+    """SwapIntent carrying explicit route metadata for multi-hop tests.
+
+    Production SwapIntent has no metadata field; the adapter reads it via
+    getattr for strategies that attach explicit arbitrage paths.
+    """
+
+    metadata: dict | None = None
+
+
+class TestExecuteIntentBranches:
+    """Branch coverage for ArbitrageBacktestAdapter.execute_intent."""
+
+    def _adapter(self, **config_overrides) -> ArbitrageBacktestAdapter:
+        config_kwargs: dict = {
+            "strategy_type": "arbitrage",
+            "base_slippage_per_hop_pct": Decimal("0"),
+            "base_fee_per_hop_pct": Decimal("0"),
+            "mev_simulation_enabled": False,
+        }
+        config_kwargs.update(config_overrides)
+        return ArbitrageBacktestAdapter(ArbitrageBacktestConfig(**config_kwargs))
+
+    def test_amount_usd_intent_with_unknown_prices_falls_back_to_one(self) -> None:
+        """amount_usd sizing with no price data assumes $1 for both legs."""
+        adapter = self._adapter()
+        market_state = MockMarketState(prices={})
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        intent = SwapIntent(from_token="FOO", to_token="BAR", amount_usd=Decimal("1000"))
+
+        fill = adapter.execute_intent(intent, portfolio, market_state)
+
+        assert fill is not None and fill.success is True
+        assert fill.amount_usd == Decimal("1000")
+        assert fill.tokens_out == {"FOO": Decimal("1000")}
+        assert fill.tokens_in == {"BAR": Decimal("1000")}
+
+    def test_token_amount_with_unknown_input_price_assumes_stablecoin(self) -> None:
+        """Token-denominated sizing with no price data treats amount as USD."""
+        adapter = self._adapter()
+        market_state = MockMarketState(prices={})
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        intent = SwapIntent(from_token="FOO", to_token="BAR", amount=Decimal("50"))
+
+        fill = adapter.execute_intent(intent, portfolio, market_state)
+
+        assert fill is not None and fill.success is True
+        assert fill.amount_usd == Decimal("50")
+        assert fill.tokens_out == {"FOO": Decimal("50")}
+
+    def test_zero_prices_fall_back_to_one(self) -> None:
+        """Zero (falsy) prices are replaced with $1 rather than dividing by zero."""
+        adapter = self._adapter()
+        market_state = MockMarketState(prices={"FOO": Decimal("0"), "BAR": Decimal("0")})
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        intent = SwapIntent(from_token="FOO", to_token="BAR", amount=Decimal("7"))
+
+        fill = adapter.execute_intent(intent, portfolio, market_state)
+
+        assert fill is not None and fill.success is True
+        assert fill.tokens_out == {"FOO": Decimal("7")}
+        assert fill.tokens_in == {"BAR": Decimal("7")}
+
+    def test_slippage_exceeded_returns_failed_fill_with_empty_flows(self) -> None:
+        """A fill rejected for slippage must not report any token movement."""
+        adapter = self._adapter(base_slippage_per_hop_pct=Decimal("0.05"))
+        market_state = MockMarketState(prices={"WETH": Decimal("2000"), "USDC": Decimal("1")})
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        intent = SwapIntent(
+            from_token="WETH",
+            to_token="USDC",
+            amount=Decimal("1"),
+            max_slippage=Decimal("0.001"),
+        )
+
+        fill = adapter.execute_intent(intent, portfolio, market_state)
+
+        assert fill is not None
+        assert fill.success is False
+        assert fill.tokens_in == {}
+        assert fill.tokens_out == {}
+        assert fill.metadata["failure_reason"] == "slippage_exceeded"
+
+    def test_explicit_route_metadata_executes_multi_hop(self) -> None:
+        """Route metadata drives multi-hop execution with per-hop slippage."""
+        adapter = self._adapter()
+        market_state = MockMarketState(
+            prices={"FOO": Decimal("1"), "MID": Decimal("1"), "BAR": Decimal("1")}
+        )
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        intent = RoutedSwapIntent(
+            from_token="FOO",
+            to_token="BAR",
+            amount=Decimal("100"),
+            metadata={
+                "route": [
+                    {"token_in": "FOO", "token_out": "MID", "slippage": "0"},
+                    {"token_in": "MID", "token_out": "BAR", "slippage": "0"},
+                ]
+            },
+        )
+
+        fill = adapter.execute_intent(intent, portfolio, market_state)
+
+        assert fill is not None and fill.success is True
+        assert fill.metadata["num_hops"] == 2
+        assert fill.tokens_out == {"FOO": Decimal("100")}
+        assert fill.tokens_in == {"BAR": Decimal("100")}
