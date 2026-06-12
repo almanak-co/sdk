@@ -99,11 +99,11 @@ almanak/
     state/             # 三级状态管理
     execution/         # 交易编排（含签名器、模拟器）
     backtesting/       # PnL、模拟交易、参数扫描
-    connectors/        # 协议适配器（SDK、adapter、receipt parser）
     data/              # 价格预言机、指标、token 解析
     market/            # 规范化的 MarketSnapshot
     alerting/          # Slack/Telegram 通知
     services/          # 卡顿检测、紧急管理
+  connectors/          # 协议适配器（SDK、adapter、receipt parser）
   gateway/             # gRPC 网关侧车
   core/                # 枚举、模型、工具
   cli/                 # 命令行界面

@@ -99,11 +99,11 @@ almanak/
     state/             # Gestion d'état à trois niveaux
     execution/         # Orchestration des transactions (incl. signers, simulateurs)
     backtesting/       # PnL, paper trading, balayage de paramètres
-    connectors/        # Adaptateurs de protocoles (SDK, adapter, receipt parser)
     data/              # Oracles de prix, indicateurs, résolution de tokens
     market/            # MarketSnapshot canonique
     alerting/          # Notifications Slack/Telegram
     services/          # Détection de blocage, gestion d'urgence
+  connectors/          # Adaptateurs de protocoles (SDK, adapter, receipt parser)
   gateway/             # Sidecar gRPC de la passerelle
   core/                # Énumérations, modèles, utilitaires
   cli/                 # Interface en ligne de commande

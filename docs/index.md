@@ -111,11 +111,11 @@ almanak/
     state/             # Three-tier state management
     execution/         # Transaction orchestration (incl. signers, simulators)
     backtesting/       # PnL, paper trading, sweeps
-    connectors/        # Protocol adapters (SDK, adapter, receipt parser)
     data/              # Price oracles, indicators, token resolution
     market/            # Canonical MarketSnapshot
     alerting/          # Slack/Telegram notifications
     services/          # Stuck detection, emergency mgmt
+  connectors/          # Protocol adapters (SDK, adapter, receipt parser)
   gateway/             # gRPC gateway sidecar
   core/                # Enums, models, utilities
   cli/                 # Command-line interface

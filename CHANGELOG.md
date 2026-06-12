@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.18.0] - 2026-06-12
+
+### Added
+
+- Add health-factor-aware leverage-loop unwind, plus Morpho health-factor and
+  market-state fixes for safer teardown and monitor-time deleveraging (#2542).
+- Add definition-only `quote_asset` strategy metadata and emit it from scaffold
+  templates and packaged demos (#2659, #2734).
+- Add Fluid DEX swaps on Arbitrum, Base, Ethereum, and Polygon, and Fluid
+  fToken lending SUPPLY/WITHDRAW on Arbitrum and Base (#2682, #2723).
+- Add Uniswap V4 position-registry support, high-confidence gateway-backed LP
+  valuation, and measured LP_CLOSE uncollected-fee accounting (#2681, #2680,
+  #2732).
+- Add deterministic nightly mainnet probe runner with budget gating,
+  stranded-funds detection, and structured Slack-compatible reports (#2748).
+- Add ChainDescriptor/ChainRegistry ownership for default-chain policy, chain
+  families, native price/display metadata, Anvil profiles, contract addresses,
+  L2 fee-oracle metadata, and chain aliasing (#2684, #2685, #2687, #2689,
+  #2690, #2747, #2749).
+- Add static ratchets for framework-to-gateway imports and protocol/chain
+  literal dispatch so new coupling sites fail CI (#2722, #2746).
+- Add money-path on-chain read fallback metrics and provenance reporting
+  contracts (#2728).
+
 ### Changed
 
 - **Action required for dashboard/backtest users**: heavy optional
@@ -18,11 +42,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   export now fail fast with a message naming the extra when it is missing.
   Install `pip install 'almanak[dashboard,backtest]'` to keep the previous
   behavior. Hosted dashboard base images and the backtest service install
-  their extras explicitly.
+  their extras explicitly (#2703).
 - Route gateway Onchain DEX pool analytics, pool history, and DEX-native OHLCV
   through CoinGecko Onchain API instead of GeckoTerminal. CoinGecko Onchain
   pool endpoints now require `COINGECKO_API_KEY` locally or
-  `ALMANAK_GATEWAY_COINGECKO_API_KEY` in gateway environments.
+  `ALMANAK_GATEWAY_COINGECKO_API_KEY` in gateway environments (#2640).
 - Backtesting funding-rate providers (`backtesting/pnl/providers/funding_rates.py`
   and `backtesting/pnl/providers/perp/`) are now thin clients of the gateway's
   `RateHistoryService` instead of opening their own HTTP sessions against GMX /
@@ -37,15 +61,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (use `DEFAULT_FUNDING_RATE`), `gmx_funding.GMX_API_URLS`,
   `gmx_funding.GMX_API_FALLBACK_URLS`, `gmx_funding.GMX_MARKET_TOKENS`,
   `gmx_funding.SUPPORTED_CHAINS` (use `GMXFundingProvider.supported_chains`),
-  `gmx_funding.GMXMarketInfo`, and `hyperliquid_funding.HYPERLIQUID_API_URL`.
+  `gmx_funding.GMXMarketInfo`, and `hyperliquid_funding.HYPERLIQUID_API_URL`
+  (#2671).
 - Backtesting fee models moved into their owning connectors
   (`almanak.connectors.<protocol>.fee_model`) and are declared on each
   connector manifest via `FeeModelDecl` (VIB-4851 Phase D). The
   `fee_models` package re-exports every model class lazily and the
   `FeeModelRegistry` lookup behavior is byte-identical (all legacy keys and
   aliases resolve; `register_fee_model` overlays still work), so existing
-  imports keep working. New: importing `fee_models` no longer imports the
-  protocol modules eagerly.
+  imports keep working. Importing `fee_models` no longer imports the protocol
+  modules eagerly (#2672).
 - Multi-DEX volume routing and liquidity-depth family dispatch are
   declaration-driven via each DEX connector's `DexVolumeDecl` (VIB-4851
   Phase D). Removed framework-internal names:
@@ -60,12 +85,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   at runtime by any backtesting module (duck-typed `.value` acceptance is
   preserved). New `GatewayDexVolumeProvider` serves any declared DEX without
   a per-DEX wrapper class; the existing per-DEX wrapper classes are
-  unchanged.
+  unchanged (#2672).
 - The backtest service's fee-model exporter derives its per-protocol standard
   fields (fee tiers, default fee, slippage-model id, supported intents/chains,
   gas estimates) from each connector's `fee_model.BACKTEST_EXPORT_METADATA`
   module attribute instead of a central table (VIB-4851 Phase D). HTTP
-  responses are byte-identical (golden-fixture pinned).
+  responses are byte-identical (golden-fixture pinned) (#2673).
 - Lending rate-lane facts derive from connector manifests
   (`LendingReadDecl.rate_history_chains` + `backtest_default_*_apy`).
   Deliberate widening: `LendingAPYProvider` now accepts `morpho_blue` (its
@@ -77,20 +102,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (unused legacy tables), `lending_apy.DEFAULT_SUPPLY_APYS` /
   `DEFAULT_BORROW_APYS` (use `GENERIC_DEFAULT_*_APY` + the manifest decls).
   `rates.monitor.SUPPORTED_PROTOCOLS` / `PROTOCOL_CHAINS` remain importable
-  from the module (lazily derived) but are no longer re-exported eagerly by
-  `almanak.framework.data.rates`; `PROTOCOL_CHAINS` values are now sorted.
+  from the module, lazily derived, but are no longer re-exported eagerly by
+  `almanak.framework.data.rates`; `PROTOCOL_CHAINS` values are now sorted
+  (#2673).
 - TWAP reference pools (`UNISWAP_V3_POOLS`, `TOKEN_TO_POOL`, per-chain
   `*_POOLS`) moved to `almanak.connectors.uniswap_v3.backtest_pools`,
   declared via `DexVolumeDecl.twap_reference_pools`; the legacy
-  `providers.twap` names remain importable (lazily derived) but left
-  `twap.__all__`.
+  `providers.twap` names remain importable, lazily derived, but left
+  `twap.__all__` (#2673).
 - `backtesting/paper/position_queries.py` resolves Uniswap V3 / GMX V2 /
   Aave V3 contract addresses through the strategy-side `AddressRegistry`
   (W1 seam) instead of local per-chain dicts — the duplicated copies were a
   drift hazard; an equivalence test pins the registry-derived values to the
   removed tables. Removed names: `UNISWAP_V3_POSITION_MANAGER`,
   `GMX_V2_READER`, `GMX_V2_DATA_STORE`, `AAVE_V3_POOL_DATA_PROVIDER`
-  (market/token metadata tables are unchanged).
+  (market/token metadata tables are unchanged) (#2691).
+- Move connector registration, read dispatch, compiler dispatch, Solana program
+  specs, address tables, protocol aliases, capability metadata, strategy
+  support, and money-path flags into connector manifests (#2635, #2636, #2639,
+  #2641, #2643, #2644, #2645, #2646, #2653, #2654, #2655, #2663, #2664,
+  #2666, #2668).
+- Gate the backtesting CLI behind `ALMANAK_ENABLE_BACKTESTING` so experimental
+  surfaces remain opt-in (#2742).
+- Update scaffold templates and packaged demos so TA strategies fire on signal
+  transitions and LP strategies rebalance inventory through swap-to-ratio flows
+  (#2626, #2726).
 
 ### Removed
 
@@ -111,7 +147,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `PlanExecutor` no longer accepts the deprecated `clob_handler`
     constructor parameter. Pass a populated `handler_registry`
     (`ExecutionHandlerRegistry`) instead; handlers are built from connector
-    manifests via `PredictionExecuteRegistry.build_handler(...)`.
+    manifests via `PredictionExecuteRegistry.build_handler(...)` (#2712).
+
+### Fixed
+
+- Fix accounting persistence, Uniswap V4 LP_OPEN identity, Uniswap V4 LP
+  valuation, LP payload units, swap token canonicalization, FIFO restart
+  rehydration, teardown token consolidation, and stale LP accountant fixtures
+  (#2660, #2661, #2676, #2678, #2680, #2700, #2709, #2729).
+- Fix block-anchored reconciliation balance reads to remove false-positive
+  reconciliation incidents (#2705).
+- Fix dashboard PnL signs, stale LP session state, latest-snapshot reads,
+  marker clipping, quant input sharing, and ledger USD-unit display (#2648,
+  #2674, #2677, #2679, #2731).
+- Fix live-mode state/accounting persistence failure handling and mode-aware
+  copy-trading, vault, prediction, and sibling write paths (#2694, #2702,
+  #2704).
+- Fix V3-family receipt parser decimal metadata, Uniswap V3 pool address
+  hashing, Uniswap V4 `StateView.getSlot0` selector usage, and non-Position
+  Manager V4 warning spam (#2695, #2708, #2715, #2716, #2717).
+- Fix PnL backtester arbitrage token-flow direction and perp collateral/cash
+  conservation (#2743, #2750).
+- Fix chain-aware market balance dispatch and native-gas accounting in
+  multichain flows (#2658, #2652).
+- Fix JoeLend raw-unit receipt enricher hooks and Aave carry strategy pool data
+  provider resolution through the AddressRegistry (#2699, #2692).
+
+### Security
+
+- Harden gateway authentication with constant-time token comparison and
+  failed-attempt throttling (#2693).
+- Route incubating Ethena time-warp RPC through the gateway and add a static
+  strategy egress guard (#2696).
+- Remove placeholder Hyperliquid signer behavior that used fake keccak and fake
+  ECDSA paths (#2720).
 
 ## [2.17.0] - 2026-06-05
 
