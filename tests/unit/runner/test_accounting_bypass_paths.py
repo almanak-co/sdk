@@ -239,11 +239,20 @@ def test_t_3762_4_once_path_uses_mode_aware_wrapper() -> None:
     canonical example of the silent-failure class. Pin the fix in
     source so a future refactor cannot silently revert it.
     """
+    import importlib
     import inspect
+    import pkgutil
 
+    from almanak.framework import cli as _cli_pkg
     from almanak.framework.cli import run_helpers
 
-    src = inspect.getsource(run_helpers)
+    # Plan 019: source now spans the facade + all _run_* implementation modules.
+    mods = [run_helpers] + [
+        importlib.import_module(f"almanak.framework.cli.{m.name}")
+        for m in pkgutil.iter_modules(_cli_pkg.__path__)
+        if m.name.startswith("_run_")
+    ]
+    src = "\n".join(inspect.getsource(m) for m in mods)
     # Strip out the comment block we wrote that mentions
     # ``_capture_portfolio_snapshot`` as historical bypass; we want to
     # forbid actual *call sites*, not commentary.

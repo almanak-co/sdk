@@ -331,12 +331,26 @@ class TestValidationSolanaAddresses:
 
 
 def _cli_run_source() -> str:
-    """Concatenated source of all CLI run-path modules (split across files after Phase 4c refactor)."""
+    """Concatenated source of all CLI run-path modules (split across files after Plan 019 refactor)."""
+    import importlib
     import inspect
+    import pkgutil
 
+    from almanak.framework import cli as _cli_pkg
     from almanak.framework.cli import run, run_helpers
 
-    return inspect.getsource(run) + "\n" + inspect.getsource(run_helpers)
+    run_star_mods = [
+        importlib.import_module(f"almanak.framework.cli.{m.name}")
+        for m in pkgutil.iter_modules(_cli_pkg.__path__)
+        if m.name.startswith("_run_")
+    ]
+    return (
+        inspect.getsource(run)
+        + "\n"
+        + inspect.getsource(run_helpers)
+        + "\n"
+        + "\n".join(inspect.getsource(m) for m in run_star_mods)
+    )
 
 
 class TestCLIBypassRemoved:

@@ -2290,13 +2290,14 @@ def test_connector_agent_tools_are_not_in_legacy_boot_file() -> None:
 def test_connector_vault_lifecycle_is_not_hardcoded_in_framework() -> None:
     """Framework vault lifecycle paths must not import concrete vault connector modules."""
     repo_root = Path(__file__).resolve().parents[3]
+    # Plan 019: also scan all _run_*.py split modules so vault-code motion is covered.
+    _run_star_texts = [p.read_text() for p in sorted((repo_root / "almanak/framework/cli").glob("_run_*.py"))]
     source = "\n".join(
-        (repo_root / path).read_text()
-        for path in (
+        [(repo_root / path).read_text() for path in (
             "almanak/framework/vault/lifecycle.py",
             "almanak/framework/cli/run_helpers.py",
             "almanak/framework/cli/run.py",
-        )
+        )] + _run_star_texts
     )
 
     assert re.search(r"\bget_vault_tool_capability\s*\(", source) is not None
