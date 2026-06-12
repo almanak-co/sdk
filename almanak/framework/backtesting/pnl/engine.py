@@ -1675,12 +1675,7 @@ class PnLBacktester:
         """
         return self.slippage_models.get(protocol, self.slippage_models["default"])
 
-    # crap-allowlist: VIB-5095 — pre-existing cc=30 dispatcher (already noqa: C901); narrow
-    # touches only: #2744 passes market_state to apply_fill, the perp-intent work adds one
-    # dispatch line routing close resolution through A-grade, test-covered helpers. Refactor is
-    # blocked on the backtesting blueprint (VIB-5080) per .claude/rules/crap-refactor.md step 1;
-    # extraction plan in VIB-5095.
-    async def _execute_intent(  # noqa: C901
+    async def _execute_intent(
         self,
         intent: Any,
         portfolio: SimulatedPortfolio,
@@ -1785,203 +1780,24 @@ class PnLBacktester:
         )
 
         # Simulate MEV costs if enabled
-        estimated_mev_cost_usd: Decimal | None = None
-        if self._mev_simulator is not None:
-            # Get token symbols for MEV simulation
-            token_in = tokens[0] if tokens else ""
-            token_out = tokens[1] if len(tokens) > 1 else ""
-
-            # Get gas price for inclusion delay simulation
-            mev_gas_price = config.gas_price_gwei if config.include_gas_costs else None
-
-            # Simulate MEV impact
-            mev_result = self._mev_simulator.simulate_mev_cost(
-                trade_amount_usd=amount_usd,
-                token_in=token_in,
-                token_out=token_out,
-                gas_price_gwei=mev_gas_price,
-                intent_type=intent_type,
-            )
-
-            # Record MEV cost
-            estimated_mev_cost_usd = mev_result.mev_cost_usd
-
-            # Add MEV-induced slippage to base slippage
-            if mev_result.is_sandwiched:
-                slippage_pct = slippage_pct + mev_result.additional_slippage_pct
-                logger.debug(
-                    f"MEV simulation: Trade sandwiched, additional slippage "
-                    f"{mev_result.additional_slippage_pct * 100:.2f}%, "
-                    f"MEV cost ${mev_result.mev_cost_usd:.2f}"
-                )
+        estimated_mev_cost_usd, slippage_pct = self._simulate_mev_impact(
+            intent_type=intent_type,
+            tokens=tokens,
+            amount_usd=amount_usd,
+            slippage_pct=slippage_pct,
+            config=config,
+        )
 
         slippage_usd = amount_usd * slippage_pct
 
         # Calculate gas cost
-        gas_cost_usd = Decimal("0")
-        gas_price_gwei: Decimal | None = None
-        gas_gwei_source: str | None = None  # Track source for trade metadata
-        if config.include_gas_costs:
-            # Estimate gas used based on intent type
-            gas_used = self._estimate_gas_for_intent(intent_type)
-
-            # Get ETH price for gas calculation with priority order:
-            # 1. gas_eth_price_override (takes precedence for reproducibility/testing)
-            # 2. Historical ETH price (if use_historical_gas_prices enabled)
-            # 3. Current market price (WETH or ETH from market_state)
-            # No more silent fallback - fail if price unavailable
-            eth_price: Decimal | None = None
-            gas_price_source = "unknown"
-
-            if config.gas_eth_price_override is not None:
-                # Priority 1: Use explicit override
-                eth_price = config.gas_eth_price_override
-                gas_price_source = "override"
-                logger.debug(
-                    "Gas ETH price: Using override value $%.2f",
-                    eth_price,
-                )
-            elif config.use_historical_gas_prices:
-                # Priority 2: Try to get historical price from data provider
-                try:
-                    eth_price = market_state.get_price("WETH")
-                    gas_price_source = "historical"
-                    logger.debug(
-                        "Gas ETH price: Using historical WETH price $%.2f at %s",
-                        eth_price,
-                        timestamp.isoformat(),
-                    )
-                except KeyError:
-                    try:
-                        eth_price = market_state.get_price("ETH")
-                        gas_price_source = "historical"
-                        logger.debug(
-                            "Gas ETH price: Using historical ETH price $%.2f at %s",
-                            eth_price,
-                            timestamp.isoformat(),
-                        )
-                    except KeyError:
-                        # Historical mode but no price available
-                        if config.strict_reproducibility:
-                            raise ValueError(
-                                f"Gas ETH price: Historical price requested but ETH/WETH not "
-                                f"available at {timestamp.isoformat()}. In strict_reproducibility mode, "
-                                f"ETH price must be available. Set gas_eth_price_override for reproducibility."
-                            ) from None
-                        else:
-                            raise ValueError(
-                                f"Gas ETH price: Historical price requested but ETH/WETH not "
-                                f"available at {timestamp.isoformat()}. Set gas_eth_price_override "
-                                f"to provide an explicit ETH price for gas calculations."
-                            ) from None
-            else:
-                # Priority 3: Use current market price (default behavior)
-                try:
-                    eth_price = market_state.get_price("WETH")
-                    gas_price_source = "market"
-                except KeyError:
-                    try:
-                        eth_price = market_state.get_price("ETH")
-                        gas_price_source = "market"
-                    except KeyError:
-                        # No fallback allowed - fail with clear error
-                        if config.strict_reproducibility:
-                            raise ValueError(
-                                f"Gas ETH price: ETH/WETH not available in market state at "
-                                f"{timestamp.isoformat()}. In strict_reproducibility mode, "
-                                f"ETH price must be available. Set gas_eth_price_override for reproducibility."
-                            ) from None
-                        else:
-                            raise ValueError(
-                                f"Gas ETH price: ETH/WETH not available in market state at "
-                                f"{timestamp.isoformat()}. Set gas_eth_price_override to provide "
-                                f"an explicit ETH price for gas calculations."
-                            ) from None
-
-            # Track gas price source in data quality metrics
-            if data_quality_tracker is not None:
-                data_quality_tracker.record_gas_price_source(gas_price_source)
-
-            # Determine gas price in gwei with priority order:
-            # 1. Historical gas price from gas_provider (if use_historical_gas_gwei=True)
-            # 2. MarketState.gas_price_gwei (if populated by data provider)
-            # 3. config.gas_price_gwei (static default)
-            gas_price_gwei = config.gas_price_gwei  # Default
-            gas_gwei_source = "config"
-
-            if config.use_historical_gas_gwei and self.gas_provider is not None:
-                # Priority 1: Fetch historical gas price from provider
-                try:
-                    historical_gas: GasPrice = await self.gas_provider.get_gas_price(
-                        timestamp=timestamp,
-                        chain=config.chain,
-                    )
-                    gas_price_gwei = historical_gas.effective_gas_price_gwei
-                    gas_gwei_source = f"historical_gas:{historical_gas.source}"
-                    logger.debug(
-                        "Gas gwei: Using historical gas price %.1f gwei (source: %s) at %s",
-                        gas_price_gwei,
-                        historical_gas.source,
-                        timestamp.isoformat(),
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "Failed to get historical gas price, falling back to market_state/config: %s",
-                        str(e),
-                    )
-                    # Fall through to next priority
-                    if market_state.gas_price_gwei is not None:
-                        gas_price_gwei = market_state.gas_price_gwei
-                        gas_gwei_source = "market_state"
-                    # else keep config.gas_price_gwei default
-
-            elif config.use_historical_gas_gwei and self.gas_provider is None:
-                # Historical gas requested but no provider - try market_state
-                if market_state.gas_price_gwei is not None:
-                    gas_price_gwei = market_state.gas_price_gwei
-                    gas_gwei_source = "market_state"
-                else:
-                    logger.warning(
-                        "use_historical_gas_gwei=True but no gas_provider and "
-                        "no gas_price_gwei in market_state, using config default %.1f gwei",
-                        config.gas_price_gwei,
-                    )
-
-            elif market_state.gas_price_gwei is not None:
-                # Priority 2: Use market state gas price if available
-                gas_price_gwei = market_state.gas_price_gwei
-                gas_gwei_source = "market_state"
-
-            # Track gas gwei source in fallback usage
-            if gas_gwei_source == "config":
-                self._track_fallback("default_gas_price")
-
-            # Calculate gas cost: gas_used * gas_price_gwei * ETH_price / 1e9
-            gas_cost_eth = Decimal(gas_used) * gas_price_gwei / Decimal("1000000000")
-            gas_cost_usd = gas_cost_eth * eth_price
-
-            # Log gas cost details at debug level for troubleshooting
-            logger.debug(
-                "Gas cost: %d gas used × %.1f gwei (%s) × $%.2f ETH (%s) = $%.4f",
-                gas_used,
-                gas_price_gwei,
-                gas_gwei_source,
-                eth_price,
-                gas_price_source,
-                gas_cost_usd,
-            )
-
-            # Record gas price if tracking is enabled
-            if self._gas_price_records is not None and gas_price_gwei is not None:
-                self._gas_price_records.append(
-                    GasPriceRecord(
-                        timestamp=timestamp,
-                        gwei=gas_price_gwei,
-                        source=gas_gwei_source or "unknown",
-                        usd_cost=gas_cost_usd,
-                        eth_price_usd=eth_price,
-                    )
-                )
+        gas_cost_usd, gas_price_gwei, gas_gwei_source = await self._resolve_gas_cost(
+            intent_type=intent_type,
+            market_state=market_state,
+            timestamp=timestamp,
+            config=config,
+            data_quality_tracker=data_quality_tracker,
+        )
 
         # Get executed price (for swaps/perps, this is the price after slippage)
         executed_price = self._get_executed_price(intent, market_state, slippage_pct, intent_type)
@@ -2056,6 +1872,295 @@ class PnLBacktester:
 
         # Convert to TradeRecord and return
         return fill.to_trade_record(pnl_usd=Decimal("0"))
+
+    def _simulate_mev_impact(
+        self,
+        intent_type: IntentType,
+        tokens: list[str],
+        amount_usd: Decimal,
+        slippage_pct: Decimal,
+        config: PnLBacktestConfig,
+    ) -> tuple[Decimal | None, Decimal]:
+        """Simulate MEV costs for an intent if the MEV simulator is enabled.
+
+        Args:
+            intent_type: Type of intent
+            tokens: Tokens involved in the intent
+            amount_usd: USD amount of the trade
+            slippage_pct: Base slippage from the slippage model
+            config: Backtest configuration
+
+        Returns:
+            Tuple of (estimated_mev_cost_usd or None when no simulator is
+            configured, slippage_pct increased by MEV-induced slippage when
+            the trade is sandwiched)
+        """
+        if self._mev_simulator is None:
+            return None, slippage_pct
+
+        # Get token symbols for MEV simulation
+        token_in = tokens[0] if tokens else ""
+        token_out = tokens[1] if len(tokens) > 1 else ""
+
+        # Get gas price for inclusion delay simulation
+        mev_gas_price = config.gas_price_gwei if config.include_gas_costs else None
+
+        # Simulate MEV impact
+        mev_result = self._mev_simulator.simulate_mev_cost(
+            trade_amount_usd=amount_usd,
+            token_in=token_in,
+            token_out=token_out,
+            gas_price_gwei=mev_gas_price,
+            intent_type=intent_type,
+        )
+
+        # Add MEV-induced slippage to base slippage
+        if mev_result.is_sandwiched:
+            slippage_pct = slippage_pct + mev_result.additional_slippage_pct
+            logger.debug(
+                f"MEV simulation: Trade sandwiched, additional slippage "
+                f"{mev_result.additional_slippage_pct * 100:.2f}%, "
+                f"MEV cost ${mev_result.mev_cost_usd:.2f}"
+            )
+
+        return mev_result.mev_cost_usd, slippage_pct
+
+    async def _resolve_gas_cost(
+        self,
+        intent_type: IntentType,
+        market_state: MarketState,
+        timestamp: datetime,
+        config: PnLBacktestConfig,
+        data_quality_tracker: DataQualityTracker | None,
+    ) -> tuple[Decimal, Decimal | None, str | None]:
+        """Resolve the simulated gas cost for an intent.
+
+        Estimates gas units for the intent type, resolves the ETH price
+        (:meth:`_resolve_gas_eth_price`) and the gas price in gwei
+        (:meth:`_resolve_gas_price_gwei`), records tracking side effects
+        (data-quality source, fallback usage, gas price records), and
+        computes the final USD cost.
+
+        Args:
+            intent_type: Type of intent
+            market_state: Current market state with prices
+            timestamp: Time of execution
+            config: Backtest configuration
+            data_quality_tracker: Optional tracker for data quality metrics
+
+        Returns:
+            Tuple of (gas_cost_usd, gas_price_gwei, gas_gwei_source).
+            Returns (Decimal("0"), None, None) when config.include_gas_costs
+            is False.
+        """
+        if not config.include_gas_costs:
+            return Decimal("0"), None, None
+
+        # Estimate gas used based on intent type
+        gas_used = self._estimate_gas_for_intent(intent_type)
+
+        eth_price, gas_price_source = self._resolve_gas_eth_price(config, market_state, timestamp)
+
+        # Track gas price source in data quality metrics
+        if data_quality_tracker is not None:
+            data_quality_tracker.record_gas_price_source(gas_price_source)
+
+        gas_price_gwei, gas_gwei_source = await self._resolve_gas_price_gwei(config, market_state, timestamp)
+
+        # Track gas gwei source in fallback usage
+        if gas_gwei_source == "config":
+            self._track_fallback("default_gas_price")
+
+        # Calculate gas cost: gas_used * gas_price_gwei * ETH_price / 1e9
+        gas_cost_eth = Decimal(gas_used) * gas_price_gwei / Decimal("1000000000")
+        gas_cost_usd = gas_cost_eth * eth_price
+
+        # Log gas cost details at debug level for troubleshooting
+        logger.debug(
+            "Gas cost: %d gas used × %.1f gwei (%s) × $%.2f ETH (%s) = $%.4f",
+            gas_used,
+            gas_price_gwei,
+            gas_gwei_source,
+            eth_price,
+            gas_price_source,
+            gas_cost_usd,
+        )
+
+        # Record gas price if tracking is enabled
+        if self._gas_price_records is not None and gas_price_gwei is not None:
+            self._gas_price_records.append(
+                GasPriceRecord(
+                    timestamp=timestamp,
+                    gwei=gas_price_gwei,
+                    source=gas_gwei_source or "unknown",
+                    usd_cost=gas_cost_usd,
+                    eth_price_usd=eth_price,
+                )
+            )
+
+        return gas_cost_usd, gas_price_gwei, gas_gwei_source
+
+    def _resolve_gas_eth_price(
+        self,
+        config: PnLBacktestConfig,
+        market_state: MarketState,
+        timestamp: datetime,
+    ) -> tuple[Decimal, str]:
+        """Resolve the ETH price used for gas-cost conversion.
+
+        Priority order:
+        1. gas_eth_price_override (takes precedence for reproducibility/testing)
+        2. Historical ETH price (if use_historical_gas_prices enabled)
+        3. Current market price (WETH or ETH from market_state)
+        No silent fallback - fail if price unavailable.
+
+        Args:
+            config: Backtest configuration
+            market_state: Current market state with prices
+            timestamp: Time of execution
+
+        Returns:
+            Tuple of (eth_price, gas_price_source)
+
+        Raises:
+            ValueError: If no ETH/WETH price is available from the selected
+                source and no gas_eth_price_override is set.
+        """
+        if config.gas_eth_price_override is not None:
+            # Priority 1: Use explicit override
+            eth_price = config.gas_eth_price_override
+            gas_price_source = "override"
+            logger.debug(
+                "Gas ETH price: Using override value $%.2f",
+                eth_price,
+            )
+        elif config.use_historical_gas_prices:
+            # Priority 2: Try to get historical price from data provider
+            try:
+                eth_price = market_state.get_price("WETH")
+                gas_price_source = "historical"
+                logger.debug(
+                    "Gas ETH price: Using historical WETH price $%.2f at %s",
+                    eth_price,
+                    timestamp.isoformat(),
+                )
+            except KeyError:
+                try:
+                    eth_price = market_state.get_price("ETH")
+                    gas_price_source = "historical"
+                    logger.debug(
+                        "Gas ETH price: Using historical ETH price $%.2f at %s",
+                        eth_price,
+                        timestamp.isoformat(),
+                    )
+                except KeyError:
+                    # Historical mode but no price available
+                    if config.strict_reproducibility:
+                        raise ValueError(
+                            f"Gas ETH price: Historical price requested but ETH/WETH not "
+                            f"available at {timestamp.isoformat()}. In strict_reproducibility mode, "
+                            f"ETH price must be available. Set gas_eth_price_override for reproducibility."
+                        ) from None
+                    else:
+                        raise ValueError(
+                            f"Gas ETH price: Historical price requested but ETH/WETH not "
+                            f"available at {timestamp.isoformat()}. Set gas_eth_price_override "
+                            f"to provide an explicit ETH price for gas calculations."
+                        ) from None
+        else:
+            # Priority 3: Use current market price (default behavior)
+            try:
+                eth_price = market_state.get_price("WETH")
+                gas_price_source = "market"
+            except KeyError:
+                try:
+                    eth_price = market_state.get_price("ETH")
+                    gas_price_source = "market"
+                except KeyError:
+                    # No fallback allowed - fail with clear error
+                    if config.strict_reproducibility:
+                        raise ValueError(
+                            f"Gas ETH price: ETH/WETH not available in market state at "
+                            f"{timestamp.isoformat()}. In strict_reproducibility mode, "
+                            f"ETH price must be available. Set gas_eth_price_override for reproducibility."
+                        ) from None
+                    else:
+                        raise ValueError(
+                            f"Gas ETH price: ETH/WETH not available in market state at "
+                            f"{timestamp.isoformat()}. Set gas_eth_price_override to provide "
+                            f"an explicit ETH price for gas calculations."
+                        ) from None
+
+        return eth_price, gas_price_source
+
+    async def _resolve_gas_price_gwei(
+        self,
+        config: PnLBacktestConfig,
+        market_state: MarketState,
+        timestamp: datetime,
+    ) -> tuple[Decimal, str]:
+        """Resolve the gas price in gwei for gas-cost simulation.
+
+        Priority order:
+        1. Historical gas price from gas_provider (if use_historical_gas_gwei=True)
+        2. MarketState.gas_price_gwei (if populated by data provider)
+        3. config.gas_price_gwei (static default)
+
+        Args:
+            config: Backtest configuration
+            market_state: Current market state
+            timestamp: Time of execution
+
+        Returns:
+            Tuple of (gas_price_gwei, gas_gwei_source)
+        """
+        gas_price_gwei = config.gas_price_gwei  # Default
+        gas_gwei_source = "config"
+
+        if config.use_historical_gas_gwei and self.gas_provider is not None:
+            # Priority 1: Fetch historical gas price from provider
+            try:
+                historical_gas: GasPrice = await self.gas_provider.get_gas_price(
+                    timestamp=timestamp,
+                    chain=config.chain,
+                )
+                gas_price_gwei = historical_gas.effective_gas_price_gwei
+                gas_gwei_source = f"historical_gas:{historical_gas.source}"
+                logger.debug(
+                    "Gas gwei: Using historical gas price %.1f gwei (source: %s) at %s",
+                    gas_price_gwei,
+                    historical_gas.source,
+                    timestamp.isoformat(),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to get historical gas price, falling back to market_state/config: %s",
+                    str(e),
+                )
+                # Fall through to next priority
+                if market_state.gas_price_gwei is not None:
+                    gas_price_gwei = market_state.gas_price_gwei
+                    gas_gwei_source = "market_state"
+                # else keep config.gas_price_gwei default
+
+        elif config.use_historical_gas_gwei and self.gas_provider is None:
+            # Historical gas requested but no provider - try market_state
+            if market_state.gas_price_gwei is not None:
+                gas_price_gwei = market_state.gas_price_gwei
+                gas_gwei_source = "market_state"
+            else:
+                logger.warning(
+                    "use_historical_gas_gwei=True but no gas_provider and "
+                    "no gas_price_gwei in market_state, using config default %.1f gwei",
+                    config.gas_price_gwei,
+                )
+
+        elif market_state.gas_price_gwei is not None:
+            # Priority 2: Use market state gas price if available
+            gas_price_gwei = market_state.gas_price_gwei
+            gas_gwei_source = "market_state"
+
+        return gas_price_gwei, gas_gwei_source
 
     def _get_intent_type(self, intent: Any) -> IntentType:
         """Extract the IntentType from an intent object. Delegates to intent_extraction module."""
@@ -2149,10 +2254,7 @@ class PnLBacktester:
             market_state=market_state,
         )
 
-    # crap-allowlist: VIB-5079 — pre-existing complexity, reduced by this PR (cc 30 -> 25:
-    # the PERP_OPEN branch moved to the test-covered _perp_open_delta helper); the per-type
-    # dispatch decomposition (mirroring _engine_helpers.calculate_token_flows) is tracked in VIB-5079.
-    def _create_position_delta(  # noqa: C901
+    def _create_position_delta(
         self,
         intent: Any,
         intent_type: IntentType,
@@ -2164,6 +2266,12 @@ class PnLBacktester:
         strict_reproducibility: bool = False,
     ) -> SimulatedPosition | None:
         """Create a position delta for intents that create positions.
+
+        Dispatches to per-intent-type handlers through
+        :data:`_POSITION_DELTA_HANDLERS` (mirroring
+        :func:`_engine_helpers.calculate_token_flows`). Intent types without
+        a handler (SWAP, HOLD, closes, ...) do not create positions and
+        return ``None`` without extracting a USD amount.
 
         Args:
             intent: Intent object
@@ -2178,157 +2286,194 @@ class PnLBacktester:
         Returns:
             SimulatedPosition if a position is created, None otherwise
         """
+        handler_name = _POSITION_DELTA_HANDLERS.get(intent_type)
+        if handler_name is None:
+            return None
+        handler = getattr(self, handler_name)
+        return handler(intent, protocol, tokens, executed_price, timestamp, market_state, strict_reproducibility)
+
+    def _lp_open_delta(
+        self,
+        intent: Any,
+        protocol: str,
+        tokens: list[str],
+        executed_price: Decimal,
+        timestamp: datetime,
+        market_state: MarketState,
+        strict_reproducibility: bool,
+    ) -> SimulatedPosition:
+        """Create the simulated LP position for an LP_OPEN intent.
+
+        Splits the intent's USD amount 50/50 across the pair; tokens whose
+        price is missing from ``market_state`` fall back to the raw USD half
+        as a unit count.
+        """
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
 
-        if intent_type == IntentType.LP_OPEN:
-            # Create LP position
-            token0 = tokens[0] if len(tokens) > 0 else "WETH"
-            token1 = tokens[1] if len(tokens) > 1 else "USDC"
+        token0 = tokens[0] if len(tokens) > 0 else "WETH"
+        token1 = tokens[1] if len(tokens) > 1 else "USDC"
 
-            amount_usd = self._get_intent_amount_usd(
-                intent, market_state, strict_reproducibility=strict_reproducibility
-            )
-            half = amount_usd / Decimal("2")
+        amount_usd = self._get_intent_amount_usd(intent, market_state, strict_reproducibility=strict_reproducibility)
+        half = amount_usd / Decimal("2")
 
-            try:
-                price0 = market_state.get_price(token0)
-                amount0 = half / price0
-            except KeyError:
-                amount0 = half
+        try:
+            price0 = market_state.get_price(token0)
+            amount0 = half / price0
+        except KeyError:
+            amount0 = half
 
-            try:
-                price1 = market_state.get_price(token1)
-                amount1 = half / price1
-            except KeyError:
-                amount1 = half
+        try:
+            price1 = market_state.get_price(token1)
+            amount1 = half / price1
+        except KeyError:
+            amount1 = half
 
-            # Get tick range if available
-            tick_lower = getattr(intent, "tick_lower", -887272)
-            tick_upper = getattr(intent, "tick_upper", 887272)
+        # Get tick range if available
+        tick_lower = getattr(intent, "tick_lower", -887272)
+        tick_upper = getattr(intent, "tick_upper", 887272)
 
-            # Get fee tier
-            fee_tier = getattr(intent, "fee_tier", Decimal("0.003"))
-            if isinstance(fee_tier, int | float):
-                fee_tier = Decimal(str(fee_tier))
+        # Get fee tier
+        fee_tier = getattr(intent, "fee_tier", Decimal("0.003"))
+        if isinstance(fee_tier, int | float):
+            fee_tier = Decimal(str(fee_tier))
 
-            # Estimate liquidity (simplified)
-            liquidity = Decimal(str(amount_usd))
+        # Estimate liquidity (simplified)
+        liquidity = Decimal(str(amount_usd))
 
-            return SimulatedPosition.lp(
-                token0=token0,
-                token1=token1,
-                amount0=amount0,
-                amount1=amount1,
-                liquidity=liquidity,
-                tick_lower=int(tick_lower) if tick_lower is not None else -887272,
-                tick_upper=int(tick_upper) if tick_upper is not None else 887272,
-                fee_tier=fee_tier,
-                entry_price=executed_price,
-                entry_time=timestamp,
-                protocol=protocol,
-            )
+        return SimulatedPosition.lp(
+            token0=token0,
+            token1=token1,
+            amount0=amount0,
+            amount1=amount1,
+            liquidity=liquidity,
+            tick_lower=int(tick_lower) if tick_lower is not None else -887272,
+            tick_upper=int(tick_upper) if tick_upper is not None else 887272,
+            fee_tier=fee_tier,
+            entry_price=executed_price,
+            entry_time=timestamp,
+            protocol=protocol,
+        )
 
-        elif intent_type == IntentType.SUPPLY:
-            # Create supply position
-            token = tokens[0] if tokens else "WETH"
-            amount_usd = self._get_intent_amount_usd(
-                intent, market_state, strict_reproducibility=strict_reproducibility
-            )
+    def _supply_delta(
+        self,
+        intent: Any,
+        protocol: str,
+        tokens: list[str],
+        executed_price: Decimal,
+        timestamp: datetime,
+        market_state: MarketState,
+        strict_reproducibility: bool,
+    ) -> SimulatedPosition:
+        """Create the simulated lending position for a SUPPLY intent."""
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
 
-            try:
-                price = market_state.get_price(token)
-                amount = amount_usd / price
-            except KeyError:
-                amount = amount_usd
+        token = tokens[0] if tokens else "WETH"
+        amount_usd = self._get_intent_amount_usd(intent, market_state, strict_reproducibility=strict_reproducibility)
 
-            # Get APY if available
-            apy = getattr(intent, "apy", Decimal("0.05"))
-            if isinstance(apy, int | float):
-                apy = Decimal(str(apy))
+        try:
+            price = market_state.get_price(token)
+            amount = amount_usd / price
+        except KeyError:
+            amount = amount_usd
 
-            return SimulatedPosition.supply(
-                token=token,
-                amount=amount,
-                apy=apy,
-                entry_price=executed_price,
-                entry_time=timestamp,
-                protocol=protocol,
-            )
+        # Get APY if available
+        apy = getattr(intent, "apy", Decimal("0.05"))
+        if isinstance(apy, int | float):
+            apy = Decimal(str(apy))
 
-        elif intent_type == IntentType.VAULT_DEPOSIT:
-            # Create vault supply position (similar to SUPPLY)
-            deposit_tok = getattr(intent, "deposit_token", None)
-            if deposit_tok:
-                token = str(deposit_tok)
-            else:
-                token = tokens[0] if tokens else "USDC"
-                logger.warning(
-                    "Vault deposit missing deposit_token, defaulting to %s"
-                    " — set deposit_token for accurate backtesting",
-                    token,
-                )
-            if isinstance(token, str):
-                token = token.upper()
-            amount_usd = self._get_intent_amount_usd(
-                intent, market_state, strict_reproducibility=strict_reproducibility
-            )
+        return SimulatedPosition.supply(
+            token=token,
+            amount=amount,
+            apy=apy,
+            entry_price=executed_price,
+            entry_time=timestamp,
+            protocol=protocol,
+        )
 
-            try:
-                price = market_state.get_price(token)
-                amount = amount_usd / price if price > 0 else amount_usd
-            except KeyError:
-                amount = amount_usd
+    def _vault_deposit_delta(
+        self,
+        intent: Any,
+        protocol: str,
+        tokens: list[str],
+        executed_price: Decimal,
+        timestamp: datetime,
+        market_state: MarketState,
+        strict_reproducibility: bool,
+    ) -> SimulatedPosition:
+        """Create the simulated vault supply position for a VAULT_DEPOSIT intent."""
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
 
-            # ERC-4626 vault yield: pending PPFS-curve replay via gateway
-            # MarketService.GetSharePriceHistory (VIB-3367). Until that ships,
-            # honour the strategy-supplied `apy` field on the intent and fall
-            # back to a neutral 5% surrogate so existing backtests keep running.
-            apy = getattr(intent, "apy", Decimal("0.05"))
-            if isinstance(apy, int | float):
-                apy = Decimal(str(apy))
-
-            return SimulatedPosition.supply(
-                token=token,
-                amount=amount,
-                apy=apy,
-                entry_price=executed_price,
-                entry_time=timestamp,
-                protocol=protocol,
-            )
-
-        elif intent_type == IntentType.BORROW:
-            # Create borrow position
+        deposit_tok = getattr(intent, "deposit_token", None)
+        if deposit_tok:
+            token = str(deposit_tok)
+        else:
             token = tokens[0] if tokens else "USDC"
-            amount_usd = self._get_intent_amount_usd(
-                intent, market_state, strict_reproducibility=strict_reproducibility
+            logger.warning(
+                "Vault deposit missing deposit_token, defaulting to %s — set deposit_token for accurate backtesting",
+                token,
             )
+        if isinstance(token, str):
+            token = token.upper()
+        amount_usd = self._get_intent_amount_usd(intent, market_state, strict_reproducibility=strict_reproducibility)
 
-            try:
-                price = market_state.get_price(token)
-                amount = amount_usd / price
-            except KeyError:
-                amount = amount_usd
+        try:
+            price = market_state.get_price(token)
+            amount = amount_usd / price if price > 0 else amount_usd
+        except KeyError:
+            amount = amount_usd
 
-            # Get APY if available
-            apy = getattr(intent, "apy", getattr(intent, "borrow_apy", Decimal("0.08")))
-            if isinstance(apy, int | float):
-                apy = Decimal(str(apy))
+        # ERC-4626 vault yield: pending PPFS-curve replay via gateway
+        # MarketService.GetSharePriceHistory (VIB-3367). Until that ships,
+        # honour the strategy-supplied `apy` field on the intent and fall
+        # back to a neutral 5% surrogate so existing backtests keep running.
+        apy = getattr(intent, "apy", Decimal("0.05"))
+        if isinstance(apy, int | float):
+            apy = Decimal(str(apy))
 
-            return SimulatedPosition.borrow(
-                token=token,
-                amount=amount,
-                apy=apy,
-                entry_price=executed_price,
-                entry_time=timestamp,
-                protocol=protocol,
-            )
+        return SimulatedPosition.supply(
+            token=token,
+            amount=amount,
+            apy=apy,
+            entry_price=executed_price,
+            entry_time=timestamp,
+            protocol=protocol,
+        )
 
-        elif intent_type == IntentType.PERP_OPEN:
-            return self._perp_open_delta(
-                intent, protocol, tokens, executed_price, timestamp, market_state, strict_reproducibility
-            )
+    def _borrow_delta(
+        self,
+        intent: Any,
+        protocol: str,
+        tokens: list[str],
+        executed_price: Decimal,
+        timestamp: datetime,
+        market_state: MarketState,
+        strict_reproducibility: bool,
+    ) -> SimulatedPosition:
+        """Create the simulated borrow position for a BORROW intent."""
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
 
-        return None
+        token = tokens[0] if tokens else "USDC"
+        amount_usd = self._get_intent_amount_usd(intent, market_state, strict_reproducibility=strict_reproducibility)
+
+        try:
+            price = market_state.get_price(token)
+            amount = amount_usd / price
+        except KeyError:
+            amount = amount_usd
+
+        # Get APY if available
+        apy = getattr(intent, "apy", getattr(intent, "borrow_apy", Decimal("0.08")))
+        if isinstance(apy, int | float):
+            apy = Decimal(str(apy))
+
+        return SimulatedPosition.borrow(
+            token=token,
+            amount=amount,
+            apy=apy,
+            entry_price=executed_price,
+            entry_time=timestamp,
+            protocol=protocol,
+        )
 
     def _perp_open_delta(
         self,
@@ -2525,6 +2670,24 @@ class PnLBacktester:
         from .metrics_calculator import decimal_sqrt
 
         return decimal_sqrt(n)
+
+
+# Dispatch table for PnLBacktester._create_position_delta — per-intent-type
+# position factories, mirroring _engine_helpers._SIMPLE_FLOW_HANDLERS
+# (Phase 6C.3). Module-level rather than a class attribute: PnLBacktester is
+# a @dataclass, where an annotated class-level dict would become a field with
+# a mutable default. Values are method NAMES resolved via ``getattr(self, ...)``
+# at dispatch time so subclass overrides are honoured; the characterization
+# test ``test_position_delta_handler_table_keys`` asserts every name resolves
+# to a PnLBacktester callable. Intent types absent from the table do not
+# create positions.
+_POSITION_DELTA_HANDLERS: dict[IntentType, str] = {
+    IntentType.LP_OPEN: "_lp_open_delta",
+    IntentType.SUPPLY: "_supply_delta",
+    IntentType.VAULT_DEPOSIT: "_vault_deposit_delta",
+    IntentType.BORROW: "_borrow_delta",
+    IntentType.PERP_OPEN: "_perp_open_delta",
+}
 
 
 __all__ = [

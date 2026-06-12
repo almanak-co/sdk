@@ -39,6 +39,10 @@ from almanak.framework.backtesting.pnl.engine import (
     PnLBacktester,
 )
 from almanak.framework.backtesting.pnl.error_handling import PreflightValidationError
+from almanak.framework.backtesting.pnl.mev_simulator import MEVSimulationResult
+from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+from almanak.framework.backtesting.pnl.position_models import PositionType
+from almanak.framework.backtesting.pnl.providers.gas import GasPrice
 
 # =============================================================================
 # Mock data providers & strategies
@@ -876,3 +880,646 @@ class TestCalculateTokenFlows:
 
         assert tokens_in == {}
         assert tokens_out == {}
+
+
+# =============================================================================
+# Gas / MEV / position-delta characterization (VIB-5095 / VIB-5079)
+#
+# Seam-level tests pinning the gas-cost resolution chains, the MEV simulation
+# block, and the per-intent-type position-delta branches of
+# ``PnLBacktester._execute_intent`` / ``_create_position_delta`` ahead of
+# their extraction into dedicated helpers. Written against the pre-extraction
+# code; they must survive the refactor unmodified (Phase 6C.3 discipline).
+# =============================================================================
+
+# Mirrors intent_extraction.estimate_gas_for_intent for SWAP.
+_SWAP_GAS_UNITS = 180000
+
+
+class _RecordingTracker:
+    """Duck-typed stand-in for DataQualityTracker capturing gas price sources."""
+
+    def __init__(self) -> None:
+        self.sources: list[str] = []
+
+    def record_gas_price_source(self, source: str) -> None:
+        self.sources.append(source)
+
+
+class _StubGasProvider:
+    """Gas provider stub returning a fixed GasPrice or raising."""
+
+    def __init__(self, gas_price: GasPrice | None = None, error: Exception | None = None) -> None:
+        self.gas_price = gas_price
+        self.error = error
+        self.calls: list[dict[str, Any]] = []
+
+    async def get_gas_price(self, timestamp: datetime, chain: str) -> GasPrice:
+        self.calls.append({"timestamp": timestamp, "chain": chain})
+        if self.error is not None:
+            raise self.error
+        assert self.gas_price is not None
+        return self.gas_price
+
+
+class _StubMEVSimulator:
+    """MEV simulator stub returning a fixed result and recording call kwargs."""
+
+    def __init__(self, result: MEVSimulationResult) -> None:
+        self.result = result
+        self.calls: list[dict[str, Any]] = []
+
+    def simulate_mev_cost(self, **kwargs: Any) -> MEVSimulationResult:
+        self.calls.append(kwargs)
+        return self.result
+
+
+def _mev_result(
+    is_sandwiched: bool,
+    mev_cost_usd: Decimal = Decimal("5"),
+    additional_slippage_pct: Decimal = Decimal("0.01"),
+) -> MEVSimulationResult:
+    return MEVSimulationResult(
+        is_sandwiched=is_sandwiched,
+        mev_cost_usd=mev_cost_usd,
+        additional_slippage_pct=additional_slippage_pct,
+        inclusion_delay_blocks=0,
+        sandwich_probability=Decimal("0.5"),
+        token_vulnerability_factor=Decimal("0.5"),
+        size_vulnerability_factor=Decimal("0.5"),
+    )
+
+
+def _gas_config(**overrides: Any) -> PnLBacktestConfig:
+    base: dict[str, Any] = {
+        "start_time": datetime(2024, 1, 1, tzinfo=UTC),
+        "end_time": datetime(2024, 1, 2, tzinfo=UTC),
+        "initial_capital_usd": Decimal("10000"),
+    }
+    base.update(overrides)
+    return PnLBacktestConfig(**base)
+
+
+def _gas_market_state(
+    prices: dict[str, Decimal] | None = None,
+    gas_price_gwei: Decimal | None = None,
+) -> MarketState:
+    return MarketState(
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        prices=prices if prices is not None else {"WETH": Decimal("3000"), "USDC": Decimal("1")},
+        gas_price_gwei=gas_price_gwei,
+    )
+
+
+def _expected_gas_cost_usd(gwei: Decimal, eth_price: Decimal) -> Decimal:
+    """Replicate the engine's Decimal-exact gas cost formula for SWAP."""
+    gas_cost_eth = Decimal(_SWAP_GAS_UNITS) * gwei / Decimal("1000000000")
+    return gas_cost_eth * eth_price
+
+
+async def _execute_swap(
+    backtester: PnLBacktester,
+    config: PnLBacktestConfig,
+    market_state: MarketState,
+    tracker: _RecordingTracker | None = None,
+) -> Any:
+    """Run a USDC->WETH swap through the generic _execute_intent lane."""
+    portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+    intent = _FakeSwapIntent(from_token="USDC", to_token="WETH", amount=Decimal("100"))
+    return await backtester._execute_intent(
+        intent=intent,
+        portfolio=portfolio,
+        market_state=market_state,
+        timestamp=market_state.timestamp,
+        config=config,
+        data_quality_tracker=tracker,
+    )
+
+
+class TestExecuteIntentGasEthPriceChain:
+    """ETH-price resolution priority: override > historical > market."""
+
+    @pytest.mark.asyncio
+    async def test_override_wins_over_historical_and_market(self):
+        engine = _backtester_for_flows()
+        tracker = _RecordingTracker()
+        config = _gas_config(
+            gas_eth_price_override=Decimal("2000"),
+            use_historical_gas_prices=True,
+        )
+
+        record = await _execute_swap(engine, config, _gas_market_state(), tracker)
+
+        assert record.gas_cost_usd == _expected_gas_cost_usd(config.gas_price_gwei, Decimal("2000"))
+        assert tracker.sources == ["override"]
+
+    @pytest.mark.asyncio
+    async def test_historical_mode_uses_weth_price(self):
+        engine = _backtester_for_flows()
+        tracker = _RecordingTracker()
+        config = _gas_config(use_historical_gas_prices=True)
+
+        record = await _execute_swap(engine, config, _gas_market_state(), tracker)
+
+        assert record.gas_cost_usd == _expected_gas_cost_usd(config.gas_price_gwei, Decimal("3000"))
+        assert tracker.sources == ["historical"]
+
+    @pytest.mark.asyncio
+    async def test_historical_mode_falls_back_to_eth_price(self):
+        engine = _backtester_for_flows()
+        tracker = _RecordingTracker()
+        config = _gas_config(use_historical_gas_prices=True)
+        market_state = _gas_market_state(prices={"ETH": Decimal("2500"), "USDC": Decimal("1")})
+
+        record = await _execute_swap(engine, config, market_state, tracker)
+
+        assert record.gas_cost_usd == _expected_gas_cost_usd(config.gas_price_gwei, Decimal("2500"))
+        assert tracker.sources == ["historical"]
+
+    @pytest.mark.asyncio
+    async def test_historical_mode_missing_price_strict_raises(self):
+        engine = _backtester_for_flows()
+        config = _gas_config(use_historical_gas_prices=True, strict_reproducibility=True)
+        market_state = _gas_market_state(prices={"USDC": Decimal("1")})
+
+        with pytest.raises(ValueError, match="Historical price requested") as excinfo:
+            await _execute_swap(engine, config, market_state)
+        assert "In strict_reproducibility mode" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_historical_mode_missing_price_nonstrict_raises(self):
+        engine = _backtester_for_flows()
+        config = _gas_config(use_historical_gas_prices=True)
+        market_state = _gas_market_state(prices={"USDC": Decimal("1")})
+
+        with pytest.raises(ValueError, match="Historical price requested") as excinfo:
+            await _execute_swap(engine, config, market_state)
+        assert "Set gas_eth_price_override to provide an explicit ETH price" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_market_mode_uses_weth_then_eth(self):
+        engine = _backtester_for_flows()
+        tracker = _RecordingTracker()
+        config = _gas_config()
+
+        record = await _execute_swap(engine, config, _gas_market_state(), tracker)
+        assert record.gas_cost_usd == _expected_gas_cost_usd(config.gas_price_gwei, Decimal("3000"))
+
+        eth_only = _gas_market_state(prices={"ETH": Decimal("2500"), "USDC": Decimal("1")})
+        record = await _execute_swap(engine, config, eth_only, tracker)
+        assert record.gas_cost_usd == _expected_gas_cost_usd(config.gas_price_gwei, Decimal("2500"))
+
+        assert tracker.sources == ["market", "market"]
+
+    @pytest.mark.asyncio
+    async def test_market_mode_missing_price_strict_raises(self):
+        engine = _backtester_for_flows()
+        config = _gas_config(strict_reproducibility=True)
+        market_state = _gas_market_state(prices={"USDC": Decimal("1")})
+
+        with pytest.raises(ValueError, match="not available in market state") as excinfo:
+            await _execute_swap(engine, config, market_state)
+        assert "In strict_reproducibility mode" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_market_mode_missing_price_nonstrict_raises(self):
+        engine = _backtester_for_flows()
+        config = _gas_config()
+        market_state = _gas_market_state(prices={"USDC": Decimal("1")})
+
+        with pytest.raises(ValueError, match="not available in market state") as excinfo:
+            await _execute_swap(engine, config, market_state)
+        assert "Set gas_eth_price_override to provide an explicit ETH price" in str(excinfo.value)
+
+
+class TestExecuteIntentGasGweiChain:
+    """Gas-gwei source priority: historical provider > market_state > config."""
+
+    @pytest.mark.asyncio
+    async def test_historical_provider_success(self):
+        engine = _backtester_for_flows()
+        provider = _StubGasProvider(
+            gas_price=GasPrice(
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+                chain="ethereum",
+                gas_price_gwei=Decimal("55"),
+                source="etherscan",
+            )
+        )
+        engine.gas_provider = provider
+        config = _gas_config(use_historical_gas_gwei=True)
+
+        record = await _execute_swap(engine, config, _gas_market_state())
+
+        assert record.gas_price_gwei == Decimal("55")
+        assert record.metadata["gas_price_source"] == "historical_gas:etherscan"
+        assert record.gas_cost_usd == _expected_gas_cost_usd(Decimal("55"), Decimal("3000"))
+        assert provider.calls == [{"timestamp": _gas_market_state().timestamp, "chain": config.chain}]
+
+    @pytest.mark.asyncio
+    async def test_provider_error_falls_back_to_market_state(self):
+        engine = _backtester_for_flows()
+        engine.gas_provider = _StubGasProvider(error=RuntimeError("boom"))
+        config = _gas_config(use_historical_gas_gwei=True)
+        market_state = _gas_market_state(gas_price_gwei=Decimal("12"))
+
+        record = await _execute_swap(engine, config, market_state)
+
+        assert record.gas_price_gwei == Decimal("12")
+        assert record.metadata["gas_price_source"] == "market_state"
+
+    @pytest.mark.asyncio
+    async def test_provider_error_falls_back_to_config(self):
+        engine = _backtester_for_flows()
+        engine.gas_provider = _StubGasProvider(error=RuntimeError("boom"))
+        config = _gas_config(use_historical_gas_gwei=True)
+
+        record = await _execute_swap(engine, config, _gas_market_state())
+
+        assert record.gas_price_gwei == config.gas_price_gwei
+        assert record.metadata["gas_price_source"] == "config"
+        assert engine._fallback_usage is not None
+        assert engine._fallback_usage["default_gas_price"] == 1
+
+    @pytest.mark.asyncio
+    async def test_no_provider_uses_market_state(self):
+        engine = _backtester_for_flows()
+        config = _gas_config(use_historical_gas_gwei=True)
+        market_state = _gas_market_state(gas_price_gwei=Decimal("9"))
+
+        record = await _execute_swap(engine, config, market_state)
+
+        assert record.gas_price_gwei == Decimal("9")
+        assert record.metadata["gas_price_source"] == "market_state"
+
+    @pytest.mark.asyncio
+    async def test_no_provider_no_market_state_uses_config(self, caplog):
+        engine = _backtester_for_flows()
+        config = _gas_config(use_historical_gas_gwei=True)
+
+        with caplog.at_level("WARNING"):
+            record = await _execute_swap(engine, config, _gas_market_state())
+
+        assert record.gas_price_gwei == config.gas_price_gwei
+        assert record.metadata["gas_price_source"] == "config"
+        assert "use_historical_gas_gwei=True but no gas_provider" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_market_state_beats_config_when_historical_disabled(self):
+        engine = _backtester_for_flows()
+        config = _gas_config()
+        market_state = _gas_market_state(gas_price_gwei=Decimal("7"))
+
+        record = await _execute_swap(engine, config, market_state)
+
+        assert record.gas_price_gwei == Decimal("7")
+        assert record.metadata["gas_price_source"] == "market_state"
+
+    @pytest.mark.asyncio
+    async def test_config_default_tracked_as_fallback(self):
+        engine = _backtester_for_flows()
+        config = _gas_config()
+
+        record = await _execute_swap(engine, config, _gas_market_state())
+
+        assert record.gas_price_gwei == config.gas_price_gwei
+        assert record.metadata["gas_price_source"] == "config"
+        assert engine._fallback_usage is not None
+        assert engine._fallback_usage["default_gas_price"] == 1
+
+    @pytest.mark.asyncio
+    async def test_gas_price_record_appended_when_tracking(self):
+        engine = _backtester_for_flows()
+        engine._gas_price_records = []
+        config = _gas_config()
+
+        record = await _execute_swap(engine, config, _gas_market_state())
+
+        assert len(engine._gas_price_records) == 1
+        gas_record = engine._gas_price_records[0]
+        assert gas_record.gwei == config.gas_price_gwei
+        assert gas_record.source == "config"
+        assert gas_record.usd_cost == record.gas_cost_usd
+        assert gas_record.eth_price_usd == Decimal("3000")
+
+    @pytest.mark.asyncio
+    async def test_gas_disabled_skips_gas_entirely(self):
+        engine = _backtester_for_flows()
+        engine._gas_price_records = []
+        tracker = _RecordingTracker()
+        config = _gas_config(include_gas_costs=False)
+
+        record = await _execute_swap(engine, config, _gas_market_state(), tracker)
+
+        assert record.gas_cost_usd == Decimal("0")
+        assert record.gas_price_gwei is None
+        assert record.metadata["gas_price_source"] is None
+        assert tracker.sources == []
+        assert engine._gas_price_records == []
+
+
+class TestExecuteIntentMEVSimulation:
+    """MEV simulation block: cost recording and slippage adjustment."""
+
+    @pytest.mark.asyncio
+    async def test_no_simulator_no_mev_cost(self):
+        engine = _backtester_for_flows()
+        config = _gas_config()
+
+        record = await _execute_swap(engine, config, _gas_market_state())
+
+        assert record.estimated_mev_cost_usd is None
+        # amount_usd=100 at base slippage 0.1%
+        assert record.slippage_usd == Decimal("100") * Decimal("0.001")
+
+    @pytest.mark.asyncio
+    async def test_sandwiched_adds_slippage_and_records_cost(self):
+        engine = _backtester_for_flows()
+        engine._mev_simulator = _StubMEVSimulator(
+            _mev_result(is_sandwiched=True, mev_cost_usd=Decimal("5"), additional_slippage_pct=Decimal("0.01"))
+        )
+        config = _gas_config()
+
+        record = await _execute_swap(engine, config, _gas_market_state())
+
+        assert record.estimated_mev_cost_usd == Decimal("5")
+        assert record.slippage_usd == Decimal("100") * (Decimal("0.001") + Decimal("0.01"))
+
+    @pytest.mark.asyncio
+    async def test_not_sandwiched_keeps_base_slippage(self):
+        engine = _backtester_for_flows()
+        engine._mev_simulator = _StubMEVSimulator(
+            _mev_result(is_sandwiched=False, mev_cost_usd=Decimal("2"))
+        )
+        config = _gas_config()
+
+        record = await _execute_swap(engine, config, _gas_market_state())
+
+        # The cost is recorded even when not sandwiched; slippage is unchanged.
+        assert record.estimated_mev_cost_usd == Decimal("2")
+        assert record.slippage_usd == Decimal("100") * Decimal("0.001")
+
+    @pytest.mark.asyncio
+    async def test_simulator_gas_price_follows_include_gas_costs(self):
+        engine = _backtester_for_flows()
+        simulator = _StubMEVSimulator(_mev_result(is_sandwiched=False))
+        engine._mev_simulator = simulator
+
+        await _execute_swap(engine, _gas_config(), _gas_market_state())
+        await _execute_swap(engine, _gas_config(include_gas_costs=False), _gas_market_state())
+
+        assert simulator.calls[0]["gas_price_gwei"] == _gas_config().gas_price_gwei
+        assert simulator.calls[1]["gas_price_gwei"] is None
+        assert simulator.calls[0]["token_in"] == "USDC"
+        assert simulator.calls[0]["token_out"] == "WETH"
+        assert simulator.calls[0]["intent_type"] == IntentType.SWAP
+
+
+class TestCreatePositionDelta:
+    """Per-intent-type position-delta branches of _create_position_delta."""
+
+    def _delta(
+        self,
+        engine: PnLBacktester,
+        intent: Any,
+        intent_type: IntentType,
+        tokens: list[str],
+        market_state: MarketState | None = None,
+        protocol: str = "test_protocol",
+    ) -> Any:
+        return engine._create_position_delta(
+            intent=intent,
+            intent_type=intent_type,
+            protocol=protocol,
+            tokens=tokens,
+            executed_price=Decimal("3000"),
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            market_state=market_state if market_state is not None else _gas_market_state(),
+        )
+
+    def test_lp_open_splits_half_at_prices(self):
+        engine = _backtester_for_flows()
+
+        @dataclass
+        class _LPIntent:
+            amount_usd: Decimal = Decimal("1000")
+
+        position = self._delta(engine, _LPIntent(), IntentType.LP_OPEN, ["WETH", "USDC"])
+
+        assert position is not None
+        assert position.position_type == PositionType.LP
+        assert position.amounts["WETH"] == Decimal("500") / Decimal("3000")
+        assert position.amounts["USDC"] == Decimal("500")
+        assert position.liquidity == Decimal("1000")
+        assert position.tick_lower == -887272
+        assert position.tick_upper == 887272
+        assert position.fee_tier == Decimal("0.003")
+        assert position.protocol == "test_protocol"
+        assert position.entry_price == Decimal("3000")
+
+    def test_lp_open_missing_prices_fall_back_to_half_usd(self):
+        engine = _backtester_for_flows()
+
+        @dataclass
+        class _LPIntent:
+            amount_usd: Decimal = Decimal("1000")
+
+        empty_market = MarketState(timestamp=datetime(2024, 1, 1, tzinfo=UTC), prices={})
+        position = self._delta(engine, _LPIntent(), IntentType.LP_OPEN, ["WETH", "USDC"], empty_market)
+
+        assert position is not None
+        assert position.amounts["WETH"] == Decimal("500")
+        assert position.amounts["USDC"] == Decimal("500")
+
+    def test_lp_open_explicit_ticks_and_float_fee_tier(self):
+        engine = _backtester_for_flows()
+
+        @dataclass
+        class _LPIntent:
+            amount_usd: Decimal = Decimal("1000")
+            tick_lower: int = -100
+            tick_upper: int = 200
+            fee_tier: float = 0.01
+
+        position = self._delta(engine, _LPIntent(), IntentType.LP_OPEN, ["WETH", "USDC"])
+
+        assert position is not None
+        assert position.tick_lower == -100
+        assert position.tick_upper == 200
+        assert position.fee_tier == Decimal("0.01")
+
+    def test_lp_open_defaults_tokens_when_list_empty(self):
+        engine = _backtester_for_flows()
+
+        @dataclass
+        class _LPIntent:
+            amount_usd: Decimal = Decimal("1000")
+
+        position = self._delta(engine, _LPIntent(), IntentType.LP_OPEN, [])
+
+        assert position is not None
+        assert position.tokens == ["WETH", "USDC"]
+
+    def test_supply_creates_position_with_default_apy(self):
+        engine = _backtester_for_flows()
+
+        @dataclass
+        class _SupplyIntent:
+            amount_usd: Decimal = Decimal("1000")
+
+        market = MarketState(
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            prices={"ARB": Decimal("2")},
+        )
+        position = self._delta(engine, _SupplyIntent(), IntentType.SUPPLY, ["ARB"], market)
+
+        assert position is not None
+        assert position.position_type == PositionType.SUPPLY
+        assert position.amounts["ARB"] == Decimal("500")
+        assert position.apy_at_entry == Decimal("0.05")
+
+    def test_supply_missing_price_uses_usd_amount(self):
+        engine = _backtester_for_flows()
+
+        @dataclass
+        class _SupplyIntent:
+            amount_usd: Decimal = Decimal("1000")
+            apy: Decimal = Decimal("0.04")
+
+        empty_market = MarketState(timestamp=datetime(2024, 1, 1, tzinfo=UTC), prices={})
+        position = self._delta(engine, _SupplyIntent(), IntentType.SUPPLY, ["ARB"], empty_market)
+
+        assert position is not None
+        assert position.amounts["ARB"] == Decimal("1000")
+        assert position.apy_at_entry == Decimal("0.04")
+
+    def test_vault_deposit_uses_deposit_token_uppercased(self):
+        engine = _backtester_for_flows()
+
+        @dataclass
+        class _VaultIntent:
+            amount_usd: Decimal = Decimal("1000")
+            deposit_token: str = "usdc"
+
+        position = self._delta(engine, _VaultIntent(), IntentType.VAULT_DEPOSIT, ["WETH"])
+
+        assert position is not None
+        assert position.position_type == PositionType.SUPPLY
+        assert position.tokens == ["USDC"]
+        assert position.amounts["USDC"] == Decimal("1000")
+        assert position.apy_at_entry == Decimal("0.05")
+
+    def test_vault_deposit_missing_token_warns_and_defaults(self, caplog):
+        engine = _backtester_for_flows()
+
+        @dataclass
+        class _VaultIntent:
+            amount_usd: Decimal = Decimal("1000")
+
+        with caplog.at_level("WARNING"):
+            position = self._delta(engine, _VaultIntent(), IntentType.VAULT_DEPOSIT, ["WETH"])
+
+        assert position is not None
+        assert position.tokens == ["WETH"]
+        assert "Vault deposit missing deposit_token, defaulting to WETH" in caplog.text
+
+    def test_vault_deposit_missing_price_uses_usd_amount(self):
+        engine = _backtester_for_flows()
+
+        @dataclass
+        class _VaultIntent:
+            amount_usd: Decimal = Decimal("1000")
+            deposit_token: str = "FRAX"
+
+        empty_market = MarketState(timestamp=datetime(2024, 1, 1, tzinfo=UTC), prices={})
+        position = self._delta(engine, _VaultIntent(), IntentType.VAULT_DEPOSIT, [], empty_market)
+
+        assert position is not None
+        assert position.amounts["FRAX"] == Decimal("1000")
+
+    def test_borrow_apy_preference_chain(self):
+        engine = _backtester_for_flows()
+
+        @dataclass
+        class _ApyIntent:
+            amount_usd: Decimal = Decimal("1000")
+            apy: Decimal = Decimal("0.02")
+            borrow_apy: Decimal = Decimal("0.03")
+
+        @dataclass
+        class _BorrowApyIntent:
+            amount_usd: Decimal = Decimal("1000")
+            borrow_apy: Decimal = Decimal("0.03")
+
+        @dataclass
+        class _NoApyIntent:
+            amount_usd: Decimal = Decimal("1000")
+
+        market = MarketState(
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            prices={"USDC": Decimal("1")},
+        )
+
+        with_apy = self._delta(engine, _ApyIntent(), IntentType.BORROW, ["USDC"], market)
+        with_borrow_apy = self._delta(engine, _BorrowApyIntent(), IntentType.BORROW, ["USDC"], market)
+        default = self._delta(engine, _NoApyIntent(), IntentType.BORROW, ["USDC"], market)
+
+        assert with_apy is not None and with_apy.apy_at_entry == Decimal("0.02")
+        assert with_borrow_apy is not None and with_borrow_apy.apy_at_entry == Decimal("0.03")
+        assert default is not None and default.apy_at_entry == Decimal("0.08")
+        assert default.position_type == PositionType.BORROW
+        assert default.amounts["USDC"] == Decimal("1000")
+
+    def test_unhandled_intent_types_return_none_without_amount_lookup(self):
+        engine = _backtester_for_flows()
+
+        def _raise(*args: Any, **kwargs: Any) -> Decimal:
+            raise AssertionError("_get_intent_amount_usd must not be called for unhandled types")
+
+        engine._get_intent_amount_usd = _raise  # type: ignore[method-assign]
+
+        for intent_type in (IntentType.SWAP, IntentType.HOLD, IntentType.WITHDRAW, IntentType.PERP_CLOSE):
+            position = self._delta(engine, MagicMock(spec=[]), intent_type, ["WETH"])
+            assert position is None
+
+    def test_position_delta_handler_table_keys(self):
+        """The dispatch table covers exactly the position-creating intent types.
+
+        Also pins that every mapped handler name resolves to a PnLBacktester
+        callable — the table holds names (resolved via ``getattr(self, ...)``
+        so subclass overrides dispatch correctly), which trades the import-time
+        existence check of direct references for this test-time one.
+        """
+        from almanak.framework.backtesting.pnl.engine import _POSITION_DELTA_HANDLERS
+
+        assert set(_POSITION_DELTA_HANDLERS) == {
+            IntentType.LP_OPEN,
+            IntentType.SUPPLY,
+            IntentType.VAULT_DEPOSIT,
+            IntentType.BORROW,
+            IntentType.PERP_OPEN,
+        }
+        for handler_name in _POSITION_DELTA_HANDLERS.values():
+            assert callable(getattr(PnLBacktester, handler_name))
+
+    def test_position_delta_dispatch_honours_subclass_overrides(self):
+        """getattr-based dispatch calls a subclass's overridden handler."""
+        sentinel = object()
+
+        class _SubclassedBacktester(PnLBacktester):
+            def _supply_delta(self, *args: Any, **kwargs: Any) -> Any:
+                return sentinel
+
+        engine = _SubclassedBacktester(
+            data_provider=EmptyDataProvider(),
+            fee_models={"default": DefaultFeeModel()},
+            slippage_models={"default": DefaultSlippageModel()},
+        )
+
+        @dataclass
+        class _SupplyIntent:
+            amount_usd: Decimal = Decimal("1000")
+
+        position = self._delta(engine, _SupplyIntent(), IntentType.SUPPLY, ["ARB"])
+
+        assert position is sentinel
