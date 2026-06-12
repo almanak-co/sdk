@@ -1527,3 +1527,113 @@ class TestHistoricalFundingRateIntegration:
         assert rate == Decimal("0.00021")
         assert source == "fallback:no_timestamp"
         adapter._funding_rate_provider.get_historical_funding_rate.assert_not_awaited()
+
+
+# =============================================================================
+# execute_intent margin validation against the REAL SimulatedPortfolio
+# =============================================================================
+#
+# Regression tests for the perp adapter referencing `portfolio.cash_balance`,
+# an attribute that does not exist on SimulatedPortfolio (the real model only
+# has `cash_usd`). The bug was masked because earlier tests only exercised
+# execute_intent with hand-rolled mock portfolios that happened to define
+# `cash_balance`.
+
+
+class TestExecuteIntentUsesRealPortfolioCash:
+    """execute_intent margin validation must work against SimulatedPortfolio."""
+
+    @staticmethod
+    def _market_state(price: str = "3000"):
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+
+        return MarketState(
+            timestamp=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            prices={
+                "ETH": Decimal(price),
+                "WETH": Decimal(price),
+                "USDC": Decimal("1"),
+            },
+            chain="arbitrum",
+        )
+
+    @staticmethod
+    def _open_intent(collateral_amount, size_usd: str = "5000", leverage: str = "5"):
+        from almanak.framework.intents.vocabulary import PerpOpenIntent
+
+        return PerpOpenIntent(
+            market="ETH/USD",
+            collateral_token="USDC",
+            collateral_amount=collateral_amount,
+            size_usd=Decimal(size_usd),
+            leverage=Decimal(leverage),
+            protocol="gmx_v2",
+        )
+
+    def test_open_with_sufficient_cash_passes_validation(self) -> None:
+        """Margin validation reads cash_usd and lets a healthy open proceed."""
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+
+        fill = adapter.execute_intent(
+            self._open_intent(Decimal("1000")), portfolio, self._market_state()
+        )
+
+        # None means validation passed and default execution proceeds.
+        assert fill is None
+
+    def test_open_with_insufficient_cash_returns_failed_fill(self) -> None:
+        """Collateral above available cash must fail margin validation, not crash."""
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100"))
+
+        fill = adapter.execute_intent(
+            self._open_intent(Decimal("1000")), portfolio, self._market_state()
+        )
+
+        assert fill is not None
+        assert fill.success is False
+        assert fill.metadata["validation_type"] == "margin"
+
+    def test_open_all_collateral_uses_portfolio_cash_usd(self) -> None:
+        """collateral_amount='all' must resolve to the portfolio's cash_usd."""
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("100"))
+
+        # size 5000 at 5x needs 1000 collateral; "all" cash is only 100.
+        fill = adapter.execute_intent(
+            self._open_intent("all"), portfolio, self._market_state()
+        )
+
+        assert fill is not None
+        assert fill.success is False
+        assert fill.metadata["validation_type"] == "margin"
+        # Proves the 'all' path read the real cash balance.
+        assert Decimal(fill.metadata["collateral_usd"]) == Decimal("100")
+
+    def test_open_all_collateral_with_ample_cash_hits_utilization_check(self) -> None:
+        """collateral_amount='all' resolves to the full cash_usd balance.
+
+        Committing 100% of cash as collateral always trips the margin
+        validator's max-utilization check (90%), so the expected outcome is
+        a failed fill whose metadata proves the 'all' path read cash_usd.
+        """
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        adapter = PerpBacktestAdapter(PerpBacktestConfig(strategy_type="perp"))
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+
+        fill = adapter.execute_intent(
+            self._open_intent("all"), portfolio, self._market_state()
+        )
+
+        assert fill is not None
+        assert fill.success is False
+        assert fill.metadata["validation_type"] == "margin"
+        assert Decimal(fill.metadata["collateral_usd"]) == Decimal("10000")

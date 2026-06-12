@@ -132,6 +132,14 @@ class SimulatedPortfolio:
         - Cash balance (deducts gas costs, adjusts for stablecoin trades)
         - Trades list (records the trade)
 
+        Perp positions have no token flows; their cash movement follows the
+        position lifecycle instead: opening debits the collateral from
+        ``cash_usd`` (an open the portfolio cannot fund is recorded as a
+        failed trade with no state mutation) and closing credits collateral
+        plus realized PnL (price PnL + accumulated funding) back to
+        ``cash_usd``, keeping total portfolio value conserved across both
+        transitions.
+
         For LP_CLOSE intents, also calculates and records:
         - il_loss_usd: Impermanent loss in USD
         - fees_earned_usd: Accumulated trading fees in USD
@@ -140,6 +148,14 @@ class SimulatedPortfolio:
         Args:
             fill: The simulated fill to apply
         """
+        # Perp conservation: collateral is funded from cash_usd (the perp
+        # lane has no token flows), so an open the portfolio cannot cover
+        # must be rejected before any state mutation.
+        funding_failure = self._perp_open_funding_failure(fill)
+        if funding_failure is not None:
+            self._record_failed_fill(fill, funding_failure)
+            return
+
         # Update token balances - subtract tokens_out
         for token, amount in fill.tokens_out.items():
             current = self.tokens.get(token, Decimal("0"))
@@ -176,7 +192,12 @@ class SimulatedPortfolio:
             closed_position = self._close_position(fill.position_close_id, fill.timestamp)
 
         if fill.position_delta:
-            # Open a new position
+            # Open a new position. Perp collateral moves from cash into the
+            # position (which every valuation path prices as collateral +
+            # unrealized PnL + funding); without this debit the open would
+            # mint the collateral amount.
+            if fill.position_delta.is_perp and fill.success:
+                self.cash_usd -= fill.position_delta.collateral_usd
             self.positions.append(fill.position_delta)
 
         # Calculate PnL for this trade
@@ -188,6 +209,11 @@ class SimulatedPortfolio:
             # Update pnl_usd with the net LP PnL if not already set from metadata
             if pnl_usd == Decimal("0") and net_lp_pnl_usd is not None:
                 pnl_usd = net_lp_pnl_usd
+
+        # Perp close: return collateral + realized PnL to cash, so the
+        # close is value-neutral at the close instant.
+        if closed_position is not None and closed_position.is_perp and fill.success:
+            pnl_usd = self._apply_perp_close_credit(closed_position, fill, pnl_usd)
 
         # Record the trade with LP PnL breakdown if applicable
         trade = fill.to_trade_record(
@@ -202,6 +228,91 @@ class SimulatedPortfolio:
         # Realized PnL is the PnL locked in when a position is closed
         if fill.position_close_id and pnl_usd != Decimal("0"):
             self._realized_pnl += pnl_usd
+
+    def _perp_open_funding_failure(self, fill: SimulatedFill) -> str | None:
+        """Reason a perp-open fill cannot be funded from cash, or None if it can.
+
+        Gas is deducted from cash within the same fill, so it counts toward
+        the required amount: a fill that covers collateral but not gas would
+        still drive ``cash_usd`` negative.
+        """
+        if not (fill.success and fill.position_delta is not None and fill.position_delta.is_perp):
+            return None
+        required_cash = fill.position_delta.collateral_usd + fill.gas_cost_usd
+        if required_cash > self.cash_usd:
+            return f"insufficient cash for perp collateral + gas: required {required_cash}, cash {self.cash_usd}"
+        return None
+
+    def _apply_perp_close_credit(
+        self,
+        position: SimulatedPosition,
+        fill: SimulatedFill,
+        pnl_usd: Decimal,
+    ) -> Decimal:
+        """Credit cash for a closed perp position and return the trade's PnL.
+
+        Liquidated positions already carry their loss and penalty in
+        ``collateral_usd`` (see the liquidation simulators), so only that
+        remainder comes back and ``pnl_usd`` passes through unchanged.
+        """
+        if position.is_liquidated:
+            self.cash_usd += position.collateral_usd
+            return pnl_usd
+        realized = self._perp_realized_pnl(position, fill)
+        self.cash_usd += position.collateral_usd + realized
+        return realized
+
+    def _record_failed_fill(self, fill: SimulatedFill, reason: str) -> None:
+        """Record ``fill`` as a failed trade without touching balances.
+
+        Execution costs are zeroed (originals stashed in ``metadata`` under
+        ``*_unapplied``) so the recorded trade matches the books: a rejected
+        fill charges nothing.
+        """
+        fill.success = False
+        fill.metadata.setdefault("failure_reason", reason)
+        for cost_field in ("fee_usd", "slippage_usd", "gas_cost_usd"):
+            original = getattr(fill, cost_field)
+            if original != Decimal("0"):
+                fill.metadata[f"{cost_field}_unapplied"] = str(original)
+                setattr(fill, cost_field, Decimal("0"))
+        logger.warning(
+            "Rejected %s fill on %s: %s",
+            fill.intent_type.value,
+            fill.protocol,
+            reason,
+        )
+        self.trades.append(fill.to_trade_record(pnl_usd=Decimal("0")))
+
+    def _perp_realized_pnl(self, position: SimulatedPosition, fill: SimulatedFill) -> Decimal:
+        """Realized PnL for closing a perp: price PnL + accumulated funding.
+
+        ``fill.metadata["realized_pnl_usd"]`` (set by adapter lanes) takes
+        precedence. Otherwise the price PnL is computed from the fill's
+        executed price against the position entry, matching the formula
+        every perp valuation path uses (collateral + price PnL +
+        accumulated funding), so the close credit is value-neutral at the
+        close instant.
+        """
+        if "realized_pnl_usd" in fill.metadata:
+            # str() round-trips Decimal losslessly, so no type branch is
+            # needed (and the VIB-4062 bifurcation guard forbids one).
+            return Decimal(str(fill.metadata["realized_pnl_usd"]))
+
+        if position.entry_price <= Decimal("0") or fill.executed_price <= Decimal("0"):
+            logger.warning(
+                "Cannot compute perp price PnL for %s (entry_price=%s, executed_price=%s); "
+                "crediting collateral + accumulated funding only",
+                position.position_id,
+                position.entry_price,
+                fill.executed_price,
+            )
+            return position.accumulated_funding
+
+        price_change_pct = (fill.executed_price - position.entry_price) / position.entry_price
+        if position.position_type == PositionType.PERP_SHORT:
+            price_change_pct = -price_change_pct
+        return price_change_pct * position.notional_usd + position.accumulated_funding
 
     def _close_position(self, position_id: str, timestamp: datetime) -> SimulatedPosition | None:
         """Close a position by ID and move to closed list.

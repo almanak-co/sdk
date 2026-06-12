@@ -656,7 +656,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
 
         # Handle "all" collateral amount - use portfolio cash balance
         if collateral_amount == "all":
-            collateral_usd = portfolio.cash_balance
+            collateral_usd = portfolio.cash_usd
         else:
             # Get collateral price to convert to USD
             try:
@@ -681,7 +681,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         can_open, reason = self._margin_validator.can_open_position(
             position_size=size_usd,
             collateral=collateral_usd,
-            available_capital=portfolio.cash_balance,
+            available_capital=portfolio.cash_usd,
             current_margin_used=self._get_current_margin_used(portfolio),
             margin_ratio=required_margin_ratio,
         )

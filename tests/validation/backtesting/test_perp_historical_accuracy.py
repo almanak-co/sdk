@@ -283,9 +283,14 @@ class MockMarketState:
 
 @dataclass
 class MockPortfolio:
-    """Mock portfolio for validation tests."""
+    """Mock portfolio for validation tests.
 
-    cash_balance: Decimal = Decimal("100000")
+    Mirrors the SimulatedPortfolio surface the perp adapter reads
+    (``cash_usd``, ``positions``) so these tests cannot mask attribute
+    drift against the real model.
+    """
+
+    cash_usd: Decimal = Decimal("100000")
     positions: list[SimulatedPosition] = field(default_factory=list)
 
 
