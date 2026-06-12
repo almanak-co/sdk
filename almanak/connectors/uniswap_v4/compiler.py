@@ -5,7 +5,11 @@ from __future__ import annotations
 import logging
 from typing import Any, ClassVar
 
-from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext, BaseProtocolCompiler
+from almanak.connectors._strategy_base.base.compiler import (
+    BaseCompilerContext,
+    BaseProtocolCompiler,
+    SwapCompilerContext,
+)
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus, TransactionData
 from almanak.framework.intents.vocabulary import CollectFeesIntent, IntentType, LPCloseIntent, LPOpenIntent, SwapIntent
 
@@ -14,9 +18,18 @@ from .addresses import UNISWAP_V4
 logger = logging.getLogger(__name__)
 
 
-class UniswapV4Compiler(BaseProtocolCompiler[BaseCompilerContext]):
-    """Compiler for Uniswap V4 singleton PoolManager intents."""
+class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
+    """Compiler for Uniswap V4 singleton PoolManager intents.
 
+    Declares :class:`SwapCompilerContext` (not the bare ``BaseCompilerContext``)
+    so the swap pipeline's price-impact / placeholder knobs
+    (``max_price_impact_pct``, ``using_placeholders``) reach the swap-safety guard
+    (VIB-2058). V4 does not use the concentrated-liquidity adapter-factory
+    machinery on ``CLCompilerContext`` — it owns its bespoke adapter — so it stops
+    at ``SwapCompilerContext``.
+    """
+
+    context_type: ClassVar[type[BaseCompilerContext]] = SwapCompilerContext
     protocols: ClassVar[frozenset[str]] = frozenset({"uniswap_v4"})
     intents: ClassVar[frozenset[IntentType]] = frozenset(
         {
@@ -28,7 +41,7 @@ class UniswapV4Compiler(BaseProtocolCompiler[BaseCompilerContext]):
     )
     chains: ClassVar[frozenset[str]] = frozenset({"ethereum", "arbitrum", "base"})
 
-    def compile(self, ctx: BaseCompilerContext, intent: Any) -> CompilationResult:
+    def compile(self, ctx: SwapCompilerContext, intent: Any) -> CompilationResult:
         invalid_ctx = self._check_context(ctx, intent)
         if invalid_ctx is not None:
             return invalid_ctx
@@ -43,7 +56,7 @@ class UniswapV4Compiler(BaseProtocolCompiler[BaseCompilerContext]):
             return self.compile_collect_fees(ctx, intent)
         return self._unsupported(intent)
 
-    def compile_swap(self, ctx: BaseCompilerContext, intent: SwapIntent) -> CompilationResult:
+    def compile_swap(self, ctx: SwapCompilerContext, intent: SwapIntent) -> CompilationResult:
         """Compile SWAP intent for Uniswap V4."""
         try:
             if ctx.chain not in UNISWAP_V4:
@@ -55,7 +68,18 @@ class UniswapV4Compiler(BaseProtocolCompiler[BaseCompilerContext]):
 
             slippage_bps = int(intent.max_slippage * 10000)
             adapter = self._adapter(ctx, default_slippage_bps=slippage_bps)
-            action_bundle = adapter.compile_swap_intent(intent, price_oracle=ctx.price_oracle)
+            # VIB-2058: thread the swap-safety knobs from the runtime context so the
+            # adapter can fail closed on a missing executable quote and run the
+            # price-impact guard (parity with the V3 swap path). ``SwapCompilerContext``
+            # (enforced by ``_check_context``) guarantees these fields, so direct
+            # attribute access is safe.
+            action_bundle = adapter.compile_swap_intent(
+                intent,
+                price_oracle=ctx.price_oracle,
+                config_max_price_impact=ctx.max_price_impact_pct,
+                permission_discovery=ctx.permission_discovery,
+                using_placeholders=ctx.using_placeholders,
+            )
 
             if not action_bundle.transactions:
                 return CompilationResult(

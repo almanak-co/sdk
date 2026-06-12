@@ -39,6 +39,7 @@ from almanak.connectors.uniswap_v4.sdk import (
     PERMIT2_ADDRESS,
     LPDecreaseParams,
     LPMintParams,
+    SwapQuote,
     SwapTransaction,
     UniswapV4SDK,
 )
@@ -216,6 +217,11 @@ class UniswapV4Adapter:
         slippage_bps: int | None = None,
         fee_tier: int | None = None,
         price_ratio: Decimal | None = None,
+        *,
+        max_price_impact: Decimal | None = None,
+        config_max_price_impact: Decimal | None = None,
+        offline_mode: bool = False,
+        using_placeholders: bool = False,
     ) -> SwapResult:
         """Build swap transactions for exact input amount.
 
@@ -226,9 +232,31 @@ class UniswapV4Adapter:
             slippage_bps: Slippage tolerance in bps. Default from config.
             fee_tier: Fee tier. Default from config.
             price_ratio: Price ratio (token_out per token_in) for cross-decimal quotes.
+            max_price_impact: Per-intent price-impact ceiling (``intent.max_price_impact``)
+                or None to fall back to ``config_max_price_impact`` (VIB-2058).
+            config_max_price_impact: Compiler-config price-impact default
+                (``ctx.max_price_impact_pct``). Defaults to 5% when unset.
+            offline_mode: Permission-discovery / placeholder compile. When True an
+                executable-quote failure degrades to the local estimate instead of
+                failing closed (the swap is never broadcast in this mode).
+            using_placeholders: Whether the price oracle holds placeholder prices —
+                relaxes the price-impact guard (oracle estimate is not real).
 
         Returns:
-            SwapResult with transactions list.
+            SwapResult with transactions list. ``success=False`` (no transactions)
+            when the executable quote is unavailable online (fail-closed, C1), the
+            executable quote returns zero output (C1), or the price impact exceeds
+            tolerance (C2) — see ``docs/internal/VIB-2058-v4-swap-quote-safety.md``.
+
+        Raises:
+            ValueError: for *permanent* compilation failures that should halt the
+                strategy rather than retry — an unresolvable token, a missing
+                ``wallet_address``, or the VIB-3875 cross-decimal guard
+                (``get_quote_local`` with no ``price_ratio`` and mismatched token
+                decimals). These deliberately propagate (not wrapped in a retryable
+                ``SwapResult``) and are caught + classified COMPILATION_PERMANENT at
+                the compiler boundary (``UniswapV4Compiler.compile_swap``). The
+                ``success=False`` returns above are the *retryable* failures.
         """
         slippage_bps = slippage_bps or self.default_slippage_bps
         fee_tier = fee_tier or self.default_fee_tier
@@ -240,41 +268,66 @@ class UniswapV4Adapter:
         # Convert to smallest units
         amount_in_raw = int(amount_in * Decimal(10**token_in_dec))
 
-        # Prefer executable pool-state quotes when gateway/RPC is configured.
-        # Offline compilation still uses the local estimate for permission
-        # discovery and unit tests that intentionally avoid chain I/O.
-        gateway_connected = self._gateway_client is not None and getattr(self._gateway_client, "is_connected", False)
-        if gateway_connected or self.rpc_url:
-            try:
-                quote = self._sdk.get_quote(
-                    token_in=token_in_addr,
-                    token_out=token_out_addr,
-                    amount_in=amount_in_raw,
-                    fee_tier=fee_tier,
-                    token_in_decimals=token_in_dec,
-                    token_out_decimals=token_out_dec,
-                )
-            except Exception as exc:
-                logger.warning("V4 executable quote failed, falling back to local estimate: %s", exc)
-                quote = self._sdk.get_quote_local(
-                    token_in=token_in_addr,
-                    token_out=token_out_addr,
-                    amount_in=amount_in_raw,
-                    fee_tier=fee_tier,
-                    token_in_decimals=token_in_dec,
-                    token_out_decimals=token_out_dec,
-                    price_ratio=price_ratio,
-                )
-        else:
-            quote = self._sdk.get_quote_local(
-                token_in=token_in_addr,
-                token_out=token_out_addr,
-                amount_in=amount_in_raw,
-                fee_tier=fee_tier,
-                token_in_decimals=token_in_dec,
-                token_out_decimals=token_out_dec,
-                price_ratio=price_ratio,
+        # VIB-2058: executable-or-fail-closed quote selection (C1). A failed
+        # on-chain quote MUST NOT be silently replaced by a theoretical estimate
+        # that then backs a real ``amount_out_minimum`` — that is the iter-133
+        # silent-no-op class. Offline / permission-discovery compiles keep the
+        # local estimate because nothing is broadcast there.
+        quote, quote_source = self._quote_for_swap(
+            token_in_addr=token_in_addr,
+            token_out_addr=token_out_addr,
+            amount_in_raw=amount_in_raw,
+            fee_tier=fee_tier,
+            token_in_dec=token_in_dec,
+            token_out_dec=token_out_dec,
+            price_ratio=price_ratio,
+            offline_mode=offline_mode,
+        )
+        if quote is None:
+            return SwapResult(
+                success=False,
+                transactions=[],
+                error=(
+                    f"On-chain V4 quote unavailable for {token_in} -> {token_out} at fee "
+                    f"tier {fee_tier}. Refusing to compile a swap backed only by a "
+                    f"theoretical estimate (would risk a silent no-op). Check gateway/RPC "
+                    f"availability and that the pool is initialized with liquidity."
+                ),
             )
+
+        # VIB-2058: a zero-output executable quote is itself a silent-no-op signal —
+        # the on-chain Quoter returned a callable-but-degenerate result (e.g. an
+        # uninitialized pool that doesn't revert). Fail closed regardless of oracle
+        # availability rather than build a swap with amount_out_minimum=0. (When an
+        # oracle price_ratio IS present the C2 guard would already flag this as 100%
+        # impact; this covers the no-oracle corner the guard otherwise skips.)
+        if quote_source == "onchain_quoter" and quote.amount_out <= 0:
+            return SwapResult(
+                success=False,
+                transactions=[],
+                error=(
+                    f"On-chain V4 quote for {token_in} -> {token_out} at fee tier "
+                    f"{fee_tier} returned zero output (degenerate / uninitialized pool). "
+                    f"Refusing to compile a swap with a zero minimum-output (silent no-op risk)."
+                ),
+            )
+
+        # VIB-2058: price-impact / liquidity guard (C2), parity with the V3 swap
+        # path. Only meaningful against an executable quote + a real oracle estimate.
+        guard_failure = self._check_swap_price_impact(
+            quote_source=quote_source,
+            quoter_amount=quote.amount_out,
+            amount_in=amount_in,
+            token_out_dec=token_out_dec,
+            price_ratio=price_ratio,
+            max_price_impact=max_price_impact,
+            config_max_price_impact=config_max_price_impact,
+            using_placeholders=using_placeholders,
+            token_in=token_in,
+            token_out=token_out,
+        )
+        if guard_failure is not None:
+            return guard_failure
 
         # Build transactions
         transactions: list[SwapTransaction] = []
@@ -325,12 +378,151 @@ class UniswapV4Adapter:
             amount_out_minimum=amount_out_minimum,
             amount_out_quoted=quote.amount_out,
             gas_estimate=sum(tx.gas_estimate for tx in transactions),
+            quote_source=quote_source,
         )
+
+    def _quote_for_swap(
+        self,
+        *,
+        token_in_addr: str,
+        token_out_addr: str,
+        amount_in_raw: int,
+        fee_tier: int,
+        token_in_dec: int,
+        token_out_dec: int,
+        price_ratio: Decimal | None,
+        offline_mode: bool,
+    ) -> tuple[SwapQuote | None, str]:
+        """Select the quote backing ``amount_out_minimum`` (VIB-2058 C1/C3).
+
+        Mirrors the V3 swap path's executable-or-fail-closed contract
+        (``uniswap_v3/compiler.py`` quoter selection): an executable on-chain quote
+        when connected, the oracle-derived local estimate only when genuinely
+        offline or in a non-broadcasting compile.
+
+        Returns ``(quote, quote_source)``. A ``None`` quote signals fail-closed —
+        the caller refuses to compile rather than fabricate a money-path minOut.
+        """
+        gateway_connected = self._gateway_client is not None and getattr(self._gateway_client, "is_connected", False)
+        connected = gateway_connected or bool(self.rpc_url)
+
+        local_kwargs: dict[str, Any] = {
+            "token_in": token_in_addr,
+            "token_out": token_out_addr,
+            "amount_in": amount_in_raw,
+            "fee_tier": fee_tier,
+            "token_in_decimals": token_in_dec,
+            "token_out_decimals": token_out_dec,
+            "price_ratio": price_ratio,
+        }
+
+        if not connected:
+            # Physically offline (no gateway, no RPC): the oracle-derived local
+            # estimate is the designed path (unit tests, offline compilation).
+            return self._sdk.get_quote_local(**local_kwargs), "local_estimate"
+
+        try:
+            quote = self._sdk.get_quote(
+                token_in=token_in_addr,
+                token_out=token_out_addr,
+                amount_in=amount_in_raw,
+                fee_tier=fee_tier,
+                token_in_decimals=token_in_dec,
+                token_out_decimals=token_out_dec,
+            )
+            return quote, "onchain_quoter"
+        except Exception as exc:
+            if offline_mode:
+                # Permission-discovery / placeholder compile: nothing is broadcast,
+                # so degrade to the local estimate rather than blocking discovery.
+                logger.warning(
+                    "V4 executable quote failed in offline-mode compile; using local estimate: %s",
+                    exc,
+                )
+                return self._sdk.get_quote_local(**local_kwargs), "local_estimate"
+            # C1: connected + online quote failed → fail closed. Do NOT substitute a
+            # theoretical estimate into a real swap (the iter-133 silent-no-op class).
+            logger.warning(
+                "V4 executable quote failed (gateway/RPC connected, online compile); failing closed: %s",
+                exc,
+            )
+            return None, "unavailable"
+
+    def _check_swap_price_impact(
+        self,
+        *,
+        quote_source: str,
+        quoter_amount: int,
+        amount_in: Decimal,
+        token_out_dec: int,
+        price_ratio: Decimal | None,
+        max_price_impact: Decimal | None,
+        config_max_price_impact: Decimal | None,
+        using_placeholders: bool,
+        token_in: str,
+        token_out: str,
+    ) -> SwapResult | None:
+        """Liquidity / price-impact guard (VIB-2058 C2), parity with V3.
+
+        Reuses the framework's protocol-agnostic ``check_price_impact`` helper.
+        Returns a failed ``SwapResult`` when impact exceeds tolerance (pool likely
+        illiquid → would silently no-op), else ``None`` (proceed).
+
+        Only runs against an executable on-chain quote: a ``local_estimate`` is
+        itself oracle-derived, so comparing it to the oracle estimate is circular.
+        Skipped on a local Anvil fork (C4 — fork pool state and the live oracle are
+        not time-aligned).
+        """
+        if quote_source != "onchain_quoter":
+            return None
+        if price_ratio is None:
+            # No oracle estimate to compare against (SKIPPED_NO_ORACLE). The
+            # executable quote already proved pool existence; depth is unguarded.
+            return None
+
+        from almanak.framework.execution.simulator.config import is_local_rpc
+
+        if is_local_rpc(self.rpc_url):
+            logger.info(
+                "Skipping V4 price-impact guard for local Anvil rpc (%s): fork pool state "
+                "and live oracle prices are not time-aligned.",
+                self.rpc_url,
+            )
+            return None
+
+        from almanak.framework.intents._compiler_helpers import PriceImpactDecision, check_price_impact
+
+        oracle_estimate = int(amount_in * price_ratio * Decimal(10**token_out_dec))
+        result = check_price_impact(
+            oracle_estimate=oracle_estimate,
+            quoter_amount=quoter_amount,
+            intent_max_impact=max_price_impact,
+            config_max_impact=config_max_price_impact if config_max_price_impact is not None else Decimal("0.05"),
+            offline_mode=using_placeholders,
+            using_placeholders=using_placeholders,
+        )
+        if result.decision is PriceImpactDecision.IMPACT_TOO_HIGH and result.price_impact is not None:
+            return SwapResult(
+                success=False,
+                transactions=[],
+                error=(
+                    f"Price impact too high for {token_in} -> {token_out}: on-chain quote "
+                    f"implies {result.price_impact:.1%} impact vs oracle (max allowed "
+                    f"{result.effective_max_impact:.0%}). Likely cause: insufficient pool "
+                    f"liquidity at the selected fee tier. Refusing to compile a swap that "
+                    f"would likely no-op or be sandwiched."
+                ),
+            )
+        return None
 
     def compile_swap_intent(
         self,
         intent: SwapIntent,
         price_oracle: dict[str, Decimal] | None = None,
+        *,
+        config_max_price_impact: Decimal | None = None,
+        permission_discovery: bool = False,
+        using_placeholders: bool = False,
     ) -> ActionBundle:
         """Compile a SwapIntent to an ActionBundle.
 
@@ -340,6 +532,13 @@ class UniswapV4Adapter:
         Args:
             intent: The SwapIntent to compile.
             price_oracle: Optional price map for USD conversions.
+            config_max_price_impact: Compiler-config price-impact default
+                (``ctx.max_price_impact_pct``); the per-intent override is read from
+                ``intent.max_price_impact`` (VIB-2058).
+            permission_discovery: Permission-discovery compile — relaxes the
+                executable-quote fail-closed rule (nothing is broadcast).
+            using_placeholders: Price oracle holds placeholder prices — relaxes the
+                price-impact guard.
 
         Returns:
             ActionBundle containing transactions for execution.
@@ -384,6 +583,10 @@ class UniswapV4Adapter:
             amount_in=amount_in,
             slippage_bps=slippage_bps,
             price_ratio=computed_price_ratio,
+            max_price_impact=intent.max_price_impact,
+            config_max_price_impact=config_max_price_impact,
+            offline_mode=permission_discovery or using_placeholders,
+            using_placeholders=using_placeholders,
         )
 
         if not result.success:
@@ -447,6 +650,9 @@ class UniswapV4Adapter:
             "pool_manager": self.addresses["pool_manager"],
             "gas_estimate": result.gas_estimate,
             "protocol_version": "v4",
+            # VIB-2058: provenance of the minOut basis (executable quote vs offline
+            # estimate) — the reader-trust half of the read-fallback contract.
+            "quote_source": result.quote_source,
         }
         if expected_output_human is not None:
             metadata["expected_output_human"] = expected_output_human
@@ -1046,6 +1252,12 @@ class SwapResult:
     amount_out_quoted: int = 0
     gas_estimate: int = 0
     error: str | None = None
+    # VIB-2058: provenance of the quote backing ``amount_out_minimum``. The
+    # reader-trust half of the VIB-5052 §7.10 read-fallback contract.
+    #   "onchain_quoter" — executable V4 Quoter quote (pool-existence verified).
+    #   "local_estimate" — offline oracle-derived estimate (no chain I/O).
+    #   ""               — not stamped (e.g. an early-return failure result).
+    quote_source: str = ""
 
 
 def tx_to_dict(tx: SwapTransaction) -> dict[str, Any]:

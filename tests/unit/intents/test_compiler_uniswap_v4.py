@@ -32,8 +32,18 @@ def _make_mock_action_bundle(
     bundle.transactions = [MagicMock() for _ in range(num_txs)] if not error else []
     bundle.metadata = {
         "intent_id": "test-intent-id",
-        "from_token": {"symbol": "USDC", "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "decimals": 6, "is_native": False},
-        "to_token": {"symbol": "WETH", "address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", "decimals": 18, "is_native": False},
+        "from_token": {
+            "symbol": "USDC",
+            "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "decimals": 6,
+            "is_native": False,
+        },
+        "to_token": {
+            "symbol": "WETH",
+            "address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+            "decimals": 18,
+            "is_native": False,
+        },
         "amount_in": "100000000",
         "amount_out_minimum": "99500000",
         "slippage_bps": 50,
@@ -290,9 +300,7 @@ class TestUniswapV4SwapCompilationMultichain:
         )
 
         result = compiler.compile(intent)
-        assert result.status == CompilationStatus.SUCCESS, (
-            f"V4 swap compilation failed on {chain}: {result.error}"
-        )
+        assert result.status == CompilationStatus.SUCCESS, f"V4 swap compilation failed on {chain}: {result.error}"
         assert result.action_bundle.metadata["pool_manager"] == "0x000000000004444c5dc75cB358380D2e3dE08A90"
 
 
@@ -319,4 +327,84 @@ class TestUniswapV4NotBlocked:
         result = compiler.compile(intent)
         # Must NOT be blocked
         assert result.status != CompilationStatus.FAILED or "blocked" not in (result.error or "").lower()
+        assert result.status == CompilationStatus.SUCCESS
+
+
+class TestUniswapV4SwapPriceImpactWiring:
+    """VIB-2058: the price-impact guard wires end-to-end through the real adapter.
+
+    These tests do NOT mock the adapter — they exercise the real
+    ``UniswapV4Adapter`` built by ``IntentCompiler``, patching only the SDK's
+    on-chain ``get_quote`` so the executable-quote path is taken without a network
+    call. They prove the new ``SwapCompilerContext`` wiring delivers
+    ``using_placeholders`` / ``max_price_impact_pct`` to the guard (the context-type
+    change is the subtle part of the fix).
+    """
+
+    @staticmethod
+    def _connected_gateway() -> MagicMock:
+        gw = MagicMock()
+        gw.is_connected = True
+        return gw
+
+    def _compile_with_quote(self, amount_out: int):
+        from almanak.connectors.uniswap_v4.sdk import SwapQuote
+
+        usdc = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+        weth = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+        thin_quote = SwapQuote(
+            amount_in=100_000_000,
+            amount_out=amount_out,
+            fee_tier=3000,
+            token_in=usdc,
+            token_out=weth,
+        )
+
+        # Real prices (not placeholders) so the guard runs: 100 USDC ≈ 0.0556 WETH.
+        compiler = IntentCompiler(
+            chain="arbitrum",
+            wallet_address=TEST_WALLET,
+            price_oracle={"USDC": Decimal("1.0"), "WETH": Decimal("1800.0"), "ETH": Decimal("1800.0")},
+            gateway_client=self._connected_gateway(),
+        )
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="WETH",
+            amount=Decimal("100"),
+            max_slippage=Decimal("0.005"),
+            protocol="uniswap_v4",
+            chain="arbitrum",
+        )
+
+        # Deterministic token resolution (address + decimals), patch only the quote.
+        def _resolve(symbol, chain):
+            m = MagicMock()
+            m.address = usdc if symbol.upper() == "USDC" else weth
+            m.decimals = 6 if symbol.upper() == "USDC" else 18
+            m.is_native = False
+            return m
+
+        resolver = MagicMock()
+        resolver.resolve.side_effect = _resolve
+        resolver.resolve_for_swap.side_effect = _resolve
+
+        with (
+            patch("almanak.connectors.uniswap_v4.sdk.UniswapV4SDK.get_quote", return_value=thin_quote),
+            patch.object(compiler, "_token_resolver", resolver),
+        ):
+            return compiler.compile(intent)
+
+    def test_high_impact_quote_fails_compilation(self):
+        """A real-price oracle expects ~0.0556 WETH; a quote of ~0.0278 WETH (50%
+        impact) must FAIL compilation — proving the guard fires through the framework.
+        """
+        # oracle ≈ 100 * (1/1800) * 1e18 ≈ 5.56e16; quote 2.78e16 → ~50% impact.
+        result = self._compile_with_quote(amount_out=27_800_000_000_000_000)
+        assert result.status == CompilationStatus.FAILED
+        assert "price impact" in (result.error or "").lower()
+
+    def test_healthy_quote_compiles(self):
+        """A quote within tolerance (~1% impact) compiles to SUCCESS."""
+        # ~0.0550 WETH vs ~0.0556 oracle → ~1% impact < 5%.
+        result = self._compile_with_quote(amount_out=55_000_000_000_000_000)
         assert result.status == CompilationStatus.SUCCESS

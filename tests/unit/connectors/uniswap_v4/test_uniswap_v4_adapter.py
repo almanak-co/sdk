@@ -130,22 +130,92 @@ class TestSwapExactInput:
         # amount_out_minimum should be ~99% of quote output
         assert result.amount_out_minimum > 0
 
-    def test_rpc_quote_failure_falls_back_to_local_estimate(self):
+    def _make_local_quote(self, amount_out: int = 300_000_000_000_000_000) -> SwapQuote:
+        return SwapQuote(
+            amount_in=1_000_000_000,
+            amount_out=amount_out,
+            fee_tier=3000,
+            token_in=self._USDC_ADDR,
+            token_out=self._WETH_ADDR,
+        )
+
+    def test_connected_online_quote_failure_fails_closed(self):
+        """VIB-2058 C1: connected + online executable-quote failure MUST fail closed.
+
+        This is the money-path fix. The prior behaviour silently fell back to the
+        theoretical ``get_quote_local`` estimate and built a REAL swap whose
+        ``amount_out_minimum`` was backed by a number that may not correspond to any
+        on-chain pool — the iter-133 silent-no-op class. Correct behaviour: refuse to
+        compile (no transactions, clear error), never fabricate the minOut basis.
+        """
         config = UniswapV4Config(
             chain="arbitrum",
             wallet_address=_TEST_WALLET,
             rpc_url="https://arb.example.invalid",
         )
         adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
-        local_quote = SwapQuote(
-            amount_in=1_000_000_000,
-            amount_out=300_000_000_000_000_000,
-            fee_tier=3000,
+        adapter._sdk.get_quote = MagicMock(side_effect=ValueError("quoter unavailable"))
+        adapter._sdk.get_quote_local = MagicMock(return_value=self._make_local_quote())
+
+        result = adapter.swap_exact_input(
             token_in=self._USDC_ADDR,
             token_out=self._WETH_ADDR,
+            amount_in=Decimal("1000"),
+            slippage_bps=50,
+            price_ratio=self._USDC_TO_WETH_PRICE_RATIO,
         )
+
+        assert result.success is False
+        assert result.transactions == []
+        assert result.amount_out_minimum == 0
+        assert "unavailable" in (result.error or "").lower()
+        adapter._sdk.get_quote.assert_called_once()
+        # The fabricating fallback must NOT have been consulted on the online path.
+        adapter._sdk.get_quote_local.assert_not_called()
+
+    def test_offline_mode_quote_failure_uses_local_estimate(self):
+        """VIB-2058 C3: in a non-broadcasting compile (permission discovery /
+        placeholders) a failed executable quote MAY degrade to the local estimate —
+        nothing is signed or sent, so the theoretical number is harmless there.
+        """
+        config = UniswapV4Config(
+            chain="arbitrum",
+            wallet_address=_TEST_WALLET,
+            rpc_url="https://arb.example.invalid",
+        )
+        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        local_quote = self._make_local_quote()
         adapter._sdk.get_quote = MagicMock(side_effect=ValueError("quoter unavailable"))
         adapter._sdk.get_quote_local = MagicMock(return_value=local_quote)
+
+        result = adapter.swap_exact_input(
+            token_in=self._USDC_ADDR,
+            token_out=self._WETH_ADDR,
+            amount_in=Decimal("1000"),
+            slippage_bps=50,
+            price_ratio=self._USDC_TO_WETH_PRICE_RATIO,
+            offline_mode=True,
+        )
+
+        assert result.success is True
+        assert result.amount_out_quoted == local_quote.amount_out
+        assert result.quote_source == "local_estimate"
+        adapter._sdk.get_quote.assert_called_once()
+        adapter._sdk.get_quote_local.assert_called_once()
+
+    def test_connected_success_uses_executable_quote_with_provenance(self):
+        """VIB-2058: a successful executable quote backs the minOut and is stamped
+        ``quote_source="onchain_quoter"``; the local estimate is never consulted.
+        """
+        config = UniswapV4Config(
+            chain="arbitrum",
+            wallet_address=_TEST_WALLET,
+            rpc_url="https://arb.example.invalid",
+        )
+        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        onchain_quote = self._make_local_quote(amount_out=299_000_000_000_000_000)
+        adapter._sdk.get_quote = MagicMock(return_value=onchain_quote)
+        adapter._sdk.get_quote_local = MagicMock(side_effect=AssertionError("must not be called"))
 
         result = adapter.swap_exact_input(
             token_in=self._USDC_ADDR,
@@ -156,17 +226,161 @@ class TestSwapExactInput:
         )
 
         assert result.success is True
-        assert result.amount_out_quoted == local_quote.amount_out
-        adapter._sdk.get_quote.assert_called_once()
-        adapter._sdk.get_quote_local.assert_called_once_with(
+        assert result.amount_out_quoted == onchain_quote.amount_out
+        assert result.quote_source == "onchain_quoter"
+        adapter._sdk.get_quote_local.assert_not_called()
+
+    def test_offline_no_connection_uses_local_estimate(self):
+        """VIB-2058 C3: with no gateway and no RPC the local estimate is the designed
+        path (the executable quoter is physically unreachable). Provenance reflects it.
+        """
+        config = UniswapV4Config(chain="arbitrum", wallet_address=_TEST_WALLET)
+        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        adapter._sdk.get_quote = MagicMock(side_effect=AssertionError("must not be called"))
+
+        result = adapter.swap_exact_input(
             token_in=self._USDC_ADDR,
             token_out=self._WETH_ADDR,
-            amount_in=1_000_000_000,
-            fee_tier=3000,
-            token_in_decimals=6,
-            token_out_decimals=18,
+            amount_in=Decimal("1000"),
+            slippage_bps=50,
             price_ratio=self._USDC_TO_WETH_PRICE_RATIO,
         )
+
+        assert result.success is True
+        assert result.quote_source == "local_estimate"
+        adapter._sdk.get_quote.assert_not_called()
+
+    def test_high_price_impact_fails_closed(self):
+        """VIB-2058 C2: an executable quote far below the oracle estimate (thin pool)
+        exceeds the impact ceiling and MUST fail compilation rather than build a swap
+        that would no-op or be sandwiched.
+        """
+        config = UniswapV4Config(
+            chain="arbitrum",
+            wallet_address=_TEST_WALLET,
+            rpc_url="https://arb.example.invalid",
+        )
+        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        # Oracle implies ~0.3 WETH out for 1000 USDC; quoter returns ~0.15 WETH → 50%
+        # impact, well over the default 5% ceiling.
+        thin_quote = self._make_local_quote(amount_out=150_000_000_000_000_000)
+        adapter._sdk.get_quote = MagicMock(return_value=thin_quote)
+
+        result = adapter.swap_exact_input(
+            token_in=self._USDC_ADDR,
+            token_out=self._WETH_ADDR,
+            amount_in=Decimal("1000"),
+            slippage_bps=50,
+            price_ratio=self._USDC_TO_WETH_PRICE_RATIO,
+        )
+
+        assert result.success is False
+        assert result.transactions == []
+        assert "price impact" in (result.error or "").lower()
+
+    def test_within_tolerance_price_impact_passes(self):
+        """VIB-2058 C2: an executable quote within the impact ceiling compiles."""
+        config = UniswapV4Config(
+            chain="arbitrum",
+            wallet_address=_TEST_WALLET,
+            rpc_url="https://arb.example.invalid",
+        )
+        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        # 1000 USDC * 0.0003 = 0.3 WETH oracle; quoter 0.297 WETH → 1% impact < 5%.
+        healthy_quote = self._make_local_quote(amount_out=297_000_000_000_000_000)
+        adapter._sdk.get_quote = MagicMock(return_value=healthy_quote)
+
+        result = adapter.swap_exact_input(
+            token_in=self._USDC_ADDR,
+            token_out=self._WETH_ADDR,
+            amount_in=Decimal("1000"),
+            slippage_bps=50,
+            price_ratio=self._USDC_TO_WETH_PRICE_RATIO,
+        )
+
+        assert result.success is True
+        assert result.quote_source == "onchain_quoter"
+
+    def test_zero_output_onchain_quote_fails_closed(self):
+        """VIB-2058: a callable-but-degenerate pool whose Quoter returns amount_out=0
+        WITHOUT reverting must fail closed even with no oracle price_ratio — otherwise
+        the swap would compile with amount_out_minimum=0 (the silent-no-op corner the
+        impact guard cannot see without an oracle).
+        """
+        config = UniswapV4Config(
+            chain="arbitrum",
+            wallet_address=_TEST_WALLET,
+            rpc_url="https://arb.example.invalid",
+        )
+        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        zero_quote = self._make_local_quote(amount_out=0)
+        adapter._sdk.get_quote = MagicMock(return_value=zero_quote)
+
+        # No price_ratio (partial oracle) so the C2 guard is skipped — the zero-output
+        # check is what must catch this.
+        result = adapter.swap_exact_input(
+            token_in=self._USDC_ADDR,
+            token_out=self._WETH_ADDR,
+            amount_in=Decimal("1000"),
+            slippage_bps=50,
+            price_ratio=None,
+        )
+
+        assert result.success is False
+        assert result.transactions == []
+        assert "zero output" in (result.error or "").lower()
+
+    def test_onchain_quote_without_oracle_skips_impact_guard(self):
+        """VIB-2058: an executable quote with no oracle price_ratio (partial oracle)
+        compiles — the executable quote already proved pool existence; depth is left
+        unguarded (SKIPPED_NO_ORACLE), mirroring the V3 swap path.
+        """
+        config = UniswapV4Config(
+            chain="arbitrum",
+            wallet_address=_TEST_WALLET,
+            rpc_url="https://arb.example.invalid",
+        )
+        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        onchain_quote = self._make_local_quote(amount_out=296_000_000_000_000_000)
+        adapter._sdk.get_quote = MagicMock(return_value=onchain_quote)
+        adapter._sdk.get_quote_local = MagicMock(side_effect=AssertionError("must not be called"))
+
+        result = adapter.swap_exact_input(
+            token_in=self._USDC_ADDR,
+            token_out=self._WETH_ADDR,
+            amount_in=Decimal("1000"),
+            slippage_bps=50,
+            price_ratio=None,
+        )
+
+        assert result.success is True
+        assert result.quote_source == "onchain_quoter"
+        assert result.amount_out_minimum > 0
+
+    def test_local_anvil_skips_price_impact_guard(self):
+        """VIB-2058 C4: on a local Anvil fork the impact guard is skipped (fork pool
+        state and live oracle prices are not time-aligned), so an otherwise-failing
+        impact still compiles.
+        """
+        config = UniswapV4Config(
+            chain="arbitrum",
+            wallet_address=_TEST_WALLET,
+            rpc_url="http://127.0.0.1:8545",
+        )
+        adapter = UniswapV4Adapter(config=config, token_resolver=_make_resolver())
+        thin_quote = self._make_local_quote(amount_out=150_000_000_000_000_000)
+        adapter._sdk.get_quote = MagicMock(return_value=thin_quote)
+
+        result = adapter.swap_exact_input(
+            token_in=self._USDC_ADDR,
+            token_out=self._WETH_ADDR,
+            amount_in=Decimal("1000"),
+            slippage_bps=50,
+            price_ratio=self._USDC_TO_WETH_PRICE_RATIO,
+        )
+
+        assert result.success is True
+        assert result.quote_source == "onchain_quoter"
 
 
 class TestTokenResolution:
