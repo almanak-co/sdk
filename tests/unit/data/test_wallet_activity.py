@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from almanak.framework.data.wallet_activity import WalletActivityProvider
-from almanak.framework.services.copy_trading_models import CopySignal, LeaderEvent
+from almanak.framework.services.copy_trading.copy_trading_models import CopySignal, LeaderEvent
 
 
 def _make_signal(

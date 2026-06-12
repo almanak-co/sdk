@@ -4,8 +4,8 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.services.copy_policy_engine import CopyPolicyEngine
-from almanak.framework.services.copy_trading_models import (
+from almanak.framework.services.copy_trading.copy_policy_engine import CopyPolicyEngine
+from almanak.framework.services.copy_trading.copy_trading_models import (
     CopySignal,
     CopyTradingConfigV2,
     PerpPayload,

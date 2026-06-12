@@ -925,22 +925,12 @@ class TestBuildComponents:
         strategy_instance = _make_strategy_instance()
 
         # Stub the copy-trading v2 config + supporting machinery.
-        from almanak.framework.services import (
+        from almanak.framework.services.copy_trading import (
             copy_circuit_breaker as ccb_mod,
-        )
-        from almanak.framework.services import (
             copy_intent_builder as cib_mod,
-        )
-        from almanak.framework.services import (
             copy_ledger as cl_mod,
-        )
-        from almanak.framework.services import (
             copy_policy_engine as cpe_mod,
-        )
-        from almanak.framework.services import (
             copy_signal_engine as cse_mod,
-        )
-        from almanak.framework.services import (
             copy_trading_models as ctm_mod,
         )
         from almanak.framework.services import (
@@ -1011,8 +1001,10 @@ class TestBuildComponents:
         _patch_component_factories(monkeypatch)
         strategy_instance = _make_strategy_instance()
 
-        from almanak.framework.services import copy_signal_engine as cse_mod
-        from almanak.framework.services import copy_trading_models as ctm_mod
+        from almanak.framework.services.copy_trading import (
+            copy_signal_engine as cse_mod,
+            copy_trading_models as ctm_mod,
+        )
         from almanak.framework.services import wallet_monitor as wm_mod
 
         fake_v1 = MagicMock(
@@ -1063,7 +1055,7 @@ class TestBuildComponents:
         _patch_component_factories(monkeypatch)
         strategy_instance = _make_strategy_instance()
 
-        from almanak.framework.services import copy_trading_models as ctm_mod
+        from almanak.framework.services.copy_trading import copy_trading_models as ctm_mod
 
         monkeypatch.setattr(ctm_mod.CopyTradingConfig, "from_config", staticmethod(lambda _raw: MagicMock()))
 

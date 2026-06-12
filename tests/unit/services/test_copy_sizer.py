@@ -5,8 +5,8 @@ from unittest.mock import patch
 
 import pytest
 
-from almanak.framework.services.copy_sizer import CopySizer, CopySizingConfig
-from almanak.framework.services.copy_trading_models import CopySignal, SizingMode
+from almanak.framework.services.copy_trading.copy_sizer import CopySizer, CopySizingConfig
+from almanak.framework.services.copy_trading.copy_trading_models import CopySignal, SizingMode
 
 
 _DEFAULT_AMOUNTS_USD = {"USDC": Decimal("1000")}
@@ -140,7 +140,7 @@ class TestDailyCap:
 
         # Simulate date change
         with patch(
-            "almanak.framework.services.copy_sizer.datetime"
+            "almanak.framework.services.copy_trading.copy_sizer.datetime"
         ) as mock_dt:
             mock_dt.now.return_value.strftime.return_value = "2099-12-31"
             assert sizer.check_daily_cap(Decimal("50")) is True

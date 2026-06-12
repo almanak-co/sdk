@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.services.copy_trading_models import (
+from almanak.framework.services.copy_trading.copy_trading_models import (
     CopyDecision,
     CopyExecutionRecord,
     CopySignal,
@@ -251,7 +251,7 @@ class TestCopyTradingConfigV2Normalization:
             "sizing": {"mode": "fixed_usd", "fixed_usd": 200, "percentage_of_leader": 0.2},  # floats
             "risk": {"max_trade_usd": 500, "max_slippage": 0.005},  # floats
         }
-        with caplog.at_level(logging.WARNING, logger="almanak.framework.services.copy_trading_models"):
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.services.copy_trading.copy_trading_models"):
             ct = CopyTradingConfig.from_config(config)
 
         assert "V2 copy trading config validation failed" in caplog.text
@@ -269,7 +269,7 @@ class TestCopyTradingConfigV2Normalization:
             "sizing": {"mode": "fixed_usd", "fixed_usd": "200"},
             "risk": {"max_trade_usd": "500"},
         }
-        with caplog.at_level(logging.WARNING, logger="almanak.framework.services.copy_trading_models"):
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.services.copy_trading.copy_trading_models"):
             CopyTradingConfig.from_config(config)
 
         assert "V2 copy trading config validation failed" not in caplog.text

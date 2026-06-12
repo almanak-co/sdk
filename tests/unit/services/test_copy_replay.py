@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from almanak.framework.services.copy_trading_models import CopyTradingConfigV2
+from almanak.framework.services.copy_trading.copy_trading_models import CopyTradingConfigV2
 from almanak.framework.testing.copy_replay import CopyReplayRunner
 
 

@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from almanak.core.chains import LEGACY_SERIALIZED_CHAIN
-from almanak.framework.services.copy_intent_builder import CopyIntentBuilder
-from almanak.framework.services.copy_ledger import CopyLedger
-from almanak.framework.services.copy_policy_engine import CopyPolicyEngine
-from almanak.framework.services.copy_trading_models import (
+from almanak.framework.services.copy_trading import (
+    CopyIntentBuilder,
+    CopyLedger,
+    CopyPolicyEngine,
     CopySignal,
     CopyTradingConfigV2,
     LendingPayload,

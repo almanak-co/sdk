@@ -4,8 +4,8 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.services.copy_ledger import CopyLedger
-from almanak.framework.services.copy_trading_models import (
+from almanak.framework.services.copy_trading.copy_ledger import CopyLedger
+from almanak.framework.services.copy_trading.copy_trading_models import (
     CopyDecision,
     CopyExecutionRecord,
     CopySignal,

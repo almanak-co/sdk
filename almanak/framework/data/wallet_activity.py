@@ -10,8 +10,8 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 
-from almanak.framework.services.copy_signal_engine import CopySignalEngine
-from almanak.framework.services.copy_trading_models import CopySignal
+from almanak.framework.services.copy_trading.copy_signal_engine import CopySignalEngine
+from almanak.framework.services.copy_trading.copy_trading_models import CopySignal
 from almanak.framework.services.wallet_monitor import WalletMonitor
 
 logger = logging.getLogger(__name__)

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from almanak.framework.services.copy_trading_models import CopyExecutionRecord, CopyTradingConfigV2
+from almanak.framework.services.copy_trading.copy_trading_models import CopyExecutionRecord, CopyTradingConfigV2
 
 
 @dataclass(frozen=True)

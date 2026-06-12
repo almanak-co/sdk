@@ -2182,10 +2182,13 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
 
     elif template == StrategyTemplate.COPY_TRADER:
         return """
-        from almanak.framework.services.copy_intent_builder import CopyIntentBuilder
-        from almanak.framework.services.copy_policy_engine import CopyPolicyEngine
-        from almanak.framework.services.copy_sizer import CopySizer, CopySizingConfig
-        from almanak.framework.services.copy_trading_models import CopyTradingConfigV2
+        from almanak.framework.services.copy_trading import (
+            CopyIntentBuilder,
+            CopyPolicyEngine,
+            CopySizer,
+            CopySizingConfig,
+            CopyTradingConfigV2,
+        )
 
         # Copy trading config
         ct_config = get_config("copy_trading", {})

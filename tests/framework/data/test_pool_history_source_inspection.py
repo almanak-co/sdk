@@ -774,7 +774,7 @@ _PER_MODULE_DYNAMIC_IMPORT_EXEMPT: dict[str, frozenset[str]] = {
     #   - "import_module("      — bare-name substring scan
     # Any OTHER forbidden import/substring in this module still
     # trips, including (e.g.) `runpy`, `code`, `exec(`, `eval(`.
-    "almanak.framework.services.copy_signal_engine": frozenset(
+    "almanak.framework.services.copy_trading.copy_signal_engine": frozenset(
         {
             "importlib",
             "import_module(",
@@ -2930,7 +2930,7 @@ def test_f4_class_e_namespaces_in_forbidden_import_names() -> None:
 
 def test_f5_per_module_dynamic_import_exempt_bound() -> None:
     """F.5: _PER_MODULE_DYNAMIC_IMPORT_EXEMPT contains exactly ONE
-    entry — `services.copy_signal_engine` mapped to
+    entry — `services.copy_trading.copy_signal_engine` mapped to
     `frozenset({"importlib", "import_module("})`. VIB-4914 tracks
     deletion of this entry once the static parser registry refactor
     ships.
@@ -2940,7 +2940,7 @@ def test_f5_per_module_dynamic_import_exempt_bound() -> None:
         f"{len(_PER_MODULE_DYNAMIC_IMPORT_EXEMPT)}, expected 1 per VIB-4901. "
         f"Adding entries requires audit evidence + follow-up ticket."
     )
-    expected_key = "almanak.framework.services.copy_signal_engine"
+    expected_key = "almanak.framework.services.copy_trading.copy_signal_engine"
     assert expected_key in _PER_MODULE_DYNAMIC_IMPORT_EXEMPT, (
         f"Expected key {expected_key!r} missing — exemption regressed."
     )
@@ -3011,7 +3011,7 @@ def test_per_module_dynamic_exemption_does_not_skip_other_forbidden_dynamic_subs
     + ``exec("...")`` (NOT exempt) and applies the production loop
     body (mirroring lines ~1330 / ~1370 of this file).
     """
-    modname = "almanak.framework.services.copy_signal_engine"
+    modname = "almanak.framework.services.copy_trading.copy_signal_engine"
     assert modname in _PER_MODULE_DYNAMIC_IMPORT_EXEMPT, (
         "test prerequisite: copy_signal_engine MUST be in the "
         "exemption table for this regression contract to be meaningful"
@@ -3057,7 +3057,7 @@ def test_per_module_dynamic_exemption_does_not_skip_class_e_namespace_imports() 
     ``_scan_import_names_against_pipeline`` with the combined exempt
     set. The runpy import must still produce a failure.
     """
-    modname = "almanak.framework.services.copy_signal_engine"
+    modname = "almanak.framework.services.copy_trading.copy_signal_engine"
     exempt = _combined_per_module_exempt(modname)
     assert "importlib" in exempt, (
         "test prerequisite: importlib must be in the combined exempt set for copy_signal_engine"

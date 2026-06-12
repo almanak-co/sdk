@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from almanak.framework.services.copy_trading_models import (
+from almanak.framework.services.copy_trading.copy_trading_models import (
     ActionPolicyConfig,
     CopyDecision,
     CopySignal,

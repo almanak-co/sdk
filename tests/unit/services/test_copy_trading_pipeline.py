@@ -12,9 +12,9 @@ from unittest.mock import MagicMock
 
 from almanak.connectors._strategy_base.contract_registry import ContractInfo, ContractRegistry
 from almanak.framework.data.wallet_activity import WalletActivityProvider
-from almanak.framework.services.copy_signal_engine import CopySignalEngine
-from almanak.framework.services.copy_sizer import CopySizer, CopySizingConfig
-from almanak.framework.services.copy_trading_models import SizingMode
+from almanak.framework.services.copy_trading.copy_signal_engine import CopySignalEngine
+from almanak.framework.services.copy_trading.copy_sizer import CopySizer, CopySizingConfig
+from almanak.framework.services.copy_trading.copy_trading_models import SizingMode
 from almanak.framework.services.wallet_monitor import WalletMonitor, WalletMonitorConfig
 
 # -- Constants ----------------------------------------------------------------

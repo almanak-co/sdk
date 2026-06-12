@@ -2,11 +2,11 @@
 
 from decimal import Decimal
 
-from almanak.framework.services.copy_circuit_breaker import (
+from almanak.framework.services.copy_trading.copy_circuit_breaker import (
     CopyCircuitBreaker,
     CopyCircuitBreakerConfig,
 )
-from almanak.framework.services.copy_trading_models import CopyExecutionRecord
+from almanak.framework.services.copy_trading.copy_trading_models import CopyExecutionRecord
 
 
 def _ok_record(lag_ms: int = 100, deviation_bps: int = 10) -> CopyExecutionRecord:
@@ -183,7 +183,7 @@ class TestWindowSliding:
 
 class TestFromCopyConfig:
     def test_builds_from_v2_config(self) -> None:
-        from almanak.framework.services.copy_trading_models import CopyTradingConfigV2
+        from almanak.framework.services.copy_trading.copy_trading_models import CopyTradingConfigV2
 
         config = CopyTradingConfigV2.from_config({"risk": {"max_price_deviation_bps": 300}})
         cb = CopyCircuitBreaker.from_copy_config(config)

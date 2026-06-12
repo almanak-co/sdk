@@ -2517,12 +2517,12 @@ def _init_copy_trading(  # noqa: C901
     from almanak.connectors._strategy_base.contract_registry import get_default_registry
 
     from ..data.wallet_activity import WalletActivityProvider
-    from ..services.copy_circuit_breaker import CopyCircuitBreaker
-    from ..services.copy_intent_builder import CopyIntentBuilder
-    from ..services.copy_ledger import CopyLedger
-    from ..services.copy_policy_engine import CopyPolicyEngine
-    from ..services.copy_signal_engine import CopySignalEngine
-    from ..services.copy_trading_models import (
+    from ..services.copy_trading.copy_circuit_breaker import CopyCircuitBreaker
+    from ..services.copy_trading.copy_intent_builder import CopyIntentBuilder
+    from ..services.copy_trading.copy_ledger import CopyLedger
+    from ..services.copy_trading.copy_policy_engine import CopyPolicyEngine
+    from ..services.copy_trading.copy_signal_engine import CopySignalEngine
+    from ..services.copy_trading.copy_trading_models import (
         CopyTradingConfig,
         CopyTradingConfigError,
         CopyTradingConfigV2,

@@ -10,7 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from almanak.framework.services.copy_trading_models import CopyDecision, CopyExecutionRecord, CopySignal
+from almanak.framework.services.copy_trading.copy_trading_models import CopyDecision, CopyExecutionRecord, CopySignal
 
 _SCHEMA_VERSION = 1
 

@@ -2,9 +2,9 @@
 
 from decimal import Decimal
 
-from almanak.framework.services.copy_ledger import CopyLedger
-from almanak.framework.services.copy_reporting import CopyReportGenerator
-from almanak.framework.services.copy_trading_models import CopyDecision, CopyExecutionRecord, CopySignal, SwapPayload
+from almanak.framework.services.copy_trading.copy_ledger import CopyLedger
+from almanak.framework.services.copy_trading.copy_reporting import CopyReportGenerator
+from almanak.framework.services.copy_trading.copy_trading_models import CopyDecision, CopyExecutionRecord, CopySignal, SwapPayload
 
 
 def test_copy_ledger_and_reporting_roundtrip(tmp_path) -> None:

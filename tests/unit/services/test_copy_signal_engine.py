@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from almanak.connectors._strategy_base.contract_registry import ContractInfo, ContractRegistry
-from almanak.framework.services.copy_signal_engine import CopySignalEngine
-from almanak.framework.services.copy_trading_models import CopySignal, LeaderEvent
+from almanak.framework.services.copy_trading.copy_signal_engine import CopySignalEngine
+from almanak.framework.services.copy_trading.copy_trading_models import CopySignal, LeaderEvent
 
 
 @pytest.fixture()

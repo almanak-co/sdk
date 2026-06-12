@@ -272,7 +272,7 @@ def _load_pyproject_run_config(working_dir: str) -> dict:
 )
 def copy_validate(config_file: str, strict: bool) -> None:
     """Validate copy-trading configuration schema."""
-    from almanak.framework.services.copy_trading_models import CopyTradingConfigV2
+    from almanak.framework.services.copy_trading import CopyTradingConfigV2
 
     config = _load_cli_config(config_file)
     if "copy_trading" in config:
@@ -327,8 +327,7 @@ def copy_validate(config_file: str, strict: bool) -> None:
 )
 def copy_replay(config_file: str, replay_file: str, ledger_db: str, shadow: bool, json_output: bool) -> None:
     """Replay copy signals deterministically through policy + intent mapping."""
-    from almanak.framework.services.copy_ledger import CopyLedger
-    from almanak.framework.services.copy_trading_models import CopyTradingConfigV2
+    from almanak.framework.services.copy_trading import CopyLedger, CopyTradingConfigV2
     from almanak.framework.testing.copy_replay import CopyReplayRunner
 
     config = _load_cli_config(config_file)
@@ -371,8 +370,7 @@ def copy_replay(config_file: str, replay_file: str, ledger_db: str, shadow: bool
 )
 def copy_report(ledger_db: str, since_hours: int | None, json_output: bool) -> None:
     """Generate copy-trading operational report and go-live gate verdicts."""
-    from almanak.framework.services.copy_ledger import CopyLedger
-    from almanak.framework.services.copy_reporting import CopyReportGenerator
+    from almanak.framework.services.copy_trading import CopyLedger, CopyReportGenerator
 
     ledger = CopyLedger(ledger_db)
     try:

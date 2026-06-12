@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from almanak.framework.services.copy_ledger import CopyLedger
+from almanak.framework.services.copy_trading.copy_ledger import CopyLedger
 
 
 @dataclass(frozen=True)

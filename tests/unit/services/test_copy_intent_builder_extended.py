@@ -2,9 +2,9 @@
 
 from decimal import Decimal
 
-from almanak.framework.services.copy_intent_builder import CopyIntentBuilder
-from almanak.framework.services.copy_sizer import CopySizer, CopySizingConfig
-from almanak.framework.services.copy_trading_models import (
+from almanak.framework.services.copy_trading.copy_intent_builder import CopyIntentBuilder
+from almanak.framework.services.copy_trading.copy_sizer import CopySizer, CopySizingConfig
+from almanak.framework.services.copy_trading.copy_trading_models import (
     CopySignal,
     CopyTradingConfigV2,
     LendingPayload,

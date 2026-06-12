@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from almanak.framework.services.copy_performance_tracker import CopyPerformanceTracker
+from almanak.framework.services.copy_trading.copy_performance_tracker import CopyPerformanceTracker
 
 
 class TestRecordExecution:

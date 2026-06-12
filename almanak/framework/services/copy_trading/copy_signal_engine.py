@@ -19,7 +19,7 @@ from typing import Any
 
 from almanak.connectors._strategy_base.contract_registry import ContractInfo, ContractRegistry
 from almanak.framework.api.timeline import TimelineEvent, TimelineEventType, add_event
-from almanak.framework.services.copy_trading_models import (
+from almanak.framework.services.copy_trading.copy_trading_models import (
     CopySignal,
     LeaderEvent,
     LendingPayload,

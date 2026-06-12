@@ -16,7 +16,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from almanak.framework.services.copy_trading_models import LeaderEvent
+from almanak.framework.services.copy_trading.copy_trading_models import LeaderEvent
 from almanak.gateway.proto import gateway_pb2
 
 logger = logging.getLogger(__name__)
