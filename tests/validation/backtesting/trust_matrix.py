@@ -151,21 +151,18 @@ CELLS: tuple[TrustCell, ...] = (
         "entry_value_neutral",
         "lp",
         "LP adapter open is value-neutral at the open instant: position value == deposited notional.",
-        # Candidate stop-the-line finding (VIB-5081 PR): liquidity is stored
-        # as USD notional but valued as V3 L-units, minting ~27x on open.
-        xfail_ticket="VIB-5096",
+        # Fixed by VIB-5096: producers convert the USD deposit into true V3
+        # L-units via ImpermanentLossCalculator.liquidity_for_target_value.
     ),
     _cell(
         "round_trip_conservation",
         "lp",
         "LP adapter open -> close at flat price with zero pool volume returns initial capital minus gas.",
-        xfail_ticket="VIB-5096",
     ),
     _cell(
         "generic_lane_entry",
         "lp",
         "Generic-lane (no adapter) LP_OPEN does not mint: equity stays at initial capital on open.",
-        xfail_ticket="VIB-5096",
     ),
     _cell(
         "rejection_no_state_change",

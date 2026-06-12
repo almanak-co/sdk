@@ -16,15 +16,16 @@ stop-the-line event (blueprint 31 section 9).
 Candidate stop-the-line findings encoded as strict xfails by this module
 (discovered while building the matrix; see the VIB-5081 PR body):
 
-1. LP positions mint value on open in BOTH lanes: the position ``liquidity``
-   field is set to the USD notional (``engine._create_position_delta`` and
-   ``lp_adapter._execute_lp_open``) but every valuation path interprets it
-   as Uniswap V3 L-units, so a $5K open marks at ~$131K-$452K and the
-   phantom value is realized into cash on close.
+1. FIXED (VIB-5096): LP positions minted value on open in BOTH lanes - the
+   ``liquidity`` field held the USD notional but every valuation path
+   interpreted it as Uniswap V3 L-units, so a $5K open marked at
+   ~$131K-$452K. Producers now convert deposits into true L-units via
+   ``ImpermanentLossCalculator.liquidity_for_target_value``; the three LP
+   cells pass with their assertions unchanged.
 2. Lending WITHDRAW never closes the supply position (generic WITHDRAW
    flows carry no position_close_id and the lending adapter's
    ``_execute_withdraw`` defers to them), so a SUPPLY -> WITHDRAW round
-   trip double-counts the principal (+$5K on a $5K supply).
+   trip double-counts the principal (+$5K on a $5K supply). VIB-5097.
 """
 
 from __future__ import annotations
@@ -71,13 +72,6 @@ from tests.validation.backtesting.trust_matrix import (
     SwapDuck,
     flat_series,
     run_backtest,
-)
-
-_LP_MINT_REASON = (
-    "CANDIDATE STOP-THE-LINE (ticket pending under VIB-5079): LP position "
-    "'liquidity' is stored as USD notional (engine._create_position_delta, "
-    "lp_adapter._execute_lp_open) but valued as V3 L-units, minting ~27x-90x "
-    "on open. See VIB-5081 PR body."
 )
 
 _LENDING_DOUBLE_COUNT_REASON = (
@@ -168,9 +162,7 @@ def test_swap_overspend_is_rejected_without_state_change() -> None:
     execution costs are zeroed (originals stashed as ``*_unapplied``), and
     no balance/cash/position state changes.
     """
-    strategy = ScriptedStrategy(
-        [SwapDuck(from_token="WETH", to_token="USDC", amount_usd=Decimal("5000"))]
-    )
+    strategy = ScriptedStrategy([SwapDuck(from_token="WETH", to_token="USDC", amount_usd=Decimal("5000"))])
     result = run_backtest(
         strategy,
         flat_series(10),
@@ -355,7 +347,6 @@ def _lp_open_intent() -> LPOpenIntent:
 
 
 @pytest.mark.trust_cell("lp:entry_value_neutral")
-@pytest.mark.xfail(strict=True, reason=_LP_MINT_REASON)
 def test_lp_adapter_open_is_value_neutral() -> None:
     """Opening an LP position must not change equity beyond the gas charge.
 
@@ -379,7 +370,6 @@ def test_lp_adapter_open_is_value_neutral() -> None:
 
 
 @pytest.mark.trust_cell("lp:round_trip_conservation")
-@pytest.mark.xfail(strict=True, reason=_LP_MINT_REASON)
 def test_lp_adapter_round_trip_conserves_value() -> None:
     """LP open -> close at flat price returns initial capital minus costs.
 
@@ -410,16 +400,13 @@ def test_lp_adapter_round_trip_conserves_value() -> None:
     assert portfolio.apply_fill(close_fill, market_state=close_state)
 
     final_equity = portfolio.mark_to_market(close_state, close_state.timestamp, adapter=adapter)
-    total_costs = sum(
-        (f.fee_usd + f.slippage_usd + f.gas_cost_usd) for f in (open_fill, close_fill)
-    )
+    total_costs = sum((f.fee_usd + f.slippage_usd + f.gas_cost_usd) for f in (open_fill, close_fill))
     expected = INITIAL_CAPITAL - total_costs
     assert len(portfolio.positions) == 0
     assert abs(final_equity - expected) <= expected * Decimal("1e-9")
 
 
 @pytest.mark.trust_cell("lp:generic_lane_entry")
-@pytest.mark.xfail(strict=True, reason=_LP_MINT_REASON)
 def test_lp_generic_lane_open_does_not_mint() -> None:
     """Generic-lane (no adapter) LP_OPEN through the engine loop must not mint.
 
@@ -498,12 +485,16 @@ def test_supply_equity_growth_ties_to_interest_accrual() -> None:
     accrual_hours = int((last_mark - executed_at).total_seconds()) // TICK_SECONDS
     assert accrual_hours == 5  # supply executes at t1, marks t2..t6 accrue
 
-    hourly = InterestCalculator().calculate_interest(
-        principal=principal,
-        apy=apy,
-        time_delta=Decimal(TICK_SECONDS) / Decimal(86400),
-        compound=True,
-    ).interest
+    hourly = (
+        InterestCalculator()
+        .calculate_interest(
+            principal=principal,
+            apy=apy,
+            time_delta=Decimal(TICK_SECONDS) / Decimal(86400),
+            compound=True,
+        )
+        .interest
+    )
     expected = INITIAL_CAPITAL + accrual_hours * hourly
 
     assert result.final_capital_usd == expected

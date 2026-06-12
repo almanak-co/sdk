@@ -212,6 +212,69 @@ class ImpermanentLossCalculator:
 
         return token0, token1
 
+    def unit_position_value(
+        self,
+        price: Decimal,
+        tick_lower: int,
+        tick_upper: int,
+    ) -> Decimal:
+        """Token1-denominated value of a liquidity=1 position at ``price``.
+
+        This is the per-L-unit value of a V3 position: the token amounts a
+        single unit of liquidity holds at ``price`` (given the tick range),
+        valued in token1 terms (token0_amount * price + token1_amount).
+
+        Args:
+            price: Price of token0 in terms of token1
+            tick_lower: Lower tick boundary of the position
+            tick_upper: Upper tick boundary of the position
+
+        Returns:
+            Value of 1 liquidity unit denominated in token1, or 0 for
+            degenerate inputs (non-positive price, inverted tick range).
+        """
+        if price <= 0 or tick_lower >= tick_upper:
+            return Decimal("0")
+
+        sqrt_price = self._decimal_sqrt(price)
+        sqrt_lower = self._tick_to_sqrt_price(tick_lower)
+        sqrt_upper = self._tick_to_sqrt_price(tick_upper)
+        token0, token1 = self._get_token_amounts(Decimal("1"), sqrt_price, sqrt_lower, sqrt_upper)
+        return token0 * price + token1
+
+    def liquidity_for_target_value(
+        self,
+        value_token1: Decimal,
+        price: Decimal,
+        tick_lower: int,
+        tick_upper: int,
+    ) -> Decimal:
+        """Convert a deposit value into true V3 liquidity units (L).
+
+        Solves ``value_token1 == L * unit_position_value(price)`` for L, so
+        that a position created with the returned liquidity is worth exactly
+        the deposited value at the entry price (VIB-5096: storing the USD
+        notional in ``SimulatedPosition.liquidity`` while valuing it as
+        L-units minted ~27x-90x on open).
+
+        Args:
+            value_token1: Deposit value denominated in token1
+                (USD value / token1 USD price)
+            price: Price of token0 in terms of token1 at entry
+            tick_lower: Lower tick boundary of the position
+            tick_upper: Upper tick boundary of the position
+
+        Returns:
+            Liquidity in V3 L-units, or 0 for degenerate inputs
+            (non-positive value/price, inverted tick range).
+        """
+        if value_token1 <= 0:
+            return Decimal("0")
+        unit_value = self.unit_position_value(price, tick_lower, tick_upper)
+        if unit_value <= 0:
+            return Decimal("0")
+        return value_token1 / unit_value
+
     def _tick_to_sqrt_price(self, tick: int) -> Decimal:
         """Convert a tick to sqrt(price).
 

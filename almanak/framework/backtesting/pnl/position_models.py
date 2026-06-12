@@ -63,7 +63,10 @@ class SimulatedPosition:
     LP-specific fields (Uniswap V3 style):
         tick_lower: Lower tick boundary for concentrated liquidity
         tick_upper: Upper tick boundary for concentrated liquidity
-        liquidity: LP liquidity units (sqrt(k) for V3)
+        liquidity: LP liquidity in TRUE Uniswap V3 L-units (sqrt(k)).
+            Never a USD notional — every valuation path feeds this into the
+            V3 token-amount math, so producers must convert deposits via
+            ImpermanentLossCalculator.liquidity_for_target_value (VIB-5096).
         fee_tier: Pool fee tier (0.01, 0.05, 0.3, 1.0 for Uniswap V3)
         fees_earned: Accumulated trading fees earned in USD
         accumulated_fees_usd: Total accumulated fees in USD (for detailed tracking)
@@ -394,7 +397,9 @@ class SimulatedPosition:
             token1: Second token symbol
             amount0: Amount of token0
             amount1: Amount of token1
-            liquidity: LP liquidity units
+            liquidity: LP liquidity in true V3 L-units (use
+                ImpermanentLossCalculator.liquidity_for_target_value to
+                convert a deposit value; never pass a USD notional)
             tick_lower: Lower tick boundary
             tick_upper: Upper tick boundary
             fee_tier: Pool fee tier

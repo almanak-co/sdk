@@ -1248,9 +1248,7 @@ class TestExecuteIntentMEVSimulation:
     @pytest.mark.asyncio
     async def test_not_sandwiched_keeps_base_slippage(self):
         engine = _backtester_for_flows()
-        engine._mev_simulator = _StubMEVSimulator(
-            _mev_result(is_sandwiched=False, mev_cost_usd=Decimal("2"))
-        )
+        engine._mev_simulator = _StubMEVSimulator(_mev_result(is_sandwiched=False, mev_cost_usd=Decimal("2")))
         config = _gas_config()
 
         record = await _execute_swap(engine, config, _gas_market_state())
@@ -1310,12 +1308,27 @@ class TestCreatePositionDelta:
         assert position.position_type == PositionType.LP
         assert position.amounts["WETH"] == Decimal("500") / Decimal("3000")
         assert position.amounts["USDC"] == Decimal("500")
-        assert position.liquidity == Decimal("1000")
+        # VIB-5096: liquidity holds TRUE V3 L-units, not the USD notional
+        # (the old `liquidity == amount_usd` assertion encoded the mint bug).
+        # The producer invariant is value-neutrality: L times the per-unit
+        # position value at the entry price recovers the deposited notional.
+        from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
+            ImpermanentLossCalculator,
+        )
+
+        unit_value = ImpermanentLossCalculator().unit_position_value(
+            price=Decimal("3000"), tick_lower=-887272, tick_upper=887272
+        )
+        assert abs(position.liquidity * unit_value - Decimal("1000")) <= Decimal("1e-9")
         assert position.tick_lower == -887272
         assert position.tick_upper == 887272
         assert position.fee_tier == Decimal("0.003")
         assert position.protocol == "test_protocol"
         assert position.entry_price == Decimal("3000")
+        assert position.metadata["entry_amounts"] == {
+            "WETH": str(Decimal("500") / Decimal("3000")),
+            "USDC": "500",
+        }
 
     def test_lp_open_missing_prices_fall_back_to_half_usd(self):
         engine = _backtester_for_flows()

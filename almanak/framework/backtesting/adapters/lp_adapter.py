@@ -190,9 +190,9 @@ class LPBacktestConfig(StrategyBacktestConfig):
             (``position_value_usd * volume_multiplier``). Only applied when
             ``allow_volume_fallback=True``. Higher values simulate more active
             pools. Default 10.
-        base_liquidity: Placeholder pool liquidity for the liquidity-share
+        base_liquidity: Placeholder pool TVL (USD) for the liquidity-share
             denominator when ``explicit_pool_liquidity_usd`` is not set.
-            Position's share = min(1, position.liquidity / base_liquidity).
+            Position's share = min(1, position_value_usd / base_liquidity).
             Default 1_000_000.
         explicit_pool_volume_usd_daily: Caller-provided daily pool volume (USD).
             When set, used directly with HIGH confidence (no subgraph, no fabrication).
@@ -383,8 +383,10 @@ class HeuristicValidationSample:
     network egress from the strategy container.
 
     Attributes:
-        position_value_usd: Position value in USD over the sample window.
-        liquidity: Position liquidity (same units the adapter uses for share).
+        position_value_usd: Position value in USD over the sample window
+            (also the numerator of the liquidity-share heuristic).
+        liquidity: Position liquidity in V3 L-units. Informational only since
+            VIB-5096 — the share heuristic uses ``position_value_usd``.
         fee_tier: Pool fee tier as a fraction (e.g. Decimal("0.0005") for 0.05%).
         elapsed_seconds: Duration of the sample window in seconds.
         observed_fees_usd: The real fees earned over the window (ground truth).
@@ -1300,6 +1302,10 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         # Convert prices to ticks using Uniswap V3 formula: tick = floor(log(price) / log(1.0001))
         tick_lower = self._price_to_tick_int(range_lower)
         tick_upper = self._price_to_tick_int(range_upper)
+        if tick_upper <= tick_lower:
+            # Degenerate range (both bounds floor to the same tick): widen by
+            # one tick so the position has a valid V3 range and non-zero value.
+            tick_upper = tick_lower + 1
 
         # Get fee tier from protocol (default 0.3% for Uniswap V3)
         # Use explicit suffix matching to avoid false positives (e.g., "uniswap_v1" matching "1")
@@ -1315,10 +1321,18 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         else:
             fee_tier = Decimal("0.003")  # Default 0.3%
 
-        # Estimate liquidity based on amount and price range
-        # For V3: L = sqrt(x * y) where x, y are virtual amounts
-        # Simplified estimate: use total USD value as proxy
-        liquidity = amount_usd
+        # VIB-5096: SimulatedPosition.liquidity holds TRUE Uniswap V3 L-units.
+        # Convert the USD deposit into L at the entry price ratio so the
+        # position is worth exactly the deposited notional on open (storing
+        # the USD notional here while calculate_il_v3 interprets the field as
+        # L-units minted ~27x on a $5K WETH/USDC open).
+        value_token1 = amount_usd / token1_price if token1_price > 0 else amount_usd
+        liquidity = self._il_calculator.liquidity_for_target_value(
+            value_token1=value_token1,
+            price=entry_price,
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
+        )
 
         # Create the LP position
         position = SimulatedPosition.lp(
@@ -1970,16 +1984,19 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         days_elapsed = Decimal(str(elapsed_seconds)) / Decimal("86400")
 
         # Calculate liquidity share factor
-        # liquidity_share = min(1, liquidity / pool_liquidity)
+        # liquidity_share = min(1, position_value_usd / pool_liquidity)
         # Prefer caller-provided real pool TVL; fall back to the base_liquidity
-        # placeholder only when no explicit value is supplied.
+        # placeholder only when no explicit value is supplied. Both
+        # denominators are USD figures, so the numerator must be the
+        # position's USD value — position.liquidity holds V3 L-units
+        # (VIB-5096) and dividing L by a USD TVL is unit nonsense.
         pool_liquidity = (
             self._config.explicit_pool_liquidity_usd
             if self._config.explicit_pool_liquidity_usd is not None
             else self._config.base_liquidity
         )
-        if position.liquidity > 0 and pool_liquidity > 0:
-            liquidity_share = min(Decimal("1"), position.liquidity / pool_liquidity)
+        if pool_liquidity > 0:
+            liquidity_share = min(Decimal("1"), position_value_usd / pool_liquidity)
         else:
             liquidity_share = Decimal("0.5")
         # Ensure minimum share of 10% for small positions
@@ -2150,14 +2167,15 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
 
         days_elapsed = Decimal(str(sample.elapsed_seconds)) / Decimal("86400")
 
-        # Liquidity share, mirroring _calculate_fee_accrual.
+        # Liquidity share, mirroring _calculate_fee_accrual (USD value over
+        # USD pool TVL — VIB-5096).
         pool_liquidity = (
             self._config.explicit_pool_liquidity_usd
             if self._config.explicit_pool_liquidity_usd is not None
             else self._config.base_liquidity
         )
-        if sample.liquidity > 0 and pool_liquidity > 0:
-            liquidity_share = min(Decimal("1"), sample.liquidity / pool_liquidity)
+        if pool_liquidity > 0:
+            liquidity_share = min(Decimal("1"), sample.position_value_usd / pool_liquidity)
         else:
             liquidity_share = Decimal("0.5")
         liquidity_share = max(Decimal("0.1"), liquidity_share)

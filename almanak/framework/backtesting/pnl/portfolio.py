@@ -741,16 +741,31 @@ class SimulatedPortfolio:
 
         # Calculate entry value using entry amounts stored in metadata or estimate
         # Entry value is typically: entry_token0 * entry_price + entry_token1 * 1 (for stablecoin quote)
-        # For simplicity, use liquidity * sqrt(entry_price) as a proxy if entry amounts not stored
         entry_amounts = position.metadata.get("entry_amounts", {})
         if entry_amounts:
             entry_token0 = Decimal(str(entry_amounts.get(token0, "0")))
             entry_token1 = Decimal(str(entry_amounts.get(token1, "0")))
-            entry_value = entry_token0 * position.entry_price + entry_token1 * token1_price
         else:
-            # Use initial value from liquidity (approximate)
-            # This is a fallback; in practice, entry amounts should be tracked
-            entry_value = position.liquidity * position.entry_price.sqrt() if position.liquidity > 0 else Decimal("0")
+            # Fallback: derive the entry token amounts from the position's V3
+            # liquidity units at the entry price (VIB-5096 — liquidity holds
+            # L-units, so amounts must come from the V3 math, never from
+            # treating liquidity as a USD figure).
+            from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
+                ImpermanentLossCalculator,
+            )
+
+            _, entry_token0, entry_token1 = ImpermanentLossCalculator().calculate_il_v3(
+                entry_price=position.entry_price,
+                current_price=position.entry_price,
+                tick_lower=position.tick_lower if position.tick_lower is not None else -887272,
+                tick_upper=position.tick_upper if position.tick_upper is not None else 887272,
+                liquidity=position.liquidity,
+            )
+        # entry_price is the token0/token1 ratio, so the parenthesised sum is
+        # the entry composition in token1 units; one multiply by token1_price
+        # converts to USD. (Adding entry_token1 * token1_price to a token1-
+        # denominated term would mix units whenever token1 is not a $1 stable.)
+        entry_value = (entry_token0 * position.entry_price + entry_token1) * token1_price
 
         # Include accumulated fees as part of unrealized gains
         fees_earned = position.accumulated_fees_usd
@@ -2009,7 +2024,7 @@ class SimulatedPortfolio:
 
         This method estimates the fees earned by an LP position based on:
         - The position's fee tier (e.g., 0.3% for Uniswap V3)
-        - The position's liquidity share (higher liquidity = more fee capture)
+        - The position's share of pool TVL (higher USD value = more fee capture)
         - Position value
         - Time elapsed since last update
         - Estimated trading volume
@@ -2054,14 +2069,13 @@ class SimulatedPortfolio:
             return Decimal("0")
 
         # Calculate liquidity share factor
-        # Higher liquidity positions capture more fees proportionally
-        # We use a simple model: liquidity_share = min(1, liquidity / base_liquidity)
-        # where base_liquidity is a reference point (e.g., 1M units)
+        # Higher-value positions capture more fees proportionally
+        # We use a simple model: liquidity_share = min(1, value / base_liquidity)
+        # where base_liquidity is a reference pool TVL in USD (e.g., $1M).
+        # The numerator must be the position's USD value — position.liquidity
+        # holds V3 L-units (VIB-5096), not a USD figure.
         base_liquidity = Decimal("1000000")
-        liquidity_share = min(
-            Decimal("1"),
-            position.liquidity / base_liquidity if position.liquidity > 0 else Decimal("0.5"),
-        )
+        liquidity_share = min(Decimal("1"), position_value_usd / base_liquidity)
         # Ensure minimum share of 10% for small positions
         liquidity_share = max(Decimal("0.1"), liquidity_share)
 
