@@ -411,7 +411,9 @@ def test_lp_generic_lane_open_does_not_mint() -> None:
     """Generic-lane (no adapter) LP_OPEN through the engine loop must not mint.
 
     A $5,000 LP open on a $10,000 portfolio must leave equity at $10,000 at
-    the execution tick. On current main it marks at ~$452,000 (~90x).
+    the execution tick. Before VIB-5096 the engine stored the USD notional
+    in ``position.liquidity`` and the V3 marker valued it as L-units,
+    marking at ~$452,000 (~90x).
     """
     result = run_backtest(ScriptedStrategy([LPOpenDuck()]), flat_series(8), hours=4)
 

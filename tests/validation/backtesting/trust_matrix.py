@@ -163,6 +163,8 @@ CELLS: tuple[TrustCell, ...] = (
         "generic_lane_entry",
         "lp",
         "Generic-lane (no adapter) LP_OPEN does not mint: equity stays at initial capital on open.",
+        # Fixed under VIB-5096: the generic lane stores true V3 liquidity
+        # derived from the USD notional, so the marker conserves at open.
     ),
     _cell(
         "rejection_no_state_change",

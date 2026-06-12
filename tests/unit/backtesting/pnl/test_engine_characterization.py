@@ -1296,6 +1296,19 @@ class TestCreatePositionDelta:
         )
 
     def test_lp_open_splits_half_at_prices(self):
+        """LP_OPEN stores true V3 liquidity so the IL-based marker conserves value.
+
+        Originally characterized ``liquidity == amount_usd`` and exact naive
+        50/50 amounts; that unit bug made ``_mark_lp_position`` (which feeds
+        ``position.liquidity`` into ``calculate_il_v3``) mint value at the
+        open tick. The position must now be worth exactly its USD cost when
+        valued with the same V3 math (full range splits ~50/50, off only by
+        the finite MIN/MAX tick bounds).
+        """
+        from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
+            ImpermanentLossCalculator,
+        )
+
         engine = _backtester_for_flows()
 
         @dataclass
@@ -1306,16 +1319,12 @@ class TestCreatePositionDelta:
 
         assert position is not None
         assert position.position_type == PositionType.LP
-        assert position.amounts["WETH"] == Decimal("500") / Decimal("3000")
-        assert position.amounts["USDC"] == Decimal("500")
+        assert position.amounts["WETH"] == pytest.approx(Decimal("500") / Decimal("3000"))
+        assert position.amounts["USDC"] == pytest.approx(Decimal("500"))
         # VIB-5096: liquidity holds TRUE V3 L-units, not the USD notional
         # (the old `liquidity == amount_usd` assertion encoded the mint bug).
         # The producer invariant is value-neutrality: L times the per-unit
         # position value at the entry price recovers the deposited notional.
-        from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
-            ImpermanentLossCalculator,
-        )
-
         unit_value = ImpermanentLossCalculator().unit_position_value(
             price=Decimal("3000"), tick_lower=-887272, tick_upper=887272
         )
@@ -1325,12 +1334,28 @@ class TestCreatePositionDelta:
         assert position.fee_tier == Decimal("0.003")
         assert position.protocol == "test_protocol"
         assert position.entry_price == Decimal("3000")
-        assert position.metadata["entry_amounts"] == {
-            "WETH": str(Decimal("500") / Decimal("3000")),
-            "USDC": "500",
-        }
+        # Entry amounts metadata carries the V3-derived composition (~50/50
+        # at full range, off only by the finite MIN/MAX tick bounds).
+        entry_amounts = position.metadata["entry_amounts"]
+        assert Decimal(entry_amounts["WETH"]) == pytest.approx(Decimal("500") / Decimal("3000"))
+        assert Decimal(entry_amounts["USDC"]) == pytest.approx(Decimal("500"))
+
+        # Conservation anchor: valuing the stored liquidity with the same V3
+        # math the portfolio marker uses returns the USD amount paid.
+        _, token0_amount, token1_amount = ImpermanentLossCalculator().calculate_il_v3(
+            entry_price=position.entry_price,
+            current_price=position.entry_price,
+            tick_lower=position.tick_lower,
+            tick_upper=position.tick_upper,
+            liquidity=position.liquidity,
+        )
+        value_usd = token0_amount * Decimal("3000") + token1_amount
+        assert value_usd == pytest.approx(Decimal("1000"))
 
     def test_lp_open_missing_prices_fall_back_to_half_usd(self):
+        """Missing prices fall back to $1 legs (the raw USD half as a unit
+        count), with the V3 math anchored at a price ratio of 1 -- the
+        L-units field never holds a USD notional (VIB-5096)."""
         engine = _backtester_for_flows()
 
         @dataclass
@@ -1341,8 +1366,8 @@ class TestCreatePositionDelta:
         position = self._delta(engine, _LPIntent(), IntentType.LP_OPEN, ["WETH", "USDC"], empty_market)
 
         assert position is not None
-        assert position.amounts["WETH"] == Decimal("500")
-        assert position.amounts["USDC"] == Decimal("500")
+        assert position.amounts["WETH"] == pytest.approx(Decimal("500"))
+        assert position.amounts["USDC"] == pytest.approx(Decimal("500"))
 
     def test_lp_open_explicit_ticks_and_float_fee_tier(self):
         engine = _backtester_for_flows()

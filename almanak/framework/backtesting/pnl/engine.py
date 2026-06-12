@@ -2304,20 +2304,23 @@ class PnLBacktester:
     ) -> SimulatedPosition:
         """Create the simulated LP position for an LP_OPEN intent.
 
-        Splits the intent's USD amount 50/50 across the pair; tokens whose
-        price is missing from ``market_state`` fall back to a $1 price (the
-        raw USD half as a unit count, matching the historical behaviour).
-
-        VIB-5096: ``SimulatedPosition.liquidity`` holds TRUE Uniswap V3
-        L-units. The USD deposit is converted into L at the entry price so
-        the position is worth exactly the deposited notional on open.
-        Storing the USD notional here while every valuation path interprets
-        the field as L-units minted ~90x on a $5K WETH/USDC open.
+        Stores true Uniswap V3 liquidity (L) derived from the intent's USD
+        notional at the entry price ratio: ``_mark_lp_position`` feeds
+        ``position.liquidity`` into ``calculate_il_v3``, so any other unit
+        in that field mints or burns value at the open tick (blueprint 31
+        section 4 conservation; VIB-5096). Entry token amounts come from the
+        same V3 math and ``entry_price`` is the token0/token1 ratio, matching
+        the ``SimulatedPosition.lp`` contract. Tokens whose price is missing
+        from ``market_state`` (or non-positive: bad data) raise in strict
+        mode and otherwise fall back to a tracked $1 price, keeping the V3
+        math anchored -- the L-units field never holds a USD notional.
         """
         from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
             ImpermanentLossCalculator,
         )
         from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
+
+        from .intent_extraction import get_lp_tick_range
 
         del executed_price  # the position stores the token0/token1 ratio instead
 
@@ -2325,51 +2328,54 @@ class PnLBacktester:
         token1 = tokens[1] if len(tokens) > 1 else "USDC"
 
         amount_usd = self._get_intent_amount_usd(intent, market_state, strict_reproducibility=strict_reproducibility)
-        half = amount_usd / Decimal("2")
-
-        # Non-positive prices (bad data) fall back like missing ones do; the
-        # adapter lane guards the same way, and price0/price1 feed divisions
-        # below (amounts, entry ratio, the L solver).
-        try:
-            price0 = market_state.get_price(token0)
-            if price0 <= Decimal("0"):
-                price0 = Decimal("1")
-        except KeyError:
-            price0 = Decimal("1")
-        try:
-            price1 = market_state.get_price(token1)
-            if price1 <= Decimal("0"):
-                price1 = Decimal("1")
-        except KeyError:
-            price1 = Decimal("1")
-        amount0 = half / price0
-        amount1 = half / price1
-
-        # Get tick range if available
-        tick_lower = getattr(intent, "tick_lower", -887272)
-        tick_upper = getattr(intent, "tick_upper", 887272)
-        tick_lower_int = int(tick_lower) if tick_lower is not None else -887272
-        tick_upper_int = int(tick_upper) if tick_upper is not None else 887272
-        if tick_upper_int <= tick_lower_int:
-            # Degenerate range: widen by one tick so the position has a valid
-            # V3 range and non-zero value (same handling as the adapter lane,
-            # lp_adapter._execute_lp_open).
-            tick_upper_int = tick_lower_int + 1
 
         # Get fee tier
         fee_tier = getattr(intent, "fee_tier", Decimal("0.003"))
         if isinstance(fee_tier, int | float):
             fee_tier = Decimal(str(fee_tier))
 
-        # Entry price ratio: token0 in terms of token1 — the unit every LP
+        calculator = ImpermanentLossCalculator()
+        tick_lower, tick_upper = get_lp_tick_range(intent, calculator.price_to_tick)
+        if tick_upper <= tick_lower:
+            # Degenerate range: widen by one tick so the position has a valid
+            # V3 range and non-zero value (same handling as the adapter lane).
+            tick_upper = tick_lower + 1
+
+        def price_or_fallback(token: str) -> Decimal:
+            try:
+                price: Decimal | None = market_state.get_price(token)
+            except KeyError:
+                price = None
+            if price is not None and price > 0:
+                return price
+            if strict_reproducibility:
+                msg = (
+                    f"Cannot determine the LP entry price ratio: no positive price available for '{token}'. "
+                    "Set strict_reproducibility=False to fall back to $1."
+                )
+                raise ValueError(msg)
+            self._track_fallback("hardcoded_price")
+            return Decimal("1")
+
+        price0 = price_or_fallback(token0)
+        price1 = price_or_fallback(token1)
+
+        # Entry price ratio: token0 in terms of token1 -- the unit every LP
         # valuation path compares against (SimulatedPosition.lp contract).
         entry_price_ratio = price0 / price1
 
-        liquidity = ImpermanentLossCalculator().liquidity_for_target_value(
+        liquidity = calculator.liquidity_for_target_value(
             value_token1=amount_usd / price1,
             price=entry_price_ratio,
-            tick_lower=tick_lower_int,
-            tick_upper=tick_upper_int,
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
+        )
+        _, amount0, amount1 = calculator.calculate_il_v3(
+            entry_price=entry_price_ratio,
+            current_price=entry_price_ratio,
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
+            liquidity=liquidity,
         )
 
         position = SimulatedPosition.lp(
@@ -2378,8 +2384,8 @@ class PnLBacktester:
             amount0=amount0,
             amount1=amount1,
             liquidity=liquidity,
-            tick_lower=tick_lower_int,
-            tick_upper=tick_upper_int,
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
             fee_tier=fee_tier,
             entry_price=entry_price_ratio,
             entry_time=timestamp,

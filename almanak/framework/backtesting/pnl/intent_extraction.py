@@ -43,6 +43,44 @@ def _perp_market_base_token(market: str) -> str | None:
     return candidate.upper()
 
 
+def lp_pool_tokens(pool: Any) -> tuple[str, str] | None:
+    """Parse ``(token0, token1)`` from a symbolic LP pool identifier.
+
+    LP vocabulary intents (``LPOpenIntent``) declare the pair as a single
+    ``pool`` string ("WETH/USDC", optionally with a fee-tier or bin-step
+    suffix: "WETH/USDC/500") and carry no token0/token1 attributes; this
+    mirrors the parsing in ``adapters/lp_adapter.py:_execute_lp_open``.
+    Address-style pools (0x...) cannot be mapped to priceable symbols
+    without chain data and return None.
+    """
+    if not isinstance(pool, str):
+        return None
+    candidate = pool.strip()
+    if not candidate or candidate.lower().startswith("0x") or "/" not in candidate:
+        return None
+    segments = [segment.strip() for segment in candidate.split("/")]
+    if not segments[0] or not segments[1]:
+        return None
+    return segments[0].upper(), segments[1].upper()
+
+
+def lp_explicit_pair(intent: Any) -> tuple[Any, Any]:
+    """Resolve an LP intent's explicit ``(token0, token1)`` attributes.
+
+    Accepts ``token_a``/``token_b`` as aliases (some duck-typed intents use
+    them); attributes set to None count as absent. Shared by
+    ``get_intent_tokens`` and ``_engine_helpers._resolve_lp_tokens`` so the
+    simulated position and its token flows always resolve the same pair.
+    """
+    token0 = getattr(intent, "token0", None)
+    if token0 is None:
+        token0 = getattr(intent, "token_a", None)
+    token1 = getattr(intent, "token1", None)
+    if token1 is None:
+        token1 = getattr(intent, "token_b", None)
+    return token0, token1
+
+
 def _decimal_or_none(value: Any) -> Decimal | None:
     """Convert ``value`` to Decimal, returning None when not numeric.
 
@@ -231,6 +269,15 @@ def get_intent_tokens(intent: Any) -> list[str]:
     back to its entry price) rather than letting the collateral token become
     the priced token, which would hide all price PnL.
 
+    LP vocabulary intents (``LPOpenIntent``) similarly declare the pair as a
+    single ``pool`` string ("WETH/USDC") with no token0/token1 attributes;
+    the parsed pair goes first so the simulated LP position is price-tracked.
+    A fully explicit pair (token0/token1, or the token_a/token_b aliases)
+    takes precedence over the pool string; a partially specified pair falls
+    back to the pool, mirroring ``_engine_helpers._resolve_lp_tokens`` so
+    position tokens and token flows never diverge. Address-style pools
+    (0x...) keep the UNKNOWN sentinel.
+
     Args:
         intent: Intent object
 
@@ -253,13 +300,22 @@ def get_intent_tokens(intent: Any) -> list[str]:
         if isinstance(collateral_token, str) and collateral_token and collateral_token.upper() not in tokens:
             tokens.append(collateral_token.upper())
 
-    # Common attribute names for tokens
+    explicit_token0, explicit_token1 = lp_explicit_pair(intent)
+    if explicit_token0 is None or explicit_token1 is None:
+        pool_pair = lp_pool_tokens(getattr(intent, "pool", None))
+        if pool_pair is not None:
+            tokens.extend(pool_token for pool_token in pool_pair if pool_token not in tokens)
+
+    # Common attribute names for tokens (token_a/token_b are LP aliases for
+    # token0/token1 -- see lp_explicit_pair)
     for attr in [
         "token",
         "from_token",
         "to_token",
         "token0",
         "token1",
+        "token_a",
+        "token_b",
         "asset",
         "collateral",
         "borrow_token",
@@ -280,6 +336,102 @@ def get_intent_tokens(intent: Any) -> list[str]:
                     tokens.append(t.upper())
 
     return tokens if tokens else ["UNKNOWN"]
+
+
+# Full V3 tick range (MIN_TICK / MAX_TICK) -- the legacy default for LP
+# intents that declare no range, making the position behave like V2.
+_FULL_RANGE_TICKS = (-887272, 887272)
+
+
+def get_lp_tick_range(intent: Any, price_to_tick: Callable[[Decimal], int]) -> tuple[int, int]:
+    """Resolve the ``(tick_lower, tick_upper)`` range for an LP intent.
+
+    Explicit ``tick_lower``/``tick_upper`` attributes win. LP vocabulary
+    intents (``LPOpenIntent``) declare the range as price bounds
+    (``range_lower``/``range_upper``) instead, converted via
+    ``price_to_tick``; protocols listed in the intent's
+    ``_TICK_BASED_LP_PROTOCOLS`` carry raw ticks in those same fields and
+    are used directly. Falls back to the full V3 range when no usable
+    bounds are present.
+
+    Args:
+        intent: Intent object
+        price_to_tick: Converter from a positive price to the nearest tick
+            (``ImpermanentLossCalculator.price_to_tick``)
+
+    Returns:
+        Tuple of (tick_lower, tick_upper)
+    """
+    tick_lower = getattr(intent, "tick_lower", None)
+    tick_upper = getattr(intent, "tick_upper", None)
+    if tick_lower is not None and tick_upper is not None:
+        return int(tick_lower), int(tick_upper)
+
+    range_lower = _decimal_or_none(getattr(intent, "range_lower", None))
+    range_upper = _decimal_or_none(getattr(intent, "range_upper", None))
+    if range_lower is None or range_upper is None or range_lower >= range_upper:
+        return _FULL_RANGE_TICKS
+
+    tick_based_protocols: frozenset[str] = getattr(intent, "_TICK_BASED_LP_PROTOCOLS", frozenset())
+    if getattr(intent, "protocol", None) in tick_based_protocols:
+        return int(range_lower), int(range_upper)
+    if range_lower <= 0:
+        return _FULL_RANGE_TICKS
+    return price_to_tick(range_lower), price_to_tick(range_upper)
+
+
+def _lp_pair_amount_usd(
+    intent: Any,
+    market_state: MarketState,
+    strict_reproducibility: bool,
+    track_fallback: Callable[[str], None] | None,
+) -> Decimal | None:
+    """Price an LP intent's ``amount0``/``amount1`` token legs in USD.
+
+    Returns None when the intent does not carry the LP pair-leg shape
+    (both ``amount0`` and ``amount1``), letting the caller's generic
+    resolution run. Zero-amount legs need no price (single-sided opens);
+    a nonzero leg whose token cannot be resolved or priced raises in
+    strict mode and falls back to zero otherwise -- never a $1 guess,
+    which would misprice the position (blueprint 31 section 4).
+    """
+    amount0 = _decimal_or_none(getattr(intent, "amount0", None))
+    amount1 = _decimal_or_none(getattr(intent, "amount1", None))
+    if amount0 is None or amount1 is None:
+        return None
+
+    tokens = get_intent_tokens(intent)
+    token0 = tokens[0] if len(tokens) > 0 else "UNKNOWN"
+    token1 = tokens[1] if len(tokens) > 1 else "UNKNOWN"
+
+    total = Decimal("0")
+    for token, amount in ((token0, amount0), (token1, amount1)):
+        if amount == 0:
+            continue
+        try:
+            price: Decimal | None = market_state.get_price(token)
+        except KeyError:
+            price = None
+        if price is None or price <= 0:
+            # Zero/negative quotes are bad data, not a $0 valuation -- treat
+            # them exactly like a missing price.
+            if strict_reproducibility:
+                msg = (
+                    f"Cannot determine USD amount for LP intent: no positive price available "
+                    f"for leg token '{token}'. Set strict_reproducibility=False to use zero as fallback."
+                )
+                raise ValueError(msg)
+            logger.warning(
+                "No positive price available for LP leg token '%s' to convert amount %s to USD. "
+                "Using zero as fallback to avoid misinterpreting token amounts as USD.",
+                token,
+                amount,
+            )
+            if track_fallback:
+                track_fallback("default_usd_amount")
+            return Decimal("0")
+        total += amount * price
+    return total
 
 
 def get_intent_amount_usd(  # noqa: C901
@@ -312,6 +464,12 @@ def get_intent_amount_usd(  # noqa: C901
             value = getattr(intent, attr)
             if value is not None:
                 return Decimal(str(value))
+
+    # LP vocabulary intents (LPOpenIntent) size the position via per-leg
+    # token amounts instead of a USD field; price both legs.
+    lp_amount_usd = _lp_pair_amount_usd(intent, market_state, strict_reproducibility, track_fallback)
+    if lp_amount_usd is not None:
+        return lp_amount_usd
 
     # Check for amount + token (need to convert to USD)
     amount: Decimal | None = None

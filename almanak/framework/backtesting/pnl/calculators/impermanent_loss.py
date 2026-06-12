@@ -168,6 +168,28 @@ class ImpermanentLossCalculator:
 
         return il_percentage, current_token0, current_token1
 
+    def price_to_tick(self, price: Decimal) -> int:
+        """Convert a price (token0 in terms of token1) to the nearest tick.
+
+        Inverse of ``_tick_to_sqrt_price`` (price = 1.0001^tick), using the
+        same ln(1.0001) constant so derived ticks round-trip consistently.
+        The result is clamped to [MIN_TICK, MAX_TICK].
+
+        Args:
+            price: Positive price of token0 in terms of token1
+
+        Returns:
+            Nearest integer tick
+
+        Raises:
+            ValueError: If price is not positive
+        """
+        if price <= 0:
+            raise ValueError(f"price must be positive to convert to a tick, got {price}")
+        ln_tick_base = Decimal("0.0000999950003333083340832824")
+        tick = int((price.ln() / ln_tick_base).to_integral_value())
+        return max(MIN_TICK, min(MAX_TICK, tick))
+
     def _get_token_amounts(
         self,
         liquidity: Decimal,

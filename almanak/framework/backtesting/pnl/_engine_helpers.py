@@ -62,6 +62,10 @@ from almanak.framework.backtesting.pnl.error_handling import (
     BacktestErrorHandler,
     PreflightValidationError,
 )
+from almanak.framework.backtesting.pnl.intent_extraction import (
+    lp_explicit_pair,
+    lp_pool_tokens,
+)
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
 
 if TYPE_CHECKING:
@@ -973,10 +977,27 @@ def _calculate_repay_flows(
 
 
 def _resolve_lp_tokens(intent: Any) -> tuple[Any, Any]:
-    """Resolve ``(token0, token1)`` for LP intents, uppercased if strings."""
-    token0 = _normalize_token(getattr(intent, "token0", getattr(intent, "token_a", "WETH")))
-    token1 = _normalize_token(getattr(intent, "token1", getattr(intent, "token_b", "USDC")))
-    return token0, token1
+    """Resolve ``(token0, token1)`` for LP intents, uppercased if strings.
+
+    A fully explicit pair (token0/token1, or the token_a/token_b aliases,
+    via ``lp_explicit_pair``) wins. LP vocabulary intents (``LPOpenIntent``)
+    declare the pair as a single ``pool`` string ("WETH/USDC") instead, so
+    that is parsed next -- without it, token flows silently debited
+    WETH/USDC for every pool. Unparseable pools (0x... addresses) keep the
+    legacy WETH/USDC default. Mirrors ``get_intent_tokens`` so position
+    tokens and token flows never diverge.
+    """
+    token0, token1 = lp_explicit_pair(intent)
+    if token0 is not None and token1 is not None:
+        return _normalize_token(token0), _normalize_token(token1)
+
+    pool_pair = lp_pool_tokens(getattr(intent, "pool", None))
+    if pool_pair is not None:
+        return pool_pair
+
+    return _normalize_token(token0 if token0 is not None else "WETH"), _normalize_token(
+        token1 if token1 is not None else "USDC"
+    )
 
 
 def _calculate_lp_open_flows(
