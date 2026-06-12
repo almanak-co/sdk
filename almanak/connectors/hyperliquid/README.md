@@ -1,5 +1,10 @@
 # Hyperliquid Connector
 
+> **EXPERIMENTAL / NOT PRODUCTION-READY.** The production execution path has
+> not shipped (VIB-4774). This adapter is an in-memory scaffold: it performs
+> no network I/O, holds no private keys, and performs no in-process signing.
+> Real signing ships gateway-side with the VIB-4774 off-chain order lane.
+
 This module provides an adapter for interacting with the Hyperliquid perpetual futures exchange.
 
 ## Overview
@@ -27,22 +32,27 @@ The connector is part of the Almanak Strategy Framework. No additional installat
 
 ```python
 from decimal import Decimal
-from src.connectors.hyperliquid import (
+from almanak.connectors.hyperliquid import (
+    ExternalSigner,
     HyperliquidAdapter,
     HyperliquidConfig,
     HyperliquidOrderType,
     HyperliquidTimeInForce,
 )
 
-# Create configuration
+# Define a delegating signing function (real signing lives outside this module)
+def my_sign_function(action: dict, nonce: int, is_l1: bool) -> str:
+    # Delegate to your external signing solution and return the hex signature
+    return "0x..."
+
+# Create configuration (no private key -- signing is delegated)
 config = HyperliquidConfig(
     network="mainnet",
     wallet_address="0xYourWalletAddress",
-    private_key="0xYourPrivateKey",  # For signing orders
 )
 
-# Initialize adapter
-adapter = HyperliquidAdapter(config)
+# Initialize adapter with a delegating signer
+adapter = HyperliquidAdapter(config, signer=ExternalSigner(my_sign_function))
 
 # Place a limit buy order
 result = adapter.place_order(
@@ -66,7 +76,6 @@ else:
 |-----------|------|----------|---------|-------------|
 | `network` | str | Yes | - | `"mainnet"` or `"testnet"` |
 | `wallet_address` | str | Yes | - | Ethereum address for the account |
-| `private_key` | str | No | None | Private key for signing (can use external signer) |
 | `default_slippage_bps` | int | No | 50 | Default slippage tolerance (0.5%) |
 | `vault_address` | str | No | None | Optional vault address for vault trading |
 | `agent_address` | str | No | None | Optional agent address for delegated trading |
@@ -202,27 +211,20 @@ leverage = adapter.get_leverage("ETH")  # Default: 1
 
 ## Message Signing
 
-Hyperliquid requires cryptographic signatures for all write operations. The connector supports two signing modes:
-
-### Built-in EIP-712 Signer
-
-When you provide a private key in the config, the adapter uses the built-in EIP-712 signer:
-
-```python
-config = HyperliquidConfig(
-    network="mainnet",
-    wallet_address="0x...",
-    private_key="0x...",  # Built-in signer will be used
-)
-adapter = HyperliquidAdapter(config)
-```
+Hyperliquid requires cryptographic signatures for all write operations. The
+adapter never signs in-process and holds no private keys: signing is delegated
+through the `MessageSigner` protocol. A placeholder local key signer
+(`EIP712Signer`) was removed deliberately -- its keccak was actually NIST
+SHA3-256 and its "signature" was not real ECDSA. Real signing (msgpack action
+hash + EIP-712 typed data) ships gateway-side with VIB-4774.
 
 ### External Signer
 
-For hardware wallets, custodians, or other external signing solutions:
+The only supported signing mode. For the gateway lane, hardware wallets,
+custodians, or other external signing solutions:
 
 ```python
-from src.connectors.hyperliquid import ExternalSigner
+from almanak.connectors.hyperliquid import ExternalSigner
 
 def my_sign_function(action: dict, nonce: int, is_l1: bool) -> str:
     # Your signing logic here
@@ -278,8 +280,7 @@ Common errors:
 Run the test suite:
 
 ```bash
-cd /path/to/stack-v2
-python -m pytest src/connectors/hyperliquid/tests/ -v
+uv run pytest tests/unit/connectors/hyperliquid/ --import-mode=importlib
 ```
 
 ## API Reference
@@ -292,7 +293,6 @@ python -m pytest src/connectors/hyperliquid/tests/ -v
 - `HyperliquidOrder` - Order dataclass
 - `OrderResult` - Order operation result
 - `CancelResult` - Cancel operation result
-- `EIP712Signer` - Built-in EIP-712 message signer
 - `ExternalSigner` - Wrapper for external signing functions
 
 ### Enums

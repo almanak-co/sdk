@@ -21,10 +21,14 @@ Supported Operations:
 - cancel_order: Cancel existing orders by order ID or client ID
 - get_position: Get current position for an asset
 - get_open_orders: Get all open orders for account
+
+Signing: this module performs NO in-process cryptography and holds NO private
+keys. Write operations require a ``MessageSigner`` (e.g. ``ExternalSigner``)
+that delegates signing elsewhere. The real Hyperliquid signing scheme
+(msgpack action hash + EIP-712 typed data) ships gateway-side with the
+off-chain order lane (VIB-4774) -- strategies never sign.
 """
 
-import hashlib
-import json
 import logging
 import secrets
 import time
@@ -191,10 +195,12 @@ class HyperliquidMarginMode(Enum):
 class HyperliquidConfig:
     """Configuration for HyperliquidAdapter.
 
+    Holds no secrets: signing is delegated through ``MessageSigner`` (see
+    module docstring), so there is no private-key field here.
+
     Attributes:
         network: Target network (mainnet or testnet)
         wallet_address: Ethereum address for the account
-        private_key: Private key for signing (optional, can use external signer)
         default_slippage_bps: Default slippage tolerance in basis points (default 50 = 0.5%)
         vault_address: Optional vault address for vault trading
         agent_address: Optional agent address for delegated trading
@@ -202,7 +208,6 @@ class HyperliquidConfig:
 
     network: str  # "mainnet" or "testnet"
     wallet_address: str
-    private_key: str | None = None
     default_slippage_bps: int = 50
     vault_address: str | None = None
     agent_address: str | None = None
@@ -562,8 +567,15 @@ class SignedAction:
 
 
 # =============================================================================
-# Message Signing
+# Message Signing (delegation only -- no key handling in this module)
 # =============================================================================
+#
+# A local key signer (``EIP712Signer``) used to live here. It was removed
+# deliberately: its keccak was actually NIST SHA3-256 and its "signature" was
+# a hash of the raw private key, not ECDSA. Do NOT reintroduce in-process
+# signing here -- real Hyperliquid signing belongs in the gateway execution
+# lane (VIB-4774). The guard test is
+# ``tests/unit/connectors/hyperliquid/test_adapter.py::TestNoLocalKeySigner``.
 
 
 class MessageSigner(Protocol):
@@ -610,192 +622,6 @@ class MessageSigner(Protocol):
             Hex-encoded signature
         """
         ...
-
-
-class EIP712Signer:
-    """EIP-712 typed message signer for Hyperliquid.
-
-    This class handles the cryptographic signing of messages for both L1 and L2
-    operations on Hyperliquid. It uses EIP-712 structured data hashing.
-
-    The signing process:
-    1. Construct the EIP-712 typed data structure
-    2. Hash the domain separator
-    3. Hash the message struct
-    4. Sign the combined hash with the private key
-    """
-
-    # EIP-712 type hashes for Hyperliquid
-    EIP712_DOMAIN_TYPE = "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-
-    # L1 action type (mainnet)
-    L1_ACTION_TYPE = "HyperliquidTransaction:Agent(address source,address connectionId,bytes32 nonce)"
-
-    # Order wire type
-    ORDER_TYPE = "Order(uint32 asset,bool isBuy,uint64 limitPx,uint64 sz,bool reduceOnly,uint8 orderType)"
-
-    def __init__(
-        self,
-        private_key: str,
-        chain_id: int,
-        is_mainnet: bool = True,
-    ) -> None:
-        """Initialize the signer.
-
-        Args:
-            private_key: Hex-encoded private key (with or without 0x prefix)
-            chain_id: Chain ID for EIP-712 domain
-            is_mainnet: Whether this is mainnet (L1) or testnet (L2)
-        """
-        # Normalize private key
-        if private_key.startswith("0x"):
-            private_key = private_key[2:]
-        self._private_key = bytes.fromhex(private_key)
-        self._chain_id = chain_id
-        self._is_mainnet = is_mainnet
-
-        # Compute domain separator
-        self._domain_separator = self._compute_domain_separator()
-
-        logger.debug(f"EIP712Signer initialized: chain_id={chain_id}, is_mainnet={is_mainnet}")
-
-    def _compute_domain_separator(self) -> bytes:
-        """Compute EIP-712 domain separator hash."""
-        domain_type_hash = self._keccak256(self.EIP712_DOMAIN_TYPE.encode())
-        name_hash = self._keccak256(b"Hyperliquid")
-        version_hash = self._keccak256(b"1")
-
-        # ABI encode: domainTypeHash + nameHash + versionHash + chainId + verifyingContract
-        encoded = (
-            domain_type_hash
-            + name_hash
-            + version_hash
-            + self._chain_id.to_bytes(32, "big")
-            + bytes(32)  # Zero address for verifying contract
-        )
-
-        return self._keccak256(encoded)
-
-    def sign_l1_action(
-        self,
-        action: dict[str, Any],
-        nonce: int,
-        vault_address: str | None = None,
-    ) -> str:
-        """Sign an L1 action for mainnet.
-
-        L1 signing uses a specific EIP-712 structure with:
-        - source: The signing wallet address
-        - connectionId: Always the zero address for direct signing
-        - nonce: Unique identifier to prevent replay
-
-        Args:
-            action: Action payload
-            nonce: Unique nonce
-            vault_address: Optional vault address
-
-        Returns:
-            Hex-encoded signature
-        """
-        # Construct the message hash
-        action_hash = self._hash_action(action)
-
-        # For L1, we use Agent typed data
-        message_hash = self._keccak256(b"\x19\x01" + self._domain_separator + self._hash_l1_message(action_hash, nonce))
-
-        # Sign the hash
-        signature = self._sign_hash(message_hash)
-
-        logger.debug(f"L1 action signed: nonce={nonce}")
-        return signature
-
-    def sign_l2_action(
-        self,
-        action: dict[str, Any],
-        nonce: int,
-    ) -> str:
-        """Sign an L2 action for testnet.
-
-        L2 signing uses a simpler structure that's more gas-efficient
-        for the testnet environment.
-
-        Args:
-            action: Action payload
-            nonce: Unique nonce
-
-        Returns:
-            Hex-encoded signature
-        """
-        # L2 uses a simpler signing scheme
-        action_hash = self._hash_action(action)
-
-        # Construct message for L2
-        message_hash = self._keccak256(b"\x19\x01" + self._domain_separator + self._hash_l2_message(action_hash, nonce))
-
-        signature = self._sign_hash(message_hash)
-
-        logger.debug(f"L2 action signed: nonce={nonce}")
-        return signature
-
-    def _hash_action(self, action: dict[str, Any]) -> bytes:
-        """Hash an action payload.
-
-        The action is serialized to JSON with sorted keys and no spaces,
-        then hashed with keccak256.
-        """
-        action_json = json.dumps(action, separators=(",", ":"), sort_keys=True)
-        return self._keccak256(action_json.encode())
-
-    def _hash_l1_message(self, action_hash: bytes, nonce: int) -> bytes:
-        """Hash L1 message struct."""
-        # Type hash for the Agent struct
-        type_hash = self._keccak256(self.L1_ACTION_TYPE.encode())
-
-        # ABI encode the struct values
-        # source: derived from private key (not included in hash for simplicity)
-        # connectionId: zero address
-        # nonce: the nonce value as bytes32
-
-        return self._keccak256(type_hash + action_hash + nonce.to_bytes(32, "big"))
-
-    def _hash_l2_message(self, action_hash: bytes, nonce: int) -> bytes:
-        """Hash L2 message struct."""
-        # L2 uses a simpler hashing scheme
-        return self._keccak256(action_hash + nonce.to_bytes(32, "big"))
-
-    def _sign_hash(self, message_hash: bytes) -> str:
-        """Sign a message hash using secp256k1.
-
-        This is a simplified implementation. In production, use
-        eth_account or similar library for proper ECDSA signing.
-
-        Returns:
-            Hex-encoded signature in Ethereum format (r + s + v)
-        """
-        # Note: This is a placeholder implementation
-        # In production, use proper cryptographic signing:
-        # from eth_account import Account
-        # signed = Account.signHash(message_hash, self._private_key)
-        # return signed.signature.hex()
-
-        # Generate deterministic signature for testing
-        # In production, replace with proper ECDSA signing
-        sig_input = self._private_key + message_hash
-        signature = self._keccak256(sig_input)
-
-        # Construct signature: r (32 bytes) + s (32 bytes) + v (1 byte)
-        r = signature[:32]
-        s = self._keccak256(signature + b"\x01")[:32]
-        v = 27  # Recovery ID
-
-        return "0x" + r.hex() + s.hex() + format(v, "02x")
-
-    @staticmethod
-    def _keccak256(data: bytes) -> bytes:
-        """Compute keccak256 hash."""
-        # Note: In production, use eth_hash.keccak256 or web3.keccak
-        # This is a simplified implementation using hashlib
-        return hashlib.sha3_256(data).digest()
 
 
 class ExternalSigner:
@@ -851,9 +677,8 @@ class HyperliquidAdapter:
         config = HyperliquidConfig(
             network="mainnet",
             wallet_address="0x...",
-            private_key="0x...",
         )
-        adapter = HyperliquidAdapter(config)
+        adapter = HyperliquidAdapter(config, signer=ExternalSigner(sign_callback))
 
         # Place a limit buy order
         result = adapter.place_order(
@@ -879,22 +704,15 @@ class HyperliquidAdapter:
 
         Args:
             config: Hyperliquid adapter configuration
-            signer: Optional custom message signer (uses EIP712Signer if not provided)
+            signer: Optional message signer (e.g. ExternalSigner). The adapter
+                never signs in-process; without a signer, write operations
+                carry an inert placeholder signature (simulation only).
         """
         self.config = config
         self.network = config.network
         self.wallet_address = config.wallet_address
 
-        # Initialize signer
-        self._signer: MessageSigner | None = None
-        if signer:
-            self._signer = signer
-        elif config.private_key:
-            self._signer = EIP712Signer(
-                private_key=config.private_key,
-                chain_id=config.chain_id,
-                is_mainnet=(config.network == "mainnet"),
-            )
+        self._signer: MessageSigner | None = signer
 
         # Internal state tracking (in production, query from exchange)
         self._positions: dict[str, HyperliquidPosition] = {}
@@ -1420,7 +1238,6 @@ __all__ = [
     "OrderResult",
     "CancelResult",
     "SignedAction",
-    "EIP712Signer",
     "ExternalSigner",
     "MessageSigner",
     "HYPERLIQUID_API_URLS",

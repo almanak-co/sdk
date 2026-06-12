@@ -2,8 +2,11 @@
 
 The Hyperliquid PERP production execution path has not shipped (VIB-4774).
 No demo, no incubating strategy, no on-chain intent test references this
-connector. The adapter / signer / type definitions remain in-tree as a
-scaffold for VIB-4774 — they are NOT a supported strategy-layer connector.
+connector. The adapter / type definitions remain in-tree as a scaffold for
+VIB-4774 — they are NOT a supported strategy-layer connector. The adapter
+holds no keys and performs no in-process signing: write operations delegate
+through ``MessageSigner`` / ``ExternalSigner``, and real signing ships
+gateway-side with the VIB-4774 execution lane.
 
 This connector is intentionally:
 - Omitted from ``ConnectorRegistry`` (see deregistration block at end of file)
@@ -27,7 +30,6 @@ if TYPE_CHECKING:
         HYPERLIQUID_GAS_ESTIMATES,
         HYPERLIQUID_WS_URLS,
         CancelResult,
-        EIP712Signer,
         ExternalSigner,
         HyperliquidAdapter,
         HyperliquidConfig,
@@ -47,7 +49,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CancelResult",
-    "EIP712Signer",
     "ExternalSigner",
     "HYPERLIQUID_API_URLS",
     "HYPERLIQUID_ASSETS",
@@ -72,7 +73,6 @@ __all__ = [
 
 _LAZY: dict[str, tuple[str, str]] = {
     "CancelResult": (".adapter", "CancelResult"),
-    "EIP712Signer": (".adapter", "EIP712Signer"),
     "ExternalSigner": (".adapter", "ExternalSigner"),
     "HYPERLIQUID_API_URLS": (".adapter", "HYPERLIQUID_API_URLS"),
     "HYPERLIQUID_ASSETS": (".adapter", "HYPERLIQUID_ASSETS"),

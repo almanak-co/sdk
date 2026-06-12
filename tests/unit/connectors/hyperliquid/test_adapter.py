@@ -5,19 +5,20 @@ This test suite covers:
 - Order management (place, cancel, query)
 - Position management
 - Leverage settings
-- L1 and L2 message signing
+- Signing delegation (ExternalSigner) and the no-local-key-signer guard
 """
 
+from dataclasses import fields
 from decimal import Decimal
 
 import pytest
 
+import almanak.connectors.hyperliquid.adapter as adapter_module
 from almanak.connectors.hyperliquid.adapter import (
     HYPERLIQUID_API_URLS,
     HYPERLIQUID_ASSETS,
     HYPERLIQUID_CHAIN_IDS,
     HYPERLIQUID_WS_URLS,
-    EIP712Signer,
     ExternalSigner,
     HyperliquidAdapter,
     HyperliquidConfig,
@@ -29,6 +30,15 @@ from almanak.connectors.hyperliquid.adapter import (
     HyperliquidPositionSide,
     HyperliquidTimeInForce,
 )
+
+
+def _stub_signer() -> ExternalSigner:
+    """ExternalSigner with an inert callback (no real cryptography)."""
+
+    def sign(action: dict, nonce: int, is_l1: bool) -> str:
+        return "0x" + "ab" * 65
+
+    return ExternalSigner(sign)
 
 # =============================================================================
 # Configuration Tests
@@ -105,16 +115,6 @@ class TestHyperliquidConfig:
                 wallet_address="1234567890123456789012345678901234567890",
             )
 
-    def test_config_with_private_key(self) -> None:
-        """Test config with private key."""
-        config = HyperliquidConfig(
-            network="mainnet",
-            wallet_address="0x1234567890123456789012345678901234567890",
-            private_key="0x" + "a" * 64,
-        )
-
-        assert config.private_key == "0x" + "a" * 64
-
     def test_config_with_vault_address(self) -> None:
         """Test config with vault address."""
         config = HyperliquidConfig(
@@ -172,19 +172,8 @@ class TestHyperliquidAdapterInit:
         assert adapter.network == "mainnet"
         assert adapter.wallet_address == "0x1234567890123456789012345678901234567890"
 
-    def test_adapter_with_private_key(self) -> None:
-        """Test adapter with private key creates signer."""
-        config = HyperliquidConfig(
-            network="mainnet",
-            wallet_address="0x1234567890123456789012345678901234567890",
-            private_key="0x" + "a" * 64,
-        )
-        adapter = HyperliquidAdapter(config)
-
-        assert adapter._signer is not None
-
-    def test_adapter_without_private_key(self) -> None:
-        """Test adapter without private key has no signer."""
+    def test_adapter_without_signer(self) -> None:
+        """Test adapter without an explicit signer has no signer."""
         config = HyperliquidConfig(
             network="mainnet",
             wallet_address="0x1234567890123456789012345678901234567890",
@@ -223,9 +212,8 @@ class TestOrderPlacement:
         config = HyperliquidConfig(
             network="mainnet",
             wallet_address="0x1234567890123456789012345678901234567890",
-            private_key="0x" + "a" * 64,
         )
-        return HyperliquidAdapter(config)
+        return HyperliquidAdapter(config, signer=_stub_signer())
 
     def test_place_limit_buy_order(self, adapter: HyperliquidAdapter) -> None:
         """Test placing a limit buy order."""
@@ -402,9 +390,8 @@ class TestOrderCancellation:
         config = HyperliquidConfig(
             network="mainnet",
             wallet_address="0x1234567890123456789012345678901234567890",
-            private_key="0x" + "a" * 64,
         )
-        return HyperliquidAdapter(config)
+        return HyperliquidAdapter(config, signer=_stub_signer())
 
     def test_cancel_order_by_id(self, adapter: HyperliquidAdapter) -> None:
         """Test canceling order by order ID."""
@@ -532,9 +519,8 @@ class TestOrderQueries:
         config = HyperliquidConfig(
             network="mainnet",
             wallet_address="0x1234567890123456789012345678901234567890",
-            private_key="0x" + "a" * 64,
         )
-        return HyperliquidAdapter(config)
+        return HyperliquidAdapter(config, signer=_stub_signer())
 
     def test_get_order(self, adapter: HyperliquidAdapter) -> None:
         """Test getting order by ID."""
@@ -942,47 +928,7 @@ class TestLeverage:
 
 
 class TestMessageSigning:
-    """Tests for message signing."""
-
-    def test_eip712_signer_creation(self) -> None:
-        """Test EIP712Signer creation."""
-        signer = EIP712Signer(
-            private_key="0x" + "a" * 64,
-            chain_id=1337,
-            is_mainnet=True,
-        )
-
-        assert signer is not None
-        assert signer._chain_id == 1337
-        assert signer._is_mainnet is True
-
-    def test_eip712_signer_l1_sign(self) -> None:
-        """Test L1 action signing."""
-        signer = EIP712Signer(
-            private_key="0x" + "a" * 64,
-            chain_id=1337,
-            is_mainnet=True,
-        )
-
-        action = {"type": "order", "orders": []}
-        signature = signer.sign_l1_action(action, nonce=1)
-
-        assert signature.startswith("0x")
-        assert len(signature) == 132  # 0x + 64 (r) + 64 (s) + 2 (v)
-
-    def test_eip712_signer_l2_sign(self) -> None:
-        """Test L2 action signing."""
-        signer = EIP712Signer(
-            private_key="0x" + "b" * 64,
-            chain_id=421614,
-            is_mainnet=False,
-        )
-
-        action = {"type": "cancel", "cancels": []}
-        signature = signer.sign_l2_action(action, nonce=1)
-
-        assert signature.startswith("0x")
-        assert len(signature) == 132
+    """Tests for message signing delegation."""
 
     def test_external_signer(self) -> None:
         """Test external signer."""
@@ -1000,6 +946,35 @@ class TestMessageSigning:
         assert sig == "0x" + "cd" * 65
         assert len(signed_actions) == 1
         assert signed_actions[0] == (action, 100, True)
+
+
+class TestNoLocalKeySigner:
+    """Guard: the strategy-container adapter must never sign in-process.
+
+    A placeholder ``EIP712Signer`` once lived in this module. Its keccak was
+    actually NIST SHA3-256 (wrong padding byte vs Ethereum Keccak-256) and its
+    "signature" was a hash of the raw private key, not ECDSA. It was removed;
+    real Hyperliquid signing belongs gateway-side (VIB-4774). These tests fail
+    loudly if a local key signer is reintroduced here.
+    """
+
+    def test_no_local_key_signer_exported(self) -> None:
+        """The fake EIP712Signer must stay removed."""
+        assert not hasattr(adapter_module, "EIP712Signer")
+
+    def test_config_holds_no_private_key(self) -> None:
+        """HyperliquidConfig must not carry secrets."""
+        field_names = {f.name for f in fields(HyperliquidConfig)}
+        assert "private_key" not in field_names
+
+    def test_adapter_module_does_no_crypto(self) -> None:
+        """The adapter module must not hash or sign with key material."""
+        import inspect
+
+        source = inspect.getsource(adapter_module)
+        assert "hashlib" not in source
+        assert "sha3_256" not in source
+        assert "_sign_hash" not in source
 
 
 # =============================================================================
