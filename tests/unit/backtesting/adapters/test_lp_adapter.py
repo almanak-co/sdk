@@ -1425,7 +1425,6 @@ class TestHistoricalVolumeIntegration:
 
         assert config.use_historical_volume is True
         assert config.chain == "arbitrum"
-        assert config.subgraph_api_key is None
 
     def test_config_historical_volume_custom(self) -> None:
         """Test custom historical volume configuration."""
@@ -1433,12 +1432,10 @@ class TestHistoricalVolumeIntegration:
             strategy_type="lp",
             use_historical_volume=False,
             chain="ethereum",
-            subgraph_api_key="test_api_key",
         )
 
         assert config.use_historical_volume is False
         assert config.chain == "ethereum"
-        assert config.subgraph_api_key == "test_api_key"
 
     def test_config_serialization_with_volume_settings(self) -> None:
         """Test config serialization includes volume settings."""
@@ -1446,14 +1443,16 @@ class TestHistoricalVolumeIntegration:
             strategy_type="lp",
             use_historical_volume=True,
             chain="base",
-            subgraph_api_key="my_api_key",
         )
 
         d = config.to_dict()
 
         assert d["use_historical_volume"] is True
         assert d["chain"] == "base"
-        assert d["subgraph_api_key"] == "my_api_key"
+        # The dead subgraph_api_key field was removed: the gateway DEX-volume
+        # lane needs no operator-side API key, and a serialized secret slot
+        # that nothing consumes is a footgun.
+        assert "subgraph_api_key" not in d
 
     def test_config_deserialization_with_volume_settings(self) -> None:
         """Test config deserialization restores volume settings."""
@@ -1461,14 +1460,27 @@ class TestHistoricalVolumeIntegration:
             "strategy_type": "lp",
             "use_historical_volume": False,
             "chain": "optimism",
-            "subgraph_api_key": "restored_key",
         }
 
         config = LPBacktestConfig.from_dict(data)
 
         assert config.use_historical_volume is False
         assert config.chain == "optimism"
-        assert config.subgraph_api_key == "restored_key"
+
+    def test_config_deserialization_ignores_legacy_subgraph_api_key(self) -> None:
+        """Configs serialized by older SDK versions still deserialize cleanly."""
+        data = {
+            "strategy_type": "lp",
+            "use_historical_volume": True,
+            "chain": "optimism",
+            "subgraph_api_key": "legacy_key",
+        }
+
+        config = LPBacktestConfig.from_dict(data)
+
+        assert config.use_historical_volume is True
+        assert config.chain == "optimism"
+        assert not hasattr(config, "subgraph_api_key")
 
     def test_adapter_with_volume_provider_disabled(self) -> None:
         """Test adapter with historical volume disabled uses heuristic."""
@@ -1565,6 +1577,10 @@ class TestHistoricalVolumeIntegration:
         assert "use_historical_volume" in message
         assert "explicit_pool_volume_usd_daily" in message
         assert "allow_volume_fallback" in message
+        # The historical path is gateway-backed (VIB-4851 Phase D); the removed
+        # subgraph_api_key field was never consumed, so recommending it would
+        # send users down a dead end.
+        assert "subgraph_api_key" not in message
         # And it must NOT have fabricated any fees.
         assert position.accumulated_fees_usd == Decimal("0")
 
@@ -1689,7 +1705,6 @@ class TestHistoricalVolumeIntegration:
             strategy_type="lp",
             use_historical_volume=True,
             chain="polygon",
-            subgraph_api_key="secret_key",
             volume_multiplier=Decimal("15"),
         )
 
@@ -1697,7 +1712,6 @@ class TestHistoricalVolumeIntegration:
 
         assert restored.use_historical_volume == original.use_historical_volume
         assert restored.chain == original.chain
-        assert restored.subgraph_api_key == original.subgraph_api_key
         assert restored.volume_multiplier == original.volume_multiplier
 
     def test_config_roundtrip_preserves_vib4849_fields(self) -> None:

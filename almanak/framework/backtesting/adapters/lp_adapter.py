@@ -195,7 +195,7 @@ class LPBacktestConfig(StrategyBacktestConfig):
             Position's share = min(1, position_value_usd / base_liquidity).
             Default 1_000_000.
         explicit_pool_volume_usd_daily: Caller-provided daily pool volume (USD).
-            When set, used directly with HIGH confidence (no subgraph, no fabrication).
+            When set, used directly with HIGH confidence (no lookup, no fabrication).
         explicit_pool_liquidity_usd: Caller-provided pool TVL (USD) used as the
             liquidity-share denominator instead of ``base_liquidity``.
         allow_volume_fallback: Opt-in to the ``volume_multiplier`` heuristic when no
@@ -234,23 +234,25 @@ class LPBacktestConfig(StrategyBacktestConfig):
     """Base pool liquidity for calculating liquidity share."""
 
     use_historical_volume: bool = True
-    """Whether to attempt fetching historical volume from subgraph.
-    If True, will try to use actual pool volume for fee calculation.
-    When the subgraph lookup fails (no key / network / no data) the adapter does
-    NOT silently fabricate a number: it either uses explicit inputs, the opt-in
-    heuristic (``allow_volume_fallback``), or raises ``DataSourceUnavailableError``."""
+    """Whether to attempt fetching historical volume via the gateway DEX-volume
+    lane (``GetDexVolumeHistory``). If True, will try to use actual pool volume
+    for fee calculation. When the lookup fails (gateway unreachable / no data)
+    the adapter does NOT silently fabricate a number: it either uses explicit
+    inputs, the opt-in heuristic (``allow_volume_fallback``), or raises
+    ``DataSourceUnavailableError``."""
 
     explicit_pool_volume_usd_daily: Decimal | None = None
     """Caller-provided daily pool volume in USD. When set, fee accrual uses this
     value directly instead of fetching historical volume or fabricating one.
-    Use this when you know the pool's volume and do not want a subgraph dependency."""
+    Use this when you know the pool's volume and do not want a historical-data
+    lookup."""
 
     explicit_pool_liquidity_usd: Decimal | None = None
     """Caller-provided pool TVL/liquidity in USD for the liquidity-share
     calculation. When set, overrides ``base_liquidity`` as the denominator so the
     position's share is grounded in a real number rather than the 1,000,000
     placeholder. Pair with ``explicit_pool_volume_usd_daily`` for a fully
-    user-specified (no-subgraph, non-fabricated) fee estimate."""
+    user-specified (no-lookup, non-fabricated) fee estimate."""
 
     allow_volume_fallback: bool = False
     """Explicit opt-in to the ``volume_multiplier`` heuristic when no real volume
@@ -261,11 +263,7 @@ class LPBacktestConfig(StrategyBacktestConfig):
     parameter sweeps), and understand the result is LOW confidence."""
 
     chain: str = DEFAULT_CHAIN
-    """Chain for subgraph queries. Options: ethereum, arbitrum, base, optimism, polygon."""
-
-    subgraph_api_key: str | None = None
-    """API key for The Graph Gateway (recommended for production).
-    If not provided, will attempt to use hosted service (may be rate limited)."""
+    """Chain for historical data routing. Options: ethereum, arbitrum, base, optimism, polygon."""
 
     def __post_init__(self) -> None:
         """Validate LP-specific configuration.
@@ -321,7 +319,6 @@ class LPBacktestConfig(StrategyBacktestConfig):
                 ),
                 "allow_volume_fallback": self.allow_volume_fallback,
                 "chain": self.chain,
-                "subgraph_api_key": self.subgraph_api_key,
             }
         )
         return base
@@ -329,6 +326,10 @@ class LPBacktestConfig(StrategyBacktestConfig):
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LPBacktestConfig":
         """Create configuration from a dictionary.
+
+        Unknown keys are ignored, so configs serialized by older SDK versions
+        (e.g. carrying the removed, never-consumed ``subgraph_api_key`` field)
+        still deserialize cleanly.
 
         Args:
             data: Dictionary with configuration values.
@@ -362,7 +363,6 @@ class LPBacktestConfig(StrategyBacktestConfig):
             ),
             allow_volume_fallback=data.get("allow_volume_fallback", False),
             chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
-            subgraph_api_key=data.get("subgraph_api_key"),
         )
 
 
@@ -447,8 +447,9 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
     When used without config, it uses sensible defaults.
 
     When BacktestDataConfig is provided, the adapter uses MultiDEXVolumeProvider
-    to fetch historical volume data from multiple DEX subgraphs (Uniswap V3,
-    SushiSwap V3, PancakeSwap V3, Aerodrome, TraderJoe V2, Curve, Balancer).
+    to fetch historical volume data via the gateway DEX-volume lane
+    (``GetDexVolumeHistory``); routing to the right DEX is declared by each
+    connector's manifest.
 
     Attributes:
         config: LP-specific configuration (optional)
@@ -550,7 +551,8 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         otherwise falls back to LPBacktestConfig.use_historical_volume.
 
         Returns:
-            True if historical volume should be fetched from subgraph.
+            True if historical volume should be fetched via the gateway
+            DEX-volume lane.
         """
         if self._data_config is not None:
             return self._data_config.use_historical_volume
@@ -1004,8 +1006,8 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         """Lazily initialize the volume provider if needed.
 
         Creates a MultiDEXVolumeProvider instance for fetching historical volume
-        data from multiple DEX subgraphs. Uses rate limiting from BacktestDataConfig
-        if provided.
+        data via the gateway DEX-volume lane. Uses rate limiting from
+        BacktestDataConfig if provided.
 
         Returns:
             MultiDEXVolumeProvider instance or None if disabled/failed
@@ -1889,9 +1891,10 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         1. **Explicit** -- ``explicit_pool_volume_usd_daily`` provided by the
            caller (``BacktestDataConfig`` takes precedence over
            ``LPBacktestConfig``). Used directly; HIGH confidence.
-        2. **Historical** -- fetched from the DEX subgraph via
-           ``_get_historical_volume`` when ``use_historical_volume`` is enabled and a
-           pool address + timestamp are available. Uses the provider's confidence.
+        2. **Historical** -- fetched via the gateway DEX-volume lane
+           (``GetDexVolumeHistory``) through ``_get_historical_volume`` when
+           ``use_historical_volume`` is enabled and a pool address + timestamp
+           are available. Uses the provider's confidence.
         3. **Fallback heuristic** -- ``position_value_usd * volume_multiplier`` --
            ONLY when the caller explicitly opted in via
            ``allow_volume_fallback=True`` on either config surface. LOW confidence.
@@ -1904,8 +1907,8 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             position: The LP position (used for diagnostics in the error).
             position_value_usd: Current position value in USD (heuristic basis).
             timestamp: Simulation timestamp for the historical lookup.
-            pool_address: Pool contract address for the subgraph query.
-            protocol: Protocol identifier for subgraph routing.
+            pool_address: Pool contract address for the historical volume lookup.
+            protocol: Protocol identifier for volume-lane routing.
 
         Returns:
             A :class:`_VolumeResolution` describing the chosen volume and its source.
@@ -1933,7 +1936,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 confidence=DataConfidence.HIGH,
             )
 
-        # 2. Historical volume from the subgraph (only when actually usable).
+        # 2. Historical volume via the gateway DEX-volume lane (only when actually usable).
         if timestamp is not None and pool_address and self._use_historical_volume():
             actual_volume, volume_confidence = self._get_historical_volume(
                 pool_address=pool_address,
@@ -1941,7 +1944,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 protocol=protocol,
             )
             # Empty != Zero: a non-LOW-confidence ``Decimal("0")`` is a *measured*
-            # zero-volume day (real subgraph observation) and is a valid value to
+            # zero-volume day (real upstream observation) and is a valid value to
             # use -- it yields zero fees for the tick. ``None`` means the lookup
             # produced nothing (unmeasured) and must fall through.
             if actual_volume is not None and actual_volume >= 0 and volume_confidence != DataConfidence.LOW:
@@ -1974,9 +1977,10 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             data_type="volume",
             identifier=pool_address or f"position:{position.position_id}",
             remediation=(
-                "set use_historical_volume=True with a valid subgraph_api_key AND a "
-                "pool address on the position; OR provide "
-                "explicit_pool_volume_usd_daily (and ideally explicit_pool_liquidity_usd); "
+                "set use_historical_volume=True with a pool address on the position "
+                "and a reachable gateway DEX-volume lane (GetDexVolumeHistory); "
+                "OR provide explicit_pool_volume_usd_daily "
+                "(and ideally explicit_pool_liquidity_usd); "
                 "OR set allow_volume_fallback=True to accept the LOW-confidence "
                 "volume_multiplier heuristic."
             ),
@@ -2001,7 +2005,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         falling back to a hybrid model combining volume-based and APR-based fee estimates.
 
         The confidence level is determined by the data source:
-        - HIGH: Historical volume from subgraph
+        - HIGH: Historical volume via the gateway DEX-volume lane
         - MEDIUM: Interpolated or estimated data
         - LOW: Fallback using volume_fallback_multiplier
 
@@ -2014,8 +2018,8 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             token0_price: Current price of token0 in USD
             token1_price: Current price of token1 in USD
             timestamp: Simulation timestamp for historical data lookup
-            pool_address: Pool contract address for subgraph queries
-            protocol: Protocol identifier for routing to correct subgraph
+            pool_address: Pool contract address for the historical volume lookup
+            protocol: Protocol identifier for routing to the correct DEX volume lane
 
         Returns:
             FeeAccrualResult with fees earned, confidence level, and data source

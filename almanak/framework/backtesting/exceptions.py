@@ -32,8 +32,8 @@ class DataSourceUnavailableError(BacktestError):
     the adapter has *no acceptable way* to obtain a number it needs and refuses to
     fabricate one. It is raised when:
 
-    - historical volume could not be fetched (no subgraph key / lookup failed /
-      ``use_historical_volume=False``), AND
+    - historical volume could not be fetched (gateway DEX-volume lane
+      unreachable / lookup failed / ``use_historical_volume=False``), AND
     - the caller did not provide explicit inputs (pool liquidity + volume), AND
     - the caller did not explicitly opt in to the heuristic fallback.
 
@@ -51,8 +51,9 @@ class DataSourceUnavailableError(BacktestError):
             data_type="volume",
             identifier="WETH/USDC",
             remediation=(
-                "Provide one of: use_historical_volume=True with a valid "
-                "subgraph_api_key; an explicit volume_provider; or set "
+                "Provide one of: use_historical_volume=True with a pool "
+                "address on the position and a reachable gateway DEX-volume "
+                "lane; an explicit volume_provider; or set "
                 "allow_volume_fallback=True to accept the rough heuristic."
             ),
         )

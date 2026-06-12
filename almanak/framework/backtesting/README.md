@@ -246,15 +246,20 @@ LP fee accrual (`LPBacktestAdapter`) estimates fees per tick as:
 
 ```text
 fees = pool_volume_usd * fee_tier * liquidity_share * days_elapsed
-liquidity_share = clamp(position.liquidity / pool_liquidity, 0.10, 1.0)
+liquidity_share = clamp(position_value_usd / pool_liquidity, 0.10, 1.0)
 ```
+
+Both sides of the share are USD-denominated: `position_value_usd` is the
+position's current USD value (not its V3 liquidity `L`), and `pool_liquidity`
+is `explicit_pool_liquidity_usd` when set, else the `base_liquidity`
+placeholder.
 
 `pool_volume_usd` is resolved from the highest-trust source available, in order:
 
 | Source | How to enable | Confidence |
 |--------|---------------|------------|
 | **Explicit** | `LPBacktestConfig.explicit_pool_volume_usd_daily` (+ `explicit_pool_liquidity_usd` for the share denominator) | HIGH |
-| **Historical** | `use_historical_volume=True` with a valid `subgraph_api_key` and a pool **address** on the position | per-subgraph |
+| **Historical** | `use_historical_volume=True` with a pool **address** on the position; volume is fetched through the gateway DEX-volume lane (`GetDexVolumeHistory`) | per-source |
 | **Heuristic fallback** | `allow_volume_fallback=True` (opt-in) | LOW |
 
 > **VIB-4849 — no silent fabrication.** When none of the above is available, the
