@@ -27,13 +27,13 @@ from web3 import Web3
 from web3.exceptions import TimeExhausted
 from web3.providers.rpc.async_rpc import AsyncHTTPProvider
 
-from almanak.framework.accounting.basis import FIFOBasisStore
-from almanak.framework.accounting.lp_accounting import _get_pool_address
-from almanak.framework.accounting.processor import AccountingProcessor, write_outbox_entry
 from almanak.connectors.uniswap_v3.slot0_fallback import (
     enrich_lp_close_with_slot0,
     enrich_lp_open_with_slot0,
 )
+from almanak.framework.accounting.basis import FIFOBasisStore
+from almanak.framework.accounting.lp_accounting import _get_pool_address
+from almanak.framework.accounting.processor import AccountingProcessor, write_outbox_entry
 from almanak.framework.observability.ledger import build_ledger_entry
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 
@@ -98,6 +98,7 @@ def web3_request_timeout(chain_name: str) -> tuple[float, float]:
     if chain_name in TEST_SLOW_FORK_CHAINS:
         return TEST_SLOW_FORK_WEB3_REQUEST_TIMEOUT
     return TEST_WEB3_REQUEST_TIMEOUT
+
 
 # Retry config for Anvil RPC calls during wallet funding.
 # Only applies to setup-time RPC calls (anvil_setBalance, anvil_setStorageAt, evm_mine),
@@ -244,6 +245,20 @@ def _default_compute_position_key(
         return f"lp:{protocol}:{chain.lower()}:{wallet_address.lower()}:{pool_address}", pool_address
     if intent_type == "SWAP":
         return f"swap:{chain.lower()}:{wallet_address.lower()}", ""
+    # Lending (SUPPLY / BORROW / REPAY / DELEVERAGE / WITHDRAW): mirror the runner's
+    # _compute_outbox_position_key so per-market protocols (Morpho Blue, fluid_vault)
+    # derive the canonical market-scoped key and the vault segment is not dropped.
+    if intent_type in {"SUPPLY", "BORROW", "REPAY", "DELEVERAGE", "WITHDRAW"}:
+        from almanak.framework.accounting.lending_accounting import (
+            _derive_position_key,
+            _intent_asset,
+            _intent_market_id,
+        )
+
+        market_id = _intent_market_id(intent) or ""
+        asset = _intent_asset(intent)
+        position_key = _derive_position_key(protocol, chain, wallet_address, market_id or None, asset)
+        return position_key, market_id
     return "", ""
 
 

@@ -53,6 +53,9 @@ FROZEN_CAPABILITIES_LOADERS = {
     "raydium_clmm": "almanak.connectors.raydium.capabilities",
     "meteora_dlmm": "almanak.connectors.meteora.capabilities",
     "orca_whirlpools": "almanak.connectors.orca.capabilities",
+    # VIB-5031: the vault NFT-CDP key (requires_market_id) — scoped to
+    # fluid_vault ONLY; fluid/fluid_lending deliberately have no entry.
+    "fluid_vault": "almanak.connectors.fluid.capabilities",
 }
 
 # almanak/connectors/_strategy_base/supported_chains_registry.py
@@ -140,6 +143,9 @@ FROZEN_LENDING_ACCOUNT_STATE_LOADERS = {
     # VIB-5030: fToken (ERC-4626) aggregate read — market-scoped on the
     # per-underlying fToken (Compound V3 / Silo V2 shape).
     "fluid": ("almanak.connectors.fluid.lending_read", "ACCOUNT_STATE_READ_SPEC"),
+    # VIB-5031: the vault NFT-CDP positionsByUser read — its own manifest
+    # slot (the registry holds one account_state per manifest name).
+    "fluid_vault": ("almanak.connectors.fluid.vault_lending_read", "ACCOUNT_STATE_READ_SPEC"),
 }
 FROZEN_LENDING_MARKET_HEALTH_LOADERS = {
     "compound_v3": ("almanak.connectors.compound_v3.lending_read", "read_compound_v3_market_health"),
@@ -152,6 +158,8 @@ FROZEN_LENDING_MARKET_TABLE_LOADERS = {
     "benqi": ("almanak.connectors.benqi.lending_read", "BENQI_ACCOUNT_STATE_MARKETS"),
     # VIB-5030: per-chain underlying-symbol -> fToken catalogue.
     "fluid": ("almanak.connectors.fluid.lending_read", "FLUID_FTOKEN_MARKETS"),
+    # VIB-5031: the pinned type-1 vault universe (vault address -> params).
+    "fluid_vault": ("almanak.connectors.fluid.addresses", "FLUID_VAULT_MARKETS"),
 }
 # B3 (VIB-4851) deliberately WIDENED the lending aliases beyond the legacy
 # registry table: the spellings previously private to
@@ -494,8 +502,18 @@ FROZEN_TWAP_POOLS = {
     "polygon": {"WMATIC/USDC-500": "0xA374094527e1673A86dE625aa59517c5dE346d32"},
 }
 FROZEN_TWAP_TOKEN_TO_POOL = {
-    "ETH": {"ethereum": "WETH/USDC-500", "arbitrum": "WETH/USDC-500", "base": "WETH/USDC-500", "optimism": "WETH/USDC-500"},
-    "WETH": {"ethereum": "WETH/USDC-500", "arbitrum": "WETH/USDC-500", "base": "WETH/USDC-500", "optimism": "WETH/USDC-500"},
+    "ETH": {
+        "ethereum": "WETH/USDC-500",
+        "arbitrum": "WETH/USDC-500",
+        "base": "WETH/USDC-500",
+        "optimism": "WETH/USDC-500",
+    },
+    "WETH": {
+        "ethereum": "WETH/USDC-500",
+        "arbitrum": "WETH/USDC-500",
+        "base": "WETH/USDC-500",
+        "optimism": "WETH/USDC-500",
+    },
     "BTC": {"ethereum": "WBTC/WETH-3000", "arbitrum": "WBTC/WETH-500"},
     "WBTC": {"ethereum": "WBTC/WETH-3000", "arbitrum": "WBTC/WETH-500"},
     "MATIC": {"polygon": "WMATIC/USDC-500"},
@@ -593,7 +611,7 @@ def test_prediction_and_stub_dispatch_equals_frozen_legacy_tables() -> None:
 # 2026-06-10, frozen verbatim (VIB-3747; manifest-derived in VIB-4851 C1).
 # VIB-5030 added "fluid": its lending compiler emits ERC-4626 asset base
 # units (wei) in ``supply_amount`` / ``withdraw_amount``.
-FROZEN_WEI_LENDING_PROTOCOLS = frozenset({"aave_v3", "spark", "fluid"})
+FROZEN_WEI_LENDING_PROTOCOLS = frozenset({"aave_v3", "spark", "fluid", "fluid_vault"})
 FROZEN_HUMAN_AMOUNT_SWAP_PROTOCOLS = frozenset({"curve", "aerodrome"})
 
 

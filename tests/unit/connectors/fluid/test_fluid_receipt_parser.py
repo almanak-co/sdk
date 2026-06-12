@@ -32,9 +32,15 @@ def _log_operate(nft_id: int, token0_amt: int, token1_amt: int, timestamp: int =
     }
 
 
-def _erc721_mint(to_addr: str, token_id: int) -> dict:
+# The VaultFactory — the ONLY emitter whose ERC-721 mints are captured
+# (VIB-5031 / ADR §5 tightening: an unrelated mint inside a bundled/Zodiac
+# receipt was previously mis-captured by the permissive any-mint fallback).
+VAULT_FACTORY = "0x324c5Dc1fC42c7a4D43d92df1eBA58a54d13Bf2d"
+
+
+def _erc721_mint(to_addr: str, token_id: int, emitter: str = VAULT_FACTORY) -> dict:
     return {
-        "address": "0x1234567890123456789012345678901234567890",
+        "address": emitter,
         "topics": [ERC721_TRANSFER_TOPIC, _pad_address(ZERO_ADDRESS), _pad_address(to_addr), _pad_uint256(token_id)],
         "data": "0x",
         "logIndex": 1,
@@ -65,9 +71,25 @@ class TestFluidReceiptParser:
         assert result.token1_amt == -1_000_000
 
     def test_erc721_mint_fallback(self):
+        # Factory-gated (VIB-5031): only a VaultFactory-emitted mint counts.
         receipt = _make_receipt([_erc721_mint(to_addr="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", token_id=99)])
         result = self.parser.parse_receipt(receipt)
         assert result.nft_id == 99
+
+    def test_erc721_foreign_mint_ignored(self):
+        # A non-factory mint in the same receipt must NOT be captured —
+        # the old permissive fallback encoded this bug (ADR §5 tightening).
+        receipt = _make_receipt(
+            [
+                _erc721_mint(
+                    to_addr="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    token_id=99,
+                    emitter="0x1234567890123456789012345678901234567890",
+                )
+            ]
+        )
+        result = self.parser.parse_receipt(receipt)
+        assert result.nft_id is None
 
     def test_reverted_transaction(self):
         result = self.parser.parse_receipt(_make_receipt([], status=0))
@@ -96,6 +118,7 @@ class TestExtractPositionId:
         assert self.parser.extract_position_id(receipt) == 42
 
     def test_from_erc721_mint(self):
+        # Factory-emitted mint (VIB-5031 gating) — captured.
         receipt = _make_receipt([_erc721_mint(to_addr="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", token_id=77)])
         assert self.parser.extract_position_id(receipt) == 77
 

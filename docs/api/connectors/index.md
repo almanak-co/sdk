@@ -24,6 +24,7 @@ The matrix below is generated from ``almanak.connectors._strategy_base.registry.
 | [Ethena](ethena.md) | Staking | Ethereum | STAKE, UNSTAKE | `ethena` |
 | [Euler V2](euler_v2.md) | Lending | Avalanche, Ethereum | BORROW, REPAY, SUPPLY, WITHDRAW | `euler_v2` |
 | [Fluid](fluid.md) | DEX | Arbitrum, Base, Ethereum, Polygon | SUPPLY, SWAP, WITHDRAW | `fluid` |
+| [Fluid Vault](fluid_vault.md) | Lending | Arbitrum, Base | BORROW, REPAY, SUPPLY, WITHDRAW | `fluid_vault` |
 | [Gimo](gimo.md) | Staking | 0G | STAKE, UNSTAKE | `gimo` |
 | [GMX V2](gmx_v2.md) | Perp | Arbitrum, Avalanche | PERP_CLOSE, PERP_OPEN | `gmx_v2` |
 | [Jupiter](jupiter.md) | DEX | Solana | SWAP | `jupiter` |

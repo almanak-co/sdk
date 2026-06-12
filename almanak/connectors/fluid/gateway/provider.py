@@ -33,5 +33,13 @@ class FluidGatewayConnector(GatewayConnector, GatewayMarketLookupCapability):
         """Return the awaitable Fluid market-lookup singleton factory."""
         return get_fluid_lookup
 
+    # NOTE (VIB-5031 v1): there is deliberately NO vault-metadata lookup
+    # here. Vault-borrow compilation enforces the pinned, on-chain-verified
+    # ``FLUID_VAULT_MARKETS`` universe (fluid/addresses.py), so a dynamic
+    # ``api.fluid.instadapp.io`` vault catalogue has no v1 consumer — and
+    # unconsumed egress does not ship into the hosted perimeter (VIB-5101).
+    # Phase 4 (smart vaults, VIB-5032) adds the lookup TOGETHER with the
+    # gateway service path that reads it.
+
 
 __all__ = ["FluidGatewayConnector"]

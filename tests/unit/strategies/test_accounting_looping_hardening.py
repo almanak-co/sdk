@@ -34,6 +34,7 @@ from strategies.accounting.looping.strategy import (
 def _bare_strategy(**overrides: Any) -> AccountingQuantLoopingStrategy:
     obj = AccountingQuantLoopingStrategy.__new__(AccountingQuantLoopingStrategy)
     obj.protocol = "aave_v3"
+    obj.market_id = ""  # single-market protocol default (VIB-5031 threading)
     obj.collateral_token = "USDC"
     obj.borrow_token = "USDT"
     obj.starting_collateral_usd = Decimal("4")

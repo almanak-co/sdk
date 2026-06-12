@@ -127,8 +127,17 @@ def _decode_word(hex_data: str, word_index: int) -> int:
 # Fork-verified on base + arbitrum by the Layer-5 ``test_fluid_lending`` intent
 # tests (HIGH-confidence before/after collateral on the SUPPLY/WITHDRAW path).
 # See fluid/lending_read.py.
+# VIB-5031: ``fluid_vault`` joined — the Fluid NFT-CDP vault surface (its own
+# protocol key / manifest; ``market_id`` = the vault address). A bespoke
+# market-scoped ``positionsByUser`` reader: collateral AND debt legs, with the
+# health factor computed PROTOCOL-TRUTH from the vault's own oracle data (the
+# ratio liquidation actually keys on); USD legs priced via the injected
+# valuation seam (like Compound/Morpho/Silo/Euler — not USD-native).
+# Fork-verified on arbitrum + base by the Layer-5 ``test_fluid_vault_lending``
+# intent tests (HIGH-confidence before/after collateral / debt / HF across the
+# open/borrow/repay/withdraw/close lifecycle). See fluid/vault_lending_read.py.
 _GENERIC_PRE_STATE_PROTOCOLS: frozenset[str] = frozenset(
-    {"aave_v3", "aave", "morpho_blue", "compound_v3", "spark", "silo_v2", "euler_v2", "benqi", "fluid"}
+    {"aave_v3", "aave", "morpho_blue", "compound_v3", "spark", "silo_v2", "euler_v2", "benqi", "fluid", "fluid_vault"}
 )
 
 

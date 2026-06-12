@@ -483,6 +483,9 @@ EXPECTED_COMPILER_MODULES = {
     "ethena": ("almanak.connectors.ethena.compiler", "EthenaCompiler"),
     "euler_v2": ("almanak.connectors.euler_v2.compiler", "EulerV2Compiler"),
     "fluid": ("almanak.connectors.fluid.compiler", "FluidCompiler"),
+    # VIB-5031: the vault NFT-CDP surface is a SECOND thin manifest over the
+    # fluid package (one codebase, two manifests — ADR r2 Q0).
+    "fluid_vault": ("almanak.connectors.fluid.vault_compiler", "FluidVaultCompiler"),
     "gimo": ("almanak.connectors.gimo.compiler", "GimoCompiler"),
     "gmx_v2": ("almanak.connectors.gmx_v2.compiler", "GMXV2Compiler"),
     "hyperliquid": ("almanak.connectors.hyperliquid.compiler", "HyperliquidCompiler"),
@@ -524,6 +527,7 @@ EXPECTED_COMPILER_PROTOCOLS = {
     "ethena": ("ethena",),
     "euler_v2": ("euler_v2",),
     "fluid": ("fluid", "fluid_lending"),
+    "fluid_vault": ("fluid_vault",),
     "gimo": ("gimo",),
     "gmx_v2": ("gmx_v2",),
     "hyperliquid": ("hyperliquid",),
@@ -624,6 +628,9 @@ EXPECTED_VAULT_TOOL_PROVIDER_MODULES = {
 }
 
 EXPECTED_RUNNER_HOOK_PROVIDER_MODULES = {
+    # VIB-5031: stamps FluidVaultOperateData (the nftId home) into
+    # extracted_data before the ledger write.
+    "fluid_vault": "almanak.connectors.fluid.runner_hooks",
     "uniswap_v3": "almanak.connectors.uniswap_v3.runner_hooks",
     "uniswap_v4": "almanak.connectors.uniswap_v4.runner_hooks",
 }
@@ -699,6 +706,7 @@ EXPECTED_ADDRESS_TABLE_MODULES = {
     "camelot": "almanak.connectors.camelot.addresses",
     "compound_v3": "almanak.connectors.compound_v3.addresses",
     "fluid": "almanak.connectors.fluid.addresses",
+    "fluid_vault": "almanak.connectors.fluid.addresses",
     "gmx_v2": "almanak.connectors.gmx_v2.addresses",
     "morpho_blue": "almanak.connectors.morpho_blue.addresses",
     "pancakeswap_perps": "almanak.connectors.pancakeswap_perps.addresses",
@@ -719,6 +727,7 @@ EXPECTED_ADDRESS_TABLE_PROTOCOLS = {
     "camelot": ("camelot",),
     "compound_v3": ("compound_v3",),
     "fluid": ("fluid",),
+    "fluid_vault": ("fluid_vault",),
     "gmx_v2": ("gmx_v2",),
     "morpho_blue": ("morpho_blue",),
     "pancakeswap_perps": ("pancakeswap_perps",),
@@ -1888,6 +1897,32 @@ def test_runner_hook_connectors_instantiate_from_descriptors() -> None:
         assert type(connector).__module__ == module
 
 
+def test_fluid_vault_runner_hook_resolves_to_operate_enrichment_capability() -> None:
+    """The fluid_vault hook must BE the FluidVaultOperate-enrichment class.
+
+    Registry membership alone (the generic test above) would pass for any
+    stub published under the fluid_vault key; the nftId persistence path
+    (VIB-5031) depends on the actual result-enrichment capability class.
+    """
+    from almanak.connectors._strategy_base.runner_hook_registry import (
+        RunnerResultEnrichmentCapability,
+    )
+    from almanak.connectors.fluid.runner_hooks import FluidVaultRunnerHookConnector
+
+    CONNECTOR_REGISTRY.clear()
+
+    manifest = next(
+        m
+        for m in CONNECTOR_REGISTRY.with_runner_hooks()
+        if m.runner_hook_connector is not None
+        and str(m.runner_hook_connector.instantiate().protocol) == "fluid_vault"
+    )
+    connector = manifest.runner_hook_connector.instantiate()
+    assert type(connector) is FluidVaultRunnerHookConnector
+    assert isinstance(connector, RunnerResultEnrichmentCapability)
+    assert callable(connector.enrich_result)
+
+
 def test_protocol_metadata_connectors_instantiate_from_descriptors() -> None:
     """Migrated protocol-metadata providers are published through connectors."""
     CONNECTOR_REGISTRY.clear()
@@ -2293,11 +2328,15 @@ def test_connector_vault_lifecycle_is_not_hardcoded_in_framework() -> None:
     # Plan 019: also scan all _run_*.py split modules so vault-code motion is covered.
     _run_star_texts = [p.read_text() for p in sorted((repo_root / "almanak/framework/cli").glob("_run_*.py"))]
     source = "\n".join(
-        [(repo_root / path).read_text() for path in (
-            "almanak/framework/vault/lifecycle.py",
-            "almanak/framework/cli/run_helpers.py",
-            "almanak/framework/cli/run.py",
-        )] + _run_star_texts
+        [
+            (repo_root / path).read_text()
+            for path in (
+                "almanak/framework/vault/lifecycle.py",
+                "almanak/framework/cli/run_helpers.py",
+                "almanak/framework/cli/run.py",
+            )
+        ]
+        + _run_star_texts
     )
 
     assert re.search(r"\bget_vault_tool_capability\s*\(", source) is not None

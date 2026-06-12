@@ -718,6 +718,39 @@ class RollingForkManager:
         except Exception as e:
             logger.error(f"anvil_setChainId error: {e}")
 
+    async def _clear_7702_delegation(self, address: str) -> None:
+        """Strip EIP-7702 delegation code from a funded wallet on the fork.
+
+        Mainnet EOAs increasingly carry 7702 delegation designators
+        (code ``0xef01...``). On a fork, that delegated code intercepts
+        plain ETH transfers and protocol native-token legs (e.g. Fluid
+        ``operate()`` collateral refunds revert with FluidLiquidityError
+        11011), so the intent-test harness has cleared it per-test for a
+        while — but the managed-gateway funding path did not, breaking any
+        native-ETH-receiving demo/E2E on managed Anvil.
+
+        Only the CANONICAL 7702 designator is cleared: exactly 23 bytes —
+        ``0xef0100`` followed by the 20-byte delegate address. Real contract
+        wallets (Zodiac Safes) also have code at the wallet address and
+        clearing them would destroy the wallet — they never match this
+        shape. Failures are logged and swallowed: funding must not be
+        blocked by a hygiene step.
+        """
+        try:
+            success, code = await self._rpc_call_raw("eth_getCode", [address, "latest"])
+            if not success or not isinstance(code, str):
+                return
+            normalized = code.lower()
+            # 23 bytes = "0x" + 46 hex chars; prefix 0xef0100 (EIP-7702 §delegation designation).
+            if normalized.startswith("0xef0100") and len(normalized) == 48:
+                cleared, _ = await self._rpc_call_raw("anvil_setCode", [address, "0x"])
+                if cleared:
+                    logger.info(f"Cleared EIP-7702 delegation code from {address[:10]}... on {self.chain} fork")
+                else:
+                    logger.warning(f"Failed to clear EIP-7702 delegation code from {address[:10]}... on {self.chain}")
+        except Exception as e:
+            logger.warning(f"7702 delegation check failed for {address[:10]}...: {e}")
+
     async def fund_wallet(self, address: str, eth_amount: Decimal) -> bool:
         """Fund a wallet with ETH.
 
@@ -733,6 +766,8 @@ class RollingForkManager:
         if not self.is_running:
             logger.error("Cannot fund wallet: Anvil fork not running")
             return False
+
+        await self._clear_7702_delegation(address)
 
         try:
             # Convert ETH to wei (hex string)

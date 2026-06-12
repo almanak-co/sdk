@@ -50,6 +50,10 @@ _FLUID_CORE_CONTRACTS: dict[str, str] = {
     "liquidity_resolver": "0xca13A15de31235A37134B4717021C35A3CF25C60",
     "vault_resolver": "0xA5C3E16523eeeDDcC34706b0E6bE88b4c6EA95cC",
     "lending_resolver": "0x48D32f49aFeAEC7AE66ad7B9264f446fc11a1569",
+    # VaultFactory — ERC-721 home of vault position NFTs (VIB-5031). Same
+    # deterministic address on every chain; re-verified on arbitrum + base
+    # 2026-06-12 (docs/internal/qa/fluid-vault-verification-2026-06-12.md).
+    "vault_factory": "0x324c5Dc1fC42c7a4D43d92df1eBA58a54d13Bf2d",
 }
 
 FLUID_ADDRESSES: dict[str, dict[str, str]] = {
@@ -377,6 +381,62 @@ DEX_T1_ERROR_IDS: dict[int, str] = {
     51060: "DexT1__IncorrectDataLength",
 }
 
+# VaultT1 errorIds (contracts/protocols/vault/errorTypes.sol, the 31xxx
+# ``Vault`` section — fetched from Instadapp/fluid-contracts-public @ main,
+# 2026-06-12). These ride the ``FluidVaultError`` selector (0x60121cca);
+# modules number errorIds independently, so the decode below dispatches the
+# name table on the MODULE, never on the bare number. 31015
+# (Vault__ExcessDebtPayback) is the over-repay revert characterized in the
+# Phase-0 V3.5 validation (VIB-5031).
+VAULT_T1_ERROR_IDS: dict[int, str] = {
+    31001: "Vault__AlreadyEntered",
+    31002: "Vault__InvalidOperateAmount",
+    31003: "Vault__InvalidMsgValueOperate",
+    31004: "Vault__NotAnOwner",
+    31005: "Vault__TickIsEmpty",
+    31006: "Vault__PositionAboveCF",
+    31007: "Vault__TopTickDoesNotExist",
+    31008: "Vault__InvalidMsgValueLiquidate",
+    31009: "Vault__ExcessSlippageLiquidation",
+    31010: "Vault__NotRebalancer",
+    31011: "Vault__NftNotOfThisVault",
+    31012: "Vault__TokenNotInitialized",
+    31013: "Vault__NotAnAuth",
+    31014: "Vault__ExcessCollateralWithdrawal",
+    31015: "Vault__ExcessDebtPayback",
+    31016: "Vault__WithdrawMoreThanOperateLimit",
+    31017: "Vault__InvalidLiquidityCallbackAddress",
+    31018: "Vault__NotEntered",
+    31019: "Vault__OnlyDelegateCallAllowed",
+    31020: "Vault__TransferFromFailed",
+    31021: "Vault__ExchangePriceOverFlow",
+    31022: "Vault__InvalidLiquidationAmt",
+    31023: "Vault__UserCollateralDebtExceed",
+    31024: "Vault__BranchDebtTooLow",
+    31025: "Vault__TickDebtTooLow",
+    31026: "Vault__LiquidityExchangePriceUnexpected",
+    31027: "Vault__UserDebtTooLow",
+    31028: "Vault__InvalidPaybackOrDeposit",
+    31029: "Vault__InvalidLiquidation",
+    31030: "Vault__InvalidMsgValueInRebalance",
+    31031: "Vault__NothingToRebalance",
+    31032: "Vault__LiquidationReverts",
+    31033: "Vault__InvalidOraclePrice",
+    31034: "Vault__ImproperConstantsSetup",
+    31035: "Vault__FetchLatestPositionFailed",
+    31036: "Vault__InvalidDexCallbackAddress",
+    31037: "Vault__DexFromAddressAlreadySet",
+    31038: "Vault__InvalidMinMaxInRebalance",
+}
+
+# Per-module errorId name tables. Modules number errorIds independently
+# (DexT1 = 51xxx on FluidDexError; VaultT1 = 31xxx on FluidVaultError), so a
+# name is only meaningful TOGETHER with its module selector.
+_MODULE_ERROR_ID_TABLES: dict[str, dict[int, str]] = {
+    "FluidDexError": DEX_T1_ERROR_IDS,
+    "FluidVaultError": VAULT_T1_ERROR_IDS,
+}
+
 # errorIds whose semantic is "the Liquidity layer's time-expanding limits
 # (or per-swap caps) currently reject this size" — retryable later or at a
 # smaller size, NOT a hard integration failure.
@@ -439,7 +499,10 @@ def decode_fluid_revert(raw_hex: str) -> str:
     module_error = FLUID_MODULE_ERROR_SELECTORS.get(selector)
     if module_error is not None and len(data) >= 72:
         error_id = int(data[8:72], 16)
-        name = DEX_T1_ERROR_IDS.get(error_id)
+        # Module-aware name lookup: each Fluid module numbers its errorIds
+        # independently, so the table is selected by module selector (DexT1
+        # names never label a FluidVaultError and vice versa).
+        name = _MODULE_ERROR_ID_TABLES.get(module_error, {}).get(error_id)
         if name is not None:
             return f"{module_error}({error_id} {name})"
         return f"{module_error}(errorId={error_id})"

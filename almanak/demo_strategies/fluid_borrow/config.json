@@ -1,0 +1,22 @@
+{
+    "chain": "arbitrum",
+    "market_id": "0xeAbBfca72F8a8bf14C4ac59e69ECB2eB69F0811C",
+    "collateral_token": "ETH",
+    "collateral_amount": "0.2",
+    "borrow_token": "USDC",
+    "ltv_target": 0.3,
+    "repay_amount": "50",
+    "token_funding": [
+        {
+            "symbol": "USDC",
+            "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            "chain": "arbitrum",
+            "amount": "200",
+            "amount_type": "usd"
+        }
+    ],
+    "anvil_funding": {
+        "ETH": 100,
+        "USDC": 1000
+    }
+}

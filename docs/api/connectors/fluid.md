@@ -1,6 +1,8 @@
 # Fluid DEX
 
-Connector for Fluid DEX protocol.
+Connector for the Fluid DEX (swap) and fToken (ERC-4626 lending) surfaces.
+The vault borrow surface (NFT-CDP, `protocol="fluid_vault"`) is documented
+under [Fluid Vault](fluid_vault.md).
 
 ::: almanak.connectors.fluid
     options:

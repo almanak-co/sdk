@@ -599,13 +599,19 @@ class TestFundWalletWithMockedRpc:
         fork_manager._process = AsyncMock()
         fork_manager._process.poll = lambda: None  # Process still running
 
-        # anvil_setBalance returns null on success
-        fork_manager._rpc_call_raw = AsyncMock(return_value=(True, None))
+        # anvil_setBalance returns null on success; the preceding eth_getCode
+        # (EIP-7702 hygiene step, VIB-5031) returns clean EOA code.
+        async def _route(method: str, params: list) -> tuple[bool, object]:
+            if method == "eth_getCode":
+                return True, "0x"
+            return True, None
+
+        fork_manager._rpc_call_raw = AsyncMock(side_effect=_route)
 
         result = await fork_manager.fund_wallet("0x1234567890123456789012345678901234567890", Decimal("10"))
         assert result is True
 
-        fork_manager._rpc_call_raw.assert_called_once_with(
+        fork_manager._rpc_call_raw.assert_called_with(
             "anvil_setBalance",
             ["0x1234567890123456789012345678901234567890", hex(int(Decimal("10") * Decimal("1e18")))],
         )

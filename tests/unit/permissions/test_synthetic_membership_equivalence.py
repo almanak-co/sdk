@@ -82,6 +82,8 @@ _SNAPSHOT_LENDING_PROTOCOLS = frozenset(
         "compound_v3",
         # VIB-5030: fluid fToken SUPPLY/WITHDRAW joins lending discovery.
         "fluid",
+        # VIB-5031: the vault NFT-CDP key — SUPPLY/BORROW/REPAY/WITHDRAW.
+        "fluid_vault",
     }
 )
 _SNAPSHOT_PERP_PROTOCOLS = frozenset(

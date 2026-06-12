@@ -43,6 +43,33 @@ ERC721_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55
 # keccak256("Swap(bool,uint256,uint256,address)")
 SWAP_TOPIC = "0xdc004dbca4ef9c966218431ee5d9133d337ad018dd5b5c5493722803f75c64f7"
 
+# =============================================================================
+# Vault NFT-CDP events (Phase 3, VIB-5031) — byte-verified constants from
+# docs/internal/qa/fluid-vault-verification-2026-06-12.md (D2)
+# =============================================================================
+
+# VaultT1 LogOperate(address user_, uint256 nftId_, int256 colAmt_,
+#                    int256 debtAmt_, address to_)
+# keccak256("LogOperate(address,uint256,int256,int256,address)") — ZERO
+# indexed params: all five fields ride in ``data`` (exactly 5 words).
+# Signed int256 two's-complement deltas (the live repay decoded -200000000).
+VAULT_LOG_OPERATE_TOPIC = "0xfef64760e30a41b9d5ba7dd65ff7236a61d89ed8b44c67a29e84db1a67513a1c"
+
+# Liquidity-layer LogOperate(address,address,int256,int256,address,address,
+# uint256,uint256) — a DIFFERENT event that appears (twice) in the same
+# vault receipt. Corroboration only; never confuse with the vault event.
+LIQUIDITY_LOG_OPERATE_TOPIC = "0x4d93b232a24e82b284ced7461bf4deacffe66759d5c24513e6f29e571ad78d15"
+
+# VaultFactory NewPositionMinted(address indexed vault, address indexed owner,
+# uint256 indexed nftId) — the factory's second, vault-scoped mint signal,
+# usable to corroborate the ERC-721 Transfer (both come from the factory).
+FACTORY_NEW_POSITION_MINTED_TOPIC = "0xfcc2278353c4cc5d54b742d7eee2d4a7abc22e4dc6213340088293860d502b51"
+
+# Vault LogOperate payload: exactly 5 non-indexed words (user, nftId, colAmt,
+# debtAmt, to) = 160 bytes = 320 hex chars. Anything else is truncated /
+# foreign and is REJECTED, never partially decoded (fail closed).
+_VAULT_LOG_OPERATE_DATA_HEX_LEN = 5 * 64
+
 # ERC-4626 fToken lending events (VIB-5030). Standard vault events — same
 # topics the morpho_vault (MetaMorpho) parser pins:
 # Deposit(address indexed sender, address indexed owner, uint256 assets, uint256 shares)
@@ -85,6 +112,50 @@ class FluidSwapEvent:
     amount_out: int
     to: str
     log_index: int = 0
+
+
+@dataclass
+class FluidVaultOperateEvent:
+    """Parsed VaultT1 ``LogOperate`` event (VIB-5031).
+
+    The SIGNED deltas are the receipt-truth amounts for accounting — never
+    inferred from ERC-20 Transfer topology, because native-collateral legs
+    produce no Transfer (the V3.5 close paid raw ETH with no ERC-20 log),
+    and the int-min sentinel's true amount is only knowable from this event.
+    """
+
+    nft_id: int
+    col_delta: int  # signed, raw collateral token units
+    debt_delta: int  # signed, raw debt token units
+    vault: str  # log emitter (lowercased)
+    log_index: int = 0
+
+
+def _log_emitter(log: dict[str, Any]) -> str:
+    """Normalized lowercase emitting address of a log."""
+    address = log.get("address", "")
+    if isinstance(address, bytes):
+        address = "0x" + address.hex()
+    return str(address).lower()
+
+
+def _vault_factory_address(chain: str) -> str:
+    """Lowercased VaultFactory address for ``chain`` (the ERC-721 home)."""
+    return FLUID_ADDRESSES.get(chain, {}).get("vault_factory", "").lower()
+
+
+@dataclass
+class FluidVaultParseResult:
+    """Result of parsing a Fluid vault ``operate()`` receipt."""
+
+    success: bool
+    transaction_hash: str = ""
+    block_number: int = 0
+    #: Factory-gated mint nftId (Transfer 0x0 -> wallet emitted by the
+    #: VaultFactory ONLY); None when the receipt contains no genuine mint.
+    minted_nft_id: int | None = None
+    operate_events: list[FluidVaultOperateEvent] = field(default_factory=list)
+    error: str | None = None
 
 
 @dataclass
@@ -184,11 +255,15 @@ class FluidReceiptParser:
                 if swap_event:
                     swap_events.append(swap_event)
 
-            # ERC-721 Transfer (mint) — fallback for NFT ID extraction
+            # ERC-721 Transfer (mint) — fallback for NFT ID extraction.
+            # FACTORY-GATED (VIB-5031, ADR §5): the position NFT lives on the
+            # VaultFactory, so only a factory-emitted mint may be captured —
+            # an unrelated mint inside a bundled/Zodiac transaction was
+            # previously mis-captured by this branch (strictly narrowing).
             elif topic0 == ERC721_TRANSFER_TOPIC and len(topics) >= 4:
                 from_addr = HexDecoder.topic_to_address(topics[1])
-                if from_addr == ZERO_ADDRESS:
-                    # Mint event — tokenId is topic[3]
+                if from_addr == ZERO_ADDRESS and _log_emitter(log) == _vault_factory_address(self.chain):
+                    # Factory mint event — tokenId is topic[3]
                     token_id = int(HexDecoder.normalize_hex(topics[3]), 16)
                     if nft_id is None:
                         nft_id = token_id
@@ -552,3 +627,263 @@ class FluidReceiptParser:
         if not s.startswith("0x"):
             s = "0x" + s
         return s.lower()
+
+
+# =============================================================================
+# FluidVaultReceiptParser — vault NFT-CDP lifecycle (Phase 3, VIB-5031)
+# =============================================================================
+
+
+class FluidVaultReceiptParser:
+    """Receipt parser for Fluid vault ``operate()`` transactions.
+
+    Routed by the ``fluid_vault`` protocol key (the fluid_vault manifest's
+    receipt-parser connector) for SUPPLY / BORROW / REPAY / WITHDRAW /
+    DELEVERAGE receipts. Three sources, in trust order:
+
+    1. **Factory-gated ERC-721 mint** — ``Transfer(0x0 -> wallet, nftId)``
+       emitted by the VaultFactory ONLY. Foreign mints inside a bundled /
+       Zodiac receipt are ignored (ADR §5; the verification report proved
+       the genuine mint's emitter == ``VaultResolver.FACTORY()``).
+    2. **VaultT1 ``LogOperate``** — the receipt-truth SIGNED deltas (the
+       int-min sentinel's true amount is only knowable from this event;
+       native legs produce no ERC-20 Transfer to infer from).
+    3. The two Liquidity-layer ``LogOperate`` legs are corroboration only
+       and are never decoded as amounts (different signature — topic0
+       ``0x4d93b232…``).
+
+    Fail-closed everywhere (Empty ≠ Zero): reverted receipts, truncated
+    payloads (data must be EXACTLY 5 words), foreign mints, and ambiguous
+    multi-operate receipts all yield ``None`` — never a fabricated nftId or
+    zero-filled delta.
+    """
+
+    SUPPORTED_EXTRACTIONS: frozenset[str] = frozenset(
+        {
+            "position_id",
+            "supply_amount",
+            "borrow_amount",
+            "repay_amount",
+            "withdraw_amount",
+            "lending_data",
+        }
+    )
+
+    def __init__(self, chain: str = "arbitrum") -> None:
+        self.chain = chain.lower()
+
+    # ------------------------------------------------------------------
+    # Core parse
+    # ------------------------------------------------------------------
+
+    def parse_receipt(self, receipt: dict[str, Any]) -> FluidVaultParseResult:
+        """Parse a Fluid vault operate() receipt (mint + signed deltas)."""
+        tx_hash = receipt.get("transactionHash", "")
+        if isinstance(tx_hash, bytes):
+            tx_hash = "0x" + tx_hash.hex()
+        block_number = receipt.get("blockNumber", 0)
+
+        if receipt.get("status", 1) != 1:
+            return FluidVaultParseResult(
+                success=False,
+                transaction_hash=str(tx_hash),
+                block_number=block_number,
+                error="Transaction reverted",
+            )
+
+        factory = _vault_factory_address(self.chain)
+        minted_nft_ids: list[int] = []
+        operate_events: list[FluidVaultOperateEvent] = []
+
+        for i, log in enumerate(receipt.get("logs", [])):
+            topics = log.get("topics", [])
+            if not topics:
+                continue
+            topic0 = self._normalize_topic(topics[0])
+
+            if topic0 == VAULT_LOG_OPERATE_TOPIC:
+                event = self._parse_vault_operate(log, i)
+                if event is not None:
+                    operate_events.append(event)
+
+            elif topic0 == ERC721_TRANSFER_TOPIC and len(topics) >= 4:
+                # Factory-gated mint: emitter must BE the chain's VaultFactory;
+                # a foreign ERC-721 mint in the same receipt is ignored.
+                if factory and _log_emitter(log) == factory:
+                    from_addr = HexDecoder.topic_to_address(topics[1])
+                    if from_addr == ZERO_ADDRESS:
+                        minted_nft_ids.append(int(HexDecoder.normalize_hex(topics[3]), 16))
+
+        # Two DIFFERENT factory mints in one receipt: this connector never
+        # batches opens, so attribution is ambiguous — fail closed (no
+        # captured nftId) rather than guess first-wins.
+        distinct_mints = set(minted_nft_ids)
+        if len(distinct_mints) > 1:
+            logger.warning(
+                "Ambiguous Fluid vault receipt: %d distinct factory mints %s — not capturing an nftId",
+                len(distinct_mints),
+                sorted(distinct_mints),
+            )
+            minted_nft_id = None
+        else:
+            minted_nft_id = minted_nft_ids[0] if minted_nft_ids else None
+
+        # Mint <-> operate correlation: when the vault's own LogOperate names
+        # a nonzero nftId, a captured factory mint MUST agree with it. A
+        # mismatch means the mint belongs to a different position in the same
+        # receipt (bundler/multicall) — ambiguous attribution, fail closed.
+        if minted_nft_id is not None:
+            operate_nft_ids = {event.nft_id for event in operate_events if event.nft_id != 0}
+            if operate_nft_ids and minted_nft_id not in operate_nft_ids:
+                logger.warning(
+                    "Ambiguous Fluid vault receipt: factory mint tokenId %d does not match "
+                    "vault LogOperate nftId(s) %s — not capturing an nftId",
+                    minted_nft_id,
+                    sorted(operate_nft_ids),
+                )
+                minted_nft_id = None
+
+        return FluidVaultParseResult(
+            success=bool(operate_events) or minted_nft_id is not None,
+            transaction_hash=str(tx_hash),
+            block_number=block_number,
+            minted_nft_id=minted_nft_id,
+            operate_events=operate_events,
+        )
+
+    def _parse_vault_operate(self, log: dict[str, Any], log_index: int) -> FluidVaultOperateEvent | None:
+        """Decode the 5-word VaultT1 LogOperate payload (nothing indexed).
+
+        Layout (verification report D2): ``user_``, ``nftId_``, ``colAmt_``
+        (int256 two's-complement), ``debtAmt_`` (int256), ``to_``. A payload
+        that is not EXACTLY 5 words is truncated/foreign and is rejected —
+        never partially decoded.
+        """
+        data = HexDecoder.normalize_hex(log.get("data", "0x"))
+        if len(data) != _VAULT_LOG_OPERATE_DATA_HEX_LEN:
+            logger.warning(
+                "Malformed Fluid vault LogOperate payload (%d hex chars, expected %d) — rejecting (fail closed)",
+                len(data),
+                _VAULT_LOG_OPERATE_DATA_HEX_LEN,
+            )
+            return None
+        try:
+            nft_id = int(data[64:128], 16)
+            col_delta = HexDecoder.decode_int256(data, 64)
+            debt_delta = HexDecoder.decode_int256(data, 96)
+        except (ValueError, IndexError, TypeError) as exc:
+            logger.warning("Undecodable Fluid vault LogOperate payload: %s — rejecting (fail closed)", exc)
+            return None
+        return FluidVaultOperateEvent(
+            nft_id=nft_id,
+            col_delta=col_delta,
+            debt_delta=debt_delta,
+            vault=_log_emitter(log),
+            log_index=log_index,
+        )
+
+    def _single_operate_event(self, receipt: dict[str, Any]) -> FluidVaultOperateEvent | None:
+        """The receipt's ONE vault operate event, or None (fail closed).
+
+        A fluid_vault intent compiles exactly one ``operate()``; multiple
+        vault events mean a bundler/multicall receipt this parser cannot
+        attribute — ambiguous, so no amount is ever guessed.
+        """
+        result = self.parse_receipt(receipt)
+        if not result.operate_events:
+            return None
+        if len(result.operate_events) > 1:
+            logger.warning(
+                "Ambiguous Fluid vault receipt: %d LogOperate events — returning None (fail closed)",
+                len(result.operate_events),
+            )
+            return None
+        return result.operate_events[0]
+
+    # ------------------------------------------------------------------
+    # Result Enrichment Methods (called by ResultEnricher / runner hooks)
+    # ------------------------------------------------------------------
+
+    def extract_position_id(self, receipt: dict[str, Any]) -> int | None:
+        """The position nftId: factory mint first (opens), vault event second.
+
+        Returns ``None`` (never a fabricated id) when the receipt carries
+        neither a factory-emitted mint nor a vault LogOperate. Multiple vault
+        LogOperate events mean a bundler/multicall receipt this parser cannot
+        attribute — fail closed exactly like ``_single_operate_event`` (a
+        surviving factory mint does not rescue an ambiguous receipt). A
+        LogOperate ``nftId`` of 0 is the operate() MINT SENTINEL, never a
+        real position id — when no factory mint resolved it, fail closed
+        (the same 0-is-not-an-id rule the mint<->operate correlation uses).
+        """
+        result = self.parse_receipt(receipt)
+        if len(result.operate_events) > 1:
+            logger.warning(
+                "Ambiguous Fluid vault receipt: %d LogOperate events — not extracting a position id (fail closed)",
+                len(result.operate_events),
+            )
+            return None
+        if result.minted_nft_id is not None:
+            return result.minted_nft_id
+        if result.operate_events and result.operate_events[0].nft_id != 0:
+            return result.operate_events[0].nft_id
+        return None
+
+    def extract_lending_data(self, receipt: dict[str, Any]) -> dict[str, str] | None:
+        """``FluidVaultOperateData`` — the §6.3 ``extracted_data_json`` payload.
+
+        String-encoded ints for JSON safety. This is the ONLY persisted home
+        of the nftId (no Postgres DDL, no typed-event field at v1). A
+        LogOperate ``nftId`` of 0 is the operate() MINT SENTINEL, never a
+        real position id — the key is OMITTED (fail closed, never "0") while
+        the receipt-truth deltas are still emitted.
+        """
+        event = self._single_operate_event(receipt)
+        if event is None:
+            return None
+        data = {
+            "vault": event.vault,
+            "col_delta": str(event.col_delta),
+            "debt_delta": str(event.debt_delta),
+        }
+        if event.nft_id != 0:
+            data["nft_id"] = str(event.nft_id)
+        return data
+
+    def extract_supply_amount(self, receipt: dict[str, Any]) -> int | None:
+        """Receipt-truth collateral added (positive col delta), else None."""
+        event = self._single_operate_event(receipt)
+        if event is None or event.col_delta <= 0:
+            return None
+        return event.col_delta
+
+    def extract_borrow_amount(self, receipt: dict[str, Any]) -> int | None:
+        """Receipt-truth debt drawn (positive debt delta), else None."""
+        event = self._single_operate_event(receipt)
+        if event is None or event.debt_delta <= 0:
+            return None
+        return event.debt_delta
+
+    def extract_repay_amount(self, receipt: dict[str, Any]) -> int | None:
+        """Receipt-truth debt repaid (negative debt delta, absolute).
+
+        For ``repay_full`` the compiled calldata carried the int-min
+        sentinel — the TRUE amount exists only here, in the resolved
+        signed delta the vault logged.
+        """
+        event = self._single_operate_event(receipt)
+        if event is None or event.debt_delta >= 0:
+            return None
+        return -event.debt_delta
+
+    def extract_withdraw_amount(self, receipt: dict[str, Any]) -> int | None:
+        """Receipt-truth collateral withdrawn (negative col delta, absolute)."""
+        event = self._single_operate_event(receipt)
+        if event is None or event.col_delta >= 0:
+            return None
+        return -event.col_delta
+
+    @staticmethod
+    def _normalize_topic(topic: Any) -> str:
+        """Normalize a log topic to lowercase hex string with 0x prefix."""
+        return FluidReceiptParser._normalize_topic(topic)

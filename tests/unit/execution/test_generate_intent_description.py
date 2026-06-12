@@ -885,6 +885,8 @@ class TestAmountEncodingDerivation:
         )
 
         # VIB-5030 added "fluid" (ERC-4626 asset base units in
-        # supply_amount / withdraw_amount) to the legacy aave_v3 + spark set.
-        assert _wei_lending_protocols() == frozenset({"aave_v3", "spark", "fluid"})
+        # supply_amount / withdraw_amount) to the legacy aave_v3 + spark set;
+        # VIB-5031 added "fluid_vault" (operate() raw-unit amounts) on its
+        # own manifest.
+        assert _wei_lending_protocols() == frozenset({"aave_v3", "spark", "fluid", "fluid_vault"})
         assert _human_amount_swap_protocols() == frozenset({"curve", "aerodrome"})
