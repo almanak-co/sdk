@@ -28,3 +28,15 @@ def _reset_runtime_private_key_override() -> Iterator[None]:
         yield
     finally:
         run_helpers._runtime_private_key_override.reset(token)
+
+
+@pytest.fixture(autouse=True)
+def _enable_backtesting_feature_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opt the CLI test suite in to the gated backtesting feature.
+
+    Backtesting is disabled by default behind ``ALMANAK_ENABLE_BACKTESTING``
+    until VIB-5079 lands; the existing CLI tests exercise the commands behind
+    the gate. The gate itself is covered by
+    ``test_backtest_feature_flag.py``, which removes the variable again.
+    """
+    monkeypatch.setenv("ALMANAK_ENABLE_BACKTESTING", "1")

@@ -180,6 +180,10 @@ almanak strat backtest dashboard    # Interactive results dashboard
 
 ## Backtesting
 
+> **Experimental - disabled by default.** Backtesting is gated behind
+> `ALMANAK_ENABLE_BACKTESTING=1` while known correctness issues are fixed;
+> results should not be trusted for strategy decisions yet.
+
 The SDK provides a dual-engine backtesting system for institutional-grade strategy validation:
 
 | Engine | Best For | Requirements |
