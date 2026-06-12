@@ -1576,8 +1576,13 @@ class BacktestMetrics:
     All financial values are in USD. Ratios are decimal (0.1 = 10%).
 
     Attributes:
-        total_pnl_usd: Total PnL before execution costs
-        net_pnl_usd: Net PnL after all execution costs
+        total_pnl_usd: Equity-curve PnL (final - initial portfolio value).
+            Already net of execution costs, which are debited from the
+            portfolio during execution.
+        net_pnl_usd: Equals total_pnl_usd. Retained for API compatibility;
+            re-subtracting the cost columns would double-count costs already
+            reflected in the equity curve. The cost breakdown lives in
+            total_fees_usd / total_slippage_usd / total_gas_usd.
         sharpe_ratio: Risk-adjusted return (annualized, assuming 0 risk-free rate)
         max_drawdown_pct: Maximum peak-to-trough decline as decimal (0.1 = 10%)
         win_rate: Percentage of profitable trades as decimal (0.6 = 60%)

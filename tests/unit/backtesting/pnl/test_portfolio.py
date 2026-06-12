@@ -663,6 +663,59 @@ class TestPortfolioGetMetrics:
         assert metrics.total_slippage_usd == Decimal("3")
         assert metrics.total_gas_usd == Decimal("1.5")
 
+    def test_net_pnl_equals_equity_curve_pnl_despite_execution_costs(
+        self, portfolio: SimulatedPortfolio, base_timestamp: datetime
+    ) -> None:
+        """net_pnl_usd must equal the equity-curve PnL, not re-subtract costs.
+
+        Execution costs are debited from the portfolio during execution (gas
+        and venue fee/slippage from cash, SWAP fee/slippage netted into
+        tokens_in), so the equity curve is already net of them. Subtracting
+        the cost columns again from ``final - initial`` double-counts every
+        cost. The cost columns remain the informational breakdown only —
+        the contract `calculate_metrics` already pins.
+        """
+        portfolio.trades = [
+            TradeRecord(
+                timestamp=base_timestamp,
+                intent_type=IntentType.SWAP,
+                executed_price=Decimal("3000"),
+                fee_usd=Decimal("30"),
+                slippage_usd=Decimal("10"),
+                gas_cost_usd=Decimal("5"),
+                pnl_usd=Decimal("0"),
+                success=True,
+            ),
+            TradeRecord(
+                timestamp=base_timestamp + timedelta(days=1),
+                intent_type=IntentType.LP_OPEN,
+                executed_price=Decimal("3000"),
+                fee_usd=Decimal("20"),
+                slippage_usd=Decimal("8"),
+                gas_cost_usd=Decimal("7"),
+                pnl_usd=Decimal("0"),
+                success=True,
+            ),
+        ]
+        # The equity curve already reflects the $80 of costs above: the
+        # portfolio ended at 10100, not 10180.
+        portfolio.equity_curve = [
+            EquityPoint(timestamp=base_timestamp, value_usd=Decimal("10000")),
+            EquityPoint(
+                timestamp=base_timestamp + timedelta(days=2),
+                value_usd=Decimal("10100"),
+            ),
+        ]
+
+        metrics = portfolio.get_metrics()
+
+        assert metrics.total_pnl_usd == Decimal("100")
+        assert metrics.net_pnl_usd == metrics.total_pnl_usd
+        # The breakdown columns still report the costs without re-deducting them.
+        assert metrics.total_fees_usd == Decimal("50")
+        assert metrics.total_slippage_usd == Decimal("18")
+        assert metrics.total_gas_usd == Decimal("12")
+
     def test_get_metrics_max_drawdown(self, portfolio: SimulatedPortfolio, base_timestamp: datetime) -> None:
         """Test get_metrics calculates correct max drawdown."""
         # Create equity curve with a 10% drawdown

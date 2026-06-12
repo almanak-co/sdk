@@ -1345,6 +1345,9 @@ class SimulatedPortfolio:
 
         return Decimal("0")
 
+    # crap-allowlist: VIB-5079 pre-existing cc=37 touched by 5-line net-PnL semantics fix (#2756)
+    # Decomposition (likely: delegate the math shared with metrics_calculator.calculate_metrics)
+    # is blocked on the backtesting blueprint (VIB-5080) per crap-refactor.md step 1.
     def get_metrics(self) -> BacktestMetrics:
         """Calculate backtest metrics from equity curve and trades.
 
@@ -1371,11 +1374,15 @@ class SimulatedPortfolio:
 
         total_pnl = final_value - initial_value
 
-        # Execution costs
+        # Execution costs (informational breakdown only -- the equity curve
+        # is already net of them: gas and venue fee/slippage are debited from
+        # cash in apply_fill, SWAP fee/slippage are netted into tokens_in).
+        # Subtracting them from total_pnl again would double-count every
+        # cost, so net_pnl == total_pnl (same contract as calculate_metrics).
         total_fees = sum((t.fee_usd for t in self.trades), Decimal("0"))
         total_slippage = sum((t.slippage_usd for t in self.trades), Decimal("0"))
         total_gas = sum((t.gas_cost_usd for t in self.trades), Decimal("0"))
-        net_pnl = total_pnl - total_fees - total_slippage - total_gas
+        net_pnl = total_pnl
 
         # Returns
         total_return = (final_value - initial_value) / initial_value if initial_value > 0 else Decimal("0")

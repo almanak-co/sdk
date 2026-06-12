@@ -146,3 +146,45 @@ class TestVIB2915SchemaMigration:
 
         assert second.metrics.total_return_pct == first.metrics.total_return_pct
         assert second.metrics.annualized_return_pct == first.metrics.annualized_return_pct
+
+
+class TestNetPnlEqualsEquityCurvePnl:
+    """net_pnl_usd == total_pnl_usd == equity-curve PnL (VIB-5079).
+
+    Execution costs (gas, venue fee/slippage, SWAP fee/slippage netted into
+    tokens_in) are debited from the portfolio during execution, so the equity
+    curve is already net of them. ``net_pnl_usd`` must therefore equal the
+    equity-curve PnL; re-subtracting the cost columns would double-count
+    every cost. The cost columns are an informational breakdown only.
+    """
+
+    def test_net_pnl_is_not_reduced_by_cost_columns(self) -> None:
+        from almanak.framework.backtesting.models import IntentType, TradeRecord
+
+        t0 = datetime(2024, 1, 1)
+        portfolio = _make_portfolio(
+            [
+                (t0, Decimal("10000")),
+                (t0 + timedelta(days=30), Decimal("10100")),
+            ]
+        )
+        trades = [
+            TradeRecord(
+                timestamp=t0,
+                intent_type=IntentType.SWAP,
+                executed_price=Decimal("3000"),
+                fee_usd=Decimal("30"),
+                slippage_usd=Decimal("10"),
+                gas_cost_usd=Decimal("5"),
+                pnl_usd=Decimal("0"),
+                success=True,
+            ),
+        ]
+
+        metrics = calculate_metrics(portfolio, trades=trades, config=_make_config())
+
+        assert metrics.total_pnl_usd == Decimal("100")
+        assert metrics.net_pnl_usd == metrics.total_pnl_usd
+        assert metrics.total_fees_usd == Decimal("30")
+        assert metrics.total_slippage_usd == Decimal("10")
+        assert metrics.total_gas_usd == Decimal("5")
