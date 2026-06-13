@@ -43,15 +43,20 @@ Example:
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
 from almanak.core.constants import STABLECOINS
 from almanak.core.enums import Chain
+from almanak.framework.backtesting.adapters._sync_bridge import (
+    in_running_event_loop_task,
+    run_coroutine_blocking,
+)
 from almanak.framework.backtesting.adapters.base import (
     StrategyBacktestAdapter,
     StrategyBacktestConfig,
@@ -85,13 +90,16 @@ if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.providers.multi_dex_volume import (
         MultiDEXVolumeProvider,
     )
-    from almanak.framework.backtesting.pnl.types import LiquidityResult
+    from almanak.framework.backtesting.pnl.types import LiquidityResult, VolumeResult
     from almanak.framework.intents.vocabulary import Intent
 
 logger = logging.getLogger(__name__)
 
 # Uniswap V3 tick constants
 TICK_BASE = Decimal("1.0001")
+
+_RAISE_PLAIN: Final = object()
+"""Sentinel for ``_volume_data_unavailable``: raise without a ``from`` clause."""
 
 
 class RangeStatus(StrEnum):
@@ -1047,7 +1055,161 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             self._volume_provider = None
             return None
 
-    def _get_historical_volume(  # noqa: C901
+    def _volume_data_unavailable(
+        self,
+        *,
+        identifier: str,
+        timestamp: datetime,
+        message: str,
+        chain: str | None,
+        protocol: str | None,
+        cache_key: tuple[str, date] | None = None,
+        cause: BaseException | None | object = _RAISE_PLAIN,
+        on_fallback: Callable[[], None] | None = None,
+    ) -> tuple[None, DataConfidence]:
+        """Apply the fidelity contract for a failed historical volume lookup.
+
+        Strict historical mode raises HistoricalDataUnavailableError -- chained
+        from ``cause`` unless it is the ``_RAISE_PLAIN`` sentinel -- without
+        logging or caching. Non-strict mode runs ``on_fallback`` (the per-site
+        log call), caches ``(None, LOW)`` under ``cache_key`` when one is
+        given, and returns the degraded result.
+        """
+        if self._is_strict_historical_mode():
+            error = HistoricalDataUnavailableError(
+                data_type="volume",
+                identifier=identifier,
+                timestamp=timestamp,
+                message=message,
+                chain=chain,
+                protocol=protocol,
+            )
+            if cause is _RAISE_PLAIN:
+                raise error
+            raise error from cast("BaseException | None", cause)
+        if on_fallback is not None:
+            on_fallback()
+        if cache_key is not None:
+            self._volume_cache[cache_key] = (None, DataConfidence.LOW)
+        return None, DataConfidence.LOW
+
+    def _resolve_volume_chain(
+        self,
+        timestamp: datetime,
+        protocol: str | None,
+        cache_key: tuple[str, date],
+    ) -> Chain | None:
+        """Resolve the config chain string to a Chain enum for volume lookups.
+
+        Returns None when the chain is unknown and the non-strict fallback has
+        already been applied (warning logged, ``(None, LOW)`` cached); strict
+        mode raises instead.
+        """
+        chain_str = self._config.chain.upper()
+        try:
+            return Chain[chain_str]
+        except KeyError:
+            self._volume_data_unavailable(
+                identifier=cache_key[0],
+                timestamp=timestamp,
+                message=f"Unknown chain '{chain_str}', cannot fetch historical volume",
+                chain=chain_str,
+                protocol=protocol,
+                cache_key=cache_key,
+                cause=None,
+                on_fallback=lambda: logger.warning("Unknown chain '%s', cannot fetch historical volume", chain_str),
+            )
+            return None
+
+    def _cache_volume_success(
+        self,
+        cache_key: tuple[str, date],
+        result: "VolumeResult",
+    ) -> tuple[Decimal, DataConfidence]:
+        """Cache and return a successful volume lookup, logging its source."""
+        volume_usd = result.value
+        confidence = result.source_info.confidence
+        self._volume_cache[cache_key] = (volume_usd, confidence)
+        logger.debug(
+            "Fetched historical volume for pool %s... on %s: volume=$%.2f, confidence=%s, source=%s",
+            cache_key[0][:10],
+            cache_key[1],
+            float(volume_usd),
+            confidence.value,
+            result.source_info.source,
+        )
+        return volume_usd, confidence
+
+    def _fetch_and_cache_volume(
+        self,
+        provider: "MultiDEXVolumeProvider",
+        pool_address_lower: str,
+        timestamp: datetime,
+        target_date: date,
+        chain: Chain,
+        protocol: str | None,
+        cache_key: tuple[str, date],
+    ) -> tuple[Decimal | None, DataConfidence]:
+        """Fetch volume from the provider and cache the outcome.
+
+        Refuses to block when called from inside a running event-loop task:
+        strict mode raises, non-strict mode caches the degraded fallback.
+        """
+        chain_label = chain.value if chain else self._config.chain
+        try:
+            if in_running_event_loop_task():
+                return self._volume_data_unavailable(
+                    identifier=pool_address_lower,
+                    timestamp=timestamp,
+                    message="Cannot fetch historical volume in async context",
+                    chain=chain_label,
+                    protocol=protocol,
+                    cache_key=cache_key,
+                    on_fallback=lambda: logger.debug(
+                        "Historical volume fetch skipped in async context; using fallback."
+                    ),
+                )
+            volume_results = run_coroutine_blocking(
+                lambda: provider.get_volume(
+                    pool_address=pool_address_lower,
+                    chain=chain,
+                    start_date=target_date,
+                    end_date=target_date,
+                    protocol=protocol,
+                ),
+                timeout=30,
+            )
+            if volume_results and len(volume_results) > 0:
+                return self._cache_volume_success(cache_key, volume_results[0])
+            return self._volume_data_unavailable(
+                identifier=pool_address_lower,
+                timestamp=timestamp,
+                message="No historical volume data returned from the gateway DEX-volume lane (GetDexVolumeHistory)",
+                chain=chain_label,
+                protocol=protocol,
+                cache_key=cache_key,
+            )
+        except HistoricalDataUnavailableError:
+            raise
+        except Exception as e:
+            fetch_error = e
+            return self._volume_data_unavailable(
+                identifier=pool_address_lower,
+                timestamp=timestamp,
+                message=f"Failed to fetch historical volume: {fetch_error}",
+                chain=chain_label,
+                protocol=protocol,
+                cache_key=cache_key,
+                cause=fetch_error,
+                on_fallback=lambda: logger.debug(
+                    "Failed to fetch historical volume for pool %s on %s: %s",
+                    pool_address_lower[:10],
+                    target_date,
+                    fetch_error,
+                ),
+            )
+
+    def _get_historical_volume(
         self,
         pool_address: str | None,
         timestamp: datetime,
@@ -1056,13 +1218,15 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
     ) -> tuple[Decimal | None, DataConfidence]:
         """Get historical pool volume for a specific date.
 
-        Fetches volume data from MultiDEXVolumeProvider which routes to the correct
-        DEX-specific subgraph based on protocol or chain detection.
+        Fetches volume data from MultiDEXVolumeProvider, which routes to the
+        gateway DEX-volume lane (GetDexVolumeHistory) based on protocol or
+        chain detection.
 
         Args:
             pool_address: The pool contract address (optional)
             timestamp: The timestamp to get volume for
-            chain: Chain enum for subgraph routing (optional, defaults to config.chain)
+            chain: Chain enum for gateway DEX-volume lane routing (optional,
+                defaults to config.chain)
             protocol: Protocol identifier (e.g., "uniswap_v3", "aerodrome") (optional)
 
         Returns:
@@ -1074,165 +1238,45 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 historical volume data cannot be fetched.
         """
         if not pool_address:
-            if self._is_strict_historical_mode():
-                raise HistoricalDataUnavailableError(
-                    data_type="volume",
-                    identifier="unknown",
-                    timestamp=timestamp,
-                    message="Pool address not provided for historical volume lookup",
-                    chain=self._config.chain,
-                    protocol=protocol,
-                )
-            return None, DataConfidence.LOW
+            return self._volume_data_unavailable(
+                identifier="unknown",
+                timestamp=timestamp,
+                message="Pool address not provided for historical volume lookup",
+                chain=self._config.chain,
+                protocol=protocol,
+            )
 
         provider = self._ensure_volume_provider()
         if provider is None:
-            if self._is_strict_historical_mode():
-                raise HistoricalDataUnavailableError(
-                    data_type="volume",
-                    identifier=pool_address,
-                    timestamp=timestamp,
-                    message="Volume provider not available (historical volume disabled or failed to initialize)",
-                    chain=self._config.chain,
-                    protocol=protocol,
-                )
-            return None, DataConfidence.LOW
+            return self._volume_data_unavailable(
+                identifier=pool_address,
+                timestamp=timestamp,
+                message="Volume provider not available (historical volume disabled or failed to initialize)",
+                chain=self._config.chain,
+                protocol=protocol,
+            )
 
-        # Normalize pool address and get date
         pool_address_lower = pool_address.lower()
         target_date = timestamp.date() if isinstance(timestamp, datetime) else timestamp
 
-        # Check cache first
         cache_key = (pool_address_lower, target_date)
         if cache_key in self._volume_cache:
             return self._volume_cache[cache_key]
 
-        # Determine chain from config if not provided
         if chain is None:
-            chain_str = self._config.chain.upper()
-            try:
-                chain = Chain[chain_str]
-            except KeyError:
-                if self._is_strict_historical_mode():
-                    raise HistoricalDataUnavailableError(
-                        data_type="volume",
-                        identifier=pool_address_lower,
-                        timestamp=timestamp,
-                        message=f"Unknown chain '{chain_str}', cannot fetch historical volume",
-                        chain=chain_str,
-                        protocol=protocol,
-                    ) from None
-                logger.warning("Unknown chain '%s', cannot fetch historical volume", chain_str)
-                self._volume_cache[cache_key] = (None, DataConfidence.LOW)
+            chain = self._resolve_volume_chain(timestamp, protocol, cache_key)
+            if chain is None:
                 return None, DataConfidence.LOW
 
-        # Fetch from MultiDEXVolumeProvider (using asyncio to run async method)
-        try:
-            # Try to get existing event loop
-            try:
-                loop = asyncio.get_running_loop()
-                loop_is_running = True
-            except RuntimeError:
-                # No running loop - create one
-                loop = asyncio.new_event_loop()
-                loop_is_running = False
-
-            # Handle case where we're already in an async context
-            if loop_is_running:
-                # Avoid blocking the running loop if we're in an async task
-                if asyncio.current_task() is not None:
-                    if self._is_strict_historical_mode():
-                        raise HistoricalDataUnavailableError(
-                            data_type="volume",
-                            identifier=pool_address_lower,
-                            timestamp=timestamp,
-                            message="Cannot fetch historical volume in async context",
-                            chain=chain.value if chain else self._config.chain,
-                            protocol=protocol,
-                        )
-                    logger.debug("Historical volume fetch skipped in async context; using fallback.")
-                    self._volume_cache[cache_key] = (None, DataConfidence.LOW)
-                    return None, DataConfidence.LOW
-                # Schedule coroutine on the running loop (thread-safe)
-                future = asyncio.run_coroutine_threadsafe(
-                    provider.get_volume(
-                        pool_address=pool_address_lower,
-                        chain=chain,
-                        start_date=target_date,
-                        end_date=target_date,
-                        protocol=protocol,
-                    ),
-                    loop,
-                )
-                try:
-                    volume_results = future.result(timeout=30)
-                except TimeoutError:
-                    future.cancel()
-                    raise
-            else:
-                try:
-                    volume_results = loop.run_until_complete(
-                        provider.get_volume(
-                            pool_address=pool_address_lower,
-                            chain=chain,
-                            start_date=target_date,
-                            end_date=target_date,
-                            protocol=protocol,
-                        )
-                    )
-                finally:
-                    loop.close()
-
-            if volume_results and len(volume_results) > 0:
-                volume_result = volume_results[0]
-                volume_usd = volume_result.value
-                confidence = volume_result.source_info.confidence
-                self._volume_cache[cache_key] = (volume_usd, confidence)
-
-                logger.debug(
-                    "Fetched historical volume for pool %s... on %s: volume=$%.2f, confidence=%s, source=%s",
-                    pool_address_lower[:10],
-                    target_date,
-                    float(volume_usd),
-                    confidence.value,
-                    volume_result.source_info.source,
-                )
-                return volume_usd, confidence
-            else:
-                # No data returned from provider
-                if self._is_strict_historical_mode():
-                    raise HistoricalDataUnavailableError(
-                        data_type="volume",
-                        identifier=pool_address_lower,
-                        timestamp=timestamp,
-                        message="No historical volume data returned from subgraph",
-                        chain=chain.value if chain else self._config.chain,
-                        protocol=protocol,
-                    )
-                self._volume_cache[cache_key] = (None, DataConfidence.LOW)
-                return None, DataConfidence.LOW
-
-        except HistoricalDataUnavailableError:
-            # Re-raise if it's already our exception
-            raise
-        except Exception as e:
-            if self._is_strict_historical_mode():
-                raise HistoricalDataUnavailableError(
-                    data_type="volume",
-                    identifier=pool_address_lower,
-                    timestamp=timestamp,
-                    message=f"Failed to fetch historical volume: {e}",
-                    chain=chain.value if chain else self._config.chain,
-                    protocol=protocol,
-                ) from e
-            logger.debug(
-                "Failed to fetch historical volume for pool %s on %s: %s",
-                pool_address_lower[:10],
-                target_date,
-                e,
-            )
-            self._volume_cache[cache_key] = (None, DataConfidence.LOW)
-            return None, DataConfidence.LOW
+        return self._fetch_and_cache_volume(
+            provider,
+            pool_address_lower,
+            timestamp,
+            target_date,
+            chain,
+            protocol,
+            cache_key,
+        )
 
     def execute_intent(
         self,

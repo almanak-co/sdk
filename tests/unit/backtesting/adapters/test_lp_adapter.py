@@ -2151,3 +2151,410 @@ class TestVolumePolicyViaDataConfig:
         )
 
         assert adapter._explicit_pool_liquidity_usd() == Decimal("999")
+
+
+# =============================================================================
+# Historical volume helper decomposition
+# =============================================================================
+
+
+class StubVolumeProvider:
+    """Async volume provider stub that records calls and returns canned data."""
+
+    def __init__(
+        self,
+        results: "list | None" = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.results = results if results is not None else []
+        self.error = error
+        self.calls: list[dict] = []
+
+    async def get_volume(self, **kwargs: object) -> list:
+        self.calls.append(dict(kwargs))
+        if self.error is not None:
+            raise self.error
+        return self.results
+
+
+def make_volume_adapter(
+    strict: bool = False,
+    chain: str = "ethereum",
+    provider: "StubVolumeProvider | None" = None,
+) -> LPBacktestAdapter:
+    """Build an adapter wired for historical-volume tests."""
+    from almanak.framework.backtesting.config import BacktestDataConfig
+
+    return LPBacktestAdapter(
+        config=LPBacktestConfig(strategy_type="lp", use_historical_volume=True, chain=chain),
+        data_config=BacktestDataConfig(strict_historical_mode=strict),
+        volume_provider=provider,
+    )
+
+
+class TestVolumeUnavailableHelper:
+    """The strict-raise-or-degrade fidelity contract in _volume_data_unavailable."""
+
+    def test_non_strict_caches_and_invokes_fallback(self) -> None:
+        """Non-strict mode logs (via on_fallback), caches (None, LOW), returns it."""
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        adapter = make_volume_adapter(strict=False)
+        ts = datetime(2024, 1, 15, 12, 0, 0)
+        key = ("0xpool", ts.date())
+        fallback_calls: list[str] = []
+
+        result = adapter._volume_data_unavailable(
+            identifier="0xpool",
+            timestamp=ts,
+            message="lookup failed",
+            chain="ethereum",
+            protocol="uniswap_v3",
+            cache_key=key,
+            on_fallback=lambda: fallback_calls.append("logged"),
+        )
+
+        assert result == (None, DataConfidence.LOW)
+        assert adapter._volume_cache[key] == (None, DataConfidence.LOW)
+        assert fallback_calls == ["logged"]
+
+    def test_non_strict_without_cache_key_skips_cache(self) -> None:
+        """The early-exit sites (no pool, no provider) must not write the cache."""
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        adapter = make_volume_adapter(strict=False)
+
+        result = adapter._volume_data_unavailable(
+            identifier="0xpool",
+            timestamp=datetime(2024, 1, 15),
+            message="lookup failed",
+            chain="ethereum",
+            protocol=None,
+        )
+
+        assert result == (None, DataConfidence.LOW)
+        assert adapter._volume_cache == {}
+
+    def test_strict_raises_with_fields_and_no_side_effects(self) -> None:
+        """Strict mode raises with all fields set; no cache write, no fallback."""
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        adapter = make_volume_adapter(strict=True)
+        ts = datetime(2024, 1, 15, 12, 0, 0)
+        fallback_calls: list[str] = []
+
+        with pytest.raises(HistoricalDataUnavailableError) as exc_info:
+            adapter._volume_data_unavailable(
+                identifier="0xpool",
+                timestamp=ts,
+                message="lookup failed",
+                chain="ethereum",
+                protocol="uniswap_v3",
+                cache_key=("0xpool", ts.date()),
+                on_fallback=lambda: fallback_calls.append("logged"),
+            )
+
+        err = exc_info.value
+        assert err.data_type == "volume"
+        assert err.identifier == "0xpool"
+        assert err.timestamp == ts
+        assert err.message == "lookup failed"
+        assert err.chain == "ethereum"
+        assert err.protocol == "uniswap_v3"
+        assert adapter._volume_cache == {}
+        assert fallback_calls == []
+
+    def test_strict_chaining_modes(self) -> None:
+        """Default raises bare; cause=None suppresses context; cause=e chains it."""
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        adapter = make_volume_adapter(strict=True)
+        common: dict = {
+            "identifier": "0xpool",
+            "timestamp": datetime(2024, 1, 15),
+            "message": "lookup failed",
+            "chain": "ethereum",
+            "protocol": None,
+        }
+
+        with pytest.raises(HistoricalDataUnavailableError) as plain:
+            adapter._volume_data_unavailable(**common)
+        assert plain.value.__cause__ is None
+        assert plain.value.__suppress_context__ is False
+
+        with pytest.raises(HistoricalDataUnavailableError) as from_none:
+            adapter._volume_data_unavailable(**common, cause=None)
+        assert from_none.value.__cause__ is None
+        assert from_none.value.__suppress_context__ is True
+
+        root = RuntimeError("root cause")
+        with pytest.raises(HistoricalDataUnavailableError) as chained:
+            adapter._volume_data_unavailable(**common, cause=root)
+        assert chained.value.__cause__ is root
+
+
+class TestResolveVolumeChain:
+    """Config-string to Chain enum resolution for the volume lane."""
+
+    def test_known_chain_returns_enum(self) -> None:
+        from almanak.core.enums import Chain
+
+        adapter = make_volume_adapter(chain="ethereum")
+        key = ("0xpool", datetime(2024, 1, 15).date())
+
+        assert adapter._resolve_volume_chain(datetime(2024, 1, 15), None, key) is Chain.ETHEREUM
+        assert adapter._volume_cache == {}
+
+    def test_unknown_chain_non_strict_warns_and_caches_low(self, caplog: pytest.LogCaptureFixture) -> None:
+        import logging
+
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        adapter = make_volume_adapter(chain="notachain")
+        ts = datetime(2024, 1, 15)
+        key = ("0xpool", ts.date())
+
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.backtesting.adapters.lp_adapter"):
+            result = adapter._resolve_volume_chain(ts, None, key)
+
+        assert result is None
+        assert adapter._volume_cache[key] == (None, DataConfidence.LOW)
+        assert any("Unknown chain 'NOTACHAIN'" in record.getMessage() for record in caplog.records)
+
+    def test_unknown_chain_strict_raises_with_suppressed_keyerror_context(self) -> None:
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        adapter = make_volume_adapter(strict=True, chain="notachain")
+        ts = datetime(2024, 1, 15)
+
+        with pytest.raises(HistoricalDataUnavailableError) as exc_info:
+            adapter._resolve_volume_chain(ts, "uniswap_v3", ("0xpool", ts.date()))
+
+        err = exc_info.value
+        assert err.chain == "NOTACHAIN"
+        assert err.identifier == "0xpool"
+        assert err.protocol == "uniswap_v3"
+        # Matches the original `raise ... from None` inside `except KeyError`.
+        assert err.__suppress_context__ is True
+        assert isinstance(err.__context__, KeyError)
+        assert adapter._volume_cache == {}
+
+
+class TestCacheVolumeSuccess:
+    """Result unpacking, cache write, and source logging for successful lookups."""
+
+    def test_stores_logs_and_returns(self, caplog: pytest.LogCaptureFixture) -> None:
+        import logging
+        from datetime import UTC
+
+        from almanak.framework.backtesting.pnl.types import (
+            DataConfidence,
+            DataSourceInfo,
+            VolumeResult,
+        )
+
+        adapter = make_volume_adapter()
+        key = ("0xabcdef123456", datetime(2024, 1, 15).date())
+        result = VolumeResult(
+            value=Decimal("1500000"),
+            source_info=DataSourceInfo(
+                source="gateway_dex_volume",
+                confidence=DataConfidence.HIGH,
+                timestamp=datetime(2024, 1, 15, tzinfo=UTC),
+            ),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="almanak.framework.backtesting.adapters.lp_adapter"):
+            volume, confidence = adapter._cache_volume_success(key, result)
+
+        assert (volume, confidence) == (Decimal("1500000"), DataConfidence.HIGH)
+        assert adapter._volume_cache[key] == (Decimal("1500000"), DataConfidence.HIGH)
+        log_line = next(r.getMessage() for r in caplog.records if "Fetched historical volume" in r.getMessage())
+        assert "0xabcdef12" in log_line
+        assert "gateway_dex_volume" in log_line
+
+
+class TestGetHistoricalVolumeOrchestration:
+    """End-to-end behaviour of _get_historical_volume through the helpers."""
+
+    @staticmethod
+    def _stub_result() -> "object":
+        from datetime import UTC
+
+        from almanak.framework.backtesting.pnl.types import (
+            DataConfidence,
+            DataSourceInfo,
+            VolumeResult,
+        )
+
+        return VolumeResult(
+            value=Decimal("1500000"),
+            source_info=DataSourceInfo(
+                source="gateway_dex_volume",
+                confidence=DataConfidence.HIGH,
+                timestamp=datetime(2024, 1, 15, tzinfo=UTC),
+            ),
+        )
+
+    def test_success_via_stub_provider(self) -> None:
+        from almanak.core.enums import Chain
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        stub = StubVolumeProvider(results=[self._stub_result()])
+        adapter = make_volume_adapter(provider=stub)
+        ts = datetime(2024, 1, 15, 12, 0, 0)
+
+        volume, confidence = adapter._get_historical_volume("0xPOOL", ts, protocol="uniswap_v3")
+
+        assert volume == Decimal("1500000")
+        assert confidence is DataConfidence.HIGH
+        assert adapter._volume_cache[("0xpool", ts.date())] == (volume, confidence)
+        assert stub.calls == [
+            {
+                "pool_address": "0xpool",
+                "chain": Chain.ETHEREUM,
+                "start_date": ts.date(),
+                "end_date": ts.date(),
+                "protocol": "uniswap_v3",
+            }
+        ]
+
+        # Second lookup is served from the cache without another provider call.
+        assert adapter._get_historical_volume("0xPOOL", ts, protocol="uniswap_v3") == (volume, confidence)
+        assert len(stub.calls) == 1
+
+    def test_empty_results_non_strict_caches_low(self) -> None:
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        stub = StubVolumeProvider(results=[])
+        adapter = make_volume_adapter(provider=stub)
+        ts = datetime(2024, 1, 15)
+
+        assert adapter._get_historical_volume("0xpool", ts) == (None, DataConfidence.LOW)
+        assert adapter._volume_cache[("0xpool", ts.date())] == (None, DataConfidence.LOW)
+
+    def test_empty_results_strict_raises_gateway_lane_message(self) -> None:
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        stub = StubVolumeProvider(results=[])
+        adapter = make_volume_adapter(strict=True, provider=stub)
+
+        with pytest.raises(HistoricalDataUnavailableError) as exc_info:
+            adapter._get_historical_volume("0xpool", datetime(2024, 1, 15))
+
+        assert exc_info.value.message == (
+            "No historical volume data returned from the gateway DEX-volume lane (GetDexVolumeHistory)"
+        )
+        assert adapter._volume_cache == {}
+
+    def test_provider_error_non_strict_caches_low(self) -> None:
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        stub = StubVolumeProvider(error=RuntimeError("provider down"))
+        adapter = make_volume_adapter(provider=stub)
+        ts = datetime(2024, 1, 15)
+
+        assert adapter._get_historical_volume("0xpool", ts) == (None, DataConfidence.LOW)
+        assert adapter._volume_cache[("0xpool", ts.date())] == (None, DataConfidence.LOW)
+
+    def test_provider_error_strict_chains_cause(self) -> None:
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        stub = StubVolumeProvider(error=RuntimeError("provider down"))
+        adapter = make_volume_adapter(strict=True, provider=stub)
+
+        with pytest.raises(HistoricalDataUnavailableError) as exc_info:
+            adapter._get_historical_volume("0xpool", datetime(2024, 1, 15))
+
+        assert exc_info.value.message == "Failed to fetch historical volume: provider down"
+        assert exc_info.value.__cause__ is stub.error
+        assert adapter._volume_cache == {}
+
+    def test_refuses_to_block_inside_async_task_non_strict(self) -> None:
+        import asyncio
+
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        stub = StubVolumeProvider(results=[self._stub_result()])
+        adapter = make_volume_adapter(provider=stub)
+        ts = datetime(2024, 1, 15)
+
+        async def lookup() -> tuple:
+            return adapter._get_historical_volume("0xpool", ts)
+
+        assert asyncio.run(lookup()) == (None, DataConfidence.LOW)
+        assert adapter._volume_cache[("0xpool", ts.date())] == (None, DataConfidence.LOW)
+        assert stub.calls == []
+
+    def test_refuses_to_block_inside_async_task_strict(self) -> None:
+        import asyncio
+
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        stub = StubVolumeProvider(results=[self._stub_result()])
+        adapter = make_volume_adapter(strict=True, provider=stub)
+
+        async def lookup() -> tuple:
+            return adapter._get_historical_volume("0xpool", datetime(2024, 1, 15))
+
+        with pytest.raises(HistoricalDataUnavailableError) as exc_info:
+            asyncio.run(lookup())
+
+        assert exc_info.value.message == "Cannot fetch historical volume in async context"
+        assert adapter._volume_cache == {}
+        assert stub.calls == []
+
+    def test_missing_pool_address_non_strict(self) -> None:
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        adapter = make_volume_adapter()
+
+        assert adapter._get_historical_volume(None, datetime(2024, 1, 15)) == (None, DataConfidence.LOW)
+        assert adapter._volume_cache == {}
+
+    def test_missing_pool_address_strict_uses_unknown_identifier(self) -> None:
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        adapter = make_volume_adapter(strict=True)
+
+        with pytest.raises(HistoricalDataUnavailableError) as exc_info:
+            adapter._get_historical_volume(None, datetime(2024, 1, 15))
+
+        assert exc_info.value.identifier == "unknown"
+        assert adapter._volume_cache == {}
+
+    def test_unavailable_provider_non_strict_skips_cache(self) -> None:
+        from almanak.framework.backtesting.config import BacktestDataConfig
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        adapter = LPBacktestAdapter(
+            config=LPBacktestConfig(strategy_type="lp", use_historical_volume=True),
+            data_config=BacktestDataConfig(use_historical_volume=False),
+        )
+
+        assert adapter._get_historical_volume("0xpool", datetime(2024, 1, 15)) == (None, DataConfidence.LOW)
+        assert adapter._volume_cache == {}
+
+    def test_unavailable_provider_strict_keeps_original_case_identifier(self) -> None:
+        from almanak.framework.backtesting.config import BacktestDataConfig
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        adapter = LPBacktestAdapter(
+            config=LPBacktestConfig(strategy_type="lp", use_historical_volume=True),
+            data_config=BacktestDataConfig(strict_historical_mode=True, use_historical_volume=False),
+        )
+
+        with pytest.raises(HistoricalDataUnavailableError) as exc_info:
+            adapter._get_historical_volume("0xPOOL", datetime(2024, 1, 15))
+
+        assert exc_info.value.identifier == "0xPOOL"
+        assert adapter._volume_cache == {}
+
+    def test_unknown_chain_returns_low_without_provider_call(self) -> None:
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        stub = StubVolumeProvider(results=[self._stub_result()])
+        adapter = make_volume_adapter(chain="notachain", provider=stub)
+
+        assert adapter._get_historical_volume("0xpool", datetime(2024, 1, 15)) == (None, DataConfidence.LOW)
+        assert stub.calls == []
