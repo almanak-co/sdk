@@ -15,6 +15,7 @@ KAMINO_LENDING_PROGRAM_ID = "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD"
 CONNECTOR = Connector(
     name="kamino",
     kind=ProtocolKind.LENDING,
+    external_ids={"defillama": "kamino-lending"},
     aliases=("kamino_klend",),
     solana_programs=(
         SolanaProgramSpec(

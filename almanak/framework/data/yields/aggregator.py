@@ -29,6 +29,7 @@ from typing import Any
 
 import aiohttp
 
+from almanak.connectors._connector_descriptor import vendor_protocol_map
 from almanak.core.chains._helpers import vendor_chain_map
 from almanak.framework.data.interfaces import DataSourceUnavailable
 from almanak.framework.data.models import (
@@ -47,24 +48,35 @@ _YIELDS_API = "https://yields.llama.fi"
 # ``ChainDescriptor.external_ids["defillama_display"]`` (byte-identical, 9 keys).
 _CHAIN_TO_LLAMA_DISPLAY: Mapping[str, str] = MappingProxyType(vendor_chain_map("defillama_display"))
 
-# Protocol -> DeFi Llama project slug
-_PROTOCOL_TO_LLAMA: dict[str, str] = {
-    "aave_v3": "aave-v3",
-    "morpho": "morpho-blue",
-    "compound_v3": "compound-v3",
-    "uniswap_v3": "uniswap-v3",
-    "aerodrome": "aerodrome-v2",
-    "lido": "lido",
-    "pancakeswap_v3": "pancakeswap-amm-v3",
+# Protocol -> DeFi Llama project slug.
+#
+# Derived compat view (VIB-4851 B1, plan 024); canonical home is
+# ``Connector.external_ids["defillama"]`` for the nine registered connectors.
+# Off-platform entries that have no connector package (or whose connector
+# name would produce the wrong legacy key) stay in _OFF_PLATFORM_LLAMA_SLUGS:
+#   jito, marinade, sanctum  — no connector package
+#   morpho                   — connector is "morpho_vault"; that name would
+#                              produce the wrong key "morpho_vault" in a
+#                              registry-keyed map; the legacy key "morpho" is
+#                              published by morpho_vault's defillama_slug_aliases
+#                              on the gateway side only (VIB-4817); residual here.
+_OFF_PLATFORM_LLAMA_SLUGS: dict[str, str] = {
     "jito": "jito",
     "marinade": "marinade-finance",
     "sanctum": "sanctum-infinity",
-    "kamino": "kamino-lending",
-    "raydium": "raydium",
-    "fluid": "fluid-dex",
+    "morpho": "morpho-blue",
 }
 
-# DeFi Llama project slug -> our yield type classification
+_PROTOCOL_TO_LLAMA: dict[str, str] = {
+    **vendor_protocol_map("defillama"),
+    **_OFF_PLATFORM_LLAMA_SLUGS,
+}
+
+# DeFi Llama project slug -> our yield type classification.
+# Vendor-side classification; hand-maintained because kind-derivation was
+# evaluated and rejected (lido is kind=LENDING but needs "staking"; fluid is
+# SWAP but needs "lp"; 9/17 entries would still need to be residual — plan 024
+# §Scope documents the anti-precedent from BacktestStrategyTypeDecl).
 _PROJECT_TYPE: dict[str, str] = {
     "aave-v3": "lending",
     "morpho-blue": "lending",

@@ -16,6 +16,7 @@ from almanak.connectors._strategy_base.address_table import AddressTableSpec
 CONNECTOR = Connector(
     name="aerodrome",
     kind=ProtocolKind.LP,
+    external_ids={"defillama": "aerodrome-v2"},
     dex_volume=DexVolumeDecl(
         chains=("base",),
         amm_family="solidly_v2",

@@ -5,6 +5,7 @@ from __future__ import annotations
 from almanak.connectors._connector_descriptor import (
     CONNECTOR_DESCRIPTOR_REGISTRY,
     CONNECTOR_REGISTRY,
+    KNOWN_PROTOCOL_VENDORS,
     BacktestRiskDecl,
     BacktestStrategyTypeDecl,
     CapabilitiesSpec,
@@ -24,6 +25,7 @@ from almanak.connectors._connector_descriptor import (
     StrategyMatrixEntry,
     SupportedChainsSpec,
     YieldPokeDecl,
+    vendor_protocol_map,
 )
 
 __all__ = [
@@ -41,11 +43,13 @@ __all__ = [
     "FeeModelDecl",
     "FundingHistoryDecl",
     "ImportRef",
+    "KNOWN_PROTOCOL_VENDORS",
     "LendingReadDecl",
     "LiquidationDefault",
     "MetadataAmountEncoding",
     "PerpsReadDecl",
     "StrategyMatrixEntry",
     "SupportedChainsSpec",
+    "vendor_protocol_map",
     "YieldPokeDecl",
 ]

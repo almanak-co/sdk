@@ -14,6 +14,7 @@ from almanak.connectors._strategy_base.address_table import AddressTableSpec
 
 CONNECTOR = Connector(
     name="fluid",
+    external_ids={"defillama": "fluid-dex"},
     # SWAP (Phase 1, VIB-5029, 4 chains) + fToken lending SUPPLY/WITHDRAW
     # (Phase 2, VIB-5030, arbitrum+base). Fluid's LP surface is
     # whitelist-gated on-chain (Phase-0 finding, VIB-5028 §V4) and ships

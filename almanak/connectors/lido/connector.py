@@ -13,6 +13,7 @@ from almanak.connectors._strategy_base.protocol_ownership import SupportedChains
 CONNECTOR = Connector(
     name="lido",
     kind=ProtocolKind.LENDING,
+    external_ids={"defillama": "lido"},
     # stETH staking backtests as a yield strategy even though the kind is LENDING.
     backtest_strategy_type=BacktestStrategyTypeDecl(strategy_type="yield"),
     gateway_connector=ImportRef(

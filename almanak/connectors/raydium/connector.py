@@ -14,6 +14,7 @@ from almanak.connectors.raydium.constants import CLMM_PROGRAM_ID
 CONNECTOR = Connector(
     name="raydium",
     kind=ProtocolKind.LP,
+    external_ids={"defillama": "raydium"},
     aliases=("raydium_clmm",),
     solana_programs=(
         SolanaProgramSpec(

@@ -18,6 +18,7 @@ from almanak.connectors.compound_v3.backtest_risk import BACKTEST_RISK as _BACKT
 CONNECTOR = Connector(
     name="compound_v3",
     kind=ProtocolKind.LENDING,
+    external_ids={"defillama": "compound-v3"},
     fee_model=FeeModelDecl(
         model=ImportRef(module="almanak.connectors.compound_v3.fee_model", attribute="CompoundV3FeeModel"),
         description="Compound V3 (Comet) lending protocol fee model",

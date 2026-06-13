@@ -16,6 +16,7 @@ from almanak.connectors._strategy_base.protocol_ownership import SupportedChains
 CONNECTOR = Connector(
     name="pancakeswap_v3",
     kind=ProtocolKind.LP,
+    external_ids={"defillama": "pancakeswap-amm-v3"},
     dex_volume=DexVolumeDecl(
         chains=("ethereum", "arbitrum", "bsc", "base"),
         amm_family="v3_concentrated",

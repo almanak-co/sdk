@@ -19,12 +19,20 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
+
+# Recognised vendor keys for ``Connector.external_ids`` (VIB-4851 B1, plan 024).
+# Mirrors ``almanak.core.chains._descriptor.KNOWN_VENDORS`` for the protocol
+# layer. ``Connector.__post_init__`` rejects any key not in this set, so a
+# typo'd vendor (e.g. ``"defi_llama"``) fails at registration time rather than
+# silently producing an unreachable id.
+KNOWN_PROTOCOL_VENDORS: frozenset[str] = frozenset({"defillama"})
 
 __all__ = [
     "CONNECTOR_REGISTRY",
@@ -37,12 +45,14 @@ __all__ = [
     "ConnectorDescriptorRegistry",
     "ConnectorDiscoveryError",
     "ImportRef",
+    "KNOWN_PROTOCOL_VENDORS",
     "LendingReadDecl",
     "LiquidationDefault",
     "MetadataAmountEncoding",
     "PerpsReadDecl",
     "StrategyMatrixEntry",
     "SupportedChainsSpec",
+    "vendor_protocol_map",
 ]
 
 
@@ -293,6 +303,16 @@ class DexVolumeDecl:
       default (aerodrome on base, traderjoe_v2 on avalanche).
     - ``generic_default``: this DEX is the detection fallback for any other
       chain it supports (uniswap_v3).
+    - ``volume_subgraph_urls``: sparse ``{chain: https_url}`` map for the
+      decentralised TheGraph gateway endpoints used by the backtesting
+      ``SubgraphVolumeProvider`` (plan 024). ``None`` = no URLs declared.
+      Keys are canonical chain names; values must start with ``"https://"``.
+      NOT named ``subgraph_endpoints`` — that name is taken by the gateway
+      side ``GatewaySubgraphCapability`` which has a different key scheme
+      (``"<protocol>-<chain>"`` aliases).
+    - ``hosted_volume_subgraph_urls``: same shape, for the free hosted-service
+      fallback endpoints (plan 024). Typically fewer chains than
+      ``volume_subgraph_urls``.
     """
 
     chains: tuple[str, ...]
@@ -304,6 +324,8 @@ class DexVolumeDecl:
     chain_default: tuple[str, ...] = ()
     generic_default: bool = False
     twap_reference_pools: ImportRef | None = None
+    volume_subgraph_urls: Mapping[str, str] | None = None
+    hosted_volume_subgraph_urls: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         """Validate the declaration's keys, chains, and family."""
@@ -339,9 +361,34 @@ class DexVolumeDecl:
             raise ValueError(
                 f"DexVolumeDecl.twap_reference_pools must be None or an ImportRef, got {self.twap_reference_pools!r}"
             )
+        self._validate_subgraph_urls("volume_subgraph_urls", self.volume_subgraph_urls)
+        self._validate_subgraph_urls("hosted_volume_subgraph_urls", self.hosted_volume_subgraph_urls)
         _validate_decl_aliases("DexVolumeDecl", self.aliases)
         if self.name is not None and self.name in self.aliases:
             raise ValueError(f"DexVolumeDecl.aliases must not include the primary name {self.name!r}")
+
+    @staticmethod
+    def _validate_subgraph_urls(field: str, urls: Mapping[str, str] | None) -> None:
+        """Validate a ``{chain: https_url}`` subgraph URL mapping."""
+        if urls is None:
+            return
+        if not isinstance(urls, Mapping):
+            raise ValueError(f"DexVolumeDecl.{field} must be None or a Mapping[str, str], got {urls!r}")
+        bad = [
+            (k, v)
+            for k, v in urls.items()
+            if (
+                not isinstance(k, str)
+                or not k.strip()
+                or k != k.lower()
+                or not isinstance(v, str)
+                or not v.startswith("https://")
+            )
+        ]
+        if bad:
+            raise ValueError(
+                f"DexVolumeDecl.{field} values must be https:// URLs keyed by lowercase chain name, got {bad!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -615,6 +662,7 @@ class Connector:
     strategy_intents: tuple[str, ...] | None = None
     strategy_chains: tuple[str, ...] | None = None
     strategy_matrix_entries: tuple[StrategyMatrixEntry, ...] | None = None
+    external_ids: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         """Validate connector-owned manifest metadata."""
@@ -681,6 +729,7 @@ class Connector:
         self._validate_compiler()
         self._validate_flash_loan()
         self._validate_strategy_support()
+        self._validate_external_ids()
 
     def _validate_address_tables(self) -> None:
         """Validate strategy-side address-table selectors."""
@@ -921,6 +970,30 @@ class Connector:
             raise ValueError(
                 f"BacktestStrategyTypeDecl.aliases must not include the effective primary name {effective_name!r}"
             )
+
+    def _validate_external_ids(self) -> None:
+        """Validate the optional vendor-keyed external-id mapping.
+
+        Mirrors ``ChainDescriptor.__post_init__`` external_ids gate (VIB-4851 B1,
+        plan 024). Keys must be in ``KNOWN_PROTOCOL_VENDORS``; values are stored
+        verbatim. ``None`` means "no vendor ids declared".
+        """
+        if self.external_ids is None:
+            return
+        if not isinstance(self.external_ids, Mapping):
+            raise ValueError(f"Connector.external_ids must be None or a Mapping[str, str], got {self.external_ids!r}")
+        unknown = [k for k in self.external_ids if k not in KNOWN_PROTOCOL_VENDORS]
+        if unknown:
+            raise ValueError(
+                f"Connector.external_ids contains unknown vendor keys {unknown!r}; "
+                f"allowed: {sorted(KNOWN_PROTOCOL_VENDORS)}"
+            )
+        bad_values = [(k, v) for k, v in self.external_ids.items() if not isinstance(v, str) or not v.strip()]
+        if bad_values:
+            raise ValueError(f"Connector.external_ids values must be non-empty strings, got {bad_values!r}")
+        # Freeze into an immutable proxy so post-construction mutations are
+        # harmless (mirrors ChainDescriptor.external_ids behaviour).
+        object.__setattr__(self, "external_ids", MappingProxyType(dict(self.external_ids)))
 
     def _validate_backtest_risk(self) -> None:
         """Validate the optional backtest-risk declaration."""
@@ -1446,6 +1519,10 @@ class ConnectorRegistry:
         """Return connectors that publish strategy-side registration metadata."""
         return tuple(d for d in self.all() if d.has_strategy_support)
 
+    def with_external_ids(self) -> tuple[Connector, ...]:
+        """Return connectors that declare vendor-keyed external ids (plan 024)."""
+        return tuple(d for d in self.all() if d.external_ids is not None)
+
     def clear(self) -> None:
         """Test helper: clear the discovery cache."""
         self._connectors = None
@@ -1699,3 +1776,30 @@ ConnectorDescriptorRegistry = ConnectorRegistry
 
 CONNECTOR_REGISTRY = ConnectorRegistry()
 CONNECTOR_DESCRIPTOR_REGISTRY = CONNECTOR_REGISTRY
+
+
+def vendor_protocol_map(vendor: str) -> dict[str, str]:
+    """Return ``{canonical_connector_name: vendor_id}`` for ``vendor``.
+
+    Inverts ``Connector.external_ids`` back into the per-vendor shape the
+    legacy standalone maps had, built **only** from the connectors whose
+    manifest actually declares ``vendor``. Sparse: a connector absent from
+    the result is genuinely unsupported by that vendor. The ``vendor`` key is
+    matched case-insensitively. An unknown / never-declared vendor yields an
+    empty dict.
+
+    Mirrors ``almanak.core.chains._helpers.vendor_chain_map`` for the
+    protocol layer (VIB-4851 B1, plan 024).
+    """
+    if not vendor:
+        return {}
+    vendor_key = vendor.lower()
+    result: dict[str, str] = {}
+    for connector in CONNECTOR_REGISTRY.all():
+        external_ids = connector.external_ids
+        if external_ids is None:
+            continue
+        vendor_id = external_ids.get(vendor_key)
+        if vendor_id is not None:
+            result[connector.name] = vendor_id
+    return result

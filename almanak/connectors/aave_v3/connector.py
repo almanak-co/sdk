@@ -19,6 +19,7 @@ from almanak.connectors.aave_v3.backtest_risk import BACKTEST_RISK as _BACKTEST_
 CONNECTOR = Connector(
     name="aave_v3",
     kind=ProtocolKind.LENDING,
+    external_ids={"defillama": "aave-v3"},
     fee_model=FeeModelDecl(
         model=ImportRef(module="almanak.connectors.aave_v3.fee_model", attribute="AaveV3FeeModel"),
         description="Aave V3 lending protocol fee model",

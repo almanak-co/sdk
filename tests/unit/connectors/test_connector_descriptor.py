@@ -2738,6 +2738,30 @@ class TestDexVolumeDeclValidation:
         with pytest.raises(ValueError, match="twap_reference_pools must be None or an ImportRef"):
             self._decl(twap_reference_pools=bad)
 
+    @pytest.mark.parametrize("field", ["volume_subgraph_urls", "hosted_volume_subgraph_urls"])
+    def test_accepts_lowercase_https_subgraph_urls(self, field):
+        decl = self._decl(**{field: {"ethereum": "https://gateway.example/subgraph"}})
+        assert getattr(decl, field) == {"ethereum": "https://gateway.example/subgraph"}
+
+    @pytest.mark.parametrize("field", ["volume_subgraph_urls", "hosted_volume_subgraph_urls"])
+    @pytest.mark.parametrize(
+        "bad_urls",
+        [
+            {"Ethereum": "https://gateway.example/subgraph"},  # uppercase key
+            {"  ": "https://gateway.example/subgraph"},  # blank key
+            {"ethereum": "http://gateway.example/subgraph"},  # non-https value
+            {"ethereum": ""},  # blank value
+        ],
+    )
+    def test_rejects_malformed_subgraph_urls(self, field, bad_urls):
+        with pytest.raises(ValueError, match=f"{field} values must be https:// URLs keyed by lowercase chain name"):
+            self._decl(**{field: bad_urls})
+
+    @pytest.mark.parametrize("field", ["volume_subgraph_urls", "hosted_volume_subgraph_urls"])
+    def test_rejects_non_mapping_subgraph_urls(self, field):
+        with pytest.raises(ValueError, match=f"{field} must be None or a Mapping"):
+            self._decl(**{field: [("ethereum", "https://gateway.example/subgraph")]})
+
 
 class TestBacktestStrategyTypeDeclValidation:
     """Each BacktestStrategyTypeDecl.__post_init__ guard fails closed (VIB-4851)."""

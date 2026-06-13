@@ -37,6 +37,7 @@ from typing import Any
 
 import aiohttp
 
+from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
 from almanak.core.chains import DEFAULT_CHAIN
 
 logger = logging.getLogger(__name__)
@@ -46,24 +47,15 @@ logger = logging.getLogger(__name__)
 # Subgraph Endpoints
 # =============================================================================
 
-# The Graph hosted service and decentralized network endpoints
-UNISWAP_V3_SUBGRAPHS: dict[str, str] = {
-    "ethereum": "https://gateway.thegraph.com/api/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
-    "arbitrum": "https://gateway.thegraph.com/api/subgraphs/id/FbCGRftH4a3yZugY7TnbYgPJVEv2LvMT6oF1fxPe9aJM",
-    "base": "https://gateway.thegraph.com/api/subgraphs/id/43Hwfi3dJSoGpyas9VwNoDAv28rqtbnqUk3EYCRr3j6i",
-    "optimism": "https://gateway.thegraph.com/api/subgraphs/id/Gc2DPCVq5UkBfyHjZDMbKTc7ynrjoSKxc6sHLKY9Pmjc",
-    "polygon": "https://gateway.thegraph.com/api/subgraphs/id/3hCPRGf4z88VC5rsBKU5AA9FBBq5nF3jbKJG7VZCbhjm",
-}
+# Derived compat views (plan 024 / VIB-4851 B1). Canonical homes are
+# ``Connector.dex_volume.volume_subgraph_urls`` /
+# ``Connector.dex_volume.hosted_volume_subgraph_urls`` on the uniswap_v3
+# manifest. These module-level names are preserved for back-compat (the test
+# suite imports them by name from this module).
+UNISWAP_V3_SUBGRAPHS: dict[str, str] = DexVolumeRegistry.volume_subgraph_urls_for("uniswap_v3") or {}
+UNISWAP_V3_HOSTED_SUBGRAPHS: dict[str, str] = DexVolumeRegistry.hosted_volume_subgraph_urls_for("uniswap_v3") or {}
 
-# Backup hosted service endpoints (free, no API key required, may be deprecated)
-UNISWAP_V3_HOSTED_SUBGRAPHS: dict[str, str] = {
-    "ethereum": "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3",
-    "arbitrum": "https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-arbitrum-one",
-    "optimism": "https://api.thegraph.com/subgraphs/name/ianlapham/optimism-post-regenesis",
-    "polygon": "https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-v3-polygon",
-}
-
-# Supported chains
+# Supported chains — derived from the primary (decentralised gateway) URL set.
 SUPPORTED_CHAINS = list(UNISWAP_V3_SUBGRAPHS.keys())
 
 # Default cache TTL: 1 hour for historical data
