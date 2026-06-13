@@ -71,11 +71,13 @@ from almanak.framework.backtesting.paper.engine import (
     get_token_decimals_with_fallback,
 )
 from almanak.framework.backtesting.paper.models import (
+    DivergenceRecord,
     PaperTrade,
     PaperTradeError,
     PaperTradeErrorType,
     PaperTradingSummary,
     PnLBreakdown,
+    ReconciliationSummary,
 )
 from almanak.framework.backtesting.paper.portfolio_tracker import PaperPortfolioTracker
 from almanak.framework.backtesting.paper.position_queries import (
@@ -136,6 +138,9 @@ __all__ = [
     "PaperTradeError",
     "PaperTradeErrorType",
     "PaperTradingSummary",
+    # Reconciliation summary (VIB-2634)
+    "DivergenceRecord",
+    "ReconciliationSummary",
     # Position queries - Uniswap V3
     "UniswapV3Position",
     "query_uniswap_v3_positions",

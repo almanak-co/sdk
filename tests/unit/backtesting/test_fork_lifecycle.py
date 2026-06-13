@@ -43,7 +43,10 @@ class TestPaperTraderConfigForkLifecycle:
         assert config.reset_fork_every_tick is True
         assert config.yield_poker_enabled is False
         assert config.use_rich_valuation is False
-        assert config.position_reconciler_enabled is False
+        # VIB-2634: reconciler defaults ON (it only runs on persistent forks;
+        # rolling-reset mode skips it with a DEBUG log).
+        assert config.position_reconciler_enabled is True
+        assert config.position_reconciler_tolerance_pct == Decimal("0.01")
 
     def test_persistent_mode(self):
         config = self._make_config(fork_lifecycle=ForkLifecycle.PERSISTENT)

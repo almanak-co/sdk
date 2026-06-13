@@ -87,6 +87,11 @@ def reset_run_state(trader: PaperTrader, strategy: PaperTradeableStrategy) -> da
     trader._equity_curve = []
     trader._tick_count = 0
     trader._reconciler_discrepancies = []
+    trader._reconciler_checks = 0
+    trader._divergence_records = {}
+    # Drop the reconciler so the next run re-baselines against its own fork
+    # instead of the previous session's positions (VIB-2634).
+    trader._position_reconciler = None
     trader._last_execution_result = None
     # Health telemetry counters (VIB-1957)
     trader._ticks_with_fork = 0
@@ -299,6 +304,14 @@ async def run_main_loop(
 
         if trader.config.position_reconciler_enabled and trader.config.fork_lifecycle == ForkLifecycle.PERSISTENT:
             await trader._run_position_reconciler()
+        elif trader.config.position_reconciler_enabled:
+            # VIB-2634: reconciling against a fork that resets to latest every
+            # tick is meaningless (no persistent state to drift) — skip.
+            logger.debug(
+                "[%s] Skipping PositionReconciler: fork_lifecycle=%s resets state every tick",
+                trader._backtest_id,
+                trader.config.fork_lifecycle.value,
+            )
 
         await asyncio.sleep(trader.config.tick_interval_seconds)
 
@@ -516,6 +529,11 @@ def init_run_loop_state(trader: PaperTrader, strategy: PaperTradeableStrategy) -
     trader._errors = []
     trader._equity_curve = []
     trader._reconciler_discrepancies = []
+    trader._reconciler_checks = 0
+    trader._divergence_records = {}
+    # Drop the reconciler so the next run re-baselines against its own fork
+    # instead of the previous session's positions (VIB-2634).
+    trader._position_reconciler = None
     trader._tick_count = 0
     trader._last_execution_result = None
     trader._ticks_with_fork = 0

@@ -184,8 +184,27 @@ class PaperTraderConfig:
     use_rich_valuation: bool = False
     """Use _value_portfolio_rich() with live prices for equity calculation."""
 
-    position_reconciler_enabled: bool = False
-    """Enable PositionReconciler to detect on-chain vs tracked divergence."""
+    position_reconciler_enabled: bool = True
+    """Enable the observe-only PositionReconciler divergence detector (VIB-2634).
+
+    Default ON. The reconciler only runs on persistent forks
+    (fork_lifecycle == PERSISTENT); when the fork resets every tick
+    (ROLLING_RESET) reconciliation against a fresh fork is meaningless and
+    the engine skips it with a DEBUG log. V1 is observe-only: divergence is
+    logged at WARNING and surfaced in PaperTradingSummary.reconciliation,
+    but nothing is auto-corrected and the tick loop never halts.
+    """
+
+    position_reconciler_tolerance_pct: Decimal = Decimal("0.01")
+    """Relative divergence threshold for the PositionReconciler (default 1%).
+
+    Divergence at or below this fraction is silent; above it, a WARNING is
+    logged and the divergence is recorded in the session summary. The 1%
+    default deliberately absorbs expected lending drift on persistent forks:
+    aToken-style balances accrue lazily on fork time advance (~0.006%/day at
+    typical rates per the VIB-2630 spike), so small on-chain-vs-tracked gaps
+    between pokes are normal and must not spam warnings.
+    """
 
     oracle_divergence_threshold: Decimal = Decimal("0.05")
     """Maximum allowed divergence between live and on-fork prices (5% default).
@@ -306,6 +325,13 @@ class PaperTraderConfig:
         if not (Decimal("0") <= self.oracle_divergence_threshold <= Decimal("1")):
             raise ValueError(
                 f"oracle_divergence_threshold must be between 0 and 1, got {self.oracle_divergence_threshold}"
+            )
+
+        # Position reconciler tolerance validation (VIB-2634)
+        if not (Decimal("0") <= self.position_reconciler_tolerance_pct <= Decimal("1")):
+            raise ValueError(
+                f"position_reconciler_tolerance_pct must be between 0 and 1, "
+                f"got {self.position_reconciler_tolerance_pct}"
             )
 
         # Startup timeout validation
@@ -440,6 +466,7 @@ class PaperTraderConfig:
             "yield_poker_enabled": self.yield_poker_enabled,
             "use_rich_valuation": self.use_rich_valuation,
             "position_reconciler_enabled": self.position_reconciler_enabled,
+            "position_reconciler_tolerance_pct": str(self.position_reconciler_tolerance_pct),
             "oracle_divergence_threshold": str(self.oracle_divergence_threshold),
             # Computed properties
             "max_duration_seconds": self.max_duration_seconds,
@@ -513,7 +540,10 @@ class PaperTraderConfig:
             else ForkLifecycle.ROLLING_RESET,
             yield_poker_enabled=data.get("yield_poker_enabled", False),
             use_rich_valuation=data.get("use_rich_valuation", False),
-            position_reconciler_enabled=data.get("position_reconciler_enabled", False),
+            position_reconciler_enabled=data.get("position_reconciler_enabled", True),
+            position_reconciler_tolerance_pct=Decimal(data["position_reconciler_tolerance_pct"])
+            if "position_reconciler_tolerance_pct" in data
+            else Decimal("0.01"),
             oracle_divergence_threshold=Decimal(data["oracle_divergence_threshold"])
             if "oracle_divergence_threshold" in data
             else Decimal("0.05"),

@@ -8,6 +8,8 @@ Models:
     - PaperTradeError: Record of a failed paper trade attempt
     - PaperTradeErrorType: Types of errors that can occur during paper trading
     - PaperTradingSummary: Summary of a paper trading session
+    - DivergenceRecord: Per-position/token aggregate of detected divergence (VIB-2634)
+    - ReconciliationSummary: Session-level divergence summary (VIB-2634)
 """
 
 from dataclasses import dataclass, field
@@ -360,6 +362,109 @@ class PnLBreakdown:
 
 
 @dataclass
+class DivergenceRecord:
+    """Per-position/token aggregate of divergence observed by the reconciler (VIB-2634).
+
+    One record per (kind, divergence_type, key) tuple. Repeated per-tick
+    observations of the same divergence fold into the same record so a
+    long session cannot flood the summary.
+
+    Attributes:
+        key: Position id (position lane) or token symbol (balance lane)
+        kind: "position" (PositionReconciler lane) or "balance"
+            (portfolio-tracker wallet-balance lane)
+        divergence_type: DiscrepancyType value (e.g. "amount_mismatch",
+            "missing_on_chain") or "balance_mismatch" for the balance lane
+        count: Number of ticks this divergence was observed
+        max_divergence_pct: Largest relative divergence seen (1 = 100%);
+            None when the divergence is non-numeric (e.g. tick-range)
+        last_seen: Timestamp of the most recent observation
+        last_expected: Expected (tracked) value at last observation
+        last_actual: Actual (on-chain) value at last observation
+        last_message: Human-readable description of the last observation
+    """
+
+    key: str
+    kind: str
+    divergence_type: str
+    count: int = 0
+    max_divergence_pct: Decimal | None = None
+    last_seen: datetime | None = None
+    last_expected: str | None = None
+    last_actual: str | None = None
+    last_message: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dictionary."""
+        return {
+            "key": self.key,
+            "kind": self.kind,
+            "divergence_type": self.divergence_type,
+            "count": self.count,
+            "max_divergence_pct": (str(self.max_divergence_pct) if self.max_divergence_pct is not None else None),
+            "last_seen": self.last_seen.isoformat() if self.last_seen else None,
+            "last_expected": self.last_expected,
+            "last_actual": self.last_actual,
+            "last_message": self.last_message,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "DivergenceRecord":
+        """Deserialize from dictionary."""
+        return cls(
+            key=data["key"],
+            kind=data["kind"],
+            divergence_type=data["divergence_type"],
+            count=data.get("count", 0),
+            max_divergence_pct=(
+                Decimal(data["max_divergence_pct"]) if data.get("max_divergence_pct") is not None else None
+            ),
+            last_seen=(datetime.fromisoformat(data["last_seen"]) if data.get("last_seen") else None),
+            last_expected=data.get("last_expected"),
+            last_actual=data.get("last_actual"),
+            last_message=data.get("last_message", ""),
+        )
+
+
+@dataclass
+class ReconciliationSummary:
+    """Session-level summary of observe-only divergence detection (VIB-2634).
+
+    Attributes:
+        checks_run: Number of per-tick reconciliation runs in the session
+        total_divergences: Total divergence observations (sum of record counts)
+        max_divergence_pct: Largest relative divergence seen across all records
+        records: Per-position/token aggregates, worst divergence first
+    """
+
+    checks_run: int = 0
+    total_divergences: int = 0
+    max_divergence_pct: Decimal | None = None
+    records: list[DivergenceRecord] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dictionary."""
+        return {
+            "checks_run": self.checks_run,
+            "total_divergences": self.total_divergences,
+            "max_divergence_pct": (str(self.max_divergence_pct) if self.max_divergence_pct is not None else None),
+            "records": [r.to_dict() for r in self.records],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ReconciliationSummary":
+        """Deserialize from dictionary."""
+        return cls(
+            checks_run=data.get("checks_run", 0),
+            total_divergences=data.get("total_divergences", 0),
+            max_divergence_pct=(
+                Decimal(data["max_divergence_pct"]) if data.get("max_divergence_pct") is not None else None
+            ),
+            records=[DivergenceRecord.from_dict(r) for r in data.get("records", [])],
+        )
+
+
+@dataclass
 class PaperTradingSummary:
     """Summary of a paper trading session.
 
@@ -402,6 +507,8 @@ class PaperTradingSummary:
     error_summary: dict[str, int] = field(default_factory=dict)
     trades: list[PaperTrade] = field(default_factory=list)
     errors: list[PaperTradeError] = field(default_factory=list)
+    reconciliation: ReconciliationSummary | None = None
+    """Observe-only divergence summary (VIB-2634); None when the reconciler never ran."""
 
     @property
     def end_time(self) -> datetime:
@@ -540,6 +647,26 @@ class PaperTradingSummary:
             for error_type, count in self.error_summary.items():
                 lines.append(f"  {error_type}: {count}")
 
+        if self.reconciliation is not None:
+            r = self.reconciliation
+            lines.extend(
+                [
+                    "",
+                    "POSITION RECONCILIATION (observe-only)",
+                    "-" * 70,
+                    f"Checks Run:         {r.checks_run}",
+                    f"Divergences:        {r.total_divergences}",
+                ]
+            )
+            if r.max_divergence_pct is not None:
+                lines.append(f"Max Divergence:     {r.max_divergence_pct * 100:.2f}%")
+            for rec in r.records:
+                pct = f"{rec.max_divergence_pct * 100:.2f}%" if rec.max_divergence_pct is not None else "n/a"
+                last_seen = rec.last_seen.strftime("%Y-%m-%d %H:%M:%S") if rec.last_seen else "n/a"
+                lines.append(
+                    f"  [{rec.kind}] {rec.key} {rec.divergence_type}: count={rec.count}, max={pct}, last_seen={last_seen}"
+                )
+
         lines.append("=" * 70)
 
         return "\n".join(lines)
@@ -566,6 +693,7 @@ class PaperTradingSummary:
             "error_summary": self.error_summary,
             "trades": [t.to_dict() for t in self.trades],
             "errors": [e.to_dict() for e in self.errors],
+            "reconciliation": self.reconciliation.to_dict() if self.reconciliation else None,
             "trades_per_hour": str(self.trades_per_hour),
             "avg_gas_per_trade": self.avg_gas_per_trade,
         }
@@ -604,6 +732,9 @@ class PaperTradingSummary:
             error_summary=data.get("error_summary", {}),
             trades=trades,
             errors=errors,
+            reconciliation=(
+                ReconciliationSummary.from_dict(data["reconciliation"]) if data.get("reconciliation") else None
+            ),
         )
 
 
@@ -613,4 +744,6 @@ __all__ = [
     "PaperTrade",
     "PaperTradeError",
     "PaperTradingSummary",
+    "DivergenceRecord",
+    "ReconciliationSummary",
 ]

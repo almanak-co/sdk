@@ -87,10 +87,12 @@ from almanak.framework.backtesting.models import (
 from almanak.framework.backtesting.paper import _engine_helpers
 from almanak.framework.backtesting.paper.config import ForkLifecycle, PaperTraderConfig
 from almanak.framework.backtesting.paper.models import (
+    DivergenceRecord,
     PaperTrade,
     PaperTradeError,
     PaperTradeErrorType,
     PaperTradingSummary,
+    ReconciliationSummary,
 )
 from almanak.framework.backtesting.paper.portfolio_tracker import PaperPortfolioTracker
 from almanak.framework.backtesting.paper.token_registry import (
@@ -480,6 +482,26 @@ async def get_token_decimals_with_fallback(
     return None
 
 
+def _safe_divergence_pct(expected: Any, actual: Any) -> Decimal | None:
+    """Best-effort relative divergence between expected and actual values (VIB-2634).
+
+    Mirrors the semantics of ``compare_positions``: a missing side
+    (``None``) is total divergence (1 = 100%), an expected of zero with a
+    non-zero actual is 100%, and non-numeric values (e.g. tick-range
+    strings) return ``None`` (unmeasurable, not zero).
+    """
+    if expected is None or actual is None:
+        return Decimal("1")
+    try:
+        expected_dec = Decimal(str(expected))
+        actual_dec = Decimal(str(actual))
+    except Exception:
+        return None
+    if expected_dec == 0:
+        return Decimal("0") if actual_dec == 0 else Decimal("1")
+    return abs(expected_dec - actual_dec) / abs(expected_dec)
+
+
 # =============================================================================
 # Protocol for Paper-Tradeable Strategies
 # =============================================================================
@@ -802,6 +824,8 @@ class PaperTrader:
     _yield_poker: Any = field(default=None, init=False, repr=False)
     _position_reconciler: Any = field(default=None, init=False, repr=False)
     _reconciler_discrepancies: list[Any] = field(default_factory=list, init=False, repr=False)
+    _reconciler_checks: int = field(default=0, init=False, repr=False)
+    _divergence_records: dict[str, DivergenceRecord] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -1163,6 +1187,15 @@ class PaperTrader:
         # For persistent forks: run reconciler after tick to detect divergence
         if self.config.position_reconciler_enabled and self.config.fork_lifecycle == ForkLifecycle.PERSISTENT:
             await self._run_position_reconciler()
+        elif self.config.position_reconciler_enabled:
+            # VIB-2634: when the fork resets to latest every tick there is no
+            # persistent state to drift, so reconciling against a fresh fork
+            # is meaningless — skip instead of producing noise.
+            logger.debug(
+                "[%s] Skipping PositionReconciler: fork_lifecycle=%s resets state every tick",
+                self._backtest_id,
+                self.config.fork_lifecycle.value,
+            )
 
         return result
 
@@ -1276,6 +1309,7 @@ class PaperTrader:
             error_summary=error_summary,
             trades=list(self._trades),
             errors=list(self._errors),
+            reconciliation=self._build_reconciliation_summary(),
         )
 
         logger.info(
@@ -2112,10 +2146,25 @@ class PaperTrader:
                 logger.warning(f"[{self._backtest_id}] YieldPoker failed: {e}")
 
     async def _run_position_reconciler(self) -> None:
-        """Run the PositionReconciler to detect on-chain vs tracked divergence.
+        """Run the observe-only divergence detector after a tick (VIB-2634).
 
-        V1: observe-only — logs warnings but doesn't correct or halt.
-        Called after each tick on persistent forks when position_reconciler_enabled=True.
+        Two lanes, both observe-only (nothing outside the detector's own
+        baseline bookkeeping is ever mutated; the portfolio tracker is never
+        corrected; the tick loop is never halted):
+
+        1. Position lane — ``PositionReconciler.reconcile()`` compares the
+           detector's baseline against on-chain LP/perp/lending positions.
+           Positions seen on-chain for the first time are adopted into the
+           baseline (not divergence — the engine does not feed the reconciler
+           from the intent stream in V1). Subsequent material changes beyond
+           ``position_reconciler_tolerance_pct`` are recorded as divergence
+           and the baseline is refreshed so the same change warns once.
+        2. Balance lane — the portfolio tracker's expected ERC-20 balances
+           vs actual on-chain wallet balances. Native ETH is excluded: poke
+           and maintenance transactions spend gas the tracker does not model.
+
+        Any failure is caught, logged, and swallowed — the detector must
+        never kill the tick loop.
         """
         try:
             from almanak.framework.backtesting.paper.position_reconciler import PositionReconciler
@@ -2130,28 +2179,319 @@ class PaperTrader:
                 return
 
             try:
-                from web3 import Web3
+                # The position_queries readers used by reconcile() are async
+                # (``await web3.eth.call(...)``). A sync Web3 instance fails
+                # every query with "HexBytes can't be used in 'await'
+                # expression" and silently reports zero positions (found via
+                # the VIB-2634 on-chain smoke) — AsyncWeb3 is required here.
+                from web3 import AsyncHTTPProvider, AsyncWeb3
 
-                w3 = Web3(Web3.HTTPProvider(fork_rpc))
+                w3 = AsyncWeb3(AsyncHTTPProvider(fork_rpc))
             except ImportError:
                 logger.debug("[%s] web3 not available, skipping reconciler", self._backtest_id)
                 return
 
             wallet = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-            discrepancies = await self._position_reconciler.reconcile(w3, wallet)
+            tolerance = self.config.position_reconciler_tolerance_pct
+            self._reconciler_checks += 1
 
-            if discrepancies:
+            try:
+                discrepancies = await self._position_reconciler.reconcile(w3, wallet, tolerance_percent=tolerance)
+                divergences = await self._sync_reconciler_baseline(discrepancies, w3, wallet)
+            finally:
+                # AsyncHTTPProvider lazily opens an aiohttp session; close it
+                # so per-tick runs don't leak one session per reconcile.
+                try:
+                    await w3.provider.disconnect()
+                except Exception:  # noqa: BLE001 - cleanup must never raise
+                    logger.debug("[%s] Failed to close reconciler web3 session", self._backtest_id, exc_info=True)
+
+            if divergences:
                 logger.warning(
-                    f"[{self._backtest_id}] PositionReconciler found {len(discrepancies)} "
-                    f"discrepancies (observe-only, no correction applied)"
+                    f"[{self._backtest_id}] PositionReconciler found {len(divergences)} "
+                    f"divergence(s) beyond {tolerance:.2%} tolerance "
+                    f"(observe-only, no correction applied)"
                 )
                 # Store for inclusion in summary
-                self._reconciler_discrepancies.extend(discrepancies)
+                self._reconciler_discrepancies.extend(divergences)
+                for d in divergences:
+                    self._record_divergence(
+                        kind="position",
+                        key=d.position_id,
+                        divergence_type=d.discrepancy_type.value,
+                        expected=d.expected,
+                        actual=d.actual,
+                        message=d.message,
+                    )
+
+            await self._check_balance_divergence(wallet)
         except Exception as e:
+            logger.warning(
+                f"[{self._backtest_id}] PositionReconciler failed (non-fatal, observe-only): {e}",
+            )
             logger.debug(
-                f"[{self._backtest_id}] PositionReconciler failed (non-fatal): {e}",
+                f"[{self._backtest_id}] PositionReconciler failure traceback",
                 exc_info=True,
             )
+
+    async def _sync_reconciler_baseline(
+        self,
+        discrepancies: list[Any],
+        w3: Any,
+        wallet: str,
+    ) -> list[Any]:
+        """Split reconcile() output into adoptions and real divergence.
+
+        ``MISSING_IN_TRACKER`` means the detector saw an on-chain position it
+        has no baseline for — in V1 the intent stream does not feed the
+        reconciler, so first sight is adoption, not divergence. Everything
+        else (missing on-chain, liquidity/size/amount mismatches) is real
+        divergence; after recording it the baseline is refreshed to the
+        observed on-chain value so an already-reported change does not warn
+        again every tick.
+
+        Returns the divergence subset (observe-only — only the detector's
+        own baseline is mutated).
+        """
+        from almanak.framework.backtesting.paper.position_reconciler import DiscrepancyType
+
+        adoptions = [d for d in discrepancies if d.discrepancy_type == DiscrepancyType.MISSING_IN_TRACKER]
+        divergences = [d for d in discrepancies if d.discrepancy_type != DiscrepancyType.MISSING_IN_TRACKER]
+
+        if adoptions:
+            await self._adopt_untracked_positions(adoptions, w3, wallet)
+        for d in divergences:
+            self._rebaseline_position(d)
+
+        return divergences
+
+    async def _adopt_untracked_positions(self, adoptions: list[Any], w3: Any, wallet: str) -> None:
+        """Adopt first-sight on-chain positions into the detector baseline.
+
+        Re-queries the relevant position readers for full position data (the
+        discrepancy alone lacks fields like LP tick bounds), then tracks each
+        active position via the reconciler's own ``track_*`` API. Queries run
+        against the local Anvil fork, so the extra round-trip is cheap and
+        only happens on ticks where a new position appeared.
+        """
+        from almanak.framework.backtesting.paper.position_reconciler import PositionType
+
+        adopted_types = {d.position_type for d in adoptions}
+        if PositionType.LP in adopted_types:
+            await self._adopt_onchain_lp_positions(w3, wallet)
+        if PositionType.PERP_LONG in adopted_types or PositionType.PERP_SHORT in adopted_types:
+            await self._adopt_onchain_perp_positions(w3, wallet)
+        if PositionType.SUPPLY in adopted_types or PositionType.BORROW in adopted_types:
+            await self._adopt_onchain_lending_positions(w3, wallet)
+
+    async def _adopt_onchain_lp_positions(self, w3: Any, wallet: str) -> None:
+        """Track active on-chain Uniswap V3 LP positions the detector has no baseline for."""
+        from almanak.framework.backtesting.paper.position_queries import query_uniswap_v3_positions
+
+        recon = self._position_reconciler
+        for lp in await query_uniswap_v3_positions(wallet=wallet, web3=w3, chain=self.config.chain):
+            pid = str(lp.token_id)
+            if lp.is_active and pid not in recon.positions:
+                recon.track_lp_open(
+                    position_id=pid,
+                    token0=lp.token0,
+                    token1=lp.token1,
+                    liquidity=lp.liquidity,
+                    tick_lower=lp.tick_lower,
+                    tick_upper=lp.tick_upper,
+                    fee_tier=lp.fee,
+                )
+                logger.info(f"[{self._backtest_id}] Reconciler adopted on-chain LP position #{pid} as baseline")
+
+    async def _adopt_onchain_perp_positions(self, w3: Any, wallet: str) -> None:
+        """Track active on-chain GMX V2 perp positions the detector has no baseline for."""
+        from almanak.framework.backtesting.paper.position_queries import query_gmx_positions
+
+        recon = self._position_reconciler
+        for perp in await query_gmx_positions(wallet=wallet, web3=w3, chain=self.config.chain):
+            if perp.is_active and perp.position_key not in recon.positions:
+                recon.track_perp_open(
+                    position_id=perp.position_key,
+                    market=perp.market,
+                    collateral_token=perp.collateral_token,
+                    size_in_usd=perp.size_in_usd,
+                    size_in_tokens=perp.size_in_tokens,
+                    collateral_amount=perp.collateral_amount,
+                    is_long=perp.is_long,
+                )
+                logger.info(
+                    f"[{self._backtest_id}] Reconciler adopted on-chain perp position "
+                    f"{perp.position_key[:16]}... as baseline"
+                )
+
+    async def _adopt_onchain_lending_positions(self, w3: Any, wallet: str) -> None:
+        """Track on-chain Aave V3 supply/borrow rows the detector has no baseline for."""
+        from almanak.framework.backtesting.paper.position_queries import query_aave_positions
+
+        recon = self._position_reconciler
+        for lending in await query_aave_positions(wallet=wallet, web3=w3, chain=self.config.chain):
+            supply_id = f"aave_v3_{lending.asset_address}_supply"
+            borrow_id = f"aave_v3_{lending.asset_address}_borrow"
+            if lending.has_supply and supply_id not in recon.positions:
+                recon.track_supply(
+                    asset=lending.asset,
+                    asset_address=lending.asset_address,
+                    amount=lending.current_atoken_balance,
+                )
+                logger.info(f"[{self._backtest_id}] Reconciler adopted on-chain supply {lending.asset} as baseline")
+            if lending.has_debt and borrow_id not in recon.positions:
+                recon.track_borrow(
+                    asset=lending.asset,
+                    asset_address=lending.asset_address,
+                    amount=lending.total_debt,
+                )
+                logger.info(f"[{self._backtest_id}] Reconciler adopted on-chain borrow {lending.asset} as baseline")
+
+    def _rebaseline_position(self, discrepancy: Any) -> None:
+        """Refresh the detector baseline for an already-reported divergence.
+
+        Mutates only the reconciler's own ``TrackedPosition`` bookkeeping so
+        the same divergence warns once instead of every tick. This is NOT
+        auto-correction — the portfolio tracker and all user-facing state
+        are untouched (V2 scope per VIB-2634).
+        """
+        from almanak.framework.backtesting.paper.position_reconciler import DiscrepancyType, PositionType
+
+        recon = self._position_reconciler
+        pid = discrepancy.position_id
+
+        if discrepancy.discrepancy_type == DiscrepancyType.MISSING_ON_CHAIN:
+            if recon.positions.pop(pid, None) is not None:
+                recon.closed_positions.append(pid)
+            return
+
+        tracked = recon.positions.get(pid)
+        if tracked is None:
+            return
+
+        if discrepancy.discrepancy_type == DiscrepancyType.LIQUIDITY_MISMATCH:
+            tracked.liquidity = int(discrepancy.actual)
+        elif discrepancy.discrepancy_type == DiscrepancyType.SIZE_MISMATCH:
+            tracked.size_in_usd = int(discrepancy.actual)
+        elif discrepancy.discrepancy_type == DiscrepancyType.AMOUNT_MISMATCH:
+            if discrepancy.position_type == PositionType.SUPPLY:
+                tracked.atoken_balance = int(discrepancy.actual)
+            else:
+                tracked.debt_balance = int(discrepancy.actual)
+        elif discrepancy.discrepancy_type == DiscrepancyType.TICK_RANGE_MISMATCH:
+            # Tick bounds are immutable on-chain, so a mismatch means the
+            # baseline itself is wrong. Drop it and re-adopt from a fresh
+            # on-chain read on the next tick.
+            recon.positions.pop(pid, None)
+
+    async def _check_balance_divergence(self, wallet: str) -> None:
+        """Compare the portfolio tracker's expected balances vs on-chain (VIB-2634).
+
+        The portfolio tracker is the strategy-side source of expected wallet
+        state; on a persistent fork the actual wallet balances must match it.
+        Divergence beyond ``position_reconciler_tolerance_pct`` means the
+        tracker disagrees with on-chain reality (missed flow, phantom trade,
+        receipt error) and is logged at WARNING + recorded for the summary.
+
+        Native ETH is excluded: poke and fork-maintenance transactions spend
+        gas that the tracker intentionally does not model, so ETH drift is
+        expected and would only produce noise. Unresolvable tokens are
+        skipped, never assumed zero (Empty != Zero).
+        """
+        expected_balances = dict(self.portfolio_tracker.current_balances)
+        if not expected_balances:
+            return
+
+        onchain = await self._snapshot_balances(wallet)
+        chain_id = self.fork_manager.chain_id
+        rpc_url = self.fork_manager.get_rpc_url() if self.fork_manager.is_running else None
+        tolerance = self.config.position_reconciler_tolerance_pct
+
+        for symbol, expected in expected_balances.items():
+            if symbol.upper() == "ETH":
+                continue  # gas drift from poke/maintenance txs is expected
+            raw = onchain.get(symbol)
+            if raw is None:
+                continue  # unmeasurable this tick — skip, don't assume zero
+            token_address = self._resolve_token_address(symbol)
+            if not token_address:
+                continue
+            decimals = await get_token_decimals_with_fallback(chain_id, token_address, rpc_url)
+            if decimals is None:
+                continue
+            actual = Decimal(raw) / (Decimal(10) ** decimals)
+
+            if expected == 0 and actual == 0:
+                continue
+            base = abs(expected) if expected != 0 else abs(actual)
+            pct = abs(expected - actual) / base
+            if pct <= tolerance:
+                continue
+
+            message = f"Wallet balance divergence for {symbol}: tracked={expected}, on-chain={actual} ({pct:.2%})"
+            logger.warning(f"[{self._backtest_id}] {message} (observe-only, no correction applied)")
+            self._record_divergence(
+                kind="balance",
+                key=symbol,
+                divergence_type="balance_mismatch",
+                expected=expected,
+                actual=actual,
+                message=message,
+                divergence_pct=pct,
+            )
+
+    def _record_divergence(
+        self,
+        *,
+        kind: str,
+        key: str,
+        divergence_type: str,
+        expected: Any,
+        actual: Any,
+        message: str,
+        divergence_pct: Decimal | None = None,
+    ) -> None:
+        """Fold one divergence observation into the per-position aggregates.
+
+        Aggregation is keyed by (kind, divergence_type, key) so repeated
+        per-tick observations of the same divergence update one record
+        instead of growing without bound over a long session.
+        """
+        if divergence_pct is None:
+            divergence_pct = _safe_divergence_pct(expected, actual)
+
+        agg_key = f"{kind}:{divergence_type}:{key}"
+        record = self._divergence_records.get(agg_key)
+        if record is None:
+            record = DivergenceRecord(key=key, kind=kind, divergence_type=divergence_type)
+            self._divergence_records[agg_key] = record
+
+        record.count += 1
+        record.last_seen = datetime.now(UTC)
+        record.last_expected = str(expected) if expected is not None else None
+        record.last_actual = str(actual) if actual is not None else None
+        record.last_message = message
+        if divergence_pct is not None and (
+            record.max_divergence_pct is None or divergence_pct > record.max_divergence_pct
+        ):
+            record.max_divergence_pct = divergence_pct
+
+    def _build_reconciliation_summary(self) -> ReconciliationSummary | None:
+        """Assemble the session-level divergence summary (None if reconciler never ran)."""
+        if self._reconciler_checks == 0 and not self._divergence_records:
+            return None
+        records = sorted(
+            self._divergence_records.values(),
+            key=lambda r: r.max_divergence_pct or Decimal("0"),
+            reverse=True,
+        )
+        pcts = [r.max_divergence_pct for r in records if r.max_divergence_pct is not None]
+        return ReconciliationSummary(
+            checks_run=self._reconciler_checks,
+            total_divergences=sum(r.count for r in records),
+            max_divergence_pct=max(pcts) if pcts else None,
+            records=records,
+        )
 
     async def _check_oracle_divergence(self) -> None:
         """Check divergence between live prices and on-fork oracle prices.
