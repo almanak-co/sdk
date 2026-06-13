@@ -41,7 +41,6 @@ Example:
     fill = adapter.execute_intent(intent, portfolio, market_state)
 """
 
-import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -766,7 +765,160 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             self._slippage_model_initialized = True
             return self._slippage_model
 
-    def _get_historical_liquidity(  # noqa: C901
+    def _liquidity_data_unavailable(
+        self,
+        *,
+        identifier: str,
+        timestamp: datetime,
+        message: str,
+        chain: str | None,
+        protocol: str | None,
+        cause: BaseException | None | object = _RAISE_PLAIN,
+        on_fallback: Callable[[], None] | None = None,
+    ) -> None:
+        """Apply the fidelity contract for a failed historical liquidity lookup.
+
+        Strict historical mode raises HistoricalDataUnavailableError -- chained
+        from ``cause`` unless it is the ``_RAISE_PLAIN`` sentinel -- without
+        logging. Non-strict mode runs ``on_fallback`` (the per-site log call)
+        and degrades to None.
+
+        Unlike the volume lane, failed liquidity lookups are never cached:
+        ``_liquidity_cache`` only ever holds provider results, so there is
+        deliberately no ``cache_key`` parameter. The low-confidence-depth call
+        site invokes this helper purely for its strict-mode raise and falls
+        through to the success path in non-strict mode.
+        """
+        if self._is_strict_historical_mode():
+            error = HistoricalDataUnavailableError(
+                data_type="liquidity",
+                identifier=identifier,
+                timestamp=timestamp,
+                message=message,
+                chain=chain,
+                protocol=protocol,
+            )
+            if cause is _RAISE_PLAIN:
+                raise error
+            raise error from cast("BaseException | None", cause)
+        if on_fallback is not None:
+            on_fallback()
+
+    def _resolve_liquidity_chain(
+        self,
+        timestamp: datetime,
+        protocol: str | None,
+        pool_address_lower: str,
+    ) -> Chain | None:
+        """Resolve the config chain string to a Chain enum for liquidity lookups.
+
+        Returns None when the chain is unknown and the non-strict fallback has
+        already been applied (warning logged, nothing cached); strict mode
+        raises instead.
+        """
+        chain_str = self._config.chain.upper()
+        try:
+            return Chain[chain_str]
+        except KeyError:
+            self._liquidity_data_unavailable(
+                identifier=pool_address_lower,
+                timestamp=timestamp,
+                message=f"Unknown chain '{chain_str}', cannot fetch historical liquidity",
+                chain=chain_str,
+                protocol=protocol,
+                cause=None,
+                on_fallback=lambda: logger.warning("Unknown chain '%s', cannot fetch historical liquidity", chain_str),
+            )
+            return None
+
+    def _cache_liquidity_success(
+        self,
+        cache_key: tuple[str, date],
+        result: "LiquidityResult",
+    ) -> "LiquidityResult":
+        """Cache and return a successful liquidity lookup, logging its source."""
+        self._liquidity_cache[cache_key] = result
+        logger.debug(
+            "Fetched historical liquidity for pool %s... on %s: depth=$%.2f, confidence=%s, source=%s",
+            cache_key[0][:10],
+            cache_key[1],
+            float(result.depth),
+            result.source_info.confidence.value,
+            result.source_info.source,
+        )
+        return result
+
+    def _fetch_and_cache_liquidity(
+        self,
+        provider: "LiquidityDepthProvider",
+        pool_address_lower: str,
+        timestamp: datetime,
+        target_date: date,
+        chain: Chain,
+        protocol: str | None,
+        cache_key: tuple[str, date],
+    ) -> "LiquidityResult | None":
+        """Fetch liquidity depth from the provider and cache successful results.
+
+        Refuses to block when called from inside a running event-loop task:
+        strict mode raises, non-strict mode degrades to None without caching.
+        Only provider results are cached -- never failure markers.
+        """
+        chain_label = chain.value if chain else self._config.chain
+        try:
+            if in_running_event_loop_task():
+                self._liquidity_data_unavailable(
+                    identifier=pool_address_lower,
+                    timestamp=timestamp,
+                    message="Cannot fetch historical liquidity in async context",
+                    chain=chain_label,
+                    protocol=protocol,
+                    on_fallback=lambda: logger.debug(
+                        "Historical liquidity fetch skipped in async context; using fallback."
+                    ),
+                )
+                return None
+            liquidity_result = run_coroutine_blocking(
+                lambda: provider.get_liquidity_depth(
+                    pool_address=pool_address_lower,
+                    chain=chain,
+                    timestamp=timestamp,
+                    protocol=protocol,
+                ),
+                timeout=30,
+            )
+            if liquidity_result.depth <= 0 and liquidity_result.source_info.confidence == DataConfidence.LOW:
+                # Strict mode raises; non-strict falls through so the
+                # low-confidence result is cached and returned like a success.
+                self._liquidity_data_unavailable(
+                    identifier=pool_address_lower,
+                    timestamp=timestamp,
+                    message="No historical liquidity data available (returned low-confidence fallback)",
+                    chain=chain_label,
+                    protocol=protocol,
+                )
+            return self._cache_liquidity_success(cache_key, liquidity_result)
+        except HistoricalDataUnavailableError:
+            raise
+        except Exception as e:
+            fetch_error = e
+            self._liquidity_data_unavailable(
+                identifier=pool_address_lower,
+                timestamp=timestamp,
+                message=f"Failed to fetch historical liquidity: {fetch_error}",
+                chain=chain_label,
+                protocol=protocol,
+                cause=fetch_error,
+                on_fallback=lambda: logger.debug(
+                    "Failed to fetch historical liquidity for pool %s on %s: %s",
+                    pool_address_lower[:10],
+                    target_date,
+                    fetch_error,
+                ),
+            )
+            return None
+
+    def _get_historical_liquidity(
         self,
         pool_address: str | None,
         timestamp: datetime,
@@ -793,157 +945,47 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 historical liquidity data cannot be fetched.
         """
         if not pool_address:
-            if self._is_strict_historical_mode():
-                raise HistoricalDataUnavailableError(
-                    data_type="liquidity",
-                    identifier="unknown",
-                    timestamp=timestamp,
-                    message="Pool address not provided for historical liquidity lookup",
-                    chain=self._config.chain,
-                    protocol=protocol,
-                )
+            self._liquidity_data_unavailable(
+                identifier="unknown",
+                timestamp=timestamp,
+                message="Pool address not provided for historical liquidity lookup",
+                chain=self._config.chain,
+                protocol=protocol,
+            )
             return None
 
         provider = self._ensure_liquidity_provider()
         if provider is None:
-            if self._is_strict_historical_mode():
-                raise HistoricalDataUnavailableError(
-                    data_type="liquidity",
-                    identifier=pool_address,
-                    timestamp=timestamp,
-                    message="Liquidity provider not available (historical liquidity disabled or failed to initialize)",
-                    chain=self._config.chain,
-                    protocol=protocol,
-                )
+            self._liquidity_data_unavailable(
+                identifier=pool_address,
+                timestamp=timestamp,
+                message="Liquidity provider not available (historical liquidity disabled or failed to initialize)",
+                chain=self._config.chain,
+                protocol=protocol,
+            )
             return None
 
-        # Normalize pool address and get date
         pool_address_lower = pool_address.lower()
         target_date = timestamp.date() if isinstance(timestamp, datetime) else timestamp
 
-        # Check cache first
         cache_key = (pool_address_lower, target_date)
         if cache_key in self._liquidity_cache:
             return self._liquidity_cache[cache_key]
 
-        # Determine chain from config if not provided
         if chain is None:
-            chain_str = self._config.chain.upper()
-            try:
-                chain = Chain[chain_str]
-            except KeyError:
-                if self._is_strict_historical_mode():
-                    raise HistoricalDataUnavailableError(
-                        data_type="liquidity",
-                        identifier=pool_address_lower,
-                        timestamp=timestamp,
-                        message=f"Unknown chain '{chain_str}', cannot fetch historical liquidity",
-                        chain=chain_str,
-                        protocol=protocol,
-                    ) from None
-                logger.warning("Unknown chain '%s', cannot fetch historical liquidity", chain_str)
+            chain = self._resolve_liquidity_chain(timestamp, protocol, pool_address_lower)
+            if chain is None:
                 return None
 
-        # Fetch from LiquidityDepthProvider (using asyncio to run async method)
-        try:
-            # Try to get existing event loop
-            try:
-                loop = asyncio.get_running_loop()
-                loop_is_running = True
-            except RuntimeError:
-                # No running loop - create one
-                loop = asyncio.new_event_loop()
-                loop_is_running = False
-
-            # Handle case where we're already in an async context
-            if loop_is_running:
-                # Avoid blocking the running loop if we're in an async task
-                if asyncio.current_task() is not None:
-                    if self._is_strict_historical_mode():
-                        raise HistoricalDataUnavailableError(
-                            data_type="liquidity",
-                            identifier=pool_address_lower,
-                            timestamp=timestamp,
-                            message="Cannot fetch historical liquidity in async context",
-                            chain=chain.value if chain else self._config.chain,
-                            protocol=protocol,
-                        )
-                    logger.debug("Historical liquidity fetch skipped in async context; using fallback.")
-                    return None
-                # Schedule coroutine on the running loop (thread-safe)
-                future = asyncio.run_coroutine_threadsafe(
-                    provider.get_liquidity_depth(
-                        pool_address=pool_address_lower,
-                        chain=chain,
-                        timestamp=timestamp,
-                        protocol=protocol,
-                    ),
-                    loop,
-                )
-                try:
-                    liquidity_result = future.result(timeout=30)
-                except TimeoutError:
-                    future.cancel()
-                    raise
-            else:
-                try:
-                    liquidity_result = loop.run_until_complete(
-                        provider.get_liquidity_depth(
-                            pool_address=pool_address_lower,
-                            chain=chain,
-                            timestamp=timestamp,
-                            protocol=protocol,
-                        )
-                    )
-                finally:
-                    loop.close()
-
-            # Check if result is valid (has non-zero depth or is from HIGH confidence source)
-            if liquidity_result.depth <= 0 and liquidity_result.source_info.confidence == DataConfidence.LOW:
-                # Result is a fallback/low-confidence value
-                if self._is_strict_historical_mode():
-                    raise HistoricalDataUnavailableError(
-                        data_type="liquidity",
-                        identifier=pool_address_lower,
-                        timestamp=timestamp,
-                        message="No historical liquidity data available (returned low-confidence fallback)",
-                        chain=chain.value if chain else self._config.chain,
-                        protocol=protocol,
-                    )
-
-            # Cache the result
-            self._liquidity_cache[cache_key] = liquidity_result
-
-            logger.debug(
-                "Fetched historical liquidity for pool %s... on %s: depth=$%.2f, confidence=%s, source=%s",
-                pool_address_lower[:10],
-                target_date,
-                float(liquidity_result.depth),
-                liquidity_result.source_info.confidence.value,
-                liquidity_result.source_info.source,
-            )
-            return liquidity_result
-
-        except HistoricalDataUnavailableError:
-            # Re-raise if it's already our exception
-            raise
-        except Exception as e:
-            if self._is_strict_historical_mode():
-                raise HistoricalDataUnavailableError(
-                    data_type="liquidity",
-                    identifier=pool_address_lower,
-                    timestamp=timestamp,
-                    message=f"Failed to fetch historical liquidity: {e}",
-                    chain=chain.value if chain else self._config.chain,
-                    protocol=protocol,
-                ) from e
-            logger.debug(
-                "Failed to fetch historical liquidity for pool %s on %s: %s",
-                pool_address_lower[:10],
-                target_date,
-                e,
-            )
-            return None
+        return self._fetch_and_cache_liquidity(
+            provider,
+            pool_address_lower,
+            timestamp,
+            target_date,
+            chain,
+            protocol,
+            cache_key,
+        )
 
     def _calculate_slippage(
         self,

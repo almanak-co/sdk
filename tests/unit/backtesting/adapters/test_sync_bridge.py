@@ -7,7 +7,8 @@ calling async data providers from synchronous code:
   states (no loop at all; running loop but no current task),
 - private-loop lifecycle (created, used, closed),
 - thread-safe scheduling on an already running loop,
-- future cancellation when the timeout fires.
+- future cancellation when the timeout fires or any other exception aborts the
+  wait.
 """
 
 import asyncio
@@ -61,6 +62,7 @@ def background_loop() -> Iterator[asyncio.AbstractEventLoop]:
     finally:
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=5)
+        assert not thread.is_alive(), "background_loop thread failed to stop before close()"
         loop.close()
 
 
@@ -114,3 +116,43 @@ class TestRunCoroutineBlocking:
             run_coroutine_blocking(slow, timeout=0.05)
 
         assert cancelled.wait(timeout=5)
+
+    def test_cancels_future_on_non_timeout_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Any BaseException from future.result -- not only TimeoutError -- cancels the future.
+
+        Guards the leak the bare ``except TimeoutError`` left open: a
+        KeyboardInterrupt (or any other BaseException) raised in the waiting
+        thread must still cancel the scheduled coroutine instead of orphaning
+        it on the loop.
+        """
+
+        class Boom(BaseException):
+            pass
+
+        class FakeFuture:
+            def __init__(self) -> None:
+                self.cancelled = False
+
+            def result(self, timeout: float | None = None) -> object:
+                raise Boom
+
+            def cancel(self) -> bool:
+                self.cancelled = True
+                return True
+
+        fake = FakeFuture()
+
+        def fake_schedule(coro: object, loop: object) -> FakeFuture:
+            coro.close()  # the coroutine is never scheduled; close it to avoid a warning
+            return fake
+
+        monkeypatch.setattr(asyncio, "get_running_loop", lambda: object())
+        monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", fake_schedule)
+
+        async def coro() -> None:
+            return None
+
+        with pytest.raises(Boom):
+            run_coroutine_blocking(coro, timeout=5)
+
+        assert fake.cancelled is True

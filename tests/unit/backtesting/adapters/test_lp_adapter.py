@@ -263,7 +263,7 @@ class TestGetRangeStatus:
         # Position with narrow range around price ratio 1
         position = create_lp_position(
             tick_lower=-1000,  # price ≈ 0.905
-            tick_upper=1000,   # price ≈ 1.105
+            tick_upper=1000,  # price ≈ 1.105
         )
 
         # Price ratio = 0.5 (well below the range)
@@ -283,7 +283,7 @@ class TestGetRangeStatus:
         # Position with narrow range around price ratio 1
         position = create_lp_position(
             tick_lower=-1000,  # price ≈ 0.905
-            tick_upper=1000,   # price ≈ 1.105
+            tick_upper=1000,  # price ≈ 1.105
         )
 
         # Price ratio = 2.0 (well above the range)
@@ -307,7 +307,7 @@ class TestGetRangeStatus:
         # Position with range around price ratio 1
         position = create_lp_position(
             tick_lower=-1000,  # price ≈ 0.9048
-            tick_upper=1000,   # price ≈ 1.1052
+            tick_upper=1000,  # price ≈ 1.1052
         )
 
         # Price ratio = 0.93 (within 10% of lower bound 0.9048)
@@ -331,7 +331,7 @@ class TestGetRangeStatus:
         # Position with range around price ratio 1
         position = create_lp_position(
             tick_lower=-1000,  # price ≈ 0.9048
-            tick_upper=1000,   # price ≈ 1.1052
+            tick_upper=1000,  # price ≈ 1.1052
         )
 
         # Price ratio = 1.05 (within 10% of upper bound 1.1052)
@@ -534,8 +534,8 @@ class TestLPStrategyAccuracy:
 
         # Narrow range around price ratio 1 (roughly 0.95 to 1.05)
         position = create_lp_position(
-            tick_lower=-500,   # price ≈ 0.9512
-            tick_upper=500,    # price ≈ 1.0513
+            tick_lower=-500,  # price ≈ 0.9512
+            tick_upper=500,  # price ≈ 1.0513
         )
 
         # In range
@@ -604,9 +604,7 @@ class TestLPStrategyAccuracy:
         """Test that update_position updates token amounts based on price."""
         # VIB-4849: this test checks token-amount math, not fees. Disable fee
         # tracking so it does not require a volume source.
-        adapter = LPBacktestAdapter(
-            LPBacktestConfig(strategy_type="lp", fee_tracking_enabled=False)
-        )
+        adapter = LPBacktestAdapter(LPBacktestConfig(strategy_type="lp", fee_tracking_enabled=False))
 
         position = create_lp_position(
             entry_price=Decimal("2000"),
@@ -654,8 +652,8 @@ class TestLPStrategyAccuracy:
         position = create_lp_position(
             token0="USDC",
             token1="USDT",
-            tick_lower=-10,   # price ≈ 0.999
-            tick_upper=10,    # price ≈ 1.001
+            tick_lower=-10,  # price ≈ 0.999
+            tick_upper=10,  # price ≈ 1.001
             fee_tier=Decimal("0.0001"),  # 0.01% fee tier
         )
 
@@ -680,7 +678,7 @@ class TestLPStrategyAccuracy:
             token0="ETH",
             token1="BTC",
             tick_lower=-10000,  # price ≈ 0.368
-            tick_upper=10000,   # price ≈ 2.718
+            tick_upper=10000,  # price ≈ 2.718
             fee_tier=Decimal("0.003"),  # 0.3% fee tier
         )
 
@@ -740,8 +738,8 @@ class TestEdgeCases:
 
         # Both ticks positive (price range > 1)
         position = create_lp_position(
-            tick_lower=1000,   # price ≈ 1.105
-            tick_upper=5000,   # price ≈ 1.649
+            tick_lower=1000,  # price ≈ 1.105
+            tick_upper=5000,  # price ≈ 1.649
         )
 
         # Price at 1.3 - in range
@@ -1741,9 +1739,7 @@ class TestValidateHeuristics:
     """Tests for LPBacktestAdapter.validate_heuristics (VIB-4849)."""
 
     def _adapter(self) -> LPBacktestAdapter:
-        return LPBacktestAdapter(
-            LPBacktestConfig(strategy_type="lp", allow_volume_fallback=True)
-        )
+        return LPBacktestAdapter(LPBacktestConfig(strategy_type="lp", allow_volume_fallback=True))
 
     def test_validate_heuristics_warns_on_large_error(self, caplog: pytest.LogCaptureFixture) -> None:
         """A sample whose observed fees are >50% off the heuristic warns and flags."""
@@ -2557,4 +2553,361 @@ class TestGetHistoricalVolumeOrchestration:
         adapter = make_volume_adapter(chain="notachain", provider=stub)
 
         assert adapter._get_historical_volume("0xpool", datetime(2024, 1, 15)) == (None, DataConfidence.LOW)
+        assert stub.calls == []
+
+
+# =============================================================================
+# Historical liquidity helper decomposition
+# =============================================================================
+
+
+class StubLiquidityProvider:
+    """Async liquidity provider stub that records calls and returns canned data."""
+
+    def __init__(
+        self,
+        result: "object | None" = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.result = result
+        self.error = error
+        self.calls: list[dict] = []
+
+    async def get_liquidity_depth(self, **kwargs: object) -> "object":
+        self.calls.append(dict(kwargs))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+def make_liquidity_adapter(
+    strict: bool = False,
+    chain: str = "ethereum",
+    provider: "StubLiquidityProvider | None" = None,
+) -> LPBacktestAdapter:
+    """Build an adapter wired for historical-liquidity tests."""
+    from almanak.framework.backtesting.config import BacktestDataConfig
+
+    return LPBacktestAdapter(
+        config=LPBacktestConfig(strategy_type="lp", chain=chain),
+        data_config=BacktestDataConfig(strict_historical_mode=strict, use_historical_liquidity=True),
+        liquidity_provider=provider,
+    )
+
+
+def make_liquidity_result(depth: Decimal, confidence: "object | None" = None) -> "object":
+    """Build a LiquidityResult stamped with a subgraph source."""
+    from datetime import UTC
+
+    from almanak.framework.backtesting.pnl.types import (
+        DataConfidence,
+        DataSourceInfo,
+        LiquidityResult,
+    )
+
+    return LiquidityResult(
+        depth=depth,
+        source_info=DataSourceInfo(
+            source="uniswap_v3_subgraph",
+            confidence=confidence if confidence is not None else DataConfidence.HIGH,
+            timestamp=datetime(2024, 1, 15, tzinfo=UTC),
+        ),
+    )
+
+
+class TestLiquidityUnavailableHelper:
+    """The strict-raise-or-degrade fidelity contract in _liquidity_data_unavailable."""
+
+    def test_non_strict_returns_none_and_invokes_fallback(self) -> None:
+        """Non-strict mode logs (via on_fallback) and degrades without caching."""
+        adapter = make_liquidity_adapter(strict=False)
+        fallback_calls: list[str] = []
+
+        result = adapter._liquidity_data_unavailable(
+            identifier="0xpool",
+            timestamp=datetime(2024, 1, 15, 12, 0, 0),
+            message="lookup failed",
+            chain="ethereum",
+            protocol="uniswap_v3",
+            on_fallback=lambda: fallback_calls.append("logged"),
+        )
+
+        assert result is None
+        assert adapter._liquidity_cache == {}
+        assert fallback_calls == ["logged"]
+
+    def test_strict_raises_with_fields_and_no_side_effects(self) -> None:
+        """Strict mode raises with all fields set; no cache write, no fallback."""
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        adapter = make_liquidity_adapter(strict=True)
+        ts = datetime(2024, 1, 15, 12, 0, 0)
+        fallback_calls: list[str] = []
+
+        with pytest.raises(HistoricalDataUnavailableError) as exc_info:
+            adapter._liquidity_data_unavailable(
+                identifier="0xpool",
+                timestamp=ts,
+                message="lookup failed",
+                chain="ethereum",
+                protocol="uniswap_v3",
+                on_fallback=lambda: fallback_calls.append("logged"),
+            )
+
+        err = exc_info.value
+        assert err.data_type == "liquidity"
+        assert err.identifier == "0xpool"
+        assert err.timestamp == ts
+        assert err.message == "lookup failed"
+        assert err.chain == "ethereum"
+        assert err.protocol == "uniswap_v3"
+        assert adapter._liquidity_cache == {}
+        assert fallback_calls == []
+
+    def test_strict_chaining_modes(self) -> None:
+        """Default raises bare; cause=None suppresses context; cause=e chains it."""
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        adapter = make_liquidity_adapter(strict=True)
+        common: dict = {
+            "identifier": "0xpool",
+            "timestamp": datetime(2024, 1, 15),
+            "message": "lookup failed",
+            "chain": "ethereum",
+            "protocol": None,
+        }
+
+        with pytest.raises(HistoricalDataUnavailableError) as plain:
+            adapter._liquidity_data_unavailable(**common)
+        assert plain.value.__cause__ is None
+        assert plain.value.__suppress_context__ is False
+
+        with pytest.raises(HistoricalDataUnavailableError) as from_none:
+            adapter._liquidity_data_unavailable(**common, cause=None)
+        assert from_none.value.__cause__ is None
+        assert from_none.value.__suppress_context__ is True
+
+        root = RuntimeError("root cause")
+        with pytest.raises(HistoricalDataUnavailableError) as chained:
+            adapter._liquidity_data_unavailable(**common, cause=root)
+        assert chained.value.__cause__ is root
+
+
+class TestResolveLiquidityChain:
+    """Config-string to Chain enum resolution for the liquidity lane."""
+
+    def test_known_chain_returns_enum(self) -> None:
+        from almanak.core.enums import Chain
+
+        adapter = make_liquidity_adapter(chain="ethereum")
+
+        assert adapter._resolve_liquidity_chain(datetime(2024, 1, 15), None, "0xpool") is Chain.ETHEREUM
+        assert adapter._liquidity_cache == {}
+
+    def test_unknown_chain_non_strict_warns_without_caching(self, caplog: pytest.LogCaptureFixture) -> None:
+        """The liquidity lane never caches failures -- unlike the volume lane."""
+        import logging
+
+        adapter = make_liquidity_adapter(chain="notachain")
+
+        with caplog.at_level(logging.WARNING, logger="almanak.framework.backtesting.adapters.lp_adapter"):
+            result = adapter._resolve_liquidity_chain(datetime(2024, 1, 15), None, "0xpool")
+
+        assert result is None
+        assert adapter._liquidity_cache == {}
+        assert any("Unknown chain 'NOTACHAIN'" in record.getMessage() for record in caplog.records)
+
+    def test_unknown_chain_strict_raises_with_suppressed_keyerror_context(self) -> None:
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        adapter = make_liquidity_adapter(strict=True, chain="notachain")
+
+        with pytest.raises(HistoricalDataUnavailableError) as exc_info:
+            adapter._resolve_liquidity_chain(datetime(2024, 1, 15), "uniswap_v3", "0xpool")
+
+        err = exc_info.value
+        assert err.chain == "NOTACHAIN"
+        assert err.identifier == "0xpool"
+        assert err.protocol == "uniswap_v3"
+        # Matches the original `raise ... from None` inside `except KeyError`.
+        assert err.__suppress_context__ is True
+        assert isinstance(err.__context__, KeyError)
+        assert adapter._liquidity_cache == {}
+
+
+class TestCacheLiquiditySuccess:
+    """Cache write and source logging for successful liquidity lookups."""
+
+    def test_stores_logs_and_returns_same_object(self, caplog: pytest.LogCaptureFixture) -> None:
+        import logging
+
+        adapter = make_liquidity_adapter()
+        key = ("0xabcdef123456", datetime(2024, 1, 15).date())
+        result = make_liquidity_result(Decimal("50000000"))
+
+        with caplog.at_level(logging.DEBUG, logger="almanak.framework.backtesting.adapters.lp_adapter"):
+            returned = adapter._cache_liquidity_success(key, result)
+
+        assert returned is result
+        assert adapter._liquidity_cache[key] is result
+        log_line = next(r.getMessage() for r in caplog.records if "Fetched historical liquidity" in r.getMessage())
+        assert "0xabcdef12" in log_line
+        assert "uniswap_v3_subgraph" in log_line
+
+
+class TestGetHistoricalLiquidityOrchestration:
+    """End-to-end behaviour of _get_historical_liquidity through the helpers."""
+
+    def test_success_via_stub_provider(self) -> None:
+        from almanak.core.enums import Chain
+
+        stub = StubLiquidityProvider(result=make_liquidity_result(Decimal("50000000")))
+        adapter = make_liquidity_adapter(provider=stub)
+        ts = datetime(2024, 1, 15, 12, 0, 0)
+
+        result = adapter._get_historical_liquidity("0xPOOL", ts, protocol="uniswap_v3")
+
+        assert result is stub.result
+        assert adapter._liquidity_cache[("0xpool", ts.date())] is stub.result
+        assert stub.calls == [
+            {
+                "pool_address": "0xpool",
+                "chain": Chain.ETHEREUM,
+                "timestamp": ts,
+                "protocol": "uniswap_v3",
+            }
+        ]
+
+        # Second lookup is served from the cache without another provider call.
+        assert adapter._get_historical_liquidity("0xPOOL", ts, protocol="uniswap_v3") is stub.result
+        assert len(stub.calls) == 1
+
+    def test_low_confidence_fallthrough_non_strict_caches_and_returns(self) -> None:
+        """A zero-depth LOW result is cached and returned like a success."""
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        stub = StubLiquidityProvider(result=make_liquidity_result(Decimal("0"), DataConfidence.LOW))
+        adapter = make_liquidity_adapter(provider=stub)
+        ts = datetime(2024, 1, 15)
+
+        result = adapter._get_historical_liquidity("0xpool", ts)
+
+        assert result is stub.result
+        assert adapter._liquidity_cache[("0xpool", ts.date())] is stub.result
+
+    def test_low_confidence_strict_raises_subgraph_worded_message(self) -> None:
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        stub = StubLiquidityProvider(result=make_liquidity_result(Decimal("0"), DataConfidence.LOW))
+        adapter = make_liquidity_adapter(strict=True, provider=stub)
+
+        with pytest.raises(HistoricalDataUnavailableError) as exc_info:
+            adapter._get_historical_liquidity("0xpool", datetime(2024, 1, 15))
+
+        assert exc_info.value.message == ("No historical liquidity data available (returned low-confidence fallback)")
+        assert exc_info.value.__cause__ is None
+        assert adapter._liquidity_cache == {}
+
+    def test_provider_error_non_strict_returns_none_without_caching(self) -> None:
+        stub = StubLiquidityProvider(error=RuntimeError("provider down"))
+        adapter = make_liquidity_adapter(provider=stub)
+        ts = datetime(2024, 1, 15)
+
+        assert adapter._get_historical_liquidity("0xpool", ts) is None
+        assert adapter._liquidity_cache == {}
+
+    def test_provider_error_strict_chains_cause(self) -> None:
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        stub = StubLiquidityProvider(error=RuntimeError("provider down"))
+        adapter = make_liquidity_adapter(strict=True, provider=stub)
+
+        with pytest.raises(HistoricalDataUnavailableError) as exc_info:
+            adapter._get_historical_liquidity("0xpool", datetime(2024, 1, 15))
+
+        assert exc_info.value.message == "Failed to fetch historical liquidity: provider down"
+        assert exc_info.value.__cause__ is stub.error
+        assert adapter._liquidity_cache == {}
+
+    def test_refuses_to_block_inside_async_task_non_strict(self) -> None:
+        import asyncio
+
+        stub = StubLiquidityProvider(result=make_liquidity_result(Decimal("50000000")))
+        adapter = make_liquidity_adapter(provider=stub)
+
+        async def lookup() -> "object":
+            return adapter._get_historical_liquidity("0xpool", datetime(2024, 1, 15))
+
+        assert asyncio.run(lookup()) is None
+        assert adapter._liquidity_cache == {}
+        assert stub.calls == []
+
+    def test_refuses_to_block_inside_async_task_strict(self) -> None:
+        import asyncio
+
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        stub = StubLiquidityProvider(result=make_liquidity_result(Decimal("50000000")))
+        adapter = make_liquidity_adapter(strict=True, provider=stub)
+
+        async def lookup() -> "object":
+            return adapter._get_historical_liquidity("0xpool", datetime(2024, 1, 15))
+
+        with pytest.raises(HistoricalDataUnavailableError) as exc_info:
+            asyncio.run(lookup())
+
+        assert exc_info.value.message == "Cannot fetch historical liquidity in async context"
+        assert adapter._liquidity_cache == {}
+        assert stub.calls == []
+
+    def test_missing_pool_address_non_strict(self) -> None:
+        adapter = make_liquidity_adapter()
+
+        assert adapter._get_historical_liquidity(None, datetime(2024, 1, 15)) is None
+        assert adapter._liquidity_cache == {}
+
+    def test_missing_pool_address_strict_uses_unknown_identifier(self) -> None:
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        adapter = make_liquidity_adapter(strict=True)
+
+        with pytest.raises(HistoricalDataUnavailableError) as exc_info:
+            adapter._get_historical_liquidity(None, datetime(2024, 1, 15))
+
+        assert exc_info.value.identifier == "unknown"
+        assert adapter._liquidity_cache == {}
+
+    def test_unavailable_provider_non_strict_skips_cache(self) -> None:
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        adapter = LPBacktestAdapter(
+            config=LPBacktestConfig(strategy_type="lp"),
+            data_config=BacktestDataConfig(use_historical_liquidity=False),
+        )
+
+        assert adapter._get_historical_liquidity("0xpool", datetime(2024, 1, 15)) is None
+        assert adapter._liquidity_cache == {}
+
+    def test_unavailable_provider_strict_keeps_original_case_identifier(self) -> None:
+        from almanak.framework.backtesting.config import BacktestDataConfig
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        adapter = LPBacktestAdapter(
+            config=LPBacktestConfig(strategy_type="lp"),
+            data_config=BacktestDataConfig(strict_historical_mode=True, use_historical_liquidity=False),
+        )
+
+        with pytest.raises(HistoricalDataUnavailableError) as exc_info:
+            adapter._get_historical_liquidity("0xPOOL", datetime(2024, 1, 15))
+
+        assert exc_info.value.identifier == "0xPOOL"
+        assert adapter._liquidity_cache == {}
+
+    def test_unknown_chain_returns_none_without_provider_call(self) -> None:
+        stub = StubLiquidityProvider(result=make_liquidity_result(Decimal("50000000")))
+        adapter = make_liquidity_adapter(chain="notachain", provider=stub)
+
+        assert adapter._get_historical_liquidity("0xpool", datetime(2024, 1, 15)) is None
+        assert adapter._liquidity_cache == {}
         assert stub.calls == []

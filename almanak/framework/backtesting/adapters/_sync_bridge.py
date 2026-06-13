@@ -44,8 +44,12 @@ def run_coroutine_blocking[T](
 
     With a running loop on this thread, the coroutine is scheduled
     thread-safely and awaited with ``timeout``; the future is cancelled before
-    the ``TimeoutError`` propagates. Without one, a private loop is created,
-    used, and closed.
+    *any* exception propagates -- a timeout, a ``KeyboardInterrupt`` or other
+    ``BaseException`` raised in the waiting thread, or a cancellation -- so a
+    still-running coroutine is never left orphaned on the loop after the wait
+    aborts. (On the normal path where the coroutine itself raised, the future
+    is already done and ``cancel()`` is a harmless no-op.) Without a running
+    loop, a private loop is created, used, and closed.
 
     A factory is taken instead of a coroutine object so that no coroutine is
     created (and left un-awaited) if loop acquisition itself fails.
@@ -61,6 +65,6 @@ def run_coroutine_blocking[T](
     future = asyncio.run_coroutine_threadsafe(coro_factory(), loop)
     try:
         return future.result(timeout=timeout)
-    except TimeoutError:
+    except BaseException:
         future.cancel()
         raise
