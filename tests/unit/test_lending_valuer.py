@@ -789,3 +789,254 @@ class TestLendingValuationProtocolRouting:
         assert captured, f"{method} made no eth_call"
         assert captured[0].lower() == _ETH_AAVE_DATA_PROVIDER.lower()
         assert captured[0].lower() != _ETH_SPARK_DATA_PROVIDER.lower()
+
+
+# =============================================================================
+# TestVib5006LendingTrackCEnrichment — HF / supply_apy_pct / borrow_balance
+# =============================================================================
+
+
+class TestVib5006LendingTrackCEnrichment:
+    """VIB-5006: the lending Track-C fields ``_materialise_lending`` reads but
+    that were never populated — ``supply_apy_pct`` + ``borrow_balance`` (from the
+    per-reserve read) and account-level ``health_factor`` (from the account-state
+    read). Closes Accountant L2/L3/L5 for the Aave family."""
+
+    def _make_position(self, position_type, **kwargs):
+        from almanak.framework.teardown.models import PositionInfo, PositionType
+
+        defaults = {
+            "position_type": getattr(PositionType, position_type),
+            "position_id": "test-position",
+            "chain": "arbitrum",
+            "protocol": "aave_v3",
+            "value_usd": Decimal("999"),
+            "details": {},
+        }
+        defaults.update(kwargs)
+        return PositionInfo(**defaults)
+
+    def _valuer_with_on_chain(self, on_chain):
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        valuer = PortfolioValuer(gateway_client=MagicMock())
+        valuer._lending_reader = MagicMock()
+        valuer._lending_reader.read_position.return_value = on_chain
+        return valuer
+
+    # --- Part 1: per-reserve enriched dict (supply_apy_pct + borrow_balance) ---
+
+    def test_enriched_dict_stamps_supply_apy_and_borrow_balance(self):
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        # liquidity_rate = 3e25 ray → 3e25 / 1e27 * 100 = 3.00% supply APY
+        on_chain = LendingPositionOnChain(
+            asset_address="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            current_atoken_balance=5_000_000_000,  # 5000 USDC (6 dp)
+            current_stable_debt=0,
+            current_variable_debt=1_000_000_000,  # 1000 USDC debt
+            liquidity_rate=30_000_000_000_000_000_000_000_000,
+            usage_as_collateral_enabled=True,
+        )
+        valuer = self._valuer_with_on_chain(on_chain)
+        market = MagicMock()
+        market.price.return_value = Decimal("1.0")
+
+        position = self._make_position(
+            "SUPPLY",
+            details={
+                "asset_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+                "wallet": "0x1234567890abcdef1234567890abcdef12345678",
+                "asset": "USDC",
+            },
+        )
+        with patch.object(PortfolioValuer, "_get_token_decimals", return_value=6):
+            result = valuer._reprice_lending_on_chain_enriched(position, "arbitrum", market)
+
+        assert result is not None
+        _value, enriched = result
+        assert Decimal(enriched["supply_apy_pct"]) == Decimal("3")
+        assert Decimal(enriched["borrow_balance"]) == Decimal("1000")
+        # health_factor is account-level — set in _get_positions, NOT here. The
+        # old code stamped a perpetually-None HF via a bogus hasattr; assert the
+        # fabricated key is gone.
+        assert "health_factor" not in enriched
+
+    def test_enriched_supply_apy_is_measured_zero_not_absent(self):
+        """A genuine 0 liquidity_rate (read succeeded) ⇒ "0", never absent
+        (Empty ≠ Zero)."""
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        on_chain = LendingPositionOnChain(
+            asset_address="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            current_atoken_balance=5_000_000_000,
+            current_stable_debt=0,
+            current_variable_debt=0,
+            liquidity_rate=0,
+            usage_as_collateral_enabled=True,
+        )
+        valuer = self._valuer_with_on_chain(on_chain)
+        market = MagicMock()
+        market.price.return_value = Decimal("1.0")
+        position = self._make_position(
+            "SUPPLY",
+            details={
+                "asset_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+                "wallet": "0x1234567890abcdef1234567890abcdef12345678",
+                "asset": "USDC",
+            },
+        )
+        with patch.object(PortfolioValuer, "_get_token_decimals", return_value=6):
+            _value, enriched = valuer._reprice_lending_on_chain_enriched(position, "arbitrum", market)
+        # Present + non-empty (the L5 gate) + parses to a measured 0 (not absent,
+        # not None — Empty ≠ Zero). The raw string may render as "0E-27"; what
+        # matters is _materialise_lending's _dec() reads it back as 0.
+        assert enriched["supply_apy_pct"] not in (None, "")
+        assert Decimal(enriched["supply_apy_pct"]) == Decimal("0")
+        assert Decimal(enriched["borrow_balance"]) == Decimal("0")  # measured zero
+
+    # --- Part 2: account-level health_factor enrichment ---
+
+    def _account_state(self, hf):
+        from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
+
+        return LendingAccountState(
+            collateral_usd=Decimal("6"),
+            debt_usd=Decimal("1.8"),
+            health_factor=hf,
+            liquidation_threshold_bps=8500,
+            e_mode_category=0,
+        )
+
+    def test_health_factor_stamped_for_aave_lending_leg(self, monkeypatch):
+        valuer = self._valuer_with_on_chain(None)
+        position = self._make_position("SUPPLY", details={"wallet": "0xWALLET"})
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_account_state",
+            lambda **_kw: self._account_state(Decimal("2.6026")),
+        )
+        cache: dict = {}
+        out = valuer._enrich_lending_health_factor(position, "arbitrum", {"k": "v"}, cache)
+        assert out["health_factor"] == "2.6026"
+        assert out["k"] == "v"  # original details preserved
+
+    def test_failed_read_stamps_explicit_none(self, monkeypatch):
+        """Attempted-but-None read ⇒ explicit health_factor=None (measured-
+        unmeasured), never a fabricated 0 — Empty ≠ Zero."""
+        valuer = self._valuer_with_on_chain(None)
+        position = self._make_position("BORROW", details={"wallet": "0xWALLET"})
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_account_state",
+            lambda **_kw: None,
+        )
+        out = valuer._enrich_lending_health_factor(position, "arbitrum", {}, {})
+        assert out["health_factor"] is None
+
+    def test_none_hf_value_stamps_explicit_none(self, monkeypatch):
+        valuer = self._valuer_with_on_chain(None)
+        position = self._make_position("SUPPLY", details={"wallet": "0xWALLET"})
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_account_state",
+            lambda **_kw: self._account_state(None),
+        )
+        out = valuer._enrich_lending_health_factor(position, "arbitrum", {}, {})
+        assert out["health_factor"] is None
+
+    def test_failed_read_overrides_stale_strategy_hf(self, monkeypatch):
+        """A failed read must NOT let a stale strategy-reported HF survive —
+        it stamps None so the merge can't pass a stale value off as live
+        (VIB-5084 class)."""
+        valuer = self._valuer_with_on_chain(None)
+        position = self._make_position("BORROW", details={"wallet": "0xWALLET"})
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_account_state",
+            lambda **_kw: None,
+        )
+        # enriched_details already carries a (stale) HF — it must be overridden.
+        out = valuer._enrich_lending_health_factor(position, "arbitrum", {"health_factor": "9.99"}, {})
+        assert out["health_factor"] is None
+
+    def test_non_lending_position_skips_read(self, monkeypatch):
+        valuer = self._valuer_with_on_chain(None)
+        position = self._make_position("TOKEN", details={"wallet": "0xWALLET"})
+        calls: list = []
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_account_state",
+            lambda **kw: calls.append(kw),
+        )
+        out = valuer._enrich_lending_health_factor(position, "arbitrum", {}, {})
+        assert "health_factor" not in out
+        assert calls == []  # no read for non-lending positions
+
+    def test_per_market_protocol_skipped_no_read(self, monkeypatch):
+        """A market_id ⇒ Morpho-class (per-market) protocol — skip rather than
+        issue a read that would fail closed (VIB-4551 twin, separate ticket)."""
+        valuer = self._valuer_with_on_chain(None)
+        position = self._make_position(
+            "BORROW", protocol="morpho_blue", details={"wallet": "0xWALLET", "market_id": "0xabc"}
+        )
+        calls: list = []
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_account_state",
+            lambda **kw: calls.append(kw),
+        )
+        out = valuer._enrich_lending_health_factor(position, "ethereum", {}, {})
+        assert "health_factor" not in out
+        assert calls == []
+
+    def test_account_state_read_cached_across_legs(self, monkeypatch):
+        """Both legs of a loop (same protocol/chain/wallet) share ONE read."""
+        valuer = self._valuer_with_on_chain(None)
+        supply = self._make_position("SUPPLY", details={"wallet": "0xWALLET"})
+        borrow = self._make_position("BORROW", details={"wallet": "0xWALLET"})
+        read_count = {"n": 0}
+
+        def _counting_read(**_kw):
+            read_count["n"] += 1
+            return self._account_state(Decimal("2.6"))
+
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_account_state",
+            _counting_read,
+        )
+        cache: dict = {}
+        out_s = valuer._enrich_lending_health_factor(supply, "arbitrum", {}, cache)
+        out_b = valuer._enrich_lending_health_factor(borrow, "arbitrum", {}, cache)
+        assert out_s["health_factor"] == "2.6"
+        assert out_b["health_factor"] == "2.6"
+        assert read_count["n"] == 1  # cached per (protocol, chain, wallet)
+
+    def test_account_state_cache_is_case_insensitive_on_wallet(self, monkeypatch):
+        """A checksummed vs lowercase spelling of the same wallet shares ONE
+        cached read — EVM addresses are case-insensitive (Gemini)."""
+        valuer = self._valuer_with_on_chain(None)
+        checksummed = self._make_position("SUPPLY", details={"wallet": "0xAbCdEf0000000000000000000000000000000001"})
+        lowercased = self._make_position("BORROW", details={"wallet": "0xabcdef0000000000000000000000000000000001"})
+        read_count = {"n": 0}
+
+        def _counting_read(**_kw):
+            read_count["n"] += 1
+            return self._account_state(Decimal("2.6"))
+
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_account_state",
+            _counting_read,
+        )
+        cache: dict = {}
+        valuer._enrich_lending_health_factor(checksummed, "arbitrum", {}, cache)
+        valuer._enrich_lending_health_factor(lowercased, "arbitrum", {}, cache)
+        assert read_count["n"] == 1  # case-normalised cache key
+
+    def test_no_gateway_skips_read(self, monkeypatch):
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        valuer = PortfolioValuer(gateway_client=None)
+        position = self._make_position("SUPPLY", details={"wallet": "0xWALLET"})
+        calls: list = []
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_account_state",
+            lambda **kw: calls.append(kw),
+        )
+        out = valuer._enrich_lending_health_factor(position, "arbitrum", {}, {})
+        assert "health_factor" not in out
+        assert calls == []

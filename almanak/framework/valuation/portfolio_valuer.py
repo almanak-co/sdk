@@ -62,6 +62,10 @@ FRAMEWORK_EXTERNAL_DIVERGENCE_THRESHOLD = Decimal("0.20")
 # 40-hex pool *contract* address (or none).
 _V4_POOL_ID_HEX_LEN = 64
 
+# VIB-5006: Aave-fork interest rates (``liquidityRate``) are reported in ray
+# (1e27 fixed-point). Divide by this and ×100 to render a human percentage.
+_RAY_SCALE = Decimal("1e27")
+
 
 def _looks_like_evm_address(value: object) -> bool:
     """Return True iff ``value`` is the 42-char ``0x``-prefixed hex shape.
@@ -1467,6 +1471,10 @@ class PortfolioValuer:
         # Re-price all positions and enrich details with valuer breakdown
         positions: list[PositionValue] = []
         any_unrepriced = False
+        # VIB-5006: account-level health-factor is a per-WALLET read shared by
+        # every leg of a wallet's position (a leverage loop's SUPPLY + BORROW
+        # legs hit the same (protocol, chain, wallet)), so cache it per snapshot.
+        account_state_cache: dict[tuple[str, str, str], Any] = {}
         for p in merged_positions:
             value_usd, enriched_details, repriced = self._reprice_position_enriched(p, strategy.chain, market)
             if not repriced:
@@ -1483,6 +1491,24 @@ class PortfolioValuer:
                     p.position_type.value,
                     p.protocol,
                     p.position_id,
+                )
+
+            # VIB-5006: stamp account-level health_factor (per-wallet, cached)
+            # onto lending legs so the Track-C ``position_state_snapshots`` rows
+            # carry HF (Accountant L2/L3). No-op for non-lending positions.
+            # Guarded: HF enrichment fails closed internally, but the snapshot
+            # must NEVER be aborted by an unforeseen raise here — dropping this
+            # position's Track-C row would regress coverage (G14/G15). Degrade to
+            # "no HF stamped", never "no row".
+            try:
+                enriched_details = self._enrich_lending_health_factor(
+                    p, strategy.chain, enriched_details, account_state_cache
+                )
+            except Exception:
+                logger.debug(
+                    "VIB-5006 health-factor enrichment raised for %s; leaving HF unmeasured",
+                    p.position_id,
+                    exc_info=True,
                 )
 
             # Merge enriched valuer details into position details
@@ -2560,15 +2586,123 @@ class PortfolioValuer:
                 "debt_value_usd": str(valued.debt_value_usd),
                 "net_value_usd": str(valued.net_value_usd),
                 "collateral_enabled": valued.collateral_enabled,
-                "health_factor": str(on_chain.health_factor) if hasattr(on_chain, "health_factor") else None,
                 "valuation_source": "on_chain",
             }
+
+            # VIB-5006: stamp the Track-C lending observability fields the
+            # ``position_state_snapshots`` materialiser
+            # (``_materialise_lending``) reads but that were never populated —
+            # the Accountant L5 (APR/APY) gap and part of the L2/L3 (HF) gap.
+            #
+            # ``borrow_balance``: this reserve's total debt in HUMAN units
+            #   (stable + variable). A measured ``Decimal("0")`` on a
+            #   supply-only reserve — NOT ``None`` (Empty ≠ Zero); both legs
+            #   reach here only after a successful on-chain read.
+            # ``supply_apy_pct``: the reserve's supply rate. Aave-fork
+            #   ``getUserReserveData`` returns ``liquidityRate`` in ray (1e27);
+            #   render as a percentage. (The variable BORROW rate is NOT in
+            #   ``getUserReserveData`` — it is a reserve-level read the connector
+            #   does not yet expose — so ``borrow_apy_pct`` stays unmeasured
+            #   here; tracked for the borrow-rate read follow-up. L5 passes on
+            #   ``supply_apy_pct`` OR ``borrow_apy_pct``, so the supply leg
+            #   already satisfies it.)
+            # ``health_factor`` is account-level (``getUserAccountData``), not a
+            #   per-reserve field — it is enriched once per (protocol, chain,
+            #   wallet) in ``_get_positions`` via the account-state reader, so it
+            #   is deliberately NOT set here (the old ``hasattr`` line was always
+            #   ``None`` because ``LendingPositionOnChain`` has no HF field).
+            enriched["borrow_balance"] = str(valued.stable_debt_balance + valued.variable_debt_balance)
+            # Stamp unconditionally past the ``on_chain is None`` guard: the rate
+            # is measured, so a genuine 0 ray ⇒ "0" (Empty ≠ Zero), never absent.
+            # NOTE: this is the *reserve's* supply rate (``liquidityRate``) — so a
+            # BORROW leg carries the supply APY of the borrowed reserve, NOT a
+            # borrow APR. The borrow rate is a separate reserve-level read the
+            # connector does not expose yet (``borrow_apy_pct`` stays unmeasured).
+            enriched["supply_apy_pct"] = str((Decimal(on_chain.liquidity_rate) / _RAY_SCALE) * Decimal("100"))
 
             return result_value, enriched
 
         except Exception:
             logger.debug("Lending enriched re-pricing failed for %s", position.position_id, exc_info=True)
             return None
+
+    def _enrich_lending_health_factor(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        enriched_details: dict[str, Any],
+        account_state_cache: dict[tuple[str, str, str], Any],
+    ) -> dict[str, Any]:
+        """VIB-5006: stamp account-level ``health_factor`` onto a lending leg.
+
+        Health factor is a per-WALLET aggregate (Aave ``getUserAccountData``),
+        not a per-reserve field, so it is read once per (protocol, chain,
+        wallet) per snapshot — via ``account_state_cache`` — and shared across
+        every leg of that wallet's position (a leverage loop's SUPPLY + BORROW
+        legs). The read routes through the gateway-boundary-correct
+        :func:`read_lending_account_state` seam (no framework-side RPC).
+
+        Scope: whole-account lending protocols (the Aave family), detected by
+        the absence of a per-market ``market_id``. Per-market protocols (Morpho
+        Blue) carry a ``market_id`` and need injected collateral/loan prices
+        this snapshot path does not assemble — that is the VIB-4551 twin,
+        tracked separately.
+
+        Empty ≠ Zero, two ways: a real read stamps the measured HF; an *attempted
+        but failed/None* read stamps ``health_factor = None`` so a stale
+        strategy-reported HF in ``position.details`` cannot survive the
+        downstream merge and masquerade as a live value (the VIB-5084 stale-HF
+        class) — unmeasured is honest, stale is not. For positions we do NOT own
+        (non-lending, no gateway, per-market protocol, no wallet) the details are
+        returned untouched.
+        """
+        from almanak.framework.teardown.models import PositionType
+
+        if position.position_type not in (PositionType.SUPPLY, PositionType.BORROW):
+            return enriched_details
+        if self._gateway_client is None:
+            return enriched_details
+        # Whole-account only (Aave family). A per-market id ⇒ Morpho-class
+        # protocol whose HF needs price injection (VIB-4551) — skip rather than
+        # issue a read that would fail closed and waste a gateway round-trip.
+        if position.details.get("market_id"):
+            return enriched_details
+        wallet = (
+            position.details.get("wallet") or position.details.get("wallet_address") or position.details.get("owner")
+        )
+        if not wallet:
+            return enriched_details
+        # EVM addresses are case-insensitive — normalise so a checksummed and a
+        # lowercase spelling of the same wallet (e.g. strategy-reported vs
+        # on-chain-discovered) share ONE cached account-state read instead of
+        # missing the cache and issuing a redundant gateway round-trip (Gemini).
+        wallet = wallet.lower()
+
+        key = (position.protocol, chain, wallet)
+        if key not in account_state_cache:
+            from almanak.framework.accounting.lending_reads import read_lending_account_state
+
+            # ``read_lending_account_state`` already fails closed (returns None)
+            # on any error; the Aave family is USD-native on-chain so no
+            # price_oracle is needed, and Track-C is an observational snapshot so
+            # block=None ("latest") is correct (not a pinned post-state read).
+            account_state_cache[key] = read_lending_account_state(
+                protocol=position.protocol,
+                chain=chain,
+                wallet_address=wallet,
+                market_id=None,
+                gateway_client=self._gateway_client,
+                price_oracle=None,
+                block=None,
+            )
+
+        state = account_state_cache[key]
+        measured_hf = state.health_factor if state is not None else None
+        # We attempted the read (past every early-return), so this leg's HF is
+        # OURS to set: the measured value, or an explicit None that overrides any
+        # stale strategy-reported HF in the merge below (honest-unmeasured, not
+        # stale-passthrough).
+        return {**enriched_details, "health_factor": str(measured_hf) if measured_hf is not None else None}
 
     def _value_matched_perp(  # noqa: C901
         self,
