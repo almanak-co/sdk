@@ -1419,9 +1419,27 @@ def _tick_to_sqrt_ratio_x96(tick: int) -> int:
 def sqrt_ratio_x96_to_tick(sqrt_ratio_x96: int) -> int | None:
     """Inverse of :func:`_tick_to_sqrt_ratio_x96`: derive tick from sqrtPriceX96.
 
-    Uses the canonical Uniswap relation ``sqrtPrice = sqrt(1.0001^tick) * 2^96``
-    so ``tick = floor(2 * log_{1.0001}(sqrtPrice / 2^96))``. Floor matches v3-core
-    / v4-core ``TickMath.getTickAtSqrtRatio`` semantics.
+    Implements ``TickMath.getTickAtSqrtRatio`` semantics: the greatest tick
+    ``t`` such that ``_tick_to_sqrt_ratio_x96(t) <= sqrt_ratio_x96``.
+
+    The decimal relation ``tick = floor(2 * log_{1.0001}(sqrtPrice / 2^96))``
+    only gives a *candidate*: ``_tick_to_sqrt_ratio_x96`` floors the ratio
+    (``int(...)``) and the ``ln`` floor compounds it, so the raw candidate
+    lands one tick low for essentially every nonzero tick (e.g. tick 1000
+    round-tripped to 999, tick -1 to -2). A bounded correction step pins the
+    result back to the ``getTickAtSqrtRatio`` invariant against this module's
+    own forward function, making the round-trip exact and keeping in-range
+    classification correct at tick boundaries.
+
+    The invariant is pinned to ``_tick_to_sqrt_ratio_x96`` (this module's own
+    Decimal forward), i.e. a self-consistent round-trip — NOT guaranteed
+    bit-identical to on-chain v4-core ``TickMath`` at sub-tick granularity (the
+    two differ by ≤1 wei at the domain extremes; e.g. our forward returns
+    ``MIN_SQRT_PRICE - 1`` at ``MIN_TICK``). That is the correct contract for
+    the sole consumer: ``adapter.py`` ``compile_time_current_tick`` derives the
+    tick from the same ``sqrt_price_x96`` it sized liquidity against, and only
+    as a fallback behind authoritative on-chain tick extraction — so internal
+    consistency, not pool-contract parity, is what matters here.
 
     Returns ``None`` for non-positive ``sqrt_ratio_x96`` (uninitialized pool /
     bogus input — callers must treat tick as unmeasured rather than substitute
@@ -1439,7 +1457,20 @@ def sqrt_ratio_x96_to_tick(sqrt_ratio_x96: int) -> int | None:
         # 2 * log_{1.0001}(ratio) = 2 * ln(ratio) / ln(1.0001)
         log_ratio = ratio.ln()
         log_base = Decimal("1.0001").ln()
-        return int((Decimal(2) * log_ratio / log_base).to_integral_value(rounding=_decimal.ROUND_FLOOR))
+        candidate = int((Decimal(2) * log_ratio / log_base).to_integral_value(rounding=_decimal.ROUND_FLOOR))
+
+    # Clamp to the valid tick domain before correcting — out-of-range sqrt
+    # ratios (impossible from a live slot0, but defends against bogus input)
+    # otherwise spin the correction loop against the forward function.
+    candidate = max(MIN_TICK, min(MAX_TICK, candidate))
+    # Pin to getTickAtSqrtRatio: walk up while the next tick still fits, then
+    # down while the current tick overshoots. The candidate is within ~1 tick
+    # of correct, so each loop runs at most a couple of iterations.
+    while candidate < MAX_TICK and _tick_to_sqrt_ratio_x96(candidate + 1) <= sqrt_ratio_x96:
+        candidate += 1
+    while candidate > MIN_TICK and _tick_to_sqrt_ratio_x96(candidate) > sqrt_ratio_x96:
+        candidate -= 1
+    return candidate
 
 
 def _get_liquidity_for_amount0(sqrt_ratio_a: int, sqrt_ratio_b: int, amount0: int) -> int:

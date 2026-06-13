@@ -26,6 +26,9 @@ from almanak.connectors.uniswap_v4.sdk import (
     ACTION_TAKE_ALL,
     ACTION_TAKE_PAIR,
     ACTION_TAKE_PORTION,
+    MAX_TICK,
+    MIN_SQRT_PRICE,
+    MIN_TICK,
     MODIFY_LIQUIDITIES_SELECTOR,
     NATIVE_CURRENCY,
     PM_BURN_POSITION,
@@ -49,6 +52,7 @@ from almanak.connectors.uniswap_v4.sdk import (
     PoolKey,
     UniswapV4SDK,
     _tick_to_sqrt_ratio_x96,
+    sqrt_ratio_x96_to_tick,
 )
 from almanak.connectors.uniswap_v4.receipt_parser import (
     EVENT_TOPICS,
@@ -153,6 +157,56 @@ class TestHookFlags:
 # =============================================================================
 # SDK LP constants tests
 # =============================================================================
+
+
+class TestSqrtRatioToTick:
+    """Regression coverage for sqrt_ratio_x96_to_tick.
+
+    Before the correction step it double-floored (``_tick_to_sqrt_ratio_x96``
+    floors the ratio, the ``ln`` floor compounds it), so every nonzero tick
+    round-tripped one tick low — tick 1000 -> 999, tick -1 -> -2. This was
+    stamped into LP_OPEN metadata (``adapter.py``) and skewed in-range
+    classification at tick boundaries. There was no test for the inverse,
+    which is how the off-by-one shipped.
+    """
+
+    @pytest.mark.parametrize(
+        "tick",
+        [MIN_TICK, -887272, -10000, -100, -2, -1, 0, 1, 2, 100, 1000, 10000, 887271, MAX_TICK],
+    )
+    def test_round_trip_is_exact(self, tick):
+        """tick -> sqrtRatio -> tick recovers the original tick exactly."""
+        assert sqrt_ratio_x96_to_tick(_tick_to_sqrt_ratio_x96(tick)) == tick
+
+    def test_round_trip_exhaustive_sample(self):
+        """Deterministic sweep across the full tick domain — no off-by-one."""
+        # Stride chosen to hit a wide spread of magnitudes and both signs
+        # without running the full ~1.77M-wide domain.
+        for tick in range(MIN_TICK, MAX_TICK + 1, 1009):
+            assert sqrt_ratio_x96_to_tick(_tick_to_sqrt_ratio_x96(tick)) == tick, tick
+
+    def test_get_tick_at_sqrt_ratio_invariant(self):
+        """Result satisfies getTickAtSqrtRatio: sqrtRatio(t) <= x < sqrtRatio(t+1)."""
+        for tick in (-50000, -1, 0, 1, 777, 50000):
+            x = _tick_to_sqrt_ratio_x96(tick) + 12345  # land strictly inside the tick range
+            t = sqrt_ratio_x96_to_tick(x)
+            assert _tick_to_sqrt_ratio_x96(t) <= x < _tick_to_sqrt_ratio_x96(t + 1)
+
+    def test_non_positive_input_is_unmeasured(self):
+        """Empty != Zero: bogus/uninitialized input returns None, not a sentinel tick."""
+        assert sqrt_ratio_x96_to_tick(0) is None
+        assert sqrt_ratio_x96_to_tick(-5) is None
+
+    def test_minimum_sqrt_price_floor(self):
+        """The lowest valid V4 sqrt price maps to MIN_TICK, not below it."""
+        assert sqrt_ratio_x96_to_tick(MIN_SQRT_PRICE) == MIN_TICK
+
+    def test_out_of_domain_input_clamps_to_max_tick(self):
+        """An out-of-domain sqrt ratio clamps to MAX_TICK without spinning the
+        correction loop (locks in the defensive clamp the docstring promises)."""
+        # ~2x the maximum valid V4 sqrt price, and a full uint160 max.
+        assert sqrt_ratio_x96_to_tick(_tick_to_sqrt_ratio_x96(MAX_TICK) * 2) == MAX_TICK
+        assert sqrt_ratio_x96_to_tick(2**160 - 1) == MAX_TICK
 
 
 class TestLPConstants:
