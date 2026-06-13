@@ -138,6 +138,68 @@ class LedgerEntry:
         )
 
 
+def lenient_ledger_decimal(value: Any) -> Decimal:
+    """Lenient parse of a ledger numeric column to a FINITE Decimal.
+
+    The dashboard quant aggregations must never crash (or zero every tile by
+    failing one aggregate query) because a single on-disk row carries a
+    degenerate numeric value. Contract (VIB-5059 Phase 1, shared verbatim by
+    the SQLite custom SQL aggregate, the Postgres numeric-literal guard, and
+    the Python reference aggregation in ``quant_aggregations``):
+
+    - ``None`` / ``""`` → ``Decimal("0")`` (absent contributes nothing).
+    - Unparsable text → ``Decimal("0")`` (legacy ``_to_decimal`` behavior).
+    - Non-finite numerics (``NaN`` / ``Infinity``) → ``Decimal("0")``. This is
+      the one documented divergence from the legacy per-row loop, which let a
+      single ``NaN`` row poison a lifetime SUM into ``NaN`` — a defect, not a
+      contract (pinned by the VIB-5059-p1sql UAT card, D3.F6).
+    """
+    if value is None or value == "":
+        return Decimal("0")
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return Decimal("0")
+    return parsed if parsed.is_finite() else Decimal("0")
+
+
+@dataclass(frozen=True)
+class LedgerQuantStats:
+    """SQL-side aggregate of everything the dashboard quant tiles need from
+    ``transaction_ledger`` (VIB-5059 Phase 1).
+
+    Replaces the bulk full-width ledger fetch in the dashboard quant-input
+    load: the per-row Python loops in ``quant_aggregations`` consumed only
+    these counts, this one sum, and the first-action anchor — so the stores
+    compute them with targeted ``COUNT``/``SUM`` queries that transfer O(1)
+    rows and never select the pre/post-state JSON blobs.
+
+    Zero-row semantics (parity with the legacy loops over an empty list —
+    Empty ≠ Zero applies per field):
+
+    - counts → ``0`` (``len([]) == 0``).
+    - ``gas_usd_sum`` → ``Decimal("0")`` (the legacy ``CostStack`` default).
+    - ``first_action_wallet_value_usd`` → ``None`` (unmeasured — triggers the
+      portfolio-metrics fallback exactly as the legacy anchor walk did; never
+      coerced to ``0``).
+
+    Frozen: the quant-input cache (PR #2731) shares one loaded object across
+    the three tile RPCs, which must treat it as read-only.
+    """
+
+    total: int = 0
+    with_tx_hash: int = 0
+    with_cycle_id: int = 0
+    with_price_inputs: int = 0
+    with_pre_post_state: int = 0
+    with_positive_gas_usd: int = 0
+    gas_usd_sum: Decimal = Decimal("0")
+    # Wallet USD value at the strategy's first action (VIB-3914 anchor).
+    # Computed from the bounded anchor-candidate walk, not from the
+    # aggregate query; ``None`` = no ledger row carries a usable anchor.
+    first_action_wallet_value_usd: Decimal | None = None
+
+
 def _extract_intent_type(intent: Any) -> str:
     """Phase alpha -- normalize intent_type to a string.
 

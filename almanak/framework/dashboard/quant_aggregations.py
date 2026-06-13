@@ -33,6 +33,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from almanak.framework.observability.ledger import LedgerQuantStats, lenient_ledger_decimal
+
 logger = logging.getLogger(__name__)
 
 
@@ -273,6 +275,83 @@ def _wallet_value_at_first_action(ledger_entries: list[Any]) -> Decimal | None:
     return None
 
 
+def ledger_quant_stats_from_entries(ledger_entries: list[Any]) -> LedgerQuantStats:
+    """Python reference aggregation over full ledger rows (VIB-5059 Phase 1).
+
+    Produces the same :class:`LedgerQuantStats` the state stores compute with
+    targeted SQL aggregates, from an in-memory list of LedgerEntry-shaped
+    objects or dicts. Field semantics mirror the legacy per-row loops this
+    module ran before the SQL path existed (non-empty-column counts, the
+    ``gas_usd`` sum, the VIB-3914 first-action anchor walk) — the equivalence
+    suite pins both implementations against each other on the same data.
+
+    Used by callers that already hold full rows (the legacy
+    ``build_quant_header`` composer and its regression tests); the gateway
+    hot path receives a store-computed ``LedgerQuantStats`` instead and never
+    materialises the row list.
+    """
+    total = len(ledger_entries)
+    with_tx_hash = 0
+    with_cycle_id = 0
+    with_price_inputs = 0
+    with_pre_post_state = 0
+    with_positive_gas_usd = 0
+    gas_usd_sum = Decimal("0")
+
+    for entry in ledger_entries:
+        if isinstance(entry, dict):
+            tx_hash = entry.get("tx_hash")
+            cycle_id = entry.get("cycle_id")
+            price_inputs = entry.get("price_inputs_json")
+            pre_state = entry.get("pre_state_json")
+            post_state = entry.get("post_state_json")
+            gas_usd_raw = entry.get("gas_usd")
+        else:
+            tx_hash = getattr(entry, "tx_hash", None)
+            cycle_id = getattr(entry, "cycle_id", None)
+            price_inputs = getattr(entry, "price_inputs_json", None)
+            pre_state = getattr(entry, "pre_state_json", None)
+            post_state = getattr(entry, "post_state_json", None)
+            gas_usd_raw = getattr(entry, "gas_usd", None)
+        if tx_hash:
+            with_tx_hash += 1
+        if cycle_id:
+            with_cycle_id += 1
+        if price_inputs:
+            with_price_inputs += 1
+        if pre_state and post_state:
+            with_pre_post_state += 1
+        gas = lenient_ledger_decimal(gas_usd_raw)
+        gas_usd_sum += gas
+        if gas_usd_raw and gas > Decimal("0"):
+            with_positive_gas_usd += 1
+
+    return LedgerQuantStats(
+        total=total,
+        with_tx_hash=with_tx_hash,
+        with_cycle_id=with_cycle_id,
+        with_price_inputs=with_price_inputs,
+        with_pre_post_state=with_pre_post_state,
+        with_positive_gas_usd=with_positive_gas_usd,
+        gas_usd_sum=gas_usd_sum,
+        first_action_wallet_value_usd=_wallet_value_at_first_action(ledger_entries),
+    )
+
+
+def _ledger_stats(ledger: list[Any] | LedgerQuantStats) -> LedgerQuantStats:
+    """Normalise the ledger input every aggregation consumes (VIB-5059).
+
+    The gateway hot path passes a store-computed :class:`LedgerQuantStats`
+    (O(1)-row SQL aggregates); legacy callers and the regression suites pass
+    full row lists, which reduce through the reference aggregation above.
+    Both shapes flow through ONE downstream code path, so list-path and
+    SQL-path consumers cannot drift.
+    """
+    if isinstance(ledger, LedgerQuantStats):
+        return ledger
+    return ledger_quant_stats_from_entries(ledger)
+
+
 def _open_position_cost_basis(accounting_events: list[dict[str, Any]]) -> Decimal:
     """Σ cost_basis_usd over positions whose OPEN event has no matching CLOSE.
 
@@ -397,23 +476,22 @@ class QuantHeader:
 
 
 def compute_cost_stack(
-    ledger_entries: list[Any],
+    ledger_entries: list[Any] | LedgerQuantStats,
     accounting_events: list[dict[str, Any]],
 ) -> CostStack:
     """Aggregate life-to-date cost / yield buckets.
 
-    ``ledger_entries`` is a list of LedgerEntry-shaped objects (the
-    backend dataclass or a dict). ``accounting_events`` is the raw-row
-    output of ``backend.get_accounting_events`` — each row's
-    ``payload_json`` is decoded here.
+    ``ledger_entries`` is either a list of LedgerEntry-shaped objects (the
+    backend dataclass or a dict) or a pre-aggregated
+    :class:`LedgerQuantStats` (VIB-5059 — the gateway hot path pushes the
+    gas SUM into the store's SQL so it never materialises the row list).
+    ``accounting_events`` is the raw-row output of
+    ``backend.get_accounting_events`` — each row's ``payload_json`` is
+    decoded here.
     """
     stack = CostStack()
 
-    for entry in ledger_entries:
-        gas_usd = getattr(entry, "gas_usd", None)
-        if gas_usd is None and isinstance(entry, dict):
-            gas_usd = entry.get("gas_usd")
-        stack.gas_usd += _to_decimal(gas_usd)
+    stack.gas_usd += _ledger_stats(ledger_entries).gas_usd_sum
 
     for event in accounting_events:
         payload = _safe_payload_loads(event.get("payload_json") if isinstance(event, dict) else None)
@@ -671,7 +749,7 @@ def compute_reconciliation(
 
 
 def compute_audit_trail(
-    ledger_entries: list[Any],
+    ledger_entries: list[Any] | LedgerQuantStats,
     accounting_events: list[dict[str, Any]],
 ) -> AuditTrailStats:
     """G9 / G12 / G13 dashboard rollup — counts of populated columns.
@@ -679,28 +757,16 @@ def compute_audit_trail(
     Specifically tracks the fields whose absence drives the May 2 mainnet
     Accountant Test gaps: ``price_inputs_json`` (G12),
     ``pre_state_json`` + ``post_state_json`` (G6 + L4 unblock),
-    ``gas_usd`` (G2), and the version-stamp triple (G13).
+    ``gas_usd`` (G2), and the version-stamp triple (G13). The ledger-side
+    counts come from :class:`LedgerQuantStats` (SQL ``COUNT`` on the gateway
+    hot path, the Python reference aggregation for list callers — VIB-5059).
     """
     stats = AuditTrailStats()
-    stats.ledger_total = len(ledger_entries)
-
-    for entry in ledger_entries:
-        if isinstance(entry, dict):
-            price_inputs = entry.get("price_inputs_json")
-            pre_state = entry.get("pre_state_json")
-            post_state = entry.get("post_state_json")
-            gas_usd_raw = entry.get("gas_usd")
-        else:
-            price_inputs = getattr(entry, "price_inputs_json", None)
-            pre_state = getattr(entry, "pre_state_json", None)
-            post_state = getattr(entry, "post_state_json", None)
-            gas_usd_raw = getattr(entry, "gas_usd", None)
-        if price_inputs:
-            stats.ledger_with_price_inputs += 1
-        if pre_state and post_state:
-            stats.ledger_with_pre_post_state += 1
-        if gas_usd_raw and _to_decimal(gas_usd_raw) > Decimal("0"):
-            stats.ledger_with_gas_usd += 1
+    ledger_stats = _ledger_stats(ledger_entries)
+    stats.ledger_total = ledger_stats.total
+    stats.ledger_with_price_inputs = ledger_stats.with_price_inputs
+    stats.ledger_with_pre_post_state = ledger_stats.with_pre_post_state
+    stats.ledger_with_gas_usd = ledger_stats.with_positive_gas_usd
 
     stats.events_total = len(accounting_events)
     for event in accounting_events:
@@ -770,7 +836,7 @@ def _detect_primitive(accounting_events: list[dict[str, Any]]) -> str:
 # scope for this misc cleanup PR.
 def evaluate_posture(  # noqa: C901
     primitive: str,
-    ledger_entries: list[Any],
+    ledger_entries: list[Any] | LedgerQuantStats,
     accounting_events: list[dict[str, Any]],
     snapshots: list[Any],
     audit: AuditTrailStats,
@@ -800,7 +866,8 @@ def evaluate_posture(  # noqa: C901
         pass
     posture.cells_total = len(cells)
 
-    have_ledger = len(ledger_entries) > 0
+    ledger_stats = _ledger_stats(ledger_entries)
+    have_ledger = ledger_stats.total > 0
     have_events = len(accounting_events) > 0
 
     def _ev_status(cell: str, passed: bool, *, structurally_xfail: bool = False) -> None:
@@ -815,10 +882,11 @@ def evaluate_posture(  # noqa: C901
             posture.failing.append(cell)
 
     # --- Generic cells ---------------------------------------------------
+    # G1/G7: "every ledger row carries X" ⇔ the non-empty-column count equals
+    # the row count (the legacy ``all(...)`` loops expressed as SQL COUNTs).
     _ev_status(
         "G1",
-        have_ledger
-        and all(getattr(e, "tx_hash", "") or (isinstance(e, dict) and e.get("tx_hash")) for e in ledger_entries),
+        have_ledger and ledger_stats.with_tx_hash == ledger_stats.total,
     )
     _ev_status(
         "G2",
@@ -840,8 +908,7 @@ def evaluate_posture(  # noqa: C901
     _ev_status("G6", reconciliation.has_data and reconciliation.passed)
     _ev_status(
         "G7",
-        have_ledger
-        and all((getattr(e, "cycle_id", "") or (isinstance(e, dict) and e.get("cycle_id"))) for e in ledger_entries),
+        have_ledger and ledger_stats.with_cycle_id == ledger_stats.total,
     )
     _ev_status("G8", len(snapshots) >= 2)
     _ev_status(
@@ -1097,7 +1164,7 @@ def compute_pnl_summary(
     *,
     portfolio_metrics: Any,
     snapshots: list[Any],
-    ledger_entries: list[Any],
+    ledger_entries: list[Any] | LedgerQuantStats,
     accounting_events: list[dict[str, Any]],
     position_summary: Any | None = None,
 ) -> PnLSummary:
@@ -1143,7 +1210,10 @@ def compute_pnl_summary(
     # row (which is seeded from the config knob and unaware of pre-existing
     # wallet contents). Falls back to portfolio_metrics only when no
     # ledger row carries pre_state — e.g., strategy hasn't acted yet.
-    wallet_anchored = _wallet_value_at_first_action(ledger_entries)
+    # VIB-5059: the anchor arrives precomputed on LedgerQuantStats (the
+    # gateway's bounded anchor walk); list callers reduce through the
+    # reference walk inside _ledger_stats.
+    wallet_anchored = _ledger_stats(ledger_entries).first_action_wallet_value_usd
 
     deposits = Decimal("0")
     withdrawals = Decimal("0")
@@ -1277,7 +1347,7 @@ def build_quant_header(
     *,
     portfolio_metrics: Any,
     snapshots: list[Any],
-    ledger_entries: list[Any],
+    ledger_entries: list[Any] | LedgerQuantStats,
     accounting_events: list[dict[str, Any]],
     position_summary: Any | None = None,
 ) -> QuantHeader:

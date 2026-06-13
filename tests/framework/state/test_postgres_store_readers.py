@@ -24,6 +24,7 @@ from decimal import Decimal
 import pytest
 
 from almanak.framework.state.state_manager import (
+    _PG_FINITE_NUMERIC_PATTERN,
     PostgresStore,
     _pg_row_to_accounting_event_dict,
     _pg_row_to_ledger_entry,
@@ -1467,3 +1468,172 @@ async def test_insert_position_registry_row_if_absent_returns_false_on_unexpecte
     inserted = await store.insert_position_registry_row_if_absent(row=_FakeRegistryRow())
 
     assert inserted is False
+
+
+# =============================================================================
+# Ledger quant stats + anchor candidates (VIB-5059 Phase 1 — SQL half)
+# =============================================================================
+#
+# UAT card D2.M2 (docs/internal/uat-cards/VIB-5059-p1sql.md): the aggregate
+# SQL computes COUNT/SUM server-side, selects NO JSON-blob column, casts the
+# text-numeric gas_usd to exact numeric ONLY behind a finite-numeric-literal
+# guard (NULL / '' / garbage / NaN / Infinity contribute zero, never raise),
+# and coalesces the zero-row sum to 0; the anchor SQL is ascending,
+# LIMIT-bounded, and projects only the three columns the anchor walk reads.
+
+
+def _quant_stats_row(**overrides):
+    base = {
+        "total": 13,
+        "with_tx_hash": 12,
+        "with_cycle_id": 12,
+        "with_price_inputs": 3,
+        "with_pre_post_state": 2,
+        "with_positive_gas_usd": 8,
+        "gas_usd_sum": "0.95",
+    }
+    base.update(overrides)
+    return _DictRow(base)
+
+
+@pytest.mark.asyncio
+async def test_get_ledger_quant_stats_sql_shape_and_conversion():
+    conn = _FakeConn(fetchrow_row=_quant_stats_row())
+    store = _make_store(conn)
+
+    stats = await store.get_ledger_quant_stats(_DEPLOYMENT_ID)
+
+    # Row → stats conversion: counts as ints, sum as exact Decimal.
+    assert stats.total == 13
+    assert stats.with_tx_hash == 12
+    assert stats.with_cycle_id == 12
+    assert stats.with_price_inputs == 3
+    assert stats.with_pre_post_state == 2
+    assert stats.with_positive_gas_usd == 8
+    assert isinstance(stats.gas_usd_sum, Decimal)
+    assert stats.gas_usd_sum == Decimal("0.95")
+    # The anchor is NEVER computed by the aggregate query (caller-owned walk).
+    assert stats.first_action_wallet_value_usd is None
+
+    assert len(conn.calls) == 1
+    kind, sql, args = conn.calls[0]
+    assert kind == "fetchrow"
+    assert args == (_DEPLOYMENT_ID,)
+    assert "FROM transaction_ledger" in sql
+    assert "WHERE deployment_id = $1" in sql
+    # Server-side aggregation, O(1) rows.
+    assert "COUNT(*)" in sql
+    assert "COUNT(*) FILTER" in sql
+    assert "SUM(" in sql
+    # No blob column VALUES selected; presence predicates only.
+    assert "SELECT *" not in sql
+    assert "extracted_data_json" not in sql
+    assert "NULLIF(pre_state_json::text, '') IS NOT NULL" in sql
+    assert "NULLIF(post_state_json::text, '') IS NOT NULL" in sql
+    # Exact-numeric cast runs ONLY behind the finite-numeric-literal guard.
+    assert f"gas_usd ~ '{_PG_FINITE_NUMERIC_PATTERN}'" in sql
+    assert "CASE WHEN gas_usd ~" in sql
+    assert "ELSE 0 END" in sql
+    # Zero-row coalescing to 0 (text-roundtripped for exactness).
+    assert "COALESCE(SUM(" in sql
+    assert "0)::text" in sql
+
+
+@pytest.mark.asyncio
+async def test_get_ledger_quant_stats_zero_rows_documented_mapping():
+    """NULL/zero-row mapping pinned per field: counts 0, sum 0, anchor None."""
+    conn = _FakeConn(fetchrow_row=_quant_stats_row(
+        total=0,
+        with_tx_hash=0,
+        with_cycle_id=0,
+        with_price_inputs=0,
+        with_pre_post_state=0,
+        with_positive_gas_usd=0,
+        gas_usd_sum="0",
+    ))
+    store = _make_store(conn)
+
+    stats = await store.get_ledger_quant_stats(_DEPLOYMENT_ID)
+    assert stats.total == 0
+    assert stats.gas_usd_sum == Decimal("0")
+    assert stats.first_action_wallet_value_usd is None
+
+    # Defensive: a missing row degrades to the same documented zeros.
+    conn_none = _FakeConn(fetchrow_row=None)
+    store_none = _make_store(conn_none)
+    stats_none = await store_none.get_ledger_quant_stats(_DEPLOYMENT_ID)
+    assert stats_none.total == 0
+    assert stats_none.gas_usd_sum == Decimal("0")
+    assert stats_none.first_action_wallet_value_usd is None
+
+
+def test_pg_finite_numeric_guard_semantics():
+    """The guard pattern itself: finite literals pass, everything else is 0.
+
+    PG's ``~`` operator is POSIX regex — semantics here are pinned with
+    Python ``re`` over the SAME pattern string (no PCRE-only syntax is used).
+    A guard that let 'NaN' / 'Infinity' through would poison the LTD SUM
+    (both are valid PG ``numeric`` casts!); one that let garbage through
+    would make the whole aggregate raise and zero every tile.
+    """
+    import re as _re
+
+    matches = lambda s: _re.match(_PG_FINITE_NUMERIC_PATTERN, s) is not None  # noqa: E731
+
+    for ok in ("0", "0.95", "-3", "+2.5", ".5", "2.", "1e-5", "3E+10", "-0.001"):
+        assert matches(ok), f"finite literal must pass the guard: {ok!r}"
+    for bad in ("NaN", "nan", "Infinity", "-Infinity", "inf", "garbage!!", "1.2.3", "", " 1", "0x10"):
+        assert not matches(bad), f"non-finite/garbage must be excluded: {bad!r}"
+
+
+@pytest.mark.asyncio
+async def test_get_ledger_anchor_candidates_sql_shape_and_conversion():
+    rows = [
+        _DictRow({
+            "id": "ledger-row-1",
+            "timestamp": datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC),
+            "pre_state_text": '{"wallet_balances": {"USDC": "1000"}}',
+            "price_inputs_text": '{"USDC": {"price_usd": "1.0"}}',
+        }),
+    ]
+    conn = _FakeConn(fetch_rows=rows)
+    store = _make_store(conn)
+
+    entries = await store.get_ledger_anchor_candidates(_DEPLOYMENT_ID, limit=64, offset=0)
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.id == "ledger-row-1"  # persisted identity, not a fabricated UUID
+    assert entry.deployment_id == _DEPLOYMENT_ID
+    assert entry.timestamp == datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
+    assert entry.pre_state_json == '{"wallet_balances": {"USDC": "1000"}}'
+    assert entry.price_inputs_json == '{"USDC": {"price_usd": "1.0"}}'
+
+    assert len(conn.calls) == 1
+    kind, sql, args = conn.calls[0]
+    assert kind == "fetch"
+    assert args == (_DEPLOYMENT_ID, 64, 0)
+    # Projection: row identity plus ONLY the three columns the anchor walk reads.
+    select_clause = sql.split("FROM", 1)[0]
+    assert "SELECT id," in sql
+    assert "timestamp" in select_clause
+    assert "pre_state_json::text" in select_clause
+    assert "price_inputs_json::text" in select_clause
+    assert "post_state_json" not in sql
+    assert "extracted_data_json" not in sql
+    assert "SELECT *" not in sql
+    # Blob-presence filtered in SQL; ascending; mandatory LIMIT bound.
+    assert "WHERE deployment_id = $1" in sql
+    assert "NULLIF(pre_state_json::text, '') IS NOT NULL" in sql
+    assert "NULLIF(price_inputs_json::text, '') IS NOT NULL" in sql
+    assert "ORDER BY timestamp ASC NULLS FIRST, id ASC" in sql
+    assert "LIMIT $2 OFFSET $3" in sql
+
+
+@pytest.mark.asyncio
+async def test_get_ledger_anchor_candidates_zero_limit_short_circuits():
+    conn = _FakeConn()
+    store = _make_store(conn)
+
+    assert await store.get_ledger_anchor_candidates(_DEPLOYMENT_ID, limit=0) == []
+    assert conn.calls == []

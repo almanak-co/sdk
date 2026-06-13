@@ -67,7 +67,7 @@ def _default_sqlite_db_path() -> str:
 if TYPE_CHECKING:
     from almanak.framework.accounting.commit import HandleMapping, RegistryRow
     from almanak.framework.execution.clob_handler import ClobFill, ClobOrderState, ClobOrderStatus
-    from almanak.framework.observability.ledger import LedgerEntry
+    from almanak.framework.observability.ledger import LedgerEntry, LedgerQuantStats
     from almanak.framework.observability.position_events import PositionEvent
     from almanak.framework.portfolio import PortfolioMetrics, PortfolioSnapshot
 
@@ -900,6 +900,55 @@ CREATE TABLE IF NOT EXISTS migration_state (
 
 
 # =============================================================================
+# Custom SQL helpers (VIB-5059 Phase 1)
+# =============================================================================
+
+
+def _register_quant_sql_functions(conn: sqlite3.Connection) -> None:
+    """Register the exact-decimal SQL helpers the quant aggregates use.
+
+    The dashboard quant-stats query (:meth:`SQLiteStore.get_ledger_quant_stats`)
+    must compute the life-to-date ``gas_usd`` total SQL-side so it transfers
+    O(1) rows — but ``SUM(CAST(gas_usd AS REAL))`` would route the Decimal-as-
+    TEXT column through IEEE-754 double, violating the lossless-precision
+    invariant the accounting stack maintains (the same pr-auditor finding that
+    shaped :meth:`SQLiteStore.sum_ledger_gas_usd`). A custom aggregate keeps
+    the summation exact Decimal arithmetic while staying inside the SQL
+    statement. Parse semantics are ``lenient_ledger_decimal`` — NULL / empty /
+    unparsable / non-finite text contribute zero and never raise (one garbage
+    row must not be able to fail the whole aggregate and zero every tile).
+    """
+    from almanak.framework.observability.ledger import lenient_ledger_decimal
+
+    class _LenientDecimalSum:
+        """Aggregate ``almanak_decimal_sum(col)`` → exact-Decimal sum as TEXT."""
+
+        def __init__(self) -> None:
+            self._total = Decimal("0")
+
+        def step(self, value: Any) -> None:
+            self._total += lenient_ledger_decimal(value)
+
+        def finalize(self) -> str:
+            return str(self._total)
+
+    def _lenient_decimal_positive(value: Any) -> int:
+        """Scalar ``almanak_decimal_positive(col)`` → 1 iff finite-parse > 0."""
+        return 1 if lenient_ledger_decimal(value) > 0 else 0
+
+    # typeshed's _AggregateProtocol pins ``finalize() -> int``; sqlite3
+    # accepts any SQLite-storable value (we return the exact Decimal sum as
+    # TEXT) — typeshed false positive.
+    conn.create_aggregate("almanak_decimal_sum", 1, _LenientDecimalSum)  # type: ignore[arg-type]
+    conn.create_function(
+        "almanak_decimal_positive",
+        1,
+        _lenient_decimal_positive,
+        deterministic=True,
+    )
+
+
+# =============================================================================
 # SQLITE STORE
 # =============================================================================
 
@@ -1019,6 +1068,8 @@ class SQLiteStore:
 
             # Enable foreign keys
             conn.execute("PRAGMA foreign_keys = ON")
+
+            _register_quant_sql_functions(conn)
 
             return conn
 
@@ -3706,6 +3757,126 @@ class SQLiteStore:
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_sum)
+
+    async def get_ledger_quant_stats(self, deployment_id: str) -> "LedgerQuantStats":
+        """SQL-side ledger aggregates for the dashboard quant tiles (VIB-5059).
+
+        One aggregate statement, O(1) rows transferred, NO JSON-blob columns
+        selected. Field semantics mirror the legacy per-row Python loops in
+        ``quant_aggregations`` (counts of non-empty columns; exact-Decimal
+        ``gas_usd`` sum via the ``almanak_decimal_sum`` custom aggregate —
+        see :func:`_register_quant_sql_functions`).
+
+        Zero-row semantics: counts → 0, sum → ``Decimal("0")``,
+        ``first_action_wallet_value_usd`` stays ``None`` (the anchor is
+        computed by the caller from :meth:`get_ledger_anchor_candidates`,
+        never here).
+        """
+        from almanak.framework.observability.ledger import LedgerQuantStats
+
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_get() -> LedgerQuantStats:
+            with self._db_lock:
+                cursor = self._conn.execute(  # type: ignore[union-attr]
+                    """
+                    SELECT
+                        COUNT(*) AS total,
+                        COUNT(CASE WHEN tx_hash IS NOT NULL AND tx_hash != ''
+                                   THEN 1 END) AS with_tx_hash,
+                        COUNT(CASE WHEN cycle_id IS NOT NULL AND cycle_id != ''
+                                   THEN 1 END) AS with_cycle_id,
+                        COUNT(CASE WHEN price_inputs_json IS NOT NULL
+                                    AND price_inputs_json != ''
+                                   THEN 1 END) AS with_price_inputs,
+                        COUNT(CASE WHEN pre_state_json IS NOT NULL
+                                    AND pre_state_json != ''
+                                    AND post_state_json IS NOT NULL
+                                    AND post_state_json != ''
+                                   THEN 1 END) AS with_pre_post_state,
+                        COUNT(CASE WHEN almanak_decimal_positive(gas_usd) = 1
+                                   THEN 1 END) AS with_positive_gas_usd,
+                        almanak_decimal_sum(gas_usd) AS gas_usd_sum
+                    FROM transaction_ledger
+                    WHERE deployment_id = ?
+                    """,
+                    (deployment_id,),
+                )
+                row = cursor.fetchone()
+            if row is None:
+                return LedgerQuantStats()
+            return LedgerQuantStats(
+                total=row["total"] or 0,
+                with_tx_hash=row["with_tx_hash"] or 0,
+                with_cycle_id=row["with_cycle_id"] or 0,
+                with_price_inputs=row["with_price_inputs"] or 0,
+                with_pre_post_state=row["with_pre_post_state"] or 0,
+                with_positive_gas_usd=row["with_positive_gas_usd"] or 0,
+                gas_usd_sum=Decimal(str(row["gas_usd_sum"] or "0")),
+            )
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_get)
+
+    async def get_ledger_anchor_candidates(
+        self,
+        deployment_id: str,
+        limit: int = 64,
+        offset: int = 0,
+    ) -> list["LedgerEntry"]:
+        """Oldest-first ledger rows that can anchor "Deployed" (VIB-5059).
+
+        Returns the ``limit`` earliest rows (after ``offset``) that carry BOTH
+        ``pre_state_json`` and ``price_inputs_json`` — the only rows the
+        VIB-3914 first-action wallet anchor can be computed from. This is the
+        ONE quant-load statement allowed to read those JSON columns, and it is
+        always LIMIT-bounded: the caller walks batches until one row yields a
+        usable anchor (normally the very first batch).
+
+        Rows are projected to ``id`` plus the three columns the anchor walk
+        reads; the returned ``LedgerEntry`` objects carry the persisted row
+        identity and defaults everywhere else. Identical-timestamp rows are
+        returned lower-id first (``id ASC``) — an intentional tiebreak: the
+        legacy in-memory stable sort over a DESC fetch inspected the
+        higher-id row first; lower id (truly written first) is the more
+        correct "first action".
+        """
+        from almanak.framework.observability.ledger import LedgerEntry
+
+        if limit <= 0:
+            return []
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_get() -> list[LedgerEntry]:
+            with self._db_lock:
+                cursor = self._conn.execute(  # type: ignore[union-attr]
+                    """
+                    SELECT id, timestamp, pre_state_json, price_inputs_json
+                    FROM transaction_ledger
+                    WHERE deployment_id = ?
+                      AND pre_state_json IS NOT NULL AND pre_state_json != ''
+                      AND price_inputs_json IS NOT NULL AND price_inputs_json != ''
+                    ORDER BY timestamp ASC, id ASC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (deployment_id, limit, offset),
+                )
+                rows = cursor.fetchall()
+            return [
+                LedgerEntry(
+                    id=str(row["id"]),
+                    deployment_id=deployment_id,
+                    timestamp=datetime.fromisoformat(row["timestamp"]),
+                    pre_state_json=row["pre_state_json"] or "",
+                    price_inputs_json=row["price_inputs_json"] or "",
+                )
+                for row in rows
+            ]
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_get)
 
     # -------------------------------------------------------------------------
     # Typed accounting events (VIB-3417)

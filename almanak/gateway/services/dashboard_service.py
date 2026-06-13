@@ -8,6 +8,7 @@ receive the formatted data.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ from uuid import uuid4
 import grpc
 
 if TYPE_CHECKING:
+    from almanak.framework.observability.ledger import LedgerQuantStats
     from almanak.framework.portfolio.models import PortfolioSnapshot
     from almanak.framework.state.state_manager import StateManager
 
@@ -49,18 +51,25 @@ logger = logging.getLogger(__name__)
 STRATEGY_CATEGORIES = ["demo", "production", "incubating", "poster_child", "tests"]
 PORTFOLIO_STALE_THRESHOLD_SECONDS = 300
 
-# Cap on rows pulled into GetQuantHeader's LTD aggregation. Sized to absorb a
-# busy strategy's full lifetime under the dashboard's expected refresh cadence.
-# A warning is logged when reached so the gap can be closed via SQL aggregation.
-_QUANT_HEADER_LEDGER_CAP = 100_000
+# VIB-5059 Phase 1 (SQL half): the quant-input load pushes the LTD ledger
+# aggregation into the store (COUNT/SUM — see LedgerQuantStats), so the only
+# per-row ledger reads left are the bounded oldest-first batches the VIB-3914
+# first-action anchor walk consumes. Batch size keeps each fetch tiny (the
+# anchor normally resolves on the FIRST batch); the scan cap bounds the
+# pathological case where thousands of anchor-candidate rows all value to
+# zero — set to the legacy bulk-fetch cap so the walk never inspects more
+# rows than the old Python path could.
+_QUANT_ANCHOR_BATCH_LIMIT = 64
+_QUANT_ANCHOR_BATCH_MAX = 4096
+_QUANT_ANCHOR_SCAN_ROW_CAP = 100_000
 
 # VIB-5059 Phase 1: one dashboard render fans out to GetPnLSummary +
 # GetCostStack + GetAuditPosture, each of which previously re-fetched the full
-# quant input set (up to _QUANT_HEADER_LEDGER_CAP ledger rows + every
-# accounting event + the recent snapshot window). The inputs change at
-# snapshot/iteration cadence (minutes), so this short TTL coalesces a render
-# burst into ONE load without any tile becoming observably stale. 0 disables
-# the cache entirely (sequential RPCs always reload).
+# quant input set (the SQL-side ledger aggregates + every accounting event +
+# the recent snapshot window). The inputs change at snapshot/iteration cadence
+# (minutes), so this short TTL coalesces a render burst into ONE load without
+# any tile becoming observably stale. 0 disables the cache entirely
+# (sequential RPCs always reload).
 _QUANT_INPUTS_CACHE_TTL_SECONDS = 5.0
 
 
@@ -76,6 +85,63 @@ _QUANT_INPUTS_CACHE_TTL_SECONDS = 5.0
 # kinds sort under their priority digit first.
 _ACTIVITY_FEED_KEY_LEDGER_PRIORITY = "1"
 _ACTIVITY_FEED_KEY_TIMELINE_PRIORITY = "0"
+
+
+class _QuantPositionSummary:
+    """Position summary shim parsed off a snapshot's ``positions_json``.
+
+    Feeds the primary-risk gauge in ``compute_pnl_summary`` (LP range /
+    lending HF / perp leverage). Extracted from ``_load_quant_inputs``
+    verbatim (VIB-5059 — behaviour unchanged; the inline class pushed the
+    loader over the complexity budget).
+    """
+
+    def __init__(self, snap: Any) -> None:
+        self.lp_positions: list[Any] = []
+        self.health_factor = None
+        self.leverage = None
+        # positions_json arrives in three shapes: a JSON string (SQLite text
+        # column), an already-deserialized list/dict (hosted JSONB), or the
+        # VIB-3923 envelope {"positions": [...], ...} in either encoding.
+        pjson = getattr(snap, "positions_json", None) or "[]"
+        if isinstance(pjson, str):
+            try:
+                positions = json.loads(pjson)
+            except (json.JSONDecodeError, TypeError):
+                positions = []
+        else:
+            positions = pjson
+        if isinstance(positions, dict):
+            positions = positions.get("positions", [])
+        if isinstance(positions, list):
+            for p in positions:
+                if not isinstance(p, dict):
+                    continue
+                ptype = (p.get("position_type") or "").upper()
+                if ptype == "LP":
+                    lp = type("LP", (), {})()
+                    # Tri-state: keep None when the writer never
+                    # determined in_range (the very case VIB-3893
+                    # exists for). Defaulting to False renders
+                    # "in-range NO" with red — a false negative
+                    # on a money-decision surface.
+                    raw = p.get("in_range")
+                    lp.in_range = None if raw is None else bool(raw)
+                    self.lp_positions.append(lp)
+                elif ptype == "LENDING":
+                    hf = p.get("health_factor")
+                    if hf is not None:
+                        try:
+                            self.health_factor = Decimal(str(hf))
+                        except Exception:
+                            pass
+                elif ptype == "PERP":
+                    lev = p.get("leverage")
+                    if lev is not None:
+                        try:
+                            self.leverage = Decimal(str(lev))
+                        except Exception:
+                            pass
 
 
 def _index_trade_tape_accounting_events(
@@ -1868,24 +1934,82 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     # Senior-Quant header + trade tape (dashboard redesign)
     # ----------------------------------------------------------------------
 
-    async def _load_quant_inputs(  # noqa: C901
+    async def _first_action_wallet_value(self, deployment_id: str) -> Decimal | None:
+        """Wallet USD value at the strategy's first action (VIB-3914 anchor).
+
+        VIB-5059: replaces the bulk full-width ledger fetch for the one
+        consumer that genuinely needs row contents — the first-action
+        "Deployed" anchor. Walks oldest-first, LIMIT-bounded batches of the
+        ONLY rows that can anchor (both ``pre_state_json`` and
+        ``price_inputs_json`` present — filtered in SQL) and stops at the
+        first row whose pre-state values to a positive total, exactly like
+        the legacy in-memory walk. Normally resolves on the first batch;
+        the scan cap bounds the pathological all-candidates-valueless case.
+
+        Returns ``None`` when no candidate anchors (the caller falls back to
+        ``portfolio_metrics``, the legacy behavior).
+        """
+        from almanak.framework.dashboard.quant_aggregations import (
+            _wallet_value_at_first_action,
+        )
+
+        if self._state_manager is None:
+            return None
+        offset = 0
+        # Batch size doubles per round (64 → _QUANT_ANCHOR_BATCH_MAX). OFFSET
+        # pagination re-scans the skipped rows on every query, so fixed-size
+        # batches make the pathological all-candidates-valueless walk
+        # O(cap²/batch) row-visits on hosted Postgres; doubling keeps the
+        # walk's total row-visits at ~2× one full scan (≈ the legacy single
+        # bulk fetch) while the common case still reads just 64 rows.
+        limit = _QUANT_ANCHOR_BATCH_LIMIT
+        while offset < _QUANT_ANCHOR_SCAN_ROW_CAP:
+            rows = await self._state_manager.get_ledger_anchor_candidates(deployment_id, limit=limit, offset=offset)
+            if not rows:
+                return None
+            value = _wallet_value_at_first_action(rows)
+            if value is not None:
+                return value
+            if len(rows) < limit:
+                return None
+            offset += len(rows)
+            limit = min(limit * 2, _QUANT_ANCHOR_BATCH_MAX)
+        logger.warning(
+            "First-action anchor walk hit scan cap (%d rows) for strategy=%s without a valued anchor; "
+            "falling back to portfolio_metrics.",
+            _QUANT_ANCHOR_SCAN_ROW_CAP,
+            deployment_id,
+        )
+        return None
+
+    async def _load_quant_inputs(
         self, deployment_id: str
-    ) -> tuple[Any, list[Any], list[Any], list[dict[str, Any]], Any]:
+    ) -> tuple[Any, list[Any], LedgerQuantStats, list[dict[str, Any]], Any]:
         """Load the on-disk inputs every quant aggregation needs.
 
         Shared data path for ``GetPnLSummary`` / ``GetCostStack`` /
-        ``GetAuditPosture`` (and the deprecated ``GetQuantHeader``
-        composer). Returns ``(portfolio_metrics, snapshots,
-        ledger_entries, accounting_events, position_summary)``.
+        ``GetAuditPosture``. Returns ``(portfolio_metrics, snapshots,
+        ledger_stats, accounting_events, position_summary)``.
+
+        VIB-5059 Phase 1 (SQL half): the ledger element is a
+        ``LedgerQuantStats`` — the store computes the LTD COUNT/SUM
+        aggregates SQL-side (O(1) rows, no JSON-blob columns) and the
+        bounded anchor walk supplies the first-action "Deployed" value, so
+        the load no longer materialises up to 100k full-width rows per
+        render. Because the SQL aggregates see EVERY row, lifetime totals
+        on >100k-row deployments are now exact where the legacy Python
+        path silently truncated to the newest 100k.
 
         Hosted Postgres uses async backends with no sync API, so all I/O
         here is awaited (VIB-3933). Failures collapse to empty inputs
         rather than raising — the compute_* layer is built to handle
         missing data and surface ``UNAVAILABLE`` confidence.
         """
+        from almanak.framework.observability.ledger import LedgerQuantStats
+
         portfolio_metrics: Any = None
         snapshots: list[Any] = []
-        ledger_entries: list[Any] = []
+        ledger_stats = LedgerQuantStats()
         accounting_events: list[dict[str, Any]] = []
         position_summary: Any = None
 
@@ -1905,28 +2029,16 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 snapshots = await self._state_manager.get_recent_snapshots(deployment_id, limit=168)
             except Exception:
                 logger.debug("get_recent_snapshots failed for %s", deployment_id, exc_info=True)
-            # The quant aggregations are LTD surfaces (cost stack,
-            # audit-trail counts, G6 reconciliation). A hard row cap
-            # silently understates lifetime totals and can mis-PASS G6 by
-            # undercounting gas. Cap is sized to cover any realistic
-            # strategy in this PR's window; warn when hit so operators
-            # know aggregation may be partial. The proper fix — a
-            # SQL-side aggregation RPC that pushes SUM/COUNT into the
-            # backend — is tracked separately (see docs/internal/notes/audit-pr-*.md).
             try:
-                ledger_entries = await self._state_manager.get_ledger_entries(
-                    deployment_id, limit=_QUANT_HEADER_LEDGER_CAP
-                )
-                if len(ledger_entries) >= _QUANT_HEADER_LEDGER_CAP:
-                    logger.warning(
-                        "Quant aggregation: ledger row count hit cap (%d) for strategy=%s — "
-                        "LTD cost stack and audit-trail counts may be partial. "
-                        "Add SQL-side aggregation when this fires regularly.",
-                        _QUANT_HEADER_LEDGER_CAP,
-                        deployment_id,
-                    )
+                ledger_stats = await self._state_manager.get_ledger_quant_stats(deployment_id)
             except Exception:
-                logger.debug("get_ledger_entries failed for %s", deployment_id, exc_info=True)
+                logger.debug("get_ledger_quant_stats failed for %s", deployment_id, exc_info=True)
+            try:
+                anchor = await self._first_action_wallet_value(deployment_id)
+                if anchor is not None:
+                    ledger_stats = dataclasses.replace(ledger_stats, first_action_wallet_value_usd=anchor)
+            except Exception:
+                logger.debug("first-action anchor walk failed for %s", deployment_id, exc_info=True)
             try:
                 accounting_events = await self._state_manager.get_accounting_events_for_dashboard(
                     deployment_id=deployment_id
@@ -1937,54 +2049,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # Pull a position summary off the latest snapshot for the primary-risk gauge.
         latest_snapshot = await self._get_latest_snapshot(deployment_id)
         if latest_snapshot is not None:
+            position_summary = _QuantPositionSummary(latest_snapshot)
 
-            class _PosShim:
-                def __init__(self, snap: Any) -> None:
-                    self.lp_positions: list[Any] = []
-                    self.health_factor = None
-                    self.leverage = None
-                    pjson = getattr(snap, "positions_json", None) or "[]"
-                    try:
-                        positions = json.loads(pjson)
-                    except (json.JSONDecodeError, TypeError):
-                        positions = []
-                    if isinstance(positions, list):
-                        for p in positions:
-                            if not isinstance(p, dict):
-                                continue
-                            ptype = (p.get("position_type") or "").upper()
-                            if ptype == "LP":
-                                lp = type("LP", (), {})()
-                                # Tri-state: keep None when the writer never
-                                # determined in_range (the very case VIB-3893
-                                # exists for). Defaulting to False renders
-                                # "in-range NO" with red — a false negative
-                                # on a money-decision surface.
-                                raw = p.get("in_range")
-                                lp.in_range = None if raw is None else bool(raw)
-                                self.lp_positions.append(lp)
-                            elif ptype == "LENDING":
-                                hf = p.get("health_factor")
-                                if hf is not None:
-                                    try:
-                                        self.health_factor = Decimal(str(hf))
-                                    except Exception:
-                                        pass
-                            elif ptype == "PERP":
-                                lev = p.get("leverage")
-                                if lev is not None:
-                                    try:
-                                        self.leverage = Decimal(str(lev))
-                                    except Exception:
-                                        pass
-
-            position_summary = _PosShim(latest_snapshot)
-
-        return portfolio_metrics, snapshots, ledger_entries, accounting_events, position_summary
+        return portfolio_metrics, snapshots, ledger_stats, accounting_events, position_summary
 
     async def _get_quant_inputs(
         self, deployment_id: str
-    ) -> tuple[Any, list[Any], list[Any], list[dict[str, Any]], Any]:
+    ) -> tuple[Any, list[Any], LedgerQuantStats, list[dict[str, Any]], Any]:
         """TTL-cached, single-flight wrapper around :meth:`_load_quant_inputs`.
 
         VIB-5059 Phase 1: a single dashboard render fans out to
@@ -2064,7 +2135,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         (
             portfolio_metrics,
             snapshots,
-            ledger_entries,
+            ledger_stats,
             accounting_events,
             position_summary,
         ) = await self._get_quant_inputs(deployment_id)
@@ -2072,7 +2143,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         pnl = compute_pnl_summary(
             portfolio_metrics=portfolio_metrics,
             snapshots=snapshots,
-            ledger_entries=ledger_entries,
+            ledger_entries=ledger_stats,
             accounting_events=accounting_events,
             position_summary=position_summary,
         )
@@ -2104,8 +2175,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         """Life-to-date Gas / Fees / Slip / Earn decomposition.
 
         VIB-3969: focused replacement for the cost-stack slice of
-        ``GetQuantHeader``. Reads ledger + accounting_events; cost is
-        proportional to ledger length.
+        ``GetQuantHeader``. Reads the SQL-side ledger aggregates +
+        accounting_events; cost is proportional to accounting-event count
+        (the ledger side is O(1) since VIB-5059 Phase 1).
         """
         try:
             deployment_id = validate_deployment_id(request.deployment_id)
@@ -2122,9 +2194,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             compute_inventory_unrealized,
         )
 
-        _, _, ledger_entries, accounting_events, _ = await self._get_quant_inputs(deployment_id)
+        _, _, ledger_stats, accounting_events, _ = await self._get_quant_inputs(deployment_id)
 
-        cs = compute_cost_stack(ledger_entries, accounting_events)
+        cs = compute_cost_stack(ledger_stats, accounting_events)
 
         # VIB-4984: mark-to-market of held directional swap inventory. Pure
         # computation over the already-loaded accounting_events + the latest
@@ -2186,7 +2258,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         (
             portfolio_metrics,
             snapshots,
-            ledger_entries,
+            ledger_stats,
             accounting_events,
             position_summary,
         ) = await self._get_quant_inputs(deployment_id)
@@ -2198,12 +2270,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         pnl = compute_pnl_summary(
             portfolio_metrics=portfolio_metrics,
             snapshots=snapshots,
-            ledger_entries=ledger_entries,
+            ledger_entries=ledger_stats,
             accounting_events=accounting_events,
             position_summary=position_summary,
         )
-        cost_stack = compute_cost_stack(ledger_entries, accounting_events)
-        audit_trail = compute_audit_trail(ledger_entries, accounting_events)
+        cost_stack = compute_cost_stack(ledger_stats, accounting_events)
+        audit_trail = compute_audit_trail(ledger_stats, accounting_events)
         reconciliation = compute_reconciliation(
             initial_value_usd=pnl.deployed_usd,
             nav_usd=pnl.nav_usd,
@@ -2213,7 +2285,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         primitive = _detect_primitive(accounting_events)
         posture = evaluate_posture(
             primitive=primitive,
-            ledger_entries=ledger_entries,
+            ledger_entries=ledger_stats,
             accounting_events=accounting_events,
             snapshots=snapshots,
             audit=audit_trail,

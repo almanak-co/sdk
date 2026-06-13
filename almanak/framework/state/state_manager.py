@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from almanak.framework.accounting.commit import HandleMapping, RegistryRow
     from almanak.framework.execution.clob_handler import ClobFill, ClobOrderState, ClobOrderStatus
-    from almanak.framework.observability.ledger import LedgerEntry
+    from almanak.framework.observability.ledger import LedgerEntry, LedgerQuantStats
     from almanak.framework.observability.position_events import PositionEvent
     from almanak.framework.portfolio import PortfolioMetrics, PortfolioSnapshot
 
@@ -76,6 +76,16 @@ def _default_local_db_path_str() -> str:
 
 
 logger = logging.getLogger(__name__)
+
+# Finite numeric literal guard for casting text-numeric Postgres columns to
+# exact ``numeric`` inside aggregates (VIB-5059). Matches optionally-signed
+# decimal literals with optional exponent; deliberately EXCLUDES non-finite
+# spellings (``NaN`` / ``Infinity`` — both valid PG ``numeric`` casts) and any
+# garbage text, so one degenerate row contributes zero instead of failing the
+# whole aggregate query. Mirrors ``lenient_ledger_decimal`` on the SQLite path.
+# Constant SQL fragment — interpolated into store SQL via f-string; never
+# user input.
+_PG_FINITE_NUMERIC_PATTERN = r"^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$"
 
 
 # =============================================================================
@@ -963,6 +973,110 @@ class PostgresStore:
             row = await conn.fetchrow(sql, deployment_id)
         total = (row or {"total": 0})["total"]
         return Decimal(str(total or 0))
+
+    async def get_ledger_quant_stats(self, deployment_id: str) -> "LedgerQuantStats":
+        """SQL-side ledger aggregates for the dashboard quant tiles (VIB-5059).
+
+        Postgres counterpart of :meth:`SQLiteStore.get_ledger_quant_stats`:
+        one aggregate statement, O(1) rows transferred, NO JSON-blob columns
+        selected. ``gas_usd`` is stored as text-numeric (hosted PG convention,
+        see :meth:`sum_ledger_gas_usd`); the cast to exact ``numeric`` runs
+        ONLY behind a finite-numeric-literal guard so NULL / empty / garbage /
+        non-finite (``NaN`` / ``Infinity``) text contributes zero instead of
+        failing the whole aggregate and zeroing every tile (parity with the
+        SQLite ``lenient_ledger_decimal`` semantics).
+
+        Zero-row semantics: counts → 0, sum → ``Decimal("0")``,
+        ``first_action_wallet_value_usd`` stays ``None`` (the caller computes
+        the anchor from :meth:`get_ledger_anchor_candidates`).
+        """
+        from almanak.framework.observability.ledger import LedgerQuantStats
+
+        if not self._initialized:
+            await self.initialize()
+
+        sql = f"""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE tx_hash IS NOT NULL AND tx_hash != '')
+                    AS with_tx_hash,
+                COUNT(*) FILTER (WHERE cycle_id IS NOT NULL AND cycle_id != '')
+                    AS with_cycle_id,
+                COUNT(*) FILTER (WHERE NULLIF(price_inputs_json::text, '') IS NOT NULL)
+                    AS with_price_inputs,
+                COUNT(*) FILTER (WHERE NULLIF(pre_state_json::text, '') IS NOT NULL
+                                   AND NULLIF(post_state_json::text, '') IS NOT NULL)
+                    AS with_pre_post_state,
+                COUNT(*) FILTER (WHERE CASE WHEN gas_usd ~ '{_PG_FINITE_NUMERIC_PATTERN}'
+                                            THEN gas_usd::numeric > 0 ELSE false END)
+                    AS with_positive_gas_usd,
+                COALESCE(SUM(CASE WHEN gas_usd ~ '{_PG_FINITE_NUMERIC_PATTERN}'
+                                  THEN gas_usd::numeric ELSE 0 END), 0)::text
+                    AS gas_usd_sum
+            FROM transaction_ledger
+            WHERE deployment_id = $1
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(sql, deployment_id)
+        if row is None:
+            return LedgerQuantStats()
+        return LedgerQuantStats(
+            total=row["total"] or 0,
+            with_tx_hash=row["with_tx_hash"] or 0,
+            with_cycle_id=row["with_cycle_id"] or 0,
+            with_price_inputs=row["with_price_inputs"] or 0,
+            with_pre_post_state=row["with_pre_post_state"] or 0,
+            with_positive_gas_usd=row["with_positive_gas_usd"] or 0,
+            gas_usd_sum=Decimal(str(row["gas_usd_sum"] or "0")),
+        )
+
+    async def get_ledger_anchor_candidates(
+        self,
+        deployment_id: str,
+        limit: int = 64,
+        offset: int = 0,
+    ) -> list["LedgerEntry"]:
+        """Oldest-first ledger rows that can anchor "Deployed" (VIB-5059).
+
+        Postgres counterpart of :meth:`SQLiteStore.get_ledger_anchor_candidates`
+        — same column projection (``id`` plus the three columns the VIB-3914
+        anchor walk reads), same blob-presence filter, same ascending order
+        with the mandatory ``LIMIT`` bound and the same intentional
+        lower-id-first tiebreak for identical timestamps. ``NULLS FIRST``
+        mirrors the legacy Python sort, which placed missing timestamps at
+        ``datetime.min``.
+        """
+        from almanak.framework.observability.ledger import LedgerEntry
+
+        if limit <= 0:
+            return []
+        if not self._initialized:
+            await self.initialize()
+
+        sql = """
+            SELECT id,
+                   timestamp,
+                   pre_state_json::text   AS pre_state_text,
+                   price_inputs_json::text AS price_inputs_text
+            FROM transaction_ledger
+            WHERE deployment_id = $1
+              AND NULLIF(pre_state_json::text, '') IS NOT NULL
+              AND NULLIF(price_inputs_json::text, '') IS NOT NULL
+            ORDER BY timestamp ASC NULLS FIRST, id ASC
+            LIMIT $2 OFFSET $3
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, deployment_id, limit, offset)
+        return [
+            LedgerEntry(
+                id=str(row["id"]),
+                deployment_id=deployment_id,
+                timestamp=_require_dt(row["timestamp"], "transaction_ledger.timestamp"),
+                pre_state_json=row["pre_state_text"] or "",
+                price_inputs_json=row["price_inputs_text"] or "",
+            )
+            for row in rows
+        ]
 
     async def get_accounting_events(
         self,
@@ -3295,6 +3409,69 @@ class StateManager:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_ledger_entries", latency, False, str(e))
             logger.error(f"Failed to get ledger entries: {e}")
+            return []
+
+    async def get_ledger_quant_stats(self, deployment_id: str) -> "LedgerQuantStats":
+        """SQL-side ledger aggregates for the dashboard quant tiles (VIB-5059).
+
+        Mirrors the :meth:`get_recent_snapshots` delegation pattern: no WARM
+        backend, an unsupported backend, or a failed read all degrade to the
+        zero-valued :class:`LedgerQuantStats` — the same inputs the legacy
+        dashboard load produced from an empty ledger list, so the tiles
+        render the honest empty state rather than erroring.
+        """
+        from almanak.framework.observability.ledger import LedgerQuantStats
+
+        if not self._initialized:
+            await self.initialize()
+
+        if not self._warm or not hasattr(self._warm, "get_ledger_quant_stats"):
+            self._unimplemented_warn("get_ledger_quant_stats", deployment_id)
+            return LedgerQuantStats()
+
+        start = time.perf_counter()
+        try:
+            result = await self._warm.get_ledger_quant_stats(deployment_id)
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_ledger_quant_stats", latency, True)
+            return result
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_ledger_quant_stats", latency, False, str(e))
+            logger.error(f"Failed to get ledger quant stats: {e}")
+            return LedgerQuantStats()
+
+    async def get_ledger_anchor_candidates(
+        self,
+        deployment_id: str,
+        limit: int = 64,
+        offset: int = 0,
+    ) -> list["LedgerEntry"]:
+        """Oldest-first first-action anchor candidate rows (VIB-5059).
+
+        Delegates to the WARM backend's LIMIT-bounded projection (see
+        :meth:`SQLiteStore.get_ledger_anchor_candidates`). Degrades to an
+        empty list on no/unsupported backend or read failure — the caller's
+        anchor walk then falls back to portfolio-metrics, exactly as the
+        legacy path did when no ledger row carried pre-state.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        if not self._warm or not hasattr(self._warm, "get_ledger_anchor_candidates"):
+            self._unimplemented_warn("get_ledger_anchor_candidates", deployment_id)
+            return []
+
+        start = time.perf_counter()
+        try:
+            result = await self._warm.get_ledger_anchor_candidates(deployment_id, limit=limit, offset=offset)
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_ledger_anchor_candidates", latency, True)
+            return result
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_ledger_anchor_candidates", latency, False, str(e))
+            logger.error(f"Failed to get ledger anchor candidates: {e}")
             return []
 
     async def sum_ledger_gas_usd(

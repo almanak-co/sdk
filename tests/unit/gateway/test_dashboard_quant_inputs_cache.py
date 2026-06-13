@@ -2,15 +2,19 @@
 
 A single page render fans out to ``GetPnLSummary`` + ``GetCostStack`` +
 ``GetAuditPosture``. Each previously called ``_load_quant_inputs``
-independently, re-fetching up to ``_QUANT_HEADER_LEDGER_CAP`` (100k)
-full-width ledger rows, every accounting event, and the recent snapshot
-window — three times per render. The inputs change at snapshot/iteration
-cadence (minutes), so a short-TTL single-flight cache coalesces the burst
-into one load without making any tile observably stale.
+independently, re-fetching the full quant input set (SQL-side ledger
+aggregates + the bounded first-action anchor batch, every accounting event,
+and the recent snapshot window) — three times per render. The inputs change
+at snapshot/iteration cadence (minutes), so a short-TTL single-flight cache
+coalesces the burst into one load without making any tile observably stale.
 
 These tests pin the contract: the three tile RPCs share one load, truly
 concurrent calls coalesce (single-flight), distinct deployments never share
-entries, and a zero TTL disables the cache (the kill-switch semantic).
+entries, and a zero TTL disables the cache (the kill-switch semantic). The
+counted proxy for "one load" is the SQL-aggregate stats fetch — VIB-5059
+Phase 1 (SQL half) replaced the legacy bulk full-width ledger fetch, which
+the load-shape suite (``test_dashboard_quant_load_shape.py``) asserts is
+never invoked.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from almanak.framework.observability.ledger import LedgerQuantStats
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.dashboard_service import DashboardServiceServicer
 
@@ -34,7 +39,8 @@ class _CountingStateManager:
         self.calls: dict[str, int] = {
             "get_portfolio_metrics": 0,
             "get_recent_snapshots": 0,
-            "get_ledger_entries": 0,
+            "get_ledger_quant_stats": 0,
+            "get_ledger_anchor_candidates": 0,
             "get_accounting_events_for_dashboard": 0,
         }
 
@@ -46,8 +52,12 @@ class _CountingStateManager:
         self.calls["get_recent_snapshots"] += 1
         return []
 
-    async def get_ledger_entries(self, deployment_id, **kwargs):
-        self.calls["get_ledger_entries"] += 1
+    async def get_ledger_quant_stats(self, deployment_id):
+        self.calls["get_ledger_quant_stats"] += 1
+        return LedgerQuantStats()
+
+    async def get_ledger_anchor_candidates(self, deployment_id, limit=64, offset=0):
+        self.calls["get_ledger_anchor_candidates"] += 1
         return []
 
     async def get_accounting_events_for_dashboard(self, deployment_id):
@@ -86,9 +96,10 @@ async def test_one_render_burst_loads_quant_inputs_once() -> None:
 
     await _fire_all_three(svc)
 
-    assert sm.calls["get_ledger_entries"] == 1, (
-        f"a single render burst must fetch the ledger once, got {sm.calls['get_ledger_entries']}"
+    assert sm.calls["get_ledger_quant_stats"] == 1, (
+        f"a single render burst must fetch the ledger aggregates once, got {sm.calls['get_ledger_quant_stats']}"
     )
+    assert sm.calls["get_ledger_anchor_candidates"] == 1
     assert sm.calls["get_accounting_events_for_dashboard"] == 1
     assert sm.calls["get_recent_snapshots"] == 1
     assert sm.calls["get_portfolio_metrics"] == 1
@@ -106,7 +117,7 @@ async def test_concurrent_rpcs_single_flight() -> None:
         svc.GetAuditPosture(gateway_pb2.GetAuditPostureRequest(deployment_id=_DEPLOYMENT), _ctx()),
     )
 
-    assert sm.calls["get_ledger_entries"] == 1
+    assert sm.calls["get_ledger_quant_stats"] == 1
 
 
 @pytest.mark.asyncio
@@ -117,7 +128,7 @@ async def test_distinct_deployments_do_not_share_cache_entries() -> None:
     await svc.GetPnLSummary(gateway_pb2.GetPnLSummaryRequest(deployment_id="dep-aaa"), _ctx())
     await svc.GetPnLSummary(gateway_pb2.GetPnLSummaryRequest(deployment_id="dep-bbb"), _ctx())
 
-    assert sm.calls["get_ledger_entries"] == 2
+    assert sm.calls["get_ledger_quant_stats"] == 2
 
 
 @pytest.mark.asyncio
@@ -130,7 +141,7 @@ async def test_zero_ttl_disables_caching() -> None:
     await svc.GetPnLSummary(gateway_pb2.GetPnLSummaryRequest(deployment_id=_DEPLOYMENT), _ctx())
     await svc.GetPnLSummary(gateway_pb2.GetPnLSummaryRequest(deployment_id=_DEPLOYMENT), _ctx())
 
-    assert sm.calls["get_ledger_entries"] == 2
+    assert sm.calls["get_ledger_quant_stats"] == 2
 
 
 @pytest.mark.asyncio
@@ -148,11 +159,11 @@ async def test_positive_ttl_expires_and_reloads() -> None:
 
     await svc.GetPnLSummary(gateway_pb2.GetPnLSummaryRequest(deployment_id=_DEPLOYMENT), _ctx())
     await svc.GetPnLSummary(gateway_pb2.GetPnLSummaryRequest(deployment_id=_DEPLOYMENT), _ctx())
-    assert sm.calls["get_ledger_entries"] == 1, "within the TTL the burst shares one load"
+    assert sm.calls["get_ledger_quant_stats"] == 1, "within the TTL the burst shares one load"
 
     # Generous margin over the 0.05 TTL — a tight 0.01 gap flakes on loaded
     # CI runners (CodeRabbit review note on PR #2731).
     await asyncio.sleep(0.2)
 
     await svc.GetPnLSummary(gateway_pb2.GetPnLSummaryRequest(deployment_id=_DEPLOYMENT), _ctx())
-    assert sm.calls["get_ledger_entries"] == 2, "after the TTL elapses the cache must reload"
+    assert sm.calls["get_ledger_quant_stats"] == 2, "after the TTL elapses the cache must reload"
