@@ -43,13 +43,13 @@ Example:
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
 from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
-from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
 from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
 from almanak.framework.backtesting.adapters.base import (
     StrategyBacktestAdapter,
@@ -83,9 +83,7 @@ if TYPE_CHECKING:
         SimulatedPosition,
     )
     from almanak.framework.backtesting.pnl.providers.perp.gmx_funding import GMXFundingProvider
-    from almanak.framework.backtesting.pnl.providers.perp.hyperliquid_funding import (
-        HyperliquidFundingProvider,
-    )
+    from almanak.framework.backtesting.pnl.providers.perp.hyperliquid_funding import HyperliquidFundingProvider
     from almanak.framework.intents.vocabulary import Intent
 
 logger = logging.getLogger(__name__)
@@ -543,29 +541,54 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
     ) -> "GMXFundingProvider | HyperliquidFundingProvider | None":
         """Get the appropriate funding provider for a given protocol.
 
-        Routes to GMXFundingProvider for GMX protocols and
-        HyperliquidFundingProvider for Hyperliquid.
+        Routes via ``FundingHistoryRegistry.canonical()`` so alias resolution
+        (e.g. ``"gmx"`` -> ``"gmx_v2"``) and hyperliquid dispatch both go
+        through the manifest-declared ``FundingHistoryDecl``.  Provider
+        instantiation is delegated to the ``_ensure_*`` helpers which cache
+        the instance per adapter.
 
         Args:
-            protocol: Protocol name (e.g., "gmx", "hyperliquid")
+            protocol: Protocol name (e.g., "gmx", "hyperliquid", "gmx_v2")
 
         Returns:
             The appropriate provider or None if not available
         """
-        protocol_lower = protocol.lower()
+        canonical = FundingHistoryRegistry.canonical(protocol)
+        provider_cls = FundingHistoryRegistry.backtest_provider(canonical) if canonical is not None else None
+        if provider_cls is not None:
+            factory = self._provider_factory_map().get(provider_cls)
+            if factory is not None:
+                return factory()
+        logger.debug(
+            "No historical funding provider for protocol '%s', will use fallback",
+            protocol,
+        )
+        return None
 
-        # "gmx" -> gmx_v2 resolves through the manifest-declared perps alias
-        # (VIB-4851 B3) instead of a local alias tuple.
-        if PerpsReadRegistry.canonical(protocol_lower) == "gmx_v2":
-            return self._ensure_gmx_provider()
-        elif protocol_lower == "hyperliquid":
-            return self._ensure_hyperliquid_provider()
-        else:
-            logger.debug(
-                "No historical funding provider for protocol '%s', will use fallback",
-                protocol,
+    def _provider_factory_map(
+        self,
+    ) -> "dict[type, Callable[[], GMXFundingProvider | HyperliquidFundingProvider | None]]":
+        """Provider class -> bound cache-slot factory, built once per adapter.
+
+        Adapter-internal binding (which ``_ensure_*`` slot caches which
+        provider class); carries no venue names — the dispatch key comes
+        entirely from the connector's ``FundingHistoryDecl.backtest_provider``.
+        Cached on the instance so the lazy imports and dict construction stay
+        out of the per-lookup path (review feedback on #2770).
+        """
+        cached = getattr(self, "_provider_factories", None)
+        if cached is None:
+            from almanak.framework.backtesting.pnl.providers.perp.gmx_funding import GMXFundingProvider
+            from almanak.framework.backtesting.pnl.providers.perp.hyperliquid_funding import (
+                HyperliquidFundingProvider,
             )
-            return None
+
+            cached = {
+                GMXFundingProvider: self._ensure_gmx_provider,
+                HyperliquidFundingProvider: self._ensure_hyperliquid_provider,
+            }
+            self._provider_factories = cached
+        return cached
 
     def _normalize_timestamp_to_hour(self, timestamp: datetime) -> datetime:
         """Normalize timestamp to hourly boundary for caching.

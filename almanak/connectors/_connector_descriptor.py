@@ -256,14 +256,26 @@ class FundingHistoryDecl:
     means chain-agnostic (off-chain venues like Hyperliquid). ``aliases`` are
     funding-scoped protocol aliases resolving to this connector's canonical key
     (e.g. the legacy ``"gmx"`` -> ``gmx_v2``).
+
+    ``markets`` lists the supported market symbols for this venue (e.g.
+    ``"ETH-USD"``, ``"BTC-USD"``). These derive the ``SUPPORTED_MARKETS``
+    framework table (plan 023) and replace the hand-maintained literal dict.
+
+    ``backtest_provider`` is a lazy reference to the
+    ``HistoricalFundingProvider`` subclass used by the backtest perp adapter for
+    this venue. When declared, the adapter routes via
+    ``FundingHistoryRegistry.backtest_provider()`` instead of an inline
+    protocol-name branch.
     """
 
     venue: str
     chains: tuple[str, ...] = ()
     aliases: tuple[str, ...] = ()
+    markets: tuple[str, ...] = ()
+    backtest_provider: ImportRef | None = None
 
     def __post_init__(self) -> None:
-        """Validate the declaration's venue, chains, and aliases."""
+        """Validate the declaration's venue, chains, aliases, markets, and provider."""
         if not isinstance(self.venue, str) or not self.venue.strip():
             raise ValueError(f"FundingHistoryDecl.venue must be a non-empty string, got {self.venue!r}")
         if self.venue != self.venue.lower() or "-" in self.venue:
@@ -276,6 +288,22 @@ class FundingHistoryDecl:
         if len(set(self.chains)) != len(self.chains):
             raise ValueError(f"FundingHistoryDecl.chains contains duplicates: {self.chains!r}")
         _validate_decl_aliases("FundingHistoryDecl", self.aliases)
+        if not isinstance(self.markets, tuple):
+            raise ValueError(f"FundingHistoryDecl.markets must be a tuple[str, ...], got {self.markets!r}")
+        import re as _re
+
+        _market_pattern = _re.compile(r"^[A-Z][A-Z0-9.]*-USD$")
+        bad_markets = [m for m in self.markets if not isinstance(m, str) or not _market_pattern.match(m)]
+        if bad_markets:
+            raise ValueError(
+                f"FundingHistoryDecl.markets must contain uppercase 'XXX-USD' strings, got {bad_markets!r}"
+            )
+        if len(set(self.markets)) != len(self.markets):
+            raise ValueError(f"FundingHistoryDecl.markets contains duplicates: {self.markets!r}")
+        if self.backtest_provider is not None and not isinstance(self.backtest_provider, ImportRef):
+            raise ValueError(
+                f"FundingHistoryDecl.backtest_provider must be None or an ImportRef, got {self.backtest_provider!r}"
+            )
 
 
 _DEX_AMM_FAMILIES = ("v3_concentrated", "solidly_v2", "liquidity_book", "weighted", "stableswap")

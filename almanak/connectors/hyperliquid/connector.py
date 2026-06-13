@@ -45,6 +45,20 @@ CONNECTOR = Connector(
     ),
     funding_history=FundingHistoryDecl(
         venue="hyperliquid",
+        markets=(
+            "ETH-USD",
+            "BTC-USD",
+            "ARB-USD",
+            "LINK-USD",
+            "SOL-USD",
+            "DOGE-USD",
+            "ATOM-USD",
+            "APT-USD",
+        ),
+        backtest_provider=ImportRef(
+            module="almanak.framework.backtesting.pnl.providers.perp.hyperliquid_funding",
+            attribute="HyperliquidFundingProvider",
+        ),
     ),
     backtest_risk=_BACKTEST_RISK,
 )

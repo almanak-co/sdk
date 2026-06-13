@@ -4,6 +4,32 @@ Pure data classes, exceptions, and constants shared by the gateway-backed
 funding rate provider. No network egress lives in this module — the only
 provider implementation is :class:`GatewayFundingRateProvider`, which routes
 all venue calls through the gateway sidecar.
+
+Venue registry contract
+-----------------------
+``Venue`` is the authoritative public type used wherever a funding venue is
+accepted or returned.  ``SUPPORTED_VENUES`` is derived from it and kept as a
+plain ``list[str]`` for backward compatibility with callers that do set/membership
+tests.  When a new venue connector ships it must touch three places:
+
+1. Add a member to the ``Venue`` enum below.
+2. Declare ``funding_history=FundingHistoryDecl(...)`` on the connector manifest
+   (this is the live source of ``SUPPORTED_MARKETS`` and the perp-adapter routing).
+3. The existing ``test_provider.py`` ``len(SUPPORTED_VENUES) == 2`` pin and the
+   parity test in ``test_models_derivation.py`` will fail loudly — fix them both.
+
+``SUPPORTED_MARKETS`` is derived lazily via PEP 562 ``__getattr__`` from
+``FundingHistoryRegistry.all_markets()``.  It is NOT a module-level literal.
+
+``VENUE_CHAINS``
+----------------
+DEPRECATED — kept for backward compatibility.  The literal below is intentionally
+frozen and may be stale (gmx_v2 also supports avalanche; the "hyperliquid" key is
+a venue name masquerading as a chain).  Use
+``FundingHistoryRegistry.declared_chains()`` / ``FundingHistoryRegistry.all_declared_chains()``
+for the live, registry-derived source.  Zero functional consumers of this table
+exist in the framework; it is re-exported only so existing import sites do not
+break.
 """
 
 from __future__ import annotations
@@ -24,18 +50,27 @@ class Venue(StrEnum):
 
 SUPPORTED_VENUES: list[str] = [v.value for v in Venue]
 
+# DEPRECATED: frozen legacy literal.  Use FundingHistoryRegistry.declared_chains()
+# / all_declared_chains() for the live registry-derived source.  This literal is
+# stale (missing avalanche for gmx_v2; "hyperliquid" key is a venue not a chain).
 VENUE_CHAINS: dict[str, list[str]] = {
     "arbitrum": ["gmx_v2"],
     "hyperliquid": ["hyperliquid"],
 }
 
-SUPPORTED_MARKETS: dict[str, list[str]] = {
-    "gmx_v2": ["ETH-USD", "BTC-USD", "ARB-USD", "LINK-USD", "SOL-USD", "DOGE-USD", "UNI-USD", "AVAX-USD"],
-    "hyperliquid": ["ETH-USD", "BTC-USD", "ARB-USD", "LINK-USD", "SOL-USD", "DOGE-USD", "ATOM-USD", "APT-USD"],
-}
-
 DEFAULT_CACHE_TTL_SECONDS = 10.0
 HOURS_PER_YEAR = 8760
+
+
+def _supported_markets() -> dict[str, list[str]]:
+    """Derive the supported-markets table from connector manifests (plan 023).
+
+    Calls ``FundingHistoryRegistry.all_markets()`` lazily so connector discovery
+    is deferred until first use — the import of this module stays side-effect free.
+    """
+    from almanak.connectors._strategy_base.funding_history_registry import FundingHistoryRegistry
+
+    return FundingHistoryRegistry.all_markets()
 
 
 class FundingRateError(Exception):
@@ -66,7 +101,7 @@ class MarketNotSupportedError(FundingRateError):
     def __init__(self, market: str, venue: str) -> None:
         self.market = market
         self.venue = venue
-        supported = SUPPORTED_MARKETS.get(venue, [])
+        supported = _supported_markets().get(venue, [])
         super().__init__(f"Market '{market}' not supported by {venue}. Supported markets: {supported}")
 
 
@@ -181,6 +216,13 @@ class FundingRateSpread:
         }
 
 
+def __getattr__(name: str) -> Any:  # noqa: ANN401 - PEP 562 lazy module attribute
+    """Serve ``SUPPORTED_MARKETS`` lazily without import-time connector discovery."""
+    if name == "SUPPORTED_MARKETS":
+        return _supported_markets()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     "DEFAULT_CACHE_TTL_SECONDS",
     "FundingRate",
@@ -189,7 +231,7 @@ __all__ = [
     "FundingRateUnavailableError",
     "HOURS_PER_YEAR",
     "MarketNotSupportedError",
-    "SUPPORTED_MARKETS",
+    "SUPPORTED_MARKETS",  # noqa: F822 - served via PEP 562 __getattr__
     "SUPPORTED_VENUES",
     "VENUE_CHAINS",
     "Venue",
