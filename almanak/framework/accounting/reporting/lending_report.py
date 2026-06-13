@@ -11,6 +11,7 @@ and ``borrow_balance_usd`` from the latest portfolio snapshot.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 
 from almanak.framework.accounting.models import LendingAccountingEvent, LendingEventType
@@ -42,6 +43,16 @@ class LendingPositionSummary:
     net_equity_usd: Decimal | None = None
     health_factor: Decimal | None = None
     liquidation_threshold: Decimal | None = None
+
+    # VIB-5084: provenance of ``health_factor`` so the renderer can show a
+    # frozen number as frozen. ``"track_c"`` = the live per-iteration
+    # position_state observer (VIB-5006; preferred — at least as fresh as the
+    # last tx). ``"event"`` = the last lending accounting event's
+    # ``health_factor_after``, which freezes during a quiet hold (events only
+    # exist when txs happen) — render with the as-of timestamp so the
+    # staleness is visible. ``""`` = no HF data (``health_factor is None``).
+    health_factor_source: str = ""
+    health_factor_as_of: datetime | None = None
 
     # APRs (bps → %)
     supply_apr_pct: Decimal | None = None
@@ -248,6 +259,10 @@ def build_lending_report(data: AccountingData) -> LendingSection:  # noqa: C901
     for ev in reversed(data.lending_events):
         by_key.setdefault(ev.position_key, []).append(ev)
 
+    # VIB-5084: the live per-iteration Track-C HF per (protocol, chain), used to
+    # override the frozen event-derived HF on open positions below.
+    track_c_hf = _latest_track_c_hf(data.position_state_snapshots)
+
     summaries: list[LendingPositionSummary] = []
     for position_key, events in by_key.items():
         first = events[0]
@@ -269,7 +284,13 @@ def build_lending_report(data: AccountingData) -> LendingSection:  # noqa: C901
             if ev.net_equity_after_usd is not None:
                 summary.net_equity_usd = ev.net_equity_after_usd
             if ev.health_factor_after is not None:
+                # VIB-5084: event-derived HF freezes during a quiet hold. Stamp
+                # the source + the event's timestamp so the renderer can flag it
+                # as-of. Track-C (if present) overrides this below with the live
+                # value.
                 summary.health_factor = ev.health_factor_after
+                summary.health_factor_source = "event"
+                summary.health_factor_as_of = ev.identity.timestamp
             if ev.liquidation_threshold is not None:
                 summary.liquidation_threshold = ev.liquidation_threshold
             if ev.supply_apr_bps is not None:
@@ -336,7 +357,96 @@ def build_lending_report(data: AccountingData) -> LendingSection:  # noqa: C901
         # carry when ``(protocol, chain, asset)`` matches.
         if not summary.is_closed:
             _enrich_from_snapshot(summary, data.snapshot)
+            # VIB-5084: prefer the live per-iteration Track-C health_factor over
+            # the last event's (frozen) HF. Only for OPEN positions — a closed
+            # position's HF is historical and must not be overwritten with a
+            # live account read (which, with no debt, would read ~infinite).
+            _prefer_track_c_health_factor(summary, track_c_hf)
 
         summaries.append(summary)
 
     return LendingSection(positions=summaries)
+
+
+def _latest_track_c_hf(
+    rows: list[dict],
+) -> dict[tuple[str, str], tuple[Decimal, datetime | None]]:
+    """Map ``(protocol, chain) → (health_factor, captured_at)`` from the latest
+    Track-C ``position_state_snapshots`` LENDING rows that carry an HF.
+
+    Health factor is account-level (one value per wallet/account, identical
+    across a position's SUPPLY+BORROW legs and reserves), so one value per
+    (protocol, chain) is the correct granularity for a single deployment.
+    ``position_id`` is ``"{protocol}:{chain}:{label}"``
+    (``materialise_position_state``), so the protocol/chain are parsed from its
+    prefix. Rows with a missing/unparseable HF or a malformed id are skipped
+    (Empty ≠ Zero — never fabricate).
+
+    Scoped to the single newest ``snapshot_id`` that carries a lending HF (FK to
+    ``portfolio_snapshots.id`` — a monotonic autoincrement, so ``max`` is newest).
+    This is stronger than relying on the ``captured_at DESC`` row order: rows
+    within one snapshot share an identical ``captured_at`` (no intra-snapshot
+    tie-break), and the loader's bounded row-count window could otherwise let an
+    older snapshot's HF bleed in if a high-position-count snapshot clipped the
+    latest lending rows. Failing to find the latest snapshot's HF degrades to the
+    as-of-stamped event value upstream — never a fabricated or cross-snapshot HF.
+    """
+    # Parse + validate candidates first (snapshot_id, key, hf, captured_at).
+    candidates: list[tuple[int | None, tuple[str, str], Decimal, datetime | None]] = []
+    for r in rows:
+        if r.get("position_type") != "LENDING":
+            continue
+        hf_raw = r.get("health_factor")
+        if hf_raw in (None, ""):
+            continue
+        pos_id = r.get("position_id") or ""
+        parts = pos_id.split(":", 2)
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            continue
+        try:
+            hf = Decimal(str(hf_raw))
+        except (ArithmeticError, ValueError, TypeError):
+            continue
+        captured_raw = r.get("captured_at")
+        captured: datetime | None = None
+        # SQLite (the strat-pnl path) stores ``captured_at`` as TEXT → str, but a
+        # different backend may hand back a native datetime — accept both (Gemini).
+        if isinstance(captured_raw, datetime):
+            captured = captured_raw
+        elif isinstance(captured_raw, str) and captured_raw:
+            try:
+                captured = datetime.fromisoformat(captured_raw)
+            except ValueError:
+                captured = None
+        sid = r.get("snapshot_id")
+        candidates.append((sid if isinstance(sid, int) else None, (parts[0].lower(), parts[1].lower()), hf, captured))
+
+    if not candidates:
+        return {}
+
+    # Restrict to the newest snapshot that carries a lending HF.
+    snapshot_ids = [sid for sid, *_ in candidates if sid is not None]
+    latest_sid = max(snapshot_ids) if snapshot_ids else None
+
+    out: dict[tuple[str, str], tuple[Decimal, datetime | None]] = {}
+    for sid, key, hf, captured in candidates:
+        if latest_sid is not None and sid != latest_sid:
+            continue
+        if key in out:  # one HF per (protocol, chain) within the snapshot
+            continue
+        out[key] = (hf, captured)
+    return out
+
+
+def _prefer_track_c_health_factor(
+    summary: LendingPositionSummary,
+    track_c_hf: dict[tuple[str, str], tuple[Decimal, datetime | None]],
+) -> None:
+    """Override an OPEN summary's HF with the live Track-C value when present."""
+    sample = track_c_hf.get((summary.protocol.lower(), summary.chain.lower()))
+    if sample is None:
+        return
+    hf, captured = sample
+    summary.health_factor = hf
+    summary.health_factor_source = "track_c"
+    summary.health_factor_as_of = captured

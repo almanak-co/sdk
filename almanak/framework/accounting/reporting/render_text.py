@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC
 from decimal import Decimal
 
 from almanak.framework.accounting.lending_nav import compute_lending_nav
 
 from .data_quality import DataQualitySection
-from .lending_report import LendingSection
+from .lending_report import LendingPositionSummary, LendingSection
 from .lp_report import LPSection
 
 _MISSING = "—"
@@ -44,6 +45,30 @@ def _hf(value: Decimal | None) -> str:
     if value is None:
         return _MISSING
     return f"{value:.3f}"
+
+
+def _hf_line(pos: LendingPositionSummary) -> str:
+    """Render the health factor, flagging an event-derived (frozen) value.
+
+    VIB-5084: a ``track_c`` HF is the live per-iteration observation — render it
+    plainly. An ``event``-derived HF freezes at the last transaction during a
+    quiet hold, so it is rendered with an ``(as of <ts>)`` qualifier to make the
+    staleness visible rather than passing a 30-minute-old number off as current.
+    ``None`` HF renders as the missing marker (Empty ≠ Zero).
+    """
+    rendered = _hf(pos.health_factor)
+    if pos.health_factor is None:
+        return rendered
+    if pos.health_factor_source == "event" and pos.health_factor_as_of is not None:
+        # Normalise a tz-aware sample to UTC before stamping the "UTC" suffix so
+        # a non-UTC (or legacy) timestamp can't be mislabelled. Live writers are
+        # already UTC; a naive value (no live writer produces one) is rendered
+        # as-is under the documented UTC assumption.
+        as_of = pos.health_factor_as_of
+        if as_of.tzinfo is not None:
+            as_of = as_of.astimezone(UTC)
+        return f"{rendered} (as of {as_of:%Y-%m-%d %H:%M UTC})"
+    return rendered
 
 
 def render_lp_section(section: LPSection) -> str:
@@ -98,7 +123,7 @@ def render_lending_section(section: LendingSection, snapshot: object = None) -> 
         lines.append(f"    Collateral: {_m(pos.collateral_usd)}")
         lines.append(f"    Debt:       {_m(None if pos.debt_usd is None else -pos.debt_usd)}")
         lines.append(f"    Net equity: {_m(pos.net_equity_usd)}")
-        lines.append(f"    Health:     {_hf(pos.health_factor)}")
+        lines.append(f"    Health:     {_hf_line(pos)}")
         if pos.liquidation_threshold is not None:
             lines.append(f"    Liq. thr.:  {_pct(pos.liquidation_threshold * 100, 1)}")
         if pos.supply_apr_pct is not None:

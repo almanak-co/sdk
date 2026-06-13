@@ -55,6 +55,13 @@ def lending_section_to_dict(section: LendingSection) -> dict[str, Any]:
                 "debt_usd": _m(p.debt_usd),
                 "net_equity_usd": _m(p.net_equity_usd),
                 "health_factor": _m(p.health_factor),
+                # VIB-5084: HF provenance so JSON consumers can tell a live
+                # Track-C reading ("track_c") from a frozen last-event value
+                # ("event", carrying the as-of timestamp). "" when HF is None.
+                "health_factor_source": p.health_factor_source,
+                "health_factor_as_of": (
+                    p.health_factor_as_of.isoformat() if p.health_factor_as_of is not None else None
+                ),
                 "liquidation_threshold": _m(p.liquidation_threshold),
                 "supply_apr_pct": _m(p.supply_apr_pct),
                 "borrow_apr_pct": _m(p.borrow_apr_pct),

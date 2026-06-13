@@ -32,6 +32,12 @@ class StrategyClass(StrEnum):
 
 _LENDING_TYPES: frozenset[str] = frozenset(e.value for e in LendingEventType)
 
+# VIB-5084: how many recent Track-C rows to pull for the live-HF lookup. The
+# latest portfolio snapshot's lending legs sit at the head of the ``captured_at
+# DESC`` order, so a small bounded window suffices; generous enough to cover a
+# multi-leg / multi-protocol deployment's most recent snapshot.
+_TRACK_C_LOOKBACK = 256
+
 
 @dataclass
 class AccountingData:
@@ -60,6 +66,13 @@ class AccountingData:
     # headline PnL on the SWAP-class fallback pattern.  Empty list when no
     # snapshots exist.
     recent_snapshots: list[Any] = field(default_factory=list)
+
+    # VIB-5084: recent Track-C ``position_state_snapshots`` rows (raw dicts,
+    # newest-first). Carries the live per-iteration ``health_factor`` /
+    # ``supply_apy_pct`` the lending report prefers over the frozen
+    # event-derived values. Empty list when Track-C is absent (the report falls
+    # back to the event-derived HF with an as-of timestamp).
+    position_state_snapshots: list[dict] = field(default_factory=list)
 
     @property
     def has_lending(self) -> bool:
@@ -205,6 +218,12 @@ async def load_accounting_data(
         position_events = await store.get_position_events(deployment_id, limit=position_limit)
         recent_snapshots = await store.get_recent_snapshots(deployment_id, limit=snapshot_window)
         raw_accounting = await store.get_accounting_events(deployment_id, limit=accounting_limit)
+        # VIB-5084: latest Track-C rows (newest-first) for the live HF / APY the
+        # lending report prefers over frozen event values. Bounded lookback —
+        # the latest snapshot's lending legs sit at the head of the DESC order.
+        position_state_snapshots = await store.get_position_state_snapshots(
+            deployment_id=deployment_id, limit=_TRACK_C_LOOKBACK
+        )
     finally:
         await store.close()
 
@@ -235,4 +254,5 @@ async def load_accounting_data(
         parse_errors=parse_errors,
         strategy_classes=strategy_classes,
         recent_snapshots=recent_snapshots or [],
+        position_state_snapshots=position_state_snapshots or [],
     )
