@@ -32,10 +32,24 @@ from almanak.framework.backtesting.pnl.providers.lending.spark_apy import (
 )
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
+    SubgraphClientConfig,
     SubgraphQueryError,
     SubgraphRateLimitError,
 )
 from almanak.framework.backtesting.pnl.types import DataConfidence
+
+
+def _make_client() -> SubgraphClient:
+    """Real SubgraphClient with the network-facing pieces mocked out.
+
+    Provider calls flow through the real ``query_with_pagination`` cursor
+    loop (VIB-5089) while tests stub ``.query`` per page; ``.close`` is
+    mocked so ownership assertions keep working.
+    """
+    client = SubgraphClient(config=SubgraphClientConfig(api_key="test-key"))
+    client.query = AsyncMock()
+    client.close = AsyncMock()
+    return client
 
 
 class TestSparkAPYProviderInitialization:
@@ -65,7 +79,7 @@ class TestSparkAPYProviderInitialization:
 
     def test_init_with_provided_client(self):
         """Test provider uses provided SubgraphClient."""
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         provider = SparkAPYProvider(client=mock_client)
         assert provider._client is mock_client
         assert provider._owns_client is False
@@ -230,7 +244,7 @@ class TestAPYFetching:
     @pytest.fixture
     def mock_client(self) -> MagicMock:
         """Create a mock SubgraphClient."""
-        client = MagicMock(spec=SubgraphClient)
+        client = _make_client()
         client.query = AsyncMock()
         client.close = AsyncMock()
         return client
@@ -391,7 +405,7 @@ class TestMarketResolution:
     @pytest.fixture
     def mock_client(self) -> MagicMock:
         """Create a mock SubgraphClient."""
-        client = MagicMock(spec=SubgraphClient)
+        client = _make_client()
         client.query = AsyncMock()
         client.close = AsyncMock()
         return client
@@ -466,7 +480,7 @@ class TestContextManager:
     @pytest.mark.asyncio
     async def test_context_manager_does_not_close_provided_client(self):
         """Test context manager doesn't close provided client."""
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.close = AsyncMock()
 
         provider = SparkAPYProvider(client=mock_client)
@@ -483,7 +497,7 @@ class TestConvenienceMethods:
     @pytest.fixture
     def mock_client(self) -> MagicMock:
         """Create a mock SubgraphClient."""
-        client = MagicMock(spec=SubgraphClient)
+        client = _make_client()
         client.query = AsyncMock()
         client.close = AsyncMock()
         return client
@@ -607,3 +621,58 @@ class TestDataSourceConstants:
         """Test interest rate side constants."""
         assert LENDER_SIDE == "LENDER"
         assert BORROWER_SIDE == "BORROWER"
+
+
+# =============================================================================
+# Cursor pagination through the provider (VIB-5089)
+# =============================================================================
+
+
+class TestCursorPaginationThroughProvider:
+    """Provider-level proof that >1000-row windows are fetched fully (VIB-5089)."""
+
+    @pytest.mark.asyncio
+    async def test_multi_year_daily_series_returns_all_rows(self):
+        """1500 daily snapshots (>1000) return fully ordered with no gaps."""
+        provider = SparkAPYProvider()
+        day0 = 18000  # days since epoch
+        n_days = 1500
+        rows = [
+            {
+                "id": f"snap-{i}",
+                "days": day0 + i,
+                "timestamp": (day0 + i) * 86_400,
+                "rates": [
+                    {"id": f"l-{i}", "rate": "3.0", "side": "LENDER", "type": "VARIABLE"},
+                    {"id": f"b-{i}", "rate": "5.0", "side": "BORROWER", "type": "VARIABLE"},
+                ],
+            }
+            for i in range(n_days)
+        ]
+
+        async def fake_query(subgraph_id, query, variables):
+            lo = int(variables["startDay"])
+            hi = int(variables["endDay"])
+            window = [r for r in rows if lo <= r["days"] <= hi]
+            window.sort(key=lambda r: r["days"])
+            return {"marketDailySnapshots": window[: variables["first"]]}
+
+        mock_client = _make_client()
+        mock_client.query = AsyncMock(side_effect=fake_query)
+        provider._client = mock_client
+        provider._owns_client = False
+
+        apys = await provider.get_apy(
+            protocol="spark",
+            market="0x1234567890abcdef1234567890abcdef12345678",
+            start_date=datetime.fromtimestamp(day0 * 86_400, tz=UTC),
+            end_date=datetime.fromtimestamp((day0 + n_days - 1) * 86_400, tz=UTC),
+        )
+
+        assert len(apys) == n_days
+        timestamps = [a.source_info.timestamp for a in apys]
+        assert timestamps == sorted(timestamps)
+        assert len(set(timestamps)) == n_days
+        assert all(a.supply_apy == Decimal("0.03") for a in apys)
+        # 2 pages: 1000 + 501 (boundary row re-fetched and deduplicated)
+        assert mock_client.query.call_count == 2

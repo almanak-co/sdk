@@ -42,6 +42,7 @@ from almanak.core.enums import Chain
 if TYPE_CHECKING:
     from almanak.core.enums import Protocol
 
+from ...exceptions import DataSourceUnavailableError
 from ..types import DataConfidence, DataSourceInfo, LiquidityResult
 from .base import HistoricalLiquidityProvider
 from .dex import (
@@ -93,23 +94,33 @@ PROTOCOL_SUBGRAPH_IDS: dict[str, dict[Chain, str]] = {
 }
 
 
+# Safety valve for cursor pagination (VIB-5089). Daily snapshots: 100 pages
+# of 1000 covers ~270 years, so real windows never hit the valve.
+MAX_PAGINATION_PAGES = 100
+
+
 # =============================================================================
 # GraphQL Queries
 # =============================================================================
+#
+# All range queries are cursor-paginated (VIB-5089): ordered ascending by
+# their time field, with the _gte lower bound advancing page by page. The
+# provider sorts parsed data points by timestamp before use, so "most
+# recent" selection does not depend on response order.
 
 # V3-style pools: Query pool daily snapshots for TVL/liquidity
 # poolDayDatas gives us tvlUSD which is the total value locked
 V3_POOL_DAY_DATA_QUERY = """
-query GetPoolLiquidity($poolAddress: String!, $startDate: Int!, $endDate: Int!) {
+query GetPoolLiquidity($first: Int!, $poolAddress: String!, $startDate: Int!, $endDate: Int!) {
     poolDayDatas(
-        first: 1000
+        first: $first
         where: {
             pool: $poolAddress
             date_gte: $startDate
             date_lte: $endDate
         }
         orderBy: date
-        orderDirection: desc
+        orderDirection: asc
     ) {
         id
         date
@@ -134,16 +145,16 @@ query GetPool($poolAddress: ID!) {
 
 # V2/Solidly-style pools: Query pair daily data for reserves
 V2_PAIR_DAY_DATA_QUERY = """
-query GetPairLiquidity($pairAddress: String!, $startDate: Int!, $endDate: Int!) {
+query GetPairLiquidity($first: Int!, $pairAddress: String!, $startDate: Int!, $endDate: Int!) {
     pairDayDatas(
-        first: 1000
+        first: $first
         where: {
             pairAddress: $pairAddress
             date_gte: $startDate
             date_lte: $endDate
         }
         orderBy: date
-        orderDirection: desc
+        orderDirection: asc
     ) {
         id
         date
@@ -155,16 +166,16 @@ query GetPairLiquidity($pairAddress: String!, $startDate: Int!, $endDate: Int!) 
 
 # Liquidity Book (TraderJoe V2): Query lb pair daily data
 LB_PAIR_DAY_DATA_QUERY = """
-query GetLBPairLiquidity($lbPairAddress: String!, $startDate: Int!, $endDate: Int!) {
+query GetLBPairLiquidity($first: Int!, $lbPairAddress: String!, $startDate: Int!, $endDate: Int!) {
     lbPairDayDatas(
-        first: 1000
+        first: $first
         where: {
             lbPair: $lbPairAddress
             date_gte: $startDate
             date_lte: $endDate
         }
         orderBy: date
-        orderDirection: desc
+        orderDirection: asc
     ) {
         id
         date
@@ -176,16 +187,16 @@ query GetLBPairLiquidity($lbPairAddress: String!, $startDate: Int!, $endDate: In
 
 # Balancer: Query pool snapshots
 BALANCER_POOL_SNAPSHOT_QUERY = """
-query GetPoolSnapshots($poolAddress: String!, $startTimestamp: Int!, $endTimestamp: Int!) {
+query GetPoolSnapshots($first: Int!, $poolAddress: String!, $startTimestamp: Int!, $endTimestamp: Int!) {
     poolSnapshots(
-        first: 1000
+        first: $first
         where: {
             pool: $poolAddress
             timestamp_gte: $startTimestamp
             timestamp_lte: $endTimestamp
         }
         orderBy: timestamp
-        orderDirection: desc
+        orderDirection: asc
     ) {
         id
         timestamp
@@ -198,16 +209,16 @@ query GetPoolSnapshots($poolAddress: String!, $startTimestamp: Int!, $endTimesta
 
 # Curve (Messari schema): Query pool daily snapshots
 CURVE_POOL_DAILY_QUERY = """
-query GetPoolLiquidity($poolAddress: String!, $startDay: Int!, $endDay: Int!) {
+query GetPoolLiquidity($first: Int!, $poolAddress: String!, $startDay: Int!, $endDay: Int!) {
     liquidityPoolDailySnapshots(
-        first: 1000
+        first: $first
         where: {
             pool: $poolAddress
             day_gte: $startDay
             day_lte: $endDay
         }
         orderBy: day
-        orderDirection: desc
+        orderDirection: asc
     ) {
         id
         day
@@ -425,6 +436,32 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             ),
         )
 
+    def _select_depth(
+        self,
+        data_points: list[tuple[datetime, Decimal]],
+        timestamp: datetime,
+    ) -> Decimal:
+        """Select the depth from parsed (timestamp, depth) data points.
+
+        Sorts the points by timestamp ascending first, so the selection does
+        not depend on subgraph response order (the cursor-paginated queries
+        return ascending pages; VIB-5089).
+
+        Args:
+            data_points: List of (timestamp, depth) tuples
+            timestamp: The target timestamp
+
+        Returns:
+            TWAP depth when enabled and multiple points exist, otherwise the
+            most recent point's depth, or Decimal('0') if empty
+        """
+        if not data_points:
+            return Decimal("0")
+        data_points.sort(key=lambda point: point[0])
+        if self._use_twap and len(data_points) > 1:
+            return self._calculate_twap_depth(data_points, timestamp, self._twap_window_hours)
+        return data_points[-1][1]
+
     def _calculate_twap_depth(
         self,
         data_points: list[tuple[datetime, Decimal]],
@@ -434,7 +471,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         """Calculate time-weighted average depth.
 
         Args:
-            data_points: List of (timestamp, depth) tuples, sorted by timestamp desc
+            data_points: List of (timestamp, depth) tuples, sorted by timestamp asc
             target_timestamp: The target timestamp
             window_hours: Window size in hours
 
@@ -450,7 +487,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
 
         if not points_in_window:
             # Use the most recent point if no points in window
-            return data_points[0][1]
+            return data_points[-1][1]
 
         if len(points_in_window) == 1:
             return points_in_window[0][1]
@@ -513,7 +550,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         end_timestamp = self._datetime_to_timestamp(timestamp)
 
         try:
-            data = await self._client.query(
+            pool_day_datas = await self._client.query_with_pagination(
                 subgraph_id=subgraph_id,
                 query=V3_POOL_DAY_DATA_QUERY,
                 variables={
@@ -521,9 +558,11 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                     "startDate": start_timestamp,
                     "endDate": end_timestamp,
                 },
+                data_path="poolDayDatas",
+                max_pages=MAX_PAGINATION_PAGES,
+                cursor_field="date",
+                cursor_variable="startDate",
             )
-
-            pool_day_datas = data.get("poolDayDatas", [])
 
             if not pool_day_datas:
                 logger.warning(
@@ -543,11 +582,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                 data_points.append((day_dt, tvl_usd))
 
             # Calculate depth (TWAP or point-in-time)
-            if self._use_twap and len(data_points) > 1:
-                depth = self._calculate_twap_depth(data_points, timestamp, self._twap_window_hours)
-            else:
-                # Use most recent data point
-                depth = data_points[0][1] if data_points else Decimal("0")
+            depth = self._select_depth(data_points, timestamp)
 
             logger.info(
                 "Fetched V3 liquidity: protocol=%s, chain=%s, pool=%s..., depth=$%s",
@@ -610,7 +645,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         end_timestamp = self._datetime_to_timestamp(timestamp)
 
         try:
-            data = await self._client.query(
+            pair_day_datas = await self._client.query_with_pagination(
                 subgraph_id=subgraph_id,
                 query=V2_PAIR_DAY_DATA_QUERY,
                 variables={
@@ -618,9 +653,11 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                     "startDate": start_timestamp,
                     "endDate": end_timestamp,
                 },
+                data_path="pairDayDatas",
+                max_pages=MAX_PAGINATION_PAGES,
+                cursor_field="date",
+                cursor_variable="startDate",
             )
-
-            pair_day_datas = data.get("pairDayDatas", [])
 
             if not pair_day_datas:
                 logger.warning(
@@ -640,10 +677,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                 data_points.append((day_dt, reserve_usd))
 
             # Calculate depth (TWAP or point-in-time)
-            if self._use_twap and len(data_points) > 1:
-                depth = self._calculate_twap_depth(data_points, timestamp, self._twap_window_hours)
-            else:
-                depth = data_points[0][1] if data_points else Decimal("0")
+            depth = self._select_depth(data_points, timestamp)
 
             logger.info(
                 "Fetched V2 liquidity: protocol=%s, chain=%s, pool=%s..., depth=$%s",
@@ -706,7 +740,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         end_timestamp = self._datetime_to_timestamp(timestamp)
 
         try:
-            data = await self._client.query(
+            lb_pair_day_datas = await self._client.query_with_pagination(
                 subgraph_id=subgraph_id,
                 query=LB_PAIR_DAY_DATA_QUERY,
                 variables={
@@ -714,9 +748,11 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                     "startDate": start_timestamp,
                     "endDate": end_timestamp,
                 },
+                data_path="lbPairDayDatas",
+                max_pages=MAX_PAGINATION_PAGES,
+                cursor_field="date",
+                cursor_variable="startDate",
             )
-
-            lb_pair_day_datas = data.get("lbPairDayDatas", [])
 
             if not lb_pair_day_datas:
                 logger.warning(
@@ -736,10 +772,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                 data_points.append((day_dt, tvl_usd))
 
             # Calculate depth (TWAP or point-in-time)
-            if self._use_twap and len(data_points) > 1:
-                depth = self._calculate_twap_depth(data_points, timestamp, self._twap_window_hours)
-            else:
-                depth = data_points[0][1] if data_points else Decimal("0")
+            depth = self._select_depth(data_points, timestamp)
 
             logger.info(
                 "Fetched LB liquidity: protocol=%s, chain=%s, pool=%s..., depth=$%s",
@@ -812,7 +845,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         end_timestamp = self._datetime_to_timestamp(timestamp)
 
         try:
-            data = await self._client.query(
+            pool_snapshots = await self._client.query_with_pagination(
                 subgraph_id=subgraph_id,
                 query=BALANCER_POOL_SNAPSHOT_QUERY,
                 variables={
@@ -820,9 +853,11 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                     "startTimestamp": start_timestamp,
                     "endTimestamp": end_timestamp,
                 },
+                data_path="poolSnapshots",
+                max_pages=MAX_PAGINATION_PAGES,
+                cursor_field="timestamp",
+                cursor_variable="startTimestamp",
             )
-
-            pool_snapshots = data.get("poolSnapshots", [])
 
             if not pool_snapshots:
                 logger.warning(
@@ -842,10 +877,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                 data_points.append((snapshot_dt, liquidity))
 
             # Calculate depth (TWAP or point-in-time)
-            if self._use_twap and len(data_points) > 1:
-                depth = self._calculate_twap_depth(data_points, timestamp, self._twap_window_hours)
-            else:
-                depth = data_points[0][1] if data_points else Decimal("0")
+            depth = self._select_depth(data_points, timestamp)
 
             logger.info(
                 "Fetched Balancer liquidity: chain=%s, pool=%s..., depth=$%s",
@@ -907,7 +939,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         end_day = self._date_to_day_number(timestamp)
 
         try:
-            data = await self._client.query(
+            pool_snapshots = await self._client.query_with_pagination(
                 subgraph_id=subgraph_id,
                 query=CURVE_POOL_DAILY_QUERY,
                 variables={
@@ -915,9 +947,11 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                     "startDay": start_day,
                     "endDay": end_day,
                 },
+                data_path="liquidityPoolDailySnapshots",
+                max_pages=MAX_PAGINATION_PAGES,
+                cursor_field="day",
+                cursor_variable="startDay",
             )
-
-            pool_snapshots = data.get("liquidityPoolDailySnapshots", [])
 
             if not pool_snapshots:
                 logger.warning(
@@ -937,10 +971,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                 data_points.append((snapshot_dt, tvl_usd))
 
             # Calculate depth (TWAP or point-in-time)
-            if self._use_twap and len(data_points) > 1:
-                depth = self._calculate_twap_depth(data_points, timestamp, self._twap_window_hours)
-            else:
-                depth = data_points[0][1] if data_points else Decimal("0")
+            depth = self._select_depth(data_points, timestamp)
 
             logger.info(
                 "Fetched Curve liquidity: chain=%s, pool=%s..., depth=$%s",
@@ -1077,6 +1108,11 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                     protocol_id,
                 )
 
+        except DataSourceUnavailableError:
+            # Pagination overflow must stay loud (VIB-5089): a partial series
+            # silently swapped for fallback would be silent truncation.
+            raise
+
         except Exception as e:
             logger.error(
                 "Unexpected error querying liquidity: protocol=%s, chain=%s, pool=%s...: %s",
@@ -1136,5 +1172,6 @@ __all__ = [
     "LiquidityDepthProvider",
     "DATA_SOURCE_FALLBACK",
     "DEFAULT_TWAP_WINDOW_HOURS",
+    "MAX_PAGINATION_PAGES",
     "PROTOCOL_SUBGRAPH_IDS",
 ]

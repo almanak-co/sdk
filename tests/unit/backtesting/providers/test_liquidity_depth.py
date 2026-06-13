@@ -17,6 +17,10 @@ from almanak.framework.backtesting.pnl.providers.liquidity_depth import (
     DEFAULT_TWAP_WINDOW_HOURS,
     LiquidityDepthProvider,
 )
+from almanak.framework.backtesting.pnl.providers.subgraph_client import (
+    SubgraphClient,
+    SubgraphClientConfig,
+)
 from almanak.framework.backtesting.pnl.types import DataConfidence
 
 
@@ -27,8 +31,13 @@ from almanak.framework.backtesting.pnl.types import DataConfidence
 
 @pytest.fixture
 def mock_subgraph_client():
-    """Create a mock SubgraphClient."""
-    client = MagicMock()
+    """Real SubgraphClient with the network-facing pieces mocked out.
+
+    Provider calls flow through the real ``query_with_pagination`` cursor
+    loop (VIB-5089) while tests stub ``.query`` per page; ``.close`` is
+    mocked so ownership assertions keep working.
+    """
+    client = SubgraphClient(config=SubgraphClientConfig(api_key="test-key"))
     client.query = AsyncMock()
     client.close = AsyncMock()
     return client
@@ -811,3 +820,59 @@ class TestTimestampHandling:
 
         # Result timestamp should have UTC
         assert result.source_info.timestamp.tzinfo is not None
+
+
+# =============================================================================
+# Cursor pagination through the provider (VIB-5089)
+# =============================================================================
+
+
+class TestCursorPaginationThroughProvider:
+    """Provider-level proof that >1000-row windows are fetched fully (VIB-5089)."""
+
+    @pytest.mark.asyncio
+    async def test_long_twap_window_consumes_all_pages(self, mock_subgraph_client):
+        """A 1200-day TWAP window (>1000 daily rows) uses every data point.
+
+        TVL ramps linearly 0..1199, so the exact TWAP (599.5) is only
+        reachable when all 1200 points arrive; truncation at the first 1000
+        points would yield 499.5 instead.
+        """
+        n_days = 1200
+        day0 = 1_600_000_000  # aligned base timestamp
+        rows = [
+            {
+                "id": f"day-{i}",
+                "date": day0 + i * 86_400,
+                "tvlUSD": str(i),
+                "liquidity": "1",
+            }
+            for i in range(n_days)
+        ]
+
+        async def fake_query(subgraph_id, query, variables):
+            lo = int(variables["startDate"])
+            hi = int(variables["endDate"])
+            window = [r for r in rows if lo <= r["date"] <= hi]
+            window.sort(key=lambda r: r["date"])
+            return {"poolDayDatas": window[: variables["first"]]}
+
+        mock_subgraph_client.query = AsyncMock(side_effect=fake_query)
+        provider = LiquidityDepthProvider(
+            client=mock_subgraph_client,
+            use_twap=True,
+            twap_window_hours=n_days * 24,
+        )
+
+        target = datetime.fromtimestamp(day0 + (n_days - 1) * 86_400, tz=UTC)
+        result = await provider.get_liquidity_depth(
+            pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
+            chain=Chain.ARBITRUM,
+            timestamp=target,
+            protocol="uniswap_v3",
+        )
+
+        assert result.depth == Decimal("599.5")
+        assert result.source_info.confidence == DataConfidence.HIGH
+        # 2 pages: 1000 + 201 (boundary row re-fetched and deduplicated)
+        assert mock_subgraph_client.query.call_count == 2

@@ -32,10 +32,24 @@ from almanak.framework.backtesting.pnl.providers.lending.morpho_apy import (
 )
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
+    SubgraphClientConfig,
     SubgraphQueryError,
     SubgraphRateLimitError,
 )
 from almanak.framework.backtesting.pnl.types import DataConfidence
+
+
+def _make_client() -> SubgraphClient:
+    """Real SubgraphClient with the network-facing pieces mocked out.
+
+    Provider calls flow through the real ``query_with_pagination`` cursor
+    loop (VIB-5089) while tests stub ``.query`` per page; ``.close`` is
+    mocked so ownership assertions keep working.
+    """
+    client = SubgraphClient(config=SubgraphClientConfig(api_key="test-key"))
+    client.query = AsyncMock()
+    client.close = AsyncMock()
+    return client
 
 
 class TestMorphoBlueAPYProviderInitialization:
@@ -65,7 +79,7 @@ class TestMorphoBlueAPYProviderInitialization:
 
     def test_init_with_provided_client(self):
         """Test provider uses provided SubgraphClient."""
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         provider = MorphoBlueAPYProvider(client=mock_client)
         assert provider._client is mock_client
         assert provider._owns_client is False
@@ -221,7 +235,7 @@ class TestGetAPY:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value=snapshots_response)
 
         provider._client = mock_client
@@ -275,7 +289,7 @@ class TestGetAPY:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=[market_response, snapshots_response])
 
         provider._client = mock_client
@@ -296,7 +310,7 @@ class TestGetAPY:
         """Test behavior when market not found by symbol."""
         provider = MorphoBlueAPYProvider()
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value={"markets": []})
 
         provider._client = mock_client
@@ -324,7 +338,7 @@ class TestGetAPY:
 
         snapshots_response = {"marketDailySnapshots": []}
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value=snapshots_response)
 
         provider._client = mock_client
@@ -350,6 +364,7 @@ class TestGetAPY:
         snapshots_response = {
             "marketDailySnapshots": [
                 {
+                    "id": "snap-1",
                     "days": 19723,
                     "timestamp": 1704067200,
                     "rates": [
@@ -360,7 +375,7 @@ class TestGetAPY:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value=snapshots_response)
 
         provider._client = mock_client
@@ -390,7 +405,7 @@ class TestErrorHandling:
         )
         provider = MorphoBlueAPYProvider(config=config)
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=SubgraphRateLimitError("Rate limit exceeded"))
 
         provider._client = mock_client
@@ -414,7 +429,7 @@ class TestErrorHandling:
         """Test that query error returns fallback results."""
         provider = MorphoBlueAPYProvider()
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=SubgraphQueryError("Query failed"))
 
         provider._client = mock_client
@@ -436,7 +451,7 @@ class TestErrorHandling:
         """Test that unexpected error returns fallback results."""
         provider = MorphoBlueAPYProvider()
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=Exception("Unexpected error"))
 
         provider._client = mock_client
@@ -466,6 +481,7 @@ class TestGetAPYForChain:
         snapshots_response = {
             "marketDailySnapshots": [
                 {
+                    "id": "snap-2",
                     "days": 19723,
                     "timestamp": 1704067200,
                     "rates": [
@@ -476,7 +492,7 @@ class TestGetAPYForChain:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value=snapshots_response)
 
         provider._client = mock_client
@@ -501,7 +517,7 @@ class TestGetAPYForChain:
         config = MorphoBlueClientConfig(chain=Chain.ETHEREUM)
         provider = MorphoBlueAPYProvider(config=config)
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value={"marketDailySnapshots": []})
 
         provider._client = mock_client
@@ -530,6 +546,7 @@ class TestGetCurrentAPY:
         snapshots_response = {
             "marketDailySnapshots": [
                 {
+                    "id": "snap-3",
                     "days": 19723,  # Earlier
                     "timestamp": 1704067200,
                     "rates": [
@@ -538,6 +555,7 @@ class TestGetCurrentAPY:
                     ],
                 },
                 {
+                    "id": "snap-4",
                     "days": 19724,  # Later
                     "timestamp": 1704153600,
                     "rates": [
@@ -548,7 +566,7 @@ class TestGetCurrentAPY:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value=snapshots_response)
 
         provider._client = mock_client
@@ -565,7 +583,7 @@ class TestGetCurrentAPY:
         """Test that get_current_apy returns fallback when no data."""
         provider = MorphoBlueAPYProvider()
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value={"marketDailySnapshots": []})
 
         provider._client = mock_client
@@ -585,7 +603,7 @@ class TestContextManager:
         provider = MorphoBlueAPYProvider()
 
         # Create a mock client
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.close = AsyncMock()
         provider._client = mock_client
         provider._owns_client = True  # We own it, so should close
@@ -598,7 +616,7 @@ class TestContextManager:
     @pytest.mark.asyncio
     async def test_context_manager_does_not_close_external_client(self):
         """Test that context manager doesn't close externally provided client."""
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.close = AsyncMock()
 
         provider = MorphoBlueAPYProvider(client=mock_client)
@@ -629,7 +647,7 @@ class TestMarketIDCaching:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value=market_response)
 
         provider._client = mock_client
@@ -742,6 +760,7 @@ class TestAPYDataParsing:
         provider = MorphoBlueAPYProvider()
 
         snapshot = {
+            "id": "snap-5",
             "timestamp": 1704067200,
             "rates": [],  # Empty rates
         }
@@ -801,7 +820,7 @@ class TestListMarkets:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value=markets_response)
 
         provider._client = mock_client
@@ -827,7 +846,7 @@ class TestListMarkets:
         """Test that query error returns empty list."""
         provider = MorphoBlueAPYProvider()
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=SubgraphQueryError("Query failed"))
 
         provider._client = mock_client
@@ -836,3 +855,58 @@ class TestListMarkets:
         markets = await provider.list_markets()
 
         assert markets == []
+
+
+# =============================================================================
+# Cursor pagination through the provider (VIB-5089)
+# =============================================================================
+
+
+class TestCursorPaginationThroughProvider:
+    """Provider-level proof that >1000-row windows are fetched fully (VIB-5089)."""
+
+    @pytest.mark.asyncio
+    async def test_multi_year_daily_series_returns_all_rows(self):
+        """1500 daily snapshots (>1000) return fully ordered with no gaps."""
+        provider = MorphoBlueAPYProvider()
+        day0 = 18000  # days since epoch
+        n_days = 1500
+        rows = [
+            {
+                "id": f"snap-{i}",
+                "days": day0 + i,
+                "timestamp": (day0 + i) * 86_400,
+                "rates": [
+                    {"id": f"l-{i}", "rate": "3.0", "side": "LENDER", "type": "VARIABLE"},
+                    {"id": f"b-{i}", "rate": "5.0", "side": "BORROWER", "type": "VARIABLE"},
+                ],
+            }
+            for i in range(n_days)
+        ]
+
+        async def fake_query(subgraph_id, query, variables):
+            lo = int(variables["startDay"])
+            hi = int(variables["endDay"])
+            window = [r for r in rows if lo <= r["days"] <= hi]
+            window.sort(key=lambda r: r["days"])
+            return {"marketDailySnapshots": window[: variables["first"]]}
+
+        mock_client = _make_client()
+        mock_client.query = AsyncMock(side_effect=fake_query)
+        provider._client = mock_client
+        provider._owns_client = False
+
+        apys = await provider.get_apy(
+            protocol="morpho_blue",
+            market="0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+            start_date=datetime.fromtimestamp(day0 * 86_400, tz=UTC),
+            end_date=datetime.fromtimestamp((day0 + n_days - 1) * 86_400, tz=UTC),
+        )
+
+        assert len(apys) == n_days
+        timestamps = [a.source_info.timestamp for a in apys]
+        assert timestamps == sorted(timestamps)
+        assert len(set(timestamps)) == n_days
+        assert all(a.supply_apy == Decimal("0.03") for a in apys)
+        # 2 pages: 1000 + 501 (boundary row re-fetched and deduplicated)
+        assert mock_client.query.call_count == 2

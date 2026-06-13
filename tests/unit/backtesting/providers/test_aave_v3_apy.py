@@ -31,10 +31,24 @@ from almanak.framework.backtesting.pnl.providers.lending.aave_v3_apy import (
 )
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
+    SubgraphClientConfig,
     SubgraphQueryError,
     SubgraphRateLimitError,
 )
 from almanak.framework.backtesting.pnl.types import DataConfidence
+
+
+def _make_client() -> SubgraphClient:
+    """Real SubgraphClient with the network-facing pieces mocked out.
+
+    Provider calls flow through the real ``query_with_pagination`` cursor
+    loop (VIB-5089) while tests stub ``.query`` per page; ``.close`` is
+    mocked so ownership assertions keep working.
+    """
+    client = SubgraphClient(config=SubgraphClientConfig(api_key="test-key"))
+    client.query = AsyncMock()
+    client.close = AsyncMock()
+    return client
 
 
 class TestAaveV3APYProviderInitialization:
@@ -64,7 +78,7 @@ class TestAaveV3APYProviderInitialization:
 
     def test_init_with_provided_client(self):
         """Test provider uses provided SubgraphClient."""
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         provider = AaveV3APYProvider(client=mock_client)
         assert provider._client is mock_client
         assert provider._owns_client is False
@@ -204,7 +218,7 @@ class TestGetAPY:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=[reserve_response, history_response])
 
         provider._client = mock_client
@@ -231,7 +245,7 @@ class TestGetAPY:
         """Test behavior when reserve not found."""
         provider = AaveV3APYProvider()
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value={"reserves": []})
 
         provider._client = mock_client
@@ -270,7 +284,7 @@ class TestGetAPY:
         }
         history_response = {"reserveParamsHistoryItems": []}
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=[reserve_response, history_response])
 
         provider._client = mock_client
@@ -306,7 +320,7 @@ class TestGetAPY:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=[reserve_response, history_response])
 
         provider._client = mock_client
@@ -336,7 +350,7 @@ class TestErrorHandling:
         )
         provider = AaveV3APYProvider(config=config)
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=SubgraphRateLimitError("Rate limit exceeded"))
 
         provider._client = mock_client
@@ -360,7 +374,7 @@ class TestErrorHandling:
         """Test that query error returns fallback results."""
         provider = AaveV3APYProvider()
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=SubgraphQueryError("Query failed"))
 
         provider._client = mock_client
@@ -382,7 +396,7 @@ class TestErrorHandling:
         """Test that unexpected error returns fallback results."""
         provider = AaveV3APYProvider()
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=Exception("Unexpected error"))
 
         provider._client = mock_client
@@ -422,7 +436,7 @@ class TestGetAPYForChain:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=[reserve_response, history_response])
 
         provider._client = mock_client
@@ -447,7 +461,7 @@ class TestGetAPYForChain:
         config = AaveV3ClientConfig(chain=Chain.ETHEREUM)
         provider = AaveV3APYProvider(config=config)
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value={"reserves": []})
 
         provider._client = mock_client
@@ -479,11 +493,13 @@ class TestGetCurrentAPY:
         history_response = {
             "reserveParamsHistoryItems": [
                 {
+                    "id": "item-earlier",
                     "timestamp": 1704067200,  # Earlier
                     "liquidityRate": "30000000000000000000000000",
                     "variableBorrowRate": "50000000000000000000000000",
                 },
                 {
+                    "id": "item-later",
                     "timestamp": 1704153600,  # Later
                     "liquidityRate": "35000000000000000000000000",  # 3.5%
                     "variableBorrowRate": "55000000000000000000000000",  # 5.5%
@@ -491,7 +507,7 @@ class TestGetCurrentAPY:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=[reserve_response, history_response])
 
         provider._client = mock_client
@@ -508,7 +524,7 @@ class TestGetCurrentAPY:
         """Test that get_current_apy returns fallback when no data."""
         provider = AaveV3APYProvider()
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value={"reserves": []})
 
         provider._client = mock_client
@@ -528,7 +544,7 @@ class TestContextManager:
         provider = AaveV3APYProvider()
 
         # Create a mock client
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.close = AsyncMock()
         provider._client = mock_client
         provider._owns_client = True  # We own it, so should close
@@ -541,7 +557,7 @@ class TestContextManager:
     @pytest.mark.asyncio
     async def test_context_manager_does_not_close_external_client(self):
         """Test that context manager doesn't close externally provided client."""
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.close = AsyncMock()
 
         provider = AaveV3APYProvider(client=mock_client)
@@ -566,7 +582,7 @@ class TestReserveIDCaching:
             "reserves": [{"id": "0xusdc-0xpool-0", "symbol": "USDC"}]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value=reserve_response)
 
         provider._client = mock_client
@@ -686,3 +702,110 @@ class TestAPYDataParsing:
 
         assert result.supply_apy == Decimal("0")
         assert result.borrow_apy == Decimal("0")
+
+
+# =============================================================================
+# Cursor pagination through the provider (VIB-5089)
+# =============================================================================
+
+
+def _make_history_subgraph(history_rows: list[dict[str, Any]]):
+    """Fake subgraph serving the reserve lookup plus cursor-paged history.
+
+    Honours The Graph semantics for the provider's history query: ascending
+    timestamp order, inclusive _gte/_lte bounds, first-limited pages.
+    """
+    ordered = sorted(history_rows, key=lambda r: int(r["timestamp"]))
+
+    async def fake_query(subgraph_id: str, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        if "reserves(" in query:
+            return {"reserves": [{"id": "0xusdc-0xpool-0", "symbol": "USDC"}]}
+        lo = int(variables["startTimestamp"])
+        hi = int(variables["endTimestamp"])
+        window = [r for r in ordered if lo <= int(r["timestamp"]) <= hi]
+        return {"reserveParamsHistoryItems": window[: variables["first"]]}
+
+    return fake_query
+
+
+class TestCursorPaginationThroughProvider:
+    """Provider-level proof that >1000-row windows are fetched fully (VIB-5089)."""
+
+    @pytest.mark.asyncio
+    async def test_four_year_daily_apy_series_returns_all_rows(self):
+        """Long-window proof: 4 years of daily snapshots (1461 rows) all return.
+
+        Before VIB-5089 the provider issued a single first-1000 query and
+        silently truncated this series at 1000 rows.
+        """
+        provider = AaveV3APYProvider()
+        day0 = 1_577_836_800  # 2020-01-01 UTC
+        n_days = 1461  # 4 years including one leap day
+        rows = [
+            {
+                "id": f"item-{i}",
+                "timestamp": day0 + i * 86_400,
+                "liquidityRate": "30000000000000000000000000",  # 3% in RAY
+                "variableBorrowRate": "50000000000000000000000000",  # 5% in RAY
+            }
+            for i in range(n_days)
+        ]
+
+        mock_client = _make_client()
+        mock_client.query = AsyncMock(side_effect=_make_history_subgraph(rows))
+        provider._client = mock_client
+        provider._owns_client = False
+
+        apys = await provider.get_apy(
+            protocol="aave_v3",
+            market="USDC",
+            start_date=datetime.fromtimestamp(day0, tz=UTC),
+            end_date=datetime.fromtimestamp(day0 + (n_days - 1) * 86_400, tz=UTC),
+        )
+
+        assert len(apys) == n_days
+        # Correct ordering, no boundary duplicates or gaps
+        timestamps = [a.source_info.timestamp for a in apys]
+        assert timestamps == sorted(timestamps)
+        assert len(set(timestamps)) == n_days
+        assert all(a.supply_apy == Decimal("0.03") for a in apys)
+        assert all(a.source_info.confidence == DataConfidence.HIGH for a in apys)
+        # 1 reserve lookup + 2 history pages (1000 + 462-row partial page,
+        # one boundary row re-fetched and deduplicated)
+        assert mock_client.query.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_pagination_overflow_raises_instead_of_fallback(self, monkeypatch):
+        """A window that exceeds the page valve fails loudly, not with fallback.
+
+        VIB-5089: the provider must never swap a partially fetched series for
+        LOW-confidence fallback values - that would be silent truncation.
+        """
+        import almanak.framework.backtesting.pnl.providers.lending.aave_v3_apy as aave_module
+        from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
+
+        monkeypatch.setattr(aave_module, "MAX_PAGINATION_PAGES", 2)
+
+        provider = AaveV3APYProvider()
+        rows = [
+            {
+                "id": f"item-{i}",
+                "timestamp": 1_700_000_000 + i,
+                "liquidityRate": "30000000000000000000000000",
+                "variableBorrowRate": "50000000000000000000000000",
+            }
+            for i in range(2500)  # needs 3 pages of 1000; valve allows 2
+        ]
+
+        mock_client = _make_client()
+        mock_client.query = AsyncMock(side_effect=_make_history_subgraph(rows))
+        provider._client = mock_client
+        provider._owns_client = False
+
+        with pytest.raises(DataSourceUnavailableError, match="max_pages=2"):
+            await provider.get_apy(
+                protocol="aave_v3",
+                market="USDC",
+                start_date=datetime.fromtimestamp(1_700_000_000, tz=UTC),
+                end_date=datetime.fromtimestamp(1_700_000_000 + 2500, tz=UTC),
+            )

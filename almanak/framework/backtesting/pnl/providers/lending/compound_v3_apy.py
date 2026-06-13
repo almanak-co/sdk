@@ -54,6 +54,7 @@ from typing import Any
 
 from almanak.core.enums import Chain
 
+from ....exceptions import DataSourceUnavailableError
 from ...types import APYResult, DataConfidence, DataSourceInfo
 from ..base import HistoricalAPYProvider
 from ..subgraph_client import (
@@ -118,12 +119,18 @@ KNOWN_COMET_ADDRESSES: dict[Chain, dict[str, str]] = {
     },
 }
 
-# GraphQL query for fetching daily market accounting data
-# Uses day number for filtering (days since epoch)
+# Safety valve for cursor pagination (VIB-5089). Daily snapshots: 100 pages
+# of 1000 covers ~270 years, so real windows never hit the valve.
+MAX_PAGINATION_PAGES = 100
+
+# GraphQL query for fetching daily market accounting data.
+# Uses day number for filtering (days since epoch).
+# Cursor-paginated (VIB-5089): ordered ascending by day, with day_gte bound
+# to $startDay which advances page by page.
 DAILY_MARKET_ACCOUNTING_QUERY = """
-query GetDailyMarketAccounting($marketId: String!, $startDay: BigInt!, $endDay: BigInt!) {
+query GetDailyMarketAccounting($first: Int!, $marketId: String!, $startDay: BigInt!, $endDay: BigInt!) {
     dailyMarketAccountings(
-        first: 1000
+        first: $first
         where: {
             market_: { id: $marketId }
             day_gte: $startDay
@@ -503,8 +510,10 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
             start_day = self._date_to_day_number(start_date)
             end_day = self._date_to_day_number(end_date)
 
-            # Query subgraph
-            data = await self._client.query(
+            # Query subgraph with cursor pagination on day (VIB-5089):
+            # windows with >1000 daily snapshots span multiple pages instead
+            # of silently truncating at the first 1000.
+            daily_accountings = await self._client.query_with_pagination(
                 subgraph_id=subgraph_id,
                 query=DAILY_MARKET_ACCOUNTING_QUERY,
                 variables={
@@ -512,9 +521,11 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
                     "startDay": str(start_day),
                     "endDay": str(end_day),
                 },
+                data_path="dailyMarketAccountings",
+                max_pages=MAX_PAGINATION_PAGES,
+                cursor_field="day",
+                cursor_variable="startDay",
             )
-
-            daily_accountings = data.get("dailyMarketAccountings", [])
 
             if not daily_accountings:
                 logger.warning(
@@ -537,6 +548,11 @@ class CompoundV3APYProvider(HistoricalAPYProvider):
             )
 
             return results
+
+        except DataSourceUnavailableError:
+            # Pagination overflow must stay loud (VIB-5089): a partial series
+            # silently swapped for fallback would be silent truncation.
+            raise
 
         except SubgraphRateLimitError as e:
             logger.warning(
@@ -707,4 +723,5 @@ __all__ = [
     "DEFAULT_SUPPLY_APY_FALLBACK",
     "DEFAULT_BORROW_APY_FALLBACK",
     "KNOWN_COMET_ADDRESSES",
+    "MAX_PAGINATION_PAGES",
 ]

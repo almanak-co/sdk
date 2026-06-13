@@ -40,6 +40,8 @@ import aiohttp
 from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
 from almanak.core.chains import DEFAULT_CHAIN
 
+from .subgraph_client import paginate_subgraph_query
+
 logger = logging.getLogger(__name__)
 
 
@@ -64,6 +66,10 @@ DEFAULT_CACHE_TTL_SECONDS = 3600
 # Rate limit settings
 DEFAULT_REQUESTS_PER_MINUTE = 30
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
+
+# Safety valve for cursor pagination (VIB-5089). Daily volume rows: 100
+# pages of 1000 covers ~270 years, so real ranges never hit the valve.
+MAX_PAGINATION_PAGES = 100
 
 
 # =============================================================================
@@ -514,15 +520,18 @@ class SubgraphVolumeProvider:
             return sorted(results, key=lambda x: x.date)
 
         # Query only the uncached span; every date outside it is cached.
+        # Cursor-paginated (VIB-5089): ordered ascending by date with date_gte
+        # advancing page by page, so spans of >1000 days fetch across multiple
+        # pages instead of silently truncating.
         start_timestamp = int(datetime.combine(dates_to_fetch[0], datetime.min.time(), tzinfo=UTC).timestamp())
         end_timestamp = int(datetime.combine(dates_to_fetch[-1], datetime.min.time(), tzinfo=UTC).timestamp())
         dates_to_fetch_set = set(dates_to_fetch)
 
         # Fetch missing dates in batch
         query = """
-        query GetPoolDayDatas($poolAddress: String!, $startDate: Int!, $endDate: Int!) {
+        query GetPoolDayDatas($first: Int!, $poolAddress: String!, $startDate: Int!, $endDate: Int!) {
             poolDayDatas(
-                first: 1000
+                first: $first
                 where: {
                     pool: $poolAddress
                     date_gte: $startDate
@@ -552,8 +561,16 @@ class SubgraphVolumeProvider:
         }
 
         try:
-            data = await self._execute_query(query, variables)
-            pool_day_datas = data.get("poolDayDatas", [])
+            pool_day_datas = await paginate_subgraph_query(
+                self._execute_query,
+                query,
+                variables,
+                data_path="poolDayDatas",
+                max_pages=MAX_PAGINATION_PAGES,
+                cursor_field="date",
+                cursor_variable="startDate",
+                context=self.provider_name,
+            )
 
             fetched_count = 0
             for day_data in pool_day_datas:

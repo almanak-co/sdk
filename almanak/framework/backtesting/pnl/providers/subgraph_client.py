@@ -36,6 +36,7 @@ Example:
 """
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -44,6 +45,7 @@ import aiohttp
 
 from almanak.config.backtest import backtest_config_from_env
 
+from ...exceptions import DataSourceUnavailableError
 from .rate_limiter import TokenBucketRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,11 @@ DEFAULT_TIMEOUT_SECONDS = 30
 
 # Default max retries for failed requests
 DEFAULT_MAX_RETRIES = 3
+
+# The Graph rejects ``skip`` values above 5000, so skip-based pagination tops
+# out at 6 pages of 1000 rows. Windows that need more rows must use cursor
+# pagination (VIB-5089).
+THE_GRAPH_MAX_SKIP = 5000
 
 
 # =============================================================================
@@ -116,6 +123,292 @@ class SubgraphQueryError(SubgraphClientError):
 
 class SubgraphConnectionError(SubgraphClientError):
     """Raised when connection to subgraph fails."""
+
+
+# =============================================================================
+# Pagination Core
+# =============================================================================
+
+
+def _extract_data_path(data: Any, data_path: str) -> list[Any]:
+    """Extract the list at a dot-separated path from a query response.
+
+    Args:
+        data: The query response data (the GraphQL "data" payload)
+        data_path: Dot-separated path to the list (e.g. "pool.snapshots").
+                   Empty string means the response itself is the list.
+
+    Returns:
+        The list at the path, or an empty list when the path is missing or
+        does not resolve to a list.
+    """
+    result = data
+    if data_path:
+        for key in data_path.split("."):
+            result = result.get(key, []) if isinstance(result, dict) else []
+    return result if isinstance(result, list) else []
+
+
+def _window_too_large_error(context: str, message: str, remediation: str) -> DataSourceUnavailableError:
+    """Build the loud-failure error for pagination overflow.
+
+    Pagination must never silently truncate (VIB-5089): when a window cannot
+    be fully fetched, the caller gets a
+    :class:`~almanak.framework.backtesting.exceptions.DataSourceUnavailableError`
+    with concrete remediation instead of a partial series.
+    """
+    return DataSourceUnavailableError(
+        data_type="subgraph",
+        identifier=context,
+        message=message,
+        remediation=remediation,
+    )
+
+
+async def paginate_subgraph_query(
+    execute: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]],
+    query: str,
+    variables: dict[str, Any] | None = None,
+    *,
+    data_path: str = "",
+    page_size: int = 1000,
+    max_pages: int = 10,
+    cursor_field: str | None = None,
+    cursor_variable: str | None = None,
+    context: str = "subgraph",
+) -> list[Any]:
+    """Paginate a GraphQL query through an arbitrary execute callable.
+
+    This is the single pagination implementation shared by
+    :meth:`SubgraphClient.query_with_pagination` and providers that own their
+    own HTTP path (e.g. ``subgraph.py``'s :class:`SubgraphVolumeProvider`).
+
+    Two modes exist:
+
+    **Cursor mode** (``cursor_field`` set) - preferred. The query must:
+
+    - select both ``id`` and ``cursor_field`` on every item,
+    - order ascending by ``cursor_field`` (``orderBy: <cursor_field>,
+      orderDirection: asc``),
+    - bind its lower-bound ``where`` filter to ``$<cursor_variable>`` with a
+      ``_gte`` comparison (e.g. ``timestamp_gte: $startTimestamp``), and
+    - take ``first: $first``.
+
+    After each full page the lower bound advances to the last item's cursor
+    value. Because the bound is inclusive (``_gte``), items sharing the
+    boundary value are re-fetched and deduplicated by ``id`` - no boundary
+    duplicates and no boundary gaps, as long as fewer than ``page_size``
+    items share a single cursor value (otherwise pagination stalls and fails
+    loudly).
+
+    **Skip mode** (``cursor_field`` is None) - legacy. The query must take
+    ``first: $first, skip: $skip``. The Graph caps ``skip`` at
+    :data:`THE_GRAPH_MAX_SKIP` (5000); needing to page past the cap fails
+    loudly.
+
+    Both modes fail loudly (``DataSourceUnavailableError``) instead of
+    silently truncating when more data remains after ``max_pages``.
+
+    Args:
+        execute: Async callable ``(query, variables) -> response data dict``.
+        query: GraphQL query string.
+        variables: Base query variables. Mutated copies are passed to
+                   ``execute``; the caller's dict is never mutated.
+        data_path: Dot-separated path to the result list in the response.
+        page_size: Items per page (default: 1000, The Graph's max ``first``).
+        max_pages: Safety valve on total pages fetched.
+        cursor_field: Response field to cursor on (e.g. "timestamp", "date").
+        cursor_variable: Query variable holding the lower bound (e.g.
+                         "startTimestamp"). Required in cursor mode; its
+                         initial value must be present in ``variables``.
+        context: Identifier used in error messages (subgraph id / provider).
+
+    Returns:
+        Combined, deduplicated list of all items across pages, in response
+        order.
+
+    Raises:
+        DataSourceUnavailableError: When the window cannot be fetched without
+            truncation (skip cap, max_pages exhaustion, or a stalled cursor).
+        ValueError: When cursor mode is misconfigured (missing
+            ``cursor_variable`` or initial cursor value).
+        SubgraphQueryError: When cursor mode encounters an item without the
+            ``id`` or cursor field it needs to make progress.
+    """
+    variables = dict(variables) if variables else {}
+
+    if cursor_field is not None:
+        return await _paginate_with_cursor(
+            execute,
+            query,
+            variables,
+            data_path=data_path,
+            page_size=page_size,
+            max_pages=max_pages,
+            cursor_field=cursor_field,
+            cursor_variable=cursor_variable,
+            context=context,
+        )
+    return await _paginate_with_skip(
+        execute,
+        query,
+        variables,
+        data_path=data_path,
+        page_size=page_size,
+        max_pages=max_pages,
+        context=context,
+    )
+
+
+async def _paginate_with_cursor(
+    execute: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]],
+    query: str,
+    variables: dict[str, Any],
+    *,
+    data_path: str,
+    page_size: int,
+    max_pages: int,
+    cursor_field: str,
+    cursor_variable: str | None,
+    context: str,
+) -> list[Any]:
+    """Cursor-mode pagination: inclusive lower bound + dedup by id."""
+    if cursor_variable is None:
+        raise ValueError("cursor_variable is required when cursor_field is set")
+    if cursor_variable not in variables:
+        raise ValueError(f"variables must contain the initial cursor value for {cursor_variable!r}")
+
+    # GraphQL Int variables are JSON numbers; BigInt variables are JSON
+    # strings. Preserve whichever shape the caller used for the lower bound.
+    cursor_is_str = isinstance(variables[cursor_variable], str)
+
+    all_results: list[Any] = []
+    seen_ids: set[str] = set()
+
+    for page in range(max_pages):
+        variables["first"] = page_size
+        data = await execute(query, variables)
+        page_items = _extract_data_path(data, data_path)
+
+        new_items: list[Any] = []
+        for item in page_items:
+            item_id = item.get("id") if isinstance(item, dict) else None
+            if item_id is None:
+                raise SubgraphQueryError(
+                    f"Cursor pagination requires every item to select 'id' (context={context})",
+                    query=query,
+                )
+            if item_id in seen_ids:
+                continue
+            seen_ids.add(item_id)
+            new_items.append(item)
+        all_results.extend(new_items)
+
+        if len(page_items) < page_size:
+            logger.debug(
+                "Cursor pagination complete: fetched %d items in %d pages (context=%s)",
+                len(all_results),
+                page + 1,
+                context,
+            )
+            return all_results
+
+        if not new_items:
+            # A full page of already-seen items: more than page_size rows
+            # share one cursor value, so the inclusive bound cannot advance.
+            raise _window_too_large_error(
+                context,
+                message=(
+                    f"Cursor pagination stalled after {len(all_results)} rows: {page_size} or more "
+                    f"items share {cursor_field}={page_items[-1].get(cursor_field)!r} so the "
+                    f"inclusive lower bound cannot advance"
+                ),
+                remediation=(
+                    "Raise page_size above the number of rows sharing a single "
+                    f"{cursor_field} value, or cursor on a finer-grained field"
+                ),
+            )
+
+        raw_cursor = page_items[-1].get(cursor_field)
+        if raw_cursor is None:
+            raise SubgraphQueryError(
+                f"Cursor pagination requires every item to select {cursor_field!r} (context={context})",
+                query=query,
+            )
+        variables[cursor_variable] = str(raw_cursor) if cursor_is_str else int(raw_cursor)
+
+    raise _window_too_large_error(
+        context,
+        message=(
+            f"Query window too large: fetched {len(all_results)} rows but exhausted "
+            f"max_pages={max_pages} (page_size={page_size}) with more data remaining"
+        ),
+        remediation="Narrow the query window or raise max_pages",
+    )
+
+
+async def _paginate_with_skip(
+    execute: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]],
+    query: str,
+    variables: dict[str, Any],
+    *,
+    data_path: str,
+    page_size: int,
+    max_pages: int,
+    context: str,
+) -> list[Any]:
+    """Skip-mode pagination: legacy first/skip with a loud cap failure."""
+    all_results: list[Any] = []
+
+    for page in range(max_pages):
+        skip = page * page_size
+        if skip > THE_GRAPH_MAX_SKIP:
+            raise _window_too_large_error(
+                context,
+                message=(
+                    f"Query window too large for skip-based pagination: fetched "
+                    f"{len(all_results)} rows but The Graph caps skip at {THE_GRAPH_MAX_SKIP} "
+                    f"and more data remains"
+                ),
+                remediation=(
+                    "Narrow the query window, or switch this query to cursor pagination "
+                    "(cursor_field on a timestamp-ordered field)"
+                ),
+            )
+
+        variables["first"] = page_size
+        variables["skip"] = skip
+        data = await execute(query, variables)
+        page_items = _extract_data_path(data, data_path)
+
+        if len(page_items) == 0:
+            logger.debug(
+                "Skip pagination complete: fetched %d items in %d pages (context=%s)",
+                len(all_results),
+                page + 1,
+                context,
+            )
+            return all_results
+
+        all_results.extend(page_items)
+
+        if len(page_items) < page_size:
+            logger.debug(
+                "Skip pagination complete (last page partial): fetched %d items in %d pages (context=%s)",
+                len(all_results),
+                page + 1,
+                context,
+            )
+            return all_results
+
+    raise _window_too_large_error(
+        context,
+        message=(
+            f"Query window too large: fetched {len(all_results)} rows but exhausted "
+            f"max_pages={max_pages} (page_size={page_size}) with more data remaining"
+        ),
+        remediation="Narrow the query window or raise max_pages",
+    )
 
 
 # =============================================================================
@@ -526,24 +819,44 @@ class SubgraphClient:
         data_path: str = "",
         page_size: int = 1000,
         max_pages: int = 10,
+        *,
+        cursor_field: str | None = None,
+        cursor_variable: str | None = None,
     ) -> list[Any]:
         """Execute a paginated GraphQL query.
 
-        This method handles pagination automatically by:
-        1. Adding skip/first parameters to the query
-        2. Fetching pages until no more data or max_pages reached
-        3. Combining all results into a single list
+        Delegates to :func:`paginate_subgraph_query`; see it for the full
+        contract of both modes.
 
-        Note: The query must support `first` and `skip` parameters.
+        **Cursor mode** (``cursor_field`` set) - preferred. The query must
+        order ascending by ``cursor_field``, select ``id`` and
+        ``cursor_field`` on every item, take ``first: $first``, and bind its
+        inclusive lower bound to ``$<cursor_variable>`` (a ``_gte`` filter).
+        The lower bound advances past each full page; boundary items are
+        deduplicated by ``id``. This is the only mode that can fetch more
+        than ~6000 rows - The Graph caps ``skip`` at
+        :data:`THE_GRAPH_MAX_SKIP`.
+
+        **Skip mode** (default) - legacy. The query must take
+        ``first: $first, skip: $skip``. Fails loudly at the skip cap.
+
+        Both modes raise
+        :class:`~almanak.framework.backtesting.exceptions.DataSourceUnavailableError`
+        instead of silently truncating when more data remains (VIB-5089).
 
         Args:
             subgraph_id: The subgraph deployment ID
-            query: GraphQL query string (must include $first and $skip vars)
-            variables: Base query variables (first/skip will be added)
+            query: GraphQL query string (must declare $first, plus $skip in
+                   skip mode or the cursor variable in cursor mode)
+            variables: Base query variables (pagination vars will be added;
+                       in cursor mode must contain the initial lower bound)
             data_path: Dot-separated path to the list in the response
                        (e.g., "poolDayDatas" or "pools.items")
             page_size: Number of items per page (default: 1000)
             max_pages: Maximum number of pages to fetch (default: 10)
+            cursor_field: Response field to cursor on (e.g. "timestamp")
+            cursor_variable: Query variable holding the inclusive lower bound
+                             (e.g. "startTimestamp")
 
         Returns:
             Combined list of all items from all pages
@@ -552,52 +865,36 @@ class SubgraphClient:
             results = await client.query_with_pagination(
                 subgraph_id="...",
                 query='''
-                    query GetPools($first: Int!, $skip: Int!) {
-                        pools(first: $first, skip: $skip) { id }
+                    query GetSnapshots($first: Int!, $startTimestamp: Int!, $endTimestamp: Int!) {
+                        snapshots(
+                            first: $first
+                            where: { timestamp_gte: $startTimestamp, timestamp_lte: $endTimestamp }
+                            orderBy: timestamp
+                            orderDirection: asc
+                        ) { id timestamp }
                     }
                 ''',
-                data_path="pools",
-                page_size=100,
+                variables={"startTimestamp": 1704067200, "endTimestamp": 1735689600},
+                data_path="snapshots",
+                cursor_field="timestamp",
+                cursor_variable="startTimestamp",
             )
         """
-        all_results: list[Any] = []
-        variables = dict(variables) if variables else {}
 
-        for page in range(max_pages):
-            # Add pagination parameters
-            variables["first"] = page_size
-            variables["skip"] = page * page_size
+        async def execute(q: str, v: dict[str, Any]) -> dict[str, Any]:
+            return await self.query(subgraph_id, q, v)
 
-            # Execute query
-            data = await self.query(subgraph_id, query, variables)
-
-            # Extract results using data_path
-            result = data
-            if data_path:
-                for key in data_path.split("."):
-                    result = result.get(key, []) if isinstance(result, dict) else []
-
-            # Check if we got results
-            if not isinstance(result, list) or len(result) == 0:
-                logger.debug(
-                    "Pagination complete: fetched %d items in %d pages",
-                    len(all_results),
-                    page + 1,
-                )
-                break
-
-            all_results.extend(result)
-
-            # If we got less than page_size, we're done
-            if len(result) < page_size:
-                logger.debug(
-                    "Pagination complete (last page partial): fetched %d items in %d pages",
-                    len(all_results),
-                    page + 1,
-                )
-                break
-
-        return all_results
+        return await paginate_subgraph_query(
+            execute,
+            query,
+            variables,
+            data_path=data_path,
+            page_size=page_size,
+            max_pages=max_pages,
+            cursor_field=cursor_field,
+            cursor_variable=cursor_variable,
+            context=subgraph_id,
+        )
 
     def get_stats(self) -> QueryStats:
         """Get query statistics.
@@ -666,8 +963,10 @@ __all__ = [
     "SubgraphConnectionError",
     "QueryStats",
     "create_subgraph_client",
+    "paginate_subgraph_query",
     "DEFAULT_REQUESTS_PER_MINUTE",
     "DEFAULT_TIMEOUT_SECONDS",
     "DEFAULT_MAX_RETRIES",
     "THEGRAPH_GATEWAY_URL",
+    "THE_GRAPH_MAX_SKIP",
 ]

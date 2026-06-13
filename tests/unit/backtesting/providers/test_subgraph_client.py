@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
+from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 from almanak.framework.backtesting.pnl.providers.rate_limiter import (
     TokenBucketRateLimiter,
 )
@@ -26,6 +27,7 @@ from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_REQUESTS_PER_MINUTE,
     DEFAULT_TIMEOUT_SECONDS,
+    THE_GRAPH_MAX_SKIP,
     THEGRAPH_GATEWAY_URL,
     QueryStats,
     SubgraphClient,
@@ -35,6 +37,7 @@ from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphQueryError,
     SubgraphRateLimitError,
     create_subgraph_client,
+    paginate_subgraph_query,
 )
 
 
@@ -672,25 +675,54 @@ class TestPaginationSupport:
         await client.close()
 
     @pytest.mark.asyncio
-    async def test_pagination_respects_max_pages(self):
-        """Test pagination stops at max_pages limit."""
+    async def test_pagination_max_pages_with_more_data_fails_loudly(self):
+        """Exhausting max_pages with full pages raises instead of truncating.
+
+        VIB-5089: silent truncation is never acceptable - a window that
+        cannot be fully fetched must fail with DataSourceUnavailableError.
+        """
         client = SubgraphClient()
 
         async def mock_query(subgraph_id, query, variables):
-            # Always return full page to test max_pages
+            # Always return full page to exhaust max_pages
             return {"pools": [{"id": str(variables["skip"])}]}
 
         with patch.object(client, "query", side_effect=mock_query):
-            results = await client.query_with_pagination(
-                subgraph_id="test",
-                query="query($first: Int!, $skip: Int!) { pools(first: $first, skip: $skip) { id } }",
-                data_path="pools",
-                page_size=1,
-                max_pages=3,
-            )
+            with pytest.raises(DataSourceUnavailableError, match="max_pages=3"):
+                await client.query_with_pagination(
+                    subgraph_id="test",
+                    query="query($first: Int!, $skip: Int!) { pools(first: $first, skip: $skip) { id } }",
+                    data_path="pools",
+                    page_size=1,
+                    max_pages=3,
+                )
 
-        # Should stop after 3 pages
-        assert len(results) == 3
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_skip_pagination_fails_loudly_past_the_graph_skip_cap(self):
+        """Skip mode raises once the next page would exceed skip=5000.
+
+        VIB-5089: The Graph rejects skip > 5000, so a window needing more
+        than 6 full pages of 1000 cannot be fetched skip-based. The failure
+        must be loud, with remediation pointing at cursor pagination.
+        """
+        client = SubgraphClient()
+
+        async def mock_query(subgraph_id, query, variables):
+            skip = variables["skip"]
+            assert skip <= THE_GRAPH_MAX_SKIP, "must never query past the cap"
+            return {"pools": [{"id": f"{skip}-{i}"} for i in range(variables["first"])]}
+
+        with patch.object(client, "query", side_effect=mock_query):
+            with pytest.raises(DataSourceUnavailableError, match="caps skip at 5000"):
+                await client.query_with_pagination(
+                    subgraph_id="test",
+                    query="query($first: Int!, $skip: Int!) { pools(first: $first, skip: $skip) { id } }",
+                    data_path="pools",
+                    page_size=1000,
+                    max_pages=10,
+                )
 
         await client.close()
 
@@ -758,6 +790,314 @@ class TestPaginationSupport:
         assert results == [{"id": "1"}]
 
         await client.close()
+
+
+# =============================================================================
+# Test Cursor Pagination (VIB-5089)
+# =============================================================================
+
+
+CURSOR_QUERY = """
+query GetItems($first: Int!, $start: Int!, $end: Int!) {
+    items(
+        first: $first
+        where: { timestamp_gte: $start, timestamp_lte: $end }
+        orderBy: timestamp
+        orderDirection: asc
+    ) { id timestamp }
+}
+"""
+
+
+def _make_rows(timestamps: list[int]) -> list[dict[str, Any]]:
+    """Build fake subgraph rows with unique ids over given timestamps."""
+    return [{"id": f"row-{i}", "timestamp": ts} for i, ts in enumerate(timestamps)]
+
+
+def _fake_cursor_subgraph(rows: list[dict[str, Any]], cursor_field: str = "timestamp"):
+    """Fake subgraph query honouring first + inclusive lower/upper bounds.
+
+    Mirrors The Graph semantics for an ascending-ordered, _gte/_lte filtered
+    entity list, so the cursor loop is exercised against realistic paging.
+    """
+    ordered = sorted(rows, key=lambda r: int(r[cursor_field]))
+
+    async def fake_query(subgraph_id: str, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        lo = int(variables["start"])
+        hi = int(variables["end"])
+        window = [r for r in ordered if lo <= int(r[cursor_field]) <= hi]
+        return {"items": window[: variables["first"]]}
+
+    return fake_query
+
+
+class TestCursorPagination:
+    """Tests for cursor-mode query_with_pagination (VIB-5089)."""
+
+    @pytest.mark.asyncio
+    async def test_cursor_fetches_all_rows_across_pages(self):
+        """All rows arrive in order, no truncation, no duplicates, no gaps."""
+        client = SubgraphClient()
+        rows = _make_rows(list(range(1000, 1000 + 257)))  # 257 unique timestamps
+
+        with patch.object(client, "query", side_effect=_fake_cursor_subgraph(rows)):
+            results = await client.query_with_pagination(
+                subgraph_id="test",
+                query=CURSOR_QUERY,
+                variables={"start": 0, "end": 10_000},
+                data_path="items",
+                page_size=50,
+                max_pages=20,
+                cursor_field="timestamp",
+                cursor_variable="start",
+            )
+
+        assert len(results) == 257
+        assert [r["id"] for r in results] == [f"row-{i}" for i in range(257)]
+        timestamps = [r["timestamp"] for r in results]
+        assert timestamps == sorted(timestamps)
+
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_cursor_dedups_shared_boundary_timestamps(self):
+        """Rows sharing the page-boundary timestamp are neither duplicated nor skipped.
+
+        The inclusive (_gte) lower bound re-fetches the boundary value on the
+        next page; dedup by id must drop the repeats while keeping the
+        same-timestamp rows that fell past the page boundary.
+        """
+        client = SubgraphClient()
+        # 10 rows, where rows 4..6 share timestamp 105: with page_size=5 the
+        # first page ends mid-group (after row-4), so rows 5 and 6 would be
+        # lost with an exclusive (_gt) bound and row-4 duplicated without
+        # dedup. The shared group (3) stays below page_size (5), which is the
+        # documented progress requirement.
+        timestamps = [101, 102, 103, 104, 105, 105, 105, 108, 109, 110]
+        rows = _make_rows(timestamps)
+
+        with patch.object(client, "query", side_effect=_fake_cursor_subgraph(rows)):
+            results = await client.query_with_pagination(
+                subgraph_id="test",
+                query=CURSOR_QUERY,
+                variables={"start": 0, "end": 1000},
+                data_path="items",
+                page_size=5,
+                max_pages=10,
+                cursor_field="timestamp",
+                cursor_variable="start",
+            )
+
+        assert len(results) == 10
+        assert sorted(r["id"] for r in results) == sorted(f"row-{i}" for i in range(10))
+        assert len({r["id"] for r in results}) == 10
+
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_cursor_stalls_loudly_when_page_size_rows_share_one_value(self):
+        """A full page of one timestamp cannot advance: loud failure, no loop."""
+        client = SubgraphClient()
+        rows = _make_rows([100] * 8)  # 8 rows, all the same timestamp
+
+        with patch.object(client, "query", side_effect=_fake_cursor_subgraph(rows)):
+            with pytest.raises(DataSourceUnavailableError, match="stalled"):
+                await client.query_with_pagination(
+                    subgraph_id="test",
+                    query=CURSOR_QUERY,
+                    variables={"start": 0, "end": 1000},
+                    data_path="items",
+                    page_size=4,
+                    max_pages=10,
+                    cursor_field="timestamp",
+                    cursor_variable="start",
+                )
+
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_cursor_max_pages_with_more_data_fails_loudly(self):
+        """Cursor mode also refuses to silently truncate at max_pages."""
+        client = SubgraphClient()
+        rows = _make_rows(list(range(100, 200)))  # 100 rows
+
+        with patch.object(client, "query", side_effect=_fake_cursor_subgraph(rows)):
+            with pytest.raises(DataSourceUnavailableError, match="max_pages=2"):
+                await client.query_with_pagination(
+                    subgraph_id="test",
+                    query=CURSOR_QUERY,
+                    variables={"start": 0, "end": 1000},
+                    data_path="items",
+                    page_size=10,
+                    max_pages=2,
+                    cursor_field="timestamp",
+                    cursor_variable="start",
+                )
+
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_cursor_preserves_bigint_string_variable_type(self):
+        """A string (BigInt) lower bound stays a string as the cursor advances."""
+        client = SubgraphClient()
+        rows = [{"id": f"row-{i}", "day": str(19000 + i)} for i in range(7)]
+        seen_types: list[type] = []
+
+        async def fake_query(subgraph_id: str, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+            seen_types.append(type(variables["start"]))
+            lo = int(variables["start"])
+            window = [r for r in rows if int(r["day"]) >= lo]
+            return {"items": window[: variables["first"]]}
+
+        with patch.object(client, "query", side_effect=fake_query):
+            results = await client.query_with_pagination(
+                subgraph_id="test",
+                query=CURSOR_QUERY,
+                variables={"start": "0"},
+                data_path="items",
+                page_size=3,
+                max_pages=10,
+                cursor_field="day",
+                cursor_variable="start",
+            )
+
+        assert len(results) == 7
+        assert seen_types and all(t is str for t in seen_types)
+
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_cursor_requires_cursor_variable_and_initial_value(self):
+        """Misconfigured cursor mode is a programming error, not a fetch error."""
+        client = SubgraphClient()
+
+        with pytest.raises(ValueError, match="cursor_variable"):
+            await client.query_with_pagination(
+                subgraph_id="test",
+                query=CURSOR_QUERY,
+                variables={"start": 0},
+                data_path="items",
+                cursor_field="timestamp",
+            )
+
+        with pytest.raises(ValueError, match="initial cursor value"):
+            await client.query_with_pagination(
+                subgraph_id="test",
+                query=CURSOR_QUERY,
+                variables={},
+                data_path="items",
+                cursor_field="timestamp",
+                cursor_variable="start",
+            )
+
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_cursor_requires_id_on_items(self):
+        """Items without id cannot be deduplicated: loud SubgraphQueryError."""
+        client = SubgraphClient()
+
+        async def fake_query(subgraph_id: str, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+            return {"items": [{"timestamp": 100}]}
+
+        with patch.object(client, "query", side_effect=fake_query):
+            with pytest.raises(SubgraphQueryError, match="'id'"):
+                await client.query_with_pagination(
+                    subgraph_id="test",
+                    query=CURSOR_QUERY,
+                    variables={"start": 0},
+                    data_path="items",
+                    cursor_field="timestamp",
+                    cursor_variable="start",
+                )
+
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_cursor_does_not_mutate_caller_variables(self):
+        """The caller's variables dict is copied, not mutated."""
+        client = SubgraphClient()
+        rows = _make_rows(list(range(100, 130)))
+        variables = {"start": 0, "end": 1000}
+
+        with patch.object(client, "query", side_effect=_fake_cursor_subgraph(rows)):
+            await client.query_with_pagination(
+                subgraph_id="test",
+                query=CURSOR_QUERY,
+                variables=variables,
+                data_path="items",
+                page_size=10,
+                max_pages=10,
+                cursor_field="timestamp",
+                cursor_variable="start",
+            )
+
+        assert variables == {"start": 0, "end": 1000}
+
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_four_year_daily_series_through_cursor_pagination(self):
+        """Long-window proof: a 4-year daily series (1461 rows) returns fully.
+
+        The Graph caps skip at THE_GRAPH_MAX_SKIP, so 1461 rows are trivially
+        within skip range at first=1000 - but the cursor path must also fetch
+        them all at realistic page sizes without truncation.
+        """
+        client = SubgraphClient()
+        day0 = 1_577_836_800  # 2020-01-01 UTC
+        rows = _make_rows([day0 + i * 86_400 for i in range(1461)])  # 4 years incl. leap day
+
+        with patch.object(client, "query", side_effect=_fake_cursor_subgraph(rows)):
+            results = await client.query_with_pagination(
+                subgraph_id="test",
+                query=CURSOR_QUERY,
+                variables={"start": day0, "end": day0 + 1461 * 86_400},
+                data_path="items",
+                page_size=1000,
+                max_pages=10,
+                cursor_field="timestamp",
+                cursor_variable="start",
+            )
+
+        assert len(results) == 1461
+        assert len({r["id"] for r in results}) == 1461
+        timestamps = [r["timestamp"] for r in results]
+        assert timestamps == sorted(timestamps)
+        assert THE_GRAPH_MAX_SKIP == 5000  # documented cap the cursor path avoids
+
+        await client.close()
+
+
+class TestPaginateSubgraphQueryFunction:
+    """Tests for the module-level paginate_subgraph_query used by providers
+    that own their HTTP path (subgraph.py)."""
+
+    @pytest.mark.asyncio
+    async def test_paginate_with_custom_execute_callable(self):
+        """The shared core paginates through an arbitrary execute callable."""
+        rows = _make_rows(list(range(100, 175)))
+        ordered = sorted(rows, key=lambda r: r["timestamp"])
+
+        async def execute(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+            lo = int(variables["start"])
+            window = [r for r in ordered if r["timestamp"] >= lo]
+            return {"items": window[: variables["first"]]}
+
+        results = await paginate_subgraph_query(
+            execute,
+            CURSOR_QUERY,
+            {"start": 0},
+            data_path="items",
+            page_size=20,
+            max_pages=10,
+            cursor_field="timestamp",
+            cursor_variable="start",
+            context="unit-test",
+        )
+
+        assert len(results) == 75
+        assert [r["id"] for r in results] == [f"row-{i}" for i in range(75)]
 
 
 # =============================================================================

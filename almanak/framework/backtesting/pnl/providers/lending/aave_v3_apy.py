@@ -47,6 +47,7 @@ from typing import Any
 
 from almanak.core.enums import Chain
 
+from ....exceptions import DataSourceUnavailableError
 from ...types import APYResult, DataConfidence, DataSourceInfo
 from ..base import HistoricalAPYProvider
 from ..subgraph_client import (
@@ -87,11 +88,19 @@ RAY = Decimal("1e27")
 DEFAULT_SUPPLY_APY_FALLBACK = Decimal("0.03")  # 3% APY
 DEFAULT_BORROW_APY_FALLBACK = Decimal("0.05")  # 5% APY
 
-# GraphQL query for fetching reserve params history
+# Safety valve for cursor pagination (VIB-5089). Aave emits a
+# ReserveParamsHistoryItem per reserve update, so long windows on active
+# markets can run to tens of thousands of rows; 100 pages of 1000 covers
+# multi-year windows while still bounding runaway queries.
+MAX_PAGINATION_PAGES = 100
+
+# GraphQL query for fetching reserve params history.
+# Cursor-paginated (VIB-5089): ordered ascending by timestamp, with
+# timestamp_gte bound to $startTimestamp which advances page by page.
 RESERVE_PARAMS_HISTORY_QUERY = """
-query GetReserveParamsHistory($reserveId: String!, $startTimestamp: Int!, $endTimestamp: Int!) {
+query GetReserveParamsHistory($first: Int!, $reserveId: String!, $startTimestamp: Int!, $endTimestamp: Int!) {
     reserveParamsHistoryItems(
-        first: 1000
+        first: $first
         where: {
             reserve_: { id: $reserveId }
             timestamp_gte: $startTimestamp
@@ -474,8 +483,10 @@ class AaveV3APYProvider(HistoricalAPYProvider):
             start_timestamp = int(start_date.timestamp())
             end_timestamp = int(end_date.timestamp())
 
-            # Query subgraph
-            data = await self._client.query(
+            # Query subgraph with cursor pagination on timestamp (VIB-5089):
+            # windows with >1000 rate snapshots span multiple pages instead
+            # of silently truncating at the first 1000.
+            history_items = await self._client.query_with_pagination(
                 subgraph_id=subgraph_id,
                 query=RESERVE_PARAMS_HISTORY_QUERY,
                 variables={
@@ -483,9 +494,11 @@ class AaveV3APYProvider(HistoricalAPYProvider):
                     "startTimestamp": start_timestamp,
                     "endTimestamp": end_timestamp,
                 },
+                data_path="reserveParamsHistoryItems",
+                max_pages=MAX_PAGINATION_PAGES,
+                cursor_field="timestamp",
+                cursor_variable="startTimestamp",
             )
-
-            history_items = data.get("reserveParamsHistoryItems", [])
 
             if not history_items:
                 logger.warning(
@@ -508,6 +521,11 @@ class AaveV3APYProvider(HistoricalAPYProvider):
             )
 
             return results
+
+        except DataSourceUnavailableError:
+            # Pagination overflow must stay loud (VIB-5089): a partial series
+            # silently swapped for fallback would be silent truncation.
+            raise
 
         except SubgraphRateLimitError as e:
             logger.warning(
@@ -646,4 +664,5 @@ __all__ = [
     "DATA_SOURCE",
     "DEFAULT_SUPPLY_APY_FALLBACK",
     "DEFAULT_BORROW_APY_FALLBACK",
+    "MAX_PAGINATION_PAGES",
 ]

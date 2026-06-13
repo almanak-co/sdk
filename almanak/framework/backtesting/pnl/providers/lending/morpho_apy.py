@@ -51,6 +51,7 @@ from typing import Any
 
 from almanak.core.enums import Chain
 
+from ....exceptions import DataSourceUnavailableError
 from ...types import APYResult, DataConfidence, DataSourceInfo
 from ..base import HistoricalAPYProvider
 from ..subgraph_client import (
@@ -88,12 +89,18 @@ DEFAULT_BORROW_APY_FALLBACK = Decimal("0.05")  # 5% APY
 LENDER_SIDE = "LENDER"
 BORROWER_SIDE = "BORROWER"
 
-# GraphQL query for fetching market daily snapshots
-# Uses Messari schema: days field is days since Unix epoch
+# Safety valve for cursor pagination (VIB-5089). Daily snapshots: 100 pages
+# of 1000 covers ~270 years, so real windows never hit the valve.
+MAX_PAGINATION_PAGES = 100
+
+# GraphQL query for fetching market daily snapshots.
+# Uses Messari schema: days field is days since Unix epoch.
+# Cursor-paginated (VIB-5089): ordered ascending by days, with days_gte
+# bound to $startDay which advances page by page.
 MARKET_DAILY_SNAPSHOTS_QUERY = """
-query GetMarketDailySnapshots($marketId: String!, $startDay: Int!, $endDay: Int!) {
+query GetMarketDailySnapshots($first: Int!, $marketId: String!, $startDay: Int!, $endDay: Int!) {
     marketDailySnapshots(
-        first: 1000
+        first: $first
         where: {
             market_: { id: $marketId }
             days_gte: $startDay
@@ -545,8 +552,10 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
             start_day = self._date_to_day_number(start_date)
             end_day = self._date_to_day_number(end_date)
 
-            # Query subgraph
-            data = await self._client.query(
+            # Query subgraph with cursor pagination on days (VIB-5089):
+            # windows with >1000 daily snapshots span multiple pages instead
+            # of silently truncating at the first 1000.
+            daily_snapshots = await self._client.query_with_pagination(
                 subgraph_id=subgraph_id,
                 query=MARKET_DAILY_SNAPSHOTS_QUERY,
                 variables={
@@ -554,9 +563,11 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
                     "startDay": start_day,
                     "endDay": end_day,
                 },
+                data_path="marketDailySnapshots",
+                max_pages=MAX_PAGINATION_PAGES,
+                cursor_field="days",
+                cursor_variable="startDay",
             )
-
-            daily_snapshots = data.get("marketDailySnapshots", [])
 
             if not daily_snapshots:
                 logger.warning(
@@ -579,6 +590,11 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
             )
 
             return results
+
+        except DataSourceUnavailableError:
+            # Pagination overflow must stay loud (VIB-5089): a partial series
+            # silently swapped for fallback would be silent truncation.
+            raise
 
         except SubgraphRateLimitError as e:
             logger.warning(
@@ -748,4 +764,5 @@ __all__ = [
     "DATA_SOURCE",
     "DEFAULT_SUPPLY_APY_FALLBACK",
     "DEFAULT_BORROW_APY_FALLBACK",
+    "MAX_PAGINATION_PAGES",
 ]

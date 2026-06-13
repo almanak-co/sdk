@@ -8,7 +8,7 @@ This module tests the SubgraphVolumeProvider class in providers/subgraph.py, cov
 - Error handling for failed queries
 """
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -739,5 +739,43 @@ class TestQueryExecution:
             call_args = mock_session_instance.post.call_args
             headers = call_args[1]["headers"]
             assert headers["Authorization"] == "Bearer test-key"
+
+        await provider.close()
+
+
+class TestCursorPaginationThroughVolumeProvider:
+    """Provider-level proof that >1000-day ranges are fetched fully (VIB-5089)."""
+
+    @pytest.mark.asyncio
+    async def test_range_beyond_1000_days_returns_all_rows(self):
+        """A 1200-day volume range (>1000 rows) returns every day in order."""
+        provider = SubgraphVolumeProvider(chain="arbitrum")
+        start = date(2020, 1, 1)
+        n_days = 1200
+        rows = []
+        for i in range(n_days):
+            day = start + timedelta(days=i)
+            ts = int(datetime.combine(day, datetime.min.time(), tzinfo=UTC).timestamp())
+            rows.append({"id": f"0xpool-{i}", "date": ts, "volumeUSD": str(i)})
+
+        async def fake_execute(query, variables):
+            lo = int(variables["startDate"])
+            hi = int(variables["endDate"])
+            window = [r for r in rows if lo <= r["date"] <= hi]
+            window.sort(key=lambda r: r["date"])
+            return {"poolDayDatas": window[: variables["first"]]}
+
+        with patch.object(provider, "_execute_query", side_effect=fake_execute):
+            volumes = await provider.get_pool_volume_range(
+                pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
+                start_date=start,
+                end_date=start + timedelta(days=n_days - 1),
+            )
+
+        assert len(volumes) == n_days
+        dates = [v.date for v in volumes]
+        assert dates == sorted(dates)
+        assert len(set(dates)) == n_days
+        assert volumes[-1].volume_usd == Decimal(str(n_days - 1))
 
         await provider.close()

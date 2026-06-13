@@ -32,10 +32,24 @@ from almanak.framework.backtesting.pnl.providers.lending.compound_v3_apy import 
 )
 from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClient,
+    SubgraphClientConfig,
     SubgraphQueryError,
     SubgraphRateLimitError,
 )
 from almanak.framework.backtesting.pnl.types import DataConfidence
+
+
+def _make_client() -> SubgraphClient:
+    """Real SubgraphClient with the network-facing pieces mocked out.
+
+    Provider calls flow through the real ``query_with_pagination`` cursor
+    loop (VIB-5089) while tests stub ``.query`` per page; ``.close`` is
+    mocked so ownership assertions keep working.
+    """
+    client = SubgraphClient(config=SubgraphClientConfig(api_key="test-key"))
+    client.query = AsyncMock()
+    client.close = AsyncMock()
+    return client
 
 
 class TestCompoundV3APYProviderInitialization:
@@ -67,7 +81,7 @@ class TestCompoundV3APYProviderInitialization:
 
     def test_init_with_provided_client(self):
         """Test provider uses provided SubgraphClient."""
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         provider = CompoundV3APYProvider(client=mock_client)
         assert provider._client is mock_client
         assert provider._owns_client is False
@@ -318,7 +332,7 @@ class TestGetAPY:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value=accounting_response)
 
         provider._client = mock_client
@@ -349,6 +363,7 @@ class TestGetAPY:
         accounting_response = {
             "dailyMarketAccountings": [
                 {
+                    "id": "snap-1",
                     "day": "19723",
                     "timestamp": "1704067200",
                     "accounting": {
@@ -361,7 +376,7 @@ class TestGetAPY:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value=accounting_response)
 
         provider._client = mock_client
@@ -404,7 +419,7 @@ class TestGetAPY:
         """Test behavior when no history data available."""
         provider = CompoundV3APYProvider()
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value={"dailyMarketAccountings": []})
 
         provider._client = mock_client
@@ -430,6 +445,7 @@ class TestGetAPY:
         accounting_response = {
             "dailyMarketAccountings": [
                 {
+                    "id": "snap-2",
                     "day": "19723",
                     "timestamp": "1704067200",
                     "accounting": {
@@ -440,7 +456,7 @@ class TestGetAPY:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value=accounting_response)
 
         provider._client = mock_client
@@ -465,6 +481,7 @@ class TestGetAPY:
         accounting_response = {
             "dailyMarketAccountings": [
                 {
+                    "id": "snap-3",
                     "day": "19723",
                     "timestamp": "1704067200",
                     "accounting": {
@@ -475,7 +492,7 @@ class TestGetAPY:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value=accounting_response)
 
         provider._client = mock_client
@@ -507,7 +524,7 @@ class TestErrorHandling:
         )
         provider = CompoundV3APYProvider(config=config)
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=SubgraphRateLimitError("Rate limit exceeded"))
 
         provider._client = mock_client
@@ -531,7 +548,7 @@ class TestErrorHandling:
         """Test that query error returns fallback results."""
         provider = CompoundV3APYProvider()
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=SubgraphQueryError("Query failed"))
 
         provider._client = mock_client
@@ -553,7 +570,7 @@ class TestErrorHandling:
         """Test that unexpected error returns fallback results."""
         provider = CompoundV3APYProvider()
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=Exception("Unexpected error"))
 
         provider._client = mock_client
@@ -583,6 +600,7 @@ class TestGetAPYForChain:
         accounting_response = {
             "dailyMarketAccountings": [
                 {
+                    "id": "snap-4",
                     "day": "19723",
                     "timestamp": "1704067200",
                     "accounting": {
@@ -593,7 +611,7 @@ class TestGetAPYForChain:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value=accounting_response)
 
         provider._client = mock_client
@@ -618,7 +636,7 @@ class TestGetAPYForChain:
         config = CompoundV3ClientConfig(chain=Chain.ETHEREUM)
         provider = CompoundV3APYProvider(config=config)
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value={"dailyMarketAccountings": []})
 
         provider._client = mock_client
@@ -647,6 +665,7 @@ class TestGetCurrentAPY:
         accounting_response = {
             "dailyMarketAccountings": [
                 {
+                    "id": "snap-5",
                     "day": "19723",  # Earlier
                     "timestamp": "1704067200",
                     "accounting": {
@@ -655,6 +674,7 @@ class TestGetCurrentAPY:
                     },
                 },
                 {
+                    "id": "snap-6",
                     "day": "19724",  # Later
                     "timestamp": "1704153600",
                     "accounting": {
@@ -665,7 +685,7 @@ class TestGetCurrentAPY:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value=accounting_response)
 
         provider._client = mock_client
@@ -682,7 +702,7 @@ class TestGetCurrentAPY:
         """Test that get_current_apy returns fallback when no data."""
         provider = CompoundV3APYProvider()
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value={"dailyMarketAccountings": []})
 
         provider._client = mock_client
@@ -702,7 +722,7 @@ class TestContextManager:
         provider = CompoundV3APYProvider()
 
         # Create a mock client
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.close = AsyncMock()
         provider._client = mock_client
         provider._owns_client = True  # We own it, so should close
@@ -715,7 +735,7 @@ class TestContextManager:
     @pytest.mark.asyncio
     async def test_context_manager_does_not_close_external_client(self):
         """Test that context manager doesn't close externally provided client."""
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.close = AsyncMock()
 
         provider = CompoundV3APYProvider(client=mock_client)
@@ -801,6 +821,7 @@ class TestAPYDataParsing:
         provider = CompoundV3APYProvider()
 
         daily_accounting = {
+            "id": "snap-7",
             "day": "19723",
             "timestamp": "1704067200",  # 2024-01-01 00:00:00 UTC
             "accounting": {
@@ -825,6 +846,7 @@ class TestAPYDataParsing:
         provider = CompoundV3APYProvider(config=config)
 
         daily_accounting = {
+            "id": "snap-8",
             "day": "19723",
             "timestamp": "1704067200",
             "accounting": {
@@ -846,6 +868,7 @@ class TestAPYDataParsing:
         provider = CompoundV3APYProvider()
 
         daily_accounting = {
+            "id": "snap-9",
             "day": "19723",
             "timestamp": "1704067200",
             # Missing "accounting" key
@@ -880,7 +903,7 @@ class TestListMarkets:
             ]
         }
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(return_value=markets_response)
 
         provider._client = mock_client
@@ -896,7 +919,7 @@ class TestListMarkets:
         """Test that list_markets returns empty list on error."""
         provider = CompoundV3APYProvider()
 
-        mock_client = MagicMock(spec=SubgraphClient)
+        mock_client = _make_client()
         mock_client.query = AsyncMock(side_effect=SubgraphQueryError("Query failed"))
 
         provider._client = mock_client
@@ -946,3 +969,55 @@ class TestKnownCometAddresses:
             for symbol, address in markets.items():
                 assert address.startswith("0x"), f"Invalid address for {chain}:{symbol}"
                 assert len(address) == 42, f"Wrong length for {chain}:{symbol}"
+
+
+# =============================================================================
+# Cursor pagination through the provider (VIB-5089)
+# =============================================================================
+
+
+class TestCursorPaginationThroughProvider:
+    """Provider-level proof that >1000-row windows are fetched fully (VIB-5089)."""
+
+    @pytest.mark.asyncio
+    async def test_multi_year_daily_series_returns_all_rows(self):
+        """1500 daily snapshots (>1000) return fully ordered with no gaps."""
+        provider = CompoundV3APYProvider()
+        day0 = 18000  # days since epoch
+        n_days = 1500
+        rows = [
+            {
+                "id": f"snap-{i}",
+                "day": str(day0 + i),  # BigInt -> string in responses
+                "timestamp": str((day0 + i) * 86_400),
+                "accounting": {"supplyApr": "0.03", "borrowApr": "0.05"},
+            }
+            for i in range(n_days)
+        ]
+
+        async def fake_query(subgraph_id, query, variables):
+            lo = int(variables["startDay"])
+            hi = int(variables["endDay"])
+            window = [r for r in rows if lo <= int(r["day"]) <= hi]
+            window.sort(key=lambda r: int(r["day"]))
+            return {"dailyMarketAccountings": window[: variables["first"]]}
+
+        mock_client = _make_client()
+        mock_client.query = AsyncMock(side_effect=fake_query)
+        provider._client = mock_client
+        provider._owns_client = False
+
+        apys = await provider.get_apy(
+            protocol="compound_v3",
+            market="USDC",
+            start_date=datetime.fromtimestamp(day0 * 86_400, tz=UTC),
+            end_date=datetime.fromtimestamp((day0 + n_days - 1) * 86_400, tz=UTC),
+        )
+
+        assert len(apys) == n_days
+        timestamps = [a.source_info.timestamp for a in apys]
+        assert timestamps == sorted(timestamps)
+        assert len(set(timestamps)) == n_days
+        assert all(a.source_info.confidence == DataConfidence.HIGH for a in apys)
+        # 2 pages: 1000 + 501 (boundary row re-fetched and deduplicated)
+        assert mock_client.query.call_count == 2
