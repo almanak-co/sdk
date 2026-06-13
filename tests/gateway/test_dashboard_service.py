@@ -2004,6 +2004,7 @@ class TestGetCostStack:
         sm.get_snapshots_since = AsyncMock(return_value=[])
         sm.get_ledger_entries = AsyncMock(return_value=[])
         sm.get_accounting_events_for_dashboard = AsyncMock(return_value=[swap_event])
+        sm.get_recent_snapshots = AsyncMock(return_value=[snapshot])
         sm.get_latest_snapshot = AsyncMock(return_value=snapshot)
         dashboard_service._state_manager = sm
 
@@ -2012,6 +2013,79 @@ class TestGetCostStack:
         assert isinstance(response, gateway_pb2.CostStackInfo)
         # 1.0 WETH * 2100 - 2000 = +100
         assert Decimal(response.inventory_unrealized_usd) == Decimal("100")
+
+    @staticmethod
+    def _swap_inventory_state_manager(snapshot_metadata):
+        """State-manager stub with one held swap lot and a latest snapshot
+        carrying ``snapshot_metadata`` (VIB-5057 stamp scenarios)."""
+        dep = "test_strategy"
+        swap_event = {
+            "event_type": "SWAP",
+            "deployment_id": dep,
+            "position_key": "swap:arbitrum:0xwallet",
+            "chain": "arbitrum",
+            "wallet_address": "0xwallet",
+            "timestamp": "2026-06-01T00:00:00+00:00",
+            "payload_json": json.dumps(
+                {
+                    "token_in": "USDC",
+                    "amount_in": "2000",
+                    "token_out": "WETH",
+                    "amount_out": "1.0",
+                    "amount_out_usd": "2000",
+                }
+            ),
+        }
+        snapshot = MagicMock()
+        snapshot.token_prices = {"arbitrum:0xweth": {"symbol": "WETH", "price_usd": "2100"}}
+        snapshot.snapshot_metadata = snapshot_metadata
+        sm = MagicMock()
+        sm.get_portfolio_metrics = AsyncMock(return_value=None)
+        sm.get_snapshots_since = AsyncMock(return_value=[])
+        sm.get_ledger_entries = AsyncMock(return_value=[])
+        sm.get_accounting_events_for_dashboard = AsyncMock(return_value=[swap_event])
+        # GetCostStack reads the stamped snapshot off the SAME cached
+        # _get_quant_inputs view as the other tiles (snapshots[-1]), so the
+        # stamp must arrive through the recent-snapshots load.
+        sm.get_recent_snapshots = AsyncMock(return_value=[snapshot])
+        sm.get_latest_snapshot = AsyncMock(return_value=snapshot)
+        return sm
+
+    @pytest.mark.asyncio
+    async def test_inventory_unrealized_suppressed_when_writer_classified(self, dashboard_service, mock_context):
+        """VIB-5057: latest snapshot stamped ``swap_inventory.status == "applied"``
+        ⇒ the additive inventory term is suppressed ("" on the wire) so
+        inventory MTM enters Strategy PnL exactly once (it already flows
+        through ``open_position_nav − deployed_capital_usd``)."""
+        dashboard_service._initialized = True
+        dashboard_service._state_manager = self._swap_inventory_state_manager(
+            {"swap_inventory": {"status": "applied", "value_usd": "2100", "cost_usd": "2000"}}
+        )
+        request = gateway_pb2.GetCostStackRequest(deployment_id="test_strategy")
+        response = await dashboard_service.GetCostStack(request, mock_context)
+        assert response.inventory_unrealized_usd == ""
+
+    @pytest.mark.asyncio
+    async def test_inventory_unrealized_kept_for_legacy_and_non_applied_stamps(self, dashboard_service, mock_context):
+        """VIB-5057: legacy snapshots (no stamp / empty metadata) and degraded
+        stamps (``unmeasured`` / ``unavailable``) keep the VIB-4984 additive
+        behaviour — the writer did NOT reclassify, so the additive term is
+        the only path that carries inventory MTM."""
+        for metadata in (
+            None,  # truly unstamped legacy snapshot — no metadata at all
+            {},
+            {"swap_inventory": {"status": "unmeasured"}},
+            {"swap_inventory": {"status": "unavailable"}},
+        ):
+            dashboard_service._initialized = True
+            dashboard_service._state_manager = self._swap_inventory_state_manager(metadata)
+            # Distinct stamp scenarios share one servicer; drop the TTL-cached
+            # quant inputs so each variant loads its own snapshot view.
+            dashboard_service._quant_inputs_cache.clear()
+            request = gateway_pb2.GetCostStackRequest(deployment_id="test_strategy")
+            response = await dashboard_service.GetCostStack(request, mock_context)
+            # 1.0 WETH * 2100 - 2000 = +100 (additive path still active)
+            assert Decimal(response.inventory_unrealized_usd) == Decimal("100"), metadata
 
 
 class TestGetAuditPosture:

@@ -1118,7 +1118,7 @@ class PostgresStore:
                    schema_version
             FROM accounting_events
             WHERE {where}
-            ORDER BY timestamp ASC
+            ORDER BY timestamp ASC, id ASC
             LIMIT ${idx}
         """
         async with self._pool.acquire() as conn:

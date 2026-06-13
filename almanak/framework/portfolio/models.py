@@ -145,7 +145,12 @@ class PortfolioSnapshot:
 
     # Core values
     total_value_usd: Decimal
-    available_cash_usd: Decimal  # Uninvested wallet funds
+    # Uninvested wallet funds. VIB-5057: wallet tokens backed by OPEN FIFO
+    # swap-inventory lots are deployed strategy capital, NOT cash — the writer
+    # subtracts their value here and surfaces them as TOKEN position rows
+    # (details.source == "swap_inventory_lots") counted in total_value_usd.
+    # NAV (total_value_usd + available_cash_usd) is invariant under that split.
+    available_cash_usd: Decimal
 
     # Value confidence indicator for dashboard display
     value_confidence: ValueConfidence = ValueConfidence.HIGH
@@ -165,6 +170,8 @@ class PortfolioSnapshot:
     # Populated by PortfolioValuer after _enrich_position_pnl() enriches each
     # PositionValue.  Distinct from total_value_usd (strategy-scoped) so callers can
     # compute strategy-level PnL without conflating uninvested wallet funds.
+    # VIB-5057: includes the FIFO cost basis of open swap-inventory lots
+    # (swap strategies' "Open cost basis" / Strategy-PnL denominators).
     # Defaults to Decimal("0") when no accounting events exist (e.g. dry-run or
     # a strategy with no open positions).
     deployed_capital_usd: Decimal = Decimal("0")

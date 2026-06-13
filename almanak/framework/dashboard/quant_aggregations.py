@@ -615,10 +615,19 @@ def compute_inventory_unrealized(
 ) -> Decimal | None:
     """Mark-to-market the held directional swap inventory (VIB-4984).
 
+    LEGACY-SNAPSHOT path only (VIB-5057): the snapshot writer now classifies
+    open swap-inventory lots as deployed capital and stamps
+    ``snapshot_metadata["swap_inventory"]["status"] == "applied"`` — for those
+    snapshots the inventory MTM already flows through ``open_position_nav −
+    deployed_capital_usd`` and the caller (``GetCostStack``) suppresses this
+    additive term to avoid double-counting. This function keeps serving
+    snapshots written by pre-classifier writers.
+
     A directional swap strategy's net-long ``token_out`` inventory (e.g. RSI
-    net-long WETH) is valued by the snapshot writer as ``available_cash_usd``,
-    so it never enters ``deployed_capital_usd`` and its mark cancels out of the
-    Strategy-PnL ``unrealized = open_position_nav − deployed_capital_usd``
+    net-long WETH) was valued by legacy snapshot writers as
+    ``available_cash_usd``, so it never entered ``deployed_capital_usd`` and
+    its mark cancelled out of the Strategy-PnL
+    ``unrealized = open_position_nav − deployed_capital_usd``
     term. This function recovers that omitted mark-to-market by replaying the
     already-persisted SWAP accounting events into ``FIFOBasisStore``, summing
     ``remaining * mark_price − cost_usd_for_remaining`` over every open swap

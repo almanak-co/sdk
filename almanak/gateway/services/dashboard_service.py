@@ -2194,7 +2194,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             compute_inventory_unrealized,
         )
 
-        _, _, ledger_stats, accounting_events, _ = await self._get_quant_inputs(deployment_id)
+        _, snapshots, ledger_stats, accounting_events, _ = await self._get_quant_inputs(deployment_id)
 
         cs = compute_cost_stack(ledger_stats, accounting_events)
 
@@ -2202,11 +2202,34 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # computation over the already-loaded accounting_events + the latest
         # snapshot's persisted token_prices — NO new network egress / live
         # oracle call (gateway boundary preserved).
-        latest_snapshot = await self._get_latest_snapshot(deployment_id)
+        #
+        # VIB-5057: snapshots written by the swap-inventory classifier stamp
+        # ``snapshot_metadata["swap_inventory"]["status"] == "applied"`` —
+        # for those, the inventory's mark already flows through the dashboard's
+        # ``open_position_nav − deployed_capital_usd`` unrealized term (the
+        # writer moved the inventory from cash to deployed), so computing the
+        # legacy additive term too would double-count inventory MTM in
+        # Strategy PnL. Suppress it (None ⇒ "" on the wire — the documented
+        # "not measured here" sentinel). Legacy snapshots (no stamp) keep the
+        # VIB-4984 additive behaviour unchanged. Data-shape gate on the
+        # persisted stamp — version-tolerant across writer/reader rollouts.
+        #
+        # The suppression decision reads the SAME TTL-cached snapshot view the
+        # other quant tiles render from (``snapshots[-1]``), not a fresh
+        # ``_get_latest_snapshot`` — otherwise a classifier-stamped snapshot
+        # landing between RPCs could suppress the additive term here while
+        # GetPnLSummary still computes against the previous snapshot shape,
+        # under-reporting inventory MTM for that refresh.
+        latest_snapshot = snapshots[-1] if snapshots else None
         latest_token_prices = getattr(latest_snapshot, "token_prices", None) or {}
-        cs.inventory_unrealized_usd = compute_inventory_unrealized(
-            accounting_events, deployment_id, latest_token_prices
-        )
+        snapshot_metadata = getattr(latest_snapshot, "snapshot_metadata", None)
+        swap_inventory_stamp = snapshot_metadata.get("swap_inventory") if isinstance(snapshot_metadata, dict) else None
+        if isinstance(swap_inventory_stamp, dict) and swap_inventory_stamp.get("status") == "applied":
+            cs.inventory_unrealized_usd = None
+        else:
+            cs.inventory_unrealized_usd = compute_inventory_unrealized(
+                accounting_events, deployment_id, latest_token_prices
+            )
 
         return gateway_pb2.CostStackInfo(
             cost_gas_usd=str(cs.gas_usd),

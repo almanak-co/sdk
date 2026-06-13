@@ -320,13 +320,17 @@ def _strategy_pnl_usd(p: PnLSummary, cost: CostStackInfo | None, open_position_n
     if p.deployed_capital_usd <= _COST_BASIS_DUST_USD and open_position_nav > _COST_BASIS_DUST_USD:
         return None
     unrealized = open_position_nav - p.deployed_capital_usd
-    # VIB-4984: held directional swap inventory (e.g. RSI net-long WETH) is
-    # valued by the snapshot writer as ``available_cash_usd``, so its mark
-    # cancels out of BOTH ``open_position_nav`` (= nav − available_cash) and
-    # ``deployed_capital_usd`` (excludes it) → zero unrealized contribution.
+    # VIB-4984: on LEGACY snapshots, held directional swap inventory (e.g. RSI
+    # net-long WETH) was valued by the snapshot writer as
+    # ``available_cash_usd``, so its mark cancelled out of BOTH
+    # ``open_position_nav`` (= nav − available_cash) and
+    # ``deployed_capital_usd`` (excluded it) → zero unrealized contribution.
     # ``cost.inventory_unrealized_usd`` is an additive (mark − cost) DELTA that
-    # recovers it. NAV is NOT an input here, so this cannot double-count (the
-    # mark enters Strategy PnL exactly once). ``None`` (unmeasured) ⇒ 0.
+    # recovers it for those snapshots. VIB-5057: classifier-written snapshots
+    # fold the inventory into open_position_nav + deployed_capital_usd, and
+    # the gateway suppresses the additive term (returns unmeasured) for them —
+    # so the mark enters Strategy PnL exactly once in every writer/reader
+    # combination. ``None`` (unmeasured / suppressed) ⇒ 0.
     inventory_unrealized = cost.inventory_unrealized_usd or Decimal("0")
     return _net_realized_pnl_usd(cost) + unrealized + inventory_unrealized
 
@@ -355,13 +359,16 @@ def render_money_trail(p: PnLSummary, cost: CostStackInfo | None = None) -> None
 
     VIB-4984: Strategy PnL also folds in ``cost.inventory_unrealized_usd`` —
     the mark-to-market of held *directional swap inventory* (e.g. RSI net-long
-    WETH). That inventory is booked as ``available_cash_usd`` by the snapshot
-    writer, so its mark cancels out of both ``open_position_nav`` and
-    ``deployed_capital_usd`` and would otherwise be silently omitted from
-    Strategy PnL (NAV stays correct; only the attribution missed it). The
-    folded term is an additive (mark − FIFO cost) delta, so it enters PnL
-    exactly once. ``None`` means unmeasured and is rendered as "—" on its own
-    sub-line, never "$0.00" (Empty ≠ Zero).
+    WETH). On LEGACY snapshots that inventory was booked as
+    ``available_cash_usd`` by the snapshot writer, so its mark cancelled out
+    of both ``open_position_nav`` and ``deployed_capital_usd`` and would
+    otherwise be silently omitted from Strategy PnL (NAV stays correct; only
+    the attribution missed it). The folded term is an additive (mark − FIFO
+    cost) delta. VIB-5057: classifier-written snapshots book the inventory as
+    deployed (it flows through ``open_position_nav − deployed_capital_usd``)
+    and the gateway suppresses the additive term for them, so it enters PnL
+    exactly once either way. ``None`` means unmeasured-or-suppressed and is
+    rendered as "—" on its own sub-line, never "$0.00" (Empty ≠ Zero).
 
     Public renderer — used by the operator-console quant header AND by
     ``render_pnl_section`` (custom-dashboard helper). ``cost`` carries the

@@ -240,6 +240,216 @@ def _token_overlaps_wallet_index(
     return False
 
 
+# ---------------------------------------------------------------------------
+# Swap-inventory classification (VIB-5057)
+# ---------------------------------------------------------------------------
+#
+# A spot TA / swap strategy's deployed capital IS wallet-held tokens, bought
+# with strategy capital and tracked as open FIFO swap-inventory lots
+# (``FIFOBasisStore.iter_open_swap_lots``, ``source == "SWAP"``). Pre-VIB-5057
+# the snapshot writer classified the ENTIRE wallet token value as
+# ``available_cash_usd``, so the dashboard money trail permanently read
+# "Available wallet cash ≈ 100% of wallet NAV / Open position NAV $0.00 /
+# Open cost basis $0.00" even mid-position. The classifier below moves the
+# open-lot inventory to the deployed side of the split:
+#
+#   * ``available_cash_usd`` = wallet value − open-swap-lot inventory value,
+#   * inventory surfaces as visible ``PositionType.TOKEN`` rows that count
+#     into ``total_value_usd`` (open-position NAV),
+#   * ``deployed_capital_usd`` gains the FIFO cost basis of the open lots.
+#
+# Wallet NAV (``total_value_usd + available_cash_usd``) and
+# ``wallet_total_value_usd`` are INVARIANT under the reclassification — only
+# the split moves (blueprint 27 §3.4 S9 no-double-count). The swap-MTM
+# attribution fix (PR #2648) recovered the *PnL* half via a gateway-side
+# additive term; that term is suppressed for snapshots stamped
+# ``swap_inventory.status == "applied"`` (see
+# ``dashboard_service.GetCostStack``) so inventory MTM enters Strategy PnL
+# exactly once in every writer/reader version combination.
+
+# ``details["source"]`` marker on the synthetic inventory rows. Data-shape
+# gate (VIB-4636 discipline): consumers detect inventory rows by this marker,
+# never by protocol-name string coupling.
+_SWAP_INVENTORY_SOURCE = "swap_inventory_lots"
+
+
+def _is_swap_inventory_row(position: Any) -> bool:
+    """True iff ``position`` is a lot-derived deployed-inventory row (VIB-5057).
+
+    These rows are wallet-held (their value lives in ``wallet_balances`` /
+    ``available_cash``'s pre-split wallet value) but represent DEPLOYED
+    strategy capital, so the snapshot sums treat them inversely to the
+    VIB-4909 wallet pseudo-positions: included in ``total_value_usd``,
+    excluded from the ``wallet_total_value_usd`` position add (already
+    counted once in wallet value).
+    """
+    if position.position_type != PositionType.TOKEN:
+        return False
+    details = getattr(position, "details", None) or {}
+    return details.get("source") == _SWAP_INVENTORY_SOURCE
+
+
+@dataclass(frozen=True)
+class _SwapInventoryClassification:
+    """Result of classifying open swap-inventory lots for one snapshot.
+
+    ``metadata`` is stamped onto ``snapshot_metadata["swap_inventory"]`` when
+    not ``None``; it is ``None`` exactly when there is nothing to report (no
+    accounting context, or a healthy event stream with zero open swap lots) so
+    non-swap strategies stay byte-identical to the pre-VIB-5057 writer.
+    """
+
+    rows: list[PositionValue]
+    inventory_value_usd: Decimal
+    metadata: dict[str, Any] | None
+
+
+_NO_SWAP_INVENTORY = _SwapInventoryClassification([], Decimal("0"), None)
+
+
+def _aggregate_open_swap_lots(
+    events: list[dict[str, Any]],
+    deployment_id: str,
+) -> dict[str, tuple[Decimal, Decimal | None]]:
+    """Aggregate open swap-inventory lots per token from accounting events.
+
+    Replays the deployment-scoped event history through ``FIFOBasisStore``
+    (the same reconstruction the dashboard's ``compute_inventory_unrealized``
+    uses — reconstruction from durable events sidesteps the runner's in-memory
+    lot store entirely, so a restart cannot silently zero the inventory) and
+    sums ``iter_open_swap_lots`` per case-folded token symbol.
+
+    Returns ``{token_key: (remaining_total, cost_total)}`` where ``cost_total``
+    is ``None`` when ANY of the token's open lots has an unmeasured cost basis
+    (Empty ≠ Zero — one unmeasured lot poisons the token's whole basis; a
+    partial sum would understate cost and overstate unrealized PnL).
+
+    Events are scoped to ``deployment_id`` before replay so a shared wallet
+    cannot leak a co-located strategy's inventory into this snapshot (same
+    fail-closed rule as ``compute_inventory_unrealized``).
+    """
+    from almanak.framework.accounting.basis import FIFOBasisStore
+
+    scoped = [ev for ev in events if isinstance(ev, dict) and ev.get("deployment_id") == deployment_id]
+    store = FIFOBasisStore()
+    store.reconstruct_from_events(scoped)
+
+    totals: dict[str, tuple[Decimal, Decimal | None]] = {}
+    for _position_key, token, remaining, cost_for_remaining in store.iter_open_swap_lots():
+        key = token.casefold()
+        prev_remaining, prev_cost = totals.get(key, (Decimal("0"), Decimal("0")))
+        cost = None if (prev_cost is None or cost_for_remaining is None) else prev_cost + cost_for_remaining
+        totals[key] = (prev_remaining + remaining, cost)
+    return totals
+
+
+def _classify_swap_inventory(
+    lot_totals: dict[str, tuple[Decimal, Decimal | None]],
+    balances: dict[str, Decimal],
+    prices: dict[str, Decimal],
+    chain: str,
+) -> _SwapInventoryClassification:
+    """Classify per-token open-lot inventory as deployed capital (VIB-5057).
+
+    Per token, the classification is whole-or-nothing with explicit skip
+    reasons (never a silent $0 booking):
+
+    * ``cost_unmeasured`` — the token's FIFO basis is ``None`` (e.g. degraded
+      SWAP events missing ``amount_out_usd``). Moving the value while booking
+      a fabricated ``Decimal("0")`` basis would overstate unrealized PnL by
+      the full mark (Empty ≠ Zero), so the token stays classified as cash —
+      exactly the pre-fix behaviour.
+    * ``capped_to_zero`` — the wallet does not currently hold the token
+      (stale lots / full external transfer). Nothing to move; cash unchanged.
+    * ``price_missing`` — the wallet holds the token but no mark price is
+      available. The token is absent from the wallet value too
+      (``value_tokens`` drops unpriced tokens), so skipping keeps the split
+      symmetric; the pre-existing ``wallet_data_incomplete`` path already
+      downgrades snapshot confidence.
+
+    When the wallet holds LESS than the open-lot quantity (partial external
+    transfer, or stale lots), the inventory is capped at the wallet's actual
+    holding and the cost basis is pro-rated by the same ratio — so
+    ``available_cash_usd`` can never go negative by construction (per token,
+    inventory value ≤ wallet token value).
+    """
+    if not lot_totals:
+        return _NO_SWAP_INVENTORY
+
+    # Case-variant duplicate symbols (e.g. "USDC" and "usdc" both tracked) must
+    # SUM, not last-write-wins: wallet_value already counts both balances, so a
+    # partial cap would understate inventory and overstate available_cash — the
+    # exact symptom this classifier fixes. First-seen symbol wins for display.
+    balance_by_key: dict[str, tuple[str, Decimal]] = {}
+    for sym, bal in balances.items():
+        key = sym.casefold()
+        display, total = balance_by_key.get(key, (sym, Decimal("0")))
+        balance_by_key[key] = (display, total + bal)
+    price_by_key = {sym.casefold(): px for sym, px in prices.items()}
+
+    rows: list[PositionValue] = []
+    skipped: dict[str, str] = {}
+    token_detail: dict[str, dict[str, Any]] = {}
+    total_value = Decimal("0")
+    total_cost = Decimal("0")
+
+    for key in sorted(lot_totals):
+        remaining, cost = lot_totals[key]
+        display, wallet_qty = balance_by_key.get(key, (key.upper(), None))
+        price = price_by_key.get(key)
+        if cost is None:
+            skipped[key] = "cost_unmeasured"
+            continue
+        if wallet_qty is None or wallet_qty <= 0:
+            skipped[key] = "capped_to_zero"
+            continue
+        if price is None or price <= 0:
+            skipped[key] = "price_missing"
+            continue
+
+        quantity = min(remaining, wallet_qty)
+        capped = quantity < remaining
+        cost_for_quantity = cost * (quantity / remaining) if capped else cost
+        value = quantity * price
+        total_value += value
+        total_cost += cost_for_quantity
+        token_detail[key] = {
+            "quantity": str(quantity),
+            "value_usd": str(value),
+            "cost_usd": str(cost_for_quantity),
+            "capped": capped,
+        }
+        rows.append(
+            PositionValue(
+                position_type=PositionType.TOKEN,
+                protocol="wallet",
+                chain=chain,
+                value_usd=value,
+                label=f"swap inventory {display}",
+                tokens=[display],
+                details={
+                    "asset": display,
+                    "source": _SWAP_INVENTORY_SOURCE,
+                    "classification": "deployed_inventory",
+                    "quantity": str(quantity),
+                    "lot_remaining": str(remaining),
+                    "capped": capped,
+                },
+                cost_basis_usd=cost_for_quantity,
+                unrealized_pnl_usd=value - cost_for_quantity,
+            )
+        )
+
+    metadata: dict[str, Any] = {"status": "applied" if rows else "unmeasured"}
+    if rows:
+        metadata["value_usd"] = str(total_value)
+        metadata["cost_usd"] = str(total_cost)
+        metadata["tokens"] = token_detail
+    if skipped:
+        metadata["skipped"] = skipped
+    return _SwapInventoryClassification(rows, total_value, metadata)
+
+
 @runtime_checkable
 class MarketDataSource(Protocol):
     """Minimal interface for fetching prices and balances.
@@ -329,6 +539,14 @@ class PortfolioValuer:
         # issuing one gRPC round trip per position. Cleared at the end
         # of value() so the next snapshot does a fresh prefetch.
         self._snapshot_event_cache: dict[str, list[dict]] | None = None
+        # VIB-5057: order-preserving flat view of the same prefetch (FIFO lot
+        # replay needs the global timestamp-ASC order that the keyed cache
+        # loses) plus a failure flag so the swap-inventory classifier can
+        # distinguish "no accounting context" (no stamp, byte-identical
+        # behaviour) from "context wired but events unavailable" (explicit
+        # degraded stamp — never a silent no-op).
+        self._snapshot_events_flat: list[dict] | None = None
+        self._snapshot_prefetch_failed: bool = False
 
     def set_gateway_client(self, gateway_client: object | None) -> None:
         """Update the gateway client for on-chain queries.
@@ -456,6 +674,16 @@ class PortfolioValuer:
             # Step 4: Get non-wallet positions (LP, lending, perps) if available
             positions, position_value, positions_unavailable = self._get_positions(strategy, market, prices)
 
+            # Step 4a (VIB-5057): classify open FIFO swap-inventory lots as
+            # DEPLOYED capital. The synthetic rows join ``positions`` before
+            # the deployed-capital sum (their ``cost_basis_usd`` flows into it)
+            # and before the value sums below; their value is subtracted from
+            # ``available_cash_usd`` so wallet NAV stays invariant — only the
+            # cash/deployed split moves. Zero open lots ⇒ empty rows + None
+            # metadata ⇒ byte-identical snapshot to the pre-VIB-5057 writer.
+            swap_inventory = self._swap_inventory_for_snapshot(chain, balances, prices)
+            positions = [*positions, *swap_inventory.rows]
+
             # Step 4b: Compute deployed capital = sum of per-position cost bases.
             # cost_basis_usd is populated by _enrich_position_pnl() inside
             # _get_positions() when accounting events exist.  Only positive cost bases
@@ -500,12 +728,20 @@ class PortfolioValuer:
             # pseudo-positions here too so total_value_usd is truly deployed-only
             # and those PnL paths stop double-counting (VIB-4909 AC: "no silent
             # double-count for any PnL-consuming path").
+            # VIB-5057: lot-derived inventory rows overlap the wallet by
+            # construction (they ARE wallet-held tokens) but represent
+            # DEPLOYED strategy capital — they count into total_value_usd
+            # (open-position NAV) while their value is subtracted from
+            # available_cash_usd, keeping NAV invariant.
             position_value_positive = sum(
                 (
                     p.value_usd
                     for p in positions
                     if p.value_usd > 0
-                    and not (p.position_type == PositionType.TOKEN and _token_overlaps_wallet_index(p, wallet_index))
+                    and (
+                        _is_swap_inventory_row(p)
+                        or not (p.position_type == PositionType.TOKEN and _token_overlaps_wallet_index(p, wallet_index))
+                    )
                 ),
                 Decimal("0"),
             )
@@ -513,11 +749,14 @@ class PortfolioValuer:
             # VIB-4909: ``wallet_total_value_usd`` is the operator-facing
             # full-portfolio value (wallet + real protocol positions); wallet
             # pseudo-positions are already counted once in ``wallet_value``.
+            # VIB-5057: lot-derived inventory rows are likewise wallet-held —
+            # excluded here so the full-portfolio value counts them once.
             non_wallet_position_value = sum(
                 (
                     p.value_usd
                     for p in positions
-                    if not (p.position_type == PositionType.TOKEN and _token_overlaps_wallet_index(p, wallet_index))
+                    if not _is_swap_inventory_row(p)
+                    and not (p.position_type == PositionType.TOKEN and _token_overlaps_wallet_index(p, wallet_index))
                 ),
                 Decimal("0"),
             )
@@ -526,7 +765,7 @@ class PortfolioValuer:
                 timestamp=now,
                 deployment_id=deployment_id,
                 total_value_usd=position_value_positive,
-                available_cash_usd=wallet_value,
+                available_cash_usd=self._idle_cash_after_inventory(wallet_value, swap_inventory.inventory_value_usd),
                 deployed_capital_usd=deployed_capital_usd,
                 wallet_total_value_usd=wallet_value + non_wallet_position_value,
                 value_confidence=confidence,
@@ -535,7 +774,7 @@ class PortfolioValuer:
                 token_prices=token_price_records,
                 chain=chain,
                 iteration_number=iteration_number,
-                snapshot_metadata={"gas_native_status": gas_native_status},
+                snapshot_metadata=self._build_snapshot_metadata(gas_native_status, swap_inventory.metadata),
             )
             # Reconciliation is advisory — never let it downgrade the framework snapshot.
             try:
@@ -561,6 +800,8 @@ class PortfolioValuer:
             # Always drop the per-snapshot cache so the next value() call
             # does a fresh prefetch and never serves stale events.
             self._snapshot_event_cache = None
+            self._snapshot_events_flat = None
+            self._snapshot_prefetch_failed = False
 
     @staticmethod
     def _determine_value_confidence(
@@ -615,11 +856,14 @@ class PortfolioValuer:
         implement the sync primitive (preserves backwards compatibility
         with old StateManager backends).
         """
+        self._snapshot_prefetch_failed = False
         if not self._accounting_store or not deployment_id:
             self._snapshot_event_cache = None
+            self._snapshot_events_flat = None
             return
         if not hasattr(self._accounting_store, "get_accounting_events_sync"):
             self._snapshot_event_cache = None
+            self._snapshot_events_flat = None
             return
         # Wrap the entire fetch + cache-build in one try/except so a backend
         # returning None, a non-iterable, or rows that aren't dicts can never
@@ -629,15 +873,23 @@ class PortfolioValuer:
         try:
             events = self._accounting_store.get_accounting_events_sync(deployment_id) or []
             cache: dict[str, list[dict]] = {}
+            flat: list[dict] = []
             for ev in events:
                 if not isinstance(ev, dict):
                     continue
                 key = ev.get("position_key") or ""
                 cache.setdefault(key, []).append(ev)
+                flat.append(ev)
             self._snapshot_event_cache = cache
+            self._snapshot_events_flat = flat
         except Exception:
             logger.debug("Accounting prefetch failed; falling back to per-position lookups", exc_info=True)
             self._snapshot_event_cache = None
+            self._snapshot_events_flat = None
+            # VIB-5057: remember the failure so the swap-inventory classifier
+            # stamps an explicit degraded status instead of silently looking
+            # like "no lots".
+            self._snapshot_prefetch_failed = True
 
     def _events_for_position_key(self, position_key: str) -> list[dict]:
         """Return cached events for ``position_key`` or fall back to a per-position lookup.
@@ -656,6 +908,83 @@ class PortfolioValuer:
             return self._accounting_store.get_accounting_events_sync(self._deployment_id, position_key=position_key)
         except Exception:
             return []
+
+    def _swap_inventory_for_snapshot(
+        self,
+        chain: str,
+        balances: dict[str, Decimal],
+        prices: dict[str, Decimal],
+    ) -> _SwapInventoryClassification:
+        """Classify this snapshot's open swap-inventory lots (VIB-5057).
+
+        Reads the order-preserving event prefetch (``_snapshot_events_flat``)
+        and never raises — any failure degrades to "inventory stays classified
+        as cash" (the pre-fix behaviour) with an explicit ``unavailable``
+        metadata stamp and a WARNING, never a silent no-op.
+
+        Returns the no-op sentinel (no rows, no stamp) when no accounting
+        context is wired — non-swap strategies and legacy callers stay
+        byte-identical to the pre-VIB-5057 writer.
+        """
+        if self._snapshot_events_flat is None:
+            if self._snapshot_prefetch_failed:
+                logger.warning(
+                    "Swap inventory classification skipped for %s: accounting events unavailable; "
+                    "inventory remains classified as cash this snapshot",
+                    self._deployment_id,
+                )
+                return _SwapInventoryClassification(
+                    [], Decimal("0"), {"status": "unavailable", "reason": "events_fetch_failed"}
+                )
+            return _NO_SWAP_INVENTORY
+        try:
+            lot_totals = _aggregate_open_swap_lots(self._snapshot_events_flat, self._deployment_id)
+            return _classify_swap_inventory(lot_totals, balances, prices, chain)
+        except Exception:
+            logger.warning(
+                "Swap inventory classification failed for %s; inventory remains classified as cash",
+                self._deployment_id,
+                exc_info=True,
+            )
+            return _SwapInventoryClassification(
+                [], Decimal("0"), {"status": "unavailable", "reason": "classification_error"}
+            )
+
+    @staticmethod
+    def _idle_cash_after_inventory(wallet_value: Decimal, inventory_value_usd: Decimal) -> Decimal:
+        """``available_cash_usd`` = wallet value − deployed swap inventory.
+
+        Non-negative by construction (per token the inventory is capped at the
+        wallet's actual holding, valued at the same price as the wallet sum);
+        the clamp is a defensive last line so a future drift can never persist
+        negative cash to the dashboard.
+        """
+        idle = wallet_value - inventory_value_usd
+        if idle < 0:
+            logger.warning(
+                "available_cash_usd computed negative (wallet=%s inventory=%s); clamping to 0",
+                wallet_value,
+                inventory_value_usd,
+            )
+            return Decimal("0")
+        return idle
+
+    @staticmethod
+    def _build_snapshot_metadata(
+        gas_native_status: str,
+        swap_inventory_metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Assemble the writer-side ``snapshot_metadata`` dict.
+
+        The ``swap_inventory`` stamp is only present when there is something
+        to report (applied / unmeasured / unavailable) — its ABSENCE is the
+        documented "no open swap lots, nothing reclassified" state, keeping
+        non-swap strategies byte-identical (VIB-5057).
+        """
+        metadata: dict[str, Any] = {"gas_native_status": gas_native_status}
+        if swap_inventory_metadata is not None:
+            metadata["swap_inventory"] = swap_inventory_metadata
+        return metadata
 
     def _reconcile_with_external(
         self,

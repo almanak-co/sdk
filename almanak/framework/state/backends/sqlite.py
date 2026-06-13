@@ -4198,8 +4198,11 @@ class SQLiteStore:
         sql = f"""
             SELECT * FROM accounting_events
             WHERE {" AND ".join(where)}
-            ORDER BY timestamp ASC
+            ORDER BY timestamp ASC, rowid ASC
         """
+        # rowid tiebreak: FIFO lot replay (VIB-5057) assumes BUY precedes
+        # SELL; two events sharing an identical ISO timestamp must replay in
+        # insertion order, not scan order.
         with self._db_lock:
             cursor = self._conn.execute(sql, params)
             rows = cursor.fetchall()
