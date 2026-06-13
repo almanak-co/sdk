@@ -6522,6 +6522,9 @@ class GetStrategyDetailsRequest(_message.Message):
     INCLUDE_TIMELINE_FIELD_NUMBER: _builtins.int
     INCLUDE_PNL_HISTORY_FIELD_NUMBER: _builtins.int
     TIMELINE_LIMIT_FIELD_NUMBER: _builtins.int
+    FROM_TS_FIELD_NUMBER: _builtins.int
+    TO_TS_FIELD_NUMBER: _builtins.int
+    MAX_POINTS_FIELD_NUMBER: _builtins.int
     deployment_id: _builtins.str
     include_timeline: _builtins.bool
     """Include recent timeline events"""
@@ -6529,6 +6532,17 @@ class GetStrategyDetailsRequest(_message.Message):
     """Include PnL history for charts"""
     timeline_limit: _builtins.int
     """Max timeline events (default 20)"""
+    from_ts: _builtins.int
+    """Windowed PnL/NAV history (VIB-5059 Phase 2). max_points > 0 selects windowed
+    mode (server-side decimation to this budget, clamped to a hard ceiling);
+    max_points <= 0 keeps the legacy recent-window default. Within windowed mode
+    from_ts=0 = from inception, to_ts=0 = until now (so "All" = 0,0,budget).
+    window lower bound, unix seconds (0 = open)
+    """
+    to_ts: _builtins.int
+    """window upper bound, unix seconds (0 = open)"""
+    max_points: _builtins.int
+    """point budget; >0 = windowed mode"""
     def __init__(
         self,
         *,
@@ -6536,8 +6550,11 @@ class GetStrategyDetailsRequest(_message.Message):
         include_timeline: _builtins.bool = ...,
         include_pnl_history: _builtins.bool = ...,
         timeline_limit: _builtins.int = ...,
+        from_ts: _builtins.int = ...,
+        to_ts: _builtins.int = ...,
+        max_points: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "include_pnl_history", b"include_pnl_history", "include_timeline", b"include_timeline", "timeline_limit", b"timeline_limit"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["deployment_id", b"deployment_id", "from_ts", b"from_ts", "include_pnl_history", b"include_pnl_history", "include_timeline", b"include_timeline", "max_points", b"max_points", "timeline_limit", b"timeline_limit", "to_ts", b"to_ts"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetStrategyDetailsRequest: _TypeAlias = GetStrategyDetailsRequest  # noqa: Y015
@@ -7789,18 +7806,26 @@ class GetTradeTapeRequest(_message.Message):
     DEPLOYMENT_ID_FIELD_NUMBER: _builtins.int
     LIMIT_FIELD_NUMBER: _builtins.int
     BEFORE_TIMESTAMP_FIELD_NUMBER: _builtins.int
+    FROM_TS_FIELD_NUMBER: _builtins.int
     deployment_id: _builtins.str
     limit: _builtins.int
     before_timestamp: _builtins.int
-    """pagination (unix; 0 = newest first)"""
+    """pagination / window upper-bound cursor (unix; 0 = newest first)"""
+    from_ts: _builtins.int
+    """Window lower bound, INCLUSIVE of from_ts (unix; 0 = open). Pairs with
+    before_timestamp to bound the tape to the same window as the NAV chart, so
+    markers cover the charted range (VIB-5059 P2). The operator-facing wiring
+    that fully closes VIB-5058 (TA/LP price-chart markers) lands in VIB-5114.
+    """
     def __init__(
         self,
         *,
         deployment_id: _builtins.str = ...,
         limit: _builtins.int = ...,
         before_timestamp: _builtins.int = ...,
+        from_ts: _builtins.int = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["before_timestamp", b"before_timestamp", "deployment_id", b"deployment_id", "limit", b"limit"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["before_timestamp", b"before_timestamp", "deployment_id", b"deployment_id", "from_ts", b"from_ts", "limit", b"limit"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetTradeTapeRequest: _TypeAlias = GetTradeTapeRequest  # noqa: Y015

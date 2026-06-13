@@ -839,6 +839,56 @@ class PostgresStore:
         # SELECT DESC then reverse, so the caller gets oldest-first.
         return [_pg_row_to_portfolio_snapshot(row) for row in reversed(rows)]
 
+    async def get_snapshots_in_window(
+        self,
+        deployment_id: str,
+        from_ts: datetime | None,
+        to_ts: datetime | None,
+        *,
+        scan_cap: int = 200_000,
+    ) -> tuple[list[tuple[datetime, str | None, str | None]], bool]:
+        """Projected NAV samples inside a time window (VIB-5059 P2). Postgres twin
+        of :meth:`SQLiteStore.get_snapshots_in_window` — identical contract.
+
+        Returns ``(rows, truncated)`` with ``rows`` = ``(timestamp,
+        total_value_usd_text, value_confidence_text)`` oldest-first. Projects only
+        the three chart columns (no JSON blobs) and casts ``total_value_usd::text``
+        so the caller owns the Empty≠Zero decision. Newest ``scan_cap`` in-window
+        rows; ``truncated`` when the window held more.
+        """
+        if scan_cap <= 0:
+            raise ValueError(f"scan_cap must be positive, got {scan_cap}")
+        if not self._initialized:
+            await self.initialize()
+
+        clauses = ["deployment_id = $1"]
+        args: list[object] = [deployment_id]
+        if from_ts is not None:
+            args.append(from_ts)
+            clauses.append(f"timestamp >= ${len(args)}")
+        if to_ts is not None:
+            args.append(to_ts)
+            clauses.append(f"timestamp <= ${len(args)}")
+        args.append(scan_cap + 1)
+        limit_pos = len(args)
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT timestamp, total_value_usd::text AS total_value_text, value_confidence
+                FROM portfolio_snapshots
+                WHERE {" AND ".join(clauses)}
+                ORDER BY timestamp DESC, id DESC
+                LIMIT ${limit_pos}
+                """,
+                *args,
+            )
+        truncated = len(rows) > scan_cap
+        if truncated:
+            rows = rows[:scan_cap]  # newest scan_cap (DESC order)
+        # DESC fetch -> emit oldest-first.
+        return [(r["timestamp"], r["total_value_text"], r["value_confidence"]) for r in reversed(rows)], truncated
+
     async def get_snapshot_at(
         self,
         deployment_id: str,
@@ -2677,6 +2727,47 @@ class StateManager:
             self._record_metrics(StateTier.WARM, "get_recent_snapshots", latency, False, str(e))
             logger.error(f"Failed to get recent snapshots: {e}")
             return []
+
+    async def get_snapshots_in_window(
+        self,
+        deployment_id: str,
+        from_ts: datetime | None,
+        to_ts: datetime | None,
+        *,
+        scan_cap: int = 200_000,
+    ) -> tuple[list[tuple[datetime, str | None, str | None]], bool]:
+        """Projected NAV samples inside a time window, for windowed charts (VIB-5059 P2).
+
+        Returns ``(rows, truncated)`` — see the backend method for the row shape.
+
+        **Loud, not graceful.** Unlike :meth:`get_snapshots_since` /
+        :meth:`get_recent_snapshots` (which swallow backend errors and return ``[]``
+        so the default dashboard render degrades quietly), the windowed path is
+        explicitly requested by the operator going back in time: a backend failure
+        or a missing backend is **raised**, not masked as an empty-but-OK series the
+        operator would read as "no history". The gateway maps the raised error to a
+        non-OK gRPC status. The metric is still recorded on the failure path.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        if not self._warm or not hasattr(self._warm, "get_snapshots_in_window"):
+            # Honour the docstring's failure-metric contract even on this
+            # config-error branch, so a missing backend is observable, not silent.
+            self._record_metrics(StateTier.WARM, "get_snapshots_in_window", 0.0, False, "unsupported backend")
+            raise RuntimeError("WARM backend does not support windowed snapshot reads")
+
+        start = time.perf_counter()
+        try:
+            result = await self._warm.get_snapshots_in_window(deployment_id, from_ts, to_ts, scan_cap=scan_cap)
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_snapshots_in_window", latency, True)
+            return result
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_snapshots_in_window", latency, False, str(e))
+            logger.error(f"Failed to get windowed snapshots [{from_ts}, {to_ts}]: {e}")
+            raise
 
     async def get_snapshot_at(
         self,

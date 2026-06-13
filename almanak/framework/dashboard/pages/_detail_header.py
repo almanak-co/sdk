@@ -770,3 +770,41 @@ def render_key_metrics(strategy: Strategy) -> None:
     AppTest fixtures that only have a ``Strategy`` to render against).
     """
     _render_fallback_metrics(strategy)
+
+
+def render_nav_history_tabs(points: list[dict[str, Any]]) -> None:
+    """Render the windowed NAV/PnL series as Portfolio-Value / PnL tabs (VIB-5059 P2).
+
+    UI shell for ``render_nav_history_section`` — kept in this coverage-omitted
+    module so the covered ``sections.py`` never imports a ``plots/*`` figure
+    builder directly (test_coverage_omits_no_callers). ``points`` is the already
+    Empty≠Zero-filtered list of ``{timestamp, value, pnl}`` dicts.
+    """
+    import pandas as pd
+
+    from almanak.framework.dashboard.plots.portfolio_plots import plot_portfolio_value_over_time
+
+    chart_df = pd.DataFrame(points)
+    tab_value, tab_pnl = st.tabs(["Portfolio Value", "PnL"])
+    with tab_value:
+        st.plotly_chart(
+            plot_portfolio_value_over_time(
+                chart_df,
+                time_column="timestamp",
+                value_column="value",
+                title="Portfolio Value Over Time",
+                show_drawdown=True,
+            ),
+            use_container_width=True,
+        )
+    with tab_pnl:
+        st.plotly_chart(
+            plot_portfolio_value_over_time(
+                chart_df,
+                time_column="timestamp",
+                value_column="pnl",
+                title="PnL Over Time",
+                show_drawdown=False,
+            ),
+            use_container_width=True,
+        )

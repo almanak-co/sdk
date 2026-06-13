@@ -204,5 +204,6 @@ def test_apptest_missing_optional_attributes_does_not_crash() -> None:
     assert not at.exception, f"Unexpected exception: {at.exception}"
     # No bridge section.
     assert "Bridge Transfers" not in _all_markdown_text(at)
-    # Portfolio-performance header from the left column renders.
-    assert "Portfolio Performance (7 days)" in _all_markdown_text(at)
+    # The windowed NAV/PnL history section header from the left column renders
+    # (VIB-5059 P2 superseded the static "Portfolio Performance (7 days)" header).
+    assert "NAV / PnL History" in _all_markdown_text(at)

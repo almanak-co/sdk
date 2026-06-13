@@ -95,7 +95,8 @@ def render_main_content_columns(strategy: Strategy) -> None:
     left_col, right_col = st.columns([2, 1])
 
     with left_col:
-        st.markdown("### Portfolio Performance (7 days)")
+        # The NAV/PnL chart carries its own range selector (VIB-5059 P2), so the
+        # column no longer hard-codes a "(7 days)" header.
         _safe_render(render_pnl_chart, strategy, "PnL chart")
         _safe_render(render_profile_charts, strategy, "strategy insights")
 

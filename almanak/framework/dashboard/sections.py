@@ -99,6 +99,98 @@ def render_pnl_section(deployment_id: str) -> None:
     render_money_trail(pnl, cost)
 
 
+# Preset NAV/PnL chart ranges (VIB-5059 Phase 2). "All" (0 seconds) = full
+# lifetime; the others are trailing windows ending "now". The server decimates
+# every range to a constant point budget, so even "All" stays bounded.
+_NAV_RANGE_SECONDS: dict[str, int] = {"24h": 86_400, "7d": 604_800, "30d": 2_592_000, "All": 0}
+_NAV_RANGE_ORDER = ("24h", "7d", "30d", "All")
+_NAV_MAX_POINTS = 1500
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_windowed_nav(deployment_id: str, range_label: str) -> list[dict[str, Any]]:
+    """Fetch the decimated NAV/PnL series for a preset range (VIB-5059 P2).
+
+    Cached per ``(deployment_id, range_label)`` with a 300 s TTL — the snapshot
+    cadence — so the trailing-window right edge is at most one snapshot stale and
+    repeated reruns don't re-hit the gateway. Each preset ends "now", so a flat
+    TTL is the correct freshness policy (a fixed past window would be immutable
+    and cacheable indefinitely; the presets are not).
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from almanak.framework.dashboard.data_source import get_dashboard_client
+
+    seconds = _NAV_RANGE_SECONDS[range_label]
+    from_ts = 0 if seconds == 0 else int((datetime.now(UTC) - timedelta(seconds=seconds)).timestamp())
+    client = get_dashboard_client()
+    details = client.get_strategy_details(
+        deployment_id,
+        include_timeline=False,
+        include_pnl_history=True,
+        from_ts=from_ts,
+        to_ts=0,
+        max_points=_NAV_MAX_POINTS,
+    )
+    points: list[dict[str, Any]] = []
+    for entry in details.pnl_history:
+        ts = entry.get("timestamp") if isinstance(entry, dict) else getattr(entry, "timestamp", None)
+        if ts is None:
+            continue
+        value = entry.get("value_usd") if isinstance(entry, dict) else getattr(entry, "value_usd", None)
+        if not value:
+            # Empty != Zero: the gateway already drops unmeasured NAV samples; this
+            # is belt-and-braces — skip rather than plot a fake $0 trough. ("0" is
+            # truthy, so a measured zero is preserved.)
+            continue
+        pnl = entry.get("pnl_usd") if isinstance(entry, dict) else getattr(entry, "pnl_usd", None)
+        points.append({"timestamp": ts, "value": float(value), "pnl": float(pnl) if pnl else 0.0})
+    return points
+
+
+def render_nav_history_section(deployment_id: str, *, default_range: str = "7d") -> None:
+    """Render the windowed NAV / PnL time-travel chart (VIB-5059 Phase 2).
+
+    Preset range buttons (24h / 7d / 30d / All) drive a server-side, decimated
+    fetch: the operator can inspect last month's behaviour, not just the most
+    recent slice, and a full-lifetime view stays bounded to a constant point
+    budget with drawdown spikes preserved. On gateway disconnect or an empty
+    series the section degrades to a banner rather than crashing the page.
+    """
+    # Delegate the Plotly rendering to the omitted ``_detail_header`` shell (same
+    # pattern as ``render_money_trail`` / ``render_cost_stack``) so this covered
+    # section never imports a coverage-omitted ``plots/*`` figure builder directly
+    # (test_coverage_omits_no_callers). The testable data shaping stays here.
+    from almanak.framework.dashboard.pages._detail_header import render_nav_history_tabs
+
+    st.divider()
+    st.markdown("### NAV / PnL History")
+    selected = st.radio(
+        "Range",
+        _NAV_RANGE_ORDER,
+        index=_NAV_RANGE_ORDER.index(default_range) if default_range in _NAV_RANGE_ORDER else 1,
+        horizontal=True,
+        key=f"nav_range_{deployment_id}",
+        label_visibility="collapsed",
+    )
+
+    try:
+        points = _fetch_windowed_nav(deployment_id, selected)
+    except GatewayConnectionError:
+        st.info("NAV history temporarily unavailable — the gateway is disconnected.")
+        return
+    except Exception:
+        logger.debug("Windowed NAV history failed for %s (%s)", deployment_id, selected, exc_info=True)
+        st.info("NAV history could not be loaded for the selected range.")
+        return
+
+    if not points:
+        st.caption("No NAV history yet for the selected range.")
+        return
+
+    render_nav_history_tabs(points)
+
+
 def render_cost_stack_section(deployment_id: str, *, heading: str = "### Cost Stack") -> None:
     """Render the life-to-date Cost Stack section (VIB-3969).
 

@@ -67,6 +67,7 @@ from almanak.framework.dashboard.models import Strategy
 if TYPE_CHECKING:
     from almanak.framework.dashboard.sections import (
         render_cost_stack_section,
+        render_nav_history_section,
         render_pnl_section,
         render_position_lifecycle_section,
         render_trade_tape_section,
@@ -86,6 +87,7 @@ if TYPE_CHECKING:
 # without tripping ModuleNotFoundError.
 _LAZY_IMPORTS: dict[str, LazySpec] = {
     "render_cost_stack_section": ".sections",
+    "render_nav_history_section": ".sections",
     "render_pnl_section": ".sections",
     "render_position_lifecycle_section": ".sections",
     "render_trade_tape_section": ".sections",
@@ -121,6 +123,7 @@ __all__ = [
     "TradeRecord",
     # Custom-dashboard section helpers (lazy — pull streamlit on first access)
     "render_cost_stack_section",
+    "render_nav_history_section",
     "render_pnl_section",
     # Phase 3 / VIB-4495 — Phase 1 RPC-backed sections (lazy)
     "render_position_lifecycle_section",

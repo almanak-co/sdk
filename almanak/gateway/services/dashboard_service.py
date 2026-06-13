@@ -15,7 +15,7 @@ import os
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -1002,15 +1002,51 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         return Decimal("0")
 
     # crap-allowlist: VIB-4722 only renamed identity plumbing inside existing dashboard history logic.
-    async def _build_pnl_history(self, deployment_id: str) -> list:
-        """Build PnL time series from portfolio snapshots for chart rendering.
+    @staticmethod
+    def _unix_to_dt(ts: int) -> datetime | None:
+        """Map a unix-seconds window bound to a UTC datetime (``<= 0`` → open bound).
 
-        Returns a list of PnLDataPoint protos from the most-recent snapshots
-        (oldest-first, up to the row cap). VIB-5026: previously used
-        ``get_snapshots_since(now-7d, limit=168)``, which — once a deployment
-        had >168 snapshots — returned the OLDEST 168 rows in the window, so the
-        chart showed the first ~14h of the strategy's life and never advanced.
-        ``get_recent_snapshots`` returns the latest window instead.
+        Out-of-range epoch values (year > 9999, platform bounds) raise
+        ``ValueError`` so the caller maps them to ``INVALID_ARGUMENT`` rather than
+        crashing the RPC — same contract as ``GetTradeTape``'s cursor parsing.
+        """
+        if ts <= 0:
+            return None
+        try:
+            return datetime.fromtimestamp(ts, tz=UTC)
+        except (OverflowError, OSError, ValueError) as e:
+            raise ValueError(f"timestamp out of range: {ts}") from e
+
+    async def _build_pnl_history(
+        self,
+        deployment_id: str,
+        *,
+        from_dt: datetime | None = None,
+        to_dt: datetime | None = None,
+        max_points: int = 0,
+    ) -> list:
+        """Build the PnL/NAV time series for chart rendering.
+
+        ``max_points > 0`` selects **windowed mode** (VIB-5059 Phase 2):
+        server-side decimation of an arbitrary ``[from_dt, to_dt]`` window down to
+        the point budget, preserving spikes — and **loud** on backend failure (the
+        operator explicitly asked to go back in time, so an empty-but-OK series
+        would be a lie). ``max_points <= 0`` keeps the legacy recent-window path,
+        which degrades gracefully for the default dashboard render. The mode split
+        keeps every existing caller byte-for-byte unchanged.
+        """
+        if max_points > 0:
+            return await self._build_pnl_history_windowed(deployment_id, from_dt, to_dt, max_points)
+        return await self._build_pnl_history_recent(deployment_id)
+
+    async def _build_pnl_history_recent(self, deployment_id: str) -> list:
+        """Legacy recent-window PnL series (oldest-first, up to 168 snapshots).
+
+        VIB-5026: previously used ``get_snapshots_since(now-7d, limit=168)``,
+        which — once a deployment had >168 snapshots — returned the OLDEST 168
+        rows, freezing the chart on the strategy's first ~14h. ``get_recent_snapshots``
+        returns the latest window. Backend errors degrade to an empty series (the
+        default render has other panels); the windowed path is the loud one.
         """
         from almanak.gateway.proto import gateway_pb2
 
@@ -1020,14 +1056,10 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         try:
             snapshots = await self._state_manager.get_recent_snapshots(deployment_id, limit=168)
-
             if not snapshots:
                 return pnl_points
-
-            # Get initial value for PnL calculation
             metrics = await self._state_manager.get_portfolio_metrics(deployment_id)
             initial_value = metrics.initial_value_usd if metrics else Decimal("0")
-
             for snap in snapshots:
                 ts = snap.timestamp
                 if ts.tzinfo is None:
@@ -1044,6 +1076,83 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             logger.debug("Failed to build PnL history for %s", deployment_id, exc_info=True)
 
         return pnl_points
+
+    async def _build_pnl_history_windowed(
+        self,
+        deployment_id: str,
+        from_dt: datetime | None,
+        to_dt: datetime | None,
+        max_points: int,
+    ) -> list:
+        """Windowed, decimated NAV series (VIB-5059 Phase 2) — raises on backend error.
+
+        Fetches the projected NAV samples in ``[from_dt, to_dt]`` (newest scan-cap
+        slice + a ``truncated`` flag), drops Empty≠Zero unmeasured samples loudly
+        (never coerced to ``$0``), decimates to ``max_points`` preserving per-bucket
+        min/max/last, and stamps the chart endpoints from the window anchors. Any
+        backend failure propagates so :meth:`GetStrategyDetails` maps it to a non-OK
+        status rather than returning an OK response with empty history.
+        """
+        from almanak.framework.dashboard.chart_window import (
+            NavPoint,
+            clamp_max_points,
+            decimate_nav,
+        )
+        from almanak.gateway.metrics import DASHBOARD_NAV_HISTORY_TRUNCATED
+        from almanak.gateway.proto import gateway_pb2
+
+        if self._state_manager is None:
+            # Loud: a missing backend on an explicit windowed request must be told,
+            # not masked as "no history" (same contract as the trade-tape primary).
+            raise RuntimeError("StateManager unavailable for windowed PnL history")
+
+        rows, truncated = await self._state_manager.get_snapshots_in_window(deployment_id, from_dt, to_dt)
+
+        points: list[NavPoint] = []
+        dropped = 0
+        # value_confidence is carried in the store projection (the minimal chart
+        # column set) for forthcoming confidence-aware NAV rendering; PnLDataPoint
+        # has no confidence field yet, so it is intentionally unused here.
+        for ts, value_text, _confidence in rows:
+            if not value_text:  # "" or None -> Empty != Zero (unmeasured); never $0
+                dropped += 1
+                continue
+            try:
+                value = Decimal(value_text)
+            except (InvalidOperation, ValueError, TypeError):
+                dropped += 1
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            points.append(NavPoint(ts, value))
+
+        if truncated:
+            DASHBOARD_NAV_HISTORY_TRUNCATED.labels(deployment_id=deployment_id).inc()
+            logger.warning(
+                "NAV history truncated at scan cap for %s (window=[%s, %s]); returning newest in-window slice",
+                deployment_id,
+                from_dt,
+                to_dt,
+            )
+        if dropped:
+            logger.warning(
+                "NAV history dropped %d unmeasured (Empty!=Zero) sample(s) for %s; excluded, not coerced to 0",
+                dropped,
+                deployment_id,
+            )
+
+        decimated = decimate_nav(points, clamp_max_points(max_points))
+
+        metrics = await self._state_manager.get_portfolio_metrics(deployment_id)
+        initial_value = metrics.initial_value_usd if metrics else Decimal("0")
+        return [
+            gateway_pb2.PnLDataPoint(
+                timestamp=int(point.timestamp.timestamp()),
+                value_usd=str(point.value),
+                pnl_usd=str(point.value - initial_value if initial_value > 0 else Decimal("0")),
+            )
+            for point in decimated
+        ]
 
     async def _get_latest_snapshot(self, deployment_id: str) -> PortfolioSnapshot | None:
         """Get the most recent portfolio snapshot for staleness checks."""
@@ -1335,10 +1444,37 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             )
             timeline = list(timeline_response.events)
 
-        # Build PnL history time series from portfolio snapshots
+        # Build PnL history time series from portfolio snapshots.
+        # Windowed mode (VIB-5059 P2) is selected by max_points > 0; it validates
+        # the window and decimates server-side, and is loud on bad input / backend
+        # failure. The legacy recent-window path (max_points <= 0) is unchanged.
         pnl_history = []
         if request.include_pnl_history:
-            pnl_history = await self._build_pnl_history(deployment_id)
+            if request.max_points > 0:
+                from almanak.framework.dashboard.chart_window import validate_window
+
+                try:
+                    validate_window(request.from_ts, request.to_ts)
+                    from_dt = self._unix_to_dt(request.from_ts)
+                    to_dt = self._unix_to_dt(request.to_ts)
+                except ValueError as e:
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details(str(e))
+                    return gateway_pb2.StrategyDetails()
+                try:
+                    pnl_history = await self._build_pnl_history(
+                        deployment_id, from_dt=from_dt, to_dt=to_dt, max_points=request.max_points
+                    )
+                except Exception:
+                    # Loud: an explicit windowed request that the backend cannot
+                    # serve must surface as non-OK, not an OK response with empty
+                    # history the operator would read as "no data".
+                    logger.exception("Windowed PnL history failed for %s", deployment_id)
+                    context.set_code(grpc.StatusCode.UNAVAILABLE)
+                    context.set_details("Failed to load windowed PnL history")
+                    return gateway_pb2.StrategyDetails()
+            else:
+                pnl_history = await self._build_pnl_history(deployment_id)
 
         # Derive chain health from strategy chains (stub — UNKNOWN until real probing wired)
         # Fix (#1705): accept any Sequence[str] (tuples are valid). A strict
@@ -2349,8 +2485,13 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         deployment_id: str,
         limit: int,
         before_ts: datetime | None,
+        since_ts: datetime | None = None,
     ) -> tuple[list[Any], list[dict[str, Any]], list[Any]]:
         """Fetch ledger / accounting / position rows for a trade tape.
+
+        ``since_ts`` (VIB-5059 P2) bounds the ledger fetch below — markers for the
+        same window as the chart — following the ledger's existing ``since``
+        semantics. ``None`` leaves the lower bound open (today's behavior).
 
         Failure semantics differ across sources:
           - **Ledger** is the primary source. ``GetTradeTapeResponse`` has no
@@ -2374,7 +2515,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # Over-fetch by 1 to set has_more; push before_timestamp cursor into SQL
         # so we never return an empty page when `limit` newer-than-cursor rows exist.
         ledger_entries = await self._state_manager.get_ledger_entries(
-            deployment_id, since=None, intent_type=None, limit=limit + 1, before=before_ts
+            deployment_id, since=since_ts, intent_type=None, limit=limit + 1, before=before_ts
         )
         # Optional enrichment — swallow per-source errors.
         try:
@@ -2420,17 +2561,39 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             before_ts = (
                 datetime.fromtimestamp(request.before_timestamp, tz=UTC) if request.before_timestamp > 0 else None
             )
+            # VIB-5059 P2: from_ts is the window lower bound so markers cover the
+            # same window as the NAV chart. 0 = open. Marker UI wiring: VIB-5114.
+            from_dt = self._unix_to_dt(request.from_ts)
         except (OverflowError, OSError, ValueError) as e:
-            logger.warning("Invalid before_timestamp in GetTradeTape (%r): %s", request.before_timestamp, e)
+            logger.warning(
+                "Invalid timestamp in GetTradeTape (before=%r, from=%r): %s",
+                request.before_timestamp,
+                request.from_ts,
+                e,
+            )
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(
-                "before_timestamp out of range (must be a Unix epoch second within the supported datetime range)"
+                "before_timestamp / from_ts out of range "
+                "(must be a Unix epoch second within the supported datetime range)"
             )
             return gateway_pb2.GetTradeTapeResponse()
 
+        # Reject an inverted window loudly rather than returning a silent empty page.
+        if from_dt is not None and before_ts is not None and from_dt >= before_ts:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("inverted window: from_ts must be strictly before before_timestamp")
+            return gateway_pb2.GetTradeTapeResponse()
+
+        # Inclusive lower bound: ``get_ledger_entries(since=...)`` filters
+        # ``timestamp > since`` (exclusive), but the NAV chart window includes
+        # ``from_ts`` (``timestamp >= from_ts``). Nudge back one microsecond — the
+        # stored-timestamp resolution — so a trade landing exactly at ``from_ts`` is
+        # kept, matching the chart window (Codex review). 0 → open (None).
+        since_ts = (from_dt - timedelta(microseconds=1)) if from_dt is not None else None
+
         try:
             ledger_entries, accounting_events, position_events = await self._collect_trade_tape_sources(
-                deployment_id, limit, before_ts
+                deployment_id, limit, before_ts, since_ts
             )
         except Exception:
             # Ledger backend failure on the primary source. ``GetTradeTapeResponse``

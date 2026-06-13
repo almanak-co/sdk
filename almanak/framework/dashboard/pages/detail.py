@@ -29,7 +29,6 @@ from almanak.framework.dashboard.plots.lp_plots import (
     plot_positions_over_time,
 )
 from almanak.framework.dashboard.plots.perp_plots import plot_leverage_gauge
-from almanak.framework.dashboard.plots.portfolio_plots import plot_portfolio_value_over_time
 from almanak.framework.dashboard.plots.ta_plots import plot_price_with_signals
 from almanak.framework.dashboard.theme import get_chain_color, get_chain_health_color
 from almanak.framework.dashboard.utils import (
@@ -298,42 +297,20 @@ def render_paper_session_detail(strategy: Strategy) -> None:
 
 
 def render_pnl_chart(strategy: Strategy) -> None:
-    """Render the PnL chart for a strategy."""
-    if not strategy.pnl_history:
-        st.info("No PnL history available.")
-        return
+    """Render the windowed NAV/PnL chart with preset range buttons (VIB-5059 P2).
 
-    import pandas as pd
+    Supersedes the prior static recent-window chart: the operator picks a range
+    (24h / 7d / 30d / All) and the gateway returns a server-side-decimated series
+    for exactly that window, so last month's behaviour is inspectable and a
+    full-lifetime view stays bounded with drawdown spikes preserved. Delegates to
+    the shared section so custom dashboards and the operator console render the
+    same chart.
+    """
+    from almanak.framework.dashboard.sections import render_nav_history_section
 
-    chart_df = pd.DataFrame(
-        {
-            "timestamp": [p.timestamp for p in strategy.pnl_history],
-            "value": [float(p.value_usd) for p in strategy.pnl_history],
-            "pnl": [float(p.pnl_usd) for p in strategy.pnl_history],
-        }
-    )
-
-    tab1, tab2 = st.tabs(["Portfolio Value", "PnL"])
-
-    with tab1:
-        value_fig = plot_portfolio_value_over_time(
-            chart_df,
-            time_column="timestamp",
-            value_column="value",
-            title="Portfolio Value Over Time",
-            show_drawdown=True,
-        )
-        st.plotly_chart(value_fig, use_container_width=True)
-
-    with tab2:
-        pnl_fig = plot_portfolio_value_over_time(
-            chart_df,
-            time_column="timestamp",
-            value_column="pnl",
-            title="PnL Over Time",
-            show_drawdown=False,
-        )
-        st.plotly_chart(pnl_fig, use_container_width=True)
+    # Strategy.id holds the deployment_id (data_source maps summary.deployment_id
+    # → Strategy.id; one identity per blueprint 29).
+    render_nav_history_section(strategy.id)
 
 
 def render_profile_charts(strategy: Strategy) -> None:

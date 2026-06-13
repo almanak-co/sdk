@@ -233,8 +233,17 @@ class DashboardDataClient:
         self,
         deployment_id: str,
         since: datetime | None = None,
+        from_ts: datetime | None = None,
+        to_ts: datetime | None = None,
+        max_points: int = 0,
     ) -> list[PnLDataPoint]:
         """Get PnL history for charting.
+
+        ``max_points > 0`` (VIB-5059 P2) selects **windowed mode**: the server
+        fetches ``[from_ts, to_ts]`` and decimates to the budget (spikes preserved),
+        so a back-in-time window is bounded server-side rather than over-fetched and
+        filtered client-side. ``max_points <= 0`` keeps the legacy recent-window
+        behavior, optionally narrowed client-side by ``since``.
 
         Returns plain ``PnLDataPoint`` dataclasses.
         """
@@ -242,13 +251,19 @@ class DashboardDataClient:
             deployment_id=deployment_id,
             include_timeline=False,
             include_pnl_history=True,
+            from_ts=int(from_ts.timestamp()) if from_ts else 0,
+            to_ts=int(to_ts.timestamp()) if to_ts else 0,
+            max_points=max_points,
         )
+        windowed = max_points > 0
         points = []
         for entry in details.pnl_history:
             ts = entry.get("timestamp")
             if ts is None:
                 continue  # Skip entries without timestamps to avoid garbage chart points
-            if since and ts < since:
+            if not windowed and since and ts < since:
+                # Legacy client-side narrowing; the server already bounds the
+                # windowed path, so don't double-filter it.
                 continue
             points.append(
                 PnLDataPoint(

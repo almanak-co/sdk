@@ -567,6 +567,9 @@ class GatewayDashboardClient:
         include_timeline: bool = True,
         include_pnl_history: bool = False,
         timeline_limit: int = 20,
+        from_ts: int = 0,
+        to_ts: int = 0,
+        max_points: int = 0,
     ) -> StrategyDetails:
         """Get detailed information about a strategy.
 
@@ -575,6 +578,10 @@ class GatewayDashboardClient:
             include_timeline: Include recent timeline events
             include_pnl_history: Include PnL history for charts
             timeline_limit: Maximum number of timeline events
+            from_ts: PnL window lower bound, unix seconds (0 = open). VIB-5059 P2.
+            to_ts: PnL window upper bound, unix seconds (0 = open). VIB-5059 P2.
+            max_points: PnL point budget; ``> 0`` selects windowed/decimated mode,
+                ``<= 0`` keeps the legacy recent-window default. VIB-5059 P2.
 
         Returns:
             StrategyDetails object
@@ -586,6 +593,9 @@ class GatewayDashboardClient:
             include_timeline=include_timeline,
             include_pnl_history=include_pnl_history,
             timeline_limit=timeline_limit,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            max_points=max_points,
         )
 
         try:
@@ -859,13 +869,19 @@ class GatewayDashboardClient:
         deployment_id: str,
         limit: int = 50,
         before: datetime | None = None,
+        from_ts: datetime | None = None,
     ) -> "TradeTapeResponse":
-        """Get the joined trade-tape view (one row per intent)."""
+        """Get the joined trade-tape view (one row per intent).
+
+        ``from_ts`` (VIB-5059 P2) bounds the tape to the same window as the chart
+        so markers never float outside the plotted price line (closes VIB-5058).
+        """
         client = self._ensure_connected()
         request = gateway_pb2.GetTradeTapeRequest(
             deployment_id=deployment_id,
             limit=limit,
             before_timestamp=int(before.timestamp()) if before else 0,
+            from_ts=int(from_ts.timestamp()) if from_ts else 0,
         )
         response = client.dashboard.GetTradeTape(request)
         rows = [_convert_trade_tape_row(r) for r in response.rows]

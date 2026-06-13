@@ -2537,6 +2537,13 @@ message GetStrategyDetailsRequest {
   bool include_timeline = 2;      // Include recent timeline events
   bool include_pnl_history = 3;   // Include PnL history for charts
   int32 timeline_limit = 4;       // Max timeline events (default 20)
+  // Windowed PnL/NAV history (VIB-5059 Phase 2). max_points > 0 selects windowed
+  // mode (server-side decimation to this budget, clamped to a hard ceiling);
+  // max_points <= 0 keeps the legacy recent-window default. Within windowed mode
+  // from_ts=0 = from inception, to_ts=0 = until now (so "All" = 0,0,budget).
+  int64 from_ts = 5;              // window lower bound, unix seconds (0 = open)
+  int64 to_ts = 6;                // window upper bound, unix seconds (0 = open)
+  int32 max_points = 7;           // point budget; >0 = windowed mode
 }
 
 message StrategyDetails {
@@ -2901,7 +2908,12 @@ message GetAuditPostureRequest {
 message GetTradeTapeRequest {
   string deployment_id = 1;
   int32 limit = 2;
-  int64 before_timestamp = 3;       // pagination (unix; 0 = newest first)
+  int64 before_timestamp = 3;       // pagination / window upper-bound cursor (unix; 0 = newest first)
+  // Window lower bound, INCLUSIVE of from_ts (unix; 0 = open). Pairs with
+  // before_timestamp to bound the tape to the same window as the NAV chart, so
+  // markers cover the charted range (VIB-5059 P2). The operator-facing wiring
+  // that fully closes VIB-5058 (TA/LP price-chart markers) lands in VIB-5114.
+  int64 from_ts = 4;
 }
 
 message GetTradeTapeResponse {

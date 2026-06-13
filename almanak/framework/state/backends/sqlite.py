@@ -2408,6 +2408,76 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get)
 
+    async def get_snapshots_in_window(
+        self,
+        deployment_id: str,
+        from_ts: datetime | None,
+        to_ts: datetime | None,
+        *,
+        scan_cap: int = 200_000,
+    ) -> tuple[list[tuple[datetime, str | None, str | None]], bool]:
+        """Projected NAV samples inside a time window, for windowed charts (VIB-5059 P2).
+
+        Returns ``(rows, truncated)`` where ``rows`` is ``(timestamp,
+        total_value_usd_text, value_confidence_text)`` oldest-first. Only the
+        three chart-relevant columns are projected — the JSON blob columns
+        (``positions_json`` / ``token_prices_json`` / ``wallet_balances_json``)
+        dominate transfer size and the NAV line does not need them.
+
+        ``total_value_usd`` is returned as its **raw stored text** (not parsed to
+        ``Decimal``) so the caller owns the Empty≠Zero decision: ``""`` / ``None``
+        is an unmeasured sample, never a measured ``$0``.
+
+        Window bounds are open when ``None`` (``from_ts=None`` → from inception,
+        ``to_ts=None`` → until now). ``scan_cap`` bounds the fetch: the newest
+        ``scan_cap`` in-window rows are returned (so the chart's right edge / current
+        value is always present) and ``truncated`` is ``True`` when the window held
+        more — surfaced loudly by the caller rather than presented as the whole
+        window.
+        """
+        if scan_cap <= 0:
+            raise ValueError(f"scan_cap must be positive, got {scan_cap}")
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_get() -> tuple[list[tuple[datetime, str | None, str | None]], bool]:
+            clauses = ["deployment_id = ?"]
+            params: list[object] = [deployment_id]
+            if from_ts is not None:
+                clauses.append("timestamp >= ?")
+                params.append(from_ts.isoformat())
+            if to_ts is not None:
+                clauses.append("timestamp <= ?")
+                params.append(to_ts.isoformat())
+            params.append(scan_cap + 1)
+            cursor = self._conn.execute(  # type: ignore[union-attr]
+                f"""
+                SELECT timestamp, total_value_usd, value_confidence
+                FROM portfolio_snapshots
+                WHERE {" AND ".join(clauses)}
+                ORDER BY timestamp DESC, id DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            )
+            fetched = cursor.fetchall()
+            truncated = len(fetched) > scan_cap
+            if truncated:
+                # Keep the newest scan_cap rows; the DESC order already places
+                # them first, so the surplus (oldest) tail is dropped.
+                fetched = fetched[:scan_cap]
+
+            rows: list[tuple[datetime, str | None, str | None]] = []
+            for row in reversed(fetched):  # DESC fetch -> emit oldest-first
+                ts = row["timestamp"]
+                if isinstance(ts, str):
+                    ts = datetime.fromisoformat(ts)
+                rows.append((ts, row["total_value_usd"], row["value_confidence"]))
+            return rows, truncated
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_get)
+
     async def get_snapshot_at(
         self,
         deployment_id: str,

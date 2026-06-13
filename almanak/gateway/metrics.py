@@ -97,6 +97,21 @@ RPC_LATENCY = Histogram(
     registry=GATEWAY_REGISTRY,
 )
 
+# Dashboard chart metrics (VIB-5059 Phase 2). A windowed NAV history read that
+# hits the safety scan-cap returns only the newest in-window slice; this counter
+# makes that truncation operator-visible (paired with a WARNING log) so a window
+# is never silently presented as the whole history.
+DASHBOARD_NAV_HISTORY_TRUNCATED = Counter(
+    "dashboard_nav_history_truncated_total",
+    "Windowed NAV history reads truncated at the scan-cap (newest-slice returned)",
+    # 1 Gateway : 1 Strategy (AGENTS.md) ⇒ exactly one series per gateway instance,
+    # so this label adds no cardinality but lets hosted dashboards aggregate
+    # truncation by logical deployment across instances (the scrape `instance`
+    # label is the pod, not the deployment_id).
+    ["deployment_id"],
+    registry=GATEWAY_REGISTRY,
+)
+
 # Token resolution metrics
 TOKEN_RESOLUTION_CACHE_HIT = Counter(
     "token_resolution_cache_hit_total",
