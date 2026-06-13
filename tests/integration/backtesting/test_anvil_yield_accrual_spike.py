@@ -44,15 +44,19 @@ AAVE_V3_POOL_ARBITRUM = "0x794a61358D6845594F94dc1DB02A252b5b4814aD"
 USDC_ARBITRUM = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
 AUSDC_ARBITRUM = "0x724dc807b04555b71ed48a6896b6F41593b8C637"
 
-# Compound V3 (USDC market) on Arbitrum
-COMPOUND_V3_COMET_ARBITRUM = "0xA5EDBDD9646f8dFF606d7448e414884C7d905dCA"
+# Compound V3 (native USDC market) on Arbitrum -- verified on-chain 2026-06-13:
+# baseToken() = 0xaf88... (native USDC). The pre-fix literal 0xA5ED... was the
+# bridged USDC.e Comet, so supplying native USDC reverted, balance_before read 0,
+# and the test self-skipped -- which is how the wrong accrueAccount selector
+# below survived unexercised.
+COMPOUND_V3_COMET_ARBITRUM = "0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf"
 
 # ERC-20 ABI fragments
 BALANCE_OF_SIG = "0x70a08231"  # balanceOf(address)
 SUPPLY_SIG = "0x617ba037"  # Aave V3: supply(address,uint256,address,uint16)
 GET_RESERVE_DATA_SIG = "0x35ea6a75"  # getReserveData(address)
 APPROVE_SIG = "0x095ea7b3"  # approve(address,uint256)
-ACCRUE_ACCOUNT_SIG = "0xf51e181a"  # Compound V3: accrueAccount(address)
+ACCRUE_ACCOUNT_SIG = "0xbfe69c8d"  # Compound V3: accrueAccount(address) -- the pre-fix 0xf51e181a was scale()
 SUPPLY_COMPOUND_SIG = "0xf2b9fdb8"  # Compound V3: supply(address,uint256)
 
 ONE_DAY_SECONDS = 86400

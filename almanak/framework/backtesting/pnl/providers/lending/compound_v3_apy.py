@@ -98,8 +98,11 @@ KNOWN_COMET_ADDRESSES: dict[Chain, dict[str, str]] = {
         "USDT": "0x3Afdc9BCA9213A35503b077a6072F3D0d5AB0840",
     },
     Chain.ARBITRUM: {
-        "USDC": "0xA5EDBDD9646f8dFF606d7448e414884C7d905dCA",
-        "USDC.e": "0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf",
+        # Verified on-chain 2026-06-13 (VIB-2630): baseToken() of 0x9c4e... is
+        # native USDC (0xaf88...) and 0xA5ED... is bridged USDC.e (0xFF97...).
+        # Matches COMPOUND_V3_COMET_ADDRESSES in almanak/connectors/compound_v3/addresses.py.
+        "USDC": "0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf",
+        "USDC.e": "0xA5EDBDD9646f8dFF606d7448e414884C7d905dCA",
         "USDT": "0xd98Be00b5D27fc98112BdE293e487f8D4cA57d07",
         "WETH": "0x6f7D514bbD4aFf3BcD1140B7344b32f063dEe486",
     },

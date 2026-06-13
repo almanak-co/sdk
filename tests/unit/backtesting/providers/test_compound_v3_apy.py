@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from almanak.connectors.compound_v3.addresses import COMPOUND_V3_COMET_ADDRESSES
 from almanak.core.enums import Chain
 from almanak.framework.backtesting.pnl.providers.lending.compound_v3_apy import (
     COMPOUND_V3_SUBGRAPH_IDS,
@@ -220,6 +221,59 @@ class TestCometAddressResolution:
         address = "0xc3d688B66703497DAA19211EEdff47f25384cdc3"
         market_id = provider._resolve_market_id(Chain.ETHEREUM, address)
         assert market_id == address.lower()
+
+
+class TestKnownCometAddressesPinned:
+    """Pin KNOWN_COMET_ADDRESSES against on-chain-verified values.
+
+    Regression guard for the VIB-2630 spike finding: the Arbitrum USDC and
+    USDC.e entries were swapped, so historical APY queries for Arbitrum USDC
+    silently read the bridged USDC.e market. Addresses verified via
+    baseToken() on 2026-06-13; see
+    docs/internal/notes/backtesting/spike-vib-2630-anvil-interest-accrual.md.
+    """
+
+    def test_arbitrum_usdc_is_native_usdc_comet(self):
+        """baseToken() of 0x9c4e... is native USDC (0xaf88...)."""
+        assert KNOWN_COMET_ADDRESSES[Chain.ARBITRUM]["USDC"] == "0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf"
+
+    def test_arbitrum_usdc_e_is_bridged_usdc_comet(self):
+        """baseToken() of 0xA5ED... is bridged USDC.e (0xFF97...)."""
+        assert KNOWN_COMET_ADDRESSES[Chain.ARBITRUM]["USDC.e"] == "0xA5EDBDD9646f8dFF606d7448e414884C7d905dCA"
+
+    def test_base_usdbc_comet(self):
+        """Base 0x9c4e... is the USDbC Comet (baseToken() = 0xd9aA... USDbC).
+
+        Same vanity address as the Arbitrum native-USDC Comet -- it exists on
+        both chains with different base tokens, so the pin is per-chain.
+        """
+        assert KNOWN_COMET_ADDRESSES[Chain.BASE]["USDbC"] == "0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf"
+
+    def test_matches_connector_comet_addresses(self):
+        """Every overlapping entry agrees with the connector's address table."""
+        symbol_to_market_id = {
+            "USDC": "usdc",
+            "USDC.e": "usdc_bridged",
+            "USDT": "usdt",
+            "WETH": "weth",
+            "AERO": "aero",
+        }
+        overlap_found = False
+        for chain, chain_key in (
+            (Chain.ETHEREUM, "ethereum"),
+            (Chain.ARBITRUM, "arbitrum"),
+            (Chain.BASE, "base"),
+        ):
+            connector_markets = COMPOUND_V3_COMET_ADDRESSES[chain_key]
+            for symbol, address in KNOWN_COMET_ADDRESSES[chain].items():
+                market_id = symbol_to_market_id.get(symbol)
+                if market_id is None or market_id not in connector_markets:
+                    continue  # e.g. Base USDbC has no connector entry
+                overlap_found = True
+                assert address == connector_markets[market_id], (
+                    f"{chain.value} {symbol}: provider has {address}, connector has {connector_markets[market_id]}"
+                )
+        assert overlap_found
 
 
 class TestGetAPY:
