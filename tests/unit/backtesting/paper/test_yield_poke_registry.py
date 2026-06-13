@@ -4,7 +4,10 @@ YieldPoker previously maintained a hardcoded CHAIN_PROTOCOL_MAP; plan 021
 moves poke functions into connector packages and derives the map from the
 connector registry. These tests pin:
 
-  (a) the derived CHAIN_PROTOCOL_MAP equals the historical literal content;
+  (a) the derived CHAIN_PROTOCOL_MAP equals the expected declarations
+      (Compound V3 on Arbitrum, Morpho Blue on Ethereum — Aave V3 declares
+      no poke since the VIB-2630 spike showed it accrues lazily and its
+      supply(0) poke reverted);
   (b) a connector without yield_poke contributes nothing;
   (c) YieldPoker.register() still allows manual additions.
 """
@@ -22,13 +25,12 @@ from almanak.connectors._strategy_base.yield_poke_base import PokeResult
 class TestDerivedChainProtocolMap:
     """The CHAIN_PROTOCOL_MAP derived from the connector registry matches history."""
 
-    def test_chain_protocol_map_equals_historical_literal(self) -> None:
-        """Derived map must contain exactly the three entries from the old literal."""
+    def test_chain_protocol_map_equals_expected_declarations(self) -> None:
+        """Derived map must contain exactly the two declared (chain, protocol) pairs."""
         from almanak.framework.backtesting.paper.yield_poker import CHAIN_PROTOCOL_MAP
 
         actual = sorted((chain, protocol) for chain, lst in CHAIN_PROTOCOL_MAP.items() for protocol, _ in lst)
         expected = [
-            ("arbitrum", "aave_v3"),
             ("arbitrum", "compound_v3"),
             ("ethereum", "morpho_blue"),
         ]
@@ -95,17 +97,23 @@ class TestYieldPokerManualRegister:
         assert "some_proto" in poker._poke_hooks["avalanche"]
 
     def test_poke_all_includes_manually_registered(self) -> None:
-        """poke_all() executes manually registered poke functions."""
+        """poke_all() executes manually registered poke functions.
+
+        Registered on an isolated chain ('solana') with no default hooks so
+        only the mock runs -- poking 'arbitrum' would also fire the real
+        default compound_v3 poke and attempt a localhost RPC call.
+        """
         from almanak.framework.backtesting.paper.yield_poker import YieldPoker
 
         poker = YieldPoker()
         result = PokeResult(protocol="test_proto", success=True)
         fn: AsyncMock = AsyncMock(return_value=result)
-        poker.register("arbitrum", "test_proto", fn)
+        poker.register("solana", "test_proto", fn)
 
-        results = asyncio.run(poker.poke_all("arbitrum", "http://localhost:8545", "0xwallet"))
+        results = asyncio.run(poker.poke_all("solana", "http://localhost:8545", "0xwallet"))
 
-        assert any(r.protocol == "test_proto" for r in results)
+        assert results == [result]
+        fn.assert_awaited_once_with("http://localhost:8545", "0xwallet")
 
     def test_poke_all_unknown_chain_returns_empty(self) -> None:
         """poke_all() on a chain with no registered hooks returns an empty list."""
@@ -120,11 +128,15 @@ class TestYieldPokerManualRegister:
 class TestYieldPokerDefaultInit:
     """YieldPoker() zero-arg construction populates exactly the expected chains/protocols."""
 
-    def test_default_init_has_arbitrum_aave_v3(self) -> None:
+    def test_default_init_excludes_aave_v3(self) -> None:
+        """Aave V3 must NOT be registered: its supply(0) poke reverted with
+        InvalidAmount() on every tick, and AToken.balanceOf projects the
+        liquidity index lazily so no poke is needed (VIB-2630 spike)."""
         from almanak.framework.backtesting.paper.yield_poker import YieldPoker
 
         poker = YieldPoker()
-        assert "aave_v3" in poker._poke_hooks.get("arbitrum", {})
+        for chain_hooks in poker._poke_hooks.values():
+            assert "aave_v3" not in chain_hooks
 
     def test_default_init_has_arbitrum_compound_v3(self) -> None:
         from almanak.framework.backtesting.paper.yield_poker import YieldPoker

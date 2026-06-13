@@ -25,6 +25,7 @@ __all__ = [
     "_pad_address",
     "_pad_uint256",
     "_send_tx",
+    "_verify_receipt_status",
 ]
 
 
@@ -56,24 +57,78 @@ def _pad_uint256(value: int) -> str:
     return hex(value)[2:].zfill(64)
 
 
+# Receipt polling bounds: with Anvil's default automine (the paper harness
+# default, block_time=None) the receipt is available on the first poll, so
+# the window size never affects a normal run. The loop only matters under
+# --block-time interval mining; the ~5s window comfortably exceeds any block
+# time used here (tests cap at 2s) without sitting on that boundary. A genuinely
+# stuck poke is non-fatal and is also bounded by the 30s per-call RPC timeout.
+_RECEIPT_POLL_ATTEMPTS = 25
+_RECEIPT_POLL_INTERVAL_SECONDS = 0.2
+
+
+async def _rpc(session: Any, rpc_url: str, method: str, params: list[Any]) -> Any:
+    """Issue a single JSON-RPC call and return its ``result`` (None if absent)."""
+    payload = {"jsonrpc": "2.0", "method": method, "params": params, "id": 1}
+    async with session.post(rpc_url, json=payload) as resp:
+        resp.raise_for_status()
+        result = await resp.json()
+    if not isinstance(result, dict):
+        raise RuntimeError(f"invalid JSON-RPC response: {result!r}")
+    if "error" in result:
+        raise RuntimeError(result["error"].get("message", str(result["error"])))
+    return result.get("result")
+
+
+async def _verify_receipt_status(session: Any, rpc_url: str, tx_hash: str) -> None:
+    """Poll for the transaction receipt and raise unless its status is 0x1.
+
+    Anvil mines reverting transactions (receipt status 0x0) instead of
+    rejecting them, so a returned tx hash alone does not prove execution —
+    both the Aave V3 ``supply(0)`` poke and the old Compound V3 ``scale()``
+    poke "succeeded" for months while doing nothing (VIB-2630 spike).
+    """
+    import asyncio
+
+    for _ in range(_RECEIPT_POLL_ATTEMPTS):
+        receipt = await _rpc(session, rpc_url, "eth_getTransactionReceipt", [tx_hash])
+        if receipt is not None:
+            # Anvil returns the status as a hex string ("0x1"), but some
+            # clients / mocks return a bare int — accept both.
+            status = receipt.get("status")
+            try:
+                status_val = int(status, 16) if isinstance(status, str) else int(status)
+            except (TypeError, ValueError):
+                status_val = None
+            if status_val != 1:
+                raise RuntimeError(f"poke transaction {tx_hash} reverted (receipt status {status!r})")
+            return
+        await asyncio.sleep(_RECEIPT_POLL_INTERVAL_SECONDS)
+    raise RuntimeError(
+        f"poke transaction {tx_hash} has no receipt after "
+        f"{_RECEIPT_POLL_ATTEMPTS * _RECEIPT_POLL_INTERVAL_SECONDS:.1f}s; cannot confirm execution"
+    )
+
+
 async def _send_tx(rpc_url: str, from_addr: str, to: str, data: str) -> str | None:
-    """Send a transaction via eth_sendTransaction on Anvil (auto-impersonate)."""
+    """Send a transaction via eth_sendTransaction on Anvil (auto-impersonate).
+
+    Raises RuntimeError when the transaction reverted or its receipt never
+    appeared, so callers' ``PokeResult.success`` reflects actual execution.
+    """
     import aiohttp
 
-    payload = {
-        "jsonrpc": "2.0",
-        "method": "eth_sendTransaction",
-        "params": [{"from": from_addr, "to": to, "data": data, "gas": "0x500000"}],
-        "id": 1,
-    }
     # Bounded so an unresponsive fork RPC cannot hang the paper session;
     # generous enough for cold upstream-state fetches on freshly forked Anvil.
     timeout = aiohttp.ClientTimeout(total=30.0)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(rpc_url, json=payload) as resp:
-            result = await resp.json()
-            if "result" in result:
-                return result["result"]
-            if "error" in result:
-                raise RuntimeError(result["error"].get("message", str(result["error"])))
+        tx_hash = await _rpc(
+            session,
+            rpc_url,
+            "eth_sendTransaction",
+            [{"from": from_addr, "to": to, "data": data, "gas": "0x500000"}],
+        )
+        if tx_hash is None:
             return None
+        await _verify_receipt_status(session, rpc_url, tx_hash)
+        return tx_hash

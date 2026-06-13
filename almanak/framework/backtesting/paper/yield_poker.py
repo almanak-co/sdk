@@ -6,9 +6,10 @@ that wouldn't happen on a quiet fork where no external users are transacting.
 
 Supported protocols are derived from the connector registry: any connector
 that declares ``CONNECTOR.yield_poke`` contributes its poke function to the
-``CHAIN_PROTOCOL_MAP`` for the chains it declares. The historical hardcoded
-set (Aave V3 on Arbitrum, Compound V3 on Arbitrum, Morpho Blue on Ethereum)
-is preserved via those three connectors' ``YieldPokeDecl`` declarations.
+``CHAIN_PROTOCOL_MAP`` for the chains it declares. Current declarations:
+Compound V3 on Arbitrum and Morpho Blue on Ethereum. Aave V3 declares no
+poke — ``AToken.balanceOf`` projects the liquidity index lazily, so the
+fork's time advance alone surfaces accrued interest (VIB-2630 spike).
 """
 
 import logging

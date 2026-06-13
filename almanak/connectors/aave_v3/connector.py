@@ -11,7 +11,6 @@ from almanak.connectors._connector import (
     LendingReadDecl,
     MetadataAmountEncoding,
     StrategyMatrixEntry,
-    YieldPokeDecl,
 )
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
@@ -102,10 +101,11 @@ CONNECTOR = Connector(
     ),
     # Aave-family compilers ship lending metadata amounts wei-encoded (VIB-3747).
     metadata_amount_encoding=MetadataAmountEncoding(lending="wei"),
-    yield_poke=YieldPokeDecl(
-        chains=("arbitrum",),
-        poke=ImportRef(module="almanak.connectors.aave_v3.backtest_poke", attribute="poke_aave_v3"),
-    ),
+    # No yield_poke: AToken.balanceOf projects the liquidity index lazily, so
+    # evm_increaseTime alone surfaces accrued interest on a persistent fork.
+    # The old supply(USDC, 0, wallet, 0) poke reverted with InvalidAmount()
+    # on every tick (VIB-2630 spike). If a storage-writing poke is ever
+    # needed, use a 1-wei supply with prior approval.
     backtest_risk=_BACKTEST_RISK,
     strategy_intents=("SUPPLY", "BORROW", "REPAY", "WITHDRAW", "FLASH_LOAN"),
     strategy_chains=("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "mantle", "xlayer"),
