@@ -520,6 +520,59 @@ class TestHealthFactorTracking:
         # HF = (20000 * 0.825) / 10000 = 1.65
         assert borrow_position.health_factor == pytest.approx(Decimal("1.65"), rel=Decimal("0.01"))
 
+    def test_untracked_collateral_leaves_health_factor_untouched(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Unregistered collateral is UNMEASURED, not zero: HF must not be clobbered.
+
+        The engine lane (``PnLBacktester._update_positions_via_adapter``)
+        calls plain ``update_position`` without ever registering collateral
+        with the adapter; portfolio-wide health factors are owned by
+        ``liquidation_simulator.update_health_factors`` there. Before the
+        fix, the adapter substituted Decimal("0") for the missing
+        bookkeeping, overwrote a healthy HF with 0, and logged
+        "CRITICAL ... Liquidation imminent" on every tick.
+        """
+        adapter = LendingBacktestAdapter(
+            LendingBacktestConfig(strategy_type="lending", health_factor_tracking_enabled=True)
+        )
+        borrow_position = create_borrow_position(
+            token="USDC",
+            amount=Decimal("2000"),
+            entry_price=Decimal("1"),
+            health_factor=Decimal("2.0625"),  # As set by the portfolio-level path
+        )
+        market = MockMarketState(prices={"USDC": Decimal("1")})
+
+        with caplog.at_level("WARNING"):
+            adapter.update_position(borrow_position, market, elapsed_seconds=3600)
+
+        assert borrow_position.health_factor == Decimal("2.0625")
+        assert not any("Health factor" in record.getMessage() for record in caplog.records)
+        # Interest accrual must still run for the untracked position
+        assert borrow_position.interest_accrued > Decimal("0")
+
+    def test_tracked_zero_collateral_still_warns_critical(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A tracked Decimal("0") is a measured zero: HF=0 and the warning stand."""
+        adapter = LendingBacktestAdapter(
+            LendingBacktestConfig(strategy_type="lending", health_factor_tracking_enabled=True)
+        )
+        borrow_position = create_borrow_position(
+            token="USDC",
+            amount=Decimal("2000"),
+            entry_price=Decimal("1"),
+            health_factor=Decimal("2.0625"),
+        )
+        adapter.set_position_collateral(borrow_position.position_id, Decimal("0"))
+        market = MockMarketState(prices={"USDC": Decimal("1")})
+
+        with caplog.at_level("WARNING"):
+            adapter.update_position(borrow_position, market, elapsed_seconds=3600)
+
+        assert borrow_position.health_factor == Decimal("0")
+        assert any(
+            "CRITICAL" in record.getMessage() and "Health factor" in record.getMessage()
+            for record in caplog.records
+        )
+
 
 class TestLiquidationSimulation:
     """Tests for liquidation simulation when health factor < 1.0."""

@@ -737,3 +737,54 @@ class TestZeroPrincipalPosition:
         assert resolution.position_reduce_id is None
         assert resolution.amount_usd == interest
         assert resolution.interest_usd == interest
+
+
+class TestAdapterLaneHealthFactor:
+    """The adapter lane must not fabricate HF=0 for engine-managed borrows.
+
+    The engine loop calls plain ``adapter.update_position`` (which never has
+    collateral registered in the adapter's bookkeeping), then
+    ``mark_to_market`` -> ``liquidation_simulator.update_health_factors``
+    computes the portfolio-wide health factor from open SUPPLY collateral.
+    Before the fix, the adapter substituted Decimal("0") for its unpopulated
+    per-position collateral map and logged "CRITICAL: Health factor 0.0000
+    ... Liquidation imminent" on every tick, despite a $5,000 supply backing
+    a $2,000 borrow (true HF = 5000 * 0.825 / 2000 = 2.0625).
+    """
+
+    def test_no_false_critical_hf_warning_with_ample_collateral(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        backtester = _backtester()
+        backtester._adapter = LendingBacktestAdapter()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        portfolio.positions.append(supply_position())  # $5,000 USDC collateral
+        borrow = SimulatedPosition.borrow(
+            token="USDC",
+            amount=Decimal("2000"),
+            apy=Decimal("0.07"),
+            entry_price=Decimal("1"),
+            entry_time=TS,
+            protocol="aave_v3",
+        )
+        portfolio.positions.append(borrow)
+
+        # Tick 0 seeds the equity curve (the elapsed-time basis for the
+        # adapter lane) and sets the portfolio-level health factor.
+        portfolio.mark_to_market(market(), TS, adapter=backtester._adapter)
+        assert borrow.health_factor == Decimal("2.0625")
+
+        tick = TS + timedelta(hours=1)
+        tick_market = MarketState(timestamp=tick, prices={"USDC": Decimal("1")}, chain="arbitrum")
+        with caplog.at_level("WARNING"):
+            backtester._update_positions_via_adapter(portfolio, tick_market, tick)
+            # The adapter must leave the portfolio-level HF untouched
+            assert borrow.health_factor == Decimal("2.0625")
+            portfolio.mark_to_market(tick_market, tick, adapter=backtester._adapter)
+
+        assert not any("Health factor" in record.getMessage() for record in caplog.records)
+        # Portfolio-level path keeps the HF in the true neighborhood
+        # (accrued interest on both legs shifts it marginally).
+        assert borrow.health_factor == pytest.approx(Decimal("2.0625"), rel=Decimal("0.001"))
+        # The adapter lane still accrued borrow interest for the tick.
+        assert borrow.interest_accrued > Decimal("0")

@@ -1206,8 +1206,11 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
         This method handles lending-specific position updates:
         - Accrues interest for supply positions (increases value)
         - Accrues interest for borrow positions (increases debt)
-        - Updates health factor for borrow positions
-        - Emits warnings when health factor is low
+        - Updates health factor for borrow positions whose collateral is
+          tracked in this adapter (see _update_borrow_health_factor); when
+          no collateral has been registered, the position's health factor
+          is left untouched for the portfolio-level path to maintain
+        - Emits warnings when a computed health factor is low
 
         Args:
             position: The lending position to update (modified in-place)
@@ -1340,32 +1343,7 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
 
         # For borrow positions, update health factor
         if position.position_type == PositionType.BORROW and self._config.health_factor_tracking_enabled:
-            # Get collateral from tracked state or estimate
-            collateral_key = f"collateral_{position.position_id}"
-            collateral_usd = self._position_collateral.get(collateral_key, Decimal("0"))
-
-            # Calculate debt including accrued interest
-            debt_usd = principal_usd + position.interest_accrued
-
-            # Get liquidation threshold
-            liq_threshold = self._health_factor_calculator.get_liquidation_threshold_for_protocol(protocol)
-
-            # Calculate health factor
-            health_result = self._health_factor_calculator.calculate_health_factor(
-                collateral_value_usd=collateral_usd,
-                debt_value_usd=debt_usd,
-                liquidation_threshold=liq_threshold,
-            )
-
-            # Update position health factor
-            position.health_factor = health_result.health_factor
-
-            # Check for warnings
-            self._health_factor_calculator.check_health_factor_warning(
-                health_factor=health_result.health_factor,
-                position_id=position.position_id,
-                emit_warning=True,
-            )
+            self._update_borrow_health_factor(position, principal_usd, protocol)
 
         # Update timestamp using simulation time for reproducibility
         # Prefer explicit timestamp > market_state.timestamp > datetime.now() (with warning)
@@ -1416,6 +1394,60 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
                 apy_data_source,
                 apy_confidence,
             )
+
+    def _update_borrow_health_factor(
+        self,
+        position: "SimulatedPosition",
+        principal_usd: Decimal,
+        protocol: str,
+    ) -> None:
+        """Refresh a borrow position's health factor from tracked collateral.
+
+        Absent collateral bookkeeping means the collateral is UNMEASURED, not
+        zero: substituting Decimal("0") would compute HF=0 and emit a false
+        "liquidation imminent" warning on every tick. The engine lane
+        (``PnLBacktester._update_positions_via_adapter``) never registers
+        collateral with this adapter; there, portfolio-wide health factors
+        are owned by ``liquidation_simulator.update_health_factors``, which
+        ``SimulatedPortfolio.mark_to_market`` runs right after this update
+        each tick. Per-position health factor is computed here only when a
+        caller has populated the bookkeeping via ``set_position_collateral``,
+        ``sync_collateral_from_portfolio``, or
+        ``update_position_with_portfolio``. A tracked value of Decimal("0")
+        is a measured zero and still yields HF=0 with a critical warning.
+
+        Args:
+            position: The BORROW position to update (modified in-place)
+            principal_usd: Current principal value of the debt in USD
+            protocol: Protocol for the liquidation-threshold lookup
+        """
+        collateral_key = f"collateral_{position.position_id}"
+        collateral_usd = self._position_collateral.get(collateral_key)
+        if collateral_usd is None:
+            return
+
+        # Calculate debt including accrued interest
+        debt_usd = principal_usd + position.interest_accrued
+
+        # Get liquidation threshold
+        liq_threshold = self._health_factor_calculator.get_liquidation_threshold_for_protocol(protocol)
+
+        # Calculate health factor
+        health_result = self._health_factor_calculator.calculate_health_factor(
+            collateral_value_usd=collateral_usd,
+            debt_value_usd=debt_usd,
+            liquidation_threshold=liq_threshold,
+        )
+
+        # Update position health factor
+        position.health_factor = health_result.health_factor
+
+        # Check for warnings
+        self._health_factor_calculator.check_health_factor_warning(
+            health_factor=health_result.health_factor,
+            position_id=position.position_id,
+            emit_warning=True,
+        )
 
     def update_position_with_portfolio(
         self,
