@@ -1146,7 +1146,7 @@ def format_iteration_result(result: IterationResult) -> str:
         "Dashboard layout. 'hosted-parity' (default) mirrors the hosted "
         "platform: one strategy, one gateway, no multi-strategy navigation. "
         "'command-center' opens the repo-wide browser. Standalone mode "
-        "(--dashboard with no working dir) always uses Command Center."
+        "(--dashboard from a non-strategy folder) always uses Command Center."
     ),
 )
 @click.option(

@@ -658,10 +658,27 @@ class TestDashboardLogObservability:
 
 
 class TestHandleStandaloneDashboard:
-    """Phase 5c helper — standalone dashboard early-exit branch."""
+    """Phase 5c helper — standalone-vs-sidecar decision (VIB-5012).
 
-    def test_non_standalone_returns_false(self) -> None:
-        # dashboard=False OR working_dir != "." -> does nothing, returns False
+    The branch is chosen by the *resolved working-dir contents*
+    (``looks_like_strategy_folder``), never by whether the path was spelled
+    ``"."``. Strategy folder → return ``False`` (caller runs the strategy +
+    sidecar dashboard); non-strategy dir → standalone Command Center.
+    Tests force ``looks_like_strategy_folder`` so they don't depend on the
+    pytest cwd.
+    """
+
+    @staticmethod
+    def _force_strategy_folder(monkeypatch: pytest.MonkeyPatch, *, value: bool) -> None:
+        """Pin the content-based predicate the helper imports at call time."""
+        monkeypatch.setattr(
+            "almanak.framework.local_paths.looks_like_strategy_folder",
+            lambda _path: value,
+        )
+
+    def test_dashboard_false_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # No --dashboard → never the standalone branch, regardless of dir.
+        self._force_strategy_folder(monkeypatch, value=False)
         assert (
             run_helpers._handle_standalone_dashboard(
                 working_dir=".",
@@ -672,21 +689,45 @@ class TestHandleStandaloneDashboard:
             )
             is False
         )
-        assert (
-            run_helpers._handle_standalone_dashboard(
-                working_dir="/some/dir",
-                dashboard=True,
-                dashboard_port=8501,
-                gateway_host="localhost",
-                gateway_port=50051,
-            )
-            is False
-        )
 
-    def test_standalone_launches_and_waits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_strategy_folder_returns_false_so_strategy_runs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """VIB-5012 regression: ``--dashboard`` from inside a strategy folder
+        (default ``-d .``) must NOT take the standalone branch — it must
+        return ``False`` so the caller boots the runner + sidecar. The old
+        ``working_dir == "."`` predicate swallowed the run here."""
+        self._force_strategy_folder(monkeypatch, value=True)
+        # If this wrongly launched standalone, the launcher would be invoked;
+        # an empty `launched` proves the strategy path wins.
+        launched: list[Any] = []
+        monkeypatch.setattr(run_helpers, "_start_dashboard_background", lambda **_k: launched.append(_k))
+        result = run_helpers._handle_standalone_dashboard(
+            working_dir=".",
+            dashboard=True,
+            dashboard_port=8501,
+            gateway_host="localhost",
+            gateway_port=50051,
+        )
+        assert result is False
+        assert launched == []  # standalone launcher never invoked from a strategy folder
+
+    def test_real_strategy_folder_via_tmp_path(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+        """End-to-end with the REAL predicate: a tmp dir holding config.json
+        is a strategy folder → returns False (no monkeypatch of the predicate)."""
+        (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(run_helpers, "_start_dashboard_background", lambda **_k: MagicMock())
+        result = run_helpers._handle_standalone_dashboard(
+            working_dir=str(tmp_path),
+            dashboard=True,
+            dashboard_port=8501,
+            gateway_host="localhost",
+            gateway_port=50051,
+        )
+        assert result is False
+
+    def test_non_strategy_dir_launches_standalone_and_waits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._force_strategy_folder(monkeypatch, value=False)
         fake_proc = MagicMock()
         fake_proc.wait = MagicMock(return_value=None)
-
         monkeypatch.setattr(run_helpers, "_start_dashboard_background", lambda **_k: fake_proc)
 
         runner = CliRunner()
@@ -702,7 +743,29 @@ class TestHandleStandaloneDashboard:
         assert result is True
         fake_proc.wait.assert_called_once()
 
+    def test_non_strategy_dir_emits_no_strategy_notice(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The standalone branch must announce that no strategy will run so a
+        mistyped working dir isn't a silent dropped run (VIB-5012 in reverse)."""
+        self._force_strategy_folder(monkeypatch, value=False)
+        monkeypatch.setattr(run_helpers, "_start_dashboard_background", lambda **_k: MagicMock())
+        captured_errs: list[str] = []
+        monkeypatch.setattr(
+            "click.echo",
+            lambda *args, **kwargs: captured_errs.append(args[0] if args else "") if kwargs.get("err") else None,
+        )
+        run_helpers._handle_standalone_dashboard(
+            working_dir="/some/random/dir",
+            dashboard=True,
+            dashboard_port=8501,
+            gateway_host="localhost",
+            gateway_port=50051,
+        )
+        combined = "\n".join(captured_errs)
+        assert "No strategy folder detected" in combined
+        assert "no strategy" in combined.lower()
+
     def test_standalone_launch_failure_exits_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._force_strategy_folder(monkeypatch, value=False)
         monkeypatch.setattr(run_helpers, "_start_dashboard_background", lambda **_k: None)
         runner = CliRunner()
         with pytest.raises(SystemExit) as exc:
@@ -717,6 +780,7 @@ class TestHandleStandaloneDashboard:
         assert exc.value.code == 1
 
     def test_keyboard_interrupt_stops_dashboard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._force_strategy_folder(monkeypatch, value=False)
         fake_proc = MagicMock()
         fake_proc.wait = MagicMock(side_effect=KeyboardInterrupt)
         stop_calls: list[Any] = []
@@ -736,12 +800,11 @@ class TestHandleStandaloneDashboard:
         assert result is True
         assert stop_calls == [fake_proc]
 
-    def test_auth_token_is_forwarded_to_subprocess_launcher(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_auth_token_is_forwarded_to_subprocess_launcher(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The ``auth_token`` kwarg must reach
         ``_start_dashboard_background`` so the standalone-dashboard path
         also gets the managed-gateway session token."""
+        self._force_strategy_folder(monkeypatch, value=False)
         captured: dict[str, Any] = {}
 
         def _fake_launcher(**kw: Any) -> Any:
@@ -753,7 +816,7 @@ class TestHandleStandaloneDashboard:
         runner = CliRunner()
         with runner.isolation():
             run_helpers._handle_standalone_dashboard(
-                working_dir=".",
+                working_dir="/some/random/dir",
                 dashboard=True,
                 dashboard_port=8501,
                 gateway_host="localhost",

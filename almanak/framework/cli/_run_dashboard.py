@@ -379,21 +379,39 @@ def _handle_standalone_dashboard(
     auth_token: str | None = None,
     dashboard_mode: str = "command-center",
 ) -> bool:
-    """Handle the standalone dashboard early-exit branch.
+    """Decide whether ``strat run --dashboard`` is a standalone launch.
 
-    Mirrors the block in ``run()``::
+    VIB-5012: the decision is driven by the **resolved working-dir
+    contents**, never by whether the path was spelled ``"."`` / ``"./"`` /
+    ``"$PWD"`` / absolute. The historical predicate was
+    ``dashboard and working_dir == "."`` — but ``"."`` is *also* the
+    default when the operator is standing inside a strategy folder (the
+    common case). That conflation silently reinterpreted
+    ``strat run --dashboard`` as a dashboard-only launch and the strategy
+    never ran (0 iterations, 0 intents). It masked itself by chain: runs
+    launched with an explicit ``-d <path>`` ran fine; runs from the default
+    ``"."`` were swallowed.
 
-        if dashboard and working_dir == ".":
-            <launch banner + block on Ctrl+C>
-            return
+    The corrected contract:
 
-    Launches the dashboard as a background subprocess, prints the banner,
-    and blocks on ``process.wait()`` until interrupted. On ``KeyboardInterrupt``
-    tears the dashboard down and returns ``True``. When launch fails,
-    exits with status 1 (preserving original semantics).
+    * **Resolved dir IS a strategy folder** → return ``False`` so the caller
+      falls through to boot the runner AND start the sidecar dashboard
+      (``_maybe_start_dashboard_process``). This is the fix.
+    * **Resolved dir is NOT a strategy folder** → genuine standalone
+      Command Center (preserves the documented "standalone dashboard"
+      mode, which also bundles the managed gateway that ``_setup_gateway``
+      already started). Launch it, announce that no strategy will run, and
+      block on ``process.wait()`` until interrupted. On ``KeyboardInterrupt``
+      tear the dashboard down and return ``True``; on launch failure exit 1.
+
+    "Strategy folder" is detected exactly as ``almanak gateway`` /
+    ``almanak dashboard`` detect it (:func:`looks_like_strategy_folder` —
+    ``config.json`` / ``config.yaml`` / ``config.yml`` / ``strategy.py``),
+    so the three commands never disagree about whether the cwd is a strategy.
 
     Args:
-        working_dir: CLI ``--working-dir`` (standalone path iff ``"."``).
+        working_dir: CLI ``--working-dir``. Standalone iff its resolved form
+            is not a strategy folder.
         dashboard: CLI ``--dashboard`` flag.
         dashboard_port: CLI ``--dashboard-port`` flag.
         gateway_host: Effective gateway host (post-``_setup_gateway``).
@@ -403,11 +421,39 @@ def _handle_standalone_dashboard(
             ephemeral token the managed gateway is enforcing.
 
     Returns:
-        ``True`` if the branch handled the request (caller must ``return``),
-        ``False`` otherwise.
+        ``True`` if the standalone branch handled the request (caller must
+        ``return``), ``False`` when the caller should run the strategy.
     """
-    if not (dashboard and working_dir == "."):
+    if not dashboard:
         return False
+
+    from almanak.framework.local_paths import looks_like_strategy_folder
+
+    try:
+        resolved_dir = Path(working_dir).resolve()
+    except OSError:
+        # cwd deleted / inaccessible — treat as "not a strategy folder" so
+        # the operator gets the standalone banner (which names the dir)
+        # rather than an opaque resolve error.
+        resolved_dir = Path(working_dir)
+
+    if looks_like_strategy_folder(resolved_dir):
+        # In a strategy folder: do NOT swallow the run. Fall through; the
+        # runner boots and ``_maybe_start_dashboard_process`` starts the
+        # sidecar dashboard alongside it.
+        return False
+
+    # No strategy here → genuine standalone Command Center. Announce that
+    # no strategy will run so a mistyped/duplicated working dir doesn't look
+    # like a silently dropped run (the VIB-5012 symptom in reverse).
+    click.echo(
+        f"No strategy folder detected at {resolved_dir} "
+        "(expected config.json / config.yaml / strategy.py). "
+        "Opening the standalone Command Center dashboard only — no strategy "
+        "will run. To run a strategy with a live dashboard, launch from its "
+        "folder or pass -d <strategy-folder>.",
+        err=True,
+    )
 
     # Standalone dashboard (no strategy directory) always opens Command
     # Center — hosted-parity scoping requires a deployment id/dir context

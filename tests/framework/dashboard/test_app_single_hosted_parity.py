@@ -611,6 +611,15 @@ def test_standalone_dashboard_warns_when_hosted_parity_explicitly_requested(monk
 
     monkeypatch.setattr(socket_module, "socket", lambda *_a, **_kw: _FakeSock())
 
+    # VIB-5012: the standalone branch is now selected by resolved-dir
+    # contents, not ``working_dir == "."``. Force "not a strategy folder"
+    # so this test exercises the standalone path deterministically
+    # regardless of the pytest cwd.
+    monkeypatch.setattr(
+        "almanak.framework.local_paths.looks_like_strategy_folder",
+        lambda _path: False,
+    )
+
     captured_errs: list[str] = []
     monkeypatch.setattr(
         "click.echo",
