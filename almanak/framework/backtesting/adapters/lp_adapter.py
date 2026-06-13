@@ -1509,9 +1509,6 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         position.fees_token0 = Decimal("0")
         position.fees_token1 = Decimal("0")
 
-        # Calculate execution costs (simplified)
-        gas_cost_usd = Decimal("20")  # Typical LP open gas cost ~350k gas at ~$0.05 gas
-
         logger.info(
             "LP_OPEN executed: pool=%s, amount_usd=%.2f, range=[%.6f, %.6f], ticks=[%d, %d], liquidity=%.2f",
             intent.pool,
@@ -1533,7 +1530,9 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             amount_usd=amount_usd,
             fee_usd=Decimal("0"),  # No protocol fee for LP open
             slippage_usd=Decimal("0"),  # No slippage for LP open
-            gas_cost_usd=gas_cost_usd,
+            # Gas is engine-owned: PnLBacktester._execute_intent stamps the
+            # chain-aware resolved cost onto successful adapter fills.
+            gas_cost_usd=Decimal("0"),
             tokens_in={},  # No tokens received on open
             tokens_out={token0: amount0, token1: amount1},  # Tokens deposited
             success=True,
@@ -1746,9 +1745,6 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         # Net LP PnL = (Current Value + Fees) - Initial Value
         net_lp_pnl_usd = (current_value + fees_earned_usd) - initial_value
 
-        # Calculate execution costs (simplified)
-        gas_cost_usd = Decimal("15")  # Typical LP close gas cost ~250k gas at ~$0.05 gas
-
         logger.info(
             "LP_CLOSE executed: position=%s, token0_out=%.6f, token1_out=%.6f, "
             "value_usd=%.2f, fees_usd=%.2f, il_pct=%.4f%%, net_pnl=%.2f",
@@ -1771,7 +1767,9 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             amount_usd=total_value_received,
             fee_usd=Decimal("0"),  # Protocol fee for LP close (typically none)
             slippage_usd=Decimal("0"),  # No slippage for LP close
-            gas_cost_usd=gas_cost_usd,
+            # Gas is engine-owned: PnLBacktester._execute_intent stamps the
+            # chain-aware resolved cost onto successful adapter fills.
+            gas_cost_usd=Decimal("0"),
             tokens_in=tokens_in,  # Tokens received from closing
             tokens_out={},  # No tokens sent when closing
             success=True,

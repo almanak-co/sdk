@@ -1765,6 +1765,29 @@ class PnLBacktester:
                 logger.debug(f"Using adapter '{self._adapter.adapter_name}' execution for intent")
                 # Set delayed_at_end flag on adapter fill
                 adapter_fill.delayed_at_end = delayed_at_end
+                # Gas is engine-owned: adapters own protocol math but have no
+                # access to the gas lane (config gas price, historical gas
+                # provider, data-quality tracking), so any adapter-side
+                # gas_cost_usd is replaced with the resolved value here --
+                # the LP adapter's old flat $20/$15 guesses overstated L2
+                # gas costs by ~200x. Failed fills are skipped: apply_fill
+                # zeroes their execution costs anyway, and resolving gas can
+                # raise when no ETH price is available.
+                if adapter_fill.success:
+                    (
+                        adapter_fill.gas_cost_usd,
+                        adapter_fill.gas_price_gwei,
+                        gas_gwei_source,
+                    ) = await self._resolve_gas_cost(
+                        intent_type=adapter_fill.intent_type,
+                        market_state=market_state,
+                        timestamp=timestamp,
+                        config=config,
+                        data_quality_tracker=data_quality_tracker,
+                    )
+                    if adapter_fill.metadata is None:
+                        adapter_fill.metadata = {}
+                    adapter_fill.metadata["gas_price_source"] = gas_gwei_source
                 # Apply the adapter's fill to the portfolio (the adapter is
                 # threaded through so a partial position reduction accrues
                 # lending interest through the fill instant).

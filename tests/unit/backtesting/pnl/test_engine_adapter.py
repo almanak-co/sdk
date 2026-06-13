@@ -598,7 +598,12 @@ async def test_execute_intent_calls_adapter_when_available(backtester):
 
 @pytest.mark.asyncio
 async def test_execute_intent_uses_adapter_fill(backtester):
-    """Test that adapter's SimulatedFill is used when returned."""
+    """Test that adapter's SimulatedFill is used when returned.
+
+    Gas is the exception: the engine owns gas resolution, so the adapter's
+    gas_cost_usd is replaced with the engine-resolved value (the LP
+    adapter's old flat $20/$15 guesses bypassed the chain-aware gas lane).
+    """
     # Set up mock adapter that returns a fill
     mock_adapter = MockAdapterWithFill()
     backtester._adapter = mock_adapter
@@ -615,6 +620,7 @@ async def test_execute_intent_uses_adapter_fill(backtester):
         start_time=datetime.now(UTC),
         end_time=datetime.now(UTC) + timedelta(days=1),
         initial_capital_usd=Decimal("10000"),
+        gas_price_gwei=Decimal("30"),
     )
 
     # Execute intent
@@ -632,7 +638,90 @@ async def test_execute_intent_uses_adapter_fill(backtester):
     assert trade_record.amount_usd == Decimal("1000")
     assert trade_record.fee_usd == Decimal("3")
     assert trade_record.slippage_usd == Decimal("1")
-    assert trade_record.gas_cost_usd == Decimal("5")
+    # Engine-stamped gas, not the adapter's Decimal("5"):
+    # SWAP 180k gas x 30 gwei x $3000 ETH / 1e9 = $16.20
+    assert trade_record.gas_cost_usd == Decimal("16.2")
+    assert trade_record.gas_price_gwei == Decimal("30")
+
+
+@pytest.mark.asyncio
+async def test_adapter_fill_gas_zeroed_when_gas_costs_disabled(backtester):
+    """include_gas_costs=False zeroes adapter-fabricated gas too.
+
+    Before the engine owned adapter-fill gas, an adapter's hardcoded
+    gas_cost_usd was charged even with gas simulation disabled.
+    """
+    mock_adapter = MockAdapterWithFill()
+    backtester._adapter = mock_adapter
+    backtester._current_backtest_id = "test_backtest_123"
+
+    from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+    from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+    portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+    config = PnLBacktestConfig(
+        start_time=datetime.now(UTC),
+        end_time=datetime.now(UTC) + timedelta(days=1),
+        initial_capital_usd=Decimal("10000"),
+        include_gas_costs=False,
+    )
+
+    trade_record = await backtester._execute_intent(
+        intent=MockIntent(),
+        portfolio=portfolio,
+        market_state=MockMarketState(),
+        timestamp=datetime.now(UTC),
+        config=config,
+    )
+
+    assert trade_record.gas_cost_usd == Decimal("0")
+    assert trade_record.gas_price_gwei is None
+
+
+@pytest.mark.asyncio
+async def test_failed_adapter_fill_skips_gas_resolution(backtester):
+    """Failed adapter fills do not resolve gas.
+
+    apply_fill zeroes execution costs on failed fills anyway, and gas
+    resolution can raise when no ETH/WETH price is available -- a failed
+    fill must stay a recorded failure, not become an engine crash.
+    """
+
+    class MockAdapterWithFailedFill(MockAdapterWithFill):
+        def execute_intent(self, intent: Any, portfolio: Any, market_state: Any) -> Any:
+            fill = super().execute_intent(intent, portfolio, market_state)
+            fill.success = False
+            fill.metadata["failure_reason"] = "position not found"
+            return fill
+
+    backtester._adapter = MockAdapterWithFailedFill()
+    backtester._current_backtest_id = "test_backtest_123"
+
+    from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
+    from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+    portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+    # No ETH/WETH price: gas resolution would raise ValueError if attempted
+    market_state = MockMarketState(_prices={"USDC": Decimal("1")})
+    config = PnLBacktestConfig(
+        start_time=datetime.now(UTC),
+        end_time=datetime.now(UTC) + timedelta(days=1),
+        initial_capital_usd=Decimal("10000"),
+        gas_price_gwei=Decimal("30"),
+    )
+
+    trade_record = await backtester._execute_intent(
+        intent=MockIntent(),
+        portfolio=portfolio,
+        market_state=market_state,
+        timestamp=datetime.now(UTC),
+        config=config,
+    )
+
+    # Costs zeroed by apply_fill's failed-fill handling; no gas stamped
+    assert trade_record.success is False
+    assert trade_record.gas_cost_usd == Decimal("0")
+    assert trade_record.gas_price_gwei is None
 
 
 @pytest.mark.asyncio

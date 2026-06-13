@@ -618,7 +618,7 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
             amount_usd=amount_usd,
             fee_usd=fee_usd,
             slippage_usd=slippage_usd,
-            gas_cost_usd=Decimal("0"),  # Gas handled separately by simulator
+            gas_cost_usd=Decimal("0"),  # Engine stamps chain-aware gas (PnLBacktester._execute_intent)
             tokens_in={token_out: actual_amount_out},  # Tokens received from the pool
             tokens_out={token_in: amount_in_tokens},  # Tokens sent to the pool
             success=True,
