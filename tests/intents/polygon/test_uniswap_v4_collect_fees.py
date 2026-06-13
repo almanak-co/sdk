@@ -18,10 +18,6 @@ collecting fees from V4 LP positions via PositionManager on Polygon:
 
 NO MOCKING. All tests execute real on-chain LP operations and verify state changes.
 
-VIB-4365 / VIB-4343: registry edit (uniswap_v4 chain set) is OUT OF SCOPE
-for this ticket. The ``no_zodiac`` marker is required because uniswap_v4
-is not in the synthetic_intents manifest matrix.
-
 Pool selection: ``MATIC/USDC/3000``. Polygon V4 has an ERC20-keyed
 ``WETH/USDC/3000`` pool used by VIB-4363 LP_OPEN, but
 ``UniswapV4SDK.build_swap_tx`` currently reverts on-chain for ERC20<>ERC20
@@ -88,10 +84,6 @@ from tests.intents.conftest import (
     format_token_amount,
     get_token_balance,
     get_token_decimals,
-)
-
-pytestmark = pytest.mark.no_zodiac(
-    reason="VIB-4343: uniswap_v4 not yet in synthetic_intents matrix"
 )
 
 # =============================================================================

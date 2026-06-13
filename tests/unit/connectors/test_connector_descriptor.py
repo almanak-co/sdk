@@ -204,7 +204,12 @@ MIGRATED_STRATEGY_REGISTRATION = {
         ("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
         ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bnb", "monad"),
     ),
-    "uniswap_v4": (("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"), ("ethereum", "arbitrum", "base")),
+    "uniswap_v4": (
+        ("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
+        # VIB-4421: extended to the full deployed set (matches UNISWAP_V4 +
+        # the 28 on-chain intent tests). "bnb" is the venue-name alias.
+        ("ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bnb"),
+    ),
 }
 
 EXPECTED_STRATEGY_MATRIX_ENTRIES = {

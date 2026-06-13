@@ -17,10 +17,6 @@ collecting fees from V4 LP positions via PositionManager on Optimism:
 
 NO MOCKING. All tests execute real on-chain LP operations and verify state changes.
 
-VIB-4361 / VIB-4343: registry edit (adding "optimism" to uniswap_v4 declared
-chains) is OUT OF SCOPE for this ticket. The ``no_zodiac`` marker is
-required because uniswap_v4 is not in the synthetic_intents manifest matrix.
-
 Pool selection: ``ETH/USDC/3000``. Optimism V4 does NOT have the
 ``WETH/USDC/3000`` (ERC-20-keyed) pool used by arbitrum / ethereum LP
 goldens, but the native-keyed ``(NATIVE_ETH, USDC, 3000, 60, 0x0)`` pool IS
@@ -70,10 +66,6 @@ from tests.intents.conftest import (
     format_token_amount,
     get_token_balance,
     get_token_decimals,
-)
-
-pytestmark = pytest.mark.no_zodiac(
-    reason="VIB-4343: uniswap_v4 not yet in synthetic_intents matrix"
 )
 
 # =============================================================================

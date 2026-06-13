@@ -66,7 +66,13 @@ CONNECTOR = Connector(
         attribute="PROTOCOL_FAMILY",
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "LP_COLLECT_FEES"),
-    strategy_chains=("ethereum", "arbitrum", "base"),
+    # VIB-4421: extended from ("ethereum", "arbitrum", "base") to the full
+    # deployed set so the registry's (connector, intent, chain) universe matches
+    # ``UNISWAP_V4`` in addresses.py and the 28 on-chain intent tests (7 chains x
+    # 4 intents). ``strategy_chains`` uses the user-facing venue name ``bnb``
+    # (validated against KNOWN_VENUES); ``strategy_matrix_entries`` below use the
+    # SDK-canonical ``bsc`` — the same bnb/bsc alias split TraderJoe V2 documents.
+    strategy_chains=("ethereum", "arbitrum", "base", "optimism", "polygon", "avalanche", "bnb"),
     # Matrix output covers deployed V4 chains for both swap and LP rows.
     strategy_matrix_entries=(
         StrategyMatrixEntry(

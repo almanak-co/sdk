@@ -17,10 +17,6 @@ collecting fees from V4 LP positions via PositionManager on Base:
 
 NO MOCKING. All tests execute real on-chain LP operations and verify state changes.
 
-VIB-4357 / VIB-4343: registry edit (adding "base" to uniswap_v4 declared
-chains) is OUT OF SCOPE for this ticket. The ``no_zodiac`` marker is
-required because uniswap_v4 is not in the synthetic_intents manifest matrix.
-
 To run:
     uv run pytest tests/intents/base/test_uniswap_v4_collect_fees.py -v -s
 """
@@ -50,10 +46,6 @@ from tests.intents.conftest import (
     format_token_amount,
     get_token_balance,
     get_token_decimals,
-)
-
-pytestmark = pytest.mark.no_zodiac(
-    reason="VIB-4343: uniswap_v4 not yet in synthetic_intents matrix"
 )
 
 # =============================================================================

@@ -48,5 +48,5 @@ The matrix below is generated from ``almanak.connectors._strategy_base.registry.
 | [SushiSwap V3](sushiswap_v3.md) | DEX | Arbitrum, Base, BNB Chain, Ethereum, Optimism, Polygon | LP_CLOSE, LP_COLLECT_FEES, LP_OPEN, SWAP | `sushiswap_v3` |
 | [TraderJoe V2](traderjoe_v2.md) | DEX | Arbitrum, Avalanche, BNB Chain, Ethereum | LP_CLOSE, LP_COLLECT_FEES, LP_OPEN, SWAP | `traderjoe_v2` |
 | [Uniswap V3](uniswap_v3.md) | DEX | Arbitrum, Avalanche, Base, BNB Chain, Ethereum, Monad, Optimism, Polygon | LP_CLOSE, LP_COLLECT_FEES, LP_OPEN, SWAP | `uniswap_v3` |
-| [Uniswap V4](uniswap_v4.md) | DEX | Arbitrum, Base, Ethereum | LP_CLOSE, LP_COLLECT_FEES, LP_OPEN, SWAP | `uniswap_v4` |
+| [Uniswap V4](uniswap_v4.md) | DEX | Arbitrum, Avalanche, Base, BNB Chain, Ethereum, Optimism, Polygon | LP_CLOSE, LP_COLLECT_FEES, LP_OPEN, SWAP | `uniswap_v4` |
 <!-- generated:connector-matrix:end -->

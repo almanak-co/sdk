@@ -54,6 +54,12 @@ _SNAPSHOT_SWAP_PROTOCOLS = frozenset(
         "traderjoe_v2",
         "pendle",
         "curve",
+        # VIB-4421: uniswap_v4 joins SWAP discovery via the connector-owned
+        # ``build_discovery_vectors`` override (V4 routes through the
+        # UniversalRouter, not PROTOCOL_ROUTERS, so the declarative path can't
+        # reach it). Not in NATIVE_IN_SWAP — V4's native-ETH path is the UR
+        # settle/take flow, not the V3 SwapRouter02 msg.value auto-wrap.
+        "uniswap_v4",
     }
 )
 _SNAPSHOT_NATIVE_IN_SWAP_PROTOCOLS = frozenset(
@@ -72,6 +78,10 @@ _SNAPSHOT_LP_PROTOCOLS = frozenset(
         "aerodrome_slipstream",
         "traderjoe_v2",
         "pendle",
+        # VIB-4421: uniswap_v4 joins LP discovery (LP_OPEN + LP_CLOSE; the
+        # connector-owned override builds V4-shaped pool-key intents the
+        # framework default can't produce).
+        "uniswap_v4",
     }
 )
 _SNAPSHOT_LENDING_PROTOCOLS = frozenset(
@@ -108,8 +118,9 @@ def test_swap_protocols_equivalent() -> None:
     assert "agni_finance" not in _SWAP_PROTOCOLS  # shares UniswapV3Compiler
     assert "aerodrome_slipstream" not in _SWAP_PROTOCOLS  # shares AerodromeCompiler
     assert "enso" not in _SWAP_PROTOCOLS  # in protocols_for_intent(SWAP), not opt-in
-    assert "uniswap_v4" not in _SWAP_PROTOCOLS
     # "fluid" joined the SWAP set in Phase 1 (VIB-5029) — kill-switch removed.
+    # "uniswap_v4" joined the SWAP + LP sets in VIB-4421 (see snapshots above).
+    assert "uniswap_v4" in _SWAP_PROTOCOLS
 
 
 def test_native_in_swap_protocols_equivalent() -> None:

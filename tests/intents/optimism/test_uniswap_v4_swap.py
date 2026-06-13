@@ -31,10 +31,6 @@ from tests.intents.conftest import (
     get_token_decimals,
 )
 
-pytestmark = pytest.mark.no_zodiac(
-    reason="VIB-4343: uniswap_v4 not yet in synthetic_intents matrix"
-)
-
 # =============================================================================
 # Test Configuration
 # =============================================================================
