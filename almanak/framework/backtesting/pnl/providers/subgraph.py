@@ -497,13 +497,11 @@ class SubgraphVolumeProvider:
             end_date: End date (inclusive)
 
         Returns:
-            List of PoolVolumeData for each day with data
+            List of PoolVolumeData for each day with data. Days already in the
+            cache (within TTL) are served from cache and NOT refreshed from the
+            subgraph, matching the get_pool_volume contract.
         """
         pool_address_lower = pool_address.lower()
-
-        # Convert dates to Unix timestamps
-        start_timestamp = int(datetime.combine(start_date, datetime.min.time(), tzinfo=UTC).timestamp())
-        end_timestamp = int(datetime.combine(end_date, datetime.min.time(), tzinfo=UTC).timestamp())
 
         # First check cache for any missing dates
         results: list[PoolVolumeData] = []
@@ -522,6 +520,11 @@ class SubgraphVolumeProvider:
         if not dates_to_fetch:
             logger.debug(f"All dates cached for pool {pool_address_lower[:10]}...")
             return sorted(results, key=lambda x: x.date)
+
+        # Query only the uncached span; every date outside it is cached.
+        start_timestamp = int(datetime.combine(dates_to_fetch[0], datetime.min.time(), tzinfo=UTC).timestamp())
+        end_timestamp = int(datetime.combine(dates_to_fetch[-1], datetime.min.time(), tzinfo=UTC).timestamp())
+        dates_to_fetch_set = set(dates_to_fetch)
 
         # Fetch missing dates in batch
         query = """
@@ -560,10 +563,18 @@ class SubgraphVolumeProvider:
             data = await self._execute_query(query, variables)
             pool_day_datas = data.get("poolDayDatas", [])
 
+            fetched_count = 0
             for day_data in pool_day_datas:
                 # Convert timestamp back to date
                 day_timestamp = int(day_data.get("date", 0))
                 day_date = datetime.fromtimestamp(day_timestamp, tz=UTC).date()
+
+                # The span query can still return days already served from
+                # cache above (interior cached dates). Skip them: fresh cache
+                # entries are authoritative until TTL expiry, and appending
+                # them again would duplicate days in the returned list.
+                if day_date not in dates_to_fetch_set:
+                    continue
 
                 volume_data = PoolVolumeData(
                     pool_address=pool_address_lower,
@@ -587,9 +598,10 @@ class SubgraphVolumeProvider:
                 )
 
                 results.append(volume_data)
+                fetched_count += 1
 
             logger.info(
-                f"Fetched {len(pool_day_datas)} days of volume data for pool "
+                f"Fetched {fetched_count} days of volume data for pool "
                 f"{pool_address_lower[:10]}... ({start_date} to {end_date})"
             )
 

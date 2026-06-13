@@ -476,6 +476,68 @@ class TestGetPoolVolumeRange:
 
         await provider.close()
 
+    @pytest.mark.asyncio
+    async def test_get_pool_volume_range_no_duplicates_when_query_returns_cached_dates(self):
+        """Regression: query rows for already-cached dates must not duplicate days.
+
+        A real subgraph range query returns every day in the window, including
+        days already served from cache. Those rows must be skipped: the fresh
+        cache entry is authoritative until TTL expiry (same contract as
+        get_pool_volume), so each day appears exactly once and the cached value
+        is preserved, not refreshed.
+        """
+        provider = SubgraphVolumeProvider(chain="arbitrum")
+
+        import time
+
+        cached_data = PoolVolumeData(
+            pool_address="0x123abc",
+            date=date(2024, 1, 15),
+            volume_usd=Decimal("999999"),
+        )
+        cache_key = ("0x123abc", date(2024, 1, 15))
+        provider._cache[cache_key] = CachedVolume(
+            data=cached_data,
+            fetched_at=time.time(),
+            ttl_seconds=3600,
+        )
+
+        # Subgraph returns BOTH the cached and the uncached date, with a
+        # different value for the cached one.
+        mock_response = {
+            "poolDayDatas": [
+                {
+                    "id": "0x123-1",
+                    "date": 1705276800,  # 2024-01-15 (cached)
+                    "volumeUSD": "1000000",
+                },
+                {
+                    "id": "0x123-2",
+                    "date": 1705363200,  # 2024-01-16 (uncached)
+                    "volumeUSD": "1100000",
+                },
+            ]
+        }
+
+        with patch.object(provider, "_execute_query", new_callable=AsyncMock) as mock_query:
+            mock_query.return_value = mock_response
+
+            volumes = await provider.get_pool_volume_range(
+                pool_address="0x123abc",
+                start_date=date(2024, 1, 15),
+                end_date=date(2024, 1, 16),
+            )
+
+            # Exactly one entry per distinct day, no duplicates
+            assert len(volumes) == 2
+            assert [v.date for v in volumes] == [date(2024, 1, 15), date(2024, 1, 16)]
+            # Cached value preserved, not refreshed from the query row
+            assert volumes[0].volume_usd == Decimal("999999")
+            assert provider._cache[cache_key].data.volume_usd == Decimal("999999")
+            assert volumes[1].volume_usd == Decimal("1100000")
+
+        await provider.close()
+
 
 class TestRateLimitHandling:
     """Tests for rate limit handling."""
