@@ -608,14 +608,20 @@ class TestEncodeExactInputSingleParams:
         params = sdk._encode_exact_input_single_params(quote, amount_out_minimum=990 * 10**15)
         # Should be hex string (no 0x prefix)
         assert not params.startswith("0x")
-        # 10 words: 5 pool key + zeroForOne + amountIn + amountOutMin + hookData offset + hookData length
-        # (sqrtPriceLimitX96 removed in deployed V4 contracts)
+        # VIB-4413: 11 words = leading 0x20 struct-offset pointer (ExactInputSingleParams
+        # is a dynamic tuple because of hookData) + 5 pool key + zeroForOne + amountIn +
+        # amountOutMin + hookData offset + hookData length. (sqrtPriceLimitX96 removed in
+        # the deployed V4 contracts.)
         words = [params[i : i + 64] for i in range(0, len(params), 64)]
-        assert len(words) == 10, f"Expected 10 words, got {len(words)}"
-        # Verify fee tier (word 2), amountIn (word 6), amountOutMinimum (word 7)
-        assert int(words[2], 16) == 3000  # fee_tier
-        assert int(words[6], 16) == 10**18  # amount_in
-        assert int(words[7], 16) == 990 * 10**15  # amount_out_minimum
+        assert len(words) == 11, f"Expected 11 words, got {len(words)}"
+        # Word 0 is the 0x20 offset pointer to the struct.
+        assert int(words[0], 16) == 0x20, "First word must be the 0x20 dynamic-tuple offset"
+        # Struct fields are offset by 1 word: fee tier (word 3), amountIn (word 7),
+        # amountOutMinimum (word 8), hookData offset within struct (word 9) == 0x120.
+        assert int(words[3], 16) == 3000  # fee_tier
+        assert int(words[7], 16) == 10**18  # amount_in
+        assert int(words[8], 16) == 990 * 10**15  # amount_out_minimum
+        assert int(words[9], 16) == 0x120  # hookData offset (relative to struct start)
 
     def test_integer_slippage_precision(self):
         """Verify integer floor division gives correct amount_out_minimum."""

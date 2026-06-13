@@ -19,13 +19,18 @@ Pool verification (probed against polygon mainnet 2026-05-14):
   100 USDC against the same fee=3000 pool. LP_OPEN on the same pool passes
   (VIB-4363, ae8f29057). So the V4 pool is functional.
 
-Status (2026-05-14): both happy-path tests are marked ``xfail(strict=True)``
-under VIB-4413. The SDK's UR-mediated V4 swap path reverts on-chain for
-ERC20<>ERC20 pairs on Polygon (USDC<>WETH, USDC<>USDT, ...). USDC<>WPOL
-works because WPOL is the chain's wrapped native and the SDK routes
-through the NATIVE-currency pool key (different code path). Once the SDK
-fix lands the ``xfail`` flip to ``xpass`` and ``strict=True`` will turn
-that into a CI failure, surfacing the fix.
+Status (2026-06-12): FIXED under VIB-4413, the ``xfail`` markers are removed and
+both happy-path tests run normally. Root cause: ``UniswapV4SDK._encode_exact_input_single_params``
+emitted the ExactInputSingleParams (a dynamic tuple, because of ``hookData``) without
+the leading ``0x20`` struct-offset pointer that the deployed v4-periphery
+CalldataDecoder requires (``swapParams := add(params.offset, calldataload(params.offset))``).
+Without it the decoder read ``currency0`` as the offset → out-of-bounds → a zeroed
+poolKey with ``currency0 == address(0)`` (native) → the UR reverted reading the native
+currency delta. The bug was masked whenever a swap currency was the chain's native token
+(``currency0`` sorts to ``address(0) == 0``, so the missing-offset read evaluated to 0 and
+coincidentally pointed at the struct start) — which is why USDC<>WPOL worked on Polygon and
+USDC<>WETH worked on chains where WETH is native (eth/op/arb/base), and only Polygon's
+all-ERC20 USDC<>WETH surfaced it. Validated end-to-end on a Polygon mainnet fork.
 
 To run:
     uv run pytest tests/intents/polygon/test_uniswap_v4_swap.py -v -s
@@ -78,20 +83,6 @@ class TestUniswapV4SwapIntent:
 
     @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason=(
-            "VIB-4413: UniswapV4SDK.build_swap_tx emits calldata that reverts "
-            "on-chain for ERC20<>ERC20 V4 swaps via UniversalRouter on Polygon "
-            "(WETH/USDC pool exists and works for LP_OPEN; Quoter returns a "
-            "valid quote; only the UR swap path reverts). Same SDK path passes "
-            "on optimism / arbitrum / base / ethereum. Trace shows UR's "
-            "unlockCallback reverts immediately after reading "
-            "currencyDelta[UR][NATIVE]=0 from PoolManager transient storage. "
-            "Likely a missing UR command for the all-ERC20 case on a chain "
-            "where WETH is not the wrapped native (as of 2026-05-14)."
-        ),
-        strict=True,
-    )
     async def test_swap_usdc_to_weth_using_intent(
         self,
         web3: Web3,
@@ -208,14 +199,6 @@ class TestUniswapV4SwapIntent:
 
     @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason=(
-            "VIB-4413: UniswapV4SDK.build_swap_tx emits calldata that reverts "
-            "on-chain for ERC20<>ERC20 V4 swaps via UniversalRouter on Polygon "
-            "(reverse direction same failure as USDC -> WETH) (as of 2026-05-14)."
-        ),
-        strict=True,
-    )
     async def test_swap_weth_to_usdc_using_intent(
         self,
         web3: Web3,

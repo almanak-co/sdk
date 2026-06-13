@@ -904,8 +904,8 @@ class UniswapV4SDK:
         amount_in = min(quote.amount_in, uint128_max)
         amount_out_min = min(amount_out_minimum, uint128_max)
 
-        # Head: 8 static fields + 1 offset for hookData = 9 words
-        # hookData offset from start of struct: 9 * 32 = 288 = 0x120
+        # Inner struct head: 8 static fields + 1 offset for hookData = 9 words.
+        # hookData offset is measured from the start of the struct: 9 * 32 = 288 = 0x120.
         head = (
             _pad_address(pool_key.currency0)
             + _pad_address(pool_key.currency1)
@@ -915,13 +915,26 @@ class UniswapV4SDK:
             + _pad_bool(zero_for_one)
             + _pad_uint(amount_in)
             + _pad_uint(amount_out_min)
-            + _pad_uint(0x120)  # offset to hookData
+            + _pad_uint(0x120)  # offset (within the struct) to hookData
         )
 
         # Tail: hookData = empty bytes
         tail = _pad_uint(0)  # hookData length = 0
 
-        return head + tail
+        # VIB-4413: ExactInputSingleParams is a DYNAMIC tuple (it contains the
+        # dynamic ``bytes hookData`` field), so the action param must lead with an
+        # offset pointer to the struct. The deployed v4-periphery CalldataDecoder
+        # reads it as ``swapParams := add(params.offset, calldataload(params.offset))``
+        # — i.e. it takes the FIRST word as the struct offset. Without this 0x20
+        # prefix the decoder reads ``currency0`` as the offset: for an all-ERC20
+        # pair that is a huge value → out-of-bounds read → a zeroed poolKey whose
+        # ``currency0`` is ``address(0)`` (native) → the swap reverts reading the
+        # native currency delta. The bug was masked for any swap where a currency
+        # is the chain's native token (``currency0`` sorts to ``address(0) == 0``,
+        # so the missing-offset read evaluates to 0 and coincidentally points at the
+        # struct start) — which is why only all-ERC20 pairs (e.g. Polygon
+        # USDC<->WETH, where WETH is not native) surfaced it.
+        return _pad_uint(0x20) + head + tail
 
     # =========================================================================
     # LP Methods — PositionManager encoding
@@ -1094,6 +1107,16 @@ class UniswapV4SDK:
             uint128 amount1Max,
             address owner,
             bytes hookData  // dynamic
+
+        NOTE (VIB-4413): unlike the swap struct in
+        ``_encode_exact_input_single_params``, the LP action params are encoded
+        INLINE with **no** leading ``0x20`` struct-offset pointer — and that is
+        correct. ``PositionManager.modifyLiquidities`` decodes each action's
+        params as a flat sequence of individual calldata arguments
+        (``decodeMintParams`` reads each field at a fixed ``params.offset + k*0x20``),
+        NOT as a single offset-indirected dynamic struct the way
+        ``decodeSwapExactInSingleParams`` does. Do NOT "normalize" these encoders
+        to match the swap struct's leading offset — that would break LP_OPEN/CLOSE.
 
         Returns:
             Hex string (no 0x prefix).
