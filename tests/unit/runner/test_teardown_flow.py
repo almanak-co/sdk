@@ -22,7 +22,7 @@ from almanak.framework.runner.strategy_runner import (
     RunnerConfig,
     StrategyRunner,
 )
-from almanak.framework.teardown.models import TeardownMode
+from almanak.framework.teardown.models import ClosureVerification, TeardownMode
 
 
 @pytest.fixture(autouse=True)
@@ -200,9 +200,7 @@ class TestTeardownInRunIteration:
 
         # Mock _execute_teardown to verify it's called from run_iteration
         runner._execute_teardown = AsyncMock(
-            return_value=IterationResult(
-                status=IterationStatus.TEARDOWN, intent=None, deployment_id="test_strat"
-            )
+            return_value=IterationResult(status=IterationStatus.TEARDOWN, intent=None, deployment_id="test_strat")
         )
 
         await runner.run_iteration(strategy)
@@ -229,9 +227,7 @@ class TestTeardownInRunIteration:
 
         # Patch TeardownManager path - returns success for empty intents
         runner._execute_teardown = AsyncMock(
-            return_value=IterationResult(
-                status=IterationStatus.TEARDOWN, intent=None, deployment_id="test_strat"
-            )
+            return_value=IterationResult(status=IterationStatus.TEARDOWN, intent=None, deployment_id="test_strat")
         )
 
         result = await runner.run_iteration(strategy)
@@ -320,9 +316,7 @@ class TestTeardownInRunIteration:
         mock_get_manager.return_value = mock_manager
 
         runner._execute_teardown = AsyncMock(
-            return_value=IterationResult(
-                status=IterationStatus.TEARDOWN, intent=None, deployment_id="test_strat"
-            )
+            return_value=IterationResult(status=IterationStatus.TEARDOWN, intent=None, deployment_id="test_strat")
         )
 
         await runner.run_iteration(strategy)
@@ -348,9 +342,7 @@ class TestTeardownInRunIteration:
         mock_get_manager.return_value = mock_manager
 
         runner._execute_teardown = AsyncMock(
-            return_value=IterationResult(
-                status=IterationStatus.TEARDOWN, intent=None, deployment_id="test_strat"
-            )
+            return_value=IterationResult(status=IterationStatus.TEARDOWN, intent=None, deployment_id="test_strat")
         )
 
         await runner.run_iteration(strategy)
@@ -376,9 +368,7 @@ class TestTeardownInRunIteration:
 
         # TeardownManager handles backward compat internally
         runner._execute_teardown = AsyncMock(
-            return_value=IterationResult(
-                status=IterationStatus.TEARDOWN, intent=None, deployment_id="test_strat"
-            )
+            return_value=IterationResult(status=IterationStatus.TEARDOWN, intent=None, deployment_id="test_strat")
         )
 
         result = await runner.run_iteration(strategy)
@@ -468,9 +458,7 @@ class TestTeardownInRunIteration:
             StrategyRunner._prefetch_teardown_prices(market_mock, [intent])
 
         # The resolver should have been called for the ALMANAK address
-        mock_resolver.resolve.assert_any_call(
-            almanak_address, "base", log_errors=False, skip_gateway=True
-        )
+        mock_resolver.resolve.assert_any_call(almanak_address, "base", log_errors=False, skip_gateway=True)
 
         # market.price() should have been called with the resolved symbol "ALMANAK"
         market_mock.price.assert_any_call("ALMANAK")
@@ -1053,6 +1041,7 @@ def _make_teardown_manager_class_mock(
     mgr.state_manager.delete_teardown_state = AsyncMock()
     # _persist_state returns a TeardownState
     from datetime import UTC, datetime as _dt
+
     state = TeardownState(
         teardown_id="td_test",
         deployment_id="test_strat",
@@ -1070,11 +1059,23 @@ def _make_teardown_manager_class_mock(
         mgr._execute_intents = AsyncMock(side_effect=execute_raises)
     else:
         mgr._execute_intents = AsyncMock(return_value=teardown_result)
-    # _verify_closure async -> bool (or raises)
+    # VIB-5085: production calls ``_verify_closure_detailed`` (returns a
+    # ClosureVerification) — ``_verify_closure`` is now a thin bool wrapper the
+    # runner lane no longer calls. The characterization strategy carries a
+    # single open position, so total=1 and closed=1 on the all-closed path.
+    from almanak.framework.teardown.models import ClosureVerification
+
     if verify_raises is not None:
-        mgr._verify_closure = AsyncMock(side_effect=verify_raises)
+        mgr._verify_closure_detailed = AsyncMock(side_effect=verify_raises)
     else:
-        mgr._verify_closure = AsyncMock(return_value=positions_closed)
+        mgr._verify_closure_detailed = AsyncMock(
+            return_value=ClosureVerification(
+                all_closed=positions_closed,
+                positions_total=1,
+                positions_closed=1 if positions_closed else 0,
+                has_position_breakdown=True,
+            )
+        )
     return mgr
 
 
@@ -1172,11 +1173,10 @@ class TestExecuteTeardownViaManagerCharacterization:
 
         @contextmanager
         def _do(**mgr_kwargs):
-            with patch(
-                "almanak.framework.teardown.teardown_manager.TeardownManager"
-            ) as mgr_cls, patch(
-                "almanak.framework.teardown.state_manager.TeardownStateAdapter"
-            ) as adapter_cls:
+            with (
+                patch("almanak.framework.teardown.teardown_manager.TeardownManager") as mgr_cls,
+                patch("almanak.framework.teardown.state_manager.TeardownStateAdapter") as adapter_cls,
+            ):
                 mock_mgr = _make_teardown_manager_class_mock(**mgr_kwargs)
                 mgr_cls.return_value = mock_mgr
                 mock_adapter = MagicMock()
@@ -1197,9 +1197,7 @@ class TestExecuteTeardownViaManagerCharacterization:
         runner.request_shutdown = MagicMock()
 
         intent = _make_intent()
-        strategy = _make_strategy_for_manager(
-            should_teardown=True, teardown_intents=[intent]
-        )
+        strategy = _make_strategy_for_manager(should_teardown=True, teardown_intents=[intent])
         runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
 
         state_mgr = MagicMock()
@@ -1225,6 +1223,53 @@ class TestExecuteTeardownViaManagerCharacterization:
         runner._request_teardown_failure_shutdown.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_success_with_no_position_breakdown_falls_back_to_intent_count(self, _patch_manager):
+        """VIB-5085 regression (Codex/Claude blocker): when the verifier takes
+        the in-memory fallback (empty pre-execution snapshot — e.g. a
+        balance-driven teardown that closes real positions but exposes no
+        PositionInfo rows), it returns has_position_breakdown=False. The success
+        mark_completed must then report the INTENT count, not a misleading
+        positions_closed=0 (the inverse of the original bug)."""
+        runner = _make_runner()
+        runner._request_teardown_failure_shutdown = MagicMock()
+        runner.request_shutdown = MagicMock()
+        runner._lifecycle_write_state = MagicMock()
+
+        intent = _make_intent()
+        strategy = _make_strategy_for_manager(should_teardown=True, teardown_intents=[intent])
+        runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
+
+        state_mgr = MagicMock()
+        state_mgr.db_path = "/tmp/test_state.db"
+        request = MagicMock()
+        request.requested_by = "cli"
+
+        # successful result lands 1 intent; verifier has NO position breakdown.
+        result_obj = _make_successful_teardown_result()
+        with _patch_manager(teardown_result=result_obj) as (mgr, _):
+            mgr._verify_closure_detailed = AsyncMock(
+                return_value=ClosureVerification(
+                    all_closed=True,
+                    positions_total=0,
+                    positions_closed=0,
+                    has_position_breakdown=False,
+                )
+            )
+            await runner._execute_teardown_via_manager(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_mode=TeardownMode.SOFT,
+                teardown_market=None,
+                start_time=datetime.now(UTC),
+                request=request,
+                state_manager=state_mgr,
+            )
+
+        mark_result = state_mgr.mark_completed.call_args.kwargs["result"]
+        # Falls back to the intent count (1), NOT a fabricated 0.
+        assert mark_result["positions_closed"] == result_obj.intents_succeeded == 1
+
+    @pytest.mark.asyncio
     async def test_cancel_window_aborts_returns_teardown_without_shutdown(self, _patch_manager):
         """Cancel-window-cancelled returns TEARDOWN status and records success
         but does NOT request shutdown — the operator explicitly aborted."""
@@ -1234,9 +1279,7 @@ class TestExecuteTeardownViaManagerCharacterization:
         runner._record_success = MagicMock()
 
         intent = _make_intent()
-        strategy = _make_strategy_for_manager(
-            should_teardown=True, teardown_intents=[intent]
-        )
+        strategy = _make_strategy_for_manager(should_teardown=True, teardown_intents=[intent])
         runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
 
         with _patch_manager(
@@ -1267,9 +1310,7 @@ class TestExecuteTeardownViaManagerCharacterization:
         runner._request_teardown_failure_shutdown = MagicMock()
 
         intent = _make_intent()
-        strategy = _make_strategy_for_manager(
-            should_teardown=True, teardown_intents=[intent]
-        )
+        strategy = _make_strategy_for_manager(should_teardown=True, teardown_intents=[intent])
         runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
 
         state_mgr = MagicMock()
@@ -1305,9 +1346,7 @@ class TestExecuteTeardownViaManagerCharacterization:
         runner.request_shutdown = MagicMock()
 
         intent = _make_intent()
-        strategy = _make_strategy_for_manager(
-            should_teardown=True, teardown_intents=[intent]
-        )
+        strategy = _make_strategy_for_manager(should_teardown=True, teardown_intents=[intent])
         runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
 
         state_mgr = MagicMock()
@@ -1337,6 +1376,13 @@ class TestExecuteTeardownViaManagerCharacterization:
         assert state_mgr.mark_failed.call_count == 2
         all_errors = [c.kwargs["error"] for c in state_mgr.mark_failed.call_args_list]
         assert all("positions still open" in e for e in all_errors)
+        # VIB-5085 (Codex): the FIRST mark_failed is the one that actually
+        # persists (the row is still active there; the terminal one runs against
+        # an inactive row and no-ops). It must carry the verified position
+        # breakdown — 1 position, 0 verified closed -> 1 failed.
+        first_failed = state_mgr.mark_failed.call_args_list[0]
+        assert first_failed.kwargs.get("positions_closed") == 0
+        assert first_failed.kwargs.get("positions_failed") == 1
         runner._request_teardown_failure_shutdown.assert_called_once()
         runner.request_shutdown.assert_not_called()  # failure path, not success
 
@@ -1348,9 +1394,7 @@ class TestExecuteTeardownViaManagerCharacterization:
         runner._request_teardown_failure_shutdown = MagicMock()
 
         intent = _make_intent()
-        strategy = _make_strategy_for_manager(
-            should_teardown=True, teardown_intents=[intent]
-        )
+        strategy = _make_strategy_for_manager(should_teardown=True, teardown_intents=[intent])
         runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
 
         state_mgr = MagicMock()
@@ -1384,9 +1428,7 @@ class TestExecuteTeardownViaManagerCharacterization:
         runner._request_teardown_failure_shutdown = MagicMock()
 
         intent = _make_intent()
-        strategy = _make_strategy_for_manager(
-            should_teardown=True, teardown_intents=[intent]
-        )
+        strategy = _make_strategy_for_manager(should_teardown=True, teardown_intents=[intent])
         runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
 
         state_mgr = MagicMock()
@@ -1420,9 +1462,7 @@ class TestExecuteTeardownViaManagerCharacterization:
         runner._request_teardown_failure_shutdown = MagicMock()
 
         intent = _make_intent()
-        strategy = _make_strategy_for_manager(
-            should_teardown=True, teardown_intents=[intent]
-        )
+        strategy = _make_strategy_for_manager(should_teardown=True, teardown_intents=[intent])
         runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
 
         state_mgr = MagicMock()
@@ -1457,9 +1497,7 @@ class TestExecuteTeardownViaManagerCharacterization:
         runner._execute_teardown_inline = AsyncMock()
 
         intent = _make_intent()
-        strategy = _make_strategy_for_manager(
-            should_teardown=True, teardown_intents=[intent]
-        )
+        strategy = _make_strategy_for_manager(should_teardown=True, teardown_intents=[intent])
 
         state_mgr = MagicMock()
         request = MagicMock()
@@ -1492,17 +1530,16 @@ class TestExecuteTeardownViaManagerCharacterization:
         runner._execute_teardown_inline = AsyncMock()
 
         intent = _make_intent()
-        strategy = _make_strategy_for_manager(
-            should_teardown=True, teardown_intents=[intent]
-        )
+        strategy = _make_strategy_for_manager(should_teardown=True, teardown_intents=[intent])
         strategy.get_open_positions.side_effect = RuntimeError("RPC timeout")
 
         state_mgr = MagicMock()
         request = MagicMock()
         request.requested_by = "cli"
 
-        with patch("almanak.framework.teardown.teardown_manager.TeardownManager"), patch(
-            "almanak.framework.teardown.state_manager.TeardownStateAdapter"
+        with (
+            patch("almanak.framework.teardown.teardown_manager.TeardownManager"),
+            patch("almanak.framework.teardown.state_manager.TeardownStateAdapter"),
         ):
             result = await runner._execute_teardown_via_manager(
                 strategy=strategy,
@@ -1530,9 +1567,7 @@ class TestExecuteTeardownViaManagerCharacterization:
         runner._lifecycle_write_state = MagicMock()
 
         intent = _make_intent()
-        strategy = _make_strategy_for_manager(
-            should_teardown=True, teardown_intents=[intent]
-        )
+        strategy = _make_strategy_for_manager(should_teardown=True, teardown_intents=[intent])
         runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
 
         # Manual mode
@@ -1577,9 +1612,7 @@ class TestExecuteTeardownViaManagerCharacterization:
         runner._lifecycle_write_state = MagicMock()
 
         intent = _make_intent()
-        strategy = _make_strategy_for_manager(
-            should_teardown=True, teardown_intents=[intent]
-        )
+        strategy = _make_strategy_for_manager(should_teardown=True, teardown_intents=[intent])
         runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
 
         state_mgr = MagicMock()
@@ -1612,9 +1645,7 @@ class TestExecuteTeardownViaManagerCharacterization:
         runner._lifecycle_write_state = MagicMock()
 
         intent = _make_intent()
-        strategy = _make_strategy_for_manager(
-            should_teardown=True, teardown_intents=[intent]
-        )
+        strategy = _make_strategy_for_manager(should_teardown=True, teardown_intents=[intent])
         runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
 
         # Market returns a populated dict
@@ -1646,9 +1677,7 @@ class TestExecuteTeardownViaManagerCharacterization:
         runner._lifecycle_write_state = MagicMock()
 
         intent = _make_intent()
-        strategy = _make_strategy_for_manager(
-            should_teardown=True, teardown_intents=[intent]
-        )
+        strategy = _make_strategy_for_manager(should_teardown=True, teardown_intents=[intent])
         runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
 
         market = MagicMock()
@@ -1680,9 +1709,7 @@ class TestExecuteTeardownViaManagerCharacterization:
         runner._lifecycle_write_state = MagicMock()
 
         intent = _make_intent()
-        strategy = _make_strategy_for_manager(
-            should_teardown=True, teardown_intents=[intent]
-        )
+        strategy = _make_strategy_for_manager(should_teardown=True, teardown_intents=[intent])
         runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
 
         with _patch_manager(teardown_result=_make_successful_teardown_result()) as (mgr, _):
@@ -1710,9 +1737,7 @@ class TestExecuteTeardownViaManagerCharacterization:
         runner._lifecycle_write_state = MagicMock()
 
         intent = _make_intent()
-        strategy = _make_strategy_for_manager(
-            should_teardown=True, teardown_intents=[intent]
-        )
+        strategy = _make_strategy_for_manager(should_teardown=True, teardown_intents=[intent])
         runner._build_teardown_compiler = MagicMock(return_value=MagicMock())
 
         with _patch_manager(teardown_result=_make_successful_teardown_result()) as (mgr, _):
@@ -1729,3 +1754,100 @@ class TestExecuteTeardownViaManagerCharacterization:
 
         assert result.status == IterationStatus.TEARDOWN
         runner.request_shutdown.assert_called_once()
+
+
+class TestInlineLanePositionCounts:
+    """VIB-5085: the inline (fallback) teardown lane reports positions, not
+    intents, and never fabricates a count from intents when positions are
+    unreadable."""
+
+    @pytest.mark.asyncio
+    async def test_inline_body_success_reports_position_count_not_intents(self):
+        """Drives ``_execute_teardown_inline_body`` to its success
+        ``mark_completed`` with 2 open positions but 3 teardown intents (the
+        field-report shape) — the persisted result must report 2 positions,
+        not 3 intents."""
+        from almanak.framework.runner import runner_teardown as rt
+        from almanak.framework.teardown.models import (
+            PositionInfo,
+            PositionType,
+            TeardownPositionSummary,
+        )
+
+        runner = MagicMock()
+        runner._execute_single_chain = AsyncMock(return_value=SimpleNamespace(success=True, error=None, status=None))
+        runner._calculate_duration_ms = MagicMock(return_value=1)
+        runner.request_shutdown = MagicMock()
+        runner._lifecycle_write_state = MagicMock()
+        runner._record_success = MagicMock()
+        runner.state_manager = MagicMock()
+
+        positions = TeardownPositionSummary(
+            deployment_id="dep",
+            timestamp=datetime.now(UTC),
+            positions=[
+                PositionInfo(
+                    position_type=PositionType.TOKEN,
+                    position_id="p1",
+                    chain="arbitrum",
+                    protocol="uniswap_v3",
+                    value_usd=Decimal("1"),
+                    details={},
+                ),
+                PositionInfo(
+                    position_type=PositionType.TOKEN,
+                    position_id="p2",
+                    chain="arbitrum",
+                    protocol="uniswap_v3",
+                    value_usd=Decimal("1"),
+                    details={},
+                ),
+            ],
+        )
+        strategy = MagicMock()
+        strategy.deployment_id = "dep"
+        strategy.get_open_positions.return_value = positions
+
+        intents = [_make_intent(), _make_intent(), _make_intent()]
+        state_manager = MagicMock()
+        request = MagicMock()
+
+        with patch.object(rt.Intent, "has_chained_amount", return_value=False):
+            result, _degraded = await rt._execute_teardown_inline_body(
+                runner,
+                strategy,
+                intents,
+                None,
+                datetime.now(UTC),
+                request,
+                state_manager,
+                teardown_cycle_id="teardown-x",
+                deferred_append=lambda **_k: None,
+            )
+
+        assert result.status == IterationStatus.TEARDOWN
+        mark_result = state_manager.mark_completed.call_args.kwargs["result"]
+        # 2 positions, NOT 3 intents.
+        assert mark_result["positions_closed"] == 2
+        assert mark_result["positions_total"] == 2
+        assert mark_result["intents_succeeded"] == 3
+
+    def test_positions_completion_result_omits_positions_when_count_unknown(self):
+        """VIB-5085: the shared payload helper carries position counts only when
+        the count is known; with None it omits them so the lift falls back to
+        the legacy ``intents`` key rather than fabricating a position count."""
+        from almanak.framework.runner.runner_teardown import _positions_completion_result
+
+        known = _positions_completion_result(2, 6)
+        assert known == {
+            "intents": 6,
+            "intents_succeeded": 6,
+            "intents_total": 6,
+            "positions_closed": 2,
+            "positions_total": 2,
+        }
+
+        unknown = _positions_completion_result(None, 6)
+        assert "positions_closed" not in unknown
+        assert "positions_total" not in unknown
+        assert unknown["intents"] == 6

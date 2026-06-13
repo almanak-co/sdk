@@ -110,7 +110,12 @@ async def test_precomputed_intents_bypass_strategy_queries():
     manager = TeardownManager(orchestrator=orchestrator, compiler=compiler)
     manager.cancel_window.run_cancel_window = AsyncMock(return_value=MagicMock(was_cancelled=False))
     manager.safety_guard.validate_teardown_request = MagicMock(return_value=MagicMock(all_passed=True))
-    manager._verify_closure = AsyncMock(return_value=True)
+    # VIB-5085: execute() calls the detailed verifier (ClosureVerification).
+    from almanak.framework.teardown.models import ClosureVerification
+
+    manager._verify_closure_detailed = AsyncMock(
+        return_value=ClosureVerification(all_closed=True, positions_total=1, positions_closed=1)
+    )
 
     result = await manager.execute(
         strategy=strategy,

@@ -113,12 +113,31 @@ class TestTeardownCountersIncrement:
         assert result.positions_failed == 0
         assert result.status == TeardownStatus.FAILED
 
-    def test_mark_completed_still_lifts_intents_into_positions_closed(
+    def test_mark_completed_prefers_positions_closed_over_intents(
         self, tmp_path: Path
     ) -> None:
-        """Regression: the existing successful-path VIB-3920 behaviour is
-        preserved — ``mark_completed`` continues to read ``result["intents"]``
-        and persist it as ``positions_closed``."""
+        """VIB-5085: ``mark_completed`` lifts ``result["positions_closed"]``
+        onto the column, preferring it over the legacy ``result["intents"]``.
+
+        Field-report scenario: 2 positions closed via 6 intents. The column
+        must read 2 (positions), not 6 (intents)."""
+        state = TeardownStateManager(db_path=str(tmp_path / "td.db"))
+        state.create_request(_make_request())
+        state.mark_started("S", total_positions=2)
+        state.mark_completed(
+            "S", result={"positions_closed": 2, "positions_total": 2, "intents": 6}
+        )
+        active = state.get_request("S")
+        assert active is not None
+        assert active.positions_closed == 2
+        assert active.status == TeardownStatus.COMPLETED
+
+    def test_mark_completed_falls_back_to_intents_when_no_positions_key(
+        self, tmp_path: Path
+    ) -> None:
+        """VIB-5085 back-compat: a result_json written by an older runner
+        mid-deploy carries only ``intents`` — ``mark_completed`` still lifts
+        that so the column is never blank during a rollout."""
         state = TeardownStateManager(db_path=str(tmp_path / "td.db"))
         state.create_request(_make_request())
         state.mark_started("S", total_positions=7)

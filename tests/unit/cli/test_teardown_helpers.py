@@ -508,7 +508,12 @@ def _result(
     final=Decimal("99"),
     costs=Decimal("1"),
     error=None,
+    positions_total=0,
+    positions_closed=0,
+    has_position_breakdown=False,
 ):
+    # VIB-5085: the double mirrors TeardownResult's position fields. Default
+    # ``has_position_breakdown=False`` exercises the intent-count fallback path.
     return SimpleNamespace(
         success=success,
         intents_total=intents_total,
@@ -519,6 +524,9 @@ def _result(
         final_value_usd=final,
         total_costs_usd=costs,
         error=error,
+        positions_total=positions_total,
+        positions_closed=positions_closed,
+        has_position_breakdown=has_position_breakdown,
     )
 
 
@@ -651,6 +659,43 @@ class TestUpdateTeardownRequestsLifecycle:
         assert existing.positions_closed == 2
         assert existing.positions_failed == 1
         assert existing.status == TeardownStatus.FAILED
+
+    def test_updates_existing_request_prefers_verified_positions(self):
+        """VIB-5085: when ``execute()`` stamped a verified position breakdown
+        onto the result, the lifecycle writer reports *positions* — not the
+        intent count. Field-report shape: 2 positions closed via 6 intents."""
+        from almanak.framework.teardown import TeardownStatus
+
+        existing = SimpleNamespace(
+            positions_total=0,
+            positions_closed=0,
+            positions_failed=0,
+            completed_at=None,
+            status=None,
+        )
+        tsm = MagicMock()
+        tsm.get_active_request.return_value = existing
+
+        th.update_teardown_requests_lifecycle(
+            deployment_id="my-strat",
+            mode="SOFT",
+            result=_result(
+                success=True,
+                intents_total=6,
+                intents_succeeded=6,
+                positions_total=2,
+                positions_closed=2,
+                has_position_breakdown=True,
+            ),
+            state_manager_provider=lambda: tsm,
+        )
+
+        tsm.update_request.assert_called_once_with(existing)
+        # 2 positions, NOT 6 intents.
+        assert existing.positions_total == 2
+        assert existing.positions_closed == 2
+        assert existing.positions_failed == 0
+        assert existing.status == TeardownStatus.COMPLETED
         assert existing.completed_at is not None
 
     def test_swallows_state_manager_failure(self):

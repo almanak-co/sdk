@@ -38,6 +38,7 @@ from almanak.framework.teardown.error_taxonomy import Disposition, classify_tear
 from almanak.framework.teardown.models import (
     ApprovalRequest,
     ApprovalResponse,
+    ClosureVerification,
     PositionInfo,
     TeardownMode,
     TeardownPositionSummary,
@@ -570,7 +571,9 @@ class TeardownManager:
                     # ``strategy.get_open_positions()`` which returns 0 the
                     # moment ``on_intent_executed`` clears the strategy's
                     # ``_position_id`` — silently passing partial closes.
-                    positions_closed = await self._verify_closure(
+                    # VIB-5085: use the detailed verifier so we record how many
+                    # *positions* (not intents) closed.
+                    verification = await self._verify_closure_detailed(
                         strategy,
                         expected_positions=precomputed_positions,
                         pre_execution_positions=positions,
@@ -580,12 +583,30 @@ class TeardownManager:
                         "Post-teardown verification raised for %s — treating as verify-fail",
                         strategy.deployment_id,
                     )
-                    positions_closed = False
+                    verification = ClosureVerification(
+                        all_closed=False,
+                        positions_total=len(getattr(positions, "positions", []) or []),
+                        positions_closed=0,
+                        has_position_breakdown=True,
+                    )
                     verify_error_msg = f"Post-teardown verification error: {verify_err}. Manual check required."
                 else:
                     verify_error_msg = "Post-teardown verification failed: positions still open. Manual check required."
 
-                if not positions_closed:
+                # VIB-5085: stamp the position-level counts onto the result so
+                # the CLI lifecycle writer reports positions, not intents.
+                # ``has_position_breakdown`` is only True when the verifier had a real
+                # pre-execution snapshot — on the in-memory fallback (empty
+                # snapshot) it stays False so the writer falls back to the intent
+                # count instead of persisting a misleading ``positions_closed=0``.
+                result = replace(
+                    result,
+                    positions_total=verification.positions_total,
+                    positions_closed=verification.positions_closed,
+                    has_position_breakdown=verification.has_position_breakdown,
+                )
+
+                if not verification.all_closed:
                     logger.warning(
                         f"Post-teardown verification: {strategy.deployment_id} still reports "
                         f"open positions (or verification errored). Marking teardown as incomplete."
@@ -1736,7 +1757,32 @@ class TeardownManager:
         expected_positions: Any = None,
         pre_execution_positions: Any = None,
     ) -> bool:
-        """Verify that positions are actually closed on-chain.
+        """Verify positions are closed on-chain — returns the all-closed bool.
+
+        Thin back-compat wrapper over :meth:`_verify_closure_detailed`
+        (VIB-5085). Existing callers and the post-condition test suite depend
+        on the bare ``bool`` contract; the position-level breakdown lives on
+        the detailed variant.
+        """
+        verification = await self._verify_closure_detailed(
+            strategy,
+            expected_positions=expected_positions,
+            pre_execution_positions=pre_execution_positions,
+        )
+        return verification.all_closed
+
+    async def _verify_closure_detailed(
+        self,
+        strategy: IntentStrategy,
+        expected_positions: Any = None,
+        pre_execution_positions: Any = None,
+    ) -> ClosureVerification:
+        """Verify that positions are actually closed on-chain (VIB-5085).
+
+        Returns a :class:`ClosureVerification` carrying ``all_closed`` plus the
+        position-level counts (``positions_total`` / ``positions_closed``) so
+        lifecycle counters report *positions* closed, not *intents* landed.
+        ``_verify_closure`` wraps this and returns only ``all_closed``.
 
         Three layers of verification, in priority order:
 
@@ -1823,6 +1869,7 @@ class TeardownManager:
                 if not check.closed:
                     failed_results.append(check)
 
+            positions_total = len(snapshot_positions)
             if failed_results:
                 for check in failed_results:
                     logger.error(
@@ -1832,25 +1879,59 @@ class TeardownManager:
                         check.residual,
                         check.error,
                     )
-                return False
+                # VIB-5085: positions_closed = total − positions whose on-chain
+                # post-condition reported residual ("known not closed"). A
+                # position with NO registered post-condition (only uniswap_v3 /
+                # traderjoe_v2 register one today; lending — Aave / Morpho /
+                # Compound — has none) is counted closed-by-execution: its
+                # closing intents ran and nothing contradicts closure. This is
+                # required, not incidental — the field-report case (Aave
+                # looping) has no hooks, so excluding no-hook positions would
+                # collapse positions_closed back to the intent count and
+                # re-introduce the very bug this fixes.
+                #
+                # Caveat (Codex Finding 2): on a PARTIAL failure a no-hook
+                # position with undetected residual is optimistically counted
+                # closed. That is acceptable because the per-position count is
+                # NOT the risk authority here — the teardown is flagged FAILED
+                # with "manual check required" + recovery options, which is the
+                # loud signal operators act on. ``has_position_breakdown`` means
+                # "a position-level count is available", NOT "every position was
+                # on-chain verified".
+                return ClosureVerification(
+                    all_closed=False,
+                    positions_total=positions_total,
+                    positions_closed=positions_total - len(failed_results),
+                    has_position_breakdown=True,
+                )
 
             # All registered post-conditions passed. We still log the
             # discover-path summary so the existing audit trail is intact.
             ids = [getattr(p, "position_id", "") for p in snapshot_positions]
             logger.info(
                 "Teardown verification: %d position(s) passed on-chain post-condition checks: %s",
-                len(snapshot_positions),
+                positions_total,
                 ids,
             )
-            return True
+            return ClosureVerification(
+                all_closed=True,
+                positions_total=positions_total,
+                positions_closed=positions_total,
+                has_position_breakdown=True,
+            )
 
         # Last-resort: legacy in-memory state read. Used when neither a
         # pre-execution snapshot nor an expected-positions list reaches us
         # (paper / unit-test paths). This is the path the original
         # implementation used end-to-end; it still works as a "did the
         # strategy at least clear its own state?" smoke test.
+        #
+        # No pre-execution snapshot reached us, so there is no trustworthy
+        # ``positions_total`` to report — leave the counts at 0 and surface
+        # only the all-closed signal (VIB-5085). Callers fall back to intent
+        # counts when ``has_position_breakdown`` is not asserted.
         positions = strategy.get_open_positions()
-        return len(positions.positions) == 0
+        return ClosureVerification(all_closed=len(positions.positions) == 0)
 
     # ------------------------------------------------------------------
     # Helpers used by _verify_closure to plumb gateway / RPC / wallet to

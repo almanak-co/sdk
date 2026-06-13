@@ -33,6 +33,7 @@ from almanak.framework.runner.teardown_commit import TeardownCommitOutcome
 from almanak.framework.teardown.config import TeardownConfig
 from almanak.framework.teardown.consolidation import ConsolidationOutcome
 from almanak.framework.teardown.models import (
+    ClosureVerification,
     PositionInfo,
     PositionType,
     TeardownMode,
@@ -212,7 +213,7 @@ class TestManagerExecuteHook:
     async def test_consolidation_runs_only_after_successful_closure_and_verify(self):
         mgr = TeardownManager(config=TeardownConfig.default())
         mgr._execute_intents = AsyncMock(return_value=_result(success=True))
-        mgr._verify_closure = AsyncMock(return_value=True)
+        mgr._verify_closure_detailed = AsyncMock(return_value=ClosureVerification(all_closed=True, positions_total=1, positions_closed=1))
         mgr.run_token_consolidation = AsyncMock(return_value=ConsolidationOutcome(planned=1, succeeded=1, failed=0))
 
         result = await mgr.execute(_closing_strategy_for_execute(), mode="graceful", is_auto_mode=True)
@@ -223,13 +224,13 @@ class TestManagerExecuteHook:
         assert result.consolidation_planned == 1
         assert result.consolidation_succeeded == 1
         # Verification happened BEFORE consolidation.
-        assert mgr._verify_closure.await_count == 1
+        assert mgr._verify_closure_detailed.await_count == 1
 
     @pytest.mark.asyncio
     async def test_consolidation_skipped_when_closure_fails(self):
         mgr = TeardownManager(config=TeardownConfig.default())
         mgr._execute_intents = AsyncMock(return_value=_result(success=False, succeeded=0, failed=1))
-        mgr._verify_closure = AsyncMock(return_value=True)
+        mgr._verify_closure_detailed = AsyncMock(return_value=ClosureVerification(all_closed=True, positions_total=1, positions_closed=1))
         mgr.run_token_consolidation = AsyncMock()
 
         result = await mgr.execute(_closing_strategy_for_execute(), mode="graceful", is_auto_mode=True)
@@ -241,7 +242,7 @@ class TestManagerExecuteHook:
     async def test_consolidation_skipped_when_verify_fails(self):
         mgr = TeardownManager(config=TeardownConfig.default())
         mgr._execute_intents = AsyncMock(return_value=_result(success=True))
-        mgr._verify_closure = AsyncMock(return_value=False)
+        mgr._verify_closure_detailed = AsyncMock(return_value=ClosureVerification(all_closed=False, positions_total=1, positions_closed=0))
         mgr.run_token_consolidation = AsyncMock()
 
         result = await mgr.execute(_closing_strategy_for_execute(), mode="graceful", is_auto_mode=True)
@@ -253,7 +254,7 @@ class TestManagerExecuteHook:
     async def test_consolidation_failure_keeps_execute_success_true(self):
         mgr = TeardownManager(config=TeardownConfig.default())
         mgr._execute_intents = AsyncMock(return_value=_result(success=True))
-        mgr._verify_closure = AsyncMock(return_value=True)
+        mgr._verify_closure_detailed = AsyncMock(return_value=ClosureVerification(all_closed=True, positions_total=1, positions_closed=1))
         mgr.run_token_consolidation = AsyncMock(
             return_value=ConsolidationOutcome(planned=1, succeeded=0, failed=1, warnings=["swap failed"])
         )
@@ -273,7 +274,9 @@ class TestManagerExecuteHook:
 def _mgr_mock_for_runner_lane(*, closure_result: TeardownResult, verify_ok: bool = True):
     mgr = MagicMock(name="TeardownManager")
     mgr._execute_intents = AsyncMock(return_value=closure_result)
-    mgr._verify_closure = AsyncMock(return_value=verify_ok)
+    mgr._verify_closure_detailed = AsyncMock(
+        return_value=ClosureVerification(all_closed=verify_ok, positions_total=1, positions_closed=1 if verify_ok else 0)
+    )
     mgr.run_token_consolidation = AsyncMock(return_value=ConsolidationOutcome(planned=1, succeeded=1, failed=0))
     # execute() must never be reached from the runner lane.
     mgr.execute = AsyncMock(side_effect=AssertionError("runner lane must not call manager.execute"))

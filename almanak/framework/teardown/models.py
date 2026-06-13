@@ -325,6 +325,38 @@ class TeardownPreview:
                 setattr(self, attr, Decimal(str(value)))
 
 
+@dataclass(frozen=True)
+class ClosureVerification:
+    """Position-level result of post-teardown closure verification (VIB-5085).
+
+    ``TeardownManager._verify_closure`` returns a bare ``bool`` (all-closed
+    y/n) and is kept for back-compat. ``_verify_closure_detailed`` returns
+    this richer record so lifecycle counters can report *positions* closed
+    rather than *intents* landed — one position can be closed by several
+    intents (REPAY + WITHDRAW + SWAP), so the two counts diverge.
+
+    ``positions_closed`` counts the pre-execution positions that passed their
+    on-chain post-condition; ``positions_total`` is the pre-execution position
+    count. ``all_closed`` is tracked explicitly because the legacy in-memory
+    fallback path (no pre-execution snapshot) can report all-closed with
+    ``positions_total == 0`` — it is not derivable from the two counts.
+
+    ``has_position_breakdown`` is True only when a real pre-execution position
+    snapshot drove the verification (so ``positions_total`` / ``positions_closed``
+    are trustworthy). It is False on the in-memory fallback path (empty snapshot)
+    where ``positions_total == 0`` carries no information — callers must then NOT
+    treat ``positions_closed == 0`` as authoritative and fall back to the intent
+    signal instead (otherwise a balance-driven teardown that closed real positions
+    but exposes no ``PositionInfo`` rows would persist ``positions_closed=0`` on
+    success — the inverse of the VIB-5085 bug).
+    """
+
+    all_closed: bool
+    positions_total: int = 0
+    positions_closed: int = 0
+    has_position_breakdown: bool = False
+
+
 @dataclass
 class TeardownResult:
     """Result of a completed teardown operation."""
@@ -372,6 +404,18 @@ class TeardownResult:
     consolidation_succeeded: int = 0
     consolidation_failed: int = 0
     consolidation_warnings: list[str] = field(default_factory=list)
+
+    # VIB-5085: position-level closure counts. ``positions_closed`` reports the
+    # number of *positions* verified closed by ``_verify_closure_detailed`` —
+    # NOT the number of teardown *intents* that landed. ``has_position_breakdown``
+    # is True only when post-execution verification actually ran and populated
+    # these counts; lifecycle persistence falls back to the intent counts when
+    # it is False (e.g. an execution failure before verification, or the
+    # multi-chain / inline fallback lanes which have no verifier). The intent
+    # signal survives on ``intents_total`` / ``intents_succeeded``.
+    positions_total: int = 0
+    positions_closed: int = 0
+    has_position_breakdown: bool = False
 
     def __post_init__(self) -> None:
         """Convert numeric fields to Decimal."""

@@ -695,11 +695,12 @@ class SQLiteTeardownStateManager:
         Args:
             deployment_id: The deployment ID
             result: Optional result details (final balances, costs, etc.)
-                If ``result["intents"]`` is set, it's lifted onto
-                ``positions_closed`` (VIB-3920) so dashboard tabs and the
-                §1.2 G5 ship gate can read a non-zero close-count after a
-                successful teardown lifecycle. Pre-fix only ``status``
-                was updated and ``positions_closed`` always read 0.
+                ``result["positions_closed"]`` (VIB-5085) is lifted onto the
+                ``positions_closed`` column so dashboard tabs and the §1.2 G5
+                ship gate read a position-accurate close-count. The legacy
+                ``result["intents"]`` key (VIB-3920) — which conflated intent
+                count with position count — is still accepted as a fallback
+                for rows written by an older runner mid-deploy.
 
         Returns:
             The updated request, or None if not found
@@ -711,14 +712,22 @@ class SQLiteTeardownStateManager:
         request.status = TeardownStatus.COMPLETED
         request.completed_at = datetime.now(UTC)
 
-        # VIB-3920 — lift the closed count off the result payload onto
-        # the dedicated column. ``intents`` is what TeardownManager emits
-        # in `result_json`; same name as the ``intents_succeeded`` field
-        # on TeardownResult.
+        # VIB-5085 — lift the closed count off the result payload onto the
+        # dedicated column, preferring the position-level ``positions_closed``
+        # over the legacy ``intents`` key. VIB-3920 originally lifted
+        # ``intents`` because the payload carried no position count, which
+        # conflated "6 intents" with "2 positions". The runner / CLI lanes now
+        # emit ``positions_closed`` explicitly; ``intents`` is retained only as
+        # a fallback for in-flight rows written by an older runner mid-deploy.
+        # Empty != Zero: only an int >= 0 lifts. ``type(x) is int`` strictly
+        # excludes ``bool`` (an ``int`` subclass that is never a valid count
+        # here) without the verbose double-isinstance dance (gemini).
         if result is not None:
-            intents_closed = result.get("intents")
-            if isinstance(intents_closed, int) and intents_closed >= 0:
-                request.positions_closed = intents_closed
+            closed = result.get("positions_closed")
+            if type(closed) is not int:
+                closed = result.get("intents")
+            if type(closed) is int and closed >= 0:
+                request.positions_closed = closed
 
         if result:
             with _open_connection(self.db_path) as conn:

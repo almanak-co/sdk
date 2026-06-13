@@ -416,7 +416,7 @@ async def execute_and_verify(
     Returns the (possibly-replaced) ``TeardownResult``. Does NOT handle
     alerts or cleanup — those are pipelined after this helper.
     """
-    from ..teardown.models import TeardownStatus
+    from ..teardown.models import ClosureVerification, TeardownStatus
     from .runner_teardown import _make_approval_callback, _safe_mark
 
     deployment_id = strategy.deployment_id
@@ -462,7 +462,9 @@ async def execute_and_verify(
             # VIB-3742: thread the pre-execution ``positions`` snapshot so
             # protocol-specific on-chain post-condition checks can run for
             # each position the teardown should have closed.
-            positions_closed = await teardown_mgr._verify_closure(
+            # VIB-5085: use the detailed verifier so lifecycle counters report
+            # how many *positions* (not intents) actually closed.
+            verification = await teardown_mgr._verify_closure_detailed(
                 strategy,
                 pre_execution_positions=positions,
             )
@@ -471,10 +473,29 @@ async def execute_and_verify(
                 "Post-teardown verification raised for %s — treating as verify-fail",
                 deployment_id,
             )
-            positions_closed = False
+            verification = ClosureVerification(
+                all_closed=False,
+                positions_total=len(getattr(positions, "positions", []) or []),
+                positions_closed=0,
+                has_position_breakdown=True,
+            )
             verify_error_msg = f"Post-teardown verification error: {verify_err}. Manual check required."
 
-        if not positions_closed:
+        # VIB-5085: stamp the verified position counts onto the result so the
+        # success result_json + the Phase-2 progress mark + any failure mark
+        # source ``positions_closed`` from positions, not ``intents_succeeded``.
+        # ``has_position_breakdown`` is only True when the verifier had a real
+        # pre-execution snapshot — on the in-memory fallback (empty snapshot)
+        # it stays False so callers fall back to the intent count rather than
+        # persist a misleading ``positions_closed=0`` on a successful teardown.
+        teardown_result = replace(
+            teardown_result,
+            positions_total=verification.positions_total,
+            positions_closed=verification.positions_closed,
+            has_position_breakdown=verification.has_position_breakdown,
+        )
+
+        if not verification.all_closed:
             if verify_error_msg is None:
                 verify_error_msg = "Post-teardown verification failed: positions still open. Manual check required."
             logger.warning(f"Post-teardown verification: {deployment_id} incomplete. Marking as failed.")
@@ -502,7 +523,28 @@ async def execute_and_verify(
                         exc_info=True,
                     )
             if request:
-                _safe_mark(state_manager, "mark_failed", deployment_id, error=verify_error_msg)
+                # VIB-5085: this is the mark_failed that actually persists — the
+                # row is still active here, so it must carry the breakdown. The
+                # terminal mark_failed in ``map_teardown_result`` runs later
+                # against an already-inactive row (get_active_request returns
+                # None) and is a no-op for persistence; relying on it would drop
+                # these counts (Codex). When the verifier had a real snapshot,
+                # report positions; otherwise fall back to the intent-landing
+                # signal rather than a misleading 0/0.
+                if verification.has_position_breakdown:
+                    _fail_closed = verification.positions_closed
+                    _fail_failed = max(verification.positions_total - _fail_closed, 0)
+                else:
+                    _fail_closed = teardown_result.intents_succeeded or 0
+                    _fail_failed = max((teardown_result.intents_total or 0) - _fail_closed, 0)
+                _safe_mark(
+                    state_manager,
+                    "mark_failed",
+                    deployment_id,
+                    error=verify_error_msg,
+                    positions_closed=_fail_closed,
+                    positions_failed=_fail_failed,
+                )
 
     # VIB-5011: token-consolidation phase (Phase 2) — runs ONLY when closure
     # AND verification both succeeded. This is the runner-lane hook; the CLI
@@ -516,11 +558,12 @@ async def execute_and_verify(
         from ..teardown.consolidation import fold_consolidation_outcome
         from ..teardown.models import TeardownPhase
 
+        # VIB-5085: report verified positions closed, not intents landed.
         _safe_mark(
             state_manager,
             "update_progress",
             deployment_id,
-            positions_closed=teardown_result.intents_succeeded,
+            positions_closed=teardown_result.positions_closed,
             current_phase=TeardownPhase.TOKEN_CONSOLIDATION,
         )
         consolidation_outcome = await teardown_mgr.run_token_consolidation(
@@ -660,12 +703,25 @@ def map_teardown_result(
         runner.request_shutdown()
         runner._lifecycle_write_state(deployment_id, "TERMINATED")
         if request:
+            # VIB-5085: ``positions_closed`` reports verified positions closed,
+            # not intents landed. ``mark_completed`` lifts ``result["positions_closed"]``
+            # onto the column (preferring it over the legacy ``result["intents"]``).
+            # The intent signal is preserved alongside under intent-named keys.
+            positions_closed_count = (
+                teardown_result.positions_closed
+                if teardown_result.has_position_breakdown
+                else teardown_result.intents_succeeded
+            )
             _safe_mark(
                 state_manager,
                 "mark_completed",
                 deployment_id,
                 result={
-                    "intents": teardown_result.intents_succeeded,
+                    "positions_closed": positions_closed_count,
+                    "positions_total": teardown_result.positions_total,
+                    "intents": teardown_result.intents_succeeded,  # back-compat alias
+                    "intents_succeeded": teardown_result.intents_succeeded,
+                    "intents_total": teardown_result.intents_total,
                     "mode": mode_str,
                     "duration_s": teardown_result.duration_seconds,
                     # VIB-5011: consolidation summary for result_json — read
@@ -692,20 +748,27 @@ def map_teardown_result(
 
     logger.warning(f"🛑 {deployment_id} teardown incomplete via TeardownManager: {teardown_result.error}")
     if request:
-        # VIB-4542: pass intent-landing counts so postmortem readers see
-        # "6 of 7 landed" instead of "0 / 0 with error_message='1 intents failed'".
-        # ``teardown_result.intents_total / intents_succeeded`` are populated
-        # by ``_execute_intents`` for both partial-success and full-failure
-        # terminal paths.
-        intents_total = teardown_result.intents_total or 0
-        intents_succeeded = teardown_result.intents_succeeded or 0
+        if teardown_result.has_position_breakdown:
+            # VIB-5085: verification ran (e.g. a verify-fail flipped success to
+            # failure) — report the position-level breakdown, not intents.
+            closed = teardown_result.positions_closed
+            failed = max(teardown_result.positions_total - closed, 0)
+        else:
+            # VIB-4542 fallback: execution failed before verification ran, so
+            # there is no position-level breakdown. Preserve the intent-landing
+            # signal ("6 of 7 landed") instead of "0 / 0" — better than nothing
+            # for a postmortem reader. ``intents_total / intents_succeeded`` are
+            # populated by ``_execute_intents`` on both partial-success and
+            # full-failure terminal paths.
+            closed = teardown_result.intents_succeeded or 0
+            failed = max((teardown_result.intents_total or 0) - closed, 0)
         _safe_mark(
             state_manager,
             "mark_failed",
             deployment_id,
             error=teardown_result.error or "teardown failed",
-            positions_closed=intents_succeeded,
-            positions_failed=max(intents_total - intents_succeeded, 0),
+            positions_closed=closed,
+            positions_failed=failed,
         )
     runner._request_teardown_failure_shutdown(teardown_result.error or "teardown failed")
     return IterationResult(

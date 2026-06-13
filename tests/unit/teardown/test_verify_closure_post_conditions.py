@@ -147,6 +147,40 @@ async def test_verify_closure_falls_back_to_in_memory_when_no_snapshot():
 
 
 @pytest.mark.asyncio
+async def test_verify_closure_detailed_marks_in_memory_fallback_as_no_breakdown():
+    """VIB-5085: the in-memory fallback (no pre-execution snapshot) returns a
+    ClosureVerification with ``has_position_breakdown=False`` so lifecycle
+    callers DON'T trust ``positions_closed=0`` and fall back to the intent
+    count — otherwise a balance-driven teardown that closed real positions but
+    exposes no PositionInfo rows would persist ``positions_closed=0`` on
+    success (the inverse of the bug)."""
+    mgr = TeardownManager()
+
+    clean = await mgr._verify_closure_detailed(strategy=_make_strategy(open_positions=[]))
+    assert clean.all_closed is True
+    assert clean.has_position_breakdown is False
+    assert clean.positions_total == 0
+
+    # The snapshot path, by contrast, DOES carry a trustworthy breakdown.
+    snapshot = _make_position_snapshot(
+        SimpleNamespace(
+            protocol="some_unregistered_protocol",
+            position_id="pos-x",
+            chain="ethereum",
+            details={},
+        )
+    )
+    detailed = await mgr._verify_closure_detailed(
+        strategy=_make_strategy(open_positions=[]),
+        pre_execution_positions=snapshot,
+    )
+    assert detailed.all_closed is True
+    assert detailed.has_position_breakdown is True
+    assert detailed.positions_total == 1
+    assert detailed.positions_closed == 1
+
+
+@pytest.mark.asyncio
 async def test_verify_closure_skips_protocols_without_post_condition(
     _restore_traderjoe_v2_hook,
 ):

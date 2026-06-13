@@ -1302,12 +1302,21 @@ def update_teardown_requests_lifecycle(
                 target_token="USDC",
                 requested_by="cli-execute",
                 reason="execute_teardown CLI invocation",
-                positions_total=result.intents_total,
+                positions_total=result.positions_total if result.has_position_breakdown else result.intents_total,
             )
             tsm.create_request(existing)
-        existing.positions_total = max(existing.positions_total, result.intents_total)
-        existing.positions_closed = result.intents_succeeded
-        existing.positions_failed = result.intents_failed
+        # VIB-5085: ``positions_*`` columns must count positions, not intents.
+        # ``execute()`` stamps the verified position breakdown onto the result;
+        # when verification ran, use it. Otherwise fall back to the intent
+        # counts (the pre-VIB-5085 behaviour) so the columns are never blank.
+        if result.has_position_breakdown:
+            existing.positions_total = max(existing.positions_total, result.positions_total)
+            existing.positions_closed = result.positions_closed
+            existing.positions_failed = max(result.positions_total - result.positions_closed, 0)
+        else:
+            existing.positions_total = max(existing.positions_total, result.intents_total)
+            existing.positions_closed = result.intents_succeeded
+            existing.positions_failed = result.intents_failed
         existing.completed_at = datetime.now(UTC)
         existing.status = _TS.COMPLETED if result.success else _TS.FAILED
         tsm.update_request(existing)

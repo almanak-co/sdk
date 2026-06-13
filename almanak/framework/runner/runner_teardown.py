@@ -330,6 +330,53 @@ def _make_approval_callback(runner: Any, state_adapter: Any):
     return on_approval_needed
 
 
+def _count_open_positions(strategy: Any) -> int | None:
+    """Best-effort pre-execution open-position count for teardown bookkeeping.
+
+    VIB-5085: lifecycle ``positions_total`` / ``positions_closed`` must count
+    *positions*, not teardown *intents* — one position can need several
+    intents (REPAY + WITHDRAW + SWAP), so ``len(teardown_intents)``
+    over-reports (the field-report symptom: 2 positions closed via 6 intents
+    logged as ``positions_closed=6``).
+
+    Returns ``None`` when the count can't be read. Callers MUST NOT substitute
+    the intent count for ``positions_closed`` — that re-introduces the exact
+    conflation this ticket fixes. On the unverified multi-chain / inline lanes
+    they instead omit ``positions_closed`` from the result payload and let the
+    persistence lift fall back to the legacy ``result_json["intents"]`` key.
+    """
+    try:
+        positions = strategy.get_open_positions()
+        return len(positions.positions)
+    except Exception:
+        logger.debug(
+            "Teardown bookkeeping: could not read open-position count (positions_closed omitted)",
+            exc_info=True,
+        )
+        return None
+
+
+def _positions_completion_result(open_positions_count: int | None, intents_count: int) -> dict[str, Any]:
+    """Build the ``mark_completed`` result_json for the unverified teardown lanes.
+
+    VIB-5085: always carries the intent signal (``intents`` / ``intents_succeeded``
+    / ``intents_total``); includes ``positions_closed`` / ``positions_total`` ONLY
+    when the open-position count is known. The unverified multi-chain / inline
+    lanes must NEVER fabricate ``positions_closed`` from the intent count — that
+    is the conflation this ticket fixes; when the count is unknown the persistence
+    lift falls back to the legacy ``intents`` key instead. Shared by both lanes.
+    """
+    result: dict[str, Any] = {
+        "intents": intents_count,
+        "intents_succeeded": intents_count,
+        "intents_total": intents_count,
+    }
+    if open_positions_count is not None:
+        result["positions_closed"] = open_positions_count
+        result["positions_total"] = open_positions_count
+    return result
+
+
 def _safe_mark(state_manager: Any, method_name: str, deployment_id: str, **kwargs: Any) -> None:
     """Call a ``mark_*`` state-manager method, swallowing any persistence error.
 
@@ -457,8 +504,15 @@ async def execute_teardown(  # noqa: C901
     # TERMINATED / ERROR writes downstream are unchanged — they take over once
     # the unwind completes (or fails).
     runner._lifecycle_write_state(deployment_id, "TEARING_DOWN")
+    # VIB-5085: record the open-position count (not the intent count) as the
+    # teardown's positions_total. ``None`` when unreadable — the mark_started
+    # denominator then degrades to the intent count (cosmetic; the completion
+    # mark is authoritative), but the completed ``positions_closed`` is NEVER
+    # fabricated from intents (see the multi-chain completion mark below).
+    open_positions_count = _count_open_positions(strategy)
+    total_positions = open_positions_count if open_positions_count is not None else len(teardown_intents)
     if request:
-        _safe_mark(manager, "mark_started", deployment_id, total_positions=len(teardown_intents))
+        _safe_mark(manager, "mark_started", deployment_id, total_positions=total_positions)
 
     # Step T2.5: Pre-fetch prices for tokens in teardown intents
     if teardown_market is not None and hasattr(teardown_market, "price"):
@@ -506,7 +560,16 @@ async def execute_teardown(  # noqa: C901
             logger.info(f"🛑 {deployment_id} teardown complete - shutting down strategy runner")
             runner.request_shutdown()
             if request:
-                _safe_mark(manager, "mark_completed", deployment_id, result={"intents": len(teardown_intents)})
+                # VIB-5085: the multi-chain lane has no position verifier; a
+                # fully-successful teardown closed every open position, so report
+                # the pre-execution count when known (else omit positions_closed
+                # so the lift falls back to the legacy ``intents`` key).
+                _safe_mark(
+                    manager,
+                    "mark_completed",
+                    deployment_id,
+                    result=_positions_completion_result(open_positions_count, len(teardown_intents)),
+                )
         else:
             if request:
                 _safe_mark(manager, "mark_failed", deployment_id, error=result.error or "execution failed")
@@ -919,6 +982,12 @@ async def _execute_teardown_inline_body(  # noqa: C901
 
     deployment_id = strategy.deployment_id
 
+    # VIB-5085: capture the open-position count BEFORE the loop so a
+    # fully-successful inline teardown reports positions closed, not intents
+    # (this lane has no position verifier). ``None`` when unreadable — the
+    # completion mark then omits ``positions_closed`` rather than fabricate it.
+    pre_exec_positions_total = _count_open_positions(strategy)
+
     inline_degraded_count = 0
     all_success = True
     last_result: IterationResult | None = None
@@ -1055,7 +1124,15 @@ async def _execute_teardown_inline_body(  # noqa: C901
             runner._lifecycle_write_state(deployment_id, "TERMINATED")
             runner._record_success()
             if request:
-                _safe_mark(state_manager, "mark_completed", deployment_id, result={"intents": len(teardown_intents)})
+                # VIB-5085: report positions closed (= pre-execution count on a
+                # full success) when known, keeping the intent signal alongside;
+                # omit positions_closed when unknown (lift falls back to intents).
+                _safe_mark(
+                    state_manager,
+                    "mark_completed",
+                    deployment_id,
+                    result=_positions_completion_result(pre_exec_positions_total, len(teardown_intents)),
+                )
         else:
             logger.warning(f"🛑 {deployment_id} teardown incomplete - manual intervention may be required")
             if request:
