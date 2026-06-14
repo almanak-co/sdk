@@ -169,6 +169,7 @@ MIGRATED_STRATEGY_REGISTRATION = {
     "ethena": (("STAKE", "UNSTAKE"), ("ethereum",)),
     "euler_v2": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("ethereum", "avalanche")),
     "fluid": (("SWAP", "SUPPLY", "WITHDRAW"), ("arbitrum", "base", "ethereum", "polygon")),
+    "fluid_dex_lp": (("LP_OPEN", "LP_CLOSE"), ("arbitrum",)),
     "gimo": (("STAKE", "UNSTAKE"), ("zerog",)),
     "gmx_v2": (("PERP_OPEN", "PERP_CLOSE"), ("arbitrum", "avalanche")),
     "jupiter": (("SWAP",), ("solana",)),
@@ -491,6 +492,9 @@ EXPECTED_COMPILER_MODULES = {
     # VIB-5031: the vault NFT-CDP surface is a SECOND thin manifest over the
     # fluid package (one codebase, two manifests — ADR r2 Q0).
     "fluid_vault": ("almanak.connectors.fluid.vault_compiler", "FluidVaultCompiler"),
+    # VIB-5032: the DEX LP (SmartLending) surface is a THIRD thin manifest over
+    # the fluid package (one codebase, three manifests).
+    "fluid_dex_lp": ("almanak.connectors.fluid.dex_lp_compiler", "FluidDexLpCompiler"),
     "gimo": ("almanak.connectors.gimo.compiler", "GimoCompiler"),
     "gmx_v2": ("almanak.connectors.gmx_v2.compiler", "GMXV2Compiler"),
     "hyperliquid": ("almanak.connectors.hyperliquid.compiler", "HyperliquidCompiler"),
@@ -533,6 +537,7 @@ EXPECTED_COMPILER_PROTOCOLS = {
     "euler_v2": ("euler_v2",),
     "fluid": ("fluid", "fluid_lending"),
     "fluid_vault": ("fluid_vault",),
+    "fluid_dex_lp": ("fluid_dex_lp",),
     "gimo": ("gimo",),
     "gmx_v2": ("gmx_v2",),
     "hyperliquid": ("hyperliquid",),
@@ -712,6 +717,7 @@ EXPECTED_ADDRESS_TABLE_MODULES = {
     "compound_v3": "almanak.connectors.compound_v3.addresses",
     "fluid": "almanak.connectors.fluid.addresses",
     "fluid_vault": "almanak.connectors.fluid.addresses",
+    "fluid_dex_lp": "almanak.connectors.fluid.addresses",
     "gmx_v2": "almanak.connectors.gmx_v2.addresses",
     "morpho_blue": "almanak.connectors.morpho_blue.addresses",
     "pancakeswap_perps": "almanak.connectors.pancakeswap_perps.addresses",
@@ -733,6 +739,7 @@ EXPECTED_ADDRESS_TABLE_PROTOCOLS = {
     "compound_v3": ("compound_v3",),
     "fluid": ("fluid",),
     "fluid_vault": ("fluid_vault",),
+    "fluid_dex_lp": ("fluid_dex_lp",),
     "gmx_v2": ("gmx_v2",),
     "morpho_blue": ("morpho_blue",),
     "pancakeswap_perps": ("pancakeswap_perps",),

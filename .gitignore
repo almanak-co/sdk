@@ -26,6 +26,10 @@ venv/
 **/almanak_state.db-wal
 **/almanak_state.db.gw.lock
 **/almanak_state.db.*
+# Runner deferred-write tape — a run-specific, machine-specific accounting
+# replay log written under a strategy folder. Never committed (leaks
+# deployment_id / tx_hash and pollutes consumer checkouts). VIB-5032.
+**/accounting_deferred.jsonl
 almanak_copy_ledger.db
 # Accountant Test reference DB backups (kept locally; never committed).
 docs/internal/AccountantTest-baseline/db-backups/

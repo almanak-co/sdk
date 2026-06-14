@@ -217,6 +217,7 @@ nav:
       - api/connectors/drift.md
       - api/connectors/fluid.md
       - api/connectors/fluid_vault.md
+      - api/connectors/fluid_dex_lp.md
       - api/connectors/lagoon.md
       - api/connectors/meteora.md
       - api/connectors/morpho_vault.md

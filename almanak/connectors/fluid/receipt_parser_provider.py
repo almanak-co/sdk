@@ -54,4 +54,26 @@ class FluidVaultReceiptParserConnector(ReceiptParserConnector, ReceiptParserCapa
         return FluidVaultReceiptParser
 
 
-__all__ = ["FluidReceiptParserConnector", "FluidVaultReceiptParserConnector"]
+class FluidDexLpReceiptParserConnector(ReceiptParserConnector, ReceiptParserCapability):
+    """DEX LP (SmartLending) receipts (VIB-5032) — declared on the
+    ``fluid_dex_lp`` manifest so LP_OPEN/LP_CLOSE receipts compiled under
+    ``protocol="fluid_dex_lp"`` route to the fungible-LP parser (wrapper share
+    mint/burn + token-leg Transfers), never the DEX/fToken or vault parser."""
+
+    protocol: ClassVar[ProtocolName] = ProtocolName("fluid_dex_lp")
+    kind: ClassVar[ProtocolKind] = ProtocolKind.LP
+
+    def receipt_parser_keys(self) -> frozenset[str]:
+        return frozenset({"fluid_dex_lp"})
+
+    def receipt_parser_class(self, key: str) -> type:
+        from almanak.connectors.fluid.dex_lp_receipt_parser import FluidDexLpReceiptParser
+
+        return FluidDexLpReceiptParser
+
+
+__all__ = [
+    "FluidDexLpReceiptParserConnector",
+    "FluidReceiptParserConnector",
+    "FluidVaultReceiptParserConnector",
+]

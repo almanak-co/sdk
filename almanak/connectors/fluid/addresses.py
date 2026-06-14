@@ -110,4 +110,98 @@ FLUID_VAULT_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
     chain: {vault.lower(): entry for vault, entry in rows.items()} for chain, rows in _FLUID_VAULT_MARKETS_SRC.items()
 }
 
-__all__ = ["FLUID", "FLUID_VAULT", "FLUID_VAULT_MARKETS", "FLUID_VAULT_NATIVE_SENTINEL"]
+# =============================================================================
+# DEX LP surface (Phase 4, VIB-5032) — protocol key ``fluid_dex_lp``
+# =============================================================================
+
+# Fluid SmartLending: fungible ERC-20-share wrappers over Fluid DEX pools.
+# Direct pool LP is whitelist-gated (``DexT1__UserSupplyInNotOn`` 51013, Phase-0
+# §V4) — the wrapper IS the whitelisted supplier, so an EOA/Safe can LP through
+# it. The SmartLendingResolver enumerates wrappers + returns per-wrapper
+# (reserves, totalSupply, token0/token1/dex) for resolver-side NAV.
+_FLUID_DEX_LP_CHAIN_ENTRY: dict[str, str] = {
+    # SmartLendingResolver — getAllSmartLendingAddresses + getSmartLendingEntireData.
+    # Verified on Arbitrum (docs/internal/qa/fluid-smartlending-validation-2026-06-12.md).
+    "smart_lending_resolver": "0x3E69A3Af4305b65598b228d3da70786Bd9cfeB0e",
+}
+
+#: Address table for the ``fluid_dex_lp`` manifest. v1 scope: arbitrum only —
+#: the only chain whose SmartLending wrappers were round-tripped on-chain.
+#: Other chains require per-chain resolver verification before being added.
+FLUID_DEX_LP: dict[str, dict[str, str]] = {
+    "arbitrum": dict(_FLUID_DEX_LP_CHAIN_ENTRY),
+}
+
+#: Fluid's native-token sentinel as it appears in a SmartLending wrapper's
+#: TOKEN0()/TOKEN1() slots (e.g. fSL5 FLUID/native-ETH — no WETH wrapping).
+FLUID_DEX_LP_NATIVE_SENTINEL = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+
+#: Pinned SmartLending wrapper universe, keyed by chain -> lowercased wrapper
+#: address (the LP ``pool`` / ``position_id`` canonical form). token0/token1 +
+#: decimals/symbols verified on Arbitrum forks (validation report P0.1-P0.2).
+#: ``deposit_enabled`` records the supply-on state observed at the probe block;
+#: it is documentation only — the compiler ALWAYS re-checks deposit-enabled
+#: live (the 51013 pre-flight), so a wrapper flipping on/off is handled at
+#: compile time, not by this static flag. The compiler refuses any wrapper
+#: outside this table (fail closed — an unpinned wrapper cannot be valued).
+_FLUID_SMARTLENDING_MARKETS_SRC: dict[str, dict[str, dict[str, Any]]] = {
+    "arbitrum": {
+        # fSL5: FLUID / native-ETH (the native-leg fixture).
+        "0x82C53239c4CFC89A8E55A691422af24c18A944b1": {
+            "symbol": "fSL5",
+            "dex": "0x2886a01a0645390872a9eb99dAe1283664b0c524",
+            "token0": "0x61E030A56D33e8260FdD81f03B162A79Fe3449Cd",
+            "token0_symbol": "FLUID",
+            "token0_decimals": 18,
+            "token1": FLUID_DEX_LP_NATIVE_SENTINEL,
+            "token1_symbol": "ETH",
+            "token1_decimals": 18,
+            "native_token1": True,
+            "deposit_enabled": True,
+        },
+        # fSL9: sUSDai / USDC (the round-trip fixture).
+        "0x1F0bFd9862ae58208d26db0d80797974434EC013": {
+            "symbol": "fSL9",
+            "dex": "0x86f874212335Af27C41cDb855C2255543d1499cE",
+            "token0": "0x0B2b2B2076d95dda7817e785989fE353fe955ef9",
+            "token0_symbol": "sUSDai",
+            "token0_decimals": 18,
+            "token1": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "token1_symbol": "USDC",
+            "token1_decimals": 6,
+            "native_token1": False,
+            "deposit_enabled": True,
+        },
+        # fSL12: RLP / USDC (the deposit-DISABLED negative fixture — kept in the
+        # table so the compiler's live 51013 pre-flight is exercised end to end).
+        "0xdC1dF9E55f3B7EBD4F19001b294d1e537320BC2E": {
+            "symbol": "fSL12",
+            "dex": "0x836951EB21F3Df98273517B7249dCEFF270d34bf",
+            "token0": "0x35E5dB674D8e93a03d814FA0ADa70731efe8a4b9",
+            "token0_symbol": "RLP",
+            "token0_decimals": 18,
+            "token1": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "token1_symbol": "USDC",
+            "token1_decimals": 6,
+            "native_token1": False,
+            "deposit_enabled": False,
+        },
+    },
+}
+
+#: Runtime view with LOWERCASED wrapper keys — the canonical lookup form. Source
+#: literals stay EIP-55 checksummed for the repo-wide checksum guard.
+FLUID_SMARTLENDING_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
+    chain: {wrapper.lower(): entry for wrapper, entry in rows.items()}
+    for chain, rows in _FLUID_SMARTLENDING_MARKETS_SRC.items()
+}
+
+__all__ = [
+    "FLUID",
+    "FLUID_DEX_LP",
+    "FLUID_DEX_LP_NATIVE_SENTINEL",
+    "FLUID_SMARTLENDING_MARKETS",
+    "FLUID_VAULT",
+    "FLUID_VAULT_MARKETS",
+    "FLUID_VAULT_NATIVE_SENTINEL",
+]

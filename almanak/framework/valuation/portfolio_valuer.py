@@ -25,6 +25,7 @@ from almanak.framework.portfolio.models import (
     ValueConfidence,
 )
 from almanak.framework.teardown.models import PositionInfo, PositionType
+from almanak.framework.valuation.fungible_lp_position_reader import FungibleLpPositionReader
 from almanak.framework.valuation.lending_position_reader import LendingPositionReader
 from almanak.framework.valuation.lending_valuer import value_lending_position
 from almanak.framework.valuation.lp_position_reader import LPPositionReader
@@ -533,6 +534,10 @@ class PortfolioValuer:
         self._lending_reader = LendingPositionReader(gateway_client)
         self._perps_reader = PerpsPositionReader.from_gateway_client(gateway_client)
         self._vault_reader = VaultPositionReader(gateway_client)
+        # VIB-5032: fungible two-token LP (Fluid SmartLending) — share balance →
+        # per-share (token0, token1) via the connector resolver. The V3-NFT LP
+        # reader cannot value a share-balance position.
+        self._fungible_lp_reader = FungibleLpPositionReader(gateway_client)
         self._discovery = PositionDiscoveryService(gateway_client)
         # VIB-3424: per-position PnL enrichment from accounting_events store.
         self._accounting_store: Any = None
@@ -562,6 +567,7 @@ class PortfolioValuer:
         self._lending_reader = LendingPositionReader(gateway_client)
         self._perps_reader = PerpsPositionReader.from_gateway_client(gateway_client)
         self._vault_reader.set_gateway_client(gateway_client)
+        self._fungible_lp_reader.set_gateway_client(gateway_client)
         self._discovery.set_gateway_client(gateway_client)
 
     def set_accounting_context(self, store: Any, deployment_id: str) -> None:
@@ -1862,29 +1868,7 @@ class PortfolioValuer:
         from almanak.framework.teardown.models import PositionType
 
         if position.position_type == PositionType.LP:
-            # VIB-5018 / VIB-4586 — Uniswap V4 LP has its own isolated,
-            # identity-faithful valuation path. It MUST NOT fall through to the
-            # V3 ``_reprice_lp_on_chain_enriched`` path, whose V3-shaped
-            # ``positions(uint256)`` read corrupts a V4 tokenId into a wrong
-            # pool / wrong tokens / 10^7 amounts (the $289M bug). The V4 stream is
-            # detected by data shape, not protocol name (VIB-4636 capability-gate
-            # discipline): a V4 LP carries a 64-hex PoolKey hash in details, while
-            # a V3 LP carries a 40-hex pool *contract* address (V4 pools have no
-            # contract address — they live in the singleton PoolManager).
-            if self._is_v4_lp_position(position):
-                return self._reprice_v4_lp_enriched(position, chain, market)
-
-            result = self._reprice_lp_on_chain_enriched(position, chain, market)
-            if result is not None:
-                return result[0], result[1], True
-            # No LP path matched (e.g. Aerodrome CL) or on-chain read failed.
-            # VIB-4584 / F3.1 scope: only flag as "no path" when no value source
-            # exists anywhere — strategies that report value_usd > 0 are
-            # asserting a value we trust (the overnight matrix specifically hit
-            # value_usd == 0 with no on-chain path).
-            if position.value_usd > 0:
-                return position.value_usd, {}, True
-            return position.value_usd, {}, False
+            return self._reprice_lp_enriched_dispatch(position, chain, market)
 
         if position.position_type in (PositionType.SUPPLY, PositionType.BORROW):
             result = self._reprice_lending_on_chain_enriched(position, chain, market)
@@ -3201,6 +3185,155 @@ class PortfolioValuer:
         if result is None:
             return None
         return result[0]
+
+    def _reprice_lp_enriched_dispatch(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, dict[str, Any], bool]:
+        """Dispatch an LP position to the correct enriched repricing path.
+
+        Three LP families, gated by capability/data-shape (VIB-4636 discipline),
+        never by a hardcoded protocol name:
+
+        * **Uniswap V4** (VIB-5018 / VIB-4586): isolated identity-faithful path.
+          MUST NOT fall through to the V3 ``positions(uint256)`` read, which
+          corrupts a V4 tokenId into a wrong pool / 10^7 amounts (the $289M bug).
+          Detected by data shape (64-hex PoolKey hash vs 40-hex V3 pool address).
+        * **Fungible two-token LP** (VIB-5032 — Fluid SmartLending): valued from
+          the connector resolver (share balance → token0/token1), NOT the V3-NFT
+          path. Capability-gated by the registered fungible-LP reader. A failed
+          resolver read fails closed (``repriced=False`` → UNAVAILABLE), never a
+          fabricated zero.
+        * **Uniswap V3 / Aerodrome CL**: the V3-shaped on-chain read. VIB-4584 /
+          F3.1: only flag ``no_path`` when no value source exists anywhere —
+          a strategy-reported ``value_usd > 0`` is a value we trust.
+        """
+        if self._is_v4_lp_position(position):
+            return self._reprice_v4_lp_enriched(position, chain, market)
+
+        if self._fungible_lp_reader.supports(position.protocol):
+            result = self._reprice_fungible_lp_enriched(position, chain, market)
+            if result is not None:
+                return result[0], result[1], True
+            return position.value_usd, {}, False
+
+        result = self._reprice_lp_on_chain_enriched(position, chain, market)
+        if result is not None:
+            return result[0], result[1], True
+        if position.value_usd > 0:
+            return position.value_usd, {}, True
+        return position.value_usd, {}, False
+
+    def _reprice_fungible_lp_enriched(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, dict[str, Any]] | None:
+        """Re-price a fungible two-token LP (Fluid SmartLending) — VIB-5032.
+
+        Value = each leg (share→token amount) priced via the oracle and summed.
+        Returns ``None`` on any failure (Empty ≠ Zero — the caller flags
+        ``no_path``/``UNAVAILABLE``); returns a measured ``Decimal("0")`` only
+        for a genuinely empty (zero-share) position.
+        """
+        try:
+            wallet_address = (
+                position.details.get("wallet")
+                or position.details.get("wallet_address")
+                or position.details.get("owner")
+            )
+            wrapper = (
+                position.details.get("pool_address") or position.details.get("wrapper") or position.details.get("pool")
+            )
+            protocol = position.protocol
+            if not wallet_address or not wrapper or not protocol:
+                return None
+
+            on_chain = self._fungible_lp_reader.read_position(
+                protocol=protocol,
+                chain=chain,
+                wrapper=wrapper,
+                wallet_address=wallet_address,
+            )
+            if on_chain is None:
+                return None
+            if not on_chain.is_active:
+                return Decimal("0"), {"wrapper": wrapper, "shares_wei": "0"}
+
+            def _price_leg(address: str, symbol: str) -> Decimal | None:
+                # Price by ADDRESS first — the gateway oracle only builds a
+                # ``ResolvedToken`` (which engages CoinGecko's by-address endpoint
+                # and DexScreener's by-address path) for address-form inputs; a
+                # bare symbol skips those sources. Fall back to the symbol if no
+                # address is available. Empty≠Zero: a miss raises → None (caller
+                # flags UNAVAILABLE), never a fabricated zero.
+                for key in (address, symbol):
+                    if not key:
+                        continue
+                    try:
+                        priced = Decimal(str(market.price(key)))
+                    except Exception:  # noqa: BLE001 — try the next key, else None
+                        continue
+                    # Fail closed on a non-positive price (≤ 0): a real token leg
+                    # is never worth ≤ $0, so a 0/negative is an oracle miss, not a
+                    # measured value. Returning it would underprice the LP while
+                    # marking it repriced AND skip the symbol fallback — so keep
+                    # trying the next key, else None (UNAVAILABLE, Empty≠Zero).
+                    if priced > 0:
+                        return priced
+                return None
+
+            price0 = _price_leg(on_chain.token0_address, on_chain.token0_symbol)
+            price1 = _price_leg(on_chain.token1_address, on_chain.token1_symbol)
+            if price0 is None or price1 is None:
+                logger.debug(
+                    "Could not price fungible-LP legs %s/%s (addr %s/%s)",
+                    on_chain.token0_symbol,
+                    on_chain.token1_symbol,
+                    on_chain.token0_address,
+                    on_chain.token1_address,
+                )
+                return None
+
+            amount0 = Decimal(on_chain.amount0_wei) / Decimal(10**on_chain.token0_decimals)
+            amount1 = Decimal(on_chain.amount1_wei) / Decimal(10**on_chain.token1_decimals)
+            value_usd = amount0 * price0 + amount1 * price1
+            if value_usd <= 0:
+                return None
+
+            details: dict[str, Any] = {
+                "wrapper": wrapper,
+                "shares_wei": str(on_chain.shares_wei),
+                # For a fungible LP the wrapper SHARE balance IS the liquidity
+                # measure (no tick-bracketed concentrated liquidity). Stamp it on
+                # the Track-C snapshot so "liquidity over time" (Accountant LP6)
+                # reads a real value instead of an empty concentrated-LP field.
+                "liquidity": str(on_chain.shares_wei),
+                "token0_symbol": on_chain.token0_symbol,
+                "token1_symbol": on_chain.token1_symbol,
+                "amount0": str(amount0),
+                "amount1": str(amount1),
+                "amount0_wei": str(on_chain.amount0_wei),
+                "amount1_wei": str(on_chain.amount1_wei),
+                "token0_price_usd": str(price0),
+                "token1_price_usd": str(price1),
+            }
+            logger.debug(
+                "Fungible-LP re-priced: position=%s protocol=%s value=$%s (shares=%s %s/%s)",
+                position.position_id,
+                protocol,
+                value_usd,
+                on_chain.shares_wei,
+                on_chain.token0_symbol,
+                on_chain.token1_symbol,
+            )
+            return value_usd, details
+        except Exception:
+            logger.debug("Fungible-LP on-chain re-pricing failed for %s", position.position_id, exc_info=True)
+            return None
 
     def _reprice_vault_on_chain_enriched(
         self,

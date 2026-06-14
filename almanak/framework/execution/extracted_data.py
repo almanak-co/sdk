@@ -365,9 +365,14 @@ class LPOpenData:
             "position_id": self.position_id,
             "tick_lower": self.tick_lower,
             "tick_upper": self.tick_upper,
-            "liquidity": str(self.liquidity) if self.liquidity else None,
-            "amount0": str(self.amount0) if self.amount0 else None,
-            "amount1": str(self.amount1) if self.amount1 else None,
+            # Empty != Zero (CLAUDE.md §Accounting): a truthy guard collapses a
+            # MEASURED zero (e.g. a single-sided LP_OPEN's unfunded leg) to null
+            # (unmeasured), which then fails the typed LPOpenEventPayload Decimal
+            # field downstream. Preserve a measured 0 as "0"; only genuine None
+            # (parser did not measure) serializes to null. (VIB-5032)
+            "liquidity": str(self.liquidity) if self.liquidity is not None else None,
+            "amount0": str(self.amount0) if self.amount0 is not None else None,
+            "amount1": str(self.amount1) if self.amount1 is not None else None,
             "current_tick": self.current_tick,
             "pool_address": self.pool_address,
             "position_hash": self.position_hash,

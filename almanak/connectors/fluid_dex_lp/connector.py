@@ -1,0 +1,49 @@
+"""Fluid DEX LP (SmartLending) connector manifest — ``fluid_dex_lp``."""
+
+from __future__ import annotations
+
+from almanak.connectors._base.types import ProtocolKind
+from almanak.connectors._connector import (
+    Connector,
+    ImportRef,
+)
+from almanak.connectors._strategy_base.address_table import AddressTableSpec
+
+CONNECTOR = Connector(
+    # DEX LP surface (Phase 4, VIB-5032): a third thin manifest over the fluid
+    # package. Fluid SmartLending wrappers are fungible ERC-20-share, two-token
+    # DEX-LP positions (no NFT, no tick range) — direct pool LP is whitelist-
+    # gated (Phase-0 §V4), so the wrapper is the whitelisted supplier. Distinct
+    # protocol key keeps LP accounting keys (``lp:fluid_dex_lp:...``) separate
+    # from the fToken lending (``fluid``) and vault borrow (``fluid_vault``)
+    # surfaces. All implementation modules live in ``almanak.connectors.fluid``.
+    name="fluid_dex_lp",
+    kind=ProtocolKind.LP,
+    aliases=(),
+    # Fungible ERC-20 LP token: ``LPCloseIntent.position_id`` is the wrapper
+    # address, never an NFT discriminator (curve precedent, VIB-4968). Drives
+    # the fungible-LP accounting/position-key path (no tokenId/tick segments).
+    fungible_lp=True,
+    address_tables=(
+        AddressTableSpec(
+            protocol="fluid_dex_lp",
+            module="almanak.connectors.fluid.addresses",
+            attribute="FLUID_DEX_LP",
+        ),
+    ),
+    compiler=ImportRef(
+        module="almanak.connectors.fluid.dex_lp_compiler",
+        attribute="FluidDexLpCompiler",
+    ),
+    receipt_parser_connector=ImportRef(
+        module="almanak.connectors.fluid.receipt_parser_provider",
+        attribute="FluidDexLpReceiptParserConnector",
+    ),
+    strategy_intents=("LP_OPEN", "LP_CLOSE"),
+    # v1 scope — arbitrum only (the sole chain whose SmartLending wrappers were
+    # round-tripped on-chain). base/ethereum/polygon need per-chain resolver
+    # verification before being added.
+    strategy_chains=("arbitrum",),
+)
+
+__all__ = ["CONNECTOR"]

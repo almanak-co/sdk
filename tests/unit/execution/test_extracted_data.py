@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.framework.execution.extracted_data import ProtocolFees, SwapAmounts
+from almanak.framework.execution.extracted_data import LPOpenData, ProtocolFees, SwapAmounts
 
 
 class TestSwapAmountsHumanAliases:
@@ -114,6 +114,27 @@ class TestProtocolFees:
         fees = ProtocolFees(total_usd=Decimal(0))
         with pytest.raises(FrozenInstanceError):
             fees.total_usd = Decimal(1)  # type: ignore[misc]
+
+
+class TestLPOpenDataToDict:
+    def test_to_dict_preserves_measured_zero_amount(self):
+        """VIB-5032 — Empty != Zero at serialization. A single-sided LP_OPEN's
+        unfunded leg is a MEASURED zero; to_dict must emit "0" (measured), not
+        null (unmeasured), or the typed LPOpenEventPayload Decimal field rejects
+        it downstream and blocks Accountant cells G6/G13/LP4."""
+        data = LPOpenData(position_id=0, liquidity=945, amount0=0, amount1=50_000_000)
+        out = data.to_dict()
+        assert out["amount0"] == "0", "measured-zero leg must serialize as '0', not null"
+        assert out["amount1"] == "50000000"
+        assert out["liquidity"] == "945"
+
+    def test_to_dict_preserves_unmeasured_none(self):
+        """A genuinely unmeasured leg (None) still serializes to null."""
+        data = LPOpenData(position_id=0, liquidity=None, amount0=None, amount1=None)
+        out = data.to_dict()
+        assert out["amount0"] is None
+        assert out["amount1"] is None
+        assert out["liquidity"] is None
 
     def test_total_usd_invariant_enforced(self):
         """VIB-3204 audit fix: total_usd must equal sum of populated components.

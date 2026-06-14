@@ -635,7 +635,7 @@ def test_metadata_amount_encoding_equals_frozen_legacy_sets() -> None:
 # almanak/framework/observability/ledger.py and
 # almanak/framework/execution/result_enricher.py protocol carve-outs as of
 # 2026-06-10, frozen verbatim (manifest-derived in VIB-4851 C2/C3).
-FROZEN_FUNGIBLE_LP_PROTOCOLS = frozenset({"curve"})
+FROZEN_FUNGIBLE_LP_PROTOCOLS = frozenset({"curve", "fluid_dex_lp"})  # VIB-5032 — Fluid SmartLending fungible DEX LP
 FROZEN_POOL_KEY_LOOKUP_PROTOCOLS = frozenset({"uniswap_v4"})
 
 
