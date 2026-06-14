@@ -1137,7 +1137,10 @@ class TestExecuteIntentGasGweiChain:
         record = await _execute_swap(engine, config, _gas_market_state())
 
         assert record.gas_price_gwei == config.gas_price_gwei
-        assert record.metadata["gas_price_source"] == "config"
+        # VIB-5088: an unset gas_price_gwei resolves to the chain-aware
+        # registry default and is labeled "chain_default" (user-set values
+        # keep the "config" label -- see test_gas_chain_defaults.py).
+        assert record.metadata["gas_price_source"] == "chain_default"
         assert engine._fallback_usage is not None
         assert engine._fallback_usage["default_gas_price"] == 1
 
@@ -1161,7 +1164,8 @@ class TestExecuteIntentGasGweiChain:
             record = await _execute_swap(engine, config, _gas_market_state())
 
         assert record.gas_price_gwei == config.gas_price_gwei
-        assert record.metadata["gas_price_source"] == "config"
+        # VIB-5088: unset gas resolves to the chain-aware registry default.
+        assert record.metadata["gas_price_source"] == "chain_default"
         assert "use_historical_gas_gwei=True but no gas_provider" in caplog.text
 
     @pytest.mark.asyncio
@@ -1183,7 +1187,10 @@ class TestExecuteIntentGasGweiChain:
         record = await _execute_swap(engine, config, _gas_market_state())
 
         assert record.gas_price_gwei == config.gas_price_gwei
-        assert record.metadata["gas_price_source"] == "config"
+        # VIB-5088: unset gas resolves to the chain-aware registry default;
+        # the compliance fallback counter still fires (a default is still a
+        # fabrication, just a plausible one).
+        assert record.metadata["gas_price_source"] == "chain_default"
         assert engine._fallback_usage is not None
         assert engine._fallback_usage["default_gas_price"] == 1
 
@@ -1198,7 +1205,8 @@ class TestExecuteIntentGasGweiChain:
         assert len(engine._gas_price_records) == 1
         gas_record = engine._gas_price_records[0]
         assert gas_record.gwei == config.gas_price_gwei
-        assert gas_record.source == "config"
+        # VIB-5088: unset gas resolves to the chain-aware registry default.
+        assert gas_record.source == "chain_default"
         assert gas_record.usd_cost == record.gas_cost_usd
         assert gas_record.eth_price_usd == Decimal("3000")
 

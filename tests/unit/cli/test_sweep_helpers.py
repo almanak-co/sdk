@@ -392,7 +392,10 @@ class TestBuildPnlConfig:
         assert cfg.chain == "arbitrum"
         assert cfg.tokens == ["WETH", "USDC"]
         assert cfg.initial_capital_usd == Decimal("10000.0")
-        assert cfg.gas_price_gwei == Decimal("30.0")
+        # VIB-5088: unset gas resolves to the chain-aware registry default
+        # (arbitrum: 0.1 gwei) -- the flat 30 is gone.
+        assert cfg.gas_price_gwei == Decimal("0.1")
+        assert cfg.gas_price_gwei_is_default is True
         # pnl-safe defaults: dataclass defaults retained when caller omits.
         assert cfg.allow_degraded_data is True  # dataclass default
         assert cfg.preflight_validation is True

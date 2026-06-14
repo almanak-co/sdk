@@ -1209,7 +1209,7 @@ def _run_sweep_over_periods(
                 initial_capital=ctx.initial_capital,
                 chain=ctx.chain,
                 tokens=ctx.token_list,
-                gas_price_gwei=30.0,
+                # gas_price_gwei omitted: chain-aware default (VIB-5088)
                 include_gas_costs=True,
                 allow_degraded_data=True,
                 preflight_validation=total_combinations <= 1,
@@ -1703,6 +1703,7 @@ def sweep_backtest(
 # =============================================================================
 
 
+# crap-allowlist: VIB-5088: pre-existing CC=37 in optimize CLI; touched only to drop the flat gas_price_gwei kwarg
 @backtest.command("optimize")
 @click.option(
     "--strategy",
@@ -2049,7 +2050,7 @@ def optimize_backtest(  # noqa: C901
                 initial_capital_usd=Decimal(str(initial_capital)),
                 chain=chain,
                 tokens=token_list,
-                gas_price_gwei=Decimal("30"),
+                # gas_price_gwei omitted: chain-aware default (VIB-5088)
                 include_gas_costs=True,
                 allow_degraded_data=True,
                 preflight_validation=(len(pnl_configs) == 0),

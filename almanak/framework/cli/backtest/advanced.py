@@ -630,7 +630,7 @@ def walk_forward_backtest(  # noqa: C901
         initial_capital_usd=Decimal(str(initial_capital)),
         chain=chain,
         tokens=token_list,
-        gas_price_gwei=Decimal("30"),
+        # gas_price_gwei omitted: chain-aware default (VIB-5088)
         include_gas_costs=True,
     )
 
@@ -890,7 +890,7 @@ def monte_carlo_backtest(  # noqa: C901
         initial_capital_usd=Decimal(str(initial_capital)),
         chain=chain,
         tokens=token_list,
-        gas_price_gwei=Decimal("30"),
+        # gas_price_gwei omitted: chain-aware default (VIB-5088)
         include_gas_costs=True,
     )
 

@@ -138,7 +138,7 @@ def build_pnl_config(
     initial_capital: float,
     chain: str,
     tokens: list[str],
-    gas_price_gwei: float = 30.0,
+    gas_price_gwei: float | None = None,
     include_gas_costs: bool = True,
     allow_degraded_data: bool | None = None,
     preflight_validation: bool | None = None,
@@ -167,7 +167,9 @@ def build_pnl_config(
         "initial_capital_usd": Decimal(str(initial_capital)),
         "chain": chain,
         "tokens": tokens,
-        "gas_price_gwei": Decimal(str(gas_price_gwei)),
+        # None = chain-aware default resolved by PnLBacktestConfig from the
+        # chain registry (VIB-5088 -- no silent flat 30 gwei).
+        "gas_price_gwei": Decimal(str(gas_price_gwei)) if gas_price_gwei is not None else None,
         "include_gas_costs": include_gas_costs,
     }
     if allow_degraded_data is not None:

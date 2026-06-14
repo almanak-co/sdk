@@ -1605,6 +1605,7 @@ The connector registry (`ConnectorRegistry.all()`) is the post-VIB-4298 source o
 | Drift | Perp | `drift` | Solana |
 | Ethena | Staking | `ethena` | Ethereum |
 | Fluid | DEX | `fluid` | Arbitrum |
+| Fluid Vault | Lending | `fluid_vault` | Arbitrum, Base |
 | Gimo | Staking | `gimo` | 0G |
 | Jupiter | DEX | `jupiter` | Solana |
 | Jupiter Lend | Lending | `jupiter_lend` | Solana |

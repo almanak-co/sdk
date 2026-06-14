@@ -209,7 +209,7 @@ config = PnLBacktestConfig(
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `include_gas_costs` | `bool` | `True` | Include gas in PnL |
-| `gas_price_gwei` | `Decimal` | `30` | Gas price |
+| `gas_price_gwei` | `Decimal \| None` | `None` (chain-aware) | Gas price; unset resolves from the chain registry (e.g. 0.1 on Arbitrum, 22 on Ethereum) |
 | `inclusion_delay_blocks` | `int` | `1` | Execution delay |
 
 ### Data Quality

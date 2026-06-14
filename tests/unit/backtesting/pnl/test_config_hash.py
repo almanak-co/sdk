@@ -179,6 +179,9 @@ def test_token_order_does_not_affect_hash(base_config: PnLBacktestConfig) -> Non
         initial_capital_usd=base_config.initial_capital_usd,
         fee_model=base_config.fee_model,
         slippage_model=base_config.slippage_model,
+        # VIB-5088: the gas default is chain-aware, not a constant -- copy
+        # the fixture's explicit value so token order is the only difference.
+        gas_price_gwei=base_config.gas_price_gwei,
         chain=base_config.chain,
         tokens=["USDC", "WETH"],  # Reversed order
         random_seed=base_config.random_seed,

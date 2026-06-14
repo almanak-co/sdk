@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from almanak.core.enums import Chain
 
-from ._descriptor import ChainDescriptor
+from ._descriptor import ChainDescriptor, GasProfile
 
 
 class ChainRegistry:
@@ -178,6 +178,19 @@ class ChainRegistry:
     def names(cls) -> tuple[str, ...]:
         """Return every canonical chain name, sorted."""
         return tuple(sorted(d.name for d in cls._by_enum.values()))
+
+    @classmethod
+    def conservative_gas_fallback(cls) -> GasProfile:
+        """Gas profile assumed for chains with no usable gas facts.
+
+        Policy: an unregistered chain (or one whose descriptor carries no
+        fallback fees) prices like Ethereum mainnet - the most expensive
+        common case - so its backtests overstate rather than understate
+        execution costs. Owned by the registry so framework consumers
+        (e.g. the backtester's default gas resolution, VIB-5088) carry no
+        chain literals (VIB-4851 coupling rule).
+        """
+        return cls._by_enum[Chain.ETHEREUM].gas
 
     @classmethod
     def aliases(cls) -> dict[str, Chain]:

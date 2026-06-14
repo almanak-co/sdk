@@ -168,7 +168,7 @@ def _validate_and_build_context(
     initial_capital: float,
     chain: str,
     tokens: str,
-    gas_price: float,
+    gas_price: float | None,
     output: str | None,
     loaded_from_result: bool,
     pnl_config: PnLBacktestConfig | None,
@@ -210,7 +210,9 @@ def _validate_and_build_context(
             initial_capital_usd=Decimal(str(initial_capital)),
             chain=chain,
             tokens=token_list,
-            gas_price_gwei=Decimal(str(gas_price)),
+            # None = chain-aware default resolved by PnLBacktestConfig from
+            # the chain registry (VIB-5088 -- no silent flat 30 gwei).
+            gas_price_gwei=Decimal(str(gas_price)) if gas_price is not None else None,
             include_gas_costs=True,
         )
 
@@ -266,7 +268,8 @@ def _print_pnl_configuration(
     click.echo(f"Interval: {pnl_config.interval_seconds}s ({pnl_config.interval_seconds / 3600:.1f} hours)")
     click.echo(f"Initial Capital: ${pnl_config.initial_capital_usd:,.2f}")
     click.echo(f"Tokens: {', '.join(ctx.token_list)}")
-    click.echo(f"Gas Price: {pnl_config.gas_price_gwei} Gwei")
+    gas_suffix = " (chain default)" if pnl_config.gas_price_gwei_is_default else ""
+    click.echo(f"Gas Price: {pnl_config.gas_price_gwei} Gwei{gas_suffix}")
     click.echo(f"Estimated Ticks: ~{pnl_config.estimated_ticks:,}")
     click.echo(f"Warm Cache: {'Yes' if warm_cache else 'No'}")
 
@@ -913,8 +916,11 @@ def _generate_html_report(
 @click.option(
     "--gas-price",
     type=float,
-    default=30.0,
-    help="Gas price in Gwei for cost estimation (default: 30)",
+    default=None,
+    help=(
+        "Gas price in Gwei for cost estimation "
+        "(default: chain-aware value from the chain registry, e.g. 0.1 on arbitrum)"
+    ),
 )
 @click.option(
     "--verbose",
@@ -1036,7 +1042,7 @@ def pnl_backtest(
     output: str | None,
     chain: str,
     tokens: str,
-    gas_price: float,
+    gas_price: float | None,
     verbose: bool,
     list_strategies: bool,
     dry_run: bool,

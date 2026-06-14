@@ -728,6 +728,23 @@ class PnLBacktester:
             error=error,
         )
 
+    def _notify_intent_failure(self, strategy: Any, intent: Any, error: Exception) -> None:
+        """Notify the strategy that an intent failed to execute.
+
+        Shared by the missing-data (``DataSourceUnavailableError``) and generic
+        execution-error paths so a strategy state machine never advances past an
+        intent that silently vanished. Best-effort: a raising callback is logged
+        at debug, never propagated (a notification failure must not mask the
+        original execution error).
+        """
+        if strategy is None or not hasattr(strategy, "on_intent_executed"):
+            return
+        try:
+            callback_result = self._build_callback_result(intent, None, success=False, error=str(error))
+            strategy.on_intent_executed(intent, False, callback_result)
+        except Exception as notify_err:
+            logger.debug(f"on_intent_executed (failure) raised: {notify_err}")
+
     def _create_parameter_source_tracker(
         self,
         config: PnLBacktestConfig,
@@ -758,7 +775,6 @@ class PnLBacktester:
             ("fee_model", config.fee_model, default_config.fee_model),
             ("slippage_model", config.slippage_model, default_config.slippage_model),
             ("include_gas_costs", config.include_gas_costs, default_config.include_gas_costs),
-            ("gas_price_gwei", config.gas_price_gwei, default_config.gas_price_gwei),
             ("inclusion_delay_blocks", config.inclusion_delay_blocks, default_config.inclusion_delay_blocks),
             ("chain", config.chain, default_config.chain),
             ("benchmark_token", config.benchmark_token, default_config.benchmark_token),
@@ -782,6 +798,19 @@ class PnLBacktester:
             source = ParameterSource.DEFAULT if value == default_value else ParameterSource.EXPLICIT
             tracker.record_parameter(name, value, source, category="config")
 
+        # gas_price_gwei provenance comes from the config's own flag rather
+        # than the value-equality heuristic above: the default is chain-aware
+        # (VIB-5088), so comparing against a default_config built on
+        # DEFAULT_CHAIN would mislabel defaults on other chains as explicit.
+        # The source stays DEFAULT for unset values -- the value just became
+        # honest -- preserving the audit trail's fabrication signal.
+        tracker.record_parameter(
+            "gas_price_gwei",
+            config.gas_price_gwei,
+            ParameterSource.DEFAULT if config.gas_price_gwei_is_default else ParameterSource.EXPLICIT,
+            category="config",
+        )
+
         # Track gas-related parameters
         if config.gas_eth_price_override is not None:
             tracker.record_parameter(
@@ -798,7 +827,9 @@ class PnLBacktester:
                 "runtime_determined",
                 source,
                 category="gas",
-                fallback_chain=["historical_provider", "current_provider", "fallback_3000"],
+                # The legacy $3000 terminal fallback was removed -- the engine
+                # raises when no ETH/WETH price is available (VIB-5088 audit).
+                fallback_chain=["historical_provider", "current_provider", "raise_if_unavailable"],
             )
 
         # Track margin/liquidation parameters
@@ -1670,14 +1701,38 @@ class PnLBacktester:
                     # Notify strategy with the real outcome so state machines
                     # do not advance past a trade that never applied
                     _engine_helpers.notify_intent_outcome(self, strategy, intent, trade_record, logger)
+                except DataSourceUnavailableError as e:
+                    # VIB-5088 (pattern from VIB-4849): a missing-data signal is a
+                    # deliberate fail-loud -- the engine refused to fabricate a
+                    # number (e.g. institutional mode rejecting the chain-default
+                    # gas price). It must never degrade to a warn-and-skip: the
+                    # trade would silently vanish from the results. Route to the
+                    # error handler if configured (so a stop policy is honoured),
+                    # otherwise re-raise so the backtest fails loudly.
+                    logger.error(
+                        "Missing data source while executing intent at %s: %s",
+                        market_state.timestamp.isoformat(),
+                        e,
+                    )
+                    # Notify the strategy of the failure (mirrors the generic
+                    # exception path below). Without this, a state machine
+                    # waiting on the intent never sees it fail when the error
+                    # handler chooses to continue -- the trade silently vanishes.
+                    self._notify_intent_failure(strategy, intent, e)
+                    if self._error_handler:
+                        result = self._error_handler.handle_error(
+                            e,
+                            context=f"execute_intent:{market_state.timestamp.isoformat()}:{type(intent).__name__}",
+                        )
+                        if result.should_stop:
+                            raise
+                        # Handler explicitly chose to continue: the loud ERROR
+                        # above guarantees the gap is visible.
+                    else:
+                        raise
                 except Exception as e:
                     # Notify strategy of execution failure
-                    if strategy is not None and hasattr(strategy, "on_intent_executed"):
-                        try:
-                            callback_result = self._build_callback_result(intent, None, success=False, error=str(e))
-                            strategy.on_intent_executed(intent, False, callback_result)
-                        except Exception as notify_err:
-                            logger.debug(f"on_intent_executed (failure) raised: {notify_err}")
+                    self._notify_intent_failure(strategy, intent, e)
                     # Use error handler for intent execution errors
                     if self._error_handler:
                         result = self._error_handler.handle_error(
@@ -2057,8 +2112,12 @@ class PnLBacktester:
 
         gas_price_gwei, gas_gwei_source = await self._resolve_gas_price_gwei(config, market_state, timestamp)
 
-        # Track gas gwei source in fallback usage
-        if gas_gwei_source == "config":
+        # Track gas gwei source in fallback usage. Both static lanes count:
+        # "chain_default" (chain-aware registry default, VIB-5088) is an
+        # honest fabrication but a fabrication nonetheless, and "config"
+        # (user-set static value) is still not historical data -- the
+        # compliance flag means "gas did not track historical conditions".
+        if gas_gwei_source in ("config", "chain_default"):
             self._track_fallback("default_gas_price")
 
         # Calculate gas cost: gas_used * gas_price_gwei * ETH_price / 1e9
@@ -2194,7 +2253,11 @@ class PnLBacktester:
         Priority order:
         1. Historical gas price from gas_provider (if use_historical_gas_gwei=True)
         2. MarketState.gas_price_gwei (if populated by data provider)
-        3. config.gas_price_gwei (static default)
+        3. config.gas_price_gwei -- source "config" when user-set, or
+           "chain_default" when it is the chain-aware registry default
+           (VIB-5088). Both are static fabrications for compliance purposes;
+           "chain_default" additionally refuses to resolve in institutional
+           mode (no user value + no historical datum = raise, never fabricate).
 
         Args:
             config: Backtest configuration
@@ -2203,9 +2266,16 @@ class PnLBacktester:
 
         Returns:
             Tuple of (gas_price_gwei, gas_gwei_source)
+
+        Raises:
+            DataSourceUnavailableError: In institutional mode when the gas
+                price would fall back to the chain-registry default (i.e. no
+                user-set value, no historical/market datum).
         """
+        # config.gas_price_gwei is resolved to a Decimal in __post_init__.
+        assert config.gas_price_gwei is not None
         gas_price_gwei = config.gas_price_gwei  # Default
-        gas_gwei_source = "config"
+        gas_gwei_source = "chain_default" if config.gas_price_gwei_is_default else "config"
 
         if config.use_historical_gas_gwei and self.gas_provider is not None:
             # Priority 1: Fetch historical gas price from provider
@@ -2249,6 +2319,27 @@ class PnLBacktester:
             # Priority 2: Use market state gas price if available
             gas_price_gwei = market_state.gas_price_gwei
             gas_gwei_source = "market_state"
+
+        # VIB-5088: institutional mode never fabricates a gas price. The
+        # chain-aware default is an honest guess, but a guess nonetheless --
+        # match the strict_price_mode / data-coverage-gate precedent and
+        # fail loud instead of silently costing trades from a made-up number.
+        if gas_gwei_source == "chain_default" and config.institutional_mode:
+            raise DataSourceUnavailableError(
+                data_type="gas_price",
+                identifier=config.chain,
+                remediation=(
+                    "Set config.gas_price_gwei explicitly, enable "
+                    "use_historical_gas_gwei with a gas_provider, or use a "
+                    "data provider that populates MarketState.gas_price_gwei."
+                ),
+                message=(
+                    f"Institutional mode: gas price for '{config.chain}' at "
+                    f"{timestamp.isoformat()} would fall back to the chain-registry "
+                    f"default ({config.gas_price_gwei} gwei) and institutional mode "
+                    f"refuses to fabricate execution costs"
+                ),
+            )
 
         return gas_price_gwei, gas_gwei_source
 

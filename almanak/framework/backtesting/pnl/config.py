@@ -64,7 +64,39 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
+from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN, ChainRegistry
+
+
+def default_gas_price_gwei_for_chain(chain: str) -> Decimal:
+    """Resolve the chain-aware default gas price in gwei for a chain.
+
+    VIB-5088: the old flat ``Decimal("30")`` default was wrong by two or
+    more orders of magnitude on L2s (a $10k/84-trade Arbitrum run simulated
+    $1,486.72 of gas). Values come from the chain registry --
+    ``ChainDescriptor.gas.fallback_base_fee_gwei`` +
+    ``fallback_priority_fee_gwei`` -- the same sourced constants that back
+    ``DEFAULT_GAS_PRICES`` in ``pnl/providers/gas.py`` (e.g. Arbitrum
+    0.1 + 0.0, Base/Optimism 0.001 + 0.001, Ethereum 20 + 2).
+
+    Chains without registered fallback fees use the ethereum descriptor's
+    values -- the documented conservative default, mirroring the legacy
+    ``DEFAULT_GAS_PRICES.get(chain, DEFAULT_GAS_PRICES["ethereum"])``
+    consumer shape. No numbers are invented here: every value traces to a
+    ``GasProfile`` in ``almanak/core/chains/``.
+
+    Args:
+        chain: Chain identifier (e.g. "arbitrum", "base", "ethereum").
+
+    Returns:
+        Default gas price in gwei (base fee + priority fee) as Decimal.
+    """
+    descriptor = ChainRegistry.try_resolve(chain)
+    gas = descriptor.gas if descriptor is not None else None
+    if gas is None or gas.fallback_base_fee_gwei is None or gas.fallback_priority_fee_gwei is None:
+        # Registry-owned policy (no chain literal here per the VIB-4851
+        # coupling rule): unknown chains assume the most expensive case.
+        gas = ChainRegistry.conservative_gas_fallback()
+    return Decimal(str(gas.fallback_base_fee_gwei)) + Decimal(str(gas.fallback_priority_fee_gwei))
 
 
 @dataclass
@@ -84,7 +116,9 @@ class PnLBacktestConfig:
         slippage_model: Slippage model to use - 'realistic', 'zero', or protocol-specific
             (e.g., 'liquidity_aware', 'constant')
         include_gas_costs: Whether to include gas costs in PnL calculations
-        gas_price_gwei: Gas price to use for cost calculations (default: 30 gwei)
+        gas_price_gwei: Gas price to use for cost calculations (default: None =
+            chain-aware default from the chain registry, e.g. 0.1 gwei on
+            Arbitrum, 22 gwei on Ethereum -- VIB-5088)
         inclusion_delay_blocks: Number of blocks to delay intent execution to simulate
             realistic trade timing (default: 1). When > 0, intents are queued and
             executed in the next iteration(s) rather than immediately.
@@ -123,7 +157,25 @@ class PnLBacktestConfig:
 
     # Gas cost configuration
     include_gas_costs: bool = True
-    gas_price_gwei: Decimal = Decimal("30")
+    gas_price_gwei: Decimal | None = None
+    """Static gas price in gwei for cost simulation (default: None = chain-aware).
+
+    ``None`` means "not set by the user": ``__post_init__`` resolves it via
+    :func:`default_gas_price_gwei_for_chain` from the chain registry and
+    flips ``gas_price_gwei_is_default`` to True (VIB-5088 -- the old flat
+    30 gwei default overstated L2 gas costs by ~100x or more). After
+    construction this field is always a ``Decimal``.
+    """
+
+    gas_price_gwei_is_default: bool = field(init=False, default=False)
+    """Provenance marker: True when ``gas_price_gwei`` was not user-set.
+
+    Set by ``__post_init__`` when the chain-aware registry default was
+    used. The engine consumes this to label the gas price source as
+    ``chain_default`` (still a fabrication for compliance purposes, just a
+    plausible one) and, in institutional mode, to refuse to fabricate gas
+    costs entirely.
+    """
 
     # Execution simulation
     inclusion_delay_blocks: int = 1
@@ -310,7 +362,9 @@ class PnLBacktestConfig:
     When None, gas costs use:
     1. Historical ETH price (if use_historical_gas_prices=True)
     2. Current ETH price from data provider
-    3. Default fallback ($3000) with warning if unavailable
+    3. No fallback -- the engine raises ValueError if no ETH/WETH price is
+       available (the legacy $3000 fabrication was removed; see
+       tests/unit/backtesting/pnl/test_gas_eth_price_fallback.py)
 
     Value should be in USD (e.g., Decimal("3000") for $3000 per ETH).
     """
@@ -326,7 +380,8 @@ class PnLBacktestConfig:
     Priority order for gas price (gwei):
     1. Historical gas price from gas_provider (if use_historical_gas_gwei=True)
     2. MarketState.gas_price_gwei (if populated by data provider)
-    3. config.gas_price_gwei (static default: 30 gwei)
+    3. config.gas_price_gwei (chain-aware default from the chain registry, e.g.
+       ~0.1 gwei on Arbitrum, ~22 gwei on Ethereum -- VIB-5088)
 
     When disabled, gas costs use the static gas_price_gwei for all trades,
     which is faster but may not reflect actual network conditions.
@@ -408,9 +463,8 @@ class PnLBacktestConfig:
         if self.initial_capital_usd <= Decimal("0"):
             raise ValueError("initial_capital_usd must be positive")
 
-        # Gas configuration validation
-        if self.gas_price_gwei < Decimal("0"):
-            raise ValueError("gas_price_gwei cannot be negative")
+        # Gas configuration: resolve + validate (VIB-5088).
+        self._resolve_and_validate_gas_price()
 
         # Inclusion delay validation
         if self.inclusion_delay_blocks < 0:
@@ -456,6 +510,27 @@ class PnLBacktestConfig:
             if self.min_data_coverage < Decimal("0.98"):
                 object.__setattr__(self, "min_data_coverage", Decimal("0.98"))
 
+    def _resolve_and_validate_gas_price(self) -> None:
+        """Resolve the chain-aware gas default and validate the result.
+
+        VIB-5088: ``gas_price_gwei is None`` means "not set by the user" --
+        resolve it from the chain registry (no silent flat 30 gwei) and mark
+        the provenance so the engine can label the source ``chain_default``
+        and institutional mode can refuse to fabricate.
+        """
+        # Direct assignment (the dataclass is not frozen) keeps mypy's
+        # None-narrowing intact for the validation below. Decimal-ness is the
+        # caller's contract (the field is typed Decimal | None and the CLI /
+        # from_dict boundaries already coerce) -- a defensive isinstance(...,
+        # Decimal) branch here would re-introduce the VIB-4062 caller
+        # bifurcation that tests/contracts/test_no_bifurcation.py forbids.
+        if self.gas_price_gwei is None:
+            self.gas_price_gwei = default_gas_price_gwei_for_chain(self.chain)
+            self.gas_price_gwei_is_default = True
+
+        if self.gas_price_gwei < Decimal("0"):
+            raise ValueError("gas_price_gwei cannot be negative")
+
     @property
     def duration_seconds(self) -> int:
         """Get the total backtest duration in seconds."""
@@ -492,7 +567,10 @@ class PnLBacktestConfig:
         Returns:
             Gas cost in USD
         """
-        # Gas cost = gas_used * gas_price (in gwei) * ETH price / 1e9
+        # Gas cost = gas_used * gas_price (in gwei) * ETH price / 1e9.
+        # gas_price_gwei is always a Decimal after __post_init__ (None is
+        # resolved to the chain-aware default there).
+        assert self.gas_price_gwei is not None  # resolved in __post_init__
         gas_cost_eth = Decimal(gas_used) * self.gas_price_gwei / Decimal("1000000000")
         return gas_cost_eth * eth_price_usd
 
@@ -507,6 +585,7 @@ class PnLBacktestConfig:
             "slippage_model": self.slippage_model,
             "include_gas_costs": self.include_gas_costs,
             "gas_price_gwei": str(self.gas_price_gwei),
+            "gas_price_gwei_is_default": self.gas_price_gwei_is_default,
             "inclusion_delay_blocks": self.inclusion_delay_blocks,
             "chain": self.chain,
             "tokens": self.tokens,
@@ -616,6 +695,10 @@ class PnLBacktestConfig:
             "fee_model": self.fee_model,
             "slippage_model": self.slippage_model,
             "include_gas_costs": self.include_gas_costs,
+            # The RESOLVED gas price is hashed, not the provenance flag:
+            # the simulation math depends only on the value, so an explicit
+            # gas_price_gwei equal to the chain default hashes identically
+            # (and pre-VIB-5088 hashes of explicitly-set configs are stable).
             "gas_price_gwei": str(self.gas_price_gwei),
             "inclusion_delay_blocks": self.inclusion_delay_blocks,
             "chain": self.chain,
@@ -687,11 +770,13 @@ class PnLBacktestConfig:
             if isinstance(data["initial_capital_usd"], str)
             else data["initial_capital_usd"]
         )
-        gas_price = (
-            Decimal(data.get("gas_price_gwei", "30"))
-            if isinstance(data.get("gas_price_gwei"), str)
-            else data.get("gas_price_gwei", Decimal("30"))
-        )
+        # VIB-5088: a missing gas_price_gwei deserializes as None so the
+        # chain-aware default resolves in __post_init__. A present value is
+        # preserved byte-for-byte (legacy artifacts always wrote the key, so
+        # pre-VIB-5088 results keep their original -- possibly flat-30 --
+        # behaviour); the provenance flag is restored after construction.
+        raw_gas_price = data.get("gas_price_gwei")
+        gas_price = Decimal(raw_gas_price) if isinstance(raw_gas_price, str) else raw_gas_price
         risk_free_rate = (
             Decimal(data.get("risk_free_rate", "0.05"))
             if isinstance(data.get("risk_free_rate"), str)
@@ -724,7 +809,7 @@ class PnLBacktestConfig:
             else gas_eth_price_override_raw
         )
 
-        return cls(
+        config = cls(
             start_time=start_time,
             end_time=end_time,
             interval_seconds=data.get("interval_seconds", 3600),
@@ -758,6 +843,12 @@ class PnLBacktestConfig:
             preflight_validation=data.get("preflight_validation", True),
             fail_on_preflight_error=data.get("fail_on_preflight_error", True),
         )
+        # Restore gas-price provenance: when the artifact recorded the value
+        # as a chain-aware default, keep the exact serialized value (set
+        # above) but mark it as default-sourced for audit/compliance lanes.
+        if raw_gas_price is not None and data.get("gas_price_gwei_is_default", False):
+            config.gas_price_gwei_is_default = True
+        return config
 
     def __repr__(self) -> str:
         """Return a human-readable representation."""
@@ -771,4 +862,4 @@ class PnLBacktestConfig:
         )
 
 
-__all__ = ["PnLBacktestConfig"]
+__all__ = ["PnLBacktestConfig", "default_gas_price_gwei_for_chain"]

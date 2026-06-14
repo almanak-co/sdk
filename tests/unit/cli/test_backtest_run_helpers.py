@@ -408,7 +408,10 @@ class TestBuildPnlConfigKwargs:
                 tokens=[],
             )
 
-    def test_gas_price_default_is_30(self) -> None:
+    def test_gas_price_default_is_chain_aware(self) -> None:
+        """VIB-5088: the flat 30 gwei default is gone -- an unset gas price
+        resolves from the chain registry (arbitrum: 0.1 gwei) and is marked
+        default-sourced for the audit trail."""
         cfg = build_pnl_config(
             start_time=self._start,
             end_time=self._end,
@@ -417,7 +420,21 @@ class TestBuildPnlConfigKwargs:
             chain="arbitrum",
             tokens=["WETH"],
         )
+        assert cfg.gas_price_gwei == Decimal("0.1")
+        assert cfg.gas_price_gwei_is_default is True
+
+    def test_gas_price_explicit_pass_through(self) -> None:
+        cfg = build_pnl_config(
+            start_time=self._start,
+            end_time=self._end,
+            interval_seconds=3600,
+            initial_capital=1000.0,
+            chain="arbitrum",
+            tokens=["WETH"],
+            gas_price_gwei=30.0,
+        )
         assert cfg.gas_price_gwei == Decimal("30.0")
+        assert cfg.gas_price_gwei_is_default is False
 
     def test_interval_seconds_pass_through(self) -> None:
         cfg = build_pnl_config(
