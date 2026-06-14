@@ -555,12 +555,16 @@ class TestTickPriceConversions:
         assert price > Decimal("0.8")
 
     def test_sqrt_price_to_tick_roundtrip(self) -> None:
-        """Converting tick -> sqrtPrice -> tick should preserve value."""
-        original_tick = 5000
-        sqrt_price_x96 = tick_to_sqrt_price_x96(original_tick)
-        recovered_tick = sqrt_price_x96_to_tick(sqrt_price_x96)
-        # Allow small rounding error
-        assert abs(recovered_tick - original_tick) <= 1
+        """Converting tick -> sqrtPrice -> tick preserves value EXACTLY.
+
+        VIB-5113: the inverse truncated against the floored forward and landed
+        one tick off near boundaries (e.g. tick 1 -> 0, tick -1 -> 0). The
+        bounded correction step makes the round-trip exact across both signs,
+        so this no longer tolerates an off-by-one.
+        """
+        for original_tick in [-100000, -5000, -1, 0, 1, 5000, 100000]:
+            sqrt_price_x96 = tick_to_sqrt_price_x96(original_tick)
+            assert sqrt_price_x96_to_tick(sqrt_price_x96) == original_tick, original_tick
 
     def test_sqrt_price_x96_to_price_known_value(self) -> None:
         """Known sqrtPriceX96 should give known price."""

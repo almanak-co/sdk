@@ -636,13 +636,18 @@ class TestTickMath:
         assert tick == 0
 
     def test_sqrt_price_x96_to_tick_roundtrip(self) -> None:
-        """Test roundtrip conversion."""
-        original_tick = 1000
-        sqrt_price = tick_to_sqrt_price_x96(original_tick)
-        recovered_tick = sqrt_price_x96_to_tick(sqrt_price)
+        """Test roundtrip conversion is EXACT, including negative ticks.
 
-        # Should be within 1 tick due to rounding
-        assert abs(recovered_tick - original_tick) <= 1
+        VIB-5113: the inverse double-floored against the floored forward and
+        landed one tick low for negative ticks (e.g. -1 -> -2). The bounded
+        correction step makes the round-trip exact, so this no longer tolerates
+        an off-by-one — it pins equality across both signs and the boundaries.
+        """
+        from almanak.connectors.uniswap_v3.sdk import MAX_TICK, MIN_TICK
+
+        for original_tick in [MIN_TICK, -100000, -10000, -1000, -1, 0, 1, 1000, 100000, MAX_TICK]:
+            sqrt_price = tick_to_sqrt_price_x96(original_tick)
+            assert sqrt_price_x96_to_tick(sqrt_price) == original_tick, original_tick
 
     def test_sqrt_price_x96_to_tick_invalid(self) -> None:
         """Test invalid sqrt price."""

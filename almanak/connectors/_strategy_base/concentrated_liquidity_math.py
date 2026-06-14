@@ -43,7 +43,19 @@ def tick_to_sqrt_price_x96(tick: int) -> int:
 
 
 def sqrt_price_x96_to_tick(sqrt_price_x96: int) -> int:
-    """Convert a Q64.96 sqrt price to the nearest lower CL tick."""
+    """Convert a Q64.96 sqrt price to a CL tick.
+
+    Returns the greatest tick ``t`` such that
+    ``tick_to_sqrt_price_x96(t) <= sqrt_price_x96`` — Uniswap
+    ``TickMath.getTickAtSqrtRatio`` semantics — pinned to this module's own
+    forward so the round-trip is exact.
+
+    The bare ``floor(log(...))`` estimate double-floors against the floored
+    forward (``int(...)``) and lands one tick low for negative ticks (e.g.
+    tick ``-1`` round-tripped to ``-2``); a bounded correction step pins it
+    back to the invariant. The correction walks at most ~1 tick since the
+    log estimate is already within one of the answer.
+    """
     if sqrt_price_x96 <= 0:
         raise ValueError("sqrt_price_x96 must be positive")
 
@@ -51,8 +63,15 @@ def sqrt_price_x96_to_tick(sqrt_price_x96: int) -> int:
     if ratio <= 0:
         raise ValueError("Invalid sqrt price ratio")
 
-    tick = math.floor(math.log(ratio, math.sqrt(1.0001)))
-    return max(MIN_TICK, min(MAX_TICK, tick))
+    candidate = math.floor(math.log(ratio, math.sqrt(1.0001)))
+    # Clamp to the valid domain first so an out-of-range price (e.g. 2**200)
+    # cannot spin the correction loop against the forward function.
+    candidate = max(MIN_TICK, min(MAX_TICK, candidate))
+    while candidate < MAX_TICK and tick_to_sqrt_price_x96(candidate + 1) <= sqrt_price_x96:
+        candidate += 1
+    while candidate > MIN_TICK and tick_to_sqrt_price_x96(candidate) > sqrt_price_x96:
+        candidate -= 1
+    return candidate
 
 
 def tick_to_price(tick: int, decimals0: int = 18, decimals1: int = 18) -> Decimal:

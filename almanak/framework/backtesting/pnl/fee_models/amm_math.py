@@ -498,10 +498,16 @@ def tick_to_sqrt_price_x96(tick: int) -> int:
 
 
 def sqrt_price_x96_to_tick(sqrt_price_x96: int) -> int:
-    """Convert sqrtPriceX96 to the nearest tick.
+    """Convert sqrtPriceX96 to a tick.
 
-    The inverse of tick_to_sqrt_price_x96.
-    tick = log_1.0001(sqrtPrice^2) = 2 * log_1.0001(sqrtPrice)
+    Inverse of ``tick_to_sqrt_price_x96``: returns the greatest tick ``t`` such
+    that ``tick_to_sqrt_price_x96(t) <= sqrt_price_x96`` (Uniswap
+    ``TickMath.getTickAtSqrtRatio`` semantics), pinned to this module's own
+    forward so the round-trip is exact.
+
+    A bare ``int(2*log(...)/log(1.0001))`` estimate truncates against the
+    floored forward and lands one tick off near boundaries (e.g. tick ``1`` ->
+    ``0``, tick ``-1`` -> ``0``); a bounded correction step pins it back.
 
     Args:
         sqrt_price_x96: sqrtPriceX96 value
@@ -514,11 +520,15 @@ def sqrt_price_x96_to_tick(sqrt_price_x96: int) -> int:
     sqrt_price = sqrt_price_x96 / Q96
     if sqrt_price <= 0:
         return MIN_TICK
-    # tick = log(price) / log(1.0001)
-    # price = sqrtPrice^2
-    # tick = 2 * log(sqrtPrice) / log(1.0001)
-    tick = int(2 * math.log(sqrt_price) / math.log(1.0001))
-    return max(MIN_TICK, min(MAX_TICK, tick))
+    candidate = math.floor(2 * math.log(sqrt_price) / math.log(1.0001))
+    # Clamp to the valid domain first so an out-of-range price cannot spin the
+    # correction loop against the forward function.
+    candidate = max(MIN_TICK, min(MAX_TICK, candidate))
+    while candidate < MAX_TICK and tick_to_sqrt_price_x96(candidate + 1) <= sqrt_price_x96:
+        candidate += 1
+    while candidate > MIN_TICK and tick_to_sqrt_price_x96(candidate) > sqrt_price_x96:
+        candidate -= 1
+    return candidate
 
 
 def sqrt_price_x96_to_price(sqrt_price_x96: int) -> Decimal:
