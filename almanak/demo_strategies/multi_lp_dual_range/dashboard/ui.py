@@ -67,6 +67,7 @@ def render_custom_dashboard(
         api_client,
         session_state=session_state,
         config=config,
+        deployment_id=deployment_id,
     )
 
     render_lp_dashboard(deployment_id, strategy_config, session_state, config, api_client=api_client)

@@ -32,6 +32,7 @@ recent-window default and never reaches this module. Within windowed mode a
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -214,3 +215,23 @@ def granularity_for_range(range_seconds: float, candle_budget: int = DEFAULT_CAN
         if range_seconds / secs <= candle_budget:
             return tf
     return "1d"
+
+
+def candles_for_range(range_seconds: float, timeframe: str, candle_budget: int = DEFAULT_CANDLE_BUDGET) -> int:
+    """Candle count to request for ``range_seconds`` at ``timeframe`` — bounded.
+
+    Pairs with :func:`granularity_for_range` so a windowed price-chart fetch
+    (VIB-5114) asks for exactly the candles spanning the selected window and no
+    more: ``ceil(range_seconds / timeframe_seconds)``, clamped to ``[1,
+    candle_budget]``. Because :func:`granularity_for_range` chose ``timeframe``
+    precisely so the span fits the budget, the clamp is a defensive ceiling, not
+    the normal path — a 7-day window at ``15m`` resolves to ~672 candles, a
+    1-year window at ``1d`` to ~365, never an unbounded request. An unknown
+    timeframe (not in :data:`TIMEFRAME_SECONDS`) falls back to the full budget
+    rather than guessing a span — fail-safe, never unbounded.
+    """
+    secs = TIMEFRAME_SECONDS.get(timeframe)
+    if not secs or range_seconds <= 0:
+        return max(1, candle_budget)
+    needed = math.ceil(range_seconds / secs)  # ceil — correct for int and float range_seconds
+    return max(1, min(needed, candle_budget))

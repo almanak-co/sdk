@@ -102,9 +102,59 @@ def render_pnl_section(deployment_id: str) -> None:
 # Preset NAV/PnL chart ranges (VIB-5059 Phase 2). "All" (0 seconds) = full
 # lifetime; the others are trailing windows ending "now". The server decimates
 # every range to a constant point budget, so even "All" stays bounded.
-_NAV_RANGE_SECONDS: dict[str, int] = {"24h": 86_400, "7d": 604_800, "30d": 2_592_000, "All": 0}
+NAV_RANGE_SECONDS: dict[str, int] = {"24h": 86_400, "7d": 604_800, "30d": 2_592_000, "All": 0}
+"""Public preset-range → trailing-window-seconds map. ``"All"`` → ``0`` (open
+bound = full lifetime). Single source of truth shared by the NAV selector here
+and the TA/LP price-chart templates that follow the same range (VIB-5114)."""
+
+# Backwards-compatible private alias (this module's render code referenced the
+# underscored name before the constant was promoted to public for VIB-5114).
+_NAV_RANGE_SECONDS = NAV_RANGE_SECONDS
 _NAV_RANGE_ORDER = ("24h", "7d", "30d", "All")
 _NAV_MAX_POINTS = 1500
+
+
+def nav_range_session_key(deployment_id: str) -> str:
+    """The ``session_state`` key the NAV range selector writes/reads.
+
+    Single source of truth for the cross-section coordination key (VIB-5114):
+    the NAV selector (:func:`render_nav_history_section`) persists the operator's
+    chosen preset here via the ``st.radio`` ``key=``, and the TA/LP price-chart
+    templates read the SAME key so their candle fetch + trade markers follow the
+    range the operator picked on the NAV chart. Scoped per ``deployment_id`` so
+    two strategies rendered in one Streamlit session never cross-contaminate.
+    """
+    return f"nav_range_{deployment_id}"
+
+
+def selected_nav_range_seconds(
+    deployment_id: str,
+    session_state: dict[str, Any] | None = None,
+) -> int | None:
+    """Resolve the operator's selected NAV range to trailing-window **seconds**.
+
+    Reads the shared range key (:func:`nav_range_session_key`) from the supplied
+    ``session_state`` (the dict the templates already thread through) so the
+    price chart follows the range the operator picked on the NAV chart
+    (VIB-5114). Returns:
+
+    - the trailing-window seconds (e.g. ``604_800`` for ``"7d"``) when a bounded
+      preset is selected;
+    - ``0`` when ``"All"`` is selected (open bound = full lifetime — a *measured*
+      "no lower bound", distinct from "unset");
+    - ``None`` when no range has been selected yet, or the stored value is not a
+      known preset — the caller keeps its existing default-window behaviour
+      unchanged (Empty != Zero: unset is not "All").
+
+    ``session_state`` defaults to ``None`` rather than reading ``st.session_state``
+    implicitly so the resolver stays a pure, unit-testable function; callers that
+    want the live Streamlit state pass ``st.session_state`` explicitly.
+    """
+    state = session_state if session_state is not None else {}
+    label = state.get(nav_range_session_key(deployment_id))
+    if not isinstance(label, str):
+        return None
+    return NAV_RANGE_SECONDS.get(label)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -170,7 +220,7 @@ def render_nav_history_section(deployment_id: str, *, default_range: str = "7d")
         _NAV_RANGE_ORDER,
         index=_NAV_RANGE_ORDER.index(default_range) if default_range in _NAV_RANGE_ORDER else 1,
         horizontal=True,
-        key=f"nav_range_{deployment_id}",
+        key=nav_range_session_key(deployment_id),
         label_visibility="collapsed",
     )
 

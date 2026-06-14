@@ -89,6 +89,7 @@ def render_custom_dashboard(
         api_client,
         session_state=session_state,
         config=config,
+        deployment_id=deployment_id,
     )
 
     # Pass api_client through so the LP template renders the gateway-backed

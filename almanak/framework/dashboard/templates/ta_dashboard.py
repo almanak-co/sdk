@@ -30,7 +30,12 @@ Usage (single indicator):
     )
 
     def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):
-        session_state = prepare_ta_session_state(api_client, session_state, config)
+        # Pass deployment_id so the price chart follows the operator-selected
+        # NAV range (24h/7d/30d) when one is picked (VIB-5114); omitting it
+        # keeps the legacy recent-window fetch.
+        session_state = prepare_ta_session_state(
+            api_client, session_state, config, deployment_id=deployment_id
+        )
         render_ta_dashboard(deployment_id, strategy_config, session_state, config)
 
 Usage (multi-signal):
@@ -42,7 +47,9 @@ Usage (multi-signal):
     config = multi_ta_config(get_rsi_config(), get_macd_config(), get_bollinger_config())
 
     def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):
-        session_state = prepare_ta_session_state(api_client, session_state, config)
+        session_state = prepare_ta_session_state(
+            api_client, session_state, config, deployment_id=deployment_id
+        )
         render_ta_dashboard(deployment_id, strategy_config, session_state, config)
 """
 
@@ -76,11 +83,37 @@ from almanak.framework.dashboard.sections import (
     render_trade_tape_section,
 )
 from almanak.framework.dashboard.templates._ohlcv_window import (
-    normalize_timeframe,
-    ohlcv_limit_for_timeframe,
+    ChartWindow,
+    build_chart_window,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_chart_window(
+    deployment_id: str | None,
+    session_state: dict[str, Any] | None,
+    config_timeframe: str | None,
+) -> ChartWindow:
+    """Pick the OHLCV timeframe / limit / marker ``from_ts`` for this render.
+
+    Reads the operator's selected NAV range from ``session_state`` (the shared
+    ``nav_range_{deployment_id}`` key) and delegates the timeframe/limit/from_ts
+    decision to the pure :func:`build_chart_window`. When the operator has
+    selected a *bounded* range (24h/7d/30d), the price chart follows it
+    (VIB-5114): finer-or-coarser candle granularity for the span and markers
+    fetched from the window start, so a marker never floats outside the plotted
+    candles (``_clip_signals_to_price_window`` is then a no-op backstop).
+
+    ``deployment_id=None``, no range selected, an unknown stored value, or
+    ``"All"`` (open bound, full lifetime) all fall through to the legacy
+    configured-timeframe recent window with ``from_ts=None`` — byte-for-byte the
+    pre-VIB-5114 fetch.
+    """
+    from almanak.framework.dashboard.sections import selected_nav_range_seconds
+
+    range_seconds = selected_nav_range_seconds(deployment_id, session_state) if deployment_id is not None else None
+    return build_chart_window(config_timeframe, range_seconds)
 
 
 @dataclass
@@ -585,12 +618,25 @@ def _decimal_or_none(value: Any) -> Decimal | None:
         return None
 
 
-def _trade_tape_rows(api_client: Any) -> list[dict[str, Any]]:
-    """Extract trade-tape rows from whatever shape the api_client exposes."""
+def _trade_tape_rows(api_client: Any, *, from_ts: datetime | None = None) -> list[dict[str, Any]]:
+    """Extract trade-tape rows from whatever shape the api_client exposes.
+
+    ``from_ts`` (VIB-5114) bounds the markers to the selected NAV window. It is
+    forwarded only when set, and only if the client accepts it — a duck-typed
+    mock with a no-kwarg ``get_trade_tape()`` falls back to the unbounded call
+    rather than raising, so existing custom dashboards keep working.
+    """
     if api_client is None or not hasattr(api_client, "get_trade_tape"):
         return []
     try:
-        tape = api_client.get_trade_tape()
+        if from_ts is not None:
+            try:
+                tape = api_client.get_trade_tape(from_ts=from_ts)
+            except TypeError:
+                # Client predates the windowed signature — fall back unbounded.
+                tape = api_client.get_trade_tape()
+        else:
+            tape = api_client.get_trade_tape()
     except Exception:  # noqa: BLE001
         logger.debug("api_client.get_trade_tape() failed", exc_info=True)
         return []
@@ -829,6 +875,8 @@ def prepare_ta_session_state(
     api_client: Any,
     session_state: dict[str, Any] | None = None,
     config: TADashboardConfig | None = None,
+    *,
+    deployment_id: str | None = None,
 ) -> dict[str, Any]:
     """Enrich session state for ``render_ta_dashboard`` (chart subplot).
 
@@ -849,6 +897,13 @@ def prepare_ta_session_state(
             already populate ``price_history`` keep working.
         config: ``TADashboardConfig`` describing the indicator, pair, and
             chain. Required to know which token to fetch OHLCV for.
+        deployment_id: Optional deployment id used to read the operator's
+            selected NAV range from ``session_state`` (VIB-5114). When supplied
+            AND the operator has picked a bounded range (24h/7d/30d) on the
+            shared NAV chart, the candle granularity + the marker window follow
+            that range. When ``None`` (the default, every legacy call site) or
+            no range is selected, the fetch is byte-for-byte the configured
+            recent window — full backward compatibility.
 
     Returns:
         The enriched session_state dict. Always returns; degrades to the
@@ -862,16 +917,20 @@ def prepare_ta_session_state(
     quote_token = result.get("quote_token") or config.quote_token
     chain = result.get("chain") or config.chain
 
+    # Resolve the chart window once: the strategy's configured recent window by
+    # default, or the operator-selected NAV range when one is active (VIB-5114).
+    # ``deployment_id=None`` (legacy callers) always yields the legacy window.
+    window = _resolve_chart_window(deployment_id, result, config.timeframe)
+
     # OHLCV + price history (skip if caller already supplied).
     price_df: pd.DataFrame | None = None
     if "price_history" not in result and api_client is not None:
         try:
-            timeframe = normalize_timeframe(config.timeframe)
             ohlcv = api_client.get_ohlcv(
                 token=base_token,
                 quote=quote_token,
-                timeframe=timeframe,
-                limit=ohlcv_limit_for_timeframe(timeframe),
+                timeframe=window.timeframe,
+                limit=window.limit,
                 chain=chain,
             )
             price_df = _ohlcv_to_price_history(ohlcv or [])
@@ -905,8 +964,10 @@ def prepare_ta_session_state(
                     result[k.replace(base, slot, 1)] = v
 
     # Chart markers (buy/sell signals) + Performance "Trades" count, both
-    # derived from the trade tape (fetched once).
-    _populate_trade_tape_derived(api_client, result, base_token, quote_token)
+    # derived from the trade tape (fetched once). ``window.from_ts`` bounds the
+    # markers to the same window as the candles (VIB-5114) so they never float
+    # outside the plotted price line.
+    _populate_trade_tape_derived(api_client, result, base_token, quote_token, from_ts=window.from_ts)
 
     if "strategy_start_time" not in result:
         start_time = _strategy_start_time(api_client)
@@ -929,6 +990,8 @@ def _populate_trade_tape_derived(
     result: dict[str, Any],
     base_token: str,
     quote_token: str,
+    *,
+    from_ts: datetime | None = None,
 ) -> None:
     """Populate buy/sell chart markers and the Performance ``total_trades``
     count from the trade tape, fetching it once and reusing it for both.
@@ -937,10 +1000,14 @@ def _populate_trade_tape_derived(
     the number of trade-tape rows — capped by the tape page size (a floor for
     very high-frequency strategies), but far better than the previous
     hardcoded ``0`` shown while a strategy was actively trading.
+
+    ``from_ts`` (VIB-5114) bounds the tape to the selected NAV window so the
+    chart markers follow the plotted candles; ``None`` keeps the legacy
+    newest-N fetch byte-for-byte.
     """
     if "buy_signals" in result and "sell_signals" in result and "total_trades" in result:
         return
-    rows = _trade_tape_rows(api_client)
+    rows = _trade_tape_rows(api_client, from_ts=from_ts)
     if "buy_signals" not in result or "sell_signals" not in result:
         buys, sells = _trade_rows_to_signals(rows, base_token, quote_token)
         result.setdefault("buy_signals", buys)

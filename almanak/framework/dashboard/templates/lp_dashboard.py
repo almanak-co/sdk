@@ -28,7 +28,12 @@ Usage:
     config = get_uniswap_v3_config(token0="WETH", token1="USDC")
 
     def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):
-        session_state = prepare_lp_session_state(api_client, config=config)
+        # Pass session_state + deployment_id so the pool price chart follows the
+        # operator-selected NAV range (24h/7d/30d) when one is picked (VIB-5114);
+        # omitting them keeps the legacy recent-window fetch.
+        session_state = prepare_lp_session_state(
+            api_client, session_state, config=config, deployment_id=deployment_id
+        )
         # Pass api_client so the template renders the gateway-backed
         # Positions registry + Position Lifecycle sections (PR #2373).
         render_lp_dashboard(deployment_id, strategy_config, session_state, config, api_client=api_client)
@@ -57,6 +62,8 @@ from almanak.framework.dashboard.sections import (
     render_trade_tape_section,
 )
 from almanak.framework.dashboard.templates._ohlcv_window import (
+    ChartWindow,
+    build_chart_window,
     normalize_timeframe,
     ohlcv_limit_for_timeframe,
 )
@@ -199,6 +206,8 @@ def prepare_lp_session_state(
     session_state: dict[str, Any] | None = None,
     config: LPDashboardConfig | None = None,
     preserve_keys: Collection[str] | None = None,
+    *,
+    deployment_id: str | None = None,
 ) -> dict[str, Any]:
     """Load strategy data from the gateway and enrich for the LP dashboard.
 
@@ -229,6 +238,14 @@ def prepare_lp_session_state(
             caller-provided value over the live read (e.g. a replay / snapshot
             dashboard that intentionally renders a historical state rather than
             live state). The safe default (``None``) refreshes every live key.
+        deployment_id: Optional deployment id used to read the operator's
+            selected NAV range from ``session_state`` (VIB-5114). When supplied
+            AND a bounded range (24h/7d/30d) is selected on the shared NAV chart,
+            the pool price-history candles follow that range's granularity. When
+            ``None`` (the default, every legacy call site) or no range is
+            selected, the OHLCV fetch is byte-for-byte the configured recent
+            window. (The LP price chart has no trade-tape markers, so only the
+            candle granularity follows the range.)
 
     Returns:
         Enriched dict containing all :data:`LP_CRITICAL_KEYS`.
@@ -278,7 +295,11 @@ def prepare_lp_session_state(
     # source for range/tick fields and must run before the caller fallback.
     events = _populate_position_history(api_client, result, config)
     _hydrate_active_position_from_events(result, events, config)
-    _populate_price_history_by_pool(api_client, result, config)
+    # VIB-5114: the pool candles follow the operator-selected NAV range when one
+    # is active (else the configured recent window). ``deployment_id=None``
+    # (legacy callers) and "All"/unset both yield the legacy window.
+    chart_window = _resolve_lp_chart_window(deployment_id, result, config)
+    _populate_price_history_by_pool(api_client, result, config, chart_window)
     _populate_liquidity_distribution(api_client, result, config)
 
     # Live reads own their keys; fall back to the caller's (last-known) value
@@ -540,25 +561,52 @@ def _collect_pool_keys(result: dict[str, Any]) -> list[tuple[str, str]]:
     return candidates
 
 
+def _resolve_lp_chart_window(
+    deployment_id: str | None,
+    session_state: dict[str, Any] | None,
+    config: LPDashboardConfig | None,
+) -> ChartWindow:
+    """Resolve the pool-candle :class:`ChartWindow` for this LP render (VIB-5114).
+
+    Reads the operator's selected NAV range from ``session_state`` (the shared
+    ``nav_range_{deployment_id}`` key) and delegates to the pure
+    :func:`build_chart_window`. ``deployment_id=None``, no selection, an unknown
+    value, or ``"All"`` all yield the legacy configured-timeframe recent window.
+    The LP chart has no markers, so only ``timeframe`` / ``limit`` are consumed
+    (``from_ts`` is carried for parity but unused by the LP path).
+    """
+    from almanak.framework.dashboard.sections import selected_nav_range_seconds
+
+    config_timeframe = config.timeframe if config else None
+    range_seconds = selected_nav_range_seconds(deployment_id, session_state) if deployment_id is not None else None
+    return build_chart_window(config_timeframe, range_seconds)
+
+
 def _fetch_pool_candles(
     api_client: Any,
     chain: str,
     pool_address: str | None,
     token0: str,
     timeframe: str = "1h",
+    *,
+    limit: int | None = None,
 ) -> list[Any]:
     """Best-effort OHLCV fetch for a single pool. Empty list on any failure.
 
     ``timeframe`` defaults to ``"1h"`` for back-compat; the recent-window candle
     count scales per timeframe via :func:`ohlcv_limit_for_timeframe` (VIB-4969).
+    ``limit`` overrides that count for the windowed path (VIB-5114) — when
+    ``None`` (legacy callers) the per-timeframe recent-window cap is used,
+    byte-for-byte the prior behaviour.
     """
     timeframe = normalize_timeframe(timeframe)
+    candle_limit = limit if limit is not None else ohlcv_limit_for_timeframe(timeframe)
     try:
         return api_client.get_ohlcv(
             token=token0,
             quote="USD",
             timeframe=timeframe,
-            limit=ohlcv_limit_for_timeframe(timeframe),
+            limit=candle_limit,
             chain=chain,
             pool_address=pool_address,
         )
@@ -576,6 +624,7 @@ def _populate_price_history_by_pool(
     api_client: Any,
     result: dict[str, Any],
     config: LPDashboardConfig | None,
+    chart_window: ChartWindow | None = None,
 ) -> None:
     """Fetch lifetime-windowed OHLCV per distinct ``(chain, pool_address)``.
 
@@ -598,11 +647,15 @@ def _populate_price_history_by_pool(
         by_pool = {}
 
     token0 = config.token0 if config else "WETH"
-    timeframe = config.timeframe if config else "1h"
+    # VIB-5114: follow the operator-selected NAV range when one is active; the
+    # resolved window falls back to the configured recent window otherwise, so a
+    # ``None`` ``chart_window`` (legacy callers) preserves the prior behaviour.
+    config_timeframe = config.timeframe if config else "1h"
+    window = chart_window if chart_window is not None else build_chart_window(config_timeframe, None)
     for chain, pool_address in candidates:
         if (chain, pool_address) in by_pool:
             continue
-        candles = _fetch_pool_candles(api_client, chain, pool_address, token0, timeframe)
+        candles = _fetch_pool_candles(api_client, chain, pool_address, token0, window.timeframe, limit=window.limit)
         if candles:
             by_pool[(chain, pool_address)] = candles
 
@@ -616,7 +669,7 @@ def _populate_price_history_by_pool(
         ((_chain, _pool), candles) = next(iter(by_pool.items()))
         result["price_history"] = candles
     elif "price_history" not in result and not by_pool and config is not None and _has_position_history(result):
-        candles = _fetch_pool_candles(api_client, config.chain, None, token0, config.timeframe)
+        candles = _fetch_pool_candles(api_client, config.chain, None, token0, window.timeframe, limit=window.limit)
         if candles:
             result["price_history"] = candles
 

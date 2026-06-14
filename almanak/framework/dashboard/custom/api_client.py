@@ -12,6 +12,7 @@ Custom dashboards cannot import the gateway client directly because:
 
 import logging
 import math
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -211,7 +212,7 @@ class DashboardAPIClient:
             logger.warning(f"Failed to get summary: {e}")
             return {}
 
-    def get_trade_tape(self, limit: int = 50) -> Any:
+    def get_trade_tape(self, limit: int = 50, from_ts: datetime | None = None) -> Any:
         """Get the joined trade-tape view for this strategy.
 
         This is intentionally a thin scoped facade over
@@ -221,13 +222,18 @@ class DashboardAPIClient:
 
         Args:
             limit: Maximum number of rows to return.
+            from_ts: Optional window lower bound (VIB-5059 P2 / VIB-5114). When
+                set, only trades at or after this timestamp are returned, so the
+                chart's buy/sell markers follow the same selected range as the
+                price candles and never float outside the plotted window. ``None``
+                (the default) preserves today's newest-N behaviour byte-for-byte.
 
         Returns:
             ``TradeTapeResponse`` from the gateway client, or an empty response
             shape on failure.
         """
         try:
-            return self._client.get_trade_tape(self._deployment_id, limit=limit)
+            return self._client.get_trade_tape(self._deployment_id, limit=limit, from_ts=from_ts)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to get trade tape: {e}")
             from almanak.framework.dashboard.gateway_client import TradeTapeResponse

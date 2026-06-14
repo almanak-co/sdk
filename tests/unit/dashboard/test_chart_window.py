@@ -13,6 +13,7 @@ from almanak.framework.dashboard.chart_window import (
     MAX_POINTS_FLOOR,
     TIMEFRAME_SECONDS,
     NavPoint,
+    candles_for_range,
     clamp_max_points,
     decimate_nav,
     granularity_for_range,
@@ -171,3 +172,104 @@ def test_legacy_ohlcv_window_values_unchanged() -> None:
     assert ow.ohlcv_limit_for_timeframe("4h") == 180
     assert ow.ohlcv_limit_for_timeframe("1d") == 120
     assert ow.ohlcv_limit_for_timeframe("unknown") == ow.DEFAULT_CANDLE_LIMIT
+
+
+# ---------------------------------------------------------------------------
+# candles_for_range (VIB-5114)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("range_seconds", "timeframe", "expected"),
+    [
+        (3600, "1m", 60),  # 1h @ 1m = 60 candles
+        (86_400, "15m", 96),  # 24h @ 15m = 96
+        (7 * 86_400, "15m", 672),  # 7d @ 15m = 672 (<= budget 720)
+        (30 * 86_400, "1h", 720),  # 30d @ 1h = 720 (exactly budget)
+        (365 * 86_400, "1d", 365),  # 1y @ 1d = 365
+    ],
+)
+def test_candles_for_range_ceil_div(range_seconds: int, timeframe: str, expected: int) -> None:
+    assert candles_for_range(range_seconds, timeframe) == expected
+
+
+@pytest.mark.parametrize(
+    ("range_seconds", "timeframe", "expected"),
+    [
+        (3600.5, "1h", 2),  # just over 1h @ 1h must ceil to 2, not floor to 1
+        (3600.0, "1h", 1),  # exactly 1h @ 1h = 1 (no spurious extra candle)
+        (60.1, "1m", 2),  # just over one 1m candle
+        (299.9, "5m", 1),  # just under one 5m candle still ceils to 1
+    ],
+)
+def test_candles_for_range_fractional_ceil(range_seconds: float, timeframe: str, expected: int) -> None:
+    # range_seconds is typed float; the ceil must be a true math.ceil, not the
+    # integer (a + b - 1) // b trick which under-counts on fractional inputs
+    # (regression guard — CodeRabbit/Gemini PR #2799).
+    assert candles_for_range(range_seconds, timeframe) == expected
+
+
+def test_candles_for_range_pairs_with_granularity_bounded() -> None:
+    # For the standard presets, the granularity_for_range timeframe + candles_for_range
+    # count never exceed the budget — the whole point of the ladder.
+    for rs in (3600, 86_400, 7 * 86_400, 30 * 86_400, 365 * 86_400):
+        tf = granularity_for_range(rs)
+        assert candles_for_range(rs, tf) <= DEFAULT_CANDLE_BUDGET
+
+
+def test_candles_for_range_clamped_to_budget() -> None:
+    # An over-long span at a fine timeframe is clamped to the budget, never unbounded.
+    assert candles_for_range(365 * 86_400, "1m") == DEFAULT_CANDLE_BUDGET
+
+
+def test_candles_for_range_unknown_timeframe_falls_back_to_budget() -> None:
+    assert candles_for_range(86_400, "3h") == DEFAULT_CANDLE_BUDGET
+
+
+def test_candles_for_range_nonpositive_range_falls_back_to_budget() -> None:
+    assert candles_for_range(0, "1h") == DEFAULT_CANDLE_BUDGET
+    assert candles_for_range(-1, "1h") == DEFAULT_CANDLE_BUDGET
+
+
+# ---------------------------------------------------------------------------
+# build_chart_window (VIB-5114) — the shared TA/LP window decision
+# ---------------------------------------------------------------------------
+
+
+def test_build_chart_window_unset_range_is_legacy() -> None:
+    from almanak.framework.dashboard.templates._ohlcv_window import build_chart_window, ohlcv_limit_for_timeframe
+
+    w = build_chart_window("5m", None)
+    assert w.timeframe == "5m"
+    assert w.limit == ohlcv_limit_for_timeframe("5m") == 720
+    assert w.from_ts is None
+
+
+def test_build_chart_window_all_is_legacy() -> None:
+    # "All" → range_seconds == 0 (open bound) → legacy window, NOT a windowed fetch.
+    from almanak.framework.dashboard.templates._ohlcv_window import build_chart_window, ohlcv_limit_for_timeframe
+
+    w = build_chart_window("1h", 0)
+    assert w.timeframe == "1h"
+    assert w.limit == ohlcv_limit_for_timeframe("1h") == 168
+    assert w.from_ts is None
+
+
+def test_build_chart_window_bounded_range_is_windowed() -> None:
+    from almanak.framework.dashboard.templates._ohlcv_window import build_chart_window
+
+    w = build_chart_window("1h", 7 * 86_400)
+    assert w.timeframe == granularity_for_range(7 * 86_400)
+    assert w.limit == candles_for_range(7 * 86_400, w.timeframe)
+    assert w.from_ts is not None
+    # Window start is ~now - 7d (tolerance for wall-clock).
+    delta = (datetime.now(UTC) - w.from_ts).total_seconds()
+    assert abs(delta - 7 * 86_400) < 30
+
+
+def test_build_chart_window_falsy_config_timeframe_normalizes() -> None:
+    from almanak.framework.dashboard.templates._ohlcv_window import build_chart_window
+
+    w = build_chart_window(None, None)
+    assert w.timeframe == "1h"
+    assert w.limit == 168

@@ -180,7 +180,10 @@ class TestGetTradeTape:
         result = api_client.get_trade_tape(limit=25)
 
         assert result is response
-        mock_gateway_client.get_trade_tape.assert_called_once_with("test-strategy", limit=25)
+        # ``from_ts`` is forwarded explicitly (defaults to None = unbounded /
+        # newest-N, byte-equivalent to the gateway client's own default). VIB-5114
+        # threads it so a windowed marker fetch can bound the tape to the chart.
+        mock_gateway_client.get_trade_tape.assert_called_once_with("test-strategy", limit=25, from_ts=None)
 
     def test_get_trade_tape_error_returns_empty_shape(self, api_client, mock_gateway_client):
         """Test error handling returns a typed empty ``TradeTapeResponse``.

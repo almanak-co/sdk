@@ -58,7 +58,9 @@ def render_custom_dashboard(
     config.protocol = "uniswap_v3"
 
     # Framework fetches OHLCV once and computes the RSI + MACD series.
-    session_state = prepare_ta_session_state(api_client, session_state=session_state, config=config)
+    session_state = prepare_ta_session_state(
+        api_client, session_state=session_state, config=config, deployment_id=deployment_id
+    )
 
     # This is an LP strategy: surface LP_OPEN / LP_CLOSE position events as the
     # price-chart markers (prepare_ta_session_state's swap-tape markers are empty
