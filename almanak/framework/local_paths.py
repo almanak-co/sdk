@@ -56,6 +56,18 @@ def _utility_data_dir() -> Path:
     return Path.home() / ".local" / "share" / "almanak" / "utility"
 
 
+def utility_db_path() -> Path:
+    """Return the per-user *utility* DB path — the fallback ``_resolve_db_path``
+    lands on when no explicit DB / strategy folder is resolved.
+
+    Public companion to the resolution internals so callers (VIB-5069: the
+    ``strat pnl`` default-DB helper) can recognise a utility-DB fallback without
+    reaching past the module surface into ``_utility_data_dir``. Read-only — it
+    changes no resolution or boot semantics.
+    """
+    return _utility_data_dir() / LOCAL_DB_FILENAME
+
+
 def _strategy_folder() -> Path | None:
     """Resolve ``ALMANAK_STRATEGY_FOLDER`` to an existing directory, or ``None``.
 

@@ -85,20 +85,53 @@ _MISSING = "—"  # em dash: signals "not yet available"
 
 
 def _default_db_path() -> str:
-    """Resolve the canonical local DB path (VIB-3761).
+    """Resolve the canonical local DB path for ``almanak strat pnl`` (VIB-3761).
 
-    Hosted mode (``ALMANAK_IS_HOSTED`` set) has no local DB; ``almanak strat pnl``
-    is a local-only command, so callers in hosted mode should not be
-    invoking this.
+    VIB-5069: ``strat run`` folder-scopes its DB off the cwd, but the non-strict
+    resolver behind :func:`local_db_path` does not consult the cwd — so a bare
+    ``strat pnl`` (no ``--db``, no env override) silently read the per-user
+    *utility* DB instead of the strategy's book, costing operators a confused
+    round-trip. Pin a cwd-detected strategy folder first (the same
+    :func:`auto_detect_strategy_folder` helper ``almanak gateway`` /
+    ``almanak dashboard`` use) so the two commands agree, and announce a genuine
+    utility-DB fallback so a silent wrong/empty book can't pass unnoticed.
+
+    Precedence is unchanged: an explicit ``ALMANAK_STATE_DB`` or
+    ``ALMANAK_STRATEGY_FOLDER`` still wins in ``_resolve_db_path`` regardless of
+    the cwd, and ``auto_detect_strategy_folder`` returns an already-set
+    ``ALMANAK_STRATEGY_FOLDER`` unchanged rather than overriding it.
+
+    Hosted mode (``ALMANAK_IS_HOSTED`` set) has no local DB; ``strat pnl`` is a
+    local-only command, so hosted callers should not be invoking this.
     """
-    from almanak.framework.local_paths import LocalPathError, local_db_path
+    from almanak.framework.local_paths import (
+        LocalPathError,
+        auto_detect_strategy_folder,
+        local_db_path,
+        utility_db_path,
+    )
+
+    # Pin a strategy folder from cwd when no env override is set. No-op when
+    # ALMANAK_STRATEGY_FOLDER is already set (returned unchanged) and harmless
+    # when ALMANAK_STATE_DB is set (that still wins in _resolve_db_path).
+    auto_detect_strategy_folder()
 
     try:
-        return str(local_db_path())
+        resolved = local_db_path()
     except LocalPathError:
         # Caller can pass --db explicitly; we return a sentinel that
         # fails fast if accidentally used in hosted mode.
         return ":hosted-mode-no-sqlite-path:"
+
+    # Announce a genuine utility-DB fallback (the silent wrong-book is the bug;
+    # the fallback itself is fine). stderr so ``--json`` stdout stays clean.
+    if resolved == utility_db_path():
+        click.echo(
+            f"Using utility DB {resolved} — pass --db or run from a strategy "
+            "folder to read a specific strategy's book.",
+            err=True,
+        )
+    return str(resolved)
 
 
 # ---------------------------------------------------------------------------
