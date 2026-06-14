@@ -57,7 +57,12 @@ from almanak.framework.backtesting.pnl.metrics_calculator import (
     calculate_volatility,
 )
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
-from almanak.framework.intents.lending_intents import SupplyIntent, WithdrawIntent
+from almanak.framework.intents.lending_intents import (
+    BorrowIntent,
+    RepayIntent,
+    SupplyIntent,
+    WithdrawIntent,
+)
 from almanak.framework.intents.vocabulary import LPCloseIntent, LPOpenIntent
 from tests.validation.backtesting.trust_matrix import (
     CELLS_BY_ID,
@@ -526,6 +531,45 @@ def test_supply_withdraw_round_trip_conserves_value() -> None:
     # NOT be double-counted.
     drift = result.final_capital_usd - INITIAL_CAPITAL
     assert Decimal("0") <= drift < Decimal("1")
+
+
+@pytest.mark.trust_cell("lending:borrow_repay_conservation")
+def test_borrow_repay_round_trip_conserves_value() -> None:
+    """BORROW opens debt + credits cash; REPAY extinguishes it (VIB-5098).
+
+    Real lending-lane intents through the real engine loop. The borrow must
+    be a real $2,000 fill (debt position + cash inflow, equity-neutral), and
+    the repay must close the matched BORROW position -- pre-fix the borrow
+    was a $0 no-op and the repay burned the $2,000 from cash.
+    """
+    intents = [
+        SupplyIntent(protocol="aave_v3", token="USDC", amount=Decimal("5000")),
+        BorrowIntent(
+            protocol="aave_v3",
+            collateral_token="USDC",
+            collateral_amount=Decimal("0"),
+            borrow_token="USDC",
+            borrow_amount=Decimal("2000"),
+        ),
+        None,
+        RepayIntent(protocol="aave_v3", token="USDC", amount=Decimal("2000")),
+    ]
+    result = run_backtest(
+        ScriptedStrategy(intents),
+        flat_series(10),
+        hours=6,
+        strategy_type="lending",
+    )
+
+    assert result.success
+    assert result.metrics.total_trades == 3
+    assert all(trade.success for trade in result.trades)
+    # The borrow is a real $2,000 fill, not a no-op.
+    assert result.trades[1].amount_usd == Decimal("2000")
+    # Drift = supply interest earned - borrow interest owed over a few open
+    # hours: cents, never principal. Pre-fix this was ~-$2,000.
+    drift = result.final_capital_usd - INITIAL_CAPITAL
+    assert abs(drift) < Decimal("1")
 
 
 @pytest.mark.trust_cell("lending:rejection_no_state_change")

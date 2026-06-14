@@ -939,11 +939,20 @@ def _calculate_borrow_flows(
     amount_usd: Decimal,
     market_state: MarketState,
 ) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
-    """BORROW: borrowed token arrives in the wallet."""
+    """BORROW: borrowed token arrives in the wallet.
+
+    BORROW vocabulary intents (``BorrowIntent``) name the received token as
+    ``borrow_token`` -- it must win over the generic token/asset scan,
+    which would otherwise credit the default symbol (VIB-5098).
+    """
     tokens_in: dict[str, Decimal] = {}
     tokens_out: dict[str, Decimal] = {}
 
-    token = _resolve_single_token(intent, "USDC")
+    borrow_token = getattr(intent, "borrow_token", None)
+    if isinstance(borrow_token, str) and borrow_token:
+        token: Any = _normalize_token(borrow_token)
+    else:
+        token = _resolve_single_token(intent, "USDC")
 
     try:
         price = market_state.get_price(token)

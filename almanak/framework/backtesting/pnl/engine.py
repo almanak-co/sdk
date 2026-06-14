@@ -521,8 +521,18 @@ class _CloseResolution:
             instant (mirroring the perp close credit).
         position_close_id: Position to close in full, if any.
         position_reduce_id: Position to partially reduce, if any.
-        interest_usd: Accrued interest realized by a full lending close;
-            recorded as the trade's realized PnL via metadata.
+        interest_usd: Accrued interest realized by a lending close OR a
+            boundary partial reduce (amount covers all principal + part of the
+            accrued interest). Recorded as the trade's realized PnL via
+            metadata. Positive for a WITHDRAW (interest earned), NEGATIVE for a
+            REPAY (borrow interest owed -- VIB-5098).
+        reduce_amounts: Explicit per-token principal to remove on a partial
+            reduce. Set only for a BOUNDARY reduce (``interest_usd`` also set):
+            the fill's flow covers principal + part of the accrued interest, so
+            the principal to remove (the position's full held principal) is
+            SMALLER than the flow. None means an ordinary sub-principal partial
+            whose reduce debits the full flow (engine derives it from
+            tokens_in / tokens_out). Only meaningful with ``position_reduce_id``.
         failure_reason: Set when the fill must be rejected unapplied.
     """
 
@@ -530,6 +540,7 @@ class _CloseResolution:
     position_close_id: str | None = None
     position_reduce_id: str | None = None
     interest_usd: Decimal = Decimal("0")
+    reduce_amounts: dict[str, Decimal] | None = None
     failure_reason: str | None = None
 
 
@@ -1985,9 +1996,23 @@ class PnLBacktester:
             position_close_id=position_close_id,
             position_reduce_id=close_resolution.position_reduce_id,
             # Partial reductions debit the position by exactly the fill's
-            # inflow token amounts, keeping the reduction value-conserving
-            # by construction.
-            position_reduce_amounts=dict(tokens_in) if close_resolution.position_reduce_id else {},
+            # flow on the position's side -- the credited inflow for a
+            # WITHDRAW (tokens leave the supply), the debited outflow for a
+            # REPAY (tokens extinguish the debt) -- keeping the reduction
+            # value-conserving by construction. A BOUNDARY reduce instead
+            # carries an explicit principal map (the flow also covers part of
+            # the accrued interest, which is realized rather than removed as
+            # principal -- VIB-5098); the gap is re-derived by the portfolio's
+            # conservation guard.
+            position_reduce_amounts=(
+                close_resolution.reduce_amounts
+                if close_resolution.reduce_amounts is not None
+                else (
+                    dict(tokens_out if intent_type == IntentType.REPAY else tokens_in)
+                    if close_resolution.position_reduce_id
+                    else {}
+                )
+            ),
             metadata=metadata,
             gas_price_gwei=gas_price_gwei,
             estimated_mev_cost_usd=estimated_mev_cost_usd,
@@ -2763,6 +2788,8 @@ class PnLBacktester:
             return _CloseResolution(amount_usd=amount_usd, position_close_id=position_close_id)
         if intent_type == IntentType.WITHDRAW:
             return self._resolve_withdraw_close(intent, portfolio, amount_usd, market_state)
+        if intent_type == IntentType.REPAY:
+            return self._resolve_repay_close(intent, portfolio, amount_usd, market_state)
         return _CloseResolution(amount_usd=amount_usd, position_close_id=self._get_position_close_id(intent))
 
     def _resolve_withdraw_close(
@@ -2810,27 +2837,190 @@ class PnLBacktester:
         if price <= Decimal("0"):
             price = position.entry_price
         principal_value = position.total_amount * price
+        total_supply = principal_value + position.interest_accrued
 
-        # Relative dust tolerance: an amount within Decimal round-trip
-        # error of the full principal is a full close, not a partial that
-        # strands dust principal (same rationale as the portfolio's
-        # _DEBIT_DUST_RELATIVE_TOLERANCE).
-        full_close_floor = principal_value * (Decimal("1") - Decimal("1E-9"))
+        # Relative dust tolerance: an amount within Decimal round-trip error of
+        # the FULL balance (principal + accrued interest) is a full close, not a
+        # partial that strands dust principal. Thresholding on total_supply (not
+        # principal alone) mirrors the REPAY fix (VIB-5098 / CodeRabbit PR
+        # #2777): a withdraw that covers principal but only part of the earned
+        # interest must NOT full-close and over-credit the remaining interest.
+        full_close_floor = total_supply * (Decimal("1") - Decimal("1E-9"))
         withdraw_all = bool(getattr(intent, "withdraw_all", False))
+
+        # FULL CLOSE: withdraw_all, an unresolvable / non-positive amount, or an
+        # amount that covers principal + all earned interest within dust.
+        # Notional = principal + interest; the interest realizes as POSITIVE PnL.
+        # NOTE: a zero-principal position is NOT force-closed here -- a withdraw
+        # >= its earned interest hits this branch via full_close_floor (= the
+        # interest), while a smaller withdraw is rejected below rather than
+        # over-crediting the whole interest (CodeRabbit PR #2777 round 2; mirror
+        # of the REPAY interest-only fix).
         if withdraw_all or amount_usd <= Decimal("0") or amount_usd >= full_close_floor:
-            if amount_usd > principal_value:
+            if amount_usd > total_supply:
                 logger.warning(
-                    "WITHDRAW amount $%s exceeds matched supply principal $%s; "
-                    "capping the withdrawal to principal + accrued interest",
+                    "WITHDRAW amount $%s exceeds matched supply $%s (principal $%s + "
+                    "accrued interest $%s); capping to the full balance",
                     amount_usd,
+                    total_supply,
                     principal_value,
+                    position.interest_accrued,
                 )
             return _CloseResolution(
-                amount_usd=principal_value + position.interest_accrued,
+                amount_usd=total_supply,
                 position_close_id=position.position_id,
                 interest_usd=position.interest_accrued,
             )
-        return _CloseResolution(amount_usd=amount_usd, position_reduce_id=position.position_id)
+
+        # SUB-PRINCIPAL PARTIAL (amount <= principal): the withdrawn inflow
+        # comes out of principal only; accrued interest stays on the position
+        # and realizes when it eventually closes in full.
+        if amount_usd <= principal_value:
+            return _CloseResolution(amount_usd=amount_usd, position_reduce_id=position.position_id)
+
+        # BOUNDARY PARTIAL (principal < amount < total_supply): the withdraw
+        # takes ALL principal plus PART of the earned interest. Remove the
+        # principal in full and realize the withdrawn interest as POSITIVE PnL;
+        # the position stays open carrying the unwithdrawn interest remainder.
+        principal_tokens = {token: amt for token, amt in position.amounts.items() if amt > Decimal("0")}
+        if not principal_tokens:
+            # Interest-only position (0 principal): no principal token to reduce,
+            # so a withdraw that does not cover the full earned interest cannot
+            # be partially settled. Reject (zero state mutation) rather than
+            # full-closing it, which would credit the entire interest, not the
+            # requested amount.
+            return _CloseResolution(
+                amount_usd=amount_usd,
+                failure_reason=(
+                    f"WITHDRAW ${amount_usd} cannot partially settle an interest-only supply position "
+                    f"(0 principal, ${position.interest_accrued} accrued interest); "
+                    f"withdraw >= the accrued interest to close it"
+                ),
+            )
+        interest_paid = amount_usd - principal_value
+        return _CloseResolution(
+            amount_usd=amount_usd,
+            position_reduce_id=position.position_id,
+            interest_usd=interest_paid,
+            reduce_amounts=principal_tokens,
+        )
+
+    def _resolve_repay_close(
+        self,
+        intent: Any,
+        portfolio: SimulatedPortfolio,
+        amount_usd: Decimal,
+        market_state: MarketState,
+    ) -> _CloseResolution:
+        """Resolve the BORROW position a REPAY intent closes or reduces.
+
+        Debt-side mirror of :meth:`_resolve_withdraw_close` (VIB-5098): the
+        repaid principal must come OUT of the matched BORROW position --
+        without this linkage the outflow debits cash while the debt keeps
+        counting against equity (a $2,000 repay burned ~$2,000). Matching
+        targets BORROW positions only via
+        :func:`find_borrow_close_position_id` (exact-id precedence, then
+        FIFO by (token, protocol), fail closed).
+
+        Semantics:
+
+        - No open borrow position matches -> the fill is rejected
+          (``failure_reason``), zero state mutation.
+        - ``repay_full`` / unresolvable amount / amount >= debt principal ->
+          full close: notional = debt principal value + accrued borrow
+          interest, the interest realizing as NEGATIVE PnL (the cost of
+          having borrowed -- sign-mirrored from the withdraw credit).
+        - amount < debt principal -> partial: the position's principal is
+          reduced by the repaid token amount; accrued borrow interest stays
+          on the position and is realized when it eventually closes in full.
+        """
+        from .intent_extraction import find_borrow_close_position_id
+
+        position_close_id = find_borrow_close_position_id(intent, portfolio.positions)
+        position = portfolio.get_position(position_close_id) if position_close_id else None
+        if position is None:
+            return _CloseResolution(
+                amount_usd=amount_usd,
+                failure_reason="REPAY matched no open borrow position to repay",
+            )
+
+        # Price the debt principal the way every valuation path does
+        # (entry-price fallback when the market price is unavailable).
+        try:
+            price = market_state.get_price(position.primary_token)
+        except KeyError:
+            price = position.entry_price
+        if price <= Decimal("0"):
+            price = position.entry_price
+        debt_value = position.total_amount * price
+        total_debt = debt_value + position.interest_accrued
+
+        # Relative dust tolerance: an amount within Decimal round-trip error of
+        # the FULL debt (principal + accrued interest) is a full close, not a
+        # partial that strands dust debt. Thresholding on total_debt (not
+        # principal alone) is the VIB-5098 fix: a repay that covers principal
+        # but only part of the interest must NOT full-close and overspend the
+        # remaining interest (CodeRabbit, PR #2777).
+        full_close_floor = total_debt * (Decimal("1") - Decimal("1E-9"))
+        repay_full = bool(getattr(intent, "repay_full", False)) or bool(getattr(intent, "repay_all", False))
+
+        # FULL CLOSE: repay_full, an unresolvable / non-positive amount, or an
+        # amount that covers principal + all accrued interest within dust.
+        # Notional = principal + interest; the interest realizes as NEGATIVE PnL
+        # (the cost of having borrowed). NOTE: a zero-principal position is NOT
+        # force-closed here -- a repay >= its accrued interest hits this branch
+        # via full_close_floor (= the interest), while a smaller repay is
+        # rejected below rather than over-paying the whole interest (CodeRabbit
+        # PR #2777 round 2; the same over-spend, applied to an interest-only
+        # remainder left by a prior boundary partial).
+        if repay_full or amount_usd <= Decimal("0") or amount_usd >= full_close_floor:
+            if amount_usd > total_debt:
+                logger.warning(
+                    "REPAY amount $%s exceeds matched debt $%s (principal $%s + "
+                    "accrued borrow interest $%s); capping to the full debt",
+                    amount_usd,
+                    total_debt,
+                    debt_value,
+                    position.interest_accrued,
+                )
+            return _CloseResolution(
+                amount_usd=total_debt,
+                position_close_id=position.position_id,
+                interest_usd=-position.interest_accrued,
+            )
+
+        # SUB-PRINCIPAL PARTIAL (amount <= principal): the repaid outflow
+        # extinguishes principal only; accrued borrow interest stays on the
+        # position and realizes when it eventually closes in full.
+        if amount_usd <= debt_value:
+            return _CloseResolution(amount_usd=amount_usd, position_reduce_id=position.position_id)
+
+        # BOUNDARY PARTIAL (principal < amount < total_debt): the repay covers
+        # ALL principal plus PART of the accrued interest. Remove the principal
+        # in full and realize the covered interest as NEGATIVE PnL; the position
+        # stays open carrying the unpaid interest remainder (VIB-5098).
+        principal_tokens = {token: amt for token, amt in position.amounts.items() if amt > Decimal("0")}
+        if not principal_tokens:
+            # Interest-only position (0 principal): there is no principal token
+            # to reduce, so a repay that does not cover the full accrued interest
+            # cannot be partially settled through the principal-reduce path.
+            # Reject (zero state mutation) rather than full-closing it, which
+            # would move the entire interest, not the requested amount.
+            return _CloseResolution(
+                amount_usd=amount_usd,
+                failure_reason=(
+                    f"REPAY ${amount_usd} cannot partially settle an interest-only borrow position "
+                    f"(0 principal, ${position.interest_accrued} accrued interest); "
+                    f"repay >= the accrued interest to close it"
+                ),
+            )
+        interest_paid = amount_usd - debt_value
+        return _CloseResolution(
+            amount_usd=amount_usd,
+            position_reduce_id=position.position_id,
+            interest_usd=-interest_paid,
+            reduce_amounts=principal_tokens,
+        )
 
     def _resolve_perp_close(
         self,

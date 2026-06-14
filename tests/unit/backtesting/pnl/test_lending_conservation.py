@@ -1,4 +1,4 @@
-"""Conservation-of-value invariants for the lending lane (VIB-5097).
+"""Conservation-of-value invariants for the lending lane (VIB-5097, VIB-5098).
 
 A lending SUPPLY -> WITHDRAW round trip must conserve value: the withdrawn
 principal comes OUT of the matched SUPPLY position. Before VIB-5097 the
@@ -21,6 +21,25 @@ The fixed semantics (engine ``_resolve_withdraw_close``):
 - A WITHDRAW with no matching open SUPPLY position is a failed fill with
   zero state mutation (apply_fill's validate-then-commit contract) --
   crediting the inflow from nothing would mint value.
+
+The debt side mirrors the same mechanics (VIB-5098). Before that fix BORROW
+was an economic no-op (``BorrowIntent.borrow_amount`` was invisible to the
+engine's amount extraction, so no cash inflow and a zero-amount debt
+position) and REPAY burned cash (the outflow debited cash but never closed
+or reduced the matched BORROW position -- a $2,000 repay lost ~$2,000 of
+equity). The fixed semantics (engine ``_resolve_repay_close``):
+
+- BORROW credits the borrowed token (swept to cash when stable) AND opens a
+  BORROW-type position whose valuation SUBTRACTS debt, so the open is
+  equity-neutral minus costs.
+- Full repay (``repay_full``, unresolvable amount, or amount >= debt
+  principal) closes the matched BORROW position and debits debt principal +
+  accrued borrow interest; the interest realizes as NEGATIVE PnL.
+- Partial repay reduces the debt principal by exactly the fill's outflow
+  token amounts; accrued borrow interest stays on the position until it
+  closes in full.
+- A REPAY with no matching open BORROW position is a failed fill with zero
+  state mutation -- debiting cash with no debt to extinguish burns value.
 
 Companion to ``test_perp_conservation.py`` (collateral lane) and
 ``test_portfolio_conservation.py`` (token-flow lanes).
@@ -49,7 +68,12 @@ from almanak.framework.backtesting.pnl.portfolio import (
     SimulatedPortfolio,
     SimulatedPosition,
 )
-from almanak.framework.intents.lending_intents import SupplyIntent, WithdrawIntent
+from almanak.framework.intents.lending_intents import (
+    BorrowIntent,
+    RepayIntent,
+    SupplyIntent,
+    WithdrawIntent,
+)
 from tests.unit.backtesting.pnl._mocks import MockDataProvider
 from tests.validation.backtesting.trust_matrix import (
     INITIAL_CAPITAL,
@@ -61,6 +85,9 @@ from tests.validation.backtesting.trust_matrix import (
 TS = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
 INITIAL_CASH = Decimal("10000")
 SUPPLY_AMOUNT = Decimal("5000")
+BORROW_AMOUNT = Decimal("2000")
+#: The engine's default borrow APY (_borrow_delta) for intents without one.
+BORROW_APY = Decimal("0.08")
 
 
 def market(usdc: Decimal = Decimal("1")) -> MarketState:
@@ -90,12 +117,45 @@ def supply_position(
     return position
 
 
+def borrow_position(
+    amount: Decimal = BORROW_AMOUNT,
+    token: str = "USDC",
+    protocol: str = "aave_v3",
+    entry_time: datetime = TS,
+    interest_accrued: Decimal = Decimal("0"),
+) -> SimulatedPosition:
+    position = SimulatedPosition.borrow(
+        token=token,
+        amount=amount,
+        apy=BORROW_APY,
+        entry_price=Decimal("1"),
+        entry_time=entry_time,
+        protocol=protocol,
+    )
+    position.interest_accrued = interest_accrued
+    return position
+
+
 def supply_intent(amount: Decimal = SUPPLY_AMOUNT) -> SupplyIntent:
     return SupplyIntent(protocol="aave_v3", token="USDC", amount=amount)
 
 
 def withdraw_intent(amount: Decimal, withdraw_all: bool = False) -> WithdrawIntent:
     return WithdrawIntent(protocol="aave_v3", token="USDC", amount=amount, withdraw_all=withdraw_all)
+
+
+def borrow_intent(amount: Decimal = BORROW_AMOUNT, token: str = "USDC") -> BorrowIntent:
+    return BorrowIntent(
+        protocol="aave_v3",
+        collateral_token="USDC",
+        collateral_amount=Decimal("0"),
+        borrow_token=token,
+        borrow_amount=amount,
+    )
+
+
+def repay_intent(amount: Decimal, repay_full: bool = False, token: str = "USDC") -> RepayIntent:
+    return RepayIntent(protocol="aave_v3", token=token, amount=amount, repay_full=repay_full)
 
 
 def _backtester() -> PnLBacktester:
@@ -115,23 +175,27 @@ def _config() -> PnLBacktestConfig:
     )
 
 
-def _exact_interest(principal: Decimal, hours: int) -> Decimal:
+def _exact_interest(principal: Decimal, hours: int, apy: Decimal = Decimal("0.05")) -> Decimal:
     """The exact interest both accrual lanes produce for the interval.
 
     Mirrors ``_mark_lending_position`` / ``LendingBacktestAdapter
     .update_position``: elapsed seconds -> days via ``Decimal(str(...))``,
-    compound daily interest on the principal at apy 0.05 (the fixture APY,
-    matching the engine's SUPPLY default).
+    compound daily interest on the principal at the position's entry APY
+    (0.05 = the engine's SUPPLY default, 0.08 = its BORROW default).
     """
     from almanak.framework.backtesting.pnl.calculators.interest import InterestCalculator
 
     days = Decimal(str(timedelta(hours=hours).total_seconds())) / Decimal("86400")
-    return InterestCalculator().calculate_interest(
-        principal=principal,
-        apy=Decimal("0.05"),
-        time_delta=days,
-        compound=True,
-    ).interest
+    return (
+        InterestCalculator()
+        .calculate_interest(
+            principal=principal,
+            apy=apy,
+            time_delta=days,
+            compound=True,
+        )
+        .interest
+    )
 
 
 # =============================================================================
@@ -281,6 +345,68 @@ class TestEngineWithdrawClose:
         assert portfolio.get_total_value_usd(state) == INITIAL_CASH
 
     @pytest.mark.asyncio
+    async def test_boundary_withdraw_takes_all_principal_and_partial_interest(self) -> None:
+        """A withdraw in (principal, principal + interest) removes ALL principal
+        and realizes only the WITHDRAWN interest; the position stays open
+        carrying the remainder (VIB-5098 / PR #2777 mirror of the repay fix)."""
+        backtester = _backtester()
+        config = _config()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        state = market()
+        interest = Decimal("25")
+
+        await backtester._execute_intent(supply_intent(), portfolio, state, TS, config)
+        # Stamp earned interest the way a mark would; withdraw at the SAME
+        # instant so accrue-before-reduce is a no-op and the math is exact.
+        portfolio.positions[0].interest_accrued = interest
+
+        # Covers all $5,000 principal + $10 of the $25 earned interest.
+        await backtester._execute_intent(
+            withdraw_intent(SUPPLY_AMOUNT + Decimal("10")), portfolio, state, TS, config
+        )
+
+        assert len(portfolio.positions) == 1
+        position = portfolio.positions[0]
+        assert position.amounts.get("USDC", Decimal("0")) == Decimal("0")
+        assert position.interest_accrued == Decimal("15")  # 25 - 10 withdrawn
+        assert portfolio._closed_positions == []
+        # Cash in equals the REQUESTED withdraw -- not the full balance (the old
+        # bug over-credited to $5,025 here).
+        assert portfolio.cash_usd == INITIAL_CASH - SUPPLY_AMOUNT + (SUPPLY_AMOUNT + Decimal("10"))
+        assert portfolio._realized_pnl == Decimal("10")
+        withdraw_trade = portfolio.trades[-1]
+        assert withdraw_trade.success
+        assert withdraw_trade.pnl_usd == Decimal("10")
+        assert withdraw_trade.amount_usd == SUPPLY_AMOUNT + Decimal("10")
+        # Equity drift is the full earned interest ($25): $10 realized + $15
+        # still on the open position. Principal is conserved.
+        assert portfolio.get_total_value_usd(state) == INITIAL_CASH + interest
+
+    @pytest.mark.asyncio
+    async def test_withdraw_covering_principal_only_defers_interest(self) -> None:
+        """Withdrawing EXACTLY the principal (interest earned) is a sub-principal
+        partial: principal -> 0, interest deferred (not over-credited)."""
+        backtester = _backtester()
+        config = _config()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        state = market()
+        interest = Decimal("25")
+
+        await backtester._execute_intent(supply_intent(), portfolio, state, TS, config)
+        portfolio.positions[0].interest_accrued = interest
+
+        await backtester._execute_intent(withdraw_intent(SUPPLY_AMOUNT), portfolio, state, TS, config)
+
+        assert len(portfolio.positions) == 1
+        position = portfolio.positions[0]
+        assert position.amounts.get("USDC", Decimal("0")) == Decimal("0")
+        assert position.interest_accrued == interest  # fully deferred
+        assert portfolio._realized_pnl == Decimal("0")
+        # Cash in == principal exactly (the old bug closed and credited $5,025).
+        assert portfolio.cash_usd == INITIAL_CASH
+        assert portfolio.get_total_value_usd(state) == INITIAL_CASH + interest
+
+    @pytest.mark.asyncio
     async def test_withdraw_without_open_supply_is_rejected(self) -> None:
         """No matching open SUPPLY position = failed fill, zero mutation."""
         backtester = _backtester()
@@ -399,6 +525,17 @@ class TestLendingCloseMatching:
         intent = SimpleNamespace(protocol="aave_v3", amount=SUPPLY_AMOUNT)
 
         assert find_lending_close_position_id(intent, [supply_position()]) is None
+
+    def test_explicit_unknown_id_fails_closed_without_fifo_fallback(self) -> None:
+        """A typoed/stale explicit id must NOT fall through to FIFO and
+        withdraw the oldest supply for that token (CodeRabbit, PR #2777):
+        exact-id intent => exact-id match or nothing."""
+        older = supply_position(entry_time=TS)
+        newer = supply_position(entry_time=TS + timedelta(hours=1))
+        intent = withdraw_intent(SUPPLY_AMOUNT)
+        object.__setattr__(intent, "position_id", "SUPPLY_aave_v3_USDC_does_not_exist")
+
+        assert find_lending_close_position_id(intent, [older, newer]) is None
 
     def test_two_same_token_supplies_still_fifo_match_oldest(self) -> None:
         """FIFO-oldest among multiple (token, protocol) matches is the
@@ -712,17 +849,19 @@ class TestProtocolScopedMatching:
 
 
 class TestZeroPrincipalPosition:
-    """An empty supply position is not a FIFO trap: it full-closes for its interest.
+    """An empty supply position is not a FIFO trap.
 
     Gemini review on PR #2758 suggested auto-closing a position whose
     principal hits zero after a partial reduce. That would DROP accrued
     interest from equity without realizing it (a conservation violation in
-    the opposite direction). The value-correct behavior, pinned here: the
-    withdraw router resolves any withdraw against a zero-principal position
-    as a FULL close whose notional is exactly the accrued interest.
+    the opposite direction). The value-correct behavior, pinned here: a
+    withdraw that covers the accrued interest FULL-closes for exactly that
+    interest; a withdraw that does NOT cover it is rejected (zero mutation)
+    rather than force-closed for the whole interest, which would credit more
+    than the requested amount (CodeRabbit PR #2777 round 2).
     """
 
-    def test_withdraw_from_zero_principal_position_full_closes_for_interest(self) -> None:
+    def test_withdraw_covering_interest_of_zero_principal_position_full_closes(self) -> None:
         interest = Decimal("12.34")
         empty = supply_position(amount=Decimal("0"), interest_accrued=interest)
         portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CAPITAL)
@@ -737,6 +876,694 @@ class TestZeroPrincipalPosition:
         assert resolution.position_reduce_id is None
         assert resolution.amount_usd == interest
         assert resolution.interest_usd == interest
+
+    def test_withdraw_below_interest_of_zero_principal_position_is_rejected(self) -> None:
+        """A withdraw that does not cover the full earned interest of an
+        interest-only position is rejected -- NOT force-closed for the whole
+        interest (the over-credit mirror of the REPAY fix)."""
+        interest = Decimal("12.34")
+        empty = supply_position(amount=Decimal("0"), interest_accrued=interest)
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CAPITAL)
+        portfolio.positions.append(empty)
+        backtester = _backtester()
+
+        resolution = backtester._resolve_withdraw_close(
+            withdraw_intent(Decimal("5")), portfolio, Decimal("5"), market()
+        )
+
+        assert resolution.position_close_id is None
+        assert resolution.position_reduce_id is None
+        assert resolution.failure_reason is not None
+        assert "interest-only" in resolution.failure_reason
+
+
+# =============================================================================
+# Debt side (VIB-5098): BORROW opens debt, REPAY extinguishes it
+# =============================================================================
+
+
+class TestEngineBorrowOpensDebt:
+    """BORROW credits cash AND opens a debt position: equity-neutral entry.
+
+    Pre-VIB-5098, ``BorrowIntent.borrow_amount`` was invisible to the
+    engine's amount extraction, so BORROW produced a $0 fill: no cash
+    inflow, a zero-amount debt position -- leverage loops backtested as if
+    borrows never happened.
+    """
+
+    @pytest.mark.asyncio
+    async def test_borrow_credits_cash_and_opens_debt(self) -> None:
+        backtester = _backtester()
+        config = _config()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        state = market()
+
+        await backtester._execute_intent(supply_intent(), portfolio, state, TS, config)
+        await backtester._execute_intent(borrow_intent(), portfolio, state, TS, config)
+
+        borrow_trade = portfolio.trades[-1]
+        assert borrow_trade.success
+        assert borrow_trade.amount_usd == BORROW_AMOUNT
+        # Cash: -supply +borrow; the borrowed USDC sweeps into cash_usd.
+        assert portfolio.cash_usd == INITIAL_CASH - SUPPLY_AMOUNT + BORROW_AMOUNT
+        debts = [p for p in portfolio.positions if p.position_type.value == "BORROW"]
+        assert len(debts) == 1
+        assert debts[0].amounts["USDC"] == BORROW_AMOUNT
+        # Debt subtracts from equity: the borrow is equity-neutral.
+        assert portfolio._get_position_value(debts[0], state) == -BORROW_AMOUNT
+        assert portfolio.get_total_value_usd(state) == INITIAL_CASH
+
+    @pytest.mark.asyncio
+    async def test_borrow_prices_the_borrow_token_not_the_collateral_token(self) -> None:
+        """A WETH borrow against USDC collateral is sized at the WETH price.
+
+        Pre-fix the token scan in ``get_intent_amount_usd`` would have hit
+        ``collateral_token`` first; the borrow leg must price ``borrow_token``.
+        """
+        backtester = _backtester()
+        config = _config()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        state = market()
+
+        await backtester._execute_intent(supply_intent(), portfolio, state, TS, config)
+        await backtester._execute_intent(borrow_intent(amount=Decimal("1"), token="WETH"), portfolio, state, TS, config)
+
+        borrow_trade = portfolio.trades[-1]
+        assert borrow_trade.success
+        assert borrow_trade.amount_usd == Decimal("2000")  # 1 WETH @ $2000
+        assert portfolio.tokens["WETH"] == Decimal("1")
+        debts = [p for p in portfolio.positions if p.position_type.value == "BORROW"]
+        assert len(debts) == 1
+        assert debts[0].amounts["WETH"] == Decimal("1")
+        assert portfolio.get_total_value_usd(state) == INITIAL_CASH
+
+    def test_adapter_lane_mark_subtracts_debt(self) -> None:
+        """The adapter lane's mark must SUBTRACT debt, like every other path.
+
+        ``LendingBacktestAdapter.value_position`` returns the debt MAGNITUDE
+        for BORROW positions by contract ("the portfolio handles subtracting
+        borrows"); pre-VIB-5098 ``mark_to_market`` added it, so every open
+        borrow inflated adapter-lane equity by 2x the debt.
+        """
+        adapter = LendingBacktestAdapter()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        interest = Decimal("25")
+        portfolio.positions.append(borrow_position(interest_accrued=interest))
+
+        adapter_value = portfolio.mark_to_market(market(), TS, adapter=adapter)
+        generic_value = portfolio.mark_to_market(market(), TS)
+
+        assert adapter_value == INITIAL_CASH - BORROW_AMOUNT - interest
+        assert adapter_value == generic_value
+
+
+class TestEngineRepayClose:
+    """REPAY debits cash AND closes/reduces the matched BORROW position.
+
+    Pre-VIB-5098 the outflow debited cash with no position linkage: a
+    $2,000 repay lost ~$2,000 of equity (measured -$1,999.71 with default
+    costs).
+    """
+
+    @pytest.mark.asyncio
+    async def test_borrow_then_full_repay_round_trip_conserves_value(self) -> None:
+        backtester = _backtester()
+        config = _config()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        state = market()
+
+        await backtester._execute_intent(supply_intent(), portfolio, state, TS, config)
+        await backtester._execute_intent(borrow_intent(), portfolio, state, TS, config)
+        # No mark runs in between, so rates are exactly zero: the round trip
+        # is Decimal-exact (zero fees / slippage / gas in this fixture).
+        await backtester._execute_intent(
+            repay_intent(Decimal("0"), repay_full=True), portfolio, state, TS + timedelta(hours=1), config
+        )
+
+        assert all(trade.success for trade in portfolio.trades)
+        assert [p.position_type.value for p in portfolio.positions] == ["SUPPLY"]
+        assert len(portfolio._closed_positions) == 1
+        assert portfolio.cash_usd == INITIAL_CASH - SUPPLY_AMOUNT
+        assert portfolio.get_total_value_usd(state) == INITIAL_CASH
+
+    @pytest.mark.asyncio
+    async def test_exact_amount_repay_closes_in_full(self) -> None:
+        """amount == debt principal (repay_full=False) is a full close."""
+        backtester = _backtester()
+        config = _config()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        state = market()
+
+        await backtester._execute_intent(borrow_intent(), portfolio, state, TS, config)
+        await backtester._execute_intent(repay_intent(BORROW_AMOUNT), portfolio, state, TS, config)
+
+        assert portfolio.positions == []
+        assert portfolio.cash_usd == INITIAL_CASH
+        assert portfolio.get_total_value_usd(state) == INITIAL_CASH
+
+    @pytest.mark.asyncio
+    async def test_partial_repay_reduces_debt_principal(self) -> None:
+        backtester = _backtester()
+        config = _config()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        state = market()
+        partial = Decimal("500")
+
+        await backtester._execute_intent(borrow_intent(), portfolio, state, TS, config)
+        await backtester._execute_intent(repay_intent(partial), portfolio, state, TS + timedelta(hours=1), config)
+
+        assert all(trade.success for trade in portfolio.trades)
+        assert len(portfolio.positions) == 1
+        position = portfolio.positions[0]
+        assert position.amounts["USDC"] == BORROW_AMOUNT - partial
+        assert portfolio._closed_positions == []
+        assert portfolio.cash_usd == INITIAL_CASH + BORROW_AMOUNT - partial
+        # The hour between borrow and repay accrues borrow interest on the
+        # FULL pre-reduce debt at the fill instant (accrue-before-reduce);
+        # equity shrinks by exactly that owed interest and nothing else.
+        accrued = _exact_interest(BORROW_AMOUNT, hours=1, apy=BORROW_APY)
+        assert position.interest_accrued == accrued
+        assert portfolio.get_total_value_usd(state) == INITIAL_CASH - accrued
+
+    @pytest.mark.asyncio
+    async def test_full_repay_realizes_accrued_borrow_interest_as_negative_pnl(self) -> None:
+        """Accrued borrow interest is paid on close and realizes as a loss."""
+        backtester = _backtester()
+        config = _config()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        state = market()
+        interest = Decimal("25")
+
+        await backtester._execute_intent(borrow_intent(), portfolio, state, TS, config)
+        # Interest accrual is owned by the mark/update paths; stamp it the
+        # way a mark would have.
+        portfolio.positions[0].interest_accrued = interest
+
+        await backtester._execute_intent(
+            repay_intent(Decimal("0"), repay_full=True), portfolio, state, TS + timedelta(hours=1), config
+        )
+
+        assert portfolio.positions == []
+        assert portfolio.cash_usd == INITIAL_CASH - interest
+        assert portfolio.get_total_value_usd(state) == INITIAL_CASH - interest
+        repay_trade = portfolio.trades[-1]
+        assert repay_trade.success
+        assert repay_trade.pnl_usd == -interest
+        assert repay_trade.amount_usd == BORROW_AMOUNT + interest
+        assert portfolio._realized_pnl == -interest
+
+    @pytest.mark.asyncio
+    async def test_repay_beyond_debt_caps_to_debt_plus_interest(self) -> None:
+        """Repaying more than owed cannot burn the difference."""
+        backtester = _backtester()
+        config = _config()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        state = market()
+
+        await backtester._execute_intent(borrow_intent(), portfolio, state, TS, config)
+        await backtester._execute_intent(
+            repay_intent(Decimal("9000")), portfolio, state, TS + timedelta(hours=1), config
+        )
+
+        assert portfolio.positions == []
+        assert portfolio.cash_usd == INITIAL_CASH
+        assert portfolio.get_total_value_usd(state) == INITIAL_CASH
+        assert portfolio.trades[-1].amount_usd == BORROW_AMOUNT
+
+    @pytest.mark.asyncio
+    async def test_boundary_repay_pays_all_principal_and_partial_interest(self) -> None:
+        """A repay in (principal, principal + interest) extinguishes ALL
+        principal and realizes only the COVERED interest as a loss; the position
+        stays open carrying the unpaid interest remainder (VIB-5098 / PR #2777).
+
+        Pre-fix this overspent: a $2,010 repay against $2,000 principal + $25
+        interest full-closed and debited the whole $2,025.
+        """
+        backtester = _backtester()
+        config = _config()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        state = market()
+        interest = Decimal("25")
+
+        await backtester._execute_intent(borrow_intent(), portfolio, state, TS, config)
+        # Stamp accrued interest the way a mark would; repay at the SAME instant
+        # so accrue-before-reduce is a no-op and the math is exact.
+        portfolio.positions[0].interest_accrued = interest
+
+        # Covers all $2,000 principal + $10 of the $25 accrued interest.
+        await backtester._execute_intent(repay_intent(Decimal("2010")), portfolio, state, TS, config)
+
+        assert len(portfolio.positions) == 1
+        position = portfolio.positions[0]
+        assert position.amounts.get("USDC", Decimal("0")) == Decimal("0")
+        assert position.interest_accrued == Decimal("15")  # 25 - 10 paid
+        assert portfolio._closed_positions == []
+        # Cash out equals the REQUESTED repay -- not the full debt.
+        assert portfolio.cash_usd == INITIAL_CASH + BORROW_AMOUNT - Decimal("2010")
+        assert portfolio._realized_pnl == Decimal("-10")
+        repay_trade = portfolio.trades[-1]
+        assert repay_trade.success
+        assert repay_trade.pnl_usd == Decimal("-10")
+        assert repay_trade.amount_usd == Decimal("2010")
+        # Equity drift is the full accrued interest ($25): $10 realized + $15
+        # still owed on the open position. Principal is conserved.
+        assert portfolio.get_total_value_usd(state) == INITIAL_CASH - interest
+
+    @pytest.mark.asyncio
+    async def test_repay_covering_principal_only_defers_interest(self) -> None:
+        """Repaying EXACTLY the principal (interest accrued) is a sub-principal
+        partial: principal -> 0, interest deferred -- it does NOT full-close and
+        overspend the accrued interest (the pre-fix bug)."""
+        backtester = _backtester()
+        config = _config()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        state = market()
+        interest = Decimal("25")
+
+        await backtester._execute_intent(borrow_intent(), portfolio, state, TS, config)
+        portfolio.positions[0].interest_accrued = interest
+
+        await backtester._execute_intent(repay_intent(BORROW_AMOUNT), portfolio, state, TS, config)
+
+        assert len(portfolio.positions) == 1
+        position = portfolio.positions[0]
+        assert position.amounts.get("USDC", Decimal("0")) == Decimal("0")
+        assert position.interest_accrued == interest  # fully deferred
+        assert portfolio._realized_pnl == Decimal("0")
+        # Cash out == principal exactly (the old bug spent $2,025).
+        assert portfolio.cash_usd == INITIAL_CASH
+        assert portfolio.get_total_value_usd(state) == INITIAL_CASH - interest
+
+    @pytest.mark.asyncio
+    async def test_boundary_repay_then_small_repay_of_interest_remainder_is_rejected(self) -> None:
+        """After a boundary repay leaves a 0-principal interest remainder, a
+        SUBSEQUENT repay of LESS than that interest is rejected -- it must not
+        force-close and over-pay the whole remainder (CodeRabbit PR #2777 r2:
+        the boundary fix must not re-introduce the over-spend on the leftover)."""
+        backtester = _backtester()
+        config = _config()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        state = market()
+        interest = Decimal("25")
+
+        await backtester._execute_intent(borrow_intent(), portfolio, state, TS, config)
+        portfolio.positions[0].interest_accrued = interest
+        # Boundary repay: all $2,000 principal + $10 interest -> 0 principal, $15 interest left.
+        await backtester._execute_intent(repay_intent(Decimal("2010")), portfolio, state, TS, config)
+        position = portfolio.positions[0]
+        assert position.amounts.get("USDC", Decimal("0")) == Decimal("0")
+        assert position.interest_accrued == Decimal("15")
+
+        cash_before = portfolio.cash_usd
+        realized_before = portfolio._realized_pnl
+        # Subsequent $5 repay < $15 remaining interest -> rejected, zero mutation.
+        await backtester._execute_intent(repay_intent(Decimal("5")), portfolio, state, TS, config)
+
+        reject = portfolio.trades[-1]
+        assert reject.success is False
+        assert "interest-only" in reject.metadata["failure_reason"]
+        assert reject.fee_usd == Decimal("0") and reject.gas_cost_usd == Decimal("0")
+        assert portfolio.cash_usd == cash_before
+        assert portfolio._realized_pnl == realized_before
+        assert position.interest_accrued == Decimal("15")
+        assert len(portfolio.positions) == 1
+
+    @pytest.mark.asyncio
+    async def test_repay_without_open_borrow_is_rejected(self) -> None:
+        """No matching open BORROW position = failed fill, zero mutation."""
+        backtester = _backtester()
+        config = _config()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        state = market()
+
+        await backtester._execute_intent(repay_intent(BORROW_AMOUNT), portfolio, state, TS, config)
+
+        assert portfolio.positions == []
+        assert portfolio.tokens == {}
+        assert portfolio.cash_usd == INITIAL_CASH
+        assert portfolio.get_total_value_usd(state) == INITIAL_CASH
+        trade = portfolio.trades[-1]
+        assert trade.success is False
+        assert "no open borrow position" in trade.metadata["failure_reason"]
+        # Rejected fills charge nothing (costs zeroed by _record_failed_fill).
+        assert trade.fee_usd == Decimal("0")
+        assert trade.gas_cost_usd == Decimal("0")
+
+    @pytest.mark.asyncio
+    async def test_repay_other_token_does_not_cross_match(self) -> None:
+        """A WETH repay must not close a USDC borrow position."""
+        backtester = _backtester()
+        config = _config()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        state = market()
+
+        await backtester._execute_intent(borrow_intent(), portfolio, state, TS, config)
+        await backtester._execute_intent(
+            repay_intent(Decimal("1"), token="WETH"), portfolio, state, TS + timedelta(hours=1), config
+        )
+
+        assert len(portfolio.positions) == 1
+        assert portfolio.positions[0].amounts["USDC"] == BORROW_AMOUNT
+        assert portfolio.trades[-1].success is False
+        assert portfolio.get_total_value_usd(state) == INITIAL_CASH
+
+    @pytest.mark.asyncio
+    async def test_unfundable_repay_is_rejected_without_mutation(self) -> None:
+        """A repay the portfolio cannot fund fails via the cash-funding check."""
+        backtester = _backtester()
+        config = _config()
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        state = market()
+
+        await backtester._execute_intent(borrow_intent(), portfolio, state, TS, config)
+        # Burn the cash so the full repay (debt 2000) cannot be funded.
+        portfolio.cash_usd = Decimal("100")
+
+        await backtester._execute_intent(
+            repay_intent(Decimal("0"), repay_full=True), portfolio, state, TS + timedelta(hours=1), config
+        )
+
+        trade = portfolio.trades[-1]
+        assert trade.success is False
+        assert "insufficient cash" in trade.metadata["failure_reason"]
+        assert len(portfolio.positions) == 1
+        assert portfolio.positions[0].amounts["USDC"] == BORROW_AMOUNT
+        assert portfolio.cash_usd == Decimal("100")
+
+
+class TestBorrowCloseMatching:
+    """find_borrow_close_position_id: exact-id precedence, FIFO, fail-closed."""
+
+    def _find(self, intent, positions):  # noqa: ANN001, ANN202 - thin import shim
+        from almanak.framework.backtesting.pnl.intent_extraction import (
+            find_borrow_close_position_id,
+        )
+
+        return find_borrow_close_position_id(intent, positions)
+
+    def test_fifo_matches_oldest_borrow(self) -> None:
+        older = borrow_position(entry_time=TS)
+        newer = borrow_position(entry_time=TS + timedelta(hours=1))
+
+        assert self._find(repay_intent(BORROW_AMOUNT), [newer, older]) == older.position_id
+
+    def test_exact_position_id_takes_precedence_over_fifo(self) -> None:
+        older = borrow_position(entry_time=TS)
+        newer = borrow_position(entry_time=TS + timedelta(hours=1))
+        intent = repay_intent(BORROW_AMOUNT)
+        object.__setattr__(intent, "position_id", newer.position_id)
+
+        assert self._find(intent, [older, newer]) == newer.position_id
+
+    def test_explicit_unknown_id_fails_closed_without_fifo_fallback(self) -> None:
+        """A typoed/stale explicit id must NOT fall through to FIFO and repay
+        the oldest borrow for that token (CodeRabbit, PR #2777): exact-id
+        intent => exact-id match or nothing."""
+        older = borrow_position(entry_time=TS)
+        newer = borrow_position(entry_time=TS + timedelta(hours=1))
+        intent = repay_intent(BORROW_AMOUNT)
+        object.__setattr__(intent, "position_id", "BORROW_aave_v3_USDC_does_not_exist")
+
+        assert self._find(intent, [older, newer]) is None
+
+    def test_token_mismatch_returns_none(self) -> None:
+        assert self._find(repay_intent(BORROW_AMOUNT), [borrow_position(token="WETH")]) is None
+
+    def test_protocol_mismatch_returns_none(self) -> None:
+        assert self._find(repay_intent(BORROW_AMOUNT), [borrow_position(protocol="compound_v3")]) is None
+
+    def test_supply_positions_are_not_repay_targets(self) -> None:
+        assert self._find(repay_intent(BORROW_AMOUNT), [supply_position()]) is None
+
+    def test_explicit_id_naming_supply_fails_closed(self) -> None:
+        """An explicit id pointing at a SUPPLY is refused outright -- it must
+        not be honored, and it must not fall through to FIFO either."""
+        supply = supply_position()
+        borrow = borrow_position()
+        intent = repay_intent(BORROW_AMOUNT)
+        object.__setattr__(intent, "position_id", supply.position_id)
+
+        assert self._find(intent, [supply, borrow]) is None
+
+    def test_tokenless_intent_fails_closed(self) -> None:
+        """No token/asset on the intent = no protocol-only fallback matching."""
+        intent = SimpleNamespace(protocol="aave_v3", amount=BORROW_AMOUNT)
+
+        assert self._find(intent, [borrow_position()]) is None
+
+    def test_missing_protocol_position_does_not_match_protocol_intent(self) -> None:
+        unstamped = borrow_position()
+        unstamped.protocol = None
+
+        assert self._find(repay_intent(BORROW_AMOUNT), [unstamped]) is None
+
+
+def _repay_reduce_fill(
+    position_id: str,
+    amounts: dict[str, Decimal],
+    timestamp: datetime = TS,
+) -> SimulatedFill:
+    total = sum(amounts.values(), Decimal("0"))
+    return SimulatedFill(
+        timestamp=timestamp,
+        intent_type=IntentType.REPAY,
+        protocol="aave_v3",
+        tokens=list(amounts),
+        executed_price=Decimal("1"),
+        amount_usd=total,
+        fee_usd=Decimal("0"),
+        slippage_usd=Decimal("0"),
+        gas_cost_usd=Decimal("0"),
+        tokens_in={},
+        tokens_out=dict(amounts),
+        success=True,
+        position_reduce_id=position_id,
+        position_reduce_amounts=dict(amounts),
+    )
+
+
+class TestApplyFillBorrowReduce:
+    """A BORROW reduce ties to the fill's OUTFLOW (the repaid tokens)."""
+
+    def test_borrow_reduce_commits_principal_and_outflow_together(self) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        position = borrow_position()
+        portfolio.positions.append(position)
+        portfolio.cash_usd = INITIAL_CASH + BORROW_AMOUNT
+
+        applied = portfolio.apply_fill(_repay_reduce_fill(position.position_id, {"USDC": Decimal("500")}))
+
+        assert applied is True
+        assert position.amounts["USDC"] == Decimal("1500")
+        assert portfolio.cash_usd == INITIAL_CASH + BORROW_AMOUNT - Decimal("500")
+        assert portfolio.get_total_value_usd(market()) == INITIAL_CASH
+        assert portfolio.trades[-1].position_id == position.position_id
+
+    def test_borrow_reduce_not_tied_to_outflow_rejects_fill(self) -> None:
+        """Reducing debt by more than the repaid outflow mints the difference."""
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        position = borrow_position()
+        portfolio.positions.append(position)
+        portfolio.cash_usd = INITIAL_CASH + BORROW_AMOUNT
+
+        fill = _repay_reduce_fill(position.position_id, {"USDC": Decimal("500")})
+        fill.position_reduce_amounts = {"USDC": Decimal("1500")}
+
+        assert portfolio.apply_fill(fill) is False
+        assert position.amounts["USDC"] == BORROW_AMOUNT
+        assert portfolio.cash_usd == INITIAL_CASH + BORROW_AMOUNT
+        assert "but reduces" in portfolio.trades[-1].metadata["failure_reason"]
+
+    def test_boundary_reduce_realizes_interest_and_passes_tie_check(self) -> None:
+        """A boundary reduce removes principal in full, realizes the COVERED
+        interest off the position, and passes the (loosened) conservation guard
+        because the flow-vs-principal gap equals exactly the realized interest
+        (VIB-5098 / PR #2777)."""
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        position = borrow_position(interest_accrued=Decimal("25"))
+        portfolio.positions.append(position)
+        portfolio.cash_usd = INITIAL_CASH + BORROW_AMOUNT
+
+        fill = _repay_reduce_fill(position.position_id, {"USDC": Decimal("2010")})
+        # Principal-only reduce ($2,000); the extra $10 of outflow retires
+        # accrued interest, realized as -$10 PnL (not removed as principal).
+        fill.position_reduce_amounts = {"USDC": BORROW_AMOUNT}
+        fill.metadata = {"interest_usd": "-10"}
+
+        assert portfolio.apply_fill(fill) is True
+        assert position.amounts.get("USDC", Decimal("0")) == Decimal("0")
+        assert position.interest_accrued == Decimal("15")  # 25 - 10 realized
+        assert portfolio._realized_pnl == Decimal("-10")
+        assert portfolio.cash_usd == INITIAL_CASH + BORROW_AMOUNT - Decimal("2010")
+        assert portfolio.get_total_value_usd(market()) == INITIAL_CASH - Decimal("25")
+
+    def test_boundary_reduce_over_reduction_still_rejected(self) -> None:
+        """Reducing principal by MORE than the outflow net of realized interest
+        is still minting and rejected, even on the boundary path."""
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        position = borrow_position(interest_accrued=Decimal("25"))
+        portfolio.positions.append(position)
+        portfolio.cash_usd = INITIAL_CASH + BORROW_AMOUNT
+
+        fill = _repay_reduce_fill(position.position_id, {"USDC": Decimal("2010")})
+        # Reduces principal by the FULL outflow including the interest slice --
+        # the $10 must be realized, not removed as principal.
+        fill.position_reduce_amounts = {"USDC": Decimal("2010")}
+        fill.metadata = {"interest_usd": "-10"}
+
+        assert portfolio.apply_fill(fill) is False
+        assert position.amounts["USDC"] == BORROW_AMOUNT
+        assert position.interest_accrued == Decimal("25")
+        assert portfolio.cash_usd == INITIAL_CASH + BORROW_AMOUNT
+        assert "but reduces" in portfolio.trades[-1].metadata["failure_reason"]
+
+    def test_boundary_reduce_clamps_realized_interest_and_syncs_trade_record(self) -> None:
+        """Defensive clamp: when a (malformed) fill claims more realized interest
+        than the position holds, the realized amount clamps to interest_accrued
+        AND the TradeRecord stays in sync with _realized_pnl -- the metadata is
+        rewritten to the clamped value before _calculate_trade_pnl reads it
+        (CodeRabbit PR #2777 round 2). The engine flow never reaches this (the
+        resolver bounds interest_paid by the accrued interest), so it is only
+        reachable via a hand-built fill."""
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        position = borrow_position(interest_accrued=Decimal("3"))  # only $3 accrued
+        portfolio.positions.append(position)
+        portfolio.cash_usd = INITIAL_CASH + BORROW_AMOUNT
+
+        fill = _repay_reduce_fill(position.position_id, {"USDC": Decimal("2010")})
+        fill.position_reduce_amounts = {"USDC": BORROW_AMOUNT}  # principal only
+        # Metadata claims $10 of interest but the position holds only $3.
+        fill.metadata = {"interest_usd": "-10"}
+
+        assert portfolio.apply_fill(fill) is True
+        assert position.interest_accrued == Decimal("0")  # clamped: 3 - min(10, 3)
+        # The clamped realized amount (-$3) lands in BOTH _realized_pnl and the
+        # TradeRecord -- no divergence between portfolio state and the trade.
+        assert portfolio._realized_pnl == Decimal("-3")
+        assert portfolio.trades[-1].pnl_usd == Decimal("-3")
+        assert portfolio.trades[-1].metadata["interest_usd"] == "-3"
+
+
+def _borrow_repay_intents(repay_amount: Decimal, repay_full: bool) -> list:
+    return [
+        SupplyIntent(protocol="aave_v3", token="USDC", amount=SUPPLY_AMOUNT),
+        BorrowIntent(
+            protocol="aave_v3",
+            collateral_token="USDC",
+            collateral_amount=Decimal("0"),
+            borrow_token="USDC",
+            borrow_amount=BORROW_AMOUNT,
+        ),
+        None,
+        RepayIntent(protocol="aave_v3", token="USDC", amount=repay_amount, repay_full=repay_full),
+    ]
+
+
+class TestEngineLoopBorrowRepayBothLanes:
+    """SUPPLY -> BORROW -> REPAY through the REAL engine iteration loop.
+
+    ``strategy_type=None`` exercises the generic lane;
+    ``strategy_type="lending"`` wires the LendingBacktestAdapter (which
+    health-factor-validates the borrow, then defers fill construction to the
+    generic lane). Equity drift must equal accrued interest only -- never the
+    borrowed or repaid principal.
+    """
+
+    @pytest.mark.parametrize("strategy_type", [None, "lending"])
+    def test_borrow_full_repay_round_trip_conserves_value(self, strategy_type: str | None) -> None:
+        result = run_backtest(
+            ScriptedStrategy(_borrow_repay_intents(Decimal("0"), repay_full=True)),
+            flat_series(10),
+            hours=6,
+            strategy_type=strategy_type,
+        )
+
+        assert result.success
+        assert result.metrics.total_trades == 3
+        assert all(trade.success for trade in result.trades)
+        # The borrow must be visible: $2,000 notional, not a $0 no-op.
+        assert result.trades[1].amount_usd == BORROW_AMOUNT
+        # Borrow interest realizes as a LOSS on the repay.
+        assert result.trades[-1].pnl_usd < Decimal("0")
+        # Drift = supply interest earned - borrow interest owed: cents, not
+        # principal. Pre-fix this was ~-$2,000 (the repay burned cash).
+        drift = result.final_capital_usd - INITIAL_CAPITAL
+        assert abs(drift) < Decimal("1")
+
+    @pytest.mark.parametrize("strategy_type", [None, "lending"])
+    def test_partial_repay_conserves_value(self, strategy_type: str | None) -> None:
+        result = run_backtest(
+            ScriptedStrategy(_borrow_repay_intents(Decimal("500"), repay_full=False)),
+            flat_series(10),
+            hours=6,
+            strategy_type=strategy_type,
+        )
+
+        assert result.success
+        assert result.metrics.total_trades == 3
+        assert all(trade.success for trade in result.trades)
+        drift = result.final_capital_usd - INITIAL_CAPITAL
+        assert abs(drift) < Decimal("1")
+
+    @pytest.mark.parametrize("strategy_type", [None, "lending"])
+    def test_repay_without_borrow_is_rejected_with_zero_mutation(self, strategy_type: str | None) -> None:
+        result = run_backtest(
+            ScriptedStrategy([RepayIntent(protocol="aave_v3", token="USDC", amount=BORROW_AMOUNT)]),
+            flat_series(10),
+            hours=6,
+            strategy_type=strategy_type,
+        )
+
+        assert result.success
+        assert result.metrics.total_trades == 1
+        trade = result.trades[0]
+        assert trade.success is False
+        assert "no open borrow position" in trade.metadata["failure_reason"]
+        assert result.final_capital_usd == INITIAL_CAPITAL
+        assert all(point.value_usd == INITIAL_CAPITAL for point in result.equity_curve)
+
+
+class TestZeroPrincipalBorrowPosition:
+    """An empty borrow position settles its accrued interest, never mints/over-pays.
+
+    Mirror of ``TestZeroPrincipalPosition`` on the debt side: dropping the
+    position would FORGIVE owed interest (minting), so a repay that covers the
+    accrued interest FULL-closes for exactly that interest (realized as negative
+    PnL). A repay that does NOT cover it is rejected (zero mutation) rather than
+    force-closed for the whole interest, which would pay more than the requested
+    amount (CodeRabbit PR #2777 round 2).
+    """
+
+    def test_repay_of_zero_principal_position_full_closes_for_interest(self) -> None:
+        interest = Decimal("12.34")
+        empty = borrow_position(amount=Decimal("0"), interest_accrued=interest)
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CAPITAL)
+        portfolio.positions.append(empty)
+        backtester = _backtester()
+
+        resolution = backtester._resolve_repay_close(repay_intent(Decimal("100")), portfolio, Decimal("100"), market())
+
+        assert resolution.position_close_id == empty.position_id
+        assert resolution.position_reduce_id is None
+        assert resolution.amount_usd == interest
+        assert resolution.interest_usd == -interest
+
+    def test_repay_below_interest_of_zero_principal_position_is_rejected(self) -> None:
+        """A repay that does not cover the full accrued interest of an
+        interest-only position is rejected -- NOT force-closed for the whole
+        interest (the over-spend the round-2 review caught)."""
+        interest = Decimal("12.34")
+        empty = borrow_position(amount=Decimal("0"), interest_accrued=interest)
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CAPITAL)
+        portfolio.positions.append(empty)
+        backtester = _backtester()
+
+        resolution = backtester._resolve_repay_close(repay_intent(Decimal("5")), portfolio, Decimal("5"), market())
+
+        assert resolution.position_close_id is None
+        assert resolution.position_reduce_id is None
+        assert resolution.failure_reason is not None
+        assert "interest-only" in resolution.failure_reason
 
 
 class TestAdapterLaneHealthFactor:

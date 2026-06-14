@@ -281,6 +281,13 @@ class SimulatedPortfolio:
             # withdrawn slice earned before the withdraw.
             self._accrue_interest_through_fill(fill, market_state, adapter)
             self._reduce_position(fill.position_reduce_id, fill.position_reduce_amounts)
+            # Boundary repay/withdraw: the flow covered principal + part of the
+            # accrued interest. The principal left via _reduce_position; realize
+            # the covered interest now -- decrement it off the position so it
+            # stops counting in equity, exactly as a full close would
+            # (VIB-5098). An ordinary sub-principal partial carries no
+            # interest_usd and this is a no-op.
+            self._realize_reduce_interest(fill)
 
         if fill.position_delta:
             # Open a new position. Perp collateral moves from cash into the
@@ -591,36 +598,59 @@ class SimulatedPortfolio:
         state mutation -- crediting the inflow without debiting the
         position would mint value.
 
-        The reduce map must also tie exactly to the credited inflow
-        (CodeRabbit, PR #2758): an empty map, or per-token amounts that do
-        not match the fill's positive ``tokens_in`` within dust tolerance,
-        is under-reduction -- the same minting class, just smaller. The
-        only producer (engine ``_execute_intent``) builds
-        ``position_reduce_amounts`` from ``tokens_in`` directly, so this is
-        defense-in-depth at the conservation boundary.
+        The reduce map must also tie exactly to the fill's flow on the
+        position's side (CodeRabbit, PR #2758): the credited ``tokens_in``
+        for an asset position (a partial WITHDRAW takes tokens out of the
+        supply) and the debited ``tokens_out`` for a BORROW position (a
+        partial REPAY's outflow extinguishes the debt -- VIB-5098). An
+        empty map, or per-token amounts that do not match within dust
+        tolerance, is under- or over-reduction -- a minting class either
+        way. The only producer (engine ``_execute_intent``) builds
+        ``position_reduce_amounts`` from the matching flow directly, so
+        this is defense-in-depth at the conservation boundary.
         """
         if fill.position_reduce_id is None:
             return None
-        credited = {token: amount for token, amount in fill.tokens_in.items() if amount > Decimal("0")}
-        reduced = {token: amount for token, amount in fill.position_reduce_amounts.items() if amount > Decimal("0")}
-        if not reduced:
-            return f"position {fill.position_reduce_id} missing positive partial-reduction amounts"
-        if credited.keys() != reduced.keys():
-            return (
-                f"position {fill.position_reduce_id} partial reduction tokens {sorted(reduced)} "
-                f"do not match credited inflow tokens {sorted(credited)}"
-            )
-        for token, credited_amount in credited.items():
-            reduced_amount = reduced[token]
-            if abs(credited_amount - reduced_amount) > max(credited_amount, reduced_amount) * (
-                _DEBIT_DUST_RELATIVE_TOLERANCE
-            ):
-                return (
-                    f"position {fill.position_reduce_id} credits {credited_amount} {token} but reduces {reduced_amount}"
-                )
         position = self.get_position(fill.position_reduce_id)
         if position is None:
             return f"position {fill.position_reduce_id} not found for partial reduction"
+        if position.position_type == PositionType.BORROW:
+            flow, flow_label, flow_verb = fill.tokens_out, "debited outflow", "debits"
+        else:
+            flow, flow_label, flow_verb = fill.tokens_in, "credited inflow", "credits"
+        tied = {token: amount for token, amount in flow.items() if amount > Decimal("0")}
+        reduced = {token: amount for token, amount in fill.position_reduce_amounts.items() if amount > Decimal("0")}
+        if not reduced:
+            return f"position {fill.position_reduce_id} missing positive partial-reduction amounts"
+        if tied.keys() != reduced.keys():
+            return (
+                f"position {fill.position_reduce_id} partial reduction tokens {sorted(reduced)} "
+                f"do not match {flow_label} tokens {sorted(tied)}"
+            )
+        # A reduce may legitimately fall SHORT of the flow by exactly the
+        # realized-interest slice: a BOUNDARY repay/withdraw's flow covers
+        # principal + part of the accrued interest, but only the principal
+        # leaves the position -- the interest is realized as PnL, not removed as
+        # principal (VIB-5098). That slice in token units is
+        # |interest_usd| / executed_price (single-token lending position). Any
+        # OTHER shortfall -- and ANY excess (reduced > flow, the original
+        # minting class) -- is still rejected.
+        realized_interest_usd = abs(self._fill_realized_interest_usd(fill))
+        interest_tokens = Decimal("0")
+        if len(tied) == 1 and realized_interest_usd > Decimal("0") and fill.executed_price > Decimal("0"):
+            interest_tokens = realized_interest_usd / fill.executed_price
+        for token, tied_amount in tied.items():
+            reduced_amount = reduced[token]
+            expected = tied_amount - interest_tokens
+            tolerance = max(tied_amount, reduced_amount) * _DEBIT_DUST_RELATIVE_TOLERANCE
+            if abs(reduced_amount - expected) > tolerance:
+                interest_note = (
+                    f" (net of ${realized_interest_usd} realized interest)" if interest_tokens > Decimal("0") else ""
+                )
+                return (
+                    f"position {fill.position_reduce_id} {flow_verb} {tied_amount} {token}{interest_note} "
+                    f"but reduces {reduced_amount}"
+                )
         for token, amount in reduced.items():
             held = position.get_amount(token)
             shortfall = amount - held
@@ -681,10 +711,10 @@ class SimulatedPortfolio:
         """Commit a validated partial reduction of a position's principal.
 
         Runs only after :meth:`_position_reduce_failure` validated coverage,
-        so every debit is held (a sub-dust shortfall clamps to zero).
-        Accrued interest stays on the position -- it is realized when the
-        position eventually closes in full. Interest through the fill
-        instant has already been accrued by
+        so every debit is held (a sub-dust shortfall clamps to zero). This
+        method removes PRINCIPAL only; any interest covered by a boundary
+        reduce is realized separately by :meth:`_realize_reduce_interest`.
+        Interest through the fill instant has already been accrued by
         :meth:`_accrue_interest_through_fill`, which also advanced
         ``last_updated``; the mark/update paths own accrual from there on.
         """
@@ -697,17 +727,68 @@ class SimulatedPortfolio:
             remaining = position.get_amount(token) - amount
             position.amounts[token] = remaining if remaining > Decimal("0") else Decimal("0")
         if position.total_amount <= Decimal("0"):
-            # Reachable only through the sub-dust clamp (the withdraw router
-            # sends amount >= principal to a FULL close). Deliberately NOT
-            # auto-closed here: _close_position would drop the position's
-            # accrued interest from equity without realizing it. The empty
-            # position stays open carrying its interest; the next WITHDRAW
-            # full-closes it (principal 0 + interest), which conserves value.
+            # Reached by a BOUNDARY reduce (amount covers all principal + part
+            # of the accrued interest -- VIB-5098) or a sub-dust clamp.
+            # Deliberately NOT auto-closed here: _close_position would drop the
+            # position's REMAINING accrued interest from equity without
+            # realizing it. The empty position stays open carrying that
+            # remainder; the next WITHDRAW/REPAY full-closes it (principal 0 +
+            # interest), which conserves value.
             logger.warning(
                 "Partial reduce clamped position %s principal to zero; "
                 "position remains open until a full close realizes its accrued interest",
                 position_id,
             )
+
+    @staticmethod
+    def _fill_realized_interest_usd(fill: SimulatedFill) -> Decimal:
+        """Interest USD a REPAY/WITHDRAW reduce realizes (0 if none).
+
+        Reads ``metadata["interest_usd"]`` (set by the engine only on a
+        BOUNDARY partial, where the flow covers principal + part of accrued
+        interest). Sign matches the close convention: NEGATIVE for a REPAY
+        (borrow interest owed), POSITIVE for a WITHDRAW (interest earned). An
+        ordinary sub-principal partial carries no such metadata and returns 0.
+
+        The engine stamps this as a ``str(Decimal)`` (engine ``_execute_intent``),
+        so ``Decimal(str(...))`` round-trips both the stored string and the
+        ``Decimal`` default losslessly -- no caller-bifurcating ``isinstance``
+        coercion (VIB-4062).
+        """
+        return Decimal(str(fill.metadata.get("interest_usd", "0")))
+
+    def _realize_reduce_interest(self, fill: SimulatedFill) -> None:
+        """Realize the interest a boundary partial reduce covered.
+
+        :meth:`_reduce_position` removed the principal; this decrements the
+        covered interest off ``position.interest_accrued`` so it leaves equity
+        (mirroring a full close) and accumulates ``_realized_pnl``. The full
+        close path accumulates ``_realized_pnl`` in ``apply_fill`` (guarded by
+        ``position_close_id``); the reduce path is not covered there, so it is
+        accumulated here. ``_accrue_interest_through_fill`` has already grown
+        ``interest_accrued`` to the fill instant, so the realized slice is
+        bounded by it (clamped defensively).
+
+        When the clamp bites, ``metadata["interest_usd"]`` is rewritten to the
+        clamped signed amount so the TradeRecord stays in sync: ``apply_fill``
+        calls :meth:`_calculate_trade_pnl` (which reads this metadata) AFTER this
+        method, so without the rewrite the trade would report the unclamped
+        value while ``_realized_pnl`` carries the clamped one (CodeRabbit PR
+        #2777 round 2).
+        """
+        realized = self._fill_realized_interest_usd(fill)
+        if realized == Decimal("0") or fill.position_reduce_id is None:
+            return
+        position = self.get_position(fill.position_reduce_id)
+        if position is None:  # pragma: no cover - guarded by the plan stage
+            return
+        interest_paid = min(abs(realized), position.interest_accrued)
+        position.interest_accrued -= interest_paid
+        # Sign mirrors the close convention: REPAY realizes a LOSS, WITHDRAW a
+        # gain.
+        signed_realized = -interest_paid if realized < Decimal("0") else interest_paid
+        self._realized_pnl += signed_realized
+        fill.metadata["interest_usd"] = str(signed_realized)
 
     def validate_margin_for_perp(
         self,
@@ -2001,7 +2082,16 @@ class SimulatedPortfolio:
                 # Use adapter for non-spot position valuation
                 # Pass timestamp for deterministic, reproducible valuation
                 try:
-                    total_value += adapter.value_position(position, market_state, timestamp)
+                    value = adapter.value_position(position, market_state, timestamp)
+                    # Adapter contract (LendingBacktestAdapter.value_position):
+                    # BORROW valuations return the debt MAGNITUDE -- every
+                    # adapter-side consumer (debt totals, health factor,
+                    # liquidation) wants it positive -- and the portfolio
+                    # owns the subtraction: debt is negative equity
+                    # (VIB-5098; mirrors _mark_lending_position's sign).
+                    if position.position_type == PositionType.BORROW:
+                        value = -value
+                    total_value += value
                 except Exception:
                     # Fall back to internal valuation on error
                     total_value += self._value_position_fallback(position, market_state, timestamp)

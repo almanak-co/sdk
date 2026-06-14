@@ -381,3 +381,87 @@ class TestFeeSlippageNoHidden1000:
         assert estimated_fee == Decimal("0")
         # If $1000 were used, fee would be $3
         assert estimated_fee != Decimal("3")
+
+
+@dataclass
+class MockBorrowIntent:
+    """Duck-typed BORROW intent: borrow_amount of borrow_token (VIB-5098)."""
+
+    intent_type: str = "BORROW"
+    collateral_token: str = "USDC"
+    borrow_token: str | None = "ETH"
+    borrow_amount: Any = field(default_factory=lambda: Decimal("2"))
+
+
+class TestBorrowAmountUsdExtraction:
+    """Branch coverage for _borrow_amount_usd (VIB-5098).
+
+    BorrowIntent sizes the borrow as ``borrow_amount`` of ``borrow_token``;
+    the generic attribute scan would price the amount at ``collateral_token``
+    (or, pre-fix, not at all). These tests pin every strict / fallback branch
+    of the dedicated extraction path.
+    """
+
+    def test_borrow_amount_priced_at_borrow_token(self, backtester: PnLBacktester, market_state: MarketState):
+        """2 ETH borrowed against USDC collateral prices at the ETH price."""
+        intent = MockBorrowIntent()
+        result = backtester._get_intent_amount_usd(intent, market_state, strict_reproducibility=False)
+        assert result == Decimal("6000")  # 2 x $3000, NOT 2 x $1 (collateral)
+
+    def test_non_numeric_borrow_amount_falls_through_to_generic(
+        self, backtester: PnLBacktester, market_state: MarketState
+    ):
+        """A chained borrow_amount ("all") is unresolvable: generic zero fallback."""
+        intent = MockBorrowIntent(borrow_amount="all")
+        result = backtester._get_intent_amount_usd(intent, market_state, strict_reproducibility=False)
+        assert result == Decimal("0")
+
+    def test_missing_price_returns_zero_and_tracks_fallback(
+        self, backtester: PnLBacktester, market_state_no_eth: MarketState
+    ):
+        """No price for the borrow token: zero fallback, tracked, never $1."""
+        from almanak.framework.backtesting.pnl.intent_extraction import get_intent_amount_usd
+
+        tracked: list[str] = []
+        result = get_intent_amount_usd(
+            MockBorrowIntent(),
+            market_state_no_eth,
+            strict_reproducibility=False,
+            track_fallback=tracked.append,
+        )
+        assert result == Decimal("0")
+        assert tracked == ["default_usd_amount"]
+
+    def test_missing_price_raises_in_strict_mode(self, backtester: PnLBacktester, market_state_no_eth: MarketState):
+        intent = MockBorrowIntent()
+        with pytest.raises(ValueError, match="borrow token 'ETH'"):
+            backtester._get_intent_amount_usd(intent, market_state_no_eth, strict_reproducibility=True)
+
+    def test_non_positive_price_treated_as_missing(self, backtester: PnLBacktester):
+        """A zero price quote is bad data, not a $0 valuation."""
+        state = MarketState(
+            timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+            prices={"ETH": Decimal("0"), "USDC": Decimal("1")},
+            chain="arbitrum",
+            block_number=100000,
+        )
+        result = backtester._get_intent_amount_usd(MockBorrowIntent(), state, strict_reproducibility=False)
+        assert result == Decimal("0")
+
+    def test_missing_borrow_token_returns_zero_and_tracks_fallback(self, market_state: MarketState):
+        from almanak.framework.backtesting.pnl.intent_extraction import get_intent_amount_usd
+
+        tracked: list[str] = []
+        result = get_intent_amount_usd(
+            MockBorrowIntent(borrow_token=None),
+            market_state,
+            strict_reproducibility=False,
+            track_fallback=tracked.append,
+        )
+        assert result == Decimal("0")
+        assert tracked == ["default_usd_amount"]
+
+    def test_missing_borrow_token_raises_in_strict_mode(self, backtester: PnLBacktester, market_state: MarketState):
+        intent = MockBorrowIntent(borrow_token=None)
+        with pytest.raises(ValueError, match="no borrow_token"):
+            backtester._get_intent_amount_usd(intent, market_state, strict_reproducibility=True)

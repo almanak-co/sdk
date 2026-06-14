@@ -61,6 +61,7 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "entry_value_neutral",
     "single_trade_closed_form",
     "round_trip_conservation",
+    "borrow_repay_conservation",
     "generic_lane_entry",
     "rejection_no_state_change",
     "cost_accounting",
@@ -191,6 +192,12 @@ CELLS: tuple[TrustCell, ...] = (
         "round_trip_conservation",
         "lending",
         "SUPPLY then WITHDRAW returns initial capital plus accrued interest - principal must not double-count.",
+    ),
+    _cell(
+        "borrow_repay_conservation",
+        "lending",
+        "BORROW opens debt and credits cash; REPAY extinguishes it: a borrow -> repay "
+        "round trip conserves equity to within accrued interest (VIB-5098).",
     ),
     _cell(
         "rejection_no_state_change",

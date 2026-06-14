@@ -434,6 +434,67 @@ def _lp_pair_amount_usd(
     return total
 
 
+def _borrow_amount_usd(
+    intent: Any,
+    market_state: MarketState,
+    strict_reproducibility: bool,
+    track_fallback: Callable[[str], None] | None,
+) -> Decimal | None:
+    """Price a BORROW-vocabulary intent's ``borrow_amount`` leg in USD.
+
+    Returns None when the intent carries no ``borrow_amount``, letting the
+    caller's generic resolution run. ``BorrowIntent`` sizes the borrow as
+    ``borrow_amount`` of ``borrow_token``; the generic attribute scan must
+    never see these intents because its token scan would hit
+    ``collateral_token`` first and price the borrow at the WRONG token
+    (VIB-5098 -- pre-fix neither field was recognized at all, making BORROW
+    a $0 economic no-op). Missing token or price follows the generic
+    semantics: raise in strict mode, tracked zero fallback otherwise --
+    never a $1 guess.
+    """
+    amount = _decimal_or_none(getattr(intent, "borrow_amount", None))
+    if amount is None:
+        return None
+
+    token = getattr(intent, "borrow_token", None)
+    token = token.upper() if isinstance(token, str) and token else None
+    if token is not None:
+        try:
+            price: Decimal | None = market_state.get_price(token)
+        except KeyError:
+            price = None
+        if price is not None and price > 0:
+            return amount * price
+        if strict_reproducibility:
+            msg = (
+                f"Cannot determine USD amount for borrow intent: no positive price available "
+                f"for borrow token '{token}'. Set strict_reproducibility=False to use zero as fallback."
+            )
+            raise ValueError(msg)
+        logger.warning(
+            "No positive price available for borrow token '%s' to convert amount %s to USD. "
+            "Using zero as fallback to avoid misinterpreting the token amount as USD.",
+            token,
+            amount,
+        )
+    else:
+        if strict_reproducibility:
+            msg = (
+                f"Cannot determine USD amount for borrow intent: found borrow_amount={amount} "
+                "but no borrow_token for price lookup. Set strict_reproducibility=False to use "
+                "zero as fallback."
+            )
+            raise ValueError(msg)
+        logger.warning(
+            "Borrow intent has borrow_amount=%s but no borrow_token for USD conversion. "
+            "Using zero as fallback to avoid misinterpreting the token amount as USD.",
+            amount,
+        )
+    if track_fallback:
+        track_fallback("default_usd_amount")
+    return Decimal("0")
+
+
 def get_intent_amount_usd(  # noqa: C901
     intent: Any,
     market_state: MarketState,
@@ -464,6 +525,13 @@ def get_intent_amount_usd(  # noqa: C901
             value = getattr(intent, attr)
             if value is not None:
                 return Decimal(str(value))
+
+    # BORROW vocabulary intents (BorrowIntent) size the borrow via
+    # borrow_amount of borrow_token; the generic scan below would price the
+    # amount at collateral_token instead (VIB-5098).
+    borrow_usd = _borrow_amount_usd(intent, market_state, strict_reproducibility, track_fallback)
+    if borrow_usd is not None:
+        return borrow_usd
 
     # LP vocabulary intents (LPOpenIntent) size the position via per-leg
     # token amounts instead of a USD field; price both legs.
@@ -724,27 +792,86 @@ def find_lending_close_position_id(intent: Any, positions: Sequence[Any]) -> str
     """
     from almanak.framework.backtesting.pnl.position_models import PositionType
 
+    return _find_lending_position_id(intent, positions, PositionType.SUPPLY, "WITHDRAW", "supply")
+
+
+def find_borrow_close_position_id(intent: Any, positions: Sequence[Any]) -> str | None:
+    """Resolve the simulated BORROW position a REPAY intent targets.
+
+    Debt-side sibling of :func:`find_lending_close_position_id`
+    (VIB-5098), with the same exact-id precedence, (token, protocol)
+    matching, FIFO-oldest tie-break, and fail-closed rules:
+
+    - An explicit id naming a non-BORROW position (e.g. a SUPPLY) is
+      refused outright -- a repay must never target collateral.
+    - An intent carrying no token/asset is refused rather than falling
+      back to protocol-only matching.
+
+    Args:
+        intent: REPAY intent object
+        positions: Open positions to match against
+
+    Returns:
+        The matched simulated position id, or None when no open BORROW
+        position matches (a repay with nothing borrowed must fail, not
+        burn the outflow)
+    """
+    from almanak.framework.backtesting.pnl.position_models import PositionType
+
+    return _find_lending_position_id(intent, positions, PositionType.BORROW, "REPAY", "borrow")
+
+
+def _find_lending_position_id(
+    intent: Any,
+    positions: Sequence[Any],
+    target_type: Any,
+    intent_label: str,
+    position_label: str,
+) -> str | None:
+    """Shared matcher behind the WITHDRAW/SUPPLY and REPAY/BORROW pairs.
+
+    Exact-id precedence, then FIFO-oldest by (token, protocol); only
+    positions of ``target_type`` qualify. See the public wrappers for the
+    documented fail-closed contract.
+    """
+    explicit_id_supplied = False
     for attr in ("position_id", "position_to_close", "close_position_id"):
         explicit_id = getattr(intent, attr, None)
         if isinstance(explicit_id, str) and explicit_id:
+            explicit_id_supplied = True
             for position in positions:
                 if position.position_id == explicit_id:
-                    if position.position_type != PositionType.SUPPLY:
+                    if position.position_type != target_type:
                         logger.warning(
-                            "WITHDRAW names position %s explicitly, but it is %s, not SUPPLY; "
-                            "refusing the withdraw target (fail closed)",
+                            "%s names position %s explicitly, but it is %s, not %s; "
+                            "refusing the close target (fail closed)",
+                            intent_label,
                             explicit_id,
                             position.position_type.value,
+                            target_type.value,
                         )
                         return None
                     return explicit_id
+
+    # An explicit id that resolves to no open position must fail closed -- a
+    # typoed/stale id must NOT silently fall through to (token, protocol) FIFO
+    # matching and repay/withdraw the oldest position for that token instead
+    # (CodeRabbit, PR #2777). Exact-id intent => exact-id match or nothing.
+    if explicit_id_supplied:
+        logger.warning(
+            "%s names an explicit %s position id that matches no open position; refusing FIFO fallback (fail closed)",
+            intent_label,
+            position_label,
+        )
+        return None
 
     token = getattr(intent, "token", getattr(intent, "asset", None))
     token = token.upper() if isinstance(token, str) and token else None
     if token is None:
         logger.warning(
-            "WITHDRAW carries no token/asset and no explicit supply position id; "
-            "refusing protocol-only matching (fail closed)"
+            "%s carries no token/asset and no explicit %s position id; refusing protocol-only matching (fail closed)",
+            intent_label,
+            position_label,
         )
         return None
     # Resolve protocol with the same resolver the open path used to stamp
@@ -755,12 +882,12 @@ def find_lending_close_position_id(intent: Any, positions: Sequence[Any]) -> str
 
     candidates = []
     for position in positions:
-        if position.position_type != PositionType.SUPPLY:
+        if position.position_type != target_type:
             continue
         position_token = position.tokens[0].upper() if position.tokens else ""
         if position_token != token:
             continue
-        # A protocol-specific WITHDRAW must not drain a position whose
+        # A protocol-specific intent must not target a position whose
         # protocol is unknown: skip on missing OR mismatched stamp. (Every
         # production producer stamps protocol; None arises in hand-built
         # fixtures, which should not satisfy a protocol-scoped match.)
@@ -770,7 +897,9 @@ def find_lending_close_position_id(intent: Any, positions: Sequence[Any]) -> str
 
     if not candidates:
         logger.warning(
-            "WITHDRAW matched no open simulated supply position (token=%s, protocol=%s)",
+            "%s matched no open simulated %s position (token=%s, protocol=%s)",
+            intent_label,
+            position_label,
             token,
             protocol,
         )
@@ -778,8 +907,10 @@ def find_lending_close_position_id(intent: Any, positions: Sequence[Any]) -> str
     candidates.sort(key=lambda position: position.entry_time)
     if len(candidates) > 1:
         logger.warning(
-            "WITHDRAW matched %d open supply positions for token=%s protocol=%s; targeting the oldest (%s)",
+            "%s matched %d open %s positions for token=%s protocol=%s; targeting the oldest (%s)",
+            intent_label,
             len(candidates),
+            position_label,
             token,
             protocol,
             candidates[0].position_id,
