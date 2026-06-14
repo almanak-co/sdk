@@ -123,5 +123,8 @@ DESCRIPTOR = register_chain(
         ),
         bridged_stablecoin_variants=("USDbC",),
         aliases=(),
+        color="#0052ff",  # Plan 027: Base blue (from legacy CHAIN_COLORS)
+        # Plan 027: default wallet-overview tokens (from legacy _CHAIN_DEFAULT_TOKENS)
+        default_display_tokens=("ETH", "WETH", "USDC", "USDbC", "DAI", "cbETH"),
     )
 )

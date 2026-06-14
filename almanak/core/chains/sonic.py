@@ -106,5 +106,7 @@ DESCRIPTOR = register_chain(
             wrapped_native_deposit=True,
         ),
         aliases=(),
+        # Plan 027: default wallet-overview tokens (from legacy _CHAIN_DEFAULT_TOKENS)
+        default_display_tokens=("S", "WS", "USDC", "WETH"),
     )
 )

@@ -131,5 +131,8 @@ DESCRIPTOR = register_chain(
             wrapped_native_deposit=True,
         ),
         aliases=("bnb", "binance"),
+        color="#f0b90b",  # Plan 027: BSC yellow (from legacy CHAIN_COLORS)
+        # Plan 027: default wallet-overview tokens (from legacy _CHAIN_DEFAULT_TOKENS)
+        default_display_tokens=("BNB", "WBNB", "USDC", "USDT", "WETH", "BTCB", "DAI"),
     )
 )

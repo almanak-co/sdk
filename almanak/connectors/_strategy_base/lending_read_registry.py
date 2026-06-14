@@ -139,6 +139,9 @@ class _LendingDispatchMaps:
     market_health_loaders: dict[str, tuple[str, str]]
     market_table_loaders: dict[str, tuple[str, str]]
     aliases: dict[str, str]
+    # Plan 027 Step 5: set of canonical protocol keys that declare
+    # accepts_is_collateral=True on their LendingReadDecl.
+    collateral_flag_protocols: frozenset[str]
 
 
 class LendingReadRegistry:
@@ -179,6 +182,7 @@ class LendingReadRegistry:
             market_health_loaders: dict[str, tuple[str, str]] = {}
             market_table_loaders: dict[str, tuple[str, str]] = {}
             aliases: dict[str, str] = {}
+            collateral_flag_protocols: set[str] = set()
             for connector_manifest in CONNECTOR_REGISTRY.with_lending_read():
                 decl = connector_manifest.lending_read
                 assert decl is not None
@@ -193,12 +197,15 @@ class LendingReadRegistry:
                     market_table_loaders[key] = (decl.market_table.module, decl.market_table.attribute)
                 for alias in decl.aliases:
                     aliases[alias] = key
+                if decl.accepts_is_collateral:
+                    collateral_flag_protocols.add(key)
             cls._dispatch_maps = _LendingDispatchMaps(
                 spec_loaders=spec_loaders,
                 account_state_loaders=account_state_loaders,
                 market_health_loaders=market_health_loaders,
                 market_table_loaders=market_table_loaders,
                 aliases=aliases,
+                collateral_flag_protocols=frozenset(collateral_flag_protocols),
             )
         return cls._dispatch_maps
 
@@ -785,6 +792,25 @@ class LendingReadRegistry:
                 assert decl is not None
                 return (decl.backtest_default_supply_apy, decl.backtest_default_borrow_apy)
         return (None, None)
+
+    @classmethod
+    def accepts_is_collateral(cls, protocol: str) -> bool:
+        """Return ``True`` when ``protocol`` accepts the ``is_collateral`` flag.
+
+        Plan 027 Step 5: replaces the ``_normalize_protocol_key(protocol) in
+        {"morpho", "morpho_blue"}`` inline set-membership guard in the executor
+        and the ax CLI withdraw path. The fold (spaces + hyphens ->
+        underscores) MUST run IN FRONT of this call so that display-cased
+        inputs like ``"Morpho Blue"`` resolve via the alias map — this method
+        only consults aliases after the fold, which maps ``"morpho_blue"``
+        (the folded form of ``"Morpho Blue"``) back to ``"morpho_blue"`` via
+        the aliases dict. Callers must pre-fold with
+        ``_normalize_protocol_key`` before passing here; this method performs
+        no folding of its own (the registry's ``_normalize`` does strip/lower/
+        hyphen-fold, which is sufficient for alias resolution, but does NOT
+        fold spaces -- pre-fold is the caller's responsibility).
+        """
+        return cls._normalize(protocol) in cls._dispatch().collateral_flag_protocols
 
     @classmethod
     def reset_cache(cls) -> None:

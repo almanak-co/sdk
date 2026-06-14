@@ -82,6 +82,11 @@ CONNECTOR = Connector(
         ),
         market_table=ImportRef(module="almanak.connectors.morpho_blue.addresses", attribute="MORPHO_MARKETS"),
         aliases=("morpho", "morphoblue"),
+        # Plan 027 Step 5: Morpho Blue supports the is_collateral flag on
+        # withdraw intents (selects loan-token vs collateral-token side).
+        # Gate declared here so executor/ax can branch without naming the
+        # protocol as a literal string.
+        accepts_is_collateral=True,
     ),
     yield_poke=YieldPokeDecl(
         chains=("ethereum",),

@@ -3,6 +3,7 @@
 Provides centralized color schemes and styling for consistent UI.
 """
 
+from almanak.core.chains import ChainRegistry
 from almanak.framework.dashboard.models import (
     ChainHealthStatus,
     Severity,
@@ -59,18 +60,26 @@ EVENT_COLORS: dict[TimelineEventType, str] = {
     TimelineEventType.BRIDGE_FAILED: "#f44336",  # Red
 }
 
-# Chain colors - distinctive colors for each supported chain
-CHAIN_COLORS: dict[str, str] = {
-    "ethereum": "#627eea",  # Ethereum blue
-    "arbitrum": "#28a0f0",  # Arbitrum blue
-    "optimism": "#ff0420",  # Optimism red
-    "base": "#0052ff",  # Base blue
-    "polygon": "#8247e5",  # Polygon purple
-    "avalanche": "#e84142",  # Avalanche red
-    "bsc": "#f0b90b",  # BSC yellow
-    "linea": "#61dfff",  # Linea cyan
-    "zksync": "#8c8dfc",  # zkSync purple
-}
+
+# Chain colors - derived from ChainDescriptor.color (Plan 027).
+# Previously a hand-maintained dict; now generated from the registry so adding
+# a chain's brand color only requires a single change in its descriptor file.
+# zksync was dropped: it has no registered ChainDescriptor and was never valid.
+def _build_chain_colors() -> dict[str, str]:
+    """Build the chain-name -> hex-color map from registered ChainDescriptors.
+
+    Only chains that declare a ``color`` field contribute an entry; chains
+    without a declared color are intentionally absent (the ``get_chain_color``
+    function already handles missing chains via ``DEFAULT_COLOR``).
+    """
+    result: dict[str, str] = {}
+    for descriptor in ChainRegistry.all():
+        if descriptor.color is not None:
+            result[descriptor.name] = descriptor.color
+    return result
+
+
+CHAIN_COLORS: dict[str, str] = _build_chain_colors()
 
 # Chain health status colors
 CHAIN_HEALTH_COLORS: dict[ChainHealthStatus, str] = {

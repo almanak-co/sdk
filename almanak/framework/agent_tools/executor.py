@@ -1404,6 +1404,7 @@ class ToolExecutor:
             # direct agent-tool invocations (bypassing the CLI guard) can't
             # silently send this flag through to Aave-style adapters that
             # would ignore it. (CodeRabbit PR #1535 round 4.)
+            from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
             from almanak.framework.agent_tools.schemas import _normalize_protocol_key
 
             protocol = args.get("protocol", DEFAULT_LENDING_PROTOCOL)
@@ -1412,7 +1413,10 @@ class ToolExecutor:
                 "amount": args["amount"],
                 "protocol": protocol,
             }
-            if _normalize_protocol_key(protocol) in {"morpho", "morpho_blue"}:
+            # fold (spaces + hyphens -> underscores) stays IN FRONT of the
+            # registry call so "Morpho Blue" resolves via the alias map
+            # (test_executor.py:2165-2178 requirement).
+            if LendingReadRegistry.accepts_is_collateral(_normalize_protocol_key(protocol)):
                 params["is_collateral"] = args.get("is_collateral", True)
             if str(args.get("amount", "")).lower() == "all":
                 params["withdraw_all"] = True
@@ -3043,21 +3047,36 @@ class ToolExecutor:
 
     # ── WALLET OVERVIEW ────────────────────────────────────────────────
 
-    # Default tokens to query per chain for wallet overview
-    _CHAIN_DEFAULT_TOKENS: ClassVar[dict[str, list[str]]] = {
-        "arbitrum": ["ETH", "WETH", "USDC", "USDC.e", "USDT", "WBTC", "DAI", "ARB"],
-        "ethereum": ["ETH", "WETH", "USDC", "USDT", "WBTC", "DAI", "stETH", "wstETH"],
-        "base": ["ETH", "WETH", "USDC", "USDbC", "DAI", "cbETH"],
-        "optimism": ["ETH", "WETH", "USDC", "USDC.e", "USDT", "WBTC", "DAI", "OP"],
-        "polygon": ["MATIC", "WMATIC", "USDC", "USDC.e", "USDT", "WETH", "WBTC", "DAI"],
-        "avalanche": ["AVAX", "WAVAX", "USDC", "USDT", "WETH.e", "WBTC.e", "DAI.e"],
-        "bsc": ["BNB", "WBNB", "USDC", "USDT", "WETH", "BTCB", "DAI"],
-        "sonic": ["S", "WS", "USDC", "WETH"],
-        "mantle": ["MNT", "WMNT", "USDC", "USDT", "WETH", "mETH"],
-        "plasma": ["XPL", "WXPL", "USDC", "USDT", "WETH", "PENDLE"],
-    }
+    # Fallback token list when a chain has no descriptor-declared defaults.
+    # ``_CHAIN_DEFAULT_TOKENS`` was removed in Plan 027 Step 4 -- tokens now
+    # live on ChainDescriptor.default_display_tokens (per-chain descriptor
+    # files). Lookup is EXACT canonical-chain-name keyed via the registry;
+    # alias inputs (e.g. "bnb") intentionally fall through to the fallback to
+    # preserve the prior behavior (an alias never produced a match in the
+    # old dict either, because the dict used canonical names only).
     _FALLBACK_TOKENS: ClassVar[list[str]] = ["ETH", "WETH", "USDC", "USDT", "WBTC", "DAI"]
 
+    @classmethod
+    def _default_tokens_for_chain(cls, chain: str) -> list[str]:
+        """Resolve the default display-token list for ``chain``.
+
+        Looks up ``ChainDescriptor.default_display_tokens`` by exact canonical
+        chain name (NOT via alias resolution — an alias like "bnb" yields the
+        fallback, exactly as the old dict-based lookup did). Returns
+        ``_FALLBACK_TOKENS`` when the chain has no declared defaults.
+        """
+        from almanak.core.chains._registry import ChainRegistry
+
+        for descriptor in ChainRegistry.all():
+            if descriptor.name == chain and descriptor.default_display_tokens is not None:
+                return list(descriptor.default_display_tokens)
+        return cls._FALLBACK_TOKENS
+
+    # crap-allowlist: plan-027 mechanical _CHAIN_DEFAULT_TOKENS ->
+    # ChainDescriptor.default_display_tokens cutover in pre-existing
+    # high-CRAP function (cov 4% predates the change) — same class of
+    # exception as the VIB-4801/VIB-4722 cutovers above; broader RPC-surface
+    # refactor of this file's executors tracked in VIB-4139.
     def _execute_get_wallet_overview(self, args: dict) -> ToolResponse:
         """Get complete wallet balance overview in a single call."""
         from almanak.gateway.proto import gateway_pb2
@@ -3068,7 +3087,7 @@ class ToolExecutor:
         extra_tokens = args.get("extra_tokens", [])
 
         # Build token list: chain defaults + extras, deduplicated
-        default_tokens = self._CHAIN_DEFAULT_TOKENS.get(chain, self._FALLBACK_TOKENS)
+        default_tokens = self._default_tokens_for_chain(chain)
         all_tokens = list(dict.fromkeys(default_tokens + extra_tokens))  # preserves order, dedupes
 
         requests = [gateway_pb2.BalanceRequest(token=t, chain=chain, wallet_address=wallet) for t in all_tokens]

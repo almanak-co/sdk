@@ -157,5 +157,8 @@ DESCRIPTOR = register_chain(
         ),
         reorg_safe_depth=12,  # VIB-3350: deep reorg window on L1
         aliases=("eth", "mainnet"),
+        color="#627eea",  # Plan 027: Ethereum blue (from legacy CHAIN_COLORS)
+        # Plan 027: default wallet-overview tokens (from legacy _CHAIN_DEFAULT_TOKENS)
+        default_display_tokens=("ETH", "WETH", "USDC", "USDT", "WBTC", "DAI", "stETH", "wstETH"),
     )
 )

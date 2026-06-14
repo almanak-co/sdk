@@ -44,9 +44,52 @@ from almanak.framework.dashboard.utils import (
 logger = logging.getLogger(__name__)
 
 
+def _build_kind_protocol_set(kind_name: str) -> frozenset[str]:
+    """Build a frozenset of slugs for all connectors with the given ProtocolKind name.
+
+    Includes canonical connector names and their manifest aliases. Uses exact
+    matching (no substring sniff) so a protocol like ``spare_finance`` does not
+    accidentally match ``perp``.  Called lazily and cached on the module-level
+    ``_KIND_SETS`` dict to avoid heavy imports at module load time (the
+    test_imports_lean.py contract forbids eager connector registry imports from
+    dashboard modules).
+    """
+    from almanak.connectors._base.types import ProtocolKind
+    from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+    target_kind = ProtocolKind[kind_name]
+    slugs: set[str] = set()
+    for conn in CONNECTOR_REGISTRY.all():
+        if conn.kind == target_kind:
+            slugs.add(conn.name)
+            slugs.update(conn.aliases)
+    return frozenset(slugs)
+
+
+# Lazily-built kind → protocol-slug frozenset cache (populated on first use).
+_KIND_SETS: dict[str, frozenset[str]] = {}
+
+
+def _kind_slugs(kind_name: str) -> frozenset[str]:
+    """Return (and cache) the protocol slugs for ``kind_name``."""
+    if kind_name not in _KIND_SETS:
+        _KIND_SETS[kind_name] = _build_kind_protocol_set(kind_name)
+    return _KIND_SETS[kind_name]
+
+
+def _normalize_for_kind_lookup(raw: str) -> list[str]:
+    """Fold a (possibly multi-protocol, display-cased) protocol string into slug list.
+
+    Handles comma-separated multi-protocol strings (``models.py:341``), folds
+    spaces and hyphens to underscores, and lowercases each segment — same
+    normalization as ``_normalize_protocol_key`` in ``agent_tools/schemas.py``
+    but applied to every segment after splitting on commas.
+    """
+    return [seg.strip().lower().replace("-", "_").replace(" ", "_") for seg in raw.split(",") if seg.strip()]
+
+
 def _detect_strategy_profile(strategy: Strategy) -> str:
     """Infer strategy profile for default chart selection."""
-    protocol = (strategy.protocol or "").lower()
     event_types = {e.event_type.value for e in strategy.timeline_events}
 
     if strategy.position and strategy.position.lp_positions:
@@ -58,12 +101,14 @@ def _detect_strategy_profile(strategy: Strategy) -> str:
         return "LENDING"
     if {"BORROW", "REPAY"} & event_types:
         return "LENDING"
-    if any(name in protocol for name in {"aave", "morpho", "compound", "spark"}):
+    lending_slugs = _kind_slugs("LENDING")
+    if any(seg in lending_slugs for seg in _normalize_for_kind_lookup(strategy.protocol or "")):
         return "LENDING"
 
     if strategy.position and strategy.position.leverage is not None:
         return "PERPS"
-    if any(name in protocol for name in {"gmx", "perp", "hyperliquid"}):
+    perp_slugs = _kind_slugs("PERP")
+    if any(seg in perp_slugs for seg in _normalize_for_kind_lookup(strategy.protocol or "")):
         return "PERPS"
 
     return "TA"

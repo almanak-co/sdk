@@ -140,5 +140,8 @@ DESCRIPTOR = register_chain(
         ),
         bridged_stablecoin_variants=("USDC.e",),
         aliases=("arb",),
+        color="#28a0f0",  # Plan 027: Arbitrum blue (from legacy CHAIN_COLORS)
+        # Plan 027: default wallet-overview tokens (from legacy _CHAIN_DEFAULT_TOKENS)
+        default_display_tokens=("ETH", "WETH", "USDC", "USDC.e", "USDT", "WBTC", "DAI", "ARB"),
     )
 )

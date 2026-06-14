@@ -59,6 +59,11 @@ class ProtocolFamily(StrEnum):
     #: from :attr:`UNIV3_LP_GROUPING` so the two grouping-policy versions evolve
     #: independently (VIB-4583).
     UNIV4_LP_GROUPING = "univ4_lp_grouping"
+    #: DEX connectors that use a tick-spacing integer as the fee-tier field
+    #: rather than the standard bps-integer (e.g. aerodrome_slipstream).
+    #: The ``ax pool`` renderer switches to ``tick_spacing=<N>`` display for
+    #: members of this family (Plan 027 Step 3).
+    TICK_SPACING_FEE_DISPLAY = "tick_spacing_fee_display"
 
 
 @dataclass(frozen=True)

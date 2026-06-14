@@ -354,3 +354,29 @@ class TestNormalizeProtocol:
     def test_total_on_none_and_non_str(self):
         assert LendingReadRegistry.normalize_protocol(None) == ""
         assert LendingReadRegistry.normalize_protocol(123) == ""  # type: ignore[arg-type]
+
+
+class TestAcceptsIsCollateral:
+    """Plan 027 Step 5: the registry owns which lending venues take the
+    ``is_collateral`` flag (replaces the inline ``{"morpho", "morpho_blue"}``
+    set-membership guard in the executor and the ax CLI withdraw path)."""
+
+    @pytest.mark.parametrize(
+        "protocol",
+        ["morpho_blue", "morpho", "morphoblue", "Morpho-Blue", "MORPHO", "morpho-blue"],
+    )
+    def test_morpho_and_aliases_accept_is_collateral(self, protocol: str) -> None:
+        # The canonical key, manifest aliases, and case/hyphen folding all
+        # resolve to the morpho_blue decl that sets accepts_is_collateral=True.
+        # (Whitespace folding is the caller's responsibility -- see the method
+        # docstring -- and is covered at the executor / ax CLI call sites.)
+        assert LendingReadRegistry.accepts_is_collateral(protocol) is True
+
+    @pytest.mark.parametrize(
+        "protocol",
+        ["aave_v3", "spark", "aave", "compound_v3", "comet", "definitely_not_a_protocol", ""],
+    )
+    def test_other_and_unknown_protocols_fail_closed(self, protocol: str) -> None:
+        # Every lending venue that does NOT declare the flag -- and any unknown
+        # key -- returns False (fail closed); the gate must never default open.
+        assert LendingReadRegistry.accepts_is_collateral(protocol) is False

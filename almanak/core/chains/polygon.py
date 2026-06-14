@@ -142,5 +142,8 @@ DESCRIPTOR = register_chain(
         bridged_stablecoin_variants=("USDC.e",),
         reorg_safe_depth=10,  # VIB-3350: PoS reorg window
         aliases=("matic",),
+        color="#8247e5",  # Plan 027: Polygon purple (from legacy CHAIN_COLORS)
+        # Plan 027: default wallet-overview tokens (from legacy _CHAIN_DEFAULT_TOKENS)
+        default_display_tokens=("MATIC", "WMATIC", "USDC", "USDC.e", "USDT", "WETH", "WBTC", "DAI"),
     )
 )

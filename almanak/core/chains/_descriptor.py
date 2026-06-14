@@ -535,6 +535,18 @@ class ChainDescriptor:
         aliases: Extra alternative names that resolve to this chain
             (e.g. ``("bnb", "binance")`` for BSC). The canonical ``name``
             is always implicit and need not be repeated here.
+        color: Brand hex color for dashboard/UI chain badges (e.g.
+            ``"#627eea"`` for Ethereum). Must be a ``#``-prefixed 3- or
+            6-digit lowercase hex string. ``None`` means the consumer falls
+            back to a neutral default (e.g. ``"#9e9e9e"``). Sparse: only
+            chains with a verified brand color declare this field. Plan 027.
+        default_display_tokens: Ordered list of token symbols shown by
+            default in the wallet-overview ``ax`` command for this chain.
+            ``None`` means "no chain-specific defaults; use the framework
+            fallback list". Mirrors the legacy ``_CHAIN_DEFAULT_TOKENS``
+            class dict in ``almanak/framework/agent_tools/executor.py``.
+            Lookup is EXACT-NAME (canonical chain name only — alias inputs
+            deliberately fall through to the fallback). Plan 027.
     """
 
     enum: Chain
@@ -555,6 +567,8 @@ class ChainDescriptor:
     bridged_stablecoin_variants: tuple[str, ...] = ()
     reorg_safe_depth: int | None = None
     aliases: tuple[str, ...] = ()
+    color: str | None = None
+    default_display_tokens: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         # Strong invariant: ``name`` always equals the lowercase enum name.
@@ -613,3 +627,21 @@ class ChainDescriptor:
                     f"{sorted(KNOWN_CONTRACT_KEYS)}"
                 )
             object.__setattr__(self, "contracts", MappingProxyType(frozen_contracts))
+        # Validate the optional brand color (Plan 027). Must be a #-prefixed
+        # 3- or 6-digit lowercase hex string; None is explicitly allowed (sparse
+        # field -- chains without a declared brand color fall back to the
+        # consumer's DEFAULT_COLOR). Fail loudly at registration so a typo'd hex
+        # value does not silently produce an invisible or wrong-colored badge.
+        if self.color is not None:
+            c = self.color
+            valid = (
+                isinstance(c, str)
+                and c.startswith("#")
+                and len(c) in (4, 7)
+                and all(ch in "0123456789abcdef" for ch in c[1:])
+            )
+            if not valid:
+                raise ValueError(
+                    f"ChainDescriptor {self.name!r} color {c!r} must be a "
+                    f"#-prefixed 3- or 6-digit lowercase hex string (e.g. '#627eea')"
+                )

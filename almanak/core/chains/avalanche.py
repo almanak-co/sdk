@@ -133,5 +133,8 @@ DESCRIPTOR = register_chain(
         bridged_stablecoin_variants=("USDC.e", "DAI.e", "USDT.e"),
         reorg_safe_depth=5,  # VIB-3350: subnet finality window
         aliases=("avax",),
+        color="#e84142",  # Plan 027: Avalanche red (from legacy CHAIN_COLORS)
+        # Plan 027: default wallet-overview tokens (from legacy _CHAIN_DEFAULT_TOKENS)
+        default_display_tokens=("AVAX", "WAVAX", "USDC", "USDT", "WETH.e", "WBTC.e", "DAI.e"),
     )
 )

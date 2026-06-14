@@ -100,5 +100,7 @@ DESCRIPTOR = register_chain(
             block_gas_limit=3_000_000_000,  # Mantle non-standard gas accounting (VIB-3666/VIB-3746)
         ),
         aliases=(),
+        # Plan 027: default wallet-overview tokens (from legacy _CHAIN_DEFAULT_TOKENS)
+        default_display_tokens=("MNT", "WMNT", "USDC", "USDT", "WETH", "mETH"),
     )
 )

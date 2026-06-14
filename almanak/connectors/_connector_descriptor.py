@@ -167,6 +167,11 @@ class LendingReadDecl:
     rate_history_chains: tuple[str, ...] = ()
     backtest_default_supply_apy: str | None = None
     backtest_default_borrow_apy: str | None = None
+    accepts_is_collateral: bool = False
+    """When ``True``, the executor / ax CLI may forward the ``is_collateral``
+    flag to this protocol's withdraw intent. Defaults to ``False`` -- the flag
+    is Morpho-specific and must not be forwarded to Aave-style adapters that
+    would silently ignore it (CodeRabbit PR #1535 round 4). Plan 027 Step 5."""
 
     def __post_init__(self) -> None:
         """Validate the declaration's import references and aliases."""
@@ -176,6 +181,10 @@ class LendingReadDecl:
                 raise ValueError(f"LendingReadDecl.{field_name} must be None or an ImportRef, got {value!r}")
         if self.spec is None and self.account_state is None:
             raise ValueError("LendingReadDecl must set at least one of spec / account_state")
+        if not isinstance(self.accepts_is_collateral, bool):
+            raise ValueError(
+                f"LendingReadDecl.accepts_is_collateral must be a bool, got {self.accepts_is_collateral!r}"
+            )
         _validate_decl_aliases("LendingReadDecl", self.aliases)
         if not isinstance(self.rate_history_chains, tuple):
             raise ValueError(

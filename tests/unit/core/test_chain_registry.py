@@ -731,3 +731,119 @@ class TestRpcProfile:
         their descriptor must carry the empty ``RpcProfile``."""
         for chain in (Chain.BERACHAIN, Chain.BLAST):
             assert ChainRegistry.get(chain).rpc == RpcProfile()
+
+
+# ---------------------------------------------------------------------------
+# Plan 027 Step 2: ChainDescriptor.color parity tests
+# ---------------------------------------------------------------------------
+
+
+# Verbatim color values from the old CHAIN_COLORS dict in theme.py (frozen
+# at Plan 027 PR-merge time). The sanctioned delta: ``zksync`` is dropped
+# because it has no registered ChainDescriptor (it was a dead entry in the
+# old dict).
+_EXPECTED_CHAIN_COLORS = {
+    "ethereum": "#627eea",
+    "arbitrum": "#28a0f0",
+    "optimism": "#ff0420",
+    "base": "#0052ff",
+    "polygon": "#8247e5",
+    "avalanche": "#e84142",
+    "bsc": "#f0b90b",
+    "linea": "#61dfff",
+}
+
+
+def test_chain_colors_parity_with_old_dict() -> None:
+    """Derived CHAIN_COLORS equals old literal dict minus the dead zksync entry.
+
+    Pins that every chain that had a color in the pre-Plan-027 dict still
+    has the identical color on its ChainDescriptor.  The sanctioned delta is
+    the removal of ``zksync`` (no registered descriptor).
+    """
+    from almanak.framework.dashboard.theme import CHAIN_COLORS
+
+    assert CHAIN_COLORS == _EXPECTED_CHAIN_COLORS, (
+        "Derived CHAIN_COLORS differs from expected parity snapshot. "
+        "If you intentionally added/changed a chain color, update _EXPECTED_CHAIN_COLORS "
+        "in this test to match."
+    )
+
+
+def test_zksync_absent_from_derived_chain_colors() -> None:
+    """``zksync`` must not appear in the derived chain-color dict.
+
+    It had no registered ChainDescriptor and was a dead entry in the old dict.
+    """
+    from almanak.framework.dashboard.theme import CHAIN_COLORS
+
+    assert "zksync" not in CHAIN_COLORS
+
+
+def test_chain_color_hex_format() -> None:
+    """Every declared ChainDescriptor.color is a valid #-prefixed hex string."""
+    for descriptor in ChainRegistry.all():
+        if descriptor.color is not None:
+            c = descriptor.color
+            assert c.startswith("#"), f"{descriptor.name} color {c!r} must start with '#'"
+            assert len(c) in (4, 7), f"{descriptor.name} color {c!r} must be 3 or 6 hex digits"
+            assert all(ch in "0123456789abcdef" for ch in c[1:]), (
+                f"{descriptor.name} color {c!r} must be lowercase hex"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Plan 027 Step 4: ChainDescriptor.default_display_tokens parity tests
+# ---------------------------------------------------------------------------
+
+# Verbatim token lists from the old _CHAIN_DEFAULT_TOKENS in executor.py
+# (frozen at Plan 027 PR-merge time). Tuples for exact ordering comparison.
+_EXPECTED_DEFAULT_TOKENS: dict[str, tuple[str, ...]] = {
+    "arbitrum": ("ETH", "WETH", "USDC", "USDC.e", "USDT", "WBTC", "DAI", "ARB"),
+    "ethereum": ("ETH", "WETH", "USDC", "USDT", "WBTC", "DAI", "stETH", "wstETH"),
+    "base": ("ETH", "WETH", "USDC", "USDbC", "DAI", "cbETH"),
+    "optimism": ("ETH", "WETH", "USDC", "USDC.e", "USDT", "WBTC", "DAI", "OP"),
+    "polygon": ("MATIC", "WMATIC", "USDC", "USDC.e", "USDT", "WETH", "WBTC", "DAI"),
+    "avalanche": ("AVAX", "WAVAX", "USDC", "USDT", "WETH.e", "WBTC.e", "DAI.e"),
+    "bsc": ("BNB", "WBNB", "USDC", "USDT", "WETH", "BTCB", "DAI"),
+    "sonic": ("S", "WS", "USDC", "WETH"),
+    "mantle": ("MNT", "WMNT", "USDC", "USDT", "WETH", "mETH"),
+    "plasma": ("XPL", "WXPL", "USDC", "USDT", "WETH", "PENDLE"),
+}
+
+
+@pytest.mark.parametrize("chain_name,expected_tokens", _EXPECTED_DEFAULT_TOKENS.items())
+def test_default_display_tokens_parity(chain_name: str, expected_tokens: tuple[str, ...]) -> None:
+    """Each chain's default_display_tokens matches the old _CHAIN_DEFAULT_TOKENS entry."""
+    descriptor = ChainRegistry.try_resolve(chain_name)
+    assert descriptor is not None, f"Chain {chain_name!r} not found in registry"
+    assert descriptor.default_display_tokens == expected_tokens, (
+        f"Chain {chain_name!r} default_display_tokens mismatch. "
+        f"Got {descriptor.default_display_tokens!r}, expected {expected_tokens!r}"
+    )
+
+
+def test_alias_input_yields_fallback_tokens() -> None:
+    """An alias like 'bnb' must NOT resolve to a chain's declared token list.
+
+    The executor's _default_tokens_for_chain uses exact canonical-name match
+    so alias inputs fall through to _FALLBACK_TOKENS -- parity with the old
+    _CHAIN_DEFAULT_TOKENS.get(chain, _FALLBACK_TOKENS) behavior where 'bnb'
+    never matched the 'bsc' key.
+    """
+    from almanak.framework.agent_tools.executor import ToolExecutor
+
+    # 'bnb' is an alias for bsc -- must get fallback, not bsc tokens
+    result = ToolExecutor._default_tokens_for_chain("bnb")
+    assert result == ToolExecutor._FALLBACK_TOKENS, (
+        f"Alias 'bnb' should yield fallback tokens, got {result!r}"
+    )
+
+
+def test_ten_chains_declare_default_display_tokens() -> None:
+    """Exactly 10 chains have default_display_tokens declared (same set as old dict)."""
+    chains_with_tokens = [d.name for d in ChainRegistry.all() if d.default_display_tokens is not None]
+    assert set(chains_with_tokens) == set(_EXPECTED_DEFAULT_TOKENS.keys()), (
+        f"Chains with default_display_tokens: {sorted(chains_with_tokens)}; "
+        f"expected: {sorted(_EXPECTED_DEFAULT_TOKENS.keys())}"
+    )

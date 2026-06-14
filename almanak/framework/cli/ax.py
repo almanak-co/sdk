@@ -1955,10 +1955,13 @@ def lending_withdraw(
     _guard_market_id_flag(protocol, market_id)
     # --loan-token remains Morpho-specific (Curvance has no analogous flag);
     # reject it on any other isolated-market protocol too.
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
     from almanak.framework.agent_tools.schemas import _normalize_protocol_key
 
-    _is_morpho = _normalize_protocol_key(protocol) in ("morpho", "morpho_blue")
-    if is_loan_token and not _is_morpho:
+    # fold (spaces + hyphens -> underscores) IN FRONT of registry call --
+    # same pattern as executor.py:1407 (Plan 027 Step 5).
+    _accepts_collateral_flag = LendingReadRegistry.accepts_is_collateral(_normalize_protocol_key(protocol))
+    if is_loan_token and not _accepts_collateral_flag:
         raise click.UsageError(f"--loan-token is only supported on Morpho Blue; got protocol={protocol}")
 
     args: dict = {
@@ -1967,9 +1970,9 @@ def lending_withdraw(
         "protocol": protocol,
         "chain": ctx.obj["chain"],
     }
-    # is_collateral and market_id are Morpho-specific; only forward them when
-    # the protocol actually uses them.
-    if _is_morpho:
+    # is_collateral and market_id are only forwarded when the protocol
+    # declares accepts_is_collateral=True on its LendingReadDecl.
+    if _accepts_collateral_flag:
         args["is_collateral"] = not is_loan_token
         if market_id:
             args["market_id"] = market_id
@@ -1989,6 +1992,31 @@ def lending_withdraw(
 # ---------------------------------------------------------------------------
 # almanak ax pool <token_a> <token_b>
 # ---------------------------------------------------------------------------
+
+
+def _pool_title_suffix(protocol: str, fee_tier: int) -> str:
+    """Render the ``ax pool`` title fee-tier suffix from registry family facts.
+
+    Protocols in ``TICK_SPACING_FEE_DISPLAY`` (e.g. aerodrome_slipstream)
+    render ``tick_spacing=<N>``; every other protocol renders a percentage.
+    The raw CLI value is normalized first so aliases ("aerodrome-slipstream",
+    "Aerodrome Slipstream") resolve the same way the registry keys are stored
+    (CodeRabbit, PR #2778). Shared with the unit test so production and test
+    exercise one code path.
+
+    Function-scope boot import satisfies the strategy-side lean-import
+    contract (pattern: compiler_constants.py:533).
+    """
+    from almanak.connectors._strategy_protocol_family_registry import (
+        PROTOCOL_FAMILY_REGISTRY,
+        ProtocolFamily,
+    )
+    from almanak.framework.agent_tools.schemas import _normalize_protocol_key
+
+    normalized_protocol = _normalize_protocol_key(protocol)
+    if normalized_protocol in PROTOCOL_FAMILY_REGISTRY.members(ProtocolFamily.TICK_SPACING_FEE_DISPLAY):
+        return f"tick_spacing={fee_tier}"
+    return f"{fee_tier / 10000:.2f}%"
 
 
 @ax.command("pool")
@@ -2032,10 +2060,7 @@ def pool(ctx, token_a, token_b, fee_tier, protocol):
                 "protocol": protocol,
             },
         )
-        if protocol == "aerodrome_slipstream":
-            title_suffix = f"tick_spacing={fee_tier}"
-        else:
-            title_suffix = f"{fee_tier / 10000:.2f}%"
+        title_suffix = _pool_title_suffix(protocol, fee_tier)
         render_result(
             response,
             json_output=json_output,

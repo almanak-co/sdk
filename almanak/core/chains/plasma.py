@@ -68,5 +68,7 @@ DESCRIPTOR = register_chain(
             },
         ),
         aliases=(),
+        # Plan 027: default wallet-overview tokens (from legacy _CHAIN_DEFAULT_TOKENS)
+        default_display_tokens=("XPL", "WXPL", "USDC", "USDT", "WETH", "PENDLE"),
     )
 )

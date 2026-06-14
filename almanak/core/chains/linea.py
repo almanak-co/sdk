@@ -86,5 +86,6 @@ DESCRIPTOR = register_chain(
             wrapped_native_deposit=True,
         ),
         aliases=(),
+        color="#61dfff",  # Plan 027: Linea cyan (from legacy CHAIN_COLORS)
     )
 )
