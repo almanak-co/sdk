@@ -672,7 +672,7 @@ class SimulatedFill:
 
     def to_trade_record(
         self,
-        pnl_usd: Decimal = Decimal("0"),
+        pnl_usd: Decimal | None = Decimal("0"),
         il_loss_usd: Decimal | None = None,
         fees_earned_usd: Decimal | None = None,
         net_lp_pnl_usd: Decimal | None = None,
@@ -681,7 +681,10 @@ class SimulatedFill:
         """Convert to a TradeRecord for backtest results.
 
         Args:
-            pnl_usd: PnL to record for this trade
+            pnl_usd: Realized PnL to record, or ``None`` when the trade
+                realized no PnL (an opening / inventory-building trade). The
+                metrics layer excludes ``None`` from win/loss stats so an
+                unknown PnL is never miscounted as a loss (VIB-5083).
             il_loss_usd: Impermanent loss in USD (for LP positions, negative = loss)
             fees_earned_usd: Trading fees earned in USD (for LP positions)
             net_lp_pnl_usd: Net LP PnL = (Current Value + Fees) - Initial Value
@@ -700,6 +703,24 @@ class SimulatedFill:
             if self.position_delta
             else self.position_close_id or self.position_reduce_id
         )
+        # For SWAP fills the actual in/out token amounts are known from the
+        # flows (tokens_out = paid = amount_in; tokens_in = received =
+        # amount_out). Surface them so downstream consumers like
+        # _build_swap_amounts have the realized amounts instead of None
+        # (VIB-5083, CodeRabbit; repo learning).
+        actual_amount_in: Decimal | None = None
+        actual_amount_out: Decimal | None = None
+        if self.intent_type == IntentType.SWAP:
+            # Only populate the singular fields when each side has exactly one
+            # positive leg; for a multi-leg SWAP next(iter(...)) would persist
+            # an arbitrary amount that misrepresents the trade (VIB-5083,
+            # CodeRabbit).
+            paid = [a for a in self.tokens_out.values() if a > Decimal("0")]
+            received = [a for a in self.tokens_in.values() if a > Decimal("0")]
+            if len(paid) == 1:
+                actual_amount_in = paid[0]
+            if len(received) == 1:
+                actual_amount_out = received[0]
         return TradeRecord(
             timestamp=self.timestamp,
             intent_type=self.intent_type,
@@ -713,6 +734,8 @@ class SimulatedFill:
             protocol=self.protocol,
             tokens=self.tokens,
             metadata=self.metadata,
+            actual_amount_in=actual_amount_in,
+            actual_amount_out=actual_amount_out,
             il_loss_usd=il_loss_usd,
             fees_earned_usd=fees_earned_usd,
             net_lp_pnl_usd=net_lp_pnl_usd,

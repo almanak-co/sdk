@@ -698,9 +698,14 @@ class TestTotalFundingMetricsAccuracy:
         assert "total_funding_paid" in metrics_dict
         assert "total_funding_received" in metrics_dict
 
-        # The serialized values should be string representations
-        assert metrics_dict["total_funding_paid"] == str(metrics.total_funding_paid)
-        assert metrics_dict["total_funding_received"] == str(metrics.total_funding_received)
+        # VIB-5083: metric Decimals are serialized in normalized form (no
+        # trailing-zero or scientific-notation artifacts like "0E+17"), so
+        # the serialized string is value-equal to the metric and carries no
+        # exponent. (Was: raw str(Decimal), which leaked "120.00000".)
+        assert Decimal(metrics_dict["total_funding_paid"]) == metrics.total_funding_paid
+        assert Decimal(metrics_dict["total_funding_received"]) == metrics.total_funding_received
+        assert "E" not in metrics_dict["total_funding_paid"].upper()
+        assert "E" not in metrics_dict["total_funding_received"].upper()
 
 
 class TestFundingEdgeCases:

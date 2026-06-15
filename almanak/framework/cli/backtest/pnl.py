@@ -731,11 +731,17 @@ def _print_verbose_trades(result: BacktestResult, verbose: bool) -> None:
     click.echo("-" * 60)
 
     for i, trade in enumerate(result.trades, 1):
-        pnl_sign = "+" if trade.pnl_usd >= 0 else ""
+        # pnl_usd is None for an opening / inventory-building trade (no
+        # realized PnL yet, VIB-5083): show an em-dash instead of a fake $0.00.
+        if trade.pnl_usd is None:
+            pnl_display = "    —    "
+        else:
+            pnl_sign = "+" if trade.pnl_usd >= 0 else ""
+            pnl_display = f"{pnl_sign}${trade.pnl_usd:,.2f}"
         click.echo(
             f"{i:3}. {trade.timestamp.strftime('%Y-%m-%d %H:%M')}: "
             f"{trade.intent_type.value:10} "
-            f"{pnl_sign}${trade.pnl_usd:,.2f} "
+            f"{pnl_display} "
             f"(fee: ${trade.fee_usd:,.2f}, gas: ${trade.gas_cost_usd:,.2f})"
         )
 

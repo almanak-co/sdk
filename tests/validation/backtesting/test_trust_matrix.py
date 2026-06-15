@@ -170,7 +170,10 @@ def test_swap_overspend_is_rejected_without_state_change() -> None:
     )
 
     assert result.success  # the backtest completes; the trade fails
-    assert result.metrics.total_trades == 1
+    # Rejected fill is recorded but is NOT a trade: total_trades excludes
+    # it; it surfaces as failed_trades (VIB-5083, CodeRabbit).
+    assert result.metrics.total_trades == 0
+    assert result.metrics.failed_trades == 1
     trade = result.trades[0]
     assert trade.success is False
     assert "insufficient" in trade.metadata.get("failure_reason", "")
@@ -216,11 +219,6 @@ def test_swap_fee_accounting_is_exact() -> None:
 
 
 @pytest.mark.trust_cell("swap:trade_pnl_attribution")
-@pytest.mark.xfail(
-    strict=True,
-    reason="VIB-5083: _calculate_trade_pnl returns Decimal('0') for every SWAP, "
-    "so per-trade pnl_usd is 0 and win_rate is degenerate (every swap counts as a loss).",
-)
 def test_swap_profitable_close_records_positive_pnl() -> None:
     """A profitable closing swap must record positive per-trade pnl_usd.
 
@@ -432,7 +430,10 @@ def test_lp_open_beyond_cash_is_rejected() -> None:
     )
 
     assert result.success
-    assert result.metrics.total_trades == 1
+    # Rejected fill is recorded but is NOT a trade: total_trades excludes
+    # it; it surfaces as failed_trades (VIB-5083, CodeRabbit).
+    assert result.metrics.total_trades == 0
+    assert result.metrics.failed_trades == 1
     trade = result.trades[0]
     assert trade.success is False
     assert "insufficient" in trade.metadata.get("failure_reason", "")
@@ -582,7 +583,10 @@ def test_supply_beyond_cash_is_rejected() -> None:
     )
 
     assert result.success
-    assert result.metrics.total_trades == 1
+    # Rejected fill is recorded but is NOT a trade: total_trades excludes
+    # it; it surfaces as failed_trades (VIB-5083, CodeRabbit).
+    assert result.metrics.total_trades == 0
+    assert result.metrics.failed_trades == 1
     trade = result.trades[0]
     assert trade.success is False
     assert "insufficient" in trade.metadata.get("failure_reason", "")
@@ -651,7 +655,10 @@ def test_perp_open_beyond_cash_is_rejected() -> None:
     )
 
     assert result.success
-    assert result.metrics.total_trades == 1
+    # Rejected fill is recorded but is NOT a trade: total_trades excludes
+    # it; it surfaces as failed_trades (VIB-5083, CodeRabbit).
+    assert result.metrics.total_trades == 0
+    assert result.metrics.failed_trades == 1
     trade = result.trades[0]
     assert trade.success is False
     assert "insufficient" in trade.metadata.get("failure_reason", "")

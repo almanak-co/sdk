@@ -10,6 +10,7 @@ and configuration parameters.
 Extracted from pnl/engine.py for module size management.
 """
 
+from dataclasses import dataclass
 from decimal import Decimal
 
 from almanak.framework.backtesting.models import (
@@ -19,6 +20,85 @@ from almanak.framework.backtesting.models import (
 )
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+
+@dataclass(frozen=True)
+class _TradeStatistics:
+    """Win/loss aggregates over the trades that realized PnL (VIB-5083)."""
+
+    win_rate: Decimal
+    profit_factor: Decimal
+    winning_trades: int
+    losing_trades: int
+    trades_with_realized_pnl: int
+    failed_trades: int
+    avg_trade_pnl: Decimal
+    largest_win: Decimal
+    largest_loss: Decimal
+    avg_win: Decimal
+    avg_loss: Decimal
+
+
+def _mean(values: list[Decimal]) -> Decimal:
+    """Mean of ``values``, or ``Decimal("0")`` for an empty list."""
+    if not values:
+        return Decimal("0")
+    return sum(values, Decimal("0")) / Decimal(str(len(values)))
+
+
+def _compute_trade_statistics(trades: list[TradeRecord]) -> _TradeStatistics:
+    """Win/loss statistics over the trades that realized PnL (VIB-5083).
+
+    Performance stats operate ONLY on trades that actually realized PnL:
+    rejected fills (``success=False``) and opening / inventory-building
+    trades (``pnl_usd=None``) carry no win/loss signal. Empty != Zero -- an
+    unknown PnL must never be miscounted as a loss, which is exactly what
+    degraded ``win_rate`` to 0 and produced negative "wins" before this fix.
+    ``failed_trades`` is reported separately so rejected fills never inflate
+    the win/loss denominator.
+    """
+    failed_count = sum(1 for t in trades if not t.success)
+    # realized_net_pnl() is gated by has_realized_pnl, so this list is all
+    # non-None Decimals.
+    realized_pnls = [t.realized_net_pnl() for t in trades if t.has_realized_pnl]
+    winning_pnls = [p for p in realized_pnls if p > Decimal("0")]
+    losing_pnls = [p for p in realized_pnls if p <= Decimal("0")]
+
+    win_rate = Decimal("0")
+    if realized_pnls:
+        win_rate = Decimal(str(len(winning_pnls))) / Decimal(str(len(realized_pnls)))
+
+    gross_profit = sum(winning_pnls, Decimal("0"))
+    gross_loss = abs(sum(losing_pnls, Decimal("0")))
+    # profit_factor is gross_profit / gross_loss. When gross_loss == 0 the
+    # ratio is mathematically undefined (an all-profit run divides by zero).
+    # We report 0 here as a documented limitation: BacktestMetrics.profit_factor
+    # is a non-Optional Decimal consumed by the JSON serializer (_decimal_str),
+    # the text report (``{...:.2f}``), and from_dict, so widening it to
+    # Optional/Infinity would ripple through all three. A 0 profit_factor on a
+    # run with gross_profit > 0 and zero losses should be read as "undefined
+    # (no losses)", not "no profit" -- the win_rate (1.0) and gross_profit
+    # disambiguate it. (VIB-5083, CodeRabbit.)
+    profit_factor = gross_profit / gross_loss if gross_loss > Decimal("0") else Decimal("0")
+
+    return _TradeStatistics(
+        win_rate=win_rate,
+        profit_factor=profit_factor,
+        winning_trades=len(winning_pnls),
+        losing_trades=len(losing_pnls),
+        trades_with_realized_pnl=len(realized_pnls),
+        failed_trades=failed_count,
+        avg_trade_pnl=_mean(realized_pnls),
+        # Directional extrema: the largest WIN comes from winning trades only
+        # and the largest LOSS from losing trades only. Taking max/min over the
+        # undirected realized list reported a negative "largest win" on an
+        # all-loss run (and a positive "largest loss" on an all-win run); the
+        # defaults make an empty side collapse to 0 (VIB-5083, CodeRabbit).
+        largest_win=max(winning_pnls, default=Decimal("0")),
+        largest_loss=min(losing_pnls, default=Decimal("0")),
+        avg_win=_mean(winning_pnls),
+        avg_loss=_mean(losing_pnls),
+    )
 
 
 def decimal_sqrt(n: Decimal) -> Decimal:
@@ -381,44 +461,8 @@ def calculate_metrics(
     if max_drawdown > Decimal("0"):
         calmar = annualized_return / max_drawdown
 
-    # Trade statistics
-    winning_trades = [t for t in trades if t.net_pnl_usd > Decimal("0")]
-    losing_trades = [t for t in trades if t.net_pnl_usd <= Decimal("0")]
-
-    # Win rate
-    win_rate = Decimal("0")
-    if trades:
-        win_rate = Decimal(str(len(winning_trades))) / Decimal(str(len(trades)))
-
-    # Profit factor (gross profit / gross loss)
-    gross_profit = sum((t.net_pnl_usd for t in winning_trades), Decimal("0"))
-    gross_loss_sum = sum((t.net_pnl_usd for t in losing_trades), Decimal("0"))
-    gross_loss = abs(gross_loss_sum)
-    profit_factor = Decimal("0")
-    if gross_loss > Decimal("0"):
-        profit_factor = gross_profit / gross_loss
-
-    # Average trade PnL
-    avg_trade_pnl = Decimal("0")
-    if trades:
-        total_trade_pnl = sum((t.net_pnl_usd for t in trades), Decimal("0"))
-        avg_trade_pnl = total_trade_pnl / Decimal(str(len(trades)))
-
-    # Largest win and loss
-    trade_pnls = [t.net_pnl_usd for t in trades]
-    largest_win = max(trade_pnls, default=Decimal("0"))
-    largest_loss = min(trade_pnls, default=Decimal("0"))
-
-    # Average win and loss
-    avg_win = Decimal("0")
-    if winning_trades:
-        winning_pnl_sum = sum((t.net_pnl_usd for t in winning_trades), Decimal("0"))
-        avg_win = winning_pnl_sum / Decimal(str(len(winning_trades)))
-
-    avg_loss = Decimal("0")
-    if losing_trades:
-        losing_pnl_sum = sum((t.net_pnl_usd for t in losing_trades), Decimal("0"))
-        avg_loss = losing_pnl_sum / Decimal(str(len(losing_trades)))
+    # Trade statistics (VIB-5083) -- see _compute_trade_statistics.
+    stats = _compute_trade_statistics(trades)
 
     # VIB-2915: `total_return_pct` and `annualized_return_pct` are stored as actual
     # percentages (e.g. 10 for 10%), not decimal ratios. Local `total_return`/`annualized_return`
@@ -429,21 +473,25 @@ def calculate_metrics(
         net_pnl_usd=net_pnl,
         sharpe_ratio=sharpe,
         max_drawdown_pct=max_drawdown,
-        win_rate=win_rate,
-        total_trades=len(trades),
-        profit_factor=profit_factor,
+        win_rate=stats.win_rate,
+        # Successful trades only -- failed fills are reported as failed_trades
+        # and excluded from the performance denominator (VIB-5083, CodeRabbit).
+        total_trades=len(trades) - stats.failed_trades,
+        profit_factor=stats.profit_factor,
         total_return_pct=total_return * Decimal("100"),
         annualized_return_pct=annualized_return * Decimal("100"),
         total_fees_usd=total_fees,
         total_slippage_usd=total_slippage,
         total_gas_usd=total_gas,
-        winning_trades=len(winning_trades),
-        losing_trades=len(losing_trades),
-        avg_trade_pnl_usd=avg_trade_pnl,
-        largest_win_usd=largest_win,
-        largest_loss_usd=largest_loss,
-        avg_win_usd=avg_win,
-        avg_loss_usd=avg_loss,
+        winning_trades=stats.winning_trades,
+        losing_trades=stats.losing_trades,
+        trades_with_realized_pnl=stats.trades_with_realized_pnl,
+        failed_trades=stats.failed_trades,
+        avg_trade_pnl_usd=stats.avg_trade_pnl,
+        largest_win_usd=stats.largest_win,
+        largest_loss_usd=stats.largest_loss,
+        avg_win_usd=stats.avg_win,
+        avg_loss_usd=stats.avg_loss,
         volatility=volatility,
         sortino_ratio=sortino,
         calmar_ratio=calmar,

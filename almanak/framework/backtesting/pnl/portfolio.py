@@ -135,6 +135,12 @@ class SimulatedPortfolio:
     # Realized/unrealized PnL tracking
     _realized_pnl: Decimal = field(default=Decimal("0"))
     _unrealized_pnl: Decimal = field(default=Decimal("0"))
+    #: Weighted-average USD cost basis per unit of each spot token currently
+    #: held (VIB-5083). A SWAP that acquires a token raises its average cost;
+    #: a SWAP that disposes of a token realizes proceeds - units x avg_cost.
+    #: Keyed by the same symbols as ``tokens`` (cash-equivalent stablecoins are
+    #: never tracked here -- they live in ``cash_usd`` at $1 by definition).
+    _cost_basis: dict[str, Decimal] = field(default_factory=dict)
 
     _STABLECOIN_SYMBOLS: frozenset[str] = STABLECOINS
 
@@ -260,7 +266,7 @@ class SimulatedPortfolio:
         if conversions:
             fill.metadata["implicit_conversions"] = {token: str(amount) for token, amount in conversions.items()}
 
-        self._apply_token_flows(fill, token_debits, cash_debit)
+        self._apply_token_flows(fill, token_debits, cash_debit, market_state)
 
         # Initialize LP PnL breakdown fields
         il_loss_usd: Decimal | None = None
@@ -298,20 +304,23 @@ class SimulatedPortfolio:
                 self.cash_usd -= fill.position_delta.collateral_usd
             self.positions.append(fill.position_delta)
 
-        # Calculate PnL for this trade
+        # Calculate PnL for this trade. ``None`` means "no realized PnL yet"
+        # (an opening / inventory-building trade) -- distinct from a measured
+        # zero (Empty != Zero, VIB-5083). The metrics layer excludes ``None``
+        # from win/loss stats.
         pnl_usd = self._calculate_trade_pnl(fill)
 
         # Calculate LP PnL breakdown if this is an LP_CLOSE with a valid closed position
         if fill.intent_type == IntentType.LP_CLOSE and closed_position and closed_position.is_lp:
             il_loss_usd, fees_earned_usd, net_lp_pnl_usd = self._calculate_lp_pnl_breakdown(closed_position, fill)
             # Update pnl_usd with the net LP PnL if not already set from metadata
-            if pnl_usd == Decimal("0") and net_lp_pnl_usd is not None:
+            if (pnl_usd is None or pnl_usd == Decimal("0")) and net_lp_pnl_usd is not None:
                 pnl_usd = net_lp_pnl_usd
 
         # Perp close: return collateral + realized PnL to cash, so the
         # close is value-neutral at the close instant.
         if closed_position is not None and closed_position.is_perp and fill.success:
-            pnl_usd = self._apply_perp_close_credit(closed_position, fill, pnl_usd)
+            pnl_usd = self._apply_perp_close_credit(closed_position, fill, pnl_usd or Decimal("0"))
 
         # Record the trade with LP PnL breakdown if applicable
         trade = fill.to_trade_record(
@@ -322,9 +331,15 @@ class SimulatedPortfolio:
         )
         self.trades.append(trade)
 
-        # Accumulate realized PnL from position close operations
-        # Realized PnL is the PnL locked in when a position is closed
-        if fill.position_close_id and pnl_usd != Decimal("0"):
+        # Accumulate realized PnL into the portfolio-level total.
+        # - Position closes lock in their PnL here (guarded by position_close_id).
+        # - SWAP disposals also realize PnL (proceeds - units x avg_cost, carried
+        #   via metadata["realized_pnl_usd"] -> _calculate_trade_pnl); without
+        #   this their gain/loss would surface per-trade but be missing from
+        #   BacktestMetrics.realized_pnl, understating it (VIB-5083, CodeRabbit).
+        # Inventory-building buys realize nothing (pnl_usd is None) and are skipped.
+        realizes_pnl = bool(fill.position_close_id) or fill.intent_type == IntentType.SWAP
+        if realizes_pnl and pnl_usd is not None and pnl_usd != Decimal("0"):
             self._realized_pnl += pnl_usd
 
         return True
@@ -334,18 +349,31 @@ class SimulatedPortfolio:
         fill: SimulatedFill,
         token_debits: dict[str, Decimal],
         cash_debit: Decimal,
+        market_state: MarketState | None = None,
     ) -> None:
         """Commit the planned token debits, credits, stablecoin sweep, gas,
         and non-embedded venue costs.
 
         Runs only after ``_plan_token_debits`` validated affordability, so
         every debit is covered by the held balance.
+
+        For SWAP fills this also maintains the per-token average cost basis
+        (VIB-5083) and stashes the realized PnL of the disposed leg under
+        ``metadata["realized_pnl_usd"]`` BEFORE the basis is mutated, so
+        :meth:`_calculate_trade_pnl` can attribute the gain/loss to the
+        closing trade.
         """
+        # SWAP cost-basis accounting must run against the PRE-disposal basis,
+        # so it happens before the balance mutations below consume tokens_out.
+        if fill.intent_type == IntentType.SWAP:
+            self._record_swap_cost_basis(fill, token_debits, market_state)
+
         # Update token balances - subtract tokens_out
         for token, debit in token_debits.items():
             new_amount = self.tokens.get(token, Decimal("0")) - debit
             if new_amount <= Decimal("0"):
                 self.tokens.pop(token, None)
+                self._cost_basis.pop(token, None)
             else:
                 self.tokens[token] = new_amount
         self.cash_usd -= cash_debit
@@ -359,9 +387,163 @@ class SimulatedPortfolio:
         for stable in CASH_EQUIVALENT_STABLECOINS:
             if stable in self.tokens:
                 self.cash_usd += self.tokens.pop(stable)
+                # Swept to cash at $1: no spot basis to carry.
+                self._cost_basis.pop(stable, None)
 
         # Deduct gas and non-embedded venue costs (fee/slippage) from cash
         self.cash_usd -= fill.gas_cost_usd + self._venue_cash_costs(fill)
+
+    def _record_swap_cost_basis(
+        self,
+        fill: SimulatedFill,
+        token_debits: dict[str, Decimal],
+        market_state: MarketState | None,
+    ) -> None:
+        """Update average cost basis for a SWAP and stash its realized PnL.
+
+        Average-cost model (acceptable for v1 -- blueprint 31 section 4):
+
+        - A token leaving the portfolio (in ``token_debits``, the covered
+          ``tokens_out``) REALIZES PnL: ``proceeds - units x avg_cost``,
+          where proceeds is the USD value received on the inflow leg. The
+          token's stored average cost is unchanged by a partial sale.
+        - A token entering the portfolio (non-cash ``tokens_in``) raises its
+          weighted-average cost by the USD value paid on the outflow leg.
+
+        The realized PnL of the disposed leg is written to
+        ``metadata["realized_pnl_usd"]`` so :meth:`_calculate_trade_pnl`
+        attributes it. A swap that only ACQUIRES inventory (a cash->token
+        buy, no tracked token disposed) writes nothing: its PnL is unknown,
+        not zero (Empty != Zero), and :meth:`_calculate_trade_pnl` returns
+        ``None`` for it.
+
+        Cash-equivalent stablecoins are never tracked: they are held at $1 in
+        ``cash_usd``, so a swap leg in/out of them is pure value transfer with
+        no cost-basis effect of its own.
+        """
+        out_value = self._leg_usd_value(fill.tokens_out, market_state)
+        in_value = self._leg_usd_value(fill.tokens_in, market_state)
+
+        # Proceeds are unpriceable when the inflow leg has tokens to receive
+        # but none of them could be valued (in_value == 0 with a non-empty
+        # inflow). Booking ``proceeds - cost`` in that case fabricates a loss
+        # equal to the whole disposed cost -- not a measured outcome but
+        # missing data (Empty != Zero, blueprint 31 section 7). Leave
+        # ``realized_pnl_usd`` UNSET so _calculate_trade_pnl returns None and
+        # the trade is excluded from win/loss stats (VIB-5083, CodeRabbit).
+        inflow_has_tokens = any(amount > Decimal("0") for amount in fill.tokens_in.values())
+        proceeds_unpriceable = inflow_has_tokens and in_value <= Decimal("0")
+
+        # Disposed legs realize PnL against their average cost. Proceeds
+        # (``in_value``) are allocated pro-rata across the disposed tracked
+        # tokens by market value -- symmetric with the acquired-leg split
+        # below -- so a multi-token-out swap does not count the full proceeds
+        # once per disposed leg.
+        realized = Decimal("0")
+        realized_any = False
+        disposed = (
+            {}
+            if proceeds_unpriceable
+            else {
+                token: debit
+                for token, debit in token_debits.items()
+                if debit > Decimal("0") and not self._is_cash_equivalent(token)
+            }
+        )
+        disposed_units_value = self._leg_usd_value(disposed, market_state)
+        # Pick ONE allocation mode for the whole disposed set so the per-leg
+        # shares always sum to in_value. Mixing modes (pro-rata for priced
+        # legs, even-split for unpriced ones) let priced tokens claim the full
+        # in_value by value while unpriced tokens also drew an even-split share,
+        # over-allocating proceeds (CodeRabbit PR #2805). Even-split when any
+        # disposed leg lacks a price or the set has no positive value;
+        # otherwise pro-rata by market value.
+        disposed_prices = {token: self._token_price(token, market_state) for token in disposed}
+        use_even_split = disposed_units_value <= Decimal("0") or any(
+            price is None for price in disposed_prices.values()
+        )
+        for token, debit in disposed.items():
+            avg_cost = self._cost_basis.get(token)
+            if avg_cost is None:
+                continue
+            if use_even_split:
+                # No single priced basis to weight by: split proceeds evenly so
+                # a single-leg sale still nets proceeds - cost exactly.
+                proceeds = in_value / Decimal(str(len(disposed)))
+            else:
+                unit_value = disposed_prices[token]
+                assert unit_value is not None  # use_even_split is False -> all priced
+                proceeds = in_value * (debit * unit_value / disposed_units_value)
+            realized += proceeds - debit * avg_cost
+            realized_any = True
+
+        # Acquired non-cash legs raise their weighted-average cost by the USD
+        # paid on the outflow leg (split pro-rata when multiple are acquired).
+        acquired = {
+            token: amount
+            for token, amount in fill.tokens_in.items()
+            if amount > Decimal("0") and not self._is_cash_equivalent(token)
+        }
+        acquired_units_value = self._leg_usd_value(acquired, market_state)
+        for token, amount in acquired.items():
+            if out_value <= Decimal("0"):
+                # The paid leg could not be priced: seeding a zero cost basis
+                # would make a later sale realize the full proceeds as a
+                # fabricated gain. Leave the basis unset (unknown) instead
+                # (VIB-5083, CodeRabbit).
+                continue
+            unit_value = self._token_price(token, market_state)
+            if unit_value is None or acquired_units_value <= Decimal("0"):
+                # No price to anchor a basis: fall back to the leg's own
+                # notional per unit so a later sale still nets to zero rather
+                # than fabricating a gain.
+                share = out_value / Decimal(str(len(acquired)))
+            else:
+                share = out_value * (amount * unit_value / acquired_units_value)
+            self._add_to_cost_basis(token, amount, share)
+
+        if realized_any:
+            fill.metadata["realized_pnl_usd"] = str(realized)
+
+    def _add_to_cost_basis(self, token: str, units: Decimal, cost_usd: Decimal) -> None:
+        """Fold ``units`` acquired for ``cost_usd`` into ``token``'s avg cost."""
+        if units <= Decimal("0"):
+            return
+        held = self.tokens.get(token, Decimal("0"))
+        prior_cost = self._cost_basis.get(token, Decimal("0")) * held
+        new_units = held + units
+        if new_units <= Decimal("0"):
+            return
+        self._cost_basis[token] = (prior_cost + cost_usd) / new_units
+
+    def _token_price(self, token: str, market_state: MarketState | None) -> Decimal | None:
+        """Market price for ``token``, or None when unavailable (no $1 guess)."""
+        if market_state is None:
+            return None
+        try:
+            price = market_state.get_price(token)
+        except KeyError:
+            return None
+        return price if price > Decimal("0") else None
+
+    def _leg_usd_value(self, leg: dict[str, Decimal], market_state: MarketState | None) -> Decimal:
+        """USD value of a token leg: cash-equivalents at $1, others at market.
+
+        Missing prices contribute zero (the conservation guards already
+        rejected fills that would mint value); this is a valuation aid for
+        cost-basis attribution, never a balance mutation.
+        """
+        total = Decimal("0")
+        for token, amount in leg.items():
+            if amount <= Decimal("0"):
+                continue
+            if self._is_cash_equivalent(token):
+                total += amount
+                continue
+            price = self._token_price(token, market_state)
+            if price is not None:
+                total += amount * price
+        return total
 
     def _plan_token_debits(
         self,
@@ -1130,28 +1312,38 @@ class SimulatedPortfolio:
             collateral=position.collateral_usd,
         )
 
-    def _calculate_trade_pnl(self, fill: SimulatedFill) -> Decimal:
-        """Calculate PnL for a trade based on fill details.
+    def _calculate_trade_pnl(self, fill: SimulatedFill) -> Decimal | None:
+        """Calculate realized PnL for a trade, or None when it has none yet.
 
-        For now, this is a simplified calculation. The actual PnL
-        depends on the intent type:
-        - SWAP: realized when converting between assets
-        - LP_CLOSE: realized from IL + fees
-        - PERP_CLOSE: realized from price movement + funding
-        - WITHDRAW/REPAY: realized from interest
+        Realization semantics by intent type (blueprint 31 section 4;
+        VIB-5083):
+        - SWAP: a leg that DISPOSES of a tracked spot token realizes
+          ``proceeds - units x avg_cost`` (stashed in
+          ``metadata["realized_pnl_usd"]`` by :meth:`_record_swap_cost_basis`
+          before the basis is mutated). A swap that only ACQUIRES inventory
+          (a cash->token buy) realizes nothing yet -- its PnL is UNKNOWN, so
+          this returns ``None`` (Empty != Zero). The metrics layer excludes
+          ``None`` from win/loss stats rather than scoring it as a loss.
+        - LP_CLOSE / PERP_CLOSE: realized from IL + fees / price + funding,
+          carried in ``metadata["realized_pnl_usd"]``.
+        - WITHDRAW / REPAY: realized from interest in ``metadata["interest_usd"]``.
+
+        Other intent types (opens, supplies, holds) realize nothing and
+        return ``None``.
 
         Args:
             fill: The simulated fill
 
         Returns:
-            Realized PnL in USD (before execution costs)
+            Realized PnL in USD (before execution costs), or ``None`` when the
+            trade realizes no PnL (an opening / inventory-building trade).
         """
-        # For swaps, PnL is the difference between value received and value sent
-        # minus slippage (slippage is the cost of the trade itself)
         if fill.intent_type == IntentType.SWAP:
-            # The slippage_usd already captures the "loss" from non-ideal execution
-            # So trade PnL for a swap is essentially 0 minus costs
-            return Decimal("0")
+            # A disposing swap stashed its realized PnL; an inventory-building
+            # buy stashed nothing -> unknown, not zero.
+            if "realized_pnl_usd" not in fill.metadata:
+                return None
+            return Decimal(str(fill.metadata["realized_pnl_usd"]))
 
         # For position closes, check if we have metadata about the close
         if fill.intent_type in (IntentType.LP_CLOSE, IntentType.PERP_CLOSE):
@@ -1163,7 +1355,7 @@ class SimulatedPortfolio:
             interest_value = fill.metadata.get("interest_usd", Decimal("0"))
             return Decimal(str(interest_value)) if not isinstance(interest_value, Decimal) else interest_value
 
-        return Decimal("0")
+        return None
 
     def _calculate_lp_pnl_breakdown(
         self,
@@ -1663,40 +1855,12 @@ class SimulatedPortfolio:
         if max_drawdown > 0:
             calmar = annualized_return / max_drawdown
 
-        # Trade statistics
-        winning_trades = [t for t in self.trades if t.net_pnl_usd > 0]
-        losing_trades = [t for t in self.trades if t.net_pnl_usd <= 0]
+        # Trade statistics (VIB-5083): shared with calculate_metrics so the
+        # win/loss / realized-PnL discipline lives in one place. Lazy import
+        # avoids the metrics_calculator <-> portfolio import cycle.
+        from almanak.framework.backtesting.pnl.metrics_calculator import _compute_trade_statistics
 
-        win_rate = Decimal(str(len(winning_trades))) / Decimal(str(len(self.trades))) if self.trades else Decimal("0")
-
-        # Profit factor
-        gross_profit = sum((t.net_pnl_usd for t in winning_trades), Decimal("0"))
-        gross_loss = abs(sum((t.net_pnl_usd for t in losing_trades), Decimal("0")))
-        profit_factor = gross_profit / gross_loss if gross_loss > Decimal("0") else Decimal("0")
-
-        # Average trade PnL
-        avg_trade_pnl = (
-            sum((t.net_pnl_usd for t in self.trades), Decimal("0")) / Decimal(str(len(self.trades)))
-            if self.trades
-            else Decimal("0")
-        )
-
-        # Largest win/loss
-        trade_pnls = [t.net_pnl_usd for t in self.trades]
-        largest_win = max(trade_pnls, default=Decimal("0"))
-        largest_loss = min(trade_pnls, default=Decimal("0"))
-
-        # Average win/loss
-        avg_win = (
-            sum((t.net_pnl_usd for t in winning_trades), Decimal("0")) / Decimal(str(len(winning_trades)))
-            if winning_trades
-            else Decimal("0")
-        )
-        avg_loss = (
-            sum((t.net_pnl_usd for t in losing_trades), Decimal("0")) / Decimal(str(len(losing_trades)))
-            if losing_trades
-            else Decimal("0")
-        )
+        stats = _compute_trade_statistics(self.trades)
 
         # Aggregate fees from LP positions (both open and closed)
         total_fees_earned = Decimal("0")
@@ -1742,9 +1906,12 @@ class SimulatedPortfolio:
             net_pnl_usd=net_pnl,
             sharpe_ratio=sharpe,
             max_drawdown_pct=max_drawdown,
-            win_rate=win_rate,
-            total_trades=len(self.trades),
-            profit_factor=profit_factor,
+            win_rate=stats.win_rate,
+            # Successful trades only -- rejected fills are reported separately
+            # as failed_trades and must stay out of the performance denominator
+            # (VIB-5083, CodeRabbit).
+            total_trades=len(self.trades) - stats.failed_trades,
+            profit_factor=stats.profit_factor,
             # VIB-2915: `*_return_pct` fields store actual percentages (e.g. 10 for 10%),
             # not decimal ratios. Local `total_return`/`annualized_return` stay as ratios
             # so the calmar calculation above (which divides by `max_drawdown`, still a ratio) stays correct.
@@ -1753,13 +1920,15 @@ class SimulatedPortfolio:
             total_fees_usd=total_fees,
             total_slippage_usd=total_slippage,
             total_gas_usd=total_gas,
-            winning_trades=len(winning_trades),
-            losing_trades=len(losing_trades),
-            avg_trade_pnl_usd=avg_trade_pnl,
-            largest_win_usd=largest_win,
-            largest_loss_usd=largest_loss,
-            avg_win_usd=avg_win,
-            avg_loss_usd=avg_loss,
+            winning_trades=stats.winning_trades,
+            losing_trades=stats.losing_trades,
+            trades_with_realized_pnl=stats.trades_with_realized_pnl,
+            failed_trades=stats.failed_trades,
+            avg_trade_pnl_usd=stats.avg_trade_pnl,
+            largest_win_usd=stats.largest_win,
+            largest_loss_usd=stats.largest_loss,
+            avg_win_usd=stats.avg_win,
+            avg_loss_usd=stats.avg_loss,
             volatility=volatility,
             sortino_ratio=sortino,
             calmar_ratio=calmar,
@@ -2728,8 +2897,17 @@ class SimulatedPortfolio:
             "min_health_factor": str(self._min_health_factor),
             "health_factor_warnings": self._health_factor_warnings,
             "liquidation_penalty": str(self.liquidation_penalty),
+            # Realized PnL total is live attribution state: a portfolio resumed
+            # after realized SWAP/close trades must report the accumulated
+            # realized_pnl, not 0 until the next close (VIB-5083, CodeRabbit).
+            "realized_pnl": str(self._realized_pnl),
+            "unrealized_pnl": str(self._unrealized_pnl),
             "lending_liquidations": [ll.to_dict() for ll in self._lending_liquidations],
             "perp_liquidations": [pl.to_dict() for pl in self._perp_liquidations],
+            # Per-token average cost basis is live attribution state: without it
+            # a resumed portfolio forgets its average costs, so a later
+            # disposing sell would realize no PnL (VIB-5083, CodeRabbit).
+            "cost_basis": {k: str(v) for k, v in self._cost_basis.items()},
         }
 
     @classmethod
@@ -2762,7 +2940,13 @@ class SimulatedPortfolio:
                     fee_usd=Decimal(t["fee_usd"]),
                     slippage_usd=Decimal(t["slippage_usd"]),
                     gas_cost_usd=Decimal(t["gas_cost_usd"]),
-                    pnl_usd=Decimal(t["pnl_usd"]),
+                    # pnl_usd is now nullable (None = realized nothing yet, an
+                    # opening / inventory-building trade); the serializer emits
+                    # ``null`` for it, so a bare Decimal(t["pnl_usd"]) would
+                    # crash on round-trip (VIB-5083, CodeRabbit). net_pnl_usd is
+                    # a derived @property, not a constructor field, so it needs
+                    # no rehydration here.
+                    pnl_usd=None if t.get("pnl_usd") is None else Decimal(str(t["pnl_usd"])),
                     success=t["success"],
                     amount_usd=Decimal(t.get("amount_usd", "0")),
                     protocol=t.get("protocol", ""),
@@ -2786,6 +2970,20 @@ class SimulatedPortfolio:
         ]
         # Deserialize perp liquidations
         portfolio._perp_liquidations = [LiquidationEvent.from_dict(pl) for pl in data.get("perp_liquidations", [])]
+        # Restore per-token average cost basis so a resumed portfolio still
+        # realizes PnL on later disposing sells (VIB-5083, CodeRabbit).
+        portfolio._cost_basis = {k: Decimal(str(v)) for k, v in data.get("cost_basis", {}).items()}
+        # Restore realized/unrealized PnL totals. Older artifacts predate the
+        # field: fall back to summing successful trades' realized pnl so a
+        # resumed portfolio's realized_pnl stays consistent (VIB-5083, CodeRabbit).
+        if "realized_pnl" in data:
+            portfolio._realized_pnl = Decimal(str(data["realized_pnl"]))
+        else:
+            portfolio._realized_pnl = sum(
+                (t.pnl_usd for t in portfolio.trades if t.success and t.pnl_usd is not None),
+                Decimal("0"),
+            )
+        portfolio._unrealized_pnl = Decimal(str(data.get("unrealized_pnl", "0")))
         return portfolio
 
 

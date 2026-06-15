@@ -1856,27 +1856,36 @@ class PnLBacktester:
                     adapter_fill.metadata["gas_price_source"] = gas_gwei_source
                 # Apply the adapter's fill to the portfolio (the adapter is
                 # threaded through so a partial position reduction accrues
-                # lending interest through the fill instant).
-                portfolio.apply_fill(adapter_fill, market_state=market_state, adapter=self._adapter)
+                # lending interest through the fill instant). A False return
+                # means the fill was rejected: portfolio.apply_fill already
+                # recorded it (with zeroed costs) AND logged the reason at
+                # WARNING, so we skip the success-path execution log to avoid
+                # double-logging and surface the recorded trade unchanged.
+                applied = portfolio.apply_fill(adapter_fill, market_state=market_state, adapter=self._adapter)
 
-                # Log detailed trade execution
-                log_trade_execution(
-                    logger=logger,
-                    backtest_id=self._current_backtest_id,
-                    timestamp=timestamp,
-                    intent_type=adapter_fill.intent_type.value,
-                    protocol=adapter_fill.protocol,
-                    tokens=adapter_fill.tokens,
-                    amount_usd=adapter_fill.amount_usd,
-                    fee_usd=adapter_fill.fee_usd,
-                    slippage_usd=adapter_fill.slippage_usd,
-                    gas_cost_usd=adapter_fill.gas_cost_usd,
-                    executed_price=adapter_fill.executed_price,
-                    mev_cost_usd=adapter_fill.estimated_mev_cost_usd,
-                )
+                if applied:
+                    # Log detailed trade execution
+                    log_trade_execution(
+                        logger=logger,
+                        backtest_id=self._current_backtest_id,
+                        timestamp=timestamp,
+                        intent_type=adapter_fill.intent_type.value,
+                        protocol=adapter_fill.protocol,
+                        tokens=adapter_fill.tokens,
+                        amount_usd=adapter_fill.amount_usd,
+                        fee_usd=adapter_fill.fee_usd,
+                        slippage_usd=adapter_fill.slippage_usd,
+                        gas_cost_usd=adapter_fill.gas_cost_usd,
+                        executed_price=adapter_fill.executed_price,
+                        mev_cost_usd=adapter_fill.estimated_mev_cost_usd,
+                    )
 
-                # Convert to TradeRecord and return
-                return adapter_fill.to_trade_record(pnl_usd=Decimal("0"))
+                # Return the canonical record apply_fill appended to
+                # portfolio.trades (which feeds metrics): it already carries
+                # the realized pnl_usd attribution, so reusing it keeps the
+                # on_intent_executed callback in lockstep with the metrics
+                # layer instead of fabricating a second record with pnl=0.
+                return portfolio.trades[-1]
 
             # Adapter returned None, fall back to generic execution
             logger.debug(f"Adapter '{self._adapter.adapter_name}' returned None, using generic execution")
@@ -1917,25 +1926,41 @@ class PnLBacktester:
             protocol=protocol,
         )
 
-        # Simulate MEV costs if enabled
-        estimated_mev_cost_usd, slippage_pct = self._simulate_mev_impact(
-            intent_type=intent_type,
-            tokens=tokens,
-            amount_usd=amount_usd,
-            slippage_pct=slippage_pct,
-            config=config,
-        )
+        # A close that already failed resolution (e.g. a WITHDRAW with no
+        # matching open supply) is recorded as a rejected trade with zeroed
+        # execution costs by apply_fill. Resolve MEV/slippage/gas only for
+        # fills that will actually apply: gas resolution raises
+        # DataSourceUnavailableError when no ETH/WETH price is available
+        # (VIB-5088 fail-loud), which would crash the whole run before
+        # apply_fill could record the rejection -- undercounting failed_trades.
+        # Mirrors the adapter lane, which already gates gas behind fill.success
+        # (VIB-5083, CodeRabbit).
+        if close_resolution.failure_reason is not None:
+            estimated_mev_cost_usd = None
+            slippage_usd = Decimal("0")
+            gas_cost_usd = Decimal("0")
+            gas_price_gwei = None
+            gas_gwei_source = "rejected_fill"
+        else:
+            # Simulate MEV costs if enabled
+            estimated_mev_cost_usd, slippage_pct = self._simulate_mev_impact(
+                intent_type=intent_type,
+                tokens=tokens,
+                amount_usd=amount_usd,
+                slippage_pct=slippage_pct,
+                config=config,
+            )
 
-        slippage_usd = amount_usd * slippage_pct
+            slippage_usd = amount_usd * slippage_pct
 
-        # Calculate gas cost
-        gas_cost_usd, gas_price_gwei, gas_gwei_source = await self._resolve_gas_cost(
-            intent_type=intent_type,
-            market_state=market_state,
-            timestamp=timestamp,
-            config=config,
-            data_quality_tracker=data_quality_tracker,
-        )
+            # Calculate gas cost
+            gas_cost_usd, gas_price_gwei, gas_gwei_source = await self._resolve_gas_cost(
+                intent_type=intent_type,
+                market_state=market_state,
+                timestamp=timestamp,
+                config=config,
+                data_quality_tracker=data_quality_tracker,
+            )
 
         # Get executed price (for swaps/perps, this is the price after slippage)
         executed_price = self._get_executed_price(intent, market_state, slippage_pct, intent_type)
@@ -2021,27 +2046,35 @@ class PnLBacktester:
 
         # Apply fill to portfolio. The adapter is threaded through so a
         # partial position reduction can accrue lending interest through the
-        # fill instant with the adapter lane's own rate sources.
-        portfolio.apply_fill(fill, market_state=market_state, adapter=self._adapter)
+        # fill instant with the adapter lane's own rate sources. A False
+        # return means the fill was rejected: apply_fill already recorded it
+        # (zeroed costs) AND logged the reason at WARNING, so the success-path
+        # execution log below is skipped to avoid double-logging.
+        applied = portfolio.apply_fill(fill, market_state=market_state, adapter=self._adapter)
 
-        # Log detailed trade execution (DEBUG level - visible in verbose mode)
-        log_trade_execution(
-            logger=logger,
-            backtest_id=self._current_backtest_id,
-            timestamp=timestamp,
-            intent_type=intent_type.value,
-            protocol=protocol,
-            tokens=tokens,
-            amount_usd=amount_usd,
-            fee_usd=fee_usd,
-            slippage_usd=slippage_usd,
-            gas_cost_usd=gas_cost_usd,
-            executed_price=executed_price,
-            mev_cost_usd=estimated_mev_cost_usd,
-        )
+        if applied:
+            # Log detailed trade execution (DEBUG level - visible in verbose mode)
+            log_trade_execution(
+                logger=logger,
+                backtest_id=self._current_backtest_id,
+                timestamp=timestamp,
+                intent_type=intent_type.value,
+                protocol=protocol,
+                tokens=tokens,
+                amount_usd=amount_usd,
+                fee_usd=fee_usd,
+                slippage_usd=slippage_usd,
+                gas_cost_usd=gas_cost_usd,
+                executed_price=executed_price,
+                mev_cost_usd=estimated_mev_cost_usd,
+            )
 
-        # Convert to TradeRecord and return
-        return fill.to_trade_record(pnl_usd=Decimal("0"))
+        # Return the canonical record apply_fill appended to portfolio.trades
+        # (which feeds metrics): it already carries the realized pnl_usd
+        # attribution, so reusing it keeps the on_intent_executed callback in
+        # lockstep with the metrics layer instead of fabricating a second
+        # record with pnl=0.
+        return portfolio.trades[-1]
 
     def _simulate_mev_impact(
         self,

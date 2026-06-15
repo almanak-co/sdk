@@ -39,6 +39,44 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
 
+
+def _decimal_str(value: Decimal) -> str:
+    """Serialize a Decimal in fixed-point, human-readable form (VIB-5083).
+
+    A bare ``str(Decimal("0E+17"))`` renders as ``"0E+17"`` -- a profit_factor
+    of zero divided by a huge gross loss, or any sum that inflated the
+    exponent, leaks this into JSON and reports. ``format(value, "f")`` renders
+    the value at its full stored precision without scientific notation
+    (``1E+3`` -> ``1000``, ``1E-7`` -> ``0.0000001``).
+
+    ``normalize()`` is deliberately avoided: it re-rounds the coefficient to
+    the active context precision (28 significant digits by default), so a
+    Decimal carrying more significant digits than that -- legitimate for
+    intermediate money-math sums -- would silently lose precision. Fixed-point
+    formatting preserves every stored digit and round-trips exactly.
+
+    Special values (NaN / Infinity) pass through verbatim: ratio metrics
+    (Sharpe, Sortino, information ratio) legitimately reach Infinity at zero
+    volatility, and ``format(value, "f")`` would emit those unchanged anyway.
+    """
+    if not value.is_finite():  # NaN / Infinity: keep the verbatim token.
+        return str(value)
+    if value.is_zero():
+        # Collapse signed/exponent zero variants (``0E+17``, ``-0``) to "0".
+        return "0"
+    text = format(value, "f")
+    # Strip trailing fractional zeros (and a now-bare dot) so 1.2300 -> 1.23
+    # and 1.000 -> 1, without touching integers that never grew a fraction.
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def _decimal_str_or_none(value: Decimal | None) -> str | None:
+    """Normalized Decimal string, or ``None`` (unknown) passed through."""
+    return None if value is None else _decimal_str(value)
+
+
 if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.calculators.monte_carlo_runner import (
         MonteCarloSimulationResult,
@@ -1501,7 +1539,11 @@ class TradeRecord:
     fee_usd: Decimal
     slippage_usd: Decimal
     gas_cost_usd: Decimal
-    pnl_usd: Decimal
+    #: Realized PnL of this trade, or ``None`` when it realized no PnL (an
+    #: opening / inventory-building trade). ``None`` is "unknown", distinct
+    #: from a measured ``Decimal("0")`` (Empty != Zero, VIB-5083): the
+    #: metrics layer excludes ``None`` from win/loss stats.
+    pnl_usd: Decimal | None
     success: bool
     amount_usd: Decimal = Decimal("0")
     protocol: str = ""
@@ -1526,9 +1568,39 @@ class TradeRecord:
     position_id: str | None = None
 
     @property
-    def net_pnl_usd(self) -> Decimal:
-        """Get net PnL after fees, slippage, and gas."""
+    def has_realized_pnl(self) -> bool:
+        """True when this trade realized PnL (so it counts in win/loss stats).
+
+        A successful trade with ``pnl_usd is None`` realized nothing yet (an
+        opening / inventory-building trade); a failed trade is excluded from
+        performance metrics entirely (VIB-5083).
+        """
+        return self.success and self.pnl_usd is not None
+
+    @property
+    def net_pnl_usd(self) -> Decimal | None:
+        """Net PnL after fees, slippage, and gas, or ``None`` if unrealized.
+
+        ``None`` (no realized PnL) stays ``None`` rather than collapsing to a
+        bare cost figure -- an opening trade is not a loss equal to its costs
+        (VIB-5083). Callers that aggregate win/loss must gate on
+        :attr:`has_realized_pnl` first.
+        """
+        if self.pnl_usd is None:
+            return None
         return self.pnl_usd - self.fee_usd - self.slippage_usd - self.gas_cost_usd
+
+    def realized_net_pnl(self) -> Decimal:
+        """Net PnL of a realized trade as a guaranteed Decimal.
+
+        Precondition: :attr:`has_realized_pnl` is True. Callers in the metrics
+        layer filter on that first; this method gives them a non-Optional
+        return so win/loss aggregation type-checks without per-call narrowing.
+        """
+        net = self.net_pnl_usd
+        if net is None:  # pragma: no cover - guarded by has_realized_pnl
+            raise ValueError("realized_net_pnl called on a trade with no realized PnL")
+        return net
 
     @property
     def total_cost_usd(self) -> Decimal:
@@ -1544,8 +1616,8 @@ class TradeRecord:
             "fee_usd": str(self.fee_usd),
             "slippage_usd": str(self.slippage_usd),
             "gas_cost_usd": str(self.gas_cost_usd),
-            "pnl_usd": str(self.pnl_usd),
-            "net_pnl_usd": str(self.net_pnl_usd),
+            "pnl_usd": _decimal_str_or_none(self.pnl_usd),
+            "net_pnl_usd": _decimal_str_or_none(self.net_pnl_usd),
             "success": self.success,
             "amount_usd": str(self.amount_usd),
             "protocol": self.protocol,
@@ -1593,9 +1665,14 @@ class BacktestMetrics:
         total_fees_usd: Total protocol fees paid
         total_slippage_usd: Total slippage incurred
         total_gas_usd: Total gas costs
-        winning_trades: Number of profitable trades
-        losing_trades: Number of losing trades
-        avg_trade_pnl_usd: Average PnL per trade
+        winning_trades: Number of profitable trades (realized PnL > 0)
+        losing_trades: Number of losing trades (realized PnL <= 0)
+        trades_with_realized_pnl: Successful trades that realized PnL -- the
+            win/loss denominator. Opening trades (pnl_usd=None) and rejected
+            fills are excluded (VIB-5083).
+        failed_trades: Rejected fills (success=False), reported separately so
+            they never inflate total_trades-driven averages or win/loss stats.
+        avg_trade_pnl_usd: Average PnL per realized-PnL trade
         largest_win_usd: Largest single winning trade
         largest_loss_usd: Largest single losing trade
         avg_win_usd: Average winning trade PnL
@@ -1647,6 +1724,13 @@ class BacktestMetrics:
     total_gas_usd: Decimal = Decimal("0")
     winning_trades: int = 0
     losing_trades: int = 0
+    #: Successful trades that realized PnL (the win/loss denominator).
+    #: Distinct from ``total_trades`` (all recorded fills) -- opening trades
+    #: with ``pnl_usd=None`` and rejected fills are excluded (VIB-5083).
+    trades_with_realized_pnl: int = 0
+    #: Rejected fills (``success=False``), reported separately so they never
+    #: inflate ``total_trades``-driven averages or the win/loss stats.
+    failed_trades: int = 0
     avg_trade_pnl_usd: Decimal = Decimal("0")
     largest_win_usd: Decimal = Decimal("0")
     largest_loss_usd: Decimal = Decimal("0")
@@ -1700,61 +1784,68 @@ class BacktestMetrics:
         return self.total_fees_usd + self.total_slippage_usd + self.total_gas_usd
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
+        """Serialize to dictionary.
+
+        Every Decimal is normalized via :func:`_decimal_str` so display
+        artifacts like ``profit_factor: 0E+17`` never leak into JSON or
+        reports (VIB-5083); they render as finite, plain-notation values.
+        """
         return {
             "schema_version": self.SCHEMA_VERSION,
-            "total_pnl_usd": str(self.total_pnl_usd),
-            "net_pnl_usd": str(self.net_pnl_usd),
-            "sharpe_ratio": str(self.sharpe_ratio),
-            "max_drawdown_pct": str(self.max_drawdown_pct),
-            "win_rate": str(self.win_rate),
+            "total_pnl_usd": _decimal_str(self.total_pnl_usd),
+            "net_pnl_usd": _decimal_str(self.net_pnl_usd),
+            "sharpe_ratio": _decimal_str(self.sharpe_ratio),
+            "max_drawdown_pct": _decimal_str(self.max_drawdown_pct),
+            "win_rate": _decimal_str(self.win_rate),
             "total_trades": self.total_trades,
-            "profit_factor": str(self.profit_factor),
-            "total_return_pct": str(self.total_return_pct),
-            "annualized_return_pct": str(self.annualized_return_pct),
-            "total_fees_usd": str(self.total_fees_usd),
-            "total_slippage_usd": str(self.total_slippage_usd),
-            "total_gas_usd": str(self.total_gas_usd),
-            "total_execution_cost_usd": str(self.total_execution_cost_usd),
+            "profit_factor": _decimal_str(self.profit_factor),
+            "total_return_pct": _decimal_str(self.total_return_pct),
+            "annualized_return_pct": _decimal_str(self.annualized_return_pct),
+            "total_fees_usd": _decimal_str(self.total_fees_usd),
+            "total_slippage_usd": _decimal_str(self.total_slippage_usd),
+            "total_gas_usd": _decimal_str(self.total_gas_usd),
+            "total_execution_cost_usd": _decimal_str(self.total_execution_cost_usd),
             "winning_trades": self.winning_trades,
             "losing_trades": self.losing_trades,
-            "avg_trade_pnl_usd": str(self.avg_trade_pnl_usd),
-            "largest_win_usd": str(self.largest_win_usd),
-            "largest_loss_usd": str(self.largest_loss_usd),
-            "avg_win_usd": str(self.avg_win_usd),
-            "avg_loss_usd": str(self.avg_loss_usd),
-            "volatility": str(self.volatility),
-            "sortino_ratio": str(self.sortino_ratio),
-            "calmar_ratio": str(self.calmar_ratio),
-            "total_fees_earned_usd": str(self.total_fees_earned_usd),
-            "fees_by_pool": {k: str(v) for k, v in self.fees_by_pool.items()},
+            "failed_trades": self.failed_trades,
+            "trades_with_realized_pnl": self.trades_with_realized_pnl,
+            "avg_trade_pnl_usd": _decimal_str(self.avg_trade_pnl_usd),
+            "largest_win_usd": _decimal_str(self.largest_win_usd),
+            "largest_loss_usd": _decimal_str(self.largest_loss_usd),
+            "avg_win_usd": _decimal_str(self.avg_win_usd),
+            "avg_loss_usd": _decimal_str(self.avg_loss_usd),
+            "volatility": _decimal_str(self.volatility),
+            "sortino_ratio": _decimal_str(self.sortino_ratio),
+            "calmar_ratio": _decimal_str(self.calmar_ratio),
+            "total_fees_earned_usd": _decimal_str(self.total_fees_earned_usd),
+            "fees_by_pool": {k: _decimal_str(v) for k, v in self.fees_by_pool.items()},
             "lp_fee_confidence_breakdown": self.lp_fee_confidence_breakdown,
-            "total_funding_paid": str(self.total_funding_paid),
-            "total_funding_received": str(self.total_funding_received),
+            "total_funding_paid": _decimal_str(self.total_funding_paid),
+            "total_funding_received": _decimal_str(self.total_funding_received),
             "liquidations_count": self.liquidations_count,
-            "liquidation_losses_usd": str(self.liquidation_losses_usd),
-            "max_margin_utilization": str(self.max_margin_utilization),
-            "total_interest_earned": str(self.total_interest_earned),
-            "total_interest_paid": str(self.total_interest_paid),
-            "min_health_factor": str(self.min_health_factor),
+            "liquidation_losses_usd": _decimal_str(self.liquidation_losses_usd),
+            "max_margin_utilization": _decimal_str(self.max_margin_utilization),
+            "total_interest_earned": _decimal_str(self.total_interest_earned),
+            "total_interest_paid": _decimal_str(self.total_interest_paid),
+            "min_health_factor": _decimal_str(self.min_health_factor),
             "health_factor_warnings": self.health_factor_warnings,
-            "avg_gas_price_gwei": str(self.avg_gas_price_gwei),
-            "max_gas_price_gwei": str(self.max_gas_price_gwei),
-            "total_gas_cost_usd": str(self.total_gas_cost_usd),
-            "total_mev_cost_usd": str(self.total_mev_cost_usd),
-            "total_leverage": str(self.total_leverage),
-            "max_net_delta": {k: str(v) for k, v in self.max_net_delta.items()},
-            "correlation_risk": str(self.correlation_risk) if self.correlation_risk is not None else None,
-            "liquidation_cascade_risk": str(self.liquidation_cascade_risk),
-            "information_ratio": str(self.information_ratio) if self.information_ratio is not None else None,
-            "beta": str(self.beta) if self.beta is not None else None,
-            "alpha": str(self.alpha) if self.alpha is not None else None,
-            "benchmark_return": str(self.benchmark_return) if self.benchmark_return is not None else None,
-            "pnl_by_protocol": {k: str(v) for k, v in self.pnl_by_protocol.items()},
-            "pnl_by_intent_type": {k: str(v) for k, v in self.pnl_by_intent_type.items()},
-            "pnl_by_asset": {k: str(v) for k, v in self.pnl_by_asset.items()},
-            "realized_pnl": str(self.realized_pnl),
-            "unrealized_pnl": str(self.unrealized_pnl),
+            "avg_gas_price_gwei": _decimal_str(self.avg_gas_price_gwei),
+            "max_gas_price_gwei": _decimal_str(self.max_gas_price_gwei),
+            "total_gas_cost_usd": _decimal_str(self.total_gas_cost_usd),
+            "total_mev_cost_usd": _decimal_str(self.total_mev_cost_usd),
+            "total_leverage": _decimal_str(self.total_leverage),
+            "max_net_delta": {k: _decimal_str(v) for k, v in self.max_net_delta.items()},
+            "correlation_risk": _decimal_str_or_none(self.correlation_risk),
+            "liquidation_cascade_risk": _decimal_str(self.liquidation_cascade_risk),
+            "information_ratio": _decimal_str_or_none(self.information_ratio),
+            "beta": _decimal_str_or_none(self.beta),
+            "alpha": _decimal_str_or_none(self.alpha),
+            "benchmark_return": _decimal_str_or_none(self.benchmark_return),
+            "pnl_by_protocol": {k: _decimal_str(v) for k, v in self.pnl_by_protocol.items()},
+            "pnl_by_intent_type": {k: _decimal_str(v) for k, v in self.pnl_by_intent_type.items()},
+            "pnl_by_asset": {k: _decimal_str(v) for k, v in self.pnl_by_asset.items()},
+            "realized_pnl": _decimal_str(self.realized_pnl),
+            "unrealized_pnl": _decimal_str(self.unrealized_pnl),
         }
 
 
@@ -2359,6 +2450,15 @@ class BacktestResult:
             total_gas_usd=Decimal(metrics_data.get("total_gas_usd", "0")),
             winning_trades=metrics_data.get("winning_trades", 0),
             losing_trades=metrics_data.get("losing_trades", 0),
+            # Old artifacts predate ``trades_with_realized_pnl``; derive the
+            # denominator from winning + losing so win-rate math stays
+            # consistent instead of defaulting to 0 while winners/losers exist
+            # (VIB-5083, CodeRabbit).
+            trades_with_realized_pnl=metrics_data.get(
+                "trades_with_realized_pnl",
+                metrics_data.get("winning_trades", 0) + metrics_data.get("losing_trades", 0),
+            ),
+            failed_trades=metrics_data.get("failed_trades", 0),
             avg_trade_pnl_usd=Decimal(metrics_data.get("avg_trade_pnl_usd", "0")),
             largest_win_usd=Decimal(metrics_data.get("largest_win_usd", "0")),
             largest_loss_usd=Decimal(metrics_data.get("largest_loss_usd", "0")),
@@ -2409,7 +2509,9 @@ class BacktestResult:
             fee_usd=Decimal(t_data["fee_usd"]),
             slippage_usd=Decimal(t_data["slippage_usd"]),
             gas_cost_usd=Decimal(t_data["gas_cost_usd"]),
-            pnl_usd=Decimal(t_data["pnl_usd"]),
+            # pnl_usd may be JSON null (an opening trade realized no PnL); a
+            # legacy artifact that stored "0" round-trips to Decimal("0").
+            pnl_usd=opt_dec(t_data, "pnl_usd"),
             success=t_data["success"],
             amount_usd=Decimal(t_data.get("amount_usd", "0")),
             protocol=t_data.get("protocol", ""),

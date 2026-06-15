@@ -818,7 +818,10 @@ class TestEngineLoopBothLanes:
         )
 
         assert result.success
-        assert result.metrics.total_trades == 1
+        # Rejected fill is recorded but not counted as a trade; it
+        # surfaces as failed_trades (VIB-5083, CodeRabbit).
+        assert result.metrics.total_trades == 0
+        assert result.metrics.failed_trades == 1
         trade = result.trades[0]
         assert trade.success is False
         assert "no open supply position" in trade.metadata["failure_reason"]
@@ -1515,7 +1518,10 @@ class TestEngineLoopBorrowRepayBothLanes:
         )
 
         assert result.success
-        assert result.metrics.total_trades == 1
+        # Rejected fill is recorded but not counted as a trade; it
+        # surfaces as failed_trades (VIB-5083, CodeRabbit).
+        assert result.metrics.total_trades == 0
+        assert result.metrics.failed_trades == 1
         trade = result.trades[0]
         assert trade.success is False
         assert "no open borrow position" in trade.metadata["failure_reason"]
@@ -1615,3 +1621,45 @@ class TestAdapterLaneHealthFactor:
         assert borrow.health_factor == pytest.approx(Decimal("2.0625"), rel=Decimal("0.001"))
         # The adapter lane still accrued borrow interest for the tick.
         assert borrow.interest_accrued > Decimal("0")
+
+
+class TestRejectedCloseSkipsGasResolution:
+    """A rejected close records the failure instead of raising on missing gas.
+
+    CodeRabbit PR #2805 (comment_id 3410921746): the generic lane resolved
+    MEV/slippage/gas before apply_fill recorded a known-rejected close. With
+    VIB-5088 fail-loud gas, a missing ETH/WETH price RAISES at gas resolution,
+    halting the run and undercounting failed_trades. The fix skips
+    MEV/slippage/gas for rejected fills (mirroring the adapter lane).
+    """
+
+    @pytest.mark.asyncio
+    async def test_rejected_withdraw_with_no_eth_price_records_failure(self) -> None:
+        backtester = _backtester()
+        # include_gas_costs=True is the default; no gas_eth_price_override.
+        config = PnLBacktestConfig(
+            start_time=TS,
+            end_time=TS + timedelta(hours=1),
+            initial_capital_usd=INITIAL_CASH,
+            include_gas_costs=True,
+        )
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        # Market has NO WETH/ETH price -> gas resolution would raise pre-fix.
+        no_eth_market = MarketState(timestamp=TS, prices={"USDC": Decimal("1")}, chain="arbitrum")
+
+        # WITHDRAW with no matching open supply position -> resolution fails.
+        trade = await backtester._execute_intent(
+            withdraw_intent(SUPPLY_AMOUNT, withdraw_all=True),
+            portfolio,
+            no_eth_market,
+            TS,
+            config,
+        )
+
+        # Recorded as a rejected trade rather than raising / halting the run.
+        assert trade.success is False
+        assert trade.gas_cost_usd == Decimal("0")
+        assert trade.metadata.get("failure_reason")
+        # No value moved: equity unchanged, no position created.
+        assert portfolio.positions == []
+        assert portfolio.cash_usd == INITIAL_CASH

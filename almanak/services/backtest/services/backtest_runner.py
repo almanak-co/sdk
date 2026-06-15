@@ -427,7 +427,9 @@ def serialize_result(result: BacktestResult) -> dict[str, Any]:
                 "amount_usd": str(t.amount_usd),
                 "fee_usd": str(t.fee_usd),
                 "slippage_usd": str(t.slippage_usd),
-                "pnl_usd": str(t.pnl_usd),
+                # None for an opening / inventory-building trade (no realized
+                # PnL yet, VIB-5083): serialize JSON null, not the str "None".
+                "pnl_usd": str(t.pnl_usd) if t.pnl_usd is not None else None,
             }
             for t in (result.trades or [])
         ],

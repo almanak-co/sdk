@@ -72,7 +72,8 @@ class _FakeIntentType:
 class _FakeTrade:
     timestamp: datetime
     intent_type: _FakeIntentType
-    pnl_usd: Decimal
+    # None for an opening / inventory-building trade (no realized PnL, VIB-5083).
+    pnl_usd: Decimal | None
     fee_usd: Decimal
     gas_cost_usd: Decimal
 
@@ -195,6 +196,20 @@ class TestPrintVerboseTrades:
         _print_verbose_trades(_make_result([trade]), verbose=True)
         captured = capsys.readouterr()
         assert "  1." in captured.out
+
+    def test_none_pnl_renders_dash_not_fake_zero(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """An opening trade (pnl_usd=None) shows an em-dash, never $0.00 (VIB-5083)."""
+        trade = _FakeTrade(
+            timestamp=datetime(2024, 1, 1, 12, 30, tzinfo=UTC),
+            intent_type=_FakeIntentType("swap"),
+            pnl_usd=None,
+            fee_usd=Decimal("1"),
+            gas_cost_usd=Decimal("2"),
+        )
+        _print_verbose_trades(_make_result([trade]), verbose=True)
+        captured = capsys.readouterr()
+        assert "—" in captured.out
+        assert "$0.00" not in captured.out
 
 
 # ===========================================================================

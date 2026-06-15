@@ -195,8 +195,10 @@ async def test_full_lifecycle_swap(client):
         assert m["winning_trades"] == 7
         assert m["losing_trades"] == 5
         assert m["total_fees_usd"] == "15.44"
-        assert m["total_slippage_usd"] == "3.20"
-        assert m["total_gas_usd"] == "1.80"
+        # VIB-5083: metric Decimals serialize normalized (no trailing zeros /
+        # scientific notation). "3.20" -> "3.2", "1.80" -> "1.8".
+        assert m["total_slippage_usd"] == "3.2"
+        assert m["total_gas_usd"] == "1.8"
         assert m["volatility"] == "0.18"
         assert m["realized_pnl"] == "234.56"
         assert m["pnl_by_protocol"] == {"uniswap_v3": "234.56"}
@@ -234,7 +236,8 @@ async def test_full_lifecycle_lp(client):
         poll_resp = await client.get(f"/api/v1/backtest/{job_id}")
         data = poll_resp.json()
         assert data["status"] == "complete"
-        assert data["result"]["metrics"]["net_pnl_usd"] == "100.00"
+        # VIB-5083: metric Decimals serialize normalized ("100.00" -> "100").
+        assert data["result"]["metrics"]["net_pnl_usd"] == "100"
         assert data["result"]["metrics"]["total_trades"] == 5
 
 
@@ -256,7 +259,8 @@ async def test_full_lifecycle_lend(client):
         poll_resp = await client.get(f"/api/v1/backtest/{job_id}")
         data = poll_resp.json()
         assert data["status"] == "complete"
-        assert data["result"]["metrics"]["net_pnl_usd"] == "50.00"
+        # VIB-5083: metric Decimals serialize normalized ("50.00" -> "50").
+        assert data["result"]["metrics"]["net_pnl_usd"] == "50"
 
 
 # ---------------------------------------------------------------------------

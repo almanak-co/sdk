@@ -135,7 +135,10 @@ CELLS: tuple[TrustCell, ...] = (
         "trade_pnl_attribution",
         "swap",
         "A profitable closing swap records positive per-trade pnl_usd (win_rate is not degenerate).",
-        xfail_ticket="VIB-5083",
+        # Fixed by VIB-5083: a disposing SWAP realizes proceeds - units x
+        # average-cost basis; opening/inventory-building swaps carry
+        # pnl_usd=None (unknown, not a fabricated 0) and the metrics layer
+        # excludes them from win/loss stats.
     ),
     _cell(
         "math_sharpe",

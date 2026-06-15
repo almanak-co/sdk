@@ -450,3 +450,63 @@ async def test_submit_poll_failed_lifecycle(client):
     assert data["status"] == "failed"
     assert "PnLBacktester" in data["error"]
     assert data["result"] is None
+
+
+class TestSerializeResult:
+    """serialize_result trade serialization, including unrealized PnL (VIB-5083)."""
+
+    def _result(self, trades):
+        from datetime import UTC, datetime
+
+        from almanak.framework.backtesting.models import (
+            BacktestEngine,
+            BacktestMetrics,
+            BacktestResult,
+            EquityPoint,
+        )
+
+        return BacktestResult(
+            engine=BacktestEngine.PNL,
+            deployment_id="svc-test",
+            start_time=datetime(2025, 11, 1, tzinfo=UTC),
+            end_time=datetime(2025, 11, 2, tzinfo=UTC),
+            metrics=BacktestMetrics(total_trades=len(trades)),
+            trades=trades,
+            equity_curve=[
+                EquityPoint(timestamp=datetime(2025, 11, 1, tzinfo=UTC), value_usd=Decimal("10000")),
+            ],
+        )
+
+    def test_realized_and_unrealized_pnl_serialize(self):
+        """A closing trade serializes its realized PnL; an opening trade serializes null."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.backtesting.models import IntentType, TradeRecord
+
+        opening = TradeRecord(
+            timestamp=datetime(2025, 11, 1, 1, tzinfo=UTC),
+            intent_type=IntentType.SWAP,
+            executed_price=Decimal("2000"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            pnl_usd=None,  # opening / inventory-building trade
+            success=True,
+            amount_usd=Decimal("5000"),
+        )
+        closing = TradeRecord(
+            timestamp=datetime(2025, 11, 1, 2, tzinfo=UTC),
+            intent_type=IntentType.SWAP,
+            executed_price=Decimal("2500"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            pnl_usd=Decimal("1250"),
+            success=True,
+            amount_usd=Decimal("6250"),
+        )
+
+        out = serialize_result(self._result([opening, closing]))
+        serialized = out["trades"]
+        assert serialized[0]["pnl_usd"] is None  # opening trade -> JSON null, not "None"
+        assert serialized[1]["pnl_usd"] == "1250"  # closing trade -> realized gain

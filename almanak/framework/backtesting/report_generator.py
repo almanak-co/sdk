@@ -148,7 +148,10 @@ def _prepare_trades_list(result: "BacktestResult") -> list[dict[str, Any]]:
                 "fee_usd": str(trade.fee_usd),
                 "slippage_usd": str(trade.slippage_usd),
                 "gas_cost_usd": str(trade.gas_cost_usd),
-                "pnl_usd": str(trade.pnl_usd),
+                # pnl_usd is None for an opening / inventory-building trade
+                # (no realized PnL yet, VIB-5083): render an em-dash rather
+                # than the literal string "None".
+                "pnl_usd": str(trade.pnl_usd) if trade.pnl_usd is not None else "-",
                 "success": trade.success,
             }
         )

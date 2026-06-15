@@ -98,6 +98,24 @@ def format_percentage(value: Decimal | float | str | None) -> str:
         return "-"
 
 
+def _realized_pnl_float(trade: TradeRecord) -> float:
+    """Realized per-trade PnL as a float, coalescing None to 0.0 (VIB-5083).
+
+    A trade with no realized PnL (``pnl_usd is None`` -- an opening /
+    inventory-building trade) realized nothing, so it contributes 0 to
+    cumulative/aggregate PnL and is neither a win nor a loss. The honest
+    None is preserved on the record; this coalescion is only for the
+    numeric dashboard aggregations.
+    """
+    return 0.0 if trade.pnl_usd is None else float(trade.pnl_usd)
+
+
+def _realized_net_pnl_float(trade: TradeRecord) -> float:
+    """Realized net per-trade PnL as a float, coalescing None to 0.0."""
+    net = trade.net_pnl_usd
+    return 0.0 if net is None else float(net)
+
+
 def render_equity_curve(
     results: dict[str, BacktestResult],
     selected_results: list[str],
@@ -495,8 +513,9 @@ def render_trade_explorer(result: BacktestResult) -> None:
         if trade.intent_type.value not in selected_types:
             continue
 
-        # PnL filter
-        pnl_value = float(trade.pnl_usd)
+        # PnL filter. A trade with no realized PnL (None) reads as zero here,
+        # so it lands in "Zero/No PnL" and never in Profitable/Losing.
+        pnl_value = _realized_pnl_float(trade)
         if pnl_filter == "Profitable" and pnl_value <= 0:
             continue
         if pnl_filter == "Losing" and pnl_value >= 0:
@@ -519,8 +538,9 @@ def render_trade_explorer(result: BacktestResult) -> None:
     if filtered_trades:
         table_data = []
         for trade in filtered_trades:
-            pnl = float(trade.pnl_usd)
-            net_pnl = float(trade.net_pnl_usd)
+            # None PnL (opening trade) renders "-", not a fabricated $0.00.
+            pnl_cell = "-" if trade.pnl_usd is None else format_currency(_realized_pnl_float(trade))
+            net_pnl_cell = "-" if trade.net_pnl_usd is None else format_currency(_realized_net_pnl_float(trade))
             table_data.append(
                 {
                     "Timestamp": trade.timestamp.strftime("%Y-%m-%d %H:%M"),
@@ -528,8 +548,8 @@ def render_trade_explorer(result: BacktestResult) -> None:
                     "Tokens": ", ".join(trade.tokens) if trade.tokens else "-",
                     "Protocol": trade.protocol or "-",
                     "Amount": format_currency(trade.amount_usd),
-                    "PnL": format_currency(pnl),
-                    "Net PnL": format_currency(net_pnl),
+                    "PnL": pnl_cell,
+                    "Net PnL": net_pnl_cell,
                     "Fee": format_currency(trade.fee_usd),
                     "Gas": format_currency(trade.gas_cost_usd),
                     "Status": "✓" if trade.success else "✗",
@@ -538,13 +558,14 @@ def render_trade_explorer(result: BacktestResult) -> None:
 
         st.dataframe(table_data, use_container_width=True, height=400)
 
-        # Trade summary stats for filtered trades
+        # Trade summary stats for filtered trades. Unrealized (None) PnL
+        # contributes 0 to totals and counts as neither win nor loss.
         st.markdown("**Filtered Trade Summary**")
-        total_pnl = sum(float(t.pnl_usd) for t in filtered_trades)
+        total_pnl = sum(_realized_pnl_float(t) for t in filtered_trades)
         total_fees = sum(float(t.fee_usd) for t in filtered_trades)
         total_gas = sum(float(t.gas_cost_usd) for t in filtered_trades)
-        winning_trades = sum(1 for t in filtered_trades if float(t.pnl_usd) > 0)
-        losing_trades = sum(1 for t in filtered_trades if float(t.pnl_usd) < 0)
+        winning_trades = sum(1 for t in filtered_trades if _realized_pnl_float(t) > 0)
+        losing_trades = sum(1 for t in filtered_trades if _realized_pnl_float(t) < 0)
 
         col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
@@ -599,7 +620,7 @@ def render_position_breakdown(result: BacktestResult) -> None:
         running_total = 0.0
 
         for trade in sorted_trades:
-            running_total += float(trade.pnl_usd)
+            running_total += _realized_pnl_float(trade)
             timestamps.append(trade.timestamp)
             cumulative_pnl.append(running_total)
 
@@ -649,7 +670,7 @@ def render_position_breakdown(result: BacktestResult) -> None:
 
     summary_data = []
     for trade_type, trades in sorted(trades_by_type.items()):
-        total_pnl = sum(float(t.pnl_usd) for t in trades)
+        total_pnl = sum(_realized_pnl_float(t) for t in trades)
         total_trades = len(trades)
         successful = sum(1 for t in trades if t.success)
         total_fees = sum(float(t.fee_usd) for t in trades)

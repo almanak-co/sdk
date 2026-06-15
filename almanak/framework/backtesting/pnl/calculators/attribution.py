@@ -102,17 +102,24 @@ class AttributionCalculator:
     use_net_pnl: bool = True
 
     def _get_trade_pnl(self, trade: "TradeRecord") -> Decimal:
-        """Get the PnL value to use for a trade.
+        """Get the realized PnL value to use for a trade.
+
+        A trade with no realized PnL (``pnl_usd is None`` -- an opening /
+        inventory-building trade, VIB-5083) contributes ``Decimal("0")`` to
+        its bucket: it realized nothing, so it adds nothing to the realized
+        attribution total. This coalescion happens only at the summation
+        boundary, where the bucket needs a number; the per-trade record
+        keeps the honest ``None``.
 
         Args:
             trade: TradeRecord to extract PnL from
 
         Returns:
-            Net PnL if use_net_pnl is True, otherwise gross PnL
+            Net PnL if use_net_pnl is True, otherwise gross PnL; ``0`` when
+            the trade realized no PnL.
         """
-        if self.use_net_pnl:
-            return trade.net_pnl_usd
-        return trade.pnl_usd
+        value = trade.net_pnl_usd if self.use_net_pnl else trade.pnl_usd
+        return value if value is not None else Decimal("0")
 
     def attribute_pnl_by_protocol(
         self,
@@ -367,14 +374,15 @@ def verify_attribution_totals(
         if not is_valid:
             logger.warning("Attribution totals do not match!")
     """
-    # Calculate expected total from trades
+    # Calculate expected total from trades. A trade with no realized PnL
+    # (None -- an opening / inventory-building trade, VIB-5083) contributes
+    # zero to the realized total, matching _get_trade_pnl's coalescion.
     expected_total = Decimal("0")
     for trade in trades:
         if trade.success:
-            if use_net_pnl:
-                expected_total += trade.net_pnl_usd
-            else:
-                expected_total += trade.pnl_usd
+            value = trade.net_pnl_usd if use_net_pnl else trade.pnl_usd
+            if value is not None:
+                expected_total += value
 
     # Sum each attribution
     protocol_total = sum(pnl_by_protocol.values(), Decimal("0"))

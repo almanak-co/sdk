@@ -458,8 +458,15 @@ class TestPnLBacktesterPerformance:
 
         # Verify
         assert result.success
-        # Should have many trades (approximately one per tick)
-        assert result.metrics.total_trades > 8000
+        # This is a throughput benchmark: the engine runs the full execution
+        # path (strategy decide -> fill build -> apply_fill validate/commit)
+        # once per hourly tick. Measure attempted fills, not successful ones:
+        # since VIB-5082 the portfolio rejects unfundable fills (this strategy
+        # bleeds its $10k capital on the flat-gas model and then cannot fund
+        # further buys), and since VIB-5083 ``total_trades`` counts only
+        # successful trades. ``total_trades + failed_trades`` is the work done.
+        attempted_trades = result.metrics.total_trades + result.metrics.failed_trades
+        assert attempted_trades > 8000
 
         # High-frequency should still complete in reasonable time
         max_allowed_seconds = 90
@@ -468,11 +475,10 @@ class TestPnLBacktesterPerformance:
             f"Trade execution path needs optimization."
         )
 
-        trades = result.metrics.total_trades
         print("\n=== High-Frequency Trading Benchmark ===")
-        print(f"Total trades: {trades}")
+        print(f"Attempted trades: {attempted_trades} (successful: {result.metrics.total_trades})")
         print(f"Elapsed time: {elapsed:.2f}s")
-        print(f"Throughput: {trades / elapsed:.1f} trades/s")
+        print(f"Throughput: {attempted_trades / elapsed:.1f} trade-attempts/s")
         print("=========================================\n")
 
     @pytest.mark.asyncio
