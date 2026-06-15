@@ -65,7 +65,10 @@ logger = logging.getLogger(__name__)
 BIN_STEPS: list[int] = [1, 5, 10, 15, 20, 25, 50, 100]
 
 # Default gas estimates
-# Note: add_liquidity for 11 bins uses ~600K gas, so 700K provides safety margin
+# Note: add_liquidity for 11 bins uses ~600K gas, so 700K provides safety margin.
+# TODO (follow-up): add_liquidity has the same latent per-bin scaling issue as
+# remove_liquidity (VIB-5136).  At very wide opens (>20 bins) 700K will also OOG.
+# The fix mirrors VIB-5136: max(700_000, base + per_bin * len(delta_ids)).
 DEFAULT_GAS_ESTIMATES: dict[str, int] = {
     "approve": 50_000,
     "swap": 200_000,
@@ -758,10 +761,24 @@ class TraderJoeV2SDK:
         Returns:
             Tuple of (transaction dict, estimated gas)
         """
+        if not ids or not amounts:
+            raise TraderJoeV2SDKError("No bin IDs or amounts provided for removing liquidity")
+        if len(ids) != len(amounts):
+            raise TraderJoeV2SDKError("Mismatch between bin IDs and amounts length")
+
         if deadline is None:
             deadline = int(time.time()) + DEADLINE_SECONDS
 
         to_addr = Web3.to_checksum_address(to)
+
+        # Gas scales with the number of bins burned: each bin costs roughly 25k
+        # gas on top of a ~150k base.  A fixed 400k budget OOGs on wide (≥11-bin)
+        # positions (VIB-5136).  We take the larger of the flat default and the
+        # per-bin estimate so that narrow (1–2 bin) closes are not penalised.
+        remove_gas = max(
+            DEFAULT_GAS_ESTIMATES["remove_liquidity"],
+            150_000 + 25_000 * len(ids),
+        )
 
         tx = self._router_contract.functions.removeLiquidity(
             Web3.to_checksum_address(token_x),
@@ -776,7 +793,7 @@ class TraderJoeV2SDK:
         ).build_transaction(
             {
                 "from": to_addr,
-                "gas": DEFAULT_GAS_ESTIMATES["remove_liquidity"],
+                "gas": remove_gas,
                 "nonce": self.web3.eth.get_transaction_count(to_addr),
             }
         )

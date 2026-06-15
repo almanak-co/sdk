@@ -138,6 +138,29 @@ class TestClassifyInstrument:
         assert inst.base == "WETH"
         assert classify_instrument(inst) == "cex_primary"
 
+    def test_cex_primary_cbbtc_usdc(self):
+        """CBBTC (Coinbase Wrapped BTC) routes as cex_primary — VIB-5137."""
+        inst = Instrument(base="CBBTC", quote="USDC", chain="base")
+        assert classify_instrument(inst) == "cex_primary"
+
+    def test_cex_primary_cbbtc_usdt(self):
+        """CBBTC with USDT quote also routes as cex_primary."""
+        inst = Instrument(base="CBBTC", quote="USDT", chain="base")
+        assert classify_instrument(inst) == "cex_primary"
+
+    def test_cbbtc_routes_to_binance_before_geckoterminal(self):
+        """CBBTC/USDC on base should try Binance first, not GeckoTerminal."""
+        router = OHLCVRouter()
+        binance = _mock_provider("binance")
+        gecko = _mock_provider("geckoterminal")
+        router.register_provider(binance)
+        router.register_provider(gecko)
+
+        envelope = router.get_ohlcv("CBBTC/USDC", chain="base")
+        assert envelope.meta.source == "binance"
+        binance.fetch.assert_called_once()
+        gecko.fetch.assert_not_called()
+
 
 class TestProviderChains:
     """Tests for provider chain ordering."""

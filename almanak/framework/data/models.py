@@ -210,6 +210,8 @@ CEX_SYMBOL_MAP: dict[tuple[str, str, str], str] = {
     ("binance", "WBTC", "USDC"): "BTCUSDC",
     ("binance", "BTCB", "USDT"): "BTCUSDT",  # Binance-Peg BTC on BSC; same spot pair as WBTC.
     ("binance", "BTCB", "USDC"): "BTCUSDC",
+    ("binance", "CBBTC", "USDT"): "BTCUSDT",  # Coinbase Wrapped BTC; CEX-side BTC spot pair.
+    ("binance", "CBBTC", "USDC"): "BTCUSDC",
     ("binance", "LINK", "USDT"): "LINKUSDT",
     ("binance", "UNI", "USDT"): "UNIUSDT",
     ("binance", "AAVE", "USDT"): "AAVEUSDT",
@@ -226,6 +228,7 @@ CEX_SYMBOL_MAP: dict[tuple[str, str, str], str] = {
     # Coinbase
     ("coinbase", "WETH", "USDC"): "ETH-USD",
     ("coinbase", "WBTC", "USDC"): "BTC-USD",
+    ("coinbase", "CBBTC", "USDC"): "CBBTC-USD",  # Coinbase Wrapped BTC; native pair on Coinbase.
     ("coinbase", "LINK", "USDC"): "LINK-USD",
     ("coinbase", "UNI", "USDC"): "UNI-USD",
     ("coinbase", "AAVE", "USDC"): "AAVE-USD",

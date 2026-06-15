@@ -101,7 +101,7 @@ def _succeeding_provider(name: str) -> MagicMock:
 def _snapshot_with_failure(detail: str) -> MarketSnapshot:
     market = MarketSnapshot(chain="base", wallet_address="0xtest")
     # _record_critical_data_failure is the internal method that indicator helpers use
-    market._record_critical_data_failure("ohlcv_router", "cbBTC", detail)
+    market._record_critical_data_failure("ohlcv_router", "AERO", detail)
     return market
 
 
@@ -117,13 +117,13 @@ class TestErrorEnvelope:
         """When Gecko fails then Binance fails, reason includes both errors."""
         router = OHLCVRouter(default_chain="base")
         gecko = _failing_provider("geckoterminal", "StatusCode.INTERNAL — GeckoTerminal OHLCV request failed")
-        binance = _failing_provider("binance", "Unknown token for Binance: 0xcbbtc")
+        binance = _failing_provider("binance", "Unknown token for Binance: 0xaero")
         router.register_provider(gecko)
         router.register_provider(binance)
 
         with patch("almanak.framework.data.ohlcv.ohlcv_router.time.sleep"):
             with pytest.raises(DataSourceUnavailable) as exc_info:
-                router.get_ohlcv("cbBTC", chain="base")
+                router.get_ohlcv("AERO", chain="base")
 
         reason = exc_info.value.reason
         assert "StatusCode.INTERNAL" in reason or "GeckoTerminal" in reason, (
@@ -153,7 +153,7 @@ class TestErrorEnvelope:
 
         with patch("almanak.framework.data.ohlcv.ohlcv_router.time.sleep"):
             with pytest.raises(DataSourceUnavailable) as exc_info:
-                router.get_ohlcv("cbBTC", chain="base")
+                router.get_ohlcv("AERO", chain="base")
 
         reason = exc_info.value.reason
         assert reason.index("GECKO_FAIL") < reason.index("BINANCE_FAIL"), (
@@ -174,10 +174,10 @@ class TestClassifyGeckoPlusBinanceCombined:
     def test_grpc_internal_plus_unknown_token_is_mixed(self):
         """Gecko INTERNAL + Binance unknown token → classification is 'mixed'."""
         combined = (
-            "All providers failed for cbBTC/USD on base"
+            "All providers failed for AERO/USD on base"
             " — primary: Data source 'gateway_geckoterminal' unavailable:"
             " <RpcError status = StatusCode.INTERNAL details = 'GeckoTerminal OHLCV request failed'>;"
-            " last: Data source 'gateway_ohlcv' unavailable: Unknown token for Binance: 0xcbbtc"
+            " last: Data source 'gateway_ohlcv' unavailable: Unknown token for Binance: 0xaero"
         )
         market = _snapshot_with_failure(combined)
         classification = market.classify_critical_data_failures()
@@ -185,7 +185,7 @@ class TestClassifyGeckoPlusBinanceCombined:
 
     def test_unknown_token_only_is_permanent(self):
         """A clean 'unknown token' error with no transient hints → 'permanent'."""
-        market = _snapshot_with_failure("Unknown token for Binance: 0xcbbtc")
+        market = _snapshot_with_failure("Unknown token for Binance: 0xaero")
         assert market.classify_critical_data_failures() == "permanent"
 
     def test_grpc_internal_only_is_transient(self):
@@ -200,8 +200,8 @@ class TestClassifyGeckoPlusBinanceCombined:
     def test_two_separate_failures_gecko_transient_binance_permanent(self):
         """Two separate recorded failures (one each) → 'mixed'."""
         market = MarketSnapshot(chain="base", wallet_address="0xtest")
-        market._record_critical_data_failure("ohlcv_router", "cbBTC_primary", "StatusCode.INTERNAL: GeckoTerminal blip")
-        market._record_critical_data_failure("ohlcv_router", "cbBTC_last", "Unknown token for Binance: 0xcbbtc")
+        market._record_critical_data_failure("ohlcv_router", "AERO_primary", "StatusCode.INTERNAL: GeckoTerminal blip")
+        market._record_critical_data_failure("ohlcv_router", "AERO_last", "Unknown token for Binance: 0xaero")
         assert market.classify_critical_data_failures() == "mixed"
 
     def test_empty_failures_returns_none(self):
@@ -218,8 +218,8 @@ class TestClassifyGeckoPlusBinanceCombined:
         market = MarketSnapshot(chain="base", wallet_address="0xtest")
         market._record_critical_data_failure(
             "ohlcv",
-            "cbBTC",
-            DataSourceUnavailable(source="gateway_ohlcv", reason="Unknown token for Binance: cbBTC"),
+            "AERO",
+            DataSourceUnavailable(source="gateway_ohlcv", reason="Unknown token for Binance: AERO"),
         )
         assert market.classify_critical_data_failures() == "permanent", (
             "A DSU wrapping 'unknown token' must be 'permanent', not 'mixed' — "
@@ -251,7 +251,7 @@ class TestRetryLogic:
         router.register_provider(gecko)
 
         with patch("almanak.framework.data.ohlcv.ohlcv_router.time.sleep"):
-            result = router.get_ohlcv("cbBTC", chain="base")
+            result = router.get_ohlcv("AERO", chain="base")
 
         assert result.meta.source == "geckoterminal"
         assert gecko.fetch.call_count == 2
@@ -273,8 +273,8 @@ class TestRetryLogic:
         router.register_provider(binance)
 
         with patch("almanak.framework.data.ohlcv.ohlcv_router.time.sleep"):
-            # cbBTC is defi_primary → chain is [geckoterminal, defillama, binance]
-            result = router.get_ohlcv("cbBTC", chain="base")
+            # AERO is defi_primary → chain is [geckoterminal, defillama, binance]
+            result = router.get_ohlcv("AERO", chain="base")
 
         assert result.meta.source == "binance"
         assert gecko.fetch.call_count == 3  # 1 original + 2 retries
@@ -288,7 +288,7 @@ class TestRetryLogic:
 
         with patch("almanak.framework.data.ohlcv.ohlcv_router.time.sleep") as mock_sleep:
             with pytest.raises(DataSourceUnavailable):
-                router.get_ohlcv("cbBTC", chain="base")
+                router.get_ohlcv("AERO", chain="base")
 
         assert gecko.fetch.call_count == 1  # No retry for permanent error
         mock_sleep.assert_not_called()
@@ -304,7 +304,7 @@ class TestRetryLogic:
 
         with patch("almanak.framework.data.ohlcv.ohlcv_router.time.sleep") as mock_sleep:
             with pytest.raises(DataSourceUnavailable):
-                router.get_ohlcv("cbBTC", chain="base", force_provider="binance")
+                router.get_ohlcv("AERO", chain="base", force_provider="binance")
 
         assert binance.fetch.call_count == 1  # CEX: one attempt only
         mock_sleep.assert_not_called()
@@ -323,7 +323,7 @@ class TestRetryLogic:
         router.register_provider(gecko)
 
         with patch("almanak.framework.data.ohlcv.ohlcv_router.time.sleep") as mock_sleep:
-            router.get_ohlcv("cbBTC", chain="base")
+            router.get_ohlcv("AERO", chain="base")
 
         assert mock_sleep.call_count == 1
         delay = mock_sleep.call_args[0][0]

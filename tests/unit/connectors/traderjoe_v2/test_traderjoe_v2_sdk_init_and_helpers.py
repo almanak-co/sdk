@@ -513,14 +513,17 @@ class TestBuilders:
         )
         assert gas == 700_000
 
-    def test_build_remove_liquidity(self) -> None:
+    def _build_remove_liquidity_with_ids(self, ids: list[int]) -> tuple[dict, int]:
+        """Helper: build_remove_liquidity with a specific ids list; returns (tx, gas)."""
         sdk = _bare_sdk()
         router = self._setup_router(sdk)
+        n = len(ids)
+        expected_gas = max(DEFAULT_GAS_ESTIMATES["remove_liquidity"], 150_000 + 25_000 * n)
         router.functions.removeLiquidity.return_value.build_transaction.return_value = {
             "to": "0xrouter",
             "data": "0xc22159b6",
             "value": 0,
-            "gas": 400_000,
+            "gas": expected_gas,
         }
         tx, gas = sdk.build_remove_liquidity(
             token_x=TOKEN_X,
@@ -528,11 +531,74 @@ class TestBuilders:
             bin_step=20,
             amount_x_min=10,
             amount_y_min=20,
-            ids=[BIN_ID_OFFSET],
-            amounts=[1_000],
+            ids=ids,
+            amounts=[1_000] * n,
             to=WALLET,
         )
+        # Verify the gas passed into build_transaction matches the formula.
+        build_tx_call_kwargs = router.functions.removeLiquidity.return_value.build_transaction.call_args[0][0]
+        assert build_tx_call_kwargs["gas"] == expected_gas
+        return tx, gas
+
+    def test_build_remove_liquidity_single_bin_uses_default_floor(self) -> None:
+        """1-bin close: formula gives 175k, floor kicks in, gas = 400k."""
+        _, gas = self._build_remove_liquidity_with_ids([BIN_ID_OFFSET])
+        # max(400_000, 150_000 + 25_000 * 1) == 400_000
         assert gas == 400_000
+
+    def test_build_remove_liquidity_two_bin_uses_default_floor(self) -> None:
+        """2-bin close: formula gives 200k, floor kicks in, gas = 400k."""
+        _, gas = self._build_remove_liquidity_with_ids([BIN_ID_OFFSET, BIN_ID_OFFSET + 1])
+        # max(400_000, 150_000 + 25_000 * 2) == 400_000
+        assert gas == 400_000
+
+    def test_build_remove_liquidity_wide_position_scales_gas(self) -> None:
+        """23-bin close: formula gives 725k which exceeds the 400k floor (VIB-5136)."""
+        ids = list(range(BIN_ID_OFFSET, BIN_ID_OFFSET + 23))
+        _, gas = self._build_remove_liquidity_with_ids(ids)
+        # max(400_000, 150_000 + 25_000 * 23) = max(400_000, 725_000) == 725_000
+        assert gas == 725_000
+
+    def test_build_remove_liquidity_crossover_point_is_at_11_bins(self) -> None:
+        """10 bins: 400k; 11 bins: 425k (formula overtakes floor)."""
+        # 10 bins: max(400_000, 150_000 + 250_000) = max(400_000, 400_000) = 400_000
+        _, gas_10 = self._build_remove_liquidity_with_ids(list(range(BIN_ID_OFFSET, BIN_ID_OFFSET + 10)))
+        assert gas_10 == 400_000
+        # 11 bins: max(400_000, 150_000 + 275_000) = max(400_000, 425_000) = 425_000
+        _, gas_11 = self._build_remove_liquidity_with_ids(list(range(BIN_ID_OFFSET, BIN_ID_OFFSET + 11)))
+        assert gas_11 == 425_000
+
+    def test_build_remove_liquidity_empty_ids_raises(self) -> None:
+        """Empty ids must be rejected before building a malformed tx."""
+        sdk = _bare_sdk()
+        self._setup_router(sdk)
+        with pytest.raises(TraderJoeV2SDKError, match="No bin IDs or amounts"):
+            sdk.build_remove_liquidity(
+                token_x=TOKEN_X,
+                token_y=TOKEN_Y,
+                bin_step=20,
+                amount_x_min=10,
+                amount_y_min=20,
+                ids=[],
+                amounts=[],
+                to=WALLET,
+            )
+
+    def test_build_remove_liquidity_mismatched_lengths_raises(self) -> None:
+        """ids/amounts length mismatch must be rejected (malformed removeLiquidity)."""
+        sdk = _bare_sdk()
+        self._setup_router(sdk)
+        with pytest.raises(TraderJoeV2SDKError, match="Mismatch between bin IDs and amounts"):
+            sdk.build_remove_liquidity(
+                token_x=TOKEN_X,
+                token_y=TOKEN_Y,
+                bin_step=20,
+                amount_x_min=10,
+                amount_y_min=20,
+                ids=[BIN_ID_OFFSET, BIN_ID_OFFSET + 1],
+                amounts=[1_000],
+                to=WALLET,
+            )
 
     def test_build_collect_fees_empty_ids_raises(self) -> None:
         sdk = _bare_sdk()
