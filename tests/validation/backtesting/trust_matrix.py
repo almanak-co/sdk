@@ -70,6 +70,8 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "math_il_closed_form",
     "math_sharpe",
     "math_max_drawdown",
+    "round_trip_conservation_numeraire",
+    "fiat_usd_pin",
 )
 
 
@@ -149,6 +151,18 @@ CELLS: tuple[TrustCell, ...] = (
         "math_max_drawdown",
         "swap",
         "Max drawdown of the protocol reference curve is exactly 25%.",
+    ),
+    _cell(
+        "round_trip_conservation_numeraire",
+        "swap",
+        "Buy then sell at a flat price with a token (WETH) numeraire conserves value "
+        "in the numeraire unit: equity is a flat 5 WETH at every mark (VIB-5127).",
+    ),
+    _cell(
+        "fiat_usd_pin",
+        "swap",
+        "A default (fiat_usd) strategy emits no numeraire fields and serializes "
+        "byte-for-byte as pre-VIB-5127 (no numeraire* keys in the artifact).",
     ),
     # --- LP column ---
     _cell(
@@ -393,10 +407,21 @@ class ScriptedStrategy:
     expectations in the cells account for this.
     """
 
-    def __init__(self, intents: list[Any], deployment_id: str = "trust-matrix") -> None:
+    def __init__(
+        self,
+        intents: list[Any],
+        deployment_id: str = "trust-matrix",
+        quote_asset: Any = None,
+    ) -> None:
         self._intents = list(intents)
         self._cursor = 0
         self.deployment_id = deployment_id
+        # Mirrors IntentStrategy.quote_asset so the engine reads the real
+        # getattr(strategy, "quote_asset", None) numeraire path (VIB-5127).
+        # None == the USD default; the attribute only exists when set so the
+        # default path also exercises the "no quote_asset attribute" branch.
+        if quote_asset is not None:
+            self.quote_asset = quote_asset
 
     def decide(self, market: Any) -> Any:
         if self._cursor < len(self._intents):

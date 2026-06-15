@@ -41,6 +41,7 @@ from almanak.framework.backtesting.models import (
     IntentType,
     TradeRecord,
 )
+from almanak.framework.backtesting.numeraire import compute_numeraire_metrics_paper
 from almanak.framework.backtesting.paper.config import (
     ForkLifecycle,
     PaperTraderConfig,
@@ -99,6 +100,11 @@ def reset_run_state(trader: PaperTrader, strategy: PaperTradeableStrategy) -> da
     trader._ticks_with_action = 0
     trader._last_successful_decision_at = None
     trader._last_trade_at = None
+    # Re-resolve the numeraire for the new strategy (VIB-5127): _numeraire_symbol
+    # is init=False and survives trader reuse, so the False sentinel must be
+    # restored or a second run would report against the previous strategy's
+    # numeraire.
+    trader._numeraire_symbol = False
     # Unique backtest_id for correlation.
     trader._backtest_id = str(uuid.uuid4())
     # Consistent error handler.
@@ -490,7 +496,21 @@ def assemble_backtest_result(
     compliance_violations: list[str],
     institutional_compliance: bool,
 ) -> BacktestResult:
-    """Build the final ``BacktestResult`` — pure data assembly, no I/O."""
+    """Build the final ``BacktestResult`` — pure data assembly, no I/O.
+
+    Attaches the numeraire reporting projection (VIB-5127) when the strategy
+    declared a non-USD ``quote_asset``: equity-curve-derived metrics recomputed
+    on the numeraire-denominated equity series (paper's hourly convention),
+    plus the numeraire-denominated start / end capital. All ``None`` / unset for
+    USD strategies, so a USD paper result is unchanged.
+    """
+    numeraire_symbol = trader._resolve_numeraire()
+    numeraire_metrics, initial_capital_numeraire, final_capital_numeraire = compute_numeraire_metrics_paper(
+        equity_curve,
+        numeraire_symbol=numeraire_symbol,
+    )
+    metrics.numeraire_metrics = numeraire_metrics
+
     return BacktestResult(
         engine=BacktestEngine.PAPER,
         deployment_id=deployment_id,
@@ -501,6 +521,9 @@ def assemble_backtest_result(
         equity_curve=equity_curve,
         initial_capital_usd=initial_capital,
         final_capital_usd=final_value,
+        numeraire=numeraire_symbol,
+        initial_capital_numeraire=initial_capital_numeraire,
+        final_capital_numeraire=final_capital_numeraire,
         chain=trader.config.chain,
         run_started_at=run_started_at,
         run_ended_at=run_ended_at,
@@ -541,6 +564,8 @@ def init_run_loop_state(trader: PaperTrader, strategy: PaperTradeableStrategy) -
     trader._ticks_with_action = 0
     trader._last_successful_decision_at = None
     trader._last_trade_at = None
+    # Re-resolve the numeraire for the new strategy (VIB-5127); see reset_run_state.
+    trader._numeraire_symbol = False
     trader._backtest_id = str(uuid.uuid4())
     trader._error_handler = BacktestErrorHandler(BacktestErrorConfig())
     return session_start

@@ -38,6 +38,7 @@ from decimal import Decimal
 
 import pytest
 
+from almanak.core.models.quote_asset import QuoteAsset
 from almanak.framework.backtesting.adapters.lp_adapter import (
     LPBacktestAdapter,
     LPBacktestConfig,
@@ -150,6 +151,75 @@ def test_swap_round_trip_conservation() -> None:
     assert result.final_capital_usd == INITIAL_CAPITAL
     # Conservation must hold at every mark, not just the endpoint.
     assert all(point.value_usd == INITIAL_CAPITAL for point in result.equity_curve)
+
+
+#: WETH on Arbitrum (the default backtest chain) -- the numeraire token used by
+#: the conservation cell below. flat_series prices WETH at $2,000.
+_WETH_ARBITRUM = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+
+
+@pytest.mark.trust_cell("swap:round_trip_conservation_numeraire")
+def test_swap_round_trip_conservation_numeraire() -> None:
+    """Round trip with a WETH numeraire conserves value in WETH (VIB-5127).
+
+    Same buy-then-sell round trip as the USD cell, but the strategy declares a
+    token quote_asset (WETH on Arbitrum). The USD core is untouched (final USD
+    equity == initial capital), and the additive numeraire projection values the
+    portfolio at a flat 5 WETH (10,000 USD / 2,000 USD-per-WETH) at every mark.
+    Decimal-exact because the WETH price is flat.
+    """
+    intents = [
+        SwapDuck(amount_usd=Decimal("5000")),  # buy 2.5 WETH
+        SwapDuck(from_token="WETH", to_token="USDC", amount_usd=Decimal("5000")),  # sell 2.5 WETH
+    ]
+    strategy = ScriptedStrategy(intents, quote_asset=QuoteAsset.token(42161, _WETH_ARBITRUM))
+    result = run_backtest(strategy, flat_series(12), hours=8)
+
+    assert result.success
+    assert all(trade.success for trade in result.trades)
+    # USD conservation core is unchanged.
+    assert result.final_capital_usd == INITIAL_CAPITAL
+    # Numeraire projection: 10,000 / 2,000 = 5 WETH, conserved at every mark.
+    expected_weth = INITIAL_CAPITAL / Decimal("2000")
+    assert result.numeraire == "WETH"
+    assert result.initial_capital_numeraire == expected_weth
+    assert result.final_capital_numeraire == expected_weth
+    assert result.metrics.numeraire_metrics is not None
+    assert result.metrics.numeraire_metrics.numeraire == "WETH"
+    assert result.metrics.numeraire_metrics.total_pnl == Decimal("0")
+    for point in result.equity_curve:
+        assert point.numeraire_price_usd == Decimal("2000")
+        assert point.value_usd / point.numeraire_price_usd == expected_weth
+
+
+@pytest.mark.trust_cell("swap:fiat_usd_pin")
+def test_swap_fiat_usd_byte_for_byte_pin() -> None:
+    """A default (USD) strategy emits no numeraire fields -- byte-for-byte pin.
+
+    Guards the additive contract (VIB-5127): the numeraire feature must never
+    change a fiat_usd artifact. Any reviewer who reuses the _usd storage for
+    the numeraire would grow numeraire* keys here and trip this cell.
+    """
+    intents = [
+        SwapDuck(amount_usd=Decimal("5000")),
+        SwapDuck(from_token="WETH", to_token="USDC", amount_usd=Decimal("5000")),
+    ]
+    result = run_backtest(ScriptedStrategy(intents), flat_series(12), hours=8)
+
+    assert result.success
+    assert result.numeraire is None
+    assert result.initial_capital_numeraire is None
+    assert result.final_capital_numeraire is None
+    assert result.metrics.numeraire_metrics is None
+    assert all(point.numeraire_price_usd is None for point in result.equity_curve)
+
+    # No numeraire* keys leak into the serialized artifact.
+    payload = result.to_dict()
+    assert "numeraire" not in payload
+    assert "initial_capital_numeraire" not in payload
+    assert "final_capital_numeraire" not in payload
+    assert "numeraire_metrics" not in payload["metrics"]
+    assert all("numeraire_price_usd" not in point for point in payload["equity_curve"])
 
 
 @pytest.mark.trust_cell("swap:rejection_no_state_change")

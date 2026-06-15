@@ -51,6 +51,10 @@ from almanak.framework.backtesting.models import (
     PreflightReport,
     TradeRecord,
 )
+from almanak.framework.backtesting.numeraire import (
+    compute_numeraire_metrics,
+    resolve_numeraire_symbol,
+)
 from almanak.framework.backtesting.pnl.data_provider import (
     HistoricalDataCapability,
     HistoricalDataConfig,
@@ -220,17 +224,32 @@ def initialize_backtest(
             f"{len(parameter_sources.apy_funding_sources)} apy/funding)"
         )
 
+        # Resolve the strategy's declared numeraire (VIB-5127). None for the USD
+        # default; a chain mismatch raises here, before the simulation loop.
+        numeraire_symbol = resolve_numeraire_symbol(strategy, config.chain)
+
         # Initialize portfolio
         portfolio = SimulatedPortfolio(
             initial_capital_usd=config.initial_capital_usd,
         )
+        # The portfolio captures the numeraire price per equity point; value_usd
+        # stays USD (the conservation core is untouched).
+        portfolio._numeraire_symbol = numeraire_symbol
+
+        # Ensure the numeraire token is always priced by the data provider, even
+        # if the strategy never trades it. Use a local copy -- never mutate
+        # config.tokens (it feeds config_hash / the reproducibility audit trail).
+        data_tokens = list(config.tokens)
+        if numeraire_symbol is not None and numeraire_symbol not in {t.upper() for t in data_tokens}:
+            data_tokens.append(numeraire_symbol)
+            bt_logger.debug(f"Added numeraire token {numeraire_symbol} to the data-fetch token set")
 
         # Create historical data config
         data_config = HistoricalDataConfig(
             start_time=config.start_time,
             end_time=config.end_time,
             interval_seconds=config.interval_seconds,
-            tokens=config.tokens,
+            tokens=data_tokens,
             chains=[config.chain],
         )
 
@@ -733,6 +752,18 @@ def finalize_backtest_result(
     with bt_logger.phase("metrics_calculation"):
         metrics = backtester._calculate_metrics(state.portfolio, state.portfolio.trades, config)
 
+        # Numeraire reporting projection (VIB-5127). No-op (None) for USD
+        # strategies; raises here (after the loop) if the numeraire token was
+        # unpriceable at any equity point.
+        numeraire_symbol = state.portfolio._numeraire_symbol
+        numeraire_metrics, initial_capital_numeraire, final_capital_numeraire = compute_numeraire_metrics(
+            state.portfolio.equity_curve,
+            numeraire_symbol=numeraire_symbol,
+            trading_days_per_year=config.trading_days_per_year,
+            risk_free_rate=config.risk_free_rate,
+        )
+        metrics.numeraire_metrics = numeraire_metrics
+
         # Get final portfolio value
         final_value = (
             state.portfolio.equity_curve[-1].value_usd if state.portfolio.equity_curve else config.initial_capital_usd
@@ -778,6 +809,9 @@ def finalize_backtest_result(
         equity_curve=state.portfolio.equity_curve,
         initial_capital_usd=config.initial_capital_usd,
         final_capital_usd=final_value,
+        numeraire=numeraire_symbol,
+        initial_capital_numeraire=initial_capital_numeraire,
+        final_capital_numeraire=final_capital_numeraire,
         chain=config.chain,
         run_started_at=run_started_at,
         run_ended_at=run_ended_at,

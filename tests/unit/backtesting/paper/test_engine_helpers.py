@@ -111,6 +111,8 @@ def _make_fake_trader(
         _last_trade_at=None,
         _error_handler=error_handler,
         _fallback_usage={"hardcoded_price": 0, "default_gas_price": 0, "default_usd_amount": 0},
+        # USD default: assemble_backtest_result reads the numeraire (VIB-5127).
+        _resolve_numeraire=lambda: None,
         config=config,
         calls=calls,
     )
@@ -228,6 +230,42 @@ class TestResetRunState:
         _engine_helpers.reset_run_state(t, _Strategy())
         second_id = t._backtest_id
         assert first_id != second_id
+
+    def test_numeraire_symbol_re_resolves_across_runs(self) -> None:
+        """Reusing one trader across strategies re-resolves the numeraire (VIB-5127).
+
+        ``_numeraire_symbol`` is ``init=False`` and survives trader reuse; the
+        reset helpers must restore the ``False`` sentinel so a second run with a
+        different ``quote_asset`` does not report against the first run's
+        numeraire. ``_resolve_numeraire`` only reads ``_current_strategy`` /
+        ``config.chain`` / ``_numeraire_symbol``, so the real method runs against
+        the duck-typed fake trader.
+        """
+        from almanak.core.models.quote_asset import QuoteAsset
+        from almanak.framework.backtesting.paper.engine import PaperTrader
+
+        weth_arbitrum = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+
+        class _TokenStrategy:
+            deployment_id = "tok"
+            quote_asset = QuoteAsset.token(42161, weth_arbitrum)
+
+        class _UsdStrategy:
+            deployment_id = "usd"  # no quote_asset -> USD default
+
+        trader = _make_fake_trader()  # config.chain == "arbitrum"
+
+        # Run 1: a token numeraire resolves to WETH and memoizes.
+        _engine_helpers.reset_run_state(trader, _TokenStrategy())
+        assert trader._numeraire_symbol is False  # sentinel restored by reset
+        assert PaperTrader._resolve_numeraire(trader) == "WETH"
+        assert trader._numeraire_symbol == "WETH"  # memoized
+
+        # Run 2 (init_run_loop_state path): a USD strategy must NOT inherit the
+        # stale WETH numeraire.
+        _engine_helpers.init_run_loop_state(trader, _UsdStrategy())
+        assert trader._numeraire_symbol is False
+        assert PaperTrader._resolve_numeraire(trader) is None
 
 
 # ---------------------------------------------------------------------------

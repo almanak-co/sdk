@@ -1478,6 +1478,11 @@ class EquityPoint:
         spot_value_usd: Wallet token balances value (when using PortfolioValuer)
         position_value_usd: LP + lending position value (when using PortfolioValuer)
         valuation_source: "portfolio_valuer" or "simple" — indicates which pricing path was used
+        numeraire_price_usd: USD price of the strategy's declared numeraire token at this
+            timestamp, captured for the numeraire reporting projection (VIB-5127). ``None``
+            for USD-numeraire strategies (the default) and for points where the numeraire
+            token was unpriceable — the reporting layer divides ``value_usd`` by this to
+            value the portfolio in the numeraire. ``value_usd`` itself always stays USD.
     """
 
     timestamp: datetime
@@ -1486,6 +1491,7 @@ class EquityPoint:
     spot_value_usd: Decimal | None = None
     position_value_usd: Decimal | None = None
     valuation_source: str = "simple"
+    numeraire_price_usd: Decimal | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
@@ -1500,6 +1506,8 @@ class EquityPoint:
             d["spot_value_usd"] = str(self.spot_value_usd)
         if self.position_value_usd is not None:
             d["position_value_usd"] = str(self.position_value_usd)
+        if self.numeraire_price_usd is not None:
+            d["numeraire_price_usd"] = str(self.numeraire_price_usd)
         return d
 
 
@@ -1642,6 +1650,73 @@ class TradeRecord:
 
 
 @dataclass
+class NumeraireMetrics:
+    """Equity-curve-derived metrics denominated in a strategy's numeraire token.
+
+    Populated only when a strategy declares a non-USD ``quote_asset`` (VIB-5127);
+    ``BacktestMetrics.numeraire_metrics`` is ``None`` for USD strategies, so a USD
+    artifact serializes byte-for-byte as before. These are the metrics that flow
+    purely from the equity curve, recomputed on the numeraire-denominated equity
+    series (``value_usd / numeraire_price_usd`` per point). Cost columns
+    (fees / slippage / gas / MEV) are NOT re-denominated and stay USD on
+    ``BacktestMetrics``.
+
+    Conventions match ``BacktestMetrics`` exactly: ``*_return_pct`` are whole
+    percentages (10 == 10%); ``max_drawdown_pct`` / ``volatility`` are ratios.
+
+    Attributes:
+        numeraire: Canonical UPPERCASE symbol of the numeraire token (e.g. "WETH").
+        total_pnl: Final minus initial equity, in numeraire units.
+        total_return_pct: Total return as a whole percentage, in numeraire terms.
+        annualized_return_pct: Annualized (CAGR) return as a whole percentage.
+        sharpe_ratio: Sharpe ratio of the numeraire-denominated returns.
+        sortino_ratio: Sortino ratio of the numeraire-denominated returns.
+        volatility: Annualized volatility of numeraire returns (ratio).
+        max_drawdown_pct: Maximum peak-to-trough decline in numeraire terms (ratio).
+        calmar_ratio: Annualized numeraire return / max drawdown.
+    """
+
+    numeraire: str
+    total_pnl: Decimal = Decimal("0")
+    total_return_pct: Decimal = Decimal("0")
+    annualized_return_pct: Decimal = Decimal("0")
+    sharpe_ratio: Decimal = Decimal("0")
+    sortino_ratio: Decimal = Decimal("0")
+    volatility: Decimal = Decimal("0")
+    max_drawdown_pct: Decimal = Decimal("0")
+    calmar_ratio: Decimal = Decimal("0")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dictionary (every Decimal normalized via ``_decimal_str``)."""
+        return {
+            "numeraire": self.numeraire,
+            "total_pnl": _decimal_str(self.total_pnl),
+            "total_return_pct": _decimal_str(self.total_return_pct),
+            "annualized_return_pct": _decimal_str(self.annualized_return_pct),
+            "sharpe_ratio": _decimal_str(self.sharpe_ratio),
+            "sortino_ratio": _decimal_str(self.sortino_ratio),
+            "volatility": _decimal_str(self.volatility),
+            "max_drawdown_pct": _decimal_str(self.max_drawdown_pct),
+            "calmar_ratio": _decimal_str(self.calmar_ratio),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "NumeraireMetrics":
+        """Deserialize from dictionary."""
+        return cls(
+            numeraire=data["numeraire"],
+            total_pnl=Decimal(data.get("total_pnl", "0")),
+            total_return_pct=Decimal(data.get("total_return_pct", "0")),
+            annualized_return_pct=Decimal(data.get("annualized_return_pct", "0")),
+            sharpe_ratio=Decimal(data.get("sharpe_ratio", "0")),
+            sortino_ratio=Decimal(data.get("sortino_ratio", "0")),
+            volatility=Decimal(data.get("volatility", "0")),
+            max_drawdown_pct=Decimal(data.get("max_drawdown_pct", "0")),
+            calmar_ratio=Decimal(data.get("calmar_ratio", "0")),
+        )
+
+
+@dataclass
 class BacktestMetrics:
     """Performance metrics calculated from backtest results.
 
@@ -1775,6 +1850,11 @@ class BacktestMetrics:
     pnl_by_asset: dict[str, Decimal] = field(default_factory=dict)
     realized_pnl: Decimal = Decimal("0")
     unrealized_pnl: Decimal = Decimal("0")
+    #: Equity-curve-derived metrics denominated in the strategy's numeraire token
+    #: (VIB-5127). ``None`` for USD-numeraire strategies (the default) so a USD
+    #: artifact serializes identically to pre-VIB-5127. The cost columns above
+    #: stay USD even when this is populated.
+    numeraire_metrics: "NumeraireMetrics | None" = None
 
     SCHEMA_VERSION: ClassVar[int] = 2
 
@@ -1789,8 +1869,13 @@ class BacktestMetrics:
         Every Decimal is normalized via :func:`_decimal_str` so display
         artifacts like ``profit_factor: 0E+17`` never leak into JSON or
         reports (VIB-5083); they render as finite, plain-notation values.
+
+        ``numeraire_metrics`` is emitted only when populated (a non-USD
+        strategy), so a USD artifact is byte-for-byte identical to
+        pre-VIB-5127 — the same emit-when-set discipline as the optional
+        ``EquityPoint`` fields.
         """
-        return {
+        result: dict[str, Any] = {
             "schema_version": self.SCHEMA_VERSION,
             "total_pnl_usd": _decimal_str(self.total_pnl_usd),
             "net_pnl_usd": _decimal_str(self.net_pnl_usd),
@@ -1847,6 +1932,9 @@ class BacktestMetrics:
             "realized_pnl": _decimal_str(self.realized_pnl),
             "unrealized_pnl": _decimal_str(self.unrealized_pnl),
         }
+        if self.numeraire_metrics is not None:
+            result["numeraire_metrics"] = self.numeraire_metrics.to_dict()
+        return result
 
 
 @dataclass
@@ -2017,6 +2105,14 @@ class BacktestResult:
     equity_curve: list[EquityPoint] = field(default_factory=list)
     initial_capital_usd: Decimal = Decimal("10000")
     final_capital_usd: Decimal = Decimal("10000")
+    #: Strategy numeraire descriptor (VIB-5127): the canonical UPPERCASE token
+    #: symbol (e.g. "WETH") when the strategy declares a non-USD quote_asset,
+    #: else ``None`` for the USD default. ``initial_capital_numeraire`` /
+    #: ``final_capital_numeraire`` carry the start / end equity in that unit;
+    #: both ``None`` for USD strategies so a USD artifact is unchanged.
+    numeraire: str | None = None
+    initial_capital_numeraire: Decimal | None = None
+    final_capital_numeraire: Decimal | None = None
     chain: str = DEFAULT_CHAIN
     run_started_at: datetime | None = None
     run_ended_at: datetime | None = None
@@ -2332,8 +2428,13 @@ class BacktestResult:
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
-        return {
+        """Serialize to dictionary.
+
+        The numeraire keys (``numeraire`` / ``initial_capital_numeraire`` /
+        ``final_capital_numeraire``, VIB-5127) are emitted only when set — a
+        USD-numeraire result serializes byte-for-byte as before.
+        """
+        result: dict[str, Any] = {
             "engine": self.engine.value,
             "deployment_id": self.deployment_id,
             "start_time": self.start_time.isoformat(),
@@ -2380,6 +2481,13 @@ class BacktestResult:
             "accuracy_estimate": self.accuracy_estimate.to_dict() if self.accuracy_estimate else None,
             "data_coverage_metrics": self.data_coverage_metrics.to_dict() if self.data_coverage_metrics else None,
         }
+        if self.numeraire is not None:
+            result["numeraire"] = self.numeraire
+        if self.initial_capital_numeraire is not None:
+            result["initial_capital_numeraire"] = str(self.initial_capital_numeraire)
+        if self.final_capital_numeraire is not None:
+            result["final_capital_numeraire"] = str(self.final_capital_numeraire)
+        return result
 
     # -------------------------------------------------------------------------
     # from_dict deserialization helpers (Phase 7.2 extraction)
@@ -2496,6 +2604,12 @@ class BacktestResult:
             pnl_by_asset={k: Decimal(v) for k, v in metrics_data.get("pnl_by_asset", {}).items()},
             realized_pnl=Decimal(metrics_data.get("realized_pnl", "0")),
             unrealized_pnl=Decimal(metrics_data.get("unrealized_pnl", "0")),
+            # Optional (VIB-5127): absent key -> None -> a USD artifact.
+            numeraire_metrics=(
+                NumeraireMetrics.from_dict(metrics_data["numeraire_metrics"])
+                if metrics_data.get("numeraire_metrics")
+                else None
+            ),
         )
 
     @staticmethod
@@ -2560,6 +2674,7 @@ class BacktestResult:
             spot_value_usd=opt_dec(e_data, "spot_value_usd"),
             position_value_usd=opt_dec(e_data, "position_value_usd"),
             valuation_source=e_data.get("valuation_source") or "simple",
+            numeraire_price_usd=opt_dec(e_data, "numeraire_price_usd"),
         )
 
     @staticmethod
@@ -2626,6 +2741,9 @@ class BacktestResult:
             equity_curve=cls._parse_equity_curve(data.get("equity_curve")),
             initial_capital_usd=Decimal(data.get("initial_capital_usd", "10000")),
             final_capital_usd=Decimal(data.get("final_capital_usd", "10000")),
+            numeraire=data.get("numeraire"),
+            initial_capital_numeraire=cls._optional_decimal(data, "initial_capital_numeraire"),
+            final_capital_numeraire=cls._optional_decimal(data, "final_capital_numeraire"),
             chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
             run_started_at=cls._optional_datetime(data.get("run_started_at")),
             run_ended_at=cls._optional_datetime(data.get("run_ended_at")),
@@ -2699,6 +2817,7 @@ __all__ = [
     "EquityPoint",
     "TradeRecord",
     "BacktestMetrics",
+    "NumeraireMetrics",
     "AggregatedPortfolioView",
     "BacktestResult",
     "ParameterSource",

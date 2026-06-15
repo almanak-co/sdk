@@ -826,6 +826,10 @@ class PaperTrader:
     _reconciler_discrepancies: list[Any] = field(default_factory=list, init=False, repr=False)
     _reconciler_checks: int = field(default=0, init=False, repr=False)
     _divergence_records: dict[str, DivergenceRecord] = field(default_factory=dict, init=False, repr=False)
+    #: Resolved numeraire token symbol (VIB-5127), or None for the USD default.
+    #: ``False`` is the "not yet resolved" sentinel; resolved lazily on the first
+    #: equity point from ``_current_strategy.quote_asset`` + config chain.
+    _numeraire_symbol: "str | None | bool" = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -1993,6 +1997,20 @@ class PaperTrader:
             },
         )
 
+    def _resolve_numeraire(self) -> str | None:
+        """Resolve (and memoize) the strategy's numeraire token symbol (VIB-5127).
+
+        Returns the canonical UPPERCASE symbol for a token quote asset, or
+        ``None`` for the USD default. Resolved once from
+        ``_current_strategy.quote_asset`` + the backtest chain; a chain mismatch
+        raises (fail loud) on the first equity point.
+        """
+        if self._numeraire_symbol is False:
+            from almanak.framework.backtesting.numeraire import resolve_numeraire_symbol
+
+            self._numeraire_symbol = resolve_numeraire_symbol(self._current_strategy, self.config.chain)
+        return self._numeraire_symbol  # type: ignore[return-value]
+
     async def _record_equity_point(self) -> None:
         """Record current portfolio value as equity point.
 
@@ -2038,6 +2056,21 @@ class PaperTrader:
                 )
 
         eth_price = self._cached_prices.get("ETH") or self._cached_prices.get("WETH")
+
+        # Capture the numeraire token's USD price (VIB-5127). Fetched with the
+        # hardcoded fallback disabled: the numeraire rescales the whole
+        # portfolio, so a provider-backed (or stablecoin) price is required --
+        # an unpriceable numeraire is left None and fails loud at result
+        # assembly (compute_numeraire_metrics_paper), never silently fabricated.
+        # None for USD strategies -> value_usd stays USD, no projection.
+        numeraire_symbol = self._resolve_numeraire()
+        numeraire_price: Decimal | None = None
+        if numeraire_symbol:
+            try:
+                numeraire_price = await self._get_token_price(numeraire_symbol, allow_hardcoded_fallback=False)
+            except ValueError:
+                numeraire_price = None
+
         point = EquityPoint(
             timestamp=now,
             value_usd=value,
@@ -2045,6 +2078,7 @@ class PaperTrader:
             spot_value_usd=spot_value,
             position_value_usd=position_value,
             valuation_source=valuation_source,
+            numeraire_price_usd=numeraire_price,
         )
 
         self._equity_curve.append(point)
@@ -3402,7 +3436,7 @@ class PaperTrader:
 
             return BinanceOHLCVProvider(cache_ttl=120)
 
-    async def _get_token_price(self, token: str) -> Decimal:  # noqa: C901
+    async def _get_token_price(self, token: str, *, allow_hardcoded_fallback: bool = True) -> Decimal:  # noqa: C901
         """Get token price in USD using the configured fallback chain.
 
         Implements a fallback chain for price sourcing. When price_source='auto',
@@ -3416,9 +3450,20 @@ class PaperTrader:
 
         Args:
             token: Token symbol (e.g., 'ETH', 'WETH', 'USDC')
+            allow_hardcoded_fallback: When False, raise instead of fabricating a
+                hardcoded price when all providers fail (a stablecoin still
+                resolves to $1). Used for the numeraire token (VIB-5127): it
+                rescales the whole portfolio, so a fabricated price would
+                silently corrupt every numeraire-denominated number -- the
+                no-silent-fabrication rule (blueprint 31 section 7) applies with
+                full force, independent of strict_price_mode.
 
         Returns:
             Token price in USD as Decimal
+
+        Raises:
+            ValueError: if all providers fail and either strict_price_mode is
+                enabled or allow_hardcoded_fallback is False.
         """
         token_upper = token.upper()
 
@@ -3601,14 +3646,16 @@ class PaperTrader:
             )
             return price
 
-        # All providers failed - check if strict price mode is enabled
-        if self.config.strict_price_mode:
-            # Strict mode: fail instead of using arbitrary prices
+        # All providers failed - fail instead of fabricating when strict price
+        # mode is enabled OR the caller forbids the hardcoded fallback (the
+        # numeraire token, VIB-5127).
+        if self.config.strict_price_mode or not allow_hardcoded_fallback:
+            reason = "strict_price_mode is enabled" if self.config.strict_price_mode else "this token is the numeraire"
             error_msg = (
                 f"All price providers failed for {token_upper} on chain={self.config.chain} "
-                f"(chain_id={self.config.chain_id}) and strict_price_mode is enabled. "
+                f"(chain_id={self.config.chain_id}) and {reason}. "
                 f"Providers attempted: chainlink, twap, coingecko. "
-                f"Set strict_price_mode=False or ensure price providers can serve this token."
+                f"Ensure price providers can serve this token."
             )
             logger.error("[%s] %s", self._backtest_id, error_msg)
             raise ValueError(error_msg)

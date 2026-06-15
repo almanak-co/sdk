@@ -141,6 +141,12 @@ class SimulatedPortfolio:
     #: Keyed by the same symbols as ``tokens`` (cash-equivalent stablecoins are
     #: never tracked here -- they live in ``cash_usd`` at $1 by definition).
     _cost_basis: dict[str, Decimal] = field(default_factory=dict)
+    #: UPPERCASE symbol of the strategy's declared numeraire token (VIB-5127),
+    #: or ``None`` for the USD default. Set by the engine at boot
+    #: (``initialize_backtest``). When set, ``mark_to_market`` captures the
+    #: numeraire token's USD price onto each equity point for the reporting
+    #: projection; it never affects ``value_usd`` or the conservation core.
+    _numeraire_symbol: str | None = field(default=None)
 
     _STABLECOIN_SYMBOLS: frozenset[str] = STABLECOINS
 
@@ -2277,8 +2283,25 @@ class SimulatedPortfolio:
         # Update unrealized PnL tracking at each mark_to_market
         self._unrealized_pnl = self.calculate_unrealized_pnl(market_state)
 
-        # Record the equity point
-        self.equity_curve.append(EquityPoint(timestamp=timestamp, value_usd=total_value))
+        # Record the equity point. ``value_usd`` stays USD (the conservation
+        # core). For a non-USD numeraire (VIB-5127), capture the numeraire
+        # token's USD price at this timestamp so the reporting layer can divide
+        # value_usd by it; a missing price stays None and fails loud at metrics
+        # time rather than aborting an otherwise-valid USD run mid-loop.
+        numeraire_price_usd: Decimal | None = None
+        if self._numeraire_symbol is not None:
+            try:
+                numeraire_price_usd = market_state.get_price(self._numeraire_symbol)
+            except KeyError:
+                numeraire_price_usd = None
+
+        self.equity_curve.append(
+            EquityPoint(
+                timestamp=timestamp,
+                value_usd=total_value,
+                numeraire_price_usd=numeraire_price_usd,
+            )
+        )
 
         return total_value
 
@@ -2908,6 +2931,9 @@ class SimulatedPortfolio:
             # a resumed portfolio forgets its average costs, so a later
             # disposing sell would realize no PnL (VIB-5083, CodeRabbit).
             "cost_basis": {k: str(v) for k, v in self._cost_basis.items()},
+            # Numeraire reporting context (VIB-5127): a resumed non-USD run must
+            # keep capturing/reporting against the same numeraire. None for USD.
+            "numeraire_symbol": self._numeraire_symbol,
         }
 
     @classmethod
@@ -2929,6 +2955,11 @@ class SimulatedPortfolio:
                 EquityPoint(
                     timestamp=datetime.fromisoformat(e["timestamp"]),
                     value_usd=Decimal(e["value_usd"]),
+                    # Preserve the captured numeraire price (VIB-5127); absent /
+                    # null round-trips to None (a USD point).
+                    numeraire_price_usd=(
+                        None if e.get("numeraire_price_usd") is None else Decimal(str(e["numeraire_price_usd"]))
+                    ),
                 )
                 for e in data.get("equity_curve", [])
             ],
@@ -2973,6 +3004,8 @@ class SimulatedPortfolio:
         # Restore per-token average cost basis so a resumed portfolio still
         # realizes PnL on later disposing sells (VIB-5083, CodeRabbit).
         portfolio._cost_basis = {k: Decimal(str(v)) for k, v in data.get("cost_basis", {}).items()}
+        # Restore the numeraire reporting context (VIB-5127); absent -> None (USD).
+        portfolio._numeraire_symbol = data.get("numeraire_symbol")
         # Restore realized/unrealized PnL totals. Older artifacts predate the
         # field: fall back to summing successful trades' realized pnl so a
         # resumed portfolio's realized_pnl stays consistent (VIB-5083, CodeRabbit).

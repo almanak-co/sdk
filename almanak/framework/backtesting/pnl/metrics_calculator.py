@@ -11,6 +11,7 @@ Extracted from pnl/engine.py for module size management.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 from almanak.framework.backtesting.models import (
@@ -294,6 +295,32 @@ def calculate_max_drawdown(values: list[Decimal]) -> Decimal:
     return max_drawdown
 
 
+def compute_cagr(total_return: Decimal, timestamps: list[datetime]) -> Decimal:
+    """Compound annual growth rate (CAGR) from a total return and a time span.
+
+    Shared by the USD metrics path (:func:`calculate_metrics`) and the
+    numeraire reporting projection (``backtesting.numeraire``) so the two can
+    never drift — both feed a ratio ``total_return`` (0.10 == 10%) and the
+    equity-curve timestamps, and get back a ratio.
+
+    Returns ``Decimal("0")`` when fewer than two timestamps or a non-positive
+    span make a rate undefined. Caps at ``-1`` (-100%) when the portfolio lost
+    >= 100%: the base ``(1 + total_return)`` is then ``<= 0`` and the
+    non-integer exponentiation would be undefined.
+    """
+    if len(timestamps) < 2:
+        return Decimal("0")
+    duration_days = (timestamps[-1] - timestamps[0]).total_seconds() / (24 * 3600)
+    if duration_days <= 0:
+        return Decimal("0")
+    years = Decimal(str(duration_days)) / Decimal("365")
+    if years <= 0:
+        return Decimal("0")
+    if total_return <= Decimal("-1"):
+        return Decimal("-1")
+    return (Decimal("1") + total_return) ** (Decimal("1") / years) - Decimal("1")
+
+
 def create_gas_price_summary(
     trades: list[TradeRecord],
 ) -> GasPriceSummary | None:
@@ -412,22 +439,8 @@ def calculate_metrics(
     if initial_value > Decimal("0"):
         total_return = (final_value - initial_value) / initial_value
 
-    # Calculate annualized return
-    annualized_return = Decimal("0")
-    if len(timestamps) >= 2:
-        duration_days = (timestamps[-1] - timestamps[0]).total_seconds() / (24 * 3600)
-        if duration_days > 0:
-            years = Decimal(str(duration_days)) / Decimal("365")
-            if years > 0:
-                # Compound annual growth rate (CAGR)
-                # (1 + total_return) ^ (1/years) - 1
-                if total_return <= Decimal("-1"):
-                    # Portfolio lost >= 100% (e.g. gas costs exceed principal).
-                    # The base (1 + total_return) is <= 0, so exponentiation is
-                    # undefined for non-integer exponents. Cap at -100%.
-                    annualized_return = Decimal("-1")
-                else:
-                    annualized_return = (Decimal("1") + total_return) ** (Decimal("1") / years) - Decimal("1")
+    # Calculate annualized return (CAGR) -- shared helper, see compute_cagr.
+    annualized_return_value = compute_cagr(total_return, timestamps)
 
     # Calculate returns series for risk metrics
     returns = calculate_returns(equity_values)
@@ -459,7 +472,7 @@ def calculate_metrics(
     # Calmar ratio (annualized return / max drawdown)
     calmar = Decimal("0")
     if max_drawdown > Decimal("0"):
-        calmar = annualized_return / max_drawdown
+        calmar = annualized_return_value / max_drawdown
 
     # Trade statistics (VIB-5083) -- see _compute_trade_statistics.
     stats = _compute_trade_statistics(trades)
@@ -479,7 +492,7 @@ def calculate_metrics(
         total_trades=len(trades) - stats.failed_trades,
         profit_factor=stats.profit_factor,
         total_return_pct=total_return * Decimal("100"),
-        annualized_return_pct=annualized_return * Decimal("100"),
+        annualized_return_pct=annualized_return_value * Decimal("100"),
         total_fees_usd=total_fees,
         total_slippage_usd=total_slippage,
         total_gas_usd=total_gas,
