@@ -20,7 +20,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.base.receipt_parser import BaseReceiptParser
-from almanak.connectors.fluid.addresses import FLUID_SMARTLENDING_MARKETS
+from almanak.connectors.fluid.addresses import FLUID_DEX_LP_NATIVE_SENTINEL, FLUID_SMARTLENDING_MARKETS
 
 if TYPE_CHECKING:
     from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData
@@ -30,6 +30,13 @@ logger = logging.getLogger(__name__)
 # ERC-20 Transfer(address indexed from, address indexed to, uint256 value).
 _TRANSFER_TOPIC0 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 _ZERO_ADDR = "0x0000000000000000000000000000000000000000"
+#: Native-ETH sentinel as it appears in a wrapper's token0/token1 slot. A native
+#: leg rides as ``msg.value`` and emits NO ERC-20 Transfer, so the log scan
+#: CANNOT measure it — that leg is left ``None`` (honest "unmeasured", Empty ≠
+#: Zero) for the runner's native-balance-bracket capture to fill at ledger-build
+#: time (VIB-5121). A fabricated ``0`` here is the exact money bug VIB-5032
+#: refused to ship.
+_NATIVE_SENTINEL = FLUID_DEX_LP_NATIVE_SENTINEL.lower()
 
 # Flatten the wrapper universe once: lowercased wrapper -> market entry.
 _WRAPPERS: dict[str, dict[str, Any]] = {
@@ -130,6 +137,8 @@ class FluidDexLpReceiptParser(BaseReceiptParser[dict, dict]):
         wrapper, wallet, entry = ident
         token0 = str(entry["token0"]).lower()
         token1 = str(entry["token1"]).lower()
+        native0 = token0 == _NATIVE_SENTINEL
+        native1 = token1 == _NATIVE_SENTINEL
         # SINGLE-INTENT receipt assumption: the wallet's net token0/token1 OUTflow
         # IS the deposit. We do NOT restrict the counterparty — Fluid routes the
         # legs through the Liquidity Layer (NOT the wrapper/DEX), so a
@@ -141,24 +150,27 @@ class FluidDexLpReceiptParser(BaseReceiptParser[dict, dict]):
         # the correct fix is intent-scoped log routing at the runner, not a
         # connector-side counterparty allowlist (Fluid's internal routing is not
         # enumerable here).
-        amount0 = amount1 = 0
+        #
+        # Empty != Zero (CLAUDE.md §Accounting): the Transfer scan MEASURES every
+        # ERC-20 leg, so an unfunded ERC-20 leg is a measured ``0``. A NATIVE leg
+        # (msg.value, no Transfer) is UNMEASURABLE from logs — seed it ``None``
+        # (honest unmeasured) so the runner's native-balance-bracket capture fills
+        # it at ledger-build time (VIB-5121). A fabricated ``0`` would be the money
+        # bug VIB-5032 refused to ship.
+        amount0: int | None = None if native0 else 0
+        amount1: int | None = None if native1 else 0
         shares = 0
         for emitter, frm, to, amt in self._transfers(receipt):
-            if frm == wallet and emitter == token0:
-                amount0 += amt
-            elif frm == wallet and emitter == token1:
-                amount1 += amt
+            if not native0 and frm == wallet and emitter == token0:
+                amount0 = (amount0 or 0) + amt
+            elif not native1 and frm == wallet and emitter == token1:
+                amount1 = (amount1 or 0) + amt
             elif emitter == wrapper and frm == _ZERO_ADDR and to == wallet:
                 shares += amt
         return LPOpenData(
             position_id=0,  # fungible: no NFT id (curve/aerodrome-classic convention)
             tick_lower=None,
             tick_upper=None,
-            # Empty != Zero (CLAUDE.md §Accounting): the Transfer scan MEASURES
-            # every leg, so an unfunded leg is a measured ``0`` — NOT ``None``
-            # (unmeasured). A single-sided USDC deposit measures amount0 (sUSDai)
-            # = 0; collapsing it to ``None`` with ``or None`` fails the typed
-            # LPOpenEventPayload Decimal field (the VIB-5032 G6/G13/LP4 blocker).
             liquidity=shares,  # share balance minted
             amount0=amount0,
             amount1=amount1,
@@ -181,17 +193,25 @@ class FluidDexLpReceiptParser(BaseReceiptParser[dict, dict]):
         wrapper, wallet, entry = ident
         token0 = str(entry["token0"]).lower()
         token1 = str(entry["token1"]).lower()
+        native0 = token0 == _NATIVE_SENTINEL
+        native1 = token1 == _NATIVE_SENTINEL
         # SINGLE-INTENT receipt assumption — see extract_lp_open_data: no
         # counterparty restriction (Fluid returns the legs via the Liquidity
         # Layer, not the wrapper/DEX). Safe because fluid_dex_lp is no_zodiac
         # (one intent per tx → intent-scoped logs).
-        amount0 = amount1 = 0
+        #
+        # Empty != Zero: a NATIVE returned leg (ETH credited via msg.value-style
+        # internal call, no ERC-20 Transfer) is UNMEASURABLE from logs — seed it
+        # ``None`` so the runner's native-balance-bracket capture fills it
+        # (VIB-5121). ERC-20 legs are measured from ``…→wallet`` Transfers.
+        amount0: int | None = None if native0 else 0
+        amount1: int | None = None if native1 else 0
         shares_burned = 0
         for emitter, frm, to, amt in self._transfers(receipt):
-            if to == wallet and emitter == token0:
-                amount0 += amt
-            elif to == wallet and emitter == token1:
-                amount1 += amt
+            if not native0 and to == wallet and emitter == token0:
+                amount0 = (amount0 or 0) + amt
+            elif not native1 and to == wallet and emitter == token1:
+                amount1 = (amount1 or 0) + amt
             elif emitter == wrapper and to == _ZERO_ADDR and frm == wallet:
                 shares_burned += amt
         return LPCloseData(

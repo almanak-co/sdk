@@ -21,7 +21,6 @@ from almanak.connectors.fluid.addresses import (
     FLUID_DEX_LP,
     FLUID_DEX_LP_NATIVE_SENTINEL,
     FLUID_SMARTLENDING_MARKETS,
-    is_native_leg,
 )
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
 from almanak.framework.intents.vocabulary import IntentType, LPCloseIntent, LPOpenIntent
@@ -110,29 +109,6 @@ class FluidDexLpCompiler(BaseProtocolCompiler[BaseCompilerContext]):
     def _to_wei(amount: Decimal, decimals: int) -> int:
         return int(amount * Decimal(10**decimals))
 
-    @staticmethod
-    def _refuse_native(entry: dict[str, Any], intent_id: str) -> CompilationResult | None:
-        """Refuse a native-ETH-leg wrapper at COMPILE (VIB-5032 v1 scope).
-
-        A native leg rides as ``msg.value`` and does NOT emit an ERC-20
-        ``Transfer`` log, so the log-based receipt parser would record the
-        native amount as a *measured zero* — silently mis-accounting the leg
-        (Empty≠Zero violation on the money path). Until native-leg accounting
-        is measured from balance deltas (follow-up VIB-5121), native wrappers
-        (e.g. fSL5 FLUID/ETH) are refused rather than executed with wrong books.
-        """
-        if is_native_leg(entry):
-            return CompilationResult(
-                status=CompilationStatus.FAILED,
-                error=(
-                    f"Fluid DEX LP wrapper {entry.get('symbol')} has a native-ETH leg, which is not "
-                    "supported in v1 (native accounting is measured from ERC-20 Transfer logs only; "
-                    "native legs would mis-account as zero). Use an all-ERC-20 wrapper. Tracked: VIB-5121."
-                ),
-                intent_id=intent_id,
-            )
-        return None
-
     # -- LP_OPEN ------------------------------------------------------------
 
     def compile_lp_open(self, ctx: BaseCompilerContext, intent: LPOpenIntent) -> CompilationResult:
@@ -142,9 +118,11 @@ class FluidDexLpCompiler(BaseProtocolCompiler[BaseCompilerContext]):
         if err is not None:
             return err
         assert entry is not None
-        native_err = self._refuse_native(entry, intent.intent_id)
-        if native_err is not None:
-            return native_err
+        # Native-ETH legs are now SUPPORTED (VIB-5121): the native leg rides as
+        # msg.value (built below) and its amount is measured from a wallet
+        # native-balance bracket in the runner at ledger-build time (it emits no
+        # ERC-20 Transfer for the log parser). The receipt parser leaves the
+        # native leg None (Empty ≠ Zero) for that capture to fill.
         sdk, err = self._build_sdk(ctx, intent.intent_id)
         if err is not None:
             return err
@@ -241,9 +219,8 @@ class FluidDexLpCompiler(BaseProtocolCompiler[BaseCompilerContext]):
         if err is not None:
             return err
         assert entry is not None
-        native_err = self._refuse_native(entry, intent.intent_id)
-        if native_err is not None:
-            return native_err
+        # Native-ETH legs supported (VIB-5121) — see compile_lp_open. The native
+        # returned leg is measured from a balance bracket in the runner.
         sdk, err = self._build_sdk(ctx, intent.intent_id)
         if err is not None:
             return err

@@ -793,12 +793,27 @@ class GatewayClient:
         self,
         chain: str,
         wallet_address: str,
+        block: int | str | None = None,
     ) -> int | None:
         """Query native token balance (ETH, MATIC, AVAX, etc.) via gateway RPC.
 
         Args:
             chain: Chain identifier (e.g., "arbitrum", "base")
             wallet_address: Wallet address to query balance for
+            block: Optional block reference for ``eth_getBalance``. ``None``
+                (default) uses the ``"latest"`` block tag — backwards-compatible
+                behaviour. An ``int`` is encoded as the standard JSON-RPC hex
+                string (``hex(N)``); a ``str`` passes through unchanged
+                (``"latest"`` / ``"pending"`` / ``"safe"`` / a pre-encoded hex).
+
+                VIB-5121 — native-leg LP accounting reads a BLOCK-PINNED
+                pre/post wallet native-balance bracket around a deposit/withdraw
+                tx (the native msg.value leg emits no ERC-20 Transfer). Both
+                anchors MUST pin to the receipt's exact block: reading the PRE
+                anchor at ``"latest"`` after the tx landed would return the POST
+                balance and fabricate a near-zero deposit (Empty ≠ Zero). Block
+                anchoring eliminates that race by construction — mirrors the
+                VIB-4589 / F7 discipline already used by :meth:`eth_call`.
 
         Returns:
             Native balance in wei, or None if query fails
@@ -809,6 +824,26 @@ class GatewayClient:
             logger.warning("Gateway client not connected")
             return None
 
+        # Encode the block reference per JSON-RPC eth_getBalance semantics —
+        # same rules as :meth:`eth_call`. Reject bool (int subclass) and negative
+        # ints locally so a caller bug surfaces here instead of silently
+        # degrading to ``"latest"`` (which would re-open the bracket race).
+        if block is None:
+            block_param: str = "latest"
+        elif isinstance(block, bool):
+            raise ValueError(f"query_native_balance block must not be bool, got {block!r}")
+        elif isinstance(block, int):
+            if block < 0:
+                raise ValueError(f"query_native_balance block must be non-negative, got {block}")
+            block_param = hex(block)
+        elif isinstance(block, str):
+            block_param = block
+        else:
+            # Reject any other type (float / list / dict / bytes) locally rather
+            # than letting json.dumps serialize a malformed block tag into the
+            # eth_getBalance RPC param.
+            raise ValueError(f"query_native_balance block must be int | str | None, got {type(block).__name__}")
+
         try:
             import json
 
@@ -816,7 +851,7 @@ class GatewayClient:
                 gateway_pb2.RpcRequest(
                     chain=chain,
                     method="eth_getBalance",
-                    params=f'["{wallet_address}", "latest"]',
+                    params=json.dumps([wallet_address, block_param]),
                 ),
                 timeout=self.config.timeout,
             )

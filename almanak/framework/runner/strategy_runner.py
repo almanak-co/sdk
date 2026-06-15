@@ -117,6 +117,29 @@ logger = logging.getLogger(__name__)
 # runner never imports a concrete connector (connector-boundary guard).
 _V4_NATIVE_CURRENCY = "0x" + "0" * 40
 
+# Native-ETH sentinels the framework recognizes on an LP leg's ``currencyN``
+# (VIB-5121). Framework-owned (connector-boundary guard) — the runner must never
+# import a concrete connector to learn its native sentinel. ``0x0`` = Uniswap V4
+# PoolKey native; ``0xEeee…`` = the de-facto ERC-7528 / Fluid SmartLending native
+# sentinel. A future native-leg connector that already populates ``currencyN``
+# with one of these gets balance-bracket native accounting for free.
+#
+# The ERC-7528 literal is written in EIP-55 checksum form (the production-address
+# checksum gate ``test_all_production_addresses_are_eip55`` requires it) and
+# lowercased into the comparison set — ``_native_leg_index`` matches it against a
+# ``.lower()``-ed currency, so the set itself must hold lowercase. ``0x0`` is
+# checksum-neutral. No allowlist entry needed (the source literal is valid EIP-55).
+_ERC7528_NATIVE_SENTINEL = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+_NATIVE_CURRENCY_SENTINELS = frozenset(
+    {
+        # Literal short ``0x0`` — a connector may serialize V4-native currency as
+        # the bare zero string rather than the 40-byte form; recognize both.
+        "0x0",
+        _V4_NATIVE_CURRENCY,
+        _ERC7528_NATIVE_SENTINEL.lower(),
+    }
+)
+
 
 def _lp_open_field(lp_open: Any, name: str) -> Any:
     """Read a field off enriched LP-open data that may be a dataclass OR a dict.
@@ -203,35 +226,134 @@ def _last_receipt_block(execution_result: Any | None) -> int | None:
     ``blockNumber`` (JSON-RPC camel); a numeric block may arrive as an int,
     decimal string, or 0x-prefixed hex string.
     """
+    return _successful_receipt_block(execution_result, first=False)
+
+
+def _first_receipt_block(execution_result: Any | None) -> int | None:
+    """Return the block number of the FIRST successful receipt (VIB-5121).
+
+    Twin of :func:`_last_receipt_block` for the PRE anchor of a native-balance
+    bracket: ``pre_block = first_receipt_block - 1`` (the block just before the
+    bundle's first tx landed). For a single-tx bundle this equals the last
+    receipt's block; for a multi-tx bundle (e.g. an ERC-20 approve before the
+    deposit) it is the earliest landed tx. Returns ``None`` when no receipt is
+    available — the native bracket then aborts to unmeasured (Empty ≠ Zero); it
+    must NOT fall back to ``"latest"`` for the PRE anchor (that would read the
+    POST balance and fabricate a near-zero deposit).
+    """
+    return _successful_receipt_block(execution_result, first=True)
+
+
+def _successful_receipt_block(execution_result: Any | None, *, first: bool) -> int | None:
+    """Block number of the first (``first=True``) or last successful receipt.
+
+    Robust to every shape the framework produces (the same set
+    ``_collect_candidate_receipts`` walks): ``transaction_results`` (object or
+    dict entries) first, then — when that yields nothing — a fallback over the
+    Gateway/singular receipt shapes (``receipts`` / ``transaction_receipts``
+    lists, singular ``receipt`` / ``transaction_receipt`` / ``tx_receipt`` /
+    ``raw_receipt`` attrs). A receipt may use ``block_number`` (snake) or
+    ``blockNumber`` (camel); a numeric block may arrive as int / decimal string /
+    0x-hex. ``None`` only when NO shape yields a positive block (the native
+    bracket then aborts to unmeasured — Empty ≠ Zero, never a ``"latest"``
+    fallback that would fabricate a near-zero).
+    """
     if execution_result is None:
         return None
+
     tx_results = getattr(execution_result, "transaction_results", None)
     if tx_results is None and isinstance(execution_result, dict):
         tx_results = execution_result.get("transaction_results")
-    if not isinstance(tx_results, list):
+    if isinstance(tx_results, list):
+        ordered = tx_results if first else list(reversed(tx_results))
+        for tx in ordered:
+            block_number = _successful_tx_block(tx)
+            if block_number is not None:
+                return block_number
+
+    # Fallback: Gateway-shaped results (``receipts`` / ``transaction_receipts``)
+    # and singular-receipt shapes carry no ``transaction_results`` list. Walk
+    # them directly for a positive block (do NOT route through
+    # ``_collect_candidate_receipts`` — that requires ``logs`` for LP-topic
+    # matching, but a bracket anchor only needs the block) and take the min
+    # (first) / max (last) positive block — order-independent.
+    blocks = [b for r in _iter_receipt_candidates(execution_result) if (b := _any_receipt_block(r)) is not None]
+    if blocks:
+        return min(blocks) if first else max(blocks)
+    return None
+
+
+def _iter_receipt_candidates(execution_result: Any) -> list[Any]:
+    """Receipt-shaped candidates for block extraction (no logs requirement).
+
+    Gateway ``receipts`` / ``transaction_receipts`` lists + singular
+    ``transaction_receipt`` / ``receipt`` / ``tx_receipt`` / ``raw_receipt``
+    attrs (object or dict access). Distinct from ``_collect_candidate_receipts``
+    (which gates on ``logs`` for LP-topic matching) — anchoring the bracket only
+    needs a block number.
+    """
+    out: list[Any] = []
+    for attr in ("receipts", "transaction_receipts"):
+        lst = getattr(execution_result, attr, None)
+        if lst is None and isinstance(execution_result, dict):
+            lst = execution_result.get(attr)
+        if isinstance(lst, list):
+            out.extend(lst)
+    for attr in ("transaction_receipt", "receipt", "tx_receipt", "raw_receipt"):
+        single = getattr(execution_result, attr, None)
+        if single is None and isinstance(execution_result, dict):
+            single = execution_result.get(attr)
+        if single is not None:
+            out.append(single)
+    return out
+
+
+def _any_receipt_block(receipt: Any) -> int | None:
+    """Positive block off a receipt (dict or object; ``block_number`` / ``blockNumber``)."""
+    if isinstance(receipt, dict):
+        raw = receipt.get("block_number")
+        if raw is None:
+            raw = receipt.get("blockNumber")
+    else:
+        raw = getattr(receipt, "block_number", None)
+        if raw is None:
+            raw = getattr(receipt, "blockNumber", None)
+    block_number = _coerce_block_number(raw)
+    if block_number is not None and block_number > 0:
+        return block_number
+    return None
+
+
+def _successful_tx_block(tx: Any) -> int | None:
+    """Positive block number of a single SUCCESSFUL tx-result, else ``None``.
+
+    Shape-robust: ``tx`` may be an object or a dict; the receipt may use
+    ``block_number`` (snake) or ``blockNumber`` (camel). The ``success`` default
+    is ``True`` (matching ``_collect_candidate_receipts``): a tx entry that omits
+    an explicit ``success`` key is treated as successful — only an explicit
+    falsey ``success`` drops it.
+    """
+    if isinstance(tx, dict):
+        if not tx.get("success", True):
+            return None
+        receipt = tx.get("receipt")
+    else:
+        if not getattr(tx, "success", True):
+            return None
+        receipt = getattr(tx, "receipt", None)
+    if receipt is None:
         return None
-    for tx in reversed(tx_results):
-        if isinstance(tx, dict):
-            if not tx.get("success", False):
-                continue
-            receipt = tx.get("receipt")
-        else:
-            if not getattr(tx, "success", False):
-                continue
-            receipt = getattr(tx, "receipt", None)
-        if receipt is None:
-            continue
-        if isinstance(receipt, dict):
-            raw = receipt.get("block_number")
-            if raw is None:
-                raw = receipt.get("blockNumber")
-        else:
-            raw = getattr(receipt, "block_number", None)
-            if raw is None:
-                raw = getattr(receipt, "blockNumber", None)
-        block_number = _coerce_block_number(raw)
-        if block_number is not None and block_number > 0:
-            return block_number
+    if isinstance(receipt, dict):
+        raw = receipt.get("block_number")
+        if raw is None:
+            raw = receipt.get("blockNumber")
+    else:
+        raw = getattr(receipt, "block_number", None)
+        if raw is None:
+            raw = getattr(receipt, "blockNumber", None)
+    block_number = _coerce_block_number(raw)
+    if block_number is not None and block_number > 0:
+        return block_number
     return None
 
 
@@ -2527,8 +2649,13 @@ class StrategyRunner:
         post_state: dict | None = None,
         emit_position_event: bool = True,
         v4_lp_close_fees: tuple[int, int] | None = None,
+        # Native-leg fills threaded to ``build_ledger_entry``. ``lp_open_native_amounts``
+        # is the connector-merged OPEN result; ``v4_lp_close_native_principal`` is
+        # VIB-5117's V4 close (position-state); ``lp_close_native_amounts`` is
+        # VIB-5121's Fluid close (balance-bracket). Per-connector (rule-of-three).
+        lp_open_native_amounts: tuple[int | None, int | None] | None = None,
         v4_lp_close_native_principal: tuple[int | None, int | None] | None = None,
-        v4_lp_open_native_amounts: tuple[int | None, int | None] | None = None,
+        lp_close_native_amounts: tuple[int | None, int | None] | None = None,
     ) -> str | None:
         """Returns the persisted LedgerEntry.id on success, None on non-live failure."""
         """Write a structured trade record to the transaction ledger.
@@ -2587,8 +2714,9 @@ class StrategyRunner:
                 pre_state=pre_state,
                 post_state=post_state,
                 v4_lp_close_fees=v4_lp_close_fees,
+                lp_open_native_amounts=lp_open_native_amounts,
                 v4_lp_close_native_principal=v4_lp_close_native_principal,
-                v4_lp_open_native_amounts=v4_lp_open_native_amounts,
+                lp_close_native_amounts=lp_close_native_amounts,
             )
 
             # Phase 4: stamp deployment_id and execution_mode onto the entry (VIB-2835/2837).
@@ -5072,6 +5200,272 @@ class StrategyRunner:
         return None
 
     @staticmethod
+    def _result_lp_close_data(result: Any) -> Any | None:
+        """Pull the enriched ``LPCloseData`` off a result (``None`` if absent).
+
+        Twin of :meth:`_result_lp_open_data` — checks the typed
+        ``result.lp_close_data`` first, then ``extracted_data['lp_close_data']``.
+        """
+        if result is None:
+            return None
+        lp_close = getattr(result, "lp_close_data", None)
+        if lp_close is not None:
+            return lp_close
+        extracted = getattr(result, "extracted_data", None)
+        if isinstance(extracted, dict):
+            return extracted.get("lp_close_data")
+        return None
+
+    # -- VIB-5121: native-leg LP accounting via wallet balance bracket --------
+
+    @staticmethod
+    def _native_leg_index(lp_data: Any, amount_fields: tuple[str, str]) -> int | None:
+        """Index (0/1) of the unmeasured native LP leg, or ``None`` if none.
+
+        Connector-agnostic gate (mirrors the V4 capability gate but needs no
+        connector reader): a leg qualifies iff its amount field is ``None``
+        (honest unmeasured — the parser couldn't see the native msg.value leg in
+        logs) AND its ``currencyN`` is a framework native sentinel. An all-ERC-20
+        LP already has both legs measured, so this returns ``None`` and the
+        capture is a no-op. Returns the FIRST qualifying index (a single native
+        leg is the only on-chain case for an LP pair).
+        """
+        for idx, (amount_field, currency_field) in enumerate(
+            zip(amount_fields, ("currency0", "currency1"), strict=True)
+        ):
+            amount = _lp_open_field(lp_data, amount_field)
+            currency = (_lp_open_field(lp_data, currency_field) or "").lower()
+            if amount is None and currency in _NATIVE_CURRENCY_SENTINELS:
+                return idx
+        return None
+
+    @staticmethod
+    def _measure_native_balance_delta(
+        *,
+        chain: str,
+        wallet_address: str,
+        result: Any,
+        gateway_client: Any,
+    ) -> tuple[int, int] | None:
+        """Block-pinned wallet native-balance bracket + summed bundle gas (VIB-5121).
+
+        Returns ``(balance_delta_wei, gas_cost_wei)`` where ``balance_delta_wei``
+        is ``pre_balance − post_balance`` (positive when native ETH LEFT the
+        wallet, e.g. a deposit). The caller applies the leg-direction sign and
+        gas separation:
+
+          * OPEN:  ``deposited = balance_delta − gas`` (wallet paid deposit + gas)
+          * CLOSE: ``returned  = −balance_delta + gas`` (wallet received − gas)
+
+        Both balances are read via the gateway (``query_native_balance``) PINNED
+        to the receipt blocks — pre at ``first_block − 1``, post at ``last_block``
+        — so the read never races the upstream receipt indexer (VIB-4589). Returns
+        ``None`` (honest unmeasured) when any block anchor or balance read is
+        unavailable; the PRE read is NEVER allowed to fall back to ``"latest"``
+        (that would read the POST balance and fabricate a near-zero amount).
+
+        ``gas_cost_wei`` is the BUNDLE-level ``total_gas_cost_wei`` — it sums gas
+        across every tx the wallet paid for (an ERC-20-leg approve AND the
+        deposit), which is the correct figure for a bracket spanning the whole
+        bundle's block range.
+        """
+        first_block = _first_receipt_block(result)
+        last_block = _last_receipt_block(result)
+        if first_block is None or last_block is None:
+            return None
+        # Gas total is dict-shaped on Gateway results, attr-shaped on local
+        # ``ExecutionResult`` — read both (snake + camel) so the bracket is not
+        # silently dropped on a Gateway-backed run.
+        if isinstance(result, dict):
+            gas_cost_wei = result.get("total_gas_cost_wei", result.get("totalGasCostWei"))
+        else:
+            gas_cost_wei = getattr(result, "total_gas_cost_wei", None)
+        if gas_cost_wei is None:
+            return None
+        try:
+            gas_cost_wei = int(gas_cost_wei)
+        except (TypeError, ValueError):
+            return None
+        if gas_cost_wei < 0:
+            return None
+        pre = gateway_client.query_native_balance(chain, wallet_address, block=first_block - 1)
+        post = gateway_client.query_native_balance(chain, wallet_address, block=last_block)
+        if pre is None or post is None:
+            return None
+        return int(pre) - int(post), int(gas_cost_wei)
+
+    @classmethod
+    def _capture_native_lp_open_amounts_safe(
+        cls,
+        *,
+        intent: Any,
+        chain: str,
+        wallet_address: str,
+        result: Any,
+        gateway_client: Any | None,
+    ) -> tuple[int | None, int | None] | None:
+        """Best-effort native-balance-bracket measurement of an LP_OPEN native leg.
+
+        For a native-ETH LP leg deposited as ``msg.value`` there is NO ERC-20
+        Transfer, so the receipt parser left that leg ``None`` (Empty ≠ Zero).
+        Measure it from a block-pinned wallet native-balance bracket with gas
+        separated::
+
+            native_deposited = (pre_balance − post_balance) − total_gas_cost_wei
+
+        Returns ``(amount0, amount1)`` raw ints with ONLY the native leg filled
+        (the other stays ``None`` so the ledger stamp preserves the parser's
+        measured ERC-20 leg), or ``None`` when: no gateway; no LP_OPEN native leg
+        is unmeasured (all-ERC-20 — nothing to do); a block anchor / balance read
+        is unavailable; or the computed deposit is negative (bracket contaminated
+        → honest unmeasured, NEVER clamped to a fabricated zero). Wrapped in a
+        broad except + ``logger.debug``: a success-path observability hook must
+        never crash the runner after the trade already landed.
+        """
+        return cls._capture_native_lp_amounts_safe(
+            intent=intent,
+            chain=chain,
+            wallet_address=wallet_address,
+            result=result,
+            gateway_client=gateway_client,
+            opening=True,
+        )
+
+    @classmethod
+    def _capture_native_lp_close_amounts_safe(
+        cls,
+        *,
+        intent: Any,
+        chain: str,
+        wallet_address: str,
+        result: Any,
+        gateway_client: Any | None,
+    ) -> tuple[int | None, int | None] | None:
+        """Best-effort native-balance-bracket measurement of an LP_CLOSE native leg.
+
+        Close-side twin of :meth:`_capture_native_lp_open_amounts_safe`::
+
+            native_returned = (post_balance − pre_balance) + total_gas_cost_wei
+
+        Same gating, gateway-boundary, block-pinning, and Empty ≠ Zero contract.
+        A negative computed return → ``None`` (unmeasured, never a clamped zero).
+        """
+        return cls._capture_native_lp_amounts_safe(
+            intent=intent,
+            chain=chain,
+            wallet_address=wallet_address,
+            result=result,
+            gateway_client=gateway_client,
+            opening=False,
+        )
+
+    @classmethod
+    def _capture_native_lp_amounts_safe(
+        cls,
+        *,
+        intent: Any,
+        chain: str,
+        wallet_address: str,
+        result: Any,
+        gateway_client: Any | None,
+        opening: bool,
+    ) -> tuple[int | None, int | None] | None:
+        """Shared native-leg balance-bracket capture for LP open/close (VIB-5121)."""
+        if gateway_client is None or not wallet_address:
+            return None
+        try:
+            lp_data = cls._result_lp_open_data(result) if opening else cls._result_lp_close_data(result)
+            if lp_data is None:
+                return None
+            amount_fields = ("amount0", "amount1") if opening else ("amount0_collected", "amount1_collected")
+            native_idx = cls._native_leg_index(lp_data, amount_fields)
+            if native_idx is None:
+                return None
+            measured = cls._measure_native_balance_delta(
+                chain=chain,
+                wallet_address=wallet_address,
+                result=result,
+                gateway_client=gateway_client,
+            )
+            if measured is None:
+                return None
+            balance_delta, gas_cost_wei = measured
+            # OPEN: deposited = (pre−post) − gas. CLOSE: returned = (post−pre) + gas.
+            native_amount = (balance_delta - gas_cost_wei) if opening else (gas_cost_wei - balance_delta)
+            if native_amount < 0:
+                # Contaminated bracket / wrong gas figure — honest unmeasured,
+                # NEVER a clamped zero (that would be the Empty ≠ Zero money bug).
+                logger.debug(
+                    "Native LP %s bracket yielded negative amount=%s (delta=%s gas=%s) — leaving unmeasured",
+                    "open" if opening else "close",
+                    native_amount,
+                    balance_delta,
+                    gas_cost_wei,
+                )
+                return None
+            amounts: list[int | None] = [None, None]
+            amounts[native_idx] = native_amount
+            return amounts[0], amounts[1]
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "Native LP %s native-amount capture failed (non-fatal) chain=%s",
+                "open" if opening else "close",
+                chain,
+                exc_info=True,
+            )
+            return None
+
+    @classmethod
+    def _capture_native_lp_amounts_for_result(
+        cls,
+        *,
+        intent: Any,
+        chain: str,
+        wallet_address: str,
+        result: Any,
+        gateway_client: Any | None,
+    ) -> tuple[tuple[int | None, int | None] | None, tuple[int | None, int | None] | None]:
+        """Measure the native-ETH LP open + close legs for a LANDED tx (VIB-5121).
+
+        Returns ``(lp_open_native_amounts, lp_close_native_amounts)``. Both are
+        best-effort and self-gating (``None`` when not applicable / unmeasurable),
+        so callers thread them straight into ``_write_ledger_entry``.
+
+        Used by BOTH the clean-success path AND the reconciliation-incident path
+        (``_single_chain_handle_recon_incident``): a native LP_OPEN/LP_CLOSE that
+        landed on-chain but tripped recon enforcement is still a real, measurable
+        deposit/return, so its ledger row must carry the native leg rather than
+        persisting a fabricated/unmeasured ``None`` (Empty ≠ Zero) on the failure
+        lane.
+
+        OPEN capture: VIB-4483 V4 (post-mint position-state read + CL math) OR —
+        on a V4 read-failure, or for a fungible by-address pool — the VIB-5121
+        block-pinned wallet native-balance bracket. CLOSE capture: the same
+        VIB-5121 bracket, self-gated on an LP_CLOSE/LP_COLLECT_FEES with an
+        unmeasured native ``amountN_collected`` leg.
+        """
+        lp_open_native_amounts = cls._capture_v4_lp_open_native_amounts_safe(
+            intent=intent,
+            chain=chain,
+            result=result,
+            gateway_client=gateway_client,
+        ) or cls._capture_native_lp_open_amounts_safe(
+            intent=intent,
+            chain=chain,
+            wallet_address=wallet_address,
+            result=result,
+            gateway_client=gateway_client,
+        )
+        lp_close_native_amounts = cls._capture_native_lp_close_amounts_safe(
+            intent=intent,
+            chain=chain,
+            wallet_address=wallet_address,
+            result=result,
+            gateway_client=gateway_client,
+        )
+        return lp_open_native_amounts, lp_close_native_amounts
+
+    @staticmethod
     def _capture_lending_state_safe(
         *,
         intent: Any,
@@ -6022,15 +6416,17 @@ class StrategyRunner:
         # ledger row will pay for gas. Cached values win on key collision so
         # this is purely additive (refreshed values fill gaps).
         ledger_price_oracle = self._merge_oracle_for_ledger(state, intent, result=state.last_execution_result)
-        # VIB-4483 (P-V1-B): for a native-ETH V4 LP_OPEN the deposited ETH leg
-        # emits no ERC-20 Transfer, so the receipt parser left it None. Read the
-        # freshly-minted position's live state (post-mint) and derive the native
-        # leg's amount via the framework's concentrated-liquidity math, then stamp
-        # it onto LPOpenData at ledger-build time. Empty ≠ Zero: a failed read
-        # leaves the leg None (never a fabricated zero).
-        v4_lp_open_native_amounts = self._capture_v4_lp_open_native_amounts_safe(
+        # Native-ETH LP leg accounting (no ERC-20 Transfer, so the receipt parser
+        # left the leg None). Measured after the tx lands, per connector, and
+        # stamped at ledger-build time; Empty ≠ Zero — a failed read leaves the
+        # leg None. OPEN: connector-merged (V4 post-mint position-state OR Fluid
+        # balance bracket). CLOSE (Fluid/fungible): balance bracket. The V4 close
+        # PRINCIPAL is captured separately on ``state.v4_lp_close_native_principal``
+        # (VIB-5117, pre-burn position-state) and threaded below.
+        lp_open_native_amounts, lp_close_native_amounts = self._capture_native_lp_amounts_for_result(
             intent=intent,
             chain=strategy.chain,
+            wallet_address=strategy.wallet_address,
             result=state.last_execution_result,
             gateway_client=state.gateway_client,
         )
@@ -6043,8 +6439,9 @@ class StrategyRunner:
             pre_state=pre_state,
             post_state=post_state,
             v4_lp_close_fees=state.v4_lp_close_fees,
+            lp_open_native_amounts=lp_open_native_amounts,
             v4_lp_close_native_principal=state.v4_lp_close_native_principal,
-            v4_lp_open_native_amounts=v4_lp_open_native_amounts,
+            lp_close_native_amounts=lp_close_native_amounts,
         )
         # VIB-4043 / PR4: emit the UX timeline breadcrumb now, threading the
         # ledger_entry_id so the renderer can navigate from the card back to
@@ -6280,6 +6677,20 @@ class StrategyRunner:
             last_execution_result,
         )
 
+        # VIB-5121 — a native LP_OPEN/LP_CLOSE that LANDED on-chain but tripped
+        # recon enforcement is still a real, measurable native deposit/return.
+        # Measure the native leg here too (same bracket as the success path) so
+        # the recon-failure ledger row carries it rather than a fabricated/
+        # unmeasured None (Empty ≠ Zero on the failure lane). Self-gating /
+        # best-effort — None when not a native LP intent or unmeasurable.
+        recon_lp_open_native_amounts, recon_lp_close_native_amounts = self._capture_native_lp_amounts_for_result(
+            intent=intent,
+            chain=strategy.chain,
+            wallet_address=strategy.wallet_address,
+            result=last_execution_result,
+            gateway_client=state.gateway_client,
+        )
+
         # Record failed trade in ledger (VIB-2402) -- on-chain state
         # changed, but the accounting outcome is a failure.
         # VIB-3658 sequel (April 30 audit #3): same as the success path —
@@ -6322,6 +6733,14 @@ class StrategyRunner:
                 ),
                 protocol=(getattr(intent, "protocol", "") or "").lower(),
             ),
+            # VIB-5121 — native-leg amounts measured above (recon row must carry
+            # the native leg of a landed-but-recon-failed native LP open/close).
+            # VIB-5117 — the V4 close PRINCIPAL was captured pre-burn on
+            # ``state`` (before this recon path); thread it so a recon-failed V4
+            # native close also records its principal, not a measured-zero lie.
+            lp_open_native_amounts=recon_lp_open_native_amounts,
+            v4_lp_close_native_principal=state.v4_lp_close_native_principal,
+            lp_close_native_amounts=recon_lp_close_native_amounts,
         )
         # VIB-4043 / PR4: emit timeline failure breadcrumb pointing at the
         # reconciliation-failure ledger row.

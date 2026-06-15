@@ -82,11 +82,12 @@ def build_close_receipt_payload(
     payload: dict[str, Any] = {
         "token_id": str(token_id),
         "pool_address": pool_address,
-        # VIB-5117 — Empty ≠ Zero on the principal legs: emit JSON ``null`` for
-        # an unmeasured leg (a V4 native principal the receipt could not
-        # observe), never the literal string ``"None"``. Symmetric with the
-        # fee_owed guards below. V3 parsers never produce ``None`` here, but the
-        # field type is now ``int | None`` so the guard is correct-by-construction.
+        # VIB-5117 / VIB-5121 — Empty ≠ Zero on the principal legs: emit JSON
+        # ``null`` for an unmeasured leg (a native principal the receipt could
+        # not observe — V4 concentrated or Fluid fungible), never the literal
+        # string ``"None"``. Symmetric with the fee_owed guards below. V3 parsers
+        # never produce ``None`` here, but the field type is now ``int | None``
+        # so the guard is correct-by-construction.
         "amount0_close": (str(lp_close.amount0_collected) if lp_close.amount0_collected is not None else None),
         "amount1_close": (str(lp_close.amount1_collected) if lp_close.amount1_collected is not None else None),
         "fee_owed_0": str(lp_close.fees0) if lp_close.fees0 is not None else None,

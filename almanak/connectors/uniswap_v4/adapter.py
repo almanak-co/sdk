@@ -1147,7 +1147,7 @@ class UniswapV4Adapter:
         # onto ``LPOpenData`` from a post-mint ``QueryV4PositionState`` read (the
         # native leg emits no ERC-20 Transfer, so the receipt alone cannot measure
         # it — see runner ``_capture_v4_lp_open_native_amounts_safe`` /
-        # ledger ``_stamp_v4_lp_open_native_amounts``). The currency0 ==
+        # ledger ``_stamp_lp_open_native_amounts``). The currency0 ==
         # NATIVE_CURRENCY rejection that previously lived here is intentionally gone.
 
     @staticmethod

@@ -34,6 +34,7 @@ re-applies it locally so unit tests / direct callers don't have to.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -115,6 +116,56 @@ def _first_tx_hash(result: Any) -> str | None:
         return None
     tx = getattr(tx_results[0], "tx_hash", "") or ""
     return tx or None
+
+
+def _capture_teardown_native_close_amounts(
+    runner: Any,
+    *,
+    intent: Any,
+    strategy: Any,
+    enriched_result: Any,
+    deployment_id: str,
+    intent_type: str | None,
+    tx_hash: str | None,
+    record: Callable[..., None],
+) -> tuple[int | None, int | None] | None:
+    """Measure the native-ETH RETURNED leg of a teardown LP close (VIB-5121).
+
+    Lane-symmetric with the iteration lane: a native leg credited to the wallet
+    emits no ERC-20 Transfer, so the parser left ``amountN_collected`` None;
+    measure it from a block-pinned wallet native-balance bracket. Returns
+    ``(amount0_collected, amount1_collected)`` with only the native leg filled,
+    or ``None`` when not applicable / unmeasurable.
+
+    ``runner._capture_native_lp_close_amounts_safe`` already returns ``None`` for
+    EXPECTED unreadable/ambiguous brackets (its own broad except), so the catch
+    here only fires on an UNEXPECTED escape (e.g. a programming error). Per
+    blueprint 27 §Teardown the teardown lane's accounting failures are LOUD
+    (ERROR + deferred-write log + ``TeardownResult.accounting_degraded`` via
+    ``record``) but never block the next risk-reducing intent — so mark it
+    degraded rather than swallow it silently while the ledger row keeps an
+    unmeasured native leg. Extracted from ``commit_teardown_intent`` to keep that
+    function under the CRAP cc threshold.
+    """
+    try:
+        return runner._capture_native_lp_close_amounts_safe(
+            intent=intent,
+            chain=getattr(strategy, "chain", "") or "",
+            wallet_address=getattr(strategy, "wallet_address", "") or "",
+            result=enriched_result,
+            gateway_client=runner._get_gateway_client(),
+        )
+    except Exception as exc:  # noqa: BLE001 — never propagate
+        logger.error(
+            "commit_teardown_intent: native close-leg capture failed for %s/%s tx=%s: %s",
+            deployment_id,
+            intent_type or "unknown-intent",
+            tx_hash or "-",
+            exc,
+            exc_info=True,
+        )
+        record("native_close_capture", exc)
+        return None
 
 
 class PositionEventNotPersistedError(RuntimeError):
@@ -510,6 +561,21 @@ async def commit_teardown_intent(
                     exc,
                 )
 
+            # VIB-5121 — native-ETH RETURNED leg accounting on the teardown
+            # close lane (lane-symmetric with iteration). Extracted to a helper so
+            # the loud-but-non-blocking failure handling does not push
+            # ``commit_teardown_intent`` over the CRAP cc threshold.
+            lp_close_native_amounts = _capture_teardown_native_close_amounts(
+                runner,
+                intent=intent,
+                strategy=strategy,
+                enriched_result=enriched_result,
+                deployment_id=deployment_id,
+                intent_type=intent_type,
+                tx_hash=tx_hash,
+                record=_record,
+            )
+
             try:
                 # VIB-4895 — ``emit_position_event=False``: the iteration lane emits
                 # the ``position_events`` row transitively from inside
@@ -537,10 +603,14 @@ async def commit_teardown_intent(
                     v4_lp_close_fees=v4_lp_close_fees,
                     # VIB-5117 — PRE-burn-measured V4 native-leg close PRINCIPAL,
                     # captured by the teardown manager on the same pre-execute
-                    # boundary. Stamped onto the unmeasured native
+                    # boundary (position-state). Stamped onto the unmeasured native
                     # ``lp_close_data.amount{0,1}_collected`` leg inside
                     # ``build_ledger_entry`` (never clobbers a measured leg).
                     v4_lp_close_native_principal=v4_lp_close_native_principal,
+                    # VIB-5121 — Fluid/fungible native-leg close RETURNED amount,
+                    # measured from a wallet balance bracket (the helper above).
+                    # Per-connector measurement; gated to the non-V4 sentinel.
+                    lp_close_native_amounts=lp_close_native_amounts,
                 )
             except Exception as exc:  # noqa: BLE001 — never propagate
                 logger.error(

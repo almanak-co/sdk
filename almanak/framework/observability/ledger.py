@@ -999,28 +999,29 @@ def _stamp_v4_lp_close_fees(
         return
 
 
-def _stamp_v4_lp_open_native_amounts(
+def _stamp_lp_open_native_amounts(
     result: Any,
     intent_type: str,
     amounts: tuple[int | None, int | None] | None,
 ) -> None:
-    """Stamp POST-mint-measured V4 native-leg amounts onto ``LPOpenData`` (VIB-4483).
+    """Stamp a runner-measured native-leg amount onto ``LPOpenData``.
 
-    A native-ETH V4 pool (``PoolKey.currency0 == 0x0``) deposits its ETH leg via
-    ``msg.value`` on ``modifyLiquidities`` — there is NO ERC-20 Transfer for that
-    leg, so the mint RECEIPT cannot measure it and the V4 receipt parser leaves it
-    ``None`` (honest "unmeasured", Empty ≠ Zero — never a fabricated zero). The
-    runner reads the freshly-minted position's live state via the gateway
-    ``QueryV4PositionState`` RPC and derives ``(amount0, amount1)`` from the
-    framework's concentrated-liquidity math, threading the raw-int pair here. This
+    Connector-agnostic native-leg fill (VIB-4483 V4 concentrated pools, VIB-5121
+    Fluid fungible DEX LP). A native-ETH LP leg deposits via ``msg.value`` — there
+    is NO ERC-20 Transfer for that leg, so the mint RECEIPT cannot measure it and
+    the receipt parser leaves it ``None`` (honest "unmeasured", Empty ≠ Zero —
+    never a fabricated zero). The runner measures the native amount AFTER the tx
+    lands (V4: a post-mint position-state gateway read + concentrated-liquidity
+    math; Fluid + any fungible native-leg LP: a block-pinned wallet
+    native-balance bracket, gas-separated) and threads the raw-int pair here. This
     is the single correct stamp point: the runner holds the enriched result just
     before it is serialised into ``transaction_ledger.extracted_data_json``, and
     the LP accounting handler reads ``lp_open_data.amount0/amount1`` straight off
     it (``lp_accounting.build_lp_accounting_event``).
 
-    ``amounts`` is ``(amount0, amount1)`` in PoolKey-currency0/1 order — the same
-    order ``LPOpenData.amount0``/``currency0`` use, because both the gateway read
-    and the parser derive ordering from the same canonical PoolKey.
+    ``amounts`` is ``(amount0, amount1)`` in the SAME currency0/1 order
+    ``LPOpenData.amount0``/``currency0`` use (the runner capture and the parser
+    derive ordering from the same canonical token pair).
 
     Symmetric with :func:`_stamp_v4_lp_close_fees`:
 
@@ -1031,15 +1032,16 @@ def _stamp_v4_lp_open_native_amounts(
       leg the parser already MEASURED from a Transfer (the ERC-20 side, or a
       genuine ``0`` for an out-of-range ERC-20 leg) is preserved — the gateway
       read never clobbers a measured value (Empty ≠ Zero idempotence).
-    * No-op unless this is an ``LP_OPEN`` carrying a V4-shaped ``LPOpenData``
-      (``currency0`` populated — the connector-agnostic capability signal, not a
-      protocol-string match).
+    * No-op unless this is an ``LP_OPEN`` carrying ``LPOpenData`` with
+      ``currency0`` populated — the connector-agnostic capability signal (a
+      parser that resolves token legs by ADDRESS), not a protocol-string match.
 
-    Precision bound (inherent, accepted): the position state is read just after
-    the mint block while the ERC-20 leg is measured at the mint block. For a
-    same-cycle open there are no intervening liquidity changes, so the derived
-    native amount reflects the same position; the ``int()`` floor drops at most
-    sub-wei. Mirrors the close-fee stamp's documented gap-read bound.
+    Precision bound (inherent, accepted): the native amount is measured just
+    after the tx block while the ERC-20 leg is measured at the tx block. For a
+    same-cycle open there are no intervening balance changes for the wallet, so
+    the measured native amount reflects the same deposit; the ``int()`` floor /
+    balance bracket drops at most sub-wei. Mirrors the close-fee stamp's
+    documented gap-read bound.
     """
     if amounts is None:
         return
@@ -1051,8 +1053,9 @@ def _stamp_v4_lp_open_native_amounts(
     open_data = extracted.get("lp_open_data")
     if open_data is None or not hasattr(open_data, "amount0"):
         return
-    # Capability-gate on the V4 PoolKey data shape (currency0/currency1 populated
-    # only by the V4 parser) rather than a hard-coded protocol string.
+    # Capability-gate on the by-address data shape (currency0/currency1 populated
+    # by parsers that resolve legs by address — V4, fluid_dex_lp) rather than a
+    # hard-coded protocol string.
     if getattr(open_data, "currency0", None) is None:
         return
 
@@ -1086,6 +1089,13 @@ def _stamp_v4_lp_open_native_amounts(
 # local plain-string constant (not a connector import) to honour the framework →
 # connector boundary; it is the well-known zero address, not connector logic.
 _V4_NATIVE_CURRENCY = "0x" + "0" * 40
+
+# The ERC-7528 / Fluid SmartLending native sentinel — the non-V4 native marker
+# the fungible-LP close stamp (VIB-5121) recognizes. Framework-owned (no connector
+# import), mirrors ``strategy_runner._ERC7528_NATIVE_SENTINEL``. Written in EIP-55
+# checksum form (the production-address checksum gate requires it) and lowercased
+# for the comparison (currencies are compared ``.lower()``-ed below).
+_ERC7528_NATIVE_CURRENCY = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".lower()
 
 
 def _stamp_v4_lp_close_native_principal(
@@ -1184,6 +1194,93 @@ def _stamp_v4_lp_close_native_principal(
         return
 
 
+def _stamp_lp_close_native_amounts(
+    result: Any,
+    intent_type: str,
+    amounts: tuple[int | None, int | None] | None,
+) -> None:
+    """Stamp a runner-measured FUNGIBLE native-leg RETURNED amount onto ``LPCloseData`` (VIB-5121).
+
+    The FLUID / fungible-LP close-side twin of the open-side native fill. A
+    fungible-pool native-ETH leg (e.g. Fluid SmartLending fSL5 FLUID/ETH) is
+    returned to the wallet via an internal call that emits NO ERC-20 Transfer, so
+    the log-based parser leaves the corresponding ``amountN_collected`` ``None``
+    (Empty ≠ Zero). There is no position state to read on a fungible pool, so the
+    runner measures the returned native amount from a block-pinned wallet
+    native-balance bracket (gas-separated: ``returned = post − pre + gas``) and
+    threads the raw-int pair here.
+
+    Per-connector measurement (rule-of-three: only V4 + Fluid exist today, so the
+    two stamps stay distinct — see :func:`_stamp_v4_lp_close_native_principal`,
+    VIB-5117): this stamp handles the FUNGIBLE native case ONLY and MUST NOT touch
+    a V4 concentrated leg. V4 is measured more accurately from pre-burn position
+    state (no gas confounding) and is stamped by the V4-specific function above.
+    The currency-sentinel gate below makes that boundary correct-by-construction:
+    a leg is filled here only when its currency is a NON-V4 native sentinel (the
+    ERC-7528 ``0xEeee…`` marker). Unification behind one injected-strategy stamp
+    is deferred until a 3rd native-leg connector lands (VIB-5135).
+
+    ``amounts`` is ``(amount0_collected, amount1_collected)`` in the same
+    currency0/1 order ``LPCloseData`` uses.
+
+    * ``amounts = None`` → leaves ``LPCloseData`` untouched (native leg stays
+      ``None`` — honest unmeasured, never a fabricated zero).
+    * Fills ONLY a leg the parser left ``None`` whose currency is a NON-V4 native
+      sentinel; a parser-measured leg, an ERC-20 leg, or a V4 native leg is left
+      untouched (never clobbered; V4 is the V4 stamp's job — Empty ≠ Zero).
+    * No-op unless this is a close-like intent (``LP_CLOSE`` / ``LP_COLLECT_FEES``)
+      carrying ``LPCloseData`` with ``currency0`` populated. ``LP_COLLECT_FEES`` is
+      included for parity with :func:`_stamp_lp_close_discriminator` /
+      :func:`_stamp_v4_lp_close_fees`: a fungible fee-collect that returns a native
+      leg with no ERC-20 Transfer is measured by the same runner balance bracket
+      (``_capture_native_lp_close_amounts_safe`` does not gate on intent_type), so
+      dropping it here would discard a measured native amount (Empty ≠ Zero).
+    """
+    if amounts is None:
+        return
+    if intent_type not in ("LP_CLOSE", "LP_COLLECT_FEES"):
+        return
+    extracted = getattr(result, "extracted_data", None) if result else None
+    if not isinstance(extracted, dict):
+        return
+    # Re-read AFTER any earlier ``lp_close_data`` replace (discriminator / close
+    # fees / the V4 native-principal stamp) so this stamp operates on the latest
+    # copy.
+    close_data = extracted.get("lp_close_data")
+    if close_data is None or not hasattr(close_data, "amount0_collected"):
+        return
+    if getattr(close_data, "currency0", None) is None:
+        return
+
+    raw0, raw1 = amounts
+    # NARROW to the FUNGIBLE native case: fill a ``None`` leg ONLY when its
+    # currency is a non-V4 native sentinel. A V4 native leg (``0x0``) is the V4
+    # stamp's responsibility (measured from position state); never stamp it here
+    # from a balance bracket. Mirrors the V4 stamp's defense-in-depth currency
+    # gate (rule-of-three: per-connector measurement, no cross-claim).
+    cur0 = (getattr(close_data, "currency0", None) or "").lower()
+    cur1 = (getattr(close_data, "currency1", None) or "").lower()
+    new0 = getattr(close_data, "amount0_collected", None)
+    new1 = getattr(close_data, "amount1_collected", None)
+    changed = False
+    if new0 is None and raw0 is not None and cur0 == _ERC7528_NATIVE_CURRENCY:
+        new0 = int(raw0)
+        changed = True
+    if new1 is None and raw1 is not None and cur1 == _ERC7528_NATIVE_CURRENCY:
+        new1 = int(raw1)
+        changed = True
+    if not changed:
+        return
+
+    import dataclasses
+
+    try:
+        extracted["lp_close_data"] = dataclasses.replace(close_data, amount0_collected=new0, amount1_collected=new1)
+    except (TypeError, ValueError):
+        # Defensive: a non-dataclass duck-typed close-data stub (tests).
+        return
+
+
 def build_ledger_entry(
     *,
     deployment_id: str,
@@ -1197,8 +1294,14 @@ def build_ledger_entry(
     pre_state: dict[str, Any] | None = None,
     post_state: dict[str, Any] | None = None,
     v4_lp_close_fees: tuple[int, int] | None = None,
+    # Native-leg open fill. ``lp_open_native_amounts`` is the connector-merged
+    # OPEN result (V4 position-state OR Fluid balance-bracket — the runner picks
+    # per connector and threads ONE value). VIB-5117's V4-close principal stays
+    # its own param; VIB-5121 adds the Fluid-close balance-bracket param. Per
+    # connector measurement (rule-of-three — unify at the 3rd connector, VIB-5135).
+    lp_open_native_amounts: tuple[int | None, int | None] | None = None,
     v4_lp_close_native_principal: tuple[int | None, int | None] | None = None,
-    v4_lp_open_native_amounts: tuple[int | None, int | None] | None = None,
+    lp_close_native_amounts: tuple[int | None, int | None] | None = None,
 ) -> LedgerEntry:
     """Build a LedgerEntry from an intent and its execution result.
 
@@ -1289,22 +1392,27 @@ def build_ledger_entry(
     # withdrawal Transfer; they are unrecoverable from the receipt). The runner
     # reads them on-chain before the burn submits and threads the raw-int pair.
     _stamp_v4_lp_close_fees(result, intent_type, v4_lp_close_fees)
-    # VIB-5117 — stamp the PRE-burn-measured native-ETH leg PRINCIPAL onto
+    # VIB-4483 (V4) / VIB-5121 (fungible) — stamp the runner-measured native-ETH
+    # OPEN leg amount onto ``lp_open_data``. A native leg deposits via msg.value
+    # (no ERC-20 Transfer), so the receipt parser left it None. The runner
+    # measures it after the tx lands per connector (V4: post-mint position-state
+    # read + CL math; Fluid + any fungible native-leg LP: a block-pinned wallet
+    # native-balance bracket, gas-separated) and threads the merged result here;
+    # this stamp fills only the unmeasured native leg (never clobbers a measured
+    # ERC-20 leg).
+    _stamp_lp_open_native_amounts(result, intent_type, lp_open_native_amounts)
+    # VIB-5117 — V4 close: stamp the PRE-burn-measured native-ETH PRINCIPAL onto
     # ``lp_close_data``. A native-ETH V4 LP_CLOSE returns its ETH leg as raw ETH
     # (no ERC-20 Transfer), so the receipt parser left ``amount{0,1}_collected``
-    # None on that leg. The runner reads the pre-burn position state on-chain and
-    # derives the native amount via the framework's concentrated-liquidity math;
-    # this stamp fills only the unmeasured native leg (never clobbers a measured
-    # ERC-20 leg). Without it the close records 0 proceeds and understates
-    # realized PnL by the full native principal. Symmetric with the open stamp.
+    # None. The runner reads pre-burn position state + CL math (V4-specific
+    # measurement — kept exactly per VIB-5117). Without it the close records 0
+    # proceeds and understates realized PnL by the full native principal.
     _stamp_v4_lp_close_native_principal(result, intent_type, v4_lp_close_native_principal)
-    # VIB-4483 (P-V1-B) — stamp the POST-mint-measured native-ETH leg amount onto
-    # ``lp_open_data``. A native-ETH V4 pool deposits its ETH leg via msg.value
-    # (no ERC-20 Transfer), so the receipt parser left it None. The runner reads
-    # the freshly-minted position state on-chain and derives the native amount via
-    # the framework's concentrated-liquidity math; this stamp fills only the
-    # unmeasured native leg (never clobbers the measured ERC-20 leg).
-    _stamp_v4_lp_open_native_amounts(result, intent_type, v4_lp_open_native_amounts)
+    # VIB-5121 — Fluid/fungible close twin: stamp the runner-measured native-ETH
+    # RETURNED leg (measured from a balance bracket, gated to the non-V4 native
+    # sentinel) onto ``lp_close_data``. Distinct from the V4 stamp above by
+    # currency gate — per-connector measurement (rule-of-three, VIB-5135).
+    _stamp_lp_close_native_amounts(result, intent_type, lp_close_native_amounts)
     extracted_data_json = _build_extracted_data_json(result)
 
     # ─── VIB-3480 columns finally populated (Accounting-AttemptNo17 §3 D3) ──

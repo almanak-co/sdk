@@ -785,10 +785,12 @@ class UniswapV4ReceiptParser:
           its absence from the observed set is NOT evidence of zero — the
           ETH genuinely deposited via ``msg.value`` and the receipt simply
           cannot see it. Stamping ``0`` here would be a measured-zero lie
-          (receipt_parser.py historical note). The runner fills this leg from
-          a post-mint ``QueryV4PositionState`` read (see
-          ``_stamp_v4_lp_open_native_amounts``); on read failure it stays
-          ``None`` (honest unmeasured), never a fabricated zero.
+          (receipt_parser.py historical note). The runner fills this leg AFTER
+          the tx lands (VIB-4483: a post-mint ``QueryV4PositionState`` read +
+          concentrated-liquidity math; VIB-5121: on a read-failure fallback, a
+          block-pinned wallet native-balance bracket) and stamps it via
+          ``_stamp_lp_open_native_amounts``; on total failure it stays ``None``
+          (honest unmeasured), never a fabricated zero.
 
         Returns:
             ``None`` to signal the caller should drop ``LPOpenData``, OR

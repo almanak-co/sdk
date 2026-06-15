@@ -54,6 +54,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
+from almanak.connectors.fluid.addresses import FLUID_DEX_LP_NATIVE_SENTINEL
 from almanak.connectors.fluid.dex_lp_receipt_parser import FluidDexLpReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
@@ -81,6 +82,13 @@ SUSDAI_ADDRESS = "0x0B2b2B2076d95dda7817e785989fE353fe955ef9"
 
 # fSL12: RLP/USDC — supply OFF (the deposit-disabled negative fixture).
 WRAPPER_FSL12 = "0xdC1dF9E55f3B7EBD4F19001b294d1e537320BC2E"
+
+# fSL5: FLUID (token0, 18 dec) / native ETH (token1, 18 dec) — the native-leg
+# fixture (VIB-5121). The native ETH leg rides as msg.value and emits NO ERC-20
+# Transfer, so the receipt parser leaves amount1 None and the runner measures it
+# from a wallet native-balance bracket.
+WRAPPER_FSL5 = "0x82C53239c4CFC89A8E55A691422af24c18A944b1"
+FLUID_ADDRESS = "0x61E030A56D33e8260FdD81f03B162A79Fe3449Cd"
 
 USDC_DECIMALS = 6
 DEPOSIT_AMOUNT_USDC = Decimal("100")
@@ -286,6 +294,221 @@ class TestFluidDexLpLifecycleArbitrum:
             usdc_returned,
             susdai_returned,
         )
+
+
+# =============================================================================
+# Native-ETH leg accounting (VIB-5121) — fSL5 FLUID/native-ETH
+# =============================================================================
+
+
+@pytest.mark.arbitrum
+@pytest.mark.lp
+@pytest.mark.no_zodiac(
+    reason="VIB-5121 re-enables native-leg execution, but VIB-5125 deliberately "
+    "EXCLUDES native-leg wrappers from the fluid_dex_lp Zodiac discovery "
+    "static_permissions, so the native deposit selector is not in the Roles "
+    "manifest. This test proves the native-leg ACCOUNTING mechanism (balance "
+    "bracket), not Zodiac discovery; it runs EOA. Aligning native-wrapper "
+    "discovery permissions is deferred until native fluid wrappers go "
+    "deposit-open (the fSL5 pool currently caps deposits) — tracked in VIB-5135."
+)
+class TestFluidDexLpNativeLegArbitrum:
+    """fSL5 native-ETH leg: 4-layer proof that the native leg is measured from a
+    wallet native-balance bracket (the receipt parser leaves it None — Empty ≠
+    Zero — and the runner's production capture fills it, gas-separated).
+
+    Marked ``no_zodiac``: native-leg wrappers are excluded from the fluid_dex_lp
+    synthetic Zodiac discovery surface (VIB-5125), so this EOA test exercises the
+    accounting mechanism without the Roles Modifier blocking the native deposit."""
+
+    @pytest.mark.intent(IntentType.LP_OPEN)
+    @pytest.mark.asyncio
+    async def test_lp_open_native_leg_balance_bracket(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+        anvil_rpc_url: str,
+        anvil_eth_call_adapter,
+    ):
+        """LP_OPEN single-sided native ETH into fSL5: parser leaves amount1 None;
+        the runner's native-balance-bracket capture measures the ETH leg."""
+        from almanak.framework.intents.vocabulary import LPOpenIntent as _LPOpenIntent
+        from almanak.framework.runner.strategy_runner import StrategyRunner
+
+        deposit_eth = Decimal("0.01")
+        expected_wei = int(deposit_eth * Decimal(10**18))
+
+        # Layer 1: compile a single-sided native-ETH deposit (amount0=FLUID=0).
+        intent = _LPOpenIntent(
+            pool=WRAPPER_FSL5,
+            amount0=Decimal("0"),
+            amount1=deposit_eth,
+            range_lower=Decimal("1"),
+            range_upper=Decimal("1000000"),
+            protocol="fluid_dex_lp",
+            chain=CHAIN_NAME,
+        )
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        result = compiler.compile(intent)
+        assert result.status.value == "SUCCESS", f"native LP_OPEN compile failed: {result.error}"
+        # The native ETH leg must ride as the deposit tx's msg.value (Layer 1
+        # proof of the native-leg encoding — VIB-5121 lifted the compile refusal).
+        dep = _find_deposit_tx(result.action_bundle)
+        assert int(dep.get("value", 0)) == expected_wei, "native ETH leg must ride as msg.value"
+
+        eth_before = web3.eth.get_balance(Web3.to_checksum_address(funded_wallet))
+        shares_before = get_token_balance(web3, WRAPPER_FSL5, funded_wallet)
+
+        # Layer 2: execute on the fork in EOA mode. This native-leg ACCOUNTING
+        # test is marked ``no_zodiac`` (native wrappers are deliberately excluded
+        # from the fluid_dex_lp Zodiac discovery surface — VIB-5125), so there is
+        # no Roles Modifier in the path to authorize against. EOA is also the mode
+        # in which the full on-chain native path can run once the fSL5 pool cap
+        # lifts, rather than staying double-blocked by the discovery manifest.
+        exec_result = await orchestrator.execute(result.action_bundle)
+        if not exec_result.success:
+            # fSL5's FLUID/ETH SmartLending pool reverts EVERY deposit at the
+            # current Arbitrum fork state with DexT1 error 51064 (selector
+            # 0x2fee3e0e, arg 0xc778) — a Liquidity-Layer deposit/supply cap on
+            # this pool, independent of amount or ratio (verified on-fork for
+            # single-sided native, two-sided, and FLUID-only). This is a pool-
+            # liveness / fixture constraint, NOT an accounting defect: the
+            # native-leg balance-bracket MECHANISM is proven deterministically by
+            # the unit suite (parser leaves the native leg None;
+            # StrategyRunner._capture_native_lp_{open,close}_amounts_safe measures
+            # it from a block-pinned bracket, gas-separated; the ledger stamp fills
+            # only the None leg). Skip the on-chain layers honestly rather than
+            # fake a pass. Tracked: the fSL5 deposit cap is a Fluid pool state, not
+            # SDK behaviour.
+            if "0x2fee3e0e" in (exec_result.error or "") or "c778" in (exec_result.error or ""):
+                pytest.skip(
+                    "fSL5 FLUID/ETH pool deposit is capped on-chain at this fork "
+                    "(DexT1 51064 / 0xc778) — native-leg accounting mechanism is "
+                    "covered deterministically by the unit suite; see VIB-5121"
+                )
+            raise AssertionError(f"native LP_OPEN execution failed: {exec_result.error}")
+
+        # Layer 3: the receipt parser leaves the NATIVE leg None (honest
+        # unmeasured — no ERC-20 Transfer for ETH), Empty ≠ Zero.
+        parser = FluidDexLpReceiptParser()
+        lp_open = None
+        for tx_result in exec_result.transaction_results:
+            if not tx_result.receipt:
+                continue
+            parsed = parser.extract_lp_open_data(tx_result.receipt.to_dict())
+            if parsed is not None:
+                lp_open = parsed
+        assert lp_open is not None, "parser must decode the fSL5 share mint"
+        assert lp_open.pool_address.lower() == WRAPPER_FSL5.lower()
+        assert lp_open.amount1 is None, "native ETH leg must be None (unmeasured) — never a fabricated 0"
+        assert lp_open.amount0 == 0, "unfunded ERC-20 (FLUID) leg is a measured 0"
+        assert lp_open.currency1.lower() == FLUID_DEX_LP_NATIVE_SENTINEL.lower()
+        # Bilateral Layer 4: the wrapper-share OUTPUT delta must match the
+        # receipt-decoded minted liquidity (a native deposit is only half the
+        # leg balances — the fSL5 shares are the other side).
+        assert lp_open.liquidity and lp_open.liquidity > 0, "minted fSL5 shares must be measured"
+        shares_after = get_token_balance(web3, WRAPPER_FSL5, funded_wallet)
+        assert (shares_after - shares_before) == lp_open.liquidity, "fSL5 share delta must match receipt liquidity"
+
+        # Layer 4: the runner's PRODUCTION capture measures the native leg from a
+        # block-pinned balance bracket via the gateway interface (here the Anvil
+        # eth_getBalance adapter), gas-separated. This is the exact production path.
+        native_amounts = StrategyRunner._capture_native_lp_open_amounts_safe(
+            intent=intent,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            result=exec_result,
+            gateway_client=anvil_eth_call_adapter,
+        )
+        assert native_amounts is not None, "native bracket capture must measure the ETH leg"
+        _a0, a1 = native_amounts
+        # The measured deposit must equal the on-chain ETH deposited (excludes gas).
+        assert a1 == expected_wei, f"native leg must equal the deposited ETH (gas-excluded): {a1} != {expected_wei}"
+
+        # Cross-check the bracket against the raw wallet delta minus gas.
+        eth_after = web3.eth.get_balance(Web3.to_checksum_address(funded_wallet))
+        gas_wei = sum(
+            (tr.receipt.gas_used * tr.receipt.effective_gas_price)
+            for tr in exec_result.transaction_results
+            if tr.receipt
+        )
+        assert (eth_before - eth_after - gas_wei) == expected_wei, "raw balance delta minus gas must equal deposit"
+        logger.info("native LP_OPEN: measured ETH leg=%s wei (deposit), gas=%s wei", a1, gas_wei)
+
+    @pytest.mark.intent(IntentType.LP_OPEN)
+    @pytest.mark.asyncio
+    async def test_native_bracket_capture_over_real_fork_balances(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        anvil_eth_call_adapter,
+    ):
+        """Prove the production native-balance-bracket capture against REAL on-chain
+        balances (the one piece the unit suite mocks): a real ETH-moving tx creates
+        a measurable native delta; the capture reads block-pinned balances via the
+        gateway interface and recovers ``deposit = (pre - post) - gas`` exactly.
+
+        fSL5 deposits are pool-capped on-chain (see the test above), so this proves
+        the gateway-backed bracket read end-to-end on live fork state independent of
+        the undepositable pool — the native leg is keyed off the same currency
+        sentinel + None-amount gate the parser emits for a native LP open.
+        """
+        from types import SimpleNamespace
+
+        from almanak.framework.runner.strategy_runner import StrategyRunner
+
+        send_wei = int(Decimal("0.05") * Decimal(10**18))
+        sink = "0x000000000000000000000000000000000000dEaD"
+        eth_before = web3.eth.get_balance(Web3.to_checksum_address(funded_wallet))
+
+        # A real on-chain native-ETH transfer (the wallet spends send_wei + gas).
+        tx_hash = web3.eth.send_transaction(
+            {
+                "from": Web3.to_checksum_address(funded_wallet),
+                "to": Web3.to_checksum_address(sink),
+                "value": send_wei,
+            }
+        )
+        receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+        gas_wei = receipt["gasUsed"] * receipt["effectiveGasPrice"]
+        eth_after = web3.eth.get_balance(Web3.to_checksum_address(funded_wallet))
+        assert (eth_before - eth_after) == send_wei + gas_wei, "real on-chain delta sanity"
+
+        # Build the result envelope a native LP_OPEN would carry: token0 ERC-20
+        # (measured), token1 native (currency1 = native sentinel, amount1 None).
+        lp_open = SimpleNamespace(
+            amount0=0,
+            amount1=None,
+            currency0=FLUID_ADDRESS.lower(),
+            currency1=FLUID_DEX_LP_NATIVE_SENTINEL.lower(),
+        )
+        result = SimpleNamespace(
+            lp_open_data=lp_open,
+            extracted_data={"lp_open_data": lp_open},
+            transaction_results=[SimpleNamespace(success=True, receipt=SimpleNamespace(block_number=receipt["blockNumber"]))],
+            total_gas_cost_wei=gas_wei,
+        )
+
+        # The PRODUCTION capture, reading REAL fork balances at the pinned blocks
+        # via the gateway interface, must recover send_wei (the "deposit"),
+        # gas-excluded.
+        native_amounts = StrategyRunner._capture_native_lp_open_amounts_safe(
+            intent=SimpleNamespace(),
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            result=result,
+            gateway_client=anvil_eth_call_adapter,
+        )
+        assert native_amounts is not None
+        _a0, a1 = native_amounts
+        assert a1 == send_wei, f"bracket must recover the deposited ETH, gas-excluded: {a1} != {send_wei}"
 
 
 # =============================================================================

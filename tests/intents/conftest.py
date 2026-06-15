@@ -173,6 +173,33 @@ class AnvilEthCallAdapter:
         )
         return Web3.to_hex(result)
 
+    def query_native_balance(self, chain: str, wallet_address: str, block: int | str | None = None) -> int | None:
+        """Gateway-shaped block-pinned native balance, backed by the Anvil Web3.
+
+        VIB-5121 — mirrors ``GatewayClient.query_native_balance`` so the intent
+        test can exercise the production ``StrategyRunner._capture_native_lp_*``
+        balance-bracket capture end-to-end over the fork. Block-tag handling
+        mirrors the production client exactly (reject bool / negative int; pass a
+        str tag through; ``None`` → ``"latest"``) so the harness cannot mask a
+        real validation difference in the capture path; a backend read failure
+        returns ``None`` (the production degraded contract), never raises.
+        """
+        del chain
+        if isinstance(block, bool):
+            raise ValueError(f"query_native_balance block must not be bool, got {block!r}")
+        if isinstance(block, int):
+            if block < 0:
+                raise ValueError(f"query_native_balance block must be non-negative, got {block}")
+            block_id: int | str = block
+        elif block is None:
+            block_id = "latest"
+        else:
+            block_id = block
+        try:
+            return int(self.web3.eth.get_balance(Web3.to_checksum_address(wallet_address), block_identifier=block_id))
+        except Exception:  # noqa: BLE001 — gateway-shaped degraded contract: read failure → None
+            return None
+
     def query_v4_position_state(
         self,
         *,
@@ -462,7 +489,7 @@ async def _persist_and_drain_for_intent_test(
         price_oracle=price_oracle,
         pre_state=pre_state,
         post_state=post_state,
-        v4_lp_open_native_amounts=v4_lp_open_native_amounts,
+        lp_open_native_amounts=v4_lp_open_native_amounts,
     )
     entry.execution_mode = execution_mode
     await _maybe_await(state_manager.save_ledger_entry(entry))

@@ -185,17 +185,43 @@ def test_lp_open_both_token_two_approves():
     assert len(approves) == 2  # both ERC-20 legs approved
 
 
-def test_lp_open_native_leg_refused_at_compile():
-    # fSL5 token1 is native ETH. v1 refuses native-leg wrappers at COMPILE: the
-    # log-based receipt parser cannot measure native ETH (no ERC-20 Transfer), so
-    # executing would mis-account the native leg as a measured zero (Empty≠Zero).
-    # Refused — not faked-success, not executed with wrong books (VIB-5121).
+def test_lp_open_native_leg_compiles_with_msg_value():
+    # fSL5 token1 is native ETH. VIB-5121: native-leg wrappers now COMPILE — the
+    # native leg rides as msg.value (no ERC-20 approve), and its amount is
+    # measured from a wallet native-balance bracket in the runner at ledger-build
+    # time (the receipt parser leaves it None, Empty ≠ Zero). FLUID/0.5 ETH:
+    # FLUID (token0, ERC-20) gets ONE approve; the 0.5 ETH (token1, native) leg
+    # rides as the deposit tx's msg.value.
     compiler = FluidDexLpCompiler()
     with patch.object(FluidDexLpCompiler, "_build_sdk", return_value=(_sdk(), None)):
-        res = compiler.compile(_ctx(_services()), _lp_open(pool=FSL5, amount0="0", amount1="0.5"))
-    assert res.status == CompilationStatus.FAILED
-    assert "native" in res.error.lower()
-    assert res.action_bundle is None  # no transaction produced for a native-leg wrapper
+        res = compiler.compile(_ctx(_services()), _lp_open(pool=FSL5, amount0="100", amount1="0.5"))
+    assert res.status == CompilationStatus.SUCCESS
+    txs = res.action_bundle.transactions
+    approves = [t for t in txs if str(t["data"]).startswith("0x095ea7b3")]
+    assert len(approves) == 1, "only the ERC-20 (FLUID) leg is approved; native ETH rides as msg.value"
+    dep = _deposit_tx(res.action_bundle)
+    assert dep["value"] == int(Decimal("0.5") * 10**18), "native ETH leg must ride as deposit msg.value"
+    assert _decode_word(dep["data"], 0) == 100 * 10**18  # token0 (FLUID) wei
+    assert _decode_word(dep["data"], 1) == int(Decimal("0.5") * 10**18)  # token1 (native ETH) wei
+
+
+def test_lp_close_native_leg_compiles():
+    # VIB-5121: native-leg close compiles (was refused). The native returned leg
+    # is measured from a balance bracket in the runner.
+    compiler = FluidDexLpCompiler()
+    close_intent = LPCloseIntent(protocol="fluid_dex_lp", pool=FSL5, position_id=FSL5, chain="arbitrum")
+    with patch.object(FluidDexLpCompiler, "_build_sdk", return_value=(_sdk(), None)):
+        res = compiler.compile(_ctx(_services()), close_intent)
+    assert res.status == CompilationStatus.SUCCESS
+    assert res.action_bundle is not None
+    # Concrete bundle shape (catch a tx-construction regression behind the
+    # status==SUCCESS, not just a non-null bundle): exactly one WITHDRAW tx, and
+    # the native returned leg carries NO msg.value (ETH is RETURNED by the
+    # withdraw, not sent) — distinct from the open path's deposit msg.value.
+    txs = list(res.action_bundle.transactions)
+    withdraws = [tx for tx in txs if str(tx.get("data", "")).startswith(WITHDRAW_SEL)]
+    assert len(withdraws) == 1, "native-leg close must build exactly one withdraw tx"
+    assert int(withdraws[0].get("value", 0) or 0) == 0, "close withdraw sends no native value"
 
 
 # ----------------------------------------------------------------------------

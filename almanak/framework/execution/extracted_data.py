@@ -152,8 +152,14 @@ class LPCloseData:
     including principal and fees.
 
     Attributes:
-        amount0_collected: Total amount of token0 collected (principal + fees)
-        amount1_collected: Total amount of token1 collected (principal + fees)
+        amount0_collected: Total amount of token0 collected (principal + fees).
+            ``None`` = UNMEASURED (Empty ≠ Zero): a NATIVE-ETH leg credited via
+            an internal call emits no ERC-20 Transfer, so a log-based parser
+            cannot measure it from the receipt and leaves it ``None`` for the
+            runner's native-balance-bracket capture to fill at ledger-build time
+            (VIB-5121). A numeric value — including ``0`` — is a measured leg.
+        amount1_collected: Total amount of token1 collected (principal + fees).
+            ``None`` = UNMEASURED native leg (see ``amount0_collected``).
         fees0: Fees earned in token0 (if separately tracked)
         fees1: Fees earned in token1 (if separately tracked)
         liquidity_removed: Amount of liquidity removed (if available)
@@ -204,6 +210,10 @@ class LPCloseData:
     # from non-nullable ``int`` to ``int | None`` removes the silent measured-
     # zero lie on the native leg that understated realized PnL by the full
     # native principal. Symmetric with ``fees0/fees1`` and ``LPOpenData``.
+    # VIB-5121: a Fluid fungible native close leg uses the SAME ``None`` →
+    # filled-by-runner contract, but the runner measures it from a wallet
+    # native-balance bracket (no position state to read) — same field, different
+    # per-connector measurement source.
     amount0_collected: int | None = None
     amount1_collected: int | None = None
     # VIB-4470 — Empty ≠ Zero. ``None`` means the parser did not measure fees
@@ -272,10 +282,11 @@ class LPCloseData:
     def all_amounts(self) -> list[int | None]:
         """Return all coin amounts as a list, including additional coins.
 
-        Per Empty ≠ Zero (VIB-5117): ``None`` slots stand for "unmeasured by
-        this parser" — e.g. a Uniswap V4 native principal leg the receipt could
-        not observe (filled later from the pre-burn position-state read). A
-        numeric ``0`` is a measured zero. Mirrors :attr:`all_fees`.
+        Per Empty ≠ Zero (VIB-5117 / VIB-5121): ``None`` slots stand for
+        "unmeasured by this parser" — e.g. a native principal leg the receipt
+        could not observe (filled later from the V4 pre-burn position-state read
+        or the Fluid balance bracket). A numeric ``0`` is a measured zero.
+        Mirrors :attr:`all_fees`.
         """
         result: list[int | None] = [self.amount0_collected, self.amount1_collected]
         if self.additional_amounts:
@@ -298,8 +309,8 @@ class LPCloseData:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         d: dict[str, Any] = {
-            # VIB-5117 — preserve None as JSON null (unmeasured native leg),
-            # distinct from the string "0" (measured zero) per Empty ≠ Zero.
+            # VIB-5117 / VIB-5121 — preserve None as JSON null (unmeasured native
+            # leg), distinct from the string "0" (measured zero) per Empty ≠ Zero.
             # Mirrors the fees0/fees1 guard directly below and LPOpenData.
             "amount0_collected": (str(self.amount0_collected) if self.amount0_collected is not None else None),
             "amount1_collected": (str(self.amount1_collected) if self.amount1_collected is not None else None),

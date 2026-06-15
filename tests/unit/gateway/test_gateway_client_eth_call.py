@@ -6,6 +6,7 @@ import json
 from unittest.mock import MagicMock
 
 import grpc
+import pytest
 
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
 
@@ -175,3 +176,59 @@ class TestBlockNumber:
         response.result = json.dumps("not-a-number")
         client._rpc_stub.Call.return_value = response
         assert client.block_number("base") is None
+
+
+class TestQueryNativeBalanceBlockParam:
+    """VIB-5121: query_native_balance(block=...) for a block-pinned native bracket."""
+
+    def test_default_uses_latest(self):
+        client = _make_client()
+        response = MagicMock()
+        response.success = True
+        response.result = json.dumps(hex(10**18))
+        client._rpc_stub.Call.return_value = response
+
+        assert client.query_native_balance("arbitrum", "0xabc") == 10**18
+        req = client._rpc_stub.Call.call_args[0][0]
+        assert req.method == "eth_getBalance"
+        assert json.loads(req.params) == ["0xabc", "latest"]
+
+    def test_int_block_encoded_as_hex(self):
+        client = _make_client()
+        response = MagicMock()
+        response.success = True
+        response.result = json.dumps(hex(500))
+        client._rpc_stub.Call.return_value = response
+
+        assert client.query_native_balance("arbitrum", "0xabc", block=21_000_000) == 500
+        req = client._rpc_stub.Call.call_args[0][0]
+        assert json.loads(req.params) == ["0xabc", hex(21_000_000)]
+
+    def test_str_block_passthrough(self):
+        client = _make_client()
+        response = MagicMock()
+        response.success = True
+        response.result = json.dumps(hex(7))
+        client._rpc_stub.Call.return_value = response
+
+        client.query_native_balance("arbitrum", "0xabc", block="pending")
+        req = client._rpc_stub.Call.call_args[0][0]
+        assert json.loads(req.params) == ["0xabc", "pending"]
+
+    def test_bool_block_rejected(self):
+        client = _make_client()
+        with pytest.raises(ValueError):
+            client.query_native_balance("arbitrum", "0xabc", block=True)
+
+    def test_negative_block_rejected(self):
+        client = _make_client()
+        with pytest.raises(ValueError):
+            client.query_native_balance("arbitrum", "0xabc", block=-1)
+
+    def test_returns_none_on_rpc_failure(self):
+        client = _make_client()
+        response = MagicMock()
+        response.success = False
+        response.error = "boom"
+        client._rpc_stub.Call.return_value = response
+        assert client.query_native_balance("arbitrum", "0xabc", block=5) is None

@@ -39,6 +39,7 @@ from almanak.framework.observability.context import (
 )
 from almanak.framework.runner.teardown_commit import (
     TeardownCommitOutcome,
+    _capture_teardown_native_close_amounts,
     commit_teardown_intent,
 )
 from almanak.framework.state.exceptions import (
@@ -1542,3 +1543,76 @@ async def test_vib4895_lp_close_hydrates_durable_store_on_cache_miss(
     runner._hydrate_lp_close_from_durable_store.assert_awaited_once_with(deployment_id="dep-1", position_id="33333")
     # Cache seeded under the (position_id, "LP") key the carry-forward reads.
     assert runner._recent_open_events[("33333", "LP")] == durable_payload
+
+
+# ---------------------------------------------------------------------------
+# VIB-5121 — _capture_teardown_native_close_amounts: the native close-leg
+# capture on the teardown lane. Happy path returns the helper's amounts; an
+# UNEXPECTED escape is LOUD (record callback fired = accounting_degraded) and
+# returns None, never propagates (blueprint 27 §Teardown).
+# ---------------------------------------------------------------------------
+
+
+def _runner_for_native_capture(*, capture_return=None, capture_raises=None) -> SimpleNamespace:
+    def _capture(**_kwargs):
+        if capture_raises is not None:
+            raise capture_raises
+        return capture_return
+
+    return SimpleNamespace(
+        _capture_native_lp_close_amounts_safe=_capture,
+        _get_gateway_client=lambda: SimpleNamespace(),
+    )
+
+
+def test_capture_teardown_native_close_amounts_happy_path():
+    runner = _runner_for_native_capture(capture_return=(None, 480_000_000_000_000_000))
+    recorded: list[tuple] = []
+    out = _capture_teardown_native_close_amounts(
+        runner,
+        intent=SimpleNamespace(),
+        strategy=SimpleNamespace(chain="arbitrum", wallet_address="0xabc"),
+        enriched_result=SimpleNamespace(),
+        deployment_id="dep-1",
+        intent_type="LP_CLOSE",
+        tx_hash="0xdead",
+        record=lambda *a, **k: recorded.append(a),
+    )
+    assert out == (None, 480_000_000_000_000_000)
+    assert recorded == []  # no degradation on the happy path
+
+
+def test_capture_teardown_native_close_amounts_unexpected_escape_is_loud_and_nonblocking():
+    runner = _runner_for_native_capture(capture_raises=RuntimeError("boom"))
+    recorded: list[tuple] = []
+    # Must NOT propagate (teardown never blocks the next risk-reducing intent).
+    out = _capture_teardown_native_close_amounts(
+        runner,
+        intent=SimpleNamespace(),
+        strategy=SimpleNamespace(chain="arbitrum", wallet_address="0xabc"),
+        enriched_result=SimpleNamespace(),
+        deployment_id="dep-1",
+        intent_type="LP_CLOSE",
+        tx_hash="0xdead",
+        record=lambda *a, **k: recorded.append(a),
+    )
+    assert out is None  # honest unmeasured, never a fabricated zero
+    # LOUD: the deferred-write record (→ accounting_degraded) was fired.
+    assert recorded and recorded[0][0] == "native_close_capture"
+
+
+def test_capture_teardown_native_close_amounts_none_return_no_degrade():
+    runner = _runner_for_native_capture(capture_return=None)
+    recorded: list[tuple] = []
+    out = _capture_teardown_native_close_amounts(
+        runner,
+        intent=SimpleNamespace(),
+        strategy=SimpleNamespace(chain="arbitrum", wallet_address="0xabc"),
+        enriched_result=SimpleNamespace(),
+        deployment_id="dep-1",
+        intent_type="LP_CLOSE",
+        tx_hash="0xdead",
+        record=lambda *a, **k: recorded.append(a),
+    )
+    assert out is None
+    assert recorded == []  # an EXPECTED None (helper's own guard) is not a degrade

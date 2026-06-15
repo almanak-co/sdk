@@ -902,6 +902,333 @@ def test_capture_v4_open_native_malformed_amounts_does_not_crash_runner():
 
 
 # ---------------------------------------------------------------------------
+
+# VIB-5121 — _capture_native_lp_{open,close}_amounts_safe: native-balance
+# bracket measurement of a native-ETH LP leg (no ERC-20 Transfer). Gas is
+# separated; a failed read or contaminated bracket leaves the leg None (never a
+# fabricated zero — Empty != Zero). Connector-agnostic (fluid_dex_lp fungible).
+# ---------------------------------------------------------------------------
+
+_EEEE = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+_FLUID = "0x61e030a56d33e8260fdd81f03b162a79fe3449cd"
+
+
+def _tx_result(block: int, *, success: bool = True):
+    return SimpleNamespace(success=success, receipt=SimpleNamespace(block_number=block))
+
+
+def _native_open_result(*, currency0=_FLUID, currency1=_EEEE, amount0=0, amount1=None, blocks=(100, 100), gas=0):
+    """Enriched LP_OPEN result with a native token1 leg (amount1 unmeasured)."""
+    lp_open = SimpleNamespace(amount0=amount0, amount1=amount1, currency0=currency0, currency1=currency1)
+    return SimpleNamespace(
+        lp_open_data=lp_open,
+        extracted_data={"lp_open_data": lp_open},
+        transaction_results=[_tx_result(b) for b in blocks],
+        total_gas_cost_wei=gas,
+    )
+
+
+def _native_close_result(*, currency0=_FLUID, currency1=_EEEE, a0=0, a1=None, blocks=(100, 100), gas=0):
+    lp_close = SimpleNamespace(amount0_collected=a0, amount1_collected=a1, currency0=currency0, currency1=currency1)
+    return SimpleNamespace(
+        lp_close_data=lp_close,
+        extracted_data={"lp_close_data": lp_close},
+        transaction_results=[_tx_result(b) for b in blocks],
+        total_gas_cost_wei=gas,
+    )
+
+
+class _NativeBalGateway:
+    """Stub gateway returning block-keyed native balances; records read blocks."""
+
+    def __init__(self, by_block: dict[int, int]):
+        self.by_block = by_block
+        self.reads: list[int] = []
+
+    def query_native_balance(self, chain, wallet_address, block=None):
+        self.reads.append(block)
+        return self.by_block.get(block)
+
+
+def test_capture_native_open_returns_none_without_gateway():
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    out = StrategyRunner._capture_native_lp_open_amounts_safe(
+        intent=SimpleNamespace(),
+        chain="arbitrum",
+        wallet_address="0xabc",
+        result=_native_open_result(),
+        gateway_client=None,
+    )
+    assert out is None
+
+
+def test_capture_native_open_skips_all_erc20_pool():
+    """Both legs measured (no native sentinel) — no balance read, returns None."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    gw = _NativeBalGateway({})
+    out = StrategyRunner._capture_native_lp_open_amounts_safe(
+        intent=SimpleNamespace(),
+        chain="arbitrum",
+        wallet_address="0xabc",
+        result=_native_open_result(currency1=_FLUID, amount1=5),  # both ERC-20
+        gateway_client=gw,
+    )
+    assert out is None
+    assert gw.reads == []  # never touched the gateway
+
+
+def test_capture_native_open_measures_deposit_minus_gas():
+    """deposit = (pre - post) - gas, stamped on the native leg only (Empty != Zero)."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    # tx landed in block 100 (single tx): pre read at 99, post at 100.
+    gas = 3_000_000_000_000_000  # 0.003 ETH
+    deposit = 500_000_000_000_000_000  # 0.5 ETH
+    pre = 10_000_000_000_000_000_000  # 10 ETH
+    post = pre - deposit - gas
+    gw = _NativeBalGateway({99: pre, 100: post})
+    out = StrategyRunner._capture_native_lp_open_amounts_safe(
+        intent=SimpleNamespace(),
+        chain="arbitrum",
+        wallet_address="0xabc",
+        result=_native_open_result(blocks=(100, 100), gas=gas),
+        gateway_client=gw,
+    )
+    assert out == (None, deposit)  # native leg filled; other slot None (stamp preserves parser's measured leg)
+    assert gw.reads == [99, 100]  # block-pinned pre/post
+
+
+def test_capture_native_open_multi_tx_bundle_pins_first_and_last_block():
+    """approve in block 100, deposit in 101: pre at 99, post at 101."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    gas = 4_000_000_000_000_000
+    deposit = 500_000_000_000_000_000
+    pre = 10_000_000_000_000_000_000
+    post = pre - deposit - gas
+    gw = _NativeBalGateway({99: pre, 101: post})
+    out = StrategyRunner._capture_native_lp_open_amounts_safe(
+        intent=SimpleNamespace(),
+        chain="arbitrum",
+        wallet_address="0xabc",
+        result=_native_open_result(blocks=(100, 101), gas=gas),
+        gateway_client=gw,
+    )
+    assert out == (None, deposit)
+    assert gw.reads == [99, 101]
+
+
+def test_capture_native_open_negative_bracket_returns_none():
+    """A contaminated bracket (computed deposit < 0) → None, NEVER a clamped zero."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    # post > pre would make (pre-post) negative; minus gas stays negative.
+    gw = _NativeBalGateway({99: 1_000, 100: 2_000})
+    out = StrategyRunner._capture_native_lp_open_amounts_safe(
+        intent=SimpleNamespace(),
+        chain="arbitrum",
+        wallet_address="0xabc",
+        result=_native_open_result(blocks=(100, 100), gas=0),
+        gateway_client=gw,
+    )
+    assert out is None
+
+
+def test_capture_native_open_failed_balance_read_returns_none():
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    gw = _NativeBalGateway({99: None, 100: 5})  # pre read failed
+    out = StrategyRunner._capture_native_lp_open_amounts_safe(
+        intent=SimpleNamespace(),
+        chain="arbitrum",
+        wallet_address="0xabc",
+        result=_native_open_result(blocks=(100, 100), gas=0),
+        gateway_client=gw,
+    )
+    assert out is None
+
+
+def test_capture_native_open_no_receipt_block_returns_none():
+    """No receipts → cannot pin the PRE anchor → None (never 'latest' fallback)."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    result = _native_open_result()
+    result.transaction_results = []
+    gw = _NativeBalGateway({})
+    out = StrategyRunner._capture_native_lp_open_amounts_safe(
+        intent=SimpleNamespace(),
+        chain="arbitrum",
+        wallet_address="0xabc",
+        result=result,
+        gateway_client=gw,
+    )
+    assert out is None
+    assert gw.reads == []
+
+
+def test_capture_native_close_measures_returned_plus_gas():
+    """returned = (post - pre) + gas, stamped on the native collected leg only."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    gas = 3_000_000_000_000_000
+    returned = 480_000_000_000_000_000  # 0.48 ETH back
+    pre = 10_000_000_000_000_000_000
+    post = pre + returned - gas  # wallet gained returned, paid gas
+    gw = _NativeBalGateway({99: pre, 100: post})
+    out = StrategyRunner._capture_native_lp_close_amounts_safe(
+        intent=SimpleNamespace(),
+        chain="arbitrum",
+        wallet_address="0xabc",
+        result=_native_close_result(blocks=(100, 100), gas=gas),
+        gateway_client=gw,
+    )
+    assert out == (None, returned)  # native leg filled; other slot None
+
+
+def test_capture_native_open_native_token0_leg():
+    """Native leg on token0 (index 0) is filled; ERC-20 token1 stays measured."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    gas = 1_000_000_000_000_000
+    deposit = 250_000_000_000_000_000
+    pre = 5_000_000_000_000_000_000
+    post = pre - deposit - gas
+    gw = _NativeBalGateway({99: pre, 100: post})
+    out = StrategyRunner._capture_native_lp_open_amounts_safe(
+        intent=SimpleNamespace(),
+        chain="arbitrum",
+        wallet_address="0xabc",
+        result=_native_open_result(currency0=_EEEE, currency1=_FLUID, amount0=None, amount1=7, gas=gas),
+        gateway_client=gw,
+    )
+    assert out == (deposit, None)  # native token0 filled; token1 left for stamp to preserve measured
+
+
+# ---------------------------------------------------------------------------
+# VIB-5121 (CodeRabbit Major #2) — the native bracket must stay block-anchorable
+# across the result shapes the framework actually produces, not just
+# ``transaction_results``: Gateway ``receipts`` lists, dict tx entries without a
+# ``success`` key, and dict-shaped ``total_gas_cost_wei``. Otherwise a
+# Gateway-backed native LP open silently returns None (unmeasured).
+# ---------------------------------------------------------------------------
+
+
+def _native_open_result_gateway_shape(*, blocks=(100, 100), gas=0):
+    """GatewayExecutionResult shape: an OBJECT carrying a ``receipts`` list (no
+    ``transaction_results``) — the real shape a gateway-backed run produces.
+    Native token1 leg unmeasured; ``lp_open_data`` attr set by the enricher."""
+    lp_open = SimpleNamespace(amount0=0, amount1=None, currency0=_FLUID, currency1=_EEEE)
+    return SimpleNamespace(
+        lp_open_data=lp_open,
+        extracted_data={"lp_open_data": lp_open},
+        receipts=[{"blockNumber": b} for b in blocks],
+        total_gas_cost_wei=gas,
+    )
+
+
+def test_capture_native_open_gateway_receipts_shape_is_block_anchorable():
+    """A GatewayExecutionResult (``receipts`` list, no transaction_results) still
+    anchors the bracket — first=min block, last=max block."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    gas = 2_000_000_000_000_000
+    deposit = 400_000_000_000_000_000
+    pre = 8_000_000_000_000_000_000
+    post = pre - deposit - gas
+    # bundle spans blocks 100 (approve) .. 101 (deposit): pre at 99, post at 101.
+    gw = _NativeBalGateway({99: pre, 101: post})
+    out = StrategyRunner._capture_native_lp_open_amounts_safe(
+        intent=SimpleNamespace(),
+        chain="arbitrum",
+        wallet_address="0xabc",
+        result=_native_open_result_gateway_shape(blocks=(100, 101), gas=gas),
+        gateway_client=gw,
+    )
+    assert out == (None, deposit)  # measured from the Gateway-shaped receipts
+    assert gw.reads == [99, 101]  # min-1 pre, max post
+
+
+def test_successful_receipt_block_dict_tx_without_success_key_is_counted():
+    """A dict tx-result that omits ``success`` is treated as successful (parity
+    with _collect_candidate_receipts), so its block anchors the bracket."""
+    from almanak.framework.runner.strategy_runner import _first_receipt_block, _last_receipt_block
+
+    result = SimpleNamespace(transaction_results=[{"receipt": {"blockNumber": 555}}])  # no "success" key
+    assert _first_receipt_block(result) == 555
+    assert _last_receipt_block(result) == 555
+
+
+def test_successful_receipt_block_explicit_false_success_is_dropped():
+    """An explicit ``success=False`` dict tx is dropped; falls back to receipts."""
+    from almanak.framework.runner.strategy_runner import _last_receipt_block
+
+    result = SimpleNamespace(transaction_results=[{"success": False, "receipt": {"blockNumber": 555}}])
+    assert _last_receipt_block(result) is None
+
+
+# ---------------------------------------------------------------------------
+# VIB-5121 (CodeRabbit Major #1) — _capture_native_lp_amounts_for_result is the
+# shared open+close capture used by BOTH the clean-success path AND the
+# reconciliation-incident path, so a landed-but-recon-failed native LP row still
+# carries the measured native leg (Empty != Zero on the failure lane).
+# ---------------------------------------------------------------------------
+
+
+def test_capture_native_lp_amounts_for_result_open_leg():
+    """The shared helper returns the OPEN native leg (recon path threads this)."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    gas = 1_000_000_000_000_000
+    deposit = 300_000_000_000_000_000
+    pre = 6_000_000_000_000_000_000
+    post = pre - deposit - gas
+    gw = _NativeBalGateway({99: pre, 100: post})
+    lp_open, lp_close = StrategyRunner._capture_native_lp_amounts_for_result(
+        intent=SimpleNamespace(),
+        chain="arbitrum",
+        wallet_address="0xabc",
+        result=_native_open_result(blocks=(100, 100), gas=gas),
+        gateway_client=gw,
+    )
+    assert lp_open == (None, deposit)  # native leg measured for the recon ledger row
+    assert lp_close is None  # not an LP_CLOSE result
+
+
+def test_capture_native_lp_amounts_for_result_close_leg():
+    """The shared helper returns the CLOSE native leg."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    gas = 1_000_000_000_000_000
+    returned = 200_000_000_000_000_000
+    pre = 1_000_000_000_000_000_000
+    post = pre + returned - gas
+    gw = _NativeBalGateway({99: pre, 100: post})
+    lp_open, lp_close = StrategyRunner._capture_native_lp_amounts_for_result(
+        intent=SimpleNamespace(),
+        chain="arbitrum",
+        wallet_address="0xabc",
+        result=_native_close_result(blocks=(100, 100), gas=gas),
+        gateway_client=gw,
+    )
+    assert lp_open is None  # not an LP_OPEN result
+    assert lp_close == (None, returned)  # native returned leg measured
+
+
+def test_capture_native_lp_amounts_for_result_no_gateway_both_none():
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    lp_open, lp_close = StrategyRunner._capture_native_lp_amounts_for_result(
+        intent=SimpleNamespace(),
+        chain="arbitrum",
+        wallet_address="0xabc",
+        result=_native_open_result(),
+        gateway_client=None,
+    )
+    assert lp_open is None and lp_close is None
+
+
 # VIB-5117 — _capture_v4_lp_close_native_principal_safe: PRE-burn native-leg
 # close PRINCIPAL read. A native-ETH V4 leg is returned to the wallet as raw ETH
 # (TAKE_PAIR, no Transfer), so the burn receipt leaves amount{0,1}_collected None
