@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from almanak.framework.backtesting.paper.token_overrides import TokenOverride, load_token_overrides
+from almanak.framework.anvil.token_overrides import TokenOverride, load_token_overrides
 
 
 @pytest.fixture
@@ -141,7 +141,7 @@ class TestLoadTokenOverrides:
         result = load_token_overrides("ethereum", config_path=config_file)
         assert "WEIRD" in result
         assert result["WEIRD"].decimals is None
-        assert "non-int decimals" in caplog.text
+        assert "invalid decimals" in caplog.text
 
     def test_boolean_decimals_rejected(self, config_dir, caplog):
         """Boolean decimals (True/False) are rejected, not treated as 1/0."""
@@ -153,7 +153,20 @@ class TestLoadTokenOverrides:
         result = load_token_overrides("ethereum", config_path=config_file)
         assert "BOOL" in result
         assert result["BOOL"].decimals is None
-        assert "non-int decimals" in caplog.text
+        assert "invalid decimals" in caplog.text
+
+    def test_out_of_range_decimals_ignored(self, config_dir, caplog):
+        """Negative or absurdly large decimals are rejected (set to None)."""
+        config_file = _write_config(config_dir, {
+            "ethereum": {
+                "NEG": {"address": "0xaaaa", "decimals": -1},
+                "HUGE": {"address": "0xbbbb", "decimals": 999},
+            }
+        })
+        result = load_token_overrides("ethereum", config_path=config_file)
+        assert result["NEG"].decimals is None
+        assert result["HUGE"].decimals is None
+        assert "invalid decimals" in caplog.text
 
     def test_unexpected_value_type_skipped(self, config_dir, caplog):
         """Unexpected value types (e.g., int) are skipped with warning."""
@@ -193,3 +206,25 @@ class TestTokenOverrideDataclass:
         """TokenOverride defaults decimals to None."""
         override = TokenOverride(address="0xaaaa")
         assert override.decimals is None
+
+
+class TestLegacyShimReExport:
+    """The implementation moved to ``almanak.framework.anvil.token_overrides``;
+    the old ``backtesting.paper`` path must keep re-exporting the same symbols
+    so existing importers don't break (backward-compatibility contract)."""
+
+    def test_legacy_path_reexports_canonical_symbols(self):
+        from almanak.framework.anvil.token_overrides import (
+            CONFIG_PATH as canonical_config_path,
+        )
+        from almanak.framework.anvil.token_overrides import (
+            TokenOverride as CanonicalTokenOverride,
+        )
+        from almanak.framework.anvil.token_overrides import (
+            load_token_overrides as canonical_loader,
+        )
+        from almanak.framework.backtesting.paper import token_overrides as legacy
+
+        assert legacy.TokenOverride is CanonicalTokenOverride
+        assert legacy.load_token_overrides is canonical_loader
+        assert legacy.CONFIG_PATH == canonical_config_path

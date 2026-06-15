@@ -831,8 +831,10 @@ class RollingForkManager:
         known_slots_ci = {k.lower(): v for k, v in known_slots.items()}
         token_decimals_ci = {k.lower(): v for k, v in TOKEN_DECIMALS.items()}
 
-        # Load paper-local token overrides (VIB-2378)
-        from almanak.framework.backtesting.paper.token_overrides import load_token_overrides
+        # Load paper-local token overrides (VIB-2378). Imported from the anvil
+        # package (not backtesting) so funding never pulls in report_generator
+        # /jinja2 or the paper engine — see token_overrides module docstring.
+        from almanak.framework.anvil.token_overrides import load_token_overrides
 
         paper_overrides_raw = load_token_overrides(self.chain)
         paper_overrides_ci = {k.lower(): v for k, v in paper_overrides_raw.items()}
