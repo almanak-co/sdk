@@ -889,6 +889,52 @@ class PostgresStore:
         # DESC fetch -> emit oldest-first.
         return [(r["timestamp"], r["total_value_text"], r["value_confidence"]) for r in reversed(rows)], truncated
 
+    async def get_nav_series(
+        self,
+        deployment_id: str,
+        *,
+        scan_cap: int = 200_000,
+    ) -> tuple[list[tuple[datetime, str | None, str | None]], bool]:
+        """Full NAV-component series for lifetime drawdown (VIB-5118). Postgres twin
+        of :meth:`SQLiteStore.get_nav_series` — identical contract.
+
+        Returns ``(rows, truncated)`` with ``rows`` = ``(timestamp,
+        total_value_usd_text, available_cash_usd_text)`` oldest-first. Projects
+        only the two NAV columns (no JSON blobs) and casts them ``::text`` so the
+        caller owns the Empty≠Zero decision. Newest ``scan_cap`` rows; ``truncated``
+        when the deployment held more.
+
+        The ``::text`` cast is deliberate (not an asyncpg-native ``Decimal`` decode):
+        it keeps this Postgres twin's return type byte-identical to the SQLite twin's
+        (whose column is ``TEXT``), so the facade contract is backend-agnostic — the
+        caller can never tell which backend served the row — and preserves the
+        raw-text Empty≠Zero semantics. Same pattern as :meth:`get_snapshots_in_window`.
+        """
+        if scan_cap <= 0:
+            raise ValueError(f"scan_cap must be positive, got {scan_cap}")
+        if not self._initialized:
+            await self.initialize()
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT timestamp,
+                       total_value_usd::text AS total_value_text,
+                       available_cash_usd::text AS available_cash_text
+                FROM portfolio_snapshots
+                WHERE deployment_id = $1
+                ORDER BY timestamp DESC, id DESC
+                LIMIT $2
+                """,
+                deployment_id,
+                scan_cap + 1,
+            )
+        truncated = len(rows) > scan_cap
+        if truncated:
+            rows = rows[:scan_cap]  # newest scan_cap (DESC order)
+        # DESC fetch -> emit oldest-first.
+        return [(r["timestamp"], r["total_value_text"], r["available_cash_text"]) for r in reversed(rows)], truncated
+
     async def get_snapshot_at(
         self,
         deployment_id: str,
@@ -2768,6 +2814,47 @@ class StateManager:
             self._record_metrics(StateTier.WARM, "get_snapshots_in_window", latency, False, str(e))
             logger.error(f"Failed to get windowed snapshots [{from_ts}, {to_ts}]: {e}")
             raise
+
+    async def get_nav_series(
+        self,
+        deployment_id: str,
+        *,
+        scan_cap: int = 200_000,
+    ) -> tuple[list[tuple[datetime, str | None, str | None]], bool]:
+        """Full NAV-component series for lifetime drawdown / high-watermark (VIB-5118).
+
+        Returns ``(rows, truncated)`` — see the backend method for the row shape.
+
+        **Graceful, not loud.** Like :meth:`get_recent_snapshots` (and unlike the
+        operator-requested time-travel :meth:`get_snapshots_in_window`), a backend
+        failure or missing backend returns ``([], False)`` rather than raising:
+        lifetime drawdown is a *default* header metric, and the caller degrades to
+        the recent-window drawdown when the full series is unavailable — better than
+        no drawdown at all. The failure metric is still recorded so the degrade is
+        observable.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        if not self._warm or not hasattr(self._warm, "get_nav_series"):
+            # Honour the docstring's failure-metric contract on this config-error
+            # branch too (parity with get_snapshots_in_window) so a missing backend
+            # is observable, not silent — even though the degrade itself is graceful.
+            self._record_metrics(StateTier.WARM, "get_nav_series", 0.0, False, "unsupported backend")
+            logger.warning("Cannot get NAV series: no WARM backend configured or unsupported")
+            return [], False
+
+        start = time.perf_counter()
+        try:
+            result = await self._warm.get_nav_series(deployment_id, scan_cap=scan_cap)
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_nav_series", latency, True)
+            return result
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_nav_series", latency, False, str(e))
+            logger.error(f"Failed to get NAV series for {deployment_id}: {e}")
+            return [], False
 
     async def get_snapshot_at(
         self,

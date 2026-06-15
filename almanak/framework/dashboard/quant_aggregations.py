@@ -1044,6 +1044,22 @@ def _drawdowns(snapshots: list[Any]) -> tuple[Decimal, Decimal]:
         wallet_nav = _to_decimal(v) + _to_decimal(cash)
         if wallet_nav > Decimal("0"):
             values.append(wallet_nav)
+    return _drawdown_stats(values)
+
+
+def _drawdown_stats(values: list[Decimal]) -> tuple[Decimal, Decimal]:
+    """Running-peak drawdown recurrence over an ordered wallet-NAV series.
+
+    ``values`` are positive wallet-NAVs (``total_value_usd + available_cash_usd``,
+    VIB-3884) in chronological order — already filtered to ``> 0``. Returns
+    ``(max_drawdown_pct, current_drawdown_pct)`` as positive percentages.
+
+    Extracted from :func:`_drawdowns` (VIB-5118) so the recent-window path and
+    the lifetime full-series path (:func:`lifetime_drawdowns_from_nav_text`) run
+    the **identical** recurrence — the lifetime number is byte-for-byte what
+    ``_drawdowns`` would return given the whole history instead of the 168-row
+    window, so the only thing that changes is how many rows are fed in.
+    """
     if len(values) < 2:
         return Decimal("0"), Decimal("0")
 
@@ -1059,6 +1075,31 @@ def _drawdowns(snapshots: list[Any]) -> tuple[Decimal, Decimal]:
     last = values[-1]
     current_dd = (running_max - last) / running_max if running_max > Decimal("0") else Decimal("0")
     return max_dd * Decimal("100"), current_dd * Decimal("100")
+
+
+def lifetime_drawdowns_from_nav_text(
+    rows: list[tuple[Any, str | None, str | None]],
+) -> tuple[Decimal, Decimal]:
+    """Lifetime ``(max_drawdown_pct, current_drawdown_pct)`` from a full NAV series.
+
+    ``rows`` are ``(timestamp, total_value_usd_text, available_cash_usd_text)``
+    oldest-first, as returned by ``StateManager.get_nav_series`` — the **whole**
+    snapshot history rather than the recent 168-row window that
+    :func:`_drawdowns` sees via the dashboard loader. Fixes VIB-5118, where a
+    lifetime peak/drawdown older than ~14h was silently understated because the
+    running peak only saw the recent window.
+
+    The NAV columns arrive as raw text so the Empty≠Zero decision lives here:
+    each sample's wallet-NAV is ``_to_decimal(total) + _to_decimal(cash)`` (the
+    same extraction :func:`_drawdowns` applies to snapshot objects), filtered to
+    ``> 0``, then fed through the shared :func:`_drawdown_stats` recurrence.
+    """
+    values: list[Decimal] = []
+    for _ts, total_text, cash_text in rows:
+        wallet_nav = _to_decimal(total_text) + _to_decimal(cash_text)
+        if wallet_nav > Decimal("0"):
+            values.append(wallet_nav)
+    return _drawdown_stats(values)
 
 
 def _annualised_return(initial_value: Decimal, current_value: Decimal, age_days: int) -> Decimal:
@@ -1176,6 +1217,7 @@ def compute_pnl_summary(
     ledger_entries: list[Any] | LedgerQuantStats,
     accounting_events: list[dict[str, Any]],
     position_summary: Any | None = None,
+    lifetime_drawdown: tuple[Decimal, Decimal] | None = None,
 ) -> PnLSummary:
     """Wallet-level money trail + cash buffer + primary-risk gauge.
 
@@ -1262,7 +1304,18 @@ def compute_pnl_summary(
             if pnl.open_position_count == 0:
                 pnl.open_position_count = 1
 
-    pnl.max_drawdown_pct, pnl.current_drawdown_pct = _drawdowns(snapshots)
+    # VIB-5118: prefer the lifetime drawdown (computed by the gateway over the
+    # FULL snapshot history via ``get_nav_series``) when supplied. ``snapshots``
+    # here is the recent 168-row window (VIB-5026), so ``_drawdowns(snapshots)``
+    # only sees ~14h of history — a lifetime peak/drawdown older than that is
+    # understated. When the full series is unavailable (no I/O caller, backend
+    # failure), fall back to the recent-window drawdown so behaviour is the
+    # documented graceful degrade, never an exception. List/legacy callers that
+    # pass no ``lifetime_drawdown`` are byte-for-byte unchanged.
+    if lifetime_drawdown is not None:
+        pnl.max_drawdown_pct, pnl.current_drawdown_pct = lifetime_drawdown
+    else:
+        pnl.max_drawdown_pct, pnl.current_drawdown_pct = _drawdowns(snapshots)
 
     _apply_primary_risk_gauge(pnl, position_summary, accounting_events)
 

@@ -2478,6 +2478,67 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get)
 
+    async def get_nav_series(
+        self,
+        deployment_id: str,
+        *,
+        scan_cap: int = 200_000,
+    ) -> tuple[list[tuple[datetime, str | None, str | None]], bool]:
+        """Full NAV-component series for lifetime drawdown / high-watermark (VIB-5118).
+
+        Returns ``(rows, truncated)`` where ``rows`` is ``(timestamp,
+        total_value_usd_text, available_cash_usd_text)`` oldest-first. Unlike
+        :meth:`get_recent_snapshots` (newest 168 rows — a ~14h window at the
+        5-min cadence), this projects the **whole** history so a lifetime peak
+        or drawdown older than the recent window is no longer silently
+        understated. Only the two NAV columns are projected — the JSON blobs
+        dominate transfer size and the wallet-NAV line (``total + cash``,
+        VIB-3884) does not need them.
+
+        Both columns are returned as their **raw stored text** (not parsed to
+        ``Decimal``) so the caller owns the Empty≠Zero decision: ``""`` / ``None``
+        is an unmeasured sample, never a measured ``$0``.
+
+        ``scan_cap`` bounds the fetch at the **newest** ``scan_cap`` rows (so the
+        right edge / current value is always present for the current-drawdown
+        term) and ``truncated`` is ``True`` when more existed — the caller
+        surfaces it loudly rather than presenting a capped window as lifetime.
+        VIB-5059 Phase 3's incremental fold is the unbounded-history fix.
+        """
+        if scan_cap <= 0:
+            raise ValueError(f"scan_cap must be positive, got {scan_cap}")
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_get() -> tuple[list[tuple[datetime, str | None, str | None]], bool]:
+            cursor = self._conn.execute(  # type: ignore[union-attr]
+                """
+                SELECT timestamp, total_value_usd, available_cash_usd
+                FROM portfolio_snapshots
+                WHERE deployment_id = ?
+                ORDER BY timestamp DESC, id DESC
+                LIMIT ?
+                """,
+                (deployment_id, scan_cap + 1),
+            )
+            fetched = cursor.fetchall()
+            truncated = len(fetched) > scan_cap
+            if truncated:
+                # Keep the newest scan_cap rows; DESC order already places them
+                # first, so the surplus (oldest) tail is dropped.
+                fetched = fetched[:scan_cap]
+
+            rows: list[tuple[datetime, str | None, str | None]] = []
+            for row in reversed(fetched):  # DESC fetch -> emit oldest-first
+                ts = row["timestamp"]
+                if isinstance(ts, str):
+                    ts = datetime.fromisoformat(ts)
+                rows.append((ts, row["total_value_usd"], row["available_cash_usd"]))
+            return rows, truncated
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_get)
+
     async def get_snapshot_at(
         self,
         deployment_id: str,

@@ -634,6 +634,11 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # __new__ (the established _make_servicer pattern).
         self._quant_inputs_cache: dict[str, tuple[float, Any]] = {}
         self._quant_inputs_locks: dict[str, asyncio.Lock] = {}
+        # VIB-5118: PnL-only lifetime-drawdown cache (separate from the shared
+        # quant-input load so GetCostStack/GetAuditPosture never pay the full-history
+        # NAV scan). Same TTL/single-flight discipline as the quant-input cache.
+        self._lifetime_dd_cache: dict[str, tuple[float, tuple[Decimal, Decimal] | None]] = {}
+        self._lifetime_dd_locks: dict[str, asyncio.Lock] = {}
         self._portfolio_chain: PortfolioProviderChain | None = None
 
         # VIB-4493 Phase 1C/D: cross-servicer reference to PositionService for
@@ -2187,6 +2192,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         if latest_snapshot is not None:
             position_summary = _QuantPositionSummary(latest_snapshot)
 
+        # VIB-5118: lifetime drawdown is intentionally NOT loaded here. It is a
+        # PnL-surface-only concern (only GetPnLSummary surfaces drawdown), and
+        # the FULL-history ``get_nav_series`` scan it needs is expensive — folding
+        # it into this shared loader would make GetCostStack / GetAuditPosture pay
+        # for a scan they discard. It lives behind its own cached accessor
+        # (:meth:`_get_lifetime_drawdown`) called only by GetPnLSummary.
         return portfolio_metrics, snapshots, ledger_stats, accounting_events, position_summary
 
     async def _get_quant_inputs(
@@ -2244,6 +2255,64 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             }
             return inputs
 
+    async def _get_lifetime_drawdown(self, deployment_id: str) -> tuple[Decimal, Decimal] | None:
+        """Lifetime ``(max_drawdown_pct, current_drawdown_pct)`` over FULL history (VIB-5118).
+
+        TTL-cached + single-flight, mirroring :meth:`_get_quant_inputs`. **Deliberately
+        separate from the shared quant-input load**: only ``GetPnLSummary`` surfaces
+        drawdown, and the ``get_nav_series`` scan this needs walks the whole snapshot
+        history (up to ``scan_cap`` rows) — folding it into ``_load_quant_inputs`` would
+        make ``GetCostStack`` / ``GetAuditPosture`` pay for a scan they discard (Codex
+        review of PR #2801). Keeping it behind this PnL-only accessor preserves the
+        bounded-load design while still rate-limiting rapid PnL polls.
+
+        Returns ``None`` (→ ``compute_pnl_summary`` degrades to the recent-window
+        drawdown) when there is no series or the backend read fails — never raises.
+        """
+        from almanak.framework.dashboard.quant_aggregations import lifetime_drawdowns_from_nav_text
+
+        if not hasattr(self, "_lifetime_dd_cache"):
+            self._lifetime_dd_cache = {}
+            self._lifetime_dd_locks = {}
+        ttl = getattr(self, "_quant_inputs_ttl_seconds", _QUANT_INPUTS_CACHE_TTL_SECONDS)
+
+        cached = self._lifetime_dd_cache.get(deployment_id)
+        if cached is not None and time.monotonic() - cached[0] < ttl:
+            return cached[1]
+
+        lock = self._lifetime_dd_locks.setdefault(deployment_id, asyncio.Lock())
+        async with lock:
+            cached = self._lifetime_dd_cache.get(deployment_id)
+            if cached is not None and time.monotonic() - cached[0] < ttl:
+                return cached[1]
+
+            lifetime_drawdown: tuple[Decimal, Decimal] | None = None
+            if self._state_manager is not None:
+                try:
+                    nav_rows, truncated = await self._state_manager.get_nav_series(deployment_id)
+                    if nav_rows:
+                        lifetime_drawdown = lifetime_drawdowns_from_nav_text(nav_rows)
+                        if truncated:
+                            logger.warning(
+                                "NAV series truncated at scan_cap for %s — lifetime drawdown "
+                                "computed over the newest window, not full history",
+                                deployment_id,
+                            )
+                except Exception:
+                    logger.debug("get_nav_series failed for %s", deployment_id, exc_info=True)
+
+            now = time.monotonic()
+            self._lifetime_dd_cache = {
+                key: value for key, value in self._lifetime_dd_cache.items() if now - value[0] < ttl
+            }
+            self._lifetime_dd_cache[deployment_id] = (now, lifetime_drawdown)
+            self._lifetime_dd_locks = {
+                key: existing
+                for key, existing in self._lifetime_dd_locks.items()
+                if key in self._lifetime_dd_cache or existing.locked()
+            }
+            return lifetime_drawdown
+
     async def GetPnLSummary(
         self,
         request: gateway_pb2.GetPnLSummaryRequest,
@@ -2276,12 +2345,17 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             position_summary,
         ) = await self._get_quant_inputs(deployment_id)
 
+        # VIB-5118: lifetime drawdown over full history — PnL-surface-only, fetched
+        # behind its own cached accessor so the cost/audit surfaces don't pay for it.
+        lifetime_drawdown = await self._get_lifetime_drawdown(deployment_id)
+
         pnl = compute_pnl_summary(
             portfolio_metrics=portfolio_metrics,
             snapshots=snapshots,
             ledger_entries=ledger_stats,
             accounting_events=accounting_events,
             position_summary=position_summary,
+            lifetime_drawdown=lifetime_drawdown,
         )
 
         return gateway_pb2.PnLSummary(
@@ -2426,6 +2500,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # surface anchors them — so the dashboard and accountant test
         # agree. Recompute the PnL slice (cheap; same inputs already
         # loaded) rather than baking those values into a separate config.
+        # VIB-5118: no lifetime_drawdown here — AuditPosture carries no drawdown
+        # field (it only reads pnl.deployed_usd / pnl.nav_usd), so it must not
+        # trigger the full-history scan that GetPnLSummary's accessor does.
         pnl = compute_pnl_summary(
             portfolio_metrics=portfolio_metrics,
             snapshots=snapshots,
