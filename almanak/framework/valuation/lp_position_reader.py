@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from almanak.connectors._strategy_base.address_registry import AddressRegistry
+from almanak.connectors._strategy_base.contract_role_registry import (
+    CONTRACT_ROLE_REGISTRY,
+    ContractRole,
+)
 from almanak.core.chains import ChainRegistry
 
 logger = logging.getLogger(__name__)
@@ -36,20 +40,33 @@ SLOT0_SELECTOR = "0x3850c7bd"  # slot0()
 
 @dataclass
 class LPPositionOnChain:
-    """Full on-chain state of a V3 LP position.
+    """Full on-chain state of a V3 (or Slipstream CL) LP position.
 
     Decoded from NonfungiblePositionManager.positions(tokenId).
+
+    Uniswap-V3-family and Aerodrome/Velodrome **Slipstream** CL positions
+    share the same selector (``positions(uint256)``) and 12-word return
+    layout for every field this valuer uses (token0/1, tick range, liquidity,
+    uncollected fees). They differ at exactly one word: V3 word [4] is the
+    ``fee`` tier (bps), whereas Slipstream word [4] is ``tickSpacing`` (the CL
+    NPM has no per-position ``fee`` field). ``fee`` is therefore ``None`` for
+    Slipstream (unmeasured — Empty ≠ Zero; the CL NPM does not report it) and
+    ``tick_spacing`` carries the CL value. The valuation math
+    (``value_lp_position``) consumes neither field, so both paths value
+    identically; the split exists only so each field carries truthful
+    provenance.
     """
 
     token_id: int
     token0: str  # Token0 contract address
     token1: str  # Token1 contract address
-    fee: int  # Fee tier (100, 500, 3000, 10000)
+    fee: int | None  # V3 fee tier (100/500/3000/10000); None for Slipstream CL
     tick_lower: int
     tick_upper: int
     liquidity: int
     tokens_owed0: int  # Uncollected fees in token0 (wei)
     tokens_owed1: int  # Uncollected fees in token1 (wei)
+    tick_spacing: int | None = None  # Slipstream CL tick spacing; None for V3
 
     @property
     def is_active(self) -> bool:
@@ -57,8 +74,14 @@ class LPPositionOnChain:
         return self.liquidity > 0
 
     @property
-    def fee_tier_percent(self) -> Decimal:
-        """Fee tier as a percentage (e.g., 0.3 for 3000)."""
+    def fee_tier_percent(self) -> Decimal | None:
+        """Fee tier as a percentage (e.g., 0.3 for 3000).
+
+        ``None`` when the underlying NPM does not report a ``fee`` field
+        (Slipstream CL keys liquidity on ``tick_spacing`` instead).
+        """
+        if self.fee is None:
+            return None
         return Decimal(self.fee) / Decimal("10000")
 
 
@@ -123,7 +146,7 @@ class LPPositionReader:
         if not result_hex:
             return None
 
-        return _parse_position_hex(result_hex, token_id)
+        return _parse_position_hex(result_hex, token_id, slipstream=_is_slipstream_protocol(protocol))
 
     def read_pool_slot0(
         self,
@@ -182,23 +205,63 @@ class LPPositionReader:
             return None
 
     def _resolve_position_manager(self, chain: str, protocol: str) -> str | None:
-        """Resolve the position manager address for a protocol/chain.
+        """Resolve the NonfungiblePositionManager address for a protocol/chain.
 
-        Connector-owned via ``AddressRegistry`` (kinds ``position_manager``
-        / ``nft`` — PancakeSwap records its NonfungiblePositionManager
-        under ``nft``). The chain is alias-normalized first: the legacy
-        dicts here were keyed ``"bnb"`` while callers and connector tables
-        use canonical ``"bsc"``. Unknown protocols fall back to the
-        Uniswap V3 manager (most forks share the interface), preserving
-        the legacy fallback; misses stay ``None`` (fail-closed).
+        Resolution order (connector-owned throughout — never a hardcoded
+        address):
+
+        1. **Contract-role ``CL_POSITION_MANAGER``** (VIB-5141). The
+           ``CONTRACT_ROLE_REGISTRY`` knows each connector's semantic-role →
+           private-kind map *and* its ``address_protocol`` alias, so it
+           resolves slugs that ``AddressRegistry`` cannot see directly — the
+           ``aerodrome_slipstream`` pseudo-slug's ``CL_POSITION_MANAGER`` role
+           maps to the ``cl_nft`` kind on the ``aerodrome`` table. Only the CL
+           role is consulted here: it is the genuine V3-NFT-shaped
+           ``positions(uint256)`` manager. ``LP_POSITION_MANAGER`` is
+           deliberately NOT followed — for Aerodrome / TraderJoe V2 it maps to
+           the *fungible*-LP router (a swap router / LBRouter), which is not a
+           ``positions(uint256)`` NFT manager and must not be fed to this
+           V3-shaped reader.
+        2. **Legacy AddressRegistry kinds** (``position_manager`` / ``nft`` —
+           PancakeSwap records its NPM under ``nft``) for V3-family slugs that
+           predate the role registry.
+        3. **Uniswap V3 fallback** — unknown protocols share the V3 interface.
+
+        The chain is alias-normalized first (legacy dicts were keyed ``"bnb"``
+        while callers / connector tables use canonical ``"bsc"``). Misses stay
+        ``None`` (fail-closed), so a failed resolution degrades valuation to
+        UNAVAILABLE rather than fabricating a value.
         """
         descriptor = ChainRegistry.try_resolve(chain)
         canonical = descriptor.name if descriptor is not None else chain.lower()
+
+        role_addr = self._resolve_npm_by_role(protocol, canonical)
+        if role_addr:
+            return role_addr
+
         kinds = ("position_manager", "nft")
         addr = AddressRegistry.resolve_contract_address(protocol, canonical, kinds)
         if addr:
             return addr
         return AddressRegistry.resolve_contract_address("uniswap_v3", canonical, kinds)
+
+    @staticmethod
+    def _resolve_npm_by_role(protocol: str, canonical_chain: str) -> str | None:
+        """Resolve the CL NonfungiblePositionManager via the contract-role registry.
+
+        Consults only the ``CL_POSITION_MANAGER`` role — the genuine
+        V3-NFT-shaped ``positions(uint256)`` manager for a concentrated-liquidity
+        slug (``aerodrome_slipstream`` → ``cl_nft`` on the ``aerodrome`` table).
+        Resolves against the slug's ``address_protocol`` so a pseudo-slug riding
+        another connector's table is found. ``None`` when the slug declares no CL
+        role (V3-family slugs fall through to the legacy ``AddressRegistry``
+        lookup, byte-for-byte unchanged) or none is present on the chain.
+        """
+        kinds = CONTRACT_ROLE_REGISTRY.kinds_for(protocol, ContractRole.CL_POSITION_MANAGER)
+        if not kinds:
+            return None
+        address_protocol = CONTRACT_ROLE_REGISTRY.address_protocol(protocol)
+        return AddressRegistry.resolve_contract_address(address_protocol, canonical_chain, kinds)
 
 
 # ---------------------------------------------------------------------------
@@ -206,14 +269,36 @@ class LPPositionReader:
 # ---------------------------------------------------------------------------
 
 
-def _parse_position_hex(hex_result: str, token_id: int) -> LPPositionOnChain | None:
+def _is_slipstream_protocol(protocol: str) -> bool:
+    """Whether ``protocol`` uses the Slipstream CL NPM positions() layout.
+
+    Connector-owned, never a hardcoded slug: a protocol uses the Slipstream
+    layout iff it declares the ``CL_POSITION_MANAGER`` contract role (only
+    ``aerodrome_slipstream`` today). This is the same registry signal the
+    resolver uses to find the CL NPM address, so the address lookup and the
+    struct-layout choice cannot drift apart.
+    """
+    return bool(CONTRACT_ROLE_REGISTRY.kinds_for(protocol, ContractRole.CL_POSITION_MANAGER))
+
+
+def _parse_position_hex(hex_result: str, token_id: int, *, slipstream: bool = False) -> LPPositionOnChain | None:
     """Parse hex response from positions(uint256) call.
 
-    The return struct has 12 words (32 bytes each = 64 hex chars):
-    [0] nonce, [1] operator, [2] token0, [3] token1, [4] fee,
-    [5] tickLower, [6] tickUpper, [7] liquidity,
-    [8] feeGrowthInside0LastX128, [9] feeGrowthInside1LastX128,
-    [10] tokensOwed0, [11] tokensOwed1
+    Both Uniswap-V3-family and Aerodrome/Velodrome **Slipstream** CL NPMs
+    return a 12-word struct (32 bytes / 64 hex chars each) with identical
+    layout for every field this valuer consumes:
+    ``[0] nonce, [1] operator, [2] token0, [3] token1, [4] fee|tickSpacing,
+    [5] tickLower, [6] tickUpper, [7] liquidity, [8] feeGrowthInside0LastX128,
+    [9] feeGrowthInside1LastX128, [10] tokensOwed0, [11] tokensOwed1``.
+
+    The single divergence is word [4]: Uniswap V3 encodes the ``fee`` tier
+    (uint24 bps) there, whereas Slipstream CL encodes ``tickSpacing`` (int24)
+    — its NPM has no per-position ``fee`` field. When ``slipstream`` is set we
+    decode word [4] as ``tick_spacing`` (signed int24, matching the ABI) and
+    leave ``fee`` ``None`` (unmeasured — Empty ≠ Zero; the CL NPM does not
+    report a fee). Both layouts feed the same valuation math, which reads
+    neither field. Slipstream layout confirmed against the Aerodrome connector
+    ABI ``almanak/connectors/aerodrome/abis/cl_nft.json`` (VIB-5141).
     """
     hex_data = hex_result[2:] if hex_result.startswith("0x") else hex_result
 
@@ -227,12 +312,13 @@ def _parse_position_hex(hex_result: str, token_id: int) -> LPPositionOnChain | N
             token_id=token_id,
             token0=_decode_address_hex(hex_data, 2),
             token1=_decode_address_hex(hex_data, 3),
-            fee=_decode_uint_hex(hex_data, 4),
+            fee=None if slipstream else _decode_uint_hex(hex_data, 4),
             tick_lower=_decode_int24_hex(hex_data, 5),
             tick_upper=_decode_int24_hex(hex_data, 6),
             liquidity=_decode_uint_hex(hex_data, 7),
             tokens_owed0=_decode_uint_hex(hex_data, 10),
             tokens_owed1=_decode_uint_hex(hex_data, 11),
+            tick_spacing=_decode_int24_hex(hex_data, 4) if slipstream else None,
         )
     except Exception:
         logger.debug("Failed to parse position #%d hex data", token_id, exc_info=True)
