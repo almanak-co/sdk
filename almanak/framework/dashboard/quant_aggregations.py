@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -1047,6 +1048,97 @@ def _drawdowns(snapshots: list[Any]) -> tuple[Decimal, Decimal]:
     return _drawdown_stats(values)
 
 
+@dataclass(frozen=True)
+class DrawdownState:
+    """Resumable running-peak drawdown fold over a wallet-NAV series (VIB-5134).
+
+    Represents the drawdown recurrence after folding some chronological prefix of
+    a wallet-NAV series. Folding the remaining suffix via :func:`fold_drawdowns`
+    is **byte-identical** to a single :func:`_drawdown_stats` recompute over the
+    whole series — the recurrence is associative in the running peak — so the
+    gateway can keep current-drawdown live by folding only the snapshots newer
+    than a cursor instead of re-scanning the full history every render.
+
+    Fields hold raw recurrence state; ``max_drawdown`` is a **fraction** in
+    ``[0, 1)`` (converted to a percentage only at the property boundary, mirroring
+    :func:`_drawdown_stats`'s final ``* 100``). ``running_peak`` / ``latest_nav``
+    are ``None`` only before any positive sample has been folded.
+    """
+
+    running_peak: Decimal | None = None
+    max_drawdown: Decimal = Decimal("0")  # fraction in [0, 1)
+    latest_nav: Decimal | None = None
+
+    @property
+    def max_drawdown_pct(self) -> Decimal:
+        return self.max_drawdown * Decimal("100")
+
+    @property
+    def current_drawdown_pct(self) -> Decimal:
+        if self.running_peak is None or self.running_peak <= Decimal("0") or self.latest_nav is None:
+            return Decimal("0")
+        return (self.running_peak - self.latest_nav) / self.running_peak * Decimal("100")
+
+    def as_pcts(self) -> tuple[Decimal, Decimal]:
+        """``(max_drawdown_pct, current_drawdown_pct)`` — the dashboard tuple."""
+        return self.max_drawdown_pct, self.current_drawdown_pct
+
+
+_EMPTY_DRAWDOWN_STATE = DrawdownState()
+
+
+def fold_drawdowns(state: DrawdownState, navs: Iterable[Decimal]) -> DrawdownState:
+    """Fold additional positive wallet-NAVs (chronological) into ``state`` (VIB-5134).
+
+    ``navs`` MUST already be filtered to ``> 0`` (the Empty≠Zero decision lives in
+    the caller / :func:`fold_nav_text`). The running-peak recurrence is resumable:
+    ``fold_drawdowns(fold_drawdowns(EMPTY, A), B)`` equals
+    ``fold_drawdowns(EMPTY, A + B)`` for any split — which is what lets the gateway
+    advance a checkpoint by only the newest snapshots and still report the lifetime
+    figure a full recompute would.
+    """
+    running_peak = state.running_peak
+    max_dd = state.max_drawdown
+    latest = state.latest_nav
+    for nav in navs:
+        if running_peak is None or nav > running_peak:
+            running_peak = nav
+        # running_peak >= nav > 0 here, so the division is always well-defined.
+        dd = (running_peak - nav) / running_peak
+        if dd > max_dd:
+            max_dd = dd
+        latest = nav
+    return DrawdownState(running_peak=running_peak, max_drawdown=max_dd, latest_nav=latest)
+
+
+def _wallet_navs_from_nav_text(rows: Iterable[tuple[Any, ...]]) -> list[Decimal]:
+    """Positive wallet-NAVs from ``get_nav_series`` rows (the Empty≠Zero filter).
+
+    Reads ``total_value_usd`` / ``available_cash_usd`` by position (row[1], row[2])
+    so it is tolerant of the row arity — the reader now appends ``id`` (VIB-5134)
+    but legacy 3-tuples still extract identically. Each wallet-NAV is
+    ``_to_decimal(total) + _to_decimal(cash)`` (matching :func:`_drawdowns`),
+    filtered to ``> 0`` so ``""`` / ``None`` / garbage (unmeasured) drop out.
+    """
+    navs: list[Decimal] = []
+    for row in rows:
+        wallet_nav = _to_decimal(row[1]) + _to_decimal(row[2])
+        if wallet_nav > Decimal("0"):
+            navs.append(wallet_nav)
+    return navs
+
+
+def fold_nav_text(state: DrawdownState, rows: Iterable[tuple[Any, ...]]) -> DrawdownState:
+    """Fold ``get_nav_series`` text rows into ``state`` (VIB-5134).
+
+    Thin bridge between the raw-text reader rows and the numeric
+    :func:`fold_drawdowns`: applies the Empty≠Zero filter
+    (:func:`_wallet_navs_from_nav_text`) then folds. Used both for the full-history
+    seed (``state=_EMPTY_DRAWDOWN_STATE``) and the gateway's incremental advance.
+    """
+    return fold_drawdowns(state, _wallet_navs_from_nav_text(rows))
+
+
 def _drawdown_stats(values: list[Decimal]) -> tuple[Decimal, Decimal]:
     """Running-peak drawdown recurrence over an ordered wallet-NAV series.
 
@@ -1056,50 +1148,38 @@ def _drawdown_stats(values: list[Decimal]) -> tuple[Decimal, Decimal]:
 
     Extracted from :func:`_drawdowns` (VIB-5118) so the recent-window path and
     the lifetime full-series path (:func:`lifetime_drawdowns_from_nav_text`) run
-    the **identical** recurrence — the lifetime number is byte-for-byte what
-    ``_drawdowns`` would return given the whole history instead of the 168-row
-    window, so the only thing that changes is how many rows are fed in.
+    the **identical** recurrence. Since VIB-5134 the recurrence itself lives in
+    :func:`fold_drawdowns`, so the windowed path, the lifetime path, and the
+    gateway's incremental fold are provably one algorithm. The ``< 2`` guard
+    preserves the original ``(0, 0)`` for empty / single-sample histories.
     """
+    # Presentational guard only: fold_drawdowns independently yields (0, 0) for an
+    # empty or single-sample series (current = (peak - peak) / peak = 0), so this is
+    # the original VIB-5118 contract made explicit, not a second source of truth.
     if len(values) < 2:
         return Decimal("0"), Decimal("0")
-
-    running_max = values[0]
-    max_dd = Decimal("0")
-    for v in values:
-        if v > running_max:
-            running_max = v
-        dd = (running_max - v) / running_max if running_max > Decimal("0") else Decimal("0")
-        if dd > max_dd:
-            max_dd = dd
-
-    last = values[-1]
-    current_dd = (running_max - last) / running_max if running_max > Decimal("0") else Decimal("0")
-    return max_dd * Decimal("100"), current_dd * Decimal("100")
+    return fold_drawdowns(_EMPTY_DRAWDOWN_STATE, values).as_pcts()
 
 
 def lifetime_drawdowns_from_nav_text(
-    rows: list[tuple[Any, str | None, str | None]],
+    rows: list[tuple[Any, ...]],
 ) -> tuple[Decimal, Decimal]:
     """Lifetime ``(max_drawdown_pct, current_drawdown_pct)`` from a full NAV series.
 
-    ``rows`` are ``(timestamp, total_value_usd_text, available_cash_usd_text)``
+    ``rows`` are ``(timestamp, total_value_usd_text, available_cash_usd_text, id)``
     oldest-first, as returned by ``StateManager.get_nav_series`` — the **whole**
     snapshot history rather than the recent 168-row window that
     :func:`_drawdowns` sees via the dashboard loader. Fixes VIB-5118, where a
     lifetime peak/drawdown older than ~14h was silently understated because the
     running peak only saw the recent window.
 
-    The NAV columns arrive as raw text so the Empty≠Zero decision lives here:
-    each sample's wallet-NAV is ``_to_decimal(total) + _to_decimal(cash)`` (the
-    same extraction :func:`_drawdowns` applies to snapshot objects), filtered to
-    ``> 0``, then fed through the shared :func:`_drawdown_stats` recurrence.
+    The NAV columns arrive as raw text so the Empty≠Zero decision lives in
+    :func:`_wallet_navs_from_nav_text`; the filtered series is then fed through
+    the shared :func:`fold_drawdowns` recurrence. Equivalent to
+    ``fold_nav_text(EMPTY, rows).as_pcts()``; kept as a named entry point for the
+    full-scan callers and the VIB-5118 regression suite.
     """
-    values: list[Decimal] = []
-    for _ts, total_text, cash_text in rows:
-        wallet_nav = _to_decimal(total_text) + _to_decimal(cash_text)
-        if wallet_nav > Decimal("0"):
-            values.append(wallet_nav)
-    return _drawdown_stats(values)
+    return fold_nav_text(_EMPTY_DRAWDOWN_STATE, rows).as_pcts()
 
 
 def _annualised_return(initial_value: Decimal, current_value: Decimal, age_days: int) -> Decimal:

@@ -893,16 +893,27 @@ class PostgresStore:
         self,
         deployment_id: str,
         *,
+        since: tuple[datetime, int] | None = None,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None]], bool]:
-        """Full NAV-component series for lifetime drawdown (VIB-5118). Postgres twin
+    ) -> tuple[list[tuple[datetime, str | None, str | None, int]], bool]:
+        """NAV-component series for lifetime drawdown (VIB-5118/5134). Postgres twin
         of :meth:`SQLiteStore.get_nav_series` — identical contract.
 
         Returns ``(rows, truncated)`` with ``rows`` = ``(timestamp,
-        total_value_usd_text, available_cash_usd_text)`` oldest-first. Projects
-        only the two NAV columns (no JSON blobs) and casts them ``::text`` so the
-        caller owns the Empty≠Zero decision. Newest ``scan_cap`` rows; ``truncated``
-        when the deployment held more.
+        total_value_usd_text, available_cash_usd_text, id)`` oldest-first. Projects
+        only the two NAV columns (no JSON blobs) plus the row ``id`` cursor
+        tiebreaker, and casts the NAV columns ``::text`` so the caller owns the
+        Empty≠Zero decision.
+
+        Two fetch modes (VIB-5134), mirroring the SQLite twin:
+
+        - ``since=None`` (full scan): newest ``scan_cap`` rows, oldest-first;
+          ``truncated`` when older history was dropped.
+        - ``since=(last_ts, last_id)`` (incremental): rows strictly after the
+          cursor — ``timestamp > last_ts OR (timestamp = last_ts AND id >
+          last_id)`` — ordered ASC (oldest-first), keeping the oldest
+          ``scan_cap`` after the cursor so a fold has no gap; ``truncated`` means
+          more new rows remain.
 
         The ``::text`` cast is deliberate (not an asyncpg-native ``Decimal`` decode):
         it keeps this Postgres twin's return type byte-identical to the SQLite twin's
@@ -915,25 +926,42 @@ class PostgresStore:
         if not self._initialized:
             await self.initialize()
 
+        clauses = ["deployment_id = $1"]
+        args: list[object] = [deployment_id]
+        if since is not None:
+            since_ts, since_id = since
+            args.append(since_ts)
+            ts_pos = len(args)
+            args.append(since_id)
+            id_pos = len(args)
+            # Composite (timestamp, id) cursor: rows strictly after it.
+            clauses.append(f"(timestamp > ${ts_pos} OR (timestamp = ${ts_pos} AND id > ${id_pos}))")
+        args.append(scan_cap + 1)
+        limit_pos = len(args)
+        # Full scan keeps the newest cap (DESC) then reverses; incremental keeps the
+        # oldest cap after the cursor (ASC, already oldest-first) for gapless paging.
+        order = "ASC, id ASC" if since is not None else "DESC, id DESC"
+
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT timestamp,
                        total_value_usd::text AS total_value_text,
-                       available_cash_usd::text AS available_cash_text
+                       available_cash_usd::text AS available_cash_text,
+                       id
                 FROM portfolio_snapshots
-                WHERE deployment_id = $1
-                ORDER BY timestamp DESC, id DESC
-                LIMIT $2
+                WHERE {" AND ".join(clauses)}
+                ORDER BY timestamp {order}
+                LIMIT ${limit_pos}
                 """,
-                deployment_id,
-                scan_cap + 1,
+                *args,
             )
         truncated = len(rows) > scan_cap
         if truncated:
-            rows = rows[:scan_cap]  # newest scan_cap (DESC order)
-        # DESC fetch -> emit oldest-first.
-        return [(r["timestamp"], r["total_value_text"], r["available_cash_text"]) for r in reversed(rows)], truncated
+            rows = rows[:scan_cap]  # newest (DESC) / oldest-after-cursor (ASC) scan_cap
+        # Incremental (ASC) is already oldest-first; full (DESC) is reversed.
+        ordered = rows if since is not None else list(reversed(rows))
+        return [(r["timestamp"], r["total_value_text"], r["available_cash_text"], r["id"]) for r in ordered], truncated
 
     async def get_snapshot_at(
         self,
@@ -2819,11 +2847,15 @@ class StateManager:
         self,
         deployment_id: str,
         *,
+        since: tuple[datetime, int] | None = None,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None]], bool]:
-        """Full NAV-component series for lifetime drawdown / high-watermark (VIB-5118).
+    ) -> tuple[list[tuple[datetime, str | None, str | None, int]], bool]:
+        """NAV-component series for lifetime drawdown / high-watermark (VIB-5118/5134).
 
-        Returns ``(rows, truncated)`` — see the backend method for the row shape.
+        Returns ``(rows, truncated)`` — see the backend method for the row shape and
+        the two fetch modes. ``since=(last_ts, last_id)`` requests only the snapshots
+        newer than a cursor (the incremental-fold path); ``since=None`` is the full
+        history scan.
 
         **Graceful, not loud.** Like :meth:`get_recent_snapshots` (and unlike the
         operator-requested time-travel :meth:`get_snapshots_in_window`), a backend
@@ -2846,7 +2878,7 @@ class StateManager:
 
         start = time.perf_counter()
         try:
-            result = await self._warm.get_nav_series(deployment_id, scan_cap=scan_cap)
+            result = await self._warm.get_nav_series(deployment_id, since=since, scan_cap=scan_cap)
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_nav_series", latency, True)
             return result

@@ -71,10 +71,10 @@ def _total_for(i: int) -> Decimal:
     return _RECENT
 
 
-def _nav_text_rows() -> list[tuple[datetime, str | None, str | None]]:
-    # (timestamp, total_value_usd_text, available_cash_usd_text) oldest-first,
-    # cash 0 so wallet-NAV == total.
-    return [(_BASE_TS + timedelta(minutes=i), str(_total_for(i)), "0") for i in range(_TOTAL_COUNT)]
+def _nav_text_rows() -> list[tuple[datetime, str | None, str | None, int]]:
+    # (timestamp, total_value_usd_text, available_cash_usd_text, id) oldest-first,
+    # cash 0 so wallet-NAV == total. id mirrors insertion order (VIB-5134 cursor).
+    return [(_BASE_TS + timedelta(minutes=i), str(_total_for(i)), "0", i) for i in range(_TOTAL_COUNT)]
 
 
 def _snap(i: int) -> PortfolioSnapshot:
@@ -197,6 +197,11 @@ async def test_get_nav_series_returns_full_history_oldest_first(store: SQLiteSto
     assert rows[0][1] == "100"
     assert rows[-1][1] == "95"
     assert [r[0] for r in rows] == sorted(r[0] for r in rows)
+    # VIB-5134: the row id (4th element) is projected and ascends with oldest-first
+    # order — it is the cursor tiebreaker for incremental folds.
+    ids = [r[3] for r in rows]
+    assert all(isinstance(i, int) for i in ids)
+    assert ids == sorted(ids)
 
 
 @pytest.mark.asyncio
@@ -262,7 +267,7 @@ async def test_facade_get_nav_series_empty_when_warm_lacks_method() -> None:
 @pytest.mark.asyncio
 async def test_facade_get_nav_series_swallows_backend_error() -> None:
     class _Boom:
-        async def get_nav_series(self, deployment_id: str, *, scan_cap: int = 200_000):
+        async def get_nav_series(self, deployment_id: str, *, since=None, scan_cap: int = 200_000):
             raise RuntimeError("db down")
 
     sm = _bare_state_manager(_Boom())
@@ -355,25 +360,35 @@ async def test_shared_loader_does_not_scan_nav_series_only_pnl_accessor_does(sto
 
 
 @pytest.mark.asyncio
-async def test_get_lifetime_drawdown_caches_within_ttl(store: SQLiteStore) -> None:
-    # Rapid PnL polls within the TTL coalesce to a single scan (the bounded-load
-    # discipline the gateway is designed around).
+async def test_full_history_scan_fires_once_per_ttl_then_incremental(store: SQLiteStore) -> None:
+    # VIB-5134: within the (longer) full-scan TTL the EXPENSIVE full-history scan
+    # fires exactly ONCE; subsequent renders advance the checkpoint with a cheap
+    # incremental "fetch since cursor" fold (NOT another full scan), so
+    # current-drawdown stays live without re-walking history every render. This is
+    # the read-cost win — it replaces "O(history) scan every render" with
+    # "O(history) once per TTL + O(new rows) per render".
     await _seed(store, _TOTAL_COUNT)
     svc = _servicer_over(store)
+    svc._lifetime_dd_ttl_seconds = 1000.0  # keep the 2nd call inside the full-scan TTL
 
-    scans = {"n": 0}
+    full_scans = {"n": 0}
+    incremental = {"n": 0}
     real = svc._state_manager.get_nav_series
 
-    async def _count(*a: Any, **k: Any) -> Any:
-        scans["n"] += 1
+    async def _spy(*a: Any, **k: Any) -> Any:
+        if k.get("since") is None:
+            full_scans["n"] += 1
+        else:
+            incremental["n"] += 1
         return await real(*a, **k)
 
-    svc._state_manager.get_nav_series = _count  # type: ignore[method-assign]
+    svc._state_manager.get_nav_series = _spy  # type: ignore[method-assign]
 
     first = await svc._get_lifetime_drawdown(_DEP)
     second = await svc._get_lifetime_drawdown(_DEP)
     assert first == second == (Decimal("40"), Decimal("5"))
-    assert scans["n"] == 1, "second call within TTL must be served from cache"
+    assert full_scans["n"] == 1, "the expensive full-history scan fires once within the TTL"
+    assert incremental["n"] == 1, "the 2nd render advances via a cheap incremental (since=) fold"
 
 
 @pytest.mark.asyncio

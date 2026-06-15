@@ -2482,58 +2482,104 @@ class SQLiteStore:
         self,
         deployment_id: str,
         *,
+        since: tuple[datetime, int] | None = None,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None]], bool]:
-        """Full NAV-component series for lifetime drawdown / high-watermark (VIB-5118).
+    ) -> tuple[list[tuple[datetime, str | None, str | None, int]], bool]:
+        """NAV-component series for lifetime drawdown / high-watermark (VIB-5118/5134).
 
         Returns ``(rows, truncated)`` where ``rows`` is ``(timestamp,
-        total_value_usd_text, available_cash_usd_text)`` oldest-first. Unlike
+        total_value_usd_text, available_cash_usd_text, id)`` oldest-first. Unlike
         :meth:`get_recent_snapshots` (newest 168 rows — a ~14h window at the
-        5-min cadence), this projects the **whole** history so a lifetime peak
-        or drawdown older than the recent window is no longer silently
-        understated. Only the two NAV columns are projected — the JSON blobs
-        dominate transfer size and the wallet-NAV line (``total + cash``,
-        VIB-3884) does not need them.
+        5-min cadence), the default (``since=None``) projects the **whole**
+        history so a lifetime peak or drawdown older than the recent window is no
+        longer silently understated. Only the two NAV columns are projected (the
+        JSON blobs dominate transfer size and the wallet-NAV line ``total + cash``,
+        VIB-3884, does not need them) plus the row ``id``, which is the cursor
+        tiebreaker for incremental folds.
 
-        Both columns are returned as their **raw stored text** (not parsed to
+        Both NAV columns are returned as their **raw stored text** (not parsed to
         ``Decimal``) so the caller owns the Empty≠Zero decision: ``""`` / ``None``
         is an unmeasured sample, never a measured ``$0``.
 
-        ``scan_cap`` bounds the fetch at the **newest** ``scan_cap`` rows (so the
-        right edge / current value is always present for the current-drawdown
-        term) and ``truncated`` is ``True`` when more existed — the caller
-        surfaces it loudly rather than presenting a capped window as lifetime.
-        VIB-5059 Phase 3's incremental fold is the unbounded-history fix.
+        **Two fetch modes** (VIB-5134 — the incremental "fetch since cursor"):
+
+        - ``since=None`` (full scan): the **newest** ``scan_cap`` rows are kept
+          (so the right edge / current value is always present for the
+          current-drawdown term), emitted oldest-first; ``truncated`` is ``True``
+          when older history was dropped — surfaced loudly rather than presented
+          as lifetime.
+        - ``since=(last_ts, last_id)`` (incremental): only rows strictly newer than
+          the cursor — ``timestamp > last_ts OR (timestamp = last_ts AND id >
+          last_id)`` — are returned, **oldest-first**, so folding them advances a
+          running-peak checkpoint identically to a full recompute. Here truncation
+          keeps the **oldest** ``scan_cap`` rows after the cursor (contiguous, no
+          gap), so the caller advances its cursor and catches up on the next call;
+          ``truncated`` means more new rows remain, not that history was lost.
+
+        VIB-5059 Phase 3's persisted incremental fold is the unbounded-history fix.
         """
         if scan_cap <= 0:
             raise ValueError(f"scan_cap must be positive, got {scan_cap}")
         if not self._initialized:
             await self.initialize()
 
-        def _sync_get() -> tuple[list[tuple[datetime, str | None, str | None]], bool]:
-            cursor = self._conn.execute(  # type: ignore[union-attr]
-                """
-                SELECT timestamp, total_value_usd, available_cash_usd
-                FROM portfolio_snapshots
-                WHERE deployment_id = ?
-                ORDER BY timestamp DESC, id DESC
-                LIMIT ?
-                """,
-                (deployment_id, scan_cap + 1),
-            )
-            fetched = cursor.fetchall()
+        def _sync_get() -> tuple[list[tuple[datetime, str | None, str | None, int]], bool]:
+            params: list[object] = [deployment_id]
+            where = "deployment_id = ?"
+            if since is not None:
+                since_ts, since_id = since
+                # (timestamp, id) composite cursor: rows strictly after it, so
+                # identical-timestamp / replay rows neither skip nor double-fold.
+                # The TEXT timestamp column compares against .isoformat() exactly
+                # as the existing ORDER BY's lexicographic ISO-8601 ordering does
+                # (same precedent as get_snapshot_at / get_snapshots_in_window).
+                # Snapshots are ALWAYS written via ``snapshot.timestamp.isoformat()``
+                # (see save_portfolio_snapshot / save_snapshot_and_metrics), so the
+                # stored text is itself an isoformat() product and the
+                # parse-then-reserialize round-trip on the cursor is byte-idempotent
+                # — the boundary row is matched exactly, never skipped/double-folded.
+                where += " AND (timestamp > ? OR (timestamp = ? AND id > ?))"
+                params.extend([since_ts.isoformat(), since_ts.isoformat(), since_id])
+            params.append(scan_cap + 1)
+            # Full scan keeps the newest cap (DESC) then reverses to oldest-first;
+            # the incremental scan must keep the OLDEST cap after the cursor so the
+            # fold has no gap, so it orders ASC (already oldest-first).
+            order = "ASC, id ASC" if since is not None else "DESC, id DESC"
+            # VIB-5134: serialize the read under _db_lock. Writers hold _db_lock
+            # across BEGIN IMMEDIATE … COMMIT on this single shared connection, and
+            # WAL gives snapshot isolation BETWEEN connections, not within one — so
+            # an unsynchronized read could observe a writer's uncommitted rows. For
+            # the incremental (since) cursor that is a correctness bug, not just a
+            # transient one: advancing the (timestamp, id) cursor past a row that
+            # later rolls back would permanently skip it. Taking the same lock the
+            # writers take makes the read see only committed state (CodeRabbit).
+            with self._db_lock:
+                cursor = self._conn.execute(  # type: ignore[union-attr]
+                    f"""
+                    SELECT timestamp, total_value_usd, available_cash_usd, id
+                    FROM portfolio_snapshots
+                    WHERE {where}
+                    ORDER BY timestamp {order}
+                    LIMIT ?
+                    """,
+                    tuple(params),
+                )
+                fetched = cursor.fetchall()
             truncated = len(fetched) > scan_cap
             if truncated:
-                # Keep the newest scan_cap rows; DESC order already places them
-                # first, so the surplus (oldest) tail is dropped.
+                # Keep the first scan_cap rows: for the full scan (DESC) these are
+                # the newest; for the incremental scan (ASC) these are the oldest
+                # after the cursor (contiguous paging). The surplus tail is dropped.
                 fetched = fetched[:scan_cap]
+            # Incremental (ASC) is already oldest-first; full (DESC) is reversed.
+            ordered = fetched if since is not None else list(reversed(fetched))
 
-            rows: list[tuple[datetime, str | None, str | None]] = []
-            for row in reversed(fetched):  # DESC fetch -> emit oldest-first
+            rows: list[tuple[datetime, str | None, str | None, int]] = []
+            for row in ordered:
                 ts = row["timestamp"]
                 if isinstance(ts, str):
                     ts = datetime.fromisoformat(ts)
-                rows.append((ts, row["total_value_usd"], row["available_cash_usd"]))
+                rows.append((ts, row["total_value_usd"], row["available_cash_usd"], row["id"]))
             return rows, truncated
 
         loop = asyncio.get_event_loop()

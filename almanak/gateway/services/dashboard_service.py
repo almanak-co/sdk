@@ -23,6 +23,7 @@ from uuid import uuid4
 import grpc
 
 if TYPE_CHECKING:
+    from almanak.framework.dashboard.quant_aggregations import DrawdownState
     from almanak.framework.observability.ledger import LedgerQuantStats
     from almanak.framework.portfolio.models import PortfolioSnapshot
     from almanak.framework.state.state_manager import StateManager
@@ -71,6 +72,42 @@ _QUANT_ANCHOR_SCAN_ROW_CAP = 100_000
 # any tile becoming observably stale. 0 disables the cache entirely
 # (sequential RPCs always reload).
 _QUANT_INPUTS_CACHE_TTL_SECONDS = 5.0
+
+# VIB-5134: the lifetime-drawdown checkpoint refreshes its expensive full-history
+# NAV scan on a SEPARATE, longer cadence than the 5 s quant-input load. A lifetime
+# max-drawdown is slow-moving, so a 30 s full-scan TTL cuts that O(history) read
+# ~6× vs. the 5 s default; between full scans the checkpoint is advanced by a cheap
+# incremental "fetch since cursor" so current-drawdown stays render-fresh AND
+# correct (a new high-water mark after the last scan is folded before the
+# current-drawdown is computed). See docs/internal/PRD-DashboardJune15.md §4.A.
+_LIFETIME_DRAWDOWN_TTL_SECONDS = 30.0
+
+# VIB-5134: after a full-scan FAILURE the checkpoint retries on this short backoff
+# instead of waiting the full slow-cadence TTL — a transient DB blip must not strand
+# the lifetime tile on the recent-window fallback for ~30 s. It is still bounded (not
+# every render) so a persistent outage does not hammer the backend. Matches the prior
+# VIB-5118 ~5 s degraded-retry cadence.
+_LIFETIME_DRAWDOWN_RETRY_SECONDS = 5.0
+
+
+@dataclasses.dataclass(frozen=True)
+class _LifetimeDrawdownCheckpoint:
+    """In-memory resumable lifetime-drawdown state per deployment (VIB-5134).
+
+    ``state`` is the running-peak drawdown fold; ``cursor`` is the ``(timestamp,
+    id)`` of the last snapshot folded so the next render fetches only newer rows;
+    ``full_scan_at`` is the ``time.monotonic()`` of the last expensive full-history
+    scan (gated by :data:`_LIFETIME_DRAWDOWN_TTL_SECONDS`); ``truncated`` records
+    whether that scan hit ``scan_cap`` (lifetime understated — surfaced as a
+    WARNING, same contract as VIB-5118). The checkpoint is ephemeral: a gateway
+    restart drops it and the next call reseeds via a full scan (the persisted fold
+    is VIB-5059 Phase 3).
+    """
+
+    state: DrawdownState
+    cursor: tuple[datetime, int] | None
+    full_scan_at: float
+    truncated: bool
 
 
 # Composite cursor-key encoding for ActivityFeed items (CodeRabbit review).
@@ -634,10 +671,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # __new__ (the established _make_servicer pattern).
         self._quant_inputs_cache: dict[str, tuple[float, Any]] = {}
         self._quant_inputs_locks: dict[str, asyncio.Lock] = {}
-        # VIB-5118: PnL-only lifetime-drawdown cache (separate from the shared
-        # quant-input load so GetCostStack/GetAuditPosture never pay the full-history
-        # NAV scan). Same TTL/single-flight discipline as the quant-input cache.
-        self._lifetime_dd_cache: dict[str, tuple[float, tuple[Decimal, Decimal] | None]] = {}
+        # VIB-5118/5134: PnL-only lifetime-drawdown checkpoint (separate from the
+        # shared quant-input load so GetCostStack/GetAuditPosture never pay the
+        # full-history NAV scan). The expensive full scan refreshes on the longer
+        # _LIFETIME_DRAWDOWN_TTL_SECONDS cadence; between scans the checkpoint is
+        # advanced by a cheap incremental fold (single-flight per deployment).
+        self._lifetime_dd_ckpt: dict[str, _LifetimeDrawdownCheckpoint] = {}
         self._lifetime_dd_locks: dict[str, asyncio.Lock] = {}
         self._portfolio_chain: PortfolioProviderChain | None = None
 
@@ -2256,62 +2295,157 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             return inputs
 
     async def _get_lifetime_drawdown(self, deployment_id: str) -> tuple[Decimal, Decimal] | None:
-        """Lifetime ``(max_drawdown_pct, current_drawdown_pct)`` over FULL history (VIB-5118).
+        """Lifetime ``(max_drawdown_pct, current_drawdown_pct)`` over FULL history (VIB-5118/5134).
 
-        TTL-cached + single-flight, mirroring :meth:`_get_quant_inputs`. **Deliberately
+        Single-flight per deployment, mirroring :meth:`_get_quant_inputs`. **Deliberately
         separate from the shared quant-input load**: only ``GetPnLSummary`` surfaces
-        drawdown, and the ``get_nav_series`` scan this needs walks the whole snapshot
-        history (up to ``scan_cap`` rows) — folding it into ``_load_quant_inputs`` would
-        make ``GetCostStack`` / ``GetAuditPosture`` pay for a scan they discard (Codex
-        review of PR #2801). Keeping it behind this PnL-only accessor preserves the
-        bounded-load design while still rate-limiting rapid PnL polls.
+        drawdown, and the full-history ``get_nav_series`` scan would otherwise make
+        ``GetCostStack`` / ``GetAuditPosture`` pay for a scan they discard (Codex review
+        of PR #2801).
+
+        VIB-5134 splits the cost in two:
+
+        - **max-drawdown** rides the expensive full-history scan, refreshed only every
+          :data:`_LIFETIME_DRAWDOWN_TTL_SECONDS` (slow-moving → ~6× fewer scans).
+        - **current-drawdown** stays live every render: between full scans the
+          checkpoint is advanced by a cheap incremental "fetch since cursor" fold
+          (:meth:`_fold_lifetime_drawdown`), so a new high-water mark that lands after
+          the last scan is folded into the running peak *before* current-drawdown is
+          computed (a plain "latest NAV vs. cached peak" would understate it).
 
         Returns ``None`` (→ ``compute_pnl_summary`` degrades to the recent-window
         drawdown) when there is no series or the backend read fails — never raises.
         """
-        from almanak.framework.dashboard.quant_aggregations import lifetime_drawdowns_from_nav_text
-
-        if not hasattr(self, "_lifetime_dd_cache"):
-            self._lifetime_dd_cache = {}
+        # Lazy re-init guard: unit tests build the servicer via __new__ (the
+        # established _make_servicer pattern), so the constructor's attributes
+        # may be absent. The constructor owns the authoritative definitions.
+        if not hasattr(self, "_lifetime_dd_ckpt"):
+            self._lifetime_dd_ckpt = {}
             self._lifetime_dd_locks = {}
-        ttl = getattr(self, "_quant_inputs_ttl_seconds", _QUANT_INPUTS_CACHE_TTL_SECONDS)
-
-        cached = self._lifetime_dd_cache.get(deployment_id)
-        if cached is not None and time.monotonic() - cached[0] < ttl:
-            return cached[1]
+        if self._state_manager is None:
+            return None
+        full_ttl = getattr(self, "_lifetime_dd_ttl_seconds", _LIFETIME_DRAWDOWN_TTL_SECONDS)
 
         lock = self._lifetime_dd_locks.setdefault(deployment_id, asyncio.Lock())
         async with lock:
-            cached = self._lifetime_dd_cache.get(deployment_id)
-            if cached is not None and time.monotonic() - cached[0] < ttl:
-                return cached[1]
-
-            lifetime_drawdown: tuple[Decimal, Decimal] | None = None
-            if self._state_manager is not None:
-                try:
-                    nav_rows, truncated = await self._state_manager.get_nav_series(deployment_id)
-                    if nav_rows:
-                        lifetime_drawdown = lifetime_drawdowns_from_nav_text(nav_rows)
-                        if truncated:
-                            logger.warning(
-                                "NAV series truncated at scan_cap for %s — lifetime drawdown "
-                                "computed over the newest window, not full history",
-                                deployment_id,
-                            )
-                except Exception:
-                    logger.debug("get_nav_series failed for %s", deployment_id, exc_info=True)
-
             now = time.monotonic()
-            self._lifetime_dd_cache = {
-                key: value for key, value in self._lifetime_dd_cache.items() if now - value[0] < ttl
+            existing = self._lifetime_dd_ckpt.get(deployment_id)
+            if existing is None or now - existing.full_scan_at >= full_ttl:
+                # First call, or the full-scan TTL elapsed: re-seed from a full scan.
+                ckpt = await self._full_scan_lifetime_drawdown(deployment_id, existing)
+            else:
+                # Within TTL: keep current-drawdown live with a cheap incremental fold.
+                ckpt = await self._fold_lifetime_drawdown(deployment_id, existing)
+            self._lifetime_dd_ckpt[deployment_id] = ckpt
+
+            # Re-read the clock: the full scan may have awaited for a while and the
+            # checkpoint stamps its OWN post-scan time, so prune against a fresh tick.
+            now = time.monotonic()
+            # Prune abandoned entries/locks (1 Gateway : 1 Strategy → ~single entry).
+            self._lifetime_dd_ckpt = {
+                key: value
+                for key, value in self._lifetime_dd_ckpt.items()
+                if now - value.full_scan_at < full_ttl or key == deployment_id
             }
-            self._lifetime_dd_cache[deployment_id] = (now, lifetime_drawdown)
             self._lifetime_dd_locks = {
                 key: existing
                 for key, existing in self._lifetime_dd_locks.items()
-                if key in self._lifetime_dd_cache or existing.locked()
+                if key in self._lifetime_dd_ckpt or existing.locked()
             }
-            return lifetime_drawdown
+
+            if ckpt.state.running_peak is None:
+                # No positive sample yet (empty history or backend failure) — degrade.
+                return None
+            return ckpt.state.as_pcts()
+
+    async def _full_scan_lifetime_drawdown(
+        self, deployment_id: str, prior: _LifetimeDrawdownCheckpoint | None
+    ) -> _LifetimeDrawdownCheckpoint:
+        """Re-seed the lifetime-drawdown checkpoint from a full-history NAV scan (VIB-5134).
+
+        The expensive O(history) read. ``full_scan_at`` is stamped **after** the awaited
+        scan (a slow scan must not leave the checkpoint already-expired and re-trigger a
+        full scan on the very next render — CodeRabbit).
+
+        On backend FAILURE the prior good lifetime is **preserved** rather than blanked:
+        a transient blip must not strand the tile on the recent-window fallback for the
+        full slow TTL. The checkpoint is stamped to retry within
+        ``_LIFETIME_DRAWDOWN_RETRY_SECONDS`` (bounded, not every render). With no prior
+        good state the checkpoint is empty (``running_peak=None`` → the accessor returns
+        ``None`` and the summary degrades to the recent window).
+        """
+        from almanak.framework.dashboard.quant_aggregations import DrawdownState, fold_nav_text
+
+        # _get_lifetime_drawdown returns early when _state_manager is None, so it is
+        # guaranteed non-None here; assert to narrow the Optional for the type checker.
+        assert self._state_manager is not None
+        try:
+            nav_rows, truncated = await self._state_manager.get_nav_series(deployment_id)
+        except Exception:
+            logger.debug("get_nav_series (full scan) failed for %s", deployment_id, exc_info=True)
+            full_ttl = getattr(self, "_lifetime_dd_ttl_seconds", _LIFETIME_DRAWDOWN_TTL_SECONDS)
+            retry_at = time.monotonic() - max(0.0, full_ttl - _LIFETIME_DRAWDOWN_RETRY_SECONDS)
+            if prior is not None and prior.state.running_peak is not None:
+                # Keep last-known-good lifetime; retry the full scan on the short backoff.
+                return _LifetimeDrawdownCheckpoint(
+                    state=prior.state, cursor=prior.cursor, full_scan_at=retry_at, truncated=prior.truncated
+                )
+            return _LifetimeDrawdownCheckpoint(
+                state=DrawdownState(), cursor=None, full_scan_at=retry_at, truncated=False
+            )
+
+        state = DrawdownState()
+        cursor: tuple[datetime, int] | None = None
+        if nav_rows:
+            state = fold_nav_text(state, nav_rows)
+            last_ts, _total, _cash, last_id = nav_rows[-1]
+            cursor = (last_ts, last_id)
+            if truncated:
+                logger.warning(
+                    "NAV series truncated at scan_cap for %s — lifetime drawdown "
+                    "computed over the newest window, not full history",
+                    deployment_id,
+                )
+        return _LifetimeDrawdownCheckpoint(
+            state=state, cursor=cursor, full_scan_at=time.monotonic(), truncated=truncated
+        )
+
+    async def _fold_lifetime_drawdown(
+        self, deployment_id: str, ckpt: _LifetimeDrawdownCheckpoint
+    ) -> _LifetimeDrawdownCheckpoint:
+        """Advance the checkpoint by snapshots newer than its cursor (VIB-5134).
+
+        Keeps current-drawdown live between full scans without re-scanning history:
+        the running-peak fold is resumable, so folding only the new tail is identical
+        to a full recompute. ``full_scan_at`` / ``truncated`` are preserved (this is
+        NOT a full scan). On fetch failure (or no cursor yet) the checkpoint is
+        returned unchanged — the last good state, never a degrade-to-None.
+        """
+        from almanak.framework.dashboard.quant_aggregations import fold_nav_text
+
+        if ckpt.cursor is None:
+            # The last full scan saw an empty history; nothing to fold forward. The
+            # next full scan (after the TTL) seeds the cursor once snapshots exist.
+            return ckpt
+        # _get_lifetime_drawdown returns early when _state_manager is None.
+        assert self._state_manager is not None
+        try:
+            # truncated here means "more new rows remain after scan_cap" — benign: we
+            # advance the cursor to the last folded row and catch up on the next call.
+            new_rows, _truncated = await self._state_manager.get_nav_series(deployment_id, since=ckpt.cursor)
+        except Exception:
+            logger.debug("get_nav_series (incremental) failed for %s", deployment_id, exc_info=True)
+            return ckpt
+        if not new_rows:
+            return ckpt
+        state = fold_nav_text(ckpt.state, new_rows)
+        last_ts, _total, _cash, last_id = new_rows[-1]
+        return _LifetimeDrawdownCheckpoint(
+            state=state,
+            cursor=(last_ts, last_id),
+            full_scan_at=ckpt.full_scan_at,
+            truncated=ckpt.truncated,
+        )
 
     async def GetPnLSummary(
         self,

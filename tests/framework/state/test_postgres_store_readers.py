@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -1637,3 +1637,127 @@ async def test_get_ledger_anchor_candidates_zero_limit_short_circuits():
 
     assert await store.get_ledger_anchor_candidates(_DEPLOYMENT_ID, limit=0) == []
     assert conn.calls == []
+
+
+# =============================================================================
+# get_nav_series PG twin — lifetime drawdown full scan + incremental cursor
+# (VIB-5118 / VIB-5134 — closes part of VIB-5099's hosted-PG coverage gap)
+# =============================================================================
+#
+# The SQLite reader runs end-to-end in tests/unit/dashboard/; this pins the
+# Postgres twin's SQL SHAPE without a live daemon: the projected columns
+# (two NAV columns ::text + raw id), the ::text Empty≠Zero cast, the two fetch
+# modes (full-scan DESC newest-kept+reversed vs. incremental ASC since-cursor),
+# and the parameter binding. The contract MUST match the SQLite twin so the
+# StateManager facade stays backend-agnostic.
+
+_NAV_BASE_TS = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)
+
+
+def _nav_row(minute: int, total: str | None, cash: str | None, id_: int) -> _DictRow:
+    """asyncpg-shaped row for get_nav_series (column aliases as the SELECT emits)."""
+    return _DictRow(
+        {
+            "timestamp": _NAV_BASE_TS + timedelta(minutes=minute),
+            "total_value_text": total,
+            "available_cash_text": cash,
+            "id": id_,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_nav_series_full_scan_sql_shape_and_oldest_first():
+    # DB yields ORDER BY timestamp DESC, id DESC (newest-first); the fake echoes it.
+    newest = _nav_row(2, "120", "0", 3)
+    oldest = _nav_row(0, "100", "0", 1)
+    conn = _FakeConn(fetch_rows=[newest, oldest])
+    store = _make_store(conn)
+
+    rows, truncated = await store.get_nav_series(_DEPLOYMENT_ID)
+
+    assert truncated is False
+    # Reversed to oldest-first; 4-tuple shape (ts, total_text, cash_text, id).
+    assert [r[3] for r in rows] == [1, 3]
+    assert rows[0] == (_NAV_BASE_TS, "100", "0", 1)
+
+    kind, sql, args = conn.calls[0]
+    assert kind == "fetch"
+    select_clause = sql.split("FROM", 1)[0]
+    assert "FROM portfolio_snapshots" in sql
+    assert "WHERE deployment_id = $1" in sql
+    # NAV columns cast ::text (Empty≠Zero, byte-identical to the SQLite TEXT twin).
+    assert "total_value_usd::text AS total_value_text" in select_clause
+    assert "available_cash_usd::text AS available_cash_text" in select_clause
+    # id projected raw (it is the cursor tiebreaker, not a money value → no cast).
+    assert "id" in select_clause
+    # No JSON-blob columns (transfer-size discipline).
+    assert "positions_json" not in sql
+    assert "token_prices_json" not in sql
+    assert "wallet_balances_json" not in sql
+    # Full scan: no cursor predicate, newest-first ordering, scan_cap+1 bound.
+    assert "ORDER BY timestamp DESC, id DESC" in sql
+    assert "timestamp >" not in sql
+    assert "LIMIT $2" in sql
+    assert args == (_DEPLOYMENT_ID, 200_001)
+
+
+@pytest.mark.asyncio
+async def test_get_nav_series_incremental_since_sql_shape():
+    cursor_ts = _NAV_BASE_TS
+    # DB yields ASC (oldest-first) for the incremental path — already in fold order.
+    conn = _FakeConn(fetch_rows=[_nav_row(1, "101", "0", 6), _nav_row(2, "102", "0", 7)])
+    store = _make_store(conn)
+
+    rows, truncated = await store.get_nav_series(_DEPLOYMENT_ID, since=(cursor_ts, 5))
+
+    assert truncated is False
+    # ASC path is NOT reversed — order preserved exactly as fetched (oldest-first).
+    assert [r[3] for r in rows] == [6, 7]
+
+    _, sql, args = conn.calls[0]
+    # Composite (timestamp, id) cursor — identical predicate to the SQLite twin.
+    assert "(timestamp > $2 OR (timestamp = $2 AND id > $3))" in sql
+    assert "ORDER BY timestamp ASC, id ASC" in sql
+    assert "LIMIT $4" in sql
+    assert args == (_DEPLOYMENT_ID, cursor_ts, 5, 200_001)
+    # The cursor timestamp binds as a datetime (asyncpg timestamptz codec), not a
+    # string — the SQLite twin instead passes .isoformat() against its TEXT column.
+    assert isinstance(args[1], datetime)
+
+
+@pytest.mark.asyncio
+async def test_get_nav_series_full_scan_truncates_newest_kept():
+    # 3 rows DESC, scan_cap=2 → keep the newest 2, emit oldest-first.
+    conn = _FakeConn(fetch_rows=[_nav_row(2, "102", "0", 3), _nav_row(1, "101", "0", 2), _nav_row(0, "100", "0", 1)])
+    store = _make_store(conn)
+
+    rows, truncated = await store.get_nav_series(_DEPLOYMENT_ID, scan_cap=2)
+
+    assert truncated is True
+    assert [r[3] for r in rows] == [2, 3]  # newest two (ids 2,3), oldest-first
+    _, _, args = conn.calls[0]
+    assert args == (_DEPLOYMENT_ID, 3)  # scan_cap + 1
+
+
+@pytest.mark.asyncio
+async def test_get_nav_series_incremental_truncates_oldest_after_cursor():
+    # 3 rows ASC after the cursor, scan_cap=2 → keep the OLDEST 2 (contiguous from
+    # the cursor, gapless paging) — the opposite direction from the full scan.
+    conn = _FakeConn(fetch_rows=[_nav_row(1, "101", "0", 6), _nav_row(2, "102", "0", 7), _nav_row(3, "103", "0", 8)])
+    store = _make_store(conn)
+
+    rows, truncated = await store.get_nav_series(_DEPLOYMENT_ID, since=(_NAV_BASE_TS, 5), scan_cap=2)
+
+    assert truncated is True
+    assert [r[3] for r in rows] == [6, 7]  # oldest two after the cursor, NOT reversed
+
+
+@pytest.mark.asyncio
+async def test_get_nav_series_rejects_nonpositive_scan_cap():
+    conn = _FakeConn()
+    store = _make_store(conn)
+
+    with pytest.raises(ValueError):
+        await store.get_nav_series(_DEPLOYMENT_ID, scan_cap=0)
+    assert conn.calls == []  # validated before touching the pool
