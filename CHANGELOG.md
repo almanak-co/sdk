@@ -6,6 +6,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Backtesting v1** (epic VIB-5079). The backtesting surface reaches v1: a
+  PnL backtest engine plus parameter sweep/optimize and Anvil-fork paper
+  trading, with value conservation now enforced end-to-end. **In scope**:
+  PnL backtest + sweep/optimize + paper trade; strategy types swap/TA, LP, and
+  lending; perp is **beta** (the adapter exists and round-trips but carries
+  wider funding-rate variance); chains the demos already cover. **Out of scope
+  (v1.1+)**: overfitting-detection heuristics (VIB-396), statistical
+  significance testing (VIB-408), order-book market-making backtester
+  (VIB-407), prediction markets (VIB-415), tick-level IL, Dune integration,
+  numeric confidence bands, async-native adapters, gas block indexing, and
+  persistent forks. The surface **remains gated behind
+  `ALMANAK_ENABLE_BACKTESTING` (off by default)**; the flag is intentionally
+  left in place and its removal is a separate human-gated step.
+  - **Certification**: the network-free Trust Matrix
+    (`tests/validation/backtesting/`) is green -- **21 PASS / 0 xfail** across
+    swap/LP/lending/perp conservation cells plus the closed-form math checks.
+    The PnL engine was re-certified L3-equivalent (production-ready on the
+    correctness axis, CI enforcement pending), and the stale Feb 2026 "L3"
+    report was formally retracted (VIB-5087). See
+    `docs/internal/notes/backtesting/TrustTest/TRUST_TEST_REPORT.md` and
+    blueprint `docs/internal/blueprints/31-backtesting.md`.
+  - **Known variance bounds** (treat PnL-engine output as carrying at least
+    this much error -- blueprint 31 section 7): LP fee estimation +/- 10-15%,
+    perp funding rates +/- 15%, lending APY +/- 10%, slippage on large trades
+    +/- 30%, gas costs +/- 20%. Optimize on the PnL engine; certify on the
+    paper trader before going live.
+
+### Fixed
+
+- **Backtesting conservation and fidelity** (epic VIB-5079). Eliminated a
+  family of value-(de)minting defects in the PnL engine that made historical
+  backtest results untrustworthy: SWAP buys that minted value by never
+  debiting stablecoin outflows (VIB-5082), LP opens marked 27x-90x their cost
+  (VIB-5096), lending WITHDRAW double-counting principal (VIB-5097), BORROW /
+  REPAY mis-accounting (VIB-5098), and a perp adapter reading a nonexistent
+  portfolio field (VIB-5093). Insufficient-balance fills are now recorded as
+  failed trades that change equity by exactly zero -- not silently clamped.
+  Per-trade realized PnL is now attributed for swaps (previously hardcoded to
+  zero, degenerating win_rate to 0 and profit_factor to `0E+17`); `win_rate`
+  is computed over realized-PnL trades, `failed_trades` is surfaced separately,
+  and `profit_factor` is normalized (VIB-5083). Gas defaults are now
+  chain-aware via the chain registry (e.g. ~0.1 gwei on Arbitrum) instead of a
+  flat 30 gwei that overstated L2 gas ~100x (VIB-5088). Subgraph-backed
+  providers paginate, so multi-year backtests no longer truncate at ~1000 data
+  points (VIB-5089), and Balancer pools resolve from bare addresses (VIB-5090).
+
 ## [2.18.0] - 2026-06-12
 
 ### Added
