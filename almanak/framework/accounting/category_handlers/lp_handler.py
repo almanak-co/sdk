@@ -452,6 +452,17 @@ def _diagnose_pricing_failure(
     for amt, sym in token_pairs:
         if amt is None:
             continue
+        # VIB-5124 — consistent with ``compute_lp_cost_basis`` (a stronger,
+        # unconditional skip here): a measured-zero leg contributes $0 and never
+        # needs a price, so it can never be the leg that voided the basis and
+        # must not be reported as a missing/invalid price (Empty≠Zero). The
+        # consumer skips a zero leg only when its price is *also* missing; this
+        # diagnostic only runs when the basis is already None, so skipping every
+        # zero leg here can never wrongly clear a real failure — it just avoids
+        # falsely blaming e.g. "missing SUSDAI" for the unfunded leg of a
+        # single-sided LP_OPEN.
+        if amt == 0:
+            continue
         if sym not in raw_keys:
             missing.append(sym or "?")
             continue

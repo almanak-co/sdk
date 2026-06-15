@@ -17,8 +17,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
+from unittest.mock import patch
+
 from almanak.framework.runner._run_loop_helpers import (
     _ensure_native_gas_in_teardown_oracle,
+    _ensure_receipt_legs_in_teardown_oracle,
     _portfolio_snapshot_to_price_oracle,
 )
 
@@ -222,4 +225,109 @@ def test_native_topoff_noop_when_chain_unknown():
     teardown_oracle = {"USDC": {"price_usd": "1.0"}}
     out = asyncio.run(_ensure_native_gas_in_teardown_oracle(runner, strategy, teardown_oracle))
     assert "ETH" not in out
+    assert fake_oracle.calls == []
+
+
+# ─── _ensure_receipt_legs_in_teardown_oracle (VIB-5124) ───────────────────────
+
+SUSDAI_ADDR = "0x0B2b2B2076d95dda7817e785989fE353fe955ef9"
+USDC_ADDR = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+_RESOLVER_PATH = "almanak.framework.data.tokens.get_token_resolver"
+
+
+def _resolved(symbol: str, coingecko_id: str | None):
+    return SimpleNamespace(symbol=symbol, coingecko_id=coingecko_id)
+
+
+def _close_result(currency0: str | None, currency1: str | None) -> SimpleNamespace:
+    """ExecutionResult-like with an LP_CLOSE receipt carrying currency addrs."""
+    return SimpleNamespace(
+        lp_open_data=None,
+        lp_close_data=SimpleNamespace(currency0=currency0, currency1=currency1),
+    )
+
+
+def test_receipt_backfill_prices_coingecko_null_leg_by_address():
+    """The non-zero sUSDai leg returned by an LP_CLOSE is priced by ADDRESS via
+    the gateway oracle and stored under the canonical SYMBOL key."""
+    fake_oracle = _FakeOracle(price="1.04")
+    runner = _fake_runner(fake_oracle)
+    strategy = _fake_strategy("arbitrum")
+    result = _close_result(SUSDAI_ADDR, USDC_ADDR)
+
+    def _resolve(token, chain, **kwargs):
+        return _resolved("SUSDAI", None) if token == SUSDAI_ADDR.lower() else _resolved("USDC", "usd-coin")
+
+    resolver = SimpleNamespace(resolve=_resolve)
+    teardown_oracle = {"USDC": {"price_usd": "1.00", "oracle_source": "portfolio_valuer"}}
+
+    with patch(_RESOLVER_PATH, return_value=resolver):
+        out = asyncio.run(_ensure_receipt_legs_in_teardown_oracle(runner, strategy, result, teardown_oracle))
+
+    assert out["SUSDAI"]["price_usd"] == "1.04"  # priced by address, keyed by symbol
+    assert out["USDC"]["price_usd"] == "1.00"  # untouched
+    # Only the coingecko-null leg is priced by address (USDC has a cg id).
+    # Address is lowercased at the shared ``_receipt_token_legs`` seam (lane symmetry).
+    assert fake_oracle.calls == [(SUSDAI_ADDR.lower(), "USD", "arbitrum")]
+
+
+def test_receipt_backfill_skips_token_with_coingecko_id():
+    fake_oracle = _FakeOracle(price="1.00")
+    runner = _fake_runner(fake_oracle)
+    strategy = _fake_strategy("arbitrum")
+    result = _close_result(USDC_ADDR, None)
+    resolver = SimpleNamespace(resolve=lambda *a, **k: _resolved("USDC", "usd-coin"))
+
+    with patch(_RESOLVER_PATH, return_value=resolver):
+        out = asyncio.run(_ensure_receipt_legs_in_teardown_oracle(runner, strategy, result, None))
+
+    assert out is None  # nothing backfilled
+    assert fake_oracle.calls == []
+
+
+def test_receipt_backfill_does_not_overwrite_existing_symbol():
+    fake_oracle = _FakeOracle(price="9.99")
+    runner = _fake_runner(fake_oracle)
+    strategy = _fake_strategy("arbitrum")
+    result = _close_result(SUSDAI_ADDR, None)
+    resolver = SimpleNamespace(resolve=lambda *a, **k: _resolved("SUSDAI", None))
+    teardown_oracle = {"SUSDAI": {"price_usd": "1.05"}}  # already present
+
+    with patch(_RESOLVER_PATH, return_value=resolver):
+        out = asyncio.run(_ensure_receipt_legs_in_teardown_oracle(runner, strategy, result, teardown_oracle))
+
+    assert out["SUSDAI"]["price_usd"] == "1.05"  # preserved
+    assert fake_oracle.calls == []
+
+
+def test_receipt_backfill_miss_leaves_key_absent_empty_not_zero():
+    fake_oracle = _FakeOracle(price=None)  # get_aggregated_price raises
+    runner = _fake_runner(fake_oracle)
+    strategy = _fake_strategy("arbitrum")
+    result = _close_result(SUSDAI_ADDR, None)
+    resolver = SimpleNamespace(resolve=lambda *a, **k: _resolved("SUSDAI", None))
+
+    with patch(_RESOLVER_PATH, return_value=resolver):
+        out = asyncio.run(_ensure_receipt_legs_in_teardown_oracle(runner, strategy, result, None))
+
+    assert out is None  # nothing added; never a fabricated $0
+
+
+def test_receipt_backfill_noop_without_result():
+    fake_oracle = _FakeOracle()
+    runner = _fake_runner(fake_oracle)
+    strategy = _fake_strategy("arbitrum")
+    out = asyncio.run(_ensure_receipt_legs_in_teardown_oracle(runner, strategy, None, {"USDC": {"price_usd": "1"}}))
+    assert out == {"USDC": {"price_usd": "1"}}
+    assert fake_oracle.calls == []
+
+
+def test_receipt_backfill_noop_without_receipt_legs():
+    """A result with no LP receipt (e.g. a teardown SWAP) contributes no legs."""
+    fake_oracle = _FakeOracle()
+    runner = _fake_runner(fake_oracle)
+    strategy = _fake_strategy("arbitrum")
+    result = SimpleNamespace(lp_open_data=None, lp_close_data=None)
+    out = asyncio.run(_ensure_receipt_legs_in_teardown_oracle(runner, strategy, result, None))
+    assert out is None
     assert fake_oracle.calls == []

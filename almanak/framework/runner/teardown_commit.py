@@ -411,12 +411,27 @@ async def commit_teardown_intent(
             # subsequent teardown intents in the same loop benefit (the
             # post-teardown bracket clears the stash so an iteration after
             # teardown never reads stale teardown prices).
-            from ._run_loop_helpers import _ensure_intent_tokens_in_teardown_oracle
+            from ._run_loop_helpers import (
+                _ensure_intent_tokens_in_teardown_oracle,
+                _ensure_receipt_legs_in_teardown_oracle,
+            )
 
             runner._teardown_price_oracle = await _ensure_intent_tokens_in_teardown_oracle(
                 runner,
                 strategy,
                 intent,
+                getattr(runner, "_teardown_price_oracle", None),
+            )
+            # VIB-5124 — also price coingecko_id-null LEGS by address on the
+            # teardown lane (e.g. the non-zero sUSDai returned by an LP_CLOSE
+            # full-drain). These leg tokens come from the RECEIPT (currency0/
+            # currency1), not the intent, so the symbol/address-from-intent
+            # top-off above cannot see them; without this the LP_CLOSE row's
+            # price_inputs_json omits SUSDAI and cost_basis/realized stay null.
+            runner._teardown_price_oracle = await _ensure_receipt_legs_in_teardown_oracle(
+                runner,
+                strategy,
+                enriched_result,
                 getattr(runner, "_teardown_price_oracle", None),
             )
             teardown_price_oracle = runner._teardown_price_oracle

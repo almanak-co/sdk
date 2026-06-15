@@ -252,3 +252,90 @@ def test_lp_cost_basis_returns_none_when_one_token_unpriceable():
         price_oracle=oracle,
     )
     assert cost is None
+
+
+# ---------------------------------------------------------------------------
+# VIB-5124 — measured-zero leg must not void the basis (Empty≠Zero)
+# ---------------------------------------------------------------------------
+
+
+def test_lp_cost_basis_single_sided_open_zero_leg_missing_price():
+    """A single-sided LP_OPEN funds one leg; the unfunded leg is a MEASURED
+    zero (``Decimal("0")``) whose token (e.g. a coingecko_id-null token) has no
+    price. That zero leg contributes $0 and must NOT void the funded leg's basis.
+
+    This is the headline VIB-5124 consumer fix: the Fluid single-sided USDC
+    deposit (sUSDai leg = 0, no SUSDAI price) must still tie to $50.
+    """
+    # USDC priced; SUSDAI absent (coingecko_id-null token the producer couldn't
+    # price by symbol on this row).
+    raw = json.dumps({"USDC": {"price_usd": "1.00"}})
+    oracle = parse_price_inputs(raw)
+    cost = compute_lp_cost_basis(
+        amount0=Decimal("0"),  # sUSDai — measured zero, unfunded leg
+        amount1=Decimal("50"),  # USDC — the single-sided deposit leg
+        token0="SUSDAI",
+        token1="USDC",
+        price_oracle=oracle,
+    )
+    assert cost == Decimal("50")
+
+
+def test_lp_cost_basis_both_legs_funded_still_requires_each_price():
+    """A NON-zero leg whose price is missing still fails closed — VIB-5124 only
+    relaxes the requirement for measured-ZERO legs, never funded ones."""
+    raw = json.dumps({"USDC": {"price_usd": "1.00"}})  # SUSDAI absent
+    oracle = parse_price_inputs(raw)
+    cost = compute_lp_cost_basis(
+        amount0=Decimal("10"),  # sUSDai funded but unpriced ⇒ must void
+        amount1=Decimal("50"),
+        token0="SUSDAI",
+        token1="USDC",
+        price_oracle=oracle,
+    )
+    assert cost is None
+
+
+def test_lp_cost_basis_both_legs_funded_and_priced_sums():
+    """Both legs funded and priced ⇒ full basis (no regression from the
+    zero-leg relaxation)."""
+    raw = json.dumps({"SUSDAI": {"price_usd": "1.05"}, "USDC": {"price_usd": "1.00"}})
+    oracle = parse_price_inputs(raw)
+    cost = compute_lp_cost_basis(
+        amount0=Decimal("20"),
+        amount1=Decimal("50"),
+        token0="SUSDAI",
+        token1="USDC",
+        price_oracle=oracle,
+    )
+    assert cost == Decimal("71.00")  # 20*1.05 + 50*1.00
+
+
+def test_lp_cost_basis_zero_leg_with_price_is_measured_zero():
+    """A zero leg WHOSE PRICE IS AVAILABLE counts as a measured leg (0·price=0
+    with ``has_any`` set) so a both-zero-with-prices event yields a measured
+    ``Decimal("0")`` — this preserves measured-zero-fees semantics that the IL
+    handler relies on (distinguishing ``Decimal("0")`` from ``None``)."""
+    raw = json.dumps({"SUSDAI": {"price_usd": "1.05"}, "USDC": {"price_usd": "1.00"}})
+    oracle = parse_price_inputs(raw)
+    cost = compute_lp_cost_basis(
+        amount0=Decimal("0"),
+        amount1=Decimal("0"),
+        token0="SUSDAI",
+        token1="USDC",
+        price_oracle=oracle,
+    )
+    assert cost == Decimal("0")
+
+
+def test_lp_cost_basis_both_legs_zero_and_unpriced_returns_none():
+    """Both legs measured-zero AND unpriced ⇒ nothing measurable ⇒ None
+    (not a fabricated $0). ``has_any`` stays False."""
+    cost = compute_lp_cost_basis(
+        amount0=Decimal("0"),
+        amount1=Decimal("0"),
+        token0="SUSDAI",
+        token1="FOO",
+        price_oracle=parse_price_inputs(json.dumps({"BAR": {"price_usd": "1.00"}})),
+    )
+    assert cost is None

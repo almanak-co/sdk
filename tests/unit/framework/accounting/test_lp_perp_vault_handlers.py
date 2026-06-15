@@ -1355,6 +1355,44 @@ class TestHandleLpCostBasisUsd:
         # contradicted itself with HIGH+unavailable_reason simultaneously.
         assert result.confidence.value == "ESTIMATED"
 
+    def test_lp_open_single_sided_zero_leg_unpriced_still_ties(self) -> None:
+        """VIB-5124 — single-sided LP_OPEN: the unfunded leg is a MEASURED zero
+        whose token has no price in ``price_inputs_json`` (a coingecko_id-null
+        token the producer couldn't price by symbol). The zero leg contributes
+        $0 and must NOT void the funded leg's basis nor name itself in
+        ``unavailable_reason`` (the consumer-side half of the fix; mirrors the
+        Fluid single-sided USDC deposit, sUSDai leg = 0).
+        """
+        led_id = str(uuid.uuid4())
+        outbox_row = _make_outbox_row(
+            led_id,
+            intent_type="LP_OPEN",
+            position_key="lp:aerodrome:base:0xwallet:0x1111111111111111111111111111111111111111",
+            market_id="0x1111111111111111111111111111111111111111",
+        )
+        # token_in (token0) = SUSDAI funded $0; token_out (token1) = USDC $50.
+        # SUSDAI is ABSENT from price_inputs_json — by-symbol unpriceable.
+        ledger_row = _make_ledger_row(
+            led_id,
+            intent_type="LP_OPEN",
+            protocol="aerodrome",
+            chain="base",
+            token_in="SUSDAI",
+            token_out="USDC",
+            amount_in="0",
+            amount_out="50.0",
+            price_inputs_json=json.dumps({"USDC": "1.00"}),
+        )
+
+        result = handle_lp(outbox_row, ledger_row)
+
+        assert result is not None
+        assert result.cost_basis_usd == Decimal("50.00")
+        # The zero SUSDAI leg must NOT be reported as a missing price.
+        assert "SUSDAI" not in result.unavailable_reason
+        assert result.unavailable_reason == ""
+        assert result.confidence.value == "HIGH"
+
     def test_lp_open_with_no_price_inputs_returns_none(self) -> None:
         """Empty price_inputs_json (older ledger rows / paper trading) → None."""
         led_id = str(uuid.uuid4())

@@ -1016,6 +1016,119 @@ async def _ensure_intent_tokens_in_teardown_oracle(
     return merged or None
 
 
+async def _ensure_receipt_legs_in_teardown_oracle(
+    runner: StrategyRunner,
+    strategy: StrategyProtocol,
+    result: Any,
+    oracle: dict | None,
+) -> dict | None:
+    """VIB-5124 — teardown twin of ``_backfill_address_priced_legs``.
+
+    Prices ``coingecko_id``-null token legs (e.g. ``SUSDAI``) BY ADDRESS on the
+    teardown lane so the LP_CLOSE ledger row's ``price_inputs_json`` carries them
+    under the canonical SYMBOL key. The iteration lane gets this through
+    :meth:`StrategyRunner._backfill_address_priced_legs` (called from
+    ``_merge_oracle_for_ledger``), but the teardown lane assembles its own oracle
+    and never reaches that path — so LP_CLOSE (a teardown-lane intent whose
+    returned ``sUSDai`` leg is NON-zero after the VIB-5032 full-drain close)
+    would otherwise leave ``cost_basis_usd``/``realized_pnl_usd`` null and fail
+    Accountant G6.
+
+    Discovery mirrors the iteration lane: the leg token ADDRESSES come from the
+    receipt (``result.lp_open_data`` / ``lp_close_data`` ``currency0``/
+    ``currency1``) via :meth:`StrategyRunner._receipt_token_legs`. The intent
+    is useless here for fungible-LP connectors whose ``pool`` is a raw wrapper
+    address. Symbols are resolved from the addresses so the price lands under the
+    SAME canonical key the LP accounting consumer reads.
+
+    Teardown has no per-iteration ``market``; we price by address directly
+    through ``runner.price_oracle.get_aggregated_price`` (same gateway-routed
+    source the sibling :func:`_ensure_intent_tokens_in_teardown_oracle` uses).
+    Only legs whose registry ``coingecko_id is None`` are backfilled — the rest
+    are owned by the by-symbol top-off above. Best-effort, additive, never
+    overwrites an existing (higher-confidence) symbol price, and a miss /
+    non-positive price leaves the key absent (Empty≠Zero).
+    """
+    if result is None:
+        return oracle
+
+    from .strategy_runner import StrategyRunner as _StrategyRunner
+
+    addresses = _StrategyRunner._receipt_token_legs(result)
+    if not addresses:
+        return oracle
+
+    chain = getattr(strategy, "chain", None) or getattr(runner.config, "chain", "")
+    if not chain:
+        return oracle
+    chain_lower = (chain or "").lower().strip()
+
+    price_oracle_obj = getattr(runner, "price_oracle", None)
+    if price_oracle_obj is None or not hasattr(price_oracle_obj, "get_aggregated_price"):
+        return oracle
+
+    from almanak.framework.data.tokens import (
+        TokenNotFoundError,
+        TokenResolutionError,
+        get_token_resolver,
+    )
+
+    merged: dict = oracle if oracle is not None else {}
+
+    def _already_present(sym: str) -> bool:
+        return any(key in merged for key in (sym, sym.upper(), sym.lower()))
+
+    token_resolver = get_token_resolver()
+    for address in addresses:
+        try:
+            info = token_resolver.resolve(address.lower(), chain=chain_lower, log_errors=False, skip_gateway=True)
+        except (TokenNotFoundError, TokenResolutionError):
+            continue
+        except Exception:  # noqa: BLE001 — best-effort
+            continue
+        symbol = (info.symbol or "").upper()
+        # Only the coingecko_id-null legs the by-symbol top-off genuinely cannot
+        # reach. A token WITH a coingecko_id that's still missing is an ordinary
+        # gap owned by the symbol path, not this defect.
+        if not symbol or _already_present(symbol) or info.coingecko_id is not None:
+            continue
+        try:
+            agg = await price_oracle_obj.get_aggregated_price(address, "USD", chain=chain_lower)
+        except Exception as exc:  # noqa: BLE001 — best-effort; miss → leave absent
+            logger.debug(
+                "VIB-5124 teardown address-backfill: get_aggregated_price(%s) failed for %s on %s: %s",
+                address,
+                symbol,
+                chain_lower,
+                exc,
+            )
+            continue
+        price = getattr(agg, "price", None)
+        # Empty≠Zero + fail-closed on ≤ 0: a real token leg is never worth ≤ $0.
+        if price is None or price <= 0:
+            continue
+        timestamp = getattr(agg, "timestamp", None)
+        fetched_at = timestamp.isoformat() if timestamp is not None and hasattr(timestamp, "isoformat") else ""
+        confidence_str = str(getattr(agg, "confidence", None) or "ESTIMATED").upper()
+        if confidence_str not in {"HIGH", "ESTIMATED", "STALE", "UNAVAILABLE"}:
+            confidence_str = "ESTIMATED"
+        merged[symbol] = {
+            "price_usd": str(price),
+            "oracle_source": getattr(agg, "source", "") or "gateway",
+            "fetched_at": fetched_at,
+            "confidence": confidence_str,
+        }
+        logger.debug(
+            "VIB-5124 teardown address-backfill: priced %s ($%s) by address %s on %s",
+            symbol,
+            price,
+            address,
+            chain_lower,
+        )
+
+    return merged or None
+
+
 @dataclass(frozen=True)
 class TeardownSnapshotOutcome:
     """Outcome of a single pre- or post-teardown snapshot bracket.

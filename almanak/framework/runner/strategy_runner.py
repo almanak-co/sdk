@@ -5196,7 +5196,7 @@ class StrategyRunner:
         except Exception:  # noqa: BLE001 — never raise on a best-effort refresh
             return None
 
-    def _merge_oracle_for_ledger(self, state: Any, intent: AnyIntent) -> dict | None:
+    def _merge_oracle_for_ledger(self, state: Any, intent: AnyIntent, result: Any | None = None) -> dict | None:
         """Refresh the market oracle and merge with the cached one.
 
         Threading consistency: every ledger-write call site (success,
@@ -5221,6 +5221,17 @@ class StrategyRunner:
         provenance, and the ledger writer's normaliser defaulted to "unknown".
         Markets without ``with_sources`` support fall back to the legacy
         flat path (cleanly).
+
+        VIB-5124: ``result`` (the post-execution ``ExecutionResult``) carries the
+        receipt-derived token *addresses* (``lp_open_data`` / ``lp_close_data``
+        ``currency0``/``currency1``). Some tokens (``coingecko_id`` -null, e.g.
+        ``SUSDAI``) can only be priced by ADDRESS — the by-symbol pre-fetch above
+        cannot resolve them, and for connectors whose ``pool`` field is a raw
+        wrapper address the symbols aren't in the intent at all. After the merge,
+        :meth:`_backfill_address_priced_legs` resolves those legs by address and
+        writes the price under the canonical SYMBOL key so the symbol-keyed LP
+        accounting consumer reads it unchanged. Generalises to any primitive /
+        connector whose receipt exposes token addresses.
         """
         cached = getattr(state, "price_oracle", None) or {}
         refreshed = self._refresh_price_oracle_for_ledger(getattr(state, "market", None), intent) or {}
@@ -5250,14 +5261,176 @@ class StrategyRunner:
             merged: dict = {**refreshed, **cached}
             for sym, payload in nested_with_sources.items():
                 merged[sym] = payload
+            merged = self._backfill_address_priced_legs(market, merged, intent, result, with_sources=True)
             return merged or None
 
         if not cached and not refreshed:
-            return None
+            # Even with no cached/refreshed symbol prices, a receipt-bearing
+            # result may still let us price coingecko-null legs by address.
+            backfilled = self._backfill_address_priced_legs(market, {}, intent, result, with_sources=False)
+            return backfilled or None
         # Legacy path: ``refreshed`` first, ``cached`` overrides — preserves
         # cached provenance / confidence on overlap, fills gaps from refresh.
         merged_flat: dict = {**refreshed, **cached}
+        merged_flat = self._backfill_address_priced_legs(market, merged_flat, intent, result, with_sources=False)
         return merged_flat or None
+
+    @staticmethod
+    def _receipt_token_legs(result: Any | None) -> list[str]:
+        """Collect receipt-derived token *addresses* from an ExecutionResult.
+
+        Returns the ``currency0``/``currency1`` addresses stamped by the LP
+        receipt parser on ``lp_open_data`` / ``lp_close_data`` (V4 / fungible-LP
+        align tokens by address). Empty list when no receipt data is present
+        (failure path, non-LP intents). Addresses only — symbols are resolved by
+        the caller via the token registry so the price lands under the canonical
+        symbol key.
+
+        Designed to be extended: a lending / perp result that exposes its
+        collateral / debt token addresses can contribute them here so the
+        by-address backfill generalises beyond LP.
+        """
+        addresses: list[str] = []
+        for attr in ("lp_open_data", "lp_close_data"):
+            data = getattr(result, attr, None)
+            if data is None:
+                continue
+            for currency_field in ("currency0", "currency1"):
+                value = getattr(data, currency_field, None)
+                if isinstance(value, str) and value.strip().lower().startswith("0x"):
+                    # VIB-5124 — normalise to lowercase at this single shared
+                    # extraction point so BOTH lanes (iteration via
+                    # ``_backfill_address_priced_legs`` and teardown via
+                    # ``_ensure_receipt_legs_in_teardown_oracle``) consume an
+                    # identically-cased address. The token resolver lowercases
+                    # internally for EVM chains, so this is purely a lane-symmetry
+                    # guarantee, not a behaviour change.
+                    addresses.append(value.strip().lower())
+        # Preserve first-seen order, dedupe (LP_OPEN+LP_CLOSE never co-occur on a
+        # single result, but a defensive dedupe keeps the price() calls minimal).
+        return list(dict.fromkeys(addresses))
+
+    def _backfill_address_priced_legs(
+        self,
+        market: Any | None,
+        oracle: dict,
+        intent: AnyIntent,
+        result: Any | None,
+        *,
+        with_sources: bool,
+    ) -> dict:
+        """VIB-5124 — price ``coingecko_id``-null legs by address, key by symbol.
+
+        Post-pass over the assembled ledger oracle. For each receipt-derived
+        token leg (addresses from ``result``) whose canonical SYMBOL is missing
+        from ``oracle`` AND whose registry entry has ``coingecko_id is None``
+        (the precise condition that makes by-symbol pricing impossible), price it
+        BY ADDRESS — mirroring the portfolio valuer's ``_price_leg`` pattern
+        (``portfolio_valuer._reprice_fungible_lp_enriched``) — and write the
+        result under the canonical SYMBOL key the LP accounting consumer reads.
+
+        Why a post-pass and not ``market.price(address)`` self-keying:
+        ``get_price_oracle_dict()`` keys by the raw ``price()`` argument, so an
+        address-priced leg would land under the raw-address key (``0X0B2B…``),
+        not the symbol. We resolve the symbol explicitly and re-key.
+
+        Best-effort and additive: never raises, never overwrites an existing
+        (higher-confidence) symbol price, and on a price miss leaves the key
+        absent (Empty≠Zero — the consumer then reports the leg UNAVAILABLE rather
+        than fabricating a zero). Generalises to any primitive / connector via
+        :meth:`_receipt_token_legs`.
+        """
+        if market is None or result is None or not hasattr(market, "price"):
+            return oracle
+        addresses = self._receipt_token_legs(result)
+        if not addresses:
+            return oracle
+
+        chain_raw = getattr(market, "chain", None) or getattr(intent, "chain", None)
+        if not chain_raw:
+            return oracle
+        # VIB-5124 — normalise the chain to lowercase+stripped, matching the
+        # teardown twin (``_ensure_receipt_legs_in_teardown_oracle``) and the
+        # resolver's own ``_normalize_chain`` contract, so the two lanes resolve
+        # and price identically.
+        chain = str(chain_raw).lower().strip()
+
+        from almanak.framework.data.tokens import (
+            TokenNotFoundError,
+            TokenResolutionError,
+            get_token_resolver,
+        )
+
+        resolver = get_token_resolver()
+        for address in addresses:
+            try:
+                resolved = resolver.resolve(address, chain, log_errors=False, skip_gateway=True)
+            except (TokenNotFoundError, TokenResolutionError):
+                continue
+            symbol = (resolved.symbol or "").upper()
+            # Only backfill the tokens by-symbol pricing genuinely cannot reach:
+            # a registry token with no CoinGecko id. Address-priced sources
+            # (CoinGecko-contract / DexScreener-by-address) are the only paths
+            # that can price these, and the by-symbol pre-fetch already skipped
+            # them. A token WITH a coingecko_id that's still missing is an
+            # ordinary oracle gap, not this defect — leave it to the normal path.
+            # Case-insensitive presence check: symbol is canonical-uppercase, but
+            # an existing oracle entry could (defensively) be lowercased — never
+            # double-write under a different casing.
+            if (
+                not symbol
+                or any(key in oracle for key in (symbol, symbol.lower()))
+                or resolved.coingecko_id is not None
+            ):
+                continue
+            source = "unknown"
+            try:
+                # ``price()`` engages the address oracle paths and caches the
+                # entry; ``price_data()`` then reads back the same cached entry
+                # (price + provenance) so the nested G12 shape carries the real
+                # source instead of "unknown".
+                raw_price = market.price(address, chain=chain)
+                # Skip explicitly before Decimal() — a None price is a miss, not a
+                # value, and ``Decimal("None")`` would raise InvalidOperation only
+                # to be swallowed below (Empty≠Zero: leave the key absent).
+                if raw_price is None:
+                    continue
+                price = Decimal(str(raw_price))
+                if with_sources:
+                    try:
+                        source = getattr(market.price_data(address, chain=chain), "source", "") or "unknown"
+                    except Exception:  # noqa: BLE001 — provenance is best-effort
+                        source = "unknown"
+            except Exception:  # noqa: BLE001 — best-effort; miss → leave absent
+                logger.debug(
+                    "VIB-5124 address-backfill: price(%s) failed for %s on %s",
+                    address,
+                    symbol,
+                    chain,
+                    exc_info=True,
+                )
+                continue
+            # Fail closed on a non-positive price (Empty≠Zero): a real token leg
+            # is never worth ≤ $0, so 0/negative is an oracle miss, not a value.
+            if not price.is_finite() or price <= 0:
+                continue
+            if with_sources:
+                oracle[symbol] = {
+                    "price_usd": str(price),
+                    "oracle_source": source,
+                    "fetched_at": "",
+                    "confidence": "HIGH",
+                }
+            else:
+                oracle[symbol] = price
+            logger.debug(
+                "VIB-5124 address-backfill: priced %s ($%s) by address %s on %s",
+                symbol,
+                price,
+                address,
+                chain,
+            )
+        return oracle
 
     @staticmethod
     def _build_single_chain_price_oracle(market: Any | None, intent: AnyIntent) -> dict | None:
@@ -5848,7 +6021,7 @@ class StrategyRunner:
         # truthy, and a non-empty cached dict is not evidence that the
         # ledger row will pay for gas. Cached values win on key collision so
         # this is purely additive (refreshed values fill gaps).
-        ledger_price_oracle = self._merge_oracle_for_ledger(state, intent)
+        ledger_price_oracle = self._merge_oracle_for_ledger(state, intent, result=state.last_execution_result)
         # VIB-4483 (P-V1-B): for a native-ETH V4 LP_OPEN the deposited ETH leg
         # emits no ERC-20 Transfer, so the receipt parser left it None. Read the
         # freshly-minted position's live state (post-mint) and derive the native
@@ -6022,7 +6195,7 @@ class StrategyRunner:
             # even when ``state.price_oracle`` was captured before market
             # warming. Without this, a slippage breach still landed gas on-
             # chain but the ledger row wrote ``gas_usd=""``.
-            price_oracle=self._merge_oracle_for_ledger(state, intent),
+            price_oracle=self._merge_oracle_for_ledger(state, intent, result=last_execution_result),
             pre_state=_build_pre_state_for_ledger(
                 state.pre_snapshot,
                 state.lending_pre_state,
@@ -6124,7 +6297,7 @@ class StrategyRunner:
             # VIB-3804 hardening (mirrors the slippage / success branches):
             # refresh+merge so the reconciliation-failure row also carries
             # the full oracle and a populated ``gas_usd``.
-            price_oracle=self._merge_oracle_for_ledger(state, intent),
+            price_oracle=self._merge_oracle_for_ledger(state, intent, result=last_execution_result),
             pre_state=_build_pre_state_for_ledger(
                 state.pre_snapshot,
                 state.lending_pre_state,
@@ -6239,7 +6412,7 @@ class StrategyRunner:
             # may have been burned by the attempt(s). Refresh+merge so the
             # ledger row carries the full oracle and ``gas_usd`` is non-
             # empty when there's gas to convert.
-            price_oracle=self._merge_oracle_for_ledger(state, intent),
+            price_oracle=self._merge_oracle_for_ledger(state, intent, result=last_execution_result),
             pre_state=_build_pre_state_for_ledger(
                 state.pre_snapshot,
                 state.lending_pre_state,

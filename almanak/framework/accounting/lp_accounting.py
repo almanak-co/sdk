@@ -357,9 +357,17 @@ def compute_lp_cost_basis(
 ) -> Decimal | None:
     """Compute LP entry cost basis as amount0*price0 + amount1*price1.
 
-    Returns None when price_oracle is unavailable, any non-None amount lacks a price,
-    or both amounts are None (no legs contributed — not a concrete zero basis).
-    price_oracle keys are uppercase token symbols (e.g. "WETH", "USDC").
+    Returns None when price_oracle is unavailable, a *non-zero* amount lacks a
+    price, or both amounts are None (no legs contributed — not a concrete zero
+    basis). price_oracle keys are uppercase token symbols (e.g. "WETH", "USDC").
+
+    VIB-5124 — Empty≠Zero: a leg with a *measured-zero* amount (``Decimal("0")``)
+    contributes exactly ``$0`` to the basis regardless of whether its price is
+    available, so it must NOT void the whole sum. A single-sided LP_OPEN funds
+    one leg only; the unfunded leg is a measured zero (e.g. a ``coingecko_id``
+    -null token whose symbol cannot be priced). Skipping it is universally
+    correct: when both prices exist ``0·price == 0`` either way, and the funded
+    (non-zero) leg still drives ``has_any`` and still requires its own price.
 
     Public canonical implementation — also imported by
     ``framework.accounting.category_handlers.lp_handler``. The leading-underscore
@@ -377,6 +385,16 @@ def compute_lp_cost_basis(
         if amt is None:
             continue
         price = price_oracle.get(sym)
+        # VIB-5124 — a measured-zero leg contributes exactly $0. When its price is
+        # AVAILABLE it still counts as a measured leg (0·price == 0; ``has_any``
+        # set) so a both-zero-with-prices event yields a measured ``Decimal("0")``
+        # (e.g. measured-zero fees). When its price is MISSING, skip it WITHOUT
+        # voiding the whole basis and WITHOUT setting ``has_any`` (Empty≠Zero):
+        # a single-sided LP_OPEN's unfunded leg (e.g. a coingecko_id-null token)
+        # must not demand a price it can never have. The funded (non-zero) leg
+        # still drives ``has_any`` and still requires its own price below.
+        if amt == 0 and price is None:
+            continue
         if price is None:
             return None
         try:
