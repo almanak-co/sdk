@@ -117,6 +117,34 @@ token-consolidation phase to resolve the ``entry_token`` policy's
 earliest-SWAP fallback (VIB-5011). Best-effort: returns ``[]`` on any
 failure."""
 
+DiscoverLpPositions = Callable[..., Awaitable[Any]]
+"""Async ``(strategy) -> LpDiscoveryResult``. Runs BOUNDED on-chain LP
+discovery (VIB-5138) for the strategy's wallet/chain via the gateway
+RpcService — the same NPM scan the ``--discover`` CLI flag uses
+(``teardown.discovery``). The teardown manager's auto-fallback path calls
+this when the strategy reports no LP (state desync — NFT live on-chain but
+``_position_id`` lost, often after an ``AccountingPersistenceError`` on LP
+open) so the orphaned NFT is still closed instead of being silently
+stranded. Returns an ``LpDiscoveryResult`` carrying the discovered
+``TeardownPositionSummary`` and an ``incomplete`` flag (True when discovery
+could not enumerate every NPM-reported position — strict mode raised
+``DiscoveryIncomplete``). Never raises: discovery failure degrades the
+teardown loudly but must never block the next risk-reducing intent."""
+
+GetDeploymentLpOwnership = Callable[..., Awaitable[Any]]
+"""Async ``(strategy, chain) -> DeploymentLpOwnership``. Returns the LP NFT
+token ids attributable to THIS deployment on ``chain`` (VIB-5138 / VIB-4976
+fund-safety scoping). Built from the deployment's own durable accounting state
+— ``position_registry`` OPEN rows (``payload.token_id``, the robust
+post-cutover signal that survives the LP-open ``AccountingPersistenceError``
+because it is committed atomically with the ledger BEFORE the typed accounting
+event) unioned with ``position_events`` LP OPEN rows (``position_id`` = token
+id, the pre-cutover fallback). NEVER enumerates the shared wallet. Used to
+scope on-chain LP discovery so teardown can only ever close positions this
+deployment opened — a sibling strategy's live LP on the same wallet is not in
+the set. Never raises; on total read failure returns ``available=False`` so
+recovery refuses to close anything (ownership unprovable)."""
+
 
 @dataclass(frozen=True)
 class TeardownRunnerHelpers:
@@ -143,6 +171,8 @@ class TeardownRunnerHelpers:
     warn_sweep_non_strategy_balance: WarnSweepNonStrategyBalance | None = None
     get_token_universe: GetTokenUniverse | None = None
     get_accounting_events: GetAccountingEvents | None = None
+    discover_lp_positions: DiscoverLpPositions | None = None
+    get_deployment_lp_ownership: GetDeploymentLpOwnership | None = None
 
     @property
     def has_commit(self) -> bool:
@@ -189,6 +219,11 @@ class TeardownRunnerHelpers:
     def has_accounting_events(self) -> bool:
         """True iff the accounting-events accessor is wired (VIB-5011)."""
         return self.get_accounting_events is not None
+
+    @property
+    def has_lp_discovery(self) -> bool:
+        """True iff the on-chain LP discovery fallback is wired (VIB-5138)."""
+        return self.discover_lp_positions is not None and self.get_deployment_lp_ownership is not None
 
 
 def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
@@ -337,14 +372,176 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
         snapshot_intent_v4_lp_close_native_principal=_snapshot_intent_v4_lp_close_native_principal,
         warn_sweep_non_strategy_balance=_warn_sweep_non_strategy_balance,
         get_token_universe=_get_token_universe,
+        discover_lp_positions=partial(_discover_lp_for_teardown, runner),
+        get_deployment_lp_ownership=partial(_deployment_lp_ownership, runner),
         get_accounting_events=_get_accounting_events,
     )
+
+
+async def _read_registry_lp_token_ids(state_manager: Any, deployment_id: str, chain: str) -> tuple[set[str], bool]:
+    """LP NFT token ids from this deployment's ``position_registry`` OPEN rows.
+
+    Source 1 of :func:`_deployment_lp_ownership` (robust, survives the LP-open
+    ``AccountingPersistenceError`` desync — the registry row is committed
+    atomically with the ledger BEFORE the typed accounting event). Owns its own
+    try/except: a backend without registry storage raises
+    ``CutoverStorageNotSupported`` (caught → treated as "no registry signal").
+
+    Returns ``(token_ids, ok)``. ``ok`` is True only when the read completed
+    (so the coordinator can compute ``available = registry_ok or events_ok``).
+    Never raises.
+    """
+    if state_manager is None or not hasattr(state_manager, "get_position_registry_open_rows"):
+        return set(), False
+    token_ids: set[str] = set()
+    try:
+        rows = await state_manager.get_position_registry_open_rows(deployment_id, chain=chain, primitive="lp")
+    except Exception as exc:  # noqa: BLE001 — CutoverStorageNotSupported et al.
+        logger.debug(
+            "Teardown LP ownership: position_registry read unavailable for %s (%s); falling back to position_events",
+            deployment_id,
+            exc,
+        )
+        return set(), False
+    for row in rows or []:
+        payload = row.get("payload") if isinstance(row, dict) else None
+        tid = payload.get("token_id") if isinstance(payload, dict) else None
+        if tid is not None:
+            token_ids.add(str(tid))
+    return token_ids, True
+
+
+def _read_position_event_lp_token_ids(state_manager: Any, deployment_id: str, chain: str) -> tuple[set[str], bool]:
+    """LP NFT token ids from this deployment's ``position_events`` LP OPEN rows.
+
+    Source 2 of :func:`_deployment_lp_ownership` (pre- and post-cutover
+    fallback — ``position_id`` IS the NFT token id). Sync read. Only this
+    chain's OPENs are counted. Owns its own try/except.
+
+    Returns ``(token_ids, ok)`` like :func:`_read_registry_lp_token_ids`.
+    Never raises.
+    """
+    if state_manager is None or not hasattr(state_manager, "get_position_events_sync"):
+        return set(), False
+    token_ids: set[str] = set()
+    try:
+        events = state_manager.get_position_events_sync(deployment_id, position_type="LP", event_type="OPEN")
+    except Exception as exc:  # noqa: BLE001 — best-effort attribution read
+        logger.debug("Teardown LP ownership: position_events read failed for %s (%s)", deployment_id, exc)
+        return set(), False
+    for ev in events or []:
+        ev_chain = (ev.get("chain") or "") if isinstance(ev, dict) else ""
+        pid = ev.get("position_id") if isinstance(ev, dict) else None
+        if pid is None:
+            continue
+        # Only count this chain's OPENs toward token_ids.
+        if ev_chain and ev_chain != chain:
+            continue
+        token_ids.add(str(pid))
+    return token_ids, True
+
+
+async def _deployment_lp_ownership(runner: Any, strategy: Any, chain: str) -> Any:
+    """LP token ids attributable to THIS deployment on ``chain`` (VIB-5138).
+
+    Fund-safety scoping (VIB-4976): the on-chain discovery scan is wallet-scoped
+    and a wallet may be shared across deployments. This reads the deployment's
+    OWN durable accounting state to learn which NFT token ids it opened, so
+    teardown recovery can never close a sibling strategy's live LP on the same
+    wallet.
+
+    Thin coordinator over two complementary read sources (both have independent
+    survival in the desync the ticket targets) — see
+    :func:`_read_registry_lp_token_ids` (robust, post-cutover) and
+    :func:`_read_position_event_lp_token_ids` (pre-cutover fallback). The ids are
+    unioned; ``had_lp_open`` is True iff any source contributed an id;
+    ``available`` is True iff at least one read completed. When BOTH reads fail
+    ``available=False`` so the caller refuses to close anything (ownership
+    unprovable). Never raises.
+
+    Bound to the runner via :func:`functools.partial` so the consumer calls
+    ``(strategy, chain) -> DeploymentLpOwnership``.
+    """
+    from .lp_recovery import DeploymentLpOwnership
+
+    deployment_id = (getattr(strategy, "deployment_id", "") or "").strip()
+    sm = getattr(runner, "state_manager", None)
+
+    registry_ids, registry_ok = await _read_registry_lp_token_ids(sm, deployment_id, chain)
+    event_ids, events_ok = _read_position_event_lp_token_ids(sm, deployment_id, chain)
+
+    token_ids = registry_ids | event_ids
+    available = registry_ok or events_ok
+    if not available:
+        logger.warning(
+            "Teardown LP ownership: NO attribution source readable for %s on %s — "
+            "recovery will refuse to close discovered NFTs (ownership unprovable).",
+            deployment_id,
+            chain,
+        )
+    return DeploymentLpOwnership(
+        token_ids=frozenset(token_ids),
+        had_lp_open=bool(token_ids),
+        available=available,
+    )
+
+
+async def _discover_lp_for_teardown(runner: Any, strategy: Any) -> Any:
+    """Bounded on-chain LP discovery fallback for teardown recovery (VIB-5138).
+
+    Reuses the SAME gateway-backed NPM scan the ``--discover`` CLI flag uses
+    (``teardown.discovery``), so the recovery path stays on the gateway
+    boundary (no direct network). Strict mode is REQUIRED: a partial scan that
+    silently drops a position would re-create the very orphan this fix closes,
+    so ``DiscoveryIncomplete`` is caught and surfaced as ``incomplete=True``
+    rather than swallowed. Never raises — discovery failure degrades the
+    teardown loudly but must never block the next risk-reducing intent.
+
+    Bound to the runner via :func:`functools.partial` in
+    :func:`build_runner_helpers` so the consumer calls ``(strategy) ->
+    LpDiscoveryResult``.
+    """
+    from .discovery import DiscoveryIncomplete, discover_lp_positions, to_teardown_summary
+    from .lp_recovery import LpDiscoveryResult
+    from .models import TeardownPositionSummary
+
+    deployment_id = (getattr(strategy, "deployment_id", "") or "").strip()
+    chain = (getattr(strategy, "chain", "") or "").strip()
+    wallet = (getattr(strategy, "wallet_address", "") or "").strip()
+    empty = TeardownPositionSummary.empty(deployment_id or "unknown")
+
+    if not (deployment_id and chain and wallet):
+        logger.warning(
+            "Teardown LP discovery skipped: missing deployment_id/chain/wallet (deployment_id=%r chain=%r wallet=%r)",
+            deployment_id,
+            chain,
+            wallet,
+        )
+        return LpDiscoveryResult(summary=empty, incomplete=False)
+
+    try:
+        discovered = await discover_lp_positions(
+            client=runner._get_gateway_client(),
+            chain=chain,
+            wallet=wallet,
+            strict=True,
+        )
+    except DiscoveryIncomplete as exc:
+        return LpDiscoveryResult(summary=empty, incomplete=True, error=str(exc))
+    except Exception as exc:  # noqa: BLE001 — never let discovery block risk reduction
+        logger.error("Teardown LP discovery failed (non-fatal): %s", exc, exc_info=True)
+        return LpDiscoveryResult(summary=empty, incomplete=True, error=str(exc))
+
+    summary = to_teardown_summary(deployment_id=deployment_id, chain=chain, positions=discovered)
+    return LpDiscoveryResult(summary=summary, incomplete=False)
 
 
 __all__ = [
     "CaptureTeardownSnapshot",
     "CommitTeardownIntent",
+    "DiscoverLpPositions",
     "GetAccountingEvents",
+    "GetDeploymentLpOwnership",
     "GetTokenUniverse",
     "ReconcilePostBalances",
     "SnapshotIntentBalances",

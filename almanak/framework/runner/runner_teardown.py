@@ -12,6 +12,7 @@ import json
 import logging
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
@@ -356,6 +357,144 @@ def _count_open_positions(strategy: Any) -> int | None:
         return None
 
 
+async def _recover_orphaned_lp_intents(
+    runner: Any,
+    strategy: Any,
+    teardown_intents: list,
+    teardown_mode: TeardownMode,
+) -> tuple[list, bool, str | None]:
+    """Auto-fallback to on-chain LP discovery when strategy state is lost (VIB-5138).
+
+    Teardown emits ``LP_CLOSE`` only when the strategy's ``_position_id``
+    survives. On state desync — the LP NFT is live on-chain but ``_position_id``
+    was lost (often after an ``AccountingPersistenceError`` on LP open) —
+    ``get_open_positions()`` returns no LP and ``generate_teardown_intents()``
+    emits no LP_CLOSE, so the signal-driven runner lane would report "no
+    positions" and strand the open NFT.
+
+    **Deployment-ownership scoping (fund-safety, VIB-4976).** The on-chain scan
+    is wallet-scoped, and a wallet may be shared across deployments. Recovery is
+    scoped to ONLY the token ids THIS deployment opened, learned from its own
+    durable accounting state (``position_registry`` OPEN rows + ``position_events``
+    LP OPEN rows — both survive the LP-open ``AccountingPersistenceError`` desync,
+    see ``runner_helpers._deployment_lp_ownership``). A sibling strategy's live LP
+    on the same wallet is never in the set and is never closed.
+
+    Ownership is read FIRST (cheap local-DB read). When this deployment has NO LP
+    attribution on the chain (a non-LP strategy), the gateway scan is skipped
+    entirely — so a non-LP teardown neither pays for a scan nor can be blocked by
+    a transient blip on an unrelated NPM.
+
+    Recovered ``LP_CLOSE`` intents are appended to ``teardown_intents`` and flow
+    through the normal ``_execute_intents`` per-intent commit pipeline — so every
+    recovered close lands in the teardown accounting lane (no bypass).
+
+    Returns ``(augmented_intents, incomplete, warning)``:
+
+    * ``augmented_intents`` — the input intents plus any deployment-owned
+      recovered ``LP_CLOSE``.
+    * ``incomplete`` — True ONLY when the scan was incomplete AND this deployment
+      is known to have opened an LP on this chain (a deployment-owned orphan may
+      remain). The caller MUST NOT report a clean success in that case.
+    * ``warning`` — operator-facing reason when ``incomplete``.
+
+    Never raises: discovery failure degrades the teardown loudly but must never
+    block the next risk-reducing intent (teardown failure semantics are
+    inverted vs the iteration lane).
+    """
+    from ..teardown.lp_recovery import merge_discovered_lp, strategy_reports_lp
+    from ..teardown.runner_helpers import build_runner_helpers
+
+    deployment_id = strategy.deployment_id
+    chain = (getattr(strategy, "chain", "") or "").strip()
+    try:
+        positions = strategy.get_open_positions()
+    except Exception:
+        # Can't read positions → can't decide. Leave intents untouched; the
+        # downstream lane has its own positions/verify path.
+        logger.debug(
+            "Teardown LP recovery: get_open_positions failed for %s — skipping discovery fallback",
+            deployment_id,
+            exc_info=True,
+        )
+        return teardown_intents, False, None
+
+    # Strategy still tracks its LP → its own close is authoritative; no scan.
+    if strategy_reports_lp(positions):
+        return teardown_intents, False, None
+
+    helpers = build_runner_helpers(runner)
+    if not helpers.has_lp_discovery:
+        return teardown_intents, False, None
+
+    # ``has_lp_discovery`` guarantees both callables are wired; bind them to
+    # non-Optional locals so the type checker sees them as callable (mypy can't
+    # narrow Optional through the property).
+    get_ownership = helpers.get_deployment_lp_ownership
+    discover = helpers.discover_lp_positions
+    assert get_ownership is not None and discover is not None  # noqa: S101 — narrowed by has_lp_discovery
+
+    # Ownership FIRST (cheap local read). Determines (a) which discovered NFTs we
+    # may close and (b) whether an incomplete scan is even relevant to us.
+    try:
+        ownership = await get_ownership(strategy, chain)
+    except Exception:  # noqa: BLE001 — ownership read must never block risk reduction
+        logger.exception(
+            "Teardown LP recovery: ownership read raised for %s — skipping recovery (cannot prove ownership)",
+            deployment_id,
+        )
+        return teardown_intents, False, None
+
+    # No attribution source readable → ownership unprovable → never close.
+    if not ownership.available:
+        return teardown_intents, False, None
+
+    # This deployment owns no LP on this chain → nothing to recover, and an
+    # unrelated NPM blip during a scan must not block this benign teardown.
+    # Skip the gateway scan entirely (resolves the spurious-FAILED concern).
+    if not ownership.token_ids and not ownership.had_lp_open:
+        return teardown_intents, False, None
+
+    try:
+        discovery = await discover(strategy)
+    except Exception:  # noqa: BLE001 — discovery must never block risk reduction
+        logger.exception(
+            "Teardown LP recovery: discovery helper raised for %s — continuing without recovery",
+            deployment_id,
+        )
+        # Honesty axis (Gemini HIGH): a RAISED scan is the same information loss
+        # as ``incomplete=True`` — we could not enumerate the wallet's NFTs. We
+        # only reach here past the guard above, so this deployment IS known to
+        # have an LP on this chain (token_ids and/or had_lp_open). Mirror the F2
+        # logic: degrade to incomplete=True (manual-check / loud) for an
+        # owned-LP deployment so teardown is NOT certified clean; a deployment
+        # with no LP attribution here would have skipped the scan already.
+        owns_lp_here = bool(ownership.token_ids) or ownership.had_lp_open
+        if owns_lp_here:
+            warning = (
+                f"On-chain LP discovery raised during teardown recovery for {deployment_id}; "
+                "this deployment is known to have opened an LP on this chain — manual on-chain "
+                "verification required."
+            )
+            return teardown_intents, True, warning
+        # Defensive: no LP attribution → a raised scan is benign (WARNING only).
+        logger.warning(
+            "Teardown LP recovery: discovery raised for %s but this deployment has no LP "
+            "attribution on this chain — degrading to a warning, not a block.",
+            deployment_id,
+        )
+        return teardown_intents, False, None
+
+    outcome = merge_discovered_lp(
+        positions=positions,
+        intents=teardown_intents,
+        discovery=discovery,
+        ownership=ownership,
+        mode=teardown_mode,
+    )
+    return outcome.intents, outcome.incomplete, outcome.warning
+
+
 def _positions_completion_result(open_positions_count: int | None, intents_count: int) -> dict[str, Any]:
     """Build the ``mark_completed`` result_json for the unverified teardown lanes.
 
@@ -479,7 +618,33 @@ async def execute_teardown(  # noqa: C901
         runner._request_teardown_failure_shutdown(str(e))
         return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, str(e), start_time)
 
+    # Step T2.4 (VIB-5138): auto-fallback to on-chain LP discovery when the
+    # strategy's state desynced (LP NFT live on-chain but ``_position_id``
+    # lost). Appends recovered LP_CLOSE intents and surfaces an incomplete flag
+    # when the bounded scan could not enumerate every position. Runs on the
+    # signal-driven runner lane only — the CLI ``teardown execute`` lane has the
+    # explicit ``--discover`` flag for the same recovery.
+    teardown_intents, recovery_incomplete, recovery_warning = await _recover_orphaned_lp_intents(
+        runner, strategy, teardown_intents, teardown_mode
+    )
+    # F3 (VIB-5138): stash the incomplete signal on the runner so the
+    # intents-present path (multi-chain + TeardownManager lanes) can degrade the
+    # teardown lifecycle to manual-check after execution, instead of letting an
+    # unenumerated orphan sit inside a clean COMPLETED. Consumed + cleared by the
+    # completion-mark sites below / in execute_teardown_via_manager.
+    runner._teardown_recovery_incomplete = recovery_incomplete
+    runner._teardown_recovery_warning = recovery_warning
+
     if not teardown_intents:
+        if recovery_incomplete:
+            # Discovery could not confirm the wallet holds no LP — refusing to
+            # report a clean "no positions" success that might strand an orphan.
+            err = recovery_warning or "On-chain LP discovery incomplete; manual check required."
+            logger.error("🛑 %s teardown blocked: %s", deployment_id, err)
+            if request:
+                _safe_mark(manager, "mark_failed", deployment_id, error=err)
+            runner._request_teardown_failure_shutdown(err)
+            return runner._create_error_result(deployment_id, IterationStatus.STRATEGY_ERROR, err, start_time)
         logger.info(f"🛑 {deployment_id} teardown complete (no positions to close)")
         if request:
             _safe_mark(manager, "mark_completed", deployment_id, result={"reason": "no_positions"})
@@ -560,16 +725,25 @@ async def execute_teardown(  # noqa: C901
             logger.info(f"🛑 {deployment_id} teardown complete - shutting down strategy runner")
             runner.request_shutdown()
             if request:
-                # VIB-5085: the multi-chain lane has no position verifier; a
-                # fully-successful teardown closed every open position, so report
-                # the pre-execution count when known (else omit positions_closed
-                # so the lift falls back to the legacy ``intents`` key).
-                _safe_mark(
-                    manager,
-                    "mark_completed",
-                    deployment_id,
-                    result=_positions_completion_result(open_positions_count, len(teardown_intents)),
-                )
+                if recovery_incomplete:
+                    # F3 (VIB-5138): execution succeeded but on-chain LP discovery
+                    # was incomplete for a deployment KNOWN to hold an LP here —
+                    # an orphan may remain. Mark FAILED (manual-check) rather than
+                    # a clean COMPLETED so the operator verifies on-chain.
+                    err = recovery_warning or "On-chain LP discovery incomplete; manual check required."
+                    logger.error("🛑 %s teardown degraded (recovery incomplete): %s", deployment_id, err)
+                    _safe_mark(manager, "mark_failed", deployment_id, error=err)
+                else:
+                    # VIB-5085: the multi-chain lane has no position verifier; a
+                    # fully-successful teardown closed every open position, so report
+                    # the pre-execution count when known (else omit positions_closed
+                    # so the lift falls back to the legacy ``intents`` key).
+                    _safe_mark(
+                        manager,
+                        "mark_completed",
+                        deployment_id,
+                        result=_positions_completion_result(open_positions_count, len(teardown_intents)),
+                    )
         else:
             if request:
                 _safe_mark(manager, "mark_failed", deployment_id, error=result.error or "execution failed")
@@ -778,6 +952,33 @@ async def execute_teardown_via_manager(
             teardown_result.accounting_degraded = True
             teardown_result.accounting_degraded_count += bracket_failures
 
+        # F3 (VIB-5138): if on-chain LP discovery was incomplete for a deployment
+        # KNOWN to hold an LP on this chain, a deployment-owned orphan may STILL
+        # be open even though every executed intent succeeded. Refuse to certify
+        # the teardown complete — degrade to a manual-check result regardless of
+        # whether intents were present. This runs AFTER execution + verify (we did
+        # all the risk reduction we could; we just don't certify it). Read off the
+        # runner attribute the recovery step stashed (cleared in finally).
+        if getattr(runner, "_teardown_recovery_incomplete", False) and teardown_result.success:
+            warn = (
+                getattr(runner, "_teardown_recovery_warning", None)
+                or "On-chain LP discovery incomplete; manual check required."
+            )
+            logger.error(
+                "🛑 %s teardown executed but LP discovery incomplete — marking manual-check: %s",
+                deployment_id,
+                warn,
+            )
+            teardown_result = replace(
+                teardown_result,
+                success=False,
+                error=warn,
+                recovery_options=[
+                    "Verify LP positions on-chain (NPM balanceOf)",
+                    "Re-run teardown once RPC is healthy",
+                ],
+            )
+
         # Phase 8: alert + cleanup (best effort, swallow exceptions).
         await _h.send_alert_and_cleanup(teardown_mgr, teardown_result, teardown_state.teardown_id)
 
@@ -809,6 +1010,10 @@ async def execute_teardown_via_manager(
                 _clear_cycle_id()
             else:
                 _set_cycle_id(saved_ctx_cycle_id)
+        # VIB-5138: clear the recovery-incomplete signal so it cannot leak into a
+        # subsequent teardown on the same runner.
+        runner._teardown_recovery_incomplete = False
+        runner._teardown_recovery_warning = None
 
     # Phase 9: map TeardownResult -> IterationResult + terminal side effects.
     return _h.map_teardown_result(runner, strategy, start_time, teardown_result, teardown_mode, request, state_manager)
