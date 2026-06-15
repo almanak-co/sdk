@@ -82,6 +82,12 @@ _SNAPSHOT_LP_PROTOCOLS = frozenset(
         # connector-owned override builds V4-shaped pool-key intents the
         # framework default can't produce).
         "uniswap_v4",
+        # VIB-5125: fluid_dex_lp joins LP discovery (LP_OPEN + LP_CLOSE). Its
+        # compile path is RPC-bound (51013 deposit pre-flight + live close
+        # balance read), so the manifest selectors are pinned via
+        # ``static_permissions`` (the TraderJoe V2 precedent) rather than an
+        # offline ``build_discovery_vectors``.
+        "fluid_dex_lp",
     }
 )
 _SNAPSHOT_LENDING_PROTOCOLS = frozenset(

@@ -196,6 +196,28 @@ FLUID_SMARTLENDING_MARKETS: dict[str, dict[str, dict[str, Any]]] = {
     for chain, rows in _FLUID_SMARTLENDING_MARKETS_SRC.items()
 }
 
+
+def is_native_leg(entry: dict[str, Any]) -> bool:
+    """True when either leg of a SmartLending wrapper is the native-ETH sentinel.
+
+    Single source of truth for the native-leg test shared by the compiler
+    (``FluidDexLpCompiler._refuse_native`` — refuses native wrappers at COMPILE
+    because a native leg rides as ``msg.value`` with no ERC-20 ``Transfer`` log
+    and would mis-account as a measured zero, VIB-5121) and synthetic
+    permission discovery (``fluid_dex_lp`` static permissions — excludes native
+    wrappers from the discovery surface so it never authorises a flow the
+    compiler refuses). Both consumers MUST agree on this definition, so it lives
+    here next to ``FLUID_SMARTLENDING_MARKETS`` rather than being re-derived in
+    each module. A wrapper is native-leg when ``native_token1`` is set OR
+    ``token0`` equals ``FLUID_DEX_LP_NATIVE_SENTINEL`` (case-insensitive).
+    """
+    native_t1 = bool(entry.get("native_token1"))
+    # ``or ""`` (not the get-default) so an explicit ``None`` token0 compares as
+    # "" rather than the string "None" — robust against a malformed config row.
+    native_t0 = str(entry.get("token0") or "").lower() == FLUID_DEX_LP_NATIVE_SENTINEL.lower()
+    return native_t0 or native_t1
+
+
 __all__ = [
     "FLUID",
     "FLUID_DEX_LP",
@@ -204,4 +226,5 @@ __all__ = [
     "FLUID_VAULT",
     "FLUID_VAULT_MARKETS",
     "FLUID_VAULT_NATIVE_SENTINEL",
+    "is_native_leg",
 ]

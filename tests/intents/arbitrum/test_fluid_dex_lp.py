@@ -24,9 +24,16 @@ Fungible-LP discipline (curve/aerodrome-classic precedent): no NFT, no tick
 range — the wrapper share balance IS the position. LPOpenIntent passes dummy
 positive ranges (required by validation for non-tick protocols).
 
-This is an EOA test (``no_zodiac``): fluid_dex_lp is not yet wired into the
-synthetic Zodiac discovery matrix (tracked as a VIB-5032 follow-up), mirroring
-the curve LP intent test.
+ZODIAC NOTE (VIB-5125): this test runs under the default-on ``ZodiacOrchestrator``
+(no ``@pytest.mark.no_zodiac``). The connector is wired into the synthetic
+discovery matrix via STATIC permissions in
+``almanak/connectors/fluid_dex_lp/permission_hints.py`` (token ``approve`` +
+wrapper ``deposit`` / ``withdraw``), because ``fluid_dex_lp``'s compile path is
+RPC-bound (the 51013 deposit-enabled pre-flight + the live close-balance read)
+and so cannot land selectors through offline compilation — the same reason
+TraderJoe V2 pins its LP selectors statically. The two compile-FAILED guard
+tests (fSL12 deposit-disabled, slippage) never reach execution, so they don't
+exercise Zodiac authorisation; the open / open-then-close lifecycle tests do.
 
 ARCHIVE NOTE: the resolver struct read (``getSmartLendingEntireData``) and the
 DEX deposit path touch storage that a non-archive public RPC cannot serve at a
@@ -52,10 +59,6 @@ from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import IntentCompiler, LPCloseIntent, LPOpenIntent
 from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import get_token_balance
-
-pytestmark = pytest.mark.no_zodiac(
-    reason="fluid_dex_lp not yet in the synthetic Zodiac discovery matrix (VIB-5032 follow-up); EOA on-chain proof"
-)
 
 logger = logging.getLogger(__name__)
 

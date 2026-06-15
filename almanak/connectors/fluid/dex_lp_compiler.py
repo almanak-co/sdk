@@ -17,7 +17,12 @@ from decimal import Decimal
 from typing import Any, ClassVar
 
 from almanak.connectors._strategy_base.base.compiler import BaseCompilerContext, BaseProtocolCompiler
-from almanak.connectors.fluid.addresses import FLUID_DEX_LP, FLUID_DEX_LP_NATIVE_SENTINEL, FLUID_SMARTLENDING_MARKETS
+from almanak.connectors.fluid.addresses import (
+    FLUID_DEX_LP,
+    FLUID_DEX_LP_NATIVE_SENTINEL,
+    FLUID_SMARTLENDING_MARKETS,
+    is_native_leg,
+)
 from almanak.framework.intents.compiler_models import CompilationResult, CompilationStatus
 from almanak.framework.intents.vocabulary import IntentType, LPCloseIntent, LPOpenIntent
 from almanak.framework.models.reproduction_bundle import ActionBundle
@@ -116,9 +121,7 @@ class FluidDexLpCompiler(BaseProtocolCompiler[BaseCompilerContext]):
         is measured from balance deltas (follow-up VIB-5121), native wrappers
         (e.g. fSL5 FLUID/ETH) are refused rather than executed with wrong books.
         """
-        native_t1 = bool(entry.get("native_token1"))
-        native_t0 = str(entry.get("token0", "")).lower() == FLUID_DEX_LP_NATIVE_SENTINEL.lower()
-        if native_t0 or native_t1:
+        if is_native_leg(entry):
             return CompilationResult(
                 status=CompilationStatus.FAILED,
                 error=(
