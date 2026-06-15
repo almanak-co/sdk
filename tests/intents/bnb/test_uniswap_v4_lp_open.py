@@ -41,7 +41,6 @@ from almanak.framework.execution.orchestrator import (
     ExecutionPhase,
     ExecutionResult,
 )
-from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType, LPOpenIntent
 from tests.intents.conftest import (
@@ -51,6 +50,21 @@ from tests.intents.conftest import (
     format_token_amount,
     get_token_balance,
     get_token_decimals,
+)
+
+# VIB-4483: the native-keyed BNB/USDT V4 pool (currency0 == 0x0) deposits its
+# native leg via msg.value, so the modifyLiquidities calldata shape differs from
+# the ERC20-ERC20 path the default-on Zodiac synthetic discovery
+# (uniswap_v4/permission_hints.build_discovery_vectors uses ctx.usdc/ctx.weth)
+# authorises — the native-pool selector set is not in the derived manifest, so
+# every tx fails execTransactionWithRole authz. Wiring a native-pool discovery
+# vector into the V4 matrix is a separate, Zodiac-scoped follow-up (VIB-4421
+# family); VIB-4483 is the native-currency accounting deliverable. Opt out here
+# so these tests validate the real 4-layer + Layer-5 accounting path on the EOA.
+pytestmark = pytest.mark.no_zodiac(
+    reason="VIB-4483: native-keyed V4 pool (currency0=0x0) selector set is not in "
+    "the ERC20-derived Zodiac manifest; native-pool matrix discovery is a separate "
+    "Zodiac follow-up (VIB-4421 family)."
 )
 
 # =============================================================================
@@ -104,12 +118,36 @@ def _execution_context(wallet: str) -> ExecutionContext:
     )
 
 
+def _native_bnb_usdt_pool_key():
+    """The canonical native BNB/USDT/500 V4 PoolKey (currency0 = 0x0).
+
+    Mirrors ``LP_POOL = "BNB/USDT/500"`` (fee=500, tick_spacing=10) — the
+    deepest native-keyed BNB pool. currency0 is the native sentinel
+    (address(0)); currency1 is the BSC USDT (Binance-Peg) address.
+    """
+    from almanak.connectors.uniswap_v4.sdk import NATIVE_CURRENCY, PoolKey
+
+    usdt = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]["USDT"]
+    return PoolKey(currency0=NATIVE_CURRENCY, currency1=usdt, fee=500, tick_spacing=10)
+
+
 def _enrich_for_accounting(execution_result, intent, wallet: str, bundle_metadata: dict | None = None):
-    return enrich_result(
+    # VIB-4483: native-keyed V4 LP_OPEN is single-sided in ERC-20 Transfers (the
+    # BNB leg has no Transfer), so the V4 parser needs a ``pool_key_lookup`` to
+    # resolve currency0/currency1. The known native pool key is injected directly
+    # (the production runner wires the gateway-backed lookup; here the pool is
+    # fixed and statically known).
+    from almanak.framework.execution.result_enricher import ResultEnricher
+
+    pool_key = _native_bnb_usdt_pool_key()
+    enricher = ResultEnricher(
+        live_mode=False,
+        pool_key_lookup=lambda pool_id_hex, chain: pool_key,
+    )
+    return enricher.enrich(
         execution_result,
         intent,
         _execution_context(wallet),
-        live_mode=False,
         bundle_metadata=bundle_metadata,
     )
 
@@ -197,10 +235,6 @@ class TestUniswapV4LPOpenIntent:
 
     @pytest.mark.intent(IntentType.LP_OPEN)
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="VIB-4426 V0 (PR #2335) rejects native-ETH V4 pools via the T06 adapter guard; native-BNB currency0 support is V1 work (VIB-4483 / P-V1-B). as of 2026-05-17.",
-        strict=True,
-    )
     async def test_lp_open_bnb_usdt(
         self,
         web3: Web3,
@@ -430,6 +464,12 @@ class TestUniswapV4LPOpenIntent:
 
         print(f"\nPosition ID: {position_id}")
         print(f"Liquidity:   {liquidity}")
+
+        # VIB-4483: bind the eth_call adapter to the native BNB/USDT pool this
+        # test minted into, so the harness's native-amount capture can read
+        # getSlot0 and derive the BNB leg the receipt couldn't see.
+        v4_reader = anvil_eth_call_adapter.with_v4_pool_key(_native_bnb_usdt_pool_key())
+
         # Layer 5: assert the real accounting pipeline persisted LP_OPEN.
         accounting_row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -439,17 +479,35 @@ class TestUniswapV4LPOpenIntent:
             wallet_address=funded_wallet,
             expected_event_type="LP_OPEN",
             price_oracle=price_oracle,
-            eth_call_reader=anvil_eth_call_adapter,
+            eth_call_reader=v4_reader,
         )
         _assert_identity(accounting_row, event_type="LP_OPEN", wallet=funded_wallet)
         payload = _payload(accounting_row)
         assert payload["event_type"] == "LP_OPEN"
         assert payload["position_key"] == accounting_row["position_key"]
         assert payload["pool_address"].startswith("0x"), "LP_OPEN must persist canonical pool address"
-        assert Decimal(payload["amount0"]) >= 0
-        assert Decimal(payload["amount1"]) >= 0
         # V4 difference vs V3: position_hash IS populated (VIB-4473 anchor).
+        # Gap-aware FIRST: on the VIB-4636 enrich-path drop the persisted
+        # lp_open_data (amounts + anchor) is missing/garbage, so xfail here
+        # before the amount asserts rather than hard-failing on corrupted
+        # books (CodeRabbit PR #2369 / VIB-4636).
         _assert_v4_open_position_hash(payload)
+        # Tie the persisted amounts to the Layer-4 signals — `>= 0` would
+        # pass on a zero or mis-scaled row (CodeRabbit PR #2369). USDT
+        # (token1, ERC-20) is a clean delta → exact equality. Native BNB
+        # (token0) cannot be matched exactly because ``bnb_spent`` is
+        # gas-polluted, so bound the persisted amount to the proven Layer-4
+        # native-deposit window: at least the gas-discounted floor and no
+        # more than what actually left the wallet.
+        assert Decimal(payload["amount1"]) == (Decimal(usdt_spent) / Decimal(10**usdt_decimals))
+        _amount0_h = Decimal(payload["amount0"])
+        assert (Decimal(actual_bnb_deposit) / Decimal(10**bnb_decimals)) <= _amount0_h <= (
+            Decimal(bnb_spent) / Decimal(10**bnb_decimals)
+        ), (
+            f"persisted LP_OPEN amount0 ({_amount0_h}) must fall within the "
+            f"proven native-BNB deposit window "
+            f"[{actual_bnb_deposit}, {bnb_spent}] / 1e{bnb_decimals}"
+        )
         assert payload["tick_lower"] is not None
         assert payload["tick_upper"] is not None
         assert payload["liquidity"] is not None

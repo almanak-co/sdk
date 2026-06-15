@@ -82,6 +82,17 @@ from tests.intents.conftest import (
     get_token_decimals,
 )
 
+# VIB-4483: native-keyed V4 pool (currency0=0x0) — its modifyLiquidities calldata
+# shape isn't in the ERC20-derived Zodiac synthetic-discovery manifest, so every
+# tx fails execTransactionWithRole authz. Native-pool matrix discovery is a
+# separate Zodiac follow-up (VIB-4421 family); opt out so these tests validate the
+# real 4-layer + Layer-5 accounting path on the EOA.
+pytestmark = pytest.mark.no_zodiac(
+    reason="VIB-4483: native-keyed V4 pool (currency0=0x0) selector set is not in "
+    "the ERC20-derived Zodiac manifest; native-pool matrix discovery is a separate "
+    "Zodiac follow-up (VIB-4421 family)."
+)
+
 # =============================================================================
 # Test Configuration
 # =============================================================================
@@ -466,10 +477,6 @@ class TestUniswapV4CollectFeesIntent:
         IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES
     )
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="VIB-4426 V0 (PR #2335) rejects native-ETH V4 pools via the T06 adapter guard at test setup; native-ETH currency0 support is V1 work (VIB-4483 / P-V1-B). as of 2026-05-17.",
-        strict=True,
-    )
     async def test_collect_fees_avax_usdc(
         self,
         web3: Web3,

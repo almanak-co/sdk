@@ -37,6 +37,7 @@ from almanak.framework.observability.ledger import (
     LedgerEntry,
     _stamp_lp_close_discriminator,
     _stamp_v4_lp_close_fees,
+    _stamp_v4_lp_open_native_amounts,
     build_ledger_entry,
     deserialize_extracted_data,
 )
@@ -1998,3 +1999,103 @@ class TestMeasuredZeroPreservation:
             deployment_id="s", cycle_id="c", intent=intent, result=result, success=False
         )
         assert entry.amount_in == ""
+
+
+# ---------------------------------------------------------------------------
+# VIB-4483 (P-V1-B) — _stamp_v4_lp_open_native_amounts branch coverage.
+#
+# A native-ETH V4 pool deposits its ETH leg via msg.value (no ERC-20 Transfer),
+# so the receipt parser leaves that leg None. The runner reads the freshly-minted
+# position state on-chain and derives (amount0, amount1) via the framework's
+# concentrated-liquidity math; this stamp fills ONLY the unmeasured (None) native
+# leg onto the frozen LPOpenData, never clobbering a measured ERC-20 leg. Empty !=
+# Zero throughout: a failed/absent read leaves the leg None.
+# ---------------------------------------------------------------------------
+
+_NATIVE_ADDR = "0x0000000000000000000000000000000000000000"
+
+
+def _v4_open_result_for_stamp(*, amount0=None, amount1=1_000_000_000, currency0=_NATIVE_ADDR, extracted="dict"):
+    """Build a result whose extracted_data carries a V4-shaped (native) LPOpenData."""
+    if extracted == "dict":
+        open_data = LPOpenData(
+            position_id=4242,
+            tick_lower=-887220,
+            tick_upper=887220,
+            liquidity=10**15,
+            amount0=amount0,
+            amount1=amount1,
+            current_tick=0,
+            pool_address="0x" + "a" * 64,  # 32-byte V4 PoolId shape
+            position_hash="0x" + "b" * 64,
+            currency0=currency0,
+            currency1="0x" + "2" * 40,
+        )
+        return SimpleNamespace(extracted_data={"lp_open_data": open_data})
+    return SimpleNamespace(extracted_data=extracted)
+
+
+class TestStampV4LpOpenNativeAmounts:
+    """Direct branch coverage for ``_stamp_v4_lp_open_native_amounts`` (VIB-4483)."""
+
+    def test_native_leg_filled_when_unmeasured(self):
+        # currency0 native, amount0 None (parser couldn't see the ETH Transfer),
+        # amount1 measured. The stamp fills amount0 from the gateway-derived pair
+        # and preserves the measured amount1.
+        result = _v4_open_result_for_stamp(amount0=None, amount1=1_000_000_000)
+        _stamp_v4_lp_open_native_amounts(result, "LP_OPEN", (777_000, 9_999))
+        open_data = result.extracted_data["lp_open_data"]
+        assert open_data.amount0 == 777_000  # native leg filled
+        assert open_data.amount1 == 1_000_000_000  # measured ERC-20 leg preserved (not clobbered)
+
+    def test_measured_erc20_leg_not_clobbered(self):
+        # The measured leg (amount1) must survive even though the derived pair
+        # carries a different value for it.
+        result = _v4_open_result_for_stamp(amount0=None, amount1=1_000_000_000)
+        _stamp_v4_lp_open_native_amounts(result, "LP_OPEN", (777_000, 42))
+        open_data = result.extracted_data["lp_open_data"]
+        assert open_data.amount1 == 1_000_000_000
+
+    def test_none_amounts_pair_is_noop_short_circuit(self):
+        # A failed / unavailable read => leave the native leg None (unmeasured),
+        # never fabricate a zero.
+        result = _v4_open_result_for_stamp(amount0=None, amount1=1_000_000_000)
+        _stamp_v4_lp_open_native_amounts(result, "LP_OPEN", None)
+        assert result.extracted_data["lp_open_data"].amount0 is None
+
+    def test_measured_zero_derived_is_honored(self):
+        # A derived 0 (e.g. an out-of-range single-sided mint that put nothing on
+        # the native leg) is a MEASURED zero and fills the None leg.
+        result = _v4_open_result_for_stamp(amount0=None, amount1=1_000_000_000)
+        _stamp_v4_lp_open_native_amounts(result, "LP_OPEN", (0, 5))
+        assert result.extracted_data["lp_open_data"].amount0 == 0
+
+    def test_non_v4_shaped_open_is_noop(self):
+        # currency0 None → not a V4-shaped LPOpenData (the capability signal).
+        open_data = LPOpenData(
+            position_id=4242,
+            tick_lower=-887220,
+            tick_upper=887220,
+            liquidity=10**15,
+            amount0=None,
+            amount1=1_000_000_000,
+            pool_address="0x" + "a" * 40,
+            # currency0 / currency1 left None → not V4-shaped.
+        )
+        result = SimpleNamespace(extracted_data={"lp_open_data": open_data})
+        _stamp_v4_lp_open_native_amounts(result, "LP_OPEN", (1, 2))
+        assert result.extracted_data["lp_open_data"].amount0 is None
+
+    @pytest.mark.parametrize("intent_type", ["LP_CLOSE", "SWAP", "SUPPLY"])
+    def test_non_open_intent_type_is_noop(self, intent_type):
+        result = _v4_open_result_for_stamp(amount0=None, amount1=1_000_000_000)
+        _stamp_v4_lp_open_native_amounts(result, intent_type, (1, 2))
+        assert result.extracted_data["lp_open_data"].amount0 is None
+
+    def test_none_result_is_noop(self):
+        _stamp_v4_lp_open_native_amounts(None, "LP_OPEN", (1, 2))
+
+    def test_non_dict_extracted_data_is_noop(self):
+        result = _v4_open_result_for_stamp(extracted=["not", "a", "dict"])
+        _stamp_v4_lp_open_native_amounts(result, "LP_OPEN", (1, 2))
+        assert result.extracted_data == ["not", "a", "dict"]

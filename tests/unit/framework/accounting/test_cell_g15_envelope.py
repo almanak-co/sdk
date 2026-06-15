@@ -228,3 +228,162 @@ def test_g15_envelope_positions_not_a_list_fails() -> None:
     result = _cell_g15_multi_period_self_consistency(snapshots, track_c)
     assert result.status == "FAIL"
     assert "90" in result.diagnostic
+
+
+# ─── VIB-4483 — Track-C eligibility: wallet/TOKEN inventory is NOT counted ──
+# A clean round-trip ending in cash leaves a VIB-5057 swap-inventory
+# pseudo-position (position_type="TOKEN", protocol="wallet") in positions_json.
+# The Track C materializer excludes it (TOKEN -> Primitive.UTILITY -> None), so
+# G15 must NOT demand a Track C row for it, or it false-fails the cell.
+
+
+def test_g15_token_wallet_inventory_only_snapshot_passes() -> None:
+    """A snapshot holding ONLY a swap-inventory TOKEN/wallet pseudo-position
+    must NOT require a Track C row (it correctly never gets one). With Track C
+    rows present elsewhere, this snapshot contributes no expected coverage.
+    """
+    snapshots = [
+        # snapshot with a real LP position (Track-C covered)
+        _snap(100, json.dumps({"schema_version": 1, "positions": [{"position_type": "LP"}]})),
+        # post-close snapshot holding only deployed cash inventory
+        _snap(
+            101,
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "positions": [
+                        {
+                            "position_type": "TOKEN",
+                            "protocol": "wallet",
+                            "details": {"source": "swap_inventory_lots"},
+                        }
+                    ],
+                }
+            ),
+        ),
+    ]
+    # Track C row exists only for the LP snapshot; NONE for the TOKEN snapshot.
+    track_c = _track_c(100, n=1)
+    result = _cell_g15_multi_period_self_consistency(snapshots, track_c)
+    assert result.status == "PASS", result.diagnostic
+
+
+def test_g15_mixed_lp_and_token_inventory_counts_only_lp() -> None:
+    """A snapshot with BOTH a real LP position and a TOKEN/wallet inventory
+    entry expects exactly 1 Track C row (the LP), not 2. One row → PASS.
+    """
+    snapshots = [
+        _snap(
+            110,
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "positions": [
+                        {"position_type": "LP"},
+                        {"position_type": "TOKEN", "protocol": "wallet"},
+                    ],
+                }
+            ),
+        )
+    ]
+    result = _cell_g15_multi_period_self_consistency(snapshots, _track_c(110, n=1))
+    assert result.status == "PASS", result.diagnostic
+
+
+def test_g15_lp_under_coverage_still_fails() -> None:
+    """The filter must NOT weaken the under-coverage guard: a snapshot with 2
+    real LP positions but only 1 Track C row is still a coverage gap → FAIL.
+    """
+    snapshots = [
+        _snap(
+            120,
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "positions": [
+                        {"position_type": "LP"},
+                        {"position_type": "LP"},
+                        {"position_type": "TOKEN", "protocol": "wallet"},
+                    ],
+                }
+            ),
+        )
+    ]
+    # Only 1 Track C row for 2 eligible LP positions.
+    result = _cell_g15_multi_period_self_consistency(snapshots, _track_c(120, n=1))
+    assert result.status == "FAIL", result.diagnostic
+    assert "120" in result.diagnostic
+
+
+def test_g15_only_token_inventory_no_track_c_is_xfail() -> None:
+    """If the ONLY positions across all snapshots are TOKEN/wallet inventory
+    and there are no Track C rows at all, the cell stays XFAIL (Track C absent
+    / no recognizable protocol positions) — not a false FAIL.
+    """
+    snapshots = [
+        _snap(
+            130,
+            json.dumps(
+                {"schema_version": 1, "positions": [{"position_type": "TOKEN", "protocol": "wallet"}]}
+            ),
+        )
+    ]
+    result = _cell_g15_multi_period_self_consistency(snapshots, [])
+    assert result.status == "XFAIL", result.diagnostic
+
+
+# ─── VIB-4483 — Track-C eligibility: a raw "LP_V4" position_type is counted ──
+# A native-ETH V4 LP can reach G15 carrying the Primitive enum-value label
+# "LP_V4" (not the protocol-name alias "UNISWAP_V4" the materializer maps). The
+# eligibility check must recognise it directly, or G15 silently drops the V4 LP
+# from its expected count and a real V4 LP MtM gap passes unnoticed.
+
+
+def test_g15_lp_v4_label_is_counted_pass() -> None:
+    """A snapshot whose position_type is the literal "LP_V4" with a matching
+    Track C row → counted → PASS (the V4 LP is in the expected coverage).
+    """
+    snapshots = [
+        _snap(140, json.dumps({"schema_version": 1, "positions": [{"position_type": "LP_V4"}]}))
+    ]
+    result = _cell_g15_multi_period_self_consistency(snapshots, _track_c(140, n=1))
+    assert result.status == "PASS", result.diagnostic
+
+
+def test_g15_lp_v4_label_under_coverage_still_fails() -> None:
+    """The real-gap contract must hold for "LP_V4" exactly as for "LP": a
+    snapshot with 2 V4 LP positions but only 1 Track C row is a coverage gap →
+    FAIL. Were "LP_V4" silently dropped from the expected count, the snapshot
+    would expect 0 rows and PASS — the exact masking VIB-4483 closes. (Track C
+    rows must be present so the global "Track C absent" XFAIL guard does not
+    short-circuit; this mirrors ``test_g15_lp_under_coverage_still_fails``.)
+    """
+    snapshots = [
+        _snap(
+            141,
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "positions": [
+                        {"position_type": "LP_V4"},
+                        {"position_type": "LP_V4"},
+                    ],
+                }
+            ),
+        )
+    ]
+    # Only 1 Track C row for 2 eligible V4 LP positions.
+    result = _cell_g15_multi_period_self_consistency(snapshots, _track_c(141, n=1))
+    assert result.status == "FAIL", result.diagnostic
+    assert "141" in result.diagnostic
+
+
+def test_g15_v4_protocol_alias_label_is_counted_pass() -> None:
+    """The connector protocol-name alias ("UNISWAP_V4", which the materializer
+    DOES map to Primitive.LP_V4) is also Track-C eligible → counted → PASS.
+    """
+    snapshots = [
+        _snap(142, json.dumps({"schema_version": 1, "positions": [{"position_type": "UNISWAP_V4"}]}))
+    ]
+    result = _cell_g15_multi_period_self_consistency(snapshots, _track_c(142, n=1))
+    assert result.status == "PASS", result.diagnostic

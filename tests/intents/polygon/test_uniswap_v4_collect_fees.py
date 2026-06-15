@@ -86,6 +86,17 @@ from tests.intents.conftest import (
     get_token_decimals,
 )
 
+# VIB-4483: native-keyed V4 pool (currency0=0x0) — its modifyLiquidities calldata
+# shape isn't in the ERC20-derived Zodiac synthetic-discovery manifest, so every
+# tx fails execTransactionWithRole authz. Native-pool matrix discovery is a
+# separate Zodiac follow-up (VIB-4421 family); opt out so these tests validate the
+# real 4-layer + Layer-5 accounting path on the EOA.
+pytestmark = pytest.mark.no_zodiac(
+    reason="VIB-4483: native-keyed V4 pool (currency0=0x0) selector set is not in "
+    "the ERC20-derived Zodiac manifest; native-pool matrix discovery is a separate "
+    "Zodiac follow-up (VIB-4421 family)."
+)
+
 # =============================================================================
 # Test Configuration
 # =============================================================================
@@ -146,7 +157,19 @@ LP_RANGE_UPPER = Decimal("0.20")
 # native-key pool but (2) the test wallet doesn't hold WMATIC and the
 # UR/Permit2 path expects wrapped-native; and (3) we already have a
 # verifiable fee-accrual signal via the USDC leg alone.
-COUNTER_SWAP_USDC = Decimal("2000")
+#
+# Sizing (VIB-4483, re-probed 2026-06-13 at fork block ~88.43M): the
+# native MATIC/USDC fee=3000 pool now carries liquidity ~1.07e17 at
+# tick ~-302226 (~$0.075 USDC/MATIC). That is ~20x thinner than the
+# ~2.09e18 the original (2026-05-14) probe recorded — these polygon V4
+# tests fork the LATEST block (no pinned fork-block), so pool depth drifts
+# with the live chain. A 2,000 USDC counter-swap exceeds the 0.10 slippage
+# tolerance against the current depth and reverts with the V4 router's
+# bare slippage abort ("Invalid revert data (too short): 0x"). 200 USDC
+# (~2,670 MATIC out) stays comfortably inside slippage at current depth
+# while still charging ~0.6 USDC of pool-wide fees, of which our in-range
+# position captures a wei-positive USDC Transfer at COLLECT_FEES.
+COUNTER_SWAP_USDC = Decimal("200")
 SWAP_MAX_SLIPPAGE = Decimal("0.10")
 
 
@@ -471,10 +494,6 @@ class TestUniswapV4CollectFeesIntent:
         IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES
     )
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="VIB-4426 V0 (PR #2335) rejects native-ETH V4 pools via the T06 adapter guard at test setup; native-MATIC currency0 support is V1 work (VIB-4483 / P-V1-B). as of 2026-05-17.",
-        strict=True,
-    )
     async def test_collect_fees_matic_usdc(
         self,
         web3: Web3,

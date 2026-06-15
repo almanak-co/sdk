@@ -60,7 +60,6 @@ from almanak.framework.execution.orchestrator import (
     ExecutionPhase,
     ExecutionResult,
 )
-from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType, LPCloseIntent, LPOpenIntent
 from tests.intents.conftest import (
@@ -70,6 +69,17 @@ from tests.intents.conftest import (
     format_token_amount,
     get_token_balance,
     get_token_decimals,
+)
+
+# VIB-4483: native-keyed V4 pool (currency0=0x0) — its modifyLiquidities calldata
+# shape isn't in the ERC20-derived Zodiac synthetic-discovery manifest, so every
+# tx fails execTransactionWithRole authz. Native-pool matrix discovery is a
+# separate Zodiac follow-up (VIB-4421 family); opt out so these tests validate the
+# real 4-layer + Layer-5 accounting path on the EOA.
+pytestmark = pytest.mark.no_zodiac(
+    reason="VIB-4483: native-keyed V4 pool (currency0=0x0) selector set is not in "
+    "the ERC20-derived Zodiac manifest; native-pool matrix discovery is a separate "
+    "Zodiac follow-up (VIB-4421 family)."
 )
 
 # =============================================================================
@@ -259,12 +269,34 @@ def _execution_context(wallet: str) -> ExecutionContext:
     )
 
 
+def _native_bnb_usdt_pool_key():
+    """The canonical native BNB/USDT/3000 V4 PoolKey (currency0 = 0x0).
+
+    Mirrors ``LP_POOL = "BNB/USDT/3000"`` (fee=3000, tick_spacing=60).
+    currency0 is the native sentinel (address(0)); currency1 is the BSC
+    USDT (Binance-Peg) address.
+    """
+    from almanak.connectors.uniswap_v4.sdk import NATIVE_CURRENCY, PoolKey
+
+    usdt = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]["USDT"]
+    return PoolKey(currency0=NATIVE_CURRENCY, currency1=usdt, fee=3000, tick_spacing=60)
+
+
 def _enrich_for_accounting(execution_result, intent, wallet: str, bundle_metadata: dict | None = None):
-    return enrich_result(
+    # VIB-4483: native-keyed V4 LP is single-sided in ERC-20 Transfers (the BNB
+    # leg has no Transfer), so the V4 parser needs a ``pool_key_lookup`` to
+    # resolve currency0/currency1. Inject the known native pool key directly.
+    from almanak.framework.execution.result_enricher import ResultEnricher
+
+    pool_key = _native_bnb_usdt_pool_key()
+    enricher = ResultEnricher(
+        live_mode=False,
+        pool_key_lookup=lambda pool_id_hex, chain: pool_key,
+    )
+    return enricher.enrich(
         execution_result,
         intent,
         _execution_context(wallet),
-        live_mode=False,
         bundle_metadata=bundle_metadata,
     )
 
@@ -422,6 +454,13 @@ async def _open_v4_position_with_accounting(
     execution_result = await orchestrator.execute(bundle)
     assert execution_result.success, f"Setup LP_OPEN execution failed: {execution_result.error}"
 
+    # VIB-4483: enrich the setup OPEN with the native-pool pool_key_lookup so the
+    # single-sided (BNB leg has no Transfer) LP_OPEN resolves currency0/currency1
+    # and reaches the accounting writer with a canonical pool_address.
+    execution_result = _enrich_for_accounting(
+        execution_result, intent, funded_wallet, bundle_metadata=bundle.metadata
+    )
+
     parser = UniswapV4ReceiptParser(chain=CHAIN_NAME)
     position_id: int | None = None
     liquidity: int | None = None
@@ -484,10 +523,6 @@ class TestUniswapV4LPCloseIntent:
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="VIB-4426 V0 (PR #2335) rejects native-ETH V4 pools via the T06 adapter guard at test setup; native-BNB currency0 support is V1 work (VIB-4483 / P-V1-B). as of 2026-05-17.",
-        strict=True,
-    )
     async def test_lp_close_bnb_usdt(
         self,
         web3: Web3,
@@ -594,7 +629,7 @@ class TestUniswapV4LPCloseIntent:
             orchestrator,
             augmented_oracle,
             harness=layer5_accounting_harness,
-            eth_call_reader=anvil_eth_call_adapter,
+            eth_call_reader=anvil_eth_call_adapter.with_v4_pool_key(_native_bnb_usdt_pool_key()),
         )
         print(f"Opened position: id={position_id}, liquidity={liquidity}")
         print(f"Currencies: {currency0[:10]}.../{currency1[:10]}...")
@@ -663,7 +698,14 @@ class TestUniswapV4LPCloseIntent:
         # Layer 3: Receipt Parsing
         # Track gas spent on the close txs so we can isolate the native BNB
         # principal/fees from the native gas burn in the Layer 4 delta check.
-        parser = UniswapV4ReceiptParser(chain=CHAIN_NAME)
+        # VIB-4483: the native-key V4 close burn attributes amounts by canonical
+        # PoolKey, so the parser needs the pool_key_lookup to resolve
+        # currency0/currency1 (the BNB leg has no Transfer to sort by).
+        _close_pool_key = _native_bnb_usdt_pool_key()
+        parser = UniswapV4ReceiptParser(
+            chain=CHAIN_NAME,
+            pool_key_lookup=lambda pool_id_hex, chain: _close_pool_key,
+        )
         lp_close_data = None
         gas_spent_wei = 0
 
@@ -714,18 +756,25 @@ class TestUniswapV4LPCloseIntent:
         )
         # Parser MUST report a positive amount on the ERC-20 side (USDT).
         # On a native-key V4 pool (currency0 = address(0)), the native BNB
-        # leg flows out of the PoolManager WITHOUT a Transfer event -- the
-        # parser sums tokens by walking Transfer events from the
-        # PoolManager, so only the USDT transfer surfaces here. Native BNB
-        # is therefore measured via the eth.get_balance delta in Layer 4
-        # below, not via the parser. The parser assigns the single ERC-20
-        # transfer to ``amount0_collected`` because it sorts by token
-        # address and USDT is the only key present; this is a parser-naming
-        # artefact, not a semantic claim about pool currency0.
-        assert lp_close_data.amount0_collected is not None and lp_close_data.amount0_collected > 0, (
-            "Parser must extract positive USDT collection from LP_CLOSE receipt "
-            "(surfaces as amount0_collected on native-key V4 pools because USDT "
-            "is the only ERC-20 transfer the parser walks)"
+        # leg flows out of the PoolManager WITHOUT a Transfer event. The V4
+        # parser now attributes by canonical PoolKey order (VIB-4426 P1 #4):
+        # USDT is currency1, so its collected amount lands on
+        # ``amount1_collected``; the native (currency0) principal is a
+        # measured-zero on ``amount0_collected`` (validated via the eth balance
+        # delta in Layer 4 below, not the parser). Resolve the ERC-20 leg by the
+        # USDT currency address so this stays correct regardless of slot.
+        _usdt_lc = usdt_addr.lower()
+        if (lp_close_data.currency0 or "").lower() == _usdt_lc:
+            _erc20_collected = lp_close_data.amount0_collected
+        else:
+            assert (lp_close_data.currency1 or "").lower() == _usdt_lc, (
+                f"expected USDT on a parser currency leg, got "
+                f"{lp_close_data.currency0}/{lp_close_data.currency1}"
+            )
+            _erc20_collected = lp_close_data.amount1_collected
+        assert _erc20_collected is not None and _erc20_collected > 0, (
+            "Parser must extract positive USDT collection from the LP_CLOSE receipt "
+            "(USDT is currency1 on the native BNB/USDT pool)"
         )
 
         # Layer 4: Balance Deltas -- wallet gains native BNB (net of gas)
@@ -753,6 +802,13 @@ class TestUniswapV4LPCloseIntent:
             f"usdt_received={usdt_received}"
         )
 
+        # VIB-4483: enrich the close result with the native-pool pool_key_lookup
+        # so lp_close_data resolves currency0/currency1 + pool_address and reaches
+        # the accounting writer.
+        execution_result = _enrich_for_accounting(
+            execution_result, close_intent, funded_wallet, bundle_metadata=bundle.metadata
+        )
+
         # Layer 5: assert the real accounting pipeline persisted LP_CLOSE.
         close_accounting_row = await assert_accounting_persisted(
             layer5_accounting_harness,
@@ -762,7 +818,7 @@ class TestUniswapV4LPCloseIntent:
             wallet_address=funded_wallet,
             expected_event_type="LP_CLOSE",
             price_oracle=augmented_oracle,
-            eth_call_reader=anvil_eth_call_adapter,
+            eth_call_reader=anvil_eth_call_adapter.with_v4_pool_key(_native_bnb_usdt_pool_key()),
         )
         _assert_identity(close_accounting_row, event_type="LP_CLOSE", wallet=funded_wallet)
         close_payload = _payload(close_accounting_row)

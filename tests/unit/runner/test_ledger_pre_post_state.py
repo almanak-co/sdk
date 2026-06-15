@@ -582,3 +582,320 @@ def test_capture_v4_lp_close_fees_undeployed_chain_returns_none():
     )
     assert out is None
     assert gateway.calls == 0  # reader short-circuits before the RPC
+
+
+# ---------------------------------------------------------------------------
+# VIB-4483 (P-V1-B) — _capture_v4_lp_open_native_amounts_safe: POST-mint native
+# leg read. A native-ETH V4 pool deposits its ETH leg via msg.value (no ERC-20
+# Transfer), so the receipt parser leaves that leg None. The runner reads the
+# freshly-minted position state and derives (amount0, amount1) via the
+# framework's concentrated-liquidity math. Returns the raw-int pair or None —
+# never fabricates a zero (Empty != Zero). Symmetric with the close-fee read.
+# ---------------------------------------------------------------------------
+
+_NATIVE = "0x0000000000000000000000000000000000000000"
+_USDC_BASE = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+
+
+def _v4_open_result(
+    *,
+    currency0=_NATIVE,
+    currency1=_USDC_BASE,
+    position_id=4242,
+    amount0=None,
+    amount1=1_000_000_000,
+    protocol_attr=True,
+):
+    """An enriched result carrying a native-pool LPOpenData (typed attr path)."""
+    lp_open = SimpleNamespace(
+        position_id=position_id,
+        currency0=currency0,
+        currency1=currency1,
+        amount0=amount0,
+        amount1=amount1,
+    )
+    return SimpleNamespace(lp_open_data=lp_open, extracted_data={"lp_open_data": lp_open})
+
+
+def _v4_open_intent(intent_type="LP_OPEN", protocol="uniswap_v4"):
+    return SimpleNamespace(intent_type=SimpleNamespace(value=intent_type), protocol=protocol)
+
+
+def test_capture_v4_open_native_returns_none_without_gateway():
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    out = StrategyRunner._capture_v4_lp_open_native_amounts_safe(
+        intent=_v4_open_intent(),
+        chain="base",
+        result=_v4_open_result(),
+        gateway_client=None,
+    )
+    assert out is None
+
+
+def test_capture_v4_open_native_skips_non_v4_protocol():
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _GatewayProbe:
+        def __init__(self):
+            self.calls = 0
+
+        def query_v4_position_state(self, *_, **__):
+            self.calls += 1
+            return None
+
+    gateway = _GatewayProbe()
+    out = StrategyRunner._capture_v4_lp_open_native_amounts_safe(
+        intent=_v4_open_intent(protocol="uniswap_v3"),
+        chain="base",
+        result=_v4_open_result(),
+        gateway_client=gateway,
+    )
+    assert out is None
+    assert gateway.calls == 0
+
+
+def test_capture_v4_open_native_skips_non_open_intents():
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _GatewayProbe:
+        def __init__(self):
+            self.calls = 0
+
+        def query_v4_position_state(self, *_, **__):
+            self.calls += 1
+            return None
+
+    gateway = _GatewayProbe()
+    for intent_type in ("LP_CLOSE", "SWAP", "SUPPLY", "LP_COLLECT_FEES"):
+        out = StrategyRunner._capture_v4_lp_open_native_amounts_safe(
+            intent=_v4_open_intent(intent_type=intent_type),
+            chain="base",
+            result=_v4_open_result(),
+            gateway_client=gateway,
+        )
+        assert out is None
+    assert gateway.calls == 0
+
+
+def test_capture_v4_open_native_skips_erc20_only_pool():
+    """An ERC20-ERC20 pool (neither leg native) needs no gateway read."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _GatewayProbe:
+        def __init__(self):
+            self.calls = 0
+
+        def query_v4_position_state(self, *_, **__):
+            self.calls += 1
+            return None
+
+    weth = "0x4200000000000000000000000000000000000006"
+    gateway = _GatewayProbe()
+    out = StrategyRunner._capture_v4_lp_open_native_amounts_safe(
+        intent=_v4_open_intent(),
+        chain="base",
+        result=_v4_open_result(currency0=weth, currency1=_USDC_BASE),
+        gateway_client=gateway,
+    )
+    assert out is None
+    assert gateway.calls == 0
+
+
+def test_capture_v4_open_native_skips_missing_position_id():
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _GatewayProbe:
+        def __init__(self):
+            self.calls = 0
+
+        def query_v4_position_state(self, *_, **__):
+            self.calls += 1
+            return None
+
+    gateway = _GatewayProbe()
+    for pid in (None, 0, -5):
+        out = StrategyRunner._capture_v4_lp_open_native_amounts_safe(
+            intent=_v4_open_intent(),
+            chain="base",
+            result=_v4_open_result(position_id=pid),
+            gateway_client=gateway,
+        )
+        assert out is None
+    assert gateway.calls == 0
+
+
+def test_capture_v4_open_native_derives_amounts_on_clean_read():
+    """A clean read derives (amount0, amount1) raw ints via the framework math."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+    from almanak.framework.valuation.lp_valuer import get_token_amounts_from_sqrt_price
+
+    # In-range position: tick_lower < current < tick_upper → both legs positive.
+    tick_lower, tick_upper = -887220, 887220
+    liquidity = 10**15
+    # sqrtPriceX96 at tick ~0 (price ~1.0): 2**96.
+    sqrt_price_x96 = 2**96
+
+    class _Gateway:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def query_v4_position_state(self, *, chain, position_manager, state_view, token_id):
+            self.calls.append({"chain": chain, "token_id": token_id, "state_view": state_view})
+            return SimpleNamespace(
+                liquidity=liquidity,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                current_tick=0,
+                sqrt_price_x96=sqrt_price_x96,
+            )
+
+    gateway = _Gateway()
+    out = StrategyRunner._capture_v4_lp_open_native_amounts_safe(
+        intent=_v4_open_intent(),
+        chain="base",
+        result=_v4_open_result(),
+        gateway_client=gateway,
+    )
+    expected = get_token_amounts_from_sqrt_price(liquidity, tick_lower, tick_upper, sqrt_price_x96)
+    assert out == (int(expected.amount0), int(expected.amount1))
+    assert out[0] > 0, "native (currency0) leg must be a positive derived deposit"
+    assert len(gateway.calls) == 1
+    assert gateway.calls[0]["chain"] == "base"
+    assert gateway.calls[0]["token_id"] == 4242
+    assert gateway.calls[0]["state_view"]  # connector-resolved, non-empty
+
+
+def test_capture_v4_open_native_none_state_returns_none():
+    """A failed/partial read (reader returns None) => None (unmeasured, never 0)."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _Gateway:
+        def query_v4_position_state(self, **__):
+            return None
+
+    out = StrategyRunner._capture_v4_lp_open_native_amounts_safe(
+        intent=_v4_open_intent(),
+        chain="base",
+        result=_v4_open_result(),
+        gateway_client=_Gateway(),
+    )
+    assert out is None
+
+
+def test_capture_v4_open_native_undeployed_chain_returns_none():
+    """A chain with no V4 StateView address => reader short-circuits => None."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _Gateway:
+        def __init__(self):
+            self.calls = 0
+
+        def query_v4_position_state(self, **__):
+            self.calls += 1
+            return SimpleNamespace(liquidity=1, tick_lower=-1, tick_upper=1, current_tick=0, sqrt_price_x96=2**96)
+
+    gateway = _Gateway()
+    out = StrategyRunner._capture_v4_lp_open_native_amounts_safe(
+        intent=_v4_open_intent(),
+        chain="zzz_nonexistent_chain",
+        result=_v4_open_result(),
+        gateway_client=gateway,
+    )
+    assert out is None
+    assert gateway.calls == 0
+
+
+def test_capture_v4_open_native_resolves_dict_shaped_lp_open_data():
+    """The native gate must fire when lp_open_data is the serialised DICT shape.
+
+    ``_result_lp_open_data`` may return ``extracted_data['lp_open_data']`` as a
+    dict (post-serialisation). A bare ``getattr`` on a dict yields ``None`` and
+    would silently skip native capture — the gate reads via ``_lp_open_field``
+    so both the dataclass and dict shapes resolve (VIB-4483, CodeRabbit review).
+    """
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+    from almanak.framework.valuation.lp_valuer import get_token_amounts_from_sqrt_price
+
+    tick_lower, tick_upper, liquidity, sqrt_price_x96 = -887220, 887220, 10**15, 2**96
+    # Result whose ONLY lp-open surface is the dict (no typed attr).
+    lp_open_dict = {
+        "position_id": 4242,
+        "currency0": _NATIVE,
+        "currency1": _USDC_BASE,
+        "amount0": None,
+        "amount1": 1_000_000_000,
+        "tick_lower": tick_lower,
+        "tick_upper": tick_upper,
+    }
+    result = SimpleNamespace(lp_open_data=None, extracted_data={"lp_open_data": lp_open_dict})
+
+    class _Gateway:
+        def query_v4_position_state(self, *, chain, position_manager, state_view, token_id):
+            return SimpleNamespace(
+                liquidity=liquidity,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                current_tick=0,
+                sqrt_price_x96=sqrt_price_x96,
+            )
+
+    out = StrategyRunner._capture_v4_lp_open_native_amounts_safe(
+        intent=_v4_open_intent(),
+        chain="base",
+        result=result,
+        gateway_client=_Gateway(),
+    )
+    expected = get_token_amounts_from_sqrt_price(liquidity, tick_lower, tick_upper, sqrt_price_x96)
+    assert out == (int(expected.amount0), int(expected.amount1))
+
+
+def test_capture_v4_open_native_reader_raising_does_not_crash_runner():
+    """A reader raising a NON-socket exception must be swallowed → None.
+
+    This is a best-effort SUCCESS-path hook: the trade already landed on-chain,
+    so an RPC-layer error (e.g. ContractLogicError / ValueError / ABI decode)
+    must never propagate and crash the runner (Gemini review, VIB-4483).
+    """
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _Gateway:
+        def query_v4_position_state(self, **__):
+            raise ValueError("could not decode position state response")
+
+    out = StrategyRunner._capture_v4_lp_open_native_amounts_safe(
+        intent=_v4_open_intent(),
+        chain="base",
+        result=_v4_open_result(),
+        gateway_client=_Gateway(),
+    )
+    assert out is None
+
+
+def test_capture_v4_open_native_malformed_amounts_does_not_crash_runner():
+    """Derivation/coercion failures are swallowed → None (never crash, never 0).
+
+    If the read returns state whose ``.amount0`` cannot be coerced to int (the
+    math/coercion is now inside the guard), the hook returns None rather than
+    propagating an AttributeError/ZeroDivisionError onto the success path.
+    """
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _Gateway:
+        def query_v4_position_state(self, **__):
+            # Non-numeric liquidity → int(liquidity) raises inside the guard.
+            return SimpleNamespace(
+                liquidity="not-a-number",
+                tick_lower=-1,
+                tick_upper=1,
+                current_tick=0,
+                sqrt_price_x96=2**96,
+            )
+
+    out = StrategyRunner._capture_v4_lp_open_native_amounts_safe(
+        intent=_v4_open_intent(),
+        chain="base",
+        result=_v4_open_result(),
+        gateway_client=_Gateway(),
+    )
+    assert out is None

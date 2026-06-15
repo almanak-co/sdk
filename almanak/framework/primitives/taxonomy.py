@@ -749,10 +749,16 @@ def materializer_primitive_for(position_type_str: str) -> Primitive | None:
     ladder handled — pinned by the characterization test in
     ``tests/unit/primitives/test_materializer_primitive_equivalence.py``.
 
-    VIB-4477: V4 position-type strings resolve to ``Primitive.LP_V4`` (a
-    parallel version stream owned by the ``uniswap_v4`` connector). The
+    VIB-4477: V4 *protocol-name alias* strings (``"UNI_V4"`` / ``"UNISWAP_V4"``,
+    owned by the ``uniswap_v4`` connector) resolve to ``Primitive.LP_V4`` (a
+    parallel version stream). NOTE the bare ``Primitive`` **enum-value** label
+    ``"LP_V4"`` is NOT one of those aliases and resolves to ``None`` here —
+    this function answers the generic-label and protocol-alias vocabularies,
+    not the enum-value strings. Callers that may see a raw ``"LP_V4"``
+    position-type label must recognise it directly (see
+    ``accounting.accountant_test._is_track_c_eligible_position``, VIB-4483). The
     materializer's caller in ``accounting.position_state._classify_position``
-    collapses ``LP_V4`` back to the ``"LP"`` materializer bucket — the
+    collapses ``Primitive.LP_V4`` back to the ``"LP"`` materializer bucket — the
     materializer code is V3/V4-shared because the LP position state machine is
     the same. The primitive split only matters at the version-stamping sites.
 

@@ -59,6 +59,16 @@ _BASE_WETH_USDC_3000_POOL_ID = (
     "0x1d8c55f347727c0fb4f5e1b65cdb93639e0c7102580a7d345e1144cd5a718f54"
 )
 
+# --- Native-currency Base ETH/USDC pool ids (VIB-4483) -------------------
+# currency0 == 0x0 (native ETH sentinel), currency1 == USDC. These hash to a
+# DIFFERENT poolId than the wrapped WETH/USDC pool above — that is the entire
+# reason native pools need their own seed rows. The expected hashes are the
+# on-chain poolIds verified against Base StateView.getSlot0 at fixture
+# authoring (all four tiers carry live liquidity); they are recomputed here
+# from compute_pool_id so a drift in the framework hash fails this test loud.
+_BASE_NATIVE_ETH_USDC_500_POOL_ID = "0x96d4b53a38337a5733179751781178a2613306063c511b78cd02684739288c0a"
+_BASE_NATIVE_ETH_USDC_3000_POOL_ID = "0xe070797535b13431808f8fc81fdbe7b41362960ed0b55bc2b6117c49c51b7eb9"
+
 
 # =========================================================================
 # CANONICAL_V4_PAIRS — table shape
@@ -90,11 +100,145 @@ class TestCanonicalPairsTable:
             assert fees == {100, 500, 3000, 10000}, (chain, fees)
 
     def test_no_duplicate_rows(self) -> None:
-        # If the same (chain, token0, token1, fee) appears twice the table
-        # is malformed — the dataclass equality would mask the duplicate.
-        counts = Counter((p.chain, p.token0_symbol, p.token1_symbol, p.fee) for p in CANONICAL_V4_PAIRS)
+        # If two rows resolve to the same pool the table is malformed — the
+        # dataclass equality would mask the duplicate. The native flag is part
+        # of the identity: a native ETH/USDC row and a wrapped WETH/USDC row are
+        # distinct pools. CRITICAL: for a native row (token0_native=True) the
+        # canonical seed FORCES currency0=NATIVE_CURRENCY and ignores
+        # token0_symbol (it's a cosmetic label), so two native rows that differ
+        # ONLY by that label hash to the SAME poolId. The identity key must
+        # therefore null out token0_symbol for native rows — otherwise a
+        # label-only-divergent native duplicate slips past this guard.
+        def _identity(p: CanonicalV4Pair) -> tuple:
+            # Native rows ignore token0_symbol (currency0 is forced to 0x0), so
+            # the cosmetic label must NOT be part of their identity.
+            label = None if p.token0_native else p.token0_symbol
+            return (p.chain, label, p.token1_symbol, p.fee, p.token0_native)
+
+        counts = Counter(_identity(p) for p in CANONICAL_V4_PAIRS)
         dupes = {k: v for k, v in counts.items() if v > 1}
         assert not dupes, f"duplicate rows in CANONICAL_V4_PAIRS: {dupes}"
+
+
+# =========================================================================
+# Native-currency pairs (VIB-4483)
+# =========================================================================
+
+
+class TestNativeCurrencyPairs:
+    """Native-ETH (currency0 == 0x0) V4 pools must be seeded as their own
+    rows. A native pool hashes to a different poolId than the wrapped
+    equivalent, so without these rows the gateway returns
+    ``pool_key_not_found`` for native LP positions (the VIB-4483 blocker:
+    LP_OPEN/LP_CLOSE accounting events are dropped because lp_open_data is
+    gated behind a successful pool-key lookup).
+    """
+
+    def test_table_contains_native_rows(self) -> None:
+        native = [p for p in CANONICAL_V4_PAIRS if p.token0_native]
+        assert native, "CANONICAL_V4_PAIRS must contain native-currency rows"
+        # native/USDC + native/USDT at 4 fee tiers, on every V4 chain.
+        chains = {p.chain for p in native}
+        assert {"ethereum", "base", "arbitrum"}.issubset(chains), chains
+        # Each native chain carries both quote symbols at all four tiers.
+        by_chain_quote: dict[tuple[str, str], set[int]] = {}
+        for p in native:
+            by_chain_quote.setdefault((p.chain, p.token1_symbol), set()).add(p.fee)
+        for key, fees in by_chain_quote.items():
+            assert fees == {100, 500, 3000, 10000}, (key, fees)
+
+    def test_native_label_is_chain_native_gas_token(self) -> None:
+        # The display label is cosmetic but must read honestly per chain —
+        # ETH on Base/Arbitrum/Optimism/Ethereum, AVAX on Avalanche, BNB on
+        # BSC, POL on Polygon. (The poolId depends only on currency0 == 0x0.)
+        labels = {(p.chain, p.token0_symbol) for p in CANONICAL_V4_PAIRS if p.token0_native}
+        assert ("base", "ETH") in labels
+        assert ("avalanche", "AVAX") in labels
+        assert ("bsc", "BNB") in labels
+        assert ("polygon", "POL") in labels
+
+    def test_native_and_wrapped_are_distinct_pool_ids(self) -> None:
+        """The native ETH/USDC pool and the wrapped WETH/USDC pool at the
+        SAME fee tier must hash to different poolIds. If they collided, the
+        native seed would be a no-op and the bug would persist.
+        """
+        assert _BASE_NATIVE_ETH_USDC_3000_POOL_ID != _BASE_WETH_USDC_3000_POOL_ID
+
+    def test_native_pool_id_currency0_is_zero_address(self) -> None:
+        """Seeding a native row must produce currency0 == 0x0 (the V4 native
+        sentinel), NOT a resolved WETH address. This is the byte-identity
+        guarantee: the on-chain native pool keys on address(0).
+        """
+        cache = V4PoolKeyCache()
+        seed_canonical_pool_keys(cache)
+        base_idx = cache._index.get("base", {})
+        assert _BASE_NATIVE_ETH_USDC_500_POOL_ID in base_idx, (
+            f"native ETH/USDC fee=500 pool_id {_BASE_NATIVE_ETH_USDC_500_POOL_ID} "
+            f"must be seeded; got {sorted(base_idx.keys())}"
+        )
+        key = base_idx[_BASE_NATIVE_ETH_USDC_500_POOL_ID]
+        assert key.currency0 == NATIVE_CURRENCY, key.currency0
+        assert key.currency1 == _USDC_BASE, key.currency1
+        assert key.fee == 500
+        assert key.hooks == NO_HOOKS
+
+    def test_native_pool_id_matches_on_chain_hash(self) -> None:
+        """The seeded native poolId must equal the on-chain-verified hash
+        (recomputed from compute_pool_id over currency0=0x0). This is the
+        load-bearing assertion: if the seed's hash drifts from what the
+        connector/PoolManager computes, the gateway lookup misses.
+        """
+        fw_key = FrameworkPoolKey(
+            currency0=NATIVE_CURRENCY,
+            currency1=_USDC_BASE,
+            fee=3000,
+            tick_spacing=60,
+            hooks=NATIVE_CURRENCY,
+        )
+        assert compute_pool_id(fw_key).lower() == _BASE_NATIVE_ETH_USDC_3000_POOL_ID
+
+    def test_native_leg_not_resolved_through_token_resolver(self) -> None:
+        """The native label MUST NOT be resolved to a wrapped address. We
+        feed a native row whose label is a token that, IF resolved, would
+        yield WETH — and assert the resulting currency0 is still 0x0.
+        Guards against a regression where someone drops the token0_native
+        short-circuit and the native leg silently becomes WETH (wrong pool).
+        """
+        pairs = (
+            CanonicalV4Pair(
+                chain="base",
+                token0_symbol="WETH",  # would resolve to WETH if not short-circuited
+                token1_symbol="USDC",
+                fee=3000,
+                token0_native=True,
+            ),
+        )
+        cache = V4PoolKeyCache()
+        seed_canonical_pool_keys(cache, pairs=pairs)
+        assert _BASE_NATIVE_ETH_USDC_3000_POOL_ID in cache._index["base"]
+        key = cache._index["base"][_BASE_NATIVE_ETH_USDC_3000_POOL_ID]
+        assert key.currency0 == NATIVE_CURRENCY
+
+    def test_native_row_skipped_when_quote_token_missing(self) -> None:
+        """If the QUOTE (token1) symbol is missing on the chain, the native
+        row is skipped like any wrapped row — not raised. The native leg
+        being 0x0 must not bypass the token1 resolution miss.
+        """
+        pairs = (
+            CanonicalV4Pair(
+                chain="base",
+                token0_symbol="ETH",
+                token1_symbol="DEFINITELY_NOT_A_REAL_TOKEN_XYZ",
+                fee=3000,
+                token0_native=True,
+            ),
+        )
+        cache = V4PoolKeyCache()
+        report = seed_canonical_pool_keys(cache, pairs=pairs)
+        assert report.registered == 0
+        assert len(report.skipped) == 1
+        _, reason = report.skipped[0]
+        assert "token_not_found" in reason
 
 
 # =========================================================================
@@ -577,7 +721,10 @@ class TestSeedEdgeCases:
 
 
 def test_public_api_importable() -> None:
-    from almanak.connectors.uniswap_v4.gateway.canonical_pools import (  # noqa: F401
+    # Intentional local re-import (already imported at module top) — this test
+    # exists to prove the public API is importable by a third party, so the
+    # redefinition (F811) and unused-binding (F401) are expected here.
+    from almanak.connectors.uniswap_v4.gateway.canonical_pools import (  # noqa: F401,F811
         CANONICAL_V4_PAIRS,
         CanonicalV4Pair,
         SeedReport,

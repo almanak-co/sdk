@@ -999,6 +999,88 @@ def _stamp_v4_lp_close_fees(
         return
 
 
+def _stamp_v4_lp_open_native_amounts(
+    result: Any,
+    intent_type: str,
+    amounts: tuple[int | None, int | None] | None,
+) -> None:
+    """Stamp POST-mint-measured V4 native-leg amounts onto ``LPOpenData`` (VIB-4483).
+
+    A native-ETH V4 pool (``PoolKey.currency0 == 0x0``) deposits its ETH leg via
+    ``msg.value`` on ``modifyLiquidities`` — there is NO ERC-20 Transfer for that
+    leg, so the mint RECEIPT cannot measure it and the V4 receipt parser leaves it
+    ``None`` (honest "unmeasured", Empty ≠ Zero — never a fabricated zero). The
+    runner reads the freshly-minted position's live state via the gateway
+    ``QueryV4PositionState`` RPC and derives ``(amount0, amount1)`` from the
+    framework's concentrated-liquidity math, threading the raw-int pair here. This
+    is the single correct stamp point: the runner holds the enriched result just
+    before it is serialised into ``transaction_ledger.extracted_data_json``, and
+    the LP accounting handler reads ``lp_open_data.amount0/amount1`` straight off
+    it (``lp_accounting.build_lp_accounting_event``).
+
+    ``amounts`` is ``(amount0, amount1)`` in PoolKey-currency0/1 order — the same
+    order ``LPOpenData.amount0``/``currency0`` use, because both the gateway read
+    and the parser derive ordering from the same canonical PoolKey.
+
+    Symmetric with :func:`_stamp_v4_lp_close_fees`:
+
+    * ``amounts = None`` (read unavailable / failed / not a native pool) → leaves
+      ``LPOpenData`` untouched. The native leg stays ``None`` (honest unmeasured),
+      never fabricates a zero.
+    * Fills ONLY a leg the parser left ``None`` (the unmeasured native leg). A
+      leg the parser already MEASURED from a Transfer (the ERC-20 side, or a
+      genuine ``0`` for an out-of-range ERC-20 leg) is preserved — the gateway
+      read never clobbers a measured value (Empty ≠ Zero idempotence).
+    * No-op unless this is an ``LP_OPEN`` carrying a V4-shaped ``LPOpenData``
+      (``currency0`` populated — the connector-agnostic capability signal, not a
+      protocol-string match).
+
+    Precision bound (inherent, accepted): the position state is read just after
+    the mint block while the ERC-20 leg is measured at the mint block. For a
+    same-cycle open there are no intervening liquidity changes, so the derived
+    native amount reflects the same position; the ``int()`` floor drops at most
+    sub-wei. Mirrors the close-fee stamp's documented gap-read bound.
+    """
+    if amounts is None:
+        return
+    if intent_type != "LP_OPEN":
+        return
+    extracted = getattr(result, "extracted_data", None) if result else None
+    if not isinstance(extracted, dict):
+        return
+    open_data = extracted.get("lp_open_data")
+    if open_data is None or not hasattr(open_data, "amount0"):
+        return
+    # Capability-gate on the V4 PoolKey data shape (currency0/currency1 populated
+    # only by the V4 parser) rather than a hard-coded protocol string.
+    if getattr(open_data, "currency0", None) is None:
+        return
+
+    raw0, raw1 = amounts
+    # Fill only the legs the parser left unmeasured (``None``). A measured leg
+    # (the ERC-20 side, or a genuine measured ``0``) is preserved — never clobber.
+    new0 = getattr(open_data, "amount0", None)
+    new1 = getattr(open_data, "amount1", None)
+    changed = False
+    if new0 is None and raw0 is not None:
+        new0 = int(raw0)
+        changed = True
+    if new1 is None and raw1 is not None:
+        new1 = int(raw1)
+        changed = True
+    if not changed:
+        return
+
+    import dataclasses
+
+    try:
+        extracted["lp_open_data"] = dataclasses.replace(open_data, amount0=new0, amount1=new1)
+    except (TypeError, ValueError):
+        # Defensive: a non-dataclass duck-typed open-data stub (tests) — leave it
+        # untouched rather than raise on the ledger-write path.
+        return
+
+
 def build_ledger_entry(
     *,
     deployment_id: str,
@@ -1012,6 +1094,7 @@ def build_ledger_entry(
     pre_state: dict[str, Any] | None = None,
     post_state: dict[str, Any] | None = None,
     v4_lp_close_fees: tuple[int, int] | None = None,
+    v4_lp_open_native_amounts: tuple[int | None, int | None] | None = None,
 ) -> LedgerEntry:
     """Build a LedgerEntry from an intent and its execution result.
 
@@ -1102,6 +1185,13 @@ def build_ledger_entry(
     # withdrawal Transfer; they are unrecoverable from the receipt). The runner
     # reads them on-chain before the burn submits and threads the raw-int pair.
     _stamp_v4_lp_close_fees(result, intent_type, v4_lp_close_fees)
+    # VIB-4483 (P-V1-B) — stamp the POST-mint-measured native-ETH leg amount onto
+    # ``lp_open_data``. A native-ETH V4 pool deposits its ETH leg via msg.value
+    # (no ERC-20 Transfer), so the receipt parser left it None. The runner reads
+    # the freshly-minted position state on-chain and derives the native amount via
+    # the framework's concentrated-liquidity math; this stamp fills only the
+    # unmeasured native leg (never clobbers the measured ERC-20 leg).
+    _stamp_v4_lp_open_native_amounts(result, intent_type, v4_lp_open_native_amounts)
     extracted_data_json = _build_extracted_data_json(result)
 
     # ─── VIB-3480 columns finally populated (Accounting-AttemptNo17 §3 D3) ──

@@ -1,0 +1,49 @@
+{
+  "_provenance": {
+    "row_id": "lp-uniswap_v4-native-base",
+    "fixture": "lp_v4_native",
+    "chain": "base",
+    "primitive": "lp",
+    "captured_from": "strategies/accounting/lp_v4_native/almanak_state.db",
+    "captured_at": "2026-06-13T13:30:00+00:00",
+    "captured_at_commit": "feat/vib-4483-v4-native-eth-pools",
+    "post_fix_for": [
+      "VIB-4483 (P-V1-B): native-ETH V4 pool support — lift V0 adapter/parser guards and add post-mint QueryV4PositionState gateway read to stamp the native-ETH deposit amount onto LPOpenData at ledger-build time.",
+      "VIB-4483 (seed): native-currency V4 pairs seeded into the canonical PoolKey registry (almanak/connectors/uniswap_v4/gateway/canonical_pools.py) so the gateway resolves native-pool PoolKeys deterministically. Without this the native poolId fell through the out-of-window Initialize scan to pool_key_not_found and lp_open_data/lp_close_data were dropped.",
+      "VIB-4483 (fixture sizing): native LP leg + both swap-back lanes (iteration + teardown) gas-reserve sized so the round-trip is solvent and value-sized on a managed Anvil fork (native balance == gas float).",
+      "VIB-4483 (G15): accountant_test.py G15 no longer demands Track C coverage for wallet/TOKEN swap-inventory pseudo-positions (VIB-5057), which are excluded from Track C by the materializer."
+    ],
+    "note": "Post-fix baseline for lp_v4_native (native ETH/USDC/3000 pool on Base — currency0=0x0, deepest native tier; mirrors wrapped lp_v4 WETH/USDC/3000). Score: 18/22 PASS. Native pairs are now seeded into the canonical V4 PoolKey registry, so LookupV4PoolKey resolves the native poolId (0xe070797535b13431808f8fc81fdbe7b41362960ed0b55bc2b6117c49c51b7eb9) deterministically and lp_open_data/lp_close_data are no longer dropped. The native amount0 stamp fires: accounting_events LP_OPEN carries a positive native amount0 (~0.001093 ETH, value-sized ~$1.8) derived from the post-mint QueryV4PositionState gateway read. Clean round-trip: SWAP -> LP_OPEN -> HOLD -> LP_CLOSE (teardown) -> SWAP-back, all 4 intents succeeded, teardown reached completed with positions_failed=0. G1/G6 FAIL: pre-existing — the SWAP rows lack a USD valuation for the native-ETH/WETH leg at event time (price not in price_inputs_json on the Anvil fork); same root cause, not a native-V4 regression. G11 SKIP: no failed intents (clean teardown). L5_22 XFAIL: position_registry mode not toggled. G3/LP1/LP2/LP3/LP4/LP5/LP6/G14/G15 PASS. Versus the pre-fix baseline (12/22) this is +6 PASS (G3, LP1, LP2, LP3, LP6) plus LP4 XFAIL->PASS, with G15 held at PASS by the Track-C-eligibility filter (a clean cash-holding post-close snapshot would otherwise false-fail it)."
+  },
+  "cells": {
+    "G1": "FAIL",
+    "G2": "PASS",
+    "G3": "PASS",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "FAIL",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "PASS",
+    "G14": "PASS",
+    "G15": "PASS",
+    "L5_22": "XFAIL",
+    "LP1": "PASS",
+    "LP2": "PASS",
+    "LP3": "PASS",
+    "LP4": "PASS",
+    "LP5": "PASS",
+    "LP6": "PASS"
+  },
+  "scores": {
+    "passed": 18,
+    "failed": 2,
+    "xfailed": 1,
+    "skipped": 1,
+    "total": 22
+  }
+}

@@ -272,19 +272,36 @@ def test_pool_key_lookup_error_emits_warning_and_counter(caplog: pytest.LogCaptu
     assert _counter_value(CHAIN, reason, "drop") == before + 1.0
 
 
-def test_native_currency_unsupported_emits_warning_and_counter(caplog: pytest.LogCaptureFixture):
-    """Native-ETH currency0 raises UniswapV4UnsupportedPoolError; counter increments BEFORE the raise."""
+def test_native_currency0_close_is_supported_no_raise(caplog: pytest.LogCaptureFixture):
+    """VIB-4483: native-ETH currency0 close is supported — no raise, no drop.
+
+    The native leg is returned as raw ETH (no ERC-20 Transfer), so only the
+    ERC-20 (currency1 = WETH) leg surfaces; the native principal is a
+    measured-zero on its amount0_collected leg (validated downstream via the
+    wallet native-balance delta). The NATIVE_CURRENCY_UNSUPPORTED telemetry
+    counter must NOT increment.
+    """
     reason = V4LPDropReason.NATIVE_CURRENCY_UNSUPPORTED
-    before = _counter_value(CHAIN, reason, "raise")
+    before_raise = _counter_value(CHAIN, reason, "raise")
     native_pool_key = PoolKey(currency0=NATIVE_CURRENCY, currency1=WETH, fee=3000, tick_spacing=60)
     parser = _make_parser(pool_key_lookup=lambda pid, chain: native_pool_key)
     tx = "0xnative"
-    receipt = {"transactionHash": tx, "logs": [_burn_log()]}
+    receipt = {
+        "transactionHash": tx,
+        "logs": [
+            _burn_log(),
+            _transfer_log(token=WETH, from_addr=POOL_MANAGER, to_addr=WALLET, amount=5 * 10**17),
+        ],
+    }
     with caplog.at_level(logging.WARNING, logger=PARSER_LOGGER):
-        with pytest.raises(UniswapV4UnsupportedPoolError):
-            parser.extract_lp_close_data(receipt)
-    _assert_warning_contract(caplog, reason, outcome="raise", tx=tx)
-    assert _counter_value(CHAIN, reason, "raise") == before + 1.0
+        result = parser.extract_lp_close_data(receipt)
+    assert result is not None, "native-ETH close must be supported (VIB-4483)"
+    assert result.currency0 == NATIVE_CURRENCY
+    assert result.currency1 == WETH.lower()
+    assert result.amount0_collected == 0  # native principal: no Transfer → measured-zero leg
+    assert result.amount1_collected == 5 * 10**17
+    # The unsupported-native telemetry path must not fire any more.
+    assert _counter_value(CHAIN, reason, "raise") == before_raise
 
 
 def test_transfer_set_mismatch_emits_warning_and_counter(caplog: pytest.LogCaptureFixture):

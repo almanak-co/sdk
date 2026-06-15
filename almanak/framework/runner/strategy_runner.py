@@ -112,6 +112,26 @@ from .runner_models import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+# V4 native-ETH sentinel: a PoolKey's native currency leg is the EVM zero
+# address (address(0)), NOT a V4-specific magic value. Framework-owned so the
+# runner never imports a concrete connector (connector-boundary guard).
+_V4_NATIVE_CURRENCY = "0x" + "0" * 40
+
+
+def _lp_open_field(lp_open: Any, name: str) -> Any:
+    """Read a field off enriched LP-open data that may be a dataclass OR a dict.
+
+    ``StrategyRunner._result_lp_open_data`` returns either the typed
+    ``LPOpenData`` (``result.lp_open_data``) or the serialised
+    ``extracted_data["lp_open_data"]`` dict, depending on enrichment stage. A
+    bare ``getattr`` on the dict shape returns ``None`` and would silently skip
+    the VIB-4483 native-amount capture, so the native-leg gate reads through
+    this shape-agnostic accessor (VIB-4483, CodeRabbit review).
+    """
+    if isinstance(lp_open, dict):
+        return lp_open.get(name)
+    return getattr(lp_open, name, None)
+
 
 # =============================================================================
 # Mode derivation (VIB-3157)
@@ -2497,6 +2517,7 @@ class StrategyRunner:
         post_state: dict | None = None,
         emit_position_event: bool = True,
         v4_lp_close_fees: tuple[int, int] | None = None,
+        v4_lp_open_native_amounts: tuple[int | None, int | None] | None = None,
     ) -> str | None:
         """Returns the persisted LedgerEntry.id on success, None on non-live failure."""
         """Write a structured trade record to the transaction ledger.
@@ -2555,6 +2576,7 @@ class StrategyRunner:
                 pre_state=pre_state,
                 post_state=post_state,
                 v4_lp_close_fees=v4_lp_close_fees,
+                v4_lp_open_native_amounts=v4_lp_open_native_amounts,
             )
 
             # Phase 4: stamp deployment_id and execution_mode onto the entry (VIB-2835/2837).
@@ -4674,6 +4696,202 @@ class StrategyRunner:
             return None
 
     @staticmethod
+    def _native_v4_open_eligible(intent: Any, result: Any) -> tuple[Any, int] | None:
+        """Gate for the VIB-4483 native-amount capture; returns ``(lp_open, token_id)``.
+
+        Returns ``None`` (skip the capture) unless ALL hold: the intent's connector
+        advertises the V4 position-state capability (capability-gate, not a
+        protocol string), the intent is an ``LP_OPEN``, the enriched ``LPOpenData``
+        is a native-leg V4 pool (exactly one PoolKey currency is the zero address —
+        an ERC20-ERC20 pool has both legs measured from Transfers already), and the
+        open carries a usable NFT ``position_id``.
+        """
+        from almanak.connectors._base.types import ProtocolName
+        from almanak.connectors._strategy_base.runner_hook_registry import (
+            RunnerV4PositionStateCapability,
+        )
+        from almanak.connectors._strategy_runner_hook_registry import (
+            STRATEGY_RUNNER_HOOK_REGISTRY,
+        )
+
+        protocol = str(getattr(intent, "protocol", "") or "").lower()
+        if not protocol:
+            return None
+        connector = STRATEGY_RUNNER_HOOK_REGISTRY.get(ProtocolName(protocol))
+        if not isinstance(connector, RunnerV4PositionStateCapability):
+            return None
+
+        intent_type = getattr(intent, "intent_type", None)
+        intent_type_value = getattr(intent_type, "value", None)
+        intent_type_str = str(intent_type_value if intent_type_value is not None else intent_type or "").upper()
+        if intent_type_str != "LP_OPEN":
+            return None
+
+        lp_open = StrategyRunner._result_lp_open_data(result)
+        if lp_open is None:
+            return None
+
+        # ``lp_open`` may be the typed ``LPOpenData`` OR the serialised
+        # ``extracted_data["lp_open_data"]`` dict (``_result_lp_open_data``
+        # returns whichever is present). Read fields through a shape-agnostic
+        # accessor so the native-leg gate fires in both — a bare ``getattr`` on a
+        # dict returns ``None`` and would silently skip native-amount capture.
+        cur0 = (_lp_open_field(lp_open, "currency0") or "").lower()
+        cur1 = (_lp_open_field(lp_open, "currency1") or "").lower()
+        if not cur0 or not cur1:
+            return None
+        if cur0 != _V4_NATIVE_CURRENCY and cur1 != _V4_NATIVE_CURRENCY:
+            return None
+
+        token_id_raw = _lp_open_field(lp_open, "position_id")
+        try:
+            token_id = int(token_id_raw) if token_id_raw is not None else None
+        except (TypeError, ValueError):
+            return None
+        if token_id is None or token_id <= 0:
+            return None
+        return lp_open, token_id
+
+    @staticmethod
+    def _capture_v4_lp_open_native_amounts_safe(
+        *,
+        intent: Any,
+        chain: str,
+        result: Any,
+        gateway_client: Any | None,
+    ) -> tuple[int | None, int | None] | None:
+        """Best-effort POST-mint read of a V4 LP_OPEN's native-leg amount (VIB-4483).
+
+        A native-ETH V4 pool (``PoolKey.currency0 == 0x0``) deposits its ETH leg
+        via ``msg.value`` on ``modifyLiquidities`` — there is NO ERC-20 Transfer,
+        so the mint RECEIPT cannot measure it and the parser honestly leaves that
+        leg ``None`` (Empty ≠ Zero). This reads the freshly-minted position's live
+        state (``liquidity`` + ``sqrt_price_x96`` + ticks) via the gateway
+        ``QueryV4PositionState`` RPC — the SAME connector-owned reader the
+        close-side fee capture uses (boundary-compliant, no new egress) — and
+        derives ``(amount0, amount1)`` with the framework's existing
+        concentrated-liquidity math (``lp_valuer.get_token_amounts_from_sqrt_price``;
+        no new liquidity math). Read just-after the mint, when the position still
+        holds its full liquidity.
+
+        Returns ``(amount0, amount1)`` raw ints in PoolKey-currency0/1 order (the
+        same order ``LPOpenData.amount0``/``currency0`` use) on a clean read, or
+        ``None`` when:
+          - ``gateway_client`` is missing (local-without-gateway / paper),
+          - the intent isn't a V4 LP open (capability-gated, not protocol-string),
+          - the enriched ``LPOpenData`` is missing / not a native-leg pool,
+          - the open has no usable NFT ``position_id``,
+          - the connector reader is unavailable (V4 not deployed / no StateView),
+          - the on-chain read fails / returns partial state.
+
+        ``None`` is the honest "unmeasured" signal (Empty ≠ Zero): the ledger stamp
+        leaves the native leg ``None`` rather than fabricating a zero. A measured
+        ``0`` is only ever written when the gateway-derived amount is genuinely zero
+        (e.g. an out-of-range single-sided mint that put nothing on the native leg).
+        """
+        if gateway_client is None:
+            return None
+        eligible = StrategyRunner._native_v4_open_eligible(intent, result)
+        if eligible is None:
+            return None
+        lp_open, token_id = eligible
+
+        from almanak.connectors._strategy_runner_hook_registry import (
+            STRATEGY_RUNNER_HOOK_REGISTRY,
+        )
+
+        try:
+            reader = STRATEGY_RUNNER_HOOK_REGISTRY.build_v4_position_state_reader(gateway_client)
+            if reader is None:
+                return None
+            state_obj = reader(chain, token_id)
+        except Exception:
+            # Best-effort observability hook on the SUCCESS path — this read must
+            # NEVER crash the runner after a trade already landed on-chain. The
+            # connector reader issues an RPC and can raise far more than transient
+            # socket errors (``web3.exceptions.ContractLogicError``, ``ValueError``,
+            # ABI-decode / client-specific exceptions). Swallow all of them and
+            # leave the native leg unmeasured (Empty ≠ Zero — never fabricate a
+            # zero); the stamp leaves the leg ``None``.
+            logger.debug(
+                "V4 LP open native-amount capture failed (non-fatal) token_id=%s chain=%s",
+                token_id,
+                chain,
+                exc_info=True,
+            )
+            return None
+        if state_obj is None:
+            return None
+
+        liquidity = getattr(state_obj, "liquidity", None)
+        sqrt_price_x96 = getattr(state_obj, "sqrt_price_x96", None)
+        # Ticks are immutable position attributes captured at mint from the
+        # ``ModifyLiquidity`` event — prefer the receipt's authoritative
+        # ``LPOpenData`` ticks and fall back to the live-read state's ticks only
+        # when the receipt didn't carry them. This keeps the derivation correct
+        # even if a live position-state read can only supply price + liquidity.
+        tick_lower = _lp_open_field(lp_open, "tick_lower")
+        if tick_lower is None:
+            tick_lower = getattr(state_obj, "tick_lower", None)
+        tick_upper = _lp_open_field(lp_open, "tick_upper")
+        if tick_upper is None:
+            tick_upper = getattr(state_obj, "tick_upper", None)
+        if liquidity is None or sqrt_price_x96 is None or tick_lower is None or tick_upper is None:
+            return None
+
+        # Reuse the framework's concentrated-liquidity math — DO NOT reimplement.
+        from almanak.framework.valuation.lp_valuer import get_token_amounts_from_sqrt_price
+
+        # The derivation AND the int() coercion both run inside this guard: a
+        # best-effort success-path hook must never crash the runner. Beyond
+        # ``TypeError`` / ``ValueError`` the math can raise ``ZeroDivisionError``
+        # / ``decimal.InvalidOperation`` on degenerate state, and ``amounts`` may
+        # be a malformed/None-bearing object whose ``.amount0`` int() coercion
+        # raises ``AttributeError``. Any failure → unmeasured (Empty ≠ Zero).
+        try:
+            amounts = get_token_amounts_from_sqrt_price(
+                liquidity=int(liquidity),
+                tick_lower=int(tick_lower),
+                tick_upper=int(tick_upper),
+                sqrt_price_x96=int(sqrt_price_x96),
+            )
+            # ``get_token_amounts_from_sqrt_price`` returns raw-wei Decimals in
+            # PoolKey (currency0 < currency1) order — exactly the order the V4
+            # parser stamps amount0/amount1. Floor to int to match the raw-int
+            # field type; the small sub-wei truncation is immaterial against the
+            # parser's exact ERC-20 leg and well inside the intent-test
+            # deposit-window tolerance.
+            amount0 = int(amounts.amount0)
+            amount1 = int(amounts.amount1)
+        except Exception:
+            logger.debug(
+                "V4 LP open native-amount derivation failed (non-fatal) token_id=%s chain=%s",
+                token_id,
+                chain,
+                exc_info=True,
+            )
+            return None
+        return amount0, amount1
+
+    @staticmethod
+    def _result_lp_open_data(result: Any) -> Any | None:
+        """Pull the enriched ``LPOpenData`` off a result (``None`` if absent).
+
+        Checks the typed ``result.lp_open_data`` attribute first (set by the
+        ResultEnricher), then the ``extracted_data['lp_open_data']`` dict the
+        ledger serialises — so this works both pre- and post-enrichment.
+        """
+        if result is None:
+            return None
+        lp_open = getattr(result, "lp_open_data", None)
+        if lp_open is not None:
+            return lp_open
+        extracted = getattr(result, "extracted_data", None)
+        if isinstance(extracted, dict):
+            return extracted.get("lp_open_data")
+        return None
+
+    @staticmethod
     def _capture_lending_state_safe(
         *,
         intent: Any,
@@ -5451,6 +5669,18 @@ class StrategyRunner:
         # ledger row will pay for gas. Cached values win on key collision so
         # this is purely additive (refreshed values fill gaps).
         ledger_price_oracle = self._merge_oracle_for_ledger(state, intent)
+        # VIB-4483 (P-V1-B): for a native-ETH V4 LP_OPEN the deposited ETH leg
+        # emits no ERC-20 Transfer, so the receipt parser left it None. Read the
+        # freshly-minted position's live state (post-mint) and derive the native
+        # leg's amount via the framework's concentrated-liquidity math, then stamp
+        # it onto LPOpenData at ledger-build time. Empty ≠ Zero: a failed read
+        # leaves the leg None (never a fabricated zero).
+        v4_lp_open_native_amounts = self._capture_v4_lp_open_native_amounts_safe(
+            intent=intent,
+            chain=strategy.chain,
+            result=state.last_execution_result,
+            gateway_client=state.gateway_client,
+        )
         ledger_entry_id = await self._write_ledger_entry(
             strategy,
             intent,
@@ -5460,6 +5690,7 @@ class StrategyRunner:
             pre_state=pre_state,
             post_state=post_state,
             v4_lp_close_fees=state.v4_lp_close_fees,
+            v4_lp_open_native_amounts=v4_lp_open_native_amounts,
         )
         # VIB-4043 / PR4: emit the UX timeline breadcrumb now, threading the
         # ledger_entry_id so the renderer can navigate from the card back to

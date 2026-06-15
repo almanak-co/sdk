@@ -41,6 +41,7 @@ from almanak.framework.accounting.payload_schemas import (
 from almanak.framework.primitives.taxonomy import (
     TAXONOMY,
     UnknownIntentTypeError,
+    materializer_primitive_for,
     primitive_for,
     record_for,
 )
@@ -1641,6 +1642,69 @@ def _cell_g14_sdk_eq_onchain(
     )
 
 
+# The four top-level primitives whose positions the Track-C materializer
+# (``accounting.position_state._classify_position``) actually re-reads on
+# chain. Stored as ``Primitive`` enum-value strings so the eligibility check
+# below can also recognise a ``position_type`` that is itself one of these
+# enum-value labels (e.g. the literal ``"LP_V4"``), which the registry-driven
+# ``materializer_primitive_for`` does NOT map (it answers protocol-name
+# aliases like ``"UNISWAP_V4"`` and the generic ``"LP"`` label, not the
+# enum-value string ``"LP_V4"``).
+_TRACK_C_PRIMITIVE_VALUES: frozenset[str] = frozenset(
+    {
+        _TaxonomyPrimitive.LP.value,
+        _TaxonomyPrimitive.LP_V4.value,
+        _TaxonomyPrimitive.LENDING.value,
+        _TaxonomyPrimitive.PERP.value,
+    }
+)
+
+
+def _is_track_c_eligible_position(pos: dict[str, Any]) -> bool:
+    """True when a ``positions_json`` entry would produce a Track C
+    (``position_state_snapshots``) row.
+
+    Track C is a periodic on-chain re-read of *protocol* positions — LP /
+    lending / perp — materialised by
+    :func:`almanak.framework.accounting.position_state.materialise_position_state`
+    via ``_classify_position`` (which accepts only ``lp`` / ``lp_v4`` /
+    ``lending`` / ``perp`` and returns ``None`` for everything else). Wallet
+    token inventory — including the VIB-5057 ``swap_inventory_lots``
+    pseudo-position (``position_type="TOKEN"``, ``protocol="wallet"``) that
+    NAV counts as deployed capital — is intentionally NOT a Track C row
+    (``TOKEN`` → ``Primitive.UTILITY`` → ``None``; blueprint 27 §Track C vs
+    §7 swap-inventory). G15 must therefore count only Track-C-eligible
+    positions when checking per-snapshot coverage, or a clean round-trip that
+    ends holding cash-as-deployed-inventory false-fails the cell.
+
+    Resolution is two-pronged so a V4 LP is counted whichever label the
+    snapshot carries (VIB-4483):
+
+    * ``materializer_primitive_for`` resolves generic labels (``"LP"``) and
+      connector protocol-name aliases (``"UNISWAP_V4"`` → ``Primitive.LP_V4``)
+      — exactly what ``_classify_position`` keys off.
+    * the ``Primitive`` enum-value strings themselves are recognised directly
+      via a case-insensitive match against ``_TRACK_C_PRIMITIVE_VALUES`` (the
+      actual enum values are lowercase — ``"lp_v4"`` / ``"lp"`` / ``"lending"``
+      / ``"perp"`` — and the input is ``.lower()``-normalised, so a label like
+      ``"LP_V4"`` matches). This direct prong is needed because the
+      registry-driven materializer maps protocol aliases — not the bare
+      enum-value label ``"LP_V4"`` — so a snapshot written with
+      ``position_type="LP_V4"`` would otherwise be silently dropped from the
+      G15 expected count and a real V4 LP MtM gap would pass unnoticed.
+
+    Neither prong invents a new primitive rule; both fold into the SAME
+    Track-C primitive set the materializer honours.
+    """
+    pt = str(pos.get("position_type") or pos.get("type") or "")
+    primitive = materializer_primitive_for(pt)
+    if primitive is not None and primitive.value in _TRACK_C_PRIMITIVE_VALUES:
+        return True
+    # Fallback: the position_type is itself a Track-C primitive enum-value
+    # string (e.g. "LP_V4") that the materializer's alias registry does not map.
+    return pt.strip().lower() in _TRACK_C_PRIMITIVE_VALUES
+
+
 def _cell_g15_multi_period_self_consistency(
     snapshots: list[dict[str, Any]], position_state_rows: list[dict[str, Any]]
 ) -> CellResult:
@@ -1700,8 +1764,14 @@ def _cell_g15_multi_period_self_consistency(
         else:
             unreadable_snapshots.append(s.get("id"))
             continue
-        if positions:
-            snapshot_position_counts[s.get("id")] = len(positions)
+        # Count only Track-C-eligible (protocol LP/lending/perp) positions —
+        # the Track C materializer excludes wallet/TOKEN inventory (incl. the
+        # VIB-5057 swap_inventory_lots pseudo-position), so counting them here
+        # would demand Track C rows that correctly never get written and
+        # false-fail a clean round-trip that ends holding deployed cash.
+        track_c_positions = [p for p in positions if isinstance(p, dict) and _is_track_c_eligible_position(p)]
+        if track_c_positions:
+            snapshot_position_counts[s.get("id")] = len(track_c_positions)
 
     if unreadable_snapshots:
         sample = unreadable_snapshots[:3]

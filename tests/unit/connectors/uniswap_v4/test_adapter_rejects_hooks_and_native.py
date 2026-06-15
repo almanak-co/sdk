@@ -112,13 +112,21 @@ class TestLPOpenRejectsHooks:
             adapter.compile_lp_open_intent(intent)
 
 
-class TestLPOpenRejectsNativeETH:
-    """compile_lp_open_intent must reject native-ETH currency pools."""
+class TestLPOpenAcceptsNativeETH:
+    """compile_lp_open_intent ACCEPTS native-ETH currency pools (VIB-4483).
 
-    def test_rejects_eth_pool(self, adapter):
+    V0 (VIB-4426) rejected ``currency0 == 0x0``; VIB-4483 (P-V1-B) lifts that
+    guard. The SDK threads the native leg as ``msg.value`` on
+    ``modifyLiquidities`` and the runner stamps the deposited native amount onto
+    ``LPOpenData`` from a post-mint position-state read.
+    """
+
+    def test_accepts_eth_pool(self, adapter):
         from almanak.framework.intents.vocabulary import LPOpenIntent
 
         # ETH/USDC: ETH resolves to address(0) for V4 → currency0 == 0x0 after sort.
+        # ``allow_estimated_price`` opts past the orthogonal VIB-2180 estimated-
+        # price slippage guard (StateView is unavailable in this unit context).
         intent = LPOpenIntent(
             pool="ETH/USDC/3000",
             amount0=Decimal("0.1"),
@@ -126,17 +134,20 @@ class TestLPOpenRejectsNativeETH:
             range_lower=Decimal("1500"),
             range_upper=Decimal("2500"),
             protocol="uniswap_v4",
+            protocol_params={"allow_estimated_price": True},
         )
         price_oracle = {"ETH": Decimal("2000"), "USDC": Decimal("1")}
 
-        with pytest.raises(UniswapV4UnsupportedPoolError) as exc_info:
-            adapter.compile_lp_open_intent(intent, price_oracle)
+        # Must NOT raise the native-ETH V0 scope guard.
+        bundle = adapter.compile_lp_open_intent(intent, price_oracle)
 
-        msg = str(exc_info.value)
-        assert "native" in msg.lower() or "eth" in msg.lower(), "Error must explain it's a native-ETH problem"
-        assert "V0" in msg, "Error must cite V0 scope"
-        assert "VIB-4483" in msg, "Error must cite the V1 lifting ticket VIB-4483"
-        assert "P-V1-B" in msg, "Error must cite the P-V1-B placeholder code"
+        assert bundle.intent_type == "LP_OPEN"
+        assert bundle.transactions, "native-ETH LP_OPEN must produce a transaction bundle"
+        # The mint tx carries the ETH leg as a non-zero native value.
+        native_values = [int(tx.get("value", 0) or 0) for tx in bundle.transactions]
+        assert any(v > 0 for v in native_values), (
+            "native-ETH LP_OPEN must thread the ETH leg as msg.value on modifyLiquidities"
+        )
 
 
 # =============================================================================
@@ -144,28 +155,26 @@ class TestLPOpenRejectsNativeETH:
 # =============================================================================
 
 
-class TestLPCloseRejectsNativeETH:
-    """compile_lp_close_intent must reject native-ETH currency0 leg."""
+class TestLPCloseAcceptsNativeETH:
+    """compile_lp_close_intent ACCEPTS native-ETH currency0 leg (VIB-4483)."""
 
-    def test_rejects_native_currency0(self, adapter):
+    def test_accepts_native_currency0(self, adapter):
         from almanak.framework.intents.vocabulary import LPCloseIntent
 
         intent = LPCloseIntent(
             position_id="42",
             protocol="uniswap_v4",
         )
-        with pytest.raises(UniswapV4UnsupportedPoolError) as exc_info:
-            adapter.compile_lp_close_intent(
-                intent,
-                liquidity=1_000_000,
-                currency0="0x0000000000000000000000000000000000000000",
-                currency1="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
-            )
-
-        msg = str(exc_info.value)
-        assert "native" in msg.lower() or "eth" in msg.lower(), "Error must explain it's a native-ETH problem"
-        assert "VIB-4483" in msg
-        assert "P-V1-B" in msg
+        # Must NOT raise — native-ETH close is supported. TAKE_PAIR returns the
+        # native leg as raw ETH; the SDK encodes (currency0, currency1, recipient).
+        bundle = adapter.compile_lp_close_intent(
+            intent,
+            liquidity=1_000_000,
+            currency0="0x0000000000000000000000000000000000000000",
+            currency1="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+        )
+        assert bundle.intent_type == "LP_CLOSE"
+        assert len(bundle.transactions) == 1
 
     def test_close_with_erc20_currencies_does_not_raise_guard(self, adapter):
         """Regression: ERC20-ERC20 close must NOT raise UniswapV4UnsupportedPoolError."""

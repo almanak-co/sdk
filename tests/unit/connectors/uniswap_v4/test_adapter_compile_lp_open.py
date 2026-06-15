@@ -124,8 +124,12 @@ def test_guard_fires_on_hooks_via_helper():
         UniswapV4Adapter._reject_unsupported_v0_pool(pool_key)
 
 
-def test_guard_fires_on_native_via_helper():
-    """Direct unit test of the guard helper for native-ETH rejection."""
+def test_guard_does_not_fire_on_native_currency0():
+    """VIB-4483: native-ETH currency0 is supported — the guard must NOT raise.
+
+    The guard now only rejects hook-bearing pools; native-ETH currency0
+    (currency0 == 0x0) is a supported V4 pool shape.
+    """
     from types import SimpleNamespace
 
     pool_key = SimpleNamespace(
@@ -133,5 +137,5 @@ def test_guard_fires_on_native_via_helper():
         currency1="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
         hooks="0x0000000000000000000000000000000000000000",
     )
-    with pytest.raises(UniswapV4UnsupportedPoolError, match="VIB-4483"):
-        UniswapV4Adapter._reject_unsupported_v0_pool(pool_key)
+    # No raise — native-ETH currency0 is in scope (VIB-4483 lifted the guard).
+    UniswapV4Adapter._reject_unsupported_v0_pool(pool_key)

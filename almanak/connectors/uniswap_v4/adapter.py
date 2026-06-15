@@ -995,17 +995,14 @@ class UniswapV4Adapter:
         if not self.wallet_address:
             raise ValueError("wallet_address must be set before building LP close transactions.")
 
-        # V0 scope guard (VIB-4475): reject native-ETH currency leg before building tx.
-        # Hooks are not visible at close (the position is identified by token_id alone),
-        # so only the currency check is enforceable here; the hook guard lives in
-        # compile_lp_open_intent. Salt is intentionally not validated — per VIB-4426
-        # §Q7, salt = bytes32(tokenId) is the canonical PositionManager._mint path.
-        if currency0 and currency0.lower() == NATIVE_CURRENCY:
-            raise UniswapV4UnsupportedPoolError(
-                f"Uniswap V4 LP close has currency0={currency0} (native ETH) but native-ETH legs "
-                "are not in V0 scope. V0 (VIB-4426) supports only ERC20-ERC20 pools. "
-                "Native-ETH currency support is tracked by VIB-4483 (P-V1-B)."
-            )
+        # VIB-4483 (P-V1-B): native-ETH currency0 is supported on close. The
+        # TAKE_PAIR action returns the native leg directly to the recipient as raw
+        # ETH (no ERC-20 Transfer), so ``build_decrease_liquidity_tx`` encodes
+        # ``(currency0, currency1, recipient)`` verbatim with no native special-
+        # casing. The currency0 == NATIVE_CURRENCY rejection that previously lived
+        # here (VIB-4475 V0 scope guard) is intentionally gone. Salt is still not
+        # validated — per VIB-4426 §Q7, salt = bytes32(tokenId) is the canonical
+        # PositionManager._mint path.
 
         try:
             token_id = int(intent.position_id)
@@ -1122,30 +1119,36 @@ class UniswapV4Adapter:
 
     @staticmethod
     def _reject_unsupported_v0_pool(pool_key: Any) -> None:
-        """Fail-loud guard for VIB-4426 V0 pool shapes (hookless ERC20-ERC20).
+        """Fail-loud guard for unsupported V4 pool shapes.
 
         Rejects:
         - hooks != 0x0000…0000 — VIB-4485 (P-V1-D) will lift this.
-        - currency0 == 0x0000…0000 (native-ETH leg) — VIB-4483 (P-V1-B) will lift this.
+
+        Native-ETH currency0 (currency0 == 0x0000…0000) is NO LONGER rejected:
+        VIB-4483 (P-V1-B) lifted that guard. Native-ETH V4 pools are supported —
+        the SDK threads the native leg as ``msg.value`` and the runner stamps the
+        post-mint native deposit amount onto ``LPOpenData`` via the gateway
+        ``QueryV4PositionState`` read.
 
         Does NOT validate salt: per VIB-4426 §Q7, salt = bytes32(tokenId) is the
         canonical PositionManager._mint path and is always non-zero for a minted
         position. Rejecting non-zero salt would break every real LP open.
         """
         hooks_norm = pool_key.hooks.lower() if isinstance(pool_key.hooks, str) else pool_key.hooks
-        currency0_norm = pool_key.currency0.lower() if isinstance(pool_key.currency0, str) else pool_key.currency0
         if hooks_norm != NATIVE_CURRENCY:
             raise UniswapV4UnsupportedPoolError(
                 f"Uniswap V4 pool has hooks={pool_key.hooks} but hook support is not in V0 scope. "
                 "V0 (VIB-4426) supports only hookless ERC20-ERC20 pools. "
                 "Hook support is tracked by VIB-4485 (P-V1-D)."
             )
-        if currency0_norm == NATIVE_CURRENCY:
-            raise UniswapV4UnsupportedPoolError(
-                f"Uniswap V4 pool has currency0={pool_key.currency0} (native ETH) but native-ETH legs "
-                "are not in V0 scope. V0 (VIB-4426) supports only ERC20-ERC20 pools. "
-                "Native-ETH currency support is tracked by VIB-4483 (P-V1-B)."
-            )
+        # VIB-4483 (P-V1-B): native-ETH currency0 (currency0 == 0x0) is supported.
+        # The SDK threads the native leg as ``msg.value`` on ``modifyLiquidities``
+        # (build_mint_position_tx) and the runner stamps the native deposit amount
+        # onto ``LPOpenData`` from a post-mint ``QueryV4PositionState`` read (the
+        # native leg emits no ERC-20 Transfer, so the receipt alone cannot measure
+        # it — see runner ``_capture_v4_lp_open_native_amounts_safe`` /
+        # ledger ``_stamp_v4_lp_open_native_amounts``). The currency0 ==
+        # NATIVE_CURRENCY rejection that previously lived here is intentionally gone.
 
     @staticmethod
     def _parse_pool(pool: str) -> tuple[str, str, int]:

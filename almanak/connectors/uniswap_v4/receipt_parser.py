@@ -650,11 +650,10 @@ class UniswapV4ReceiptParser:
         # VIB-4535: when only one currency landed in PoolManager we cannot
         # honestly attribute it to currency0 vs currency1 from the observed
         # transfers alone. Resolve via the gateway PoolKey lookup -- mirror of
-        # close-side T07 (extract_lp_close_data). The helper either returns
-        # a resolved (amount0, amount1, currency0, currency1) tuple, returns
-        # None to signal a drop, OR raises UniswapV4UnsupportedPoolError on
-        # native-ETH currency0 (defense-in-depth; T06 adapter guard already
-        # rejects at compile time).
+        # close-side T07 (extract_lp_close_data). The helper returns a resolved
+        # (amount0, amount1, currency0, currency1) tuple (with the unobserved
+        # native leg left ``None`` for the runner to stamp from a post-mint
+        # position-state read, VIB-4483) or ``None`` to signal a drop.
         if amount0 is not None and amount1 is None:
             resolved = self._resolve_single_sided_lp_open(
                 pool_id_hex=mint_event.pool_id.lower(),
@@ -732,7 +731,7 @@ class UniswapV4ReceiptParser:
         tx_hash: str,
         observed_currency: str,
         observed_amount: int,
-    ) -> tuple[int, int, str, str] | None:
+    ) -> tuple[int | None, int | None, str, str] | None:
         """Resolve a single-sided LP_OPEN via the gateway PoolKey lookup.
 
         VIB-4535: when only one currency landed in PoolManager,
@@ -744,24 +743,34 @@ class UniswapV4ReceiptParser:
           canonical PoolKey.
         - On lookup failure (no callable / returns None / raises) emits a
           structured WARNING + telemetry and returns ``None`` (caller drops).
-        - On native-ETH ``currency0`` raises ``UniswapV4UnsupportedPoolError``
-          (defense-in-depth; adapter T06 already rejects at compile time;
-          gemini-code-assist PR-review medium-priority concern).
         - On observed-currency-outside-PoolKey returns ``None`` with
           ``transfer_set_mismatch`` telemetry (caller drops).
-        - On success returns ``(amount0, amount1, currency0, currency1)``
-          where the missing leg is stamped as measured zero (``0``) per
-          blueprint 27 §Empty != Zero — the lookup succeeded AND we observed
-          all transfers from the PoolManager so the unobserved leg truly
-          received zero.
+        - On success returns ``(amount0, amount1, currency0, currency1)``.
+
+        Unobserved-leg attribution honours Empty ≠ Zero (blueprint 27):
+
+        * **ERC-20 unobserved leg** → measured ``0``. We observed every
+          ERC-20 Transfer leaving / entering the PoolManager, so an ERC-20
+          currency with no Transfer truly received zero in this open (a
+          legitimate out-of-range single-sided ERC-20 deposit).
+        * **native-ETH unobserved leg** (``currency == 0x0``, VIB-4483) →
+          ``None`` (unmeasured). The native leg emits NO ERC-20 Transfer, so
+          its absence from the observed set is NOT evidence of zero — the
+          ETH genuinely deposited via ``msg.value`` and the receipt simply
+          cannot see it. Stamping ``0`` here would be a measured-zero lie
+          (receipt_parser.py historical note). The runner fills this leg from
+          a post-mint ``QueryV4PositionState`` read (see
+          ``_stamp_v4_lp_open_native_amounts``); on read failure it stays
+          ``None`` (honest unmeasured), never a fabricated zero.
 
         Returns:
             ``None`` to signal the caller should drop ``LPOpenData``, OR
-            a resolved ``(amount0, amount1, currency0, currency1)`` tuple.
-
-        Raises:
-            ``UniswapV4UnsupportedPoolError``: on native-ETH currency0.
+            a resolved ``(amount0, amount1, currency0, currency1)`` tuple
+            where an unobserved native leg is ``None`` and an unobserved
+            ERC-20 leg is ``0``.
         """
+        from almanak.connectors.uniswap_v4.sdk import NATIVE_CURRENCY
+
         if self._pool_key_lookup is None:
             self._emit_drop_telemetry(
                 outcome="drop",
@@ -795,33 +804,6 @@ class UniswapV4ReceiptParser:
         pk_currency0 = pool_key.currency0.lower()
         pk_currency1 = pool_key.currency1.lower()
 
-        # Native-ETH currency0 is out of V0 scope (VIB-4483 / P-V1-B). The
-        # adapter compile-time guard (T06 / VIB-4471) already rejects native
-        # ETH at compile time, so in normal flow no native-ETH receipt should
-        # reach this branch. Defense-in-depth: if one ever does (e.g. a
-        # non-PositionManager hook bypass), raise rather than silently
-        # attribute measured-zero to the native-ETH leg (the native leg
-        # emits no ERC-20 Transfer so the single observed transfer is always
-        # the ERC-20 side; stamping `amount=0` on the ETH leg would be a
-        # misattribution). Mirror of ``extract_lp_close_data``.
-        from almanak.connectors.uniswap_v4.adapter import UniswapV4UnsupportedPoolError
-        from almanak.connectors.uniswap_v4.sdk import NATIVE_CURRENCY
-
-        if pk_currency0 == NATIVE_CURRENCY:
-            self._emit_drop_telemetry(
-                outcome="raise",
-                reason=V4LPDropReason.NATIVE_CURRENCY_UNSUPPORTED,
-                pool_id=pool_id_hex,
-                tx_hash=tx_hash,
-                extras=f"currency0={pool_key.currency0}",
-            )
-            raise UniswapV4UnsupportedPoolError(
-                f"Uniswap V4 LP open has currency0={pool_key.currency0} (native ETH) but "
-                f"native-ETH legs are not in V0 scope. V0 (VIB-4426) supports only ERC20-ERC20 "
-                f"pools. Native-ETH currency support is tracked by VIB-4483 (P-V1-B). "
-                f"pool_id={pool_id_hex} chain={self.chain}"
-            )
-
         # The single observed currency MUST be one of the two PoolKey
         # currencies; otherwise attribution is impossible (mirror of the
         # close-side ``transfer_set_mismatch`` drop). Catches parser
@@ -836,14 +818,17 @@ class UniswapV4ReceiptParser:
             )
             return None
 
-        # Map observed amount onto its correct leg; missing leg is measured
-        # zero (Decimal("0") semantics; int field = 0). Empty != Zero only
-        # applies when we don't know -- here the lookup succeeded AND we
-        # observed all transfers so the unobserved currency truly received
-        # zero in this open.
+        # Map the observed amount onto its leg. The unobserved leg is a
+        # measured ``0`` for an ERC-20 currency (no Transfer = truly zero) but
+        # ``None`` for the native-ETH currency (no Transfer ≠ zero — the ETH
+        # deposit is invisible to the receipt; the runner stamps it from a
+        # post-mint position-state read).
+        def _unobserved(currency: str) -> int | None:
+            return None if currency == NATIVE_CURRENCY else 0
+
         if observed_currency == pk_currency0:
-            return observed_amount, 0, pk_currency0, pk_currency1
-        return 0, observed_amount, pk_currency0, pk_currency1
+            return observed_amount, _unobserved(pk_currency1), pk_currency0, pk_currency1
+        return _unobserved(pk_currency0), observed_amount, pk_currency0, pk_currency1
 
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> LPCloseData | None:
         """Extract LP close data from a V4 burn receipt.
@@ -862,18 +847,22 @@ class UniswapV4ReceiptParser:
            mint). Pull ``pool_id`` from ``topics[1]``.
         2. Canonical ``PoolKey`` for that ``pool_id`` via the injected
            ``pool_key_lookup`` callable.
-        3. Native-ETH currency leg (``currency0 == 0x0`` after PoolKey's
-           sorted-order normalisation) → raise
-           :class:`UniswapV4UnsupportedPoolError` citing VIB-4483 (P-V1-B),
-           consistent with the T06 adapter guard.
-        4. Transfer-set integrity check: the set of token addresses in
-           observed ``Transfer`` logs leaving the PoolManager MUST match
-           ``{currency0, currency1}`` from the PoolKey. On mismatch:
-           structured WARNING + return ``None`` (fail-loud over silent
-           misattribution).
-        5. PoolKey-ordered amount assignment: ``amount0_collected`` =
+        3. Transfer-set integrity check: the set of token addresses in
+           observed ``Transfer`` logs leaving the PoolManager MUST be a
+           non-empty subset of ``{currency0, currency1}`` from the PoolKey.
+           On a token outside that set: structured WARNING + return ``None``
+           (fail-loud over silent misattribution).
+        4. PoolKey-ordered amount assignment: ``amount0_collected`` =
            sum of transfers of ``currency0``; ``amount1_collected`` =
            sum of transfers of ``currency1``.
+
+        Native-ETH currency0 (VIB-4483 / P-V1-B) is supported: the native leg
+        is returned as raw ETH (no ERC-20 Transfer) so its
+        ``amount{0,1}_collected`` principal surfaces as ``0`` here and is
+        validated downstream by the wallet native-balance delta. Measuring the
+        native close PRINCIPAL is a VIB-4483 follow-up (needs a pre-burn read +
+        a nullable ``amount{0,1}_collected``); uncollected FEES are already
+        measured pre-burn via ``_stamp_v4_lp_close_fees`` (VIB-4482).
 
         Emits:
 
@@ -891,13 +880,7 @@ class UniswapV4ReceiptParser:
             ``LPCloseData`` with PoolKey-driven amount attribution, or
             ``None`` when no eligible burn is found, the PoolKey lookup
             fails, or the observed Transfer set does not match the PoolKey.
-
-        Raises:
-            UniswapV4UnsupportedPoolError: PoolKey has native-ETH
-                ``currency0``. Lifting tracked by VIB-4483 (P-V1-B).
         """
-        from almanak.connectors.uniswap_v4.adapter import UniswapV4UnsupportedPoolError
-        from almanak.connectors.uniswap_v4.sdk import NATIVE_CURRENCY
         from almanak.framework.execution.extracted_data import LPCloseData
 
         parsed = self.parse_receipt(receipt)
@@ -962,20 +945,18 @@ class UniswapV4ReceiptParser:
         currency0 = pool_key.currency0.lower()
         currency1 = pool_key.currency1.lower()
 
-        if currency0 == NATIVE_CURRENCY:
-            self._emit_drop_telemetry(
-                outcome="raise",
-                reason=V4LPDropReason.NATIVE_CURRENCY_UNSUPPORTED,
-                pool_id=pool_id_hex,
-                tx_hash=tx_hash,
-                extras=f"currency0={pool_key.currency0}",
-            )
-            raise UniswapV4UnsupportedPoolError(
-                f"Uniswap V4 LP close has currency0={pool_key.currency0} (native ETH) but "
-                f"native-ETH legs are not in V0 scope. V0 (VIB-4426) supports only ERC20-ERC20 "
-                f"pools. Native-ETH currency support is tracked by VIB-4483 (P-V1-B). "
-                f"pool_id={pool_id_hex} chain={self.chain}"
-            )
+        # VIB-4483 (P-V1-B): native-ETH currency0 is supported on close. The
+        # native leg is returned to the wallet as raw ETH (TAKE_PAIR) and emits
+        # NO ERC-20 Transfer, so the ``collected_by_token`` walk below sees only
+        # the ERC-20 leg; the native principal surfaces as ``0`` on its
+        # ``amountN_collected`` leg here. That principal leg is validated
+        # downstream by the wallet native-balance delta (the avalanche
+        # ``test_lp_close_avax_usdc`` Layer-4 check), not by the parser. Promoting
+        # the native close PRINCIPAL to a measured value requires a pre-burn
+        # position-state read threaded onto a nullable ``amount{0,1}_collected``
+        # (today typed ``int``) — tracked as a VIB-4483 close-principal follow-up;
+        # uncollected FEES are already measured pre-burn via
+        # ``_stamp_v4_lp_close_fees`` (VIB-4482).
 
         collected_by_token: dict[str, int] = {}
         for transfer in parsed.transfer_events:

@@ -16,9 +16,14 @@ pool whose ``Initialize`` event lives outside the gateway's bounded backfill
 window (Base WETH/USDC fee=3000 sits ~15M blocks behind the configured
 500k-block historical floor as of 2026-05-17). This module supplies path (2)
 for the common case: a static table of ``CanonicalV4Pair`` rows covering the
-WETH/USDC, WETH/USDT, WBTC/WETH, and USDC/USDT pairs at all four V4-canonical
-fee tiers, on every chain whose V4 PoolManager is registered in
-:data:`almanak.core.contracts.UNISWAP_V4`.
+WETH/USDC, WETH/USDT, WBTC/WETH, and USDC/USDT wrapped pairs PLUS the
+native-currency pairs (native/USDC, native/USDT — currency0 == address(0);
+VIB-4483) at all four V4-canonical fee tiers, on every chain whose V4
+PoolManager is registered in :data:`almanak.core.contracts.UNISWAP_V4`. A
+native pool hashes to a different ``poolId`` than its wrapped equivalent, so
+it MUST be seeded as its own row or the gateway returns ``pool_key_not_found``
+for native LP positions whose ``Initialize`` event predates the backfill
+window.
 
 The seed is read in-process only — no outbound RPC or HTTP call is made when
 populating it. Pool addresses are resolved via the framework token resolver,
@@ -83,6 +88,20 @@ logger = logging.getLogger(__name__)
 # is where ~99% of TVL sits.
 _CANONICAL_FEE_TIERS: tuple[int, ...] = (100, 500, 3000, 10000)
 
+# Display labels for each chain's native gas token (VIB-4483). The native V4
+# pool is keyed on currency0 == address(0) regardless of label — this map only
+# affects how a native seed row READS (auditable table), never the computed
+# poolId. Chains absent from the map fall back to the generic "NATIVE" label.
+_NATIVE_GAS_SYMBOL: dict[str, str] = {
+    "arbitrum": "ETH",
+    "avalanche": "AVAX",
+    "base": "ETH",
+    "bsc": "BNB",
+    "ethereum": "ETH",
+    "optimism": "ETH",
+    "polygon": "POL",
+}
+
 
 class V4CanonicalSeedConfigError(ValueError):
     """A row in :data:`CANONICAL_V4_PAIRS` references a chain or pair that
@@ -105,17 +124,33 @@ class CanonicalV4Pair:
     resolver carries no notion of "this pool uses a custom hook" — for
     custom-hook pools, fall back to the eth_getLogs cache path.
 
+    Native-currency pools (VIB-4483): Uniswap V4 keys pools on the native
+    asset directly (``currency == address(0)``, NOT the wrapped ERC-20).
+    A native ETH/USDC pool therefore hashes to a DIFFERENT ``poolId`` than
+    the wrapped WETH/USDC pool, so it must be seeded as its own row. The
+    ``token0_native`` flag marks ``currency0`` as the native sentinel
+    (:data:`NATIVE_CURRENCY` = ``0x0``); ``token0_symbol`` is then a
+    human-readable label only (e.g. ``"ETH"``) and is NOT resolved through
+    the token resolver. The zero address sorts numerically first, so a
+    native pool's ``currency0`` is always ``0x0`` — no native row can ever
+    sort the native sentinel into ``currency1``.
+
     Attributes:
         chain: lowercase chain name; must be present in :data:`UNISWAP_V4`.
-        token0_symbol: e.g. ``"WETH"``; resolved via the framework token resolver.
+        token0_symbol: e.g. ``"WETH"``; resolved via the framework token
+            resolver — UNLESS ``token0_native`` is set, in which case it is a
+            display label only (``currency0`` is forced to ``0x0``).
         token1_symbol: e.g. ``"USDC"``; resolved via the framework token resolver.
         fee: one of ``CANONICAL_FEE_TIERS`` (100, 500, 3000, 10000).
+        token0_native: when True, ``currency0`` is the native sentinel
+            (``0x0``) and ``token0_symbol`` is NOT resolved.
     """
 
     chain: str
     token0_symbol: str
     token1_symbol: str
     fee: int
+    token0_native: bool = False
 
 
 @dataclass(frozen=True)
@@ -149,13 +184,26 @@ def _build_pairs() -> tuple[CanonicalV4Pair, ...]:
     Kept as a function so the registry's shape is auditable in one place
     and the chain/pair coverage is obvious from reading the source.
     """
-    # Base pairs that we expect to find on every V4 chain.
+    # Wrapped-ERC20 pairs that we expect to find on every V4 chain.
     base_pairs: tuple[tuple[str, str], ...] = (
         ("WETH", "USDC"),
         ("WETH", "USDT"),
         ("WBTC", "WETH"),
         ("USDC", "USDT"),
     )
+    # Native-currency pools (VIB-4483). In V4 the chain's native asset is keyed
+    # as currency0 == address(0), which hashes to a DIFFERENT poolId than the
+    # wrapped equivalent — so native pools need their own seed rows or the
+    # gateway returns pool_key_not_found for them (the Initialize event sits
+    # outside the bounded backfill window, same as the wrapped pools). The
+    # token1 symbol is still resolved through the token resolver; the native
+    # leg is forced to 0x0 via the token0_native flag. The display label is
+    # the chain's native gas token (purely cosmetic — the poolId depends only
+    # on currency0 == 0x0, never the label). Hooks-bearing native pools (e.g.
+    # liquid-staking hooks) are out of scope here — the same NO_HOOKS
+    # constraint as the wrapped table applies. Token1 quote symbols seeded
+    # against the native leg on every chain:
+    native_quote_symbols: tuple[str, ...] = ("USDC", "USDT")
     pairs: list[CanonicalV4Pair] = []
     # Chains supported by V4 per the framework deployment registry. We rely
     # on UNISWAP_V4 as the single source of truth so future chain additions
@@ -172,6 +220,18 @@ def _build_pairs() -> tuple[CanonicalV4Pair, ...]:
                         fee=fee,
                     )
                 )
+        native_label = _NATIVE_GAS_SYMBOL.get(chain, "NATIVE")
+        for token1 in native_quote_symbols:
+            for fee in _CANONICAL_FEE_TIERS:
+                pairs.append(
+                    CanonicalV4Pair(
+                        chain=chain,
+                        token0_symbol=native_label,
+                        token1_symbol=token1,
+                        fee=fee,
+                        token0_native=True,
+                    )
+                )
     return tuple(pairs)
 
 
@@ -185,10 +245,22 @@ def _resolve_pair_addresses(pair: CanonicalV4Pair) -> tuple[str, str]:
     and 0x-prefixed. Raises :class:`TokenNotFoundError` (the resolver's own
     exception) if either symbol is missing on the chain; the caller is
     responsible for swallowing the miss and recording it in the skip report.
+
+    Native-currency pools (VIB-4483): when ``pair.token0_native`` is set the
+    native leg is the V4 sentinel :data:`NATIVE_CURRENCY` (``0x0``), NOT a
+    resolved wrapped-token address. We deliberately do NOT route the native
+    label through the token resolver — resolving "ETH" would yield the WETH
+    address and hash to the wrong (wrapped) poolId. Only ``token1`` is
+    resolved; if token1 is missing on the chain the row is skipped exactly
+    like a wrapped row.
     """
     resolver = get_token_resolver()
-    t0 = resolver.resolve(pair.token0_symbol, pair.chain, skip_gateway=True, log_errors=False)
     t1 = resolver.resolve(pair.token1_symbol, pair.chain, skip_gateway=True, log_errors=False)
+    if pair.token0_native:
+        # currency0 is the native sentinel; _make_pool_key sorts it first
+        # (int(0x0, 16) == 0 < any token1).
+        return NATIVE_CURRENCY.lower(), t1.address.lower()
+    t0 = resolver.resolve(pair.token0_symbol, pair.chain, skip_gateway=True, log_errors=False)
     return t0.address.lower(), t1.address.lower()
 
 

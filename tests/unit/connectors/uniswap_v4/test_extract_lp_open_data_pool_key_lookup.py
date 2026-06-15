@@ -13,8 +13,11 @@ VIB-4535 mirrors that mechanism on the open path:
   ``self._pool_key_lookup(pool_id, chain)``.
 - On success: both currencies are resolved from the PoolKey, the observed
   amount is mapped onto its correct leg (currency0 OR currency1), and the
-  missing leg is stamped as measured zero (``Decimal("0")`` semantics; the
-  underlying int field uses ``0``) per blueprint 27 §Empty != Zero.
+  missing leg honours Empty != Zero (blueprint 27): a missing ERC-20 leg is
+  measured zero (``0`` — every ERC-20 Transfer was observed), while a missing
+  native-ETH leg (VIB-4483) stays ``None`` (the native deposit emits no
+  Transfer, so its absence is NOT evidence of zero; the runner stamps it from
+  a post-mint position-state read).
 - On lookup failure (no callable, callable returns None, callable raises):
   the LPOpenData is DROPPED with telemetry -- same disposition as T07's
   close-side drops.
@@ -408,27 +411,21 @@ class TestSingleSidedMissingLookup:
 # =============================================================================
 
 
-class TestSingleSidedNativeCurrencyUnsupported:
-    """Native-ETH (currency0 == 0x0) is out of V0 scope (VIB-4483 / P-V1-B).
-    The adapter compile-time guard (T06 / VIB-4471) already rejects native-ETH
-    at compile time. This parser-side guard is defense-in-depth: if a
-    native-ETH receipt ever reaches the parser via a code path that bypasses
-    the adapter guard (e.g. a non-PositionManager hook), the parser MUST raise
-    rather than silently attribute a measured-zero to the unobserved
-    native-ETH leg (the native-ETH leg emits no ERC-20 Transfer, so the
-    single observed transfer is always the ERC-20 side — stamping
-    ``amount=0`` on the ETH leg would be a misattribution). Mirror of
-    close-side ``extract_lp_close_data``.
+class TestSingleSidedNativeCurrencyLeftUnmeasured:
+    """Native-ETH (currency0 == 0x0) is SUPPORTED (VIB-4483 / P-V1-B).
+
+    A native-ETH V4 pool deposits its ETH leg via ``msg.value`` and emits NO
+    ERC-20 Transfer, so the single observed transfer is always the ERC-20 leg.
+    The parser must NOT raise (V0 used to) and must NOT fabricate a measured
+    zero on the unobserved native leg (Empty != Zero — that would be a
+    misattribution since the ETH genuinely deposited). Instead it attributes
+    the observed ERC-20 amount to its correct PoolKey leg and leaves the
+    native leg ``None`` (unmeasured) for the runner to stamp from a post-mint
+    ``QueryV4PositionState`` read. Mirror of the close-side acceptance path.
     """
 
-    def test_native_currency0_raises(self, caplog: pytest.LogCaptureFixture) -> None:
-        from almanak.connectors.uniswap_v4.adapter import (
-            UniswapV4UnsupportedPoolError,
-        )
+    def test_native_currency0_leaves_native_leg_none(self, caplog: pytest.LogCaptureFixture) -> None:
         from almanak.connectors.uniswap_v4.sdk import NATIVE_CURRENCY
-
-        reason = V4LPDropReason.NATIVE_CURRENCY_UNSUPPORTED
-        before = _counter_value(CHAIN, reason, "raise")
 
         # PoolKey with native ETH as currency0 (after sort, since 0x0 < anything).
         native_pool_key = PoolKey(
@@ -436,21 +433,20 @@ class TestSingleSidedNativeCurrencyUnsupported:
         )
 
         tx_hash = "0xsinglesided_native"
+        # Only the ERC-20 (currency1 = WETH) leg transfers into the PoolManager.
         receipt = _single_sided_receipt(token=WETH_BASE, amount=WETH_AMOUNT, tx_hash=tx_hash)
-        parser = UniswapV4ReceiptParser(
-            chain=CHAIN, pool_key_lookup=lambda pid, chain: native_pool_key
-        )
+        parser = UniswapV4ReceiptParser(chain=CHAIN, pool_key_lookup=lambda pid, chain: native_pool_key)
 
         with caplog.at_level(logging.WARNING, logger=PARSER_LOGGER):
-            with pytest.raises(UniswapV4UnsupportedPoolError) as exc_info:
-                parser.extract_lp_open_data(receipt)
+            data = parser.extract_lp_open_data(receipt)
 
-        assert "VIB-4483" in str(exc_info.value)
-        assert "native ETH" in str(exc_info.value).lower() or "native-eth" in str(exc_info.value).lower()
-        joined = " ".join(rec.message for rec in caplog.records)
-        assert "native_currency_unsupported" in joined
-        # Counter increments BEFORE the raise (dashboards see the event).
-        assert _counter_value(CHAIN, reason, "raise") == before + 1.0
+        assert data is not None, "native-ETH single-sided open must NOT be dropped/raised (VIB-4483)"
+        # currency0 = native (0x0), currency1 = WETH. The observed WETH leg
+        # lands on amount1; the native leg stays None (unmeasured), NOT zero.
+        assert data.currency0 == NATIVE_CURRENCY
+        assert data.currency1 == WETH_BASE
+        assert data.amount0 is None, "native leg MUST be None (unmeasured), never a fabricated zero"
+        assert data.amount1 == WETH_AMOUNT, "observed ERC-20 leg must be measured on its PoolKey leg"
 
 
 # =============================================================================

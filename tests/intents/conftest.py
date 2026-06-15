@@ -152,6 +152,16 @@ class AnvilEthCallAdapter:
     """Test-scoped gateway-shaped eth_call adapter backed by the Anvil Web3."""
 
     web3: Web3
+    # VIB-4483: the V4 PoolKey whose getSlot0 this adapter reads for
+    # ``query_v4_position_state`` (native-pool tests set it via
+    # ``with_v4_pool_key``). ``None`` ⇒ no V4 position-state read available.
+    _v4_pool_key: Any = None
+
+    def with_v4_pool_key(self, pool_key: Any) -> "AnvilEthCallAdapter":
+        """Return a copy of this adapter bound to ``pool_key`` for getSlot0 reads."""
+        import dataclasses
+
+        return dataclasses.replace(self, _v4_pool_key=pool_key)
 
     def eth_call(self, chain: str, to: str, data: str) -> str | None:
         del chain
@@ -162,6 +172,83 @@ class AnvilEthCallAdapter:
             }
         )
         return Web3.to_hex(result)
+
+    def query_v4_position_state(
+        self,
+        *,
+        chain: str,
+        position_manager: str,
+        state_view: str,
+        token_id: int,
+    ) -> "V4PositionState | None":
+        """Gateway-shaped V4 position-state read, backed by raw eth_call (VIB-4483).
+
+        This is the gateway INTERFACE (same signature + return type as
+        ``GatewayClient.query_v4_position_state``) implemented over the test
+        Anvil fork's ``eth_call`` — NOT a re-implementation of the gateway's
+        position-state logic. It composes the connector's EXISTING encoders /
+        decoders:
+
+        * ``StateView.getSlot0(bytes32 poolId)`` via the VIB-5038-fixed
+          ``build_get_slot0_calldata`` / ``decode_slot0_response`` →
+          ``sqrt_price_x96`` + ``current_tick``.
+        * ``PositionManager.getPositionLiquidity(uint256)`` (selector
+          ``0x1efeed33``) → ``liquidity``.
+
+        Returns a :class:`V4PositionState` carrying those live fields. ``ticks``
+        and ``tokens_owed`` are left at their dataclass defaults — the VIB-4483
+        native-amount capture sources the immutable position ticks from the mint
+        receipt's ``LPOpenData`` (authoritative at mint), and only needs the live
+        ``liquidity`` + ``sqrt_price_x96`` from this read. Returns ``None`` on any
+        missing/failed read so the capture leaves the native leg unmeasured
+        (Empty ≠ Zero), never fabricating a zero.
+
+        The PoolKey for ``getSlot0`` is reconstructed from the V4 LP pool this
+        suite exercises — see ``v4_pool_key`` below; tests that use a different
+        V4 pool override it via the fixture.
+        """
+        from almanak.connectors.uniswap_v4.hooks import (
+            build_get_slot0_calldata,
+            decode_slot0_response,
+        )
+        from almanak.framework.gateway_client import V4PositionState
+
+        pool_key = getattr(self, "_v4_pool_key", None)
+        if pool_key is None:
+            return None
+
+        # getSlot0(bytes32 poolId) — VIB-5038-fixed selector via the connector encoder.
+        try:
+            slot0_hex = self.eth_call(chain, state_view, build_get_slot0_calldata(pool_key))
+        except Exception:
+            return None
+        if not slot0_hex:
+            return None
+        pool_state = decode_slot0_response(slot0_hex)
+        if not pool_state.exists or pool_state.sqrt_price_x96 <= 0:
+            return None
+
+        # getPositionLiquidity(uint256) selector 0x1efeed33.
+        liq_calldata = "0x1efeed33" + format(int(token_id), "064x")
+        try:
+            liq_hex = self.eth_call(chain, position_manager, liq_calldata)
+        except Exception:
+            return None
+        if not liq_hex:
+            return None
+        try:
+            liquidity = int(liq_hex, 16)
+        except (TypeError, ValueError):
+            return None
+
+        return V4PositionState(
+            liquidity=liquidity,
+            tick_lower=pool_state.tick,  # placeholder; capture prefers receipt ticks
+            tick_upper=pool_state.tick,  # placeholder; capture prefers receipt ticks
+            current_tick=pool_state.tick,
+            sqrt_price_x96=pool_state.sqrt_price_x96,
+            pool_id="",
+        )
 
 
 @pytest.fixture
@@ -262,6 +349,34 @@ def _default_compute_position_key(
     return "", ""
 
 
+def _capture_v4_lp_open_native_for_intent_test(
+    *,
+    intent: Any,
+    chain: str,
+    result: Any,
+    eth_call_reader: Any | None,
+) -> tuple[int | None, int | None] | None:
+    """Layer-5 mirror of the runner's VIB-4483 native-amount capture.
+
+    Delegates to the SAME ``StrategyRunner._capture_v4_lp_open_native_amounts_safe``
+    static method the production runner uses (no logic duplication), passing the
+    test eth_call adapter as the ``gateway_client``. The adapter implements the
+    gateway ``query_v4_position_state`` interface over the Anvil fork, so this
+    exercises the real stamp path. ``None`` (gateway-less harness / non-native /
+    failed read) leaves the native leg unmeasured (Empty ≠ Zero).
+    """
+    if eth_call_reader is None:
+        return None
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    return StrategyRunner._capture_v4_lp_open_native_amounts_safe(
+        intent=intent,
+        chain=chain,
+        result=result,
+        gateway_client=eth_call_reader,
+    )
+
+
 def _maybe_enrich_with_slot0(result: Any, *, chain: str, eth_call_reader: Any | None) -> None:
     if eth_call_reader is None:
         return
@@ -322,6 +437,20 @@ async def _persist_and_drain_for_intent_test(
     """
     _maybe_enrich_with_slot0(result, chain=chain, eth_call_reader=eth_call_reader)
 
+    # VIB-4483: mirror the runner's POST-mint native-ETH leg capture so the
+    # Layer-5 native-pool LP_OPEN row carries the real native amount0 (the leg
+    # the receipt parser left None — no ERC-20 Transfer). The eth_call adapter
+    # implements the gateway ``query_v4_position_state`` interface over the fork,
+    # so this exercises the exact production stamp path end-to-end. Empty ≠ Zero:
+    # a gateway-less harness (eth_call_reader=None) yields None and the leg stays
+    # unmeasured, never a fabricated zero.
+    v4_lp_open_native_amounts = _capture_v4_lp_open_native_for_intent_test(
+        intent=intent,
+        chain=chain,
+        result=result,
+        eth_call_reader=eth_call_reader,
+    )
+
     entry = build_ledger_entry(
         deployment_id=deployment_id,
         cycle_id=cycle_id,
@@ -333,6 +462,7 @@ async def _persist_and_drain_for_intent_test(
         price_oracle=price_oracle,
         pre_state=pre_state,
         post_state=post_state,
+        v4_lp_open_native_amounts=v4_lp_open_native_amounts,
     )
     entry.execution_mode = execution_mode
     await _maybe_await(state_manager.save_ledger_entry(entry))
