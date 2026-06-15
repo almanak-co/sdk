@@ -99,6 +99,24 @@ def _make_temp_store() -> tuple[SQLiteStore, str]:
     return store, f.name
 
 
+def _lookup_ci(mapping: dict, symbol: str):
+    """Case-insensitive lookup by token symbol.
+
+    ``CHAIN_CONFIGS`` and the ``price_oracle`` dict preserve the source casing
+    of token symbols (e.g. ``"wstETH"``), but Morpho market metadata uses its
+    own casing. A naive ``mapping.get(symbol.upper())`` therefore misses
+    ``"wstETH"`` (it is not ``"WSTETH"``) — the exact masking that produced
+    VIB-4833's "Token addresses not found" skip. Match on casefold instead.
+    """
+    if not isinstance(symbol, str):
+        return None
+    target = symbol.casefold()
+    for key, value in mapping.items():
+        if isinstance(key, str) and key.casefold() == target:
+            return value
+    return None
+
+
 def _make_identity(
     deployment_id: str = "test-deploy",
     chain: str = "arbitrum",
@@ -1051,27 +1069,42 @@ class TestLendingAccountingE2E:
                 pytest.skip(f"Morpho market '{MORPHO_MARKET_NAME}' not found on arbitrum")
 
             market_info = arb_markets[market_id]
-            loan_token = market_info.get("loan_token_symbol", "USDC")
-            collateral_token = market_info.get("collateral_token_symbol", "wstETH")
+            # MORPHO_MARKETS records the symbols under ``loan_token`` /
+            # ``collateral_token`` (the ``*_symbol`` keys never existed, so the
+            # old defaults always fired). Read the real keys.
+            loan_token = market_info["loan_token"]
+            collateral_token = market_info["collateral_token"]
 
-            # Check wallet has tokens
-            collateral_addr = CHAIN_CONFIG.get("tokens", {}).get(collateral_token.upper())
-            loan_addr = CHAIN_CONFIG.get("tokens", {}).get(loan_token.upper())
+            # Check wallet has tokens. CHAIN_CONFIG keys preserve source casing
+            # (e.g. "wstETH"), so resolve case-insensitively — ``.upper()`` here
+            # was the VIB-4833 masking bug ("WSTETH" != "wstETH" -> skip).
+            collateral_addr = _lookup_ci(CHAIN_CONFIG.get("tokens", {}), collateral_token)
+            loan_addr = _lookup_ci(CHAIN_CONFIG.get("tokens", {}), loan_token)
 
             if not collateral_addr or not loan_addr:
                 pytest.skip(f"Token addresses not found for {collateral_token}/{loan_token}")
 
-            supply_amount = Decimal("0.01")  # small wstETH collateral
-            borrow_amount = Decimal("10")  # small USDC borrow
+            # Morpho margin-lending sizing. Collateral 0.02 wstETH (~$40+ at the
+            # fork block); borrow 5 USDC keeps LTV well under 30% (intent-test
+            # rule #10) with headroom for price moves even at a conservative
+            # wstETH valuation.
+            collateral_amount = Decimal("0.02")  # small wstETH collateral
+            borrow_amount = Decimal("5")  # small USDC borrow
+            # Kept as supply_* for the downstream accounting-proof printout.
+            supply_amount = collateral_amount
 
-            supply_price = price_oracle.get(collateral_token.upper(), Decimal("3500"))
+            # Explicit None-check (not ``or``): a valid Decimal("0") price is
+            # falsy and would wrongly trigger the fallback (Empty≠Zero).
+            supply_price = _lookup_ci(price_oracle, collateral_token)
+            if supply_price is None:
+                supply_price = Decimal("3500")
             supply_usd = supply_amount * supply_price
 
             # Skip if collateral balance insufficient
             col_bal = get_token_balance(web3, collateral_addr, funded_wallet)
             col_dec = get_token_decimals(web3, collateral_addr)
             col_bal_dec = Decimal(col_bal) / Decimal(10**col_dec)
-            if col_bal_dec < supply_amount:
+            if col_bal_dec < collateral_amount:
                 pytest.skip(f"Insufficient {collateral_token} balance: {col_bal_dec}")
 
             compiler = IntentCompiler(
@@ -1083,55 +1116,84 @@ class TestLendingAccountingE2E:
 
             loan_dec = get_token_decimals(web3, loan_addr)
 
-            # === SUPPLY ===
-            from almanak.framework.intents import SupplyIntent
-
-            supply_intent = SupplyIntent(
-                protocol="morpho_blue",
-                chain=CHAIN_NAME,
-                token=collateral_token,
-                amount=supply_amount,
-                market_id=market_id,
-            )
-            supply_compile = compiler.compile(supply_intent)
-            assert supply_compile.status.value == "SUCCESS", f"Supply compile failed: {supply_compile.error}"
-
-            col_before_supply = get_token_balance(web3, collateral_addr, funded_wallet)
-            supply_exec = await orchestrator.execute(supply_compile.action_bundle)
-            assert supply_exec.success, f"Supply execution failed: {supply_exec.error}"
-            col_after_supply = get_token_balance(web3, collateral_addr, funded_wallet)
-
-            # Layer 4: collateral must have decreased by supply_amount
-            col_spent = col_before_supply - col_after_supply
-            assert col_spent > 0, "Collateral balance must decrease after supply"
-            assert col_spent <= int(supply_amount * Decimal(10**col_dec) * Decimal("1.001")), (
-                "Collateral spent must not exceed supply amount"
-            )
-
-            supply_tx_hash = supply_exec.transaction_results[0].tx_hash or "0x"
-            print(f"\n[SUPPLY] tx_hash={supply_tx_hash[:20]}...")
-
-            # === BORROW ===
+            # === BORROW (supply collateral + borrow, the canonical Morpho flow) ===
+            # On Morpho Blue, collateral is supplied via supplyCollateral inside the
+            # BORROW bundle (approve + supplyCollateral + borrow). SupplyIntent on
+            # Morpho supplies the *loan* token as lending liquidity, NOT collateral,
+            # so a separate collateral SupplyIntent was the wrong primitive — the
+            # third defect VIB-4833 unmasked once the skip stopped hiding the body.
             borrow_intent = BorrowIntent(
                 protocol="morpho_blue",
                 chain=CHAIN_NAME,
-                token=loan_token,
-                amount=borrow_amount,
+                collateral_token=collateral_token,
+                collateral_amount=collateral_amount,
+                borrow_token=loan_token,
+                borrow_amount=borrow_amount,
                 market_id=market_id,
             )
             borrow_compile = compiler.compile(borrow_intent)
             assert borrow_compile.status.value == "SUCCESS", f"Borrow compile failed: {borrow_compile.error}"
 
+            col_before_borrow = get_token_balance(web3, collateral_addr, funded_wallet)
             loan_before_borrow = get_token_balance(web3, loan_addr, funded_wallet)
             borrow_exec = await orchestrator.execute(borrow_compile.action_bundle)
             assert borrow_exec.success, f"Borrow execution failed: {borrow_exec.error}"
+            col_after_borrow = get_token_balance(web3, collateral_addr, funded_wallet)
             loan_after_borrow = get_token_balance(web3, loan_addr, funded_wallet)
 
-            # Layer 4: loan token must have increased by borrow_amount
-            loan_received = loan_after_borrow - loan_before_borrow
-            assert loan_received > 0, "Loan token balance must increase after borrow"
+            # Layer 4: collateral must have decreased by exactly the supplied amount
+            col_spent = col_before_borrow - col_after_borrow
+            expected_col_wei = int(collateral_amount * Decimal(10**col_dec))
+            assert col_spent == expected_col_wei, (
+                f"Collateral spent must EXACTLY equal supply amount. "
+                f"Expected: {expected_col_wei}, Got: {col_spent}"
+            )
 
-            borrow_tx_hash = borrow_exec.transaction_results[0].tx_hash or "0x"
+            # Layer 4: loan token must have increased by exactly the borrow amount
+            loan_received = loan_after_borrow - loan_before_borrow
+            expected_borrow_wei = int(borrow_amount * Decimal(10**loan_dec))
+            assert loan_received == expected_borrow_wei, (
+                f"Loan token received must EXACTLY equal borrow amount. "
+                f"Expected: {expected_borrow_wei}, Got: {loan_received}"
+            )
+
+            # Layer 3: receipt parsing — the Morpho parser must extract the
+            # SupplyCollateral and Borrow events with assets matching the deltas.
+            from almanak.connectors.morpho_blue.receipt_parser import (
+                MorphoBlueEventType,
+                MorphoBlueReceiptParser,
+            )
+
+            morpho_parser = MorphoBlueReceiptParser()
+            borrow_events = []
+            for tx_result in borrow_exec.transaction_results:
+                if tx_result.receipt is None:
+                    continue
+                parse_result = morpho_parser.parse_receipt(tx_result.receipt.to_dict())
+                assert parse_result.success, f"Morpho receipt parse failed: {parse_result.error}"
+                borrow_events.extend(parse_result.events)
+
+            supply_col_event = next(
+                (e for e in borrow_events if e.event_type == MorphoBlueEventType.SUPPLY_COLLATERAL), None
+            )
+            borrow_event = next(
+                (e for e in borrow_events if e.event_type == MorphoBlueEventType.BORROW), None
+            )
+            assert supply_col_event is not None, "Parser must find a SupplyCollateral event"
+            assert borrow_event is not None, "Parser must find a Borrow event"
+            assert int(Decimal(str(supply_col_event.data["assets"]))) == expected_col_wei, (
+                "Parsed SupplyCollateral assets must equal supplied collateral"
+            )
+            assert int(Decimal(str(borrow_event.data["assets"]))) == expected_borrow_wei, (
+                "Parsed Borrow assets must equal borrowed amount"
+            )
+
+            # The BORROW bundle is approve(collateral) + supplyCollateral + borrow.
+            # Expose the supplyCollateral and borrow tx hashes for the proof block.
+            borrow_results = borrow_exec.transaction_results
+            supply_tx_hash = (borrow_results[1].tx_hash if len(borrow_results) > 1 else borrow_results[0].tx_hash) or "0x"
+            borrow_tx_hash = borrow_results[-1].tx_hash or "0x"
+            print(f"\n[SUPPLY-COLLATERAL] tx_hash={supply_tx_hash[:20]}...")
             print(f"[BORROW] tx_hash={borrow_tx_hash[:20]}...")
 
             # === Forward time to accrue interest ===
@@ -1139,13 +1201,17 @@ class TestLendingAccountingE2E:
             _advance_time(web3, 86400)  # 1 day
             print("[TIME] Advanced 1 day, 1000 blocks")
 
-            # === REPAY ===
-            repay_amount = borrow_amount * Decimal("1.001")  # principal + tiny interest buffer
+            # === REPAY (full debt) ===
+            # repay_full=True sends shares-based MAX so Morpho takes exactly the
+            # outstanding debt (principal + accrued interest). A fixed-asset repay
+            # slightly above debt can revert in Morpho's accounting, so the
+            # canonical close is repay_full (matches test_morpho_blue_lending.py).
             repay_intent = RepayIntent(
                 protocol="morpho_blue",
                 chain=CHAIN_NAME,
                 token=loan_token,
-                amount=repay_amount,
+                amount=borrow_amount,  # ignored when repay_full=True, but model-required
+                repay_full=True,
                 market_id=market_id,
             )
             repay_compile = compiler.compile(repay_intent)
@@ -1156,14 +1222,19 @@ class TestLendingAccountingE2E:
             assert repay_exec.success, f"Repay execution failed: {repay_exec.error}"
             loan_after_repay = get_token_balance(web3, loan_addr, funded_wallet)
 
-            # Layer 4: loan token must have decreased by repay_amount
+            # Layer 4: loan token must have decreased by ~the borrowed amount.
+            # Full repay = principal + tiny interest after 1 day, so spend must be
+            # >= borrow and within a small interest buffer (1%) above it.
             loan_spent_repay = loan_before_repay - loan_after_repay
-            assert loan_spent_repay > 0, "Loan token balance must decrease after repay"
-            assert loan_spent_repay <= int(repay_amount * Decimal(10**loan_dec) * Decimal("1.01")), (
-                "Repay amount must not exceed repay_amount + 1% slippage"
+            assert loan_spent_repay >= expected_borrow_wei, (
+                f"Full repay must spend at least the borrowed principal. "
+                f"Borrowed: {expected_borrow_wei}, Repaid: {loan_spent_repay}"
+            )
+            assert loan_spent_repay <= int(expected_borrow_wei * Decimal("1.01")), (
+                "Full repay must not exceed principal + 1% (interest after 1 day is negligible)"
             )
 
-            repay_tx_hash = repay_exec.transaction_results[0].tx_hash or "0x"
+            repay_tx_hash = repay_exec.transaction_results[-1].tx_hash or "0x"
             print(f"[REPAY] tx_hash={repay_tx_hash[:20]}...")
 
             # ================================================================
@@ -1176,7 +1247,8 @@ class TestLendingAccountingE2E:
             print("  Transaction ledger records: YES (tx_hash, token amounts, gas)")
             print(f"  Supply collateral: {supply_amount} {collateral_token} (~${supply_usd:.0f})")
             print(f"  Borrow amount:     {borrow_amount} {loan_token}")
-            print(f"  Repay amount:      {repay_amount} {loan_token} (with interest buffer)")
+            repaid_human = Decimal(loan_spent_repay) / Decimal(10**loan_dec)
+            print(f"  Repay amount:      {repaid_human} {loan_token} (full debt: principal + interest)")
             print("  Balance deltas are traceable from the on-chain transaction hashes.")
 
             # These tx_hashes prove the actions happened and are on-chain verifiable
@@ -1197,7 +1269,7 @@ class TestLendingAccountingE2E:
 
             # GAP 2: Interest accrual not computed
             print("  GAP-2 [CRITICAL]: Interest accrued (repay - principal) is NOT computed.")
-            print(f"         Borrow: {borrow_amount} {loan_token}. Repay: {repay_amount} {loan_token}.")
+            print(f"         Borrow: {borrow_amount} {loan_token}. Repay: {repaid_human} {loan_token}.")
             print("         Difference = interest paid. This is never explicitly recorded.")
             print("         Fix: VIB-3418 FIFO lot matching on REPAY → interest_delta_usd.")
 

@@ -57,7 +57,7 @@ from almanak.connectors.morpho_blue.receipt_parser import (
 from almanak.connectors.morpho_blue.sdk import MorphoBlueSDK
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator, ExecutionResult
 from almanak.framework.execution.result_enricher import enrich_result
-from almanak.framework.intents import BorrowIntent, RepayIntent, WithdrawIntent
+from almanak.framework.intents import BorrowIntent, RepayIntent, SupplyIntent, WithdrawIntent
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import (
@@ -960,4 +960,167 @@ class TestMorphoBlueWithdrawCollateralIntent:
         assert payload["principal_delta_usd"] is not None, "WITHDRAW must measure a principal leg"
         assert Decimal(payload["principal_delta_usd"]) > 0
 
+        print("\nALL CHECKS PASSED")
+
+
+@pytest.mark.arbitrum
+@pytest.mark.lending
+class TestMorphoBlueSupplyIntent:
+    """SUPPLY USDC as loan token into the wstETH/USDC market.
+
+    Uses ``use_as_collateral=False`` so we deposit USDC as loan capital
+    (earning interest from borrowers) rather than as collateral. This is
+    the standard "lending" side of the market — no collateral checks
+    needed, just an approve + supply pair.
+
+    Coverage note: this is the (morpho_blue, SUPPLY, arbitrum) intent-coverage
+    triple. It used to be carried by a standalone collateral ``SupplyIntent``
+    in ``test_accounting_e2e.py``, but VIB-4833 corrected that test to the
+    canonical BORROW (collateral + borrow) flow — a standalone Morpho
+    ``SupplyIntent`` supplies the *loan* token as lending liquidity, not
+    collateral. This dedicated, primitive-correct SUPPLY test restores the
+    triple and mirrors the Base/Ethereum coverage shape.
+    """
+
+    @pytest.mark.intent(IntentType.SUPPLY)
+    @pytest.mark.asyncio
+    async def test_supply_usdc_as_loan_token(
+        self,
+        web3: Web3,
+        anvil_rpc_url: str,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        execution_context: ExecutionContext,
+        price_oracle: dict[str, Decimal],
+        layer5_accounting_harness,
+        anvil_eth_call_adapter,
+    ) -> None:
+        """Supply USDC as loan token (not collateral) into wstETH/USDC market.
+
+        Layer 5: loan-side supply emits a Morpho ``Supply`` event, so the
+        lending handler resolves the amount via the primary ``supply_amount``
+        key → ``amount_token`` populated and ``confidence=HIGH`` (this is the
+        loan-side path, NOT the collateral path that hits VIB-4635).
+        """
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        usdc_address = tokens["USDC"]
+        usdc_decimals = get_token_decimals(web3, usdc_address)
+        assert usdc_address.lower() == MORPHO_MARKET_INFO["loan_token_address"].lower(), (
+            "Expected market loan token to be USDC"
+        )
+
+        supply_amount = Decimal("1000")  # 1000 USDC
+
+        usdc_before = get_token_balance(web3, usdc_address, funded_wallet)
+        expected_wei = int(supply_amount * Decimal(10**usdc_decimals))
+        assert usdc_before >= expected_wei, (
+            f"funded_wallet has only {usdc_before} USDC wei, need >= {expected_wei}"
+        )
+
+        print(f"\n{'='*80}")
+        print(f"Morpho Blue SUPPLY: {supply_amount} USDC (loan token) on Arbitrum")
+        print(f"Market: {MORPHO_MARKET_NAME} ({MORPHO_MARKET_ID[:10]}...)")
+        print(f"{'='*80}")
+        print(f"USDC before: {format_token_amount(usdc_before, usdc_decimals)}")
+
+        # Layer 1: Compile
+        intent = SupplyIntent(
+            protocol="morpho_blue",
+            token="USDC",
+            amount=supply_amount,
+            use_as_collateral=False,
+            market_id=MORPHO_MARKET_ID,
+            chain=CHAIN_NAME,
+        )
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=anvil_rpc_url,
+        )
+        compilation_result = compiler.compile(intent)
+        assert compilation_result.status.value == "SUCCESS", (
+            f"Compilation failed: {compilation_result.error}"
+        )
+        assert compilation_result.action_bundle is not None
+
+        pre_state = _capture_lending_state(
+            intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False
+        )
+
+        # Layer 2: Execute
+        execution_result = await orchestrator.execute(
+            compilation_result.action_bundle, execution_context
+        )
+        assert execution_result.success, f"Execution failed: {execution_result.error}"
+
+        # Layer 3: Receipt parse — Supply (loan-token) event
+        events = _collect_morpho_events(execution_result)
+        supply_event = _first_event(events, MorphoBlueEventType.SUPPLY)
+        assert supply_event is not None, (
+            "Expected Supply event in Morpho Blue receipts (loan-token supply)"
+        )
+        assert supply_event.data["market_id"].lower() == MORPHO_MARKET_ID.lower()
+        supplied_wei = _assets_wei(supply_event)
+        assert supplied_wei == expected_wei, (
+            f"Supply event assets must EXACTLY equal supply amount. "
+            f"Expected: {expected_wei}, Got: {supplied_wei}"
+        )
+
+        # Layer 4: Balance delta — exact USDC spent
+        usdc_after = get_token_balance(web3, usdc_address, funded_wallet)
+        usdc_spent = usdc_before - usdc_after
+        assert usdc_spent == expected_wei, (
+            f"USDC spent must EXACTLY equal supply amount. "
+            f"Expected: {expected_wei}, Got: {usdc_spent}"
+        )
+        assert usdc_spent == supplied_wei
+
+        # On-chain sanity
+        sdk = MorphoBlueSDK(chain=CHAIN_NAME, rpc_url=anvil_rpc_url)
+        position = sdk.get_position(MORPHO_MARKET_ID, funded_wallet)
+        assert position.supply_shares > 0, (
+            f"Expected supply_shares > 0 after loan-token supply, got {position.supply_shares}"
+        )
+
+        # ── Layer 5: loan-side SUPPLY accounting ─────────────────────────────
+        enriched = _enrich_for_accounting(
+            execution_result, intent, funded_wallet, compilation_result.action_bundle.metadata
+        )
+        post_state = _capture_lending_state(
+            intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=True
+        )
+
+        row = await assert_accounting_persisted(
+            layer5_accounting_harness,
+            intent=intent,
+            result=enriched,
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            expected_event_type="SUPPLY",
+            price_oracle=price_oracle,
+            eth_call_reader=anvil_eth_call_adapter,
+            pre_state=pre_state,
+            post_state=post_state,
+        )
+        _assert_identity(row, event_type="SUPPLY", wallet=funded_wallet)
+        payload = _payload(row)
+        _assert_no_lot_id(row, payload)
+        _assert_high_confidence_state(payload)
+        _assert_asset(payload, "USDC")
+        # Loan-side Supply event → handler resolves the amount via the primary
+        # supply_amount key (NOT the collateral path), so amount_token is
+        # populated. SUPPLY drains wallet inventory: principal measured,
+        # interest not applicable (must be None, not 0).
+        assert payload["amount_token"] is not None, (
+            "loan-side SUPPLY must populate amount_token (Supply event → "
+            "supply_amount key; not the VIB-4635 collateral path)"
+        )
+        assert Decimal(payload["amount_token"]) == supply_amount
+        assert payload["principal_delta_usd"] is not None, "SUPPLY must measure principal_delta_usd"
+        assert Decimal(payload["principal_delta_usd"]) > 0
+        assert payload["interest_delta_usd"] is None, "SUPPLY has no interest leg — must be None, not 0"
+
+        print(f"\nUSDC spent: {format_token_amount(usdc_spent, usdc_decimals)}")
+        print(f"Supply shares: {position.supply_shares}")
         print("\nALL CHECKS PASSED")
