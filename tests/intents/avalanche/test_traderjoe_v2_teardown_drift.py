@@ -77,10 +77,12 @@ LP_AMOUNT_USDC = Decimal("50")
 RANGE_LOWER = Decimal("5")
 RANGE_UPPER = Decimal("500")
 
-# How far to push the active bin away from its starting value. The
-# compiler heuristic scans active_id +/- 50 bins, so we must move at
-# least 51 to guarantee the original bins fall outside the window.
-ACTIVE_BIN_DRIFT_DELTA = 75
+# The compiler's heuristic close scans ``active_id ± HEURISTIC_WINDOW`` bins
+# (TraderJoeV2SDK.get_position_balances ``bin_range=50``). When a strategy
+# omits ``protocol_params['bin_ids']`` the LP_CLOSE falls back to this window,
+# so bins that drift outside it after a price move are silently stranded —
+# the VIB-3741 / VIB-3742 leak. Keep this in sync with the SDK default.
+HEURISTIC_WINDOW = 50
 
 
 # =============================================================================
@@ -120,14 +122,16 @@ def _drift_active_bin(rpc_url: str, pool_address: str, delta: int) -> tuple[int,
     The LBPair contract packs its parameters into a single ``bytes32``
     field. Per joe-v2 ``PairParameterHelper.sol``, ``active_id`` is stored
     at bit offset **224** (24 bits wide) inside that packed value. The
-    storage slot of the field varies by LBPair version; we locate it at
-    runtime by probing candidate slots and matching the decoded value
-    against the canonical ``getActiveId()`` accessor — that way the test
-    is robust against future layout changes.
+    storage slot of the field varies by LBPair version, so we locate it at
+    runtime by *write-and-verify*: for each slot whose decoded value at
+    offset 224 matches ``getActiveId()`` we write the drifted value and
+    confirm the canonical accessor reflects it, restoring the slot on a
+    false-positive match before continuing. This is version-independent and
+    self-verifying — a coincidental bit-pattern match cannot fool it.
 
-    The write is verified by re-reading ``getActiveId()`` after the
-    storage poke; on mismatch we ``pytest.skip`` cleanly rather than
-    proceed with a misleading "drift didn't happen" assertion.
+    We only ``pytest.skip`` if no slot in the scanned range reflects the
+    drift, which is a genuine infrastructure / unknown-layout failure rather
+    than a misleading "drift didn't happen" assertion.
 
     Returns ``(original_active_id, drifted_active_id)``.
     """
@@ -139,46 +143,100 @@ def _drift_active_bin(rpc_url: str, pool_address: str, delta: int) -> tuple[int,
     original_active_id = int(pair.functions.getActiveId().call())
     new_active_id = original_active_id + delta
 
-    # active_id occupies bits [224, 248) of the packed _parameters bytes32.
-    OFFSET_ACTIVE_ID = 224
     ACTIVE_ID_WIDTH = 24
     ACTIVE_ID_MASK = (1 << ACTIVE_ID_WIDTH) - 1
-    BITMASK = ACTIVE_ID_MASK << OFFSET_ACTIVE_ID
 
-    # Probe candidate slots: locate the one whose decoded active_id at
-    # offset 224 matches getActiveId(). joe-v2 v2.2 uses slot 16, but
-    # earlier versions / forks may differ — search a small range.
-    found_slot: int | None = None
-    found_value: int = 0
-    for candidate in (16, 5, 6, 7, 8, 4, 3, 9, 10, 11, 12, 13, 14, 15):
-        raw = w3.eth.get_storage_at(pool_address, candidate)
-        raw_int = int.from_bytes(raw, "big") if isinstance(raw, bytes) else int(raw, 16)
-        if ((raw_int & BITMASK) >> OFFSET_ACTIVE_ID) == original_active_id:
-            found_slot = candidate
-            found_value = raw_int
-            break
-    if found_slot is None:
-        pytest.skip(
-            f"Could not locate LBPair _parameters slot for active_id="
-            f"{original_active_id}; contract layout may differ from joe-v2 v2.2."
-        )
+    def _set_slot(slot: int, value: int) -> None:
+        slot_hex = "0x" + format(slot, "x").rjust(64, "0")
+        value_hex = "0x" + format(value, "x").rjust(64, "0")
+        w3.provider.make_request("anvil_setStorageAt", [pool_address, slot_hex, value_hex])
 
-    new_params = (found_value & ~BITMASK) | ((new_active_id & ACTIVE_ID_MASK) << OFFSET_ACTIVE_ID)
-    new_hex = "0x" + format(new_params, "x").rjust(64, "0")
-    slot_hex = "0x" + format(found_slot, "x").rjust(64, "0")
-    w3.provider.make_request("anvil_setStorageAt", [pool_address, slot_hex, new_hex])
+    # Locate the packed ``_parameters`` field by *write-and-verify* over both
+    # the storage slot AND the bit offset, rather than a single hardcoded
+    # (slot, offset) pair. The joe-v2 v2.2 ``PairParameterHelper`` packs
+    # ``activeId`` as the top field — bit offset **232** (24 bits wide), with
+    # ``oracleId`` occupying [216, 232) below it. Earlier code assumed offset
+    # 224 and a static slot list; VIB-4828 found the avalanche WAVAX/USDC/20
+    # pair stores ``_parameters`` at slot 4 / offset 232, so the old probe
+    # matched nothing and the VIB-3742 regression silently skipped.
+    #
+    # We try the canonical offset 232 first, then 224 as a fallback for any
+    # variant layout. For each (slot, offset) whose decoded value already
+    # equals ``getActiveId()`` we write the drifted value and confirm the
+    # canonical accessor reflects it — a coincidental bit-pattern match on a
+    # wrong slot/offset fails the accessor check and is restored before we
+    # continue. Discovery is therefore self-verifying and version-independent;
+    # only a genuine "nothing reflects the drift" outcome skips.
+    #
+    # Read each slot's value once up front: the inner loop restores any slot it
+    # writes before moving on, so the original contents are invariant across
+    # both offset passes — caching halves the ``get_storage_at`` calls (64 vs
+    # up to 128) without changing behaviour.
+    slot_values: dict[int, int] = {}
+    for slot in range(0, 64):
+        raw = w3.eth.get_storage_at(pool_address, slot)
+        slot_values[slot] = int.from_bytes(raw, "big") if isinstance(raw, bytes) else int(raw, 16)
 
-    # Verify the write propagated through the canonical accessor — proves
-    # we hit the right slot/offset, not just "wrote what we wrote back".
-    landed = int(pair.functions.getActiveId().call())
-    if landed != new_active_id:
-        pytest.skip(
-            f"Storage write did not affect getActiveId() (wrote "
-            f"{new_active_id}, reads {landed}); active_id may be derived "
-            f"from a slot we did not probe."
-        )
+    for offset in (232, 224):
+        bitmask = ACTIVE_ID_MASK << offset
+        for slot in range(0, 64):
+            raw_int = slot_values[slot]
+            if ((raw_int & bitmask) >> offset) != original_active_id:
+                continue
 
-    return original_active_id, new_active_id
+            new_params = (raw_int & ~bitmask) | ((new_active_id & ACTIVE_ID_MASK) << offset)
+            _set_slot(slot, new_params)
+
+            if int(pair.functions.getActiveId().call()) == new_active_id:
+                return original_active_id, new_active_id
+
+            # Wrong (slot, offset) — restore it and keep searching.
+            _set_slot(slot, raw_int)
+
+    pytest.skip(
+        f"Could not locate the LBPair _parameters slot for active_id="
+        f"{original_active_id} on {pool_address}; no slot in [0, 64) at offset "
+        "232/224 reflected the drift through getActiveId(). Contract layout may "
+        "differ from any known joe-v2 LBPair version."
+    )
+
+
+def _partial_overlap_drift(captured_bin_ids: list[int], original_active: int) -> int:
+    """Derive an active-id drift that GUARANTEES a *partial* heuristic overlap.
+
+    The heuristic close scans ``[active ± HEURISTIC_WINDOW]``. To exercise the
+    VIB-3742 silent-leak path we need the post-drift window to cover SOME of
+    the position's bins (those get withdrawn) while leaving the rest stranded
+    (the leak). We do NOT hardcode a drift constant: a fork-block-tuned magic
+    number silently stops exercising the partial path if a future fork roll
+    compiles the LP range into a wider or narrower bin cluster.
+
+    Instead we measure the actual on-chain cluster ``[lo, hi]`` and place the
+    post-drift window's LOWER edge (``drifted_active - HEURISTIC_WINDOW``) at
+    the cluster's floor midpoint, so bins below the midpoint leak and bins
+    at/above it are withdrawn. drift = midpoint - original_active +
+    HEURISTIC_WINDOW.
+
+    Requires a cluster spanning at least 3 bins (``hi - lo >= 2``). With the
+    *floor* midpoint, a span-1 cluster (two adjacent bins) degenerates: the
+    midpoint floors down to ``lo``, the window becomes ``[lo, lo + 2*W]`` and
+    covers BOTH bins — a full overlap, no leak. Only span >= 2 guarantees a
+    bin strictly below the floor midpoint to strand. We reject narrower
+    clusters here with an actionable message rather than letting the
+    downstream partial-overlap backstop trip with a misdirected one. The
+    backstop still asserts the realised partial overlap on chain state.
+    """
+    lo = min(captured_bin_ids)
+    hi = max(captured_bin_ids)
+    assert hi - lo >= 2, (
+        "Partial-leak scenario needs a cluster spanning >= 3 bins so the floor "
+        "midpoint can strand a bin below it; the opened position compiled to a "
+        f"{hi - lo + 1}-bin cluster (captured_bin_ids={sorted(captured_bin_ids)}). "
+        "Widen RANGE_LOWER/RANGE_UPPER so the LP_OPEN spans more bins."
+    )
+    # Lower window edge at the cluster floor midpoint: drifted_active - W == midpoint.
+    midpoint = (lo + hi) // 2
+    return midpoint - original_active + HEURISTIC_WINDOW
 
 
 async def _open_position(
@@ -286,23 +344,38 @@ class TestTraderJoeV2TeardownDrift:
         wavax_before = get_token_balance(web3, wavax_addr, funded_wallet)
         usdc_before = get_token_balance(web3, usdc_addr, funded_wallet)
 
-        # Drift active_id past the +/- 50 bin heuristic window.
+        # Drift active_id so the post-drift ±50 window PARTIALLY overlaps the
+        # position: the drift is DERIVED from the measured on-chain bin cluster
+        # (not a fork-tuned constant) so the partial-leak path is exercised
+        # regardless of how the LP range compiles at the current fork block.
+        pre_drift_active = _get_active_id(anvil_rpc_url, pool_address)
+        drift_delta = _partial_overlap_drift(captured_bin_ids, pre_drift_active)
         original_active, drifted_active = _drift_active_bin(
-            anvil_rpc_url, pool_address, ACTIVE_BIN_DRIFT_DELTA
+            anvil_rpc_url, pool_address, drift_delta
         )
-        assert abs(drifted_active - original_active) > 50, (
-            f"Drift insufficient to escape the +/- 50 window "
+        assert abs(drifted_active - original_active) > 0, (
+            f"Drift did not move the active bin "
             f"(orig={original_active} drifted={drifted_active})"
         )
 
-        # Confirm: every original bin is now > 50 away from the drifted active.
-        # Use min(...) — `max(...)>50` would only prove "at least one bin
-        # outside", which is a weaker invariant than the leak guard requires.
-        min_distance = min(abs(b - drifted_active) for b in captured_bin_ids)
-        assert min_distance > 50, (
-            f"Every captured bin must lie OUTSIDE the +/- 50 heuristic window "
-            f"after drift. min_distance_to_active={min_distance} "
-            f"(captured_bin_ids={captured_bin_ids}, drifted_active={drifted_active})"
+        # The VIB-3742 silent leak is a *partial* close: after drift the
+        # heuristic's ±50 window still covers the near edge of the position
+        # (those bins are withdrawn) but the far edge falls outside (those
+        # bins are stranded). Pin BOTH halves of that overlap on real chain
+        # state — this is the backstop the user asked for, proving the
+        # derived drift actually produced a partial overlap and not a total
+        # miss (zero events) or a total hit (no leak).
+        bins_in_window = [b for b in captured_bin_ids if abs(b - drifted_active) <= HEURISTIC_WINDOW]
+        bins_outside_window = [b for b in captured_bin_ids if abs(b - drifted_active) > HEURISTIC_WINDOW]
+        assert bins_in_window, (
+            "Derived drift must leave at least one captured bin INSIDE the "
+            f"±{HEURISTIC_WINDOW} heuristic window (else the heuristic withdraws nothing). "
+            f"captured_bin_ids={sorted(captured_bin_ids)} drifted_active={drifted_active}"
+        )
+        assert bins_outside_window, (
+            "Derived drift must leave at least one captured bin OUTSIDE the "
+            f"±{HEURISTIC_WINDOW} heuristic window (else there is no leak to detect). "
+            f"captured_bin_ids={sorted(captured_bin_ids)} drifted_active={drifted_active}"
         )
 
         # === Buggy close: omit bin_ids, hit the heuristic ===
@@ -379,20 +452,25 @@ class TestTraderJoeV2TeardownDrift:
             f"total_before={total_before} total_after={total_after}"
         )
 
-        # Layer 4b: bilateral wallet token deltas — heuristic still withdrew
-        # the bins inside the ±50 window, so both legs MUST move. This pins
-        # the partial-close behaviour (something came back, just not all of
-        # it) and would catch a regression that left wallet balances flat
+        # Layer 4b: wallet token delta — the heuristic withdrew the bins
+        # inside the ±50 window, so at least one leg MUST move. We do NOT
+        # require BOTH legs: in the LB bin model a bin above the active price
+        # holds only token X (WAVAX) and a bin below holds only token Y
+        # (USDC); the active bin holds both. A partial close that catches only
+        # the bins on one side of the active price therefore returns only that
+        # side's token. Requiring both legs would falsely fail whenever the
+        # in-window bins sit entirely above or below the drifted active (the
+        # common case for a one-directional drift). Pinning "something came
+        # back" still catches a regression that left both wallet balances flat
         # while LB-bin balances also stayed flat.
         wavax_after = get_token_balance(web3, wavax_addr, funded_wallet)
         usdc_after = get_token_balance(web3, usdc_addr, funded_wallet)
-        assert wavax_after - wavax_before > 0, (
-            f"Heuristic close must still increase WAVAX balance from the "
-            f"bins inside the ±50 window. before={wavax_before} after={wavax_after}"
-        )
-        assert usdc_after - usdc_before > 0, (
-            f"Heuristic close must still increase USDC balance from the "
-            f"bins inside the ±50 window. before={usdc_before} after={usdc_after}"
+        wavax_delta = wavax_after - wavax_before
+        usdc_delta = usdc_after - usdc_before
+        assert wavax_delta > 0 or usdc_delta > 0, (
+            "Heuristic close must increase at least one wallet token balance "
+            "from the bins inside the ±50 window. "
+            f"wavax_delta={wavax_delta} usdc_delta={usdc_delta}"
         )
 
         logger.info(
@@ -401,8 +479,8 @@ class TestTraderJoeV2TeardownDrift:
             total_after,
             total_before,
             len(captured_bin_ids),
-            wavax_after - wavax_before,
-            usdc_after - usdc_before,
+            wavax_delta,
+            usdc_delta,
         )
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.LP_CLOSE)
@@ -435,7 +513,14 @@ class TestTraderJoeV2TeardownDrift:
         )
         assert sum(balances_before.values()) > 0
 
-        _drift_active_bin(anvil_rpc_url, pool_address, ACTIVE_BIN_DRIFT_DELTA)
+        # Same measured-cluster-derived drift as the leak test: it pushes part
+        # of the position outside the heuristic window. The strong-mode close
+        # below supplies bin_ids, so it must close fully despite the drift —
+        # which is the point of this test.
+        pre_drift_active = _get_active_id(anvil_rpc_url, pool_address)
+        _drift_active_bin(
+            anvil_rpc_url, pool_address, _partial_overlap_drift(captured_bin_ids, pre_drift_active)
+        )
 
         # Capture pre-close token balances so Layer 4 can assert STRICT
         # positive deltas (just checking ``after > 0`` is a weak guard —
@@ -580,8 +665,14 @@ class TestTraderJoeV2TeardownDrift:
 
         # And the injected intent compiles + executes successfully —
         # i.e. the runner-equivalent path closes the position fully even
-        # when the strategy author forgot the bin_ids.
-        _drift_active_bin(anvil_rpc_url, pool_address, ACTIVE_BIN_DRIFT_DELTA)
+        # when the strategy author forgot the bin_ids. Drift derived from the
+        # measured cluster (same as the leak test) so part of the position
+        # falls outside the heuristic window; auto-injected bin_ids must still
+        # close it fully.
+        pre_drift_active = _get_active_id(anvil_rpc_url, pool_address)
+        _drift_active_bin(
+            anvil_rpc_url, pool_address, _partial_overlap_drift(captured_bin_ids, pre_drift_active)
+        )
 
         # Layer 4 capture: pre-close balances so we can assert deltas.
         wavax_before = get_token_balance(web3, wavax_addr, funded_wallet)

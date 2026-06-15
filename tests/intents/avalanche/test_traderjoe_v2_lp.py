@@ -647,7 +647,19 @@ class TestTraderJoeV2LPCloseIntent:
         print("Test #2: LP Close - No Position Exists (TraderJoe V2)")
         print(f"{'=' * 80}")
 
-        # 1. Verify no position exists
+        # 1. Assert no position exists at test start (isolation invariant).
+        #
+        # VIB-4828: this used to ``pytest.skip`` when a position was found,
+        # defensively masking suspected Anvil snapshot/revert leakage of
+        # TraderJoe V2 LBPair bin state. That hid a real isolation failure
+        # instead of surfacing it. Under the default-on Zodiac model
+        # (`.claude/rules/intent-tests.md`) every test runs against a fresh
+        # per-test Safe (`zodiac_safe`, function-scoped), so ``funded_wallet``
+        # is a brand-new owner each test and cannot inherit a sibling's
+        # position — the precondition holds structurally. Assert it so any
+        # future regression (e.g. reverting to a shared module-scoped wallet
+        # without working snapshot isolation) fails loudly here rather than
+        # silently skipping.
         position = _get_position_via_adapter(
             rpc_url=anvil_rpc_url,
             wallet=funded_wallet,
@@ -655,9 +667,12 @@ class TestTraderJoeV2LPCloseIntent:
             token_y=usdc_addr,
             bin_step=BIN_STEP,
         )
-        if position is not None and len(position.bin_ids) > 0:
-            print("WARNING: Position already exists, skipping test")
-            pytest.skip("Position already exists - snapshot isolation may have failed")
+        assert position is None or len(position.bin_ids) == 0, (
+            "VIB-4828: a TraderJoe V2 position already exists at the start of the "
+            "no-position test — test isolation has leaked LBPair bin state across "
+            f"tests (bins={sorted(position.bin_ids) if position else []}). "
+            "The no-position close path cannot be verified against a dirty wallet."
+        )
 
         # 2. Record balances BEFORE
         usdc_before = get_token_balance(web3, usdc_addr, funded_wallet)
