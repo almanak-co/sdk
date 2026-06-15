@@ -283,6 +283,7 @@ async def commit_teardown_intent(
     recon: dict[str, Any] | None = None,
     lending_pre_state: Any | None = None,
     v4_lp_close_fees: tuple[int, int] | None = None,
+    v4_lp_close_native_principal: tuple[int | None, int | None] | None = None,
 ) -> TeardownCommitOutcome:
     """Run the full success-path commit pipeline for one teardown intent.
 
@@ -519,6 +520,12 @@ async def commit_teardown_intent(
                     # post-burn read returns zero liquidity). Stamped onto
                     # ``lp_close_data.fees0/1`` inside ``build_ledger_entry``.
                     v4_lp_close_fees=v4_lp_close_fees,
+                    # VIB-5117 — PRE-burn-measured V4 native-leg close PRINCIPAL,
+                    # captured by the teardown manager on the same pre-execute
+                    # boundary. Stamped onto the unmeasured native
+                    # ``lp_close_data.amount{0,1}_collected`` leg inside
+                    # ``build_ledger_entry`` (never clobbers a measured leg).
+                    v4_lp_close_native_principal=v4_lp_close_native_principal,
                 )
             except Exception as exc:  # noqa: BLE001 — never propagate
                 logger.error(

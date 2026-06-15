@@ -899,3 +899,307 @@ def test_capture_v4_open_native_malformed_amounts_does_not_crash_runner():
         gateway_client=_Gateway(),
     )
     assert out is None
+
+
+# ---------------------------------------------------------------------------
+# VIB-5117 — _capture_v4_lp_close_native_principal_safe: PRE-burn native-leg
+# close PRINCIPAL read. A native-ETH V4 leg is returned to the wallet as raw ETH
+# (TAKE_PAIR, no Transfer), so the burn receipt leaves amount{0,1}_collected None
+# on that leg. The runner derives the principal from the SAME pre-burn position
+# state the fee capture uses (liquidity + sqrt_price + ticks → concentrated-
+# liquidity math). Gated on the close INTENT's native-leg protocol_params (the
+# LPCloseData does not exist pre-burn). Returns the raw-int pair or None — never
+# fabricates a zero (Empty != Zero). Close-side mirror of the open capture.
+# ---------------------------------------------------------------------------
+
+_NATIVE_5117 = "0x0000000000000000000000000000000000000000"
+_USDC_BASE_5117 = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+
+
+def _v4_close_intent_native(
+    *,
+    intent_type="LP_CLOSE",
+    protocol="uniswap_v4",
+    position_id="12345",
+    currency0=_NATIVE_5117,
+    currency1=_USDC_BASE_5117,
+    with_params=True,
+    liquidity=None,
+):
+    params = {"currency0": currency0, "currency1": currency1} if with_params else None
+    if params is not None and liquidity is not None:
+        # The strategy requests a PARTIAL close by setting protocol_params["liquidity"]
+        # below the full position liquidity (uniswap_v4/compiler.py reads it verbatim).
+        params["liquidity"] = liquidity
+    return SimpleNamespace(
+        intent_type=SimpleNamespace(value=intent_type),
+        protocol=protocol,
+        position_id=position_id,
+        protocol_params=params,
+    )
+
+
+def test_capture_v4_close_principal_returns_none_without_gateway():
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    out = StrategyRunner._capture_v4_lp_close_native_principal_safe(
+        intent=_v4_close_intent_native(),
+        chain="base",
+        gateway_client=None,
+    )
+    assert out is None
+
+
+def test_capture_v4_close_principal_no_protocol_params_still_reads():
+    """The capture does NOT depend on intent.protocol_params (the real-path bug).
+
+    The teardown / strategy LP_CLOSE intent carries no ``protocol_params`` (only
+    the compiler resolves currencies, internal to the action bundle). The
+    pre-burn read must still fire and derive the principal — the stamp's never-
+    clobber-None-only guard is the safety, not a pre-read pool-shape gate.
+    """
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+    from almanak.framework.valuation.lp_valuer import get_token_amounts_from_sqrt_price
+
+    tick_lower, tick_upper, liquidity, sqrt_price_x96 = -887220, 887220, 10**15, 2**96
+
+    class _Gateway:
+        def __init__(self):
+            self.calls = 0
+
+        def query_v4_position_state(self, *, chain, position_manager, state_view, token_id):
+            self.calls += 1
+            return SimpleNamespace(
+                liquidity=liquidity,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                current_tick=0,
+                sqrt_price_x96=sqrt_price_x96,
+            )
+
+    gateway = _Gateway()
+    out = StrategyRunner._capture_v4_lp_close_native_principal_safe(
+        intent=_v4_close_intent_native(with_params=False),
+        chain="base",
+        gateway_client=gateway,
+    )
+    expected = get_token_amounts_from_sqrt_price(liquidity, tick_lower, tick_upper, sqrt_price_x96)
+    assert out == (int(expected.amount0), int(expected.amount1))
+    assert gateway.calls == 1  # the read fires even without protocol_params
+
+
+def test_capture_v4_close_principal_skips_non_v4_protocol():
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _GatewayProbe:
+        def __init__(self):
+            self.calls = 0
+
+        def query_v4_position_state(self, *_, **__):
+            self.calls += 1
+            return None
+
+    gateway = _GatewayProbe()
+    out = StrategyRunner._capture_v4_lp_close_native_principal_safe(
+        intent=_v4_close_intent_native(protocol="uniswap_v3"),
+        chain="base",
+        gateway_client=gateway,
+    )
+    assert out is None
+    assert gateway.calls == 0
+
+
+def test_capture_v4_close_principal_skips_non_close_intents():
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _GatewayProbe:
+        def __init__(self):
+            self.calls = 0
+
+        def query_v4_position_state(self, *_, **__):
+            self.calls += 1
+            return None
+
+    gateway = _GatewayProbe()
+    for intent_type in ("LP_OPEN", "SWAP", "SUPPLY", "PERP_OPEN"):
+        out = StrategyRunner._capture_v4_lp_close_native_principal_safe(
+            intent=_v4_close_intent_native(intent_type=intent_type),
+            chain="base",
+            gateway_client=gateway,
+        )
+        assert out is None
+    assert gateway.calls == 0
+
+
+def test_capture_v4_close_principal_derives_amounts_on_clean_read():
+    """A clean pre-burn read derives (amount0, amount1) raw ints via framework math."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+    from almanak.framework.valuation.lp_valuer import get_token_amounts_from_sqrt_price
+
+    tick_lower, tick_upper = -887220, 887220
+    liquidity = 10**15
+    sqrt_price_x96 = 2**96  # price ~1.0
+
+    class _Gateway:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def query_v4_position_state(self, *, chain, position_manager, state_view, token_id):
+            self.calls.append({"chain": chain, "token_id": token_id, "state_view": state_view})
+            return SimpleNamespace(
+                liquidity=liquidity,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                current_tick=0,
+                sqrt_price_x96=sqrt_price_x96,
+                tokens_owed0=0,
+                tokens_owed1=0,
+            )
+
+    gateway = _Gateway()
+    out = StrategyRunner._capture_v4_lp_close_native_principal_safe(
+        intent=_v4_close_intent_native(position_id="12345"),
+        chain="base",
+        gateway_client=gateway,
+    )
+    expected = get_token_amounts_from_sqrt_price(liquidity, tick_lower, tick_upper, sqrt_price_x96)
+    assert out == (int(expected.amount0), int(expected.amount1))
+    assert out[0] > 0, "native (currency0) principal leg must be a positive derived amount"
+    assert len(gateway.calls) == 1
+    assert gateway.calls[0]["chain"] == "base"
+    assert gateway.calls[0]["token_id"] == 12345
+    assert gateway.calls[0]["state_view"]  # connector-resolved, non-empty
+
+
+def test_capture_v4_close_principal_partial_close_uses_requested_liquidity():
+    """VIB-5117 (Codex P1): a PARTIAL native close derives the principal from the
+    REQUESTED liquidity (protocol_params["liquidity"]), not the full pre-burn
+    position liquidity — else proceeds/PnL overstate by the unburned fraction.
+    """
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+    from almanak.framework.valuation.lp_valuer import get_token_amounts_from_sqrt_price
+
+    tick_lower, tick_upper = -887220, 887220
+    full_liquidity = 10**15
+    requested_liquidity = full_liquidity // 4  # close only a quarter
+    sqrt_price_x96 = 2**96
+
+    class _Gateway:
+        def query_v4_position_state(self, *, chain, position_manager, state_view, token_id):
+            # The on-chain read always reports the FULL pre-burn position liquidity.
+            return SimpleNamespace(
+                liquidity=full_liquidity,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                current_tick=0,
+                sqrt_price_x96=sqrt_price_x96,
+            )
+
+    out = StrategyRunner._capture_v4_lp_close_native_principal_safe(
+        intent=_v4_close_intent_native(liquidity=requested_liquidity),
+        chain="base",
+        gateway_client=_Gateway(),
+    )
+    expected_requested = get_token_amounts_from_sqrt_price(
+        requested_liquidity, tick_lower, tick_upper, sqrt_price_x96
+    )
+    expected_full = get_token_amounts_from_sqrt_price(
+        full_liquidity, tick_lower, tick_upper, sqrt_price_x96
+    )
+    assert out == (int(expected_requested.amount0), int(expected_requested.amount1))
+    # Guard against the bug this test exists for: the derived principal must be the
+    # requested quarter, strictly less than the full-position principal.
+    assert out[0] < int(expected_full.amount0)
+    assert out[0] > 0
+
+
+def test_capture_v4_close_principal_full_close_ignores_absent_liquidity_param():
+    """A full close (no protocol_params["liquidity"]) keeps the full pre-burn read."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+    from almanak.framework.valuation.lp_valuer import get_token_amounts_from_sqrt_price
+
+    tick_lower, tick_upper = -887220, 887220
+    full_liquidity = 10**15
+    sqrt_price_x96 = 2**96
+
+    class _Gateway:
+        def query_v4_position_state(self, **__):
+            return SimpleNamespace(
+                liquidity=full_liquidity,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                current_tick=0,
+                sqrt_price_x96=sqrt_price_x96,
+            )
+
+    out = StrategyRunner._capture_v4_lp_close_native_principal_safe(
+        intent=_v4_close_intent_native(),  # no liquidity param → full close
+        chain="base",
+        gateway_client=_Gateway(),
+    )
+    expected_full = get_token_amounts_from_sqrt_price(
+        full_liquidity, tick_lower, tick_upper, sqrt_price_x96
+    )
+    assert out == (int(expected_full.amount0), int(expected_full.amount1))
+
+
+def test_capture_v4_close_principal_none_state_returns_none():
+    """A failed / partial read (reader returns None) => None (unmeasured, never 0)."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _Gateway:
+        def query_v4_position_state(self, **__):
+            return None
+
+    out = StrategyRunner._capture_v4_lp_close_native_principal_safe(
+        intent=_v4_close_intent_native(),
+        chain="base",
+        gateway_client=_Gateway(),
+    )
+    assert out is None
+
+
+def test_capture_v4_close_principal_undeployed_chain_returns_none():
+    """A chain with no V4 StateView address => reader short-circuits => None."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _Gateway:
+        def __init__(self):
+            self.calls = 0
+
+        def query_v4_position_state(self, **__):
+            self.calls += 1
+            return SimpleNamespace(
+                liquidity=1, tick_lower=-1, tick_upper=1, current_tick=0, sqrt_price_x96=2**96
+            )
+
+    gateway = _Gateway()
+    out = StrategyRunner._capture_v4_lp_close_native_principal_safe(
+        intent=_v4_close_intent_native(),
+        chain="zzz_nonexistent_chain",
+        gateway_client=gateway,
+    )
+    assert out is None
+    assert gateway.calls == 0
+
+
+def test_capture_v4_close_principal_degenerate_state_returns_none():
+    """Non-numeric state inside the derivation guard returns None (never crashes)."""
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    class _Gateway:
+        def query_v4_position_state(self, **__):
+            return SimpleNamespace(
+                liquidity="not-a-number",
+                tick_lower=-1,
+                tick_upper=1,
+                current_tick=0,
+                sqrt_price_x96=2**96,
+            )
+
+    out = StrategyRunner._capture_v4_lp_close_native_principal_safe(
+        intent=_v4_close_intent_native(),
+        chain="base",
+        gateway_client=_Gateway(),
+    )
+    assert out is None

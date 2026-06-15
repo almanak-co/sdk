@@ -81,6 +81,19 @@ fees (``fees0/1``) lane-symmetric with iteration. Returns ``None`` for
 non-V4-LP-close intents, missing gateway, undeployed chains, or read failures —
 never raises, never fabricates a zero (Empty ≠ Zero)."""
 
+SnapshotIntentV4LpCloseNativePrincipal = Callable[..., Awaitable[tuple[int | None, int | None] | None]]
+"""Async ``(strategy, intent) -> (amount0, amount1) | None``. Reads the closing
+V4 position's native-leg PRINCIPAL ON-CHAIN BEFORE the LP_CLOSE burn executes —
+the teardown counterpart of the iteration lane's
+``state.v4_lp_close_native_principal`` capture at ``_init_single_chain_state``
+(VIB-5117). A native-ETH leg is withdrawn as raw ETH (no Transfer), so the burn
+receipt cannot measure it; the principal is derived from the pre-burn position
+state (post-burn read = zero liquidity). Threaded into the commit pipeline so the
+LP accounting handler records the real native proceeds (instead of a measured-
+zero lie) lane-symmetric with iteration. Returns ``None`` for non-native-leg
+closes, missing gateway, undeployed chains, or read failures — never raises,
+never fabricates a zero (Empty ≠ Zero)."""
+
 WarnSweepNonStrategyBalance = Callable[..., None]
 """Sync ``(strategy, intent, balance_token, balance_value) -> None``. Logs a
 WARNING when teardown's ``amount='all'`` SWAP would sweep a wallet balance
@@ -126,6 +139,7 @@ class TeardownRunnerHelpers:
     reconcile_post_balances: ReconcilePostBalances | None = None
     snapshot_intent_lending_state: SnapshotIntentLendingState | None = None
     snapshot_intent_v4_lp_close_fees: SnapshotIntentV4LpCloseFees | None = None
+    snapshot_intent_v4_lp_close_native_principal: SnapshotIntentV4LpCloseNativePrincipal | None = None
     warn_sweep_non_strategy_balance: WarnSweepNonStrategyBalance | None = None
     get_token_universe: GetTokenUniverse | None = None
     get_accounting_events: GetAccountingEvents | None = None
@@ -155,6 +169,11 @@ class TeardownRunnerHelpers:
     def has_v4_lp_close_fees(self) -> bool:
         """True iff the V4 LP-close pre-fee capture helper is wired (VIB-4482)."""
         return self.snapshot_intent_v4_lp_close_fees is not None
+
+    @property
+    def has_v4_lp_close_native_principal(self) -> bool:
+        """True iff the V4 LP-close native-principal capture helper is wired (VIB-5117)."""
+        return self.snapshot_intent_v4_lp_close_native_principal is not None
 
     @property
     def has_sweep_warning(self) -> bool:
@@ -291,6 +310,23 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
             gateway_client=runner._get_gateway_client(),
         )
 
+    async def _snapshot_intent_v4_lp_close_native_principal(
+        strategy: Any, intent: Any
+    ) -> tuple[int | None, int | None] | None:
+        # VIB-5117 — capture the closing V4 position's native-leg PRINCIPAL
+        # on-chain BEFORE the LP_CLOSE burn executes, via the runner's safe
+        # wrapper. A native-ETH leg is withdrawn as raw ETH (no Transfer), so a
+        # post-burn read returns zero liquidity — this MUST run pre-execute.
+        # Returns ``None`` for non-native-leg closes, missing gateway, undeployed
+        # chains, or read failures — never raises, never fabricates a zero
+        # (Empty ≠ Zero). Lane-symmetric with the iteration lane's
+        # ``state.v4_lp_close_native_principal``.
+        return runner._capture_v4_lp_close_native_principal_safe(
+            intent=intent,
+            chain=getattr(strategy, "chain", "") or "",
+            gateway_client=runner._get_gateway_client(),
+        )
+
     return TeardownRunnerHelpers(
         commit=_commit_with_heartbeat,
         capture_snapshot=partial(capture_teardown_snapshot_with_accounting, runner),
@@ -298,6 +334,7 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
         reconcile_post_balances=partial(reconcile_post_execution_balances, runner),
         snapshot_intent_lending_state=_snapshot_intent_lending_state,
         snapshot_intent_v4_lp_close_fees=_snapshot_intent_v4_lp_close_fees,
+        snapshot_intent_v4_lp_close_native_principal=_snapshot_intent_v4_lp_close_native_principal,
         warn_sweep_non_strategy_balance=_warn_sweep_non_strategy_balance,
         get_token_universe=_get_token_universe,
         get_accounting_events=_get_accounting_events,
@@ -313,6 +350,7 @@ __all__ = [
     "SnapshotIntentBalances",
     "SnapshotIntentLendingState",
     "SnapshotIntentV4LpCloseFees",
+    "SnapshotIntentV4LpCloseNativePrincipal",
     "TeardownRunnerHelpers",
     "WarnSweepNonStrategyBalance",
     "build_runner_helpers",

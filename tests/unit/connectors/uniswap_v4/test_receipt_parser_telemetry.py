@@ -276,10 +276,10 @@ def test_native_currency0_close_is_supported_no_raise(caplog: pytest.LogCaptureF
     """VIB-4483: native-ETH currency0 close is supported — no raise, no drop.
 
     The native leg is returned as raw ETH (no ERC-20 Transfer), so only the
-    ERC-20 (currency1 = WETH) leg surfaces; the native principal is a
-    measured-zero on its amount0_collected leg (validated downstream via the
-    wallet native-balance delta). The NATIVE_CURRENCY_UNSUPPORTED telemetry
-    counter must NOT increment.
+    ERC-20 (currency1 = WETH) leg surfaces; the native principal is UNMEASURED
+    (None, VIB-5117 — never a fabricated zero) on its amount0_collected leg and
+    is filled pre-burn by the runner from a QueryV4PositionState read. The
+    NATIVE_CURRENCY_UNSUPPORTED telemetry counter must NOT increment.
     """
     reason = V4LPDropReason.NATIVE_CURRENCY_UNSUPPORTED
     before_raise = _counter_value(CHAIN, reason, "raise")
@@ -298,7 +298,9 @@ def test_native_currency0_close_is_supported_no_raise(caplog: pytest.LogCaptureF
     assert result is not None, "native-ETH close must be supported (VIB-4483)"
     assert result.currency0 == NATIVE_CURRENCY
     assert result.currency1 == WETH.lower()
-    assert result.amount0_collected == 0  # native principal: no Transfer → measured-zero leg
+    # VIB-5117: native principal leg has no Transfer → UNMEASURED (None, not a
+    # fabricated zero); the runner fills it pre-burn from QueryV4PositionState.
+    assert result.amount0_collected is None
     assert result.amount1_collected == 5 * 10**17
     # The unsupported-native telemetry path must not fire any more.
     assert _counter_value(CHAIN, reason, "raise") == before_raise

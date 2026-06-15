@@ -37,6 +37,7 @@ from almanak.framework.observability.ledger import (
     LedgerEntry,
     _stamp_lp_close_discriminator,
     _stamp_v4_lp_close_fees,
+    _stamp_v4_lp_close_native_principal,
     _stamp_v4_lp_open_native_amounts,
     build_ledger_entry,
     deserialize_extracted_data,
@@ -2098,4 +2099,134 @@ class TestStampV4LpOpenNativeAmounts:
     def test_non_dict_extracted_data_is_noop(self):
         result = _v4_open_result_for_stamp(extracted=["not", "a", "dict"])
         _stamp_v4_lp_open_native_amounts(result, "LP_OPEN", (1, 2))
+        assert result.extracted_data == ["not", "a", "dict"]
+
+
+# ---------------------------------------------------------------------------
+# VIB-5117 — _stamp_v4_lp_close_native_principal branch coverage.
+#
+# A native-ETH V4 pool returns its ETH leg to the wallet as raw ETH (TAKE_PAIR,
+# no ERC-20 Transfer) on close, so the burn-receipt parser leaves that leg's
+# amount{0,1}_collected None. The runner reads the PRE-burn position state on-
+# chain and derives (amount0, amount1) via the framework's concentrated-liquidity
+# math; this stamp fills ONLY the unmeasured (None) native leg onto the frozen
+# LPCloseData, never clobbering a measured ERC-20 leg. Empty != Zero throughout:
+# a failed/absent read leaves the leg None (never a fabricated zero). The exact
+# close-side mirror of TestStampV4LpOpenNativeAmounts.
+# ---------------------------------------------------------------------------
+
+
+def _v4_close_result_for_principal(
+    *, amount0_collected=None, amount1_collected=170_000, currency0=_NATIVE_ADDR, extracted="dict"
+):
+    """Build a result whose extracted_data carries a V4-shaped (native) LPCloseData."""
+    if extracted == "dict":
+        close = LPCloseData(
+            amount0_collected=amount0_collected,
+            amount1_collected=amount1_collected,
+            fees0=None,
+            fees1=None,
+            liquidity_removed=1_000_000,
+            pool_address="0x" + "a" * 64,  # 32-byte V4 PoolId shape
+            source="modify_liquidity",
+            currency0=currency0,
+            currency1="0x" + "2" * 40,
+        )
+        return SimpleNamespace(extracted_data={"lp_close_data": close})
+    return SimpleNamespace(extracted_data=extracted)
+
+
+class TestStampV4LpCloseNativePrincipal:
+    """Direct branch coverage for ``_stamp_v4_lp_close_native_principal`` (VIB-5117)."""
+
+    def test_native_leg_filled_when_unmeasured(self):
+        # currency0 native, amount0_collected None (parser couldn't see the ETH
+        # withdrawal). The stamp fills amount0 from the gateway-derived pair and
+        # preserves the measured ERC-20 amount1.
+        result = _v4_close_result_for_principal(amount0_collected=None, amount1_collected=170_000)
+        _stamp_v4_lp_close_native_principal(result, "LP_CLOSE", (888_000, 9_999))
+        close = result.extracted_data["lp_close_data"]
+        assert close.amount0_collected == 888_000  # native principal filled
+        assert close.amount1_collected == 170_000  # measured ERC-20 leg preserved
+
+    def test_measured_erc20_leg_not_clobbered(self):
+        # The measured leg (amount1_collected) must survive even though the derived
+        # pair carries a different value for it (Empty != Zero idempotence).
+        result = _v4_close_result_for_principal(amount0_collected=None, amount1_collected=170_000)
+        _stamp_v4_lp_close_native_principal(result, "LP_CLOSE", (888_000, 42))
+        assert result.extracted_data["lp_close_data"].amount1_collected == 170_000
+
+    def test_none_amounts_pair_is_noop_short_circuit(self):
+        # A failed / unavailable read => leave the native leg None (unmeasured),
+        # never fabricate a zero — the whole point of VIB-5117.
+        result = _v4_close_result_for_principal(amount0_collected=None, amount1_collected=170_000)
+        _stamp_v4_lp_close_native_principal(result, "LP_CLOSE", None)
+        assert result.extracted_data["lp_close_data"].amount0_collected is None
+
+    def test_none_read_leg_preserves_none(self):
+        # A read that returns a None native leg (partial/failed derivation) leaves
+        # the unmeasured leg None — never a fabricated zero.
+        result = _v4_close_result_for_principal(amount0_collected=None, amount1_collected=170_000)
+        _stamp_v4_lp_close_native_principal(result, "LP_CLOSE", (None, None))
+        assert result.extracted_data["lp_close_data"].amount0_collected is None
+
+    def test_measured_zero_derived_is_honored(self):
+        # A derived 0 (e.g. an out-of-range single-sided close that withdrew
+        # nothing on the native leg) is a MEASURED zero and fills the None leg.
+        result = _v4_close_result_for_principal(amount0_collected=None, amount1_collected=170_000)
+        _stamp_v4_lp_close_native_principal(result, "LP_CLOSE", (0, 5))
+        assert result.extracted_data["lp_close_data"].amount0_collected == 0
+
+    def test_measured_zero_erc20_leg_not_clobbered(self):
+        # A genuinely-measured ERC-20 zero (amount1_collected=0, e.g. an out-of-
+        # range ERC-20 leg) must be preserved — it is measured, not unmeasured.
+        result = _v4_close_result_for_principal(amount0_collected=None, amount1_collected=0)
+        _stamp_v4_lp_close_native_principal(result, "LP_CLOSE", (888_000, 9_999))
+        close = result.extracted_data["lp_close_data"]
+        assert close.amount0_collected == 888_000
+        assert close.amount1_collected == 0  # measured zero never clobbered
+
+    def test_non_native_currency_none_leg_not_filled(self):
+        # Defense-in-depth (Codex/pr-auditor hardening, VIB-5117): a None leg whose
+        # PoolKey currency is NOT the native sentinel must NOT receive a derived
+        # value — an ERC-20 leg's true amount comes from its Transfer, never from
+        # the pre-burn liquidity math. The parser never emits this shape today (it
+        # leaves None only for the native leg); this guards a future regression.
+        result = _v4_close_result_for_principal(
+            amount0_collected=None, amount1_collected=170_000, currency0="0x" + "1" * 40
+        )
+        _stamp_v4_lp_close_native_principal(result, "LP_CLOSE", (888_000, 9_999))
+        close = result.extracted_data["lp_close_data"]
+        assert close.amount0_collected is None  # non-native None leg left unmeasured
+        assert close.amount1_collected == 170_000
+
+    def test_non_v4_shaped_close_is_noop(self):
+        # currency0 None → not a V4-shaped LPCloseData (the capability signal).
+        close = LPCloseData(
+            amount0_collected=None,
+            amount1_collected=170_000,
+            fees0=None,
+            fees1=None,
+            liquidity_removed=1_000_000,
+            pool_address="0x" + "a" * 40,
+            # currency0 / currency1 left None → not V4-shaped.
+        )
+        result = SimpleNamespace(extracted_data={"lp_close_data": close})
+        _stamp_v4_lp_close_native_principal(result, "LP_CLOSE", (1, 2))
+        assert result.extracted_data["lp_close_data"].amount0_collected is None
+
+    @pytest.mark.parametrize("intent_type", ["LP_OPEN", "SWAP", "SUPPLY", "LP_COLLECT_FEES"])
+    def test_non_close_intent_type_is_noop(self, intent_type):
+        # The principal stamp is scoped to LP_CLOSE only (a fees-only
+        # LP_COLLECT_FEES withdraws no principal — measured zero, not a native fill).
+        result = _v4_close_result_for_principal(amount0_collected=None, amount1_collected=170_000)
+        _stamp_v4_lp_close_native_principal(result, intent_type, (1, 2))
+        assert result.extracted_data["lp_close_data"].amount0_collected is None
+
+    def test_none_result_is_noop(self):
+        _stamp_v4_lp_close_native_principal(None, "LP_CLOSE", (1, 2))
+
+    def test_non_dict_extracted_data_is_noop(self):
+        result = _v4_close_result_for_principal(extracted=["not", "a", "dict"])
+        _stamp_v4_lp_close_native_principal(result, "LP_CLOSE", (1, 2))
         assert result.extracted_data == ["not", "a", "dict"]

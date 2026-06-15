@@ -166,8 +166,8 @@ class TestOpenPayloadDisagrees:
 
 def _make_lp_close(
     *,
-    amount0_collected: int = 2295340,
-    amount1_collected: int = 979486010818981,
+    amount0_collected: int | None = 2295340,
+    amount1_collected: int | None = 979486010818981,
     fees0: int | None = 14368,
     fees1: int | None = 0,
     liquidity_removed: int | None = 1042017676194,
@@ -255,6 +255,21 @@ class TestBuildCloseReceiptPayload:
         )
         assert out["amount0_close"] == "0"
         assert out["amount1_close"] == "0"
+
+    def test_none_amount_emits_json_null_not_string_none(self) -> None:
+        # VIB-5117: an unmeasured native principal leg (None) must serialise as
+        # JSON null (Python None), NOT the literal string "None" — symmetric with
+        # the fee_owed guard. Distinct from a measured-zero leg → "0".
+        lp_close = _make_lp_close(amount0_collected=None, amount1_collected=0)
+        out = build_close_receipt_payload(
+            token_id=self.TOKEN_ID,
+            pool_address=self.POOL,
+            lp_close=lp_close,
+            nft_manager_addr=self.NPM,
+        )
+        assert out["amount0_close"] is None
+        assert out["amount0_close"] != "None"
+        assert out["amount1_close"] == "0"  # measured zero stays distinguishable
 
 
 # ---------------------------------------------------------------------------

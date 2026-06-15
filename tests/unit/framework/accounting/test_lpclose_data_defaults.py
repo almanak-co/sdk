@@ -112,6 +112,49 @@ class TestLPCloseDataToDict:
             assert key in d, f"to_dict missing required key {key!r}"
 
 
+class TestLPCloseDataPrincipalNullability:
+    """VIB-5117 — ``amount0_collected`` / ``amount1_collected`` nullability.
+
+    The close PRINCIPAL legs are now ``int | None``. ``None`` = unmeasured (the
+    canonical case is a Uniswap V4 native leg withdrawn as raw ETH with no
+    Transfer); ``0`` = measured zero (an ERC-20 leg that truly withdrew nothing).
+    The two must stay distinguishable across the SQLite payload boundary — a
+    ``None`` native leg must not collapse to ``"0"`` and silently understate
+    realized PnL by the full native principal.
+    """
+
+    def test_principal_legs_default_to_none(self) -> None:
+        # No explicit amounts → unmeasured (None), NOT a fabricated zero.
+        data = LPCloseData()
+        assert data.amount0_collected is None
+        assert data.amount1_collected is None
+
+    def test_measured_zero_distinct_from_none(self) -> None:
+        unmeasured = LPCloseData(amount0_collected=None, amount1_collected=5)
+        measured_zero = LPCloseData(amount0_collected=0, amount1_collected=5)
+        assert unmeasured.amount0_collected is None
+        assert measured_zero.amount0_collected == 0
+        # Empty ≠ Zero — the two states must remain distinguishable.
+        assert unmeasured.amount0_collected is not measured_zero.amount0_collected
+
+    def test_to_dict_none_principal_serialises_as_null(self) -> None:
+        # Native leg unmeasured → JSON null (NOT the literal string "None").
+        d = LPCloseData(amount0_collected=None, amount1_collected=170_000).to_dict()
+        assert d["amount0_collected"] is None
+        assert d["amount1_collected"] == "170000"
+
+    def test_to_dict_measured_zero_principal_serialises_as_string_zero(self) -> None:
+        # Measured ERC-20 zero → "0" string, distinct from JSON null.
+        d = LPCloseData(amount0_collected=0, amount1_collected=170_000).to_dict()
+        assert d["amount0_collected"] == "0"
+        assert d["amount1_collected"] == "170000"
+
+    def test_all_amounts_surfaces_none_unchanged(self) -> None:
+        # ``all_amounts`` must surface a None slot as None, never coerce to 0.
+        data = LPCloseData(amount0_collected=None, amount1_collected=170_000)
+        assert data.all_amounts == [None, 170_000]
+
+
 class TestLPCloseDataFeeSeparationTaxonomy:
     """VIB-4848 (T8) — ``fee_separation_method`` + ``fee_confidence``."""
 

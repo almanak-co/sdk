@@ -146,10 +146,19 @@ def state_manager_mock() -> MagicMock:
     return sm
 
 
-def _make_helpers(*, commit_outcomes: list[TeardownCommitOutcome] | None = None):
+def _make_helpers(
+    *,
+    commit_outcomes: list[TeardownCommitOutcome] | None = None,
+    native_principal_snapshot=None,
+):
     """Build a TeardownRunnerHelpers whose ``commit`` callable returns the
     given outcomes in order. ``capture_snapshot`` is a no-op (tested
     separately in the runner_teardown integration tests).
+
+    ``native_principal_snapshot`` (VIB-5117): when provided, wired as the
+    ``snapshot_intent_v4_lp_close_native_principal`` hook so the manager's
+    ``has_v4_lp_close_native_principal`` gate fires and the captured pair is
+    forwarded into ``commit(...)``.
     """
     commit_calls: list[dict] = []
     outcomes_iter = iter(
@@ -169,7 +178,8 @@ def _make_helpers(*, commit_outcomes: list[TeardownCommitOutcome] | None = None)
     ):
         # Absorb pre_snapshot / recon kwargs added by VIB-3918 per-intent
         # balance capture so this thin test stub stays signature-compatible
-        # with the real ``commit_teardown_intent``.
+        # with the real ``commit_teardown_intent``. Capture the VIB-5117 native
+        # principal so threading tests can assert it was forwarded.
         commit_calls.append(
             {
                 "deployment_id": strategy.deployment_id,
@@ -177,6 +187,8 @@ def _make_helpers(*, commit_outcomes: list[TeardownCommitOutcome] | None = None)
                 "tx_hash": execution_result.transaction_results[0].tx_hash,
                 "bundle_metadata": bundle_metadata,
                 "teardown_cycle_id": teardown_cycle_id,
+                "v4_lp_close_native_principal": _kwargs.get("v4_lp_close_native_principal"),
+                "v4_lp_close_fees": _kwargs.get("v4_lp_close_fees"),
             }
         )
         try:
@@ -188,7 +200,14 @@ def _make_helpers(*, commit_outcomes: list[TeardownCommitOutcome] | None = None)
                 degraded_reason=None,
             )
 
-    return TeardownRunnerHelpers(commit=_commit, capture_snapshot=None), commit_calls
+    return (
+        TeardownRunnerHelpers(
+            commit=_commit,
+            capture_snapshot=None,
+            snapshot_intent_v4_lp_close_native_principal=native_principal_snapshot,
+        ),
+        commit_calls,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +251,92 @@ async def test_t9_manager_invokes_commit_with_correct_args(
     assert call["tx_hash"] == "0xabc"
     assert call["bundle_metadata"] == {"expected_output_human": "1.5"}
     assert call["teardown_cycle_id"] == "teardown-td-uuid-7"
+
+
+# ---------------------------------------------------------------------------
+# VIB-5117 — native-principal snapshot threads into commit on the teardown lane
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_native_principal_threaded_into_commit_for_lp_close(
+    fake_orchestrator, fake_compiler, state_manager_mock
+):
+    """When the runner advertises the native-principal snapshot hook, the manager
+    captures it pre-execute and forwards it into ``commit(...)`` for the LP_CLOSE
+    intent — lane-symmetric with the iteration lane. Guards the teardown wiring
+    (CodeRabbit PR #2810): a native V4 close in teardown must book its real native
+    proceeds, not 0.
+    """
+    captured_principal = (123_456, 789)
+    snapshot_calls: list[tuple] = []
+
+    async def _native_principal_snapshot(strategy, intent):
+        snapshot_calls.append((strategy, intent))
+        return captured_principal
+
+    helpers, commit_calls = _make_helpers(native_principal_snapshot=_native_principal_snapshot)
+    assert helpers.has_v4_lp_close_native_principal is True
+
+    mgr = TeardownManager(
+        orchestrator=fake_orchestrator,
+        compiler=fake_compiler,
+        state_manager=state_manager_mock,
+        runner_helpers=helpers,
+        config=TeardownConfig.default(),
+    )
+
+    intent = _make_intent("LP_CLOSE")
+    state = _make_state(total_intents=1)
+    result = await mgr._execute_intents(
+        teardown_id=state.teardown_id,
+        strategy=_make_strategy(),
+        intents=[intent],
+        positions=_make_position_summary(),
+        mode=TeardownMode.SOFT,
+        teardown_state=state,
+        is_auto_mode=True,
+    )
+
+    assert result.success is True
+    assert result.intents_succeeded == 1
+    # The snapshot hook fired once (pre-execute) and its pair reached commit.
+    assert len(snapshot_calls) == 1
+    assert len(commit_calls) == 1
+    assert commit_calls[0]["intent_type"] == "LP_CLOSE"
+    assert commit_calls[0]["v4_lp_close_native_principal"] == captured_principal
+
+
+@pytest.mark.asyncio
+async def test_no_native_principal_snapshot_forwards_none(
+    fake_orchestrator, fake_compiler, state_manager_mock
+):
+    """No native-principal hook (non-V4 runner) → commit receives None for the
+    principal — the gate is off, never a fabricated value (Empty ≠ Zero)."""
+    helpers, commit_calls = _make_helpers()  # native_principal_snapshot=None
+    assert helpers.has_v4_lp_close_native_principal is False
+
+    mgr = TeardownManager(
+        orchestrator=fake_orchestrator,
+        compiler=fake_compiler,
+        state_manager=state_manager_mock,
+        runner_helpers=helpers,
+        config=TeardownConfig.default(),
+    )
+
+    state = _make_state(total_intents=1)
+    result = await mgr._execute_intents(
+        teardown_id=state.teardown_id,
+        strategy=_make_strategy(),
+        intents=[_make_intent("LP_CLOSE")],
+        positions=_make_position_summary(),
+        mode=TeardownMode.SOFT,
+        teardown_state=state,
+        is_auto_mode=True,
+    )
+
+    assert result.success is True
+    assert commit_calls[0]["v4_lp_close_native_principal"] is None
 
 
 # ---------------------------------------------------------------------------

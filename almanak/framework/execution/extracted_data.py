@@ -192,8 +192,20 @@ class LPCloseData:
             all_amounts = result.lp_close_data.all_amounts  # [amt0, amt1, amt2, amt3]
     """
 
-    amount0_collected: int
-    amount1_collected: int
+    # VIB-5117 — Empty ≠ Zero on the close PRINCIPAL legs. ``None`` means the
+    # parser could NOT measure that leg's withdrawn principal — the canonical
+    # case is a Uniswap V4 NATIVE leg (``currency == 0x0``), which is returned
+    # to the wallet as raw ETH via TAKE_PAIR and emits NO ERC-20 Transfer, so
+    # the receipt-scanning parser has nothing to attribute. The runner fills it
+    # at enrichment from a pre-burn ``QueryV4PositionState`` read (mirror of the
+    # open-side ``LPOpenData.amount0/amount1`` native fill). A numeric value —
+    # including ``0`` — is a MEASURED observation (e.g. an ERC-20 leg that truly
+    # withdrew nothing on an out-of-range single-sided close). Flipping these
+    # from non-nullable ``int`` to ``int | None`` removes the silent measured-
+    # zero lie on the native leg that understated realized PnL by the full
+    # native principal. Symmetric with ``fees0/fees1`` and ``LPOpenData``.
+    amount0_collected: int | None = None
+    amount1_collected: int | None = None
     # VIB-4470 — Empty ≠ Zero. ``None`` means the parser did not measure fees
     # separately (the canonical case for protocols that bundle fees into the
     # withdrawal amount). A numeric value — including ``0`` — is a measured
@@ -257,9 +269,15 @@ class LPCloseData:
             object.__setattr__(self, "fee_confidence", "EXACT")
 
     @property
-    def all_amounts(self) -> list[int]:
-        """Return all coin amounts as a list, including additional coins."""
-        result = [self.amount0_collected, self.amount1_collected]
+    def all_amounts(self) -> list[int | None]:
+        """Return all coin amounts as a list, including additional coins.
+
+        Per Empty ≠ Zero (VIB-5117): ``None`` slots stand for "unmeasured by
+        this parser" — e.g. a Uniswap V4 native principal leg the receipt could
+        not observe (filled later from the pre-burn position-state read). A
+        numeric ``0`` is a measured zero. Mirrors :attr:`all_fees`.
+        """
+        result: list[int | None] = [self.amount0_collected, self.amount1_collected]
         if self.additional_amounts:
             for i in sorted(self.additional_amounts):
                 result.append(self.additional_amounts[i])
@@ -280,8 +298,11 @@ class LPCloseData:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         d: dict[str, Any] = {
-            "amount0_collected": str(self.amount0_collected),
-            "amount1_collected": str(self.amount1_collected),
+            # VIB-5117 — preserve None as JSON null (unmeasured native leg),
+            # distinct from the string "0" (measured zero) per Empty ≠ Zero.
+            # Mirrors the fees0/fees1 guard directly below and LPOpenData.
+            "amount0_collected": (str(self.amount0_collected) if self.amount0_collected is not None else None),
+            "amount1_collected": (str(self.amount1_collected) if self.amount1_collected is not None else None),
             # VIB-4470 — preserve None as JSON null (unmeasured), distinct
             # from the string "0" (measured zero) per Empty ≠ Zero.
             "fees0": (str(self.fees0) if self.fees0 is not None else None),

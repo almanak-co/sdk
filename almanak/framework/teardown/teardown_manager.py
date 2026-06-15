@@ -1452,6 +1452,29 @@ class TeardownManager:
                                 exc,
                             )
 
+                    # VIB-5117 — on the SAME pre-execute boundary, capture the
+                    # closing V4 position's native-leg PRINCIPAL. A native-ETH leg
+                    # is withdrawn as raw ETH (no Transfer) so the burn receipt
+                    # leaves ``amount{0,1}_collected = None``; the principal is
+                    # derived from the pre-burn position state (post-burn read =
+                    # zero liquidity). Threaded into the commit so the LP handler
+                    # records the real native proceeds. Returns ``None`` for
+                    # non-native-leg closes and never raises.
+                    v4_lp_close_native_principal_for_intent: tuple[int | None, int | None] | None = None
+                    if self.runner_helpers.has_v4_lp_close_native_principal:
+                        try:
+                            v4_lp_close_native_principal_for_intent = (
+                                await self.runner_helpers.snapshot_intent_v4_lp_close_native_principal(  # type: ignore[misc]
+                                    strategy, intent_to_exec
+                                )
+                            )
+                        except Exception as exc:  # noqa: BLE001 — best-effort
+                            logger.debug(
+                                "teardown V4 LP-close native-principal snapshot failed for %s: %s",
+                                strategy.deployment_id,
+                                exc,
+                            )
+
                     # Execute via orchestrator
                     exec_result = await self.orchestrator.execute(
                         compilation_result.action_bundle,
@@ -1511,6 +1534,7 @@ class TeardownManager:
                                 recon=post_intent_recon,
                                 lending_pre_state=lending_pre_state_for_intent,
                                 v4_lp_close_fees=v4_lp_close_fees_for_intent,
+                                v4_lp_close_native_principal=v4_lp_close_native_principal_for_intent,
                             )
                             if commit_outcome.accounting_degraded:
                                 accounting_degraded_records.extend(commit_outcome.degraded_writes)

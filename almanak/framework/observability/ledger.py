@@ -1081,6 +1081,109 @@ def _stamp_v4_lp_open_native_amounts(
         return
 
 
+# The V4 native-currency sentinel (the zero address) — the same value the
+# connector parser and the runner's open-side eligibility gate use. Kept as a
+# local plain-string constant (not a connector import) to honour the framework →
+# connector boundary; it is the well-known zero address, not connector logic.
+_V4_NATIVE_CURRENCY = "0x" + "0" * 40
+
+
+def _stamp_v4_lp_close_native_principal(
+    result: Any,
+    intent_type: str,
+    amounts: tuple[int | None, int | None] | None,
+) -> None:
+    """Stamp PRE-burn-measured V4 native-leg close PRINCIPAL onto ``LPCloseData`` (VIB-5117).
+
+    A native-ETH V4 pool (``PoolKey.currency == 0x0``) returns its ETH leg to the
+    wallet as raw ETH via ``TAKE_PAIR`` on close — there is NO ERC-20 Transfer for
+    that leg, so the burn RECEIPT cannot measure it and the V4 receipt parser
+    leaves that leg's ``amount{0,1}_collected = None`` (honest "unmeasured",
+    Empty ≠ Zero — never a fabricated zero). The runner derives the principal from
+    the freshly-read pre-burn position state (``liquidity`` + ``sqrt_price_x96`` +
+    ticks → the framework's concentrated-liquidity math) and threads the raw-int
+    pair here. This is the single correct stamp point: the runner holds the
+    enriched result just before it is serialised into
+    ``transaction_ledger.extracted_data_json``, and the LP accounting handler reads
+    ``lp_close_data.amount{0,1}_collected`` straight off it
+    (``lp_accounting.build_lp_accounting_event`` → ``received_value_usd`` →
+    ``realized_pnl_usd``).
+
+    ``amounts`` is ``(amount0, amount1)`` in PoolKey-currency0/1 order — the same
+    order ``LPCloseData.amount0_collected``/``currency0`` use, because both the
+    gateway read and the parser derive ordering from the same canonical PoolKey.
+
+    The exact close-side mirror of :func:`_stamp_v4_lp_open_native_amounts`:
+
+    * ``amounts = None`` (read unavailable / failed / not a native pool) → leaves
+      ``LPCloseData`` untouched. The native leg stays ``None`` (honest unmeasured),
+      never fabricates a zero.
+    * Fills ONLY a leg the parser left ``None`` (the unmeasured native leg). A
+      leg the parser already MEASURED from a Transfer (the ERC-20 side, or a
+      genuine ``0`` for an unobserved ERC-20 leg) is preserved — the gateway read
+      never clobbers a measured value (Empty ≠ Zero idempotence).
+    * No-op unless this is an ``LP_CLOSE`` carrying a V4-shaped ``LPCloseData``
+      (``currency0`` populated — the connector-agnostic capability signal, not a
+      protocol-string match).
+
+    Precision bound (inherent, accepted): the position state is read just before
+    the burn while the ERC-20 leg is measured at the burn block. For a same-cycle
+    close there are no intervening liquidity changes, so the derived native amount
+    reflects the burned position; the ``int()`` floor drops at most sub-wei.
+    Mirrors the open-stamp / close-fee gap-read bound.
+    """
+    if amounts is None:
+        return
+    if intent_type != "LP_CLOSE":
+        return
+    extracted = getattr(result, "extracted_data", None) if result else None
+    if not isinstance(extracted, dict):
+        return
+    # Re-read AFTER ``_stamp_lp_close_discriminator`` / ``_stamp_v4_lp_close_fees``
+    # (which also replace ``extracted["lp_close_data"]``) so this stamp operates on
+    # the latest copy.
+    close_data = extracted.get("lp_close_data")
+    if close_data is None or not hasattr(close_data, "amount0_collected"):
+        return
+    # Capability-gate on the V4 PoolKey data shape (currency0/currency1 populated
+    # only by the V4 parser) rather than a hard-coded protocol string.
+    if getattr(close_data, "currency0", None) is None:
+        return
+
+    raw0, raw1 = amounts
+    # Fill only the legs the parser left unmeasured (``None``). A measured leg
+    # (the ERC-20 side, or a genuine measured ``0``) is preserved — never clobber.
+    # Defense-in-depth (mirrors the open-side ``_native_v4_open_eligible`` rigor):
+    # gate the derived fill on the leg's currency being the native sentinel. The
+    # V4 parser leaves a leg ``None`` ONLY for the native currency (an unobserved
+    # ERC-20 leg is a measured ``0``), so today every ``None`` leg here is already
+    # native — but checking the currency keeps this correct-by-construction should
+    # a future parser change ever emit a ``None`` ERC-20 leg: a derived value must
+    # never land on an ERC-20 leg whose true amount comes from its Transfer.
+    cur0 = (getattr(close_data, "currency0", None) or "").lower()
+    cur1 = (getattr(close_data, "currency1", None) or "").lower()
+    new0 = getattr(close_data, "amount0_collected", None)
+    new1 = getattr(close_data, "amount1_collected", None)
+    changed = False
+    if new0 is None and raw0 is not None and cur0 == _V4_NATIVE_CURRENCY:
+        new0 = int(raw0)
+        changed = True
+    if new1 is None and raw1 is not None and cur1 == _V4_NATIVE_CURRENCY:
+        new1 = int(raw1)
+        changed = True
+    if not changed:
+        return
+
+    import dataclasses
+
+    try:
+        extracted["lp_close_data"] = dataclasses.replace(close_data, amount0_collected=new0, amount1_collected=new1)
+    except (TypeError, ValueError):
+        # Defensive: a non-dataclass duck-typed close-data stub (tests) — leave it
+        # untouched rather than raise on the ledger-write path.
+        return
+
+
 def build_ledger_entry(
     *,
     deployment_id: str,
@@ -1094,6 +1197,7 @@ def build_ledger_entry(
     pre_state: dict[str, Any] | None = None,
     post_state: dict[str, Any] | None = None,
     v4_lp_close_fees: tuple[int, int] | None = None,
+    v4_lp_close_native_principal: tuple[int | None, int | None] | None = None,
     v4_lp_open_native_amounts: tuple[int | None, int | None] | None = None,
 ) -> LedgerEntry:
     """Build a LedgerEntry from an intent and its execution result.
@@ -1185,6 +1289,15 @@ def build_ledger_entry(
     # withdrawal Transfer; they are unrecoverable from the receipt). The runner
     # reads them on-chain before the burn submits and threads the raw-int pair.
     _stamp_v4_lp_close_fees(result, intent_type, v4_lp_close_fees)
+    # VIB-5117 — stamp the PRE-burn-measured native-ETH leg PRINCIPAL onto
+    # ``lp_close_data``. A native-ETH V4 LP_CLOSE returns its ETH leg as raw ETH
+    # (no ERC-20 Transfer), so the receipt parser left ``amount{0,1}_collected``
+    # None on that leg. The runner reads the pre-burn position state on-chain and
+    # derives the native amount via the framework's concentrated-liquidity math;
+    # this stamp fills only the unmeasured native leg (never clobbers a measured
+    # ERC-20 leg). Without it the close records 0 proceeds and understates
+    # realized PnL by the full native principal. Symmetric with the open stamp.
+    _stamp_v4_lp_close_native_principal(result, intent_type, v4_lp_close_native_principal)
     # VIB-4483 (P-V1-B) — stamp the POST-mint-measured native-ETH leg amount onto
     # ``lp_open_data``. A native-ETH V4 pool deposits its ETH leg via msg.value
     # (no ERC-20 Transfer), so the receipt parser left it None. The runner reads

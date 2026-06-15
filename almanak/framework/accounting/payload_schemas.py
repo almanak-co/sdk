@@ -379,8 +379,25 @@ class LPCloseEventPayload(_Versioned):
     pool_address: str
     token0: str
     token1: str
-    amount0: Decimal
-    amount1: Decimal
+    # VIB-5117: amount0 / amount1 are Decimal | None per AGENTS.md Empty ≠ Zero
+    # — same rule the LendingEventPayload.amount widening (VIB-4539) applies on
+    # the lending side. A Uniswap V4 NATIVE close leg is returned to the wallet
+    # as raw ETH (TAKE_PAIR) with NO Transfer, so the burn-receipt parser leaves
+    # it ``None`` (unmeasured). The runner normally fills it from a pre-burn
+    # ``QueryV4PositionState`` read, so on the production path ``amount0`` is a
+    # measured Decimal; but if that read genuinely fails the leg stays ``None``
+    # (an honest measured-unmeasured state), and forcing it to a fabricated zero
+    # would understate realized PnL by the full native principal. Without this
+    # widening such a row FAILs Pydantic validation, blocking G6 / G13 / LP4.
+    #
+    # ``Field(...)`` (Pydantic v2 "required key, no default") preserves Empty ≠
+    # Zero discipline: a parser bug that drops the field entirely (``""`` shape)
+    # FAILs loud, while a measured-unmeasured row with explicit ``None``
+    # validates. The writer always emits both keys
+    # (``LPAccountingEvent.to_payload_json`` → ``_enc``), so the key is always
+    # present on the production path.
+    amount0: Decimal | None = Field(...)
+    amount1: Decimal | None = Field(...)
     amount0_usd: Decimal | None = None
     amount1_usd: Decimal | None = None
     fees0_collected: Decimal | None = None

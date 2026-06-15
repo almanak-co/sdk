@@ -9,13 +9,13 @@ ERC-20 Transfer, so:
 
 * The parser does NOT raise — it produces a valid ``LPCloseData``.
 * The observed ERC-20 (currency1) leg is measured from its Transfer.
-* The native (currency0) PRINCIPAL leg surfaces as ``0`` on
-  ``amount0_collected`` here (its real value is validated downstream by the
-  wallet native-balance delta in the avalanche intent test). Promoting the
-  native close principal to a measured value needs a pre-burn read + a
-  nullable ``amount{0,1}_collected`` field — a VIB-4483 close-principal
-  follow-up; uncollected FEES are already measured pre-burn via
-  ``_stamp_v4_lp_close_fees`` (VIB-4482).
+* The native (currency0) PRINCIPAL leg is ``None`` (unmeasured, Empty ≠ Zero)
+  on ``amount0_collected`` — VIB-5117. The native ETH is returned via TAKE_PAIR
+  with NO Transfer, so the receipt cannot measure it; stamping ``0`` would be a
+  misattribution that understates realized PnL by the full native principal. The
+  runner fills the real value pre-burn from a ``QueryV4PositionState`` read
+  (``_stamp_v4_lp_close_native_principal``), mirroring the open-side native fill
+  (VIB-4483) and the pre-burn fee stamp (``_stamp_v4_lp_close_fees``, VIB-4482).
 """
 
 from __future__ import annotations
@@ -83,8 +83,10 @@ def test_native_eth_close_does_not_raise_and_measures_erc20_leg():
     """Native-ETH currency0 close produces a valid LPCloseData (VIB-4483).
 
     The ERC-20 (currency1 = WETH) leg is measured from its withdrawal Transfer;
-    the native (currency0) principal leg is ``0`` here (no Transfer; validated
-    via balance-delta downstream). Crucially: no raise.
+    the native (currency0) principal leg is ``None`` here (no Transfer →
+    unmeasured per Empty ≠ Zero, VIB-5117; the runner fills it pre-burn). The
+    runner fills it pre-burn from a ``QueryV4PositionState`` read. Crucially:
+    no raise.
     """
     parser = _native_pool_parser()
     receipt = {
@@ -103,8 +105,11 @@ def test_native_eth_close_does_not_raise_and_measures_erc20_leg():
     # currency0 = native, currency1 = WETH.
     assert data.currency0 == NATIVE_CURRENCY
     assert data.currency1 == WETH.lower()
-    # Native principal leg = 0 (no Transfer); WETH leg measured from its transfer.
-    assert data.amount0_collected == 0
+    # Native principal leg = None (no Transfer → unmeasured, VIB-5117); WETH leg
+    # measured from its transfer. The native leg is NOT a measured zero — that
+    # would understate realized PnL by the full native principal; the runner
+    # fills it pre-burn.
+    assert data.amount0_collected is None
     assert data.amount1_collected == WETH_WITHDRAWN
     # Fees stay None (Empty != Zero) — V4 bundles fees; separation is VIB-4482.
     assert data.fees0 is None

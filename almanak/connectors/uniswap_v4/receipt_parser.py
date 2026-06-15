@@ -664,6 +664,33 @@ class UniswapV4ReceiptParser:
             if resolved is None:
                 return None
             amount0, amount1, currency0, currency1 = resolved
+        elif amount0 is None and amount1 is None and self._pool_key_lookup is not None:
+            # VIB-5119: a fully-native single-sided mint (out-of-range, only the
+            # native ETH leg moved) deposits ETH via ``msg.value`` and emits NO
+            # ERC-20 deposit Transfer, so the sum above returns all-``None``. We
+            # cannot resolve currencies from transfers alone — resolve the
+            # native-leg PoolKey via the gateway lookup (mirror of the
+            # single-sided branch above and close-side T07) so ``currency0`` /
+            # ``currency1`` ARE set, which is what gates the runner's native-amount
+            # capture (``_native_v4_open_eligible``). The native leg stays
+            # ``None`` (unmeasured — the runner's
+            # ``_stamp_v4_lp_open_native_amounts`` fills it from a post-mint
+            # position-state read); the ERC-20 leg is a measured ``0`` (genuinely
+            # zero this out-of-range mint). A non-native PoolKey that landed zero
+            # deposit Transfers is not attributable and stays a drop.
+            #
+            # When NO ``pool_key_lookup`` is configured (degraded / unit path) we
+            # do NOT drop here — we preserve the legacy both-``None`` /
+            # null-currency shape (Empty ≠ Zero; the LP handler falls back to
+            # user-intent token order). Only attempt resolution when a lookup
+            # exists, mirroring how production always wires it.
+            resolved = self._resolve_native_only_lp_open(
+                pool_id_hex=mint_event.pool_id.lower(),
+                tx_hash=tx_hash,
+            )
+            if resolved is None:
+                return None
+            amount0, amount1, currency0, currency1 = resolved
 
         current_tick: int | None = None
         for swap in parsed.swap_events:
@@ -830,6 +857,94 @@ class UniswapV4ReceiptParser:
             return observed_amount, _unobserved(pk_currency1), pk_currency0, pk_currency1
         return _unobserved(pk_currency0), observed_amount, pk_currency0, pk_currency1
 
+    def _resolve_native_only_lp_open(
+        self,
+        *,
+        pool_id_hex: str,
+        tx_hash: str,
+    ) -> tuple[int | None, int | None, str, str] | None:
+        """Resolve a fully-native single-sided LP_OPEN via the gateway PoolKey lookup.
+
+        VIB-5119: a single-sided out-of-range mint that moves ONLY the native
+        ETH leg deposits via ``msg.value`` and emits NO ERC-20 deposit Transfer,
+        so ``_sum_deposit_transfers_by_currency_order`` returns all-``None`` and
+        there is no observed currency to anchor attribution on. This helper
+        mirrors ``_resolve_single_sided_lp_open`` (and close-side T07) but for
+        the zero-observed-transfer shape: it resolves the canonical PoolKey and,
+        ONLY when that PoolKey carries the native-ETH currency, returns a
+        resolved tuple with the native leg ``None`` (unmeasured — the runner's
+        ``_stamp_v4_lp_open_native_amounts`` fills it from a post-mint
+        position-state read) and the ERC-20 leg a measured ``0`` (genuinely zero
+        this mint).
+
+        Scoping (Empty ≠ Zero / fail-loud): an all-ERC-20 PoolKey that somehow
+        landed ZERO deposit Transfers is NOT attributable — both legs would be
+        unanchored guesses — so it stays a drop (``transfer_set_mismatch``).
+        Only a native-leg PoolKey, whose native deposit is structurally
+        invisible to the receipt, is allowed to resolve from the lookup alone.
+
+        Returns:
+            ``None`` to signal the caller should drop ``LPOpenData``, OR a
+            resolved ``(amount0, amount1, currency0, currency1)`` tuple where the
+            native leg is ``None`` and the ERC-20 leg is ``0``.
+        """
+        from almanak.connectors.uniswap_v4.sdk import NATIVE_CURRENCY
+
+        if self._pool_key_lookup is None:
+            self._emit_drop_telemetry(
+                outcome="drop",
+                reason=V4LPDropReason.MISSING_POOL_KEY_LOOKUP,
+                pool_id=pool_id_hex,
+                tx_hash=tx_hash,
+            )
+            return None
+
+        try:
+            pool_key = self._pool_key_lookup(pool_id_hex, self.chain)
+        except Exception as exc:
+            self._emit_drop_telemetry(
+                outcome="drop",
+                reason=V4LPDropReason.POOL_KEY_LOOKUP_ERROR,
+                pool_id=pool_id_hex,
+                tx_hash=tx_hash,
+                extras=f"error={type(exc).__name__}",
+            )
+            return None
+
+        if pool_key is None:
+            self._emit_drop_telemetry(
+                outcome="drop",
+                reason=V4LPDropReason.POOL_KEY_NOT_FOUND,
+                pool_id=pool_id_hex,
+                tx_hash=tx_hash,
+            )
+            return None
+
+        pk_currency0 = pool_key.currency0.lower()
+        pk_currency1 = pool_key.currency1.lower()
+
+        # Scope the zero-observed-transfer bypass to native-leg pools only. An
+        # all-ERC-20 pool with zero observed deposit Transfers is a genuine
+        # attribution failure (we observed every PoolManager Transfer and saw
+        # none), so it must drop — mirror of the close-side empty-observed
+        # protection. Only the native leg's deposit is structurally invisible.
+        if NATIVE_CURRENCY not in (pk_currency0, pk_currency1):
+            self._emit_drop_telemetry(
+                outcome="drop",
+                reason=V4LPDropReason.TRANSFER_SET_MISMATCH,
+                pool_id=pool_id_hex,
+                tx_hash=tx_hash,
+                extras=f"expected={sorted([pk_currency0, pk_currency1])} observed=[]",
+            )
+            return None
+
+        # Native leg → ``None`` (unmeasured; runner stamps it). ERC-20 leg →
+        # measured ``0`` (no Transfer = truly zero this out-of-range mint).
+        def _unobserved(currency: str) -> int | None:
+            return None if currency == NATIVE_CURRENCY else 0
+
+        return _unobserved(pk_currency0), _unobserved(pk_currency1), pk_currency0, pk_currency1
+
     def extract_lp_close_data(self, receipt: dict[str, Any]) -> LPCloseData | None:
         """Extract LP close data from a V4 burn receipt.
 
@@ -856,13 +971,15 @@ class UniswapV4ReceiptParser:
            sum of transfers of ``currency0``; ``amount1_collected`` =
            sum of transfers of ``currency1``.
 
-        Native-ETH currency0 (VIB-4483 / P-V1-B) is supported: the native leg
-        is returned as raw ETH (no ERC-20 Transfer) so its
-        ``amount{0,1}_collected`` principal surfaces as ``0`` here and is
-        validated downstream by the wallet native-balance delta. Measuring the
-        native close PRINCIPAL is a VIB-4483 follow-up (needs a pre-burn read +
-        a nullable ``amount{0,1}_collected``); uncollected FEES are already
-        measured pre-burn via ``_stamp_v4_lp_close_fees`` (VIB-4482).
+        Native-ETH currency (VIB-4483 / P-V1-B) is supported: the native leg is
+        returned as raw ETH (no ERC-20 Transfer) so its ``amount{0,1}_collected``
+        principal is ``None`` (unmeasured, Empty ≠ Zero — VIB-5117) rather than a
+        fabricated ``0``; the runner fills it pre-burn from a
+        ``QueryV4PositionState`` read (``_stamp_v4_lp_close_native_principal``).
+        A fully-native single-sided close emits NO ERC-20 Transfer at all; the
+        empty-observed-tokens gate below allows it through ONLY for a native-leg
+        PoolKey (VIB-5119) so the LP_CLOSE event is still booked. Uncollected
+        FEES are measured pre-burn via ``_stamp_v4_lp_close_fees`` (VIB-4482).
 
         Emits:
 
@@ -945,18 +1062,18 @@ class UniswapV4ReceiptParser:
         currency0 = pool_key.currency0.lower()
         currency1 = pool_key.currency1.lower()
 
-        # VIB-4483 (P-V1-B): native-ETH currency0 is supported on close. The
-        # native leg is returned to the wallet as raw ETH (TAKE_PAIR) and emits
-        # NO ERC-20 Transfer, so the ``collected_by_token`` walk below sees only
-        # the ERC-20 leg; the native principal surfaces as ``0`` on its
-        # ``amountN_collected`` leg here. That principal leg is validated
-        # downstream by the wallet native-balance delta (the avalanche
-        # ``test_lp_close_avax_usdc`` Layer-4 check), not by the parser. Promoting
-        # the native close PRINCIPAL to a measured value requires a pre-burn
-        # position-state read threaded onto a nullable ``amount{0,1}_collected``
-        # (today typed ``int``) — tracked as a VIB-4483 close-principal follow-up;
-        # uncollected FEES are already measured pre-burn via
-        # ``_stamp_v4_lp_close_fees`` (VIB-4482).
+        # VIB-4483 (P-V1-B) / VIB-5117: native-ETH currency is supported on
+        # close. The native leg is returned to the wallet as raw ETH (TAKE_PAIR)
+        # and emits NO ERC-20 Transfer, so the ``collected_by_token`` walk below
+        # never observes it. Per Empty ≠ Zero, an unobserved NATIVE leg is
+        # ``None`` (unmeasured), NOT ``0`` (which would be a misattribution that
+        # understates realized PnL by the full native principal). The runner
+        # fills it at ledger-build from a pre-burn ``QueryV4PositionState`` read
+        # (``_stamp_v4_lp_close_native_principal`` — mirror of the open-side
+        # native fill, VIB-4483); on read failure the leg stays unmeasured. An
+        # unobserved ERC-20 leg, by contrast, is a genuine measured ``0`` (the
+        # PoolKey resolved and we saw every PoolManager Transfer, so a missing
+        # ERC-20 currency truly received zero in this burn).
 
         collected_by_token: dict[str, int] = {}
         for transfer in parsed.transfer_events:
@@ -964,8 +1081,11 @@ class UniswapV4ReceiptParser:
                 token = transfer.token.lower()
                 collected_by_token[token] = collected_by_token.get(token, 0) + transfer.amount
 
+        from almanak.connectors.uniswap_v4.sdk import NATIVE_CURRENCY
+
         observed_tokens = set(collected_by_token.keys())
         expected_tokens = {currency0, currency1}
+        pool_has_native_leg = NATIVE_CURRENCY in expected_tokens
         # VIB-4426 P1 #3 — allow legitimate single-sided closes. A
         # concentrated-liquidity position that is out of range at burn time
         # legitimately returns only one of {currency0, currency1}; the
@@ -974,11 +1094,25 @@ class UniswapV4ReceiptParser:
         # ``transfer_set_mismatch`` and the LP_CLOSE accounting event was
         # silently lost.
         #
-        # The drop predicate is now: observed tokens must be a non-empty
-        # SUBSET of expected. An observation outside the PoolKey currency
-        # set IS a real attribution error (could be a token the parser
-        # mis-extracted) and stays as a drop.
-        if not observed_tokens or not observed_tokens.issubset(expected_tokens):
+        # The drop predicate is: any observed token outside the PoolKey
+        # currency set IS a real attribution error (could be a token the
+        # parser mis-extracted) and stays a drop.
+        #
+        # VIB-5119 — empty observed set: a fully-native single-sided close
+        # (out-of-range, only the native ETH leg returned via TAKE_PAIR) emits
+        # NO ERC-20 Transfer at all, so ``observed_tokens`` is empty even though
+        # the close DID happen on-chain. Pre-fix the ``not observed_tokens``
+        # guard dropped this as ``transfer_set_mismatch`` and the LP_CLOSE
+        # accounting event was silently lost (the position showed open in the
+        # books). Allow the empty-observed case ONLY when the PoolKey carries
+        # the native-ETH leg (whose return is structurally invisible to the
+        # receipt) — the native principal is then filled pre-burn by
+        # ``_stamp_v4_lp_close_native_principal``. A genuine all-ERC-20 burn
+        # that emits no expected Transfer is still a real attribution failure
+        # and MUST drop — that protection is preserved by the
+        # ``pool_has_native_leg`` scope.
+        empty_observed_drop = not observed_tokens and not pool_has_native_leg
+        if empty_observed_drop or not observed_tokens.issubset(expected_tokens):
             self._emit_drop_telemetry(
                 outcome="drop",
                 reason=V4LPDropReason.TRANSFER_SET_MISMATCH,
@@ -988,12 +1122,22 @@ class UniswapV4ReceiptParser:
             )
             return None
 
-        # Missing leg = measured zero (Empty ≠ Zero only applies when we
-        # don't know; here the PoolKey lookup succeeded AND we observed all
-        # transfers from the PoolManager so a non-observed currency truly
-        # received zero in this burn).
-        amount0_collected = collected_by_token.get(currency0, 0)
-        amount1_collected = collected_by_token.get(currency1, 0)
+        # A leg with no PoolManager Transfer is a MEASURED ZERO for an ERC-20
+        # currency (the PoolKey lookup succeeded AND we observed every transfer
+        # from the PoolManager, so a non-observed ERC-20 currency truly received
+        # zero in this burn) but UNMEASURED ``None`` for the NATIVE currency
+        # (VIB-5117 — native ETH is returned via TAKE_PAIR with no Transfer, so
+        # its absence from ``collected_by_token`` says nothing about its value;
+        # the runner fills it from a pre-burn position-state read). Mirror of
+        # the open-side ``_resolve_single_sided_lp_open._unobserved``.
+        # (``NATIVE_CURRENCY`` is imported above for the empty-observed gate.)
+        def _leg(currency: str) -> int | None:
+            if currency in collected_by_token:
+                return collected_by_token[currency]
+            return None if currency == NATIVE_CURRENCY else 0
+
+        amount0_collected = _leg(currency0)
+        amount1_collected = _leg(currency1)
 
         return LPCloseData(
             amount0_collected=amount0_collected,
@@ -1189,8 +1333,14 @@ class UniswapV4ReceiptParser:
             "token_id": str(token_id),
             "pool_id": pool_id,
             "position_manager": position_manager,
-            "amount0_close": str(lp_close.amount0_collected),
-            "amount1_close": str(lp_close.amount1_collected),
+            # VIB-5117 — Empty ≠ Zero on the principal legs: a native leg the
+            # burn receipt could not observe is ``None`` here → emit JSON
+            # ``null``, never the literal string ``"None"``. The runner fills
+            # the native principal at ledger-build from the pre-burn position
+            # state; if that read failed the leg stays unmeasured. Symmetric
+            # with the fee_owed guards below.
+            "amount0_close": (str(lp_close.amount0_collected) if lp_close.amount0_collected is not None else None),
+            "amount1_close": (str(lp_close.amount1_collected) if lp_close.amount1_collected is not None else None),
             # V4 bundles fees into the withdrawal Transfer in V0 — unmeasured
             # (Empty ≠ Zero); separate fee measurement is VIB-4482.
             "fee_owed_0": str(lp_close.fees0) if lp_close.fees0 is not None else None,

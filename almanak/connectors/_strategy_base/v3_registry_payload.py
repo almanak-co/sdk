@@ -82,8 +82,13 @@ def build_close_receipt_payload(
     payload: dict[str, Any] = {
         "token_id": str(token_id),
         "pool_address": pool_address,
-        "amount0_close": str(lp_close.amount0_collected),
-        "amount1_close": str(lp_close.amount1_collected),
+        # VIB-5117 — Empty ≠ Zero on the principal legs: emit JSON ``null`` for
+        # an unmeasured leg (a V4 native principal the receipt could not
+        # observe), never the literal string ``"None"``. Symmetric with the
+        # fee_owed guards below. V3 parsers never produce ``None`` here, but the
+        # field type is now ``int | None`` so the guard is correct-by-construction.
+        "amount0_close": (str(lp_close.amount0_collected) if lp_close.amount0_collected is not None else None),
+        "amount1_close": (str(lp_close.amount1_collected) if lp_close.amount1_collected is not None else None),
         "fee_owed_0": str(lp_close.fees0) if lp_close.fees0 is not None else None,
         "fee_owed_1": str(lp_close.fees1) if lp_close.fees1 is not None else None,
         "nft_manager_addr": nft_manager_addr,

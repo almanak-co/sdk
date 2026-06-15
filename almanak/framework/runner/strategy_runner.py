@@ -492,6 +492,16 @@ class SingleChainExecutionState:
     # Empty ≠ Zero) when the read is unavailable / fails. Stamped onto
     # ``LPCloseData.fees0/fees1`` at ledger-build time (observability/ledger.py).
     v4_lp_close_fees: tuple[int, int] | None = None
+    # VIB-5117 — native-leg close PRINCIPAL, symmetric with v4_lp_close_fees and
+    # the open-side native fill. A native-ETH V4 leg is withdrawn as raw ETH
+    # (TAKE_PAIR, no Transfer) so the burn receipt cannot measure it; the runner
+    # derives it from the SAME pre-burn ``QueryV4PositionState`` read (liquidity
+    # + sqrt_price + ticks → concentrated-liquidity math). ``(amount0, amount1)``
+    # raw ints in PoolKey-currency0/1 order, each leg ``None`` when unmeasured
+    # (Empty ≠ Zero — never a fabricated zero). Stamped onto
+    # ``LPCloseData.amount{0,1}_collected`` at ledger-build time, filling ONLY a
+    # leg the parser left ``None`` (never clobbers the measured ERC-20 leg).
+    v4_lp_close_native_principal: tuple[int | None, int | None] | None = None
     # --- Running bookkeeping (updated by state-machine loop) ---
     last_execution_result: Any | None = None
     last_execution_context: Any | None = None
@@ -2517,6 +2527,7 @@ class StrategyRunner:
         post_state: dict | None = None,
         emit_position_event: bool = True,
         v4_lp_close_fees: tuple[int, int] | None = None,
+        v4_lp_close_native_principal: tuple[int | None, int | None] | None = None,
         v4_lp_open_native_amounts: tuple[int | None, int | None] | None = None,
     ) -> str | None:
         """Returns the persisted LedgerEntry.id on success, None on non-live failure."""
@@ -2576,6 +2587,7 @@ class StrategyRunner:
                 pre_state=pre_state,
                 post_state=post_state,
                 v4_lp_close_fees=v4_lp_close_fees,
+                v4_lp_close_native_principal=v4_lp_close_native_principal,
                 v4_lp_open_native_amounts=v4_lp_open_native_amounts,
             )
 
@@ -4109,6 +4121,7 @@ class StrategyRunner:
         recon: dict[str, Any] | None = None,
         lending_pre_state: Any | None = None,
         v4_lp_close_fees: tuple[int, int] | None = None,
+        v4_lp_close_native_principal: tuple[int | None, int | None] | None = None,
     ) -> "TeardownCommitOutcome":
         """Run the per-intent teardown commit pipeline (VIB-3773 Phase 0).
 
@@ -4134,6 +4147,7 @@ class StrategyRunner:
             recon=recon,
             lending_pre_state=lending_pre_state,
             v4_lp_close_fees=v4_lp_close_fees,
+            v4_lp_close_native_principal=v4_lp_close_native_principal,
         )
 
     # Pre-T4 this function was cc=37; VIB-4164 (T4) extracted the BRIDGE and
@@ -4595,35 +4609,50 @@ class StrategyRunner:
             gateway_client=state.gateway_client,
         )
 
+        # VIB-5117: on the SAME pre-burn boundary, capture the native-leg close
+        # PRINCIPAL for a native-ETH V4 pool. The native leg is withdrawn as raw
+        # ETH (TAKE_PAIR, no Transfer), so the burn receipt leaves
+        # ``LPCloseData.amount{0,1}_collected = None`` (Empty ≠ Zero). Derive the
+        # principal from the pre-burn position state (post-burn = zero liquidity)
+        # and stamp it onto the unmeasured native leg at ledger-build time so the
+        # LP handler records the real proceeds instead of a measured-zero lie that
+        # understates realized PnL by the full native principal. Mirror of the
+        # open-side ``state.v4_lp_open_native_amounts`` (VIB-4483).
+        state.v4_lp_close_native_principal = self._capture_v4_lp_close_native_principal_safe(
+            intent=intent,
+            chain=strategy.chain,
+            gateway_client=state.gateway_client,
+        )
+
     @staticmethod
-    def _capture_v4_lp_close_fees_safe(
+    def _read_v4_close_pre_burn_state(
         *,
         intent: Any,
         chain: str,
         gateway_client: Any | None,
-    ) -> tuple[int, int] | None:
-        """Best-effort PRE-close read of V4 uncollected fees (VIB-4482).
+    ) -> Any | None:
+        """Best-effort PRE-close read of the closing V4 position's live state.
 
-        Reads ``tokens_owed0/tokens_owed1`` for the closing V4 LP position via
-        the connector-owned ``build_v4_position_state_reader`` hook (which routes
-        through the gateway ``QueryV4PositionState`` RPC — boundary-compliant, no
-        new egress). Scoped to ``uniswap_v4`` ``LP_CLOSE`` / ``LP_COLLECT_FEES``
-        intents whose ``position_id`` is a usable NFT tokenId.
+        Shared by the pre-burn fee capture (VIB-4482) and the pre-burn native
+        PRINCIPAL capture (VIB-5117): both derive from the SAME
+        ``QueryV4PositionState`` read — the post-burn read returns zero liquidity,
+        so this MUST run before the burn submits. Routes through the connector-
+        owned ``build_v4_position_state_reader`` hook (gateway ``QueryV4PositionState``
+        RPC — boundary-compliant, no new egress).
 
-        Returns ``(tokens_owed0, tokens_owed1)`` raw ints (PoolKey-currency0/1
-        order — the same order ``LPCloseData.currency0/amount0_collected`` use)
-        on a clean read, or ``None`` when:
+        Scoped to a connector advertising the V4 position-state capability
+        (capability-gate, not a protocol string) on an ``LP_CLOSE`` /
+        ``LP_COLLECT_FEES`` intent whose ``position_id`` is a usable NFT tokenId.
+
+        Returns the connector's ``V4PositionState`` (carrying ``liquidity`` +
+        ``sqrt_price_x96`` + ticks + ``tokens_owed0/1``) on a clean read, or
+        ``None`` when:
           - ``gateway_client`` is missing (local-without-gateway / paper),
           - the intent isn't a V4 LP close (SWAP, lending, V3, …),
           - the close intent has no usable tokenId,
           - the connector reader is unavailable (V4 not deployed on the chain /
             no StateView address),
           - the on-chain read fails / returns partial state.
-
-        Returning ``None`` is the honest "unmeasured" signal (Empty ≠ Zero):
-        the ledger stamp leaves ``fees0/fees1 = None`` and the LP handler keeps
-        the pre-VIB-4482 deferral rather than fabricating a zero. ``Decimal("0")``
-        / ``0`` is only ever written when the gateway *measured* zero owed fees.
 
         The narrow except mirrors ``_capture_lending_state_safe``: the connector
         reader already swallows broad gateway errors internally and returns
@@ -4634,10 +4663,10 @@ class StrategyRunner:
         if gateway_client is None:
             return None
         # Capability-gate, not a protocol-string match (blueprint 22 / scan-coupling):
-        # only attempt the pre-burn fee read when the intent's connector advertises
-        # the V4 position-state capability. Keeps framework code free of hard-coded
-        # protocol names and auto-extends to any future connector providing the same
-        # on-chain reader.
+        # only attempt the read when the intent's connector advertises the V4
+        # position-state capability. Keeps framework code free of hard-coded
+        # protocol names and auto-extends to any future connector providing the
+        # same on-chain reader.
         from almanak.connectors._base.types import ProtocolName
         from almanak.connectors._strategy_base.runner_hook_registry import (
             RunnerV4PositionStateCapability,
@@ -4664,22 +4693,27 @@ class StrategyRunner:
         if token_id is None:
             return None
         try:
-            from almanak.connectors._strategy_runner_hook_registry import (
-                STRATEGY_RUNNER_HOOK_REGISTRY,
-            )
-
             reader = STRATEGY_RUNNER_HOOK_REGISTRY.build_v4_position_state_reader(gateway_client)
             if reader is None:
                 return None
-            state_obj = reader(chain, token_id)
+            return reader(chain, token_id)
         except (ConnectionError, TimeoutError, OSError):
             logger.debug(
-                "V4 LP close pre-fee capture failed (transient/non-fatal) token_id=%s chain=%s",
+                "V4 LP close pre-burn state read failed (transient/non-fatal) token_id=%s chain=%s",
                 token_id,
                 chain,
                 exc_info=True,
             )
             return None
+
+    @staticmethod
+    def _v4_close_fees_from_state(state_obj: Any | None) -> tuple[int, int] | None:
+        """Derive ``(tokens_owed0, tokens_owed1)`` from a pre-burn state (VIB-4482).
+
+        ``None`` (unmeasured, Empty ≠ Zero) when the state is missing or a leg
+        is absent. ``Decimal("0")`` / ``0`` is only returned when the gateway
+        *measured* zero owed fees.
+        """
         if state_obj is None:
             return None
         owed0 = getattr(state_obj, "tokens_owed0", None)
@@ -4694,6 +4728,152 @@ class StrategyRunner:
             return int(owed0), int(owed1)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _capture_v4_lp_close_fees_safe(
+        *,
+        intent: Any,
+        chain: str,
+        gateway_client: Any | None,
+    ) -> tuple[int, int] | None:
+        """Best-effort PRE-close read of V4 uncollected fees (VIB-4482).
+
+        Reads ``tokens_owed0/tokens_owed1`` for the closing V4 LP position via
+        the shared pre-burn ``QueryV4PositionState`` read
+        (:meth:`_read_v4_close_pre_burn_state`). See that method for the gating /
+        ``None`` contract.
+
+        Returns ``(tokens_owed0, tokens_owed1)`` raw ints (PoolKey-currency0/1
+        order — the same order ``LPCloseData.currency0/amount0_collected`` use)
+        on a clean read, ``None`` (honest "unmeasured", Empty ≠ Zero) otherwise.
+        The ledger stamp then leaves ``fees0/fees1 = None`` rather than
+        fabricating a zero; ``0`` is only written when the gateway *measured*
+        zero owed fees.
+        """
+        state_obj = StrategyRunner._read_v4_close_pre_burn_state(
+            intent=intent,
+            chain=chain,
+            gateway_client=gateway_client,
+        )
+        return StrategyRunner._v4_close_fees_from_state(state_obj)
+
+    @staticmethod
+    def _capture_v4_lp_close_native_principal_safe(
+        *,
+        intent: Any,
+        chain: str,
+        gateway_client: Any | None,
+    ) -> tuple[int | None, int | None] | None:
+        """Best-effort PRE-burn read of a V4 LP_CLOSE's native-leg PRINCIPAL (VIB-5117).
+
+        A native-ETH V4 leg (``PoolKey.currency == 0x0``) is returned to the
+        wallet as raw ETH via ``TAKE_PAIR`` — there is NO ERC-20 Transfer, so the
+        burn RECEIPT cannot measure it and the parser honestly leaves that leg's
+        ``amount{0,1}_collected = None`` (Empty ≠ Zero). This derives the
+        principal from the SAME pre-burn ``QueryV4PositionState`` read the fee
+        capture uses (``liquidity`` + ``sqrt_price_x96`` + ticks → the framework's
+        concentrated-liquidity math, ``lp_valuer.get_token_amounts_from_sqrt_price``;
+        no new egress, no new liquidity math) — the exact mirror of the open-side
+        ``_capture_v4_lp_open_native_amounts_safe``. The read MUST be pre-burn: a
+        post-burn read returns zero liquidity → zero principal. Runs on the same
+        pre-execute boundary (and through the same capability-gated reader) as the
+        fee capture.
+
+        The derived ``(amount0, amount1)`` pair is threaded to the ledger stamp,
+        which fills ONLY a leg the V4 parser left ``None`` (the unmeasured native
+        leg) and NEVER clobbers a measured leg. That never-clobber guard — not a
+        pre-read pool-shape gate — is the safety: the V4 parser emits ``None`` for
+        a native currency leg ONLY (an unobserved ERC-20 leg is a measured ``0``),
+        so the derived value lands exactly on native legs. We therefore do not
+        need the close intent's currency legs ahead of the read (the close INTENT
+        does not carry ``protocol_params`` on the teardown / strategy path — only
+        the compiler resolves them, internal to the action bundle), and deriving
+        the principal on every eligible V4 close is harmless: an ERC20-ERC20 close
+        has both legs measured, so the stamp no-ops.
+
+        Returns ``(amount0, amount1)`` raw ints in PoolKey-currency0/1 order (the
+        same order ``LPCloseData.amount0_collected`` uses) on a clean read, or
+        ``None`` when this isn't an eligible V4 LP close, the gateway is missing,
+        or the on-chain read / derivation fails. ``None`` is the honest
+        "unmeasured" signal (Empty ≠ Zero): the ledger stamp leaves the native leg
+        ``None`` rather than fabricating a zero.
+        """
+        if gateway_client is None:
+            return None
+
+        state_obj = StrategyRunner._read_v4_close_pre_burn_state(
+            intent=intent,
+            chain=chain,
+            gateway_client=gateway_client,
+        )
+        if state_obj is None:
+            return None
+
+        liquidity = getattr(state_obj, "liquidity", None)
+        sqrt_price_x96 = getattr(state_obj, "sqrt_price_x96", None)
+        # Ticks are immutable position attributes carried authoritatively by the
+        # live position-state read (``QueryV4PositionState`` returns
+        # ``tick_lower``/``tick_upper``). The pre-burn read happens before the
+        # ``LPCloseData`` exists, so the state read is the sole tick source here.
+        tick_lower = getattr(state_obj, "tick_lower", None)
+        tick_upper = getattr(state_obj, "tick_upper", None)
+        if liquidity is None or sqrt_price_x96 is None or tick_lower is None or tick_upper is None:
+            return None
+
+        # VIB-5117 partial-close correctness: the V4 LP_CLOSE compiler burns the
+        # liquidity the strategy requests via ``protocol_params["liquidity"]`` and
+        # only falls back to the full on-chain position liquidity when none is given
+        # (``uniswap_v4/compiler.py`` — ``liquidity = int(protocol_params.get("liquidity", 0))``
+        # then the ``get_position_liquidity`` fallback). A PARTIAL native close
+        # returns only the requested fraction's principal, so deriving from the full
+        # pre-burn ``state_obj.liquidity`` would OVERSTATE proceeds and realized PnL.
+        # Mirror the compiler: derive against the requested liquidity when present,
+        # capped at the position's full liquidity (a request above the position
+        # reverts on-chain → the close fails → this best-effort stamp never runs, so
+        # the cap only ever protects, never overstates). A full close (teardown, or
+        # no ``liquidity`` param) keeps the full pre-burn read. The requested-value
+        # parse is guarded here; the ``int(liquidity)`` coercion + cap stay INSIDE
+        # the derivation try below so degenerate state still fails closed to None.
+        close_params = getattr(intent, "protocol_params", None) or {}
+        try:
+            requested_liquidity = int(close_params.get("liquidity", 0))
+        except (TypeError, ValueError):
+            requested_liquidity = 0
+
+        # Reuse the framework's concentrated-liquidity math — DO NOT reimplement.
+        from almanak.framework.valuation.lp_valuer import get_token_amounts_from_sqrt_price
+
+        # The derivation AND the int() coercion both run inside this guard: a
+        # best-effort pre-burn hook must never crash the runner. Beyond
+        # ``TypeError`` / ``ValueError`` the math can raise ``ZeroDivisionError``
+        # / ``decimal.InvalidOperation`` on degenerate state; ``amounts`` may be a
+        # malformed/None-bearing object whose ``.amount0`` int() coercion raises
+        # ``AttributeError``. Any failure → unmeasured (Empty ≠ Zero).
+        try:
+            effective_liquidity = int(liquidity)
+            if requested_liquidity > 0:
+                effective_liquidity = min(requested_liquidity, effective_liquidity)
+            amounts = get_token_amounts_from_sqrt_price(
+                liquidity=effective_liquidity,
+                tick_lower=int(tick_lower),
+                tick_upper=int(tick_upper),
+                sqrt_price_x96=int(sqrt_price_x96),
+            )
+            # ``get_token_amounts_from_sqrt_price`` returns raw-wei Decimals in
+            # PoolKey (currency0 < currency1) order — exactly the order the V4
+            # parser stamps amount0_collected/amount1_collected. Floor to int to
+            # match the raw-int field type; the small sub-wei truncation is
+            # immaterial against the parser's exact ERC-20 leg.
+            amount0 = int(amounts.amount0)
+            amount1 = int(amounts.amount1)
+        except Exception:
+            logger.debug(
+                "V4 LP close native-principal derivation failed (non-fatal) chain=%s",
+                chain,
+                exc_info=True,
+            )
+            return None
+        return amount0, amount1
 
     @staticmethod
     def _native_v4_open_eligible(intent: Any, result: Any) -> tuple[Any, int] | None:
@@ -5690,6 +5870,7 @@ class StrategyRunner:
             pre_state=pre_state,
             post_state=post_state,
             v4_lp_close_fees=state.v4_lp_close_fees,
+            v4_lp_close_native_principal=state.v4_lp_close_native_principal,
             v4_lp_open_native_amounts=v4_lp_open_native_amounts,
         )
         # VIB-4043 / PR4: emit the UX timeline breadcrumb now, threading the
