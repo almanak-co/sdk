@@ -58,6 +58,7 @@ from almanak.framework.backtesting.pnl.metrics_calculator import (
     calculate_volatility,
 )
 from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+from almanak.framework.backtesting.pnl.position_models import PositionType, SimulatedPosition
 from almanak.framework.intents.lending_intents import (
     BorrowIntent,
     RepayIntent,
@@ -509,6 +510,152 @@ def test_lp_open_beyond_cash_is_rejected() -> None:
     assert "insufficient" in trade.metadata.get("failure_reason", "")
     assert result.final_capital_usd == INITIAL_CAPITAL
     assert all(point.value_usd == INITIAL_CAPITAL for point in result.equity_curve)
+
+
+def _accrue_one_day_of_fees(
+    pool_tvl_usd: Decimal,
+    *,
+    volume_usd: Decimal,
+) -> tuple[Decimal, Decimal, Decimal]:
+    """Open a ~$5k LP position in a pool of the given TVL, accrue one day of
+    fees at flat prices through the REAL adapter, and return
+    ``(position_value_used, accrued_fee_usd, effective_fee_tier)``.
+
+    Explicit volume + explicit liquidity make fee accrual a deterministic,
+    network-free closed form: ``fees = volume * fee_tier * (value / TVL) * days``
+    with HIGH-confidence ``explicit_volume`` (no APR averaging). The fee tier is
+    read back from the position the adapter actually built (``position.fee_tier``)
+    rather than assumed, so the closed-form check stays exact even if the
+    intent's default tier changes.
+    """
+    adapter = LPBacktestAdapter(
+        config=LPBacktestConfig(
+            strategy_type="lp",
+            fee_tracking_enabled=True,
+            explicit_pool_volume_usd_daily=volume_usd,
+            explicit_pool_liquidity_usd=pool_tvl_usd,
+        )
+    )
+    portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CAPITAL)
+
+    open_state = _market_state(0)
+    fill = adapter.execute_intent(_lp_open_intent(), portfolio, open_state)
+    assert fill is not None and fill.success
+    assert portfolio.apply_fill(fill, market_state=open_state)
+    position = portfolio.positions[0]
+
+    # Flat-price update one tick later. value_position() here (before any
+    # accrual, so accumulated_fees == 0) is byte-identical to the
+    # position_value _calculate_fee_accrual will divide by: both run the same
+    # calculate_il_v3 with the same inputs.
+    update_state = _market_state(1)
+    position_value = adapter.value_position(position, update_state)
+    fees_before = position.accumulated_fees_usd
+    adapter.update_position(position, update_state, float(TICK_SECONDS) * 24, update_state.timestamp)
+    return position_value, position.accumulated_fees_usd - fees_before, position.fee_tier
+
+
+#: base_liquidity reference TVL hardcoded in SimulatedPortfolio._simulate_lp_fee_accrual.
+_GENERIC_LANE_REF_TVL = Decimal("1000000")
+
+
+def _accrue_generic_lane_lp_fee(position_value_usd: Decimal, *, fee_tier: Decimal) -> Decimal:
+    """Accrue one day of LP fees through the generic/fallback portfolio lane.
+
+    Drives ``SimulatedPortfolio._simulate_lp_fee_accrual`` directly - the path
+    ``_mark_lp_position`` takes when no adapter is wired or adapter valuation
+    raises. This lane carries its own copy of the liquidity-share model with a
+    fixed ``$1M`` reference TVL (``_GENERIC_LANE_REF_TVL``), so it had the same
+    10% floor as the adapter path and is fixed in lockstep.
+    """
+    portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CAPITAL)
+    position = SimulatedPosition(
+        position_type=PositionType.LP,
+        protocol="uniswap_v3",
+        tokens=["WETH", "USDC"],
+        amounts={"WETH": Decimal("1.25"), "USDC": Decimal("2500")},
+        entry_price=Decimal("2000"),
+        entry_time=START,
+        tick_lower=-887272,
+        tick_upper=887272,
+        liquidity=Decimal("1"),
+        fee_tier=fee_tier,
+    )
+    # last_updated is None -> elapsed measured from entry_time == one day.
+    return portfolio._simulate_lp_fee_accrual(position, position_value_usd, START + timedelta(days=1))
+
+
+@pytest.mark.trust_cell("lp:fee_share_scaling")
+def test_lp_fee_accrual_scales_with_liquidity_share() -> None:
+    """LP fee accrual must scale with the REAL share of pool liquidity.
+
+    The removed ``max(Decimal("0.1"), liquidity_share)`` floor (epic VIB-5079;
+    blocked the VIB-5130 v1 flag removal) credited any sub-10% position - i.e.
+    essentially every realistic position - with 10% of the ENTIRE pool's fee
+    revenue, minting value on every LP fee backtest. The SAME floor lived in
+    BOTH fee-accrual paths, so this cell pins both:
+
+    - **Adapter lane** (``LPBacktestAdapter._calculate_fee_accrual``):
+      1. **Closed form**: accrued fee == volume * fee_tier * (position_value /
+         pool_TVL) * days, Decimal-exact. For a ~$5k position in a $20M pool
+         that is ~$3.75/day, not the floored ~$1,500/day (~400x overstatement).
+      2. **Inverse scaling**: 10x-ing pool TVL divides the fee by exactly 10.
+         Under the floor both runs clamp to 10% and the ratio collapses to 1.0 -
+         the exact symptom the bug report reproduced by 10x-ing
+         ``--pool-liquidity-usd`` and observing identical accrual.
+    - **Generic / fallback lane** (``SimulatedPortfolio._simulate_lp_fee_accrual``,
+      used by ``_mark_lp_position`` when no adapter is wired or adapter
+      valuation raises): closed-form check that a ~$5k position against the
+      lane's fixed $1M reference TVL accrues at its true ~0.5% share, not the
+      floored 10% (~20x on the volume term).
+    """
+    volume_usd = Decimal("5000000")  # $5M daily pool volume
+    days_elapsed = Decimal("1")
+    pool_small = Decimal("20000000")  # $20M TVL -> ~0.025% share for a $5k position
+    pool_large = pool_small * 10  # $200M TVL
+
+    value_small, fee_small, fee_tier = _accrue_one_day_of_fees(pool_small, volume_usd=volume_usd)
+    value_large, fee_large, _ = _accrue_one_day_of_fees(pool_large, volume_usd=volume_usd)
+
+    # (1) Closed form on the small pool: fees track the TRUE liquidity share.
+    # fee_tier is the tier the adapter actually accrued at (read off the
+    # position), so this stays exact regardless of the intent's default tier.
+    expected_small = volume_usd * fee_tier * (value_small / pool_small) * days_elapsed
+    # Numeric dust bound only (Decimal division round-trip), never economic tolerance.
+    assert abs(fee_small - expected_small) <= expected_small * Decimal("1e-9")
+
+    # The true share (~0.025%) is far below the old 10% floor, so the floored
+    # fee would have been hundreds of times larger. Pin the accrual well under it.
+    floored_fee = volume_usd * fee_tier * Decimal("0.1") * days_elapsed
+    assert fee_small < floored_fee / 100  # ~$3.75 vs the floored ~$1,500
+
+    # (2) Inverse scaling: identical $5k position, 10x the TVL -> exactly 1/10
+    # the fee. The floor would clamp BOTH runs to the 10% share, collapsing
+    # this ratio to 1.0 (the bug report's root-cause confirmation).
+    assert value_large == value_small  # same intent, same flat prices
+    expected_large = fee_small / 10
+    assert abs(fee_large - expected_large) <= expected_large * Decimal("1e-9")
+
+    # (3) Generic / fallback lane: _simulate_lp_fee_accrual must scale with the
+    # real share too. A $5k position is ~0.5% of the lane's fixed $1M reference
+    # TVL - far below the old 10% floor. The lane's 0.3%-tier branch uses
+    # volume_multiplier=10 and base_apr=0.25, and averages volume- and APR-based
+    # fees, so the no-floor closed form for one day is exact.
+    generic_fee_tier = Decimal("0.003")  # 0.3% tier -> multiplier 10, apr 0.25
+    pos_value = Decimal("5000")
+    generic_fee = _accrue_generic_lane_lp_fee(pos_value, fee_tier=generic_fee_tier)
+
+    real_share = pos_value / _GENERIC_LANE_REF_TVL  # min(1, ...) is a no-op here
+    volume_based = pos_value * Decimal("10") * generic_fee_tier * real_share * days_elapsed
+    apr_based = pos_value * (Decimal("0.25") / Decimal("365")) * days_elapsed
+    generic_expected = (volume_based + apr_based) / Decimal("2")
+    assert abs(generic_fee - generic_expected) <= generic_expected * Decimal("1e-9")
+
+    # Under the old floor the share would clamp from ~0.5% to 10% (~20x on the
+    # volume term), materially inflating the total. Pin it below the floored value.
+    floored_volume = pos_value * Decimal("10") * generic_fee_tier * Decimal("0.1") * days_elapsed
+    floored_total = (floored_volume + apr_based) / Decimal("2")
+    assert generic_fee < floored_total
 
 
 # =============================================================================

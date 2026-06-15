@@ -66,6 +66,7 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "rejection_no_state_change",
     "cost_accounting",
     "yield_tie_out",
+    "fee_share_scaling",
     "trade_pnl_attribution",
     "math_il_closed_form",
     "math_sharpe",
@@ -193,6 +194,19 @@ CELLS: tuple[TrustCell, ...] = (
         "math_il_closed_form",
         "lp",
         "Full-range IL for a 50% price move is ~2.02% per the V2 closed form (trust protocol Phase 2.1).",
+    ),
+    _cell(
+        "fee_share_scaling",
+        "lp",
+        "LP fee accrual scales with the REAL share of pool liquidity in BOTH "
+        "lanes: the adapter path (closed form + 10x-TVL inverse scaling) and "
+        "the generic/fallback path (_simulate_lp_fee_accrual closed form).",
+        # Guards the removed max(0.1, liquidity_share) floor (epic VIB-5079;
+        # blocked the VIB-5130 flag removal). The floor lived in THREE places -
+        # adapter _calculate_fee_accrual, adapter _estimate_heuristic_fees, and
+        # SimulatedPortfolio._simulate_lp_fee_accrual (the generic/fallback lane,
+        # caught in PR review) - each crediting any sub-10% position with 10% of
+        # the ENTIRE pool's fees, minting value on essentially every LP backtest.
     ),
     # --- lending column ---
     _cell(

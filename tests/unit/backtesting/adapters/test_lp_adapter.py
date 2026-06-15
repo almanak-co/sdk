@@ -2148,6 +2148,44 @@ class TestVolumePolicyViaDataConfig:
 
         assert adapter._explicit_pool_liquidity_usd() == Decimal("999")
 
+    def test_estimate_heuristic_fees_honors_data_config_liquidity(self) -> None:
+        """The heuristic-validation path uses the same TVL source as accrual.
+
+        Regression for the VIB-5079 review: _estimate_heuristic_fees read pool
+        TVL straight off self._config, ignoring data_config precedence, so
+        validate_heuristics could score against a different liquidity-share
+        model than the fees the engine actually accrues at runtime.
+        """
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        sample = HeuristicValidationSample(
+            position_value_usd=Decimal("10000"),
+            liquidity=Decimal("1000000"),
+            fee_tier=Decimal("0.003"),
+            elapsed_seconds=86400,
+            observed_fees_usd=Decimal("0"),
+            label="data-config-tvl",
+        )
+
+        # data_config TVL ($5M) must win over the adapter-config TVL ($1k)...
+        via_data_config = LPBacktestAdapter(
+            config=LPBacktestConfig(strategy_type="lp", explicit_pool_liquidity_usd=Decimal("1000")),
+            data_config=BacktestDataConfig(explicit_pool_liquidity_usd=Decimal("5000000")),
+        )._estimate_heuristic_fees(sample)
+
+        # ...so the estimate equals a config-only adapter using that same $5M TVL...
+        via_config_only = LPBacktestAdapter(
+            config=LPBacktestConfig(strategy_type="lp", explicit_pool_liquidity_usd=Decimal("5000000")),
+        )._estimate_heuristic_fees(sample)
+
+        # ...and differs from one that (wrongly) used the ignored $1k config TVL.
+        via_small_tvl = LPBacktestAdapter(
+            config=LPBacktestConfig(strategy_type="lp", explicit_pool_liquidity_usd=Decimal("1000")),
+        )._estimate_heuristic_fees(sample)
+
+        assert via_data_config == via_config_only
+        assert via_data_config != via_small_tvl
+
 
 # =============================================================================
 # Historical volume helper decomposition

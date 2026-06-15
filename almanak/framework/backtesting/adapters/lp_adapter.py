@@ -2133,11 +2133,25 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         explicit_pool_liquidity = self._explicit_pool_liquidity_usd()
         pool_liquidity = explicit_pool_liquidity if explicit_pool_liquidity is not None else self._config.base_liquidity
         if pool_liquidity > 0:
+            # Real share of pool TVL. There is deliberately NO floor here: a
+            # position that is 0.1% of the pool earns 0.1% of pool fees, not
+            # 10%. The removed ``max(Decimal("0.1"), liquidity_share)`` floor
+            # was a value-minting / conservation-class defect (epic VIB-5079;
+            # blocks the v1 flag removal VIB-5130): it credited ANY sub-10%
+            # position -- i.e. essentially every realistic position -- with
+            # 10% of the ENTIRE pool's fee revenue, making LP fee backtests
+            # optimistic by one to three orders of magnitude. Conservation
+            # spec: blueprint 31 §4.3 (fee attribution must scale with the
+            # real liquidity share); guarded by the lp:fee_share_scaling
+            # Trust Matrix cell.
             liquidity_share = min(Decimal("1"), position_value_usd / pool_liquidity)
         else:
+            # Pool TVL genuinely unknown (non-positive denominator, only
+            # reachable through a misconfigured base_liquidity). Fall back to a
+            # neutral 0.5 share rather than fabricating a precise number. This
+            # is the unknown-liquidity fallback, NOT a floor applied to a
+            # known-small share.
             liquidity_share = Decimal("0.5")
-        # Ensure minimum share of 10% for small positions
-        liquidity_share = max(Decimal("0.1"), liquidity_share)
 
         # Determine base APR based on fee tier (used as fallback)
         fee_tier_pct = position.fee_tier * Decimal("100")  # Convert to percentage
@@ -2305,17 +2319,21 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         days_elapsed = Decimal(str(sample.elapsed_seconds)) / Decimal("86400")
 
         # Liquidity share, mirroring _calculate_fee_accrual (USD value over
-        # USD pool TVL — VIB-5096).
-        pool_liquidity = (
-            self._config.explicit_pool_liquidity_usd
-            if self._config.explicit_pool_liquidity_usd is not None
-            else self._config.base_liquidity
-        )
+        # USD pool TVL — VIB-5096). Use the same _explicit_pool_liquidity_usd()
+        # accessor as the runtime accrual path so data_config precedence is
+        # honored: otherwise validate_heuristics would score against a
+        # different share model than the fees the engine actually accrues.
+        explicit_pool_liquidity = self._explicit_pool_liquidity_usd()
+        pool_liquidity = explicit_pool_liquidity if explicit_pool_liquidity is not None else self._config.base_liquidity
         if pool_liquidity > 0:
+            # Real share, no floor -- mirrors _calculate_fee_accrual. The 10%
+            # floor removed here was the same value-minting defect (epic
+            # VIB-5079; blocks VIB-5130): it over-credited small positions in
+            # the heuristic-validation path too, so validate_heuristics would
+            # have masked the accrual bug instead of flagging it.
             liquidity_share = min(Decimal("1"), sample.position_value_usd / pool_liquidity)
         else:
             liquidity_share = Decimal("0.5")
-        liquidity_share = max(Decimal("0.1"), liquidity_share)
 
         multiplier = self._get_volume_fallback_multiplier()
         estimated_daily_volume = sample.position_value_usd * multiplier

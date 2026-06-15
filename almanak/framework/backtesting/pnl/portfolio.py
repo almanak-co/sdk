@@ -2506,10 +2506,20 @@ class SimulatedPortfolio:
         # where base_liquidity is a reference pool TVL in USD (e.g., $1M).
         # The numerator must be the position's USD value — position.liquidity
         # holds V3 L-units (VIB-5096), not a USD figure.
+        #
+        # There is deliberately NO floor on the share. The removed
+        # ``max(Decimal("0.1"), liquidity_share)`` was the SAME value-minting
+        # defect fixed in the adapter path (epic VIB-5079; blocks VIB-5130):
+        # it credited any position below 10% of the $1M reference TVL — i.e.
+        # essentially every realistic position — with at least 10% of pool fee
+        # revenue (a ~$5k position marked through this generic/fallback lane saw
+        # its true ~0.5% share clamped to 10%, a ~20x overstatement). With
+        # base_liquidity fixed at $1M and position_value_usd > 0 guaranteed
+        # above, the share is always well-defined in (0, 1] — no fallback
+        # needed. Guarded by the lp:fee_share_scaling Trust Matrix cell
+        # (generic-lane arm).
         base_liquidity = Decimal("1000000")
         liquidity_share = min(Decimal("1"), position_value_usd / base_liquidity)
-        # Ensure minimum share of 10% for small positions
-        liquidity_share = max(Decimal("0.1"), liquidity_share)
 
         # Estimate daily trading volume as a multiple of position value
         # Volume multiplier varies by fee tier (lower tiers = higher volume pools)
