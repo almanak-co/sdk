@@ -349,6 +349,35 @@ class TestBuildMarketAndOracle:
         assert "Could not get market prices" in output
         assert "using placeholders" in output
 
+    def test_cli_market_serves_position_health_for_chain(self):
+        """VIB-5139 P2: the market the CLI teardown lane builds must serve
+        chain-scoped ``position_health`` — otherwise CLI lending teardown would
+        silently degrade (every lending position reads unmeasured) and the
+        fresh-state guard could never drop a stale REPAY 0 / withdraw_all.
+
+        Exercises the REAL ``build_market_and_oracle(strategy)`` path with a
+        strategy whose ``create_market_snapshot`` uses the sanctioned
+        ``MarketSnapshotBuilder`` factory (VIB-4062 §5.7 forbids constructing
+        ``MarketSnapshot`` directly outside the allow-list). Confirms the
+        resulting snapshot exposes a callable ``position_health`` and reports its
+        pinned chain, which the guard's chain-scoping
+        (``_intent_chain_matches_snapshot``) requires.
+        """
+        from almanak.framework.market.builders import MarketSnapshotBuilder
+
+        class _Strategy:
+            chain = "arbitrum"
+
+            def create_market_snapshot(self) -> object:
+                return MarketSnapshotBuilder.for_strategy_runner(strategy=self, chain="arbitrum")
+
+        m, _oracle = th.build_market_and_oracle(strategy=_Strategy())
+
+        assert m is not None
+        assert callable(getattr(m, "position_health", None))
+        # The guard reads ``market.chain`` to decide whether a read is trustworthy.
+        assert m.chain == "arbitrum"
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # generate_teardown_intents_for_cli

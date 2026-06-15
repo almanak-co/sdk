@@ -779,6 +779,17 @@ class TeardownManager:
                     intents = strategy.generate_teardown_intents(state.mode)
                 else:
                     raise
+            # VIB-5139: the regenerated plan is freshly hand-rolled lending intents
+            # that have NOT passed the runner/CLI fresh-state guard, so sanitise it
+            # here too (drop stale REPAY 0 / withdraw_all-when-flat, preserve any
+            # interleaved staircase order). Pure list transform — execution still
+            # routes through _execute_intents with the commit pairing intact.
+            from .lending_unwind_guard import sanitize_lending_teardown_intents
+
+            guarded = sanitize_lending_teardown_intents(intents, market)
+            for reason in guarded.dropped:
+                logger.info("Teardown resume lending guard dropped intent — %s", reason)
+            intents = guarded.intents
             state.pending_intents_json = json.dumps([_serialize_intent_for_state(i) for i in intents])
             state.current_intent_index = 0
             # Codex re-audit P1: the freshly generated plan is a brand-new

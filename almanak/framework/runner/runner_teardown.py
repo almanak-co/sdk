@@ -545,6 +545,45 @@ def _safe_mark(state_manager: Any, method_name: str, deployment_id: str, **kwarg
 # -------------------------------------------------------------------------
 
 
+def _apply_lending_unwind_guard(teardown_intents: list, teardown_market: Any, deployment_id: str) -> list:
+    """Sanitise strategy-emitted lending teardown intents against fresh state.
+
+    Wraps the pure ``sanitize_lending_teardown_intents`` guard (VIB-5139) and
+    logs any dropped / reordered / degraded outcome. Returns the guarded intent
+    list. A guard failure must never block teardown (its first job is removing
+    on-chain risk), so any unexpected error falls back to the original intents
+    with a loud WARNING.
+    """
+    from ..teardown.lending_unwind_guard import sanitize_lending_teardown_intents
+
+    try:
+        guarded = sanitize_lending_teardown_intents(teardown_intents, teardown_market)
+    except Exception as e:  # pragma: no cover - defensive; guard is pure
+        logger.warning(
+            "Lending fresh-state guard errored for %s (%s); using original intents",
+            deployment_id,
+            e,
+            exc_info=True,
+        )
+        return teardown_intents
+
+    for reason in guarded.dropped:
+        logger.info("🛑 %s lending guard dropped intent — %s", deployment_id, reason)
+    if guarded.no_op_positions:
+        logger.info(
+            "🛑 %s lending guard: positions already flat (no debt, no collateral): %s",
+            deployment_id,
+            ", ".join(guarded.no_op_positions),
+        )
+    if guarded.degraded:
+        logger.warning(
+            "🛑 %s lending guard degraded: a fresh exposure read was unmeasured — "
+            "kept risk-reducing intents only, suppressed any unconfirmed withdraw_all (VIB-5139)",
+            deployment_id,
+        )
+    return guarded.intents
+
+
 # crap-allowlist: VIB-4049 — pre-existing cc=21 teardown coordinator; PR touches a single line (``_lifecycle_write_state("TEARING_DOWN")``), zero new branches.
 # Function is the canonical sequencer (market snapshot → intents → routing → manager/inline/fallback);
 # decomposing it requires the four-step SDK crap-refactor protocol (blueprint 14 + Plan agent +
@@ -634,6 +673,19 @@ async def execute_teardown(  # noqa: C901
     # completion-mark sites below / in execute_teardown_via_manager.
     runner._teardown_recovery_incomplete = recovery_incomplete
     runner._teardown_recovery_warning = recovery_warning
+
+    # Step T2.5 (VIB-5139): universal fresh-state guard for lending unwind.
+    # Strategies hand-roll REPAY/WITHDRAW teardown intents from cached exposure;
+    # stale state emits a REPAY 0, a withdraw_all when already flat, or a
+    # collateral withdraw before the debt repay — all of which revert
+    # (e.g. Aave HealthFactorLowerThanLiquidationThreshold) and strand the
+    # position. The guard does a FRESH on-chain exposure read (gateway-backed
+    # ``market.position_health``) and drops measured-zero actions, enforces
+    # repay-first, and degrades conservatively on an unmeasured read (Empty ≠
+    # Zero — never acts on a None as if it were zero). Pure list transform: the
+    # sanitised intents flow through the same dispatch funnel, so the per-intent
+    # commit pairing / anti-bypass guards are untouched.
+    teardown_intents = _apply_lending_unwind_guard(teardown_intents, teardown_market, deployment_id)
 
     if not teardown_intents:
         if recovery_incomplete:
