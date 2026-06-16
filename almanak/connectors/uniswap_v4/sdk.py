@@ -969,16 +969,44 @@ class UniswapV4SDK:
         # Encode SETTLE_PAIR params: abi.encode(currency0, currency1)
         settle_params = _pad_address(params.pool_key.currency0) + _pad_address(params.pool_key.currency1)
 
-        # Build modifyLiquidities calldata
-        actions = bytes([PM_MINT_POSITION, PM_SETTLE_PAIR])
-        calldata = _encode_modify_liquidities(actions, [mint_params, settle_params], deadline)
+        action_list = [PM_MINT_POSITION, PM_SETTLE_PAIR]
+        params_list = [mint_params, settle_params]
 
-        # Native ETH: when one currency is address(0), send native value
+        # Native ETH (VIB-5145): when a currency is address(0) the full
+        # ``amount*_max`` is pre-sent as ``msg.value`` — native cannot be pulled
+        # via Permit2 the way an ERC-20 SETTLE_PAIR pulls exactly ``settled``. The
+        # MINT settles only what the minted ``liquidity`` requires (sized from the
+        # slippage-discounted budget, VIB-2180), so the unspent remainder
+        # (``amount*_max − settled``) is left in the PositionManager. A SWEEP action
+        # refunds that remainder to the owner; WITHOUT it the native ETH is
+        # stranded — a fund leak that scales with the slippage buffer and is worst
+        # for single-sided / out-of-range native mints (the whole buffer goes
+        # unspent). ERC-20-only pools need no SWEEP (nothing is ever over-sent), so
+        # their action set stays exactly [MINT_POSITION, SETTLE_PAIR].
+        # V4 ``Actions.SWEEP`` params = abi.encode(Currency currency, address to);
+        # it sweeps the router's full balance of ``currency`` to ``to``.
         native_value = 0
+        native_currency: str | None = None
         if params.pool_key.currency0 == NATIVE_CURRENCY:
             native_value = params.amount0_max
+            native_currency = params.pool_key.currency0
         elif params.pool_key.currency1 == NATIVE_CURRENCY:
             native_value = params.amount1_max
+            native_currency = params.pool_key.currency1
+        # Only SWEEP when native ETH is actually pre-sent as ``msg.value``
+        # (``native_value > 0``). A native pool whose native leg is 0 — e.g. a
+        # single-sided out-of-range mint that deposits only the ERC-20 leg —
+        # over-sends nothing, so a SWEEP would be a redundant 0-ETH action that
+        # just wastes gas. ERC-20-only pools (``native_currency is None``) never
+        # over-send either, so their action set stays exactly
+        # [MINT_POSITION, SETTLE_PAIR].
+        if native_value > 0 and native_currency is not None:
+            action_list.append(PM_SWEEP)
+            params_list.append(_pad_address(native_currency) + _pad_address(params.owner))
+
+        # Build modifyLiquidities calldata (SWEEP appended above for native pools)
+        actions = bytes(action_list)
+        calldata = _encode_modify_liquidities(actions, params_list, deadline)
 
         return SwapTransaction(
             to=position_manager,

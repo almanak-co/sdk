@@ -1548,7 +1548,10 @@ class TestHandleLpCostBasisUsd:
         assert result is not None
         assert result.cost_basis_usd is None
         assert result.unavailable_reason is not None
-        assert "no resolvable amount legs" in result.unavailable_reason
+        # VIB-5131: empty/None amounts are now reported as unmeasured legs
+        # (Empty≠Zero) rather than the older generic "no resolvable amount legs"
+        # catch-all. The core contract (cost_basis_usd is None) is unchanged.
+        assert "unmeasured amount leg" in result.unavailable_reason
 
     def test_lp_open_with_invalid_price_returns_none_and_reason(self) -> None:
         """``price_inputs_json`` carries a non-numeric string → fail-closed

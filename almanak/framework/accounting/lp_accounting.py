@@ -358,8 +358,9 @@ def compute_lp_cost_basis(
     """Compute LP entry cost basis as amount0*price0 + amount1*price1.
 
     Returns None when price_oracle is unavailable, a *non-zero* amount lacks a
-    price, or both amounts are None (no legs contributed — not a concrete zero
-    basis). price_oracle keys are uppercase token symbols (e.g. "WETH", "USDC").
+    price, or *any* leg amount is None (an unmeasured leg — Empty≠Zero, VIB-5131:
+    a partial one-legged total would understate the basis). price_oracle keys are
+    uppercase token symbols (e.g. "WETH", "USDC").
 
     VIB-5124 — Empty≠Zero: a leg with a *measured-zero* amount (``Decimal("0")``)
     contributes exactly ``$0`` to the basis regardless of whether its price is
@@ -383,7 +384,17 @@ def compute_lp_cost_basis(
     # function fail-closed (returns None) instead of raising AttributeError.
     for amt, sym in ((amount0, (token0 or "").upper()), (amount1, (token1 or "").upper())):
         if amt is None:
-            continue
+            # VIB-5131 — Empty≠Zero: an UNMEASURED leg (None) is not a concrete
+            # zero. Skipping it and returning the other leg's value would emit a
+            # one-legged partial total that silently understates the basis (e.g.
+            # a native-ETH V4 leg the parser left None and the runner stamp could
+            # not fill on a read failure). Fail closed → None so the consumer
+            # degrades confidence to ESTIMATED with an explicit reason instead of
+            # publishing a precise-looking but incomplete USD number. Type-distinct
+            # from a *measured-zero* leg (``Decimal("0")``, the single-sided
+            # VIB-5124 case handled below), which legitimately contributes $0 and
+            # must NOT void the basis.
+            return None
         price = price_oracle.get(sym)
         # VIB-5124 — a measured-zero leg contributes exactly $0. When its price is
         # AVAILABLE it still counts as a measured leg (0·price == 0; ``has_any``

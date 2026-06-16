@@ -222,13 +222,20 @@ class AnvilEthCallAdapter:
         * ``PositionManager.getPositionLiquidity(uint256)`` (selector
           ``0x1efeed33``) → ``liquidity``.
 
-        Returns a :class:`V4PositionState` carrying those live fields. ``ticks``
-        and ``tokens_owed`` are left at their dataclass defaults — the VIB-4483
-        native-amount capture sources the immutable position ticks from the mint
-        receipt's ``LPOpenData`` (authoritative at mint), and only needs the live
-        ``liquidity`` + ``sqrt_price_x96`` from this read. Returns ``None`` on any
-        missing/failed read so the capture leaves the native leg unmeasured
-        (Empty ≠ Zero), never fabricating a zero.
+        Returns a :class:`V4PositionState` carrying those live fields, including
+        the position's REAL ``tick_lower`` / ``tick_upper`` decoded from
+        ``PositionManager.getPoolAndPositionInfo(tokenId)`` (selector ``0x7ba03aad``)
+        — the SAME read + decoder the production gateway uses
+        (``rpc_service._decode_v4_pool_and_position_info``). The VIB-4483 OPEN
+        capture sources ticks from the mint receipt's ``LPOpenData`` so it would
+        tolerate placeholders, but the VIB-5117 CLOSE native-PRINCIPAL capture
+        derives amounts from the position's tick RANGE off this state read alone
+        (the pre-burn read predates ``LPCloseData``). A degenerate
+        ``tick_lower == tick_upper`` placeholder would collapse the native
+        principal to a measured ``0`` (silent understatement); the real bounds keep
+        the derived proceeds exact. Returns ``None`` on any missing/failed read so
+        the capture leaves the native leg unmeasured (Empty ≠ Zero), never
+        fabricating a zero.
 
         The PoolKey for ``getSlot0`` is reconstructed from the V4 LP pool this
         suite exercises — see ``v4_pool_key`` below; tests that use a different
@@ -268,10 +275,30 @@ class AnvilEthCallAdapter:
         except (TypeError, ValueError):
             return None
 
+        # getPoolAndPositionInfo(uint256) selector 0x7ba03aad → decode the
+        # position's REAL tick_lower/tick_upper. Reuse the production gateway's
+        # packed-PositionInfo decoder so the int24 bit layout is single-sourced
+        # (never duplicated/drifting). The VIB-5117 close native-principal capture
+        # derives proceeds from this tick RANGE, so a degenerate placeholder range
+        # would silently zero the native leg. Fail closed (None) on a missing/
+        # malformed read rather than fall back to a degenerate range.
+        from almanak.gateway.services.rpc_service import _decode_v4_pool_and_position_info
+
+        try:
+            info_hex = self.eth_call(chain, position_manager, "0x7ba03aad" + format(int(token_id), "064x"))
+        except Exception:
+            return None
+        if not info_hex:
+            return None
+        try:
+            _pool_key_words, tick_lower, tick_upper, _pool_id = _decode_v4_pool_and_position_info(info_hex)
+        except (ValueError, TypeError):
+            return None
+
         return V4PositionState(
             liquidity=liquidity,
-            tick_lower=pool_state.tick,  # placeholder; capture prefers receipt ticks
-            tick_upper=pool_state.tick,  # placeholder; capture prefers receipt ticks
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
             current_tick=pool_state.tick,
             sqrt_price_x96=pool_state.sqrt_price_x96,
             pool_id="",
@@ -404,6 +431,40 @@ def _capture_v4_lp_open_native_for_intent_test(
     )
 
 
+def capture_v4_lp_close_native_principal(
+    *,
+    intent: Any,
+    chain: str,
+    eth_call_reader: Any | None,
+) -> tuple[int | None, int | None] | None:
+    """Layer-5 mirror of the runner's VIB-5117 PRE-burn native-principal capture.
+
+    The native-ETH leg of a V4 close is returned via ``TAKE_PAIR`` (no ERC-20
+    Transfer), so the burn receipt leaves ``LPCloseData.amount{0,1}_collected =
+    None`` (Empty ≠ Zero) and the runner fills it from a PRE-burn
+    ``QueryV4PositionState`` read. This delegates to the SAME
+    ``StrategyRunner._capture_v4_lp_close_native_principal_safe`` static method the
+    production runner uses (no logic duplication), passing the test eth_call
+    adapter as the ``gateway_client``.
+
+    **Tests MUST call this BEFORE executing the close** — a post-burn read returns
+    zero liquidity → zero principal. The captured pair is then threaded into
+    :func:`assert_accounting_persisted` via ``v4_lp_close_native_principal`` so the
+    Layer-5 LP_CLOSE row carries the real native proceeds (exact realized PnL
+    instead of a fail-closed ``None`` under VIB-5131). ``None`` (gateway-less
+    harness / non-native / failed read) leaves the native leg unmeasured.
+    """
+    if eth_call_reader is None:
+        return None
+    from almanak.framework.runner.strategy_runner import StrategyRunner
+
+    return StrategyRunner._capture_v4_lp_close_native_principal_safe(
+        intent=intent,
+        chain=chain,
+        gateway_client=eth_call_reader,
+    )
+
+
 def _maybe_enrich_with_slot0(result: Any, *, chain: str, eth_call_reader: Any | None) -> None:
     if eth_call_reader is None:
         return
@@ -448,6 +509,8 @@ async def _persist_and_drain_for_intent_test(
     pre_state: dict[str, Any] | None = None,
     post_state: dict[str, Any] | None = None,
     resolved_pool: str | None = None,
+    v4_lp_close_native_principal: tuple[int | None, int | None] | None = None,
+    lp_close_native_amounts: tuple[int | None, int | None] | None = None,
 ) -> Layer5Persisted:
     """Persist one real intent result through the production outbox path.
 
@@ -478,6 +541,15 @@ async def _persist_and_drain_for_intent_test(
         eth_call_reader=eth_call_reader,
     )
 
+    # VIB-5117 / VIB-5121 — close-side native-leg principal. Unlike the OPEN
+    # capture above (a post-mint read the harness performs itself), the V4 close
+    # principal MUST be read PRE-burn, so the test captures it before executing
+    # the close (``capture_v4_lp_close_native_principal``) and passes it in. The
+    # ``lp_close_native_amounts`` twin carries the Fluid/fungible balance-bracket
+    # close. Both mirror the runner's ``build_ledger_entry`` close-stamp wiring so
+    # the Layer-5 native LP_CLOSE row records the real proceeds (exact realized
+    # PnL) instead of a VIB-5131 fail-closed ``None``.
+
     entry = build_ledger_entry(
         deployment_id=deployment_id,
         cycle_id=cycle_id,
@@ -490,6 +562,8 @@ async def _persist_and_drain_for_intent_test(
         pre_state=pre_state,
         post_state=post_state,
         lp_open_native_amounts=v4_lp_open_native_amounts,
+        v4_lp_close_native_principal=v4_lp_close_native_principal,
+        lp_close_native_amounts=lp_close_native_amounts,
     )
     entry.execution_mode = execution_mode
     await _maybe_await(state_manager.save_ledger_entry(entry))
@@ -534,6 +608,8 @@ async def assert_accounting_persisted(
     pre_state: dict[str, Any] | None = None,
     post_state: dict[str, Any] | None = None,
     resolved_pool: str | None = None,
+    v4_lp_close_native_principal: tuple[int | None, int | None] | None = None,
+    lp_close_native_amounts: tuple[int | None, int | None] | None = None,
 ) -> dict[str, Any]:
     """Persist a real execution result through Layer 5 and return the event row.
 
@@ -561,6 +637,8 @@ async def assert_accounting_persisted(
         pre_state=pre_state,
         post_state=post_state,
         resolved_pool=resolved_pool,
+        v4_lp_close_native_principal=v4_lp_close_native_principal,
+        lp_close_native_amounts=lp_close_native_amounts,
     )
     assert persisted.outbox_id is not None, "Layer-5 helper must write accounting_outbox"
     assert persisted.drained is True, "AccountingProcessor.drain_one must process the row"

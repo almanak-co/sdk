@@ -437,6 +437,7 @@ def _diagnose_pricing_failure(
 
     missing: list[str] = []
     invalid: list[str] = []
+    unmeasured: list[str] = []
     # ``token0`` / ``token1`` are typed as ``str`` upstream but a malformed
     # ledger row could carry ``None``. ``(t or "")`` keeps the diagnostic
     # alive without raising AttributeError.
@@ -451,6 +452,14 @@ def _diagnose_pricing_failure(
     raw_keys = {k.upper() for k in raw_price_inputs if isinstance(k, str)}
     for amt, sym in token_pairs:
         if amt is None:
+            # VIB-5131 — an UNMEASURED leg (None amount) is now the dominant
+            # reason ``compute_lp_cost_basis`` returns None (it fails closed on
+            # the first None leg). Report it explicitly rather than letting it
+            # fall through to the misleading "no resolvable amount legs"
+            # catch-all (which reads as "nothing was deposited" when in fact one
+            # leg IS resolvable and only the other is unmeasured — e.g. a native
+            # V4 leg whose stamp read failed).
+            unmeasured.append(sym or "?")
             continue
         # VIB-5124 — consistent with ``compute_lp_cost_basis`` (a stronger,
         # unconditional skip here): a measured-zero leg contributes $0 and never
@@ -469,6 +478,15 @@ def _diagnose_pricing_failure(
         if sym not in price_oracle:
             invalid.append(sym or "?")
 
+    if unmeasured:
+        # VIB-5131 — an unmeasured (None) leg fails the basis closed regardless of
+        # prices, so report it first. "Empty≠Zero" — the leg amount was never
+        # measured (e.g. a native-ETH leg the parser left None and the runner
+        # stamp could not fill), NOT a measured zero.
+        return (
+            f"{intent_type_str} cost_basis_usd unavailable: unmeasured amount leg(s) "
+            f"(Empty≠Zero — amount was None): {', '.join(unmeasured)}"
+        )
     if missing:
         return (
             f"{intent_type_str} cost_basis_usd unavailable: missing prices in price_inputs_json: {', '.join(missing)}"
@@ -481,10 +499,9 @@ def _diagnose_pricing_failure(
         return (
             f"{intent_type_str} cost_basis_usd unavailable: invalid prices in price_inputs_json: {', '.join(invalid)}"
         )
-    # Defensive: covers the "both legs are None amounts" case where
-    # compute_lp_cost_basis returns None but neither the missing nor invalid
-    # bucket fired. Without this, operators see cost_basis_usd=None with no
-    # explanation.
+    # Defensive: covers the residual case where compute_lp_cost_basis returns
+    # None but neither the unmeasured, missing, nor invalid bucket fired. Without
+    # this, operators see cost_basis_usd=None with no explanation.
     return f"{intent_type_str} cost_basis_usd unavailable: no resolvable amount legs"
 
 

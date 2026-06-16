@@ -83,6 +83,35 @@ def _extract_actions_from_modify_liquidities(calldata_hex: str) -> bytes:
     return unlock_data[actions_offset + 32 : actions_offset + 32 + actions_len]
 
 
+def _extract_params_from_modify_liquidities(calldata_hex: str) -> list[bytes]:
+    """Extract the per-action params blobs from modifyLiquidities calldata.
+
+    unlockData is abi.encode(bytes actions, bytes[] params); this returns the
+    decoded ``params`` list (each element the raw param blob for the action at
+    the same index). Used to assert the SWEEP param encodes ``(currency, owner)``
+    — a transposition would route the native refund to ``address(0)`` (burning
+    the leftover) or sweep the wrong currency, which the actions-bytes assertion
+    alone cannot catch (VIB-5145).
+    """
+    raw = bytes.fromhex(calldata_hex[2:])
+    outer = raw[4:]
+    unlock_offset = int.from_bytes(outer[0:32], "big")
+    unlock_len = int.from_bytes(outer[unlock_offset : unlock_offset + 32], "big")
+    unlock_data = outer[unlock_offset + 32 : unlock_offset + 32 + unlock_len]
+    # Second word: offset to the params bytes[] array (relative to unlock_data).
+    params_offset = int.from_bytes(unlock_data[32:64], "big")
+    arr = unlock_data[params_offset:]
+    count = int.from_bytes(arr[0:32], "big")
+    body = arr[32:]  # element offsets are relative to here (after the count word)
+    params: list[bytes] = []
+    for i in range(count):
+        elem_off = int.from_bytes(body[i * 32 : i * 32 + 32], "big")
+        elem = body[elem_off:]
+        elem_len = int.from_bytes(elem[0:32], "big")
+        params.append(elem[32 : 32 + elem_len])
+    return params
+
+
 # =============================================================================
 # HookFlags tests
 # =============================================================================
@@ -399,6 +428,92 @@ class TestSDKLPMethods:
         assert actions == bytes([PM_MINT_POSITION, PM_SETTLE_PAIR]), (
             f"Mint actions must be exactly [0x02, 0x0D] but got: {actions.hex()}"
         )
+
+    def test_native_mint_tx_appends_sweep(self, sdk):
+        """VIB-5145: a native-ETH pool mint MUST append SWEEP after SETTLE_PAIR.
+
+        The full ``amount0_max`` is pre-sent as ``msg.value`` (native can't be
+        pulled via Permit2); the MINT settles only what the discounted-budget
+        liquidity needs, so the unspent remainder must be SWEPT back to the owner
+        or it is stranded in the PositionManager (the VIB-5145 fund leak). The
+        action set must be exactly [MINT_POSITION, SETTLE_PAIR, SWEEP] and the
+        tx must carry the full native value.
+        """
+        # 0x0 (native) sorts below any ERC-20, so currency0 == NATIVE_CURRENCY.
+        pool_key = sdk.compute_pool_key(
+            NATIVE_CURRENCY,
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",  # USDC (arbitrum)
+            fee=3000,
+        )
+        assert pool_key.currency0 == NATIVE_CURRENCY
+        amount0_max = 1_000_000_000_000_000_000
+        params = LPMintParams(
+            pool_key=pool_key,
+            tick_lower=-60000,
+            tick_upper=60000,
+            liquidity=1_000_000,
+            amount0_max=amount0_max,
+            amount1_max=2_000_000_000,
+            owner="0x1234567890abcdef1234567890abcdef12345678",
+        )
+
+        tx = sdk.build_mint_position_tx(params)
+        actions = _extract_actions_from_modify_liquidities(tx.data)
+        assert actions == bytes([PM_MINT_POSITION, PM_SETTLE_PAIR, PM_SWEEP]), (
+            f"Native mint actions must be [0x02, 0x0D, 0x14] (SWEEP refunds unspent "
+            f"msg.value) but got: {actions.hex()}"
+        )
+        # The full native budget is pre-sent; SWEEP returns whatever the mint
+        # didn't settle.
+        assert tx.value == amount0_max
+
+        # Decode the SWEEP param blob: V4 Actions.SWEEP = abi.encode(Currency
+        # currency, address to). A transposed/mis-encoded blob (wrong currency,
+        # or to=address(currency)=0x0) would burn the leftover ETH while keeping
+        # the actions bytes green — so assert the words explicitly (VIB-5145).
+        param_blobs = _extract_params_from_modify_liquidities(tx.data)
+        assert len(param_blobs) == 3, f"expected 3 param blobs, got {len(param_blobs)}"
+        sweep_blob = param_blobs[2]
+        assert len(sweep_blob) == 64, f"SWEEP param must be 2 words, got {len(sweep_blob)}B"
+        swept_currency = "0x" + sweep_blob[12:32].hex()
+        swept_to = "0x" + sweep_blob[44:64].hex()
+        assert swept_currency.lower() == pool_key.currency0.lower(), (
+            f"SWEEP must target the native currency {pool_key.currency0}, got {swept_currency}"
+        )
+        assert swept_to.lower() == params.owner.lower(), (
+            f"SWEEP must refund the owner {params.owner}, got {swept_to}"
+        )
+
+    def test_native_pool_zero_native_leg_appends_no_sweep(self, sdk):
+        """VIB-5145: a native pool whose native leg is 0 must NOT append SWEEP.
+
+        A single-sided out-of-range mint that deposits only the ERC-20 leg sends
+        no native ``msg.value`` (``amount0_max == 0``), so a SWEEP would be a
+        redundant 0-ETH action that just wastes gas (Gemini review). The action
+        set stays exactly [MINT_POSITION, SETTLE_PAIR] and ``tx.value`` is 0.
+        """
+        pool_key = sdk.compute_pool_key(
+            NATIVE_CURRENCY,
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",  # USDC (arbitrum)
+            fee=3000,
+        )
+        assert pool_key.currency0 == NATIVE_CURRENCY
+        params = LPMintParams(
+            pool_key=pool_key,
+            tick_lower=-60000,
+            tick_upper=60000,
+            liquidity=1_000_000,
+            amount0_max=0,  # native leg empty — only the USDC leg is deposited
+            amount1_max=2_000_000_000,
+            owner="0x1234567890abcdef1234567890abcdef12345678",
+        )
+
+        tx = sdk.build_mint_position_tx(params)
+        actions = _extract_actions_from_modify_liquidities(tx.data)
+        assert actions == bytes([PM_MINT_POSITION, PM_SETTLE_PAIR]), (
+            f"A zero native leg must not append SWEEP; got: {actions.hex()}"
+        )
+        assert tx.value == 0
 
     def test_build_decrease_liquidity_tx(self, sdk):
         params = LPDecreaseParams(

@@ -53,6 +53,7 @@ from tests.intents.conftest import (
     CHAIN_CONFIGS,
     assert_accounting_persisted,
     assert_no_accounting_on_failure,
+    capture_v4_lp_close_native_principal,
     format_token_amount,
     get_token_balance,
     get_token_decimals,
@@ -601,6 +602,19 @@ class TestUniswapV4LPCloseIntent:
         bundle = compilation_result.action_bundle
         print(f"ActionBundle created with {len(bundle.transactions)} transactions")
 
+        # VIB-5117 / VIB-5131: capture the native AVAX close PRINCIPAL from the
+        # PRE-burn position state — the native leg returns via TAKE_PAIR (no
+        # Transfer), so the receipt parser leaves amount0_collected None and the
+        # close cost basis would fail closed under VIB-5131. This MUST run before
+        # the burn executes (post-burn liquidity is zero); it mirrors the runner's
+        # pre-burn boundary so the Layer-5 LP_CLOSE row carries the real native
+        # proceeds and realized PnL is exact, not a one-legged understatement.
+        v4_close_native_principal = capture_v4_lp_close_native_principal(
+            intent=close_intent,
+            chain=CHAIN_NAME,
+            eth_call_reader=anvil_eth_call_adapter.with_v4_pool_key(_native_avax_usdc_pool_key()),
+        )
+
         # Layer 2: Execution
         print("\nExecuting LP_CLOSE via ExecutionOrchestrator...")
         execution_result = await orchestrator.execute(bundle)
@@ -732,6 +746,7 @@ class TestUniswapV4LPCloseIntent:
             expected_event_type="LP_CLOSE",
             price_oracle=augmented_oracle,
             eth_call_reader=anvil_eth_call_adapter.with_v4_pool_key(_native_avax_usdc_pool_key()),
+            v4_lp_close_native_principal=v4_close_native_principal,
         )
         _assert_identity(close_accounting_row, event_type="LP_CLOSE", wallet=funded_wallet)
         close_payload = _payload(close_accounting_row)
@@ -742,8 +757,39 @@ class TestUniswapV4LPCloseIntent:
         # #2 directional null-contract: V4 close matches by position_key, so
         # position_hash stays None on LP_CLOSE (the anchor lives on LP_OPEN).
         _assert_v4_close_position_hash(close_payload)
-        assert close_payload["realized_pnl_usd"] is not None, (
-            "open-then-close must compute realized PnL"
+        # VIB-5117 / VIB-5131: the native AVAX leg (currency0 = 0x0) is returned
+        # via TAKE_PAIR with no ERC-20 Transfer, so the parser leaves
+        # amount0_collected None. The pre-burn principal capture above must have
+        # stamped the REAL principal so the close cost basis is two-legged and
+        # realized PnL is exact — never a one-legged understatement (VIB-5131 fails
+        # that closed) and never a degenerate-tick measured-zero (which would read
+        # as the entire native principal being lost).
+        assert close_payload["amount0"] is not None, (
+            "native AVAX close leg must be measured from the pre-burn principal "
+            f"(VIB-5117); got amount0=None, reason={close_payload.get('unavailable_reason')!r}"
+        )
+        assert close_payload["cost_basis_usd"] is not None, (
+            "close cost basis must be two-legged once the native leg is measured; "
+            f"reason={close_payload.get('unavailable_reason')!r}"
+        )
+        # The native principal returned at close must be ~the amount deposited at
+        # open (a no-price-move round-trip on the fork). A degenerate-tick
+        # derivation (tick_lower == tick_upper) would collapse it to ~0 and pass a
+        # weaker not-None check — this catches that.
+        open_native = Decimal(str(open_payload["amount0"]))
+        close_native = Decimal(str(close_payload["amount0"]))
+        assert close_native >= open_native * Decimal("0.9"), (
+            "native AVAX close principal must be ~the deposited amount, not a "
+            f"degenerate zero: open amount0={open_native}, close amount0={close_native}"
+        )
+        # Realized PnL on a no-move round-trip is near zero (LP fees / rounding),
+        # not a large loss; |pnl| within 10% of the open basis catches a native leg
+        # silently dropped to zero (which showed realized_pnl ~= -85% of basis).
+        realized = close_payload["realized_pnl_usd"]
+        assert realized is not None, "open-then-close must compute realized PnL"
+        assert abs(Decimal(str(realized))) <= Decimal(str(open_payload["cost_basis_usd"])) * Decimal("0.10"), (
+            f"realized PnL {realized} is implausibly large vs open cost basis "
+            f"{open_payload['cost_basis_usd']} — a dropped native leg understates proceeds"
         )
 
         # #3 parser ↔ event exact equality, matched by token IDENTITY

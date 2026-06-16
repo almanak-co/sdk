@@ -1,0 +1,45 @@
+{
+  "_provenance": {
+    "row_id": "lp-uniswap_v4-native-single-sided-base",
+    "fixture": "lp_v4_native_single_sided",
+    "chain": "base",
+    "primitive": "lp",
+    "captured_from": "docs/internal/notes/.tmp/matrix-after/lp-uniswap_v4-native-single-sided-base/accountant.json",
+    "captured_at": "2026-06-15T18:16:05.016418+00:00",
+    "captured_at_commit": "5c0c13e54d5c36d4f0658d127ed46d0bbde54759",
+    "post_fix_for": [
+      "VIB-5145: SWEEP unspent native msg.value on V4 LP mint (native-ETH fund leak); VIB-5133: first live single-sided-native V4 LP fixture."
+    ],
+    "note": "Real-Anvil baseline (Base fork) \u2014 first run of the single-sided-native V4 LP fixture, post VIB-5145 SWEEP fix. G6 FAIL is the managed-Anvil 100-ETH funding artifact (shared with lp_v4_native); L5_22 XFAIL = registry-mode not yet on."
+  },
+  "cells": {
+    "G1": "PASS",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "PASS",
+    "G14": "PASS",
+    "G15": "PASS",
+    "G2": "PASS",
+    "G3": "PASS",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "FAIL",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "L5_22": "XFAIL",
+    "LP1": "PASS",
+    "LP2": "PASS",
+    "LP3": "PASS",
+    "LP4": "PASS",
+    "LP5": "PASS",
+    "LP6": "PASS"
+  },
+  "scores": {
+    "passed": 19,
+    "failed": 1,
+    "xfailed": 1,
+    "total": 22
+  }
+}

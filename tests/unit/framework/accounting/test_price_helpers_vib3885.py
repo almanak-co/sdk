@@ -339,3 +339,57 @@ def test_lp_cost_basis_both_legs_zero_and_unpriced_returns_none():
         price_oracle=parse_price_inputs(json.dumps({"BAR": {"price_usd": "1.00"}})),
     )
     assert cost is None
+
+
+# ---------------------------------------------------------------------------
+# VIB-5131 — an UNMEASURED (None) leg must void the basis (Empty≠Zero), and is
+# type-distinct from a measured-zero (Decimal("0")) leg (VIB-5124).
+# ---------------------------------------------------------------------------
+
+
+def test_lp_cost_basis_unmeasured_none_leg_voids_basis():
+    """A leg with a ``None`` amount is UNMEASURED (Empty≠Zero), not a concrete
+    zero. Even when the other leg is fully priced, the basis must fail closed to
+    ``None`` — emitting the one-legged total would silently understate the basis
+    (the VIB-5131 bug: e.g. a native-ETH V4 leg the parser left None and the
+    runner stamp could not fill on a read failure)."""
+    raw = json.dumps({"ETH": {"price_usd": "1800.00"}, "USDC": {"price_usd": "1.00"}})
+    oracle = parse_price_inputs(raw)
+    cost = compute_lp_cost_basis(
+        amount0=None,  # native ETH leg — UNMEASURED (stamp/read failure)
+        amount1=Decimal("50"),  # USDC leg — measured and priced
+        token0="ETH",
+        token1="USDC",
+        price_oracle=oracle,
+    )
+    # Pre-VIB-5131 this returned Decimal("50") (the one-legged partial). It must
+    # now be None so the handler degrades confidence with an explicit reason.
+    assert cost is None
+
+
+def test_lp_cost_basis_none_leg_vs_measured_zero_leg_are_distinct():
+    """The headline VIB-5131 distinction: ``None`` (unmeasured) voids the basis;
+    ``Decimal("0")`` (measured zero, VIB-5124) does NOT — it contributes $0 and
+    the funded leg still drives the total. Same priced funded leg, opposite
+    outcomes purely on the None-vs-zero type of the other leg."""
+    raw = json.dumps({"ETH": {"price_usd": "1800.00"}, "USDC": {"price_usd": "1.00"}})
+    oracle = parse_price_inputs(raw)
+    # None leg → unmeasured → None.
+    assert (
+        compute_lp_cost_basis(
+            amount0=None,
+            amount1=Decimal("50"),
+            token0="ETH",
+            token1="USDC",
+            price_oracle=oracle,
+        )
+        is None
+    )
+    # Measured-zero leg → $0 contribution → one-legged total stands (VIB-5124).
+    assert compute_lp_cost_basis(
+        amount0=Decimal("0"),
+        amount1=Decimal("50"),
+        token0="ETH",
+        token1="USDC",
+        price_oracle=oracle,
+    ) == Decimal("50")
