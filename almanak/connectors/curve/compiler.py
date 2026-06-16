@@ -361,9 +361,31 @@ class CurveCompiler(BaseProtocolCompiler[BaseCompilerContext]):
 
             n_coins = pool_data["n_coins"]
 
-            amounts: list[Decimal] = [intent.amount0, intent.amount1]
-            while len(amounts) < n_coins:
-                amounts.append(Decimal("0"))
+            coin_amounts = getattr(intent, "coin_amounts", None)
+            if coin_amounts is not None:
+                # Pool-coin-aligned full allocation vector (VIB-5154 / ALM-2728).
+                # coin_amounts[i] maps directly to pool coin index i, so non-leading
+                # coins (index 2+) can be funded without forcing index 0. This is the
+                # only mapping that can express e.g. a Polygon 3pool deposit of USDC.e
+                # (idx 1) + USDT (idx 2) while leaving DAI (idx 0) at zero.
+                if len(coin_amounts) != n_coins:
+                    return CompilationResult(
+                        status=CompilationStatus.FAILED,
+                        error=(
+                            f"coin_amounts has {len(coin_amounts)} entries but Curve pool "
+                            f"'{pool_name or pool_address}' on {ctx.chain} has {n_coins} coins. "
+                            f"coin_amounts must provide exactly one amount per pool coin, "
+                            f"indexed as {pool_data.get('coins')}."
+                        ),
+                        intent_id=intent.intent_id,
+                    )
+                amounts: list[Decimal] = [Decimal(str(a)) for a in coin_amounts]
+            else:
+                # Legacy two-slot mapping: amount0/amount1 -> indices 0/1, tail zero-filled.
+                # Unchanged behaviour for every existing caller.
+                amounts = [intent.amount0, intent.amount1]
+                while len(amounts) < n_coins:
+                    amounts.append(Decimal("0"))
 
             slippage_bps = 50
 

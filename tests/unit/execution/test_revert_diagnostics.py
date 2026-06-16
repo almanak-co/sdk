@@ -17,7 +17,9 @@ from almanak.framework.execution.revert_diagnostics import (
     NativeETHCheck,
     _get_weth_address,
     determine_likely_cause,
+    extract_token_requirements,
 )
+from almanak.framework.intents.vocabulary import Intent
 
 
 def _get_cause(error: str) -> tuple[str, list[str]]:
@@ -387,3 +389,49 @@ class TestDetermineLikelyCauseCharacterization:
             raw_error="some totally unrelated runtime error",
         )
         assert cause == "Unknown - balances appear sufficient"
+
+
+class TestExtractTokenRequirementsLPOpen:
+    """VIB-5154: revert diagnostics must report token requirements for both the
+    legacy amount0/amount1 Curve path and the new pool-coin-aligned coin_amounts
+    path (non-leading multi-coin deposits)."""
+
+    def test_legacy_amount0_amount1_unchanged(self):
+        """When coin_amounts is None, idx0/idx1 mapping is unchanged."""
+        intent = Intent.lp_open(
+            pool="WETH/USDC/500",
+            amount0=Decimal("1"),
+            amount1=Decimal("2000"),
+            range_lower=Decimal("1800"),
+            range_upper=Decimal("2200"),
+            protocol="uniswap_v3",
+        )
+        reqs = extract_token_requirements(intent, "ethereum")
+        assert [(r.symbol, r.amount) for r in reqs] == [
+            ("WETH", Decimal("1")),
+            ("USDC", Decimal("2000")),
+        ]
+
+    def test_coin_amounts_targets_non_leading_coins(self):
+        """A Curve 3pool deposit of USDC.e (idx1) + USDT (idx2), DAI (idx0) zero,
+        reports exactly the two funded coins — not an empty list."""
+        intent = Intent.lp_open(
+            pool="DAI/USDC.e/USDT",
+            coin_amounts=[Decimal("0"), Decimal("500"), Decimal("500")],
+            protocol="curve",
+        )
+        reqs = extract_token_requirements(intent, "polygon")
+        assert [(r.symbol, r.amount) for r in reqs] == [
+            ("USDC.e", Decimal("500")),
+            ("USDT", Decimal("500")),
+        ]
+
+    def test_coin_amounts_skips_zero_entries(self):
+        """Zero-amount coins produce no requirement entry."""
+        intent = Intent.lp_open(
+            pool="DAI/USDC.e/USDT",
+            coin_amounts=[Decimal("100"), Decimal("0"), Decimal("0")],
+            protocol="curve",
+        )
+        reqs = extract_token_requirements(intent, "polygon")
+        assert [(r.symbol, r.amount) for r in reqs] == [("DAI", Decimal("100"))]

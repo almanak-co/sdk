@@ -334,6 +334,15 @@ class LPOpenIntent(BaseIntent):
         protocol: LP protocol (e.g., "uniswap_v3", "camelot")
         chain: Optional target chain for execution (defaults to strategy's primary chain)
         protocol_params: Optional protocol-specific parameters (e.g., {"bin_range": 10} for TraderJoe V2)
+        coin_amounts: Optional pool-coin-aligned full allocation vector for multi-coin
+            pools (e.g. Curve 3pool/4pool). When set, ``coin_amounts[i]`` is the amount to
+            deposit for pool coin index ``i``, indexed exactly as the pool orders its
+            ``coins``. This makes it possible to target non-leading coins — e.g. depositing
+            only USDC.e (index 1) + USDT (index 2) into a Polygon 3pool without touching DAI
+            (index 0), which the two-slot ``amount0``/``amount1`` mapping cannot express.
+            Additive and optional: connectors that do not consume it (Uniswap V3/V4,
+            Aerodrome, TraderJoe V2, Pendle, …) ignore it entirely and continue to read
+            ``amount0``/``amount1``. When ``None`` (the default), behaviour is unchanged.
         intent_id: Unique identifier for this intent
         created_at: Timestamp when the intent was created
     """
@@ -346,6 +355,7 @@ class LPOpenIntent(BaseIntent):
     protocol: str = "uniswap_v3"
     chain: str | None = None
     protocol_params: dict[str, Any] | None = None
+    coin_amounts: list[SafeDecimal] | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
 
@@ -361,8 +371,10 @@ class LPOpenIntent(BaseIntent):
             raise ValueError("amount0 must be non-negative")
         if self.amount1 < 0:
             raise ValueError("amount1 must be non-negative")
-        if self.amount0 == 0 and self.amount1 == 0:
+        if self.amount0 == 0 and self.amount1 == 0 and self.coin_amounts is None:
             raise ValueError("At least one amount must be positive")
+        if self.coin_amounts is not None:
+            self._validate_coin_amounts()
         if self.range_lower >= self.range_upper:
             raise ValueError("range_lower must be less than range_upper")
         # Skip positivity check for tick-based protocols: their range values are raw
@@ -378,6 +390,34 @@ class LPOpenIntent(BaseIntent):
                 if isinstance(br, bool) or not isinstance(br, int) or br < 1 or br > 100:
                     raise ValueError(f"protocol_params.bin_range must be an integer between 1 and 100, got {br}")
         return self
+
+    def _validate_coin_amounts(self) -> None:
+        """Validate the pool-coin-aligned ``coin_amounts`` allocation vector.
+
+        Only invoked when ``coin_amounts`` is not None.
+        """
+        assert self.coin_amounts is not None  # narrowed by caller
+        # coin_amounts is consumed only by the Curve compiler. Any other LP
+        # protocol reads amount0/amount1 and would silently ignore it, opening a
+        # 0-liquidity position. Fail loudly instead of silently mis-funding.
+        if self.protocol != "curve":
+            raise ValueError(
+                "coin_amounts is only supported for the 'curve' protocol; "
+                f"protocol '{self.protocol}' uses amount0/amount1"
+            )
+        # coin_amounts is the full pool-coin-aligned allocation vector, so
+        # amount0/amount1 are unused for this path. Reject mixing the two mappings
+        # rather than silently dropping amount0/amount1.
+        if self.amount0 != 0 or self.amount1 != 0:
+            raise ValueError(
+                "Cannot provide both coin_amounts and amount0/amount1; coin_amounts is the full allocation vector"
+            )
+        if len(self.coin_amounts) == 0:
+            raise ValueError("coin_amounts must not be empty when provided")
+        if any(a < 0 for a in self.coin_amounts):
+            raise ValueError("coin_amounts entries must be non-negative")
+        if all(a == 0 for a in self.coin_amounts):
+            raise ValueError("coin_amounts must have at least one positive entry")
 
     @property
     def intent_type(self) -> IntentType:
@@ -823,26 +863,38 @@ class Intent:
     @staticmethod
     def lp_open(
         pool: str,
-        amount0: Decimal,
-        amount1: Decimal,
-        range_lower: Decimal,
-        range_upper: Decimal,
+        amount0: Decimal = Decimal("0"),
+        amount1: Decimal = Decimal("0"),
+        range_lower: Decimal = Decimal("1"),
+        range_upper: Decimal = Decimal("2"),
         protocol: str = "uniswap_v3",
         chain: str | None = None,
         protocol_params: dict[str, Any] | None = None,
+        coin_amounts: list[Decimal] | None = None,
         registry_handle: str | None = None,
     ) -> LPOpenIntent:
         """Create an LP open intent.
 
         Args:
             pool: Pool address or identifier
-            amount0: Amount of token0 to provide
-            amount1: Amount of token1 to provide
-            range_lower: Lower price bound for concentrated liquidity
-            range_upper: Upper price bound for concentrated liquidity
+            amount0: Amount of token0 to provide (default 0; ignored when
+                ``coin_amounts`` is supplied for a multi-coin pool)
+            amount1: Amount of token1 to provide (default 0; ignored when
+                ``coin_amounts`` is supplied for a multi-coin pool)
+            range_lower: Lower price bound for concentrated liquidity. Unused by
+                fungible-LP protocols (Curve); defaults exist so multi-coin Curve
+                callers need not pass dummy bounds.
+            range_upper: Upper price bound for concentrated liquidity. Unused by
+                fungible-LP protocols (Curve); see ``range_lower``.
             protocol: LP protocol (default "uniswap_v3")
             chain: Target chain for execution (defaults to strategy's primary chain)
             protocol_params: Optional protocol-specific parameters (e.g., {"bin_range": 10} for TraderJoe V2)
+            coin_amounts: Optional pool-coin-aligned full allocation vector for
+                multi-coin pools (e.g. Curve 3pool/4pool). ``coin_amounts[i]`` is the
+                amount for pool coin index ``i``. When supplied, the Curve compiler
+                uses it directly instead of mapping ``amount0``/``amount1`` to indices
+                0/1, so non-leading coins (index 2+) can be targeted. Connectors that
+                do not consume it ignore it entirely.
 
         Returns:
             LPOpenIntent: The created LP open intent
@@ -856,6 +908,15 @@ class Intent:
                 range_lower=Decimal("1800"),
                 range_upper=Decimal("2200"),
             )
+
+            # Open a Curve Polygon 3pool position in USDC.e (idx 1) + USDT (idx 2),
+            # skipping DAI (idx 0):
+            intent = Intent.lp_open(
+                pool="USDC.e/USDT/DAI",
+                coin_amounts=[Decimal("0"), Decimal("500"), Decimal("500")],
+                protocol="curve",
+                chain="polygon",
+            )
         """
         return LPOpenIntent(
             pool=pool,
@@ -866,6 +927,7 @@ class Intent:
             protocol=protocol,
             chain=chain,
             protocol_params=protocol_params,
+            coin_amounts=coin_amounts,
             registry_handle=registry_handle,
         )
 

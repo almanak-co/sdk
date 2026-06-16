@@ -264,6 +264,43 @@ def get_token_address(symbol: str, chain: str) -> str | None:
     return chain_tokens.get(symbol) or chain_tokens.get(symbol.upper())
 
 
+def _lp_open_requirements(intent: "LPOpenIntent", chain: str) -> list[TokenRequirement]:
+    """Token requirements for an LP-open intent.
+
+    Pool string lists coin symbols in pool-coin-index order
+    (e.g. "WETH/USDC/500" or the Curve 3pool "DAI/USDC.e/USDT").
+
+    - ``coin_amounts`` present (VIB-5154 multi-coin Curve path): ``coin_amounts[i]``
+      aligns to pool coin index ``i``; each positive entry maps to its symbol so
+      non-leading-coin deposits still report their required tokens.
+    - ``coin_amounts`` absent: legacy ``amount0``/``amount1`` → indices 0/1.
+    """
+    pool_parts = intent.pool.split("/")
+    requirements: list[TokenRequirement] = []
+
+    def _add(symbol: str, amount: Decimal) -> None:
+        requirements.append(
+            TokenRequirement(
+                symbol=symbol,
+                amount=amount,
+                address=get_token_address(symbol, chain),
+                decimals=TOKEN_DECIMALS.get(symbol, 18),
+            )
+        )
+
+    if intent.coin_amounts is not None:
+        for idx, amount in enumerate(intent.coin_amounts):
+            if amount > 0 and idx < len(pool_parts):
+                _add(pool_parts[idx], amount)
+    elif len(pool_parts) >= 2:
+        if intent.amount0 > 0:
+            _add(pool_parts[0], intent.amount0)
+        if intent.amount1 > 0:
+            _add(pool_parts[1], intent.amount1)
+
+    return requirements
+
+
 def extract_token_requirements(
     intent: SwapIntent
     | LPOpenIntent
@@ -301,32 +338,7 @@ def extract_token_requirements(
         # Note: amount_usd requires price lookup which we skip here
 
     elif isinstance(intent, LPOpenIntent):
-        # LP Open requires both tokens
-        # Parse pool to get token symbols (e.g., "WETH/USDC/500" or "WETH/USDC.e/500")
-        pool_parts = intent.pool.split("/")
-        if len(pool_parts) >= 2:
-            token0_symbol = pool_parts[0]
-            token1_symbol = pool_parts[1]
-
-            if intent.amount0 > 0:
-                requirements.append(
-                    TokenRequirement(
-                        symbol=token0_symbol,
-                        amount=intent.amount0,
-                        address=get_token_address(token0_symbol, chain),
-                        decimals=TOKEN_DECIMALS.get(token0_symbol, 18),
-                    )
-                )
-
-            if intent.amount1 > 0:
-                requirements.append(
-                    TokenRequirement(
-                        symbol=token1_symbol,
-                        amount=intent.amount1,
-                        address=get_token_address(token1_symbol, chain),
-                        decimals=TOKEN_DECIMALS.get(token1_symbol, 18),
-                    )
-                )
+        requirements.extend(_lp_open_requirements(intent, chain))
 
     elif isinstance(intent, SupplyIntent):
         # Supply requires the token being supplied
