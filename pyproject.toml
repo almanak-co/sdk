@@ -145,6 +145,10 @@ dev = [
     "pytest-xdist>=3.5.0",
     "pytest-cov>=7.1.0",
     "pytest-timeout>=2.3.1",
+    # Duration-balanced test sharding for CI. Each shard runs
+    # `pytest --splits N --group K`; the PR pipeline's template_pytest.yml
+    # fans the unit suite across N runners and combines coverage afterward.
+    "pytest-split>=0.9.0",
     "asgi-lifespan>=2.1.0",
     # CRAP/complexity tooling (Phase 0, see docs/internal/coverage-improvement-plan.md §8)
     "radon>=6.0.1",

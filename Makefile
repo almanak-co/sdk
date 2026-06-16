@@ -239,10 +239,19 @@ export COVERAGE_CORE := sysmon
 # Run all tests for CI (with JUnit XML + coverage report; coverage gate via fail_under).
 # Phase 0 (2026-05-04): coverage now runs on every CI invocation. See
 # docs/internal/coverage-improvement-plan.md §8 Phase 0 for the ratchet policy.
+#
+# STORE_DURATIONS is empty by default (local + crap-diff-fresh runs are
+# unchanged). The post-merge Main pipeline (template_test_suite.yml) passes
+# `STORE_DURATIONS="--store-durations --clean-durations"` so the full unsharded
+# run records per-test timings into `.test_durations`, which is cached and
+# restored by the PR pipeline's sharded jobs for duration-balanced splitting
+# (template_pytest.yml). Main is the only place this runs the *full* suite, so
+# it is the only place that can produce a complete, clean durations file.
+STORE_DURATIONS ?=
 test-ci: ## CI test run with coverage (writes .coverage/coverage.xml)
 	uv run pytest tests/ --ignore=tests/intents --ignore=tests/visual/nightly -m "not integration" -v --import-mode=importlib \
 		--cov=almanak --cov-report=xml:coverage.xml --cov-report=term \
-		--junitxml=test-results.xml
+		--junitxml=test-results.xml $(STORE_DURATIONS)
 
 # Full coverage pass used by `make crap` for the CRAP-score baseline.
 # Runs the CI subset first (unit + non-intent), then APPENDS intent-test coverage
