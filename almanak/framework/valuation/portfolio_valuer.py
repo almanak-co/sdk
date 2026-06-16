@@ -13,7 +13,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
@@ -1477,10 +1477,11 @@ class PortfolioValuer:
         # Re-price all positions and enrich details with valuer breakdown
         positions: list[PositionValue] = []
         any_unrepriced = False
-        # VIB-5006: account-level health-factor is a per-WALLET read shared by
-        # every leg of a wallet's position (a leverage loop's SUPPLY + BORROW
-        # legs hit the same (protocol, chain, wallet)), so cache it per snapshot.
-        account_state_cache: dict[tuple[str, str, str], Any] = {}
+        # Track-C lending state (HF + Comet APY base) is a per-WALLET read shared
+        # by every leg of a wallet's position (a leverage loop's SUPPLY + BORROW
+        # legs hit the same (protocol, chain, wallet, market_id)), so cache it per
+        # snapshot. market_id is None for whole-account protocols (Aave family).
+        account_state_cache: dict[tuple[str, str, str, str | None], Any] = {}
         for p in merged_positions:
             value_usd, enriched_details, repriced = self._reprice_position_enriched(p, strategy.chain, market)
             if not repriced:
@@ -1499,20 +1500,25 @@ class PortfolioValuer:
                     p.position_id,
                 )
 
-            # VIB-5006: stamp account-level health_factor (per-wallet, cached)
-            # onto lending legs so the Track-C ``position_state_snapshots`` rows
-            # carry HF (Accountant L2/L3). No-op for non-lending positions.
-            # Guarded: HF enrichment fails closed internally, but the snapshot
-            # must NEVER be aborted by an unforeseen raise here — dropping this
-            # position's Track-C row would regress coverage (G14/G15). Degrade to
-            # "no HF stamped", never "no row".
+            # Stamp Track-C lending fields (health_factor + Comet supply/borrow
+            # APY, cached per wallet) onto lending legs so the
+            # ``position_state_snapshots`` rows carry them (Accountant L2/L3/L5).
+            # No-op for non-lending positions. Guarded: enrichment fails closed
+            # internally, but the snapshot must NEVER be aborted by an unforeseen
+            # raise here — dropping this position's Track-C row would regress
+            # coverage (G14/G15). Degrade to "no fields stamped", never "no row".
             try:
-                enriched_details = self._enrich_lending_health_factor(
-                    p, strategy.chain, enriched_details, account_state_cache
+                enriched_details = self._enrich_lending_trackc_fields(
+                    p,
+                    strategy.chain,
+                    enriched_details,
+                    account_state_cache,
+                    market,
+                    strategy_wallet=getattr(strategy, "wallet_address", None),
                 )
             except Exception:
                 logger.debug(
-                    "VIB-5006 health-factor enrichment raised for %s; leaving HF unmeasured",
+                    "Track-C lending enrichment raised for %s; leaving fields unmeasured",
                     p.position_id,
                     exc_info=True,
                 )
@@ -2610,50 +2616,117 @@ class PortfolioValuer:
             logger.debug("Lending enriched re-pricing failed for %s", position.position_id, exc_info=True)
             return None
 
-    def _enrich_lending_health_factor(
+    def _enrich_lending_trackc_fields(
         self,
         position: "PositionInfo",
         chain: str,
         enriched_details: dict[str, Any],
-        account_state_cache: dict[tuple[str, str, str], Any],
+        account_state_cache: dict[tuple[str, str, str, str | None], Any],
+        market: MarketDataSource,
+        *,
+        strategy_wallet: str | None = None,
     ) -> dict[str, Any]:
-        """VIB-5006: stamp account-level ``health_factor`` onto a lending leg.
+        """Stamp Track-C lending observability fields via one capability-dispatched seam.
 
-        Health factor is a per-WALLET aggregate (Aave ``getUserAccountData``),
-        not a per-reserve field, so it is read once per (protocol, chain,
-        wallet) per snapshot — via ``account_state_cache`` — and shared across
-        every leg of that wallet's position (a leverage loop's SUPPLY + BORROW
-        legs). The read routes through the gateway-boundary-correct
-        :func:`read_lending_account_state` seam (no framework-side RPC).
+        The Track-C ``position_state_snapshots`` materialiser
+        (``accounting/position_state.py:_materialise_lending``) reads
+        ``health_factor`` / ``supply_apy_pct`` / ``borrow_apy_pct`` /
+        ``borrow_balance`` straight off ``PositionValue.details``. This method
+        populates them for any registered lending connector, dispatching on
+        **connector capability** (never a protocol-name ``if/elif``), mirroring
+        :meth:`PositionHealthProvider.get_health`:
 
-        Scope: whole-account lending protocols (the Aave family), detected by
-        the absence of a per-market ``market_id``. Per-market protocols (Morpho
-        Blue) carry a ``market_id`` and need injected collateral/loan prices
-        this snapshot path does not assemble — that is the VIB-4551 twin,
-        tracked separately.
+        * **health_factor** — protocols publishing a multi-collateral
+          market-health reader (Compound V3, VIB-5160) read via
+          :func:`read_lending_market_health` (the summed
+          ``Σ(value×LCF)/debt`` HF the single-leg account-state read cannot
+          express); whole-account protocols (the Aave family, VIB-5006 — no
+          per-market id) read via :func:`read_lending_account_state`. Both route
+          through the gateway-boundary-correct lending-read seams (no
+          framework-side RPC) and are cached per ``(protocol, chain, wallet,
+          market_id)`` per snapshot — a leverage loop's SUPPLY + BORROW legs
+          share one read. The *raw* reducer HF is stamped (a no-debt position's
+          sentinel stays a number, not normalised to Infinity, so the cell
+          scorers parse it — and so Compound matches the Aave convention).
+          Per-market protocols whose account-state read declares priceable
+          valuation roles (Morpho Blue — VIB-4551, plus Silo V2 / Euler V2 / Fluid,
+          which ride the same capability-gated path) read the aggregate account
+          state with the market's collateral/loan token prices injected
+          (non-USD-native), scoped by ``market_id``. A per-market protocol needing
+          a different injection (BENQI's collaterals-map) is excluded — it would
+          fail closed and only appear wired.
+        * **supply_apy_pct / borrow_apy_pct** — for market-health protocols
+          (Compound) via the gateway-routed :meth:`MarketSnapshot.lending_rate`.
+          The Aave family already carries ``supply_apy_pct`` from
+          :meth:`_reprice_lending_on_chain_enriched` (its single-reserve
+          repricer), so this method is idempotent — it fills only keys that path
+          left absent, keeping the Aave leg byte-identical. Morpho's live rate is
+          unmeasured until VIB-5040 (its gateway provider raises), so its APY
+          stays ``None`` honestly.
 
-        Empty ≠ Zero, two ways: a real read stamps the measured HF; an *attempted
-        but failed/None* read stamps ``health_factor = None`` so a stale
-        strategy-reported HF in ``position.details`` cannot survive the
-        downstream merge and masquerade as a live value (the VIB-5084 stale-HF
-        class) — unmeasured is honest, stale is not. For positions we do NOT own
-        (non-lending, no gateway, per-market protocol, no wallet) the details are
-        returned untouched.
+        Empty ≠ Zero, two ways: a real read stamps the measured value; an
+        *attempted but failed/None* read stamps an explicit ``None`` so a stale
+        strategy-reported value cannot survive the downstream merge and
+        masquerade as live (the VIB-5084 stale class). For positions we do NOT
+        own (non-lending, no gateway, no wallet) the details are returned
+        untouched.
         """
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
         from almanak.framework.teardown.models import PositionType
 
         if position.position_type not in (PositionType.SUPPLY, PositionType.BORROW):
             return enriched_details
         if self._gateway_client is None:
             return enriched_details
-        # Whole-account only (Aave family). A per-market id ⇒ Morpho-class
-        # protocol whose HF needs price injection (VIB-4551) — skip rather than
-        # issue a read that would fail closed and waste a gateway round-trip.
-        if position.details.get("market_id"):
-            return enriched_details
+
+        protocol = position.protocol
+        has_market_health = LendingReadRegistry.market_health_reader(protocol) is not None
+        # Per-market lending protocols we can value here: Compound V3 (summed
+        # market-health reader) and protocols whose account-state read declares
+        # priceable valuation roles (Morpho Blue, Silo V2, Euler V2, Fluid —
+        # non-USD-native, valued via injected token prices). Gate on
+        # ``declares_valuation_roles``, NOT ``publishes_market_table``: a
+        # per-market protocol that needs a *different* injection (BENQI's
+        # collaterals-map, ``valuation_role_keys=()``) is deliberately excluded —
+        # routing it through the priced read would fail closed forever, looking
+        # wired but inert. The Aave family declares no roles ⇒ whole-account.
+        is_per_market = has_market_health or LendingReadRegistry.declares_valuation_roles(protocol)
+
+        # Resolve the market id for per-market protocols, accepting both detail
+        # spellings — on-chain discovery uses ``market_id`` while a strategy's
+        # ``get_open_positions`` reports ``market``. Whole-account protocols (the
+        # Aave family) carry no market id; force ``None`` so a stray detail key can
+        # never mis-route a whole-account leg into the per-market read path
+        # (keeps the Aave path byte-neutral).
+        if is_per_market:
+            market_id = position.details.get("market_id") or position.details.get("market")
+            if not market_id:
+                # A per-market lending leg we recognise but cannot scope (no market
+                # id) — fail closed: this seam owns the leg's Track-C fields, so
+                # stamp explicit None for HF AND APY so a stale strategy-reported
+                # value cannot survive the downstream merge (VIB-5084 class),
+                # rather than returning the details unchanged. (Aave is never
+                # per-market, so this never touches its repricer-set APY.)
+                return {
+                    **enriched_details,
+                    "health_factor": None,
+                    "supply_apy_pct": None,
+                    "borrow_apy_pct": None,
+                }
+        else:
+            market_id = None
+
         wallet = (
             position.details.get("wallet") or position.details.get("wallet_address") or position.details.get("owner")
         )
+        # Per-market lending protocols (Compound V3, Morpho Blue) have no
+        # single-reserve discovery spec, so their legs arrive only via the
+        # strategy's ``get_open_positions`` — which reports the asset + market but
+        # not the owner. Fall back to the deployment wallet (1 gateway : 1 strategy
+        # ⇒ one owner) so the read can execute. The Aave family is discovered with
+        # its wallet on-chain, so this fallback never changes its byte-neutral path.
+        if not wallet and is_per_market:
+            wallet = strategy_wallet
         if not wallet:
             return enriched_details
         # EVM addresses are case-insensitive — normalise so a checksummed and a
@@ -2662,16 +2735,127 @@ class PortfolioValuer:
         # missing the cache and issuing a redundant gateway round-trip (Gemini).
         wallet = wallet.lower()
 
-        key = (position.protocol, chain, wallet)
+        key = (protocol, chain, wallet, market_id)
         if key not in account_state_cache:
+            account_state_cache[key] = self._read_lending_trackc_state(
+                protocol=protocol,
+                chain=chain,
+                wallet=wallet,
+                market_id=market_id,
+                has_market_health=has_market_health,
+                market=market,
+            )
+        state = account_state_cache[key]
+
+        # We attempted a supported read (past every early-return), so this leg's
+        # HF is OURS to set: the measured value, or an explicit None that
+        # overrides any stale strategy-reported HF in the merge below
+        # (honest-unmeasured, not stale-passthrough).
+        measured_hf = state.health_factor if state is not None else None
+        out = {**enriched_details, "health_factor": str(measured_hf) if measured_hf is not None else None}
+
+        # APY for multi-collateral protocols (Compound): the Aave family already
+        # stamps supply_apy_pct via its single-reserve repricer, so fill here only
+        # for protocols that path does not cover. Idempotent — never clobber a
+        # value the repricer already set (Aave stays byte-identical).
+        if has_market_health and market_id:
+            # The lending-rate provider keys on the Comet's *base token symbol*
+            # (e.g. "USDC"), NOT the lowercase market key ("usdc") — and the
+            # mapping is case-sensitive, so a naive ``market_id.upper()`` breaks
+            # for cased symbols (wstETH, USDC.e). Resolve the canonical base symbol
+            # from the connector's market table (the same inputs the health read
+            # uses); fall back to the leg's reported asset.
+            inputs = LendingReadRegistry.market_health_inputs(protocol, chain, market_id)
+            base_symbol = (inputs or {}).get("base_token") or position.details.get("asset")
+            if base_symbol:
+                base_symbol = str(base_symbol)
+                if out.get("supply_apy_pct") is None:
+                    out["supply_apy_pct"] = self._lending_rate_pct(market, protocol, base_symbol, "supply", chain)
+                if out.get("borrow_apy_pct") is None:
+                    out["borrow_apy_pct"] = self._lending_rate_pct(market, protocol, base_symbol, "borrow", chain)
+        elif is_per_market:
+            # Per-market protocols without a market-health rate source (Morpho
+            # Blue, role-based) — the seam owns these fields but has no live-rate
+            # source yet (Morpho live rate is VIB-5040), so stamp an explicit None
+            # rather than leaving the keys absent: a stale strategy-reported APY
+            # must not survive the merge. (Aave is whole-account, never per-market,
+            # so its repricer-set supply_apy_pct is untouched — byte-neutral.)
+            out["supply_apy_pct"] = None
+            out["borrow_apy_pct"] = None
+
+        return out
+
+    def _read_lending_trackc_state(
+        self,
+        *,
+        protocol: str,
+        chain: str,
+        wallet: str,
+        market_id: str | None,
+        has_market_health: bool,
+        market: MarketDataSource,
+    ) -> Any:
+        """Read the aggregate lending state a leg's Track-C HF derives from.
+
+        Routes through the capability-appropriate gateway-boundary-correct seam:
+        the summed multi-collateral :func:`read_lending_market_health` for
+        market-health protocols (Compound V3 — the base/borrow token price +
+        decimals are resolved by a :class:`PositionHealthProvider` and threaded
+        in; the per-collateral price/scale/liquidation factor are read on-chain
+        by the connector reader), else the aggregate
+        :func:`read_lending_account_state` for whole-account protocols (the Aave
+        family — USD-native, no price oracle needed). Track-C is an observational
+        snapshot so ``block=None`` ("latest") is correct (not a pinned
+        post-state read). Fails closed to ``None`` (Empty ≠ Zero) on any error.
+        """
+        try:
+            if has_market_health:
+                if not market_id:
+                    return None
+                from almanak.framework.accounting.lending_reads import read_lending_market_health
+                from almanak.framework.data.position_health import PositionHealthProvider
+
+                # Reuse the canonical base-token price/decimals resolvers (USD
+                # stablecoin 1:1 fallback + never-guess-decimals safety). Only the
+                # resolvers are used here — they read ``price_oracle`` + the token
+                # resolver, NOT the gateway client — so we pass ``gateway_client=None``
+                # (the market-health read itself routes through ``self._gateway_client``
+                # in ``read_lending_market_health`` below).
+                php = PositionHealthProvider(
+                    chain=chain,
+                    gateway_client=None,
+                    price_oracle=(lambda s: market.price(s)) if market is not None else None,
+                )
+                return read_lending_market_health(
+                    protocol=protocol,
+                    chain=chain,
+                    wallet_address=wallet,
+                    market_id=market_id,
+                    gateway_client=self._gateway_client,
+                    resolve_base_price=php._resolve_base_price,
+                    resolve_base_decimals=php._resolve_base_decimals,
+                )
+
             from almanak.framework.accounting.lending_reads import read_lending_account_state
 
-            # ``read_lending_account_state`` already fails closed (returns None)
-            # on any error; the Aave family is USD-native on-chain so no
-            # price_oracle is needed, and Track-C is an observational snapshot so
-            # block=None ("latest") is correct (not a pinned post-state read).
-            account_state_cache[key] = read_lending_account_state(
-                protocol=position.protocol,
+            if market_id:
+                # Per-market, non-USD-native protocol (Morpho Blue, VIB-4551): price
+                # the market's collateral + loan tokens via the gateway-routed market
+                # and inject them so the account-state reducer can value the position
+                # and derive HF. A missing price ⇒ the read fails closed (None).
+                price_oracle = self._build_lending_price_oracle(protocol, chain, market_id, market)
+                return read_lending_account_state(
+                    protocol=protocol,
+                    chain=chain,
+                    wallet_address=wallet,
+                    market_id=market_id,
+                    gateway_client=self._gateway_client,
+                    price_oracle=price_oracle,
+                    block=None,
+                )
+
+            return read_lending_account_state(
+                protocol=protocol,
                 chain=chain,
                 wallet_address=wallet,
                 market_id=None,
@@ -2679,14 +2863,76 @@ class PortfolioValuer:
                 price_oracle=None,
                 block=None,
             )
+        except Exception:
+            logger.debug("Track-C lending state read failed for %s on %s", protocol, chain, exc_info=True)
+            return None
 
-        state = account_state_cache[key]
-        measured_hf = state.health_factor if state is not None else None
-        # We attempted the read (past every early-return), so this leg's HF is
-        # OURS to set: the measured value, or an explicit None that overrides any
-        # stale strategy-reported HF in the merge below (honest-unmeasured, not
-        # stale-passthrough).
-        return {**enriched_details, "health_factor": str(measured_hf) if measured_hf is not None else None}
+    def _build_lending_price_oracle(
+        self,
+        protocol: str,
+        chain: str,
+        market_id: str,
+        market: MarketDataSource,
+    ) -> dict[str, Any] | None:
+        """USD price map for a per-market lending read's valuation roles.
+
+        Non-USD-native protocols (Morpho Blue) declare which tokens the
+        account-state reducer must value (``valuation_roles`` → the market's
+        collateral + loan symbols); this resolves each to a USD price via the
+        gateway-routed :meth:`MarketSnapshot.price`. Empty ≠ Zero: a token whose
+        price is unavailable is omitted, so the downstream read fails closed
+        (returns ``None``) rather than valuing an incomplete set. Returns ``None``
+        when there are no roles (the read then needs no oracle) or none priced.
+        """
+        if market is None:
+            return None
+        from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+        try:
+            roles = LendingReadRegistry.valuation_roles(protocol, chain, market_id)
+        except Exception:
+            return None
+        oracle: dict[str, Any] = {}
+        for _query_field, symbol in roles:
+            try:
+                price = market.price(symbol)
+            except Exception:
+                continue
+            if price is None:
+                continue
+            try:
+                oracle[symbol] = Decimal(str(price))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+        return oracle or None
+
+    def _lending_rate_pct(
+        self,
+        market: MarketDataSource,
+        protocol: str,
+        token: str,
+        side: str,
+        chain: str,
+    ) -> str | None:
+        """Gateway-routed live lending APY as a stringified percent, or ``None``.
+
+        Empty ≠ Zero: an unavailable rate (no market, protocol raises
+        ``RateHistoryUnavailable``, reduced ``market`` lacking the accessor)
+        stamps an explicit ``None``, never a fabricated rate. Never raises into
+        the snapshot path.
+        """
+        # ``lending_rate`` lives on the concrete MarketSnapshot, not the narrow
+        # ``MarketDataSource`` protocol — resolve it dynamically so a reduced
+        # market source simply yields ``None`` (Empty ≠ Zero) instead of raising.
+        rate_fn = getattr(market, "lending_rate", None)
+        if not callable(rate_fn):
+            return None
+        try:
+            rate = rate_fn(protocol, token, side, chain=chain)
+        except Exception:
+            return None
+        pct = getattr(rate, "apy_percent", None)
+        return str(pct) if pct is not None else None
 
     def _value_matched_perp(  # noqa: C901
         self,

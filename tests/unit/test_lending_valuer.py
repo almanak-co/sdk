@@ -916,7 +916,7 @@ class TestVib5006LendingTrackCEnrichment:
             lambda **_kw: self._account_state(Decimal("2.6026")),
         )
         cache: dict = {}
-        out = valuer._enrich_lending_health_factor(position, "arbitrum", {"k": "v"}, cache)
+        out = valuer._enrich_lending_trackc_fields(position, "arbitrum", {"k": "v"}, cache, None)
         assert out["health_factor"] == "2.6026"
         assert out["k"] == "v"  # original details preserved
 
@@ -929,7 +929,7 @@ class TestVib5006LendingTrackCEnrichment:
             "almanak.framework.accounting.lending_reads.read_lending_account_state",
             lambda **_kw: None,
         )
-        out = valuer._enrich_lending_health_factor(position, "arbitrum", {}, {})
+        out = valuer._enrich_lending_trackc_fields(position, "arbitrum", {}, {}, None)
         assert out["health_factor"] is None
 
     def test_none_hf_value_stamps_explicit_none(self, monkeypatch):
@@ -939,7 +939,7 @@ class TestVib5006LendingTrackCEnrichment:
             "almanak.framework.accounting.lending_reads.read_lending_account_state",
             lambda **_kw: self._account_state(None),
         )
-        out = valuer._enrich_lending_health_factor(position, "arbitrum", {}, {})
+        out = valuer._enrich_lending_trackc_fields(position, "arbitrum", {}, {}, None)
         assert out["health_factor"] is None
 
     def test_failed_read_overrides_stale_strategy_hf(self, monkeypatch):
@@ -953,7 +953,7 @@ class TestVib5006LendingTrackCEnrichment:
             lambda **_kw: None,
         )
         # enriched_details already carries a (stale) HF — it must be overridden.
-        out = valuer._enrich_lending_health_factor(position, "arbitrum", {"health_factor": "9.99"}, {})
+        out = valuer._enrich_lending_trackc_fields(position, "arbitrum", {"health_factor": "9.99"}, {}, None)
         assert out["health_factor"] is None
 
     def test_non_lending_position_skips_read(self, monkeypatch):
@@ -964,25 +964,88 @@ class TestVib5006LendingTrackCEnrichment:
             "almanak.framework.accounting.lending_reads.read_lending_account_state",
             lambda **kw: calls.append(kw),
         )
-        out = valuer._enrich_lending_health_factor(position, "arbitrum", {}, {})
+        out = valuer._enrich_lending_trackc_fields(position, "arbitrum", {}, {}, None)
         assert "health_factor" not in out
         assert calls == []  # no read for non-lending positions
 
-    def test_per_market_protocol_skipped_no_read(self, monkeypatch):
-        """A market_id ⇒ Morpho-class (per-market) protocol — skip rather than
-        issue a read that would fail closed (VIB-4551 twin, separate ticket)."""
+    def test_morpho_per_market_reads_account_state_with_price_injection(self, monkeypatch):
+        """VIB-4551: a Morpho leg (per-market — publishes a market table but no
+        market-health reader) now reads the aggregate account state scoped by
+        market_id (with the market's token prices injected), no longer skipped.
+        HF is stamped; APY stays None (Morpho live rate is VIB-5040)."""
+        from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
+
         valuer = self._valuer_with_on_chain(None)
         position = self._make_position(
             "BORROW", protocol="morpho_blue", details={"wallet": "0xWALLET", "market_id": "0xabc"}
         )
+        captured: dict = {}
+
+        def _as(**kw):
+            captured.update(kw)
+            return LendingAccountState(
+                collateral_usd=Decimal("100"),
+                debt_usd=Decimal("40"),
+                health_factor=Decimal("1.95"),
+                liquidation_threshold_bps=None,
+                e_mode_category=None,
+                lltv=Decimal("0.86"),
+            )
+
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_account_state", _as
+        )
+        market = MagicMock()
+        market.price.return_value = Decimal("2000")
+        out = valuer._enrich_lending_trackc_fields(position, "ethereum", {}, {}, market)
+        assert out["health_factor"] == "1.95"
+        assert captured["market_id"] == "0xabc"  # per-market scoped read
+        # APY stays unmeasured for Morpho (VIB-5040) — stamped as an EXPLICIT None
+        # (key present) so a stale strategy-reported APY can't survive the merge,
+        # never fabricated.
+        assert "supply_apy_pct" in out and out["supply_apy_pct"] is None
+        assert "borrow_apy_pct" in out and out["borrow_apy_pct"] is None
+
+    def test_morpho_per_market_without_market_id_fails_closed(self, monkeypatch):
+        """A per-market protocol with no resolvable market id cannot be scoped ⇒
+        no read, AND an explicit health_factor=None stamped so a stale
+        strategy-reported HF cannot survive the merge (Empty ≠ Zero / VIB-5084)."""
+        valuer = self._valuer_with_on_chain(None)
+        position = self._make_position("BORROW", protocol="morpho_blue", details={"wallet": "0xWALLET"})
         calls: list = []
         monkeypatch.setattr(
             "almanak.framework.accounting.lending_reads.read_lending_account_state",
             lambda **kw: calls.append(kw),
         )
-        out = valuer._enrich_lending_health_factor(position, "ethereum", {}, {})
-        assert "health_factor" not in out
-        assert calls == []
+        # A stale strategy-reported HF must be overridden, not preserved.
+        out = valuer._enrich_lending_trackc_fields(position, "ethereum", {"health_factor": "9.99"}, {}, MagicMock())
+        assert out["health_factor"] is None
+        assert calls == []  # no read issued without a market to scope it
+
+    def test_benqi_excluded_from_per_market_priced_read(self, monkeypatch):
+        """BENQI publishes a market table but declares NO valuation roles (it needs
+        a different collaterals-map injection), so it must NOT route through the
+        priced per-market read — which would fail closed forever and only *look*
+        wired. The dispatch gates on declares_valuation_roles, so a benqi leg's
+        market id is forced None and it never issues a market-scoped read."""
+        valuer = self._valuer_with_on_chain(None)
+        position = self._make_position(
+            "BORROW", protocol="benqi", details={"wallet": "0xWALLET", "market_id": "0xbenqimkt"}
+        )
+        as_calls: list = []
+        mh_calls: list = []
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_account_state",
+            lambda **kw: as_calls.append(kw),
+        )
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_market_health",
+            lambda **kw: mh_calls.append(kw),
+        )
+        valuer._enrich_lending_trackc_fields(position, "avalanche", {}, {}, MagicMock())
+        assert mh_calls == []  # benqi has no market-health reader
+        # Never scoped to the benqi market id — the per-market priced read is not taken.
+        assert all(kw.get("market_id") is None for kw in as_calls)
 
     def test_account_state_read_cached_across_legs(self, monkeypatch):
         """Both legs of a loop (same protocol/chain/wallet) share ONE read."""
@@ -1000,8 +1063,8 @@ class TestVib5006LendingTrackCEnrichment:
             _counting_read,
         )
         cache: dict = {}
-        out_s = valuer._enrich_lending_health_factor(supply, "arbitrum", {}, cache)
-        out_b = valuer._enrich_lending_health_factor(borrow, "arbitrum", {}, cache)
+        out_s = valuer._enrich_lending_trackc_fields(supply, "arbitrum", {}, cache, None)
+        out_b = valuer._enrich_lending_trackc_fields(borrow, "arbitrum", {}, cache, None)
         assert out_s["health_factor"] == "2.6"
         assert out_b["health_factor"] == "2.6"
         assert read_count["n"] == 1  # cached per (protocol, chain, wallet)
@@ -1023,8 +1086,8 @@ class TestVib5006LendingTrackCEnrichment:
             _counting_read,
         )
         cache: dict = {}
-        valuer._enrich_lending_health_factor(checksummed, "arbitrum", {}, cache)
-        valuer._enrich_lending_health_factor(lowercased, "arbitrum", {}, cache)
+        valuer._enrich_lending_trackc_fields(checksummed, "arbitrum", {}, cache, None)
+        valuer._enrich_lending_trackc_fields(lowercased, "arbitrum", {}, cache, None)
         assert read_count["n"] == 1  # case-normalised cache key
 
     def test_no_gateway_skips_read(self, monkeypatch):
@@ -1037,6 +1100,197 @@ class TestVib5006LendingTrackCEnrichment:
             "almanak.framework.accounting.lending_reads.read_lending_account_state",
             lambda **kw: calls.append(kw),
         )
-        out = valuer._enrich_lending_health_factor(position, "arbitrum", {}, {})
+        out = valuer._enrich_lending_trackc_fields(position, "arbitrum", {}, {}, None)
         assert "health_factor" not in out
         assert calls == []
+
+
+class TestCompoundV3LendingTrackCEnrichment:
+    """VIB-5160: the shared lending Track-C seam stamps the same observability
+    fields for Compound V3 (Comet) that VIB-5006 stamps for the Aave family —
+    dispatching on connector capability, never a protocol-name if/elif. HF comes
+    from the summed multi-collateral ``read_lending_market_health`` (not the
+    single-leg account-state read), and supply/borrow APY from the gateway-routed
+    ``market.lending_rate``. Closes Accountant L2/L3/L5 for Compound V3."""
+
+    def _make_position(self, position_type, **kwargs):
+        from almanak.framework.teardown.models import PositionInfo, PositionType
+
+        defaults = {
+            "position_type": getattr(PositionType, position_type),
+            "position_id": "test-position",
+            "chain": "base",
+            "protocol": "compound_v3",
+            "value_usd": Decimal("999"),
+            "details": {"wallet": "0xWALLET", "market_id": "usdc", "asset": "USDC"},
+        }
+        defaults.update(kwargs)
+        return PositionInfo(**defaults)
+
+    def _valuer(self):
+        from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
+
+        return PortfolioValuer(gateway_client=MagicMock())
+
+    def _market_state(self, hf):
+        from almanak.connectors._strategy_base.lending_read_base import LendingAccountState
+
+        return LendingAccountState(
+            collateral_usd=Decimal("100"),
+            debt_usd=Decimal("40"),
+            health_factor=hf,
+            liquidation_threshold_bps=None,
+            e_mode_category=None,
+            lltv=Decimal("0.83"),
+        )
+
+    def _market(self, supply_apy="4.5", borrow_apy="6.1"):
+        market = MagicMock()
+        market.price.return_value = Decimal("1.0")
+
+        def _rate(protocol, token, side, *, chain=None):
+            pct = Decimal(supply_apy) if side == "supply" else Decimal(borrow_apy)
+            return SimpleNamespace(apy_percent=pct)
+
+        market.lending_rate.side_effect = _rate
+        return market
+
+    def test_compound_market_health_hf_and_apy_stamped(self, monkeypatch):
+        """A Comet leg gets HF from the summed market-health read and supply +
+        borrow APY from ``market.lending_rate`` — all measured, none fabricated.
+        The APY token is the Comet's BASE SYMBOL ("USDC"), resolved from the
+        connector market table — NOT the lowercase market key ("usdc"), which the
+        case-sensitive rate provider would reject (the Anvil-proven failure mode)."""
+        valuer = self._valuer()
+        position = self._make_position("BORROW")  # market_id "usdc"
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_market_health",
+            lambda **_kw: self._market_state(Decimal("2.5")),
+        )
+        rate_tokens: list[str] = []
+        market = self._market()
+        orig = market.lending_rate.side_effect
+
+        def _capture(protocol, token, side, *, chain=None):
+            rate_tokens.append(token)
+            return orig(protocol, token, side, chain=chain)
+
+        market.lending_rate.side_effect = _capture
+        out = valuer._enrich_lending_trackc_fields(position, "base", {}, {}, market)
+        assert out["health_factor"] == "2.5"
+        assert Decimal(out["supply_apy_pct"]) == Decimal("4.5")
+        assert Decimal(out["borrow_apy_pct"]) == Decimal("6.1")
+        assert rate_tokens == ["USDC", "USDC"]  # base symbol, not the "usdc" market key
+
+    def test_compound_dispatch_uses_market_health_not_account_state(self, monkeypatch):
+        """Capability dispatch: Compound publishes a market-health reader, so HF
+        MUST come from it — the single-leg account-state read (a wrong
+        one-collateral HF) is NEVER taken for Compound."""
+        valuer = self._valuer()
+        position = self._make_position("SUPPLY")
+        mh_calls: list = []
+        as_calls: list = []
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_market_health",
+            lambda **kw: (mh_calls.append(kw) or self._market_state(Decimal("3.0"))),
+        )
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_account_state",
+            lambda **kw: as_calls.append(kw),
+        )
+        out = valuer._enrich_lending_trackc_fields(position, "base", {}, {}, self._market())
+        assert out["health_factor"] == "3.0"
+        assert len(mh_calls) == 1
+        assert as_calls == []  # account-state path NOT taken for a market-health protocol
+
+    def test_compound_failed_market_health_stamps_none_hf(self, monkeypatch):
+        """Attempted-but-None market-health read ⇒ explicit health_factor=None
+        (Empty ≠ Zero), never a fabricated healthy value."""
+        valuer = self._valuer()
+        position = self._make_position("BORROW", details={"wallet": "0xWALLET", "market_id": "usdc", "asset": "USDC"})
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_market_health",
+            lambda **_kw: None,
+        )
+        out = valuer._enrich_lending_trackc_fields(position, "base", {"health_factor": "9.99"}, {}, self._market())
+        assert out["health_factor"] is None  # stale strategy HF overridden
+
+    def test_compound_unavailable_rate_stamps_none_apy(self, monkeypatch):
+        """An unavailable lending rate (gateway raises) ⇒ explicit None APY, never
+        a fabricated rate. HF is still stamped from the (successful) health read."""
+        valuer = self._valuer()
+        position = self._make_position("SUPPLY")
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_market_health",
+            lambda **_kw: self._market_state(Decimal("2.0")),
+        )
+        market = MagicMock()
+        market.price.return_value = Decimal("1.0")
+        market.lending_rate.side_effect = ValueError("RateHistoryUnavailable")
+        out = valuer._enrich_lending_trackc_fields(position, "base", {}, {}, market)
+        assert out["health_factor"] == "2.0"
+        assert out["supply_apy_pct"] is None
+        assert out["borrow_apy_pct"] is None
+
+    def test_compound_strategy_reported_leg_resolves_market_and_wallet(self, monkeypatch):
+        """A strategy-reported Comet leg carries ``market`` (not ``market_id``) and
+        NO owner — Compound has no single-reserve discovery spec, so the leg never
+        gets a wallet on-chain. The stamp must resolve the market key from
+        ``market`` and the owner from the deployment wallet, then fire the read.
+        (Regression for the Anvil finding: all-NULL Compound Track-C rows.)"""
+        valuer = self._valuer()
+        position = self._make_position(
+            "SUPPLY", details={"asset": "WETH", "market": "usdc", "type": "collateral"}
+        )
+        captured: dict = {}
+
+        def _mh(**kw):
+            captured.update(kw)
+            return self._market_state(Decimal("2.7"))
+
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_market_health", _mh
+        )
+        out = valuer._enrich_lending_trackc_fields(
+            position, "base", {}, {}, self._market(), strategy_wallet="0xDEPLOYMENTWALLET"
+        )
+        assert out["health_factor"] == "2.7"
+        assert captured["market_id"] == "usdc"  # resolved from details["market"]
+        assert captured["wallet_address"] == "0xdeploymentwallet"  # deployment-wallet fallback, lowercased
+
+    def test_compound_no_wallet_and_no_strategy_wallet_skips(self, monkeypatch):
+        """No owner anywhere ⇒ no read, details untouched (never a fabricated HF)."""
+        valuer = self._valuer()
+        position = self._make_position("SUPPLY", details={"asset": "WETH", "market": "usdc"})
+        calls: list = []
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_market_health",
+            lambda **kw: calls.append(kw),
+        )
+        out = valuer._enrich_lending_trackc_fields(position, "base", {}, {}, self._market())
+        assert "health_factor" not in out
+        assert calls == []
+
+    def test_compound_market_health_cached_across_legs(self, monkeypatch):
+        """Both legs of a Comet loop (same protocol/chain/wallet/market_id) share
+        ONE market-health read."""
+        valuer = self._valuer()
+        supply = self._make_position("SUPPLY")
+        borrow = self._make_position("BORROW")
+        read_count = {"n": 0}
+
+        def _counting(**_kw):
+            read_count["n"] += 1
+            return self._market_state(Decimal("2.4"))
+
+        monkeypatch.setattr(
+            "almanak.framework.accounting.lending_reads.read_lending_market_health",
+            _counting,
+        )
+        cache: dict = {}
+        market = self._market()
+        out_s = valuer._enrich_lending_trackc_fields(supply, "base", {}, cache, market)
+        out_b = valuer._enrich_lending_trackc_fields(borrow, "base", {}, cache, market)
+        assert out_s["health_factor"] == "2.4"
+        assert out_b["health_factor"] == "2.4"
+        assert read_count["n"] == 1  # cached per (protocol, chain, wallet, market_id)
