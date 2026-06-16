@@ -112,7 +112,6 @@ from ._run_gateway import (  # noqa: F401
     _normalize_anvil_funding,
     _normalize_quick_chains,
     _parse_anvil_port_overrides,
-    _quick_load_config_dict,
     _resolve_anvil_chain_dispatch,
     _resolve_anvil_chains_and_funding,
     _resolve_gateway_chains_for_mainnet,

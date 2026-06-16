@@ -5,7 +5,6 @@ Split from run_helpers.py; import via the run_helpers facade externally.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable, Coroutine
 from pathlib import Path
@@ -290,25 +289,6 @@ def _resolve_quick_config_path(working_dir: str, config_file: str | None) -> Pat
     return None
 
 
-def _quick_load_config_dict(path: Path) -> dict[str, Any]:
-    """Best-effort parse of a quick-probe config file; malformed input yields an empty dict."""
-    try:
-        with open(path) as f:
-            if path.suffix.lower() in [".yaml", ".yml"]:
-                import yaml
-
-                parsed = yaml.safe_load(f)
-            else:
-                parsed = json.load(f)
-    except Exception as e:
-        logger.debug("Quick config probe failed for %s: %s", path, e)
-        return {}
-    # `yaml.safe_load` returns None for empty files, and a user-supplied
-    # config could parse to a scalar or list. Coerce anything non-dict
-    # to an empty dict so `.get()` is always safe.
-    return parsed if isinstance(parsed, dict) else {}
-
-
 def _chains_from_quick_config(quick_config: dict[str, Any]) -> list[str]:
     """Extract `chains` (preferred) or `chain` from a quick-config dict."""
     chains_val = quick_config.get("chains")
@@ -342,11 +322,17 @@ def _resolve_anvil_chains_and_funding(
 
     config_path = _resolve_quick_config_path(working_dir, config_file)
     if config_path and config_path.exists():
-        # Malformed config files must not crash gateway startup. Swallow
-        # parse errors here and fall through with an empty dict; the
-        # full loader later in `_discover_and_load_config` will surface
-        # a proper user-facing error if the file is truly broken.
-        quick_config = _quick_load_config_dict(config_path)
+        # Parse + schema-validate ONCE through the shared loader (#2101). A
+        # malformed config now fails fast here with a ``click.ClickException``
+        # naming the file + line, instead of being swallowed into the
+        # misleading "no chain found" warning below while the real error
+        # surfaces only later in the runner. ``warn_unknown_keys=False`` so the
+        # typo warning fires exactly once, at the canonical load — not on this
+        # pre-boot peek. The hosted ``ALMANAK_STRATEGY_CONFIG`` override is NOT
+        # applied here; it belongs to the canonical loader only.
+        from .run import parse_strategy_config_file
+
+        quick_config = parse_strategy_config_file(config_path, warn_unknown_keys=False)
         anvil_chains = _chains_from_quick_config(quick_config)
         anvil_funding = _normalize_anvil_funding(quick_config.get("anvil_funding", {}))
 
@@ -389,9 +375,12 @@ def _resolve_gateway_chains_for_mainnet(
     chains: list[str] = []
     config_path = _resolve_quick_config_path(working_dir, config_file)
     if config_path and config_path.exists():
-        # Same defensive treatment as the Anvil probe above: a malformed
-        # config must not crash gateway startup at this early peek.
-        chains = _chains_from_quick_config(_quick_load_config_dict(config_path))
+        # Same shared validated parse as the Anvil probe (#2101): one parse,
+        # fail-fast with a file-naming error rather than swallowing. Probe peek
+        # only — no typo warning, no hosted override here.
+        from .run import parse_strategy_config_file
+
+        chains = _chains_from_quick_config(parse_strategy_config_file(config_path, warn_unknown_keys=False))
 
     # Fall back to decorator metadata if config has no chain
     if not chains and early_strategy_class:

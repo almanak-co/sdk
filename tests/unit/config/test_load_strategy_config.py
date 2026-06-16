@@ -211,3 +211,116 @@ def test_env_override_empty_object_is_noop(
     monkeypatch.setenv("ALMANAK_STRATEGY_CONFIG", "{}")
     config = load_strategy_config("any", str(cfg_file))
     assert config["chain"] == "arbitrum"
+
+
+# ---------------------------------------------------------------------------
+# #2098 / VIB-2867 — warn on unrecognized config keys that look like typos.
+# ---------------------------------------------------------------------------
+
+
+def test_typo_key_warns_with_suggestion(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A near-miss unknown key warns with a 'did you mean' suggestion (the money-bug guard)."""
+    cfg_file = tmp_path / "config.json"
+    # ``chian`` -> ``chain`` (dist 2); ``totl_value_usd`` -> ``total_value_usd`` (dist 1).
+    cfg_file.write_text(json.dumps({"chain": "arbitrum", "chian": "ethereum", "totl_value_usd": "4.0"}))
+    with caplog.at_level("WARNING", logger="almanak.framework.cli.run"):
+        config = load_strategy_config("any", str(cfg_file))
+    # extra="allow" — the typo is retained (not dropped), but it is surfaced.
+    assert config["chian"] == "ethereum"
+    warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert any("'chian'" in m and "did you mean 'chain'" in m for m in warnings)
+    assert any("'totl_value_usd'" in m and "did you mean 'total_value_usd'" in m for m in warnings)
+
+
+def test_legit_custom_field_does_not_warn(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A legitimate per-strategy extension field (not near a known field) does NOT warn — no noise."""
+    cfg_file = tmp_path / "config.json"
+    # ``lp1_range_width_pct`` shares a substring with ``range_width_pct`` but is dist 4 — not a typo.
+    cfg_file.write_text(json.dumps({"chain": "arbitrum", "lp1_range_width_pct": "0.1"}))
+    with caplog.at_level("WARNING", logger="almanak.framework.cli.run"):
+        load_strategy_config("any", str(cfg_file))
+    warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert not any("lp1_range_width_pct" in m for m in warnings)
+
+
+@pytest.mark.parametrize(
+    "extension_key",
+    # Real per-strategy extension keys that a plain-Levenshtein<=2 heuristic
+    # false-flagged (traderjoe_fee_rotator's pool_a/pool_b vs `pool`,
+    # uniswap_v4_hooks' hook_address vs `pool_address`). Each differs from the
+    # nearest known field by a whole token (OSA distance >= 2), so the
+    # transposition-aware threshold-1 heuristic must stay silent.
+    ["pool_a", "pool_b", "hook_address"],
+)
+def test_real_extension_keys_do_not_warn(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, extension_key: str
+) -> None:
+    """Whole-token extension keys must not trip the typo warning (regression guard)."""
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"chain": "arbitrum", extension_key: "x"}))
+    with caplog.at_level("WARNING", logger="almanak.framework.cli.run"):
+        load_strategy_config("any", str(cfg_file))
+    warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert not any(extension_key in m for m in warnings)
+
+
+def test_transposition_typo_is_flagged(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """An adjacent-swap typo (OSA distance 1) is still caught under the tighter threshold."""
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"chian": "arbitrum"}))  # chian <-> chain, one transposition
+    with caplog.at_level("WARNING", logger="almanak.framework.cli.run"):
+        load_strategy_config("any", str(cfg_file))
+    warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert any("'chian'" in m and "did you mean 'chain'" in m for m in warnings)
+
+
+def test_probe_parse_suppresses_typo_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """The pre-boot probe parse (warn_unknown_keys=False) stays silent so the warning fires once."""
+    from almanak.framework.cli.run import parse_strategy_config_file
+
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"chain": "arbitrum", "chian": "ethereum"}))
+    with caplog.at_level("WARNING", logger="almanak.framework.cli.run"):
+        parse_strategy_config_file(cfg_file, warn_unknown_keys=False)
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+# ---------------------------------------------------------------------------
+# #2101 / VIB-5164 — the gateway-boot quick probe shares the single validated
+# parse; a malformed config fails fast with the file error instead of being
+# swallowed into a misleading "no chain found" warning.
+# ---------------------------------------------------------------------------
+
+
+def test_anvil_probe_fails_fast_on_malformed_config(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    """A malformed config raises the file-naming error FIRST — before any 'no chain found' warning."""
+    from almanak.framework.cli._run_gateway import _resolve_anvil_chains_and_funding
+
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text('{"chain": "arbitrum",,}')  # stray double comma
+    with pytest.raises(click.ClickException) as exc_info:
+        _resolve_anvil_chains_and_funding(
+            working_dir=str(tmp_path),
+            config_file=str(cfg_file),
+            early_strategy_class=None,
+            external_anvil_ports={},
+        )
+    assert str(cfg_file) in exc_info.value.message
+    # The misleading warning must NOT have been printed before the real error.
+    assert "no chain found" not in capsys.readouterr().out
+
+
+def test_anvil_probe_reads_chain_from_valid_config(tmp_path: Path) -> None:
+    """The shared validated parse still extracts chain + anvil_funding for a valid config."""
+    from almanak.framework.cli._run_gateway import _resolve_anvil_chains_and_funding
+
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"chain": "arbitrum", "anvil_funding": {"WETH": "1.5"}}))
+    chains, funding = _resolve_anvil_chains_and_funding(
+        working_dir=str(tmp_path),
+        config_file=str(cfg_file),
+        early_strategy_class=None,
+        external_anvil_ports={},
+    )
+    assert chains == ["arbitrum"]
+    assert funding == {"WETH": "1.5"}

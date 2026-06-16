@@ -670,12 +670,16 @@ class TestSetupGatewayManaged:
 
 
 class TestSetupGatewayQuickConfigRobustness:
-    """Defensive handling of malformed Anvil quick-load configs.
+    """Quick-load config handling at gateway boot (#2101).
 
     `_setup_gateway` reads the strategy's config file early to discover which
-    chains need Anvil forks. The parse can return non-dict values (empty YAML
-    -> None, a YAML list -> list) and the `chains` field may be a bare string
-    in user-authored configs. These tests pin the hardened behavior.
+    chains need Anvil forks. Since #2101 this early probe shares the SINGLE
+    validated parse (`parse_strategy_config_file`) used by the canonical runner
+    loader, so a malformed or schema-invalid config now FAILS FAST with a
+    `click.ClickException` naming the file — the same error the runner would
+    raise moments later — instead of being silently swallowed into a misleading
+    "no chain found" warning. An empty config (empty YAML -> None -> {}) is
+    valid and still boots with no Anvil forks. These tests pin that contract.
     """
 
     def test_empty_yaml_config_does_not_crash(
@@ -709,20 +713,25 @@ class TestSetupGatewayQuickConfigRobustness:
         assert _FakeManagedGateway.last is not None
         assert _FakeManagedGateway.last.anvil_chains == []
 
-    def test_chains_as_single_string_is_normalized_to_list(
+    def test_chains_as_single_string_is_rejected(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """`chains: arbitrum` (a string scalar) must not iterate as characters."""
+        """`chains: arbitrum` (a string scalar) is a schema violation — fail fast, don't iterate chars.
+
+        Since #2101 the probe shares the canonical validated parse, so a bare
+        string for the list-typed `chains` field raises the same schema error
+        the runner would — early and naming the file — rather than being
+        silently wrapped only at the probe while the runner rejects it.
+        """
         _install_gateway_fakes(monkeypatch)
         import atexit as real_atexit
 
         monkeypatch.setattr(real_atexit, "register", lambda *a, **kw: None)
-        # Use JSON so we deterministically get a string scalar for chains.
         (tmp_path / "config.json").write_text(json.dumps({"chains": "arbitrum"}))
         runner = CliRunner()
-        with runner.isolation():
+        with runner.isolation(), pytest.raises(click.ClickException) as exc_info:
             run_helpers._setup_gateway(
                 working_dir=str(tmp_path),
                 config_file=None,
@@ -736,16 +745,15 @@ class TestSetupGatewayQuickConfigRobustness:
                 reset_fork=False,
                 once=False,
             )
-        assert _FakeManagedGateway.last is not None
-        # "arbitrum" wrapped into a single-element list, NOT iterated as chars.
-        assert _FakeManagedGateway.last.anvil_chains == ["arbitrum"]
+        assert "config.json" in exc_info.value.message
+        assert "schema validation" in exc_info.value.message
 
-    def test_malformed_json_config_does_not_crash(
+    def test_malformed_json_config_fails_fast(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """Malformed JSON must be swallowed, not crash gateway startup."""
+        """Malformed JSON fails fast with a file-naming error, not a swallowed empty parse (#2101)."""
         _install_gateway_fakes(monkeypatch)
         import atexit as real_atexit
 
@@ -753,8 +761,8 @@ class TestSetupGatewayQuickConfigRobustness:
         # Truncated JSON - json.load will raise.
         (tmp_path / "config.json").write_text("{chain:")
         runner = CliRunner()
-        with runner.isolation():
-            _, _, _, _, gw_network, _, _, _ = run_helpers._setup_gateway(
+        with runner.isolation(), pytest.raises(click.ClickException) as exc_info:
+            run_helpers._setup_gateway(
                 working_dir=str(tmp_path),
                 config_file=None,
                 network="anvil",
@@ -767,24 +775,22 @@ class TestSetupGatewayQuickConfigRobustness:
                 reset_fork=False,
                 once=False,
             )
-        assert gw_network == "anvil"
-        assert _FakeManagedGateway.last is not None
-        # Parse failed -> fell through to empty list (no decorator fallback either).
-        assert _FakeManagedGateway.last.anvil_chains == []
+        assert "config.json" in exc_info.value.message
+        assert "Failed to read strategy config" in exc_info.value.message
 
-    def test_chains_as_int_is_ignored(
+    def test_chains_as_int_is_rejected(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """A numeric `chains` value is nonsensical and must be dropped, not coerced."""
+        """A numeric `chains` value is a schema violation — fail fast, don't silently drop it."""
         _install_gateway_fakes(monkeypatch)
         import atexit as real_atexit
 
         monkeypatch.setattr(real_atexit, "register", lambda *a, **kw: None)
         (tmp_path / "config.json").write_text(json.dumps({"chains": 5}))
         runner = CliRunner()
-        with runner.isolation():
+        with runner.isolation(), pytest.raises(click.ClickException) as exc_info:
             run_helpers._setup_gateway(
                 working_dir=str(tmp_path),
                 config_file=None,
@@ -798,23 +804,21 @@ class TestSetupGatewayQuickConfigRobustness:
                 reset_fork=False,
                 once=False,
             )
-        assert _FakeManagedGateway.last is not None
-        assert _FakeManagedGateway.last.anvil_chains == []
+        assert "schema validation" in exc_info.value.message
 
-    def test_chains_as_dict_does_not_use_keys_as_chains(
+    def test_chains_as_dict_is_rejected(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """Guard the `list({"base": 1}) == ["base"]` footgun: dict values must be ignored."""
+        """A dict `chains` is a schema violation — fail fast, never coerce keys (the list({"base":1}) footgun)."""
         _install_gateway_fakes(monkeypatch)
         import atexit as real_atexit
 
         monkeypatch.setattr(real_atexit, "register", lambda *a, **kw: None)
-        # A dict value would silently iterate its keys under a naive list() coercion.
         (tmp_path / "config.json").write_text(json.dumps({"chains": {"base": 1}}))
         runner = CliRunner()
-        with runner.isolation():
+        with runner.isolation(), pytest.raises(click.ClickException) as exc_info:
             run_helpers._setup_gateway(
                 working_dir=str(tmp_path),
                 config_file=None,
@@ -828,9 +832,8 @@ class TestSetupGatewayQuickConfigRobustness:
                 reset_fork=False,
                 once=False,
             )
-        assert _FakeManagedGateway.last is not None
-        # Critical: NOT ["base"]. The dict must be ignored entirely.
-        assert _FakeManagedGateway.last.anvil_chains == []
+        # Critical: the dict is REJECTED, never coerced to ["base"].
+        assert "schema validation" in exc_info.value.message
 
     def test_chains_as_list_is_preserved(
         self,
@@ -861,16 +864,17 @@ class TestSetupGatewayQuickConfigRobustness:
         assert _FakeManagedGateway.last is not None
         assert _FakeManagedGateway.last.anvil_chains == ["arbitrum", "base"]
 
-    def test_mainnet_probe_malformed_json_does_not_crash(
+    def test_mainnet_probe_malformed_json_fails_fast(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """The second probe (mainnet chain detection) must also swallow parse errors.
+        """The second probe (mainnet chain detection) also fails fast on a malformed config (#2101).
 
         The second probe runs when `anvil_chains` is empty (typically on mainnet)
-        to seed `gateway_chains` for the managed GatewaySettings. A malformed
-        config must not crash startup here either.
+        to seed `gateway_chains`. Like the Anvil probe it shares the validated
+        parse, so a malformed config raises a file-naming error here too rather
+        than silently seeding an empty chain list.
         """
         _install_gateway_fakes(monkeypatch)
         import atexit as real_atexit
@@ -878,8 +882,8 @@ class TestSetupGatewayQuickConfigRobustness:
         monkeypatch.setattr(real_atexit, "register", lambda *a, **kw: None)
         (tmp_path / "config.json").write_text("{chain:")
         runner = CliRunner()
-        with runner.isolation():
-            _, managed, _, _, gw_network, _, _, _ = run_helpers._setup_gateway(
+        with runner.isolation(), pytest.raises(click.ClickException) as exc_info:
+            run_helpers._setup_gateway(
                 working_dir=str(tmp_path),
                 config_file=None,
                 network=None,  # -> mainnet, exercises probe 2
@@ -892,26 +896,22 @@ class TestSetupGatewayQuickConfigRobustness:
                 reset_fork=False,
                 once=False,
             )
-        assert gw_network == "mainnet"
-        assert managed is not None
-        # `gateway_chains` is passed through GatewaySettings; our _FakeSettings
-        # stores kwargs unchanged, so we can assert the final value.
-        assert managed.settings.kwargs["chains"] == []
+        assert "Failed to read strategy config" in exc_info.value.message
 
-    def test_mainnet_probe_chains_as_dict_is_ignored(
+    def test_mainnet_probe_chains_as_dict_is_rejected(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """Second probe must also reject dict `chains` rather than coerce keys."""
+        """Second probe also rejects a dict `chains` via schema validation rather than coercing keys."""
         _install_gateway_fakes(monkeypatch)
         import atexit as real_atexit
 
         monkeypatch.setattr(real_atexit, "register", lambda *a, **kw: None)
         (tmp_path / "config.json").write_text(json.dumps({"chains": {"base": 1}}))
         runner = CliRunner()
-        with runner.isolation():
-            _, managed, _, _, _, _, _, _ = run_helpers._setup_gateway(
+        with runner.isolation(), pytest.raises(click.ClickException) as exc_info:
+            run_helpers._setup_gateway(
                 working_dir=str(tmp_path),
                 config_file=None,
                 network=None,  # mainnet -> probe 2
@@ -924,8 +924,7 @@ class TestSetupGatewayQuickConfigRobustness:
                 reset_fork=False,
                 once=False,
             )
-        assert managed is not None
-        assert managed.settings.kwargs["chains"] == []
+        assert "schema validation" in exc_info.value.message
 
 
 class TestNormalizeQuickChains:

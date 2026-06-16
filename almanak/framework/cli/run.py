@@ -218,6 +218,161 @@ def _apply_env_strategy_config_override(config: dict[str, Any]) -> dict[str, Any
 
 # crap-allowlist: #2098/#2101 adds schema validation around the existing loader
 # without increasing its decision complexity.
+# Edit-distance threshold for "did you mean" config-key typo detection (#2098).
+# We use Optimal String Alignment distance (Levenshtein + adjacent transposition)
+# with a threshold of 1: a single fat-finger — one inserted/deleted/substituted
+# char OR one adjacent swap (``chian`` -> ``chain``, ``totl_value_usd`` ->
+# ``total_value_usd``) — is flagged, but keys that differ from a known field by a
+# whole token are NOT (``pool_a`` / ``pool_b`` vs ``pool``, ``hook_address`` vs
+# ``pool_address``, ``lp1_range_width_pct`` vs ``range_width_pct`` are all
+# distance >= 2). Threshold 1 (with transposition as one edit) is what keeps the
+# warning high-precision and noise-free against real per-strategy extension keys.
+_CONFIG_KEY_TYPO_MAX_DISTANCE = 1
+
+
+def _bounded_osa_distance(a: str, b: str, max_distance: int) -> int:
+    """Optimal String Alignment distance (Levenshtein + adjacent transposition).
+
+    Short-circuits to ``max_distance + 1`` as soon as the best achievable distance
+    exceeds the cap, so the typo check stays cheap for long custom-field names.
+    Unlike plain Levenshtein, an adjacent transposition (``ab`` <-> ``ba``) counts
+    as ONE edit — the common typo shape — which lets the caller use a tight
+    threshold of 1 without missing swaps like ``chian`` -> ``chain``.
+    """
+    la, lb = len(a), len(b)
+    if abs(la - lb) > max_distance:
+        return max_distance + 1
+    prev2: list[int] | None = None
+    prev1 = list(range(lb + 1))
+    for i in range(1, la + 1):
+        current = [i] + [0] * lb
+        row_best = current[0]
+        for j in range(1, lb + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            current[j] = min(prev1[j] + 1, current[j - 1] + 1, prev1[j - 1] + cost)
+            if prev2 is not None and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                current[j] = min(current[j], prev2[j - 2] + 1)
+            row_best = min(row_best, current[j])
+        if row_best > max_distance:
+            return max_distance + 1
+        prev2 = prev1
+        prev1 = current
+    return prev1[lb]
+
+
+def _closest_known_config_field(key: str) -> str | None:
+    """Closest ``StrategyConfig`` field within the typo distance of ``key``, else ``None``."""
+    from almanak.config.strategy import StrategyConfig
+
+    best_field: str | None = None
+    best_distance = _CONFIG_KEY_TYPO_MAX_DISTANCE + 1
+    for field in StrategyConfig.model_fields:
+        distance = _bounded_osa_distance(key, field, _CONFIG_KEY_TYPO_MAX_DISTANCE)
+        if distance < best_distance:
+            best_field, best_distance = field, distance
+    return best_field if best_distance <= _CONFIG_KEY_TYPO_MAX_DISTANCE else None
+
+
+def _warn_unknown_config_keys(config_path: Path, validated: Any) -> None:
+    """Warn on unrecognized config keys that look like typos of a known field (#2098 / VIB-2867).
+
+    ``StrategyConfig`` is ``extra="allow"`` because per-strategy dataclass
+    extensions legitimately add fields, so a blanket "unknown key" warning would
+    be noise across the ~102 demo configs. Instead we WARN only when an unknown
+    key is within a small edit distance of a known field — i.e. a likely
+    fat-finger (``chian`` -> ``chain``) — and log other unknowns at DEBUG. This
+    catches the silent-typo money bug (a misspelled ``max_slippage`` becomes a
+    silent no-op) without false-flagging intentional custom fields. The hard
+    ``extra="forbid"`` flip stays a separate phase (demo migration first).
+    """
+    extra = getattr(validated, "model_extra", None) or {}
+    for key in sorted(extra):
+        suggestion = _closest_known_config_field(key)
+        if suggestion:
+            logger.warning(
+                "Strategy config %s: unrecognized key %r — did you mean %r? Ignoring it (check for a typo).",
+                config_path,
+                key,
+                suggestion,
+            )
+        else:
+            logger.debug(
+                "Strategy config %s: unrecognized key %r (not a known field; treated as a per-strategy extension).",
+                config_path,
+                key,
+            )
+
+
+def parse_strategy_config_file(config_path: Path, *, warn_unknown_keys: bool = True) -> dict[str, Any]:
+    """Read, parse, and schema-validate a strategy config file — the single source of truth (#2101).
+
+    Shared by ``load_strategy_config`` (the canonical runner load) and the
+    gateway-boot quick probes in ``_run_gateway.py``. Routing both through one
+    validated parse means a malformed ``config.json`` fails ONCE with a
+    ``click.ClickException`` naming the file + line, instead of being swallowed
+    by the probe into a misleading "no chain found" warning while the real error
+    surfaces only later in the runner.
+
+    Does NOT apply the hosted ``ALMANAK_STRATEGY_CONFIG`` deep-merge override —
+    that stays in ``load_strategy_config`` so the pre-boot chain probe never
+    triggers the hosted merge (a probe is only a peek at chain / funding).
+
+    Args:
+        config_path: Path to the ``config.json`` / ``config.yaml`` file. The
+            caller owns the existence check; a missing path raises a parse error
+            like any other unreadable file.
+        warn_unknown_keys: Emit the typo "did you mean" warning for unrecognized
+            keys. The canonical loader warns (``True``); the pre-boot probes pass
+            ``False`` so the warning fires exactly once, at the canonical load.
+
+    Returns:
+        The validated config as a ``dict`` (``mode="python"`` preserves
+        ``Decimal`` / list types; ``exclude_unset=True`` keeps the pre-Phase-3
+        dict shape — only keys present in the file appear).
+
+    Raises:
+        click.ClickException: on read / JSON / YAML / schema-validation errors,
+            naming the file.
+    """
+    import yaml
+    from pydantic import ValidationError
+
+    from almanak.config.strategy import StrategyConfig
+
+    try:
+        with open(config_path) as f:
+            if config_path.suffix.lower() in (".yaml", ".yml"):
+                raw = yaml.safe_load(f)
+            else:
+                raw = json.load(f)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, yaml.YAMLError) as e:
+        raise click.ClickException(f"Failed to read strategy config {config_path}: {e}") from e
+
+    if raw is None:
+        # Empty / all-comments YAML — treat as empty config.
+        raw = {}
+    if not isinstance(raw, dict):
+        raise click.ClickException(
+            f"Strategy config {config_path} must be a JSON/YAML object, got {type(raw).__name__}."
+        )
+
+    try:
+        validated = StrategyConfig.model_validate(raw)
+    except ValidationError as e:
+        raise click.ClickException(f"Strategy config {config_path} failed schema validation:\n{e}") from e
+
+    if warn_unknown_keys:
+        _warn_unknown_config_keys(config_path, validated)
+
+    # ``mode="python"`` preserves Decimal / list types instead of coercing to
+    # JSON-friendly strings. ``exclude_unset=True`` preserves the pre-Phase-3
+    # dict shape exactly: only fields actually present in the source file appear
+    # in the returned dict. Downstream contracts like ``_warn_missing_token_funding``
+    # (``"token_funding" in config``) and the per-strategy dataclass extension
+    # keep working.
+    return validated.model_dump(mode="python", exclude_unset=True)
+
+
 def load_strategy_config(
     strategy_name: str,
     config_file: str | None = None,
@@ -247,44 +402,6 @@ def load_strategy_config(
     Returns:
         Configuration dictionary (Pydantic-validated; typed values preserved).
     """
-    from pydantic import ValidationError
-
-    from almanak.config.strategy import StrategyConfig
-
-    def _parse_file(config_path: Path) -> dict[str, Any]:
-        """Read, parse, and schema-validate a config file. Errors name the path."""
-        import yaml
-
-        try:
-            with open(config_path) as f:
-                if config_path.suffix.lower() in [".yaml", ".yml"]:
-                    raw = yaml.safe_load(f)
-                else:
-                    raw = json.load(f)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, yaml.YAMLError) as e:
-            raise click.ClickException(f"Failed to read strategy config {config_path}: {e}") from e
-
-        if raw is None:
-            # Empty / all-comments YAML — treat as empty config.
-            raw = {}
-        if not isinstance(raw, dict):
-            raise click.ClickException(
-                f"Strategy config {config_path} must be a JSON/YAML object, got {type(raw).__name__}."
-            )
-
-        try:
-            validated = StrategyConfig.model_validate(raw)
-        except ValidationError as e:
-            raise click.ClickException(f"Strategy config {config_path} failed schema validation:\n{e}") from e
-
-        # ``mode="python"`` preserves Decimal / list types instead of coercing
-        # to JSON-friendly strings. ``exclude_unset=True`` preserves the
-        # pre-Phase-3 dict shape exactly: only fields actually present in the
-        # source file appear in the returned dict. Downstream contracts like
-        # ``_warn_missing_token_funding`` (``"token_funding" in config``) and
-        # the per-strategy dataclass extension keep working.
-        return validated.model_dump(mode="python", exclude_unset=True)
-
     config: dict[str, Any] | None = None
     # Path of the source file the warning should name, if any.
     loaded_config_path: Path | None = None
@@ -293,7 +410,7 @@ def load_strategy_config(
         config_path = Path(config_file)
         if not config_path.exists():
             raise click.ClickException(f"Config file not found: {config_file}")
-        config = _parse_file(config_path)
+        config = parse_strategy_config_file(config_path)
         click.echo(f"Loaded config from: {config_path}")
         loaded_config_path = config_path
     else:
@@ -303,7 +420,7 @@ def load_strategy_config(
             for name in ("config.json", "config.yaml", "config.yml"):
                 config_path = strategy_dir / name
                 if config_path.exists():
-                    config = _parse_file(config_path)
+                    config = parse_strategy_config_file(config_path)
                     click.echo(f"Loaded config from: {config_path}")
                     loaded_config_path = config_path
                     break
