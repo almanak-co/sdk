@@ -181,6 +181,26 @@ How the gateway binds itself and how strategy clients reach it. The defaults are
 | `ALMANAK_GATEWAY_DATABASE_URL` | Postgres DSN for the hosted state backend (`metrics_db`). **Must be set in hosted mode; must NOT be set in local mode.** A mismatch is fatal at boot. | unset |
 | `ALMANAK_GATEWAY_CHAINS` | Comma-separated list of chains to pre-initialize at startup (`bnb,arb,base`). Empty = accept any chain on-demand. Each entry is canonicalized via `resolve_chain_name` so aliases work (`bsc`/`bnb`/`binance` all resolve). | unset |
 
+### Client connection flags & env-var precedence
+
+The CLI flags that tell a **client** how to reach the gateway — `--gateway-host` /
+`--gateway-port`, shared by `almanak strat run`, `strat status` / `list` / `logs` /
+`pause` / `resume`, `ax`, and `teardown` — resolve their value with this precedence
+(matching `GatewayClientConfig.from_env`):
+
+| Precedence | Source |
+|---|---|
+| 1 (highest) | the explicit `--gateway-host` / `--gateway-port` flag |
+| 2 | `ALMANAK_GATEWAY_HOST` / `ALMANAK_GATEWAY_PORT` (canonical) |
+| 3 | `GATEWAY_HOST` / `GATEWAY_PORT` (legacy, **deprecated**) |
+| 4 (default) | `127.0.0.1` / `50051` |
+
+Set the canonical `ALMANAK_GATEWAY_*` names. The legacy unprefixed `GATEWAY_*` names
+still work but emit a one-time deprecation `UserWarning` at CLI start
+(`warn_legacy_gateway_envvars`) and will be removed in a future release. All CLI surfaces
+share the single `gateway_client_options` decorator, so this precedence is identical
+across every command (VIB-5163 / GH #2099).
+
 ---
 
 ## Logging & Audit

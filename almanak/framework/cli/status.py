@@ -19,6 +19,8 @@ from datetime import UTC, datetime
 
 import click
 
+from almanak.config.cli_options import gateway_client_options
+
 from ..gateway_client import GatewayClient, GatewayClientConfig
 from .status_helpers import (
     _fetch_strategy_details,
@@ -106,31 +108,6 @@ def _status_color(status: str) -> str:
     return click.style(status, fg=_STATUS_COLORS.get(status.upper(), "white"))
 
 
-# Shared gateway options
-_gateway_options = [
-    click.option(
-        "--gateway-host",
-        default="localhost",
-        envvar="GATEWAY_HOST",
-        help="Gateway hostname (default: localhost).",
-    ),
-    click.option(
-        "--gateway-port",
-        default=50051,
-        type=int,
-        envvar="GATEWAY_PORT",
-        help="Gateway gRPC port (default: 50051).",
-    ),
-]
-
-
-def _add_gateway_options(func):
-    """Apply shared gateway options to a click command."""
-    for option in reversed(_gateway_options):
-        func = option(func)
-    return func
-
-
 # =============================================================================
 # strat list
 # =============================================================================
@@ -151,7 +128,7 @@ def _add_gateway_options(func):
 )
 @click.option("--chain", "-c", default=None, help="Filter by chain.")
 @click.option("--json", "-j", "as_json", is_flag=True, help="Output as JSON.")
-@_add_gateway_options
+@gateway_client_options
 def list_strategies(status_filter, chain, as_json, gateway_host, gateway_port):
     """List all strategies registered with the gateway.
 
@@ -272,7 +249,7 @@ def list_strategies(status_filter, chain, as_json, gateway_host, gateway_port):
     help="Number of timeline events to show (default: 10).",
 )
 @click.option("--json", "-j", "as_json", is_flag=True, help="Output as JSON.")
-@_add_gateway_options
+@gateway_client_options
 def strategy_status(deployment_id, timeline, timeline_limit, as_json, gateway_host, gateway_port):
     """Get detailed status of a strategy.
 
@@ -452,7 +429,7 @@ def _render_logs_pretty(deployment_id: str, event_type: str | None, events, has_
     help="Show events since timestamp (ISO 8601 or epoch seconds).",
 )
 @click.option("--json", "-j", "as_json", is_flag=True, help="Output as JSON.")
-@_add_gateway_options
+@gateway_client_options
 def strategy_logs(deployment_id, limit, event_type, since, as_json, gateway_host, gateway_port):
     """Show timeline events for a strategy.
 
@@ -501,7 +478,7 @@ def strategy_logs(deployment_id, limit, event_type, since, as_json, gateway_host
     help="Wait until strategy confirms PAUSED status.",
 )
 @click.option("--timeout", default=60, type=int, help="Seconds to wait (default 60).")
-@_add_gateway_options
+@gateway_client_options
 def strategy_pause(deployment_id, reason, wait, timeout, gateway_host, gateway_port):
     """Suspend a strategy's iteration loop without closing positions.
 
@@ -575,7 +552,7 @@ def strategy_pause(deployment_id, reason, wait, timeout, gateway_host, gateway_p
 @click.command("resume")
 @click.option("--deployment-id", "-s", required=True, help="Strategy instance ID.")
 @click.option("--reason", required=True, help="Reason for resume (required for audit trail).")
-@_add_gateway_options
+@gateway_client_options
 def strategy_resume(deployment_id, reason, gateway_host, gateway_port):
     """Resume a previously paused strategy.
 
