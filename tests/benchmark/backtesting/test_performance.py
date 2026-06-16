@@ -19,6 +19,7 @@ Usage:
     pytest tests/benchmark/backtesting/test_performance.py::TestParameterSweepBenchmark -v
 """
 
+import statistics
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -531,7 +532,15 @@ class TestParameterSweepBenchmark:
             config_dict["random_seed"] = i
             configs.append(PnLBacktestConfig.from_dict(config_dict))
 
-        # Measure individual execution times
+        # Measure individual execution times.
+        #
+        # We measure CPU time (time.process_time), NOT wall-clock
+        # (time.perf_counter): these backtests are pure CPU work (mock data
+        # provider, no I/O), so CPU time captures real per-backtest cost while
+        # ignoring OS descheduling on shared CI runners. A descheduled
+        # sub-second run inflates wall-clock but not CPU time - that descheduling
+        # was the dominant source of the old max/min wall-clock variance that
+        # made this gate flaky.
         execution_times = []
         successful = 0
 
@@ -544,39 +553,74 @@ class TestParameterSweepBenchmark:
             )
             strategy = BenchmarkStrategy(trade_every_n_ticks=24)
 
-            start = time.perf_counter()
+            start = time.process_time()
             result = await backtester.backtest(strategy, config)
-            elapsed = time.perf_counter() - start
+            elapsed = time.process_time() - start
 
             if result.error is None:
                 successful += 1
                 execution_times.append(elapsed)
 
-        # Calculate statistics
+        # Drop the first backtest as a warmup run: the first iteration pays
+        # one-time costs (lazy imports, first allocations) that do not reflect
+        # steady-state per-backtest cost, which is what this test verifies.
+        warmup = 1 if len(execution_times) > 1 else 0
+        steady_times = execution_times[warmup:]
+
+        # Calculate statistics on steady-state CPU times.
         total_time = sum(execution_times)
-        avg_time = total_time / len(execution_times) if execution_times else 0
-        min_time = min(execution_times) if execution_times else 0
-        max_time = max(execution_times) if execution_times else 0
+        avg_time = statistics.fmean(steady_times) if steady_times else 0.0
+        min_time = min(steady_times) if steady_times else 0.0
+        max_time = max(steady_times) if steady_times else 0.0
+        median_time = statistics.median(steady_times) if steady_times else 0.0
+
+        # Trend statistic: mean of the second half vs the first half. A memory
+        # leak or accumulating overhead manifests as a sustained upward drift
+        # (later backtests systematically slower), not a single spike. Averaging
+        # each half makes this robust to one-off GC pauses.
+        half = len(steady_times) // 2
+        first_half_mean = statistics.fmean(steady_times[:half]) if half else 0.0
+        second_half_mean = statistics.fmean(steady_times[half:]) if half else 0.0
+        trend_ratio = second_half_mean / first_half_mean if first_half_mean > 0 else 0.0
 
         print("\n" + "-" * 60)
-        print("Parameter Sweep Efficiency Analysis")
+        print("Parameter Sweep Efficiency Analysis (CPU time)")
         print("-" * 60)
         print(f"Total time: {total_time:.2f}s")
-        print(f"Average per backtest: {avg_time:.4f}s")
-        print(f"Min: {min_time:.4f}s, Max: {max_time:.4f}s")
-        print(f"Variance (max/min): {max_time / min_time:.2f}x" if min_time > 0 else "N/A")
+        print(f"Average per backtest: {avg_time:.4f}s (warmup run excluded)")
+        print(f"Min: {min_time:.4f}s, Median: {median_time:.4f}s, Max: {max_time:.4f}s")
+        print(f"Spike (max/median): {max_time / median_time:.2f}x" if median_time > 0 else "N/A")
+        print(f"Trend (2nd half / 1st half): {trend_ratio:.2f}x")
         print(f"Successful: {successful}/{len(configs)}")
         print("-" * 60)
 
         # All should succeed
         assert successful == len(configs), f"Only {successful}/{len(configs)} backtests succeeded"
 
-        # Per-backtest time should be consistent (max no more than 5x min)
-        # Using 5x to account for GC pauses, OS scheduling, and CI variability
-        if min_time > 0:
-            variance_ratio = max_time / min_time
-            assert variance_ratio < 5.0, (
-                f"Execution time variance too high: min={min_time:.4f}s, max={max_time:.4f}s"
+        # Spike guard: no single backtest should cost far more than the typical
+        # (median) one. We compare against the median, not the min: the old
+        # max/min wall-clock ratio flaked because a single descheduled
+        # sub-second run shrank min / inflated max past any fixed threshold. The
+        # median is unmoved by a single outlier, and CPU time (above) already
+        # removes the descheduling noise, so the headroom here is generous.
+        if median_time > 0:
+            spike_ratio = max_time / median_time
+            assert spike_ratio < 3.0, (
+                f"Per-backtest CPU time spiked: median={median_time:.4f}s, "
+                f"max={max_time:.4f}s (ratio {spike_ratio:.2f}x). One backtest "
+                f"cost far more than typical - investigate the per-backtest path "
+                f"rather than relaxing this gate."
+            )
+
+        # Accumulating-overhead / memory-leak guard: later backtests must not be
+        # systematically slower than earlier ones. This is the docstring's
+        # stated intent and the signal a fixed-spread ratio cannot capture.
+        if first_half_mean > 0:
+            assert trend_ratio < 1.5, (
+                f"Per-backtest CPU time drifts upward across the sweep: "
+                f"first-half mean={first_half_mean:.4f}s, second-half "
+                f"mean={second_half_mean:.4f}s (ratio {trend_ratio:.2f}x). This "
+                f"looks like accumulating overhead or a memory leak."
             )
 
 
