@@ -39,6 +39,7 @@ from .helpers import (
     load_strategy_config,
     parse_date,
 )
+from .run_helpers import build_token_address_map
 from .sweep import load_optimization_config, parse_param_ranges_from_config
 
 # =============================================================================
@@ -634,9 +635,17 @@ def walk_forward_backtest(  # noqa: C901
         include_gas_costs=True,
     )
 
+    # Resolve the SYMBOL -> (chain, address) map once for every provider the
+    # factory builds (Refinement R1). Natives resolve via the chain registry.
+    token_addresses = build_token_address_map(
+        strategy_config=base_config,
+        tracked_tokens=token_list,
+        chain=chain,
+    )
+
     # Create factories
     def create_data_provider() -> CoinGeckoDataProvider:
-        return CoinGeckoDataProvider()
+        return CoinGeckoDataProvider(token_addresses=token_addresses)
 
     def create_strategy(config_overrides: dict[str, Any] | None = None) -> Any:
         effective_config = {**base_config, **(config_overrides or {})}
@@ -894,8 +903,15 @@ def monte_carlo_backtest(  # noqa: C901
         include_gas_costs=True,
     )
 
-    # Create data provider to fetch historical prices for path generation
-    data_provider = CoinGeckoDataProvider()
+    # Create data provider to fetch historical prices for path generation.
+    # Pass the SYMBOL -> (chain, address) map so non-native ERC20s resolve their
+    # coin id via the contract endpoint (Refinement R1).
+    token_addresses = build_token_address_map(
+        strategy_config=base_config,
+        tracked_tokens=token_list,
+        chain=chain,
+    )
+    data_provider = CoinGeckoDataProvider(token_addresses=token_addresses)
 
     click.echo()
     click.echo(f"Fetching historical prices for {base_token_upper}...")
@@ -1272,8 +1288,15 @@ def scenario_backtest(  # noqa: C901
     # Create strategy instance
     strategy_instance = _create_backtest_strategy(strategy_class, base_config, chain)
 
-    # Create PnL backtester
-    data_provider = CoinGeckoDataProvider()
+    # Create PnL backtester. Pass the SYMBOL -> (chain, address) map so
+    # non-native ERC20s resolve their coin id via the contract endpoint
+    # (Refinement R1); natives resolve via the chain registry.
+    token_addresses = build_token_address_map(
+        strategy_config=base_config,
+        tracked_tokens=token_list,
+        chain=chain,
+    )
+    data_provider = CoinGeckoDataProvider(token_addresses=token_addresses)
     backtester = PnLBacktester(
         data_provider=data_provider,
         fee_models={},

@@ -441,6 +441,7 @@ class AggregatedDataProvider:
         data_config: "BacktestDataConfig",
         chain: str = DEFAULT_CHAIN,
         rpc_url: str | None = None,
+        token_addresses: dict[str, tuple[str, str]] | None = None,
     ) -> "AggregatedDataProvider":
         """Create an AggregatedDataProvider from BacktestDataConfig.
 
@@ -456,6 +457,12 @@ class AggregatedDataProvider:
             chain: Blockchain network identifier (default: "arbitrum").
             rpc_url: Optional RPC URL for on-chain providers. If not provided,
                     will attempt to use ARCHIVE_RPC_URL_{CHAIN} env var.
+            token_addresses: Optional SYMBOL_UPPER -> (chain, address) map threaded
+                    into the CoinGecko provider so non-native ERC20s (LINK, UNI,
+                    ...) keep their dynamic contract-address resolution route on
+                    the 'auto' / 'coingecko' paths. Without it the CoinGecko leg
+                    can only price natives, and the preflight guard blocks the
+                    rest.
 
         Returns:
             Configured AggregatedDataProvider instance.
@@ -501,6 +508,7 @@ class AggregatedDataProvider:
                 chain=chain,
                 rpc_url=rpc_url,
                 data_config=data_config,
+                token_addresses=token_addresses,
             )
         elif mode == "chainlink":
             provider = await cls._create_chainlink_provider(chain, rpc_url)
@@ -513,7 +521,7 @@ class AggregatedDataProvider:
                 providers.append(provider)
                 provider_names.append("twap")
         elif mode == "coingecko":
-            provider = await cls._create_coingecko_provider(data_config)
+            provider = await cls._create_coingecko_provider(data_config, token_addresses=token_addresses)
             if provider:
                 providers.append(provider)
                 provider_names.append("coingecko")
@@ -534,6 +542,7 @@ class AggregatedDataProvider:
         chain: str,
         rpc_url: str,
         data_config: "BacktestDataConfig",
+        token_addresses: dict[str, tuple[str, str]] | None = None,
     ) -> tuple[list[Any], list[str]]:
         """Create the deterministic fallback chain: Chainlink -> TWAP -> CoinGecko.
 
@@ -568,7 +577,7 @@ class AggregatedDataProvider:
             )
 
         # 3. Create CoinGecko provider (lowest priority, always available)
-        coingecko = await cls._create_coingecko_provider(data_config)
+        coingecko = await cls._create_coingecko_provider(data_config, token_addresses=token_addresses)
         if coingecko:
             providers.append(coingecko)
             provider_names.append("coingecko")
@@ -638,8 +647,15 @@ class AggregatedDataProvider:
     async def _create_coingecko_provider(
         cls,
         data_config: "BacktestDataConfig",
+        token_addresses: dict[str, tuple[str, str]] | None = None,
     ) -> Any | None:
         """Create a CoinGeckoDataProvider with rate limiting from config.
+
+        Args:
+            data_config: Backtest data config (rate-limit settings).
+            token_addresses: Optional SYMBOL_UPPER -> (chain, address) map so the
+                provider can resolve non-native ERC20 coin ids dynamically via
+                the contract endpoint (else it can only price natives).
 
         Returns:
             CoinGeckoDataProvider instance or None if creation fails.
@@ -649,6 +665,7 @@ class AggregatedDataProvider:
 
             provider = CoinGeckoDataProvider(
                 data_config=data_config,  # Passes rate limit settings
+                token_addresses=token_addresses,
             )
             logger.debug(
                 "Created CoinGecko provider with rate_limit=%d/min",

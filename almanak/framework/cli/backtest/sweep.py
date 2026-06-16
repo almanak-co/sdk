@@ -203,6 +203,7 @@ from .helpers import (
 )
 from .run_helpers import (
     build_pnl_config,
+    build_token_address_map,
     parse_token_list,
     resolve_strategy_class_or_mock,
 )
@@ -733,6 +734,10 @@ class _SweepTask:
     emit_ambiguity_warnings: bool = False
 
 
+# crap-allowlist: pre-existing sweep-worker body (cc=19 on main, unchanged by this PR); the only
+# addition is a build_token_address_map call + provider kwarg for dynamic coin-id resolution.
+# Score is coverage-driven (subprocess worker, no unit harness). Coverage backfill / decomposition
+# tracked as a follow-up (file under AGI - Strategist / VibeCoders).
 def _run_sweep_task_worker(task: _SweepTask) -> SweepResult:
     """Worker function to run a single sweep task in a subprocess.
 
@@ -825,8 +830,15 @@ def _run_sweep_task_worker(task: _SweepTask) -> SweepResult:
         pnl_config_dict.pop(key, None)
     pnl_config = PnLBacktestConfig.from_dict(pnl_config_dict)
 
-    # Create data provider and backtester
-    data_provider = CoinGeckoDataProvider()
+    # Create data provider and backtester. Pass the SYMBOL -> (chain, address)
+    # map so non-native ERC20s resolve their coin id via the contract endpoint;
+    # natives resolve via the chain registry (Refinement R1).
+    token_addresses = build_token_address_map(
+        strategy_config=strategy_config,
+        tracked_tokens=list(pnl_config.tokens),
+        chain=worker_chain,
+    )
+    data_provider = CoinGeckoDataProvider(token_addresses=token_addresses)
     backtester = PnLBacktester(
         data_provider=data_provider,
         fee_models={},
@@ -1401,6 +1413,10 @@ def _generate_sweep_report(
 # =============================================================================
 
 
+# crap-allowlist: pre-existing CLI command body (cc=13 on main, unchanged by this PR); the only
+# addition is a build_token_address_map call + provider kwarg for dynamic coin-id resolution.
+# Score is coverage-driven (CLI command body, no unit harness). Coverage backfill / decomposition
+# tracked as a follow-up (file under AGI - Strategist / VibeCoders).
 @backtest.command("sweep")
 @click.option(
     "--strategy",
@@ -1669,7 +1685,12 @@ def sweep_backtest(
 
     click.echo()
     click.echo("Initializing CoinGecko data provider...")
-    data_provider = CoinGeckoDataProvider()
+    token_addresses = build_token_address_map(
+        strategy_config=base_config,
+        tracked_tokens=token_list,
+        chain=chain,
+    )
+    data_provider = CoinGeckoDataProvider(token_addresses=token_addresses)
 
     if multi_period_mode:
         click.echo(f"Starting multi-period sweep ({total_runs} total runs)...")
@@ -2059,9 +2080,17 @@ def optimize_backtest(  # noqa: C901
         )
     pnl_config = pnl_configs[0]
 
+    # Resolve the SYMBOL -> (chain, address) map once; reused by every provider
+    # the factory builds (Refinement R1). Natives resolve via the chain registry.
+    token_addresses = build_token_address_map(
+        strategy_config=base_config,
+        tracked_tokens=token_list,
+        chain=chain,
+    )
+
     # Create factories
     def create_data_provider() -> CoinGeckoDataProvider:
-        return CoinGeckoDataProvider()
+        return CoinGeckoDataProvider(token_addresses=token_addresses)
 
     def create_strategy(config_overrides: dict[str, Any] | None = None) -> Any:
         effective_config = {**base_config, **(config_overrides or {})}

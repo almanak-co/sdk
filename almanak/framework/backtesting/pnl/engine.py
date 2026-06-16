@@ -115,7 +115,11 @@ from almanak.framework.backtesting.pnl.mev_simulator import (
     MEVSimulator,
     MEVSimulatorConfig,
 )
-from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio, SimulatedPosition
+from almanak.framework.backtesting.pnl.portfolio import (
+    CASH_EQUIVALENT_STABLECOINS,
+    SimulatedPortfolio,
+    SimulatedPosition,
+)
 from almanak.framework.backtesting.pnl.providers.gas import GasPrice, GasPriceProvider
 from almanak.framework.backtesting.pnl.simulated_result import (
     SimulatedExecutionResult,
@@ -488,6 +492,176 @@ def create_market_snapshot_from_state(
                 snapshot.set_balance(token, zero_balance)
 
     return snapshot
+
+
+async def classify_token_availability(
+    data_provider: Any,
+    tokens: list[str],
+    start_time: datetime,
+) -> tuple[list[str], list[str]]:
+    """Classify each tracked token as available / unavailable for ``data_provider``.
+
+    Preflight Check-2 helper (blueprint 31 §7: DataConfidence honesty). Three
+    strategies, picked per provider:
+
+    - **Membership** -- provider exposes a non-empty ``supported_tokens`` and is
+      NOT resolution-based (e.g. chainlink's fixed allowlist): set membership is
+      authoritative, no I/O.
+    - **Resolution-based probe** (``resolution_based_availability=True``, e.g. the
+      CoinGecko provider) -- ``supported_tokens`` is membership-only and not
+      authoritative, so probe-fetch a price. ONLY a resolution miss / not-found
+      (surfaced as ``ValueError``) marks the token unavailable; a transient error
+      (rate limit / network) is NOT a miss and propagates so the caller can retry
+      rather than misreporting a priceable token as unpriceable (Refinement R3).
+    - **Best-effort probe** -- no membership list and not resolution-based (e.g. a
+      minimal test/mock provider): probe with a broad catch so a provider that
+      does not implement ``get_price`` degrades to "unavailable" rather than
+      crashing preflight.
+
+    Args:
+        data_provider: The historical data provider under test.
+        tokens: Tracked token symbols from the backtest config.
+        start_time: Timestamp to probe (the config start).
+
+    Returns:
+        ``(tokens_available, tokens_unavailable)``, both upper-cased.
+
+    Raises:
+        Exception: A transient error from a resolution-based provider's
+            ``get_price`` (anything that is not ``ValueError``) propagates.
+    """
+    # _make_request surfaces transient timeout / network / 5xx failures AND
+    # auth failures (401/403) as ValueError too (not just genuine misses), so
+    # probe-fetch errors must be screened: a transient failure (retryable) or an
+    # auth/config failure (every token, not this one) propagates -- the caller
+    # fails with the real cause -- and is NEVER recorded as an unavailable
+    # token, which would abort a backtest on a network blip or a bad API key
+    # (Refinement R3).
+    from almanak.framework.backtesting.pnl.providers.coingecko import _is_auth_error, _is_transient_request_error
+
+    tokens_available: list[str] = []
+    tokens_unavailable: list[str] = []
+
+    supported_tokens = getattr(data_provider, "supported_tokens", [])
+    resolution_based = getattr(data_provider, "resolution_based_availability", False)
+    use_membership = bool(supported_tokens) and not resolution_based
+    membership_upper = {t.upper() for t in supported_tokens} if use_membership else set()
+
+    for token in tokens:
+        token_upper = token.upper()
+        if token_upper in CASH_EQUIVALENT_STABLECOINS:
+            # Valued as cash at $1 face value (no market price needed). Skip the
+            # provider probe entirely so a transient error on a stablecoin -- a
+            # token that does not need pricing -- can never abort preflight.
+            tokens_available.append(token_upper)
+            continue
+        if use_membership:
+            (tokens_available if token_upper in membership_upper else tokens_unavailable).append(token_upper)
+        elif resolution_based:
+            try:
+                await data_provider.get_price(token, start_time)
+                tokens_available.append(token_upper)
+            except ValueError as exc:
+                if _is_transient_request_error(exc) or _is_auth_error(exc):
+                    raise
+                tokens_unavailable.append(token_upper)
+        else:
+            try:
+                await data_provider.get_price(token, start_time)
+                tokens_available.append(token_upper)
+            except Exception as exc:
+                if _is_transient_request_error(exc) or _is_auth_error(exc):
+                    raise
+                tokens_unavailable.append(token_upper)
+
+    return tokens_available, tokens_unavailable
+
+
+def _build_token_availability_check(
+    data_provider: Any,
+    tokens_available: list[str],
+    tokens_unavailable: list[str],
+) -> tuple[PreflightCheckResult, list[str]]:
+    """Build the preflight Check-2 result + recommendations (priceability guard).
+
+    Blueprint 31 §7 (DataConfidence honesty): a tracked asset that cannot be
+    priced must surface loudly, never as a fabricated $0. The severity decision:
+
+    - The hard-stop (``severity="error"`` -> blocking) is scoped to
+      resolution-based providers (the CoinGecko provider sets
+      ``resolution_based_availability = True``). Only there is "unavailable" an
+      AUTHORITATIVE determination -- a real resolution miss / not-found surfaced
+      as ``ValueError`` (Refinement R3). Membership providers and minimal
+      test/mock providers stay on the historical non-blocking warning path, so
+      escalating their best-effort misses cannot break unrelated backtests.
+    - Cash-equivalent stablecoins (USDC/USDT/DAI) are valued at $1 face value via
+      the portfolio cash sweep and never need a market price, so an unpriceable
+      stablecoin is non-blocking even on the resolution-based path. A NON-cash
+      tracked asset that cannot be priced IS blocking: continuing would silently
+      mis-value a position the strategy holds (e.g. a bridged L2 token whose
+      CoinGecko listing has no history). Mirrors the LP volume honesty guard;
+      opt out with --allow-missing-prices (fail_on_preflight_error=False).
+
+    Returns:
+        ``(check, recommendations)`` -- the caller appends the check and extends
+        its recommendation list. The check is ``severity="error"`` only for a
+        blocking miss; everything else is a passed check or a ``"warning"``.
+    """
+    if not tokens_unavailable:
+        return (
+            PreflightCheckResult(
+                check_name="token_availability",
+                passed=True,
+                message=f"All {len(tokens_available)} token(s) have price data available",
+                details={"available": tokens_available},
+            ),
+            [],
+        )
+
+    resolution_based = getattr(data_provider, "resolution_based_availability", False)
+    blocking_unavailable = (
+        [t for t in tokens_unavailable if t.upper() not in CASH_EQUIVALENT_STABLECOINS] if resolution_based else []
+    )
+    if blocking_unavailable:
+        return (
+            PreflightCheckResult(
+                check_name="token_availability",
+                passed=False,
+                message=(
+                    f"No historical price data for tracked token(s) "
+                    f"{', '.join(blocking_unavailable)} over the backtest window. "
+                    "Refusing to run a backtest that cannot price a tracked asset. "
+                    "To proceed: choose a chain/window where the asset has price history "
+                    "(mainnet listings usually do; bridged L2 listings often do not), "
+                    "remove it from --tokens, or pass --allow-missing-prices to accept a "
+                    "degraded run."
+                ),
+                details={
+                    "available": tokens_available,
+                    "unavailable": tokens_unavailable,
+                    "blocking_unavailable": blocking_unavailable,
+                },
+                severity="error",
+            ),
+            [
+                f"No price history for: {', '.join(blocking_unavailable)} "
+                "(use --allow-missing-prices to override with a degraded run)"
+            ],
+        )
+
+    # Non-blocking: a non-authoritative provider (membership / mock best-effort),
+    # or a resolution-based provider where only cash-equivalent stablecoins are
+    # unpriceable. Preserve the historical warning behaviour verbatim.
+    return (
+        PreflightCheckResult(
+            check_name="token_availability",
+            passed=False,
+            message=f"{len(tokens_unavailable)} token(s) may not have price data available",
+            details={"available": tokens_available, "unavailable": tokens_unavailable},
+            severity="warning",
+        ),
+        [f"Check price data availability for: {', '.join(tokens_unavailable)}"],
+    )
 
 
 # =============================================================================
@@ -1172,9 +1346,9 @@ class PnLBacktester:
         recommendations: list[str] = []
         archive_accessible: bool | None = None
 
-        # Get provider info
+        # Get provider info. ``supported_tokens`` is read inside
+        # ``classify_token_availability`` (Check 2), not here.
         provider_name = getattr(self.data_provider, "provider_name", "unknown")
-        supported_tokens = getattr(self.data_provider, "supported_tokens", [])
 
         # Check 1: Data provider capability
         try:
@@ -1235,49 +1409,18 @@ class PnLBacktester:
                 )
             )
 
-        # Check 2: Token availability
-        for token in config.tokens:
-            token_upper = token.upper()
-
-            # Check if token is in supported list (if available)
-            if supported_tokens:
-                if token_upper in [t.upper() for t in supported_tokens]:
-                    tokens_available.append(token_upper)
-                else:
-                    tokens_unavailable.append(token_upper)
-            else:
-                # If no supported_tokens list, try to fetch price to check availability
-                try:
-                    # Try a simple price fetch at current time to check availability
-                    await self.data_provider.get_price(token, config.start_time)
-                    tokens_available.append(token_upper)
-                except Exception:
-                    tokens_unavailable.append(token_upper)
-
-        # Create token availability check result
-        if tokens_unavailable:
-            checks.append(
-                PreflightCheckResult(
-                    check_name="token_availability",
-                    passed=False,
-                    message=f"{len(tokens_unavailable)} token(s) may not have price data available",
-                    details={
-                        "available": tokens_available,
-                        "unavailable": tokens_unavailable,
-                    },
-                    severity="warning",
-                )
-            )
-            recommendations.append(f"Check price data availability for: {', '.join(tokens_unavailable)}")
-        else:
-            checks.append(
-                PreflightCheckResult(
-                    check_name="token_availability",
-                    passed=True,
-                    message=f"All {len(tokens_available)} token(s) have price data available",
-                    details={"available": tokens_available},
-                )
-            )
+        # Check 2: Token availability. Both the classification (membership vs
+        # probe-fetch, R3 transient-vs-miss) and the priceability-guard severity
+        # decision (resolution-based hard-stop vs warning, cash exemption) live in
+        # tested module-level helpers so this orchestrator stays a thin sequencer.
+        tokens_available, tokens_unavailable = await classify_token_availability(
+            self.data_provider, list(config.tokens), config.start_time
+        )
+        token_check, token_recommendations = _build_token_availability_check(
+            self.data_provider, tokens_available, tokens_unavailable
+        )
+        checks.append(token_check)
+        recommendations.extend(token_recommendations)
 
         # Check 3: Archive node accessibility (if provider supports it)
         if hasattr(self.data_provider, "verify_archive_access"):

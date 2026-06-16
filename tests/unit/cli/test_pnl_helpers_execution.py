@@ -157,6 +157,23 @@ class TestRunBacktest:
         captured = capsys.readouterr()
         assert captured.err.startswith("Error running backtest: kaboom")
 
+    def test_preflight_validation_error_prints_banner_and_exits_2(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """A PreflightValidationError aborts loudly with exit code 2 and the remedy hint."""
+        from almanak.framework.backtesting.pnl.error_handling import PreflightValidationError
+
+        backtester = MagicMock()
+        backtester.backtest = AsyncMock(
+            side_effect=PreflightValidationError("No historical price data for WSTETH", error_count=1)
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            _run_backtest(backtester, MagicMock(), _make_pnl_config())
+
+        assert exc_info.value.code == 2
+        captured = capsys.readouterr()
+        assert "BACKTEST ABORTED: PREFLIGHT VALIDATION FAILED" in captured.err
+        assert "--allow-missing-prices" in captured.err
+
 
 # ===========================================================================
 # _warm_cache_async

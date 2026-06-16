@@ -160,34 +160,22 @@ class TestNativeCoinGeckoProjection:
 
         assert set(CoinGeckoPriceSource._SUPPORTED_TOKENS) == FROZEN_GATEWAY_SUPPORTED_TOKENS
 
-    def test_framework_token_ids_legacy_values(self) -> None:
-        from almanak.framework.backtesting.pnl.providers.coingecko import TOKEN_IDS
+    def test_framework_native_projection_values(self) -> None:
+        # The hardcoded ``TOKEN_IDS`` allowlist was removed: the backtesting
+        # CoinGecko provider now resolves natives via the chain registry
+        # projection (``_native_ids_by_upper``) and every other token by
+        # contract address. This pins that the native rows survived the
+        # removal; the formerly-hardcoded ERC20 rows (USDC, ARB, WBTC, ...)
+        # are now resolved dynamically by address and are intentionally absent
+        # from any in-process map.
+        from almanak.framework.backtesting.pnl.providers.coingecko import (
+            CoinGeckoDataProvider,
+        )
 
-        legacy = {
-            **FROZEN_NATIVE_ROWS,
-            "USDC": "usd-coin",
-            "USDC.E": "usd-coin",
-            "ARB": "arbitrum",
-            "WBTC": "wrapped-bitcoin",
-            "USDT": "tether",
-            "DAI": "dai",
-            "LINK": "chainlink",
-            "UNI": "uniswap",
-            "GMX": "gmx",
-            "PENDLE": "pendle",
-            "RDNT": "radiant-capital",
-            "JOE": "trader-joe",
-            "LDO": "lido-dao",
-            "BTC": "bitcoin",
-            "STETH": "lido-dao-wrapped-staked-eth",
-            "CBETH": "coinbase-wrapped-staked-eth",
-            "OP": "optimism",
-            "WPOL": "polygon-ecosystem-token",
-            "AAVE": "aave",
-            "CRV": "curve-dao-token",
-        }
-        for symbol, cg_id in legacy.items():
-            assert TOKEN_IDS.get(symbol) == cg_id, symbol
+        provider = CoinGeckoDataProvider()
+        native_projection = provider._native_ids_by_upper
+        for symbol, cg_id in FROZEN_NATIVE_ROWS.items():
+            assert native_projection.get(symbol.upper()) == cg_id, symbol
 
     def test_framework_supported_chains_superset(self) -> None:
         from almanak.framework.backtesting.pnl.providers.coingecko import (

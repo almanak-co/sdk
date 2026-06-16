@@ -527,7 +527,16 @@ class TestCacheWarming:
     async def test_warm_cache_multiple_tokens(
         self, provider, mock_response_200_factory
     ):
-        """Test warm_cache handles multiple tokens."""
+        """Test warm_cache handles multiple tokens.
+
+        USDC is no longer in a hardcoded allowlist; it resolves by contract
+        address (R2 option b). The (chain, address) -> coin id resolution is
+        pre-seeded into the cache so the price-fetch call count stays at
+        3 days * 2 tokens = 6 (no extra contract-endpoint round trips).
+        """
+        provider._token_addresses["USDC"] = ("arbitrum", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
+        provider._coin_id_cache[("arbitrum", "0xaf88d065e77c8cc2239327c5edb3a432268e5831")] = "usd-coin"
+
         with patch.object(
             provider, "_get_session"
         ) as mock_session, patch.object(
@@ -554,7 +563,14 @@ class TestCacheWarming:
     async def test_warm_cache_returns_counts(
         self, provider, mock_response_200_factory
     ):
-        """Test warm_cache returns correct counts per token."""
+        """Test warm_cache returns correct counts per token.
+
+        ARB resolves by contract address now (R2 option b); the resolution is
+        pre-seeded so it does not add price-fetch round trips.
+        """
+        provider._token_addresses["ARB"] = ("arbitrum", "0x912CE59144191C1204E64559FE8253a0e49E6548")
+        provider._coin_id_cache[("arbitrum", "0x912ce59144191c1204e64559fe8253a0e49e6548")] = "arbitrum"
+
         with patch.object(
             provider, "_get_session"
         ) as mock_session, patch.object(

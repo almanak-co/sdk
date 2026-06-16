@@ -743,7 +743,29 @@ class TestIterateEmptyOrUnavailableFallback:
         assert all(row[1].prices["ETH"] == Decimal("2500") for row in rows)
 
 
+class TestCreateWithDataConfigThreadsTokenAddresses:
+    """The token_addresses map must reach the CoinGecko leg via the factory.
+
+    Without it, price_provider='auto'/'coingecko' would lose dynamic ERC20
+    resolution and the preflight guard would block LINK/UNI/etc.
+    """
+
+    @pytest.mark.asyncio
+    async def test_coingecko_mode_threads_token_addresses(self):
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        addr_map = {"WSTETH": ("arbitrum", "0x5979D7b546E38E414F7E9822514be443A4800529")}
+        agg = await AggregatedDataProvider.create_with_data_config(
+            BacktestDataConfig(price_provider="coingecko"),
+            chain="arbitrum",
+            token_addresses=addr_map,
+        )
+        cg = agg.providers[0]
+        assert cg._token_addresses == addr_map
+
+
 __all__ = [
+    "TestCreateWithDataConfigThreadsTokenAddresses",
     "TestIterateEmptyOrUnavailableFallback",
     "TestFallbackWhenPrimaryFails",
     "TestAllProvidersFailing",

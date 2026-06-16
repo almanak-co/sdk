@@ -30,6 +30,7 @@ Example:
 import asyncio
 import logging
 import random
+import re
 import sqlite3
 import time
 from collections.abc import AsyncIterator
@@ -43,7 +44,11 @@ import aiohttp
 
 from almanak.config.backtest import backtest_config_from_env
 from almanak.core.chains import DEFAULT_CHAIN
-from almanak.core.chains._helpers import native_coingecko_ids, vendor_chain_map
+from almanak.core.chains._helpers import (
+    external_id_for,
+    native_coingecko_ids,
+    vendor_chain_map,
+)
 from almanak.core.chains._registry import ChainRegistry
 from almanak.framework.backtesting.config import BacktestDataConfig
 
@@ -51,39 +56,6 @@ from ..data_provider import OHLCV, HistoricalDataConfig, MarketState
 from .rate_limiter import TokenBucketRateLimiter
 
 logger = logging.getLogger(__name__)
-
-
-# Token ID mappings for common tokens
-# CoinGecko uses specific IDs for each token
-TOKEN_IDS: dict[str, str] = {
-    # Native + wrapped-native coin ids derive from the chain registry
-    # (VIB-4851 CS-3b; the MATIC->POL id preference of VIB-3137 now lives
-    # on the polygon descriptor). Keys uppercased to match symbol
-    # normalization.
-    **{symbol.upper(): cg_id for symbol, cg_id in native_coingecko_ids().items()},
-    "USDC": "usd-coin",
-    "USDC.E": "usd-coin",
-    "ARB": "arbitrum",
-    "WBTC": "wrapped-bitcoin",
-    "USDT": "tether",
-    "DAI": "dai",
-    "LINK": "chainlink",
-    "UNI": "uniswap",
-    "GMX": "gmx",
-    "PENDLE": "pendle",
-    "RDNT": "radiant-capital",
-    "JOE": "trader-joe",
-    "LDO": "lido-dao",
-    "BTC": "bitcoin",
-    "STETH": "lido-dao-wrapped-staked-eth",
-    "CBETH": "coinbase-wrapped-staked-eth",
-    "OP": "optimism",
-    # WPOL is the post-rename wrapper symbol; the registry projection
-    # carries WMATIC (the deployed contract symbol).
-    "WPOL": "polygon-ecosystem-token",
-    "AAVE": "aave",
-    "CRV": "curve-dao-token",
-}
 
 
 class CoinGeckoRateLimitError(Exception):
@@ -105,6 +77,62 @@ class CoinGeckoRateLimitError(Exception):
         super().__init__(message)
         self.retry_count = retry_count
         self.last_backoff = last_backoff
+
+
+# Transient-vs-miss discriminator for the ValueErrors that ``_make_request``
+# surfaces. ``_make_request`` raises ``ValueError(...) from <TimeoutError |
+# aiohttp.ClientError>`` for timeout/network failures (carrying the "Request
+# timed out" / "Network error" message markers) and a bare
+# ``ValueError("CoinGecko API error {status}: ...")`` for any non-200/non-429
+# HTTP status. A 408 (timeout) or 5xx (server error) is also transient -- a
+# temporary CoinGecko outage -- whereas a 4xx (404 "contract not found",
+# 400, ...) and the no-data misses ("No price data available", "Unknown
+# token", ...) are genuine. Resolution and preflight code MUST NOT treat a
+# transient failure as an unavailable token: that would abort a backtest on a
+# momentary outage and falsely report a priceable asset as missing
+# (Refinement R3). Prefer the preserved ``__cause__`` type; fall back to the
+# message text for callers that re-raise without chaining.
+_TRANSIENT_REQUEST_MARKERS: tuple[str, ...] = ("Request timed out", "Network error")
+_HTTP_STATUS_RE = re.compile(r"CoinGecko API error (\d{3}):")
+
+
+def _is_transient_request_error(exc: BaseException) -> bool:
+    """Return True if ``exc`` is a transient request failure, not a resolution miss.
+
+    Transient = timeout / network / HTTP 408 / HTTP 5xx; it should propagate so
+    the caller can retry. A genuine miss (4xx / no data) is an honest
+    "unavailable". See the module note above for why this distinction is
+    load-bearing.
+    """
+    if isinstance(exc.__cause__, TimeoutError | aiohttp.ClientError):
+        return True
+    if not isinstance(exc, ValueError):
+        return False
+    msg = str(exc)
+    if any(marker in msg for marker in _TRANSIENT_REQUEST_MARKERS):
+        return True
+    status_match = _HTTP_STATUS_RE.search(msg)
+    if status_match:
+        status = int(status_match.group(1))
+        return status == 408 or 500 <= status < 600
+    return False
+
+
+def _is_auth_error(exc: BaseException) -> bool:
+    """Return True for a CoinGecko auth / permission failure (HTTP 401 / 403).
+
+    A 401/403 is provider MISCONFIGURATION -- a bad/expired API key or a
+    plan/access problem -- that affects every token, not a per-token "contract
+    not found" miss. Resolution and preflight code re-raise it so the operator
+    sees a credentials error rather than every asset silently reported as
+    unpriceable. (404 / 400 stay honest misses; see callers.)
+    """
+    if not isinstance(exc, ValueError):
+        return False
+    status_match = _HTTP_STATUS_RE.search(str(exc))
+    if status_match is None:
+        return False
+    return int(status_match.group(1)) in (401, 403)
 
 
 @dataclass
@@ -328,6 +356,20 @@ class HistoricalPriceCache:
                 )
                 """
             )
+            # Sibling table for (chain, address) -> CoinGecko coin id
+            # resolutions. A contract's coin id is immutable, so this carries
+            # no TTL: once resolved, the row is good for the life of the DB.
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS coin_id_resolutions (
+                    chain TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    coin_id TEXT NOT NULL,
+                    resolved_at TEXT NOT NULL,
+                    PRIMARY KEY (chain, address)
+                )
+                """
+            )
             self._db.commit()
         except (OSError, RuntimeError, sqlite3.Error) as exc:
             logger.warning("Could not open persistent cache (%s), falling back to in-memory only", exc)
@@ -427,6 +469,49 @@ class HistoricalPriceCache:
             )
             self._db.commit()
 
+    def get_coin_id(self, chain: str, address: str) -> str | None:
+        """Read a persisted (chain, address) -> CoinGecko coin id resolution.
+
+        Coin-id resolutions are immutable per contract, so this lookup carries
+        no TTL. Returns ``None`` when persistence is disabled/unavailable or no
+        row exists for the (chain, address) pair (keys are lower-cased to match
+        the write path).
+
+        Args:
+            chain: Chain name (any case).
+            address: Contract address (any case).
+
+        Returns:
+            The cached coin id, or ``None`` on a miss.
+        """
+        if not (self._persistent and self._db is not None):
+            return None
+        row = self._db.execute(
+            "SELECT coin_id FROM coin_id_resolutions WHERE chain = ? AND address = ?",
+            (chain.lower(), address.lower()),
+        ).fetchone()
+        return row[0] if row is not None else None
+
+    def set_coin_id(self, chain: str, address: str, coin_id: str) -> None:
+        """Persist a (chain, address) -> CoinGecko coin id resolution.
+
+        No-op when persistence is disabled. Keys are lower-cased so reads and
+        writes agree regardless of caller casing.
+
+        Args:
+            chain: Chain name (any case).
+            address: Contract address (any case).
+            coin_id: The resolved CoinGecko coin id.
+        """
+        if not (self._persistent and self._db is not None):
+            return
+        self._db.execute(
+            """INSERT OR REPLACE INTO coin_id_resolutions (chain, address, coin_id, resolved_at)
+               VALUES (?, ?, ?, ?)""",
+            (chain.lower(), address.lower(), coin_id, datetime.now(UTC).isoformat()),
+        )
+        self._db.commit()
+
     def get_stats(self) -> HistoricalCacheStats:
         """Get current cache statistics.
 
@@ -450,6 +535,7 @@ class HistoricalPriceCache:
         self._stats = HistoricalCacheStats()
         if self._persistent and self._db is not None:
             self._db.execute("DELETE FROM historical_prices")
+            self._db.execute("DELETE FROM coin_id_resolutions")
             self._db.commit()
 
     @property
@@ -558,9 +644,6 @@ class CoinGeckoDataProvider:
     _FREE_API_BASE = "https://api.coingecko.com/api/v3"
     _PRO_API_BASE = "https://pro-api.coingecko.com/api/v3"
 
-    # Supported tokens
-    _SUPPORTED_TOKENS = list(TOKEN_IDS.keys())
-
     # Supported chains
     # Chains declaring a CoinGecko platform id, plus their registered
     # aliases (preserves the legacy "bnb" acceptance). Deliberate widening
@@ -580,6 +663,14 @@ class CoinGeckoDataProvider:
     _FREE_RATE_LIMIT = 10
     _PRO_RATE_LIMIT = 500
 
+    # Preflight signal: this provider resolves coin ids dynamically (native via
+    # the chain registry, ERC20s via the contract endpoint), so ``supported_tokens``
+    # is membership-only and not authoritative for availability. The engine must
+    # probe-fetch a price to decide availability rather than trust set membership
+    # (Refinement R3). Providers with a genuine fixed allowlist (chainlink) leave
+    # this absent / False and keep the membership path.
+    resolution_based_availability = True
+
     def __init__(
         self,
         api_key: str = "",
@@ -589,6 +680,7 @@ class CoinGeckoDataProvider:
         historical_cache_ttl: int = 3600,  # 1 hour default for historical data
         data_config: BacktestDataConfig | None = None,
         persistent_cache: bool = False,
+        token_addresses: dict[str, tuple[str, str]] | None = None,
     ) -> None:
         """Initialize the CoinGecko data provider.
 
@@ -611,6 +703,14 @@ class CoinGeckoDataProvider:
                             at ~/.almanak/cache/historical_prices.db. Cached prices
                             survive across process restarts, eliminating redundant
                             API calls on repeated backtests.
+            token_addresses: Optional map of ``SYMBOL -> (chain, contract_address)``
+                            used to resolve a token's CoinGecko coin id dynamically
+                            via the contract-address endpoint when the symbol is not
+                            a native gas token. Keys are upper-cased on store. Native
+                            gas / wrapped-native symbols are always resolved via the
+                            chain registry and need no entry here; a symbol that is
+                            neither native nor in this map is an honest miss (no
+                            fabricated price).
         """
         # Phase 5c: env reads for backtest creds live in
         # almanak.config.backtest. The factory is called only when no
@@ -622,6 +722,23 @@ class CoinGeckoDataProvider:
         self._min_request_interval = min_request_interval
         self._retry_config = retry_config or RetryConfig()
         self._data_config = data_config
+
+        # Address-backed resolution map: SYMBOL_UPPER -> (chain, address).
+        # Non-native ERC20s resolve their coin id through the contract endpoint
+        # keyed off this map; symbols absent from it (and not native) are
+        # honest misses.
+        self._token_addresses: dict[str, tuple[str, str]] = {k.upper(): v for k, v in (token_addresses or {}).items()}
+
+        # Case-folded native symbol -> coin id projection, built once for O(1)
+        # case-insensitive lookup. Registry-derived (native_coingecko_ids keys
+        # are verbatim case, e.g. "wS"), never a hardcoded allowlist.
+        self._native_ids_by_upper: dict[str, str] = {
+            symbol.upper(): cg_id for symbol, cg_id in native_coingecko_ids().items()
+        }
+
+        # In-memory coin-id resolution cache keyed by (chain_lower, address_lower).
+        # Sits in front of the persistent SQLite resolution table.
+        self._coin_id_cache: dict[tuple[str, str], str] = {}
 
         # Select API base URL based on whether we have an API key
         self._api_base = self._PRO_API_BASE if self._api_key else self._FREE_API_BASE
@@ -705,9 +822,111 @@ class CoinGeckoDataProvider:
             self._session = None
         self._historical_cache.close()
 
-    def _resolve_token_id(self, token: str) -> str | None:
-        """Resolve token symbol to CoinGecko ID."""
-        return TOKEN_IDS.get(token.upper())
+    async def _resolve_token_id(self, token: str) -> str | None:
+        """Resolve a token symbol to its CoinGecko coin id.
+
+        Three steps, in order:
+
+        1. **Native** (case-insensitive): a native gas / wrapped-native symbol
+           resolves to its registry-derived coin id with zero I/O.
+        2. **Address-backed**: a symbol present in ``token_addresses`` resolves
+           via :meth:`_resolve_coin_id_by_address`, which hits the CoinGecko
+           contract endpoint (cache-fronted). The chain-specific (bridged) coin
+           id the contract resolves to is returned deliberately — it is the
+           asset actually traded.
+        3. **Honest miss**: any other symbol returns ``None`` (no fabricated
+           price). The caller raises ``ValueError`` on ``None``.
+
+        Args:
+            token: Token symbol.
+
+        Returns:
+            CoinGecko coin id, or ``None`` on an honest miss.
+
+        Raises:
+            CoinGeckoRateLimitError: A transient 429 during address resolution
+                propagates (it is not a miss).
+        """
+        native_id = self._native_ids_by_upper.get(token.upper())
+        if native_id is not None:
+            return native_id
+
+        entry = self._token_addresses.get(token.upper())
+        if entry is not None:
+            chain, address = entry
+            return await self._resolve_coin_id_by_address(chain, address)
+
+        return None
+
+    async def _resolve_coin_id_by_address(self, chain: str, address: str) -> str | None:
+        """Resolve a (chain, address) to its CoinGecko coin id via the contract endpoint.
+
+        Lookup order: in-memory cache -> persistent SQLite cache -> CoinGecko
+        ``/coins/{asset_platform}/contract/{address}``. The asset-platform id
+        comes from :func:`external_id_for` (registry-derived); a chain CoinGecko
+        does not index returns ``None`` (honest miss, no fabricated price).
+
+        The endpoint returns the chain-specific (BRIDGED) coin id the contract
+        maps to; that id is returned and cached verbatim — it is the asset
+        actually traded, not a canonical/mainnet id.
+
+        Args:
+            chain: Chain name (used both for the asset-platform lookup and the
+                cache key).
+            address: Contract address on ``chain``.
+
+        Returns:
+            The resolved coin id, or ``None`` on an honest miss (chain not
+            indexed by CoinGecko, or a genuine "contract not found").
+
+        Raises:
+            CoinGeckoRateLimitError: A transient 429 propagates (not a miss).
+        """
+        cache_key = (chain.lower(), address.lower())
+
+        cached = self._coin_id_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        persisted = self._historical_cache.get_coin_id(chain, address)
+        if persisted is not None:
+            self._coin_id_cache[cache_key] = persisted
+            return persisted
+
+        platform = external_id_for(chain, "coingecko")
+        if platform is None:
+            # CoinGecko does not index this chain: honest miss, no price.
+            return None
+
+        try:
+            data = await self._make_request(f"/coins/{platform}/contract/{address}", {})
+        except CoinGeckoRateLimitError:
+            # Transient — never cache, never treat as a miss. Propagate so the
+            # caller (e.g. preflight) can retry rather than misreport the token
+            # as unpriceable.
+            raise
+        except ValueError as exc:
+            if _is_transient_request_error(exc):
+                # Timeout / network / 408 / 5xx (also surfaced as ValueError by
+                # _make_request): transient, not a miss. Propagate so the caller
+                # can retry rather than caching a false "contract not found".
+                raise
+            if _is_auth_error(exc):
+                # 401 / 403: provider misconfiguration (bad/expired key, plan
+                # access). Re-raise loudly instead of reporting the asset as an
+                # unpriceable miss for every token.
+                raise
+            # A genuine 4xx miss (404 "contract not found", 400 invalid address)
+            # is an honest miss: no coin id, no fabricated price.
+            return None
+
+        coin_id = data.get("id")
+        if not coin_id:
+            return None
+
+        self._coin_id_cache[cache_key] = coin_id
+        self._historical_cache.set_coin_id(chain, address, coin_id)
+        return coin_id
 
     async def _wait_for_rate_limit(self) -> None:
         """Wait if needed to respect rate limits.
@@ -863,7 +1082,9 @@ class CoinGeckoDataProvider:
         """Get the price of a token at a specific timestamp.
 
         Uses the CoinGecko /coins/{id}/history endpoint for historical prices.
-        Results are cached by (token, date) with 1-hour TTL to minimize API calls.
+        Results are cached by (resolved coin id, date) to minimize API calls --
+        coin-id keyed, not symbol keyed, so a symbol that resolves to different
+        chain-specific ids cannot collide across runs.
 
         Args:
             token: Token symbol (e.g., "WETH", "USDC", "ARB")
@@ -875,22 +1096,26 @@ class CoinGeckoDataProvider:
         Raises:
             ValueError: If price data is not available for the token/timestamp
         """
-        token_id = self._resolve_token_id(token)
+        token_id = await self._resolve_token_id(token)
         if token_id is None:
             raise ValueError(f"Unknown token: {token}")
 
-        # Check historical price cache first (keyed by token+date, 1-hour TTL)
-        cached_price = self._historical_cache.get(token, timestamp)
+        # Persistent cache is keyed by the resolved coin id, NOT the symbol: the
+        # same symbol resolves to different chain-specific (bridged) coin ids
+        # across chains, so a symbol-keyed cache would reuse one chain's price
+        # for another chain's asset on a later run sharing the on-disk cache.
+        cached_price = self._historical_cache.get(token_id, timestamp)
         if cached_price is not None:
-            logger.debug(f"Historical cache hit for {token} on {timestamp.strftime('%Y-%m-%d')}")
+            logger.debug(f"Historical cache hit for {token} ({token_id}) on {timestamp.strftime('%Y-%m-%d')}")
             return cached_price
 
-        # Check OHLCV cache (if iterate() was called)
+        # Check OHLCV cache (if iterate() was called). The OHLCV cache is a
+        # per-run DataCache (single chain), so symbol keying is unambiguous there.
         if self._cache is not None:
             ohlcv_cached_price = self._cache.get_price_at(token, timestamp)
             if ohlcv_cached_price is not None:
-                # Also store in historical cache for future requests
-                self._historical_cache.set(token, timestamp, ohlcv_cached_price)
+                # Also store in the persistent cache (coin-id-keyed) for reuse.
+                self._historical_cache.set(token_id, timestamp, ohlcv_cached_price)
                 return ohlcv_cached_price
 
         # Format date for CoinGecko API (dd-mm-yyyy)
@@ -909,9 +1134,9 @@ class CoinGeckoDataProvider:
 
         price = Decimal(str(price_usd))
 
-        # Store in historical cache for future requests
-        self._historical_cache.set(token, timestamp, price)
-        logger.debug(f"Cached historical price for {token} on {timestamp.strftime('%Y-%m-%d')}: ${price}")
+        # Store in historical cache keyed by the resolved coin id (see above).
+        self._historical_cache.set(token_id, timestamp, price)
+        logger.debug(f"Cached historical price for {token} ({token_id}) on {timestamp.strftime('%Y-%m-%d')}: ${price}")
 
         return price
 
@@ -945,7 +1170,7 @@ class CoinGeckoDataProvider:
         Raises:
             ValueError: If data is not available for the token/range
         """
-        token_id = self._resolve_token_id(token)
+        token_id = await self._resolve_token_id(token)
         if token_id is None:
             raise ValueError(f"Unknown token: {token}")
 
@@ -1104,8 +1329,15 @@ class CoinGeckoDataProvider:
 
     @property
     def supported_tokens(self) -> list[str]:
-        """Return list of supported token symbols."""
-        return self._SUPPORTED_TOKENS.copy()
+        """Return the symbols that have a resolution route, sorted.
+
+        A symbol has a route when it is either a native gas / wrapped-native
+        symbol (registry-derived) or carries an entry in ``token_addresses``
+        (address-backed dynamic resolution). This is membership only — it does
+        NOT perform the contract lookup, so it stays synchronous and I/O-free.
+        Symbols outside this set are honest misses at price-fetch time.
+        """
+        return sorted(set(self._native_ids_by_upper) | set(self._token_addresses))
 
     @property
     def supported_chains(self) -> list[str]:
@@ -1248,11 +1480,23 @@ class CoinGeckoDataProvider:
             token_upper = token.upper()
             cached_counts[token_upper] = 0
 
+            # Resolve the coin id once so the "already cached" pre-check uses the
+            # same coin-id key get_price() writes under (symbol keying would
+            # always miss and silently re-probe every day).
+            try:
+                cache_id = await self._resolve_token_id(token_upper)
+            except CoinGeckoRateLimitError as e:
+                logger.warning(f"Rate limited resolving {token_upper} for warm cache: {e}")
+                continue
+            if cache_id is None:
+                logger.warning(f"No CoinGecko id for {token_upper}; skipping warm cache")
+                continue
+
             # Iterate through each day in the range
             current_date = start_date
             while current_date <= end_date:
-                # Check if already in cache
-                if self._historical_cache.get(token_upper, current_date) is not None:
+                # Check if already in cache (coin-id keyed, matching get_price)
+                if self._historical_cache.get(cache_id, current_date) is not None:
                     # Already cached, increment count but don't fetch
                     cached_counts[token_upper] += 1
                     current_date += timedelta(days=1)
@@ -1310,5 +1554,4 @@ __all__ = [
     "HistoricalCacheStats",
     "HistoricalPriceCache",
     "RetryConfig",
-    "TOKEN_IDS",
 ]

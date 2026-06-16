@@ -27,6 +27,7 @@ from ...backtesting.config import BacktestDataConfig
 from ...backtesting.exceptions import DataSourceUnavailableError
 from ...backtesting.models import BacktestResult
 from ...backtesting.pnl.config_loader import ConfigLoadError, load_config_from_result
+from ...backtesting.pnl.error_handling import PreflightValidationError
 from ...backtesting.pnl.logging_utils import configure_backtest_logging
 from ...backtesting.visualization import save_chart
 from ...data.cache import CacheStats, DataCache
@@ -40,6 +41,7 @@ from .helpers import (
     parse_date,
 )
 from .run_helpers import (
+    build_token_address_map,
     ensure_deployment_id,
     parse_token_list,
     validate_strategy_is_registered,
@@ -401,6 +403,10 @@ async def _warm_cache_async(
     )
 
 
+# crap-allowlist: pre-existing CLI command body (cc=11 on main, unchanged by this PR); the
+# only addition is the token_addresses param + provider kwarg for dynamic coin-id resolution.
+# Score is coverage-driven (CLI bodies have no unit harness). Coverage backfill / decomposition
+# tracked as a follow-up (file under AGI - Strategist / VibeCoders).
 def _warm_cache(
     ctx: PnLBacktestContext,
     start: datetime | None,
@@ -408,6 +414,7 @@ def _warm_cache(
     interval: int,
     *,
     strict: bool = False,
+    token_addresses: dict[str, tuple[str, str]] | None = None,
 ) -> DataCache | None:
     """Phase 9: pre-warm the OHLCV cache for the backtest.
 
@@ -448,6 +455,7 @@ def _warm_cache(
         retry_config=RetryConfig.for_backtest(),
         persistent_cache=True,
         historical_cache_ttl=0,
+        token_addresses=token_addresses,
     )
 
     outcome: WarmCacheOutcome
@@ -540,6 +548,21 @@ def _run_backtest(
         if e.data_type == "volume":
             click.echo(_MISSING_VOLUME_HINT, err=True)
         sys.exit(1)
+    except PreflightValidationError as e:
+        # A tracked non-cash asset could not be priced for the window. The engine
+        # refuses to run rather than emit a plausible-looking $0 result; surface
+        # the actionable message loudly and exit non-zero (distinct code 2 so
+        # scripts/CI can tell a preflight abort from a generic failure).
+        click.echo("", err=True)
+        click.echo("=" * 60, err=True)
+        click.echo("BACKTEST ABORTED: PREFLIGHT VALIDATION FAILED", err=True)
+        click.echo("=" * 60, err=True)
+        click.echo(str(e), err=True)
+        click.echo(
+            "\nTo run anyway with degraded data, re-run with --allow-missing-prices.",
+            err=True,
+        )
+        sys.exit(2)
     except Exception as e:
         click.echo(f"Error running backtest: {e}", err=True)
         sys.exit(1)
@@ -1039,6 +1062,16 @@ def _generate_html_report(
         "volume and fails loud instead (VIB-4849)."
     ),
 )
+@click.option(
+    "--allow-missing-prices",
+    is_flag=True,
+    default=False,
+    help=(
+        "Opt in to a degraded run when a tracked non-cash token has no historical "
+        "price data for the window. Off by default: the engine refuses to run a "
+        "backtest that cannot price a tracked asset (mirrors --allow-volume-fallback)."
+    ),
+)
 def pnl_backtest(
     strategy: str | None,
     start: datetime | None,
@@ -1064,6 +1097,7 @@ def pnl_backtest(
     pool_volume_usd_daily: float | None,
     pool_liquidity_usd: float | None,
     allow_volume_fallback: bool,
+    allow_missing_prices: bool,
 ) -> None:
     """
     Run a PnL backtest using historical price data.
@@ -1092,7 +1126,9 @@ def pnl_backtest(
     - 1: backtest failed -- the engine raised, or it stopped on a fatal
       error and returned a partial result; results and JSON output are
       still printed/written before exiting
-    - 2: usage error (invalid flags or arguments)
+    - 2: preflight validation aborted (a tracked non-cash asset could not be
+      priced; re-run with --allow-missing-prices to continue degraded), or a
+      usage error from invalid CLI flags/arguments
 
     Examples:
 
@@ -1174,6 +1210,18 @@ def pnl_backtest(
             err=True,
         )
 
+    # --allow-missing-prices opts out of the priceability guard: a tracked
+    # non-cash token with no price history becomes a degraded run instead of a
+    # hard preflight abort. Mirrors --allow-volume-fallback; echoed before the
+    # dry-run return so the contract is uniform across invocation paths.
+    if allow_missing_prices:
+        ctx.pnl_config.fail_on_preflight_error = False
+        click.echo(
+            "Warning: --allow-missing-prices continues even when a tracked asset has no "
+            "price history; results for that asset are degraded.",
+            err=True,
+        )
+
     # Phase 6: --dry-run early exit
     if dry_run:
         click.echo()
@@ -1201,6 +1249,17 @@ def pnl_backtest(
     )
     ensure_deployment_id(strategy_instance, fallback=fallback_id)
 
+    # Build the SYMBOL -> (chain, address) map that lets the CoinGecko provider
+    # resolve each non-native ERC20's coin id dynamically via the contract
+    # endpoint (Refinement R1). Natives resolve via the chain registry and need
+    # no entry; a tracked symbol with no native/registry address is left out and
+    # surfaces as an honest preflight miss.
+    token_addresses = build_token_address_map(
+        strategy_config=strategy_config,
+        tracked_tokens=ctx.token_list,
+        chain=ctx.pnl_config.chain,
+    )
+
     # Phase 8: initialize data provider for the backtest run
     click.echo()
     click.echo("Initializing CoinGecko data provider...")
@@ -1211,7 +1270,7 @@ def pnl_backtest(
     # before the dry-run early return, so it fires on every invocation path.
     cache: DataCache | None = None
     if warm_cache:
-        cache = _warm_cache(ctx, start, end, interval, strict=strict_warm)
+        cache = _warm_cache(ctx, start, end, interval, strict=strict_warm, token_addresses=token_addresses)
 
     # Fresh data provider for the backtest run. Matches the original two-step
     # sequence: warming uses a throwaway provider (closed in its own finally),
@@ -1220,6 +1279,7 @@ def pnl_backtest(
         retry_config=RetryConfig.for_backtest(),
         persistent_cache=True,
         historical_cache_ttl=0,
+        token_addresses=token_addresses,
     )
 
     # Phase 10: run the backtest
