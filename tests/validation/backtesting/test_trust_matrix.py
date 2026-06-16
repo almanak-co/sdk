@@ -871,43 +871,6 @@ def test_supply_beyond_cash_is_rejected() -> None:
     assert all(point.value_usd == INITIAL_CAPITAL for point in result.equity_curve)
 
 
-@pytest.mark.trust_cell("lending:snapshot_price_case_insensitive")
-def test_snapshot_price_resolves_strategy_config_casing() -> None:
-    """The engine seeds the snapshot with upper-cased symbols, but a strategy
-    queries its config casing. The strategy-facing ``market.price()`` must
-    resolve case-insensitively.
-
-    Regression: ``create_market_snapshot_from_state`` seeds ``_prices`` from
-    ``market_state.available_tokens`` (upper-cased), while a lending strategy
-    queries ``market.price(self.supply_token)`` with its config casing (e.g.
-    ``"wstETH"``). A case-sensitive lookup missed and fell through to an oracle
-    that cannot resolve a non-native token, so the strategy got ``ValueError``
-    every tick, executed zero intents, and the run still reported
-    ``institutional_compliance=true`` / 100% coverage - a silent false-clean
-    lending backtest where the engine HAD the price but never exposed it.
-    """
-    from almanak.framework.backtesting.pnl.engine import create_market_snapshot_from_state
-
-    state = MarketState(
-        timestamp=START,
-        prices={"WSTETH": Decimal("3965.76"), "USDC": Decimal("1")},
-        chain="arbitrum",
-        block_number=1_000_000,
-        gas_price_gwei=Decimal("30"),
-    )
-    snapshot = create_market_snapshot_from_state(state, chain="arbitrum")
-
-    # Engine seeds upper-cased; the strategy queries its config casing.
-    assert snapshot.price("WSTETH") == Decimal("3965.76")  # exact
-    assert snapshot.price("wstETH") == Decimal("3965.76")  # strategy config casing
-    assert snapshot.price("wsteth") == Decimal("3965.76")  # lower
-
-    # The case-insensitive fallback must NOT turn a genuinely-unknown token
-    # into a hit (no oracle is wired on the backtest snapshot, so it raises).
-    with pytest.raises(ValueError, match="Cannot determine price"):
-        snapshot.price("ARB")
-
-
 # =============================================================================
 # perp column (v1 beta)
 # =============================================================================

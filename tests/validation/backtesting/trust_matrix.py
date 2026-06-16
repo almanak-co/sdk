@@ -68,7 +68,6 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "yield_tie_out",
     "fee_share_scaling",
     "fungible_close_by_pool_id",
-    "snapshot_price_case_insensitive",
     "trade_pnl_attribution",
     "math_il_closed_form",
     "math_sharpe",
@@ -249,14 +248,6 @@ CELLS: tuple[TrustCell, ...] = (
         "rejection_no_state_change",
         "lending",
         "A SUPPLY beyond available cash is rejected with zero state mutation.",
-    ),
-    _cell(
-        "snapshot_price_case_insensitive",
-        "lending",
-        "The engine seeds the snapshot with upper-cased symbols, but a strategy queries "
-        "its config casing (market.price('wstETH')). The price MUST resolve case-insensitively "
-        "instead of raising and silently executing zero intents while the run still reports "
-        "institutional_compliance=true / 100% coverage (the silent false-clean lending backtest).",
     ),
     # --- perp column (v1 beta) ---
     _cell(

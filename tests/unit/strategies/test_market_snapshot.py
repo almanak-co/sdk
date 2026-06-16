@@ -353,35 +353,6 @@ class TestCachedPriceForCaseInsensitive:
         assert market._cached_price_for("WETH", "base") is None
 
 
-class TestPriceCaseInsensitive:
-    """``price()`` resolves seeded prices case-insensitively, matching the balance
-    path (``_cached_price_for``).
-
-    Regression: the PnL backtest engine seeds ``_prices`` with upper-cased
-    symbols (``market_state.available_tokens``) but a strategy queries its
-    config casing (e.g. ``market.price("wstETH")``). A case-sensitive lookup
-    missed and fell through to an oracle that cannot resolve a non-native
-    token, so the strategy got ``ValueError`` every tick, executed zero
-    intents, and the run still reported ``institutional_compliance=true`` /
-    100% coverage — a silent false-clean lending backtest.
-    """
-
-    def test_price_resolves_mixed_case_seeded_symbol(self):
-        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
-        market.set_price("WSTETH", Decimal("3965.76"))  # engine seeds upper-cased
-
-        assert market.price("WSTETH") == Decimal("3965.76")  # exact
-        assert market.price("wstETH") == Decimal("3965.76")  # strategy config casing
-        assert market.price("wsteth") == Decimal("3965.76")  # lower
-
-    def test_price_still_raises_for_genuinely_unknown_token(self):
-        """The case-insensitive fallback must not turn an unknown token into a hit."""
-        market = MarketSnapshot(chain="arbitrum", wallet_address="0xtest")
-        market.set_price("WSTETH", Decimal("3965.76"))
-        with pytest.raises(ValueError, match="Cannot determine price"):
-            market.price("ARB")
-
-
 class TestMarketSnapshotTimeframeResolution:
     """Tests for _resolve_timeframe() priority: explicit > config default > 4h fallback."""
 

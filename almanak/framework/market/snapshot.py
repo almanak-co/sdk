@@ -663,18 +663,9 @@ class MarketSnapshot:
             requested_chain = self._resolve_chain(chain)
         cache_key = f"{token}/{quote}@{requested_chain}"
 
-        # Check pre-populated prices first. Case-insensitive, matching the
-        # balance path (``_cached_price_for``): ``_prices`` is seeded by
-        # ``set_price()`` verbatim, so a strategy querying
-        # ``market.price("wstETH")`` must find a ``"WSTETH"``-seeded price
-        # instead of falling through to an oracle that cannot resolve a
-        # non-native token (the silent false-clean lending backtest, where
-        # the engine seeds upper-cased symbols but the strategy queries its
-        # config casing).
-        if chain is None or requested_chain == self._chain:
-            seeded = self._seeded_price_for_symbol(token)
-            if seeded is not None:
-                return seeded
+        # Check pre-populated prices first
+        if token in self._prices and (chain is None or requested_chain == self._chain):
+            return self._prices[token]
 
         # Check cache
         if cache_key in self._price_cache:
@@ -1923,30 +1914,6 @@ class MarketSnapshot:
             self._balance_usd_unmeasured.discard(cache_key)
         return filled
 
-    def _seeded_price_for_symbol(self, token: str) -> Decimal | None:
-        """Case-insensitive lookup in the ``set_price()``-seeded ``_prices`` map.
-
-        ``_prices`` is seeded verbatim (no case normalization), so a mixed-case
-        symbol (cbBTC, wstETH, cbETH, ...) seeded under one case must still
-        resolve under another, or its price/balance USD is silently left
-        unmeasured. Exact key first (the common path, O(1)), then a
-        case-insensitive fallback mirroring ``get_price_oracle_dict()``'s
-        upper-casing convention. USD-denominated (the only thing ``set_price``
-        stores). Returns ``None`` when no seeded price exists.
-
-        Single source of truth for both ``price()`` (the strategy-facing read)
-        and ``_cached_price_for()`` (the balance USD fill), so the two never
-        diverge on case handling again.
-        """
-        exact = self._prices.get(token)
-        if exact is not None:
-            return exact
-        token_upper = token.upper()
-        for key, val in self._prices.items():
-            if key.upper() == token_upper:
-                return val
-        return None
-
     def _cached_price_for(self, token: str, requested_chain: str) -> Decimal | None:
         """Return an already-known USD price for ``token`` WITHOUT a fetch.
 
@@ -1956,9 +1923,19 @@ class MarketSnapshot:
         call from a balance lookup.
         """
         if requested_chain == self._chain:
-            seeded = self._seeded_price_for_symbol(token)
-            if seeded is not None:
-                return seeded
+            # ``_prices`` is populated by ``set_price()`` without case
+            # normalization, so a mixed-case token (cbBTC, wstETH, cbETH, ...)
+            # seeded under one case must still resolve a lookup under another,
+            # or its balance USD is silently left unmeasured. Exact key first
+            # (the common path, O(1)), then a case-insensitive fallback that
+            # mirrors get_price_oracle_dict()'s upper-casing convention.
+            exact = self._prices.get(token)
+            if exact is not None:
+                return exact
+            token_upper = token.upper()
+            for key, val in self._prices.items():
+                if key.upper() == token_upper:
+                    return val
         cache_key = f"{token}/USD@{requested_chain}"
         cached = self._price_cache.get(cache_key)
         if cached is not None:
