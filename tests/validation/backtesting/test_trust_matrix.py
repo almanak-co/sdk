@@ -473,6 +473,66 @@ def test_lp_adapter_round_trip_conserves_value() -> None:
     assert abs(final_equity - expected) <= expected * Decimal("1e-9")
 
 
+@pytest.mark.trust_cell("lp:fungible_close_by_pool_id")
+def test_lp_close_by_pool_descriptor_id_round_trips() -> None:
+    """Fungible-LP LP_CLOSE by pool-descriptor id matches, closes, conserves.
+
+    Aerodrome / Uniswap-V2-style strategies emit LP_CLOSE with a pool-string
+    position_id ("WETH/USDC/volatile") -- what the LIVE compiler expects --
+    which never equals the engine's synthetic open id
+    ("LP_aerodrome_WETH_USDC_<ts>", VIB-2916). Before find_lp_close_position_id
+    the LP adapter matched by exact id only, so every such close failed
+    ("Position ... not found"), the position never closed, and the strategy
+    was mis-simulated as "open and never exit". This drives the real adapter
+    through open -> close exactly as the engine loop does and asserts the
+    close succeeds, the position count returns to zero, and equity conserves.
+    """
+    adapter, portfolio = _lp_adapter_and_portfolio()
+
+    open_intent = LPOpenIntent(
+        pool="WETH/USDC/volatile",
+        amount0=Decimal("1.25"),
+        amount1=Decimal("2500"),
+        range_lower=Decimal("1000"),
+        range_upper=Decimal("4000"),
+        protocol="aerodrome",
+    )
+    open_state = _market_state(0)
+    open_fill = adapter.execute_intent(open_intent, portfolio, open_state)
+    assert open_fill is not None and open_fill.success
+    assert portfolio.apply_fill(open_fill, market_state=open_state)
+    portfolio.mark_to_market(open_state, open_state.timestamp, adapter=adapter)
+
+    # The synthetic open id is NOT the pool descriptor the close will carry --
+    # this is the id-scheme mismatch the matcher must bridge.
+    synthetic_id = portfolio.positions[0].position_id
+    assert synthetic_id != "WETH/USDC/volatile"
+
+    # One flat-price hour (real per-tick adapter update): no IL, no fees.
+    tick_state = _market_state(1)
+    for position in portfolio.positions:
+        adapter.update_position(position, tick_state, float(TICK_SECONDS), tick_state.timestamp)
+    portfolio.mark_to_market(tick_state, tick_state.timestamp, adapter=adapter)
+
+    close_state = _market_state(2)
+    close_intent = LPCloseIntent(
+        position_id="WETH/USDC/volatile",
+        pool="WETH/USDC/volatile",
+        protocol="aerodrome",
+    )
+    close_fill = adapter.execute_intent(close_intent, portfolio, close_state)
+    assert close_fill is not None and close_fill.success
+    # The fill must target the matched SYNTHETIC id so apply_fill closes it.
+    assert close_fill.position_close_id == synthetic_id
+    assert portfolio.apply_fill(close_fill, market_state=close_state)
+
+    final_equity = portfolio.mark_to_market(close_state, close_state.timestamp, adapter=adapter)
+    total_costs = sum((f.fee_usd + f.slippage_usd + f.gas_cost_usd) for f in (open_fill, close_fill))
+    expected = INITIAL_CAPITAL - total_costs
+    assert len(portfolio.positions) == 0
+    assert abs(final_equity - expected) <= expected * Decimal("1e-9")
+
+
 @pytest.mark.trust_cell("lp:generic_lane_entry")
 def test_lp_generic_lane_open_does_not_mint() -> None:
     """Generic-lane (no adapter) LP_OPEN through the engine loop must not mint.

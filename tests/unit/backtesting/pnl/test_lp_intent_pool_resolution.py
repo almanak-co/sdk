@@ -35,12 +35,14 @@ from almanak.framework.backtesting.pnl.engine import (
     PnLBacktester,
 )
 from almanak.framework.backtesting.pnl.intent_extraction import (
+    find_lp_close_position_id,
     get_intent_amount_usd,
     get_intent_tokens,
     get_lp_tick_range,
     lp_pool_tokens,
 )
-from almanak.framework.intents.vocabulary import LPOpenIntent
+from almanak.framework.backtesting.pnl.position_models import PositionType, SimulatedPosition
+from almanak.framework.intents.vocabulary import LPCloseIntent, LPOpenIntent
 
 START = datetime(2024, 1, 1, tzinfo=UTC)
 
@@ -438,3 +440,99 @@ class TestRealLpOpenIntentEndToEnd:
         values = [point.value_usd for point in result.equity_curve]
         final_delta = values[-1] - Decimal("10000")
         assert final_delta == pytest.approx(-costs, abs=Decimal("1e-9"))
+
+
+def _lp_position(
+    token0: str = "WETH",
+    token1: str = "USDC",
+    protocol: str = "aerodrome",
+    entry_time: datetime = START,
+) -> SimulatedPosition:
+    """An open LP SimulatedPosition with an auto-generated synthetic id."""
+    return SimulatedPosition(
+        position_type=PositionType.LP,
+        protocol=protocol,
+        tokens=[token0, token1],
+        amounts={token0: Decimal("1"), token1: Decimal("3000")},
+        entry_price=Decimal("3000"),
+        entry_time=entry_time,
+    )
+
+
+def _lp_close(position_id: str, pool: str | None = None, protocol: str = "aerodrome") -> LPCloseIntent:
+    return LPCloseIntent(position_id=position_id, pool=pool, protocol=protocol)
+
+
+class TestFindLpClosePositionId:
+    """find_lp_close_position_id: fungible-LP close matching (sibling of VIB-5097).
+
+    Fungible-LP LP_CLOSE carries a pool-descriptor id ("WETH/USDC/volatile")
+    that never equals the synthetic open id ("LP_aerodrome_WETH_USDC_<ts>");
+    the matcher resolves it by pair+protocol the way the perp matcher resolves
+    venue ids, never minting on a no-match.
+    """
+
+    def test_matches_fungible_pool_descriptor_id(self):
+        position = _lp_position()
+        assert position.position_id != "WETH/USDC/volatile"  # the bug premise
+        intent = _lp_close(position_id="WETH/USDC/volatile", pool="WETH/USDC/volatile")
+        assert find_lp_close_position_id(intent, [position]) == position.position_id
+
+    def test_matches_via_pool_attribute_when_id_opaque(self):
+        # An NFT-style numeric id (no "/") cannot parse to a pair; the pool
+        # attribute supplies it.
+        position = _lp_position()
+        intent = _lp_close(position_id="42", pool="WETH/USDC")
+        assert find_lp_close_position_id(intent, [position]) == position.position_id
+
+    def test_exact_id_match_takes_precedence(self):
+        position = _lp_position()
+        intent = _lp_close(position_id=position.position_id, pool="WETH/USDC/volatile")
+        assert find_lp_close_position_id(intent, [position]) == position.position_id
+
+    def test_unordered_pair_matches(self):
+        # Position opened with tokens in the reverse order still matches: a
+        # pool is identified by its unordered pair.
+        position = _lp_position(token0="USDC", token1="WETH")
+        intent = _lp_close(position_id="WETH/USDC/volatile", pool="WETH/USDC/volatile")
+        assert find_lp_close_position_id(intent, [position]) == position.position_id
+
+    def test_no_open_position_returns_none(self):
+        intent = _lp_close(position_id="WETH/USDC/volatile", pool="WETH/USDC/volatile")
+        assert find_lp_close_position_id(intent, []) is None
+
+    def test_pair_mismatch_returns_none(self):
+        position = _lp_position(token0="WETH", token1="USDC")
+        intent = _lp_close(position_id="ARB/USDC/volatile", pool="ARB/USDC/volatile")
+        assert find_lp_close_position_id(intent, [position]) is None
+
+    def test_protocol_mismatch_returns_none(self):
+        position = _lp_position(protocol="aerodrome")
+        intent = _lp_close(position_id="WETH/USDC/volatile", pool="WETH/USDC/volatile", protocol="uniswap_v3")
+        assert find_lp_close_position_id(intent, [position]) is None
+
+    def test_ignores_non_lp_positions(self):
+        supply = SimulatedPosition(
+            position_type=PositionType.SUPPLY,
+            protocol="aerodrome",
+            tokens=["WETH", "USDC"],
+            amounts={"WETH": Decimal("1")},
+            entry_price=Decimal("3000"),
+            entry_time=START,
+        )
+        intent = _lp_close(position_id="WETH/USDC/volatile", pool="WETH/USDC/volatile")
+        assert find_lp_close_position_id(intent, [supply]) is None
+
+    def test_fifo_oldest_wins_among_matching(self):
+        oldest = _lp_position(entry_time=START)
+        newest = _lp_position(entry_time=START + timedelta(hours=1))
+        intent = _lp_close(position_id="WETH/USDC/volatile", pool="WETH/USDC/volatile")
+        # Pass newest-first to prove the result is time-ordered, not list-ordered.
+        assert find_lp_close_position_id(intent, [newest, oldest]) == oldest.position_id
+
+    def test_unresolvable_descriptor_returns_none(self):
+        # An address-style id with no pool attribute cannot resolve a pair, so
+        # the close is rejected rather than matched ambiguously.
+        position = _lp_position()
+        intent = _lp_close(position_id="0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640", pool=None)
+        assert find_lp_close_position_id(intent, [position]) is None

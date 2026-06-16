@@ -1593,16 +1593,25 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 metadata={"failure_reason": "Invalid intent type"},
             )
 
-        # Find the position to close in the portfolio
+        # Find the position to close in the portfolio. Fungible-LP protocols
+        # (Aerodrome, Uniswap-V2-style) emit LP_CLOSE with a pool-descriptor id
+        # ("TOKEN0/TOKEN1/pool_type") that never equals the engine's synthetic
+        # open id, so an exact-id match is not enough -- resolve via
+        # find_lp_close_position_id (exact-id precedence, then pair+protocol
+        # FIFO, mirroring the perp/lending matchers).
+        from almanak.framework.backtesting.pnl.intent_extraction import find_lp_close_position_id
+
+        matched_id = find_lp_close_position_id(intent, portfolio.positions)
         position = None
-        for pos in portfolio.positions:
-            if pos.position_id == intent.position_id:
-                position = pos
-                break
+        if matched_id is not None:
+            for pos in portfolio.positions:
+                if pos.position_id == matched_id:
+                    position = pos
+                    break
 
         if position is None:
             logger.warning(
-                "LP_CLOSE failed: position %s not found in portfolio",
+                "LP_CLOSE failed: no open LP position matched %s in portfolio",
                 intent.position_id,
             )
             return SimulatedFill(
@@ -1640,7 +1649,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 tokens_in={},
                 tokens_out={},
                 success=False,
-                position_close_id=intent.position_id,
+                position_close_id=position.position_id,
                 metadata={"failure_reason": "Position has fewer than 2 tokens"},
             )
 
@@ -1773,7 +1782,10 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             tokens_in=tokens_in,  # Tokens received from closing
             tokens_out={},  # No tokens sent when closing
             success=True,
-            position_close_id=intent.position_id,
+            # The matched simulated position id drives apply_fill's
+            # _close_position; for fungible LP it differs from the requested
+            # pool-descriptor id (kept in metadata["position_id"] below).
+            position_close_id=position.position_id,
             metadata={
                 "position_id": intent.position_id,
                 "pool": intent.pool or f"{token0}/{token1}",

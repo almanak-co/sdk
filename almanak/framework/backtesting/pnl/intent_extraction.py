@@ -918,6 +918,138 @@ def _find_lending_position_id(
     return candidates[0].position_id
 
 
+def _lp_token_pair(token0: Any, token1: Any) -> frozenset[str] | None:
+    """Normalize two token symbols into an unordered, upper-cased pair.
+
+    A pool's identity is its unordered token pair, so matching keys off a
+    ``frozenset`` rather than an ordered tuple -- the close intent and the
+    open position need not agree on which token is token0.
+    """
+    if not isinstance(token0, str) or not isinstance(token1, str):
+        return None
+    a, b = token0.strip().upper(), token1.strip().upper()
+    if not a or not b:
+        return None
+    return frozenset((a, b))
+
+
+def _lp_close_pair(intent: Any) -> frozenset[str] | None:
+    """Resolve the unordered token pair an LP_CLOSE intent targets.
+
+    Explicit ``token0``/``token1`` (or the ``token_a``/``token_b`` aliases)
+    win; otherwise the pair is parsed from the pool descriptor carried in
+    ``pool`` or -- for fungible-LP protocols -- ``position_id``, both of
+    which spell "TOKEN0/TOKEN1[/suffix]". Address-style descriptors (0x...)
+    return None: a pool address cannot be mapped to a priceable pair without
+    chain data, mirroring :func:`lp_pool_tokens`.
+    """
+    explicit = _lp_token_pair(*lp_explicit_pair(intent))
+    if explicit is not None:
+        return explicit
+    for descriptor in (getattr(intent, "pool", None), getattr(intent, "position_id", None)):
+        parsed = lp_pool_tokens(descriptor)
+        if parsed is not None:
+            return frozenset(parsed)
+    return None
+
+
+def _lp_position_pair(position: Any) -> frozenset[str] | None:
+    """Resolve the unordered token pair an open LP position holds."""
+    tokens = getattr(position, "tokens", None) or []
+    if len(tokens) < 2:
+        return None
+    return _lp_token_pair(tokens[0], tokens[1])
+
+
+def find_lp_close_position_id(intent: Any, positions: Sequence[Any]) -> str | None:
+    """Resolve the simulated LP position an LP_CLOSE intent targets.
+
+    Fungible-LP protocols (Aerodrome, Uniswap-V2-style) emit LP_CLOSE with a
+    *pool-descriptor* id ("TOKEN0/TOKEN1/pool_type") because that is what the
+    LIVE compiler expects -- it never equals the engine's synthetic open id
+    ("LP_<protocol>_<token0>_<token1>_<ts>", assigned at open by VIB-2916).
+    So, exactly like :func:`find_perp_close_position_id` (venue position ids
+    never equal simulated ids), an exact-id check comes first and the match
+    then falls back to (token-pair, protocol) -- the unordered pair that
+    identifies the pool. The oldest matching position wins (FIFO) when
+    several are open.
+
+    Unlike :func:`find_lending_close_position_id`, an explicit
+    ``position_id`` that matches no open position does **not** fail closed:
+    for fungible LP the ``position_id`` *is* the pool descriptor, so falling
+    through to pair matching is the intended path -- not the stale-handle
+    hazard the lending matcher guards against. This is the same reasoning the
+    perp matcher applies to venue position ids.
+
+    Limitation: the simulated LP position records only ``(tokens, protocol)``,
+    not the pool-type / fee-tier suffix, so two pools over the same pair on
+    the same protocol (e.g. an Aerodrome *stable* AND *volatile* WETH/USDC)
+    are indistinguishable here and resolve FIFO-oldest. Single-pool
+    strategies -- every current fungible-LP demo -- are unaffected.
+
+    Args:
+        intent: LP_CLOSE intent object
+        positions: Open positions to match against
+
+    Returns:
+        The matched simulated position id, or None when no open LP position
+        matches the pair+protocol (the close is then rejected, never minted).
+    """
+    from almanak.framework.backtesting.pnl.position_models import PositionType
+
+    explicit_id = getattr(intent, "position_id", None)
+    if isinstance(explicit_id, str) and explicit_id:
+        for position in positions:
+            if position.position_id == explicit_id:
+                return explicit_id
+
+    pair = _lp_close_pair(intent)
+    if pair is None:
+        logger.warning(
+            "LP_CLOSE carries no resolvable token pair (position_id=%r, pool=%r); refusing ambiguous close matching",
+            getattr(intent, "position_id", None),
+            getattr(intent, "pool", None),
+        )
+        return None
+
+    # Resolve protocol with the same resolver the open path used to stamp the
+    # position, so protocol_name / connector / adapter spellings match too.
+    protocol: str | None = get_intent_protocol(intent)
+    if protocol == "default":
+        protocol = None
+
+    candidates = []
+    for position in positions:
+        if getattr(position, "position_type", None) != PositionType.LP:
+            continue
+        if _lp_position_pair(position) != pair:
+            continue
+        # A protocol-specific intent must not target a position whose protocol
+        # is unknown: skip on missing OR mismatched stamp (the lending-matcher
+        # convention -- every production LP producer stamps protocol).
+        if protocol and (not position.protocol or position.protocol.lower() != protocol):
+            continue
+        candidates.append(position)
+
+    if not candidates:
+        logger.warning(
+            "LP_CLOSE matched no open simulated LP position (pair=%s, protocol=%s)",
+            "/".join(sorted(pair)),
+            protocol,
+        )
+        return None
+    candidates.sort(key=lambda position: position.entry_time)
+    if len(candidates) > 1:
+        logger.warning(
+            "LP_CLOSE matched %d open LP positions for pair=%s protocol=%s; closing the oldest (%s)",
+            len(candidates),
+            "/".join(sorted(pair)),
+            protocol,
+            candidates[0].position_id,
+        )
+    return candidates[0].position_id
+
+
 def estimate_gas_for_intent(intent_type: IntentType) -> int:
     """Estimate gas usage for an intent type.
 

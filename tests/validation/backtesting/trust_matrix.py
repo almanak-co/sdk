@@ -67,6 +67,7 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "cost_accounting",
     "yield_tie_out",
     "fee_share_scaling",
+    "fungible_close_by_pool_id",
     "trade_pnl_attribution",
     "math_il_closed_form",
     "math_sharpe",
@@ -207,6 +208,19 @@ CELLS: tuple[TrustCell, ...] = (
         # SimulatedPortfolio._simulate_lp_fee_accrual (the generic/fallback lane,
         # caught in PR review) - each crediting any sub-10% position with 10% of
         # the ENTIRE pool's fees, minting value on essentially every LP backtest.
+    ),
+    _cell(
+        "fungible_close_by_pool_id",
+        "lp",
+        "Fungible-LP LP_CLOSE carrying a pool-descriptor position_id "
+        "('TOKEN0/TOKEN1/pool_type', != the synthetic open id) round-trips: the "
+        "adapter matches the open position by pair+protocol, closes it, the "
+        "position count returns to zero, and equity conserves.",
+        # Guards the fungible-LP close-matching bug (sibling of VIB-5097/VIB-5098;
+        # blocked the VIB-5130 flag removal): the LP adapter matched LP_CLOSE by
+        # exact id only, so every Aerodrome/V2-style close ("WETH/USDC/volatile")
+        # missed the synthetic open id ("LP_aerodrome_WETH_USDC_<ts>") and the
+        # position never closed. Fixed by find_lp_close_position_id.
     ),
     # --- lending column ---
     _cell(
