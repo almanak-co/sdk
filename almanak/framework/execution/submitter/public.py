@@ -42,6 +42,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from eth_abi.abi import decode as abi_decode
+from eth_utils import to_checksum_address
 from hexbytes import HexBytes
 from web3 import AsyncHTTPProvider, AsyncWeb3
 from web3.exceptions import TransactionNotFound
@@ -153,13 +155,18 @@ KNOWN_CUSTOM_ERRORS: dict[str, str] = {
     "0x00000000": "Unknown()",
     # PancakeSwap V3
     "0xce30421c": "TooLittleReceived()",
-    "0x675cae38": "TooMuchRequested()",
+    # VIB-5017: 0x675cae38 is the keccak-correct selector for InsufficientToken(),
+    # NOT TooMuchRequested(). Verified via `cast sig "InsufficientToken()"` ==
+    # 0x675cae38 exactly. The correct TooMuchRequested() selector is 0x24df576f
+    # (in the V4 block below). The prior "PancakeSwap V3 / TooMuchRequested()"
+    # label was a mislabel; the signature decode is now selector-accurate.
+    "0x675cae38": "InsufficientToken()",
     # Uniswap V4 PositionManager / PoolManager (VIB-2703).
     # Selectors keccak-verified against v4-periphery / v4-core signatures.
     # NOTE: the v4-core "PoolNotInitialized()" selector is 0x486aa307 — NOT
     # 0xe450d38c (that selector is OpenZeppelin ERC20InsufficientBalance, below).
     # The 0x24df576f "TooMuchRequested()" here is the keccak-correct selector and
-    # is distinct from PancakeSwap's pre-existing 0x675cae38 row above.
+    # is distinct from the 0x675cae38 (InsufficientToken()) row above.
     "0x0ca968d8": "NotApproved(address)",
     "0x1ad777f8": "TickUpperOutOfBounds(int24)",
     "0x24df576f": "TooMuchRequested()",
@@ -265,6 +272,25 @@ KNOWN_CUSTOM_ERRORS: dict[str, str] = {
     "0xa2d3f3e4": "LBFactory__ImplementationNotSet()",
     # General
     "0x": "EmptyRevertData()",
+}
+
+# Parameterized custom errors whose arguments carry operator-actionable context
+# we can ABI-decode from the revert payload (VIB-5016). Distinct from the
+# label-only ``KNOWN_CUSTOM_ERRORS`` table above: this maps the 4-byte selector
+# to ``(error_name, [abi_arg_types])`` so the decoder can surface the decoded
+# value, e.g. ``NotApproved(0xabc…)`` instead of just ``NotApproved(address)``.
+#
+# Only Uniswap V4 errors with actionable args are listed. Selectors NOT present
+# here (non-parameterized errors such as ``PoolNotInitialized()`` /
+# ``InsufficientToken()``, or parameterized errors we have not opted in) keep
+# the label-only behaviour. Every selector here MUST also exist in
+# ``KNOWN_CUSTOM_ERRORS`` and its ``error_name(arg_types…)`` MUST equal that
+# label — enforced by ``test_revert_decoder_v4_errors.py``.
+PARAMETERIZED_CUSTOM_ERRORS: dict[str, tuple[str, list[str]]] = {
+    "0x0ca968d8": ("NotApproved", ["address"]),
+    "0xbfb22adf": ("DeadlinePassed", ["uint256"]),
+    "0xd5e2f7ab": ("TickLowerOutOfBounds", ["int24"]),
+    "0x1ad777f8": ("TickUpperOutOfBounds", ["int24"]),
 }
 
 
@@ -918,10 +944,72 @@ class PublicMempoolSubmitter(Submitter):
 
         # Check for known custom errors
         if selector in KNOWN_CUSTOM_ERRORS:
+            # VIB-5016: parameterized errors (e.g. NotApproved(address)) get
+            # their args ABI-decoded from the payload; on any failure we fall
+            # back to the label-only signature. Non-parameterized selectors
+            # never enter the decode path.
+            decoded = self._decode_custom_error_args(selector, hex_data)
+            if decoded is not None:
+                return f"Custom error: {decoded}"
             return f"Custom error: {KNOWN_CUSTOM_ERRORS[selector]}"
 
         # Unknown error - return raw selector and truncated data
         return f"Unknown revert (selector={selector}): {hex_data[:100]}{'...' if len(hex_data) > 100 else ''}"
+
+    def _decode_custom_error_args(self, selector: str, hex_data: str) -> str | None:
+        """ABI-decode a parameterized custom error's arguments (VIB-5016).
+
+        Args:
+            selector: 0x-prefixed lowercase 4-byte selector.
+            hex_data: Full 0x-prefixed revert payload (selector + ABI args).
+
+        Returns:
+            A formatted ``Name(arg, …)`` string (e.g. ``NotApproved(0xAbC…)``)
+            when ``selector`` is parameterized and its payload decodes cleanly;
+            ``None`` when the selector is not parameterized or the payload is
+            missing / truncated / undecodable. Never raises — the caller falls
+            back to the label-only signature on ``None``.
+        """
+        entry = PARAMETERIZED_CUSTOM_ERRORS.get(selector)
+        if entry is None:
+            return None
+        name, arg_types = entry
+
+        # Strip "0x" + 4-byte (8 hex char) selector, then take exactly the
+        # expected head payload — one 32-byte (64 hex char) slot per top-level
+        # ABI arg. Slicing to the expected length BEFORE ``bytes.fromhex`` drops
+        # any trailing garbage (including odd-length trailing nibbles that would
+        # otherwise raise ``ValueError``) so a valid head still decodes. Bail if
+        # the payload is too short to hold one slot per declared arg.
+        expected_hex_len = 32 * len(arg_types) * 2
+        payload_hex = hex_data[10 : 10 + expected_hex_len]
+        if len(payload_hex) < expected_hex_len:
+            return None
+        try:
+            payload = bytes.fromhex(payload_hex)
+        except ValueError:
+            return None
+
+        try:
+            values = abi_decode(arg_types, payload)
+        except Exception as exc:  # eth_abi raises a range of decoding errors
+            logger.debug(f"Failed to decode custom error args for {selector}: {exc}")
+            return None
+
+        rendered = [self._format_error_arg(t, v) for t, v in zip(arg_types, values, strict=False)]
+        return f"{name}({', '.join(rendered)})"
+
+    @staticmethod
+    def _format_error_arg(abi_type: str, value: Any) -> str:
+        """Render a single decoded ABI value for a revert message (VIB-5016)."""
+        if abi_type == "address" and isinstance(value, str):
+            try:
+                return to_checksum_address(value)
+            except (ValueError, TypeError):
+                return value
+        if isinstance(value, bytes | bytearray):
+            return "0x" + bytes(value).hex()
+        return str(value)
 
     async def _extract_revert_reason(
         self,
