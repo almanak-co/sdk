@@ -584,8 +584,11 @@ class PredictionAccountingEvent:
       position (e.g. the strategy was deployed with an existing on-chain
       position the framework never recorded a BUY for). Callers must NOT
       treat None as zero — it signals "PnL unknown for this disposal."
-    - position_size_after / position_basis_after capture the post-trade
-      aggregate so reconstruction-from-events can restore in-memory state.
+    - position_size_after / position_basis_after / position_loaded_extras_after
+      capture the post-trade aggregate so reconstruction-from-events can restore
+      in-memory state. ``position_loaded_extras_after`` (#2146) snapshots the
+      VIB-3710 gas+fee accumulator so a runner restart does not drop it and
+      overstate realized PnL on the next SELL/REDEEM.
     """
 
     identity: AccountingIdentity
@@ -603,12 +606,22 @@ class PredictionAccountingEvent:
     # Post-trade aggregate snapshot (used by reconstruct_from_events).
     position_size_after: Decimal
     position_basis_after: Decimal
+    # #2146: post-trade snapshot of the VIB-3710 loaded-extras accumulator
+    # (gas + fees folded into the fully-loaded basis). Replay must restore this
+    # alongside size/basis or a cross-restart SELL/REDEEM prices realized PnL
+    # against bare basis and overstates it by Σ loaded_extras. Decimal("0") =
+    # measured zero / no extras; legacy payloads without the field default to 0.
+    position_loaded_extras_after: Decimal = Decimal("0")
     gas_usd: Decimal | None = None
     confidence: AccountingConfidence = AccountingConfidence.HIGH
     unavailable_reason: str = ""
     schema_version: int = 1
     # VIB-4166 (T6) — see module docstring for bump policy.
-    primitive_version: int = 1
+    # #2146: bumped 1→2 alongside PRIMITIVE_VERSIONS[Primitive.PREDICTION] (the
+    # payload now carries position_loaded_extras_after). Mirrors the
+    # SwapAccountingEvent precedent (VIB-4905) so a directly-serialized event's
+    # default matches the writer-stamped per-primitive value.
+    primitive_version: int = 2
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -629,6 +642,8 @@ class PredictionAccountingEvent:
             "realized_pnl_usd": _enc(self.realized_pnl_usd),
             "position_size_after": _enc(self.position_size_after),
             "position_basis_after": _enc(self.position_basis_after),
+            # #2146: persisted so replay restores the loaded-extras accumulator.
+            "position_loaded_extras_after": _enc(self.position_loaded_extras_after),
             "gas_usd": _enc(self.gas_usd),
             "confidence": self.confidence.value,
             # VIB-3938 — see LPAccountingEvent.to_payload_json for rationale.
@@ -658,6 +673,12 @@ class PredictionAccountingEvent:
             ),
             position_basis_after=(
                 Decimal(d["position_basis_after"]) if d.get("position_basis_after") is not None else Decimal("0")
+            ),
+            # #2146: legacy payloads (pre-field) default to Decimal("0").
+            position_loaded_extras_after=(
+                Decimal(d["position_loaded_extras_after"])
+                if d.get("position_loaded_extras_after") is not None
+                else Decimal("0")
             ),
             gas_usd=_dec(d.get("gas_usd")),
             confidence=AccountingConfidence(d.get("confidence", AccountingConfidence.HIGH.value)),

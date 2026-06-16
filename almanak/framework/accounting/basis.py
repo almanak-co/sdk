@@ -557,6 +557,12 @@ class FIFOBasisStore:
         basis_after = _parse_decimal(ctx.payload.get("position_basis_after"))
         if size_after is None or basis_after is None:
             return 0
+        # #2146: restore the VIB-3710 loaded-extras accumulator from the
+        # post-trade snapshot. Without it, a cross-restart SELL/REDEEM prices
+        # realized PnL against bare basis and overstates it by Σ loaded_extras.
+        # Legacy payloads (pre-field) parse as None -> treated as zero extras,
+        # preserving their prior arithmetic.
+        extras_after = _parse_decimal(ctx.payload.get("position_loaded_extras_after")) or Decimal("0")
         k = self._prediction_key(ctx.deployment_id, pos_key)
         # Position closed (zero size) — drop the row entirely so
         # match_prediction_sell on a closed position correctly
@@ -569,6 +575,7 @@ class FIFOBasisStore:
                     "kind": "prediction",
                     "size": size_after,
                     "basis": basis_after,
+                    "loaded_extras": extras_after,
                 }
             ]
         return 1

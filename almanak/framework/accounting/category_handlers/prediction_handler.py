@@ -294,6 +294,10 @@ def _handle_buy(
         fee_pusd=fee_pusd_extras,
     )
     event_type = PredictionEventType.PREDICTION_OPEN if is_open else PredictionEventType.PREDICTION_INCREASE
+    # #2146: snapshot the post-buy loaded-extras accumulator so replay restores it.
+    loaded_extras_after = basis_store.get_prediction_loaded_extras(
+        deployment_id=deployment_id, position_key=position_key
+    )
 
     return _build_event(
         event_type=event_type,
@@ -315,10 +319,46 @@ def _handle_buy(
         realized_pnl_usd=None,
         position_size_after=new_size,
         position_basis_after=new_basis,
+        position_loaded_extras_after=loaded_extras_after,
         gas_usd=gas_usd,
         confidence=confidence,
         unavailable_reason=unavailable_reason,
     )
+
+
+def _parse_disposal_fields(
+    intent_type: str, extracted: dict[str, Any]
+) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+    """Parse ``(shares, gross usd_value, net_proceeds)`` for a SELL/REDEEM disposal.
+
+    Extracted from ``_handle_sell_or_redeem`` to keep that handler within the
+    cyclomatic-complexity gate. Behaviour is unchanged.
+
+    VIB-3710: the SELL/REDEEM operator fee (``fee_pusd``) is subtracted from the
+    gross before realized PnL so the bookkeeping matches what the wallet actually
+    received. Missing fee → 0; negatives clamped to 0 (mirrors the BUY guard).
+    The gross ``usd_value`` is returned separately and preserved on the event
+    payload for audit traceability — only ``net_proceeds`` flows into
+    ``match_prediction_sell``.
+
+    CodeRabbit thread 4: a negative gross from a malformed enrichment payload
+    would otherwise book a synthetic loss against the live aggregate. The BUY
+    branch already rejects negative ``cost_basis``; here a negative (or missing)
+    gross yields ``net_proceeds=None`` so the caller's missing-fields guard
+    short-circuits to UNAVAILABLE without mutating the basis store.
+    """
+    if intent_type == "PREDICTION_SELL":
+        shares = _parse_decimal(extracted.get("outcome_tokens_sold"))
+        usd_value = _parse_decimal(extracted.get("proceeds"))
+    else:  # PREDICTION_REDEEM
+        shares = _parse_decimal(extracted.get("redemption_amount"))
+        usd_value = _parse_decimal(extracted.get("payout"))
+
+    sell_fee = _parse_decimal(extracted.get("fee_pusd")) or Decimal("0")
+    if sell_fee < 0:
+        sell_fee = Decimal("0")
+    net_proceeds: Decimal | None = None if usd_value is None or usd_value < 0 else usd_value - sell_fee
+    return shares, usd_value, net_proceeds
 
 
 def _handle_sell_or_redeem(
@@ -340,34 +380,7 @@ def _handle_sell_or_redeem(
     outcome: str | None,
     gas_usd: Decimal | None,
 ) -> PredictionAccountingEvent:
-    if intent_type == "PREDICTION_SELL":
-        shares = _parse_decimal(extracted.get("outcome_tokens_sold"))
-        usd_value = _parse_decimal(extracted.get("proceeds"))
-    else:  # PREDICTION_REDEEM
-        shares = _parse_decimal(extracted.get("redemption_amount"))
-        usd_value = _parse_decimal(extracted.get("payout"))
-
-    # VIB-3710: SELL/REDEEM operator fee — subtracted from proceeds before
-    # realized PnL is computed so the bookkeeping matches what the wallet
-    # actually received (gross proceeds minus operator fee). The handler reads
-    # ``fee_pusd`` from extracted_data the same way the BUY path does (the
-    # result enricher writes it on the disposal fill when the operator
-    # reported one). Missing values become 0; defensive clamp on negatives
-    # mirrors the BUY-side guard. ``usd_value`` (the gross) is still preserved
-    # on the event payload for audit traceability — only ``net_proceeds``
-    # flows into ``match_prediction_sell``.
-    #
-    # CodeRabbit thread 4 fix: a negative gross ``usd_value`` from a malformed
-    # enrichment payload would otherwise propagate into ``match_prediction_sell``
-    # and book a synthetic loss against the live aggregate. The BUY branch
-    # already rejects negative ``cost_basis``; SELL/REDEEM mirrors that
-    # contract — negative gross proceeds become ``None`` here so the
-    # missing-fields guard below short-circuits to UNAVAILABLE without
-    # mutating the basis store.
-    sell_fee = _parse_decimal(extracted.get("fee_pusd")) or Decimal("0")
-    if sell_fee < 0:
-        sell_fee = Decimal("0")
-    net_proceeds: Decimal | None = None if usd_value is None or usd_value < 0 else usd_value - sell_fee
+    shares, usd_value, net_proceeds = _parse_disposal_fields(intent_type, extracted)
 
     confidence, unavailable_reason = _confidence_for_fields(
         intent_type=intent_type,
@@ -484,6 +497,10 @@ def _handle_sell_or_redeem(
             else PredictionEventType.PREDICTION_REDUCE
         )
         prior_size, prior_basis = prior
+        # #2146: aggregate is left untouched here, so the loaded-extras snapshot
+        # must reflect the prior accumulator (not 0) — otherwise replaying this
+        # event would zero out extras that a later valid disposal still owes.
+        prior_extras = basis_store.get_prediction_loaded_extras(deployment_id=deployment_id, position_key=position_key)
         return _build_event(
             event_type=event_type,
             deployment_id=deployment_id,
@@ -504,6 +521,7 @@ def _handle_sell_or_redeem(
             realized_pnl_usd=None,
             position_size_after=prior_size,
             position_basis_after=prior_basis,
+            position_loaded_extras_after=prior_extras,
             gas_usd=gas_usd,
             confidence=AccountingConfidence.UNAVAILABLE,
             unavailable_reason=(unavailable_reason or "missing/invalid shares / proceeds on disposal"),
@@ -527,6 +545,12 @@ def _handle_sell_or_redeem(
         position_key=position_key,
         shares_sold=consume_shares,
         proceeds_usd=net_proceeds or Decimal("0"),
+    )
+    # #2146: snapshot the residual loaded-extras after the disposal. A full
+    # close pops the row, so this reads Decimal("0"); a partial REDUCE leaves
+    # the proportionally-shrunk accumulator that replay must restore.
+    loaded_extras_after = basis_store.get_prediction_loaded_extras(
+        deployment_id=deployment_id, position_key=position_key
     )
 
     if intent_type == "PREDICTION_REDEEM":
@@ -556,6 +580,7 @@ def _handle_sell_or_redeem(
         realized_pnl_usd=realized_pnl,
         position_size_after=new_size,
         position_basis_after=new_basis,
+        position_loaded_extras_after=loaded_extras_after,
         gas_usd=gas_usd,
         confidence=confidence,
         unavailable_reason=unavailable_reason,
@@ -591,6 +616,7 @@ def _build_event(
     gas_usd: Decimal | None,
     confidence: AccountingConfidence,
     unavailable_reason: str,
+    position_loaded_extras_after: Decimal = Decimal("0"),
 ) -> PredictionAccountingEvent:
     _id_seed = tx_hash or ledger_entry_id or position_key
     identity = AccountingIdentity(
@@ -617,6 +643,7 @@ def _build_event(
         realized_pnl_usd=realized_pnl_usd,
         position_size_after=position_size_after,
         position_basis_after=position_basis_after,
+        position_loaded_extras_after=position_loaded_extras_after,
         gas_usd=gas_usd,
         confidence=confidence,
         unavailable_reason=unavailable_reason,

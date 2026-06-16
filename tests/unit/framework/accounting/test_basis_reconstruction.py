@@ -1107,3 +1107,186 @@ class TestSwapFifoKeyHealingOnReplay:
         # No lot under "WETH" → entire disposal unmatched.
         assert cost_consumed is None
         assert unmatched == Decimal("1")
+
+
+# ---------------------------------------------------------------------------
+# Tests: prediction loaded_extras survives restart (#2146)
+# ---------------------------------------------------------------------------
+
+
+def _prediction_snapshot_row(
+    *,
+    event_type: str,
+    deployment_id: str,
+    position_key: str,
+    position_size_after: Decimal,
+    position_basis_after: Decimal,
+    position_loaded_extras_after: Decimal,
+    drop_extras_field: bool = False,
+    timestamp: str = "2026-04-27T10:00:00+00:00",
+) -> dict:
+    """Build a reconstruct_from_events row from a serialized PredictionAccountingEvent.
+
+    Routes through the real ``to_payload_json`` so the test exercises model
+    serialization + replay deserialization together. ``drop_extras_field``
+    simulates a legacy (pre-#2146) payload that never carried the new field.
+    """
+    from datetime import datetime
+
+    from almanak.framework.accounting.models import (
+        AccountingIdentity,
+        PredictionAccountingEvent,
+        PredictionEventType,
+    )
+
+    identity = AccountingIdentity(
+        id=f"evt-{event_type}",
+        deployment_id=deployment_id,
+        cycle_id="c1",
+        execution_mode="paper",
+        timestamp=datetime.fromisoformat(timestamp),
+        chain="polygon",
+        protocol="polymarket",
+        wallet_address="0xwallet",
+        tx_hash="",
+        ledger_entry_id="",
+    )
+    event = PredictionAccountingEvent(
+        identity=identity,
+        event_type=PredictionEventType(event_type),
+        position_key=position_key,
+        market_id="m1",
+        outcome="YES",
+        intent_type="PREDICTION_BUY",
+        shares_delta=Decimal("0"),
+        usd_delta=Decimal("0"),
+        realized_pnl_usd=None,
+        position_size_after=position_size_after,
+        position_basis_after=position_basis_after,
+        position_loaded_extras_after=position_loaded_extras_after,
+        confidence=AccountingConfidence.HIGH,
+    )
+    payload = json.loads(event.to_payload_json())
+    if drop_extras_field:
+        payload.pop("position_loaded_extras_after", None)
+    return {
+        "event_type": event_type,
+        "deployment_id": deployment_id,
+        "position_key": position_key,
+        "timestamp": timestamp,
+        "payload_json": json.dumps(payload),
+    }
+
+
+class TestPredictionLoadedExtrasReconstruction:
+    """#2146: the VIB-3710 loaded-extras accumulator must survive a runner
+    restart so a cross-restart SELL/REDEEM prices realized PnL against the
+    fully-loaded basis, not bare basis.
+    """
+
+    DEP = "deployment:test"
+    PK = "prediction:polymarket:polygon:0xwallet:m1:YES"
+
+    def test_full_close_after_restart_matches_single_process(self) -> None:
+        # Single-process baseline: BUY (basis 50 + extras 3), then full sell.
+        single = FIFOBasisStore()
+        single.record_prediction_buy(
+            deployment_id=self.DEP,
+            position_key=self.PK,
+            shares=Decimal("100"),
+            cost_basis_usd=Decimal("50"),
+            gas_cost_usd=Decimal("2"),
+            fee_pusd=Decimal("1"),
+        )
+        realized_single, _, _, _ = single.match_prediction_sell(
+            deployment_id=self.DEP, position_key=self.PK, shares_sold=Decimal("100"), proceeds_usd=Decimal("60")
+        )
+        # 60 - (50 + 3) = 7.
+        assert realized_single == Decimal("7")
+
+        # Restart: reconstruct from the post-BUY snapshot, then full sell.
+        restarted = FIFOBasisStore()
+        restarted.reconstruct_from_events(
+            [
+                _prediction_snapshot_row(
+                    event_type="PREDICTION_OPEN",
+                    deployment_id=self.DEP,
+                    position_key=self.PK,
+                    position_size_after=Decimal("100"),
+                    position_basis_after=Decimal("50"),
+                    position_loaded_extras_after=Decimal("3"),
+                )
+            ]
+        )
+        assert restarted.get_prediction_loaded_extras(self.DEP, self.PK) == Decimal("3")
+        realized_restarted, _, _, _ = restarted.match_prediction_sell(
+            deployment_id=self.DEP, position_key=self.PK, shares_sold=Decimal("100"), proceeds_usd=Decimal("60")
+        )
+        assert realized_restarted == realized_single == Decimal("7")
+
+    def test_partial_reduce_then_restart_then_close_matches_single_process(self) -> None:
+        # Single-process: BUY, partial REDUCE, then CLOSE the remainder.
+        single = FIFOBasisStore()
+        single.record_prediction_buy(
+            deployment_id=self.DEP,
+            position_key=self.PK,
+            shares=Decimal("100"),
+            cost_basis_usd=Decimal("50"),
+            gas_cost_usd=Decimal("2"),
+            fee_pusd=Decimal("1"),
+        )
+        single.match_prediction_sell(
+            deployment_id=self.DEP, position_key=self.PK, shares_sold=Decimal("40"), proceeds_usd=Decimal("30")
+        )
+        # Residual after REDUCE: size 60, basis 30, extras 1.8.
+        realized_close_single, _, _, is_close = single.match_prediction_sell(
+            deployment_id=self.DEP, position_key=self.PK, shares_sold=Decimal("60"), proceeds_usd=Decimal("40")
+        )
+        # 40 - (30 + 1.8) = 8.2.
+        assert is_close is True
+        assert realized_close_single == Decimal("8.2")
+
+        # Restart from the post-REDUCE snapshot, then CLOSE the remainder.
+        restarted = FIFOBasisStore()
+        restarted.reconstruct_from_events(
+            [
+                _prediction_snapshot_row(
+                    event_type="PREDICTION_REDUCE",
+                    deployment_id=self.DEP,
+                    position_key=self.PK,
+                    position_size_after=Decimal("60"),
+                    position_basis_after=Decimal("30"),
+                    position_loaded_extras_after=Decimal("1.8"),
+                )
+            ]
+        )
+        assert restarted.get_prediction_loaded_extras(self.DEP, self.PK) == Decimal("1.8")
+        realized_close_restarted, _, _, _ = restarted.match_prediction_sell(
+            deployment_id=self.DEP, position_key=self.PK, shares_sold=Decimal("60"), proceeds_usd=Decimal("40")
+        )
+        assert realized_close_restarted == realized_close_single == Decimal("8.2")
+
+    def test_legacy_payload_without_extras_field_defaults_to_zero(self) -> None:
+        # A pre-#2146 payload (no position_loaded_extras_after) must still
+        # reconstruct — extras default to 0, preserving the old arithmetic
+        # rather than crashing.
+        restarted = FIFOBasisStore()
+        restarted.reconstruct_from_events(
+            [
+                _prediction_snapshot_row(
+                    event_type="PREDICTION_OPEN",
+                    deployment_id=self.DEP,
+                    position_key=self.PK,
+                    position_size_after=Decimal("100"),
+                    position_basis_after=Decimal("50"),
+                    position_loaded_extras_after=Decimal("3"),
+                    drop_extras_field=True,
+                )
+            ]
+        )
+        assert restarted.get_prediction_loaded_extras(self.DEP, self.PK) == Decimal("0")
+        realized, _, _, _ = restarted.match_prediction_sell(
+            deployment_id=self.DEP, position_key=self.PK, shares_sold=Decimal("100"), proceeds_usd=Decimal("60")
+        )
+        # Bare basis (50), extras treated as 0: 60 - 50 = 10.
+        assert realized == Decimal("10")

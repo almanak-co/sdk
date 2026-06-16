@@ -262,11 +262,12 @@
         "realized_pnl_usd": null,
         "position_size_after": "0",
         "position_basis_after": "0",
+        "position_loaded_extras_after": "0",
         "gas_usd": null,
         "confidence": "UNAVAILABLE",
         "unavailable_reason": "PREDICTION_BUY missing market_id, outcome, shares, usd_value on extracted_data",
         "schema_version": 1,
-        "primitive_version": 1
+        "primitive_version": 2
       }
     }
   ]

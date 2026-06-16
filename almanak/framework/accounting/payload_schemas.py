@@ -145,7 +145,13 @@ MATCHING_POLICY_VERSIONS: dict[Primitive, int] = {
     Primitive.VAULT: 1,
     Primitive.STAKING: 1,
     Primitive.BRIDGE: 1,
-    Primitive.PREDICTION: 1,
+    # #2146 (v1→v2): the prediction replay path now reconstructs the VIB-3710
+    # loaded-extras accumulator from the new ``position_loaded_extras_after``
+    # payload snapshot. Pre-v2 replay restored only size+basis, so a
+    # cross-restart SELL/REDEEM priced realized PnL against bare basis and
+    # overstated it by Σ loaded_extras. The reconstruction algorithm changed,
+    # so the per-primitive lot-matching slot advances.
+    Primitive.PREDICTION: 2,
     Primitive.FLASH_LOAN: 1,
 }
 
@@ -191,7 +197,11 @@ PRIMITIVE_VERSIONS: dict[Primitive, int] = {
     Primitive.VAULT: PRIMITIVE_VERSION_DEFAULT,
     Primitive.STAKING: PRIMITIVE_VERSION_DEFAULT,
     Primitive.BRIDGE: PRIMITIVE_VERSION_DEFAULT,
-    Primitive.PREDICTION: PRIMITIVE_VERSION_DEFAULT,
+    # #2146 (v1→v2): PredictionAccountingEvent payload contract extended with
+    # ``position_loaded_extras_after`` (additive). Bump documents the new
+    # emitter contract at the primitive level, separate from the matching-policy
+    # bump above (see module docstring for the policy/contract split).
+    Primitive.PREDICTION: 2,
     Primitive.FLASH_LOAN: PRIMITIVE_VERSION_DEFAULT,
 }
 
