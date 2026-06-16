@@ -31,6 +31,9 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal
 
+from almanak.framework.accounting.inventory_revaluation import (
+    compute_inventory_revaluation,
+)
 from almanak.framework.accounting.payload_schemas import (
     FORMULA_VERSION,
     MATCHING_POLICY_VERSION,
@@ -926,6 +929,21 @@ def _cell_g6_reconciliation(  # noqa: C901
     IL is NOT a reconciliation term — recovered LP principal already reflects
     post-IL outcome. IL is a decomposition of the LP open→close delta, lives
     in LP4/LP5 attribution only.
+
+    Ambient inventory revaluation IS a reconciliation term (blueprint 27 §11.5).
+    The wallet (equity) method moves when an UNTRADED token the strategy merely
+    holds changes price between the two endpoint snapshots — idle WETH, the
+    native-gas remainder, the unspent half of a single-sided swap, an open swap
+    lot's residual mark-to-market. None of that lands in a typed component
+    bucket, so without the ``Σ_inventory_reval_usd`` term the component sum is
+    structurally short and G6 reports a spurious gap. The term
+    (``qty_idle × Δmark`` for ambient tokens + ``remaining × mark − basis`` for
+    open lots) is read off the SAME priced[0]/priced[-1] snapshot rows that
+    produced ``wallet_pnl`` — same marks, no skew, no new reads — and collapses
+    to exactly zero when there is no untraded inventory at either endpoint. An
+    unmeasured term (a held token with no persisted mark, or an open lot with no
+    basis) is a NULL input (Empty≠Zero) and FAILs the cell with a diagnostic,
+    never a silent zero.
     """
     # VIB-3868: any acct_event with a malformed payload would silently
     # contribute zero to the component PnL through ``_json`` returning ``{}``
@@ -1118,7 +1136,36 @@ def _cell_g6_reconciliation(  # noqa: C901
                 if notional > max_perp_notional:
                     max_perp_notional = notional
 
+    # Ambient inventory revaluation term (blueprint 27 §11.5): the component
+    # sum above only carries the PnL of tokens the strategy TRADED. The wallet
+    # (equity) method also moves when an UNTRADED token the strategy is merely
+    # holding changes price between the two endpoint snapshots (idle WETH, the
+    # native-gas remainder, the unspent half of a single-sided swap, an open
+    # swap lot's residual MTM). That revaluation is a real reconciliation term,
+    # not a measurement gap. It is read off the SAME priced[0]/priced[-1] rows
+    # that produced wallet_pnl — same snapshot rows ⇒ same marks ⇒ no skew, and
+    # no new on-chain / price reads. The term collapses to exactly zero when no
+    # untraded inventory exists at either endpoint.
+    inv_deployment_id = ""
+    for s in (priced[0], priced[-1]):
+        did = s.get("deployment_id")
+        if did:
+            inv_deployment_id = str(did)
+            break
+    inv = compute_inventory_revaluation(
+        snapshot_initial=priced[0],
+        snapshot_final=priced[-1],
+        accounting_events=acct_events,
+        deployment_id=inv_deployment_id,
+    )
+    # Empty ≠ Zero: a None total means a held token's mark (or an open lot's
+    # basis) was unmeasured at an endpoint. Surface it as a null bucket so G6
+    # FAILs with a diagnostic instead of folding an unmeasured term in as zero.
+    sum_inventory_reval = inv.total_usd if inv.total_usd is not None else Decimal(0)
+    null_inventory_reval = 0 if inv.total_usd is not None else 1
+
     component_pnl = sum_swap + sum_lp + sum_perp + sum_fees + sum_funding + sum_interest - sum_gas
+    component_pnl += sum_inventory_reval
 
     # VIB-3869 (B): primitive-aware notional-scaled tolerance.
     # Replaces the prior `max($0.50, eps_pct × capital)` rule, which on a
@@ -1155,6 +1202,10 @@ def _cell_g6_reconciliation(  # noqa: C901
         "Σ_funding_usd_null_count": null_perp_funding,
         "Σ_interest_supply_null_count": null_withdraw_interest,
         "Σ_interest_borrow_null_count": null_repay_interest,
+        # An unmeasured ambient-revaluation term (a held token with no mark, or
+        # an open lot with no basis) is a null input to the reconciliation, not
+        # a measured zero — FAIL the cell rather than fold it in as zero.
+        "Σ_inventory_reval_usd_null_count": null_inventory_reval,
     }
     has_nulls = any(v > 0 for v in null_breakdown.values())
 
@@ -1168,6 +1219,12 @@ def _cell_g6_reconciliation(  # noqa: C901
         "Σ_funding_usd": str(sum_funding),
         "Σ_interest_usd": str(sum_interest),
         "Σ_gas_usd": str(-sum_gas),
+        # Blueprint 27 §11.5 — ambient inventory revaluation (untraded
+        # qty_idle × Δmark + open swap-lot residual MTM). "" when unmeasured.
+        "Σ_inventory_reval_usd": ("" if inv.total_usd is None else str(sum_inventory_reval)),
+        "inventory_reval_confidence": inv.confidence,
+        "inventory_reval_per_token": inv.per_token,
+        "inventory_reval_excluded_tokens": inv.excluded_tokens,
         "gap_usd": str(gap),
         "ε_threshold_usd": str(eps),
         "ε_pct": str(eps_pct),

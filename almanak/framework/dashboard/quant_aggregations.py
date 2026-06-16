@@ -175,6 +175,15 @@ class ReconciliationStatus:
     sum_funding: Decimal = Decimal("0")
     sum_interest: Decimal = Decimal("0")
     sum_gas: Decimal = Decimal("0")
+    # Ambient inventory revaluation (blueprint 27 §11.5) — the same additive
+    # component term the Accountant Test G6 cell folds in, so the dashboard G6
+    # and the harness G6 stay byte-identical on the same DB.
+    sum_inventory_reval: Decimal = Decimal("0")
+    # True when the inventory-revaluation term was UNMEASURED (a held token with
+    # no mark, or an open lot with no basis). Empty≠Zero: the term is left out
+    # of ``component_pnl_usd`` and the surface degrades rather than silently
+    # folding in a zero.
+    has_unmeasured: bool = False
 
 
 @dataclass
@@ -692,6 +701,10 @@ def compute_reconciliation(
     nav_usd: Decimal,
     cost_stack: CostStack,
     accounting_events: list[dict[str, Any]],
+    *,
+    snapshot_initial: dict[str, Any] | None = None,
+    snapshot_final: dict[str, Any] | None = None,
+    deployment_id: str = "",
 ) -> ReconciliationStatus:
     """G6: wallet PnL ≡ Σ component PnL within ε.
 
@@ -699,6 +712,15 @@ def compute_reconciliation(
     ``almanak.framework.accounting.accountant_test`` — kept here as a
     duplicate for the local (no-pytest) read path. If the formula
     upstream changes, both sites move together (small, audit-friendly).
+
+    Ambient inventory revaluation (blueprint 27 §11.5): when the caller supplies
+    the endpoint snapshots (``snapshot_initial`` / ``snapshot_final``) it folds
+    the SAME ``compute_inventory_revaluation`` term the Accountant Test G6 cell
+    adds, so the dashboard G6 and the harness G6 produce a byte-identical
+    ``component_pnl_usd`` on the same DB. Callers that have not yet been wired to
+    pass snapshots get the back-compat behaviour (term = 0); an UNMEASURED term
+    (Empty≠Zero) leaves the component sum unchanged and flags ``has_unmeasured``
+    so the surface can degrade rather than silently fold in a zero.
     """
     status = ReconciliationStatus()
     status.wallet_pnl_usd = nav_usd - initial_value_usd
@@ -742,7 +764,29 @@ def compute_reconciliation(
 
     sum_gas = -cost_stack.gas_usd  # gas is a cost (negative contribution)
 
+    # Ambient inventory revaluation (blueprint 27 §11.5). Folds in ONLY when the
+    # caller supplied the endpoint snapshots — same lane, same marks, same number
+    # as the Accountant Test G6 cell. Empty≠Zero: an unmeasured term is left out
+    # of the sum and flagged on ``has_unmeasured`` (never coerced to zero).
+    sum_inventory_reval = Decimal("0")
+    if snapshot_initial is not None or snapshot_final is not None:
+        from almanak.framework.accounting.inventory_revaluation import (
+            compute_inventory_revaluation,
+        )
+
+        inv = compute_inventory_revaluation(
+            snapshot_initial=snapshot_initial,
+            snapshot_final=snapshot_final,
+            accounting_events=accounting_events,
+            deployment_id=deployment_id,
+        )
+        if inv.total_usd is None:
+            status.has_unmeasured = True
+        else:
+            sum_inventory_reval = inv.total_usd
+
     component_pnl = sum_swap + sum_lp + sum_perp + sum_fees + sum_funding + sum_interest + sum_gas
+    component_pnl += sum_inventory_reval
 
     status.component_pnl_usd = component_pnl
     status.gap_usd = (status.wallet_pnl_usd - component_pnl).copy_abs()
@@ -754,6 +798,7 @@ def compute_reconciliation(
     status.sum_funding = sum_funding
     status.sum_interest = sum_interest
     status.sum_gas = sum_gas
+    status.sum_inventory_reval = sum_inventory_reval
 
     return status
 
