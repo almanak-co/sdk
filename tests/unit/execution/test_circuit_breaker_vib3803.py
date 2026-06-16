@@ -132,6 +132,65 @@ class TestClassifyFailure:
             assert classify_failure(wrapper) == FailureKind.DATA_UNAVAILABLE
 
 
+class TestClassifyMarketSnapshotErrorVIB5153:
+    """VIB-5153 / ALM-2814: transient ``MarketSnapshotError``s are data-class.
+
+    The source bug: ``il_exposure`` on Aerodrome Slipstream raised
+    ``ILExposureUnavailableError`` (a ``MarketSnapshotError``, severity=warning,
+    retryable=True). It propagated out of ``decide()`` and classify_failure
+    returned UNKNOWN → action-class fast-fail (3) → a single unavailable-data
+    cycle tripped the breaker and STOPPED the deployment. These tests pin the
+    new tolerant classification.
+    """
+
+    def test_il_exposure_unavailable_is_data_class(self) -> None:
+        from almanak.framework.market.errors import ILExposureUnavailableError
+
+        kind = classify_failure(ILExposureUnavailableError("pos-1", "Slipstream IL unavailable"))
+        assert kind == FailureKind.DATA_UNAVAILABLE
+        assert kind.is_data_class
+
+    def test_warning_retryable_snapshot_errors_are_data_class(self) -> None:
+        # Sweep the transient (severity=warning/info, retryable) snapshot errors.
+        from almanak.framework.market.errors import (
+            LiquidityDepthUnavailableError,
+            RollingSharpeUnavailableError,
+            StaleDataError,
+        )
+
+        assert classify_failure(StaleDataError("arbitrum", "too old")) == FailureKind.DATA_UNAVAILABLE
+        assert classify_failure(LiquidityDepthUnavailableError("0xpool", "thin")) == FailureKind.DATA_UNAVAILABLE
+        assert classify_failure(RollingSharpeUnavailableError("short series")) == FailureKind.DATA_UNAVAILABLE
+
+    def test_error_severity_snapshot_errors_stay_action_class(self) -> None:
+        # severity="error" (PriceUnavailableError) is NOT auto-tolerated: it may
+        # signal something worse than a transient outage, so it keeps the
+        # conservative action-class default (narrow VIB-5153 contract).
+        from almanak.framework.market.errors import PriceUnavailableError
+
+        assert classify_failure(PriceUnavailableError("ETH", "no source")) == FailureKind.UNKNOWN
+
+    def test_critical_nonretryable_snapshot_error_stays_action_class(self) -> None:
+        # A misconfiguration (chain not configured) is critical + non-retryable —
+        # it should fast-fail, not idle for the full data-class budget.
+        from almanak.framework.market.errors import ChainNotConfiguredError
+
+        assert classify_failure(ChainNotConfiguredError("arbitrum", "unknown chain")) == FailureKind.UNKNOWN
+
+    def test_snapshot_error_in_cause_chain_is_data_class(self) -> None:
+        # The dominant production shape: a generic exception wrapping the typed
+        # snapshot error via ``raise X from snapshot_err``.
+        from almanak.framework.market.errors import ILExposureUnavailableError
+
+        try:
+            try:
+                raise ILExposureUnavailableError("pos-1", "unavailable")
+            except ILExposureUnavailableError as e:
+                raise RuntimeError("decide() error") from e
+        except RuntimeError as wrapper:
+            assert classify_failure(wrapper) == FailureKind.DATA_UNAVAILABLE
+
+
 # ---------------------------------------------------------------------------
 # CircuitBreaker.record_exposure
 # ---------------------------------------------------------------------------

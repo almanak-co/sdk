@@ -22,7 +22,7 @@ import logging
 import re
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from .models import (
     ADXData,
@@ -104,6 +104,18 @@ _QUIET_POOL_STALE_RE = re.compile(
 # unsafe per-iteration in both local and hosted multi-tenant runners.
 # An explicit ``ohlcv_limit`` overrides this cap (the caller has opted in).
 _MAX_VOL_CANDLE_LIMIT = 10_000
+
+# Sentinel distinguishing "caller did not pass a default" (raise on failure,
+# the historical contract) from "caller passed default=None" (soft-return None
+# on a transient/recoverable failure). Used by soft-fallback methods such as
+# ``il_exposure`` (VIB-5153 / ALM-2814). A dedicated object — rather than
+# ``None`` — is required because ``None`` is itself a valid default value.
+_NO_DEFAULT: Any = object()
+
+# Preserves the precise type of a caller-supplied ``default`` in soft-fallback
+# return annotations (e.g. ``il_exposure(..., default=None) -> ILExposure | None``)
+# instead of collapsing to ``ILExposure | Any``.
+_DefaultT = TypeVar("_DefaultT")
 
 
 def _derive_ohlcv_base_symbol(token: Any, token_str: str) -> str:
@@ -3961,7 +3973,9 @@ class MarketSnapshot:
         self,
         position_id: str,
         fees_earned: Decimal = Decimal("0"),
-    ) -> ILExposure:
+        *,
+        default: _DefaultT = _NO_DEFAULT,
+    ) -> ILExposure | _DefaultT:
         """Get impermanent loss exposure for a tracked LP position.
 
         Requires an ILCalculator with the position already registered via
@@ -3970,13 +3984,35 @@ class MarketSnapshot:
         Args:
             position_id: Unique identifier for the LP position.
             fees_earned: Optional fees earned (for net PnL).
+            default: Soft-fallback value (VIB-5153 / ALM-2814). When supplied
+                — including ``default=None`` — a transient/recoverable IL
+                computation failure (e.g. on a protocol whose IL exposure is
+                not yet available, such as Aerodrome Slipstream) returns
+                ``default`` instead of raising
+                :class:`ILExposureUnavailableError`. This mirrors the
+                soft-return contract of :meth:`prediction_price` and lets a
+                strategy write ``il = market.il_exposure(pid, default=None)``
+                then ``if il is None: hold`` without the failure escaping into
+                the runner's consecutive-failure circuit breaker. When
+                ``default`` is omitted, the historical raising contract is
+                preserved exactly. ``default`` is honoured ONLY for the typed,
+                transient IL-unavailability conditions (position not yet
+                registered / exposure not computable). It is deliberately NOT
+                honoured for a missing IL calculator (a wiring error → always
+                raises ``ValueError``) nor for any other unexpected exception
+                (misconfiguration / upstream bug, e.g. chain ambiguity →
+                stays loud), so a broken strategy is never silently degraded
+                to ``default`` forever.
 
         Returns:
-            ILExposure with current IL metrics.
+            ILExposure with current IL metrics, or ``default`` if supplied and
+            the exposure cannot be computed.
 
         Raises:
-            ValueError: If no IL calculator is configured.
-            ILExposureUnavailableError: If exposure cannot be calculated.
+            ValueError: If no IL calculator is configured (regardless of
+                ``default`` — this is a misconfiguration, not transient data).
+            ILExposureUnavailableError: If exposure cannot be calculated and no
+                ``default`` was supplied.
         """
         from almanak.framework.data.lp import (
             ILExposureUnavailableError as CalcILExposureError,
@@ -4018,10 +4054,23 @@ class MarketSnapshot:
                 fees_earned=fees_earned,
             )
         except PositionNotFoundError as e:
+            if default is not _NO_DEFAULT:
+                logger.debug("il_exposure(%s): position not found, returning default: %s", position_id, e)
+                return default
             raise ILExposureUnavailableError(position_id, f"Position not found: {e}") from e
         except CalcILExposureError as e:
+            if default is not _NO_DEFAULT:
+                logger.debug("il_exposure(%s): unavailable, returning default: %s", position_id, e.reason)
+                return default
             raise ILExposureUnavailableError(position_id, e.reason) from e
         except Exception as e:  # noqa: BLE001
+            # An unexpected exception here is NOT transient IL-unavailability —
+            # it signals a misconfiguration or upstream bug (e.g. chain
+            # ambiguity from ``self.price(...)``, a malformed calculator). Per
+            # this method's contract (see the ``default`` docstring) such a
+            # broken-strategy condition must stay loud and must NOT be silently
+            # degraded to ``default`` forever. ``default`` is honoured ONLY for
+            # the typed, transient IL-unavailability branches above.
             raise ILExposureUnavailableError(position_id, f"Unexpected error: {e}") from e
 
     def projected_il(

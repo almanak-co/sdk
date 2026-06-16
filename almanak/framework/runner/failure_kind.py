@@ -106,6 +106,20 @@ def classify_failure(exc: Any) -> FailureKind:
     if isinstance(exc, DataSourceUnavailable | AllDataSourcesFailed):
         return FailureKind.DATA_UNAVAILABLE
 
+    # VIB-5153 / ALM-2814: a transient ``MarketSnapshotError`` (the typed error
+    # raised by the strategy-facing snapshot, e.g. ``ILExposureUnavailableError``
+    # on a protocol whose IL exposure isn't yet available) is a data-class
+    # failure — same family as the ``DataSource*`` exceptions above, just
+    # surfaced through the snapshot rather than a raw provider. Without this it
+    # falls through to ``UNKNOWN`` (action-class) and a single unavailable-data
+    # cycle counts toward the fast-fail breaker, killing the deployment. Only
+    # transient/recoverable warnings qualify; hard ``error``/``critical`` or
+    # non-retryable snapshot errors (misconfiguration, e.g.
+    # ``ChainNotConfiguredError``) keep the conservative action-class default.
+    snapshot_kind = _classify_market_snapshot_error(exc)
+    if snapshot_kind != FailureKind.UNKNOWN:
+        return snapshot_kind
+
     # Try to unwrap a typed gRPC trailer. ``data_source_error_from_grpc``
     # tolerates non-gRPC inputs (returns None silently).
     try:
@@ -160,6 +174,40 @@ def _classify_direct(exc: Any) -> FailureKind:
     if isinstance(exc, DataSourceTimeout):
         return FailureKind.DATA_TIMEOUT
     if isinstance(exc, DataSourceUnavailable | AllDataSourcesFailed):
+        return FailureKind.DATA_UNAVAILABLE
+    return _classify_market_snapshot_error(exc)
+
+
+# Snapshot-error severities that we are willing to treat as a tolerant
+# data-class failure. ``error``/``critical`` snapshot errors keep the
+# conservative action-class (UNKNOWN) default — they may signal something worse
+# than a transient outage — matching the narrow VIB-5153 / ALM-2814 contract.
+_TRANSIENT_SNAPSHOT_SEVERITIES = frozenset({"info", "warning"})
+
+
+def _classify_market_snapshot_error(exc: Any) -> FailureKind:
+    """Classify a :class:`MarketSnapshotError` into a data-class kind.
+
+    A snapshot error is data-class only when it is **retryable** and its
+    ``severity`` is ``info``/``warning`` (the snapshot's own marker for a
+    transient/recoverable data gap, e.g. ``ILExposureUnavailableError`` on a
+    protocol whose IL exposure isn't available yet). Anything else — a
+    non-snapshot exception, a non-retryable snapshot error, or an
+    ``error``/``critical`` severity — returns ``UNKNOWN`` so action-class
+    fast-fail semantics are unchanged.
+    """
+    # Late import: keeps this module importable without the market package and
+    # avoids a circular import at runner import time.
+    from almanak.framework.market.errors import MarketSnapshotError
+
+    if not isinstance(exc, MarketSnapshotError):
+        return FailureKind.UNKNOWN
+    # Normalise case defensively: every in-repo subclass uses lowercase
+    # severities, but a future subclass declaring ``severity="Warning"`` must
+    # not silently fall back to action-class.
+    severity = str(getattr(exc, "severity", "error")).lower()
+    retryable = bool(getattr(exc, "retryable", False))
+    if retryable and severity in _TRANSIENT_SNAPSHOT_SEVERITIES:
         return FailureKind.DATA_UNAVAILABLE
     return FailureKind.UNKNOWN
 

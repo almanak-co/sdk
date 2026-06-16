@@ -168,6 +168,72 @@ def test_il_exposure_reaches_calculator_not_config_error(make_snapshot) -> None:
         snap.il_exposure(position_id="does-not-exist")
 
 
+# --- VIB-5153 / ALM-2814: il_exposure soft-fallback via default= -------------
+
+
+@pytest.mark.parametrize("make_snapshot", _FACTORIES)
+def test_il_exposure_default_none_soft_returns(make_snapshot) -> None:
+    """When ``default=None`` is supplied, an unavailable IL exposure returns
+    ``None`` instead of raising — so a defensive strategy
+    (``il = market.il_exposure(pid, default=None); if il is None: hold``)
+    does not let the failure escape into the runner circuit breaker.
+    """
+    snap = make_snapshot()
+    assert snap.il_exposure(position_id="does-not-exist", default=None) is None
+
+
+@pytest.mark.parametrize("make_snapshot", _FACTORIES)
+def test_il_exposure_default_sentinel_value_returned(make_snapshot) -> None:
+    """An arbitrary ``default`` object is returned verbatim on failure (None is
+    not special — it is just one possible default)."""
+    snap = make_snapshot()
+    sentinel = object()
+    assert snap.il_exposure(position_id="does-not-exist", default=sentinel) is sentinel
+
+
+@pytest.mark.parametrize("make_snapshot", _FACTORIES)
+def test_il_exposure_no_default_still_raises(make_snapshot) -> None:
+    """Back-compat: omitting ``default`` preserves the historical raising
+    contract exactly (existing callers are unaffected)."""
+    from almanak.framework.data.market_snapshot import ILExposureUnavailableError
+
+    snap = make_snapshot()
+    with pytest.raises(ILExposureUnavailableError):
+        snap.il_exposure(position_id="does-not-exist")
+
+
+def test_il_exposure_default_does_not_mask_missing_calculator() -> None:
+    """A missing IL calculator is a wiring error, not transient data — it must
+    raise ``ValueError`` even when ``default`` is supplied, so a broken strategy
+    is never silently degraded to ``default`` forever."""
+    from almanak.framework.market.snapshot import MarketSnapshot
+
+    snap = MarketSnapshot(chain="base", wallet_address="0x" + "5" * 40)
+    assert snap._il_calculator is None
+    with pytest.raises(ValueError, match="No IL calculator configured"):
+        snap.il_exposure(position_id="anything", default=None)
+
+
+def test_il_exposure_default_does_not_mask_unexpected_error() -> None:
+    """An *unexpected* error inside the calculator path (not typed transient
+    IL-unavailability) is a misconfiguration / upstream bug and must stay loud
+    even when ``default`` is supplied — it is wrapped as
+    ``ILExposureUnavailableError``, NOT silently degraded to ``default``.
+    ``default`` is reserved for the typed transient branches only
+    (VIB-5153 / ALM-2814; CodeRabbit review of PR #2841)."""
+    from almanak.framework.data.market_snapshot import ILExposureUnavailableError
+    from almanak.framework.market.snapshot import MarketSnapshot
+
+    class _BoomCalculator:
+        def get_position(self, position_id: str):
+            raise RuntimeError("upstream boom")
+
+    snap = MarketSnapshot(chain="base", wallet_address="0x" + "5" * 40)
+    snap._il_calculator = _BoomCalculator()  # type: ignore[assignment]
+    with pytest.raises(ILExposureUnavailableError, match="Unexpected error"):
+        snap.il_exposure(position_id="anything", default=None)
+
+
 # --- T3-E (gas oracle) is explicitly NOT wired by this ticket ----------------
 
 
