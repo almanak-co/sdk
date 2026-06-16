@@ -825,6 +825,16 @@ class StrategyRunner:
         self._total_iterations = 0
         self._successful_iterations = 0
 
+        # VIB-5155 / ALM-2719: one-shot post-resume side-state reconciliation.
+        # After a restart, a strategy that caches a position-side flag (e.g.
+        # "holding base token") may resume a flag that disagrees with live
+        # on-chain balance — a stale/false flag can HOLD-lock a valid risk-off
+        # exit. Before the FIRST decide() we call the strategy's optional
+        # ``reconcile_resumed_state`` hook with a live snapshot, warn-only.
+        # Set True after the first attempt so the guardrail runs exactly once
+        # per process.
+        self._resume_state_reconciled = False
+
         # Track recovered session tx_hashes to prevent duplicates
         self._recovered_tx_hashes: set[str] = set()
         self._recovered_nonces: dict[str, set[int]] = {}  # deployment_id -> set of nonces
@@ -1095,6 +1105,10 @@ class StrategyRunner:
             early = await self._step_build_snapshot(state)
             if early is not None:
                 return early
+
+            # Step 1.5: One-shot post-resume side-state reconciliation
+            # (VIB-5155 / ALM-2719). Warn-only; never early-exits.
+            await self._step_reconcile_resumed_state(state)
 
             # Step 2: Call strategy.decide() with timeout + overlap guard.
             early = await self._step_decide(state)
@@ -1434,6 +1448,69 @@ class StrategyRunner:
             market.clear_critical_data_failures()
 
         return None
+
+    async def _step_reconcile_resumed_state(self, state: RunIterationState) -> None:
+        """One-shot post-resume side-state guardrail (VIB-5155 / ALM-2719).
+
+        After a restart, a strategy that caches a position-side flag (e.g.
+        "holding base token") may resume that flag desynced from live on-chain
+        balance — and a stale/false flag can HOLD-lock a valid risk-off exit.
+        Before the first ``decide()`` of the process, call the strategy's
+        optional ``reconcile_resumed_state(market)`` hook so the strategy can
+        re-derive cached side-state from live balance.
+
+        This is a **guardrail, not a control-flow gate**:
+
+        * It runs exactly once per process (gated by ``_resume_state_reconciled``).
+        * It is fully wrapped in try/except and never raises out.
+        * It never early-exits the iteration and never changes ``state``.
+
+        When the hook reports a corrected desync (returns ``True``) the runner
+        logs a WARNING and emits a forensic ``STATE_CHANGE`` event so the
+        operator can see that persisted state disagreed with reality. A ``None``
+        return (the base-class default) means the strategy tracks no
+        reconcilable side-state — silent no-op.
+        """
+        if self._resume_state_reconciled:
+            return
+        # Mark first so a raising/strange hook still runs only once.
+        self._resume_state_reconciled = True
+
+        strategy = state.strategy
+        reconcile = getattr(strategy, "reconcile_resumed_state", None)
+        if not callable(reconcile):
+            return
+
+        try:
+            corrected = reconcile(state.market)
+        except Exception as e:  # noqa: BLE001 — guardrail must never break the loop
+            logger.warning(
+                "Post-resume state reconciliation hook raised for %s (ignored): %s",
+                state.deployment_id,
+                e,
+            )
+            return
+
+        if corrected is True:
+            logger.warning(
+                "Post-resume state reconciliation for %s: persisted side-state "
+                "disagreed with live on-chain balance and was corrected from live "
+                "truth before the first decide().",
+                state.deployment_id,
+            )
+            try:
+                from almanak.framework.observability.emitter import emit_phase_event
+                from almanak.framework.observability.events import StrategyPhase
+
+                emit_phase_event(
+                    deployment_id=state.deployment_id,
+                    phase=StrategyPhase.DECIDE,
+                    event_type="STATE_CHANGE",
+                    description="post-resume side-state reconciled from live balance",
+                    details={"reconciled": True, "source": "reconcile_resumed_state"},
+                )
+            except Exception as e:  # noqa: BLE001 — metric emission is best-effort
+                logger.debug("Could not emit resume-reconcile event: %s", e)
 
     async def _step_decide(self, state: RunIterationState) -> IterationResult | None:
         """Call ``strategy.decide(market)`` with timeout + overlap guard.

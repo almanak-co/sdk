@@ -481,6 +481,41 @@ class IntentStrategy(StrategyBase[ConfigT]):
         """
         pass
 
+    def reconcile_resumed_state(self, market: MarketSnapshot) -> bool | None:
+        """Reconcile resumed in-memory side-state against live on-chain truth.
+
+        Optional post-resume guardrail hook (VIB-5155 / ALM-2719). After the
+        runner restores persisted state via ``load_persistent_state`` it calls
+        this hook ONCE, before the first ``decide()``, with a live market
+        snapshot. A strategy that caches a position-side flag (e.g. "holding
+        base token") can use this to re-derive that flag from
+        ``market.balance(...)`` so a stale / desynced flag cannot HOLD-lock a
+        valid risk-off exit.
+
+        The default implementation is a no-op — strategies with no cached
+        side-state need not override it.
+
+        Contract:
+            * This is a *guardrail*, not a control-flow gate. The runner runs it
+              warn-only and inside a try/except: the return value never gates
+              whether the strategy runs, and exceptions are swallowed. State
+              mutations the hook makes (e.g. correcting a cached flag) are
+              strategy-owned and DO affect the subsequent ``decide()`` /
+              teardown — that is the intended reconciliation behavior.
+            * Live balance is truth; the persisted flag is only a hint.
+
+        Args:
+            market: A fresh market snapshot for the current cycle.
+
+        Returns:
+            ``True`` if a desync was detected and the cached side-state was
+            corrected (the runner logs a WARNING + emits a ``STATE_CHANGE``
+            event); ``False`` if state already agreed with live balance;
+            ``None`` (default) when the strategy does not track reconcilable
+            side-state.
+        """
+        return None
+
     # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
     def save_state(self) -> None:
         """Save current strategy state to persistence.

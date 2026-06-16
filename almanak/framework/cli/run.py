@@ -1168,7 +1168,10 @@ def format_iteration_result(result: IterationResult) -> str:
     "--fresh",
     is_flag=True,
     default=False,
-    help="Clear strategy state before running (useful for fresh Anvil forks)",
+    help="Start from a clean slate: clear persisted strategy state before running "
+    "instead of resuming it (useful for fresh Anvil forks, or to recover from a "
+    "desynced restart). Default is to resume existing state; the boot banner and "
+    "log report whether this run RESUMED or started FRESH.",
 )
 @click.option(
     "--copy-mode",

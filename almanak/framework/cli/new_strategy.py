@@ -412,6 +412,14 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 logger.warning(f"Could not get balances: {e}")
                 return Intent.hold(reason="Balance data unavailable")
 
+            # Reconcile the cached position-side flag against live balance each
+            # cycle: the persisted `_holding_base` flag is only a HINT; the live
+            # wallet balance is TRUTH. Without this, a stale/false flag (e.g.
+            # after a restart whose runtime state desynced) could HOLD-lock a
+            # valid risk-off exit even though the wallet actually holds base.
+            # See VIB-5155 / ALM-2719.
+            self._reconcile_holding_base(market, base_balance=base_balance)
+
             buy_signal = False
             sell_signal = False
             reason = ""
@@ -1313,7 +1321,13 @@ def _get_template_teardown(
     # -------------------------------------------------------------------------
 
     def get_open_positions(self):
-        """Return all open positions for teardown preview."""
+        """Return all open positions for teardown preview.
+
+        Reconciles the cached ``_holding_base`` flag from live balance first so
+        a stale/false flag (e.g. after a desynced restart) cannot hide a base
+        position the wallet actually holds (VIB-5155 / ALM-2719). Falls back to
+        the cached hint only if a live snapshot is unavailable.
+        """
         from datetime import UTC, datetime
 
         from almanak.framework.teardown import (
@@ -1321,6 +1335,14 @@ def _get_template_teardown(
             PositionType,
             TeardownPositionSummary,
         )
+
+        try:
+            self._reconcile_holding_base(self.create_market_snapshot())
+        except Exception as e:
+            logger.warning(
+                f"get_open_positions: live-balance reconcile unavailable, "
+                f"using cached holding flag: {{e}}"
+            )
 
         positions = []
 
@@ -1346,8 +1368,21 @@ def _get_template_teardown(
         """Generate intents to close all positions.
 
         Teardown goal: {teardown_comment}
+
+        Live balance is truth: reconcile the cached ``_holding_base`` flag from
+        the provided ``market`` (or a freshly-built snapshot) BEFORE deciding
+        whether to emit the risk-off swap. A stale/false flag must never block
+        a valid exit (VIB-5155 / ALM-2719).
         """
         from almanak.framework.teardown import TeardownMode
+
+        try:
+            self._reconcile_holding_base(market or self.create_market_snapshot())
+        except Exception as e:
+            logger.warning(
+                f"generate_teardown_intents: live-balance reconcile unavailable, "
+                f"using cached holding flag: {{e}}"
+            )
 
         intents: list[Intent] = []
 
@@ -2092,7 +2127,15 @@ def _get_template_init_params(template: StrategyTemplate, config: TemplateConfig
         self.base_token = get_config("base_token", "WETH")
         self.quote_token = get_config("quote_token", "USDC")
 
-        # Position tracking (restored via load_persistent_state)
+        # Dust floor (USD) above which the wallet is considered to be HOLDING
+        # base. Used to reconcile the cached `_holding_base` flag against live
+        # balance (VIB-5155 / ALM-2719) so rounding dust isn't treated as an
+        # open position.
+        self.holding_dust_usd = Decimal(str(get_config("holding_dust_usd", "1")))
+
+        # Position tracking. The cached flag is a HINT; live balance is the
+        # source of truth and is reconciled each cycle / on resume / before
+        # teardown via _reconcile_holding_base() (VIB-5155 / ALM-2719).
         self._holding_base = False
         # Neutral-rearm latch: last signal we acted on (buy/sell/neutral)
         self._last_signal = 'neutral'"""
@@ -2902,6 +2945,58 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
 
     elif template == StrategyTemplate.TA_SWAP:
         return (
+            "    def _reconcile_holding_base(self, market, base_balance=None):\n"
+            '        """Re-derive the cached `_holding_base` flag from live balance.\n'
+            "\n"
+            "        The persisted `_holding_base` flag is only a HINT. The wallet's\n"
+            "        live base-token balance is the source of truth. A stale/false\n"
+            "        flag (e.g. after a restart whose runtime state desynced) must\n"
+            "        never HOLD-lock a valid risk-off exit, so every cycle / resume /\n"
+            "        teardown reconciles the flag from the live snapshot before any\n"
+            "        decision is made (VIB-5155 / ALM-2719).\n"
+            "\n"
+            "        Returns True if the flag disagreed with live balance and was\n"
+            "        corrected, False if it already agreed, and None if the live\n"
+            "        balance could not be read (flag left untouched).\n"
+            '        """\n'
+            "        try:\n"
+            "            if base_balance is None:\n"
+            "                base_balance = market.balance(self.base_token)\n"
+            "            native = base_balance.balance\n"
+            "            usd = base_balance.balance_usd\n"
+            "        except (ValueError, AttributeError) as e:\n"
+            "            # Live balance unavailable: keep the cached hint, do not flip.\n"
+            '            logger.debug(f"Could not reconcile holding flag from live balance: {e}")\n'
+            "            return None\n"
+            "        # Empty != Zero (VIB-5155): a non-zero native balance whose USD\n"
+            "        # coerced to 0 means the price was UNMEASURED, not flat. Treating\n"
+            "        # that as 'not holding' would withhold the teardown risk-off swap\n"
+            "        # and strand the position. Native balance is truth; USD is only the\n"
+            "        # dust threshold. Mirrors snapshot.py _coerce_balance_result.\n"
+            "        if native > Decimal('0') and usd == Decimal('0'):\n"
+            "            # Funded but unpriceable: hold (cannot dust-floor without a price).\n"
+            "            live_holding = True\n"
+            "        else:\n"
+            "            live_holding = native > Decimal('0') and usd > self.holding_dust_usd\n"
+            "        if live_holding != self._holding_base:\n"
+            "            logger.warning(\n"
+            '                f"Reconciling _holding_base {self._holding_base} -> {live_holding} '
+            'from live balance "\n'
+            '                f"({self.base_token} ${base_balance.balance_usd})"\n'
+            "            )\n"
+            "            self._holding_base = live_holding\n"
+            "            return True\n"
+            "        return False\n"
+            "\n"
+            "    def reconcile_resumed_state(self, market):\n"
+            '        """Post-resume guardrail hook (VIB-5155 / ALM-2719).\n'
+            "\n"
+            "        Called once by the runner after state is restored and before\n"
+            "        the first decide(). Re-derives `_holding_base` from live\n"
+            "        balance so a desynced restart cannot strand a position.\n"
+            '        """\n'
+            "        return self._reconcile_holding_base(market)\n"
+            "\n"
             "    def on_intent_executed(self, intent, success: bool, result):\n"
             '        """Track swap executions for position tracking."""\n'
             "        if not success:\n"
@@ -2924,7 +3019,13 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             '        return {"holding_base": self._holding_base, "last_signal": self._last_signal}\n'
             "\n"
             "    def load_persistent_state(self, state):\n"
-            '        """Restore position state after restart."""\n'
+            '        """Restore position state after restart.\n'
+            "\n"
+            "        The restored `holding_base` value is only a HINT — it is\n"
+            "        reconciled against live on-chain balance before the first\n"
+            "        decision via reconcile_resumed_state() / _reconcile_holding_base()\n"
+            "        (VIB-5155 / ALM-2719). Never trust the cached flag alone.\n"
+            '        """\n'
             "        if state:\n"
             '            self._holding_base = state.get("holding_base", False)\n'
             '            self._last_signal = state.get("last_signal", "neutral")\n'
@@ -3227,6 +3328,11 @@ def generate_config_json(
                 # - max_gas_ratio: reject when estimated gas cost > ratio * trade_size
                 "min_trade_value_usd": "10",
                 "max_gas_ratio": "0.05",
+                # Live-balance reconciliation dust floor (VIB-5155): the cached
+                # ``_holding_base`` flag is re-derived from live balance each
+                # cycle; a base position worth <= this USD value is treated as
+                # dust (not "holding base"), so it cannot HOLD-lock an exit.
+                "holding_dust_usd": "1",
             }
         )
     elif template == StrategyTemplate.DYNAMIC_LP:
@@ -3395,6 +3501,10 @@ class _TemplateTestSpec:
         generate_teardown_intents() produces intents)
     * transitions: list of on_intent_executed calls to test
     * persistent_state_sample: a representative state dict that round-trips
+    * reconciles_side_state: whether the template caches a position-side flag
+        that is reconciled from live balance on resume / before teardown
+        (VIB-5155 / ALM-2719). When True the emitted suite includes a
+        desync regression test proving a stale/false flag can still exit.
     """
 
     state_fields: tuple[str, ...] = ()
@@ -3403,6 +3513,7 @@ class _TemplateTestSpec:
     position_setup: str = ""
     transitions: tuple[_StateTransition, ...] = ()
     persistent_state_sample: dict[str, object] | None = None
+    reconciles_side_state: bool = False
 
 
 _BLANK_TEST_SPEC = _TemplateTestSpec()
@@ -3436,6 +3547,7 @@ _TEMPLATE_TEST_SPECS: dict[StrategyTemplate, _TemplateTestSpec] = {
             ),
         ),
         persistent_state_sample={"holding_base": True, "last_signal": "buy"},
+        reconciles_side_state=True,
     ),
     StrategyTemplate.DYNAMIC_LP: _TemplateTestSpec(
         state_fields=("_position_id", "_range_lower", "_range_upper"),
@@ -4321,6 +4433,132 @@ class Test{class_name}Persistence:
 '''
 
 
+def _render_resume_reconcile_tests(
+    class_name: str,
+    chain: str,
+) -> str:
+    """Resume-state reconciliation regression tests (VIB-5155 / ALM-2719).
+
+    The bug: a strategy that caches a position-side flag can resume that flag
+    desynced from live balance. If the cached flag is stale/false while the
+    wallet actually holds base AND a sell/exit fires, the strategy HOLD-locks
+    and cannot exit. These tests pin that the cached flag is treated as a HINT
+    and the live balance is truth, so the desync->exit path works again.
+    """
+    return f'''
+# ---------------------------------------------------------------------------
+# Resume-state reconciliation (VIB-5155 / ALM-2719)
+#
+# A stale/false cached side-state flag must never HOLD-lock a valid exit:
+# live wallet balance is truth, the persisted flag is only a hint.
+# ---------------------------------------------------------------------------
+
+
+class Test{class_name}ResumeReconcile:
+    """Cached side-state flag is reconciled from live balance, not trusted blindly."""
+
+    def test_reconcile_resumed_state_flips_stale_false_flag(
+        self, strategy: {class_name}, mock_market: MagicMock
+    ) -> None:
+        """Resume hook flips a stale FALSE flag to True when the wallet holds base.
+
+        Simulates a desynced restart: persisted state said 'not holding base'
+        but the wallet actually holds base. The post-resume guardrail must
+        correct the flag from live balance and report the correction.
+        """
+        # Persisted (desynced) state: flag false despite holding base on-chain.
+        strategy.load_persistent_state({{"holding_base": False, "last_signal": "buy"}})
+        assert strategy._holding_base is False
+
+        corrected = strategy.reconcile_resumed_state(mock_market)
+
+        assert corrected is True, "desync should be detected and corrected"
+        assert strategy._holding_base is True, "flag must follow live balance (truth)"
+
+    def test_reconcile_resumed_state_noop_when_already_agrees(
+        self, strategy: {class_name}, mock_market: MagicMock
+    ) -> None:
+        """No desync -> hook returns False and leaves the flag unchanged."""
+        strategy.load_persistent_state({{"holding_base": True, "last_signal": "buy"}})
+        corrected = strategy.reconcile_resumed_state(mock_market)
+        assert corrected is False
+        assert strategy._holding_base is True
+
+    def test_teardown_exits_despite_stale_false_flag(
+        self, strategy: {class_name}, mock_market: MagicMock
+    ) -> None:
+        """THE FUND-SAFETY CASE: balance-true-but-flag-false must still exit.
+
+        Wallet holds base, but the resumed flag is False. A teardown request
+        (operator risk-off) must still generate the exit swap by reconciling
+        from live balance -- the cached flag must not block the exit.
+        """
+        from almanak.framework.teardown import TeardownMode
+
+        # Desynced resume: flag false, but the wallet holds base (mock_market
+        # reports a funded base balance).
+        strategy.load_persistent_state({{"holding_base": False, "last_signal": "buy"}})
+        assert strategy._holding_base is False
+
+        intents = strategy.generate_teardown_intents(
+            mode=TeardownMode.SOFT, market=mock_market
+        )
+
+        assert len(intents) > 0, (
+            "teardown must reconcile from live balance and exit even when the "
+            "cached holding flag is stale/false (VIB-5155)"
+        )
+        swap = intents[0]
+        assert getattr(swap, "from_token", None) == strategy.base_token
+        assert getattr(swap, "to_token", None) == strategy.quote_token
+
+    def test_teardown_no_exit_when_truly_flat(
+        self, strategy: {class_name}
+    ) -> None:
+        """Symmetric guard: flag true but wallet flat -> no phantom exit swap.
+
+        Live balance is truth in BOTH directions. A stale TRUE flag on an empty
+        wallet must not generate a swap of funds the wallet does not hold.
+        """
+        from almanak.framework.teardown import TeardownMode
+
+        flat = _make_mock_market(balance=Decimal("0"), balance_usd=Decimal("0"))
+        strategy.load_persistent_state({{"holding_base": True, "last_signal": "buy"}})
+
+        intents = strategy.generate_teardown_intents(mode=TeardownMode.SOFT, market=flat)
+
+        assert intents == [], "no exit swap when the wallet is genuinely flat"
+        assert strategy._holding_base is False, "stale TRUE flag corrected to flat"
+
+    def test_teardown_exits_when_base_held_but_unpriceable(
+        self, strategy: {class_name}
+    ) -> None:
+        """Empty != Zero: a funded base token whose USD is UNMEASURED still exits.
+
+        When the price oracle cannot price the base token, MarketSnapshot
+        coerces ``balance_usd`` to ``Decimal('0')`` while the native balance
+        stays non-zero (VIB-4843 sentinel). Reconciling on USD alone would read
+        that as 'flat', clear the holding flag, and emit no teardown swap --
+        stranding a real position. Native balance is truth: the exit must still
+        fire (VIB-5155 / ALM-2719).
+        """
+        from almanak.framework.teardown import TeardownMode
+
+        # Funded but unpriceable: non-zero native balance, USD coerced to 0.
+        unpriceable = _make_mock_market(balance=Decimal("5"), balance_usd=Decimal("0"))
+        strategy.load_persistent_state({{"holding_base": True, "last_signal": "buy"}})
+
+        intents = strategy.generate_teardown_intents(mode=TeardownMode.SOFT, market=unpriceable)
+
+        assert len(intents) > 0, (
+            "teardown must exit on native balance even when USD price is "
+            "unmeasured -- a couldn't-price $0 must not strand a held position"
+        )
+        assert strategy._holding_base is True, "non-zero native holding stays 'holding'"
+
+'''
+
+
 def generate_test_file(
     name: str,
     template: StrategyTemplate,
@@ -4365,7 +4603,13 @@ def generate_test_file(
         callback_tests = _render_callback_tests(class_name, spec)
         persistence_tests = _render_persistence_tests(class_name, spec, chain)
 
-    return header + base_tests + edge_tests + teardown_tests + callback_tests + persistence_tests
+    # Resume-state reconciliation regression (VIB-5155 / ALM-2719) — only for
+    # templates that cache a position-side flag reconciled from live balance.
+    reconcile_tests = ""
+    if spec.reconciles_side_state:
+        reconcile_tests = _render_resume_reconcile_tests(class_name, chain)
+
+    return header + base_tests + edge_tests + teardown_tests + callback_tests + persistence_tests + reconcile_tests
 
 
 def generate_init_file(name: str) -> str:

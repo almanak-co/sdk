@@ -378,6 +378,24 @@ def _print_startup_banner(
     # every hosted iteration regardless of actual Postgres state.
     from almanak.framework.deployment import is_hosted
 
+    # Log the resume mode to the structured logger too (VIB-5155 / ALM-2719):
+    # the click banner only reaches stdout, but operators triaging a
+    # stale-state desync need the resume decision in the JSON log file. The
+    # ``fresh`` flag is included so a `--fresh` boot is unambiguous in the log.
+    if is_hosted():
+        resume_mode = "hosted"
+    elif is_resume:
+        resume_mode = "resume"
+    else:
+        resume_mode = "fresh-start"
+    logger.info(
+        "Boot resume mode for %s: %s (--fresh=%s, version=%s)",
+        deployment_id,
+        resume_mode,
+        fresh,
+        (existing_state_info or {}).get("version"),
+    )
+
     if is_hosted():
         click.secho(
             "Mode: HOSTED (state managed by gateway via Postgres)",
