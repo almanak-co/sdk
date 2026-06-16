@@ -85,7 +85,6 @@ from almanak.framework.dashboard.sections import (
 from almanak.framework.dashboard.templates._ohlcv_window import (
     ChartWindow,
     build_chart_window,
-    extend_window_to_cover_signal,
 )
 
 logger = logging.getLogger(__name__)
@@ -576,37 +575,6 @@ def _trade_rows_to_signals(
     return _frame(buys), _frame(sells)
 
 
-def _earliest_signal_ts(buy_signals: pd.DataFrame, sell_signals: pd.DataFrame) -> datetime | None:
-    """Earliest timestamp across the buy/sell marker frames (VIB-5156).
-
-    Anchors the OHLCV backfill window on the oldest marker that would actually
-    plot — i.e. the output of :func:`_trade_rows_to_signals`, already parsed to
-    UTC-aware ``time`` and filtered to this pair's SWAPs — so the price line is
-    grown to cover precisely the signals being rendered, no more. Returns a
-    native UTC :class:`datetime.datetime` (not a ``pd.Timestamp``) so the pure
-    ``_ohlcv_window`` arithmetic stays pandas-free; ``None`` when there are no
-    plottable markers.
-    """
-    times: list[pd.Timestamp] = []
-    for frame in (buy_signals, sell_signals):
-        if isinstance(frame, pd.DataFrame) and "time" in frame.columns and not frame.empty:
-            col = frame["time"].dropna()
-            if col.empty:
-                continue
-            val = col.min()
-            if pd.isna(val):
-                continue
-            # Normalize each frame's minimum to UTC *before* the cross-frame
-            # comparison so a mix of tz-naive and tz-aware frames (custom
-            # dashboards / future callers) can't raise on ``min(times)``.
-            ts = pd.Timestamp(val)
-            ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
-            times.append(ts)
-    if not times:
-        return None
-    return min(times).to_pydatetime()
-
-
 def _trade_row_marker_price(
     row: dict[str, Any],
     token_in: str,
@@ -956,27 +924,7 @@ def prepare_ta_session_state(
 
     # OHLCV + price history (skip if caller already supplied).
     price_df: pd.DataFrame | None = None
-    tape_rows: list[dict[str, Any]] | None = None
     if "price_history" not in result and api_client is not None:
-        # VIB-5156: before fetching candles, look at the trade tape's earliest
-        # still-displayed marker. The legacy recent-window limit is timeframe-only
-        # and never consults the tape, so after a redeploy an old marker can land
-        # outside the fetched candles (and, post-VIB-5058, gets clipped away).
-        # Fetch the tape once here, grow the window to cover its earliest signal,
-        # and reuse the rows for the marker step so the tape is fetched only once.
-        # A no-op when an operator range is active (``window.from_ts`` already set)
-        # or the earliest signal is already inside the window — back-compat-safe.
-        if window.from_ts is None and not _signals_already_supplied(result):
-            # Fetch the legacy newest-N tape page (``from_ts=None``, matching the
-            # VIB-5114 legacy marker contract). The dashboard tape is page-capped
-            # (gateway ``get_trade_tape(limit=50)``), so this is NOT an unbounded
-            # fetch — the earliest of the returned page is by construction the
-            # oldest marker that will ever plot, which is exactly what we grow the
-            # candle window to cover. Reuse these rows for the marker step below so
-            # the tape is fetched only once.
-            tape_rows = _trade_tape_rows(api_client)
-            buys, sells = _trade_rows_to_signals(tape_rows, base_token, quote_token)
-            window = extend_window_to_cover_signal(window, _earliest_signal_ts(buys, sells))
         try:
             ohlcv = api_client.get_ohlcv(
                 token=base_token,
@@ -1018,10 +966,8 @@ def prepare_ta_session_state(
     # Chart markers (buy/sell signals) + Performance "Trades" count, both
     # derived from the trade tape (fetched once). ``window.from_ts`` bounds the
     # markers to the same window as the candles (VIB-5114) so they never float
-    # outside the plotted price line. ``tape_rows`` is reused when the VIB-5156
-    # backfill already fetched the tape above (it fetches unbounded, then grows
-    # the candle window to cover the earliest signal — so no marker is clipped).
-    _populate_trade_tape_derived(api_client, result, base_token, quote_token, from_ts=window.from_ts, rows=tape_rows)
+    # outside the plotted price line.
+    _populate_trade_tape_derived(api_client, result, base_token, quote_token, from_ts=window.from_ts)
 
     if "strategy_start_time" not in result:
         start_time = _strategy_start_time(api_client)
@@ -1039,17 +985,6 @@ def prepare_ta_session_state(
     return result
 
 
-def _signals_already_supplied(result: dict[str, Any]) -> bool:
-    """True when the caller pre-populated both marker frames (VIB-5156).
-
-    The OHLCV signal-backfill anchors on the markers it would otherwise compute
-    from the tape; when the caller already supplied ``buy_signals`` /
-    ``sell_signals`` (a custom dashboard), there is nothing to derive and no tape
-    to fetch for the window — leave the legacy window untouched.
-    """
-    return "buy_signals" in result and "sell_signals" in result
-
-
 def _populate_trade_tape_derived(
     api_client: Any,
     result: dict[str, Any],
@@ -1057,7 +992,6 @@ def _populate_trade_tape_derived(
     quote_token: str,
     *,
     from_ts: datetime | None = None,
-    rows: list[dict[str, Any]] | None = None,
 ) -> None:
     """Populate buy/sell chart markers and the Performance ``total_trades``
     count from the trade tape, fetching it once and reusing it for both.
@@ -1070,15 +1004,10 @@ def _populate_trade_tape_derived(
     ``from_ts`` (VIB-5114) bounds the tape to the selected NAV window so the
     chart markers follow the plotted candles; ``None`` keeps the legacy
     newest-N fetch byte-for-byte.
-
-    ``rows`` lets the caller pass an already-fetched tape (VIB-5156: the OHLCV
-    backfill step fetches the tape to find the earliest signal) so it is not
-    fetched twice in one render; ``None`` falls back to fetching it here.
     """
     if "buy_signals" in result and "sell_signals" in result and "total_trades" in result:
         return
-    if rows is None:
-        rows = _trade_tape_rows(api_client, from_ts=from_ts)
+    rows = _trade_tape_rows(api_client, from_ts=from_ts)
     if "buy_signals" not in result or "sell_signals" not in result:
         buys, sells = _trade_rows_to_signals(rows, base_token, quote_token)
         result.setdefault("buy_signals", buys)
