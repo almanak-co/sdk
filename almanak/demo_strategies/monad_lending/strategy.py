@@ -3,10 +3,16 @@
 Exercises the Curvance connector end-to-end through the intent layer on the
 isolated **WMON -> USDC** market:
 
-    1. BORROW: approve + depositAsCollateral(WMON) + borrow(USDC)
-    2. REPAY:  approve + repay(0)  (0 is Curvance's full-debt sentinel)
-    3. WITHDRAW: redeemCollateral(shares, wallet, wallet)
-    4. COMPLETE (hold)
+    1. SUPPLY: approve + depositAsCollateral(WMON)
+    2. BORROW: borrow(USDC) against the supplied collateral (collateral_amount=0)
+    3. REPAY:  approve + repay(0)  (0 is Curvance's full-debt sentinel)
+    4. WITHDRAW: redeemCollateral(shares, wallet, wallet)
+    5. COMPLETE (hold)
+
+The supply and borrow are emitted as two separate intents (not a bundled
+``Intent.borrow(collateral_amount>0)``) so the accounting layer records a
+distinct SUPPLY event and its supply cost-basis lot — the 1:1 ledger->event
+invariant the framework enforces. See docs/internal/bundled-collateral-borrow-migration.md.
 
 Protocol constraints to be aware of:
 
@@ -44,16 +50,18 @@ if TYPE_CHECKING:
     from almanak.framework.teardown import TeardownMode, TeardownPositionSummary
 
 IDLE = "idle"
+SUPPLIED = "supplied"
 BORROWED = "borrowed"
 REPAID = "repaid"
 COMPLETE = "complete"
 
+SUPPLYING = "supplying"
 BORROWING = "borrowing"
 REPAYING = "repaying"
 WITHDRAWING = "withdrawing"
 
-STABLE_STATES = {IDLE, BORROWED, REPAID, COMPLETE}
-TRANSITIONAL_STATES = {BORROWING, REPAYING, WITHDRAWING}
+STABLE_STATES = {IDLE, SUPPLIED, BORROWED, REPAID, COMPLETE}
+TRANSITIONAL_STATES = {SUPPLYING, BORROWING, REPAYING, WITHDRAWING}
 
 WMON_USDC_MARKET = "0xa6A2A92F126b79Ee0804845ee6B52899b4491093"
 
@@ -66,7 +74,7 @@ WMON_USDC_MARKET = "0xa6A2A92F126b79Ee0804845ee6B52899b4491093"
     tags=["demo", "lending", "curvance", "monad", "lifecycle"],
     supported_chains=["monad"],
     supported_protocols=["curvance"],
-    intent_types=["BORROW", "REPAY", "WITHDRAW", "HOLD"],
+    intent_types=["SUPPLY", "BORROW", "REPAY", "WITHDRAW", "HOLD"],
     default_chain="monad",
     quote_asset="USD",
 )
@@ -109,6 +117,28 @@ class MonadCurvanceLendingStrategy(IntentStrategy):
                 return Intent.hold(reason=f"Recovered from stuck state '{stuck_state}', holding before retry")
 
             if self._loop_state == IDLE:
+                # Step 1: SUPPLY the collateral as a standalone intent. The
+                # accounting layer writes one event per intent, so the supply
+                # must NOT be bundled into the borrow (a bundled
+                # Intent.borrow(collateral_amount>0) drops the SUPPLY accounting
+                # event + supply FIFO lot). Supplying first is also more robust
+                # on Curvance: depositAsCollateral succeeds even inside the
+                # post-deploy window that reverts BORROW/REPAY/WITHDRAW.
+                logger.info(
+                    f"Step 1: SUPPLY {self.collateral_amount} {self.collateral_token} as collateral on Curvance "
+                    f"(market={self.market_id})"
+                )
+                self._transition(SUPPLYING)
+                return Intent.supply(
+                    protocol="curvance",
+                    token=self.collateral_token,
+                    amount=self.collateral_amount,
+                    use_as_collateral=True,
+                    market_id=self.market_id,
+                    chain=self.chain,
+                )
+
+            if self._loop_state == SUPPLIED:
                 if self.borrow_amount_override is not None:
                     borrow_amount = self.borrow_amount_override
                     logger.info(f"Using fixed borrow_amount_override: {borrow_amount} {self.borrow_token}")
@@ -127,16 +157,18 @@ class MonadCurvanceLendingStrategy(IntentStrategy):
                     return Intent.hold(reason="Computed borrow amount is zero")
 
                 logger.info(
-                    f"Step 1: BORROW {format_token_amount_human(borrow_amount, self.borrow_token)} "
+                    f"Step 2: BORROW {format_token_amount_human(borrow_amount, self.borrow_token)} "
                     f"against {self.collateral_amount} {self.collateral_token} on Curvance "
                     f"(market={self.market_id}, LTV={self.ltv_target * 100:.0f}%)"
                 )
                 self._transition(BORROWING)
 
+                # collateral_amount=0: the collateral is already supplied by the
+                # SUPPLY step above. collateral_token is retained as metadata.
                 return Intent.borrow(
                     protocol="curvance",
                     collateral_token=self.collateral_token,
-                    collateral_amount=self.collateral_amount,
+                    collateral_amount=Decimal("0"),
                     borrow_token=self.borrow_token,
                     borrow_amount=borrow_amount,
                     market_id=self.market_id,
@@ -233,15 +265,26 @@ class MonadCurvanceLendingStrategy(IntentStrategy):
         intent_type_val = intent_type.value if hasattr(intent_type, "value") else str(intent_type)
 
         if success:
-            if intent_type_val == "BORROW":
+            if intent_type_val == "SUPPLY":
+                self._loop_state = SUPPLIED
+                self._previous_stable_state = SUPPLIED
+                # Record what was actually supplied (the executed intent's amount),
+                # not the config default — this is the collateral the WITHDRAW
+                # step later redeems.
+                self._supplied_amount = Decimal(str(getattr(intent, "amount", self.collateral_amount)))
+                logger.info(
+                    f"SUPPLY succeeded: supplied {self._supplied_amount} {self.collateral_token} as collateral on Curvance"
+                )
+                self._log_result_details("SUPPLY", result)
+
+            elif intent_type_val == "BORROW":
                 self._loop_state = BORROWED
                 self._previous_stable_state = BORROWED
-                self._supplied_amount = self.collateral_amount
                 if hasattr(intent, "borrow_amount"):
                     self._borrowed_amount = Decimal(str(intent.borrow_amount))
                 logger.info(
-                    f"BORROW succeeded: supplied {self._supplied_amount} {self.collateral_token}, "
-                    f"borrowed {self._borrowed_amount} {self.borrow_token} on Curvance"
+                    f"BORROW succeeded: borrowed {self._borrowed_amount} {self.borrow_token} on Curvance "
+                    f"(collateral {self._supplied_amount} {self.collateral_token} already supplied)"
                 )
                 self._log_result_details("BORROW", result)
 
@@ -301,7 +344,7 @@ class MonadCurvanceLendingStrategy(IntentStrategy):
             "borrowed": f"{self._borrowed_amount} {self.borrow_token}",
         }
 
-    def get_open_positions(self) -> "TeardownPositionSummary":
+    def get_open_positions(self) -> TeardownPositionSummary:
         from almanak.framework.teardown import PositionInfo, PositionType, TeardownPositionSummary
 
         try:
@@ -345,7 +388,7 @@ class MonadCurvanceLendingStrategy(IntentStrategy):
             positions=positions,
         )
 
-    def generate_teardown_intents(self, mode: "TeardownMode", market=None) -> list[Intent]:
+    def generate_teardown_intents(self, mode: TeardownMode, market=None) -> list[Intent]:
         intents: list[Intent] = []
         repay_skipped = False
 

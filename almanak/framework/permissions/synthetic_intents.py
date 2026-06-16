@@ -604,8 +604,13 @@ def _build_borrow_intents(protocol: str, chain: str, usdc: str, weth: str) -> li
         return []
     hints = get_permission_hints(protocol)
 
+    # Synthetic bundled-collateral borrow for permission discovery only: this
+    # vector is never executed and never reaches the accounting ledger, so it
+    # bypasses the bundled-collateral guard via for_permission_discovery. The
+    # bundled shape is intentional here -- it enumerates BOTH the collateral
+    # supply approval and the borrow selector on the Safe manifest.
     return [
-        BorrowIntent(
+        BorrowIntent.for_permission_discovery(
             protocol=protocol,
             collateral_token=weth,
             collateral_amount=Decimal("1"),

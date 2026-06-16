@@ -165,7 +165,10 @@ class TestExtractIntentTokens:
         move the wallet (collateral out, borrowed token in)."""
         from almanak.framework.intents.lending_intents import BorrowIntent
 
-        intent = BorrowIntent(
+        # Token-extraction fixture on a pre-built bundled borrow -- model_construct
+        # bypasses the bundled-collateral guard so both legs (collateral_token +
+        # borrow_token) still exist to reconcile; extraction is under test, not validation.
+        intent = BorrowIntent.model_construct(
             protocol="aave_v3",
             collateral_token="WETH",
             collateral_amount=Decimal("1"),

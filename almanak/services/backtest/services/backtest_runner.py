@@ -210,13 +210,18 @@ class SpecBacktestStrategy:
 
     def _build_borrow_intent(self, params: dict[str, Any]) -> BorrowIntent:
         collateral_token = params.get("collateral_token", "WETH")
-        collateral_amount = Decimal(str(params.get("collateral_amount", "1")))
         borrow_token = params.get("borrow_token", "USDC")
         borrow_amount = Decimal(str(params.get("borrow_amount", "1000")))
+        # Standalone borrow (collateral_amount=0): a bundled
+        # Intent.borrow(collateral_amount>0) is rejected because accounting
+        # writes one event per intent and would drop the SUPPLY event + supply
+        # cost-basis lot. The "borrow" backtest action models the borrow leg
+        # only; collateral_token is retained as metadata. A collateral-supplying
+        # backtest should use the "lend"/"supply" action.
         return BorrowIntent(
             protocol=self._spec.protocol,
             collateral_token=collateral_token,
-            collateral_amount=collateral_amount,
+            collateral_amount=Decimal("0"),
             borrow_token=borrow_token,
             borrow_amount=borrow_amount,
             chain=self._spec.chain,

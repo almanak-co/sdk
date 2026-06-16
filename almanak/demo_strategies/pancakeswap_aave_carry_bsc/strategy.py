@@ -6,15 +6,25 @@ T2 multi-protocol composition on BSC combining Aave V3 lending with
 PancakeSwap V3 swaps. Full lifecycle with teardown:
 
 Entry:
-  1. BORROW: Supply WBNB collateral to Aave V3, borrow USDC at 30% LTV
-  2. SWAP: Swap borrowed USDC -> USDT via PancakeSwap V3
+  1. SUPPLY: Supply WBNB collateral to Aave V3 (use_as_collateral=True)
+  2. BORROW: Borrow USDC against the supplied collateral at 30% LTV
+  3. SWAP: Swap borrowed USDC -> USDT via PancakeSwap V3
 
 Teardown:
-  3. SWAP_BACK: Swap USDT -> USDC via PancakeSwap V3
-  4. REPAY: Repay Aave V3 USDC debt (repay_full=True)
-  5. WITHDRAW: Withdraw WBNB collateral (withdraw_all=True)
+  4. SWAP_BACK: Swap USDT -> USDC via PancakeSwap V3
+  5. REPAY: Repay Aave V3 USDC debt (repay_full=True)
+  6. WITHDRAW: Withdraw WBNB collateral (withdraw_all=True)
 
 Note: BSC USDC and USDT both have 18 decimals (not 6 like other chains).
+
+Accounting note (VIB-3586): SUPPLY and BORROW are emitted as two distinct
+intents — never bundled into a single ``Intent.borrow(collateral_amount>0)``.
+The accounting layer writes exactly one ``accounting_events`` row per intent;
+bundling the collateral leg into the borrow collapses the supply into the
+BORROW event and drops the standalone SUPPLY event (and its ``supply:`` FIFO
+lot, which the closing WITHDRAW needs). A fail-closed guard now rejects
+``Intent.borrow(collateral_amount > 0)`` at decide()-time, so the collateral
+MUST be deposited by a preceding standalone SUPPLY intent.
 
 USAGE:
 ------
@@ -42,6 +52,7 @@ if TYPE_CHECKING:
 
 # Stable states
 IDLE = "idle"
+SUPPLIED = "supplied"
 BORROWED = "borrowed"
 SWAPPED = "swapped"
 SWAP_BACK = "swap_back"
@@ -49,14 +60,15 @@ REPAID = "repaid"
 COMPLETE = "complete"
 
 # Transitional states
+SUPPLYING = "supplying"
 BORROWING = "borrowing"
 SWAPPING = "swapping"
 SWAPPING_BACK = "swapping_back"
 REPAYING = "repaying"
 WITHDRAWING = "withdrawing"
 
-STABLE_STATES = {IDLE, BORROWED, SWAPPED, SWAP_BACK, REPAID, COMPLETE}
-TRANSITIONAL_STATES = {BORROWING, SWAPPING, SWAPPING_BACK, REPAYING, WITHDRAWING}
+STABLE_STATES = {IDLE, SUPPLIED, BORROWED, SWAPPED, SWAP_BACK, REPAID, COMPLETE}
+TRANSITIONAL_STATES = {SUPPLYING, BORROWING, SWAPPING, SWAPPING_BACK, REPAYING, WITHDRAWING}
 
 
 @almanak_strategy(
@@ -67,7 +79,7 @@ TRANSITIONAL_STATES = {BORROWING, SWAPPING, SWAPPING_BACK, REPAYING, WITHDRAWING
     tags=["demo", "carry-trade", "aave-v3", "pancakeswap-v3", "lending", "swap", "bsc", "multi-protocol"],
     supported_chains=["bsc"],
     supported_protocols=["aave_v3", "pancakeswap_v3"],
-    intent_types=["BORROW", "SWAP", "REPAY", "WITHDRAW", "HOLD"],
+    intent_types=["SUPPLY", "BORROW", "SWAP", "REPAY", "WITHDRAW", "HOLD"],
     default_chain="bsc",
     quote_asset="USD",
 )
@@ -75,9 +87,9 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
     """T2 carry trade: Aave V3 lending + PancakeSwap V3 swap on BSC.
 
     State machine:
-        idle -> borrowing -> borrowed -> swapping -> swapped
-            -> swapping_back -> swap_back -> repaying -> repaid
-            -> withdrawing -> complete
+        idle -> supplying -> supplied -> borrowing -> borrowed
+            -> swapping -> swapped -> swapping_back -> swap_back
+            -> repaying -> repaid -> withdrawing -> complete
 
     Config parameters:
         collateral_token: Token to supply as collateral (default: WBNB)
@@ -128,6 +140,9 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
 
             # === ENTRY PHASE ===
             if self._state == IDLE:
+                return self._do_supply()
+
+            if self._state == SUPPLIED:
                 return self._do_borrow(market)
 
             if self._state == BORROWED:
@@ -146,7 +161,7 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
             if self._state == COMPLETE:
                 return Intent.hold(
                     reason=(
-                        "Full lifecycle complete: BORROW -> SWAP -> SWAP_BACK -> REPAY -> WITHDRAW. "
+                        "Full lifecycle complete: SUPPLY -> BORROW -> SWAP -> SWAP_BACK -> REPAY -> WITHDRAW. "
                         "All positions closed."
                     )
                 )
@@ -161,8 +176,36 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
     # PHASE HELPERS
     # =========================================================================
 
+    def _do_supply(self) -> Intent:
+        """Phase 1: Supply WBNB collateral into Aave V3 as a standalone intent.
+
+        Emitting SUPPLY as its own intent (rather than bundling the collateral
+        leg into the BORROW intent) produces a first-class SUPPLY accounting
+        event and the ``supply:`` FIFO lot the closing WITHDRAW needs — see the
+        module docstring (VIB-3586). The fail-closed guard now rejects a bundled
+        ``Intent.borrow(collateral_amount > 0)``, so this phase is mandatory.
+        """
+        logger.info(
+            f"Phase 1 SUPPLY: supply {format_token_amount_human(self.collateral_amount, self.collateral_token)} "
+            f"as collateral into Aave V3"
+        )
+        self._transition(SUPPLYING)
+        return Intent.supply(
+            protocol="aave_v3",
+            token=self.collateral_token,
+            amount=self.collateral_amount,
+            use_as_collateral=True,
+            chain=self.chain,
+        )
+
     def _do_borrow(self, market: MarketSnapshot) -> Intent:
-        """Phase 1: Supply WBNB collateral + borrow USDC from Aave V3."""
+        """Phase 2: Borrow USDC against the already-supplied WBNB collateral.
+
+        ``collateral_amount=Decimal("0")`` because the collateral was deposited
+        by the preceding standalone SUPPLY intent (VIB-3586) — bundling it here
+        would collapse the supply into the BORROW accounting event and trip the
+        fail-closed guard.
+        """
         try:
             collateral_price = market.price(self.collateral_token)
             borrow_price = market.price(self.borrow_token)
@@ -178,15 +221,16 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
             return Intent.hold(reason="Computed borrow amount is zero")
 
         logger.info(
-            f"Phase 1 BORROW: supply {format_token_amount_human(self.collateral_amount, self.collateral_token)} "
-            f"(value={format_usd(collateral_value)}), borrow {format_token_amount_human(borrow_amount, self.borrow_token)} "
+            f"Phase 2 BORROW: collateral {format_token_amount_human(self.collateral_amount, self.collateral_token)} "
+            f"(value={format_usd(collateral_value)}, already supplied), "
+            f"borrow {format_token_amount_human(borrow_amount, self.borrow_token)} "
             f"from Aave V3 (LTV={self.ltv_target * 100:.0f}%)"
         )
         self._transition(BORROWING)
         return Intent.borrow(
             protocol="aave_v3",
             collateral_token=self.collateral_token,
-            collateral_amount=self.collateral_amount,
+            collateral_amount=Decimal("0"),  # Already supplied by the SUPPLY phase
             borrow_token=self.borrow_token,
             borrow_amount=borrow_amount,
             chain=self.chain,
@@ -273,9 +317,18 @@ class PancakeswapAaveCarryBscStrategy(IntentStrategy):
         intent_type_val = intent_type.value if hasattr(intent_type, "value") else str(intent_type)
 
         if success:
-            if intent_type_val == "BORROW":
+            if intent_type_val == "SUPPLY":
+                self._state = SUPPLIED
+                # Track the amount actually supplied by the executed intent so
+                # accounting/teardown reflect what executed even if config is
+                # hot-reloaded mid-flight.
+                self._supplied_amount = Decimal(str(getattr(intent, "amount", self.collateral_amount)))
+                logger.info(
+                    f"SUPPLY OK: supplied={self._supplied_amount} {self.collateral_token} -- state -> supplied"
+                )
+
+            elif intent_type_val == "BORROW":
                 self._state = BORROWED
-                self._supplied_amount = self.collateral_amount
                 if hasattr(intent, "borrow_amount"):
                     self._borrowed_amount = Decimal(str(intent.borrow_amount))
                 logger.info(

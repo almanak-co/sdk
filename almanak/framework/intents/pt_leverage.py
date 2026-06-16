@@ -204,10 +204,17 @@ def build_pt_leverage_loop(
             market_id=morpho_market_id,
             chain=chain,
         ),
-        # 3. Borrow from Morpho to repay flash loan
+        # 3. Borrow from Morpho to repay flash loan.
+        # collateral_amount=0 (standalone borrow): the PT collateral is already
+        # supplied by callback 2 above, so this borrow must NOT re-bundle a
+        # supply. A bundled collateral_amount here ("all") would both double the
+        # supply on-chain and collapse the supply into the BORROW accounting
+        # event, dropping the standalone SUPPLY event + supply FIFO lot (the
+        # bundled-collateral guard in BorrowIntent rejects it). collateral_token
+        # is retained as metadata identifying which collateral backs the loan.
         BorrowIntent(
             collateral_token=pt_token,
-            collateral_amount="all",
+            collateral_amount=Decimal("0"),
             borrow_token=borrow_token,
             borrow_amount=flash_amount,
             protocol="morpho_blue",

@@ -141,7 +141,9 @@ class TestSupplyCompile:
 
 class TestBorrowCompile:
     def test_borrow_happy_path(self, compiler: IntentCompiler) -> None:
-        intent = BorrowIntent(
+        # Bundled fixture fed to the compiler -- model_construct bypasses the
+        # bundled-collateral guard (the compiler, not the validator, is under test).
+        intent = BorrowIntent.model_construct(
             protocol="curvance",
             collateral_token="WMON",
             collateral_amount=Decimal("30"),
@@ -166,7 +168,9 @@ class TestBorrowCompile:
 
     def test_borrow_market_token_mismatch_rejected(self, compiler: IntentCompiler) -> None:
         """Borrowing WMON from the WMON-USDC market (USDC is the debt asset) must FAIL."""
-        intent = BorrowIntent(
+        # Bundled fixture fed to the compiler -- model_construct bypasses the
+        # bundled-collateral guard (the compiler's market-mismatch path is under test).
+        intent = BorrowIntent.model_construct(
             protocol="curvance",
             collateral_token="WMON",
             collateral_amount=Decimal("30"),

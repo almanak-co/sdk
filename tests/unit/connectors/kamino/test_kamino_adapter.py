@@ -79,7 +79,9 @@ class TestCompileBorrowIntent:
 
     def test_borrow_compiles_to_borrow_bundle(self):
         adapter = _mock_adapter()
-        intent = BorrowIntent(
+        # Bundled fixture fed to the adapter's compile path -- model_construct
+        # bypasses the bundled-collateral guard (the adapter is under test).
+        intent = BorrowIntent.model_construct(
             protocol="kamino",
             collateral_token="SOL",
             collateral_amount=Decimal("10"),

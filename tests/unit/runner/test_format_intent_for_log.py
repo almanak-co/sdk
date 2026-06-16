@@ -11,7 +11,9 @@ class TestFormatBorrowIntentForLog:
 
     def test_borrow_intent_shows_amount_and_token(self):
         """BorrowIntent summary should show borrow_amount and borrow_token, not N/A."""
-        intent = BorrowIntent(
+        # Log-formatter fixture on a pre-built bundled intent -- model_construct
+        # bypasses the bundled-collateral guard (formatting, not validation, is under test).
+        intent = BorrowIntent.model_construct(
             protocol="aave_v3",
             collateral_token="WETH",
             collateral_amount=Decimal("1.0"),
@@ -26,7 +28,9 @@ class TestFormatBorrowIntentForLog:
 
     def test_borrow_intent_shows_collateral_info(self):
         """BorrowIntent summary should include collateral details."""
-        intent = BorrowIntent(
+        # Log-formatter fixture on a pre-built bundled intent -- model_construct
+        # bypasses the bundled-collateral guard (formatting, not validation, is under test).
+        intent = BorrowIntent.model_construct(
             protocol="compound_v3",
             collateral_token="WETH",
             collateral_amount=Decimal("2.5"),
@@ -40,7 +44,10 @@ class TestFormatBorrowIntentForLog:
 
     def test_borrow_intent_chained_collateral(self):
         """BorrowIntent with collateral_amount='all' should show ALL."""
-        intent = BorrowIntent(
+        # Log-formatter fixture on a pre-built chained-collateral intent --
+        # model_construct bypasses the bundled-collateral guard (the "all" -> ALL
+        # formatting machinery operates post-construction).
+        intent = BorrowIntent.model_construct(
             protocol="aave_v3",
             collateral_token="WETH",
             collateral_amount="all",

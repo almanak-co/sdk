@@ -54,7 +54,9 @@ class TestCompileSupplyIntent:
 class TestCompileBorrowIntent:
     def test_borrow_produces_bundle(self):
         adapter = _make_adapter()
-        intent = BorrowIntent(
+        # Bundled fixture fed to the adapter's compile path -- model_construct
+        # bypasses the bundled-collateral guard (the adapter is under test).
+        intent = BorrowIntent.model_construct(
             protocol="jupiter_lend",
             collateral_token="SOL",
             collateral_amount=Decimal("10"),

@@ -10,7 +10,7 @@ VIB-1423: Bug: amount='all' not resolved for single intents returned from decide
 from decimal import Decimal
 from unittest.mock import MagicMock
 
-from almanak.framework.intents.vocabulary import Intent, IntentType, SwapIntent
+from almanak.framework.intents.vocabulary import BorrowIntent, Intent, IntentType, SwapIntent
 
 
 def test_single_intent_has_chained_amount_detected():
@@ -159,7 +159,10 @@ def test_vault_redeem_shares_all_no_token_field():
 
 def test_borrow_intent_collateral_amount_all_token_extraction():
     """BorrowIntent with collateral_amount='all' extracts collateral_token."""
-    intent = Intent.borrow(
+    # Chained-amount fixture on a pre-built intent -- model_construct bypasses
+    # the bundled-collateral guard ("all" resolution/extraction operates
+    # post-construction; the guard would otherwise reject the chained form).
+    intent = BorrowIntent.model_construct(
         borrow_token="USDC",
         borrow_amount=Decimal("1000"),
         collateral_token="WETH",

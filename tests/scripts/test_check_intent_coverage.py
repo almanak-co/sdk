@@ -84,6 +84,29 @@ def test_protocol_non_literal_silently_skipped(gate):
     assert pairs == set()
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# Validator-bypass constructors (model_construct / for_permission_discovery)
+# still count for coverage — intent-test fixtures use them to build a bundled
+# borrow the BorrowIntent guard would reject at normal construction.
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def test_model_construct_emits_pair(gate):
+    pairs = _scan(gate, 'BorrowIntent.model_construct(protocol="aave_v3", collateral_amount=1)')
+    assert pairs == {("aave_v3", "BORROW")}
+
+
+def test_for_permission_discovery_emits_pair(gate):
+    pairs = _scan(gate, 'BorrowIntent.for_permission_discovery(protocol="morpho_blue")')
+    assert pairs == {("morpho_blue", "BORROW")}
+
+
+def test_unknown_method_on_intent_class_skipped(gate):
+    # A non-constructor method call on an intent class must NOT be credited.
+    pairs = _scan(gate, 'BorrowIntent.serialize(protocol="aave_v3")')
+    assert pairs == set()
+
+
 def test_protocol_unknown_value_passes_through(gate):
     # Legacy behavior: `protocol=` is NOT validated against the registry
     # at scan time. Phantom credit gets filtered out by `gaps = required

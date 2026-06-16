@@ -61,9 +61,27 @@ def _mock_market(
 
 
 class TestEntryPath:
-    """Test the entry path: BORROW -> SWAP -> LP_OPEN."""
+    """Test the entry path: SUPPLY -> BORROW -> SWAP -> LP_OPEN."""
 
-    def test_idle_creates_borrow_intent(self, strategy):
+    def test_idle_creates_supply_intent(self, strategy):
+        market = _mock_market()
+        intent = strategy.decide(market)
+        assert intent is not None
+        assert intent.intent_type.value == "SUPPLY"
+        assert intent.protocol == "morpho_blue"
+        assert intent.use_as_collateral is True
+        assert strategy._loop_state == "supplying"
+
+    def test_supply_intent_includes_market_id(self, strategy):
+        market = _mock_market()
+        intent = strategy.decide(market)
+        assert intent.intent_type.value == "SUPPLY"
+        assert intent.market_id == strategy.market_id
+        assert intent.token == "WETH"
+        assert intent.amount == Decimal("0.05")
+
+    def test_supplied_creates_borrow_intent(self, strategy):
+        strategy._loop_state = "supplied"
         market = _mock_market()
         intent = strategy.decide(market)
         assert intent is not None
@@ -72,18 +90,28 @@ class TestEntryPath:
         assert strategy._loop_state == "borrowing"
 
     def test_borrow_intent_uses_morpho_protocol(self, strategy):
+        strategy._loop_state = "supplied"
         market = _mock_market()
         intent = strategy.decide(market)
         assert intent.protocol == "morpho_blue"
 
+    def test_borrow_intent_excludes_bundled_collateral(self, strategy):
+        """Collateral is supplied by the standalone SUPPLY intent (VIB-3586)."""
+        strategy._loop_state = "supplied"
+        market = _mock_market()
+        intent = strategy.decide(market)
+        assert intent.collateral_amount == Decimal("0")
+
     def test_borrow_intent_calculates_amount(self, strategy):
         """Borrow amount = collateral_value * ltv / borrow_price."""
+        strategy._loop_state = "supplied"
         market = _mock_market(collateral_price=3000.0, borrow_price=1.0)
         intent = strategy.decide(market)
         # 0.05 WETH * $3000 * 0.3 LTV / $1 = $45
         assert intent.borrow_amount == Decimal("45.00")
 
     def test_borrow_intent_includes_market_id(self, strategy):
+        strategy._loop_state = "supplied"
         market = _mock_market()
         intent = strategy.decide(market)
         assert intent.market_id == strategy.market_id
@@ -129,8 +157,18 @@ class TestEntryPath:
 class TestOnIntentExecuted:
     """Test state machine transitions via on_intent_executed."""
 
+    def test_supply_success_transitions(self, strategy):
+        strategy._loop_state = "supplying"
+        intent = MagicMock()
+        intent.intent_type.value = "SUPPLY"
+        intent.amount = Decimal("0.05")
+        strategy.on_intent_executed(intent, True, None)
+        assert strategy._loop_state == "supplied"
+        assert strategy._collateral_supplied == Decimal("0.05")
+
     def test_borrow_success_transitions(self, strategy):
         strategy._loop_state = "borrowing"
+        strategy._collateral_supplied = Decimal("0.05")  # Set by prior SUPPLY
         intent = MagicMock()
         intent.intent_type.value = "BORROW"
         intent.borrow_amount = Decimal("45.00")
@@ -189,17 +227,29 @@ class TestTransitionalStateRecovery:
     On the *next* call, the stable state handler fires the correct intent.
     """
 
-    def test_borrowing_reverts_to_idle(self, strategy):
+    def test_borrowing_reverts_to_supplied(self, strategy):
         strategy._loop_state = "borrowing"
+        strategy._previous_stable_state = "supplied"
+        market = _mock_market()
+        # First call: revert + HOLD
+        intent = strategy.decide(market)
+        assert strategy._loop_state == "supplied"
+        assert intent.intent_type.value == "HOLD"
+        # Second call: supplied -> BORROW
+        intent2 = strategy.decide(market)
+        assert intent2.intent_type.value == "BORROW"
+
+    def test_supplying_reverts_to_idle(self, strategy):
+        strategy._loop_state = "supplying"
         strategy._previous_stable_state = "idle"
         market = _mock_market()
         # First call: revert + HOLD
         intent = strategy.decide(market)
         assert strategy._loop_state == "idle"
         assert intent.intent_type.value == "HOLD"
-        # Second call: idle -> BORROW
+        # Second call: idle -> SUPPLY
         intent2 = strategy.decide(market)
-        assert intent2.intent_type.value == "BORROW"
+        assert intent2.intent_type.value == "SUPPLY"
 
     def test_swapping_reverts_to_borrowed(self, strategy):
         strategy._loop_state = "swapping"

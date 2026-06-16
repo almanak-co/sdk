@@ -523,7 +523,11 @@ class TestCompoundV3Borrow:
         mock_adapter.borrow.return_value = _mock_tx_result("Borrow 500 USDC from Compound V3")
         mock_adapter_cls.return_value = mock_adapter
 
-        intent = BorrowIntent(
+        # Bundled (nonzero-collateral) borrow fed to the COMPILER, which still
+        # decomposes supply + borrow. The model validator now rejects bundled
+        # collateral at construction, so bypass it via model_construct to keep
+        # exercising the compiler's decomposition path.
+        intent = BorrowIntent.model_construct(
             collateral_token="WETH",
             collateral_amount=Decimal("1"),
             borrow_token="USDC",
@@ -551,7 +555,11 @@ class TestCompoundV3Borrow:
         mock_adapter.borrow.return_value = _mock_tx_result("Borrow 500 USDC")
         mock_adapter_cls.return_value = mock_adapter
 
-        intent = BorrowIntent(
+        # Bundled (nonzero-collateral) borrow fed to the COMPILER, which still
+        # decomposes supply + borrow. The model validator now rejects bundled
+        # collateral at construction, so bypass it via model_construct to keep
+        # exercising the compiler's decomposition path.
+        intent = BorrowIntent.model_construct(
             collateral_token="WETH",
             collateral_amount=Decimal("1"),
             borrow_token="USDC",
@@ -577,7 +585,11 @@ class TestCompoundV3Borrow:
         mock_adapter.borrow.return_value = _mock_failed_result("Insufficient collateral")
         mock_adapter_cls.return_value = mock_adapter
 
-        intent = BorrowIntent(
+        # Bundled (nonzero-collateral) borrow fed to the COMPILER, which still
+        # decomposes supply + borrow. The model validator now rejects bundled
+        # collateral at construction, so bypass it via model_construct to keep
+        # exercising the compiler's decomposition path.
+        intent = BorrowIntent.model_construct(
             collateral_token="WETH",
             collateral_amount=Decimal("1"),
             borrow_token="USDC",
@@ -600,7 +612,11 @@ class TestCompoundV3Borrow:
         mock_adapter.market_config = MOCK_CHAIN_ADDRESSES["ethereum"]["usdc"]
         mock_adapter_cls.return_value = mock_adapter
 
-        intent = BorrowIntent(
+        # Bundled (nonzero-collateral) borrow fed to the COMPILER, which still
+        # decomposes supply + borrow. The model validator now rejects bundled
+        # collateral at construction, so bypass it via model_construct to keep
+        # exercising the compiler's decomposition path.
+        intent = BorrowIntent.model_construct(
             collateral_token="WBTC",
             collateral_amount=Decimal("0.1"),
             borrow_token="WETH",  # Not the USDC market's base asset.
@@ -624,7 +640,11 @@ class TestCompoundV3Borrow:
         config = IntentCompilerConfig(allow_placeholder_prices=True)
         polygon_compiler = IntentCompiler(chain="polygon", config=config)
 
-        intent = BorrowIntent(
+        # Bundled (nonzero-collateral) borrow fed to the COMPILER, which still
+        # decomposes supply + borrow. The model validator now rejects bundled
+        # collateral at construction, so bypass it via model_construct to keep
+        # exercising the compiler's decomposition path.
+        intent = BorrowIntent.model_construct(
             collateral_token="WETH",
             collateral_amount=Decimal("1"),
             borrow_token="USDC",
@@ -805,7 +825,11 @@ class TestUnsupportedProtocolErrors:
         assert "compound_v3" in result.error
 
     def test_borrow_error_mentions_compound_v3(self, compiler):
-        intent = BorrowIntent(
+        # Bundled (nonzero-collateral) borrow fed to the COMPILER, which still
+        # decomposes supply + borrow. The model validator now rejects bundled
+        # collateral at construction, so bypass it via model_construct to keep
+        # exercising the compiler's decomposition path.
+        intent = BorrowIntent.model_construct(
             collateral_token="WETH",
             collateral_amount=Decimal("1"),
             borrow_token="USDC",
@@ -879,7 +903,11 @@ class TestCompoundV3Optimism:
         mock_adapter.borrow.return_value = _mock_tx_result("Borrow 300 USDC on Optimism")
         mock_adapter_cls.return_value = mock_adapter
 
-        intent = BorrowIntent(
+        # Bundled (nonzero-collateral) borrow fed to the COMPILER, which still
+        # decomposes supply + borrow. The model validator now rejects bundled
+        # collateral at construction, so bypass it via model_construct to keep
+        # exercising the compiler's decomposition path.
+        intent = BorrowIntent.model_construct(
             collateral_token="WETH",
             collateral_amount=Decimal("0.5"),
             borrow_token="USDC",
@@ -1059,7 +1087,11 @@ class TestCompoundV3Polygon:
         mock_adapter.borrow.return_value = _mock_tx_result("Borrow USDC.e on Polygon")
         mock_adapter_cls.return_value = mock_adapter
 
-        intent = BorrowIntent(
+        # Bundled (nonzero-collateral) borrow fed to the COMPILER, which still
+        # decomposes supply + borrow. The model validator now rejects bundled
+        # collateral at construction, so bypass it via model_construct to keep
+        # exercising the compiler's decomposition path.
+        intent = BorrowIntent.model_construct(
             collateral_token="WETH",
             collateral_amount=Decimal("1"),
             borrow_token="USDC.e",

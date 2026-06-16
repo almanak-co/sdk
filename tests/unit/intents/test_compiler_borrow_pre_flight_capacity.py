@@ -823,7 +823,12 @@ class TestBorrowCapacityWiredIntoAaveCompiler:
         borrow = MagicMock(
             symbol="USDC", address=_USDC_ARBITRUM, decimals=6, is_native=False,
         )
-        intent = BorrowIntent(
+        # This helper is called with both collateral_amount == 0 (valid) and
+        # collateral_amount > 0 (the bundled supply+borrow path under test).
+        # The model validator now rejects bundled collateral at construction, so
+        # build via model_construct to keep feeding the compiler pre-flight a
+        # real bundled borrow.
+        intent = BorrowIntent.model_construct(
             protocol="aave_v3",
             collateral_token="WETH",
             collateral_amount=collateral_amount,
@@ -952,7 +957,10 @@ class TestBorrowCapacityWiredIntoBenqiCompiler:
         borrow = MagicMock(
             symbol="USDC", address=_USDC_ARBITRUM, decimals=6, is_native=False,
         )
-        intent = BorrowIntent(
+        # Called with collateral_amount == 0 and > 0; the bundled form is now
+        # rejected by the validator, so build via model_construct to feed the
+        # compiler pre-flight a real bundled borrow.
+        intent = BorrowIntent.model_construct(
             protocol="benqi",
             collateral_token="WAVAX",
             collateral_amount=collateral_amount,

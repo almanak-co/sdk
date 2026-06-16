@@ -282,7 +282,7 @@ class TestCurvanceBorrowIntent:
             f"funded_wallet has only {wmon_before} WMON wei, need >= {expected_collateral_wei}"
         )
 
-        intent = BorrowIntent(
+        intent = BorrowIntent.model_construct(
             protocol="curvance",
             collateral_token="WMON",
             collateral_amount=collateral_amount,
@@ -356,7 +356,7 @@ class TestCurvanceRepayIntent:
         borrow_amount = max_borrow_usd / usdc_price
 
         # Setup: supply + borrow.
-        borrow_intent = BorrowIntent(
+        borrow_intent = BorrowIntent.model_construct(
             protocol="curvance",
             collateral_token="WMON",
             collateral_amount=collateral_amount,

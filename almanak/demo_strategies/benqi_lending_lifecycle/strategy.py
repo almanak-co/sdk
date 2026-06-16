@@ -13,16 +13,30 @@ BENQI is a Compound V2 fork on Avalanche using qiToken architecture:
 - Withdraw via redeemUnderlying
 
 Lifecycle steps (one per iteration):
-1. BORROW: Supply USDC collateral + enterMarkets + borrow USDT
-2. REPAY: Repay the borrowed USDT (repay_full with MAX_UINT256 approve)
-3. WITHDRAW: Withdraw USDC collateral (amount-based, not withdraw_all)
-4. HOLD: Lifecycle complete
+1. SUPPLY: Supply USDC collateral (enterMarkets via use_as_collateral)
+2. BORROW: Borrow USDT against the supplied collateral
+3. REPAY: Repay the borrowed USDT (repay_full with MAX_UINT256 approve)
+4. WITHDRAW: Withdraw USDC collateral (amount-based, not withdraw_all)
+5. HOLD: Lifecycle complete
 
 Coverage gaps filled:
 - First BENQI connector test ever (connector exists, never exercised)
 - First lending lifecycle on Avalanche
 - Tests Compound V2 qiToken architecture (distinct from Aave V3 / Compound V3)
 - Tests ERC20 borrow/repay (USDT via qiUSDT)
+
+Accounting note (VIB-3586): SUPPLY and BORROW are emitted as two distinct
+intents — never bundled into a single ``Intent.borrow(collateral_amount>0)``.
+The framework's canonical lending lifecycle is
+``_LENDING_LIFECYCLE = ("SUPPLY", "BORROW", "REPAY", "WITHDRAW")`` and the
+accounting layer writes exactly one ``accounting_events`` row per intent
+(one ``transaction_ledger`` row → one event). Bundling the collateral leg
+into the borrow collapses the supply into the BORROW event and silently
+drops the SUPPLY ``accounting_events`` row (and its ``supply:`` FIFO lot,
+which the closing WITHDRAW needs to surface accrued interest). Emitting a
+standalone SUPPLY first — exactly as every Aave V3 lifecycle strategy and
+the Accountant Test looping fixture do — keeps the books tied. A fail-closed
+guard now rejects ``Intent.borrow(collateral_amount > 0)``.
 """
 
 import logging
@@ -50,7 +64,7 @@ if TYPE_CHECKING:
     supported_chains=["avalanche"],
     default_chain="avalanche",
     supported_protocols=["benqi"],
-    intent_types=["BORROW", "REPAY", "WITHDRAW", "HOLD"],
+    intent_types=["SUPPLY", "BORROW", "REPAY", "WITHDRAW", "HOLD"],
     quote_asset="USD",
 )
 class BenqiLendingLifecycleStrategy(IntentStrategy):
@@ -70,7 +84,9 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
         self.borrow_token = self.get_config("borrow_token", "USDT")
         self.ltv_target = Decimal(str(self.get_config("ltv_target", "0.2")))
 
-        # State machine: idle -> borrowing -> borrowed -> repaying -> repaid -> withdrawing -> complete
+        # State machine:
+        #   idle -> supplying -> supplied -> borrowing -> borrowed
+        #        -> repaying -> repaid -> withdrawing -> complete
         self._loop_state = "idle"
         self._previous_stable_state = "idle"
         self._collateral_supplied = Decimal("0")
@@ -86,8 +102,15 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
     def decide(self, market: MarketSnapshot) -> Intent | None:
         """Make a lending decision based on lifecycle state."""
         try:
-            # State: IDLE -> BORROW (needs prices to calculate borrow amount)
+            # State: IDLE -> SUPPLY (deposit USDC collateral; no price needed)
             if self._loop_state == "idle":
+                logger.info("State: IDLE -> Supplying collateral")
+                self._previous_stable_state = self._loop_state
+                self._loop_state = "supplying"
+                return self._create_supply_intent()
+
+            # State: SUPPLIED -> BORROW (needs prices to calculate borrow amount)
+            if self._loop_state == "supplied":
                 try:
                     collateral_price = market.price(self.collateral_token)
                     borrow_price = market.price(self.borrow_token)
@@ -102,7 +125,7 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
                 if collateral_price == Decimal("0") or borrow_price == Decimal("0"):
                     return Intent.hold(reason="Price data unavailable, skipping this iteration")
 
-                logger.info("State: IDLE -> Supplying collateral and borrowing")
+                logger.info("State: SUPPLIED -> Borrowing against collateral")
                 self._previous_stable_state = self._loop_state
                 self._loop_state = "borrowing"
                 return self._create_borrow_intent(collateral_price, borrow_price)
@@ -126,7 +149,7 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
                 return Intent.hold(reason="Full lifecycle complete: borrow -> repay -> withdraw")
 
             # Stuck in transitional state -- revert to last stable state
-            if self._loop_state in ("borrowing", "repaying", "withdrawing"):
+            if self._loop_state in ("supplying", "borrowing", "repaying", "withdrawing"):
                 revert_to = self._previous_stable_state
                 logger.warning(
                     f"Stuck in transitional state '{self._loop_state}' -- reverting to '{revert_to}'"
@@ -139,13 +162,42 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
             logger.exception(f"Error in decide(): {e}")
             return Intent.hold(reason=f"Error: {e!s}")
 
+    def _create_supply_intent(self) -> Intent:
+        """Create a SUPPLY intent: deposit USDC collateral into BENQI.
+
+        Emitting SUPPLY as its own intent (rather than bundling collateral into
+        the BORROW intent) is what produces a first-class SUPPLY accounting
+        event and the ``supply:`` FIFO lot the closing WITHDRAW needs — see the
+        module docstring (VIB-3586). ``use_as_collateral=True`` triggers the
+        BENQI ``Comptroller.enterMarkets`` call so the supplied qiUSDC counts as
+        collateral for the subsequent borrow.
+        """
+        logger.info(
+            f"SUPPLY intent: supply "
+            f"{format_token_amount_human(self.collateral_amount, self.collateral_token)} "
+            f"as collateral into BENQI"
+        )
+
+        return Intent.supply(
+            protocol="benqi",
+            token=self.collateral_token,
+            amount=self.collateral_amount,
+            use_as_collateral=True,
+            chain=self.chain,
+        )
+
     def _create_borrow_intent(self, collateral_price: Decimal, borrow_price: Decimal) -> Intent:
-        """Create a BORROW intent: supply collateral, enter markets, and borrow the configured token."""
+        """Create a BORROW intent: borrow the configured token against supplied collateral.
+
+        ``collateral_amount=Decimal("0")`` because the collateral is supplied by
+        the preceding standalone SUPPLY intent (VIB-3586) — bundling it here
+        would collapse the supply into the BORROW accounting event.
+        """
         collateral_value = self.collateral_amount * collateral_price
         borrow_amount = (collateral_value * self.ltv_target / borrow_price).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
 
         if borrow_amount <= 0:
-            self._loop_state = "idle"
+            self._loop_state = "supplied"
             return Intent.hold(
                 reason=f"Computed borrow_amount={borrow_amount} (collateral {self.collateral_amount} "
                 f"{self.collateral_token} worth {format_usd(collateral_value)} at {self.ltv_target * 100:.0f}% LTV). "
@@ -154,7 +206,7 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
 
         logger.info(
             f"BORROW intent: collateral={format_token_amount_human(self.collateral_amount, self.collateral_token)} "
-            f"(value={format_usd(collateral_value)}), "
+            f"(value={format_usd(collateral_value)}, already supplied), "
             f"LTV={self.ltv_target * 100:.0f}%, "
             f"borrow={format_token_amount_human(borrow_amount, self.borrow_token)}"
         )
@@ -162,7 +214,7 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
         return Intent.borrow(
             protocol="benqi",
             collateral_token=self.collateral_token,
-            collateral_amount=self.collateral_amount,
+            collateral_amount=Decimal("0"),  # Already supplied by the SUPPLY intent
             borrow_token=self.borrow_token,
             borrow_amount=borrow_amount,
             chain=self.chain,
@@ -203,9 +255,19 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
         intent_type = intent.intent_type.value
 
         if success:
-            if intent_type == "BORROW":
+            if intent_type == "SUPPLY":
+                self._loop_state = "supplied"
+                # Track the amount actually supplied by the executed intent
+                # rather than the config value, so accounting/teardown reflect
+                # what executed even if config is hot-reloaded mid-flight.
+                self._collateral_supplied = Decimal(str(getattr(intent, "amount", self.collateral_amount)))
+                logger.info(
+                    f"SUPPLY successful: collateral={self._collateral_supplied} {self.collateral_token} "
+                    f"-- state -> supplied"
+                )
+
+            elif intent_type == "BORROW":
                 self._loop_state = "borrowed"
-                self._collateral_supplied = self.collateral_amount
                 if hasattr(intent, "borrow_amount"):
                     self._borrowed_amount = Decimal(str(intent.borrow_amount))
                 logger.info(
@@ -248,7 +310,9 @@ class BenqiLendingLifecycleStrategy(IntentStrategy):
             "borrowed_amount": str(self._borrowed_amount),
         }
 
-    _VALID_STATES = frozenset({"idle", "borrowing", "borrowed", "repaying", "repaid", "withdrawing", "complete"})
+    _VALID_STATES = frozenset(
+        {"idle", "supplying", "supplied", "borrowing", "borrowed", "repaying", "repaid", "withdrawing", "complete"}
+    )
 
     def load_persistent_state(self, state: dict[str, Any]) -> None:
         """Load persisted state on startup."""

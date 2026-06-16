@@ -299,7 +299,7 @@ class TestBenqiBorrowIntent:
         print(f"USDC before: {format_token_amount(usdc_before, usdc_decimals)}")
 
         # Create BorrowIntent
-        intent = BorrowIntent(
+        intent = BorrowIntent.model_construct(
             protocol="benqi",
             collateral_token="AVAX",
             collateral_amount=collateral_amount,
@@ -481,7 +481,7 @@ class TestBenqiBorrowIntent:
         # price: Compound-V2 ``borrow()`` is comptroller-rejected via a ``Failure``
         # event WITHOUT reverting (status == 1), so no ``Borrow`` event is emitted
         # and ``amount_token`` comes back ``None`` (intent-tests.md LTV-cap rule #10).
-        borrow_intent = BorrowIntent(
+        borrow_intent = BorrowIntent.model_construct(
             protocol="benqi",
             collateral_token="AVAX",
             collateral_amount=Decimal("40"),
@@ -693,7 +693,7 @@ class TestBenqiBorrowIntent:
             rpc_url=anvil_rpc_url,
         )
 
-        setup_intent = BorrowIntent(
+        setup_intent = BorrowIntent.model_construct(
             protocol="benqi",
             collateral_token="AVAX",
             collateral_amount=Decimal("10"),  # ~$200 collateral
@@ -917,7 +917,7 @@ class TestBenqiBorrowIntent:
         usdc_before = get_token_balance(web3, usdc, funded_wallet)
 
         # Supply tiny collateral but borrow massive amount
-        intent = BorrowIntent(
+        intent = BorrowIntent.model_construct(
             protocol="benqi",
             collateral_token="AVAX",
             collateral_amount=Decimal("1"),  # ~$20 collateral

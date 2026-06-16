@@ -771,7 +771,7 @@ class TestSparkBorrowIntent:
         print(f"Debt before: {account_data_before['totalDebtBase']}")
 
         # Create BorrowIntent
-        intent = BorrowIntent(
+        intent = BorrowIntent.model_construct(
             protocol="spark",
             collateral_token="WETH",
             collateral_amount=collateral_amount,
@@ -982,7 +982,7 @@ class TestSparkBorrowIntent:
         # cap as WETH price moves.
         setup_collateral = Decimal("1")
         setup_borrow = _safe_usdc_borrow_amount(price_oracle, setup_collateral)
-        borrow_intent = BorrowIntent(
+        borrow_intent = BorrowIntent.model_construct(
             protocol="spark",
             collateral_token="WETH",
             collateral_amount=setup_collateral,
@@ -1194,7 +1194,7 @@ class TestSparkBorrowIntent:
         # ~25% LTV so it stays under the 30% cap as WETH price moves.
         setup_collateral = Decimal("1")
         setup_borrow = _safe_usdc_borrow_amount(price_oracle, setup_collateral)
-        borrow_intent = BorrowIntent(
+        borrow_intent = BorrowIntent.model_construct(
             protocol="spark",
             collateral_token="WETH",
             collateral_amount=setup_collateral,

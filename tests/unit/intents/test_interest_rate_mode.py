@@ -31,7 +31,7 @@ class TestBorrowIntentInterestRateMode:
         intent = Intent.borrow(
             protocol="aave_v3",
             collateral_token="ETH",
-            collateral_amount=Decimal("1"),
+            collateral_amount=Decimal("0"),
             borrow_token="USDC",
             borrow_amount=Decimal("1000"),
             interest_rate_mode="variable",
@@ -44,7 +44,7 @@ class TestBorrowIntentInterestRateMode:
             Intent.borrow(
                 protocol="aave_v3",
                 collateral_token="ETH",
-                collateral_amount=Decimal("1"),
+                collateral_amount=Decimal("0"),
                 borrow_token="USDC",
                 borrow_amount=Decimal("1000"),
                 interest_rate_mode="stable",
@@ -56,7 +56,7 @@ class TestBorrowIntentInterestRateMode:
             Intent.borrow(
                 protocol="spark",
                 collateral_token="ETH",
-                collateral_amount=Decimal("1"),
+                collateral_amount=Decimal("0"),
                 borrow_token="DAI",
                 borrow_amount=Decimal("1000"),
                 interest_rate_mode="stable",
@@ -67,7 +67,7 @@ class TestBorrowIntentInterestRateMode:
             Intent.borrow(
                 protocol="morpho",
                 collateral_token="ETH",
-                collateral_amount=Decimal("1"),
+                collateral_amount=Decimal("0"),
                 borrow_token="USDC",
                 borrow_amount=Decimal("1000"),
                 interest_rate_mode="variable",
@@ -79,7 +79,7 @@ class TestBorrowIntentInterestRateMode:
             Intent.borrow(
                 protocol="compound_v3",
                 collateral_token="ETH",
-                collateral_amount=Decimal("1"),
+                collateral_amount=Decimal("0"),
                 borrow_token="USDC",
                 borrow_amount=Decimal("1000"),
                 interest_rate_mode="variable",
@@ -90,7 +90,7 @@ class TestBorrowIntentInterestRateMode:
         intent = Intent.borrow(
             protocol="aave_v3",
             collateral_token="ETH",
-            collateral_amount=Decimal("1"),
+            collateral_amount=Decimal("0"),
             borrow_token="USDC",
             borrow_amount=Decimal("1000"),
         )

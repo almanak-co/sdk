@@ -439,10 +439,13 @@ class TestHoldIntent:
 
 class TestBorrowIntentValidators:
     def _kwargs(self, **overrides):
+        # Default to the now-canonical standalone-borrow form
+        # (collateral_amount == 0). Bundled collateral (> 0 or "all") is rejected
+        # by BorrowIntent's validator; collateral_token remains metadata only.
         base = {
             "protocol": "aave_v3",
             "collateral_token": "WETH",
-            "collateral_amount": Decimal("1"),
+            "collateral_amount": Decimal("0"),
             "borrow_token": "USDC",
             "borrow_amount": Decimal("1000"),
         }
@@ -454,9 +457,12 @@ class TestBorrowIntentValidators:
         assert intent.intent_type == IntentType.BORROW
         assert intent.is_chained_amount is False
 
-    def test_collateral_all(self):
-        intent = BorrowIntent(**self._kwargs(collateral_amount="all"))
-        assert intent.is_chained_amount is True
+    def test_collateral_all_bundled_rejected(self):
+        # Bundled chained collateral ("all") is now rejected at construction:
+        # the accounting layer cannot record the implicit on-chain supply as a
+        # distinct SUPPLY event.
+        with pytest.raises(ValidationError, match="Bundled collateralized borrow is not supported"):
+            BorrowIntent(**self._kwargs(collateral_amount="all"))
 
     def test_negative_collateral_raises(self):
         with pytest.raises(ValidationError, match="collateral_amount must be non-negative"):
@@ -485,10 +491,12 @@ class TestBorrowIntentValidators:
             PROTOCOL_CAPABILITIES["aave_v3"]["interest_rate_modes"] = original
 
     def test_factory(self):
+        # The factory routes through validation, so it uses the canonical
+        # standalone-borrow form (collateral_amount == 0).
         intent = Intent.borrow(
             protocol="aave_v3",
             collateral_token="WETH",
-            collateral_amount=Decimal("1"),
+            collateral_amount=Decimal("0"),
             borrow_token="USDC",
             borrow_amount=Decimal("1000"),
             interest_rate_mode="variable",
@@ -497,12 +505,31 @@ class TestBorrowIntentValidators:
         assert intent.protocol == "aave_v3"
         assert intent.borrow_amount == Decimal("1000")
 
+    def test_factory_bundled_collateral_rejected(self):
+        # A bundled (nonzero) collateral through the factory must now raise,
+        # since the factory routes through BorrowIntent validation.
+        with pytest.raises(ValidationError, match="Bundled collateralized borrow is not supported"):
+            Intent.borrow(
+                protocol="aave_v3",
+                collateral_token="WETH",
+                collateral_amount=Decimal("1"),
+                borrow_token="USDC",
+                borrow_amount=Decimal("1000"),
+                interest_rate_mode="variable",
+                chain="arbitrum",
+            )
+
     def test_serialize_preserves_all(self):
-        intent = BorrowIntent(**self._kwargs(collateral_amount="all"))
+        # The "all"-form intent is rejected by the validator, so build the
+        # fixture via model_construct; serialize operates on an already-
+        # constructed intent and must still emit the "all" literal.
+        intent = BorrowIntent.model_construct(**self._kwargs(collateral_amount="all"))
         data = intent.serialize()
         assert data["collateral_amount"] == "all"
-        rebuilt = BorrowIntent.deserialize(data)
-        assert rebuilt.collateral_amount == "all"
+        # deserialize re-runs validation, which now rejects bundled collateral,
+        # so re-hydrating an "all"-form borrow raises rather than round-tripping.
+        with pytest.raises(ValidationError, match="Bundled collateralized borrow is not supported"):
+            BorrowIntent.deserialize(data)
 
 
 class TestRepayIntentValidators:
@@ -805,7 +832,7 @@ class TestIntentTopLevelHelpers:
             BorrowIntent(
                 protocol="aave_v3",
                 collateral_token="WETH",
-                collateral_amount=Decimal("1"),
+                collateral_amount=Decimal("0"),
                 borrow_token="USDC",
                 borrow_amount=Decimal("100"),
             ),
@@ -1048,16 +1075,22 @@ class TestChainedAmountHelpers:
         resolved = Intent.set_resolved_amount(intent, Decimal("7.5"))
         assert resolved.amount == Decimal("7.5")
 
-    def test_set_resolved_amount_borrow_collateral_all(self):
-        intent = BorrowIntent(
+    def test_set_resolved_amount_borrow_collateral_all_rejected(self):
+        # A chained collateral_amount="all" on a borrow is the bundled form the
+        # validator now forbids. The "all" fixture can only be built via
+        # model_construct; resolving it re-serializes and re-validates through
+        # Intent.deserialize, which rejects the now-positive bundled collateral.
+        # The resolution path therefore raises rather than producing a bundled
+        # borrow with a concrete collateral amount.
+        intent = BorrowIntent.model_construct(
             protocol="aave_v3",
             collateral_token="WETH",
             collateral_amount="all",
             borrow_token="USDC",
             borrow_amount=Decimal("1500"),
         )
-        resolved = Intent.set_resolved_amount(intent, Decimal("2"))
-        assert resolved.collateral_amount == Decimal("2")
+        with pytest.raises(ValidationError, match="Bundled collateralized borrow is not supported"):
+            Intent.set_resolved_amount(intent, Decimal("2"))
 
     def test_set_resolved_amount_without_all_is_noop(self):
         intent = SwapIntent(from_token="USDC", to_token="ETH", amount=Decimal("1"))

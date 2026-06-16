@@ -286,8 +286,11 @@ class TestOverrideBypassesLendingPoolGate:
         from almanak.framework.permissions import synthetic_intents
 
         if intent_type == "BORROW":
+            # Discovery sentinel fixture -- model_construct bypasses the
+            # bundled-collateral guard (the override-ordering gate is under test,
+            # not borrow validation; synthetic discovery intents are never executed).
             sentinel = [
-                BorrowIntent(
+                BorrowIntent.model_construct(
                     protocol="spark",
                     collateral_token="0xC",
                     collateral_amount=Decimal("1"),

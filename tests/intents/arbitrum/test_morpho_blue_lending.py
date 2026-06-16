@@ -291,7 +291,7 @@ class TestMorphoBlueBorrowIntent:
         print(f"wstETH before: {format_token_amount(wsteth_before, wsteth_decimals)}")
         print(f"USDC before:   {format_token_amount(usdc_before, usdc_decimals)}")
 
-        intent = BorrowIntent(
+        intent = BorrowIntent.model_construct(
             protocol="morpho_blue",
             collateral_token="wstETH",
             collateral_amount=collateral_amount,
@@ -498,7 +498,7 @@ async def _setup_borrow(
     borrow-then-repay split) can persist it through the harness. Callers that
     only need the on-chain side effect ignore the return value.
     """
-    intent = BorrowIntent(
+    intent = BorrowIntent.model_construct(
         protocol="morpho_blue",
         collateral_token="wstETH",
         collateral_amount=collateral_amount,

@@ -21,7 +21,7 @@ from almanak.framework.models.base import (
 )
 
 from .base import BaseIntent
-from .intent_errors import InvalidProtocolParameterError
+from .intent_errors import BundledCollateralBorrowError, InvalidProtocolParameterError
 from .vocabulary import (
     IntentType,
     InterestRateMode,
@@ -91,9 +91,49 @@ class BorrowIntent(BaseIntent):
             raise ValueError("collateral_amount must be a non-negative Decimal or 'all'")
         if self.borrow_amount <= 0:
             raise ValueError("borrow_amount must be positive")
+        # Fail-closed: reject a bundled collateralized borrow. A nonzero
+        # collateral_amount (or the chained "all" form, which resolves to a
+        # positive supply at execution time) supplies AND borrows on-chain in
+        # one action, but accounting writes one event per intent -- the SUPPLY
+        # event and supply FIFO lot are silently dropped. Only the standalone
+        # form (collateral_amount == Decimal("0")) is accounting-correct.
+        # See docs/internal/bundled-collateral-borrow-migration.md (and
+        # docs/internal/FollowUp-13June15.md §D1 for the original root cause).
+        self._reject_bundled_collateral()
         # Validate interest_rate_mode against protocol capabilities
         self._validate_protocol_params()
         return self
+
+    def _reject_bundled_collateral(self) -> None:
+        """Reject a bundled collateralized borrow (``collateral_amount > 0`` or ``"all"``).
+
+        Allowed: ``collateral_amount == Decimal("0")`` (the standalone-borrow
+        form -- ``collateral_token`` is metadata only and nothing is supplied).
+        Rejected: any positive ``Decimal`` or the chained ``"all"`` literal,
+        both of which bundle an on-chain supply that the accounting layer cannot
+        record as a distinct SUPPLY event. Raises
+        :class:`BundledCollateralBorrowError`.
+
+        Protocols whose native open is an *atomic* supply+borrow (e.g. a Fluid
+        vault ``operate()`` that mints an NFT-CDP and supplies + borrows in one
+        call) opt out by declaring ``supports_bundled_collateral_borrow`` in
+        their connector capabilities -- for them the bundled shape is correct
+        and the accounting split is owned by the receipt parser, not by
+        intent-level decomposition.
+        """
+        is_positive_decimal = isinstance(self.collateral_amount, Decimal) and self.collateral_amount > 0
+        is_chained_all = not isinstance(self.collateral_amount, Decimal) and self.collateral_amount == "all"
+        if not (is_positive_decimal or is_chained_all):
+            return
+        capabilities = _capabilities_for(self.protocol.lower())
+        if capabilities.get("supports_bundled_collateral_borrow", False):
+            return
+        raise BundledCollateralBorrowError(
+            protocol=self.protocol,
+            collateral_token=self.collateral_token,
+            collateral_amount=self.collateral_amount,
+            borrow_token=self.borrow_token,
+        )
 
     def _validate_protocol_params(self) -> None:
         """Validate protocol-specific parameters."""
@@ -127,6 +167,26 @@ class BorrowIntent(BaseIntent):
                     value=self.interest_rate_mode,
                     reason=f"Valid modes for '{self.protocol}': {', '.join(valid_modes)}",
                 )
+
+    @classmethod
+    def for_permission_discovery(cls, **fields: Any) -> "BorrowIntent":
+        """Build a synthetic BORROW intent for permission discovery, bypassing the bundled-collateral guard.
+
+        Permission discovery (``build_discovery_vectors`` in connector
+        ``permission_hints.py``) intentionally emits a *bundled* borrow
+        (``collateral_amount > 0``) so the compiler enumerates BOTH the
+        collateral-supply approval and the borrow selector on the Safe
+        manifest. These synthetic intents are never executed and never reach
+        the accounting ledger, so the 1:1 ledger→event invariant the
+        :meth:`validate_borrow_intent` guard protects does not apply.
+
+        This uses ``model_construct`` (Pydantic's trusted-data constructor) to
+        skip the model validator while still applying field defaults
+        (``intent_id``, ``created_at``). Do NOT use this for any
+        strategy-emitted or executable borrow — those must go through
+        :meth:`Intent.borrow` / normal construction so the guard fires.
+        """
+        return cls.model_construct(**fields)
 
     @property
     def is_chained_amount(self) -> bool:

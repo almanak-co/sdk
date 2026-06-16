@@ -20,8 +20,6 @@ from dataclasses import dataclass
 from typing import Any
 from unittest.mock import patch
 
-import pytest
-
 from almanak.framework.execution.signer.safe.constants import (
     MULTISEND_SELECTOR as _SAFE_MULTISEND_SELECTOR,
 )
@@ -337,8 +335,11 @@ def _run_with_patched_harness(
     """
     observation = _HarnessObservation()
 
-    def _fake_setup(case_arg: PermissionTestCase, **_kw: Any) -> tuple[str, str, bytes, list[dict]]:
-        return ("0xsafe", "0xroles", b"role_key_padded_to_32_bytes____", targets)
+    def _fake_deploy(*_a: Any, **_kw: Any) -> tuple[str, str, bytes]:
+        return ("0xsafe", "0xroles", b"role_key_padded_to_32_bytes____")
+
+    def _fake_apply_manifest(case_arg: PermissionTestCase, **_kw: Any) -> list[dict]:
+        return targets
 
     _LOAD_BEARING_LOOKUP_ADDR = "0xloadbearing"
 
@@ -382,8 +383,16 @@ def _run_with_patched_harness(
 
     with (
         patch(
-            "tests.intents._permission_onchain_harness._setup_zodiac_and_apply_manifest",
-            _fake_setup,
+            "tests.intents._permission_onchain_harness._deploy_and_setup_zodiac",
+            _fake_deploy,
+        ),
+        patch(
+            "tests.intents._permission_onchain_harness._apply_manifest_for_case",
+            _fake_apply_manifest,
+        ),
+        patch(
+            "tests.intents._permission_onchain_harness._seed_borrow_collateral",
+            lambda *a, **kw: None,
         ),
         patch(
             "tests.intents._permission_onchain_harness._find_target_by_selector",

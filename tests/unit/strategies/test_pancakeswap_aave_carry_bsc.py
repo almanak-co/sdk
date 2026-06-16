@@ -1,6 +1,7 @@
 """Unit tests for the PancakeSwap V3 + Aave V3 Carry Trade on BSC demo strategy.
 
-Tests the T2 composition lifecycle: borrow -> swap -> swap_back -> repay -> withdraw.
+Tests the T2 composition lifecycle:
+supply -> borrow -> swap -> swap_back -> repay -> withdraw.
 """
 
 from decimal import Decimal
@@ -15,6 +16,8 @@ from almanak.demo_strategies.pancakeswap_aave_carry_bsc.strategy import (
     IDLE,
     REPAID,
     REPAYING,
+    SUPPLIED,
+    SUPPLYING,
     SWAP_BACK,
     SWAPPED,
     SWAPPING,
@@ -113,36 +116,83 @@ class TestStrategyMetadata:
 # =============================================================================
 
 
+def _advance_to_supplied(strategy) -> None:
+    """Drive the strategy from IDLE through a successful SUPPLY to SUPPLIED.
+
+    The first decide() from IDLE now emits the standalone SUPPLY intent
+    (VIB-3586); the BORROW is only emitted afterwards from the SUPPLIED state.
+    """
+    supply_intent = strategy.decide(_make_market())
+    assert supply_intent.intent_type.value == "SUPPLY"
+    strategy.on_intent_executed(supply_intent, success=True, result=None)
+    assert strategy._state == SUPPLIED
+
+
 class TestEntryPhase:
-    def test_idle_emits_borrow(self):
+    def test_idle_emits_supply(self):
         strategy = _make_strategy()
         market = _make_market()
 
         intent = strategy.decide(market)
 
         assert intent is not None
-        assert intent.intent_type.value == "BORROW"
-        assert strategy._state == BORROWING
+        assert intent.intent_type.value == "SUPPLY"
+        assert strategy._state == SUPPLYING
 
-    def test_borrow_uses_aave_v3(self):
+    def test_supply_uses_aave_v3_as_collateral(self):
         strategy = _make_strategy()
         market = _make_market()
 
         intent = strategy.decide(market)
 
         assert intent.protocol == "aave_v3"
+        assert intent.token == "WBNB"
+        assert intent.amount == Decimal("0.5")
+        assert intent.use_as_collateral is True
+
+    def test_supplied_emits_borrow(self):
+        strategy = _make_strategy()
+        _advance_to_supplied(strategy)
+
+        intent = strategy.decide(_make_market())
+
+        assert intent.intent_type.value == "BORROW"
+        assert strategy._state == BORROWING
+
+    def test_borrow_uses_aave_v3(self):
+        strategy = _make_strategy()
+        _advance_to_supplied(strategy)
+
+        intent = strategy.decide(_make_market())
+
+        assert intent.protocol == "aave_v3"
+
+    def test_borrow_does_not_bundle_collateral(self):
+        """VIB-3586: collateral is supplied by the SUPPLY phase, so the BORROW
+        intent must carry collateral_amount == 0 (the fail-closed guard rejects
+        a bundled Intent.borrow(collateral_amount > 0))."""
+        strategy = _make_strategy()
+        _advance_to_supplied(strategy)
+
+        intent = strategy.decide(_make_market())
+
+        assert intent.collateral_amount == Decimal("0")
 
     def test_borrow_amount_calculation(self):
-        """0.5 WBNB * $600 = $300 collateral, 30% LTV = $90 USDC at $1."""
-        strategy = _make_strategy()
-        market = _make_market(wbnb_price=Decimal("600"))
+        """0.5 WBNB * $600 = $300 collateral, 30% LTV = $90 USDC at $1.
 
-        intent = strategy.decide(market)
+        Borrow amount is computed on the post-supply BORROW intent.
+        """
+        strategy = _make_strategy()
+        _advance_to_supplied(strategy)
+
+        intent = strategy.decide(_make_market(wbnb_price=Decimal("600")))
 
         assert intent.borrow_amount == Decimal("90.00")
 
     def test_borrow_with_zero_collateral_price_holds(self):
         strategy = _make_strategy()
+        _advance_to_supplied(strategy)
         market = _make_market()
         market.price.side_effect = ValueError("No price")
 
@@ -260,15 +310,26 @@ class TestTeardownPhase:
 
 
 class TestTransitionalRecovery:
-    def test_stuck_borrowing_reverts_to_idle(self):
+    def test_stuck_supplying_reverts_to_idle(self):
         strategy = _make_strategy()
-        strategy._state = BORROWING
+        strategy._state = SUPPLYING
         strategy._previous_stable = IDLE
 
         intent = strategy.decide(_make_market())
 
-        # After revert to idle, should try borrow again
+        # After revert to idle, should try supply again
+        assert intent.intent_type.value == "SUPPLY"
+
+    def test_stuck_borrowing_reverts_to_supplied(self):
+        strategy = _make_strategy()
+        strategy._state = BORROWING
+        strategy._previous_stable = SUPPLIED
+
+        intent = strategy.decide(_make_market())
+
+        # After revert to supplied, should try borrow again
         assert intent.intent_type.value == "BORROW"
+        assert intent.collateral_amount == Decimal("0")
 
     def test_stuck_swapping_reverts_to_borrowed(self):
         strategy = _make_strategy()
@@ -297,9 +358,24 @@ class TestTransitionalRecovery:
 
 
 class TestOnIntentExecuted:
+    def test_supply_success(self):
+        strategy = _make_strategy()
+        strategy._state = SUPPLYING
+
+        mock_intent = MagicMock()
+        mock_intent.intent_type.value = "SUPPLY"
+        mock_intent.amount = Decimal("0.5")
+
+        strategy.on_intent_executed(mock_intent, success=True, result=None)
+
+        assert strategy._state == SUPPLIED
+        assert strategy._supplied_amount == Decimal("0.5")
+
     def test_borrow_success(self):
         strategy = _make_strategy()
         strategy._state = BORROWING
+        # Collateral was already booked by the preceding SUPPLY phase.
+        strategy._supplied_amount = Decimal("0.5")
 
         mock_intent = MagicMock()
         mock_intent.intent_type.value = "BORROW"

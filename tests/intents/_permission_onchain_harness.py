@@ -753,8 +753,43 @@ def _build_withdraw_intent(case: PermissionTestCase) -> WithdrawIntent:
 
 
 def _build_borrow_intent(case: PermissionTestCase) -> BorrowIntent:
-    """Construct a ``BorrowIntent`` from the case config via ``**config``."""
-    return BorrowIntent(**case.config, protocol=case.protocol, chain=case.chain)
+    """Construct the EXECUTED standalone ``BorrowIntent`` for the borrow case.
+
+    The intent built here is COMPILED-AND-EXECUTED on-chain via Zodiac, so it
+    must be a production-valid STANDALONE borrow: ``collateral_amount == 0``.
+    A bundled ``collateral_amount > 0`` is rejected for separable lending
+    protocols by ``BorrowIntent.validate_borrow_intent`` (only ``fluid`` opts
+    out via ``supports_bundled_collateral_borrow``), and production now requires
+    a prior standalone ``SUPPLY(use_as_collateral=True)`` before the borrow —
+    which the harness seeds via ``_seed_borrow_collateral`` (see
+    ``_run_lend_borrow_positive``). Building the executed intent through the
+    ``for_permission_discovery`` bypass would exercise a borrow shape production
+    rejects, masking the guard in the test path.
+
+    The Safe manifest still authorises BOTH the collateral-supply and borrow
+    selectors: it is derived from compilation-based *discovery* vectors
+    (``discover_permissions`` over synthetic intents), not from this executed
+    intent. Those synthetic vectors are never executed, so they legitimately
+    keep using the bundled bypass. The executed standalone borrow's calls
+    (``borrow`` plus any debt-token approval) are a subset of the authorised
+    targets.
+
+    ``collateral_token`` / ``borrow_token`` / ``borrow_amount`` / ``market_id``
+    come from ``case.config``; ``collateral_amount`` is forced to ``0`` here so
+    the executed intent is the standalone form regardless of what the case
+    config declares for the collateral side (that value drives seeding, not the
+    executed borrow). ``borrow_amount`` is coerced to ``Decimal`` to match
+    normal construction (case configs store amounts as ``str``).
+    """
+    cfg = {k: v for k, v in case.config.items() if k != "collateral_amount"}
+    if "borrow_amount" in cfg and not isinstance(cfg["borrow_amount"], Decimal):
+        cfg["borrow_amount"] = Decimal(str(cfg["borrow_amount"]))
+    return BorrowIntent(
+        **cfg,
+        collateral_amount=Decimal("0"),
+        protocol=case.protocol,
+        chain=case.chain,
+    )
 
 
 def _build_repay_intent(case: PermissionTestCase) -> RepayIntent:
@@ -1235,20 +1270,24 @@ def _run_lend_borrow_positive(
     Two tokens matter: ``collateral_token`` (seeded) and ``borrow_token``
     (expected delta). Direction: ``borrow_token`` balance must increase.
 
-    Protocol shape drives the seeding strategy:
+    The EXECUTED intent is a production-valid STANDALONE borrow
+    (``collateral_amount == 0`` — see ``_build_borrow_intent``): a bundled
+    ``collateral_amount > 0`` is rejected for separable lending protocols by
+    the intent-level guard. The compiled bundle therefore ONLY calls ``borrow``
+    (plus any debt-token approvals); it never supplies collateral in-line. The
+    protocol requires a prior collateral supply on the lending pool/Comet —
+    without it the borrow reverts for lack of account collateral, not for
+    authorisation — so collateral is seeded via ``_seed_borrow_collateral``
+    for EVERY protocol BEFORE the manifest is applied. The seed is a plain
+    SUPPLY tx executed by the Safe OWNER (outside Zodiac), so the manifest the
+    Roles Modifier must authorise is the BORROW alone.
 
-    - **compound_v3**: the compiled BORROW bundle is *atomic* — a single bundle
-      emits ``approve`` + ``supplyCollateral`` + ``borrow``. The collateral
-      does not need to pre-exist as a supplied position on the Comet because
-      the same tx supplies it. The manifest authorises all three calls. No
-      seeding helper.
-
-    - **aave_v3 / spark / morpho_blue**: the compiled BORROW
-      bundle ONLY calls ``borrow`` (plus any debt-token approvals). The
-      protocol requires a prior collateral supply on the lending pool —
-      without it the borrow reverts for lack of account collateral, not for
-      authorisation. Seed collateral via ``_seed_supply_collateral`` BEFORE
-      the manifest is applied so the manifest authorises only the BORROW.
+    This holds uniformly across compound_v3 / aave_v3 / spark / morpho_blue:
+    none of them rely on the old atomic bundled-supply-then-borrow shape any
+    more. (The manifest still authorises the collateral-supply selector too,
+    because it is derived from compilation-based discovery vectors, not from
+    the executed standalone intent — but that selector is simply unused on the
+    Zodiac-executed borrow path here.)
     """
     cfg = case.config
     collat_symbol = cfg["collateral_token"]
@@ -1256,21 +1295,23 @@ def _run_lend_borrow_positive(
     collat_addr, _, collat_wei = _token_amount_wei(web3, case.chain, collat_symbol, cfg["collateral_amount"])
     borrow_addr, borrow_decimals, _ = _token_amount_wei(web3, case.chain, borrow_symbol, 0)
 
-    # Deploy Safe + Roles first; seed (if needed) BEFORE the manifest is
+    # Deploy Safe + Roles first; seed collateral BEFORE the manifest is
     # applied; THEN apply the manifest. Collateral seeding is a plain SUPPLY
     # tx executed by the Safe owner — Zodiac is not involved until step 3.
     safe, roles, role_key = _deploy_and_setup_zodiac(web3, funded_wallet, test_private_key, role_label=role_label)
 
-    if case.protocol != "compound_v3":
-        _seed_borrow_collateral(
-            case,
-            safe=safe,
-            web3=web3,
-            anvil_rpc_url=anvil_rpc_url,
-            funded_wallet=funded_wallet,
-            test_private_key=test_private_key,
-            price_oracle=price_oracle,
-        )
+    # Seed collateral for every protocol. The executed borrow is standalone
+    # (collateral_amount=0), so even compound_v3 needs its collateral already
+    # supplied on the Comet — the borrow no longer supplies it in-line.
+    _seed_borrow_collateral(
+        case,
+        safe=safe,
+        web3=web3,
+        anvil_rpc_url=anvil_rpc_url,
+        funded_wallet=funded_wallet,
+        test_private_key=test_private_key,
+        price_oracle=price_oracle,
+    )
 
     _apply_manifest_for_case(
         case,
@@ -1282,10 +1323,9 @@ def _run_lend_borrow_positive(
         test_private_key=test_private_key,
     )
     # 2x headroom mirrors SWAP — covers rounding + any transient buffering the
-    # compiler/connector adds before the borrow executes. Atomic compound_v3
-    # BORROW needs its collateral on the Safe so supplyCollateral succeeds;
-    # non-atomic connectors already supplied via the seed but keep the funding
-    # for any residual transferFrom a different compile path might emit.
+    # compiler/connector adds before the borrow executes. The collateral was
+    # already supplied via the seed; keep this funding for any residual
+    # transferFrom a different compile path might emit.
     _fund_safe_with_token(safe, collat_symbol, collat_wei * 2, case.chain, anvil_rpc_url)
     assert get_token_balance(web3, collat_addr, safe) >= collat_wei, (
         f"Safe collateral funding failed for {collat_symbol} on {case.chain}"
@@ -1709,8 +1749,12 @@ def _seed_borrow_collateral(
     and executes via Safe. Leaves the Safe with collateral but NO outstanding
     debt — exactly the state the BORROW test needs.
 
-    Used by non-atomic BORROW positive paths (aave_v3, spark, morpho_blue).
-    Not used by compound_v3 — its BORROW bundle supplies collateral in-line.
+    Used by every BORROW positive path (compound_v3, aave_v3, spark,
+    morpho_blue). The executed borrow is now standalone (collateral_amount=0)
+    for all of them, so each needs its collateral pre-supplied on the
+    pool/Comet — compound_v3 no longer supplies it in-line. Compound V3 routes
+    a non-base collateral token to ``supplyCollateral`` by address, so the
+    default ``use_as_collateral`` is correct for it without a dedicated branch.
     """
     cfg = case.config
     collat_symbol = cfg["collateral_token"]
@@ -2177,12 +2221,36 @@ def run_negative_authorisation_case(
     label = role_label or f"PermOnchain:{case.protocol}:{case.intent_type}:neg"
     it = case.intent_type.upper()
 
-    safe, roles, role_key, targets = _setup_zodiac_and_apply_manifest(
+    safe, roles, role_key = _deploy_and_setup_zodiac(
+        web3,
+        funded_wallet,
+        test_private_key,
+        role_label=label,
+    )
+    # BORROW executes as a standalone borrow (collateral_amount=0), so the
+    # collateral must already be supplied INTO the protocol before the revoked
+    # execution — otherwise the borrow would revert for "no collateral" rather
+    # than for the stripped Roles permission, and the assertion would prove
+    # nothing about the Roles Modifier. Seed as the Safe owner (outside Zodiac),
+    # mirroring the positive path; the manifest is applied AFTER the seed.
+    if it == "BORROW":
+        _seed_borrow_collateral(
+            case,
+            safe=safe,
+            web3=web3,
+            anvil_rpc_url=anvil_rpc_url,
+            funded_wallet=funded_wallet,
+            test_private_key=test_private_key,
+            price_oracle=price_oracle,
+        )
+    targets = _apply_manifest_for_case(
         case,
         web3=web3,
+        safe=safe,
+        roles=roles,
+        role_key=role_key,
         funded_wallet=funded_wallet,
         test_private_key=test_private_key,
-        role_label=label,
         strategy_suffix="_neg",
     )
 

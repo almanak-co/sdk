@@ -92,8 +92,11 @@ def build_discovery_vectors(
     if intent_type == "BORROW":
         from almanak.framework.intents.vocabulary import BorrowIntent
 
+        # Synthetic bundled-collateral borrow for permission discovery only:
+        # never executed, never accounted, so it bypasses the bundled-collateral
+        # guard via for_permission_discovery (see BorrowIntent.validate_borrow_intent).
         return [
-            BorrowIntent(
+            BorrowIntent.for_permission_discovery(
                 protocol=protocol,
                 collateral_token=entry["collateral_token"],
                 collateral_amount=_SYNTHETIC_COLLATERAL_AMOUNTS.get(entry["collateral_token"], Decimal("1")),

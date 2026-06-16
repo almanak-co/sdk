@@ -130,7 +130,12 @@ def _borrow_intent(
     borrow_amount: Decimal = Decimal("500"),
     market_id: str | None = None,
 ) -> BorrowIntent:
-    return BorrowIntent(
+    # These tests feed a *bundled* (nonzero-collateral) borrow to the COMPILER,
+    # which legitimately still decomposes it into supply + borrow. The model
+    # validator now rejects bundled collateral at construction
+    # (BundledCollateralBorrowError), so build via model_construct to bypass the
+    # validator while keeping the real bundled shape the compiler is tested on.
+    return BorrowIntent.model_construct(
         protocol=protocol,
         collateral_token=collateral_token,
         collateral_amount=collateral_amount,

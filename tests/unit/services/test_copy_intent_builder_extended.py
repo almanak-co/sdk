@@ -150,7 +150,13 @@ class TestBuildWithdraw:
 
 
 class TestBuildBorrow:
-    def test_borrow_intent_created(self) -> None:
+    def test_borrow_with_collateral_emits_supply_then_standalone_borrow(self) -> None:
+        """A collateralized copy-borrow is the accounting-correct two-intent form:
+        SUPPLY the collateral, then borrow with collateral_amount=0. A single
+        bundled Intent.borrow(collateral_amount>0) is rejected (it would drop the
+        SUPPLY accounting event + supply cost-basis lot)."""
+        from almanak.framework.intents import IntentSequence
+
         builder = CopyIntentBuilder(_make_config())
         payload = LendingPayload(
             token="USDC",
@@ -162,7 +168,15 @@ class TestBuildBorrow:
         signal = _signal("BORROW", payload, amounts_usd={"USDC": Decimal("1000")})
         result = builder.build(signal)
         assert result.intent is not None
-        assert result.intent.intent_type.value == "BORROW"
+        assert isinstance(result.intent, IntentSequence)
+        intents = result.intent.intents
+        assert len(intents) == 2
+        assert intents[0].intent_type.value == "SUPPLY"
+        assert intents[0].use_as_collateral is True
+        assert intents[0].token == "WETH"
+        assert intents[1].intent_type.value == "BORROW"
+        assert intents[1].collateral_amount == Decimal("0")
+        assert intents[1].borrow_token == "USDC"
 
     def test_borrow_incomplete_payload(self) -> None:
         builder = CopyIntentBuilder(_make_config())

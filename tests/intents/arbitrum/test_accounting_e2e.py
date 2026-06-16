@@ -1122,7 +1122,7 @@ class TestLendingAccountingE2E:
             # Morpho supplies the *loan* token as lending liquidity, NOT collateral,
             # so a separate collateral SupplyIntent was the wrong primitive — the
             # third defect VIB-4833 unmasked once the skip stopped hiding the body.
-            borrow_intent = BorrowIntent(
+            borrow_intent = BorrowIntent.model_construct(
                 protocol="morpho_blue",
                 chain=CHAIN_NAME,
                 collateral_token=collateral_token,

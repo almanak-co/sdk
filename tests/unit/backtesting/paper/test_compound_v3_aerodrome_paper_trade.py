@@ -148,24 +148,51 @@ class TestPaperTraderConfig:
 class TestMultiTickLifecycle:
     """Simulate paper trading ticks: each tick calls decide() once.
 
-    Tick 1: idle -> BORROW intent (transitional: borrowing)
+    Tick 1: idle -> SUPPLY intent (transitional: supplying)
+    On success: state -> supplied
+    Tick 2: supplied -> BORROW intent (transitional: borrowing)
     On success: state -> borrowed
-    Tick 2: borrowed -> LP_OPEN intent (transitional: opening_lp)
+    Tick 3: borrowed -> LP_OPEN intent (transitional: opening_lp)
     On success: state -> complete
-    Tick 3+: complete -> HOLD
+    Tick 4+: complete -> HOLD
     """
 
-    def test_tick1_emits_borrow(self):
+    def test_tick1_emits_supply(self):
         strat = _make_strategy()
+        market = _mock_market()
+        intent = strat.decide(market)
+        assert intent is not None
+        assert intent.intent_type.value == "SUPPLY"
+        assert intent.protocol == "compound_v3"
+        assert intent.use_as_collateral is True
+
+    def test_tick1_supply_success_advances_state(self):
+        strat = _make_strategy()
+        strat._state = "supplying"
+
+        intent = MagicMock()
+        intent.intent_type.value = "SUPPLY"
+        intent.amount = Decimal("0.05")
+
+        strat.on_intent_executed(intent, True, None)
+        assert strat._state == "supplied"
+        assert strat._supplied_amount == Decimal("0.05")
+
+    def test_tick2_emits_borrow(self):
+        strat = _make_strategy()
+        strat._state = "supplied"
         market = _mock_market()
         intent = strat.decide(market)
         assert intent is not None
         assert intent.intent_type.value == "BORROW"
         assert intent.protocol == "compound_v3"
+        # Collateral supplied by the standalone SUPPLY intent (VIB-3586)
+        assert intent.collateral_amount == Decimal("0")
 
-    def test_tick1_borrow_success_advances_state(self):
+    def test_tick2_borrow_success_advances_state(self):
         strat = _make_strategy()
         strat._state = "borrowing"
+        strat._supplied_amount = Decimal("0.05")  # Set by prior SUPPLY
 
         intent = MagicMock()
         intent.intent_type.value = "BORROW"
@@ -176,7 +203,7 @@ class TestMultiTickLifecycle:
         assert strat._borrowed_amount == Decimal("45.00")
         assert strat._supplied_amount == Decimal("0.05")
 
-    def test_tick2_emits_lp_open(self):
+    def test_tick3_emits_lp_open(self):
         strat = _make_strategy()
         strat._state = "borrowed"
         strat._borrowed_amount = Decimal("45.00")
@@ -213,31 +240,50 @@ class TestMultiTickLifecycle:
         assert intent.intent_type.value == "HOLD"
 
     def test_full_lifecycle_across_ticks(self):
-        """Simulate the complete 3-tick lifecycle with state persistence."""
+        """Simulate the complete 4-tick lifecycle with state persistence."""
         strat = _make_strategy()
         market = _mock_market()
 
-        # Tick 1: BORROW
-        intent1 = strat.decide(market)
+        # Tick 1: SUPPLY (standalone collateral leg, VIB-3586)
+        intent0 = strat.decide(market)
+        assert intent0.intent_type.value == "SUPPLY"
+
+        # Simulate successful SUPPLY execution
+        supply_intent = MagicMock()
+        supply_intent.intent_type.value = "SUPPLY"
+        supply_intent.amount = Decimal("0.05")
+        strat.on_intent_executed(supply_intent, True, None)
+
+        # Persist + restore between SUPPLY and BORROW ticks
+        supplied_state = strat.get_persistent_state()
+        strat_b = _make_strategy()
+        strat_b.load_persistent_state(supplied_state)
+        assert strat_b._state == "supplied"
+        assert strat_b._supplied_amount == Decimal("0.05")
+
+        # Tick 2: BORROW
+        intent1 = strat_b.decide(market)
         assert intent1.intent_type.value == "BORROW"
+        assert intent1.collateral_amount == Decimal("0")
 
         # Simulate successful BORROW execution
         borrow_intent = MagicMock()
         borrow_intent.intent_type.value = "BORROW"
         borrow_intent.borrow_amount = Decimal("45.00")
-        strat.on_intent_executed(borrow_intent, True, None)
+        strat_b.on_intent_executed(borrow_intent, True, None)
 
         # Save and restore state (simulates between-tick persistence)
-        saved_state = strat.get_persistent_state()
+        saved_state = strat_b.get_persistent_state()
         assert "previous_stable_state" in saved_state
 
         strat2 = _make_strategy()
         strat2.load_persistent_state(saved_state)
         assert strat2._state == "borrowed"
         assert strat2._borrowed_amount == Decimal("45.00")
+        assert strat2._supplied_amount == Decimal("0.05")
         assert strat2._previous_stable_state == saved_state["previous_stable_state"]
 
-        # Tick 2: LP_OPEN
+        # Tick 3: LP_OPEN
         intent2 = strat2.decide(market)
         assert intent2.intent_type.value == "LP_OPEN"
 
@@ -255,7 +301,7 @@ class TestMultiTickLifecycle:
         assert strat3._state == "complete"
         assert strat3._lp_position_active is True
 
-        # Tick 3: HOLD
+        # Tick 4: HOLD
         intent3 = strat3.decide(market)
         assert intent3.intent_type.value == "HOLD"
 
@@ -268,9 +314,21 @@ class TestMultiTickLifecycle:
 class TestCrossProtocolStateTracking:
     """Test that the strategy tracks positions across both protocols."""
 
+    def test_supply_updates_compound_collateral(self):
+        strat = _make_strategy()
+        strat._state = "supplying"
+        intent = MagicMock()
+        intent.intent_type.value = "SUPPLY"
+        intent.amount = Decimal("0.05")
+        strat.on_intent_executed(intent, True, None)
+
+        assert strat._state == "supplied"
+        assert strat._supplied_amount == strat.collateral_amount
+
     def test_borrow_updates_compound_state(self):
         strat = _make_strategy()
         strat._state = "borrowing"
+        strat._supplied_amount = strat.collateral_amount  # Set by prior SUPPLY
         intent = MagicMock()
         intent.intent_type.value = "BORROW"
         intent.borrow_amount = Decimal("45.00")

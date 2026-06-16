@@ -110,6 +110,7 @@ from .tick_utils import (
 # boot.
 from .vocabulary import (
     BorrowIntent,
+    BundledCollateralBorrowError,
     ChainedAmount,
     CollectFeesIntent,
     DecideResult,
@@ -159,6 +160,7 @@ __all__ = [
     "InvalidSequenceError",
     "InvalidAmountError",
     "InvalidCollateralForMarketError",
+    "BundledCollateralBorrowError",
     "LpOpenZeroLiquidityError",
     "InvalidProtocolParameterError",
     "ProtocolRequiredError",

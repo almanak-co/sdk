@@ -15,6 +15,7 @@ from almanak.framework.intents.vocabulary import (
     HoldIntent,
     IntentType,
     RepayIntent,
+    SupplyIntent,
     SwapIntent,
     WithdrawIntent,
 )
@@ -76,12 +77,24 @@ def _make_market(collateral_price=2000, borrow_price=1):
 
 
 class TestStateMachineTransitions:
-    def test_idle_produces_borrow_intent(self, strategy):
+    def test_idle_produces_supply_intent(self, strategy):
+        market = _make_market()
+        intent = strategy.decide(market)
+
+        assert isinstance(intent, SupplyIntent)
+        assert intent.intent_type == IntentType.SUPPLY
+        assert intent.use_as_collateral is True
+        assert strategy._loop_state == "supplying"
+
+    def test_supplied_produces_borrow_intent(self, strategy):
+        strategy._loop_state = "supplied"
         market = _make_market()
         intent = strategy.decide(market)
 
         assert isinstance(intent, BorrowIntent)
         assert intent.intent_type == IntentType.BORROW
+        # Collateral is supplied by the standalone SUPPLY intent (VIB-3586)
+        assert intent.collateral_amount == Decimal("0")
         assert strategy._loop_state == "borrowing"
 
     def test_borrowed_produces_swap_intent(self, strategy):
@@ -130,18 +143,32 @@ class TestStateMachineTransitions:
 
 
 class TestIntentParameters:
+    def test_supply_intent_uses_correct_market_id(self, strategy):
+        market = _make_market()
+        intent = strategy.decide(market)
+
+        assert isinstance(intent, SupplyIntent)
+        assert intent.market_id == "0x13c42741a359ac4a8aa8287d2be109dcf28344484f91185f9a79bd5a805a55ae"
+        assert intent.token == "wstETH"
+        assert intent.amount == Decimal("0.1")
+        assert intent.use_as_collateral is True
+        assert intent.protocol == "morpho_blue"
+
     def test_borrow_intent_uses_correct_market_id(self, strategy):
+        strategy._loop_state = "supplied"
         market = _make_market()
         intent = strategy.decide(market)
 
         assert isinstance(intent, BorrowIntent)
         assert intent.market_id == "0x13c42741a359ac4a8aa8287d2be109dcf28344484f91185f9a79bd5a805a55ae"
         assert intent.collateral_token == "wstETH"
+        assert intent.collateral_amount == Decimal("0")  # Supplied separately (VIB-3586)
         assert intent.borrow_token == "USDC"
         assert intent.protocol == "morpho_blue"
 
     def test_borrow_amount_respects_ltv_target(self, strategy):
         """With 0.1 wstETH at $2000, LTV 30% => borrow 0.1 * 2000 * 0.3 / 1.0 = $60 USDC."""
+        strategy._loop_state = "supplied"
         market = _make_market(collateral_price=2000.0, borrow_price=1.0)
         intent = strategy.decide(market)
 
@@ -181,8 +208,20 @@ class TestIntentParameters:
 
 
 class TestOnIntentExecuted:
+    def test_successful_supply_advances_to_supplied(self, strategy):
+        strategy._loop_state = "supplying"
+        supply_intent = MagicMock()
+        supply_intent.intent_type.value = "SUPPLY"
+        supply_intent.amount = Decimal("0.1")
+
+        strategy.on_intent_executed(supply_intent, success=True, result=MagicMock())
+
+        assert strategy._loop_state == "supplied"
+        assert strategy._collateral_supplied == Decimal("0.1")
+
     def test_successful_borrow_advances_to_borrowed(self, strategy):
         strategy._loop_state = "borrowing"
+        strategy._collateral_supplied = Decimal("0.1")  # Set by prior SUPPLY
         borrow_intent = MagicMock()
         borrow_intent.intent_type.value = "BORROW"
         borrow_intent.borrow_amount = Decimal("60")

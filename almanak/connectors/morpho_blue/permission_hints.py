@@ -207,8 +207,11 @@ def build_discovery_vectors(
     if intent_type == "BORROW":
         loan_token = _loan_token(chain, ctx.usdc)
         collateral_token = _collateral_token(chain, ctx.weth)
+        # Synthetic bundled-collateral borrow for permission discovery only:
+        # never executed, never accounted, so it bypasses the bundled-collateral
+        # guard via for_permission_discovery (see BorrowIntent.validate_borrow_intent).
         return [
-            BorrowIntent(
+            BorrowIntent.for_permission_discovery(
                 protocol=protocol,
                 collateral_token=collateral_token,
                 collateral_amount=Decimal("1"),

@@ -45,11 +45,6 @@ from typing import Any
 import pytest
 from web3 import Web3
 
-from almanak.framework.accounting.lending_accounting import (
-    capture_lending_post_state,
-    capture_lending_pre_state,
-    lending_state_to_dict,
-)
 from almanak.connectors.morpho_blue.adapter import MORPHO_MARKETS
 from almanak.connectors.morpho_blue.receipt_parser import (
     MorphoBlueEvent,
@@ -57,6 +52,11 @@ from almanak.connectors.morpho_blue.receipt_parser import (
     MorphoBlueReceiptParser,
 )
 from almanak.connectors.morpho_blue.sdk import MorphoBlueSDK
+from almanak.framework.accounting.lending_accounting import (
+    capture_lending_post_state,
+    capture_lending_pre_state,
+    lending_state_to_dict,
+)
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionOrchestrator,
@@ -449,27 +449,56 @@ async def _setup_borrow(
     collateral_amount: Decimal,
     borrow_amount: Decimal,
 ) -> None:
-    """Helper: supply wstETH collateral and borrow WETH. Asserts success."""
-    intent = BorrowIntent(
-        protocol="morpho_blue",
-        collateral_token="wstETH",
-        collateral_amount=collateral_amount,
-        borrow_token="WETH",
-        borrow_amount=borrow_amount,
-        market_id=MORPHO_MARKET_ID,
-        chain=CHAIN_NAME,
-    )
+    """Helper: supply wstETH collateral then borrow WETH. Asserts success.
+
+    Production-faithful two-intent shape (PR #2827): a bundled
+    ``BorrowIntent(collateral_amount>0)`` is rejected for SEPARABLE lending
+    protocols (morpho_blue is guarded — only ``fluid`` opts out via
+    ``supports_bundled_collateral_borrow``). The user-facing flow is a
+    standalone ``SUPPLY(use_as_collateral=True)`` followed by a standalone
+    ``BORROW(collateral_amount=0)``, so the setup mirrors exactly that.
+    """
     compiler = IntentCompiler(
         chain=CHAIN_NAME,
         wallet_address=funded_wallet,
         price_oracle=price_oracle,
         rpc_url=anvil_rpc_url,
     )
-    result = compiler.compile(intent)
-    assert result.status.value == "SUCCESS", f"Borrow setup compile failed: {result.error}"
-    assert result.action_bundle is not None, "Borrow setup missing action_bundle"
-    exec_result = await orchestrator.execute(result.action_bundle, execution_context)
-    assert exec_result.success, f"Borrow setup execution failed: {exec_result.error}"
+
+    # 1) Supply wstETH as collateral (standalone SUPPLY → supplyCollateral).
+    supply_intent = SupplyIntent(
+        protocol="morpho_blue",
+        token="wstETH",
+        amount=collateral_amount,
+        use_as_collateral=True,
+        market_id=MORPHO_MARKET_ID,
+        chain=CHAIN_NAME,
+    )
+    supply_result = compiler.compile(supply_intent)
+    assert supply_result.status.value == "SUCCESS", (
+        f"Borrow setup collateral-supply compile failed: {supply_result.error}"
+    )
+    assert supply_result.action_bundle is not None, "Borrow setup missing supply action_bundle"
+    supply_exec = await orchestrator.execute(supply_result.action_bundle, execution_context)
+    assert supply_exec.success, f"Borrow setup collateral-supply execution failed: {supply_exec.error}"
+
+    # 2) Borrow WETH against the now-existing collateral (standalone BORROW).
+    borrow_intent = BorrowIntent(
+        protocol="morpho_blue",
+        collateral_token="wstETH",
+        collateral_amount=Decimal("0"),
+        borrow_token="WETH",
+        borrow_amount=borrow_amount,
+        market_id=MORPHO_MARKET_ID,
+        chain=CHAIN_NAME,
+    )
+    borrow_result = compiler.compile(borrow_intent)
+    assert borrow_result.status.value == "SUCCESS", (
+        f"Borrow setup compile failed: {borrow_result.error}"
+    )
+    assert borrow_result.action_bundle is not None, "Borrow setup missing action_bundle"
+    borrow_exec = await orchestrator.execute(borrow_result.action_bundle, execution_context)
+    assert borrow_exec.success, f"Borrow setup execution failed: {borrow_exec.error}"
 
 
 @pytest.mark.monad
@@ -519,22 +548,62 @@ class TestMorphoBlueBorrowIntent:
             "Funded wallet lacks wstETH collateral on Monad."
         )
 
-        intent = BorrowIntent(
-            protocol="morpho_blue",
-            collateral_token="wstETH",
-            collateral_amount=collateral_amount,
-            borrow_token="WETH",
-            borrow_amount=borrow_amount,
-            market_id=MORPHO_MARKET_ID,
-            chain=CHAIN_NAME,
-        )
+        expected_collateral_wei = int(collateral_amount * Decimal(10**wsteth_decimals))
+        expected_borrow_wei = int(borrow_amount * Decimal(10**weth_decimals))
+
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
             wallet_address=funded_wallet,
             price_oracle=price_oracle,
             rpc_url=anvil_rpc_url,
         )
-        compilation_result = compiler.compile(intent)
+
+        # Production-faithful two-intent shape (PR #2827): morpho_blue is a
+        # SEPARABLE lending protocol, so a bundled BORROW(collateral_amount>0)
+        # is rejected at validation. Supply collateral standalone, then borrow
+        # standalone (collateral_amount=0). The SUPPLY_COLLATERAL event + the
+        # wstETH balance decrease belong to the SUPPLY execution; the BORROW
+        # event + the WETH balance increase belong to the BORROW execution.
+
+        # ── Standalone SUPPLY (collateral) ───────────────────────────────────
+        supply_intent = SupplyIntent(
+            protocol="morpho_blue",
+            token="wstETH",
+            amount=collateral_amount,
+            use_as_collateral=True,
+            market_id=MORPHO_MARKET_ID,
+            chain=CHAIN_NAME,
+        )
+        supply_compilation = compiler.compile(supply_intent)
+        assert supply_compilation.status.value == "SUCCESS", (
+            f"Collateral-supply compilation failed: {supply_compilation.error}"
+        )
+        assert supply_compilation.action_bundle is not None
+
+        supply_execution = await orchestrator.execute(
+            supply_compilation.action_bundle, execution_context
+        )
+        assert supply_execution.success, f"Collateral-supply execution failed: {supply_execution.error}"
+
+        supply_events = _collect_morpho_events(supply_execution)
+        supply_collateral_event = _first_event(supply_events, MorphoBlueEventType.SUPPLY_COLLATERAL)
+        assert supply_collateral_event is not None
+        assert _assets_wei(supply_collateral_event) == expected_collateral_wei
+
+        wsteth_after = get_token_balance(web3, wsteth_address, funded_wallet)
+        assert wsteth_before - wsteth_after == expected_collateral_wei
+
+        # ── Standalone BORROW (against the now-existing collateral) ───────────
+        borrow_intent = BorrowIntent(
+            protocol="morpho_blue",
+            collateral_token="wstETH",
+            collateral_amount=Decimal("0"),
+            borrow_token="WETH",
+            borrow_amount=borrow_amount,
+            market_id=MORPHO_MARKET_ID,
+            chain=CHAIN_NAME,
+        )
+        compilation_result = compiler.compile(borrow_intent)
         assert compilation_result.status.value == "SUCCESS", (
             f"Compilation failed: {compilation_result.error}"
         )
@@ -545,20 +614,12 @@ class TestMorphoBlueBorrowIntent:
         )
         assert execution_result.success, f"Execution failed: {execution_result.error}"
 
-        events = _collect_morpho_events(execution_result)
-        supply_collateral_event = _first_event(events, MorphoBlueEventType.SUPPLY_COLLATERAL)
-        borrow_event = _first_event(events, MorphoBlueEventType.BORROW)
-        assert supply_collateral_event is not None
+        borrow_events = _collect_morpho_events(execution_result)
+        borrow_event = _first_event(borrow_events, MorphoBlueEventType.BORROW)
         assert borrow_event is not None
-
-        expected_collateral_wei = int(collateral_amount * Decimal(10**wsteth_decimals))
-        expected_borrow_wei = int(borrow_amount * Decimal(10**weth_decimals))
-        assert _assets_wei(supply_collateral_event) == expected_collateral_wei
         assert _assets_wei(borrow_event) == expected_borrow_wei
 
-        wsteth_after = get_token_balance(web3, wsteth_address, funded_wallet)
         weth_after = get_token_balance(web3, weth_address, funded_wallet)
-        assert wsteth_before - wsteth_after == expected_collateral_wei
         assert weth_after - weth_before == expected_borrow_wei
 
 

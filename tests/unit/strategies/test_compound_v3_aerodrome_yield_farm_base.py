@@ -103,8 +103,22 @@ class TestStateMachine:
         strategy = _create_strategy()
         assert strategy._state == "idle"
 
-    def test_idle_emits_borrow(self):
+    def test_idle_emits_supply(self):
         strategy = _create_strategy()
+        market = _mock_market()
+        intent = strategy.decide(market)
+        assert intent is not None
+        assert intent.intent_type == IntentType.SUPPLY
+        assert intent.protocol == "compound_v3"
+        assert intent.token == "WETH"
+        assert intent.amount == Decimal("0.05")
+        assert intent.use_as_collateral is True
+        assert strategy._state == "supplying"
+
+    def test_supplied_emits_borrow(self):
+        strategy = _create_strategy()
+        strategy._state = "supplied"
+        strategy._supplied_amount = Decimal("0.05")
         market = _mock_market()
         intent = strategy.decide(market)
         assert intent is not None
@@ -113,19 +127,26 @@ class TestStateMachine:
 
     def test_borrow_uses_compound_v3_protocol(self):
         strategy = _create_strategy()
+        strategy._state = "supplied"
+        strategy._supplied_amount = Decimal("0.05")
         market = _mock_market()
         intent = strategy.decide(market)
         assert intent.protocol == "compound_v3"
 
-    def test_borrow_includes_collateral(self):
+    def test_borrow_collateral_already_supplied(self):
         strategy = _create_strategy()
+        strategy._state = "supplied"
+        strategy._supplied_amount = Decimal("0.05")
         market = _mock_market()
         intent = strategy.decide(market)
         assert intent.collateral_token == "WETH"
-        assert intent.collateral_amount == Decimal("0.05")
+        # Collateral supplied by the standalone SUPPLY intent (VIB-3586)
+        assert intent.collateral_amount == Decimal("0")
 
     def test_borrow_amount_is_30pct_ltv(self):
         strategy = _create_strategy()
+        strategy._state = "supplied"
+        strategy._supplied_amount = Decimal("0.05")
         market = _mock_market(weth_price=Decimal("3000"))
         intent = strategy.decide(market)
         # 0.05 WETH * $3000 = $150 collateral value
@@ -167,13 +188,23 @@ class TestStateMachine:
         assert intent is not None
         assert intent.intent_type == IntentType.HOLD
 
-    def test_stuck_borrowing_reverts_to_idle(self):
+    def test_stuck_supplying_reverts_to_idle(self):
         strategy = _create_strategy()
-        strategy._state = "borrowing"
+        strategy._state = "supplying"
         strategy._previous_stable_state = "idle"
         market = _mock_market()
         intent = strategy.decide(market)
-        # Should revert to idle, then emit borrow
+        # Should revert to idle, then emit supply
+        assert intent.intent_type == IntentType.SUPPLY
+
+    def test_stuck_borrowing_reverts_to_supplied(self):
+        strategy = _create_strategy()
+        strategy._state = "borrowing"
+        strategy._previous_stable_state = "supplied"
+        strategy._supplied_amount = Decimal("0.05")
+        market = _mock_market()
+        intent = strategy.decide(market)
+        # Should revert to supplied, then emit borrow
         assert intent.intent_type == IntentType.BORROW
 
     def test_stuck_opening_lp_reverts_to_borrowed(self):
@@ -188,6 +219,9 @@ class TestStateMachine:
 
     def test_zero_borrow_emits_hold(self):
         strategy = _create_strategy({"collateral_amount": "0.0000001"})
+        # Borrow amount is computed in the BORROW phase (SUPPLIED state).
+        strategy._state = "supplied"
+        strategy._supplied_amount = Decimal("0.0000001")
         market = _mock_market(weth_price=Decimal("1"))
         intent = strategy.decide(market)
         # Collateral value so small that borrow rounds to 0
@@ -202,9 +236,19 @@ class TestStateMachine:
 class TestCallbacks:
     """Test on_intent_executed callbacks."""
 
+    def test_supply_success_transitions_to_supplied(self):
+        strategy = _create_strategy()
+        strategy._state = "supplying"
+        intent = _mock_intent_with_type("SUPPLY", amount=Decimal("0.05"))
+        result = MagicMock()
+        strategy.on_intent_executed(intent, success=True, result=result)
+        assert strategy._state == "supplied"
+        assert strategy._supplied_amount == Decimal("0.05")
+
     def test_borrow_success_transitions_to_borrowed(self):
         strategy = _create_strategy()
         strategy._state = "borrowing"
+        strategy._supplied_amount = Decimal("0.05")
         intent = _mock_intent_with_type("BORROW", borrow_amount=Decimal("45.00"))
         result = MagicMock()
         strategy.on_intent_executed(intent, success=True, result=result)
@@ -470,7 +514,10 @@ class TestPriceErrors:
     """Test behavior when price data is unavailable."""
 
     def test_price_error_emits_hold(self):
+        # Price is read in the BORROW phase (SUPPLIED state), not SUPPLY.
         strategy = _create_strategy()
+        strategy._state = "supplied"
+        strategy._supplied_amount = Decimal("0.05")
         market = MagicMock()
         market.price = MagicMock(side_effect=ValueError("No price"))
         intent = strategy.decide(market)
@@ -478,6 +525,8 @@ class TestPriceErrors:
 
     def test_exception_in_decide_emits_hold(self):
         strategy = _create_strategy()
+        strategy._state = "supplied"
+        strategy._supplied_amount = Decimal("0.05")
         market = MagicMock()
         market.price = MagicMock(side_effect=RuntimeError("Unexpected"))
         intent = strategy.decide(market)

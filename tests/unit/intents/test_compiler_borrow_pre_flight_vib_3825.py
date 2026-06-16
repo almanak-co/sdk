@@ -212,7 +212,10 @@ class TestBorrowFrozenReserveGate:
         borrow = MagicMock(
             symbol="USDC", address="0x" + "cd" * 20, decimals=6, is_native=False,
         )
-        intent = BorrowIntent(
+        # Bundled (nonzero-collateral) borrow fed to the COMPILER pre-flight.
+        # The model validator now rejects bundled collateral at construction, so
+        # bypass it via model_construct to keep exercising the compiler path.
+        intent = BorrowIntent.model_construct(
             protocol="aave_v3",
             collateral_token="WETH",
             collateral_amount=Decimal("1"),

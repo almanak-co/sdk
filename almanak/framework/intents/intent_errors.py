@@ -247,6 +247,72 @@ class LendingBorrowExceedsCapacityError(ValueError):
         super().__init__(f"{self.ERROR_PREFIX} for {asset_symbol} on {protocol} {chain}: {reason}")
 
 
+class BundledCollateralBorrowError(ValueError):
+    """Raised when a lending BORROW intent bundles a collateral supply (``collateral_amount > 0``).
+
+    A lending ``BorrowIntent`` that carries ``collateral_amount > 0`` (or the
+    chained ``collateral_amount="all"`` form, which resolves to a positive
+    supply at execution time) supplies **and** borrows on-chain in a single
+    action. But the accounting layer writes exactly **one** ``accounting_events``
+    row per intent (one ``transaction_ledger`` row → one event,
+    ``AccountingProcessor.drain_one``). The supply leg therefore collapses into
+    the single BORROW event: no standalone SUPPLY accounting event is written
+    and no ``supply:<position_key>`` FIFO cost-basis lot is recorded. A later
+    WITHDRAW that closes the position has no supply lot to match interest
+    against, so principal/interest attribution is wrong and deployed collateral
+    is under-reported.
+
+    This is the 1:1 ledger→event invariant (load-bearing across
+    accounting/reconciliation) being violated at the *event* level without
+    violating the *intent* count. Until a compiler-level decomposition exists
+    that emits the supply and borrow as two ledger rows, the production-safe
+    behaviour is to fail closed (loud reject) and steer callers to the
+    accounting-correct two-intent form.
+
+    See ``docs/internal/bundled-collateral-borrow-migration.md`` for the guard,
+    carve-outs, and migration tracker (and ``docs/internal/FollowUp-13June15.md``
+    §D1 / VIB-3586 ``9d982cadf`` for the original root cause).
+
+    Attributes:
+        protocol: The lending protocol the borrow targets (e.g. ``"aave_v3"``).
+        collateral_token: The collateral token the bundled borrow tried to supply.
+        collateral_amount: The bundled collateral amount that triggered the guard
+            (a positive ``Decimal`` or the literal ``"all"``).
+        borrow_token: The token the intent tried to borrow.
+
+    Strategies/callers can match on the stable error-message prefix
+    (``"Bundled collateralized borrow is not supported"``) returned in
+    ``CompilationResult.error``.
+    """
+
+    ERROR_PREFIX = "Bundled collateralized borrow is not supported"
+
+    def __init__(
+        self,
+        *,
+        protocol: str,
+        collateral_token: str,
+        collateral_amount: Any,
+        borrow_token: str,
+    ) -> None:
+        self.protocol = protocol
+        self.collateral_token = collateral_token
+        self.collateral_amount = collateral_amount
+        self.borrow_token = borrow_token
+        super().__init__(
+            f"{self.ERROR_PREFIX} for accounting-correct lending "
+            f"(protocol={protocol!r}, collateral_amount={collateral_amount!r}). "
+            f"A single bundled borrow supplies and borrows on-chain in one action, but accounting "
+            f"writes one event per intent — the SUPPLY accounting event and the supply cost-basis lot "
+            f"are dropped, corrupting principal/interest attribution. "
+            f"Emit Intent.supply(protocol={protocol!r}, token={collateral_token!r}, "
+            f"amount=<collateral_amount>, use_as_collateral=True) first, then "
+            f"Intent.borrow(protocol={protocol!r}, collateral_token={collateral_token!r}, "
+            f'collateral_amount=Decimal("0"), borrow_token={borrow_token!r}, borrow_amount=<amount>). '
+            f"(See docs/internal/bundled-collateral-borrow-migration.md.)"
+        )
+
+
 class InvalidCollateralForMarketError(ValueError):
     """Raised when a perp intent specifies a collateral that is invalid for the market.
 

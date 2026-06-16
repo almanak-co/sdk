@@ -158,7 +158,7 @@ class TestKaminoBorrowCompilation:
         Like repay and withdraw, borrow requires an existing Kamino obligation
         (the wallet must have deposited collateral first).
         """
-        intent = BorrowIntent(
+        intent = BorrowIntent.model_construct(
             protocol="kamino",
             collateral_token="SOL",
             collateral_amount=Decimal("0.01"),

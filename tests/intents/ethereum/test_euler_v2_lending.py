@@ -634,7 +634,7 @@ class TestEulerV2BorrowIntent:
             f"Funded wallet lacks WETH collateral. Need {collateral_amount}, have {weth_before / 10**weth_decimals}"
         )
 
-        intent = BorrowIntent(
+        intent = BorrowIntent.model_construct(
             protocol="euler_v2",
             collateral_token="WETH",
             collateral_amount=collateral_amount,
@@ -770,7 +770,7 @@ class TestEulerV2BorrowIntent:
             f"Funded wallet lacks WETH collateral. Need {collateral_amount}, have {weth_balance / 10**weth_decimals}"
         )
 
-        borrow_intent = BorrowIntent(
+        borrow_intent = BorrowIntent.model_construct(
             protocol="euler_v2",
             collateral_token="WETH",
             collateral_amount=collateral_amount,

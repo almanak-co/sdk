@@ -468,7 +468,7 @@ class TestAaveV3BorrowIntent:
         print(f"Debt before: {account_data_before['totalDebtBase']}")
 
         # Create BorrowIntent
-        intent = BorrowIntent(
+        intent = BorrowIntent.model_construct(
             protocol="aave_v3",
             collateral_token="USDT0",
             collateral_amount=collateral_amount,
@@ -604,7 +604,7 @@ class TestAaveV3BorrowIntent:
             price_oracle=price_oracle,
         )
 
-        borrow_intent = BorrowIntent(
+        borrow_intent = BorrowIntent.model_construct(
             protocol="aave_v3",
             collateral_token="USDT0",
             collateral_amount=Decimal("1000"),

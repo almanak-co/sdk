@@ -57,6 +57,7 @@ from .base import BaseIntent, assert_registry_handle_known  # noqa: E402
 # Exceptions (re-exported from intent_errors for backward compatibility)
 # =============================================================================
 from .intent_errors import (  # noqa: E402, F401
+    BundledCollateralBorrowError,
     InvalidAmountError,
     InvalidChainError,
     InvalidCollateralForMarketError,

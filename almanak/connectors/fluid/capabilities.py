@@ -22,6 +22,16 @@ _FLUID_VAULT: dict[str, Any] = {
     "supports_collateral_toggle": False,  # vault collateral is always collateral
     "requires_market_id": True,  # the (lowercased) vault address
     "operations": ["supply", "withdraw", "borrow", "repay"],
+    # Fluid vaults open atomically: a single ``operate()`` mints the NFT-CDP and
+    # supplies + borrows in one on-chain call, so a bundled
+    # ``Intent.borrow(collateral_amount>0)`` is the protocol's NATIVE action --
+    # not the accounting-incorrect anti-pattern the bundled-collateral guard
+    # rejects for SEPARABLE protocols (Aave/Compound/Morpho/Benqi/...). Opting in
+    # here exempts ``fluid_vault`` from that guard; the supply/borrow accounting
+    # split for the atomic operate() is owned by the Fluid receipt-parser /
+    # accounting path, not by intent-level decomposition. See
+    # ``lending_intents.BorrowIntent`` and ``docs/internal/bundled-collateral-borrow-migration.md``.
+    "supports_bundled_collateral_borrow": True,
 }
 
 PROTOCOL_CAPABILITIES: dict[str, dict[str, Any]] = {

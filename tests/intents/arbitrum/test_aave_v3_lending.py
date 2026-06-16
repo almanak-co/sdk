@@ -701,7 +701,7 @@ class TestAaveV3BorrowIntent:
         print(f"Debt before: {account_data_before['totalDebtBase']}")
 
         # Create BorrowIntent
-        intent = BorrowIntent(
+        intent = BorrowIntent.model_construct(
             protocol="aave_v3",
             collateral_token="wstETH",
             collateral_amount=collateral_amount,
@@ -874,7 +874,7 @@ class TestAaveV3BorrowIntent:
         )
 
         borrow_amount = Decimal("500")
-        borrow_intent = BorrowIntent(
+        borrow_intent = BorrowIntent.model_construct(
             protocol="aave_v3",
             collateral_token="wstETH",
             collateral_amount=Decimal("1"),
@@ -1085,7 +1085,7 @@ class TestAaveV3BorrowIntent:
 
         # On-chain borrow setup — intentionally NOT persisted through Layer 5,
         # so the FIFO basis pool has no matching BORROW lot.
-        borrow_intent = BorrowIntent(
+        borrow_intent = BorrowIntent.model_construct(
             protocol="aave_v3",
             collateral_token="wstETH",
             collateral_amount=Decimal("1"),

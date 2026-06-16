@@ -1,7 +1,7 @@
 """Tests for Compound V3 WETH market lifecycle strategy on Arbitrum.
 
 Validates:
-1. State machine transitions (idle -> borrow -> repay -> withdraw -> complete)
+1. State machine transitions (idle -> supply -> borrow -> repay -> withdraw -> complete)
 2. Intent generation with correct market/collateral params
 3. Failure recovery (revert to previous stable state)
 4. State persistence and restoration
@@ -69,7 +69,19 @@ def _mock_market(wsteth_price: str = "3500", weth_price: str = "3000") -> MagicM
 class TestCompoundV3WETHStateMachine:
     """Test the state machine lifecycle."""
 
-    def test_idle_emits_borrow_intent(self, strategy):
+    def test_idle_emits_supply_intent(self, strategy):
+        market = _mock_market()
+        intent = strategy.decide(market)
+        assert intent is not None
+        assert intent.intent_type.value == "SUPPLY"
+        assert intent.token == "wstETH"
+        assert intent.amount == Decimal("0.05")
+        assert intent.use_as_collateral is True
+        assert strategy._loop_state == "supplying"
+
+    def test_supplied_emits_borrow_intent(self, strategy):
+        strategy._loop_state = "supplied"
+        strategy._collateral_supplied = Decimal("0.05")
         market = _mock_market()
         intent = strategy.decide(market)
         assert intent is not None
@@ -99,13 +111,22 @@ class TestCompoundV3WETHStateMachine:
         assert intent.intent_type.value == "HOLD"
         assert "complete" in intent.reason.lower()
 
-    def test_stuck_in_borrowing_reverts(self, strategy):
-        strategy._loop_state = "borrowing"
+    def test_stuck_in_supplying_reverts(self, strategy):
+        strategy._loop_state = "supplying"
         strategy._previous_stable_state = "idle"
         market = _mock_market()
         intent = strategy.decide(market)
         assert intent.intent_type.value == "HOLD"
         assert strategy._loop_state == "idle"
+
+    def test_stuck_in_borrowing_reverts(self, strategy):
+        strategy._loop_state = "borrowing"
+        strategy._previous_stable_state = "supplied"
+        strategy._collateral_supplied = Decimal("0.05")
+        market = _mock_market()
+        intent = strategy.decide(market)
+        assert intent.intent_type.value == "HOLD"
+        assert strategy._loop_state == "supplied"
 
     def test_price_unavailable_returns_hold(self, strategy):
         market = MagicMock()
@@ -123,18 +144,33 @@ class TestCompoundV3WETHStateMachine:
 class TestCompoundV3WETHIntents:
     """Verify intent parameters."""
 
+    def test_supply_intent_uses_weth_market(self, strategy):
+        market = _mock_market()
+        intent = strategy.decide(market)
+        assert intent.intent_type.value == "SUPPLY"
+        assert intent.protocol == "compound_v3"
+        assert intent.market_id == "weth"
+        assert intent.token == "wstETH"
+        assert intent.use_as_collateral is True
+
     def test_borrow_intent_uses_weth_market(self, strategy):
+        strategy._loop_state = "supplied"
+        strategy._collateral_supplied = Decimal("0.05")
         market = _mock_market()
         intent = strategy.decide(market)
         assert intent.protocol == "compound_v3"
         assert intent.market_id == "weth"
         assert intent.collateral_token == "wstETH"
         assert intent.borrow_token == "WETH"
+        # Collateral supplied by the standalone SUPPLY intent (VIB-3586)
+        assert intent.collateral_amount == Decimal("0")
 
     def test_borrow_amount_respects_ltv(self, strategy):
         # wstETH=$3500, WETH=$3000, collateral=0.05
         # value = 0.05 * 3500 = 175
         # borrow = 175 * 0.3 / 3000 = 0.0175
+        strategy._loop_state = "supplied"
+        strategy._collateral_supplied = Decimal("0.05")
         market = _mock_market("3500", "3000")
         intent = strategy.decide(market)
         assert intent.borrow_amount == Decimal("0.017500")
@@ -166,8 +202,18 @@ class TestCompoundV3WETHIntents:
 class TestCompoundV3WETHLifecycle:
     """Test on_intent_executed callbacks."""
 
+    def test_supply_success_advances_state(self, strategy):
+        strategy._loop_state = "supplying"
+        intent = MagicMock()
+        intent.intent_type.value = "SUPPLY"
+        intent.amount = Decimal("0.05")
+        strategy.on_intent_executed(intent, success=True, result=None)
+        assert strategy._loop_state == "supplied"
+        assert strategy._collateral_supplied == Decimal("0.05")
+
     def test_borrow_success_advances_state(self, strategy):
         strategy._loop_state = "borrowing"
+        strategy._collateral_supplied = Decimal("0.05")
         intent = MagicMock()
         intent.intent_type.value = "BORROW"
         intent.borrow_amount = Decimal("0.015")

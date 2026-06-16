@@ -160,7 +160,7 @@ def _case_kwargs() -> list[tuple[type[BaseIntent], dict]]:
                                    registry_handle="d2_ensure")),
         (BorrowIntent, dict(protocol="aave_v3",
                             collateral_token="WETH",
-                            collateral_amount=Decimal("1"),
+                            collateral_amount=Decimal("0"),  # standalone borrow; bundled collateral rejected by guard
                             borrow_token="USDC",
                             borrow_amount=Decimal("1000"),
                             chain="arbitrum",
@@ -455,7 +455,7 @@ _D3_KW_BY_BASE: dict[type[BaseIntent], dict] = {
                        range_upper=Decimal("2200"),
                        protocol="uniswap_v3", chain="arbitrum"),
     BorrowIntent: dict(protocol="aave_v3", collateral_token="WETH",
-                       collateral_amount=Decimal("1"),
+                       collateral_amount=Decimal("0"),  # standalone borrow; bundled collateral rejected by guard
                        borrow_token="USDC",
                        borrow_amount=Decimal("1000"),
                        chain="arbitrum"),
@@ -785,7 +785,7 @@ _FACTORY_BUILDERS: dict[str, dict] = {
     "withdraw": dict(protocol="aave_v3", token="USDC",
                      amount=Decimal("100"), chain="arbitrum"),
     "borrow": dict(protocol="aave_v3", collateral_token="WETH",
-                   collateral_amount=Decimal("1"),
+                   collateral_amount=Decimal("0"),  # standalone borrow; bundled collateral rejected by guard
                    borrow_token="USDC",
                    borrow_amount=Decimal("1000"),
                    chain="arbitrum"),

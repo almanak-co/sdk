@@ -225,16 +225,36 @@ class CopyIntentBuilder:
         collateral_amount = payload.amount * scale
         borrow_amount = payload.amount * scale
 
-        intent = Intent.borrow(
+        # Accounting-correct two-intent form: supply the collateral, then borrow
+        # against it with collateral_amount=0. A single bundled
+        # Intent.borrow(collateral_amount>0) supplies and borrows on-chain in one
+        # action but accounting writes one event per intent -- it would drop the
+        # SUPPLY accounting event and the supply cost-basis lot. The framework
+        # rejects the bundled form (BundledCollateralBorrowError); emit the two
+        # legs as a sequence so each lands its own ledger row. When there is no
+        # collateral to supply (collateral_amount <= 0) emit the standalone
+        # borrow only.
+        borrow = Intent.borrow(
             protocol=signal.protocol,
             collateral_token=payload.collateral_token,
-            collateral_amount=collateral_amount,
+            collateral_amount=Decimal("0"),
             borrow_token=payload.borrow_token,
             borrow_amount=borrow_amount,
             market_id=payload.market_id,
             chain=signal.chain,
         )
-        return CopyIntentBuildResult(intent=intent)
+        if collateral_amount <= 0:
+            return CopyIntentBuildResult(intent=borrow)
+
+        supply = Intent.supply(
+            protocol=signal.protocol,
+            token=payload.collateral_token,
+            amount=collateral_amount,
+            use_as_collateral=True,
+            market_id=payload.market_id,
+            chain=signal.chain,
+        )
+        return CopyIntentBuildResult(intent=IntentSequence([supply, borrow]))
 
     def _build_repay(self, signal: CopySignal) -> CopyIntentBuildResult:
         payload = signal.action_payload if isinstance(signal.action_payload, LendingPayload) else None

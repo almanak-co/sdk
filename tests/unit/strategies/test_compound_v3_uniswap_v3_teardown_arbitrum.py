@@ -1,7 +1,7 @@
 """Tests for Compound V3 + Uniswap V3 teardown lifecycle on Arbitrum.
 
 Kitchen Loop iteration 142. Validates the full state machine:
-IDLE -> BORROW -> SWAP -> SWAP_BACK -> REPAY -> WITHDRAW -> COMPLETE
+IDLE -> SUPPLY -> BORROW -> SWAP -> SWAP_BACK -> REPAY -> WITHDRAW -> COMPLETE
 
 Also tests teardown, state persistence, error recovery, and intent fields.
 """
@@ -67,39 +67,69 @@ def _mock_market(
 # ===========================================================================
 
 
-class TestEntryBorrow:
-    """Phase 1: IDLE -> BORROW."""
+class TestEntrySupply:
+    """Phase 1: IDLE -> SUPPLY."""
 
-    def test_idle_produces_borrow_intent(self, strategy):
+    def test_idle_produces_supply_intent(self, strategy):
+        market = _mock_market()
+        intent = strategy.decide(market)
+        assert intent.intent_type.value == "SUPPLY"
+        assert intent.protocol == "compound_v3"
+        assert intent.token == "WETH"
+        assert intent.amount == Decimal("0.05")
+        assert intent.use_as_collateral is True
+        assert intent.market_id == "usdc"
+
+    def test_supply_transitions_to_supplying(self, strategy):
+        market = _mock_market()
+        strategy.decide(market)
+        assert strategy._state == "supplying"
+
+
+class TestEntryBorrow:
+    """Phase 2: SUPPLIED -> BORROW (collateral already supplied)."""
+
+    def test_supplied_produces_borrow_intent(self, strategy):
+        strategy._state = "supplied"
+        strategy._supplied_amount = Decimal("0.05")
         market = _mock_market()
         intent = strategy.decide(market)
         assert intent.intent_type.value == "BORROW"
         assert intent.protocol == "compound_v3"
         assert intent.collateral_token == "WETH"
         assert intent.borrow_token == "USDC"
+        # Collateral was supplied by the standalone SUPPLY intent (VIB-3586)
+        assert intent.collateral_amount == Decimal("0")
 
     def test_borrow_includes_market_id(self, strategy):
+        strategy._state = "supplied"
+        strategy._supplied_amount = Decimal("0.05")
         market = _mock_market()
         intent = strategy.decide(market)
         assert intent.market_id == "usdc"
 
     def test_borrow_amount_respects_ltv(self, strategy):
+        strategy._state = "supplied"
+        strategy._supplied_amount = Decimal("0.05")
         market = _mock_market(weth_price=2500.0)
         intent = strategy.decide(market)
         # 0.05 WETH * $2500 = $125, 30% LTV = $37.50 USDC / $1 = 37.50
         assert intent.borrow_amount == Decimal("37.50")
 
     def test_borrow_with_zero_price_holds(self, strategy):
+        strategy._state = "supplied"
         market = _mock_market(weth_price=0.0)
         intent = strategy.decide(market)
         assert intent.intent_type.value == "HOLD"
 
     def test_borrow_transitions_to_borrowing(self, strategy):
+        strategy._state = "supplied"
         market = _mock_market()
         strategy.decide(market)
         assert strategy._state == "borrowing"
 
     def test_borrow_price_unavailable_holds(self, strategy):
+        strategy._state = "supplied"
         market = MagicMock()
         market.price = MagicMock(side_effect=ValueError("no price"))
         intent = strategy.decide(market)
@@ -196,8 +226,18 @@ class TestComplete:
 
 
 class TestOnIntentExecuted:
+    def test_supply_success(self, strategy):
+        strategy._state = "supplying"
+        intent = MagicMock()
+        intent.intent_type.value = "SUPPLY"
+        intent.amount = Decimal("0.05")
+        strategy.on_intent_executed(intent, success=True, result=MagicMock())
+        assert strategy._state == "supplied"
+        assert strategy._supplied_amount == Decimal("0.05")
+
     def test_borrow_success(self, strategy):
         strategy._state = "borrowing"
+        strategy._supplied_amount = Decimal("0.05")
         intent = MagicMock()
         intent.intent_type.value = "BORROW"
         intent.borrow_amount = Decimal("37.50")
@@ -270,9 +310,17 @@ class TestOnIntentExecuted:
 
 
 class TestTransitionalRecovery:
+    def test_stuck_supplying_reverts(self, strategy):
+        strategy._state = "supplying"
+        strategy._previous_stable = "idle"
+        market = _mock_market()
+        intent = strategy.decide(market)
+        assert intent.intent_type.value == "SUPPLY"
+
     def test_stuck_borrowing_reverts(self, strategy):
         strategy._state = "borrowing"
-        strategy._previous_stable = "idle"
+        strategy._previous_stable = "supplied"
+        strategy._supplied_amount = Decimal("0.05")
         market = _mock_market()
         intent = strategy.decide(market)
         assert intent.intent_type.value == "BORROW"
@@ -466,17 +514,29 @@ class TestFullLifecycle:
     def test_full_lifecycle(self, strategy):
         market = _mock_market(weth_price=2500.0)
 
-        # Phase 1: IDLE -> BORROW
+        # Phase 1: IDLE -> SUPPLY
+        intent = strategy.decide(market)
+        assert intent.intent_type.value == "SUPPLY"
+        assert intent.protocol == "compound_v3"
+        assert intent.token == "WETH"
+        mock_intent = MagicMock()
+        mock_intent.intent_type.value = "SUPPLY"
+        mock_intent.amount = Decimal("0.05")
+        strategy.on_intent_executed(mock_intent, True, MagicMock())
+        assert strategy._state == "supplied"
+
+        # Phase 2: SUPPLIED -> BORROW
         intent = strategy.decide(market)
         assert intent.intent_type.value == "BORROW"
         assert intent.protocol == "compound_v3"
+        assert intent.collateral_amount == Decimal("0")
         mock_intent = MagicMock()
         mock_intent.intent_type.value = "BORROW"
         mock_intent.borrow_amount = Decimal("37.50")
         strategy.on_intent_executed(mock_intent, True, MagicMock())
         assert strategy._state == "borrowed"
 
-        # Phase 2: BORROWED -> SWAP
+        # Phase 3: BORROWED -> SWAP
         intent = strategy.decide(market)
         assert intent.intent_type.value == "SWAP"
         assert intent.protocol == "uniswap_v3"

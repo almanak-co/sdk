@@ -7,17 +7,16 @@ teardown, and state persistence without requiring a gateway or Anvil.
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from strategies.incubating.aave_enso_carry_polygon.strategy import (
     BORROWED,
     BORROWING,
     IDLE,
+    SUPPLIED,
+    SUPPLYING,
     SWAPPED,
     SWAPPING,
     AaveEnsoCarryPolygonStrategy,
 )
-
 
 # =============================================================================
 # Fixtures
@@ -197,15 +196,32 @@ class TestStateMachine:
         assert strategy._state == SWAPPING
         assert strategy._previous_stable_state == BORROWED
 
-    def test_stuck_borrowing_reverts_to_idle(self):
+    def test_stuck_borrowing_reverts_to_previous_stable(self):
+        # A BORROWING leg reached from the SUPPLIED phase reverts to SUPPLIED and
+        # re-emits the BORROW+SWAP sequence (never re-supplies collateral).
         strategy = _make_strategy()
         strategy._state = BORROWING
+        strategy._previous_stable_state = SUPPLIED
+        strategy._supplied_amount = Decimal("0.5")
+        market = _make_market()
+        intent = strategy.decide(market)
+        # Should revert to SUPPLIED and then return an IntentSequence (BORROW + SWAP)
+        assert intent is not None
+        assert hasattr(intent, "intents")  # IntentSequence
+        assert len(intent.intents) == 2
+        assert intent.intents[0].intent_type.value == "BORROW"
+        assert intent.intents[1].intent_type.value == "SWAP"
+
+    def test_stuck_supplying_reverts_to_idle_resupplies(self):
+        # A SUPPLYING leg that never lands reverts to IDLE and re-emits SUPPLY.
+        strategy = _make_strategy()
+        strategy._state = SUPPLYING
         strategy._previous_stable_state = IDLE
         market = _make_market()
         intent = strategy.decide(market)
-        # Should revert to IDLE and then return an IntentSequence (BORROW + SWAP)
         assert intent is not None
-        assert hasattr(intent, "intents")  # IntentSequence
+        assert intent.intent_type.value == "SUPPLY"
+        assert strategy._state == SUPPLYING
 
     def test_stuck_swapping_reverts_to_borrowed_then_retries_swap(self):
         strategy = _make_strategy()
@@ -226,32 +242,82 @@ class TestStateMachine:
 # =============================================================================
 
 
-class TestDecideBorrowAndSwapSequence:
-    """Test the bundled BORROW + SWAP IntentSequence from IDLE state."""
+def _drive_to_supplied(strategy, market) -> None:
+    """Run the IDLE SUPPLY phase and simulate a successful SUPPLY callback.
 
-    def test_idle_returns_intent_sequence_with_override(self):
+    Leaves the strategy in the SUPPLIED stable state with collateral tracked,
+    ready for the BORROW+SWAP sequence on the next ``decide()``.
+    """
+    supply_intent = strategy.decide(market)
+    assert supply_intent.intent_type.value == "SUPPLY"
+    assert strategy._state == SUPPLYING
+    strategy.on_intent_executed(
+        _mock_intent("SUPPLY", amount=strategy.collateral_amount), True, _mock_result()
+    )
+    assert strategy._state == SUPPLIED
+
+
+class TestDecideSupplyPhase:
+    """Test the standalone SUPPLY phase emitted from IDLE state."""
+
+    def test_idle_returns_single_supply_intent(self):
         strategy = _make_strategy(borrow_amount_override="300")
         market = _make_market()
         intent = strategy.decide(market)
         assert intent is not None
-        # IntentSequence has intent_type SEQUENCE
+        # IDLE now emits a single SUPPLY intent, not a bundled sequence.
+        assert not hasattr(intent, "intents")
+        assert intent.intent_type.value == "SUPPLY"
+        assert intent.protocol == "aave_v3"
+        assert intent.token == "WETH"
+        assert intent.amount == Decimal("0.5")
+        assert intent.use_as_collateral is True
+        assert strategy._state == SUPPLYING
+
+    def test_idle_holds_when_borrow_amount_unavailable(self):
+        # Gate: never supply collateral we cannot borrow against.
+        from almanak.framework.market import PriceUnavailableError
+
+        strategy = _make_strategy(borrow_amount_override="")
+        market = MagicMock()
+        market.price.side_effect = PriceUnavailableError("WETH", "No oracle")
+        intent = strategy.decide(market)
+        assert intent.intent_type.value == "HOLD"
+        assert "unavailable" in intent.reason.lower()
+        # Stays in IDLE — no collateral supplied.
+        assert strategy._state == IDLE
+
+
+class TestDecideBorrowAndSwapSequence:
+    """Test the BORROW + SWAP IntentSequence emitted from the SUPPLIED state."""
+
+    def test_supplied_returns_borrow_swap_sequence_with_override(self):
+        strategy = _make_strategy(borrow_amount_override="300")
+        market = _make_market()
+        _drive_to_supplied(strategy, market)
+        intent = strategy.decide(market)
+        assert intent is not None
         assert hasattr(intent, "intents")  # IntentSequence
         assert strategy._state == BORROWING
 
     def test_sequence_contains_borrow_and_swap(self):
         strategy = _make_strategy(borrow_amount_override="300")
         market = _make_market()
+        _drive_to_supplied(strategy, market)
         intent = strategy.decide(market)
-        # IntentSequence has .intents list
+        # Collateral was supplied in the SUPPLY phase; sequence is now BORROW, SWAP.
         assert len(intent.intents) == 2
         borrow = intent.intents[0]
         swap = intent.intents[1]
+
         assert borrow.intent_type.value == "BORROW"
         assert borrow.protocol == "aave_v3"
         assert borrow.collateral_token == "WETH"
-        assert borrow.collateral_amount == Decimal("0.5")
+        # Collateral already supplied by the standalone SUPPLY phase (VIB-3586)
+        assert borrow.collateral_amount == Decimal("0")
         assert borrow.borrow_token == "USDC"
         assert borrow.borrow_amount == Decimal("300")
+
         assert swap.intent_type.value == "SWAP"
         assert swap.from_token == "USDC"
         assert swap.to_token == "WETH"
@@ -261,25 +327,17 @@ class TestDecideBorrowAndSwapSequence:
     def test_computed_borrow_amount_from_market(self):
         strategy = _make_strategy(borrow_amount_override="")
         market = _make_market(weth_price=Decimal("2400"), usdc_price=Decimal("1"))
+        _drive_to_supplied(strategy, market)
         intent = strategy.decide(market)
         assert hasattr(intent, "intents")  # IntentSequence
         borrow = intent.intents[0]
         # 0.5 WETH * 2400 = 1200 USD * 0.5 LTV = 600 / 1 = 600 USDC
         assert borrow.borrow_amount == Decimal("600.00")
 
-    def test_price_unavailable_returns_hold(self):
-        from almanak.framework.market import PriceUnavailableError
-
-        strategy = _make_strategy(borrow_amount_override="")
-        market = MagicMock()
-        market.price.side_effect = PriceUnavailableError("WETH", "No oracle")
-        intent = strategy.decide(market)
-        assert intent.intent_type.value == "HOLD"
-        assert "unavailable" in intent.reason.lower()
-
     def test_borrow_chain_is_polygon(self):
         strategy = _make_strategy()
         market = _make_market()
+        _drive_to_supplied(strategy, market)
         intent = strategy.decide(market)
         borrow = intent.intents[0]
         assert borrow.chain == "polygon"
@@ -287,6 +345,7 @@ class TestDecideBorrowAndSwapSequence:
     def test_swap_slippage_from_config(self):
         strategy = _make_strategy(borrow_amount_override="300", max_slippage_pct="5.0")
         market = _make_market()
+        _drive_to_supplied(strategy, market)
         intent = strategy.decide(market)
         swap = intent.intents[1]
         assert swap.max_slippage == Decimal("0.05")
@@ -320,10 +379,24 @@ class TestDecidePhase3Hold:
 class TestOnIntentExecuted:
     """Test the on_intent_executed callback for all intent types."""
 
+    def test_supply_success_advances_to_supplied(self):
+        # SUPPLY success advances the machine to the SUPPLIED stable state AND
+        # marks SUPPLIED as the previous-stable revert target (the crux of the
+        # partial-failure fix).
+        strategy = _make_strategy()
+        strategy._state = SUPPLYING
+        strategy._previous_stable_state = IDLE
+        intent = _mock_intent("SUPPLY", amount=Decimal("0.5"))
+        strategy.on_intent_executed(intent, True, _mock_result())
+        assert strategy._state == SUPPLIED
+        assert strategy._previous_stable_state == SUPPLIED
+        assert strategy._supplied_amount == Decimal("0.5")
+
     def test_borrow_success_transitions_to_borrowed(self):
         strategy = _make_strategy()
         strategy._state = BORROWING
-        strategy._previous_stable_state = IDLE
+        strategy._previous_stable_state = SUPPLIED
+        strategy._supplied_amount = Decimal("0.5")
         intent = _mock_intent("BORROW", borrow_amount=Decimal("300"))
         result = _mock_result(success=True)
         strategy.on_intent_executed(intent, True, result)
@@ -378,14 +451,17 @@ class TestOnIntentExecuted:
         # After full teardown, state resets to IDLE
         assert strategy._state == IDLE
 
-    def test_borrow_failure_reverts_state(self):
+    def test_borrow_failure_reverts_to_supplied_not_idle(self):
+        # After a successful SUPPLY, a BORROW failure must revert to SUPPLIED so
+        # the next decide() re-emits only BORROW+SWAP — NEVER re-supplies.
         strategy = _make_strategy()
         strategy._state = BORROWING
-        strategy._previous_stable_state = IDLE
+        strategy._previous_stable_state = SUPPLIED
+        strategy._supplied_amount = Decimal("0.5")
         intent = _mock_intent("BORROW")
         result = _mock_result(success=False)
         strategy.on_intent_executed(intent, False, result)
-        assert strategy._state == IDLE
+        assert strategy._state == SUPPLIED
 
     def test_swap_failure_reverts_state(self):
         strategy = _make_strategy()
@@ -615,13 +691,24 @@ class TestGetStatus:
 
 
 class TestFullLifecycle:
-    """Test full strategy lifecycle: IDLE -> BORROW -> SWAP -> HOLD."""
+    """Test full strategy lifecycle: IDLE -> SUPPLY -> BORROW -> SWAP -> HOLD."""
 
     def test_full_lifecycle(self):
         strategy = _make_strategy(borrow_amount_override="300")
         market = _make_market()
 
-        # Step 1: IDLE -> IntentSequence (BORROW + SWAP)
+        # Step 1: IDLE -> single SUPPLY intent
+        intent = strategy.decide(market)
+        assert intent.intent_type.value == "SUPPLY"
+        assert strategy._state == SUPPLYING
+
+        # Simulate SUPPLY success -> advances to SUPPLIED
+        supply_intent = _mock_intent("SUPPLY", amount=Decimal("0.5"))
+        strategy.on_intent_executed(supply_intent, True, _mock_result())
+        assert strategy._state == SUPPLIED
+        assert strategy._supplied_amount == Decimal("0.5")
+
+        # Step 2: SUPPLIED -> IntentSequence (BORROW + SWAP)
         intent = strategy.decide(market)
         assert hasattr(intent, "intents")  # IntentSequence
         assert strategy._state == BORROWING
@@ -643,33 +730,78 @@ class TestFullLifecycle:
         assert strategy._state == SWAPPED
         assert strategy._swap_amount_out == Decimal("0.125")
 
-        # Step 2: SWAPPED -> HOLD
+        # Step 3: SWAPPED -> HOLD
         intent = strategy.decide(market)
         assert intent.intent_type.value == "HOLD"
         assert "carry position active" in intent.reason.lower()
 
-    def test_lifecycle_with_borrow_failure_recovery(self):
+    def test_partial_failure_supply_ok_then_borrow_fail_does_not_resupply(self):
+        # The core money-path guard: SUPPLY lands, BORROW reverts -> the machine
+        # must revert to SUPPLIED and re-emit only BORROW+SWAP, never re-supply.
         strategy = _make_strategy(borrow_amount_override="300")
         market = _make_market()
 
-        # Step 1: IDLE -> IntentSequence
+        # IDLE -> single SUPPLY
         intent = strategy.decide(market)
-        assert strategy._state == BORROWING
+        assert intent.intent_type.value == "SUPPLY"
+        assert strategy._state == SUPPLYING
 
-        # Simulate BORROW failure
-        borrow_intent = _mock_intent("BORROW")
-        strategy.on_intent_executed(borrow_intent, False, _mock_result(success=False))
-        assert strategy._state == IDLE
+        # SUPPLY lands on-chain (collateral now supplied).
+        strategy.on_intent_executed(
+            _mock_intent("SUPPLY", amount=Decimal("0.5")), True, _mock_result()
+        )
+        assert strategy._state == SUPPLIED
+        assert strategy._supplied_amount == Decimal("0.5")
 
-        # Step 2: Retry -> should issue sequence again
+        # SUPPLIED -> BORROW+SWAP sequence.
         intent = strategy.decide(market)
         assert hasattr(intent, "intents")  # IntentSequence
+        assert len(intent.intents) == 2
+        assert intent.intents[0].intent_type.value == "BORROW"
+        assert intent.intents[1].intent_type.value == "SWAP"
+        assert strategy._state == BORROWING
+
+        # BORROW reverts.
+        strategy.on_intent_executed(
+            _mock_intent("BORROW"), False, _mock_result(success=False)
+        )
+        # Must revert to SUPPLIED — NOT IDLE.
+        assert strategy._state == SUPPLIED
+        # Collateral is still tracked and was supplied exactly once.
+        assert strategy._supplied_amount == Decimal("0.5")
+
+        # Next decide() must NOT re-supply: it re-emits the BORROW+SWAP sequence.
+        retry = strategy.decide(market)
+        assert hasattr(retry, "intents")  # IntentSequence
+        retry_types = {leg.intent_type.value for leg in retry.intents}
+        assert "SUPPLY" not in retry_types
+        assert retry_types == {"BORROW", "SWAP"}
+        # Collateral unchanged — never supplied a second time.
+        assert strategy._supplied_amount == Decimal("0.5")
+
+    def test_lifecycle_with_supply_failure_recovery(self):
+        strategy = _make_strategy(borrow_amount_override="300")
+        market = _make_market()
+
+        # Step 1: IDLE -> SUPPLY
+        intent = strategy.decide(market)
+        assert intent.intent_type.value == "SUPPLY"
+        assert strategy._state == SUPPLYING
+
+        # SUPPLY fails -> revert to IDLE (collateral never landed).
+        strategy.on_intent_executed(_mock_intent("SUPPLY"), False, _mock_result(success=False))
+        assert strategy._state == IDLE
+
+        # Step 2: Retry -> re-emits SUPPLY (safe; nothing was supplied).
+        intent = strategy.decide(market)
+        assert intent.intent_type.value == "SUPPLY"
 
     def test_lifecycle_with_swap_failure_recovery(self):
         strategy = _make_strategy(borrow_amount_override="300")
         market = _make_market()
 
-        # Step 1: Issue sequence
+        # Drive IDLE -> SUPPLIED, then issue BORROW+SWAP sequence.
+        _drive_to_supplied(strategy, market)
         intent = strategy.decide(market)
         assert strategy._state == BORROWING
 

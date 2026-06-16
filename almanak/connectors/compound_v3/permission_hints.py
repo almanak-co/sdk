@@ -153,8 +153,11 @@ def build_discovery_vectors(
         # not native USDC). Collateral fallback to weth covers ethereum/arbitrum/
         # base/optimism/polygon — all polygon Comet collaterals include WETH.
         base_token, _collateral, market = _synthetic_tokens(chain, ctx.usdc, hint_market_id)
+        # Synthetic bundled-collateral borrow for permission discovery only:
+        # never executed, never accounted, so it bypasses the bundled-collateral
+        # guard via for_permission_discovery (see BorrowIntent.validate_borrow_intent).
         return [
-            BorrowIntent(
+            BorrowIntent.for_permission_discovery(
                 protocol=protocol,
                 collateral_token=ctx.weth,
                 collateral_amount=Decimal("1"),

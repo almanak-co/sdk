@@ -817,7 +817,7 @@ class TestRepayIntentInterestRateMode:
         borrow = Intent.borrow(
             protocol="aave_v3",
             collateral_token="WETH",
-            collateral_amount=Decimal("1"),
+            collateral_amount=Decimal("0"),  # standalone borrow; guard rejects bundled collateral
             borrow_token="USDC",
             borrow_amount=Decimal("1000"),
             interest_rate_mode="variable",
