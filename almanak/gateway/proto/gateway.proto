@@ -2042,6 +2042,8 @@ message PoolHistoryResponse {
 //        → ``GatewayDexTwapCapability``
 //   - GetDexVolumeHistory
 //        → ``GatewayDexVolumeCapability``
+//   - GetGasPriceAt
+//        → gateway-owned Etherscan-family gas oracle / archive RPC lookup
 //
 // Wire conventions (Decimal as string, Empty != Zero, dual-channel
 // envelope) mirror ``PoolHistoryService`` / ``PoolAnalyticsService``.
@@ -2100,10 +2102,16 @@ service RateHistoryService {
   // framework-side (the caller passes already-resolved pools); the gateway
   // owns the multi-pool reads + weighting (VIB-4948, L3 of ALM-2770).
   rpc GetDexLwap(GetDexLwapRequest) returns (DexLwapPointResponse);
+
+  // Current or historical gas price for one chain. Replaces
+  // ``backtesting/pnl/providers/gas.py`` direct Etherscan-family HTTP and
+  // archive-RPC calls. ``timestamp=0`` asks for current gas oracle data;
+  // ``timestamp>0`` asks for the closest historical block estimate.
+  rpc GetGasPriceAt(GetGasPriceAtRequest) returns (GasPricePointResponse);
 }
 
 // -----------------------------------------------------------------------------
-// Common point messages (the four data shapes)
+// Common point messages
 // -----------------------------------------------------------------------------
 //
 // All Decimal fields are encoded as strings — same convention as
@@ -2178,6 +2186,22 @@ message DexLwapPoint {
 
   // Number of pools that contributed to the weighted average.
   int64 pool_count = 3;
+}
+
+message GasPricePoint {
+  // Unix seconds, UTC. Current requests return the gateway observation time;
+  // historical requests return the observed block timestamp so clients can
+  // inspect skew from the requested timestamp.
+  int64 timestamp = 1;
+
+  // EIP-1559 base fee in gwei. Empty when unmeasured.
+  string base_fee_gwei = 2;
+
+  // Priority fee / tip in gwei. Empty when unmeasured.
+  string priority_fee_gwei = 3;
+
+  // Legacy/effective gas price in gwei. Empty when unmeasured.
+  string gas_price_gwei = 4;
 }
 
 // -----------------------------------------------------------------------------
@@ -2284,6 +2308,26 @@ message FundingRateHistoryResponse {
   string source = 5;
   bool success = 6;
   string error = 7;
+}
+
+message GetGasPriceAtRequest {
+  // Required. Chain name. Must resolve to an EVM ChainDescriptor.
+  string chain = 1;
+
+  // Optional. Unix seconds, UTC. 0 = current gas oracle; >0 = historical
+  // block estimate via gateway-owned archive RPC. Negative -> INVALID_ARGUMENT.
+  int64 timestamp = 2;
+}
+
+message GasPricePointResponse {
+  string chain = 1;
+
+  // Populated when success=true.
+  GasPricePoint point = 2;
+
+  string source = 3;
+  bool success = 4;
+  string error = 5;
 }
 
 message GetDexTwapRequest {

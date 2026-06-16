@@ -5686,7 +5686,7 @@ Global___PoolHistoryResponse: _TypeAlias = PoolHistoryResponse  # noqa: Y015
 @_typing.final
 class LendingRatePoint(_message.Message):
     """-----------------------------------------------------------------------------
-    Common point messages (the four data shapes)
+    Common point messages
     -----------------------------------------------------------------------------
 
     All Decimal fields are encoded as strings — same convention as
@@ -5839,6 +5839,38 @@ class DexLwapPoint(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___DexLwapPoint: _TypeAlias = DexLwapPoint  # noqa: Y015
+
+@_typing.final
+class GasPricePoint(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    BASE_FEE_GWEI_FIELD_NUMBER: _builtins.int
+    PRIORITY_FEE_GWEI_FIELD_NUMBER: _builtins.int
+    GAS_PRICE_GWEI_FIELD_NUMBER: _builtins.int
+    timestamp: _builtins.int
+    """Unix seconds, UTC. Current requests return the gateway observation time;
+    historical requests return the observed block timestamp so clients can
+    inspect skew from the requested timestamp.
+    """
+    base_fee_gwei: _builtins.str
+    """EIP-1559 base fee in gwei. Empty when unmeasured."""
+    priority_fee_gwei: _builtins.str
+    """Priority fee / tip in gwei. Empty when unmeasured."""
+    gas_price_gwei: _builtins.str
+    """Legacy/effective gas price in gwei. Empty when unmeasured."""
+    def __init__(
+        self,
+        *,
+        timestamp: _builtins.int = ...,
+        base_fee_gwei: _builtins.str = ...,
+        priority_fee_gwei: _builtins.str = ...,
+        gas_price_gwei: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["base_fee_gwei", b"base_fee_gwei", "gas_price_gwei", b"gas_price_gwei", "priority_fee_gwei", b"priority_fee_gwei", "timestamp", b"timestamp"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GasPricePoint: _TypeAlias = GasPricePoint  # noqa: Y015
 
 @_typing.final
 class GetLendingRateCurrentRequest(_message.Message):
@@ -6085,6 +6117,62 @@ class FundingRateHistoryResponse(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___FundingRateHistoryResponse: _TypeAlias = FundingRateHistoryResponse  # noqa: Y015
+
+@_typing.final
+class GetGasPriceAtRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    CHAIN_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    chain: _builtins.str
+    """Required. Chain name. Must resolve to an EVM ChainDescriptor."""
+    timestamp: _builtins.int
+    """Optional. Unix seconds, UTC. 0 = current gas oracle; >0 = historical
+    block estimate via gateway-owned archive RPC. Negative -> INVALID_ARGUMENT.
+    """
+    def __init__(
+        self,
+        *,
+        chain: _builtins.str = ...,
+        timestamp: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "timestamp", b"timestamp"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GetGasPriceAtRequest: _TypeAlias = GetGasPriceAtRequest  # noqa: Y015
+
+@_typing.final
+class GasPricePointResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    CHAIN_FIELD_NUMBER: _builtins.int
+    POINT_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    chain: _builtins.str
+    source: _builtins.str
+    success: _builtins.bool
+    error: _builtins.str
+    @_builtins.property
+    def point(self) -> Global___GasPricePoint:
+        """Populated when success=true."""
+
+    def __init__(
+        self,
+        *,
+        chain: _builtins.str = ...,
+        point: Global___GasPricePoint | None = ...,
+        source: _builtins.str = ...,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["point", b"point"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "error", b"error", "point", b"point", "source", b"source", "success", b"success"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___GasPricePointResponse: _TypeAlias = GasPricePointResponse  # noqa: Y015
 
 @_typing.final
 class GetDexTwapRequest(_message.Message):

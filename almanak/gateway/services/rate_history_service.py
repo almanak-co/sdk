@@ -1,14 +1,14 @@
 """RateHistoryService implementation (VIB-4859 / W7 of epic VIB-4851).
 
 Gateway-side dispatcher for lending APY / perp funding / DEX TWAP / DEX
-volume data. Replaces the per-protocol dispatch + direct ``httpx`` /
+volume / gas data. Replaces the per-protocol dispatch + direct ``httpx`` /
 ``aiohttp`` / ``Web3(HTTPProvider(...))`` egress that lived in
 ``almanak/framework/data/rates/{monitor,history}.py`` and
-``almanak/framework/backtesting/pnl/providers/{lending_apy,twap,dex/*}.py``
+``almanak/framework/backtesting/pnl/providers/{lending_apy,twap,dex/*,gas}.py``
 — all of which violated the gateway-boundary rule
 (``AGENTS.md`` §"Gateway boundary").
 
-Four-RPC service, mirroring the four sibling capabilities declared in
+Rate-history service, mirroring the sibling capabilities declared in
 ``almanak.connectors._base.gateway_capabilities``:
 
 * :class:`GatewayLendingRateHistoryCapability` →
@@ -18,6 +18,7 @@ Four-RPC service, mirroring the four sibling capabilities declared in
 * :class:`GatewayDexTwapCapability` → ``GetDexTwap`` /
   ``GetDexTwapSeries``.
 * :class:`GatewayDexVolumeCapability` → ``GetDexVolumeHistory``.
+* Gateway-owned gas lookup → ``GetGasPriceAt``.
 
 Each RPC follows the dispatcher pattern set by ``FundingRateService``:
 
@@ -63,6 +64,7 @@ from almanak.connectors._base.gateway_capabilities import (
 )
 from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
 from almanak.gateway.core.settings import GatewaySettings
+from almanak.gateway.data.gas import fetch_gas_price_at
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
@@ -143,6 +145,21 @@ class DexLwapPoint:
     timestamp: int
     price: Decimal
     pool_count: int = 0
+
+
+@dataclass(frozen=True)
+class GasPricePoint:
+    """One gas-price observation in gwei.
+
+    ``None`` means "unmeasured by this provider" and encodes as the empty
+    string on the wire. The gateway must not invent a priority fee when an
+    archive block only measured ``baseFeePerGas``.
+    """
+
+    timestamp: int
+    base_fee_gwei: Decimal | None = None
+    priority_fee_gwei: Decimal | None = None
+    gas_price_gwei: Decimal | None = None
 
 
 # =============================================================================
@@ -487,6 +504,15 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
             timestamp=p.timestamp,
             price=cls._encode_decimal(p.price),
             pool_count=p.pool_count,
+        )
+
+    @classmethod
+    def _encode_gas_point(cls, p: GasPricePoint) -> gateway_pb2.GasPricePoint:
+        return gateway_pb2.GasPricePoint(
+            timestamp=p.timestamp,
+            base_fee_gwei=cls._encode_decimal(p.base_fee_gwei),
+            priority_fee_gwei=cls._encode_decimal(p.priority_fee_gwei),
+            gas_price_gwei=cls._encode_decimal(p.gas_price_gwei),
         )
 
     @dataclass(frozen=True)
@@ -971,6 +997,70 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
         )
 
     # ---------------------------------------------------------------------
+    # RPC: GetGasPriceAt
+    # ---------------------------------------------------------------------
+
+    async def GetGasPriceAt(
+        self,
+        request: gateway_pb2.GetGasPriceAtRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GasPricePointResponse:
+        from almanak.core.chains import ChainRegistry
+        from almanak.core.enums import ChainFamily
+
+        chain = _normalize_key(request.chain)
+        timestamp = request.timestamp
+
+        if not chain:
+            _invalid_argument(context, "chain is required")
+            return gateway_pb2.GasPricePointResponse(success=False, error="chain is required")
+        if timestamp < 0:
+            msg = f"timestamp must be >= 0 (unix seconds, or 0 for current), got {timestamp}"
+            _invalid_argument(context, msg)
+            return gateway_pb2.GasPricePointResponse(chain=chain, success=False, error=msg)
+
+        descriptor = ChainRegistry.try_resolve(chain)
+        if descriptor is None:
+            msg = f"unknown chain: {chain!r}"
+            _invalid_argument(context, msg)
+            return gateway_pb2.GasPricePointResponse(chain=chain, success=False, error=msg)
+        if descriptor.family is not ChainFamily.EVM:
+            msg = f"chain {chain!r} is not EVM"
+            _invalid_argument(context, msg)
+            return gateway_pb2.GasPricePointResponse(chain=chain, success=False, error=msg)
+
+        try:
+            point, source = await fetch_gas_price_at(
+                self,
+                chain=descriptor.name,
+                timestamp=timestamp,
+                descriptor=descriptor,
+            )
+        except RateHistoryUnavailable as exc:
+            return gateway_pb2.GasPricePointResponse(
+                chain=descriptor.name,
+                source=exc.source or "none",
+                success=False,
+                error=str(exc),
+            )
+        except Exception:
+            logger.exception("GetGasPriceAt failed for %s/%s", descriptor.name, timestamp)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(_INTERNAL_ERROR_DETAIL)
+            return gateway_pb2.GasPricePointResponse(
+                chain=descriptor.name,
+                success=False,
+                error=_INTERNAL_ERROR_DETAIL,
+            )
+
+        return gateway_pb2.GasPricePointResponse(
+            chain=descriptor.name,
+            point=self._encode_gas_point(point),
+            source=source,
+            success=True,
+        )
+
+    # ---------------------------------------------------------------------
     # RPC: GetDexTwap
     # ---------------------------------------------------------------------
 
@@ -1258,6 +1348,7 @@ __all__ = [
     "DexTwapPoint",
     "DexVolumePoint",
     "FundingRatePoint",
+    "GasPricePoint",
     "LendingRatePoint",
     "RateHistoryServiceServicer",
     "RateHistoryUnavailable",

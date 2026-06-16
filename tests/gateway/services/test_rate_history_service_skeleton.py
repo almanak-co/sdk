@@ -21,9 +21,7 @@ import pytest
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.rate_history_service import (
-    DexTwapPoint,
-    DexVolumePoint,
-    FundingRatePoint,
+    GasPricePoint,
     LendingRatePoint,
     RateHistoryServiceServicer,
     RateHistoryUnavailable,
@@ -101,9 +99,7 @@ def test_lending_current_rejects_empty_asset(servicer: RateHistoryServiceService
 
 
 @pytest.mark.parametrize("side", ["", "long", "short", "supplyy"])
-def test_lending_current_rejects_invalid_side(
-    servicer: RateHistoryServiceServicer, side: str
-) -> None:
+def test_lending_current_rejects_invalid_side(servicer: RateHistoryServiceServicer, side: str) -> None:
     """``side`` must be the literal ``"supply"`` / ``"borrow"`` post-normalisation.
 
     ``"Supply"`` / ``"BORROW"`` ARE normalised to lowercase and pass the
@@ -128,9 +124,7 @@ def test_lending_current_rejects_invalid_side(
 
 
 @pytest.mark.parametrize("side", ["supply", "borrow", "Supply", "BORROW"])
-def test_lending_current_accepts_case_insensitive_side(
-    servicer: RateHistoryServiceServicer, side: str
-) -> None:
+def test_lending_current_accepts_case_insensitive_side(servicer: RateHistoryServiceServicer, side: str) -> None:
     """Side normalisation: case-insensitive, then strict ``supply`` / ``borrow``.
 
     With a registered ``aave_v3`` provider but a chain it doesn't
@@ -255,6 +249,83 @@ def test_funding_history_rejects_unknown_venue(
 
 
 # =============================================================================
+# Gas price — validator + gateway helper dispatch
+# =============================================================================
+
+
+def test_gas_price_rejects_empty_chain(servicer: RateHistoryServiceServicer) -> None:
+    ctx = _MockContext()
+    request = gateway_pb2.GetGasPriceAtRequest(chain="", timestamp=0)
+    response = asyncio.run(servicer.GetGasPriceAt(request, ctx))  # type: ignore[arg-type]
+
+    assert ctx.code == grpc.StatusCode.INVALID_ARGUMENT
+    assert "chain is required" in ctx.details
+    assert response.success is False
+
+
+def test_gas_price_rejects_negative_timestamp(servicer: RateHistoryServiceServicer) -> None:
+    ctx = _MockContext()
+    request = gateway_pb2.GetGasPriceAtRequest(chain="ethereum", timestamp=-1)
+    response = asyncio.run(servicer.GetGasPriceAt(request, ctx))  # type: ignore[arg-type]
+
+    assert ctx.code == grpc.StatusCode.INVALID_ARGUMENT
+    assert "timestamp must be >= 0" in ctx.details
+    assert response.success is False
+
+
+def test_gas_price_rejects_unknown_chain(servicer: RateHistoryServiceServicer) -> None:
+    ctx = _MockContext()
+    request = gateway_pb2.GetGasPriceAtRequest(chain="not-a-chain", timestamp=0)
+    response = asyncio.run(servicer.GetGasPriceAt(request, ctx))  # type: ignore[arg-type]
+
+    assert ctx.code == grpc.StatusCode.INVALID_ARGUMENT
+    assert "unknown chain" in ctx.details
+    assert response.success is False
+
+
+def test_gas_price_success_maps_gateway_helper(
+    servicer: RateHistoryServiceServicer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from decimal import Decimal
+
+    async def _fake_fetch(
+        got_servicer: RateHistoryServiceServicer,
+        *,
+        chain: str,
+        timestamp: int,
+        descriptor: object | None = None,
+    ) -> tuple[GasPricePoint, str]:
+        assert got_servicer is servicer
+        assert chain == "ethereum"
+        assert timestamp == 1_700_000_000
+        assert getattr(descriptor, "name", None) == "ethereum"
+        return (
+            GasPricePoint(
+                timestamp=1_700_000_000,
+                base_fee_gwei=Decimal("20"),
+                priority_fee_gwei=None,
+                gas_price_gwei=None,
+            ),
+            "archive_rpc",
+        )
+
+    monkeypatch.setattr("almanak.gateway.services.rate_history_service.fetch_gas_price_at", _fake_fetch)
+
+    ctx = _MockContext()
+    request = gateway_pb2.GetGasPriceAtRequest(chain="ETHEREUM", timestamp=1_700_000_000)
+    response = asyncio.run(servicer.GetGasPriceAt(request, ctx))  # type: ignore[arg-type]
+
+    assert ctx.code is None
+    assert response.success is True
+    assert response.chain == "ethereum"
+    assert response.source == "archive_rpc"
+    assert response.point.base_fee_gwei == "20"
+    assert response.point.priority_fee_gwei == ""
+    assert response.point.gas_price_gwei == ""
+
+
+# =============================================================================
 # DEX TWAP — validator
 # =============================================================================
 
@@ -373,6 +444,25 @@ def test_lending_point_partial_unmeasured(
     assert encoded.supply_apy_pct == "5.25"
     assert encoded.borrow_apy_pct == ""
     assert encoded.utilization_pct == ""
+
+
+def test_gas_point_partial_unmeasured(
+    servicer: RateHistoryServiceServicer,
+) -> None:
+    """Archive blocks may measure only base fee; priority stays empty."""
+    from decimal import Decimal
+
+    point = GasPricePoint(
+        timestamp=1_700_000_000,
+        base_fee_gwei=Decimal("20"),
+        priority_fee_gwei=None,
+        gas_price_gwei=None,
+    )
+    encoded = servicer._encode_gas_point(point)
+    assert encoded.timestamp == 1_700_000_000
+    assert encoded.base_fee_gwei == "20"
+    assert encoded.priority_fee_gwei == ""
+    assert encoded.gas_price_gwei == ""
 
 
 def test_rate_history_unavailable_carries_source_and_reason() -> None:

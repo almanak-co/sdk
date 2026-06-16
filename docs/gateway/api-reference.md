@@ -18,7 +18,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | SimulationService | 1 | Transaction bundle simulation (Tenderly/Alchemy) |
 | PoolAnalyticsService | 1 | DEX pool analytics (TVL, volume, fees) for risk-adjusted decisions |
 | PoolHistoryService | 1 | Historical pool snapshots (TVL, volume, fees over time). Feature-flagged off by default; enable via `ALMANAK_GATEWAY_POOL_HISTORY_ENABLED=true` |
-| RateHistoryService | 7 | Lending APY (live + historical), perp funding history, DEX TWAP (single + series), DEX LWAP (liquidity-weighted spot), DEX volume history (VIB-4859 / W7, VIB-4948). Strategy-side `RateMonitor` / backtesting rate providers are thin gRPC clients of this service. |
+| RateHistoryService | 8 | Lending APY (live + historical), perp funding history, DEX TWAP (single + series), DEX LWAP (liquidity-weighted spot), DEX volume history, and gas prices (VIB-4859 / W7, VIB-4948). Strategy-side `RateMonitor` / backtesting rate providers are thin gRPC clients of this service. |
 | PolymarketService | 20 | Polymarket CLOB API proxy (market data, orders, positions, price history, trade tape) |
 | EnsoService | 4 | Enso Finance routing and bundling |
 | TokenService | 4 | Token resolution and on-chain metadata |
@@ -1476,6 +1476,28 @@ bucket spacing).
 ```protobuf
 rpc GetDexVolumeHistory(GetDexVolumeHistoryRequest) returns (DexVolumeHistoryResponse)
 ```
+
+### GetGasPriceAt
+
+Current or historical gas-price observation for an EVM chain. `timestamp = 0`
+uses the gateway-owned explorer gas oracle. `timestamp > 0` reads
+`baseFeePerGas` from the gateway's archive RPC path; the returned
+`GasPricePoint.timestamp` is the actual observed block timestamp, not the
+requested timestamp.
+
+```protobuf
+rpc GetGasPriceAt(GetGasPriceAtRequest) returns (GasPricePointResponse)
+```
+
+**Request:**
+```protobuf
+message GetGasPriceAtRequest {
+  string chain = 1;    // EVM chain name, e.g. "ethereum", "arbitrum", "base"
+  int64 timestamp = 2; // Unix seconds; 0 means current gas oracle
+}
+```
+
+**Response:** `GasPricePointResponse { chain, point: GasPricePoint, source, success, error }`.
 
 **Wire conventions** — Decimal fields are encoded as strings (mirrors
 `PoolHistoryService` / `FundingRateService`). Empty string means

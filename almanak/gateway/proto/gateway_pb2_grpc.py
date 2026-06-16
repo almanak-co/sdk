@@ -3683,6 +3683,8 @@ class RateHistoryServiceStub(object):
     → ``GatewayDexTwapCapability``
     - GetDexVolumeHistory
     → ``GatewayDexVolumeCapability``
+    - GetGasPriceAt
+    → gateway-owned Etherscan-family gas oracle / archive RPC lookup
 
     Wire conventions (Decimal as string, Empty != Zero, dual-channel
     envelope) mirror ``PoolHistoryService`` / ``PoolAnalyticsService``.
@@ -3739,6 +3741,11 @@ class RateHistoryServiceStub(object):
                 request_serializer=gateway__pb2.GetDexLwapRequest.SerializeToString,
                 response_deserializer=gateway__pb2.DexLwapPointResponse.FromString,
                 _registered_method=True)
+        self.GetGasPriceAt = channel.unary_unary(
+                '/almanak.gateway.proto.RateHistoryService/GetGasPriceAt',
+                request_serializer=gateway__pb2.GetGasPriceAtRequest.SerializeToString,
+                response_deserializer=gateway__pb2.GasPricePointResponse.FromString,
+                _registered_method=True)
 
 
 class RateHistoryServiceServicer(object):
@@ -3767,6 +3774,8 @@ class RateHistoryServiceServicer(object):
     → ``GatewayDexTwapCapability``
     - GetDexVolumeHistory
     → ``GatewayDexVolumeCapability``
+    - GetGasPriceAt
+    → gateway-owned Etherscan-family gas oracle / archive RPC lookup
 
     Wire conventions (Decimal as string, Empty != Zero, dual-channel
     envelope) mirror ``PoolHistoryService`` / ``PoolAnalyticsService``.
@@ -3850,6 +3859,16 @@ class RateHistoryServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetGasPriceAt(self, request, context):
+        """Current or historical gas price for one chain. Replaces
+        ``backtesting/pnl/providers/gas.py`` direct Etherscan-family HTTP and
+        archive-RPC calls. ``timestamp=0`` asks for current gas oracle data;
+        ``timestamp>0`` asks for the closest historical block estimate.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_RateHistoryServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -3888,6 +3907,11 @@ def add_RateHistoryServiceServicer_to_server(servicer, server):
                     request_deserializer=gateway__pb2.GetDexLwapRequest.FromString,
                     response_serializer=gateway__pb2.DexLwapPointResponse.SerializeToString,
             ),
+            'GetGasPriceAt': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetGasPriceAt,
+                    request_deserializer=gateway__pb2.GetGasPriceAtRequest.FromString,
+                    response_serializer=gateway__pb2.GasPricePointResponse.SerializeToString,
+            ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
             'almanak.gateway.proto.RateHistoryService', rpc_method_handlers)
@@ -3922,6 +3946,8 @@ class RateHistoryService(object):
     → ``GatewayDexTwapCapability``
     - GetDexVolumeHistory
     → ``GatewayDexVolumeCapability``
+    - GetGasPriceAt
+    → gateway-owned Etherscan-family gas oracle / archive RPC lookup
 
     Wire conventions (Decimal as string, Empty != Zero, dual-channel
     envelope) mirror ``PoolHistoryService`` / ``PoolAnalyticsService``.
@@ -4116,6 +4142,33 @@ class RateHistoryService(object):
             '/almanak.gateway.proto.RateHistoryService/GetDexLwap',
             gateway__pb2.GetDexLwapRequest.SerializeToString,
             gateway__pb2.DexLwapPointResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetGasPriceAt(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.RateHistoryService/GetGasPriceAt',
+            gateway__pb2.GetGasPriceAtRequest.SerializeToString,
+            gateway__pb2.GasPricePointResponse.FromString,
             options,
             channel_credentials,
             insecure,

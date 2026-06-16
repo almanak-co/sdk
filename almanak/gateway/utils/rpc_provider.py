@@ -80,6 +80,11 @@ def _get_gateway_api_key(name: str) -> str | None:
     return gateway_prefixed_or_bare(name)
 
 
+def get_gateway_api_key(name: str) -> str | None:
+    """Return a gateway-owned API key by config name."""
+    return _get_gateway_api_key(name)
+
+
 # =============================================================================
 # Enums
 # =============================================================================
