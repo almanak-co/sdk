@@ -142,11 +142,20 @@ def _uniswap_v3_post_condition(
     wallet_address: str,
     gateway_client: Any | None = None,
     rpc_url: str | None = None,
+    block: int | str | None = None,
 ) -> ClosureCheckResult:
     """Verify a Uniswap V3 (or V3-fork) LP NFT is closed on-chain.
 
     Reads on-chain truth via the gateway's ``QueryPositionLiquidity`` and
-    ``QueryPositionTokensOwed`` RPCs. Closure rules:
+    ``QueryPositionTokensOwed`` RPCs, both pinned to ``block`` (VIB-5140 —
+    the close-tx receipt's ``block_number``). Pinning is the fix for the
+    false-negative teardown verify: when the RPC pool routes to a read
+    replica one block behind the writer, an unpinned ``"latest"`` read
+    returns PRE-close liquidity / tokensOwed, the verifier concludes the
+    position is still open, and the strategy transitions to STRATEGY_ERROR
+    even though the close succeeded (user double-close / janitor hot-loop).
+    ``block=None`` falls back to ``"latest"`` (legacy behaviour). Closure
+    rules:
 
     - ``liquidity == 0`` AND ``tokensOwed0 == 0`` AND ``tokensOwed1 == 0``
       → ``closed=True``. This covers BOTH (a) the burnt-NFT path
@@ -295,6 +304,7 @@ def _uniswap_v3_post_condition(
             chain=chain,
             position_manager=npm_address,
             token_id=token_id,
+            block=block,
         )
     except Exception as exc:  # noqa: BLE001 — fail-closed
         return ClosureCheckResult(
@@ -320,6 +330,7 @@ def _uniswap_v3_post_condition(
             chain=chain,
             position_manager=npm_address,
             token_id=token_id,
+            block=block,
         )
     except Exception as exc:  # noqa: BLE001 — fail-closed
         return ClosureCheckResult(

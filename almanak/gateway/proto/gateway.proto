@@ -1315,6 +1315,13 @@ message AllowanceRequest {
   string token_address = 2;       // ERC-20 token contract address
   string owner_address = 3;       // Token owner address
   string spender_address = 4;     // Spender address
+  // VIB-5140: optional block reference for the underlying eth_call. Empty
+  // ("") → "latest" (legacy, backward-compatible). A post-transaction read
+  // MUST pin to the confirmed receipt's block (decimal or 0x-hex string) so
+  // the call cannot race a read replica that trails the writer by a block
+  // and return PRE-tx state. Mirrors the EthCall block plumbing in
+  // lending_accounting (VIB-4589 / F7).
+  string block = 5;
 }
 
 message AllowanceResponse {
@@ -1327,6 +1334,10 @@ message BalanceQueryRequest {
   string chain = 1;               // Chain identifier
   string token_address = 2;       // ERC-20 token contract address
   string wallet_address = 3;      // Wallet to query balance for
+  // VIB-5140: optional block reference for the underlying eth_call. Empty
+  // ("") → "latest" (legacy, backward-compatible). Post-tx reads pin to the
+  // confirmed receipt's block to avoid a stale read-replica false-negative.
+  string block = 4;
 }
 
 message BalanceQueryResponse {
@@ -1339,6 +1350,12 @@ message PositionLiquidityRequest {
   string chain = 1;               // Chain identifier
   string position_manager = 2;    // NFT Position Manager address
   uint64 token_id = 3;            // Position NFT token ID
+  // VIB-5140: optional block reference for the underlying eth_call. Empty
+  // ("") → "latest" (legacy, backward-compatible). The teardown verifier
+  // pins this to the close-tx receipt's block so a read replica that trails
+  // the writer cannot return PRE-close liquidity and false-negative the
+  // closure check.
+  string block = 4;
 }
 
 message PositionLiquidityResponse {
@@ -1351,6 +1368,12 @@ message PositionTokensOwedRequest {
   string chain = 1;               // Chain identifier
   string position_manager = 2;    // NFT Position Manager address
   uint64 token_id = 3;            // Position NFT token ID
+  // VIB-5140: optional block reference for the underlying eth_call. Empty
+  // ("") → "latest" (legacy, backward-compatible). The teardown verifier
+  // pins this to the close-tx receipt's block so a read replica that trails
+  // the writer cannot return PRE-close tokensOwed and false-negative the
+  // closure check.
+  string block = 4;
 }
 
 message PositionTokensOwedResponse {

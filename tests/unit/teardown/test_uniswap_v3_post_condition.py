@@ -165,15 +165,19 @@ class TestUniswapV3PostCondition:
         assert result.closed is True
         assert result.error is None
         assert result.residual == {}
+        # VIB-5140: the hook now forwards an optional ``block`` to both reads;
+        # with no block supplied here it defaults to None (gateway → "latest").
         gateway.query_position_liquidity.assert_called_once_with(
             chain="arbitrum",
             position_manager=NPM_ARBITRUM,
             token_id=5460223,
+            block=None,
         )
         gateway.query_position_tokens_owed.assert_called_once_with(
             chain="arbitrum",
             position_manager=NPM_ARBITRUM,
             token_id=5460223,
+            block=None,
         )
 
     def test_closed_when_decremented_without_burn(self) -> None:
@@ -738,11 +742,11 @@ def test_verify_closure_aggregates_multi_protocol_failures(
     fake_gateway = MagicMock()
     fake_gateway.is_connected = True
 
-    def liquidity_side_effect(*, chain, position_manager, token_id):
+    def liquidity_side_effect(*, chain, position_manager, token_id, block=None):
         # Position 111 is closed; position 222 still has residual liquidity.
         return 0 if token_id == 111 else 9999
 
-    def tokens_owed_side_effect(*, chain, position_manager, token_id):
+    def tokens_owed_side_effect(*, chain, position_manager, token_id, block=None):
         return (0, 0)
 
     fake_gateway.query_position_liquidity.side_effect = liquidity_side_effect
@@ -862,6 +866,145 @@ def test_verify_closure_uses_orchestrator_client_for_v3_post_condition(
 
     assert result is True
     fake_gateway.query_position_liquidity.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# VIB-5140 — post-tx state reads pin to the close-tx receipt block.
+#
+# Failure mode (ALM-2788): the post-teardown verifier read on-chain state at
+# the unpinned ``"latest"`` tag. When the RPC pool routed to a read replica
+# one block behind the writer, the call returned PRE-close (still-open) state,
+# the verifier concluded the position was still open, and the strategy
+# transitioned to STRATEGY_ERROR even though the close succeeded — driving
+# user double-close / janitor hot-loop. The fix pins the reads to the close-tx
+# receipt's block so the replica cannot answer with stale PRE-close state.
+# ---------------------------------------------------------------------------
+
+
+def _make_block_aware_gateway(
+    *,
+    receipt_block: int,
+    pre_close_liquidity: int = 9999,
+    pre_close_tokens_owed: tuple[int, int] = (0, 0),
+) -> MagicMock:
+    """Fake gateway whose reads return PRE-close (still-open) state at the
+    unpinned ``"latest"`` tag (``block is None``) and CLOSED state at the
+    confirmed receipt block — exactly the read-replica-lag race from
+    ALM-2788. A read NOT pinned to ``receipt_block`` false-negatives.
+    """
+    gateway = MagicMock()
+    gateway.is_connected = True
+
+    def liquidity_side_effect(*, chain, position_manager, token_id, block=None):
+        # "latest" (block is None) hits the trailing replica → still open.
+        if block is None:
+            return pre_close_liquidity
+        # Pinned to the receipt block → the close is visible → liquidity 0.
+        return 0
+
+    def tokens_owed_side_effect(*, chain, position_manager, token_id, block=None):
+        if block is None:
+            return pre_close_tokens_owed
+        return (0, 0)
+
+    gateway.query_position_liquidity.side_effect = liquidity_side_effect
+    gateway.query_position_tokens_owed.side_effect = tokens_owed_side_effect
+    return gateway
+
+
+def test_post_condition_unpinned_latest_false_negatives():
+    """WITHOUT the fix (block omitted → "latest"), the post-condition reads
+    the trailing replica's PRE-close state and reports the position OPEN —
+    the false-negative this ticket fixes. Guards against a regression that
+    drops the block plumbing."""
+    gateway = _make_block_aware_gateway(receipt_block=19_000_000)
+    position = _make_position(position_id="5460223")
+
+    result = _uniswap_v3_post_condition(
+        position=position,
+        wallet_address=WALLET,
+        gateway_client=gateway,
+        # block omitted → defaults to None → gateway maps to "latest"
+    )
+
+    assert result.closed is False
+    assert result.residual.get("liquidity") == 9999
+
+
+def test_post_condition_pinned_to_receipt_block_confirms_closure():
+    """WITH the fix (block = close-tx receipt block), the post-condition reads
+    the state AS OF the block the close landed at, sees liquidity 0 /
+    tokensOwed 0, and correctly confirms closure — even though the unpinned
+    "latest" view still trails on the replica."""
+    receipt_block = 19_000_000
+    gateway = _make_block_aware_gateway(receipt_block=receipt_block)
+    position = _make_position(position_id="5460223")
+
+    result = _uniswap_v3_post_condition(
+        position=position,
+        wallet_address=WALLET,
+        gateway_client=gateway,
+        block=receipt_block,
+    )
+
+    assert result.closed is True
+    # Both reads MUST have been pinned to the receipt block.
+    liq_call = gateway.query_position_liquidity.call_args
+    owed_call = gateway.query_position_tokens_owed.call_args
+    assert liq_call.kwargs["block"] == receipt_block
+    assert owed_call.kwargs["block"] == receipt_block
+
+
+def test_verify_closure_threads_receipt_block_end_to_end(_restore_uniswap_v3_hook):
+    """End-to-end through the manager: ``_verify_closure`` forwards
+    ``close_receipt_block`` to the hook, which pins its reads — so the
+    teardown verifier confirms closure despite the trailing-replica
+    "latest" view. Without threading, the same scenario false-negatives
+    (covered by ``test_post_condition_unpinned_latest_false_negatives``)."""
+    receipt_block = 19_000_000
+    gateway = _make_block_aware_gateway(receipt_block=receipt_block)
+
+    mgr = TeardownManager()
+    mgr.compiler = SimpleNamespace(_gateway_client=gateway)
+
+    strategy = _make_strategy_with_tracker_still_set()
+    pre_exec = _make_lp_position_summary()
+
+    result = asyncio.run(
+        mgr._verify_closure(
+            strategy=strategy,
+            pre_execution_positions=pre_exec,
+            close_receipt_block=receipt_block,
+        )
+    )
+
+    assert result is True
+    assert gateway.query_position_liquidity.call_args.kwargs["block"] == receipt_block
+
+
+def test_verify_closure_unpinned_false_negatives_end_to_end(_restore_uniswap_v3_hook):
+    """The same manager scenario but with NO receipt block (the pre-VIB-5140
+    behaviour): the hook reads "latest", the trailing replica returns the
+    still-open PRE-close state, and the verifier false-negatives. This is the
+    exact STRATEGY_ERROR-driving bug — proving the threaded block is what
+    flips the outcome."""
+    gateway = _make_block_aware_gateway(receipt_block=19_000_000)
+
+    mgr = TeardownManager()
+    mgr.compiler = SimpleNamespace(_gateway_client=gateway)
+
+    strategy = _make_strategy_with_tracker_still_set()
+    pre_exec = _make_lp_position_summary()
+
+    result = asyncio.run(
+        mgr._verify_closure(
+            strategy=strategy,
+            pre_execution_positions=pre_exec,
+            close_receipt_block=None,
+        )
+    )
+
+    assert result is False
 
 
 if __name__ == "__main__":

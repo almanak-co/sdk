@@ -281,6 +281,21 @@ class RpcMetrics:
     indexer_lag_retries: int = 0
 
 
+def _block_param(block: str) -> str:
+    """Map a typed-query proto ``block`` field to an ``eth_call`` block tag.
+
+    VIB-5140: the four typed RPC queries (allowance / balance / position
+    liquidity / position tokens-owed) gained an OPTIONAL ``string block``
+    field. The wire value is already a JSON-RPC-ready tag (a named tag such
+    as ``"latest"`` / ``"safe"`` / ``"finalized"`` or a ``0x``-prefixed hex
+    block number — the framework client encodes ints to hex before sending,
+    mirroring ``GatewayClient.eth_call``). An empty string (the proto default
+    for a field a legacy caller never set) maps to ``"latest"`` — preserving
+    the exact pre-VIB-5140 behaviour for every caller that omits the field.
+    """
+    return block or "latest"
+
+
 class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
     """Implements RpcService gRPC interface.
 
@@ -999,7 +1014,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
 
         params = [
             {"to": token_address, "data": calldata},
-            "latest",
+            _block_param(request.block),  # VIB-5140: pin post-tx reads; "" → "latest"
         ]
 
         # Record request for rate limiting
@@ -1105,7 +1120,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
 
         params = [
             {"to": token_address, "data": calldata},
-            "latest",
+            _block_param(request.block),  # VIB-5140: pin post-tx reads; "" → "latest"
         ]
 
         # Record request for rate limiting
@@ -1219,7 +1234,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
 
         params = [
             {"to": position_manager, "data": calldata},
-            "latest",
+            _block_param(request.block),  # VIB-5140: pin post-tx reads; "" → "latest"
         ]
 
         # Record request for rate limiting
@@ -1348,7 +1363,7 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
 
         params = [
             {"to": position_manager, "data": calldata},
-            "latest",
+            _block_param(request.block),  # VIB-5140: pin post-tx reads; "" → "latest"
         ]
 
         # Record request for rate limiting

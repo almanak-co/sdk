@@ -216,7 +216,7 @@ async def test_verify_closure_aggregates_multiple_position_failures(
     """If two TJ V2 positions both have residuals, verify reports False."""
     calls = []
 
-    def hook(*, position, wallet_address, gateway_client=None, rpc_url=None):
+    def hook(*, position, wallet_address, gateway_client=None, rpc_url=None, block=None):
         calls.append(position.position_id)
         return ClosureCheckResult(
             closed=False,

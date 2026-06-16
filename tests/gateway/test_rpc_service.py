@@ -367,6 +367,261 @@ class TestRpcServiceChainAllowlist:
         assert int(response.balance) == 10**18
 
 
+class TestRpcServiceBlockPinning:
+    """VIB-5140: the four typed queries pin their eth_call to ``request.block``.
+
+    An omitted ``block`` (proto3 default "") MUST fall back to "latest"
+    (backward-compatible). A supplied block tag MUST be threaded into the
+    eth_call params as the block reference so a post-tx read pins to the
+    confirmed receipt's block instead of an unpinned "latest" that a
+    trailing read replica can answer with PRE-tx state.
+    """
+
+    @staticmethod
+    def _block_arg(make_rpc_call_mock) -> str:
+        """Extract the eth_call block tag from the captured _make_rpc_call.
+
+        Signature: ``_make_rpc_call(rpc_url, method, params, label, ...)`` —
+        ``params`` is the 3rd positional arg; its 2nd element is the block tag.
+        """
+        params = make_rpc_call_mock.call_args.args[2]
+        return params[1]
+
+    @pytest.mark.asyncio
+    async def test_balance_omitted_block_defaults_to_latest(self, rpc_service, mock_context):
+        request = gateway_pb2.BalanceQueryRequest(
+            chain="arbitrum",
+            token_address="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            wallet_address="0x54776446Aa29Fc49d152B4850bD410eA1E4d24bF",
+        )
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(
+                rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x1", None))
+            ) as call:
+                await rpc_service.QueryBalance(request, mock_context)
+        assert self._block_arg(call) == "latest"
+
+    @pytest.mark.asyncio
+    async def test_balance_pinned_block_threaded(self, rpc_service, mock_context):
+        request = gateway_pb2.BalanceQueryRequest(
+            chain="arbitrum",
+            token_address="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            wallet_address="0x54776446Aa29Fc49d152B4850bD410eA1E4d24bF",
+            block="0x1234abc",
+        )
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(
+                rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x1", None))
+            ) as call:
+                await rpc_service.QueryBalance(request, mock_context)
+        assert self._block_arg(call) == "0x1234abc"
+
+    @pytest.mark.asyncio
+    async def test_allowance_omitted_block_defaults_to_latest(self, rpc_service, mock_context):
+        request = gateway_pb2.AllowanceRequest(
+            chain="arbitrum",
+            token_address="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            owner_address="0x54776446Aa29Fc49d152B4850bD410eA1E4d24bF",
+            spender_address="0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+        )
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(
+                rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x1", None))
+            ) as call:
+                await rpc_service.QueryAllowance(request, mock_context)
+        assert self._block_arg(call) == "latest"
+
+    @pytest.mark.asyncio
+    async def test_allowance_pinned_block_threaded(self, rpc_service, mock_context):
+        request = gateway_pb2.AllowanceRequest(
+            chain="arbitrum",
+            token_address="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            owner_address="0x54776446Aa29Fc49d152B4850bD410eA1E4d24bF",
+            spender_address="0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+            block="0xdeadbeef",
+        )
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(
+                rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x1", None))
+            ) as call:
+                await rpc_service.QueryAllowance(request, mock_context)
+        assert self._block_arg(call) == "0xdeadbeef"
+
+    @pytest.mark.asyncio
+    async def test_position_liquidity_omitted_block_defaults_to_latest(self, rpc_service, mock_context):
+        request = gateway_pb2.PositionLiquidityRequest(
+            chain="arbitrum",
+            position_manager="0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+            token_id=5460223,
+        )
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(
+                rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x" + "00" * 256, None))
+            ) as call:
+                await rpc_service.QueryPositionLiquidity(request, mock_context)
+        assert self._block_arg(call) == "latest"
+
+    @pytest.mark.asyncio
+    async def test_position_liquidity_pinned_block_threaded(self, rpc_service, mock_context):
+        request = gateway_pb2.PositionLiquidityRequest(
+            chain="arbitrum",
+            position_manager="0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+            token_id=5460223,
+            block="0x1220a40",
+        )
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(
+                rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x" + "00" * 256, None))
+            ) as call:
+                await rpc_service.QueryPositionLiquidity(request, mock_context)
+        assert self._block_arg(call) == "0x1220a40"
+
+    @pytest.mark.asyncio
+    async def test_position_tokens_owed_omitted_block_defaults_to_latest(self, rpc_service, mock_context):
+        request = gateway_pb2.PositionTokensOwedRequest(
+            chain="arbitrum",
+            position_manager="0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+            token_id=5460223,
+        )
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(
+                rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x" + "00" * 256, None))
+            ) as call:
+                await rpc_service.QueryPositionTokensOwed(request, mock_context)
+        assert self._block_arg(call) == "latest"
+
+    @pytest.mark.asyncio
+    async def test_position_tokens_owed_pinned_block_threaded(self, rpc_service, mock_context):
+        request = gateway_pb2.PositionTokensOwedRequest(
+            chain="arbitrum",
+            position_manager="0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+            token_id=5460223,
+            block="0x1220a40",
+        )
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(
+                rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x" + "00" * 256, None))
+            ) as call:
+                await rpc_service.QueryPositionTokensOwed(request, mock_context)
+        assert self._block_arg(call) == "0x1220a40"
+
+
+class TestPositionQueryParsing:
+    """Parse / validation branch coverage for the V3 position handlers.
+
+    These exercise the result-decode and guard branches that the
+    block-pinning tests (which stop at the eth_call boundary) do not, so the
+    handlers stay well within the CRAP gate after the VIB-5140 block plumbing
+    landed. The Anvil intent LP suite covers the same paths end-to-end in CI;
+    these unit tests pin the behaviour without a live chain.
+    """
+
+    NPM = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88"
+
+    @pytest.mark.asyncio
+    async def test_liquidity_rejects_unknown_chain(self, rpc_service, mock_context):
+        request = gateway_pb2.PositionLiquidityRequest(chain="not_a_chain", position_manager=self.NPM, token_id=1)
+        response = await rpc_service.QueryPositionLiquidity(request, mock_context)
+        assert response.success is False
+
+    @pytest.mark.asyncio
+    async def test_liquidity_decodes_nonzero(self, rpc_service, mock_context):
+        # 8 words; liquidity (word 7) = 0x...64 (=100).
+        words = ["00" * 32] * 7 + [f"{100:064x}"]
+        result = "0x" + "".join(words)
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(rpc_service, "_make_rpc_call", new=AsyncMock(return_value=(result, None))):
+                request = gateway_pb2.PositionLiquidityRequest(chain="arbitrum", position_manager=self.NPM, token_id=1)
+                response = await rpc_service.QueryPositionLiquidity(request, mock_context)
+        assert response.success is True
+        assert int(response.liquidity) == 100
+
+    @pytest.mark.asyncio
+    async def test_liquidity_position_not_found_on_empty(self, rpc_service, mock_context):
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x", None))):
+                request = gateway_pb2.PositionLiquidityRequest(chain="arbitrum", position_manager=self.NPM, token_id=1)
+                response = await rpc_service.QueryPositionLiquidity(request, mock_context)
+        assert response.success is False
+        assert "not found" in response.error
+
+    @pytest.mark.asyncio
+    async def test_liquidity_short_result_length(self, rpc_service, mock_context):
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x" + "00" * 16, None))):
+                request = gateway_pb2.PositionLiquidityRequest(chain="arbitrum", position_manager=self.NPM, token_id=1)
+                response = await rpc_service.QueryPositionLiquidity(request, mock_context)
+        assert response.success is False
+        assert "length" in response.error
+
+    @pytest.mark.asyncio
+    async def test_liquidity_rpc_error_propagates(self, rpc_service, mock_context):
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(
+                rpc_service, "_make_rpc_call", new=AsyncMock(return_value=(None, {"message": "boom"}))
+            ):
+                request = gateway_pb2.PositionLiquidityRequest(chain="arbitrum", position_manager=self.NPM, token_id=1)
+                response = await rpc_service.QueryPositionLiquidity(request, mock_context)
+        assert response.success is False
+        assert response.error == "boom"
+
+    @pytest.mark.asyncio
+    async def test_tokens_owed_decodes_nonzero(self, rpc_service, mock_context):
+        # 12 words; tokensOwed0 (word 10) = 7, tokensOwed1 (word 11) = 9.
+        words = ["00" * 32] * 10 + [f"{7:064x}", f"{9:064x}"]
+        result = "0x" + "".join(words)
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(rpc_service, "_make_rpc_call", new=AsyncMock(return_value=(result, None))):
+                request = gateway_pb2.PositionTokensOwedRequest(chain="arbitrum", position_manager=self.NPM, token_id=1)
+                response = await rpc_service.QueryPositionTokensOwed(request, mock_context)
+        assert response.success is True
+        assert int(response.tokens_owed0) == 7
+        assert int(response.tokens_owed1) == 9
+
+    @pytest.mark.asyncio
+    async def test_tokens_owed_position_not_found_on_empty(self, rpc_service, mock_context):
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x", None))):
+                request = gateway_pb2.PositionTokensOwedRequest(chain="arbitrum", position_manager=self.NPM, token_id=1)
+                response = await rpc_service.QueryPositionTokensOwed(request, mock_context)
+        assert response.success is False
+        assert "not found" in response.error
+
+    @pytest.mark.asyncio
+    async def test_tokens_owed_short_result_length(self, rpc_service, mock_context):
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(rpc_service, "_make_rpc_call", new=AsyncMock(return_value=("0x" + "00" * 16, None))):
+                request = gateway_pb2.PositionTokensOwedRequest(chain="arbitrum", position_manager=self.NPM, token_id=1)
+                response = await rpc_service.QueryPositionTokensOwed(request, mock_context)
+        assert response.success is False
+        assert "length" in response.error
+
+    @pytest.mark.asyncio
+    async def test_tokens_owed_rpc_error_propagates(self, rpc_service, mock_context):
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(
+                rpc_service, "_make_rpc_call", new=AsyncMock(return_value=(None, {"message": "boom"}))
+            ):
+                request = gateway_pb2.PositionTokensOwedRequest(chain="arbitrum", position_manager=self.NPM, token_id=1)
+                response = await rpc_service.QueryPositionTokensOwed(request, mock_context)
+        assert response.success is False
+        assert response.error == "boom"
+
+    @pytest.mark.asyncio
+    async def test_liquidity_negative_token_id_rejected(self, rpc_service, mock_context):
+        # token_id is uint64 on the wire; negative cannot be constructed, so
+        # cover the invalid-address guard instead (a sibling early-return).
+        request = gateway_pb2.PositionLiquidityRequest(chain="arbitrum", position_manager="not_an_address", token_id=1)
+        response = await rpc_service.QueryPositionLiquidity(request, mock_context)
+        assert response.success is False
+
+    @pytest.mark.asyncio
+    async def test_tokens_owed_invalid_address_rejected(self, rpc_service, mock_context):
+        request = gateway_pb2.PositionTokensOwedRequest(chain="arbitrum", position_manager="not_an_address", token_id=1)
+        response = await rpc_service.QueryPositionTokensOwed(request, mock_context)
+        assert response.success is False
+
+
 class TestRpcServiceBatchCall:
     """Tests for RpcService.BatchCall."""
 

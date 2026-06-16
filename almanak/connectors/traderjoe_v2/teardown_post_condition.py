@@ -103,6 +103,7 @@ def traderjoe_v2_post_condition(
     wallet_address: str,
     gateway_client: Any | None = None,
     rpc_url: str | None = None,
+    block: int | str | None = None,
 ) -> ClosureCheckResult:
     """Verify a TraderJoe V2 LP position has zero residual LB token balance.
 
@@ -110,6 +111,13 @@ def traderjoe_v2_post_condition(
     they're present in ``position.details``. Otherwise falls back to the same
     +/-50 bin scan the compiler uses, marking the result with
     ``residual["fallback_scan"]`` so operators can see the scan was incomplete.
+
+    VIB-5140: ``block`` is accepted to satisfy the ``TeardownPostCondition``
+    protocol (the teardown manager pins V3 reads to the close-tx receipt's
+    block). It is NOT yet threaded through this hook's LB-token
+    ``balanceOfBatch`` read path — block-pinning the TJ V2 SDK read is a
+    Layer-2 follow-up. Accepting and ignoring it keeps the hook backward
+    compatible with the manager's pinned-call site.
     """
     protocol = "traderjoe_v2"
     position_id = getattr(position, "position_id", "") or ""

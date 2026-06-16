@@ -417,6 +417,15 @@ class TeardownResult:
     positions_closed: int = 0
     has_position_breakdown: bool = False
 
+    # VIB-5140: block number of the last successful close-tx receipt in this
+    # teardown. Threaded into the on-chain closure verifier so it pins its
+    # ``QueryPositionLiquidity`` / ``QueryPositionTokensOwed`` reads to the
+    # exact block the close landed at — a read replica that trails the writer
+    # by a block then cannot return PRE-close state and false-negative the
+    # verification. ``None`` (no receipt block available) falls back to the
+    # legacy ``"latest"`` read.
+    last_receipt_block: int | None = None
+
     def __post_init__(self) -> None:
         """Convert numeric fields to Decimal."""
         for attr in ["starting_value_usd", "final_value_usd", "total_costs_usd"]:

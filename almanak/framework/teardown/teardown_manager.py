@@ -268,6 +268,29 @@ def _warm_oracle_best_effort(market: Any, executable: list[Any], chain: str | No
     return warm_and_validate_oracle(market, executable, chain, raise_on_missing=False)
 
 
+def _fold_max_receipt_block(current: int | None, execution_result: Any) -> int | None:
+    """Fold ``execution_result``'s receipt block into the running MAX (VIB-5140).
+
+    A multi-intent teardown closes several positions whose txs can land in
+    DIFFERENT blocks, and intents may complete non-monotonically (slippage
+    retries / reordering). The post-teardown closure verifier pins its on-chain
+    reads to this block; pinning to the LAST-PROCESSED intent's block would
+    under-pin when that block is EARLIER than another close's, making a position
+    closed in a LATER block falsely read as still-open. Reading at the HIGHEST
+    close block makes every close visible (close state only moves forward), so
+    MAX is the correct anchor for verifying all positions.
+
+    Uses the same single-source extractor the iteration/lending lane uses
+    (``strategy_runner._last_receipt_block``), which returns a positive block or
+    ``None``. A receipt that lacks a block contributes ``0`` and so never lowers
+    or erases a prior anchor; the final ``or None`` restores ``None`` when no
+    block has ever been seen (caller then falls back to ``"latest"``).
+    """
+    from almanak.framework.runner.strategy_runner import _last_receipt_block
+
+    return max(current or 0, _last_receipt_block(execution_result) or 0) or None
+
+
 @dataclass
 class AtomicBundle:
     """Represents a bundle of intents for atomic execution."""
@@ -577,6 +600,7 @@ class TeardownManager:
                         strategy,
                         expected_positions=precomputed_positions,
                         pre_execution_positions=positions,
+                        close_receipt_block=result.last_receipt_block,
                     )
                 except Exception as verify_err:
                     logger.exception(
@@ -1138,6 +1162,12 @@ class TeardownManager:
         total_costs = Decimal("0")
         final_balances: dict[str, Decimal] = {}
 
+        # VIB-5140: track the block of the last successful close-tx receipt so
+        # the post-teardown on-chain closure verifier can pin its state reads
+        # to it (instead of an unpinned "latest" that a trailing read replica
+        # can answer with PRE-close state → false-negative → STRATEGY_ERROR).
+        last_receipt_block: int | None = None
+
         # VIB-3773: stable cycle id for every accounting row written by this
         # teardown — both ledger/outbox (per-intent commit) and snapshot/
         # metrics (pre/post bracket) stamp on it via the runner helpers.
@@ -1629,6 +1659,11 @@ class TeardownManager:
 
             if exec_result.success:
                 succeeded += 1
+                # VIB-5140: fold this intent's receipt block into the running
+                # MAX across all successful closes (see _fold_max_receipt_block
+                # for why MAX, not last-processed, is correct under
+                # non-monotonic completion).
+                last_receipt_block = _fold_max_receipt_block(last_receipt_block, exec_result)
                 # Estimate cost
                 actual_slippage = exec_result.final_slippage
                 intent_value = positions.total_value_usd / len(intents)  # Simplified
@@ -1754,6 +1789,7 @@ class TeardownManager:
             error=None if failed == 0 else f"{failed} intents failed",
             accounting_degraded=bool(accounting_degraded_records),
             accounting_degraded_count=len(accounting_degraded_records),
+            last_receipt_block=last_receipt_block,
         )
 
     async def _persist_state(
@@ -1791,18 +1827,21 @@ class TeardownManager:
         strategy: IntentStrategy,
         expected_positions: Any = None,
         pre_execution_positions: Any = None,
+        close_receipt_block: int | None = None,
     ) -> bool:
         """Verify positions are closed on-chain — returns the all-closed bool.
 
         Thin back-compat wrapper over :meth:`_verify_closure_detailed`
         (VIB-5085). Existing callers and the post-condition test suite depend
         on the bare ``bool`` contract; the position-level breakdown lives on
-        the detailed variant.
+        the detailed variant. ``close_receipt_block`` (VIB-5140) is forwarded
+        so the on-chain reads pin to the close-tx block.
         """
         verification = await self._verify_closure_detailed(
             strategy,
             expected_positions=expected_positions,
             pre_execution_positions=pre_execution_positions,
+            close_receipt_block=close_receipt_block,
         )
         return verification.all_closed
 
@@ -1811,6 +1850,7 @@ class TeardownManager:
         strategy: IntentStrategy,
         expected_positions: Any = None,
         pre_execution_positions: Any = None,
+        close_receipt_block: int | None = None,
     ) -> ClosureVerification:
         """Verify that positions are actually closed on-chain (VIB-5085).
 
@@ -1818,6 +1858,15 @@ class TeardownManager:
         position-level counts (``positions_total`` / ``positions_closed``) so
         lifecycle counters report *positions* closed, not *intents* landed.
         ``_verify_closure`` wraps this and returns only ``all_closed``.
+
+        VIB-5140: ``close_receipt_block`` is the block of the last successful
+        close-tx receipt (from ``TeardownResult.last_receipt_block``). It is
+        forwarded to each post-condition hook so on-chain state reads pin to
+        the exact block the close landed at — a read replica that trails the
+        writer by a block then cannot return PRE-close state and falsely
+        report the position still open (the false-negative teardown verify
+        that drove STRATEGY_ERROR + double-close). ``None`` falls back to the
+        legacy ``"latest"`` read.
 
         Three layers of verification, in priority order:
 
@@ -1887,6 +1936,7 @@ class TeardownManager:
                         wallet_address=wallet_address,
                         gateway_client=gateway_client,
                         rpc_url=rpc_url,
+                        block=close_receipt_block,
                     )
                 except Exception as exc:  # noqa: BLE001 — fail-closed
                     logger.exception(

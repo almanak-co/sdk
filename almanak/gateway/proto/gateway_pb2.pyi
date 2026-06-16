@@ -3934,6 +3934,7 @@ class AllowanceRequest(_message.Message):
     TOKEN_ADDRESS_FIELD_NUMBER: _builtins.int
     OWNER_ADDRESS_FIELD_NUMBER: _builtins.int
     SPENDER_ADDRESS_FIELD_NUMBER: _builtins.int
+    BLOCK_FIELD_NUMBER: _builtins.int
     chain: _builtins.str
     """Chain identifier"""
     token_address: _builtins.str
@@ -3942,6 +3943,14 @@ class AllowanceRequest(_message.Message):
     """Token owner address"""
     spender_address: _builtins.str
     """Spender address"""
+    block: _builtins.str
+    """VIB-5140: optional block reference for the underlying eth_call. Empty
+    ("") → "latest" (legacy, backward-compatible). A post-transaction read
+    MUST pin to the confirmed receipt's block (decimal or 0x-hex string) so
+    the call cannot race a read replica that trails the writer by a block
+    and return PRE-tx state. Mirrors the EthCall block plumbing in
+    lending_accounting (VIB-4589 / F7).
+    """
     def __init__(
         self,
         *,
@@ -3949,8 +3958,9 @@ class AllowanceRequest(_message.Message):
         token_address: _builtins.str = ...,
         owner_address: _builtins.str = ...,
         spender_address: _builtins.str = ...,
+        block: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "owner_address", b"owner_address", "spender_address", b"spender_address", "token_address", b"token_address"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["block", b"block", "chain", b"chain", "owner_address", b"owner_address", "spender_address", b"spender_address", "token_address", b"token_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___AllowanceRequest: _TypeAlias = AllowanceRequest  # noqa: Y015
@@ -3985,20 +3995,27 @@ class BalanceQueryRequest(_message.Message):
     CHAIN_FIELD_NUMBER: _builtins.int
     TOKEN_ADDRESS_FIELD_NUMBER: _builtins.int
     WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
+    BLOCK_FIELD_NUMBER: _builtins.int
     chain: _builtins.str
     """Chain identifier"""
     token_address: _builtins.str
     """ERC-20 token contract address"""
     wallet_address: _builtins.str
     """Wallet to query balance for"""
+    block: _builtins.str
+    """VIB-5140: optional block reference for the underlying eth_call. Empty
+    ("") → "latest" (legacy, backward-compatible). Post-tx reads pin to the
+    confirmed receipt's block to avoid a stale read-replica false-negative.
+    """
     def __init__(
         self,
         *,
         chain: _builtins.str = ...,
         token_address: _builtins.str = ...,
         wallet_address: _builtins.str = ...,
+        block: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "token_address", b"token_address", "wallet_address", b"wallet_address"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["block", b"block", "chain", b"chain", "token_address", b"token_address", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___BalanceQueryRequest: _TypeAlias = BalanceQueryRequest  # noqa: Y015
@@ -4033,20 +4050,29 @@ class PositionLiquidityRequest(_message.Message):
     CHAIN_FIELD_NUMBER: _builtins.int
     POSITION_MANAGER_FIELD_NUMBER: _builtins.int
     TOKEN_ID_FIELD_NUMBER: _builtins.int
+    BLOCK_FIELD_NUMBER: _builtins.int
     chain: _builtins.str
     """Chain identifier"""
     position_manager: _builtins.str
     """NFT Position Manager address"""
     token_id: _builtins.int
     """Position NFT token ID"""
+    block: _builtins.str
+    """VIB-5140: optional block reference for the underlying eth_call. Empty
+    ("") → "latest" (legacy, backward-compatible). The teardown verifier
+    pins this to the close-tx receipt's block so a read replica that trails
+    the writer cannot return PRE-close liquidity and false-negative the
+    closure check.
+    """
     def __init__(
         self,
         *,
         chain: _builtins.str = ...,
         position_manager: _builtins.str = ...,
         token_id: _builtins.int = ...,
+        block: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "position_manager", b"position_manager", "token_id", b"token_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["block", b"block", "chain", b"chain", "position_manager", b"position_manager", "token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PositionLiquidityRequest: _TypeAlias = PositionLiquidityRequest  # noqa: Y015
@@ -4081,20 +4107,29 @@ class PositionTokensOwedRequest(_message.Message):
     CHAIN_FIELD_NUMBER: _builtins.int
     POSITION_MANAGER_FIELD_NUMBER: _builtins.int
     TOKEN_ID_FIELD_NUMBER: _builtins.int
+    BLOCK_FIELD_NUMBER: _builtins.int
     chain: _builtins.str
     """Chain identifier"""
     position_manager: _builtins.str
     """NFT Position Manager address"""
     token_id: _builtins.int
     """Position NFT token ID"""
+    block: _builtins.str
+    """VIB-5140: optional block reference for the underlying eth_call. Empty
+    ("") → "latest" (legacy, backward-compatible). The teardown verifier
+    pins this to the close-tx receipt's block so a read replica that trails
+    the writer cannot return PRE-close tokensOwed and false-negative the
+    closure check.
+    """
     def __init__(
         self,
         *,
         chain: _builtins.str = ...,
         position_manager: _builtins.str = ...,
         token_id: _builtins.int = ...,
+        block: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "position_manager", b"position_manager", "token_id", b"token_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["block", b"block", "chain", b"chain", "position_manager", b"position_manager", "token_id", b"token_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PositionTokensOwedRequest: _TypeAlias = PositionTokensOwedRequest  # noqa: Y015

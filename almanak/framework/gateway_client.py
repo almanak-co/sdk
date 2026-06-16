@@ -21,6 +21,45 @@ logger = logging.getLogger(__name__)
 AUTH_METADATA_KEY = "authorization"
 
 
+def _encode_block_tag(block: int | str | None) -> str:
+    """Encode an optional block reference for a typed-query proto ``block`` field.
+
+    VIB-5140: the typed RPC queries (QueryAllowance / QueryBalance /
+    QueryPositionLiquidity / QueryPositionTokensOwed) carry block as a
+    ``string`` (proto3 default ``""``). This helper mirrors
+    :meth:`GatewayClient.eth_call`'s JSON-RPC block encoding so the gateway
+    handler receives a wire-ready tag:
+
+    - ``None`` → ``""`` (proto default; the handler maps ``""`` → ``"latest"``,
+      preserving exactly the pre-VIB-5140 behaviour for every caller that
+      omits ``block``).
+    - ``int`` → ``hex(N)`` (the standard JSON-RPC block-number form). ``bool``
+      is rejected (it is an ``int`` subclass but never a valid block), and a
+      negative int is rejected — both surface a caller bug loudly rather than
+      silently degrading to ``"latest"`` and re-opening the stale-read race.
+    - ``str`` → passed through unchanged (covers ``"latest"`` / ``"pending"`` /
+      ``"safe"`` / ``"finalized"`` and pre-encoded ``"0x..."`` hex).
+    - any other type → ``TypeError`` (fail loudly here rather than letting a
+      bad value reach proto serialization, which raises a cryptic gRPC error
+      far from the offending call site).
+
+    Post-transaction reads (the teardown closure verifier) MUST pass the
+    confirmed receipt's ``block_number`` so the call cannot race a read
+    replica that trails the writer by a block and return PRE-tx state.
+    """
+    if block is None:
+        return ""
+    if isinstance(block, bool):
+        raise ValueError(f"block must not be bool, got {block!r}")
+    if isinstance(block, int):
+        if block < 0:
+            raise ValueError(f"block must be non-negative, got {block}")
+        return hex(block)
+    if isinstance(block, str):
+        return block
+    raise TypeError(f"block must be int, str, or None, got {type(block).__name__}")
+
+
 @dataclass(frozen=True)
 class V4PositionState:
     """Live on-chain state of a Uniswap V4 LP position (VIB-5024).
@@ -714,6 +753,7 @@ class GatewayClient:
         token_address: str,
         owner_address: str,
         spender_address: str,
+        block: int | str | None = None,
     ) -> int | None:
         """Query ERC-20 allowance via gateway.
 
@@ -722,6 +762,10 @@ class GatewayClient:
             token_address: ERC-20 token contract address
             owner_address: Token owner address
             spender_address: Spender address
+            block: Optional block reference (VIB-5140). ``None`` (default) →
+                ``"latest"`` (legacy behaviour). Post-transaction reads should
+                pin to the confirmed receipt's ``block_number`` so the call
+                cannot race a read replica that trails the writer.
 
         Returns:
             Allowance in wei, or None if query fails
@@ -739,6 +783,7 @@ class GatewayClient:
                     token_address=token_address,
                     owner_address=owner_address,
                     spender_address=spender_address,
+                    block=_encode_block_tag(block),
                 ),
                 timeout=self.config.timeout,
             )
@@ -755,6 +800,7 @@ class GatewayClient:
         chain: str,
         token_address: str,
         wallet_address: str,
+        block: int | str | None = None,
     ) -> int | None:
         """Query ERC-20 balance via gateway.
 
@@ -762,6 +808,10 @@ class GatewayClient:
             chain: Chain identifier (e.g., "arbitrum", "base")
             token_address: ERC-20 token contract address
             wallet_address: Wallet address to query balance for
+            block: Optional block reference (VIB-5140). ``None`` (default) →
+                ``"latest"`` (legacy behaviour). Post-transaction reads should
+                pin to the confirmed receipt's ``block_number`` so the call
+                cannot race a read replica that trails the writer.
 
         Returns:
             Balance in wei, or None if query fails
@@ -778,6 +828,7 @@ class GatewayClient:
                     chain=chain,
                     token_address=token_address,
                     wallet_address=wallet_address,
+                    block=_encode_block_tag(block),
                 ),
                 timeout=self.config.timeout,
             )
@@ -1006,6 +1057,7 @@ class GatewayClient:
         chain: str,
         position_manager: str,
         token_id: int,
+        block: int | str | None = None,
     ) -> int | None:
         """Query Uniswap V3 position liquidity via gateway.
 
@@ -1013,6 +1065,11 @@ class GatewayClient:
             chain: Chain identifier (e.g., "arbitrum", "base")
             position_manager: NFT Position Manager contract address
             token_id: Position NFT token ID
+            block: Optional block reference (VIB-5140). ``None`` (default) →
+                ``"latest"`` (legacy behaviour). The teardown closure verifier
+                pins this to the close-tx receipt's ``block_number`` so a read
+                replica that trails the writer cannot return PRE-close
+                liquidity and false-negative the closure check.
 
         Returns:
             Liquidity value, or None if query fails
@@ -1029,6 +1086,7 @@ class GatewayClient:
                     chain=chain,
                     position_manager=position_manager,
                     token_id=token_id,
+                    block=_encode_block_tag(block),
                 ),
                 timeout=self.config.timeout,
             )
@@ -1052,6 +1110,7 @@ class GatewayClient:
         chain: str,
         position_manager: str,
         token_id: int,
+        block: int | str | None = None,
     ) -> tuple[int, int] | None:
         """Query Uniswap V3 ``positions(tokenId).tokensOwed{0,1}`` via gateway.
 
@@ -1065,6 +1124,11 @@ class GatewayClient:
             chain: Chain identifier (e.g., "arbitrum", "base").
             position_manager: NFT Position Manager contract address.
             token_id: Position NFT token ID.
+            block: Optional block reference (VIB-5140). ``None`` (default) →
+                ``"latest"`` (legacy behaviour). The teardown closure verifier
+                pins this to the close-tx receipt's ``block_number`` so a read
+                replica that trails the writer cannot return PRE-close
+                tokensOwed and false-negative the closure check.
 
         Returns:
             ``(tokens_owed0, tokens_owed1)`` on success.
@@ -1087,6 +1151,7 @@ class GatewayClient:
                     chain=chain,
                     position_manager=position_manager,
                     token_id=token_id,
+                    block=_encode_block_tag(block),
                 ),
                 timeout=self.config.timeout,
             )

@@ -467,6 +467,7 @@ async def execute_and_verify(
             verification = await teardown_mgr._verify_closure_detailed(
                 strategy,
                 pre_execution_positions=positions,
+                close_receipt_block=teardown_result.last_receipt_block,
             )
         except Exception as verify_err:
             logger.exception(

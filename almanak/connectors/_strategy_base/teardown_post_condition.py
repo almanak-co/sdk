@@ -31,7 +31,14 @@ class ClosureCheckResult:
 
 
 class TeardownPostCondition(Protocol):
-    """Protocol-specific on-chain closure check."""
+    """Protocol-specific on-chain closure check.
+
+    VIB-5140: ``block`` is an OPTIONAL block reference (the close-tx receipt's
+    ``block_number``). Hooks that re-query on-chain state SHOULD pin their
+    reads to it so a read replica trailing the writer cannot return PRE-close
+    state and false-negative the closure check. ``None`` (the default for any
+    caller that omits it) preserves the legacy ``"latest"`` behaviour.
+    """
 
     def __call__(
         self,
@@ -39,6 +46,7 @@ class TeardownPostCondition(Protocol):
         wallet_address: str,
         gateway_client: Any | None = None,
         rpc_url: str | None = None,
+        block: int | str | None = None,
     ) -> ClosureCheckResult: ...
 
 
