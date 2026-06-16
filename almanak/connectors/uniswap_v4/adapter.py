@@ -32,7 +32,6 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3_TOKENS
 from almanak.connectors.uniswap_v4.hooks import HookFlags
 from almanak.connectors.uniswap_v4.sdk import (
     NATIVE_CURRENCY,
@@ -45,7 +44,7 @@ from almanak.connectors.uniswap_v4.sdk import (
 )
 from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import native_symbols_for
-from almanak.framework.data.tokens import TokenNotFoundError
+from almanak.framework.data.tokens import TokenNotFoundError, get_token_resolver
 
 from .addresses import UNISWAP_V4
 
@@ -1198,42 +1197,34 @@ class UniswapV4Adapter:
             resolved = self._token_resolver.resolve_for_swap(token, self.chain)
             return resolved.address, resolved.decimals
 
-        # Fallback: use UNISWAP_V3_TOKENS registry for address
-        chain_tokens = UNISWAP_V3_TOKENS.get(self.chain, {})
-        address = chain_tokens.get(token.upper())
-        if address:
-            # Known decimals only — never assume 18
-            decimals_map = {
-                "USDC": 6,
-                "USDT": 6,
-                "USDC.e": 6,
-                "USDT.e": 6,
-                "WBTC": 8,
-                "WETH": 18,
-                "ETH": 18,
-                "DAI": 18,
-                "LINK": 18,
-                "UNI": 18,
-                "WAVAX": 18,
-                "AVAX": 18,
-                "WMATIC": 18,
-                "WBNB": 18,
-            }
-            decimals = decimals_map.get(token.upper())
-            if decimals is None:
-                raise TokenNotFoundError(
-                    token=token,
-                    chain=self.chain,
-                    reason="Token address found but decimals unknown",
-                    suggestions=["Provide a token_resolver for reliable decimal resolution"],
-                )
-            return address, decimals
-
-        raise TokenNotFoundError(
-            token=token,
-            chain=self.chain,
-            reason="Token not in static registry",
-        )
+        # Fallback: no per-adapter ``token_resolver`` was injected. Route
+        # through the framework's connector-agnostic static token resolver
+        # rather than a sibling connector's private catalogue.
+        #
+        # Reading ``uniswap_v3.UNISWAP_V3_TOKENS`` here was a ``CONNECTOR_IMPORT``
+        # coupling site (blueprint 22 "Connector + Chain Self-Containment" →
+        # "Goal": *"every ``from almanak.connectors.<protocol> import …`` outside
+        # the connector itself — is debt"*; §"The ratchet gate" →
+        # "Interpreting a gate failure" gives the ``CONNECTOR_IMPORT`` fix
+        # archetype: replace with the relevant framework/strategy-side lookup).
+        # Neutral token addresses (ETH/WETH/USDC/…) are not owned by any one
+        # protocol, so they belong on the framework resolver, not on V3.
+        #
+        # ``skip_gateway=True`` keeps this the same offline static lookup the
+        # old dict was (no surprise gateway round-trip on the degraded path);
+        # ``resolve`` (not ``resolve_for_swap``) preserves the old fallback's
+        # no-auto-wrap behaviour (native symbols stay the native sentinel).
+        #
+        # An unresolvable symbol still fails closed: under ``skip_gateway=True``
+        # the resolver's symbol path can only raise ``TokenNotFoundError`` (the
+        # ``AmbiguousTokenError`` path is gateway-only and is skipped here), so
+        # we let that exception propagate untouched rather than wrapping it —
+        # this preserves the resolver's richer ``reason`` + ``suggestions``
+        # (e.g. "did you mean …") for the strategy author instead of flattening
+        # them to a generic message. The fail-closed contract (a
+        # ``TokenNotFoundError`` for unknown symbols) is unchanged. VIB-4866.
+        resolved = get_token_resolver().resolve(token, self.chain, skip_gateway=True, log_errors=False)
+        return resolved.address, resolved.decimals
 
 
 # =============================================================================

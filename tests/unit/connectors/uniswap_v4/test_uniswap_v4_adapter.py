@@ -447,15 +447,86 @@ class TestTokenResolution:
         with pytest.raises(TokenNotFoundError):
             adapter._resolve_token("UNKNOWN_TOKEN_XYZ")
 
-    def test_resolve_symbol_with_unknown_decimals_raises(self):
-        """Symbol found in UNISWAP_V3_TOKENS but not in decimals_map must raise."""
-        from unittest.mock import patch
+    def test_resolver_fallback_preserves_v3_catalogue_addresses(self):
+        """VIB-4866 behaviour-preservation: the no-injected-resolver fallback now
+        routes through the framework's connector-agnostic token resolver instead
+        of importing ``uniswap_v3.UNISWAP_V3_TOKENS``. For every (chain, symbol)
+        the OLD fallback could resolve — i.e. present in BOTH ``UNISWAP_V3_TOKENS``
+        AND the old hard-coded ``decimals_map`` — the address must resolve
+        identically (case-insensitively; EVM addresses are case-insensitive and
+        the framework resolver returns lowercase, matching the injected-resolver
+        path)."""
+        from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3_TOKENS
+        from almanak.connectors.uniswap_v4.addresses import UNISWAP_V4
 
-        fake_tokens = {"arbitrum": {"FAKECOIN": "0x1234567890123456789012345678901234567890"}}
+        # The exact decimals the old fallback hard-coded. Symbols outside this
+        # map raised "decimals unknown" in the old code, so they are not part of
+        # the preserved contract. BSC USDC/USDT are deliberately excluded: the
+        # old map hard-coded 6, but those tokens are actually 18-decimal on BSC —
+        # the framework resolver returns the correct 18 (a latent-bug fix,
+        # asserted separately below).
+        old_decimals_map = {
+            "USDC": 6, "USDT": 6, "USDC.e": 6, "USDT.e": 6, "WBTC": 8,
+            "WETH": 18, "ETH": 18, "DAI": 18, "LINK": 18, "UNI": 18,
+            "WAVAX": 18, "AVAX": 18, "WMATIC": 18, "WBNB": 18,
+        }  # fmt: skip
+        checked = 0
+        for chain, toks in UNISWAP_V3_TOKENS.items():
+            if chain not in UNISWAP_V4:
+                continue  # V4 adapter only constructs on V4-supported chains
+            for symbol, old_address in toks.items():
+                if symbol not in old_decimals_map:
+                    continue  # old fallback raised — not part of the contract
+                if chain == "bsc" and symbol in ("USDC", "USDT"):
+                    continue  # bugfix asserted below
+                adapter = UniswapV4Adapter(chain=chain)
+                try:
+                    addr, dec = adapter._resolve_token(symbol)
+                except TokenNotFoundError:
+                    pytest.fail(f"regression: {symbol} on {chain} no longer resolves")
+                assert addr.lower() == old_address.lower(), f"{symbol} on {chain}"
+                assert dec == old_decimals_map[symbol], f"{symbol} on {chain}"
+                checked += 1
+        assert checked > 30, f"expected broad coverage, only checked {checked}"
+
+    def test_resolver_fallback_native_symbol_not_auto_wrapped(self):
+        """The swap-path fallback (for_v4_pool=False) preserves the old behaviour
+        of NOT auto-wrapping native symbols: ETH stays the native sentinel rather
+        than resolving to WETH."""
+        from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
+
         adapter = UniswapV4Adapter(chain="arbitrum")
-        with patch("almanak.connectors.uniswap_v4.adapter.UNISWAP_V3_TOKENS", fake_tokens):
-            with pytest.raises(TokenNotFoundError):
-                adapter._resolve_token("FAKECOIN")
+        addr, dec = adapter._resolve_token("ETH")
+        assert addr.lower() == NATIVE_SENTINEL.lower()
+        assert dec == 18
+
+    def test_resolver_fallback_corrects_bsc_stable_decimals(self):
+        """Latent-bug fix surfaced by VIB-4866: the old hard-coded decimals_map
+        returned 6 for BSC USDC/USDT, but both are 18-decimal on BSC. The
+        framework resolver returns the correct value."""
+        adapter = UniswapV4Adapter(chain="bsc")
+        _, usdc_dec = adapter._resolve_token("USDC")
+        _, usdt_dec = adapter._resolve_token("USDT")
+        assert usdc_dec == 18
+        assert usdt_dec == 18
+
+    def test_resolver_fallback_unknown_symbol_raises(self):
+        """Unknown symbols still fail-closed with TokenNotFoundError — no
+        fabricated 18-decimals on the degraded fallback path."""
+        adapter = UniswapV4Adapter(chain="arbitrum")
+        with pytest.raises(TokenNotFoundError):
+            adapter._resolve_token("FAKECOIN_XYZ")
+
+    def test_adapter_has_no_uniswap_v3_import(self):
+        """VIB-4866 / blueprint 22: no cross-connector CONNECTOR_IMPORT from
+        uniswap_v3 may remain in the V4 adapter."""
+        from pathlib import Path
+
+        import almanak.connectors.uniswap_v4.adapter as v4_adapter
+
+        assert not hasattr(v4_adapter, "UNISWAP_V3_TOKENS")
+        source = Path(v4_adapter.__file__).read_text()
+        assert "from almanak.connectors.uniswap_v3" not in source
 
     def test_raw_address_without_resolver_raises(self):
         """Raw addresses without a token_resolver must fail, not assume 18 decimals."""
