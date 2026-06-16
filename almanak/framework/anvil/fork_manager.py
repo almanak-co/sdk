@@ -321,8 +321,16 @@ class RollingForkManager:
         rpc_url: Archive RPC URL to fork from
         chain: Chain name (e.g., "arbitrum")
         anvil_port: Port for Anvil (default 8546)
-        startup_timeout_seconds: Timeout for startup (default 30)
+        startup_timeout_seconds: Total readiness budget — caps the
+            ``_wait_for_ready`` poll loop (default 30).
         auto_impersonate: Enable auto-impersonation (default True)
+        rpc_timeout_seconds: Per-call timeout for post-ready operational
+            JSON-RPC calls (env ``ALMANAK_FORK_RPC_TIMEOUT``).
+        health_timeout_seconds: Per-probe timeout for the readiness health
+            check (the ``eth_blockNumber`` probe inside ``_wait_for_ready``),
+            distinct from ``rpc_timeout_seconds`` and from the
+            ``startup_timeout_seconds`` total budget (env
+            ``ALMANAK_FORK_HEALTH_TIMEOUT``).
 
     Example:
         manager = RollingForkManager(
@@ -1398,9 +1406,12 @@ class RollingForkManager:
 
         while time.time() - start_time < self.startup_timeout_seconds:
             if self._is_port_open():
-                # Verify RPC is responding
+                # Verify RPC is responding. The readiness health probe is bounded
+                # by health_timeout_seconds (per-probe), distinct from
+                # startup_timeout_seconds (the total readiness budget capping this
+                # loop) and rpc_timeout_seconds (post-ready operational calls).
                 try:
-                    block = await self._get_block_number()
+                    block = await self._get_block_number(timeout_override=self.health_timeout_seconds)
                     if block is not None:
                         return True
                 except Exception:
@@ -1434,17 +1445,21 @@ class RollingForkManager:
         self,
         method: str,
         params: list[Any],
+        timeout_override: float | None = None,
     ) -> Any:
         """Make a JSON-RPC call to the fork.
 
         Args:
             method: RPC method name
             params: Method parameters
+            timeout_override: Per-call timeout in seconds. When ``None`` (every
+                post-ready operational call) the steady-state ``rpc_timeout_seconds``
+                applies; the readiness health probe passes ``health_timeout_seconds``.
 
         Returns:
             Result from the RPC call, or None on error
         """
-        success, result = await self._rpc_call_raw(method, params)
+        success, result = await self._rpc_call_raw(method, params, timeout_override=timeout_override)
         if not success:
             return None
         return result
@@ -1453,6 +1468,7 @@ class RollingForkManager:
         self,
         method: str,
         params: list[Any],
+        timeout_override: float | None = None,
     ) -> tuple[bool, Any]:
         """Make a JSON-RPC call and return success status separately from result.
 
@@ -1463,6 +1479,11 @@ class RollingForkManager:
         Args:
             method: RPC method name
             params: Method parameters
+            timeout_override: Per-call timeout in seconds. ``None`` (the default,
+                used by all post-ready operational calls) selects
+                ``rpc_timeout_seconds``; the readiness health probe in
+                ``_wait_for_ready`` passes ``health_timeout_seconds`` so the
+                readiness-probe and steady-state RPC budgets are tuned separately.
 
         Returns:
             Tuple of (success, result). success is True when the JSON-RPC response
@@ -1470,6 +1491,7 @@ class RollingForkManager:
         """
         import aiohttp
 
+        timeout_seconds = self.rpc_timeout_seconds if timeout_override is None else timeout_override
         url = self.get_rpc_url()
         payload = {
             "jsonrpc": "2.0",
@@ -1481,7 +1503,7 @@ class RollingForkManager:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    url, json=payload, timeout=aiohttp.ClientTimeout(total=self.rpc_timeout_seconds)
+                    url, json=payload, timeout=aiohttp.ClientTimeout(total=timeout_seconds)
                 ) as response:
                     result_data: dict[str, Any] = await response.json()
                     if "error" in result_data:
@@ -1492,13 +1514,18 @@ class RollingForkManager:
             logger.debug(f"RPC call failed for {method}: {e}")
             return (False, None)
 
-    async def _get_block_number(self) -> int | None:
+    async def _get_block_number(self, timeout_override: float | None = None) -> int | None:
         """Get the current block number from the fork.
+
+        Args:
+            timeout_override: Per-call timeout in seconds. ``None`` uses
+                ``rpc_timeout_seconds``; the readiness health probe passes
+                ``health_timeout_seconds``.
 
         Returns:
             Block number or None on error
         """
-        result = await self._rpc_call("eth_blockNumber", [])
+        result = await self._rpc_call("eth_blockNumber", [], timeout_override=timeout_override)
         if result is not None:
             return int(result, 16)
         return None

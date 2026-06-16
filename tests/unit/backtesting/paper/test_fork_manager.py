@@ -643,10 +643,11 @@ class TestFundWalletWithMockedRpc:
 class TestRpcCallRawTimeout:
     """Tests for the rpc_timeout_seconds attribute and how it drives _rpc_call_raw.
 
-    The current `RollingForkManager` reads its timeout from `self.rpc_timeout_seconds`
-    (env-overridable via `ALMANAK_FORK_RPC_TIMEOUT`). `_rpc_call_raw` no longer
-    accepts a per-call `timeout_seconds=` kwarg -- the attribute is the single
-    source of truth.
+    `RollingForkManager` reads its steady-state timeout from
+    `self.rpc_timeout_seconds` (env-overridable via `ALMANAK_FORK_RPC_TIMEOUT`).
+    `_rpc_call_raw` accepts an optional `timeout_override=` kwarg used solely by
+    the readiness health probe (`health_timeout_seconds`, #2165); every
+    post-ready operational call omits it and inherits `rpc_timeout_seconds`.
     """
 
     def test_default_timeout_values(self, rpc_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -726,6 +727,84 @@ class TestRpcCallRawTimeout:
         assert len(captured_post_timeout) == 1
         assert captured_post_timeout[0] is not None
         assert captured_post_timeout[0].total == 4.5
+
+    @pytest.mark.asyncio
+    async def test_rpc_call_raw_applies_timeout_override(self, rpc_url: str) -> None:
+        """timeout_override= overrides rpc_timeout_seconds for a single call (#2165)."""
+        import aiohttp
+
+        manager = RollingForkManager(
+            rpc_url=rpc_url, chain="arbitrum", rpc_timeout_seconds=8.0, health_timeout_seconds=2.5
+        )
+
+        captured_post_timeout: list[aiohttp.ClientTimeout] = []
+
+        class CapturingSession:
+            def __init__(self, *args, **kwargs):
+                self._mock_response = AsyncMock(spec=aiohttp.ClientResponse)
+                self._mock_response.json = AsyncMock(return_value={"jsonrpc": "2.0", "id": 1, "result": "0x1"})
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            def post(self, *args, **kwargs):
+                captured_post_timeout.append(kwargs.get("timeout"))
+                ctx = AsyncMock()
+                ctx.__aenter__ = AsyncMock(return_value=self._mock_response)
+                ctx.__aexit__ = AsyncMock(return_value=False)
+                return ctx
+
+        with patch("aiohttp.ClientSession", CapturingSession):
+            success, _ = await manager._rpc_call_raw("eth_blockNumber", [], timeout_override=2.5)
+
+        assert success is True
+        assert len(captured_post_timeout) == 1
+        # The override wins over rpc_timeout_seconds (8.0).
+        assert captured_post_timeout[0].total == 2.5
+
+    @pytest.mark.asyncio
+    async def test_wait_for_ready_probe_uses_health_timeout(self, rpc_url: str) -> None:
+        """The readiness probe in _wait_for_ready is bounded by health_timeout_seconds,
+        not rpc_timeout_seconds (#2165 -- previously ALMANAK_FORK_HEALTH_TIMEOUT was a no-op).
+        """
+        import aiohttp
+
+        manager = RollingForkManager(
+            rpc_url=rpc_url, chain="arbitrum", rpc_timeout_seconds=8.0, health_timeout_seconds=2.5
+        )
+
+        captured_post_timeout: list[aiohttp.ClientTimeout] = []
+
+        class CapturingSession:
+            def __init__(self, *args, **kwargs):
+                self._mock_response = AsyncMock(spec=aiohttp.ClientResponse)
+                self._mock_response.json = AsyncMock(return_value={"jsonrpc": "2.0", "id": 1, "result": "0x1"})
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            def post(self, *args, **kwargs):
+                captured_post_timeout.append(kwargs.get("timeout"))
+                ctx = AsyncMock()
+                ctx.__aenter__ = AsyncMock(return_value=self._mock_response)
+                ctx.__aexit__ = AsyncMock(return_value=False)
+                return ctx
+
+        with patch.object(manager, "_is_port_open", return_value=True), patch(
+            "aiohttp.ClientSession", CapturingSession
+        ):
+            ready = await manager._wait_for_ready()
+
+        assert ready is True
+        assert len(captured_post_timeout) >= 1
+        # The readiness health probe applies health_timeout_seconds (2.5), not rpc_timeout_seconds (8.0).
+        assert captured_post_timeout[0].total == 2.5
 
 
 # =============================================================================
