@@ -10,16 +10,17 @@ stored alongside timeline events in the gateway state store.
 Phase 5k -- helper extraction layout
 ------------------------------------
 ``build_ledger_entry`` is composed from small phase helpers that each
-return a piece of the final ``LedgerEntry``.  The helpers run in a fixed
-order; ordering is NOT load-bearing (unlike the position-events pipeline)
-because none of the helpers depend on output of earlier phases:
+return a piece of the final ``LedgerEntry``:
 
     alpha  _extract_intent_type          : enum-or-string dispatch
-    beta   _extract_tokens_and_amounts   : dispatch between three sub-helpers:
+    beta   _extract_tokens_and_amounts   : dispatch between sub-helpers:
              _extract_from_swap_amounts       (SwapAmounts + intent fallback
                                                for empty token sides)
              _extract_from_lp_open           (LP_OPEN: LPOpenData amounts +
                                                intent token0/token1 lookup)
+             _extract_from_lp_close          (LP_CLOSE: LPCloseData collected
+                                               amounts + currency0/1 symbols,
+                                               VIB-5132)
              _extract_from_intent_fallback    (intent-attr precedence chain
                                                from_token > borrow_token >
                                                supply_token > token;
@@ -29,6 +30,15 @@ because none of the helpers depend on output of earlier phases:
     gamma  _extract_tx_and_gas           : first tx_hash + total gas + gas USD
     delta  _coalesce_error               : failure + empty-error -> result.error
     epsilon _build_extracted_data_json   : serialize + multi-tx augmentation
+
+ORDERING (VIB-5132): the beta token/amount extraction is now DEFERRED until
+AFTER the LP-close native-leg stamps (``_stamp_v4_lp_close_native_principal`` /
+``_stamp_lp_close_native_amounts``) run, because ``_extract_from_lp_close``
+reads ``LPCloseData.amount{0,1}_collected`` — values the stamps fill for a
+native-ETH leg that emits no ERC-20 Transfer. Extracting before the stamps
+would read the pre-stamp ``None`` legs and re-emit empty amount_in/out. For
+every non-LP-close intent type the deferral is behaviourally identical (the
+stamps are no-ops outside LP_CLOSE).
 
 The SQLite INSERT at ``backends/sqlite.py:2291-2322`` names 21 columns and
 pairs each with a specific ``entry.<attribute>`` read.  The refactor
@@ -418,6 +428,154 @@ def _extract_from_lp_open(intent: Any, result: Any, chain: str = "") -> _TokensA
     return (token_in, token_out, amount_in, amount_out, "", None)
 
 
+def _resolve_lp_close_symbol(currency: Any, chain: str) -> str:
+    """Map a V4 PoolKey currency address to a ledger token symbol.
+
+    The V4 receipt parser emits ``amount0_collected`` / ``amount1_collected`` in
+    PoolKey-sorted order (``int(currency0, 16) < int(currency1, 16)``), which may
+    be the OPPOSITE of the user's intent order. Resolving the symbol FROM the
+    currency address (rather than the intent's ``token0`` / ``token1``) keeps the
+    ledger ``token_in`` / ``amount_in`` pair aligned with the leg the amount
+    actually belongs to (the same by-address discipline VIB-4426 applied to the
+    LP accounting handler's ``_v4_realign_token_pair``).
+
+    A native sentinel — V4's zero address (``0x0…0``) or the ERC-7528 marker
+    (``0xEeee…``) — maps to the chain's native symbol so ``_lp_amount_to_human``
+    scales it at native (18-dp) decimals. A real ERC-20 address resolves through
+    the token resolver (``skip_gateway=True`` — accounting write hot path, never
+    risk a gateway round-trip stall). Returns ``""`` when ``currency`` is absent
+    or unresolvable, so the caller falls back to the intent's token symbol with
+    the SAME precedence ``_extract_from_lp_open`` uses (V3 closes leave
+    ``currency0`` / ``currency1`` ``None`` and rely entirely on that fallback).
+    """
+    if not currency:
+        return ""
+    cur = str(currency).lower()
+    if cur in (_V4_NATIVE_CURRENCY, _ERC7528_NATIVE_CURRENCY):
+        if not chain:
+            return ""
+        from almanak.framework.accounting.gas_pricing import native_token_for_chain
+
+        return native_token_for_chain(chain) or ""
+    if not chain:
+        return ""
+    try:
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        resolver = get_token_resolver()
+        # Pass the normalised lowercase string ``cur`` (not the raw ``currency``,
+        # which may be ``HexBytes`` / non-str) so the resolver's address handling
+        # never trips on a missing ``.startswith`` (Gemini).
+        token_info = resolver.resolve(cur, chain, log_errors=False, skip_gateway=True)
+        return getattr(token_info, "symbol", "") or ""
+    except Exception as exc:  # noqa: BLE001 — fail-open to intent fallback
+        logger.debug(
+            "ledger LP_CLOSE: failed to resolve currency=%s on chain=%s to a symbol: %s",
+            currency,
+            chain,
+            exc,
+        )
+        return ""
+
+
+def _resolve_lp_close_tokens(intent: Any, currency0: Any, currency1: Any, chain: str) -> tuple[str, str]:
+    """Resolve ``(token_in, token_out)`` symbols for an LP_CLOSE, address-aligned.
+
+    ADDRESS-ALIGNMENT is the money-correctness invariant (codex P2 / CodeRabbit).
+    V4 ``amount{0,1}_collected`` are PoolKey-sorted (``int(currency0,16) <
+    int(currency1,16)``); the intent's ``token0`` / ``token1`` (and the ``pool``
+    string) are USER-ordered and may be the OPPOSITE. Pairing a PoolKey-index
+    amount with a user-ordered symbol would scale it by the WRONG token's decimals
+    and persist a materially wrong ledger amount — worse than the honest empty it
+    had pre-fix. So when a V4 PoolKey currency is PRESENT we resolve the symbol
+    FROM THE ADDRESS only; the intent / pool-string fallback applies PER LEG ONLY
+    when that leg's currency is ABSENT (``None`` — V3-style close data, no PoolKey
+    re-sort). An unresolved present-currency leg stays ``""`` so the caller's
+    ``_lp_amount_to_human`` returns ``None`` for a non-zero raw and the leg stays
+    unmeasured (Empty != Zero) rather than carrying a misordered symbol.
+    """
+    pool_parts = [p.strip() for p in (getattr(intent, "pool", "") or "").strip().split("/")]
+    if len(pool_parts) <= 1:
+        pool_parts = []
+    # Per-leg resolution (written once for both legs to keep it auditable): the
+    # PoolKey-sorted index ``idx`` ties the symbol to the same-index collected
+    # amount. ``_resolve_lp_close_symbol`` returns "" for an absent (``None``)
+    # currency, so ``currency is None`` is exactly the leg that may take the
+    # user-ordered intent / pool fallback; a present-but-unresolved leg keeps "".
+    resolved: list[str] = []
+    legs = ((currency0, ("token0", "from_token"), 0), (currency1, ("token1", "to_token"), 1))
+    for currency, intent_attrs, idx in legs:
+        symbol = _resolve_lp_close_symbol(currency, chain)
+        if currency is None and not symbol:
+            for attr in intent_attrs:
+                symbol = getattr(intent, attr, "") or ""
+                if symbol:
+                    break
+            if not symbol and idx < len(pool_parts):
+                symbol = pool_parts[idx]
+        resolved.append(symbol)
+    return resolved[0], resolved[1]
+
+
+def _extract_from_lp_close(intent: Any, result: Any, chain: str = "") -> _TokensAndAmounts | None:
+    """Phase beta-lp-close -- the symmetric twin of :func:`_extract_from_lp_open`.
+
+    An LP_CLOSE has no ``swap_amounts`` for a **V4 native** leg: the ETH side is
+    returned to the wallet as raw ETH (TAKE_PAIR, no ERC-20 Transfer), so the
+    receipt parser emits no ``SwapAmounts`` and the row historically fell through
+    to ``_extract_from_intent_fallback`` → ``amount_in=""`` / ``amount_out=""``.
+    The measured proceeds live on ``LPCloseData.amount{0,1}_collected`` (VIB-5117
+    stamps the native principal there), but nothing read them back into the
+    ledger's top-level amount columns (VIB-5132). This helper closes that gap.
+
+    Field mapping (mirrors LP_OPEN's amount0->amount_in / amount1->amount_out
+    convention for lane symmetry):
+    - ``token_in``  : ``currency0`` symbol -> ``intent.token0`` -> ``from_token``
+                      -> pool-string ``[0]`` -> ``""``
+    - ``token_out`` : ``currency1`` symbol -> ``intent.token1`` -> ``to_token``
+                      -> pool-string ``[1]`` -> ``""``
+    - ``amount_in`` : ``LPCloseData.amount0_collected`` (raw int) **scaled to
+                      human units** via ``_lp_amount_to_human``.
+    - ``amount_out``: same logic for ``amount1_collected``.
+
+    VIB-5036: amounts are scaled to human units before persistence so
+    ``transaction_ledger`` carries the same human-form contract as SWAP, lending,
+    and LP_OPEN rows. **Empty != Zero**: a ``None`` collected leg (UNMEASURED —
+    e.g. a native leg whose runner stamp never ran) stays ``""``; a measured
+    ``0`` becomes the human ``"0"`` (both via ``_lp_amount_to_human``).
+
+    Returns ``None`` when there is no ``LPCloseData`` on the result (no V4/LP
+    close data to read), or when it yields neither a token nor an amount, so the
+    caller falls back to ``_extract_from_intent_fallback``.
+    """
+    extracted_data = getattr(result, "extracted_data", None) or {} if result else {}
+    lp_close_data = extracted_data.get("lp_close_data") if isinstance(extracted_data, dict) else None
+    if lp_close_data is None:
+        return None
+
+    # Address-aligned symbol resolution (see ``_resolve_lp_close_tokens``): a V4
+    # PoolKey currency resolves FROM ITS ADDRESS (amounts are PoolKey-sorted); the
+    # user-ordered intent / pool fallback is used only for a currency-ABSENT leg.
+    currency0 = getattr(lp_close_data, "currency0", None)
+    currency1 = getattr(lp_close_data, "currency1", None)
+    token_in, token_out = _resolve_lp_close_tokens(intent, currency0, currency1, chain)
+
+    # Scale on-chain raw collected amounts (smallest unit) to human. ``None``
+    # (unmeasured) stays ``""`` (Empty != Zero); a measured ``0`` scales to "0".
+    # Token is address-aligned (above), so the decimals are the leg's own.
+    raw0 = getattr(lp_close_data, "amount0_collected", None)
+    raw1 = getattr(lp_close_data, "amount1_collected", None)
+    amount_in = _lp_amount_to_human(raw0, token_in, chain)
+    amount_out = _lp_amount_to_human(raw1, token_out, chain)
+    amount_in = amount_in if amount_in is not None else ""
+    amount_out = amount_out if amount_out is not None else ""
+
+    # Yielded nothing usable -> let the caller take the intent-attr fallback.
+    if not any((token_in, token_out, amount_in, amount_out)):
+        return None
+    return (token_in, token_out, amount_in, amount_out, "", None)
+
+
 def _extract_from_lending(
     intent: Any,
     result: Any,
@@ -538,6 +696,16 @@ def _extract_tokens_and_amounts(
     intent_type = _extract_intent_type(intent)
     if intent_type == "LP_OPEN":
         return _extract_from_lp_open(intent, result, chain)
+    if intent_type == "LP_CLOSE":
+        # VIB-5132 — a V4 native close emits no ERC-20 Transfer for its ETH leg,
+        # so there is no ``swap_amounts`` (handled above) and the row used to fall
+        # through to the intent-attr fallback (amount_in/out=""). Read the measured
+        # proceeds off ``LPCloseData`` instead; fall back only when it yields
+        # nothing (no LPCloseData / no token or amount). MUST run after the
+        # ``swap_amounts`` short-circuit so V3 ERC-20 closes are untouched.
+        lp_close = _extract_from_lp_close(intent, result, chain)
+        if lp_close is not None:
+            return lp_close
     if intent_type == "PERP_OPEN":
         token_in = getattr(intent, "collateral_token", "") or ""
         collateral_amount = getattr(intent, "collateral_amount", None)
@@ -1333,14 +1501,15 @@ def build_ledger_entry(
     ``oracle_source`` field on each priced asset is required (G12).
     """
     intent_type = _extract_intent_type(intent)
-    (
-        token_in,
-        token_out,
-        amount_in,
-        amount_out,
-        effective_price,
-        slippage_bps,
-    ) = _extract_tokens_and_amounts(intent, result, chain=chain)
+    # VIB-5132 — token/amount extraction is DEFERRED to after the LP-close native
+    # stamps below. ``_extract_from_lp_close`` reads ``LPCloseData.amount{0,1}_
+    # collected``, and the native-ETH legs are populated by
+    # ``_stamp_v4_lp_close_native_principal`` / ``_stamp_lp_close_native_amounts``
+    # (VIB-5117 / VIB-5121). Extracting here (the historical position) would read
+    # the PRE-stamp ``None`` legs and re-emit empty amount_in/out. Nothing between
+    # this point and the deferred call consumes the extraction tuple (verified:
+    # tx/gas, the gas WARN, error coalescing, and the stamps depend only on
+    # ``result`` / ``intent`` / ``intent_type``).
     tx_hash, gas_used, gas_usd = _extract_tx_and_gas(
         result,
         chain=chain,
@@ -1413,6 +1582,19 @@ def build_ledger_entry(
     # sentinel) onto ``lp_close_data``. Distinct from the V4 stamp above by
     # currency gate — per-connector measurement (rule-of-three, VIB-5135).
     _stamp_lp_close_native_amounts(result, intent_type, lp_close_native_amounts)
+    # VIB-5132 — extract tokens/amounts NOW, after the LP-close native stamps, so
+    # ``_extract_from_lp_close`` reads the POST-stamp ``LPCloseData.amount{0,1}_
+    # collected`` (the native ETH leg is filled by the stamps above). For every
+    # non-LP-close intent type this is behaviourally identical to extracting at
+    # the top of the function (the stamps are no-ops outside LP_CLOSE).
+    (
+        token_in,
+        token_out,
+        amount_in,
+        amount_out,
+        effective_price,
+        slippage_bps,
+    ) = _extract_tokens_and_amounts(intent, result, chain=chain)
     extracted_data_json = _build_extracted_data_json(result)
 
     # ─── VIB-3480 columns finally populated (Accounting-AttemptNo17 §3 D3) ──
