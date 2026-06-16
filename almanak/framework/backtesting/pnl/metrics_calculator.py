@@ -477,6 +477,17 @@ def calculate_metrics(
     # Trade statistics (VIB-5083) -- see _compute_trade_statistics.
     stats = _compute_trade_statistics(trades)
 
+    # Position-derived metrics (LP fee accrual, perp funding, lending interest,
+    # health/margin extrema, realized/unrealized PnL). The engine result is
+    # assembled from THIS function (engine._calculate_metrics ->
+    # _engine_helpers.finalize_backtest_result), so without this the engine
+    # result silently reported total_fees_earned_usd=0 / fees_by_pool={} on
+    # every LP backtest even when fees accrued and were credited into equity at
+    # close -- a reporting/KPI bug, not a value bug (VIB-5079 v1.1 reporting).
+    # Sourced from the same SimulatedPortfolio helper get_metrics() uses so the
+    # two metric paths can never drift apart again.
+    pos = portfolio.aggregate_position_metrics()
+
     # VIB-2915: `total_return_pct` and `annualized_return_pct` are stored as actual
     # percentages (e.g. 10 for 10%), not decimal ratios. Local `total_return`/`annualized_return`
     # are kept as ratios to preserve the calmar/sharpe/sortino chain that divides by
@@ -512,4 +523,19 @@ def calculate_metrics(
         max_gas_price_gwei=max_gas_price,
         total_gas_cost_usd=total_gas,
         total_mev_cost_usd=total_mev,
+        # Position-derived block -- see aggregate_position_metrics above.
+        total_fees_earned_usd=pos.total_fees_earned_usd,
+        fees_by_pool=pos.fees_by_pool,
+        lp_fee_confidence_breakdown=pos.lp_fee_confidence_breakdown,
+        total_funding_paid=pos.total_funding_paid,
+        total_funding_received=pos.total_funding_received,
+        total_interest_earned=pos.total_interest_earned,
+        total_interest_paid=pos.total_interest_paid,
+        max_margin_utilization=pos.max_margin_utilization,
+        min_health_factor=pos.min_health_factor,
+        health_factor_warnings=pos.health_factor_warnings,
+        realized_pnl=pos.realized_pnl,
+        unrealized_pnl=pos.unrealized_pnl,
+        liquidations_count=pos.liquidations_count,
+        liquidation_losses_usd=pos.liquidation_losses_usd,
     )

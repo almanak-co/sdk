@@ -9,6 +9,7 @@ a 4882% actual return was being reported as 48.82% — the raw ratio stored in t
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+from almanak.framework.backtesting.models import LendingLiquidationEvent, LiquidationEvent
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.metrics_calculator import calculate_metrics
 from almanak.framework.backtesting.pnl.portfolio import EquityPoint, SimulatedPortfolio
@@ -188,3 +189,60 @@ class TestNetPnlEqualsEquityCurvePnl:
         assert metrics.total_fees_usd == Decimal("30")
         assert metrics.total_slippage_usd == Decimal("10")
         assert metrics.total_gas_usd == Decimal("5")
+
+
+class TestPositionDerivedMetricsParity:
+    """The engine-result path and the portfolio-native path must agree (VIB-5079).
+
+    ``calculate_metrics`` (the path the engine *result* uses) and
+    ``SimulatedPortfolio.get_metrics`` now source the position-derived block from
+    one shared helper (``aggregate_position_metrics``). These pin that the two
+    agree -- the regression that motivated the helper was them silently
+    diverging, with ``calculate_metrics`` reporting zeros.
+    """
+
+    def test_liquidation_metrics_aggregated_and_match_get_metrics(self) -> None:
+        """liquidations_count / liquidation_losses_usd are aggregated in BOTH paths.
+
+        Before the shared helper, neither path populated these (they only ever
+        round-tripped through from_dict), so every result reported zero
+        liquidations. Perp loss is the explicit LiquidationEvent.loss_usd; lending
+        loss is collateral_seized - debt_repaid (the liquidation-penalty bonus).
+        """
+        t0 = datetime(2024, 1, 1)
+        portfolio = _make_portfolio(
+            [
+                (t0, Decimal("10000")),
+                (t0 + timedelta(days=30), Decimal("9000")),
+            ]
+        )
+        portfolio._perp_liquidations.append(
+            LiquidationEvent(
+                timestamp=t0,
+                position_id="perp-1",
+                price=Decimal("2000"),
+                loss_usd=Decimal("250.50"),
+            )
+        )
+        portfolio._lending_liquidations.append(
+            LendingLiquidationEvent(
+                timestamp=t0,
+                position_id="lend-1",
+                health_factor=Decimal("0.95"),
+                collateral_seized=Decimal("1050"),  # debt_repaid * (1 + penalty)
+                debt_repaid=Decimal("1000"),
+                penalty=Decimal("0.05"),
+            )
+        )
+        # Borrower's loss == the penalty bonus == collateral_seized - debt_repaid.
+        expected_losses = Decimal("250.50") + (Decimal("1050") - Decimal("1000"))
+
+        metrics = calculate_metrics(portfolio, trades=[], config=_make_config())
+
+        assert metrics.liquidations_count == 2
+        assert metrics.liquidation_losses_usd == expected_losses
+
+        # Parity: the portfolio-native path reports the same (shared helper).
+        native = portfolio.get_metrics()
+        assert native.liquidations_count == metrics.liquidations_count
+        assert native.liquidation_losses_usd == metrics.liquidation_losses_usd

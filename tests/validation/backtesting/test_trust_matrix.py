@@ -50,9 +50,11 @@ from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
     ImpermanentLossCalculator,
 )
 from almanak.framework.backtesting.pnl.calculators.interest import InterestCalculator
+from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.data_provider import MarketState
 from almanak.framework.backtesting.pnl.metrics_calculator import (
     calculate_max_drawdown,
+    calculate_metrics,
     calculate_returns,
     calculate_sharpe_ratio,
     calculate_volatility,
@@ -531,6 +533,94 @@ def test_lp_close_by_pool_descriptor_id_round_trips() -> None:
     expected = INITIAL_CAPITAL - total_costs
     assert len(portfolio.positions) == 0
     assert abs(final_equity - expected) <= expected * Decimal("1e-9")
+
+
+@pytest.mark.trust_cell("lp:fee_reporting_tie_out")
+def test_lp_fee_reporting_ties_out_to_per_trade() -> None:
+    """Summary LP fee metrics must equal the per-trade fees they aggregate.
+
+    The engine *result* is assembled from ``metrics_calculator.calculate_metrics``
+    (``engine._calculate_metrics`` -> ``_engine_helpers.finalize_backtest_result``),
+    which before VIB-5079 v1.1 never aggregated ``position.fees_earned`` -- so
+    ``total_fees_earned_usd`` / ``fees_by_pool`` stayed at their dataclass defaults
+    (``0`` / ``{}``) on EVERY LP backtest, even though per-trade ``fees_earned_usd``
+    were correct and credited into equity at close. Surfaced after #2832
+    (fungible-LP positions now close instead of accumulating, so the broken
+    aggregate is the only place LP fees would show in the summary). A
+    reporting/KPI bug only: conservation was always exact.
+
+    Drives a real LP open -> accrue -> close round trip through the real adapter
+    and portfolio (explicit volume + TVL make accrual deterministic and
+    network-free), then asserts the engine-result metric path:
+
+    1. Fees demonstrably accrued (``total_fees_earned_usd > 0``) -- otherwise the
+       tie-out below is vacuous.
+    2. ``total_fees_earned_usd`` == the sum of the per-trade ``fees_earned_usd``,
+       Decimal-exact.
+    3. ``fees_by_pool`` sums to the same total.
+    4. The engine-result path agrees with ``SimulatedPortfolio.get_metrics()`` --
+       both now share one aggregation helper and cannot drift apart again.
+    """
+    adapter = LPBacktestAdapter(
+        config=LPBacktestConfig(
+            strategy_type="lp",
+            fee_tracking_enabled=True,
+            explicit_pool_volume_usd_daily=Decimal("5000000"),  # $5M daily volume
+            explicit_pool_liquidity_usd=Decimal("20000000"),  # $20M TVL
+        )
+    )
+    portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CAPITAL)
+
+    open_state = _market_state(0)
+    open_fill = adapter.execute_intent(_lp_open_intent(), portfolio, open_state)
+    assert open_fill is not None and open_fill.success
+    assert portfolio.apply_fill(open_fill, market_state=open_state)
+    portfolio.mark_to_market(open_state, open_state.timestamp, adapter=adapter)
+
+    # One hour of flat-price fee accrual through the real adapter.
+    tick_state = _market_state(1)
+    for position in portfolio.positions:
+        adapter.update_position(position, tick_state, float(TICK_SECONDS), tick_state.timestamp)
+    portfolio.mark_to_market(tick_state, tick_state.timestamp, adapter=adapter)
+
+    # Collect fees at close (the default) so the round trip fully realizes them.
+    close_state = _market_state(2)
+    position_id = portfolio.positions[0].position_id
+    close_fill = adapter.execute_intent(
+        LPCloseIntent(position_id=position_id, protocol="uniswap_v3"), portfolio, close_state
+    )
+    assert close_fill is not None and close_fill.success
+    assert portfolio.apply_fill(close_fill, market_state=close_state)
+    portfolio.mark_to_market(close_state, close_state.timestamp, adapter=adapter)
+    assert len(portfolio.positions) == 0  # round trip complete
+
+    config = PnLBacktestConfig(
+        start_time=START,
+        end_time=START + timedelta(hours=2),
+        interval_seconds=TICK_SECONDS,
+        initial_capital_usd=INITIAL_CAPITAL,
+        tokens=["WETH", "USDC"],
+    )
+    metrics = calculate_metrics(portfolio, portfolio.trades, config)
+
+    per_trade_fees = sum(
+        (t.fees_earned_usd for t in portfolio.trades if t.fees_earned_usd is not None),
+        Decimal("0"),
+    )
+
+    # (1) Fees actually accrued -- without this the tie-out below is vacuous and
+    # the cell would have passed against the pre-fix all-zero behaviour.
+    assert metrics.total_fees_earned_usd > Decimal("0")
+    assert per_trade_fees > Decimal("0")
+
+    # (2) The summary aggregate equals the per-trade fees it sums, Decimal-exact.
+    assert metrics.total_fees_earned_usd == per_trade_fees
+
+    # (3) fees_by_pool ties to the same total.
+    assert sum(metrics.fees_by_pool.values(), Decimal("0")) == metrics.total_fees_earned_usd
+
+    # (4) Engine-result path agrees with the portfolio-native path (shared helper).
+    assert metrics.total_fees_earned_usd == portfolio.get_metrics().total_fees_earned_usd
 
 
 @pytest.mark.trust_cell("lp:generic_lane_entry")

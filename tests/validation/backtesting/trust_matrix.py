@@ -68,6 +68,7 @@ INVARIANT_ROWS: tuple[str, ...] = (
     "yield_tie_out",
     "fee_share_scaling",
     "fungible_close_by_pool_id",
+    "fee_reporting_tie_out",
     "snapshot_price_case_insensitive",
     "trade_pnl_attribution",
     "math_il_closed_form",
@@ -222,6 +223,23 @@ CELLS: tuple[TrustCell, ...] = (
         # exact id only, so every Aerodrome/V2-style close ("WETH/USDC/volatile")
         # missed the synthetic open id ("LP_aerodrome_WETH_USDC_<ts>") and the
         # position never closed. Fixed by find_lp_close_position_id.
+    ),
+    _cell(
+        "fee_reporting_tie_out",
+        "lp",
+        "The summary metric total_fees_earned_usd (and fees_by_pool) returned by "
+        "the engine-result path (metrics_calculator.calculate_metrics) equals the "
+        "sum of the per-trade fees_earned_usd across an LP round-trip that "
+        "demonstrably accrued fees, and matches SimulatedPortfolio.get_metrics().",
+        # Guards the LP fee-reporting bug (VIB-5079 v1.1 reporting): calculate_metrics
+        # -- the path finalize_backtest_result uses for the engine result -- never
+        # aggregated position.fees_earned, so total_fees_earned_usd / fees_by_pool
+        # stayed at their dataclass defaults (0 / {}) on EVERY LP backtest even
+        # though per-trade fees were correct and credited into equity at close.
+        # Surfaced after #2832 (fungible-LP positions now close instead of
+        # accumulating). Fixed by sourcing the position block from the shared
+        # SimulatedPortfolio.aggregate_position_metrics so the two metric paths
+        # cannot drift. Reporting/KPI bug only -- conservation was always exact.
     ),
     # --- lending column ---
     _cell(

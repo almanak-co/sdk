@@ -83,6 +83,56 @@ _SLIPPAGE_EMBEDDED_IN_PRICE: frozenset[IntentType] = frozenset(
 # PositionType, SimulatedPosition, and SimulatedFill are now imported from position_models.py above.
 
 
+@dataclass(frozen=True)
+class PositionMetricsAggregate:
+    """Position-derived metric aggregates over a portfolio's open + closed positions.
+
+    These fields come from the simulated positions themselves (LP fee accrual,
+    perp funding, lending interest) and the portfolio's running risk trackers
+    (health factor, margin utilization, realized/unrealized PnL, and the perp +
+    lending liquidation ledgers) -- NOT from the equity curve or the trade
+    records. Both code paths that assemble a
+    :class:`~almanak.framework.backtesting.models.BacktestMetrics` --
+    :meth:`SimulatedPortfolio.get_metrics` (the portfolio-native path) and
+    ``metrics_calculator.calculate_metrics`` (the path the PnL engine *result*
+    actually uses, ``_engine_helpers.finalize_backtest_result``) -- now source
+    this block from :meth:`SimulatedPortfolio.aggregate_position_metrics`, so the
+    two can never drift.
+
+    They DID drift (VIB-5079 v1.1 reporting): ``calculate_metrics`` never
+    populated any of these, so every engine-result LP backtest reported
+    ``total_fees_earned_usd=0`` / ``fees_by_pool={}`` even when fees demonstrably
+    accrued and were credited into equity at close -- a reporting/KPI bug, not a
+    value bug (conservation stayed exact). The same omission silently zeroed perp
+    funding, lending interest, health/margin extrema, and realized/unrealized PnL
+    in the engine result. Centralizing the aggregation here fixes all of them in
+    lockstep and removes the duplicated loop that allowed the drift.
+
+    ``liquidations_count`` / ``liquidation_losses_usd`` were a step worse: never
+    populated by *either* path (only ever round-tripped through ``from_dict``),
+    so every result reported zero liquidations regardless of what happened. They
+    are aggregated here too -- perp loss is the explicit ``LiquidationEvent.loss_usd``;
+    lending loss is ``collateral_seized - debt_repaid`` (the liquidation-penalty
+    bonus the liquidator keeps, since the simulator sets
+    ``collateral_seized = debt_repaid * (1 + penalty)``).
+    """
+
+    total_fees_earned_usd: Decimal
+    fees_by_pool: dict[str, Decimal]
+    lp_fee_confidence_breakdown: dict[str, int]
+    total_funding_paid: Decimal
+    total_funding_received: Decimal
+    total_interest_earned: Decimal
+    total_interest_paid: Decimal
+    max_margin_utilization: Decimal
+    min_health_factor: Decimal
+    health_factor_warnings: int
+    realized_pnl: Decimal
+    unrealized_pnl: Decimal
+    liquidations_count: int
+    liquidation_losses_usd: Decimal
+
+
 @dataclass
 class SimulatedPortfolio:
     """Portfolio tracker for PnL backtesting.
@@ -1789,9 +1839,91 @@ class SimulatedPortfolio:
 
         return Decimal("0")
 
-    # crap-allowlist: VIB-5079 pre-existing cc=37 touched by 5-line net-PnL semantics fix (#2756)
-    # Decomposition (likely: delegate the math shared with metrics_calculator.calculate_metrics)
-    # is blocked on the backtesting blueprint (VIB-5080) per crap-refactor.md step 1.
+    def aggregate_position_metrics(self) -> PositionMetricsAggregate:
+        """Aggregate position-derived metrics over open + closed positions.
+
+        Single source of truth for the position-level metric block shared by
+        :meth:`get_metrics` and the engine-result path
+        (``metrics_calculator.calculate_metrics``). LP fee accrual, perp funding,
+        and lending interest are summed over both ``positions`` (open) and
+        ``_closed_positions``; the risk extrema and realized/unrealized PnL are
+        read off the portfolio's running trackers. See
+        :class:`PositionMetricsAggregate` for why this is centralized.
+        """
+        # Aggregate fees from LP positions (both open and closed)
+        total_fees_earned = Decimal("0")
+        fees_by_pool: dict[str, Decimal] = {}
+        lp_fee_confidence_breakdown: dict[str, int] = {"high": 0, "medium": 0, "low": 0}
+
+        # Aggregate funding from perp positions (both open and closed)
+        total_funding_paid = Decimal("0")
+        total_funding_received = Decimal("0")
+
+        # Aggregate interest from lending positions (both open and closed)
+        total_interest_earned = Decimal("0")
+        total_interest_paid = Decimal("0")
+
+        all_positions = list(self.positions) + list(self._closed_positions)
+        for position in all_positions:
+            if position.is_lp:
+                # Use the SAME fee source as the per-trade close reporter
+                # (_calculate_lp_pnl_breakdown), value_position, and
+                # _calculate_lp_unrealized_pnl: the detailed accumulator
+                # (accumulated_fees_usd) is primary, with fees_earned as the
+                # fallback. The two are kept in lockstep by both accrual lanes
+                # today, but matching the close reporter makes the fee-reporting
+                # tie-out robust by construction even if a lane only updates the
+                # detailed accumulator (CodeRabbit, PR #2852).
+                lp_fees = position.accumulated_fees_usd
+                if lp_fees == Decimal("0"):
+                    lp_fees = position.fees_earned
+                total_fees_earned += lp_fees
+                # Use position_id as pool identifier
+                pool_id = position.position_id
+                fees_by_pool[pool_id] = fees_by_pool.get(pool_id, Decimal("0")) + lp_fees
+                # Track fee confidence breakdown
+                if position.fee_confidence in lp_fee_confidence_breakdown:
+                    lp_fee_confidence_breakdown[position.fee_confidence] += 1
+                elif position.fee_confidence is not None:
+                    # Unknown confidence level - treat as low
+                    lp_fee_confidence_breakdown["low"] += 1
+            elif position.is_perp:
+                total_funding_paid += position.cumulative_funding_paid
+                total_funding_received += position.cumulative_funding_received
+            elif position.is_lending:
+                # SUPPLY positions earn interest, BORROW positions pay interest
+                if position.position_type == PositionType.SUPPLY:
+                    total_interest_earned += position.interest_accrued
+                else:
+                    total_interest_paid += position.interest_accrued
+
+        # Liquidation ledgers. Perp records an explicit loss_usd; lending records
+        # collateral_seized / debt_repaid, whose difference is the liquidation
+        # penalty (the borrower's loss) -- the simulator sets
+        # collateral_seized = debt_repaid * (1 + penalty).
+        perp_liquidation_losses = sum((liq.loss_usd for liq in self._perp_liquidations), Decimal("0"))
+        lending_liquidation_losses = sum(
+            (liq.collateral_seized - liq.debt_repaid for liq in self._lending_liquidations),
+            Decimal("0"),
+        )
+
+        return PositionMetricsAggregate(
+            total_fees_earned_usd=total_fees_earned,
+            fees_by_pool=fees_by_pool,
+            lp_fee_confidence_breakdown=lp_fee_confidence_breakdown,
+            total_funding_paid=total_funding_paid,
+            total_funding_received=total_funding_received,
+            total_interest_earned=total_interest_earned,
+            total_interest_paid=total_interest_paid,
+            max_margin_utilization=self._max_margin_utilization,
+            min_health_factor=self._min_health_factor,
+            health_factor_warnings=self._health_factor_warnings,
+            realized_pnl=self._realized_pnl,
+            unrealized_pnl=self._unrealized_pnl,
+            liquidations_count=len(self._perp_liquidations) + len(self._lending_liquidations),
+            liquidation_losses_usd=perp_liquidation_losses + lending_liquidation_losses,
+        )
+
     def get_metrics(self) -> BacktestMetrics:
         """Calculate backtest metrics from equity curve and trades.
 
@@ -1868,44 +2000,11 @@ class SimulatedPortfolio:
 
         stats = _compute_trade_statistics(self.trades)
 
-        # Aggregate fees from LP positions (both open and closed)
-        total_fees_earned = Decimal("0")
-        fees_by_pool: dict[str, Decimal] = {}
-        lp_fee_confidence_breakdown: dict[str, int] = {"high": 0, "medium": 0, "low": 0}
-
-        # Aggregate funding from perp positions (both open and closed)
-        total_funding_paid = Decimal("0")
-        total_funding_received = Decimal("0")
-
-        # Aggregate interest from lending positions (both open and closed)
-        total_interest_earned = Decimal("0")
-        total_interest_paid = Decimal("0")
-
-        all_positions = list(self.positions) + list(self._closed_positions)
-        for position in all_positions:
-            if position.is_lp:
-                total_fees_earned += position.fees_earned
-                # Use position_id as pool identifier
-                pool_id = position.position_id
-                if pool_id in fees_by_pool:
-                    fees_by_pool[pool_id] += position.fees_earned
-                else:
-                    fees_by_pool[pool_id] = position.fees_earned
-                # Track fee confidence breakdown
-                if position.fee_confidence in lp_fee_confidence_breakdown:
-                    lp_fee_confidence_breakdown[position.fee_confidence] += 1
-                elif position.fee_confidence is not None:
-                    # Unknown confidence level - treat as low
-                    lp_fee_confidence_breakdown["low"] += 1
-            elif position.is_perp:
-                total_funding_paid += position.cumulative_funding_paid
-                total_funding_received += position.cumulative_funding_received
-            elif position.is_lending:
-                # SUPPLY positions earn interest, BORROW positions pay interest
-                if position.position_type == PositionType.SUPPLY:
-                    total_interest_earned += position.interest_accrued
-                else:
-                    total_interest_paid += position.interest_accrued
+        # Position-derived metrics (LP fees, perp funding, lending interest,
+        # health/margin extrema, realized/unrealized PnL). Sourced from the same
+        # helper the engine-result path uses so the two can never drift -- see
+        # PositionMetricsAggregate.
+        pos = self.aggregate_position_metrics()
 
         return BacktestMetrics(
             total_pnl_usd=total_pnl,
@@ -1938,18 +2037,20 @@ class SimulatedPortfolio:
             volatility=volatility,
             sortino_ratio=sortino,
             calmar_ratio=calmar,
-            total_fees_earned_usd=total_fees_earned,
-            fees_by_pool=fees_by_pool,
-            lp_fee_confidence_breakdown=lp_fee_confidence_breakdown,
-            total_funding_paid=total_funding_paid,
-            total_funding_received=total_funding_received,
-            max_margin_utilization=self._max_margin_utilization,
-            total_interest_earned=total_interest_earned,
-            total_interest_paid=total_interest_paid,
-            min_health_factor=self._min_health_factor,
-            health_factor_warnings=self._health_factor_warnings,
-            realized_pnl=self._realized_pnl,
-            unrealized_pnl=self._unrealized_pnl,
+            total_fees_earned_usd=pos.total_fees_earned_usd,
+            fees_by_pool=pos.fees_by_pool,
+            lp_fee_confidence_breakdown=pos.lp_fee_confidence_breakdown,
+            total_funding_paid=pos.total_funding_paid,
+            total_funding_received=pos.total_funding_received,
+            max_margin_utilization=pos.max_margin_utilization,
+            total_interest_earned=pos.total_interest_earned,
+            total_interest_paid=pos.total_interest_paid,
+            min_health_factor=pos.min_health_factor,
+            health_factor_warnings=pos.health_factor_warnings,
+            realized_pnl=pos.realized_pnl,
+            unrealized_pnl=pos.unrealized_pnl,
+            liquidations_count=pos.liquidations_count,
+            liquidation_losses_usd=pos.liquidation_losses_usd,
         )
 
     def calculate_data_coverage_metrics(self) -> DataCoverageMetrics:  # noqa: C901
