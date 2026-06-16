@@ -1,4 +1,4 @@
-.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet scan-coupling scan-coupling-report scan-coupling-baseline
+.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline
 
 # Load .env file if it exists
 -include .env
@@ -105,6 +105,23 @@ check-decimal-policy:
 
 check-decimal-policy-baseline:
 	uv run python scripts/ci/check_decimal_policy.py --baseline
+
+# Hardcoded-address ratchet gate. Fails CI on any NET-NEW 20-byte address
+# literal in almanak/framework/ production code (token / pool / market / vault /
+# router addresses), and on STALE baseline entries — so the frozen population in
+# scripts/ci/hardcoded-address-baseline.txt only ever shrinks. Token addresses
+# belong in chain descriptors (almanak/core/chains/) and resolve via the
+# TokenResolver / MarketSnapshot; pools/markets/vaults via config or a connector
+# AddressRegistry. Carve-out: the zero + native-gas-coin sentinels and the
+# descriptor-owned wrapped-native addresses (pulled live from ChainRegistry).
+# Docstring/comment addresses and 64-hex hashes are not literals and are exempt.
+#   make check-hardcoded-addresses            # check against baseline (CI mode)
+#   make check-hardcoded-addresses-baseline   # refresh baseline (after a cleanup)
+check-hardcoded-addresses:
+	uv run python scripts/ci/check_hardcoded_addresses.py --check
+
+check-hardcoded-addresses-baseline:
+	uv run python scripts/ci/check_hardcoded_addresses.py --baseline
 
 # Content-keyed contract-gate baselines (bifurcation / private-cache /
 # direct-constructor). Regenerate after legitimately adding or removing a
