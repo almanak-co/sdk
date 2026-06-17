@@ -1605,3 +1605,95 @@ class TestPositionEventSQLiteRoundtrip:
         # trips as an ISO string without guessing its exact value.
         assert isinstance(row["timestamp"], str)
         assert "T" in row["timestamp"]  # ISO-8601 'YYYY-MM-DDTHH:MM:SS...' shape.
+
+
+# ---------------------------------------------------------------------------
+# VIB-5195 — _pair_tokens_from_intent: LP pair resolution from the intent
+# (close-leg self-describe fallback). Locks the positional / mixed-descriptor
+# hardening (pr-auditor PR #2894 Potential #1).
+# ---------------------------------------------------------------------------
+
+
+class _PairIntent:
+    """Minimal LP-intent stand-in carrying the attrs the resolver inspects."""
+
+    def __init__(self, *, pool=None, token0=None, token1=None, from_token=None, to_token=None):
+        if pool is not None:
+            self.pool = pool
+        if token0 is not None:
+            self.token0 = token0
+        if token1 is not None:
+            self.token1 = token1
+        if from_token is not None:
+            self.from_token = from_token
+        if to_token is not None:
+            self.to_token = to_token
+
+
+class TestPairTokensFromIntent:
+    def test_explicit_token0_token1_win(self):
+        from almanak.framework.observability.position_events import _pair_tokens_from_intent
+
+        assert _pair_tokens_from_intent(_PairIntent(token0="WETH", token1="USDC")) == ("WETH", "USDC")
+
+    def test_from_to_token_aliases(self):
+        from almanak.framework.observability.position_events import _pair_tokens_from_intent
+
+        assert _pair_tokens_from_intent(_PairIntent(from_token="WAVAX", to_token="USDC")) == ("WAVAX", "USDC")
+
+    def test_pool_descriptor_uniswap_fee_tier(self):
+        from almanak.framework.observability.position_events import _pair_tokens_from_intent
+
+        # bin step / fee tier (digit) is dropped; symbols upper-cased.
+        assert _pair_tokens_from_intent(_PairIntent(pool="weth/usdc/3000")) == ("WETH", "USDC")
+
+    def test_pool_descriptor_traderjoe_bin_step(self):
+        from almanak.framework.observability.position_events import _pair_tokens_from_intent
+
+        assert _pair_tokens_from_intent(_PairIntent(pool="WAVAX/USDC/20")) == ("WAVAX", "USDC")
+
+    def test_pool_descriptor_solidly_stable_segment(self):
+        from almanak.framework.observability.position_events import _pair_tokens_from_intent
+
+        # 3rd "stable" / "volatile" segment is positional overflow, never a token.
+        assert _pair_tokens_from_intent(_PairIntent(pool="USDC/DAI/stable")) == ("USDC", "DAI")
+        assert _pair_tokens_from_intent(_PairIntent(pool="WETH/USDC/volatile")) == ("WETH", "USDC")
+
+    def test_two_segment_pool(self):
+        from almanak.framework.observability.position_events import _pair_tokens_from_intent
+
+        assert _pair_tokens_from_intent(_PairIntent(pool="WETH/USDC")) == ("WETH", "USDC")
+
+    def test_bare_address_pool_yields_none(self):
+        from almanak.framework.observability.position_events import _pair_tokens_from_intent
+
+        # A bare pool address (no '/') carries no symbols — fail-closed.
+        assert _pair_tokens_from_intent(_PairIntent(pool="0x" + "a" * 40)) == (None, None)
+
+    def test_all_address_descriptor_yields_none(self):
+        from almanak.framework.observability.position_events import _pair_tokens_from_intent
+
+        a0 = "0x" + "a" * 40
+        a1 = "0x" + "b" * 40
+        assert _pair_tokens_from_intent(_PairIntent(pool=f"{a0}/{a1}/3000")) == (None, None)
+
+    def test_mixed_address_symbol_descriptor_rejected_whole(self):
+        from almanak.framework.observability.position_events import _pair_tokens_from_intent
+
+        # VIB-5195 hardening: a leading address must NOT shift the trailing
+        # symbol into token0's slot — the mixed descriptor is rejected whole so
+        # no leg is ever misattributed (pr-auditor Potential #1).
+        a0 = "0x" + "a" * 40
+        assert _pair_tokens_from_intent(_PairIntent(pool=f"{a0}/USDC/3000")) == (None, None)
+        assert _pair_tokens_from_intent(_PairIntent(pool=f"USDC/{a0}/3000")) == (None, None)
+
+    def test_no_pool_no_tokens_yields_none(self):
+        from almanak.framework.observability.position_events import _pair_tokens_from_intent
+
+        assert _pair_tokens_from_intent(_PairIntent()) == (None, None)
+
+    def test_partial_explicit_token_filled_from_pool(self):
+        from almanak.framework.observability.position_events import _pair_tokens_from_intent
+
+        # token0 explicit, token1 missing -> token1 recovered from pool, token0 untouched.
+        assert _pair_tokens_from_intent(_PairIntent(token0="WETH", pool="FOO/USDC/500")) == ("WETH", "USDC")

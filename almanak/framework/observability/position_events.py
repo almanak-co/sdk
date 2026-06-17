@@ -383,6 +383,55 @@ def _seed_event(ctx: IntentEventContext) -> PositionEvent | None:
     )
 
 
+def _pair_tokens_from_intent(intent: Any) -> tuple[str | None, str | None]:
+    """Resolve the LP pair ``(token0, token1)`` symbols from an LP intent.
+
+    Prefers explicit ``token0`` / ``token1`` (or the ``from_token`` /
+    ``to_token`` aliases an LP open may carry), falling back to parsing the
+    ``pool`` descriptor — e.g. ``"WETH/USDC/3000"`` (Uniswap V3 fee tier),
+    ``"WAVAX/USDC/20"`` (TraderJoe V2 bin step), ``"USDC/DAI/stable"``
+    (Solidly). Numeric and ``0x``-address segments are dropped so only the
+    two token symbols survive; a ``pool`` that is itself a bare address
+    yields ``(None, None)`` (the descriptor carries no symbols to recover).
+
+    Shared by the OPEN (Phase γ) and CLOSE (Phase κ) enrichers. The CLOSE
+    use makes the close event self-describing — its token columns no longer
+    depend solely on the in-process ``recent_open_events`` carry-forward,
+    which misses when the CLOSE's ``position_id`` differs from the OPEN leg's
+    (e.g. TraderJoe V2 fungible-LP closes under a synthetic id) or on a
+    cross-process teardown / resume where the cache is empty (VIB-5195).
+
+    Invariant: the ``pool`` descriptor's first two segments are token0 / token1
+    in that order, and a given connector emits the SAME order on OPEN and CLOSE
+    (the CLOSE fallback fires only on a cache miss, so a connector that reversed
+    the order between OPEN and CLOSE would swap the per-leg token columns — the
+    value_usd magnitude is order-invariant, ``a0·p0 + a1·p1``, so the total is
+    unaffected). The pair is parsed POSITIONALLY (not filter-then-index) and is
+    accepted only when BOTH leading segments are symbols; a mixed / partial
+    descriptor (an address in either leg) is rejected whole so a trailing symbol
+    can never be misattributed onto the wrong slot.
+    """
+    t0 = getattr(intent, "token0", None) or getattr(intent, "from_token", None)
+    t1 = getattr(intent, "token1", None) or getattr(intent, "to_token", None)
+    if not t0 or not t1:
+        pool_str = (getattr(intent, "pool", "") or "").strip()
+        if "/" in pool_str:
+            parts = [p.strip() for p in pool_str.split("/") if p.strip()]
+            if len(parts) >= 2:
+                seg0 = parts[0].split("(")[0].split(" ")[0].strip()
+                seg1 = parts[1].split("(")[0].split(" ")[0].strip()
+
+                def _is_symbol(seg: str) -> bool:
+                    return bool(seg) and not seg.isdigit() and not seg.lower().startswith("0x")
+
+                if _is_symbol(seg0) and _is_symbol(seg1):
+                    if not t0:
+                        t0 = seg0.upper()
+                    if not t1:
+                        t1 = seg1.upper()
+    return (str(t0) if t0 else None, str(t1) if t1 else None)
+
+
 def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:
     """Phase γ — enrich with lp_open_data.
 
@@ -431,28 +480,13 @@ def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:
         event.amount0 = str(amount0)
     if amount1 is not None:
         event.amount1 = str(amount1)
-    # Token addresses: LPOpenData doesn't carry them directly. Try intent attrs,
-    # then parse from the pool string (e.g. "WETH/USDC/3000", "USDC/DAI/stable").
-    intent = ctx.intent
-    t0 = getattr(intent, "token0", None) or getattr(intent, "from_token", None)
-    t1 = getattr(intent, "token1", None) or getattr(intent, "to_token", None)
-    if not t0 or not t1:
-        pool_str = (getattr(intent, "pool", "") or "").strip()
-        if "/" in pool_str:
-            parts = [p.strip() for p in pool_str.split("/") if p.strip()]
-            normalized = [
-                p.split("(")[0].split(" ")[0].strip()
-                for p in parts
-                if not p.strip().isdigit() and not p.strip().lower().startswith("0x")
-            ]
-            if not t0 and normalized:
-                t0 = normalized[0].upper()
-            if not t1 and len(normalized) > 1:
-                t1 = normalized[1].upper()
+    # Token symbols: LPOpenData doesn't carry them directly. Resolve from the
+    # intent attrs / pool descriptor (e.g. "WETH/USDC/3000", "USDC/DAI/stable").
+    t0, t1 = _pair_tokens_from_intent(ctx.intent)
     if t0:
-        event.token0 = str(t0)
+        event.token0 = t0
     if t1:
-        event.token1 = str(t1)
+        event.token1 = t1
 
 
 def _apply_lp_close(event: PositionEvent, ctx: IntentEventContext) -> None:
@@ -1357,6 +1391,25 @@ def _apply_lp_close_columns(
                 event.token0 = str(t0)
             if not event.token1 and t1:
                 event.token1 = str(t1)
+    # VIB-5195 — self-describing fallback when the cache carry-forward above
+    # leaves a token slot empty. The cache (and its durable-store sibling,
+    # VIB-4839) is keyed by ``position_id``, so it misses whenever the CLOSE's
+    # ``position_id`` differs from the OPEN leg's — the TraderJoe V2 fungible-LP
+    # demos close under a synthetic id (``traderjoe_*_lp_0``) while the OPEN
+    # cached under the pool descriptor — or on a cross-process teardown / resume
+    # where the cache is empty. The LP_CLOSE intent carries the pair via its
+    # ``pool`` descriptor ("TOKEN_X/TOKEN_Y/<bin_step|fee>"), so resolve the
+    # symbols from it. Without this the close lands with token0=''/token1='' and
+    # ``_apply_lp_close_value_usd`` below fails closed (missing_tokens_or_amounts
+    # have_token0=False), leaving the close-leg USD value unattributed (Empty ≠
+    # Zero — unmeasured, not a fabricated zero). Fills empty slots only, so the
+    # cache stays authoritative for every path that already resolves it.
+    if not event.token0 or not event.token1:
+        it0, it1 = _pair_tokens_from_intent(ctx.intent)
+        if not event.token0 and it0:
+            event.token0 = it0
+        if not event.token1 and it1:
+            event.token1 = it1
     # in_range is unambiguously False post-close (NFT burned / liquidity
     # withdrawn). The dashboard reads ``in_range=None`` as "unknown" and
     # ``False`` as "out of range". Either is honest; False is more

@@ -69,14 +69,26 @@ class _LPCloseIntent:
     using a plain object avoids importing chain-resolution side-effects.
     """
 
-    def __init__(self, position_id: str, protocol: str = "uniswap_v3", chain: str = "arbitrum") -> None:
+    def __init__(
+        self,
+        position_id: str,
+        protocol: str = "uniswap_v3",
+        chain: str = "arbitrum",
+        pool: str | None = "WETH/USDC/500",
+    ) -> None:
         from almanak.framework.intents.vocabulary import IntentType
 
         self.intent_type = IntentType.LP_CLOSE
         self.position_id = position_id
         self.protocol = protocol
         self.chain = chain
-        self.pool = "WETH/USDC/500"
+        # ``pool`` is the close intent's pair descriptor. Pool-bearing closes
+        # (TraderJoe V2, and any strategy that threads "TOKEN_X/TOKEN_Y/<tier>"
+        # into the close intent) let VIB-5195 self-describe token0/token1 even
+        # on a cache + durable miss. A pool-less close (NFT-only, e.g. a bare
+        # Uniswap V3 LPCloseIntent) has no recoverable pair, so it must still
+        # fail closed (Empty ≠ Zero) when the OPEN cannot be resolved.
+        self.pool = pool
         self.collect_fees = True
         self.protocol_params = None
 
@@ -251,12 +263,15 @@ async def test_lp_close_stays_empty_when_durable_lookup_returns_no_open(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Per CLAUDE.md §Accounting: Empty ≠ Zero. When neither the in-memory
-    cache nor durable storage holds the OPEN bracket, the CLOSE row must
-    land with empty token0/token1/value_usd — NOT fabricated zeros — and a
-    structured WARN must surface so operators can reconcile.
+    cache nor durable storage holds the OPEN bracket AND the close intent
+    carries no recoverable pair (a pool-less NFT-only close), the CLOSE row
+    must land with empty token0/token1/value_usd — NOT fabricated zeros —
+    and a structured WARN must surface so operators can reconcile.
 
     This is the fail-closed contract from blueprint 27 §14.1: accounting
-    failures are loud + durable, never silent.
+    failures are loud + durable, never silent. VIB-5195's intent-descriptor
+    fallback does NOT fire here because ``pool=None`` — there is genuinely
+    nothing to recover (contrast the sibling test below where ``pool`` is set).
     """
     position_id = "5500999-orphan"
 
@@ -275,7 +290,7 @@ async def test_lp_close_stays_empty_when_durable_lookup_returns_no_open(
     with caplog.at_level(logging.WARNING, logger="almanak.framework.observability.position_events"):
         await runner._emit_position_event_for_intent(
             strategy=_Strategy(),
-            intent=_LPCloseIntent(position_id=position_id),
+            intent=_LPCloseIntent(position_id=position_id, pool=None),
             result=_ExecResult(position_id=position_id),
             entry=_ledger_entry(),
             chain="arbitrum",
@@ -304,6 +319,66 @@ async def test_lp_close_stays_empty_when_durable_lookup_returns_no_open(
         "'lp_close_value_usd' in the message MUST be emitted. Silent empty value_usd "
         "is what hid this bug for two weeks."
     )
+
+
+@pytest.mark.asyncio
+async def test_lp_close_self_describes_from_intent_pool_on_cache_and_durable_miss() -> None:
+    """VIB-5195 — when both the in-memory cache and durable store miss the
+    OPEN bracket but the LP_CLOSE intent carries a pair descriptor
+    (``pool`` = "TOKEN_X/TOKEN_Y/<tier>"), the CLOSE row self-describes its
+    token0/token1 from the intent and ``value_usd`` is computed from the
+    received amounts × close-time prices.
+
+    This is the TraderJoe V2 teardown/rebalance shape: the close intent
+    carries ``pool`` but its ``position_id`` differs from the OPEN leg's
+    (fungible LP closes under a synthetic id), so the position_id-keyed cache
+    and durable lookup BOTH miss. Pre-VIB-5195 the close landed with
+    token0=''/token1='' and ``_apply_lp_close_value_usd`` failed closed with
+    ``missing_tokens_or_amounts have_token0=False`` — the close-leg USD value
+    was unattributed even though the pair was fully recoverable from the
+    intent.
+    """
+    position_id = "tj-v2-close-synthetic-id"
+
+    state_mgr = MagicMock()
+    # Both surfaces miss: no in-memory cache entry, durable lookup empty.
+    state_mgr.get_position_history = AsyncMock(return_value=[])
+    saved: list[PositionEvent] = []
+
+    async def _save(ev: PositionEvent) -> bool:
+        saved.append(ev)
+        return True
+
+    state_mgr.save_position_event = AsyncMock(side_effect=_save)
+
+    runner = _Runner(state_manager=state_mgr, config=RunnerConfig(dry_run=False))
+
+    await runner._emit_position_event_for_intent(
+        strategy=_Strategy(),
+        intent=_LPCloseIntent(position_id=position_id, pool="WETH/USDC/500"),
+        result=_ExecResult(position_id=position_id),
+        entry=_ledger_entry(),
+        chain="arbitrum",
+        deployment_id="deployment:vib5195test",
+        execution_mode="live",
+        cycle_id="teardown-td_vib5195test",
+        price_oracle=_arbitrum_price_oracle(),
+        post_state=None,
+        pre_state=None,
+    )
+
+    from decimal import Decimal
+
+    assert len(saved) == 1
+    ev = saved[0]
+    # Tokens recovered from the intent's pool descriptor (NOT the cache).
+    assert ev.token0 == "WETH", f"VIB-5195: token0 must self-describe from intent pool (got {ev.token0!r})"
+    assert ev.token1 == "USDC", f"VIB-5195: token1 must self-describe from intent pool (got {ev.token1!r})"
+    # value_usd must be a real computed VALUE, not just non-empty: received
+    # amounts × close-time prices (measured-zero legs are a known trap, so
+    # assert a strictly positive magnitude).
+    assert ev.value_usd not in ("", None), "VIB-5195: value_usd must be populated once tokens resolve"
+    assert Decimal(ev.value_usd) > 0, f"VIB-5195: value_usd must be a real positive value (got {ev.value_usd!r})"
 
 
 # ──────────────────────────────────────────────────────────────────────────
