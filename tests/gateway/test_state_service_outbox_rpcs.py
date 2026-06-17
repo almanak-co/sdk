@@ -360,6 +360,53 @@ class TestGetLedgerEntry:
         # Service converts ISO string → Unix epoch int for the proto field
         assert resp.entry.timestamp == ts_epoch
 
+    @pytest.mark.asyncio
+    async def test_sqlite_mapping_preserves_bytes_and_optional_slippage(
+        self, state_service, mock_context
+    ):
+        warm = _make_warm(state_service)
+        warm.get_ledger_entry_by_id = AsyncMock(
+            return_value={
+                "id": _LEDGER_ID,
+                "cycle_id": "cycle-2",
+                "deployment_id": _DEPLOYMENT_ID,
+                "execution_mode": "paper",
+                "timestamp": "not-a-timestamp",
+                "intent_type": "LP_CLOSE",
+                "token_in": "USDC",
+                "amount_in": "12.5",
+                "token_out": "WETH",
+                "amount_out": "0.004",
+                "effective_price": "3125",
+                "slippage_bps": "0",
+                "gas_used": "12345",
+                "gas_usd": "0",
+                "tx_hash": "0xdef",
+                "chain": "base",
+                "protocol": "uniswap_v3",
+                "success": 0,
+                "error": "reverted",
+                "extracted_data_json": b'{"source":"bytes"}',
+                "price_inputs_json": '{"price":"text"}',
+                "pre_state_json": None,
+                "post_state_json": "",
+            }
+        )
+
+        resp = await state_service.GetLedgerEntry(
+            gateway_pb2.GetLedgerEntryRequest(ledger_entry_id=_LEDGER_ID),
+            mock_context,
+        )
+
+        assert resp.found
+        assert resp.entry.timestamp == 0
+        assert resp.entry.slippage_bps == 0.0
+        assert resp.entry.success is False
+        assert resp.entry.extracted_data_json == b'{"source":"bytes"}'
+        assert resp.entry.price_inputs_json == b'{"price":"text"}'
+        assert resp.entry.pre_state_json == b""
+        assert resp.entry.post_state_json == b""
+
 
 # =============================================================================
 # PostgreSQL path — accounting_outbox SQL contract (VIB-3658)
@@ -416,6 +463,35 @@ def _outbox_pg_row(
         "last_error": None,
         "created_at": datetime(2026, 4, 29, 12, 0, 0, tzinfo=UTC),
         "processed_at": None,
+    }
+
+
+def _ledger_pg_row() -> dict[str, object]:
+    """A dict shaped like the GetLedgerEntry PG SELECT result."""
+    return {
+        "id": _LEDGER_ID,
+        "cycle_id": "cycle-pg",
+        "deployment_id": _DEPLOYMENT_ID,
+        "execution_mode": "live",
+        "ts_epoch": 1767225600,
+        "intent_type": "SWAP",
+        "token_in": "WETH",
+        "amount_in": "0.1",
+        "token_out": "USDC",
+        "amount_out": "300.0",
+        "effective_price": "3000.0",
+        "slippage_bps": "1.25",
+        "gas_used": "200000",
+        "gas_usd": "0.5",
+        "tx_hash": "0xabc",
+        "chain": "arbitrum",
+        "protocol": "uniswap_v3",
+        "success": True,
+        "error": "",
+        "extracted_data_text": '{"extracted":true}',
+        "price_inputs_text": '{"price":"pg"}',
+        "pre_state_text": None,
+        "post_state_text": "",
     }
 
 
@@ -546,3 +622,31 @@ class TestPostgresOutboxRoundTrip:
         assert resp.entries[1].wallet_address == "0xcafebabe"
         assert resp.entries[1].position_key == "aave_v3:base:0xcafebabe:USDC"
         assert resp.entries[1].market_id == "aave-usdc"
+
+
+class TestPostgresGetLedgerEntry:
+    @pytest.mark.asyncio
+    async def test_pg_found_maps_row_to_proto(self, state_service_pg, mock_context):
+        state_service_pg._snapshot_fetchrow.return_value = _ledger_pg_row()
+
+        resp = await state_service_pg.GetLedgerEntry(
+            gateway_pb2.GetLedgerEntryRequest(ledger_entry_id=_LEDGER_ID),
+            mock_context,
+        )
+
+        assert resp.found
+        assert resp.entry.id == _LEDGER_ID
+        assert resp.entry.deployment_id == _DEPLOYMENT_ID
+        assert resp.entry.timestamp == 1767225600
+        assert resp.entry.slippage_bps == 1.25
+        assert resp.entry.gas_used == 200000
+        assert resp.entry.extracted_data_json == b'{"extracted":true}'
+        assert resp.entry.price_inputs_json == b'{"price":"pg"}'
+        assert resp.entry.pre_state_json == b""
+        assert resp.entry.post_state_json == b""
+
+        sql, ledger_entry_id = state_service_pg._snapshot_fetchrow.call_args.args
+        assert "deployment_id" in sql
+        assert "agent_id" not in sql
+        assert "extracted_data_json::text AS extracted_data_text" in sql
+        assert ledger_entry_id == _LEDGER_ID

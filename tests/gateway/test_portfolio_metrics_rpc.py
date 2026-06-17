@@ -211,6 +211,73 @@ class TestGetPortfolioMetrics:
         mock_context.set_code.assert_called_with(grpc.StatusCode.INTERNAL)
         mock_context.set_details.assert_called_with("internal server error")
 
+    @pytest.mark.asyncio
+    async def test_get_metrics_pg_success(self, state_service, mock_context):
+        """GetPortfolioMetrics returns data from the hosted Postgres path."""
+        updated_at = datetime(2026, 4, 1, 12, 30, 0, tzinfo=UTC)
+        initial_ts = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
+        state_service._snapshot_pool = object()
+        state_service._ensure_snapshot_pool = AsyncMock()
+        state_service._snapshot_fetchrow = AsyncMock(
+            return_value={
+                "initial_value_usd": "10000",
+                "initial_timestamp": initial_ts,
+                "deposits_usd": "500",
+                "withdrawals_usd": "100",
+                "gas_spent_usd": "25",
+                "updated_at": updated_at,
+                "deployment_id": "test-strategy",
+                "cycle_id": "cycle-1",
+                "execution_mode": "paper",
+                "is_complete": False,
+            }
+        )
+
+        response = await state_service.GetPortfolioMetrics(
+            gateway_pb2.GetMetricsRequest(deployment_id="test-strategy"),
+            mock_context,
+        )
+
+        assert response.found is True
+        assert response.deployment_id == "test-strategy"
+        assert response.initial_timestamp == int(initial_ts.timestamp())
+        assert response.updated_at == int(updated_at.timestamp())
+        assert response.cycle_id == "cycle-1"
+        assert response.execution_mode == "paper"
+        assert response.is_complete is False
+        state_service._snapshot_fetchrow.assert_awaited_once()  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_get_metrics_pg_not_found(self, state_service, mock_context):
+        """Postgres row miss maps to found=False."""
+        state_service._snapshot_pool = object()
+        state_service._ensure_snapshot_pool = AsyncMock()
+        state_service._snapshot_fetchrow = AsyncMock(return_value=None)
+
+        response = await state_service.GetPortfolioMetrics(
+            gateway_pb2.GetMetricsRequest(deployment_id="missing"),
+            mock_context,
+        )
+
+        assert response.found is False
+        mock_context.set_code.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_metrics_pg_backend_failure(self, state_service, mock_context):
+        """Postgres read failure maps to INTERNAL + found=False."""
+        state_service._snapshot_pool = object()
+        state_service._ensure_snapshot_pool = AsyncMock()
+        state_service._snapshot_fetchrow = AsyncMock(side_effect=RuntimeError("pg down"))
+
+        response = await state_service.GetPortfolioMetrics(
+            gateway_pb2.GetMetricsRequest(deployment_id="test-strategy"),
+            mock_context,
+        )
+
+        assert response.found is False
+        mock_context.set_code.assert_called_with(grpc.StatusCode.INTERNAL)
+        mock_context.set_details.assert_called_with("internal server error")
+
 
 class TestGatewayStateManagerMetrics:
     """Tests for GatewayStateManager portfolio metrics methods."""

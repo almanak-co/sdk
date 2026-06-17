@@ -10,8 +10,8 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import datetime
-from unittest.mock import MagicMock
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock
 
 import grpc
 import pytest
@@ -49,6 +49,19 @@ def _make_servicer(warm_rows: list[dict] | None = None, raise_exc: Exception | N
     return servicer
 
 
+def _make_pg_servicer(rows: list[dict] | None = None, raise_exc: Exception | None = None) -> StateServiceServicer:
+    servicer = StateServiceServicer(GatewaySettings(db_path=":memory:"))
+    servicer._initialized = True
+    servicer._snapshot_pool_initialized = True
+    servicer._snapshot_pool = object()
+    servicer._ensure_snapshot_pool = AsyncMock()
+    if raise_exc is not None:
+        servicer._snapshot_fetch = AsyncMock(side_effect=raise_exc)
+    else:
+        servicer._snapshot_fetch = AsyncMock(return_value=rows or [])
+    return servicer
+
+
 def _make_context() -> MagicMock:
     ctx = MagicMock(spec=grpc.aio.ServicerContext)
     ctx.set_code = MagicMock()
@@ -67,6 +80,33 @@ async def test_get_accounting_events_missing_deployment_id() -> None:
     ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
     assert "deployment_id" in ctx.set_details.call_args.args[0]
     assert "required" in ctx.set_details.call_args.args[0]
+    assert len(resp.events) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("limit", -1, "limit must be >= 0"),
+        ("since_timestamp", -1, "since_timestamp must be >= 0"),
+    ],
+)
+async def test_get_accounting_events_rejects_negative_boundaries(
+    field: str,
+    value: int,
+    message: str,
+) -> None:
+    servicer = _make_servicer(warm_rows=[])
+    ctx = _make_context()
+
+    req = gateway_pb2.GetAccountingEventsRequest(
+        deployment_id=_DEPLOYMENT_ID,
+        **{field: value},
+    )
+    resp = await servicer.GetAccountingEvents(req, ctx)
+
+    ctx.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+    ctx.set_details.assert_called_once_with(message)
     assert len(resp.events) == 0
 
 
@@ -136,6 +176,52 @@ async def test_get_accounting_events_rows_converted() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_accounting_events_sqlite_filters_event_type_since_and_limit() -> None:
+    day_1 = datetime(2026, 1, 1, tzinfo=UTC).isoformat()
+    day_2 = datetime(2026, 1, 2, tzinfo=UTC).isoformat()
+    day_3 = datetime(2026, 1, 3, tzinfo=UTC).isoformat()
+    rows = [
+        {
+            "id": "row-old",
+            "deployment_id": _DEPLOYMENT_ID,
+            "timestamp": day_1,
+            "event_type": "LP_OPEN",
+            "position_key": _POSITION_KEY,
+            "payload_json": "{}",
+        },
+        {
+            "id": "row-wrong-type",
+            "deployment_id": _DEPLOYMENT_ID,
+            "timestamp": day_2,
+            "event_type": "LP_CLOSE",
+            "position_key": _POSITION_KEY,
+            "payload_json": "{}",
+        },
+        {
+            "id": "row-kept",
+            "deployment_id": _DEPLOYMENT_ID,
+            "timestamp": day_3,
+            "event_type": "LP_OPEN",
+            "position_key": _POSITION_KEY,
+            "payload_json": "{}",
+        },
+    ]
+    servicer = _make_servicer(warm_rows=rows)
+    ctx = _make_context()
+
+    req = gateway_pb2.GetAccountingEventsRequest(
+        deployment_id=_DEPLOYMENT_ID,
+        event_type="LP_OPEN",
+        since_timestamp=int(datetime(2026, 1, 2, tzinfo=UTC).timestamp()),
+        limit=1,
+    )
+    resp = await servicer.GetAccountingEvents(req, ctx)
+
+    ctx.set_code.assert_not_called()
+    assert [event.id for event in resp.events] == ["row-kept"]
+
+
+@pytest.mark.asyncio
 async def test_get_accounting_events_position_key_filter_passed_through() -> None:
     servicer = _make_servicer(warm_rows=[])
     ctx = _make_context()
@@ -158,6 +244,99 @@ async def test_get_accounting_events_backend_exception() -> None:
     resp = await servicer.GetAccountingEvents(req, ctx)
 
     # Main's service is fail-quiet on SQLite exceptions — logs warning and returns empty.
+    ctx.set_code.assert_not_called()
+    assert len(resp.events) == 0
+
+
+@pytest.mark.asyncio
+async def test_get_accounting_events_pg_filters_and_converts_rows() -> None:
+    rows = [
+        {
+            "id": "pg-row-1",
+            "deployment_id": _DEPLOYMENT_ID,
+            "cycle_id": "cycle-1",
+            "execution_mode": "live",
+            "ts_epoch": 1767225600,
+            "chain": "base",
+            "protocol": "aerodrome",
+            "wallet_address": "0xwallet",
+            "event_type": "LP_OPEN",
+            "position_key": _POSITION_KEY,
+            "ledger_entry_id": "ledger-1",
+            "tx_hash": "0xtx",
+            "confidence": "HIGH",
+            "payload_text": '{"source":"pg"}',
+            "schema_version": 2,
+        }
+    ]
+    servicer = _make_pg_servicer(rows=rows)
+    ctx = _make_context()
+
+    req = gateway_pb2.GetAccountingEventsRequest(
+        deployment_id=_DEPLOYMENT_ID,
+        position_key=_POSITION_KEY,
+        event_type="LP_OPEN",
+        since_timestamp=1767220000,
+        limit=25,
+    )
+    resp = await servicer.GetAccountingEvents(req, ctx)
+
+    ctx.set_code.assert_not_called()
+    servicer._snapshot_fetch.assert_awaited_once()  # type: ignore[attr-defined]
+    args = servicer._snapshot_fetch.call_args.args  # type: ignore[attr-defined]
+    assert "FROM accounting_events" in args[0]
+    assert args[1:] == (_DEPLOYMENT_ID, _POSITION_KEY, "LP_OPEN", 1767220000, 25)
+    assert len(resp.events) == 1
+    assert resp.events[0].id == "pg-row-1"
+    assert resp.events[0].payload_json == b'{"source":"pg"}'
+    assert resp.events[0].schema_version == 2
+
+
+@pytest.mark.asyncio
+async def test_get_accounting_events_pg_null_fields_use_proto_defaults() -> None:
+    rows = [
+        {
+            "id": None,
+            "deployment_id": None,
+            "cycle_id": None,
+            "execution_mode": None,
+            "ts_epoch": None,
+            "chain": None,
+            "protocol": None,
+            "wallet_address": None,
+            "event_type": None,
+            "position_key": None,
+            "ledger_entry_id": None,
+            "tx_hash": None,
+            "confidence": None,
+            "payload_text": None,
+            "schema_version": None,
+        }
+    ]
+    servicer = _make_pg_servicer(rows=rows)
+    ctx = _make_context()
+
+    req = gateway_pb2.GetAccountingEventsRequest(deployment_id=_DEPLOYMENT_ID)
+    resp = await servicer.GetAccountingEvents(req, ctx)
+
+    ctx.set_code.assert_not_called()
+    assert len(resp.events) == 1
+    event = resp.events[0]
+    assert event.id == ""
+    assert event.deployment_id == ""
+    assert event.timestamp == 0
+    assert event.payload_json == b"{}"
+    assert event.schema_version == 1
+
+
+@pytest.mark.asyncio
+async def test_get_accounting_events_pg_exception_returns_empty() -> None:
+    servicer = _make_pg_servicer(raise_exc=RuntimeError("pg is gone"))
+    ctx = _make_context()
+
+    req = gateway_pb2.GetAccountingEventsRequest(deployment_id=_DEPLOYMENT_ID)
+    resp = await servicer.GetAccountingEvents(req, ctx)
+
     ctx.set_code.assert_not_called()
     assert len(resp.events) == 0
 

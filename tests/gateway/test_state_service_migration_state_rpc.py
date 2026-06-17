@@ -37,6 +37,7 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import asyncpg
 import grpc
 import pytest
 import pytest_asyncio
@@ -351,6 +352,57 @@ class TestGetMigrationState:
         assert not resp.error
         state_service._snapshot_fetchrow.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_get_postgres_found_returns_full_row(self, state_service, mock_context):
+        started = datetime(2026, 5, 11, 0, 0, 0, tzinfo=UTC)
+        completed = datetime(2026, 5, 11, 0, 0, 5, tzinfo=UTC)
+        state_service._snapshot_pool = object()
+        state_service._snapshot_fetchrow = AsyncMock(
+            return_value={
+                "deployment_id": _DEPLOYMENT_ID,
+                "primitive": _PRIMITIVE,
+                "cutover_key": _CUTOVER_KEY,
+                "position_registry_backfill_complete": True,
+                "backfill_started_at": started,
+                "backfill_completed_at": completed,
+                "backfill_source_table": "position_events",
+                "backfill_reader_version": 1,
+                "rows_synthesized": 2,
+                "rows_skipped_already_present": 3,
+                "notes_text": '{"audit":[]}',
+                "created_at": started,
+                "updated_at": completed,
+            }
+        )
+        req = gateway_pb2.GetMigrationStateRequest(
+            deployment_id=_DEPLOYMENT_ID, primitive=_PRIMITIVE, cutover_key=_CUTOVER_KEY
+        )
+
+        resp = await state_service.GetMigrationState(req, mock_context)
+
+        assert resp.found
+        assert resp.data.deployment_id == _DEPLOYMENT_ID
+        assert resp.data.backfill_started_at == started.isoformat()
+        assert resp.data.backfill_completed_at == completed.isoformat()
+        assert resp.data.rows_synthesized == 2
+        assert resp.data.rows_skipped_already_present == 3
+        assert json.loads(resp.data.notes.decode("utf-8")) == {"audit": []}
+
+    @pytest.mark.asyncio
+    async def test_get_postgres_exception_returns_internal_error(self, state_service, mock_context):
+        state_service._snapshot_pool = object()
+        state_service._snapshot_fetchrow = AsyncMock(side_effect=RuntimeError("pg down"))
+        req = gateway_pb2.GetMigrationStateRequest(
+            deployment_id=_DEPLOYMENT_ID, primitive=_PRIMITIVE, cutover_key=_CUTOVER_KEY
+        )
+
+        resp = await state_service.GetMigrationState(req, mock_context)
+
+        assert not resp.found
+        assert resp.error == "internal server error"
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)
+        mock_context.set_details.assert_called_once_with("internal server error")
+
 
 # =============================================================================
 # Client-adapter round-trip (D1.S6 / D1.S7) — proves the proto + handler + adapter triangle
@@ -512,6 +564,52 @@ class TestUpdateMigrationState:
         assert bound == datetime(2026, 5, 12, 8, 21, 33, 574522, tzinfo=UTC)
 
     @pytest.mark.asyncio
+    async def test_postgres_builds_dynamic_set_clause(self, state_service, mock_context):
+        state_service._snapshot_pool = object()
+        state_service._snapshot_execute = AsyncMock(return_value="UPDATE 1")
+        req = gateway_pb2.UpdateMigrationStateRequest(
+            deployment_id=_DEPLOYMENT_ID,
+            primitive=_PRIMITIVE,
+            cutover_key=_CUTOVER_KEY,
+            backfill_started_at="2026-05-12T08:21:33.574522+00:00",
+            rows_synthesized=42,
+            rows_skipped_already_present=7,
+        )
+
+        resp = await state_service.UpdateMigrationState(req, mock_context)
+
+        assert resp.success
+        args = state_service._snapshot_execute.await_args.args
+        sql = args[0]
+        assert "backfill_started_at = $1" in sql
+        assert "rows_synthesized = $2" in sql
+        assert "rows_skipped_already_present = $3" in sql
+        assert "updated_at = NOW()" in sql
+        assert "deployment_id = $4" in sql
+        assert "primitive = $5" in sql
+        assert "cutover_key = $6" in sql
+        assert isinstance(args[1], datetime)
+        assert args[2:] == (42, 7, _DEPLOYMENT_ID, _PRIMITIVE, _CUTOVER_KEY)
+
+    @pytest.mark.asyncio
+    async def test_postgres_exception_returns_internal_error(self, state_service, mock_context):
+        state_service._snapshot_pool = object()
+        state_service._snapshot_execute = AsyncMock(side_effect=RuntimeError("pg down"))
+        req = gateway_pb2.UpdateMigrationStateRequest(
+            deployment_id=_DEPLOYMENT_ID,
+            primitive=_PRIMITIVE,
+            cutover_key=_CUTOVER_KEY,
+            rows_synthesized=42,
+        )
+
+        resp = await state_service.UpdateMigrationState(req, mock_context)
+
+        assert not resp.success
+        assert resp.error == "internal server error"
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)
+        mock_context.set_details.assert_called_once_with("internal server error")
+
+    @pytest.mark.asyncio
     async def test_postgres_rejects_malformed_backfill_started_at(
         self, state_service, mock_context
     ):
@@ -583,6 +681,49 @@ class TestMarkBackfillComplete:
         bound_completed_at = state_service._snapshot_execute.await_args.args[-1]
         assert isinstance(bound_completed_at, datetime)
         assert bound_completed_at == datetime(2026, 5, 12, 8, 21, 33, 574522, tzinfo=UTC)
+
+    @pytest.mark.asyncio
+    async def test_postgres_update_zero_still_succeeds_with_warning(
+        self, state_service, mock_context, caplog
+    ):
+        """Missing seed row is logged as a contract warning, not an RPC failure."""
+        state_service._snapshot_pool = object()
+        state_service._snapshot_execute = AsyncMock(return_value="UPDATE 0")
+        req = gateway_pb2.MarkBackfillCompleteRequest(
+            deployment_id=_DEPLOYMENT_ID,
+            primitive=_PRIMITIVE,
+            cutover_key=_CUTOVER_KEY,
+            rows_synthesized=3,
+            rows_skipped_already_present=1,
+            backfill_completed_at="2026-05-12T08:21:33.574522+00:00",
+        )
+
+        with caplog.at_level("WARNING"):
+            resp = await state_service.MarkBackfillComplete(req, mock_context)
+
+        assert resp.success
+        assert "matched 0 rows" in caplog.text
+        mock_context.set_code.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_postgres_exception_returns_internal_error(self, state_service, mock_context):
+        state_service._snapshot_pool = object()
+        state_service._snapshot_execute = AsyncMock(side_effect=RuntimeError("pg down"))
+        req = gateway_pb2.MarkBackfillCompleteRequest(
+            deployment_id=_DEPLOYMENT_ID,
+            primitive=_PRIMITIVE,
+            cutover_key=_CUTOVER_KEY,
+            rows_synthesized=3,
+            rows_skipped_already_present=1,
+            backfill_completed_at="2026-05-12T08:21:33.574522+00:00",
+        )
+
+        resp = await state_service.MarkBackfillComplete(req, mock_context)
+
+        assert not resp.success
+        assert resp.error == "internal server error"
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)
+        mock_context.set_details.assert_called_once_with("internal server error")
 
     @pytest.mark.asyncio
     async def test_postgres_rejects_malformed_completed_at(
@@ -680,6 +821,79 @@ class TestGetPositionEventsFiltered:
         # Fast-path: no DB call.
         state_service._snapshot_fetch.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_postgres_populated_rows_remap_attribution_text(self, state_service, mock_context):
+        state_service._snapshot_pool = object()
+        state_service._snapshot_fetch = AsyncMock(
+            return_value=[
+                {
+                    "id": "evt-1",
+                    "deployment_id": _DEPLOYMENT_ID,
+                    "cycle_id": "cycle-1",
+                    "execution_mode": "paper",
+                    "position_id": "pos-1",
+                    "position_type": "LP",
+                    "event_type": "OPEN",
+                    "timestamp": 1770000000,
+                    "protocol": "uniswap_v3",
+                    "chain": "arbitrum",
+                    "token0": "USDC",
+                    "token1": "WETH",
+                    "amount0": "100",
+                    "amount1": "0.1",
+                    "value_usd": "100",
+                    "liquidity": "1000",
+                    "fees_token0": "0",
+                    "fees_token1": "0",
+                    "leverage": "",
+                    "entry_price": "",
+                    "mark_price": "",
+                    "unrealized_pnl": "",
+                    "tx_hash": "0xabc",
+                    "gas_usd": "0.5",
+                    "ledger_entry_id": "ledger-1",
+                    "protocol_fees_usd": "",
+                    "attribution_text": '{"source":"pg"}',
+                    "attribution_version": 2,
+                    "tick_lower": None,
+                    "tick_upper": None,
+                    "in_range": None,
+                    "is_long": None,
+                }
+            ]
+        )
+
+        req = gateway_pb2.GetPositionEventsFilteredRequest(
+            deployment_id=_DEPLOYMENT_ID,
+            position_types=[" LP ", "", "PERP"],
+        )
+        resp = await state_service.GetPositionEventsFiltered(req, mock_context)
+
+        assert len(resp.events) == 1
+        event = resp.events[0]
+        assert event.id == "evt-1"
+        assert event.attribution_json == '{"source":"pg"}'
+        assert event.attribution_version == 2
+        args = state_service._snapshot_fetch.await_args.args
+        assert "position_type = ANY($2::text[])" in args[0]
+        assert args[1] == _DEPLOYMENT_ID
+        assert set(args[2]) == {"LP", "PERP"}
+
+    @pytest.mark.asyncio
+    async def test_postgres_exception_returns_internal_error(self, state_service, mock_context):
+        state_service._snapshot_pool = object()
+        state_service._snapshot_fetch = AsyncMock(side_effect=RuntimeError("pg down"))
+        req = gateway_pb2.GetPositionEventsFilteredRequest(
+            deployment_id=_DEPLOYMENT_ID,
+            position_types=["LP"],
+        )
+
+        resp = await state_service.GetPositionEventsFiltered(req, mock_context)
+
+        assert resp.error == "internal server error"
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)
+        mock_context.set_details.assert_called_once_with("internal server error")
+
 
 # =============================================================================
 # GetPositionRegistryOpenRows
@@ -729,6 +943,104 @@ class TestGetPositionRegistryOpenRows:
         assert row.status == "open"
         parsed = json.loads(row.payload.decode("utf-8"))
         assert parsed == {"token_id": 5482307, "pool_address": "0xpool"}
+
+    @pytest.mark.asyncio
+    async def test_postgres_filters_and_parses_payload(self, state_service, mock_context):
+        state_service._snapshot_pool_initialized = True
+        state_service._snapshot_pool = object()
+        state_service._snapshot_fetch = AsyncMock(
+            return_value=[
+                {
+                    "deployment_id": _DEPLOYMENT_ID,
+                    "chain": "arbitrum",
+                    "primitive": "lp",
+                    "accounting_category": "lp",
+                    "physical_identity_hash": "0xabc",
+                    "semantic_grouping_key": "arbitrum:0xpool",
+                    "grouping_policy_version": "univ3_lp@v1",
+                    "handle": None,
+                    "status": "open",
+                    "payload_text": '{"token_id": 5482307, "pool_address": "0xpool"}',
+                    "opened_at_block": 12345,
+                    "opened_tx": "0xtxopen",
+                    "closed_at_block": None,
+                    "closed_tx": None,
+                    "last_reconciled_at_block": None,
+                    "matching_policy_version": 1,
+                }
+            ]
+        )
+
+        req = gateway_pb2.GetPositionRegistryOpenRowsRequest(
+            deployment_id=_DEPLOYMENT_ID,
+            chain=" arbitrum ",
+            primitive=" lp ",
+            accounting_category=" lp ",
+        )
+        resp = await state_service.GetPositionRegistryOpenRows(req, mock_context)
+
+        assert len(resp.rows) == 1
+        row = resp.rows[0]
+        assert row.physical_identity_hash == "0xabc"
+        assert json.loads(row.payload.decode("utf-8")) == {
+            "token_id": 5482307,
+            "pool_address": "0xpool",
+        }
+        args = state_service._snapshot_fetch.call_args.args
+        assert "AND chain = $2" in args[0]
+        assert "AND primitive = $3" in args[0]
+        assert "AND accounting_category = $4" in args[0]
+        assert "NULLS FIRST" in args[0]
+        assert args[1:] == (_DEPLOYMENT_ID, "arbitrum", "lp", "lp")
+
+    @pytest.mark.asyncio
+    async def test_postgres_non_object_payload_surfaces_shape_error(self, state_service, mock_context):
+        state_service._snapshot_pool_initialized = True
+        state_service._snapshot_pool = object()
+        state_service._snapshot_fetch = AsyncMock(
+            return_value=[
+                {
+                    "deployment_id": _DEPLOYMENT_ID,
+                    "chain": "arbitrum",
+                    "primitive": "lp",
+                    "accounting_category": "lp",
+                    "physical_identity_hash": "0xabc",
+                    "semantic_grouping_key": "arbitrum:0xpool",
+                    "grouping_policy_version": "univ3_lp@v1",
+                    "handle": None,
+                    "status": "open",
+                    "payload_text": '["not", "an", "object"]',
+                    "opened_at_block": 12345,
+                    "opened_tx": "0xtxopen",
+                    "closed_at_block": None,
+                    "closed_tx": None,
+                    "last_reconciled_at_block": None,
+                    "matching_policy_version": 1,
+                }
+            ]
+        )
+
+        req = gateway_pb2.GetPositionRegistryOpenRowsRequest(deployment_id=_DEPLOYMENT_ID)
+        resp = await state_service.GetPositionRegistryOpenRows(req, mock_context)
+
+        assert len(resp.rows) == 1
+        row = resp.rows[0]
+        assert row.payload == b"{}"
+        assert row.payload_raw == '["not", "an", "object"]'
+        assert row.payload_shape_error == "expected JSON object, got list"
+
+    @pytest.mark.asyncio
+    async def test_postgres_exception_returns_internal_error(self, state_service, mock_context):
+        state_service._snapshot_pool_initialized = True
+        state_service._snapshot_pool = object()
+        state_service._snapshot_fetch = AsyncMock(side_effect=RuntimeError("pg down"))
+
+        req = gateway_pb2.GetPositionRegistryOpenRowsRequest(deployment_id=_DEPLOYMENT_ID)
+        resp = await state_service.GetPositionRegistryOpenRows(req, mock_context)
+
+        assert resp.error == "internal server error"
+        mock_context.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)
+        mock_context.set_details.assert_called_once_with("internal server error")
 
 
 # =============================================================================
@@ -781,6 +1093,78 @@ def _make_registry_row(*, status: str = "open") -> RegistryRow:
         opened_at_block=12345,
         opened_tx="0xopen",
     )
+
+
+def _compact_sql(sql: str) -> str:
+    return " ".join(sql.split())
+
+
+class _FakePgTransaction:
+    def __init__(self, conn: _FakePgConn) -> None:
+        self._conn = conn
+
+    async def __aenter__(self) -> _FakePgTransaction:
+        self._conn.transaction_entries += 1
+        self._conn._transaction_depth += 1
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001
+        self._conn.transaction_exits += 1
+        self._conn._transaction_depth -= 1
+        return False
+
+
+class _FakePgAcquire:
+    def __init__(self, conn: _FakePgConn) -> None:
+        self._conn = conn
+
+    async def __aenter__(self) -> _FakePgConn:
+        return self._conn
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001
+        return False
+
+
+class _FakePgPool:
+    def __init__(self, conn: _FakePgConn) -> None:
+        self._conn = conn
+
+    def acquire(self) -> _FakePgAcquire:
+        return _FakePgAcquire(self._conn)
+
+
+class _FakePgConn:
+    def __init__(self) -> None:
+        self.operations: list[tuple[str, str, tuple[Any, ...], bool]] = []
+        self.transaction_entries = 0
+        self.transaction_exits = 0
+        self._transaction_depth = 0
+        self.execute_failures: list[tuple[str, BaseException]] = []
+
+    def transaction(self) -> _FakePgTransaction:
+        return _FakePgTransaction(self)
+
+    async def fetchval(self, sql: str, *args: Any) -> str:
+        self.operations.append(("fetchval", _compact_sql(sql), args, self._transaction_depth > 0))
+        return "ok"
+
+    async def execute(self, sql: str, *args: Any) -> str:
+        self.operations.append(("execute", _compact_sql(sql), args, self._transaction_depth > 0))
+        for pattern, exc in self.execute_failures:
+            if pattern in sql:
+                raise exc
+        return "EXECUTE 1"
+
+
+def _pg_service_with_conn(
+    service: StateServiceServicer,
+    conn: _FakePgConn,
+    *,
+    schema: str | None = None,
+) -> StateServiceServicer:
+    service._snapshot_pool = _FakePgPool(conn)
+    service._snapshot_schema = schema
+    return service
 
 
 class TestSaveLedgerAndRegistry:
@@ -946,3 +1330,119 @@ class TestSaveLedgerAndRegistry:
         assert not resp.success
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
         assert "invalid mode" in resp.error
+
+    @pytest.mark.asyncio
+    async def test_postgres_atomic_commit_sql_order(self, state_service):
+        """The PG primitive keeps search_path + all three writes in one transaction."""
+        conn = _FakePgConn()
+        _pg_service_with_conn(state_service, conn, schema="metrics")
+
+        ledger = _make_ledger()
+        registry = _make_registry_row()
+        resp = await state_service._save_ledger_and_registry_pg(
+            ledger=ledger,
+            registry=registry,
+            effective_handle="lp:auto-slot",
+            ledger_id=ledger.id,
+            mode="commit",
+        )
+
+        assert resp.success is True
+        assert conn.transaction_entries == 1
+        assert conn.transaction_exits == 1
+        assert all(in_tx for _, _, _, in_tx in conn.operations)
+        assert [kind for kind, *_ in conn.operations] == [
+            "fetchval",
+            "execute",
+            "execute",
+            "execute",
+            "execute",
+        ]
+        sqls = [sql for _, sql, _, _ in conn.operations]
+        assert "set_config('search_path'" in sqls[0]
+        assert "INSERT INTO transaction_ledger" in sqls[1]
+        assert "UPDATE position_registry SET handle = NULL" in sqls[2]
+        assert "INSERT INTO position_registry" in sqls[3]
+        assert "UPDATE position_registry SET handle = $1" in sqls[4]
+        ledger_args = conn.operations[1][2]
+        assert ledger_args[0] == ledger.id
+        assert ledger_args[2] == ledger.deployment_id
+
+    @pytest.mark.asyncio
+    async def test_postgres_registry_reconciliation_skips_ledger_inside_transaction(self, state_service):
+        """Reconciliation mode skips only the immutable ledger INSERT."""
+        conn = _FakePgConn()
+        _pg_service_with_conn(state_service, conn)
+
+        ledger = _make_ledger()
+        registry = _make_registry_row()
+        resp = await state_service._save_ledger_and_registry_pg(
+            ledger=ledger,
+            registry=registry,
+            effective_handle="lp:auto-slot",
+            ledger_id=ledger.id,
+            mode="registry_reconciliation",
+        )
+
+        assert resp.success is True
+        assert conn.transaction_entries == 1
+        assert conn.transaction_exits == 1
+        assert all(in_tx for _, _, _, in_tx in conn.operations)
+        sqls = [sql for _, sql, _, _ in conn.operations]
+        assert all("transaction_ledger" not in sql for sql in sqls)
+        assert [kind for kind, *_ in conn.operations] == ["execute", "execute", "execute"]
+        assert "UPDATE position_registry SET handle = NULL" in sqls[0]
+        assert "INSERT INTO position_registry" in sqls[1]
+        assert "UPDATE position_registry SET handle = $1" in sqls[2]
+
+    @pytest.mark.asyncio
+    async def test_postgres_unique_violation_with_handle_stays_persistence_error(self, state_service):
+        """Handle-bearing rows cannot be auto-mode collisions."""
+        conn = _FakePgConn()
+        duplicate = asyncpg.UniqueViolationError("duplicate handle")
+        conn.execute_failures.append(("INSERT INTO position_registry", duplicate))
+        _pg_service_with_conn(state_service, conn)
+        state_service._snapshot_fetchrow = AsyncMock()
+
+        ledger = _make_ledger()
+        resp = await state_service._save_ledger_and_registry_pg(
+            ledger=ledger,
+            registry=_make_registry_row(),
+            effective_handle="lp:auto-slot",
+            ledger_id=ledger.id,
+            mode="commit",
+        )
+
+        assert resp.success is False
+        assert resp.error_class == "AccountingPersistenceError"
+        assert ledger.id in resp.error
+        state_service._snapshot_fetchrow.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_postgres_auto_mode_unique_violation_surfaces_typed_collision(self, state_service):
+        """Handle-less ix_registry_auto_mode conflicts map to RegistryAutoCollisionError."""
+        conn = _FakePgConn()
+        collision = asyncpg.UniqueViolationError("auto-mode collision")
+        collision.constraint_name = state_service._AUTO_MODE_INDEX_NAME
+        conn.execute_failures.append(("INSERT INTO position_registry", collision))
+        _pg_service_with_conn(state_service, conn)
+        state_service._snapshot_fetchrow = AsyncMock(
+            return_value={
+                "physical_identity_hash": "0xexisting",
+                "opened_tx": "0xwinner",
+            }
+        )
+
+        ledger = _make_ledger()
+        resp = await state_service._save_ledger_and_registry_pg(
+            ledger=ledger,
+            registry=_make_registry_row(),
+            effective_handle=None,
+            ledger_id=ledger.id,
+            mode="commit",
+        )
+
+        assert resp.success is False
+        assert resp.error_class == "RegistryAutoCollisionError"
+        assert "0xexisting" in resp.error
+        state_service._snapshot_fetchrow.assert_awaited_once()

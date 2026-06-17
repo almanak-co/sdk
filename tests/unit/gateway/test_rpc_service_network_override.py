@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from almanak.gateway.services.rpc_service import RpcServiceServicer
 
 

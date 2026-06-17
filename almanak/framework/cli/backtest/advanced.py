@@ -7,6 +7,7 @@ statistical simulation, and crisis scenario stress testing.
 import asyncio
 import json
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -337,7 +338,344 @@ def print_crisis_backtest_results(result: CrisisBacktestResult) -> None:
 # =============================================================================
 
 
-# crap-allowlist: VIB-4062 — pre-existing CC=26 in walk-forward CLI; touched only to repoint MarketSnapshot import
+@dataclass
+class _WalkForwardSettings:
+    objective: str
+    n_trials: int
+    patience: int | None
+
+
+@dataclass
+class _WalkForwardWindowSummary:
+    total_duration_days: int
+    effective_step_days: int
+    estimated_windows: int
+
+
+@dataclass
+class _WalkForwardRunContext:
+    strategy: str
+    start: datetime
+    end: datetime
+    chain: str
+    token_list: list[str]
+    interval: int
+    initial_capital: float
+    output_label: str | None
+    output_path: Path | None
+    train_days: int
+    test_days: int
+    step_days: int | None
+    gap_days: int
+    min_windows: int
+    wf_config: Any
+    param_ranges: dict[str, Any]
+    settings: _WalkForwardSettings
+    window_summary: _WalkForwardWindowSummary
+    verbose: bool
+
+
+@dataclass
+class _WalkForwardFactories:
+    strategy_factory: Any
+    data_provider_factory: Any
+    backtester_factory: Any
+
+
+def _load_walk_forward_inputs(
+    *,
+    config_file: str,
+    objective: str | None,
+    n_trials: int | None,
+    patience: int | None,
+) -> tuple[dict[str, Any], _WalkForwardSettings]:
+    config_path = Path(config_file)
+    try:
+        opt_config = load_optimization_config(config_path)
+    except Exception as e:
+        click.echo(f"Error loading config file: {e}", err=True)
+        raise click.Abort() from None
+
+    try:
+        param_ranges = parse_param_ranges_from_config(opt_config)
+    except click.BadParameter as e:
+        click.echo(f"Error parsing config: {e}", err=True)
+        raise click.Abort() from None
+
+    if not param_ranges:
+        raise click.UsageError(
+            "No parameter ranges defined in config file. Add 'param_ranges' with at least one parameter."
+        )
+
+    settings = _WalkForwardSettings(
+        objective=objective or opt_config.get("objective", "sharpe_ratio"),
+        n_trials=n_trials or opt_config.get("n_trials", 50),
+        patience=patience or opt_config.get("patience"),
+    )
+    return param_ranges, settings
+
+
+def _validate_walk_forward_strategy(strategy: str) -> None:
+    available_strategies = list_strategies_fn()
+    if strategy not in available_strategies and available_strategies:
+        click.echo(f"Error: Unknown strategy '{strategy}'", err=True)
+        click.echo(f"Available strategies: {', '.join(sorted(available_strategies))}", err=True)
+        raise click.Abort()
+
+
+def _estimate_walk_forward_windows(
+    *,
+    start: datetime,
+    end: datetime,
+    train_days: int,
+    test_days: int,
+    step_days: int | None,
+    gap_days: int,
+) -> _WalkForwardWindowSummary:
+    total_duration = (end - start).days
+    window_size = train_days + gap_days + test_days
+    effective_step = step_days if step_days else test_days
+    estimated_windows = max(0, (total_duration - window_size) // effective_step + 1)
+    return _WalkForwardWindowSummary(
+        total_duration_days=total_duration,
+        effective_step_days=effective_step,
+        estimated_windows=estimated_windows,
+    )
+
+
+def _build_walk_forward_context(
+    *,
+    strategy: str,
+    start: datetime,
+    end: datetime,
+    config_file: str,
+    train_days: int,
+    test_days: int,
+    step_days: int | None,
+    gap_days: int,
+    min_windows: int,
+    objective: str | None,
+    n_trials: int | None,
+    patience: int | None,
+    interval: int,
+    initial_capital: float,
+    chain: str,
+    tokens: str,
+    output: str | None,
+    verbose: bool,
+) -> _WalkForwardRunContext:
+    from ...backtesting.pnl import WalkForwardConfig
+
+    param_ranges, settings = _load_walk_forward_inputs(
+        config_file=config_file,
+        objective=objective,
+        n_trials=n_trials,
+        patience=patience,
+    )
+    wf_config = WalkForwardConfig.from_days(
+        train_days=train_days,
+        test_days=test_days,
+        step_days=step_days,
+        gap_days=gap_days,
+        min_windows=min_windows,
+    )
+    _validate_walk_forward_strategy(strategy)
+
+    return _WalkForwardRunContext(
+        strategy=strategy,
+        start=start,
+        end=end,
+        chain=chain,
+        token_list=[t.strip().upper() for t in tokens.split(",")],
+        interval=interval,
+        initial_capital=initial_capital,
+        output_label=output,
+        output_path=Path(output) if output else None,
+        train_days=train_days,
+        test_days=test_days,
+        step_days=step_days,
+        gap_days=gap_days,
+        min_windows=min_windows,
+        wf_config=wf_config,
+        param_ranges=param_ranges,
+        settings=settings,
+        window_summary=_estimate_walk_forward_windows(
+            start=start,
+            end=end,
+            train_days=train_days,
+            test_days=test_days,
+            step_days=step_days,
+            gap_days=gap_days,
+        ),
+        verbose=verbose,
+    )
+
+
+def _format_walk_forward_param_range(name: str, spec: Any) -> str:
+    if not hasattr(spec, "param_type"):
+        return f"  {name}: {spec}"
+    if spec.param_type.value == "categorical":
+        return f"  {name}: categorical {spec.choices}"
+    if spec.param_type.value == "discrete":
+        step_str = f", step={spec.step}" if spec.step else ""
+        return f"  {name}: discrete [{spec.low}, {spec.high}{step_str}]"
+    log_str = " (log)" if spec.log else ""
+    step_str = f", step={spec.step}" if spec.step else ""
+    return f"  {name}: continuous [{spec.low}, {spec.high}{step_str}]{log_str}"
+
+
+def _print_walk_forward_configuration(ctx: _WalkForwardRunContext) -> None:
+    click.echo("=" * 70)
+    click.echo("WALK-FORWARD OPTIMIZATION CONFIGURATION")
+    click.echo("=" * 70)
+    click.echo(f"Strategy: {ctx.strategy}")
+    click.echo(f"Chain: {ctx.chain}")
+    click.echo(f"Period: {ctx.start.date()} -> {ctx.end.date()} ({ctx.window_summary.total_duration_days} days)")
+    click.echo(f"Interval: {ctx.interval}s ({ctx.interval / 3600:.1f} hours)")
+    click.echo(f"Initial Capital: ${ctx.initial_capital:,.2f}")
+    click.echo(f"Tokens: {', '.join(ctx.token_list)}")
+    click.echo()
+    click.echo("Window Configuration:")
+    click.echo(f"  Train Window: {ctx.train_days} days")
+    click.echo(f"  Test Window: {ctx.test_days} days")
+    click.echo(f"  Step Size: {ctx.window_summary.effective_step_days} days")
+    click.echo(f"  Gap: {ctx.gap_days} days")
+    click.echo(f"  Min Windows: {ctx.min_windows}")
+    click.echo(f"  Estimated Windows: ~{ctx.window_summary.estimated_windows}")
+    click.echo()
+    click.echo(f"Optimization: {ctx.settings.objective}")
+    click.echo(f"Trials per Window: {ctx.settings.n_trials}")
+    if ctx.settings.patience:
+        click.echo(f"Early Stopping: patience={ctx.settings.patience}")
+    else:
+        click.echo("Early Stopping: disabled")
+    click.echo()
+    click.echo("Parameters to optimize:")
+    for name, spec in ctx.param_ranges.items():
+        click.echo(_format_walk_forward_param_range(name, spec))
+
+    if ctx.output_label:
+        click.echo(f"Output: {ctx.output_label}")
+
+    click.echo("=" * 70)
+
+
+def _handle_walk_forward_dry_run() -> None:
+    click.echo()
+    click.echo("Dry run - walk-forward optimization not executed.")
+
+
+def _resolve_walk_forward_strategy_class(strategy: str) -> Any:
+    try:
+        return get_strategy(strategy)
+    except ValueError:
+        click.echo()
+        click.echo("Warning: No strategies registered in factory.", err=True)
+        click.echo("Running with mock strategy for demonstration.", err=True)
+        click.echo()
+
+        from ...backtesting import make_mock_strategy_class
+
+        return make_mock_strategy_class("mock-walk-forward")
+
+
+def _build_walk_forward_pnl_config(ctx: _WalkForwardRunContext) -> PnLBacktestConfig:
+    return PnLBacktestConfig(
+        start_time=ctx.start,
+        end_time=ctx.end,
+        interval_seconds=ctx.interval,
+        initial_capital_usd=Decimal(str(ctx.initial_capital)),
+        chain=ctx.chain,
+        tokens=ctx.token_list,
+        # gas_price_gwei omitted: chain-aware default (VIB-5088)
+        include_gas_costs=True,
+    )
+
+
+def _build_walk_forward_factories(
+    *,
+    strategy_class: Any,
+    base_config: dict[str, Any],
+    chain: str,
+    token_addresses: dict[str, Any],
+) -> _WalkForwardFactories:
+    def create_data_provider() -> CoinGeckoDataProvider:
+        return CoinGeckoDataProvider(token_addresses=token_addresses)
+
+    def create_strategy(config_overrides: dict[str, Any] | None = None) -> Any:
+        effective_config = {**base_config, **(config_overrides or {})}
+        return _create_backtest_strategy(strategy_class, effective_config, chain)
+
+    def create_backtester(
+        data_provider: Any,
+        fee_models: dict[str, Any],
+        slippage_models: dict[str, Any],
+    ) -> PnLBacktester:
+        return PnLBacktester(
+            data_provider=data_provider,
+            fee_models=fee_models,
+            slippage_models=slippage_models,
+        )
+
+    return _WalkForwardFactories(
+        strategy_factory=create_strategy,
+        data_provider_factory=create_data_provider,
+        backtester_factory=create_backtester,
+    )
+
+
+def _run_walk_forward(
+    *,
+    ctx: _WalkForwardRunContext,
+    factories: _WalkForwardFactories,
+    pnl_config: PnLBacktestConfig,
+    base_config: dict[str, Any],
+) -> Any:
+    from ...backtesting.pnl import run_walk_forward_optimization
+
+    click.echo()
+    click.echo(
+        "Starting walk-forward optimization "
+        f"(~{ctx.window_summary.estimated_windows} windows, {ctx.settings.n_trials} trials per window)..."
+    )
+    click.echo()
+
+    try:
+        return asyncio.run(
+            run_walk_forward_optimization(
+                strategy_factory=factories.strategy_factory,
+                data_provider_factory=factories.data_provider_factory,
+                backtester_factory=factories.backtester_factory,
+                base_config=pnl_config,
+                param_ranges=ctx.param_ranges,
+                wf_config=ctx.wf_config,
+                objective_metric=ctx.settings.objective,
+                n_trials_per_window=ctx.settings.n_trials,
+                patience=ctx.settings.patience,
+                show_progress=ctx.verbose,
+                strategy_config=base_config,
+            )
+        )
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error during walk-forward optimization: {e}", err=True)
+        sys.exit(1)
+
+
+def _write_walk_forward_output(output_path: Path | None, result: Any) -> None:
+    if output_path is None:
+        return
+    try:
+        result_dict = result.to_dict()
+        with open(output_path, "w") as f:
+            json.dump(result_dict, f, indent=2, default=str)
+        click.echo(f"Walk-forward results written to: {output_path}")
+    except Exception as e:
+        click.echo(f"Warning: Could not save results: {e}", err=True)
+
+
 @backtest.command("walk-forward")
 @click.option("--strategy", "-s", required=True, help="Name of the strategy to optimize")
 @click.option("--start", required=True, callback=parse_date, help="Start date (YYYY-MM-DD)")
@@ -400,7 +738,7 @@ def print_crisis_backtest_results(result: CrisisBacktestResult) -> None:
     "--dry-run", is_flag=True, default=False, help="Show configuration without running walk-forward optimization"
 )
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Show progress bar and detailed logging")
-def walk_forward_backtest(  # noqa: C901
+def walk_forward_backtest(
     strategy: str,
     start: datetime,
     end: datetime,
@@ -489,222 +827,58 @@ def walk_forward_backtest(  # noqa: C901
             --start 2023-01-01 --end 2024-01-01 \\
             --config-file config.json --dry-run
     """
-    from ...backtesting.pnl import (
-        WalkForwardConfig,
-        run_walk_forward_optimization,
-    )
-
-    # Load optimization config
-    config_path = Path(config_file)
-    try:
-        opt_config = load_optimization_config(config_path)
-    except Exception as e:
-        click.echo(f"Error loading config file: {e}", err=True)
-        raise click.Abort() from None
-
-    # Parse parameter ranges
-    try:
-        param_ranges = parse_param_ranges_from_config(opt_config)
-    except click.BadParameter as e:
-        click.echo(f"Error parsing config: {e}", err=True)
-        raise click.Abort() from None
-
-    if not param_ranges:
-        raise click.UsageError(
-            "No parameter ranges defined in config file. Add 'param_ranges' with at least one parameter."
-        )
-
-    # Determine settings (CLI args override config file)
-    effective_objective = objective or opt_config.get("objective", "sharpe_ratio")
-    effective_n_trials = n_trials or opt_config.get("n_trials", 50)
-    effective_patience = patience or opt_config.get("patience")
-
-    # Create walk-forward config
-    wf_config = WalkForwardConfig.from_days(
+    ctx = _build_walk_forward_context(
+        strategy=strategy,
+        start=start,
+        end=end,
+        config_file=config_file,
         train_days=train_days,
         test_days=test_days,
         step_days=step_days,
         gap_days=gap_days,
         min_windows=min_windows,
+        objective=objective,
+        n_trials=n_trials,
+        patience=patience,
+        interval=interval,
+        initial_capital=initial_capital,
+        chain=chain,
+        tokens=tokens,
+        output=output,
+        verbose=verbose,
     )
+    _print_walk_forward_configuration(ctx)
 
-    # Validate strategy exists
-    available_strategies = list_strategies_fn()
-    if strategy not in available_strategies and available_strategies:
-        click.echo(f"Error: Unknown strategy '{strategy}'", err=True)
-        click.echo(f"Available strategies: {', '.join(sorted(available_strategies))}", err=True)
-        raise click.Abort()
-
-    # Parse tokens list
-    token_list = [t.strip().upper() for t in tokens.split(",")]
-
-    # Estimate number of windows
-    total_duration = (end - start).days
-    window_size = train_days + gap_days + test_days
-    effective_step = step_days if step_days else test_days
-    estimated_windows = max(0, (total_duration - window_size) // effective_step + 1)
-
-    # Display configuration
-    click.echo("=" * 70)
-    click.echo("WALK-FORWARD OPTIMIZATION CONFIGURATION")
-    click.echo("=" * 70)
-    click.echo(f"Strategy: {strategy}")
-    click.echo(f"Chain: {chain}")
-    click.echo(f"Period: {start.date()} -> {end.date()} ({total_duration} days)")
-    click.echo(f"Interval: {interval}s ({interval / 3600:.1f} hours)")
-    click.echo(f"Initial Capital: ${initial_capital:,.2f}")
-    click.echo(f"Tokens: {', '.join(token_list)}")
-    click.echo()
-    click.echo("Window Configuration:")
-    click.echo(f"  Train Window: {train_days} days")
-    click.echo(f"  Test Window: {test_days} days")
-    click.echo(f"  Step Size: {effective_step} days")
-    click.echo(f"  Gap: {gap_days} days")
-    click.echo(f"  Min Windows: {min_windows}")
-    click.echo(f"  Estimated Windows: ~{estimated_windows}")
-    click.echo()
-    click.echo(f"Optimization: {effective_objective}")
-    click.echo(f"Trials per Window: {effective_n_trials}")
-    if effective_patience:
-        click.echo(f"Early Stopping: patience={effective_patience}")
-    else:
-        click.echo("Early Stopping: disabled")
-    click.echo()
-    click.echo("Parameters to optimize:")
-    for name, spec in param_ranges.items():
-        if hasattr(spec, "param_type"):
-            if spec.param_type.value == "categorical":
-                click.echo(f"  {name}: categorical {spec.choices}")
-            elif spec.param_type.value == "discrete":
-                step_str = f", step={spec.step}" if spec.step else ""
-                click.echo(f"  {name}: discrete [{spec.low}, {spec.high}{step_str}]")
-            else:
-                log_str = " (log)" if spec.log else ""
-                step_str = f", step={spec.step}" if spec.step else ""
-                click.echo(f"  {name}: continuous [{spec.low}, {spec.high}{step_str}]{log_str}")
-        else:
-            click.echo(f"  {name}: {spec}")
-
-    if output:
-        click.echo(f"Output: {output}")
-
-    click.echo("=" * 70)
-
-    # Handle dry run
     if dry_run:
-        click.echo()
-        click.echo("Dry run - walk-forward optimization not executed.")
+        _handle_walk_forward_dry_run()
         return
 
-    # Load strategy
-    try:
-        strategy_class = get_strategy(strategy)
-    except ValueError:
-        click.echo()
-        click.echo("Warning: No strategies registered in factory.", err=True)
-        click.echo("Running with mock strategy for demonstration.", err=True)
-        click.echo()
-
-        from ...market import MarketSnapshot
-
-        class MockWalkForwardStrategy:
-            """Mock strategy for walk-forward demonstration."""
-
-            deployment_id: str = "mock-walk-forward"
-
-            def __init__(self, config: dict[str, Any]) -> None:
-                self.config = config
-
-            def decide(self, market: MarketSnapshot) -> dict[str, Any] | None:
-                return None
-
-        strategy_class = MockWalkForwardStrategy
-
-    # Load base strategy config
-    base_config = load_strategy_config(strategy, chain)
-
-    # Create PnL backtest config
-    pnl_config = PnLBacktestConfig(
-        start_time=start,
-        end_time=end,
-        interval_seconds=interval,
-        initial_capital_usd=Decimal(str(initial_capital)),
-        chain=chain,
-        tokens=token_list,
-        # gas_price_gwei omitted: chain-aware default (VIB-5088)
-        include_gas_costs=True,
-    )
+    strategy_class = _resolve_walk_forward_strategy_class(ctx.strategy)
+    base_config = load_strategy_config(ctx.strategy, ctx.chain)
+    pnl_config = _build_walk_forward_pnl_config(ctx)
 
     # Resolve the SYMBOL -> (chain, address) map once for every provider the
     # factory builds (Refinement R1). Natives resolve via the chain registry.
     token_addresses = build_token_address_map(
         strategy_config=base_config,
-        tracked_tokens=token_list,
-        chain=chain,
+        tracked_tokens=ctx.token_list,
+        chain=ctx.chain,
+    )
+    factories = _build_walk_forward_factories(
+        strategy_class=strategy_class,
+        base_config=base_config,
+        chain=ctx.chain,
+        token_addresses=token_addresses,
+    )
+    result = _run_walk_forward(
+        ctx=ctx,
+        factories=factories,
+        pnl_config=pnl_config,
+        base_config=base_config,
     )
 
-    # Create factories
-    def create_data_provider() -> CoinGeckoDataProvider:
-        return CoinGeckoDataProvider(token_addresses=token_addresses)
-
-    def create_strategy(config_overrides: dict[str, Any] | None = None) -> Any:
-        effective_config = {**base_config, **(config_overrides or {})}
-        return _create_backtest_strategy(strategy_class, effective_config, chain)
-
-    def create_backtester(
-        data_provider: Any,
-        fee_models: dict[str, Any],
-        slippage_models: dict[str, Any],
-    ) -> PnLBacktester:
-        return PnLBacktester(
-            data_provider=data_provider,
-            fee_models=fee_models,
-            slippage_models=slippage_models,
-        )
-
-    # Run walk-forward optimization
-    click.echo()
-    click.echo(
-        f"Starting walk-forward optimization (~{estimated_windows} windows, {effective_n_trials} trials per window)..."
-    )
-    click.echo()
-
-    try:
-        result = asyncio.run(
-            run_walk_forward_optimization(
-                strategy_factory=create_strategy,
-                data_provider_factory=create_data_provider,
-                backtester_factory=create_backtester,
-                base_config=pnl_config,
-                param_ranges=param_ranges,
-                wf_config=wf_config,
-                objective_metric=effective_objective,
-                n_trials_per_window=effective_n_trials,
-                patience=effective_patience,
-                show_progress=verbose,
-                strategy_config=base_config,
-            )
-        )
-    except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
-    except Exception as e:
-        click.echo(f"Error during walk-forward optimization: {e}", err=True)
-        sys.exit(1)
-
-    # Display results
-    print_walk_forward_results(result, effective_objective)
-
-    # Write output if requested
-    if output:
-        output_path = Path(output)
-        try:
-            result_dict = result.to_dict()
-            with open(output_path, "w") as f:
-                json.dump(result_dict, f, indent=2, default=str)
-            click.echo(f"Walk-forward results written to: {output_path}")
-        except Exception as e:
-            click.echo(f"Warning: Could not save results: {e}", err=True)
+    print_walk_forward_results(result, ctx.settings.objective)
+    _write_walk_forward_output(ctx.output_path, result)
 
 
 # =============================================================================

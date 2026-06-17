@@ -500,12 +500,569 @@ def _amount_to_usd(amount_human: Decimal | None, price_oracle: dict | None, asse
         return None
 
 
-# crap-allowlist: VIB-4437 / VIB-4440 — replay-path counterpart of handle_lending
-# (also allowlisted at lending_handler.py:78 under VIB-4257). Dispatches over 5
-# lending intent types × 3 protocols (Aave, Morpho, Compound); CRAP=165 (cc=99,
-# cov=81%) reflects the integration matrix, not a tidiness gap. Refactor tracked
-# under VIB-4440 and must follow .claude/rules/crap-refactor.md.
-def build_lending_accounting_event(  # noqa: C901
+@dataclasses.dataclass(frozen=True)
+class _LendingEventContext:
+    intent_type_str: str
+    lending_event_type: Any
+    now: datetime
+    protocol: str
+    asset: str
+    market_id: str | None
+    position_key: str
+    extracted: dict[str, Any]
+    tx_hash: str
+    id_seed: str
+    is_morpho: bool
+    swap_wallet_key: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _LendingExecutionAmounts:
+    amount_human: Decimal | None
+    supply_apr_bps: int | None
+    borrow_apr_bps: int | None
+    gas_usd: Decimal | None
+
+
+@dataclasses.dataclass(frozen=True)
+class _LendingDeltas:
+    principal_delta_usd: Decimal | None = None
+    interest_delta_usd: Decimal | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class _PostStateRead:
+    state: LendingAccountState | None
+    unavailable_reason: str = ""
+
+
+@dataclasses.dataclass(frozen=True)
+class _LendingStateFields:
+    collateral_usd: Decimal | None = None
+    debt_usd: Decimal | None = None
+    health_factor: Decimal | None = None
+    net_equity_usd: Decimal | None = None
+    liquidation_threshold: Decimal | None = None
+    lltv: Decimal | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class _ConfidenceFields:
+    confidence: Any
+    unavailable_reason: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _DeleverageFields:
+    health_factor_before_override: Decimal | None
+    unavailable_reason: str
+
+
+def _resolve_lending_event_context(
+    *,
+    intent: Any,
+    result: Any,
+    chain: str,
+    wallet_address: str,
+    ledger_entry_id: str | None,
+) -> _LendingEventContext | None:
+    intent_type_str = _intent_type_value(intent)
+    if intent_type_str not in _LENDING_INTENT_TYPES:
+        return None
+
+    lending_event_type = _to_lending_event_type(intent_type_str)
+    if lending_event_type is None:
+        return None
+
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+
+    raw_protocol = getattr(intent, "protocol", "") or ""
+    protocol = LendingReadRegistry.normalize_protocol(raw_protocol) or str(raw_protocol)
+    asset = _intent_asset(intent)
+    market_id = _intent_market_id(intent)
+    position_key = _derive_position_key(protocol, chain, wallet_address, market_id, asset)
+    tx_hash = getattr(result, "tx_hash", None) or ""
+
+    chain_norm = chain.lower().strip() if chain else ""
+    wallet_norm = wallet_address.lower().strip() if wallet_address else ""
+    return _LendingEventContext(
+        intent_type_str=intent_type_str,
+        lending_event_type=lending_event_type,
+        now=datetime.now(UTC),
+        protocol=protocol,
+        asset=asset,
+        market_id=market_id,
+        position_key=position_key,
+        extracted=getattr(result, "extracted_data", None) or {},
+        tx_hash=tx_hash,
+        id_seed=tx_hash or ledger_entry_id or position_key,
+        is_morpho=protocol.lower() == "morpho_blue",
+        swap_wallet_key=f"swap:{chain_norm}:{wallet_norm}" if chain_norm and wallet_norm else "",
+    )
+
+
+def _resolve_lending_amount_human(
+    *,
+    extracted: dict[str, Any],
+    asset: str,
+    chain: str,
+) -> Decimal | None:
+    raw_amount = _select_lending_raw_amount(extracted)
+    if raw_amount is None:
+        return None
+    try:
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        resolver = get_token_resolver()
+        token_info = resolver.resolve(asset, chain=chain)
+        if token_info is None:
+            logger.debug("token resolution returned None for %s on %s, skipping amount", asset, chain)
+            return None
+        return Decimal(str(raw_amount)) / Decimal(10**token_info.decimals)
+    except Exception:
+        logger.debug("token decimal resolution failed for %s, skipping amount conversion", asset)
+        return None
+
+
+def _resolve_lending_gas_usd(result: Any, chain: str, price_oracle: dict | None) -> Decimal | None:
+    gas_cost_wei = getattr(result, "total_gas_cost_wei", None)
+    gas_cost_native: Decimal | None = None
+    if gas_cost_wei is not None and gas_cost_wei > 0:
+        try:
+            gas_cost_native = Decimal(str(gas_cost_wei)) / Decimal(10**18)
+        except Exception:
+            pass
+    native_token = native_token_for_chain(chain)
+    return _amount_to_usd(gas_cost_native, price_oracle, native_token)
+
+
+def _resolve_lending_execution_amounts(
+    *,
+    context: _LendingEventContext,
+    result: Any,
+    chain: str,
+    price_oracle: dict | None,
+) -> _LendingExecutionAmounts:
+    return _LendingExecutionAmounts(
+        amount_human=_resolve_lending_amount_human(
+            extracted=context.extracted,
+            asset=context.asset,
+            chain=chain,
+        ),
+        supply_apr_bps=_ray_to_bps(context.extracted.get("supply_rate")),
+        borrow_apr_bps=_ray_to_bps(context.extracted.get("borrow_rate")),
+        gas_usd=_resolve_lending_gas_usd(result, chain, price_oracle),
+    )
+
+
+def _apply_borrow_basis_effects(
+    *,
+    context: _LendingEventContext,
+    amount_human: Decimal,
+    deployment_id: str,
+    cycle_id: str,
+    ledger_entry_id: str | None,
+    basis_store: FIFOBasisStore,
+    price_oracle: dict | None,
+) -> _LendingDeltas:
+    principal_delta_usd = _amount_to_usd(amount_human, price_oracle, context.asset)
+    basis_store.record_borrow(
+        deployment_id=deployment_id,
+        position_key=context.position_key,
+        token=context.asset,
+        principal_amount=amount_human,
+        principal_usd=principal_delta_usd,
+        timestamp=context.now,
+        lot_id=make_accounting_event_id(deployment_id, cycle_id, "BORROW_LOT", context.id_seed, context.position_key),
+        source_ledger_entry_id=ledger_entry_id,
+    )
+    if context.swap_wallet_key:
+        basis_store.record_swap_acquisition(
+            deployment_id=deployment_id,
+            position_key=context.swap_wallet_key,
+            token=context.asset,
+            amount=amount_human,
+            cost_usd=principal_delta_usd,
+            timestamp=context.now,
+            lot_id=make_accounting_event_id(
+                deployment_id, cycle_id, "BORROW_WALLET_LOT", context.id_seed, context.asset
+            ),
+            source="BORROW",
+        )
+    return _LendingDeltas(principal_delta_usd=principal_delta_usd)
+
+
+def _apply_repay_like_basis_effects(
+    *,
+    context: _LendingEventContext,
+    amount_human: Decimal,
+    deployment_id: str,
+    basis_store: FIFOBasisStore,
+    price_oracle: dict | None,
+) -> _LendingDeltas:
+    match_result = basis_store.match_repay(
+        deployment_id=deployment_id,
+        position_key=context.position_key,
+        token=context.asset,
+        repay_amount=amount_human,
+    )
+    principal_delta_usd = _amount_to_usd(match_result.repaid_principal, price_oracle, context.asset)
+    if match_result.unmatched_amount > 0:
+        logger.debug(
+            "%s unmatched for %s: unmatched=%.6f (no BORROW lots recorded)",
+            context.intent_type_str,
+            context.position_key,
+            match_result.unmatched_amount,
+        )
+        interest_delta_usd = None
+    else:
+        interest_delta_usd = _amount_to_usd(match_result.interest_or_yield, price_oracle, context.asset)
+
+    if context.swap_wallet_key:
+        basis_store.match_swap_disposal(
+            deployment_id=deployment_id,
+            position_key=context.swap_wallet_key,
+            token=context.asset,
+            amount=amount_human,
+        )
+    return _LendingDeltas(principal_delta_usd=principal_delta_usd, interest_delta_usd=interest_delta_usd)
+
+
+def _apply_supply_basis_effects(
+    *,
+    context: _LendingEventContext,
+    amount_human: Decimal,
+    deployment_id: str,
+    cycle_id: str,
+    ledger_entry_id: str | None,
+    basis_store: FIFOBasisStore,
+    price_oracle: dict | None,
+) -> _LendingDeltas:
+    principal_delta_usd = _amount_to_usd(amount_human, price_oracle, context.asset)
+    if context.swap_wallet_key:
+        basis_store.match_swap_disposal(
+            deployment_id=deployment_id,
+            position_key=context.swap_wallet_key,
+            token=context.asset,
+            amount=amount_human,
+        )
+
+    supply_position_key = f"supply:{context.position_key}"
+    basis_store.record_borrow(
+        deployment_id=deployment_id,
+        position_key=supply_position_key,
+        token=context.asset,
+        principal_amount=amount_human,
+        principal_usd=principal_delta_usd,
+        timestamp=context.now,
+        lot_id=make_accounting_event_id(deployment_id, cycle_id, "SUPPLY_LOT", context.id_seed, supply_position_key),
+        source_ledger_entry_id=ledger_entry_id,
+    )
+    return _LendingDeltas(principal_delta_usd=principal_delta_usd)
+
+
+def _is_trustworthy_withdraw_supply_match(match_result: Any, amount_human: Decimal) -> bool:
+    return match_result.unmatched_amount <= 0 and (
+        match_result.repaid_principal >= amount_human or match_result.interest_or_yield <= match_result.repaid_principal
+    )
+
+
+def _apply_withdraw_basis_effects(
+    *,
+    context: _LendingEventContext,
+    amount_human: Decimal,
+    deployment_id: str,
+    cycle_id: str,
+    basis_store: FIFOBasisStore,
+    price_oracle: dict | None,
+) -> _LendingDeltas:
+    withdraw_total_usd = _amount_to_usd(amount_human, price_oracle, context.asset)
+    if context.swap_wallet_key:
+        basis_store.record_swap_acquisition(
+            deployment_id=deployment_id,
+            position_key=context.swap_wallet_key,
+            token=context.asset,
+            amount=amount_human,
+            cost_usd=withdraw_total_usd,
+            timestamp=context.now,
+            lot_id=make_accounting_event_id(
+                deployment_id, cycle_id, "WITHDRAW_WALLET_LOT", context.id_seed, context.asset
+            ),
+            source="WITHDRAW",
+        )
+
+    supply_position_key = f"supply:{context.position_key}"
+    supply_match = basis_store.match_repay(
+        deployment_id=deployment_id,
+        position_key=supply_position_key,
+        token=context.asset,
+        repay_amount=amount_human,
+    )
+    if _is_trustworthy_withdraw_supply_match(supply_match, amount_human):
+        return _LendingDeltas(
+            principal_delta_usd=_amount_to_usd(supply_match.repaid_principal, price_oracle, context.asset),
+            interest_delta_usd=_amount_to_usd(supply_match.interest_or_yield, price_oracle, context.asset),
+        )
+    return _LendingDeltas(principal_delta_usd=withdraw_total_usd)
+
+
+def _apply_lending_basis_effects(
+    *,
+    context: _LendingEventContext,
+    amounts: _LendingExecutionAmounts,
+    deployment_id: str,
+    cycle_id: str,
+    ledger_entry_id: str | None,
+    basis_store: FIFOBasisStore,
+    price_oracle: dict | None,
+) -> _LendingDeltas:
+    amount_human = amounts.amount_human
+    if amount_human is None:
+        return _LendingDeltas()
+
+    if context.intent_type_str == "BORROW":
+        return _apply_borrow_basis_effects(
+            context=context,
+            amount_human=amount_human,
+            deployment_id=deployment_id,
+            cycle_id=cycle_id,
+            ledger_entry_id=ledger_entry_id,
+            basis_store=basis_store,
+            price_oracle=price_oracle,
+        )
+    if context.intent_type_str in ("REPAY", "DELEVERAGE"):
+        return _apply_repay_like_basis_effects(
+            context=context,
+            amount_human=amount_human,
+            deployment_id=deployment_id,
+            basis_store=basis_store,
+            price_oracle=price_oracle,
+        )
+    if context.intent_type_str == "SUPPLY":
+        return _apply_supply_basis_effects(
+            context=context,
+            amount_human=amount_human,
+            deployment_id=deployment_id,
+            cycle_id=cycle_id,
+            ledger_entry_id=ledger_entry_id,
+            basis_store=basis_store,
+            price_oracle=price_oracle,
+        )
+    if context.intent_type_str == "WITHDRAW":
+        return _apply_withdraw_basis_effects(
+            context=context,
+            amount_human=amount_human,
+            deployment_id=deployment_id,
+            cycle_id=cycle_id,
+            basis_store=basis_store,
+            price_oracle=price_oracle,
+        )
+    return _LendingDeltas()
+
+
+def _read_lending_post_state_for_event(
+    *,
+    context: _LendingEventContext,
+    intent: Any,
+    result: Any,
+    chain: str,
+    wallet_address: str,
+    gateway_client: Any | None,
+    price_oracle: dict | None,
+) -> _PostStateRead:
+    if gateway_client is None or context.protocol.lower() not in _GENERIC_PRE_STATE_PROTOCOLS:
+        return _PostStateRead(state=None)
+
+    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
+    from almanak.framework.runner.strategy_runner import _last_receipt_block
+
+    query_inputs = LendingReadRegistry.query_inputs(context.protocol, intent)
+    if query_inputs is None:
+        return _PostStateRead(state=None)
+    if context.is_morpho and not context.market_id:
+        reason = "market_id missing from intent — cannot read Morpho Blue position"
+        logger.debug("read_lending_account_state skipped: %s", reason)
+        return _PostStateRead(state=None, unavailable_reason=reason)
+
+    state = read_lending_account_state(
+        protocol=context.protocol,
+        chain=chain,
+        wallet_address=wallet_address,
+        gateway_client=gateway_client,
+        price_oracle=price_oracle,
+        block=_last_receipt_block(result),
+        **query_inputs,
+    )
+    if state is not None and state.family == "aave":
+        state = _overlay_aave_interest_rate_mode(state, intent)
+    if state is None and context.is_morpho:
+        return _PostStateRead(state=None, unavailable_reason="Morpho Blue position/market gateway read failed")
+    return _PostStateRead(state=state)
+
+
+def _state_fields_from_lending_state(
+    state: LendingAccountState | None,
+    *,
+    include_threshold: bool,
+) -> _LendingStateFields:
+    if state is None:
+        return _LendingStateFields()
+
+    collateral_usd = state.collateral_usd
+    debt_usd = state.debt_usd
+    net_equity_usd = (collateral_usd - debt_usd) if (collateral_usd is not None and debt_usd is not None) else None
+    liquidation_threshold: Decimal | None = None
+    if include_threshold:
+        if state.liquidation_threshold_bps is not None:
+            liquidation_threshold = Decimal(state.liquidation_threshold_bps) / Decimal("10000")
+        elif state.lltv is not None:
+            liquidation_threshold = state.lltv
+
+    return _LendingStateFields(
+        collateral_usd=collateral_usd,
+        debt_usd=debt_usd,
+        health_factor=state.health_factor,
+        net_equity_usd=net_equity_usd,
+        liquidation_threshold=liquidation_threshold,
+        lltv=state.lltv if include_threshold else None,
+    )
+
+
+def _confidence_from_post_state(context: _LendingEventContext, post_state: _PostStateRead) -> _ConfidenceFields:
+    from almanak.framework.accounting.models import AccountingConfidence
+
+    if post_state.state is not None:
+        return _ConfidenceFields(confidence=AccountingConfidence.HIGH, unavailable_reason="")
+    if context.is_morpho and post_state.unavailable_reason:
+        return _ConfidenceFields(
+            confidence=AccountingConfidence.ESTIMATED, unavailable_reason=post_state.unavailable_reason
+        )
+    return _ConfidenceFields(
+        confidence=AccountingConfidence.ESTIMATED,
+        unavailable_reason="post-execution on-chain read unavailable",
+    )
+
+
+def _apply_deleverage_enrichment(
+    *,
+    context: _LendingEventContext,
+    intent: Any,
+    confidence: Any,
+    unavailable_reason: str,
+) -> _DeleverageFields:
+    if context.intent_type_str != "DELEVERAGE":
+        return _DeleverageFields(health_factor_before_override=None, unavailable_reason=unavailable_reason)
+
+    observed_hf_intent = getattr(intent, "observed_hf", None)
+    hf_before_from_intent: Decimal | None = None
+    if observed_hf_intent is not None:
+        try:
+            hf_before_from_intent = Decimal(str(observed_hf_intent))
+        except (ValueError, TypeError, InvalidOperation):
+            pass
+
+    trigger_reason = getattr(intent, "trigger_reason", "") or ""
+    target_hf_intent = getattr(intent, "target_hf", None)
+    parts = [f"DELEVERAGE: {trigger_reason}" if trigger_reason else "DELEVERAGE: emergency-triggered"]
+    if observed_hf_intent is not None:
+        parts.append(f"observed_hf={observed_hf_intent}")
+    if target_hf_intent is not None:
+        parts.append(f"target_hf={target_hf_intent}")
+    deleverage_context = "; ".join(parts)
+
+    if unavailable_reason:
+        unavailable_reason = f"{deleverage_context} | {unavailable_reason}"
+
+    logger.debug(
+        "DELEVERAGE accounting event enriched: %s (position=%s, confidence=%s)",
+        deleverage_context,
+        context.position_key,
+        confidence.value,
+    )
+    return _DeleverageFields(
+        health_factor_before_override=hf_before_from_intent,
+        unavailable_reason=unavailable_reason,
+    )
+
+
+def _build_lending_identity(
+    *,
+    context: _LendingEventContext,
+    deployment_id: str,
+    cycle_id: str,
+    execution_mode: str,
+    chain: str,
+    wallet_address: str,
+    ledger_entry_id: str | None,
+) -> Any:
+    from almanak.framework.accounting.models import AccountingIdentity
+
+    return AccountingIdentity(
+        id=make_accounting_event_id(
+            deployment_id,
+            cycle_id,
+            context.intent_type_str,
+            context.id_seed,
+            context.position_key,
+        ),
+        deployment_id=deployment_id,
+        cycle_id=cycle_id,
+        execution_mode=execution_mode,
+        timestamp=context.now,
+        chain=chain,
+        protocol=context.protocol,
+        wallet_address=wallet_address,
+        tx_hash=context.tx_hash,
+        ledger_entry_id=ledger_entry_id or "",
+    )
+
+
+def _build_lending_event(
+    *,
+    context: _LendingEventContext,
+    identity: Any,
+    amounts: _LendingExecutionAmounts,
+    deltas: _LendingDeltas,
+    before: _LendingStateFields,
+    after: _LendingStateFields,
+    confidence: _ConfidenceFields,
+    deleverage: _DeleverageFields,
+) -> Any:
+    from almanak.framework.accounting.models import LendingAccountingEvent
+
+    health_factor_before = (
+        deleverage.health_factor_before_override
+        if deleverage.health_factor_before_override is not None
+        else before.health_factor
+    )
+    return LendingAccountingEvent(
+        identity=identity,
+        event_type=context.lending_event_type,
+        position_key=context.position_key,
+        market_id=context.market_id or "",
+        asset=context.asset,
+        collateral_value_before_usd=before.collateral_usd,
+        collateral_value_after_usd=after.collateral_usd,
+        debt_value_before_usd=before.debt_usd,
+        debt_value_after_usd=after.debt_usd,
+        net_equity_before_usd=before.net_equity_usd,
+        net_equity_after_usd=after.net_equity_usd,
+        health_factor_before=health_factor_before,
+        health_factor_after=after.health_factor,
+        liquidation_threshold=after.liquidation_threshold,
+        lltv=after.lltv,
+        supply_apr_bps=amounts.supply_apr_bps,
+        borrow_apr_bps=amounts.borrow_apr_bps,
+        principal_delta_usd=deltas.principal_delta_usd,
+        interest_delta_usd=deltas.interest_delta_usd,
+        gas_usd=amounts.gas_usd,
+        amount_token=amounts.amount_human,
+        confidence=confidence.confidence,
+        unavailable_reason=deleverage.unavailable_reason,
+    )
+
+
+def build_lending_accounting_event(
     *,
     intent: Any,
     result: Any,
@@ -534,451 +1091,67 @@ def build_lending_accounting_event(  # noqa: C901
       - REPAY   → matches lots; interest_delta_usd = excess over principal.
       - SUPPLY / WITHDRAW → principal_delta_usd only.
     """
-    from almanak.framework.accounting.models import (
-        AccountingConfidence,
-        AccountingIdentity,
-        LendingAccountingEvent,
+    context = _resolve_lending_event_context(
+        intent=intent,
+        result=result,
+        chain=chain,
+        wallet_address=wallet_address,
+        ledger_entry_id=ledger_entry_id,
     )
-
-    intent_type_str = _intent_type_value(intent)
-    if intent_type_str not in _LENDING_INTENT_TYPES:
+    if context is None:
         return None
 
-    lending_event_type = _to_lending_event_type(intent_type_str)
-    if lending_event_type is None:
-        return None
-
-    now = datetime.now(UTC)
-    # Canonicalize lending-scoped protocol aliases once, at the boundary
-    # (mirrors ``capture_lending_pre_state``): the platform spec's
-    # ``"fluid_lending"`` must resolve to ``fluid`` BEFORE the
-    # ``_GENERIC_PRE_STATE_PROTOCOLS`` gate (else the after-state read is
-    # skipped → ESTIMATED) and before position-key derivation / the
-    # persisted ``AccountingIdentity.protocol``. Unknown spellings pass
-    # through folded; the empty-string fallback preserves the legacy raw
-    # value for non-str protocols (never observed on real intents).
-    from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
-
-    raw_protocol = getattr(intent, "protocol", "") or ""
-    protocol = LendingReadRegistry.normalize_protocol(raw_protocol) or str(raw_protocol)
-    asset = _intent_asset(intent)
-    market_id = _intent_market_id(intent)
-    position_key = _derive_position_key(protocol, chain, wallet_address, market_id, asset)
-
-    extracted = getattr(result, "extracted_data", None) or {}
-    tx_hash = getattr(result, "tx_hash", None) or ""
-
-    # ── Amounts & APRs from extracted_data ────────────────────────────────────
-    raw_amount: int | None = _select_lending_raw_amount(extracted)
-    amount_human: Decimal | None = None
-    if raw_amount is not None:
-        try:
-            from almanak.framework.data.tokens.resolver import get_token_resolver
-
-            resolver = get_token_resolver()
-            token_info = resolver.resolve(asset, chain=chain)
-            if token_info is None:
-                logger.debug("token resolution returned None for %s on %s, skipping amount", asset, chain)
-            else:
-                amount_human = Decimal(str(raw_amount)) / Decimal(10**token_info.decimals)
-        except Exception:
-            logger.debug("token decimal resolution failed for %s, skipping amount conversion", asset)
-
-    supply_apr_bps = _ray_to_bps(extracted.get("supply_rate"))
-    borrow_apr_bps = _ray_to_bps(extracted.get("borrow_rate"))
-
-    # ── Gas ───────────────────────────────────────────────────────────────────
-    # ExecutionResult exposes total_gas_cost_wei (sum of all tx costs in the bundle).
-    # Convert to native-token units (wei → 1e18), then look up the chain-specific
-    # gas token (ETH on EVM L1/L2, AVAX on Avalanche, etc.).
-    gas_cost_wei = getattr(result, "total_gas_cost_wei", None)
-    gas_cost_native: Decimal | None = None
-    if gas_cost_wei is not None and gas_cost_wei > 0:
-        try:
-            gas_cost_native = Decimal(str(gas_cost_wei)) / Decimal(10**18)
-        except Exception:
-            pass
-    native_token = native_token_for_chain(chain)
-    gas_usd = _amount_to_usd(gas_cost_native, price_oracle, native_token)
-
-    # ── FIFO lot matching ─────────────────────────────────────────────────────
-    principal_delta_usd: Decimal | None = None
-    interest_delta_usd: Decimal | None = None
-
-    # VIB-3964: a single chain+wallet wallet-basis pool is shared across the SWAP
-    # handler and the lending writers — BORROW / WITHDRAW credit it, SUPPLY /
-    # REPAY drain it. Mirroring on-chain wallet flow into the FIFO store is what
-    # lets a SWAP that disposes a borrowed (or withdrawn) token report a non-null
-    # ``realized_pnl_usd`` and unblocks the looping G6 reconciliation cell.
-    _chain_norm = chain.lower().strip() if chain else ""
-    _wallet_norm = wallet_address.lower().strip() if wallet_address else ""
-    swap_wallet_key = f"swap:{_chain_norm}:{_wallet_norm}" if _chain_norm and _wallet_norm else ""
-
-    if amount_human is not None:
-        if intent_type_str == "BORROW":
-            principal_delta_usd = _amount_to_usd(amount_human, price_oracle, asset)
-            _borrow_id_seed = tx_hash or ledger_entry_id or position_key
-            basis_store.record_borrow(
-                deployment_id=deployment_id,
-                position_key=position_key,
-                token=asset,
-                principal_amount=amount_human,
-                principal_usd=principal_delta_usd,
-                timestamp=now,
-                lot_id=make_accounting_event_id(deployment_id, cycle_id, "BORROW_LOT", _borrow_id_seed, position_key),
-                source_ledger_entry_id=ledger_entry_id,
-            )
-            # VIB-3964: borrowed tokens land in the wallet — credit the wallet
-            # basis pool so a follow-up SWAP that disposes them gets a basis.
-            if swap_wallet_key:
-                basis_store.record_swap_acquisition(
-                    deployment_id=deployment_id,
-                    position_key=swap_wallet_key,
-                    token=asset,
-                    amount=amount_human,
-                    cost_usd=principal_delta_usd,
-                    timestamp=now,
-                    lot_id=make_accounting_event_id(
-                        deployment_id, cycle_id, "BORROW_WALLET_LOT", _borrow_id_seed, asset
-                    ),
-                    source="BORROW",
-                )
-            interest_delta_usd = None  # interest accrues, not known at borrow time
-
-        elif intent_type_str in ("REPAY", "DELEVERAGE"):
-            # DELEVERAGE is structurally a repay: it reduces an open borrow lot.
-            match_result = basis_store.match_repay(
-                deployment_id=deployment_id,
-                position_key=position_key,
-                token=asset,
-                repay_amount=amount_human,
-            )
-            if match_result.unmatched_amount > 0:
-                # No basis lots → interest is UNAVAILABLE, not zero
-                logger.debug(
-                    "%s unmatched for %s: unmatched=%.6f (no BORROW lots recorded)",
-                    intent_type_str,
-                    position_key,
-                    match_result.unmatched_amount,
-                )
-                principal_delta_usd = _amount_to_usd(match_result.repaid_principal, price_oracle, asset)
-                interest_delta_usd = None  # UNAVAILABLE — cannot fabricate
-            else:
-                principal_delta_usd = _amount_to_usd(match_result.repaid_principal, price_oracle, asset)
-                interest_delta_usd = _amount_to_usd(match_result.interest_or_yield, price_oracle, asset)
-            # VIB-3964: REPAY drains wallet inventory — dispose the swap-key
-            # lots so the wallet pool stays consistent with on-chain balance.
-            # Returned (cost_consumed, unmatched) is intentionally discarded
-            # here; lending realized-PnL still routes through match_repay
-            # above. The disposal exists purely to mirror wallet flow.
-            if swap_wallet_key:
-                basis_store.match_swap_disposal(
-                    deployment_id=deployment_id,
-                    position_key=swap_wallet_key,
-                    token=asset,
-                    amount=amount_human,
-                )
-
-        elif intent_type_str == "SUPPLY":
-            principal_delta_usd = _amount_to_usd(amount_human, price_oracle, asset)
-            # VIB-3964: SUPPLY drains wallet inventory — dispose to keep the
-            # wallet basis pool truthful for a later WITHDRAW-then-SWAP.
-            if swap_wallet_key:
-                basis_store.match_swap_disposal(
-                    deployment_id=deployment_id,
-                    position_key=swap_wallet_key,
-                    token=asset,
-                    amount=amount_human,
-                )
-            # VIB-3964 (G6 closer): also record the supplied principal as a
-            # BORROW-style lot keyed under ``supply:<lending_pk>`` so a later
-            # WITHDRAW can FIFO-match and surface ``interest_accrued_usd``.
-            # Symmetric with the live writer path in
-            # ``category_handlers/lending_handler.py`` — keeping the two writers
-            # in lock-step is the contract that prevents drift between live
-            # and replay (CodeRabbit 2026-05-04).
-            _supply_id_seed = tx_hash or ledger_entry_id or position_key
-            basis_store.record_borrow(
-                deployment_id=deployment_id,
-                position_key=f"supply:{position_key}",
-                token=asset,
-                principal_amount=amount_human,
-                principal_usd=principal_delta_usd,
-                timestamp=now,
-                lot_id=make_accounting_event_id(
-                    deployment_id, cycle_id, "SUPPLY_LOT", _supply_id_seed, f"supply:{position_key}"
-                ),
-                source_ledger_entry_id=ledger_entry_id,
-            )
-
-        elif intent_type_str == "WITHDRAW":
-            # Total withdraw value in USD — used as wallet-basis lot cost
-            # but NOT as the event's ``principal_delta_usd``. The split
-            # mirrors REPAY (pr-auditor 2026-05-04 item 2): principal is
-            # the matched supply principal only; the residual is interest.
-            _withdraw_total_usd = _amount_to_usd(amount_human, price_oracle, asset)
-            # VIB-3964: WITHDRAW credits the wallet (principal + accrued
-            # supply interest). Mint a swap-key lot for the FULL withdraw
-            # amount so the next SWAP that disposes the withdrawn token
-            # can compute realized PnL.
-            if swap_wallet_key:
-                _withdraw_id_seed = tx_hash or ledger_entry_id or position_key
-                basis_store.record_swap_acquisition(
-                    deployment_id=deployment_id,
-                    position_key=swap_wallet_key,
-                    token=asset,
-                    amount=amount_human,
-                    cost_usd=_withdraw_total_usd,
-                    timestamp=now,
-                    lot_id=make_accounting_event_id(
-                        deployment_id, cycle_id, "WITHDRAW_WALLET_LOT", _withdraw_id_seed, asset
-                    ),
-                    source="WITHDRAW",
-                )
-            # VIB-3964 (G6 closer): FIFO-match the SUPPLY lots and split
-            # principal vs interest the same way REPAY does. Trust the
-            # matched ``interest_or_yield`` only when the FIFO match was
-            # either fully principal-covered OR the implied interest is
-            # bounded by consumed principal — see the lending_handler
-            # counterpart for the full reasoning (Codex 2026-05-04 P2).
-            _supply_match = basis_store.match_repay(
-                deployment_id=deployment_id,
-                position_key=f"supply:{position_key}",
-                token=asset,
-                repay_amount=amount_human,
-            )
-            if _supply_match.unmatched_amount > 0:
-                principal_delta_usd = _withdraw_total_usd
-                interest_delta_usd = None
-            elif (
-                _supply_match.repaid_principal >= amount_human
-                or _supply_match.interest_or_yield <= _supply_match.repaid_principal
-            ):
-                principal_delta_usd = _amount_to_usd(_supply_match.repaid_principal, price_oracle, asset)
-                interest_delta_usd = _amount_to_usd(_supply_match.interest_or_yield, price_oracle, asset)
-            else:
-                principal_delta_usd = _withdraw_total_usd
-                interest_delta_usd = None
-
-    # ── After-state: on-chain read ───────────────────────────────────────────
-    # VIB-4929 PR-3a/3b: Aave V3 + Morpho Blue + Compound V3 share the unified
-    # ``LendingAccountState``, read through the single generic
-    # ``read_lending_account_state`` — but only for protocols explicitly enabled +
-    # fork/byte-equivalence-verified in ``_GENERIC_PRE_STATE_PROTOCOLS``. A
-    # spec-capable-but-unverified connector (e.g. Spark, which opted into
-    # ``_ACCOUNT_STATE_LOADERS``) is NOT auto-read here (→ ESTIMATED; VIB-4963).
-    # (``LendingReadRegistry`` was imported above where ``protocol`` is
-    # canonicalized.)
-    generic_state: LendingAccountState | None = None
-    morpho_unavailable_reason: str = ""
-
-    is_morpho = protocol.lower() == "morpho_blue"
-
-    # VIB-4964: pin the after-state read to the confirmed receipt's block,
-    # mirroring the runner's ``capture_lending_post_state`` path (VIB-4589/F7).
-    # The legacy ``block=None`` → ``"latest"`` read is wrong in two ways: in a
-    # replay reprocessing it reads *present-day* state for a *historical* event,
-    # and live it races the upstream RPC's receipt indexer. Reuses the canonical
-    # receipt-block extractor (single source of truth; same lazy cross-module
-    # reuse the runner's ``teardown_commit`` already relies on — VIB-4987 tracks
-    # relocating both helpers to a shared module to retire the accounting→runner
-    # edge). ``None`` (no receipt available) falls back to ``"latest"``,
-    # preserving prior behaviour.
-    # Indexer lag at the pinned block is absorbed by the gateway RPC retry
-    # (VIB-4985 / ALM-2777), so the pin no longer trades stale-data for a
-    # missing read.
-    from almanak.framework.runner.strategy_runner import _last_receipt_block
-
-    post_block = _last_receipt_block(result)
-    if gateway_client is not None and protocol.lower() in _GENERIC_PRE_STATE_PROTOCOLS:
-        query_inputs = LendingReadRegistry.query_inputs(protocol, intent)
-        if query_inputs is not None and (
-            not is_morpho or intent_type_str in ("BORROW", "REPAY", "DELEVERAGE", "SUPPLY", "WITHDRAW")
-        ):
-            # Morpho post-state HF persistence covers all lending intent types so
-            # post-state is in parity with pre-state (VIB-4432). market_id is
-            # required for Morpho — surface the same diagnostic as the pre-PR path.
-            if is_morpho and not market_id:
-                morpho_unavailable_reason = "market_id missing from intent — cannot read Morpho Blue position"
-                logger.debug("read_lending_account_state skipped: %s", morpho_unavailable_reason)
-            else:
-                generic_state = read_lending_account_state(
-                    protocol=protocol,
-                    chain=chain,
-                    wallet_address=wallet_address,
-                    gateway_client=gateway_client,
-                    price_oracle=price_oracle,
-                    block=post_block,
-                    **query_inputs,
-                )
-                # Aave-family intent-metadata overlay (interest_rate_mode), gated on
-                # the structural family discriminator — parity with the pre-state arm.
-                if generic_state is not None and generic_state.family == "aave":
-                    generic_state = _overlay_aave_interest_rate_mode(generic_state, intent)
-                if generic_state is None and is_morpho:
-                    morpho_unavailable_reason = "Morpho Blue position/market gateway read failed"
-
-    # ── Unify after-state fields from whichever protocol provided data ────────
-    # Single generic arm now (VIB-4929 PR-3b retired the per-protocol Compound V3
-    # branch): Aave / Morpho / Compound V3 all surface as ``LendingAccountState``.
-    got_after_state = generic_state is not None
-
-    if generic_state is not None:
-        # Single field extraction off the unified ``LendingAccountState`` — no
-        # per-protocol ``isinstance`` priority chain (VIB-4929 PR-3a/3b). The
-        # protocol-shape differences are carried structurally on the state:
-        #   * Aave family: ``liquidation_threshold_bps`` set, ``lltv`` None →
-        #     ``liquidation_threshold = bps / 10000``.
-        #   * Morpho: ``lltv`` set, ``liquidation_threshold_bps`` None → lltv IS
-        #     the liquidation threshold (no-debt HF stays the 999999 sentinel;
-        #     callers must not treat HF == 999999 as a trigger).
-        #   * Compound V3: ``family=None`` and ``lltv=None`` → no single threshold
-        #     (per-asset collateral factors folded into HF by the spec reducer).
-        collateral_after: Decimal | None = generic_state.collateral_usd
-        debt_after: Decimal | None = generic_state.debt_usd
-        hf_after: Decimal | None = generic_state.health_factor
-        lt_bps: int | None = generic_state.liquidation_threshold_bps
-        lltv_after: Decimal | None = generic_state.lltv
-        if lt_bps is not None:
-            liquidation_threshold: Decimal | None = Decimal(lt_bps) / Decimal("10000")
-        elif generic_state.lltv is not None:
-            liquidation_threshold = generic_state.lltv  # LLTV serves as liquidation_threshold
-        else:
-            liquidation_threshold = None
-    else:
-        collateral_after = None
-        debt_after = None
-        hf_after = None
-        lt_bps = None
-        liquidation_threshold = None
-        lltv_after = None
-
-    net_equity_after = (
-        (collateral_after - debt_after) if (collateral_after is not None and debt_after is not None) else None
+    amounts = _resolve_lending_execution_amounts(
+        context=context,
+        result=result,
+        chain=chain,
+        price_oracle=price_oracle,
+    )
+    deltas = _apply_lending_basis_effects(
+        context=context,
+        amounts=amounts,
+        deployment_id=deployment_id,
+        cycle_id=cycle_id,
+        ledger_entry_id=ledger_entry_id,
+        basis_store=basis_store,
+        price_oracle=price_oracle,
     )
 
-    # ── Before-state: from pre_execution_state (VIB-3489) ────────────────────
-    # pre_execution_state is captured by the runner BEFORE the tx is submitted.
-    # If None (read failed or not available), before fields stay None — honest
-    # absence is preferred over stale data. Absence is signaled by before fields
-    # being None; it does NOT affect unavailable_reason (which tracks after-state
-    # quality) or confidence.
-    collateral_before: Decimal | None = None
-    debt_before: Decimal | None = None
-    hf_before: Decimal | None = None
-    net_equity_before: Decimal | None = None
+    post_state = _read_lending_post_state_for_event(
+        context=context,
+        intent=intent,
+        result=result,
+        chain=chain,
+        wallet_address=wallet_address,
+        gateway_client=gateway_client,
+        price_oracle=price_oracle,
+    )
+    before = _state_fields_from_lending_state(pre_execution_state, include_threshold=False)
+    after = _state_fields_from_lending_state(post_state.state, include_threshold=True)
 
-    if pre_execution_state is not None:
-        # Every protocol surfaces as the unified ``LendingAccountState`` (VIB-4929
-        # PR-3a/3b), so the common fields read off directly — no protocol-specific
-        # branching needed.
-        collateral_before = pre_execution_state.collateral_usd
-        debt_before = pre_execution_state.debt_usd
-        hf_before = pre_execution_state.health_factor
-        if collateral_before is not None and debt_before is not None:
-            net_equity_before = collateral_before - debt_before
-
-    # Confidence: HIGH if we got a live after-state read, ESTIMATED otherwise.
-    # unavailable_reason tracks the primary (after-state) signal only — callers
-    # interpret confidence + unavailable_reason as a pair. Pre-state absence is
-    # already observable via the before fields being None; polluting
-    # unavailable_reason with it would degrade HIGH-confidence events when
-    # pre-state was simply not yet available on this cycle.
-    confidence = AccountingConfidence.HIGH if got_after_state else AccountingConfidence.ESTIMATED
-    if not got_after_state:
-        if is_morpho and morpho_unavailable_reason:
-            unavailable_reason = morpho_unavailable_reason
-        else:
-            unavailable_reason = "post-execution on-chain read unavailable"
-    else:
-        unavailable_reason = ""
-
-    # ── DELEVERAGE enrichment (VIB-3490) ─────────────────────────────────────
-    # For DELEVERAGE events, persist the observed HF as health_factor_before
-    # (pre-trigger snapshot) so analytics can reconstruct the risk state at the
-    # moment the deleverage was triggered without needing a separate pre-read.
-    #
-    # Trigger metadata (trigger_reason, observed_hf, target_hf) is appended to
-    # unavailable_reason ONLY when the event is already estimated/degraded (i.e.
-    # got_after_state is False). When confidence is HIGH the deleverage context
-    # is emitted as a debug log only — it must not overwrite an empty
-    # unavailable_reason, as that would incorrectly signal data degradation to
-    # downstream consumers.
-    hf_before_from_intent: Decimal | None = None  # populated below for DELEVERAGE only
-    if intent_type_str == "DELEVERAGE":
-        trigger_reason = getattr(intent, "trigger_reason", "") or ""
-        observed_hf_intent = getattr(intent, "observed_hf", None)
-        target_hf_intent = getattr(intent, "target_hf", None)
-
-        # Persist the observed HF as health_factor_before (pre-trigger snapshot).
-        if observed_hf_intent is not None:
-            try:
-                hf_before_from_intent = Decimal(str(observed_hf_intent))
-            except (ValueError, TypeError, InvalidOperation):
-                pass
-
-        # Build trigger context string for logging / degraded-event annotation.
-        parts: list[str] = []
-        if trigger_reason:
-            parts.append(f"DELEVERAGE: {trigger_reason}")
-        else:
-            parts.append("DELEVERAGE: emergency-triggered")
-        if observed_hf_intent is not None:
-            parts.append(f"observed_hf={observed_hf_intent}")
-        if target_hf_intent is not None:
-            parts.append(f"target_hf={target_hf_intent}")
-        deleverage_context = "; ".join(parts)
-
-        if unavailable_reason:
-            # Event is already degraded/estimated — safe to append trigger context.
-            unavailable_reason = f"{deleverage_context} | {unavailable_reason}"
-
-        logger.debug(
-            "DELEVERAGE accounting event enriched: %s (position=%s, confidence=%s)",
-            deleverage_context,
-            position_key,
-            confidence.value,
-        )
-
-    _id_seed = tx_hash or ledger_entry_id or position_key
-    identity = AccountingIdentity(
-        id=make_accounting_event_id(deployment_id, cycle_id, intent_type_str, _id_seed, position_key),
+    confidence = _confidence_from_post_state(context, post_state)
+    deleverage = _apply_deleverage_enrichment(
+        context=context,
+        intent=intent,
+        confidence=confidence.confidence,
+        unavailable_reason=confidence.unavailable_reason,
+    )
+    identity = _build_lending_identity(
+        context=context,
         deployment_id=deployment_id,
         cycle_id=cycle_id,
         execution_mode=execution_mode,
-        timestamp=now,
         chain=chain,
-        protocol=protocol,
         wallet_address=wallet_address,
-        tx_hash=tx_hash,
-        ledger_entry_id=ledger_entry_id or "",
+        ledger_entry_id=ledger_entry_id,
     )
-
-    return LendingAccountingEvent(
+    return _build_lending_event(
+        context=context,
         identity=identity,
-        event_type=lending_event_type,
-        position_key=position_key,
-        market_id=market_id or "",
-        asset=asset,
-        collateral_value_before_usd=collateral_before,
-        collateral_value_after_usd=collateral_after,
-        debt_value_before_usd=debt_before,
-        debt_value_after_usd=debt_after,
-        net_equity_before_usd=net_equity_before,
-        net_equity_after_usd=net_equity_after,
-        # For DELEVERAGE intents: prefer the observed_hf from the intent (the exact HF
-        # at the moment the strategy triggered the deleverage) over the pre-execution
-        # gateway read. For all other intent types use the pre-execution state read.
-        health_factor_before=hf_before_from_intent if hf_before_from_intent is not None else hf_before,
-        health_factor_after=hf_after,
-        liquidation_threshold=liquidation_threshold,
-        lltv=lltv_after,
-        supply_apr_bps=supply_apr_bps,
-        borrow_apr_bps=borrow_apr_bps,
-        principal_delta_usd=principal_delta_usd,
-        interest_delta_usd=interest_delta_usd,
-        gas_usd=gas_usd,
-        amount_token=amount_human,
+        amounts=amounts,
+        deltas=deltas,
+        before=before,
+        after=after,
         confidence=confidence,
-        unavailable_reason=unavailable_reason,
+        deleverage=deleverage,
     )

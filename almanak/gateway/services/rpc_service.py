@@ -281,6 +281,21 @@ class RpcMetrics:
     indexer_lag_retries: int = 0
 
 
+@dataclass(frozen=True)
+class _RpcBatchPlan:
+    chain: str
+    requests: list[gateway_pb2.RpcRequest]
+    num_requests: int
+    network_override: str | None
+    effective_network: str
+
+
+@dataclass(frozen=True)
+class _RpcBatchTransport:
+    limiter: ChainRateLimiter
+    rpc_url: str
+
+
 def _block_param(block: str) -> str:
     """Map a typed-query proto ``block`` field to an ``eth_call`` block tag.
 
@@ -788,7 +803,208 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
             id=request.id,
         )
 
-    async def BatchCall(  # noqa: C901
+    def _failed_batch_response(
+        self,
+        context: grpc.aio.ServicerContext,
+        num_requests: int,
+        status_code: grpc.StatusCode,
+        details: str,
+    ) -> gateway_pb2.RpcBatchResponse:
+        self._metrics.failed_requests += num_requests
+        context.set_code(status_code)
+        context.set_details(details)
+        return gateway_pb2.RpcBatchResponse(responses=[])
+
+    def _validate_batch_chain_or_response(
+        self,
+        request: gateway_pb2.RpcBatchRequest,
+        context: grpc.aio.ServicerContext,
+        num_requests: int,
+    ) -> tuple[str | None, gateway_pb2.RpcBatchResponse | None]:
+        try:
+            chain = validate_chain(request.chain)
+        except ValidationError as e:
+            return None, self._failed_batch_response(context, num_requests, grpc.StatusCode.INVALID_ARGUMENT, str(e))
+
+        msg = self._chain_not_configured_error(chain)
+        if msg is not None:
+            return None, self._failed_batch_response(context, num_requests, grpc.StatusCode.FAILED_PRECONDITION, msg)
+
+        return chain, None
+
+    def _validate_batch_size_or_response(
+        self,
+        requests: list[gateway_pb2.RpcRequest],
+        context: grpc.aio.ServicerContext,
+        num_requests: int,
+    ) -> gateway_pb2.RpcBatchResponse | None:
+        try:
+            validate_batch_size(requests)
+        except ValidationError as e:
+            return self._failed_batch_response(context, num_requests, grpc.StatusCode.INVALID_ARGUMENT, str(e))
+        return None
+
+    def _resolve_batch_network_or_response(
+        self,
+        requests: list[gateway_pb2.RpcRequest],
+        context: grpc.aio.ServicerContext,
+        num_requests: int,
+    ) -> tuple[str | None, gateway_pb2.RpcBatchResponse | None]:
+        batch_networks = {rpc_request.network.strip().lower() for rpc_request in requests if rpc_request.network}
+        if len(batch_networks) > 1:
+            response = self._failed_batch_response(
+                context,
+                num_requests,
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "All requests in a batch must use the same network override",
+            )
+            return None, response
+        return next(iter(batch_networks), None), None
+
+    def _validate_batch_methods_or_response(
+        self,
+        plan: _RpcBatchPlan,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.RpcBatchResponse | None:
+        for rpc_request in plan.requests:
+            try:
+                validate_rpc_method(rpc_request.method, chain=plan.chain, network=plan.effective_network)
+            except ValidationError as e:
+                details = f"Request {rpc_request.id}: {e}"
+                return self._failed_batch_response(
+                    context,
+                    plan.num_requests,
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    details,
+                )
+        return None
+
+    def _prepare_batch_plan_or_response(
+        self,
+        request: gateway_pb2.RpcBatchRequest,
+        context: grpc.aio.ServicerContext,
+        num_requests: int,
+    ) -> tuple[_RpcBatchPlan | None, gateway_pb2.RpcBatchResponse | None]:
+        chain, response = self._validate_batch_chain_or_response(request, context, num_requests)
+        if response is not None:
+            return None, response
+
+        requests = list(request.requests)
+        response = self._validate_batch_size_or_response(requests, context, num_requests)
+        if response is not None:
+            return None, response
+
+        network_override, response = self._resolve_batch_network_or_response(requests, context, num_requests)
+        if response is not None:
+            return None, response
+
+        plan = _RpcBatchPlan(
+            chain=chain or "",
+            requests=requests,
+            num_requests=num_requests,
+            network_override=network_override,
+            effective_network=network_override or self.settings.network,
+        )
+        response = self._validate_batch_methods_or_response(plan, context)
+        if response is not None:
+            return None, response
+
+        return plan, None
+
+    async def _prepare_batch_transport_or_response(
+        self,
+        plan: _RpcBatchPlan,
+        context: grpc.aio.ServicerContext,
+    ) -> tuple[_RpcBatchTransport | None, gateway_pb2.RpcBatchResponse | None]:
+        limiter = self._get_rate_limiter(plan.chain)
+        allowed, wait_time = await limiter.check_rate_limit(plan.num_requests)
+        if not allowed:
+            self._metrics.rate_limited_requests += plan.num_requests
+            context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
+            context.set_details(f"Rate limited, retry after {wait_time:.2f}s")
+            return None, gateway_pb2.RpcBatchResponse(responses=[])
+
+        rpc_url = self._get_rpc_url(plan.chain, network_override=plan.network_override)
+        if not rpc_url:
+            details = f"Chain '{plan.chain}' is not configured"
+            response = self._failed_batch_response(
+                context, plan.num_requests, grpc.StatusCode.FAILED_PRECONDITION, details
+            )
+            return None, response
+
+        return _RpcBatchTransport(limiter=limiter, rpc_url=rpc_url), None
+
+    async def _record_batch_rate_limit_slots(self, limiter: ChainRateLimiter, num_requests: int) -> None:
+        for _ in range(num_requests):
+            await limiter.record_request()
+
+    def _build_batch_call_items(
+        self,
+        rpc_url: str,
+        requests: list[gateway_pb2.RpcRequest],
+    ) -> tuple[list[str], list[Any]]:
+        request_ids: list[str] = []
+        call_items: list[Any] = []
+        for rpc_request in requests:
+            request_ids.append(rpc_request.id)
+            try:
+                params = json.loads(rpc_request.params) if rpc_request.params else []
+                call_items.append(self._make_rpc_call(rpc_url, rpc_request.method, params, rpc_request.id))
+            except json.JSONDecodeError as e:
+                call_items.append((None, {"code": -32700, "message": f"Invalid params JSON: {e!s}"}))
+        return request_ids, call_items
+
+    async def _gather_batch_call_results(self, call_items: list[Any]) -> list[Any]:
+        coro_indices: list[int] = []
+        coros: list[Any] = []
+        for index, item in enumerate(call_items):
+            if asyncio.iscoroutine(item):
+                coro_indices.append(index)
+                coros.append(item)
+
+        coro_results = await asyncio.gather(*coros, return_exceptions=True) if coros else []
+
+        results = list(call_items)
+        for index, coro_result in zip(coro_indices, coro_results, strict=False):
+            results[index] = coro_result
+        return results
+
+    def _batch_response_from_result(self, request_id: str, result_item: Any) -> gateway_pb2.RpcResponse:
+        if isinstance(result_item, Exception):
+            self._metrics.failed_requests += 1
+            return gateway_pb2.RpcResponse(
+                success=False,
+                error=json.dumps({"code": -32603, "message": f"Internal error: {result_item!s}"}),
+                id=request_id,
+            )
+
+        result, error = result_item
+        if error:
+            self._metrics.failed_requests += 1
+            return gateway_pb2.RpcResponse(
+                success=False,
+                error=json.dumps(error),
+                id=request_id,
+            )
+
+        self._metrics.successful_requests += 1
+        return gateway_pb2.RpcResponse(
+            success=True,
+            result=json.dumps(result) if result is not None else "",
+            id=request_id,
+        )
+
+    def _batch_responses_from_results(
+        self,
+        request_ids: list[str],
+        results: list[Any],
+    ) -> list[gateway_pb2.RpcResponse]:
+        return [
+            self._batch_response_from_result(request_id, result_item)
+            for request_id, result_item in zip(request_ids, results, strict=False)
+        ]
+
+    async def BatchCall(
         self,
         request: gateway_pb2.RpcBatchRequest,
         context: grpc.aio.ServicerContext,
@@ -802,140 +1018,23 @@ class RpcServiceServicer(gateway_pb2_grpc.RpcServiceServicer):
         Returns:
             RpcBatchResponse with list of responses
         """
-        # Count requests early for metrics accounting on early exits
         num_requests = len(request.requests)
         self._metrics.total_requests += num_requests
 
-        # Validate chain
-        try:
-            chain = validate_chain(request.chain)
-        except ValidationError as e:
-            self._metrics.failed_requests += num_requests
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(e))
-            return gateway_pb2.RpcBatchResponse(responses=[])
+        plan, response = self._prepare_batch_plan_or_response(request, context, num_requests)
+        if response is not None:
+            return response
+        assert plan is not None
 
-        msg = self._chain_not_configured_error(chain)
-        if msg is not None:
-            self._metrics.failed_requests += num_requests
-            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-            context.set_details(msg)
-            return gateway_pb2.RpcBatchResponse(responses=[])
+        transport, response = await self._prepare_batch_transport_or_response(plan, context)
+        if response is not None:
+            return response
+        assert transport is not None
 
-        # Validate batch size
-        try:
-            validate_batch_size(list(request.requests))
-        except ValidationError as e:
-            self._metrics.failed_requests += num_requests
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(e))
-            return gateway_pb2.RpcBatchResponse(responses=[])
-
-        # Resolve effective network for the batch (reject mixed per-request overrides)
-        batch_networks = {r.network.strip().lower() for r in request.requests if r.network}
-        if len(batch_networks) > 1:
-            self._metrics.failed_requests += num_requests
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("All requests in a batch must use the same network override")
-            return gateway_pb2.RpcBatchResponse(responses=[])
-        network_override = next(iter(batch_networks), None)
-        effective_network = network_override or self.settings.network
-
-        # Validate all RPC methods in batch (chain-aware: Solana vs EVM, network-aware: Anvil)
-        for rpc_request in request.requests:
-            try:
-                validate_rpc_method(rpc_request.method, chain=chain, network=effective_network)
-            except ValidationError as e:
-                self._metrics.failed_requests += num_requests
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details(f"Request {rpc_request.id}: {e}")
-                return gateway_pb2.RpcBatchResponse(responses=[])
-
-        # Check rate limit (count as multiple requests)
-        limiter = self._get_rate_limiter(chain)
-        allowed, wait_time = await limiter.check_rate_limit(num_requests)
-        if not allowed:
-            self._metrics.rate_limited_requests += num_requests
-            context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
-            context.set_details(f"Rate limited, retry after {wait_time:.2f}s")
-            return gateway_pb2.RpcBatchResponse(responses=[])
-
-        # Get RPC URL using the resolved network override
-        rpc_url = self._get_rpc_url(chain, network_override=network_override)
-        if not rpc_url:
-            self._metrics.failed_requests += num_requests
-            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-            context.set_details(f"Chain '{chain}' is not configured")
-            return gateway_pb2.RpcBatchResponse(responses=[])
-
-        # Record requests for rate limiting
-        for _ in range(num_requests):
-            await limiter.record_request()
-
-        # Build coroutines/error placeholders and track request IDs for parallel execution
-        # Error placeholders are used for requests with invalid JSON params
-        request_ids: list[str] = []
-        coros_or_errors: list = []
-        for rpc_request in request.requests:
-            request_ids.append(rpc_request.id)
-            try:
-                params = json.loads(rpc_request.params) if rpc_request.params else []
-                coros_or_errors.append(self._make_rpc_call(rpc_url, rpc_request.method, params, rpc_request.id))
-            except json.JSONDecodeError as e:
-                # Store error placeholder as a tuple matching _make_rpc_call return format
-                coros_or_errors.append((None, {"code": -32700, "message": f"Invalid params JSON: {e!s}"}))
-
-        # Separate coroutines from error placeholders for asyncio.gather
-        coro_indices: list[int] = []
-        coros: list = []
-        for i, item in enumerate(coros_or_errors):
-            if asyncio.iscoroutine(item):
-                coro_indices.append(i)
-                coros.append(item)
-
-        # Execute all RPC coroutines concurrently, capturing exceptions per-request
-        coro_results = await asyncio.gather(*coros, return_exceptions=True) if coros else []
-
-        # Merge coroutine results back into the full results list
-        results: list = list(coros_or_errors)  # Start with error placeholders in place
-        for idx, coro_result in zip(coro_indices, coro_results, strict=False):
-            results[idx] = coro_result
-
-        # Build responses from gathered results
-        responses = []
-        for request_id, result_item in zip(request_ids, results, strict=False):
-            # Handle exceptions from asyncio.gather
-            if isinstance(result_item, Exception):
-                self._metrics.failed_requests += 1
-                responses.append(
-                    gateway_pb2.RpcResponse(
-                        success=False,
-                        error=json.dumps({"code": -32603, "message": f"Internal error: {result_item!s}"}),
-                        id=request_id,
-                    )
-                )
-            else:
-                # result_item is a tuple of (result, error) from _make_rpc_call or error placeholder
-                result, error = result_item
-                if error:
-                    self._metrics.failed_requests += 1
-                    responses.append(
-                        gateway_pb2.RpcResponse(
-                            success=False,
-                            error=json.dumps(error),
-                            id=request_id,
-                        )
-                    )
-                else:
-                    self._metrics.successful_requests += 1
-                    responses.append(
-                        gateway_pb2.RpcResponse(
-                            success=True,
-                            result=json.dumps(result) if result is not None else "",
-                            id=request_id,
-                        )
-                    )
-
+        await self._record_batch_rate_limit_slots(transport.limiter, plan.num_requests)
+        request_ids, call_items = self._build_batch_call_items(transport.rpc_url, plan.requests)
+        results = await self._gather_batch_call_results(call_items)
+        responses = self._batch_responses_from_results(request_ids, results)
         return gateway_pb2.RpcBatchResponse(responses=responses)
 
     async def QueryAllowance(

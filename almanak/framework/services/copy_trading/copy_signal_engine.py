@@ -464,7 +464,10 @@ class CopySignalEngine:
             current_block=current_block,
         )
 
-    def _extract_perp(  # noqa: C901
+    def _legacy_perp_method(self, action_type: str) -> str:
+        return "extract_perp_open" if action_type == "PERP_OPEN" else "extract_perp_close"
+
+    def _extract_legacy_perp_signal(
         self,
         parser: Any,
         info: ContractInfo,
@@ -473,7 +476,7 @@ class CopySignalEngine:
         action_type: str,
         current_block: int | None = None,
     ) -> CopySignal | None:
-        legacy_method = "extract_perp_open" if action_type == "PERP_OPEN" else "extract_perp_close"
+        legacy_method = self._legacy_perp_method(action_type)
         if hasattr(parser, legacy_method):
             try:
                 legacy_data = getattr(parser, legacy_method)(event.receipt)
@@ -508,77 +511,130 @@ class CopySignalEngine:
                     current_block=current_block,
                 )
 
+        return None
+
+    def _select_perp_position_data(self, parser: Any, receipt: dict[str, Any], action_type: str) -> Any | None:
         parse_result = None
         if hasattr(parser, "parse_receipt"):
             try:
-                parse_result = parser.parse_receipt(event.receipt)
+                parse_result = parser.parse_receipt(receipt)
             except Exception:
                 logger.debug("Perp parse_receipt failed", exc_info=True)
 
-        position_data = None
         if parse_result is not None:
             if action_type == "PERP_OPEN" and getattr(parse_result, "position_increases", None):
-                position_data = parse_result.position_increases[0]
+                return parse_result.position_increases[0]
             if action_type == "PERP_CLOSE" and getattr(parse_result, "position_decreases", None):
-                position_data = parse_result.position_decreases[0]
+                return parse_result.position_decreases[0]
 
-        if position_data is None:
-            # Fallback heuristic for older parser APIs
-            if action_type == "PERP_OPEN" and hasattr(parser, "extract_entry_price"):
-                entry_price = parser.extract_entry_price(event.receipt)
-                if entry_price is None:
-                    return None
-            elif action_type == "PERP_CLOSE" and hasattr(parser, "extract_exit_price"):
-                exit_price = parser.extract_exit_price(event.receipt)
-                if exit_price is None:
-                    return None
-            else:
-                return None
+        return None
 
-        market = self._get_field(position_data, "market") if position_data is not None else event.to_address
+    def _has_perp_price_fallback(self, parser: Any, receipt: dict[str, Any], action_type: str) -> bool:
+        if action_type == "PERP_OPEN" and hasattr(parser, "extract_entry_price"):
+            return parser.extract_entry_price(receipt) is not None
+        if action_type == "PERP_CLOSE" and hasattr(parser, "extract_exit_price"):
+            return parser.extract_exit_price(receipt) is not None
+        return False
+
+    def _resolve_perp_collateral(
+        self,
+        position_data: Any | None,
+        chain: str,
+    ) -> tuple[str | None, Decimal | None, bool]:
         collateral_token_raw = self._get_field(position_data, "collateral_token") if position_data is not None else None
-        collateral_token = None
-        token_metadata_resolved = True
-        if collateral_token_raw is not None:
-            collateral_token, token_metadata_resolved = self._resolve_symbol(str(collateral_token_raw), event.chain)
+        if collateral_token_raw is None:
+            return None, self._first_decimal_field(position_data, "collateral_delta_amount", "collateral_amount"), True
 
-        size_usd = self._to_decimal(self._get_field(position_data, "size_delta_usd"))
-        if size_usd is None:
-            size_usd = self._to_decimal(self._get_field(position_data, "size_in_usd"))
+        collateral_token, token_metadata_resolved = self._resolve_symbol(str(collateral_token_raw), chain)
+        collateral_amount = self._first_decimal_field(position_data, "collateral_delta_amount", "collateral_amount")
+        return collateral_token, collateral_amount, token_metadata_resolved
 
-        collateral_amount = self._to_decimal(self._get_field(position_data, "collateral_delta_amount"))
-        if collateral_amount is None:
-            collateral_amount = self._to_decimal(self._get_field(position_data, "collateral_amount"))
+    def _first_decimal_field(self, position_data: Any | None, *field_names: str) -> Decimal | None:
+        for field_name in field_names:
+            value = self._to_decimal(self._get_field(position_data, field_name))
+            if value is not None:
+                return value
+        return None
 
+    def _perp_position_id(self, parser: Any, event: LeaderEvent, position_data: Any | None) -> str | None:
+        key = self._get_field(position_data, "key")
+        if key is not None:
+            return str(key)
+        return self._safe_extract_position_id(parser, event.receipt)
+
+    def _perp_amounts(self, collateral_token: str | None, collateral_amount: Decimal | None) -> dict[str, Decimal]:
+        amounts: dict[str, Decimal] = {}
+        if collateral_token is not None and collateral_amount is not None:
+            amounts[collateral_token] = collateral_amount
+        return amounts
+
+    def _perp_amounts_usd(
+        self,
+        amounts: dict[str, Decimal],
+        chain: str,
+        size_usd: Decimal | None,
+    ) -> dict[str, Decimal]:
+        amounts_usd = self._enrich_usd(amounts, chain)
+        if size_usd is not None:
+            amounts_usd["NOTIONAL_USD"] = size_usd
+        return amounts_usd
+
+    def _build_perp_payload(
+        self,
+        *,
+        parser: Any,
+        event: LeaderEvent,
+        position_data: Any | None,
+        market: Any,
+        collateral_token: str | None,
+        collateral_amount: Decimal | None,
+        size_usd: Decimal | None,
+    ) -> PerpPayload:
         is_long_raw = self._get_field(position_data, "is_long")
         is_long = bool(is_long_raw) if is_long_raw is not None else None
-
-        payload = PerpPayload(
+        return PerpPayload(
             market=str(market) if market is not None else event.to_address,
             collateral_token=collateral_token,
             collateral_amount=collateral_amount,
             size_usd=size_usd,
             is_long=is_long,
             leverage=self._to_decimal(self._get_field(position_data, "leverage")),
-            position_id=(
-                str(self._get_field(position_data, "key"))
-                if self._get_field(position_data, "key") is not None
-                else self._safe_extract_position_id(parser, event.receipt)
-            ),
+            position_id=self._perp_position_id(parser, event, position_data),
+        )
+
+    def _build_perp_position_signal(
+        self,
+        *,
+        parser: Any,
+        info: ContractInfo,
+        event: LeaderEvent,
+        current_time: int,
+        action_type: str,
+        position_data: Any | None,
+        current_block: int | None,
+    ) -> CopySignal:
+        market = self._get_field(position_data, "market") if position_data is not None else event.to_address
+        collateral_token, collateral_amount, token_metadata_resolved = self._resolve_perp_collateral(
+            position_data,
+            event.chain,
+        )
+        size_usd = self._first_decimal_field(position_data, "size_delta_usd", "size_in_usd")
+        payload = self._build_perp_payload(
+            parser=parser,
+            event=event,
+            position_data=position_data,
+            market=market,
+            collateral_token=collateral_token,
+            collateral_amount=collateral_amount,
+            size_usd=size_usd,
         )
 
         metadata = {
             "position": self._serialize_obj(position_data),
             "notional_usd": str(size_usd) if size_usd is not None else None,
         }
-
-        amounts: dict[str, Decimal] = {}
-        if collateral_token is not None and collateral_amount is not None:
-            amounts[collateral_token] = collateral_amount
-
-        amounts_usd = self._enrich_usd(amounts, event.chain)
-        if size_usd is not None:
-            amounts_usd["NOTIONAL_USD"] = size_usd
+        amounts = self._perp_amounts(collateral_token, collateral_amount)
+        amounts_usd = self._perp_amounts_usd(amounts, event.chain, size_usd)
 
         return self._build_signal(
             event=event,
@@ -591,6 +647,40 @@ class CopySignalEngine:
             action_payload=payload,
             current_time=current_time,
             capability_flags=self._default_capability_flags(info, action_type, token_metadata_resolved),
+            current_block=current_block,
+        )
+
+    def _extract_perp(
+        self,
+        parser: Any,
+        info: ContractInfo,
+        event: LeaderEvent,
+        current_time: int,
+        action_type: str,
+        current_block: int | None = None,
+    ) -> CopySignal | None:
+        legacy_signal = self._extract_legacy_perp_signal(
+            parser,
+            info,
+            event,
+            current_time,
+            action_type,
+            current_block,
+        )
+        if legacy_signal is not None:
+            return legacy_signal
+
+        position_data = self._select_perp_position_data(parser, event.receipt, action_type)
+        if position_data is None and not self._has_perp_price_fallback(parser, event.receipt, action_type):
+            return None
+
+        return self._build_perp_position_signal(
+            parser=parser,
+            info=info,
+            event=event,
+            current_time=current_time,
+            action_type=action_type,
+            position_data=position_data,
             current_block=current_block,
         )
 

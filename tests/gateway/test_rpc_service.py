@@ -666,6 +666,184 @@ class TestRpcServiceBatchCall:
                 assert response.responses[0].success is True
                 assert response.responses[1].success is True
 
+    @pytest.mark.asyncio
+    async def test_batch_rejects_mixed_network_overrides(self, rpc_service, mock_context):
+        """BatchCall rejects per-request overrides that target different networks."""
+        request = gateway_pb2.RpcBatchRequest(
+            chain="arbitrum",
+            requests=[
+                gateway_pb2.RpcRequest(method="eth_blockNumber", params="[]", id="1", network="mainnet"),
+                gateway_pb2.RpcRequest(method="eth_chainId", params="[]", id="2", network="anvil"),
+            ],
+        )
+
+        response = await rpc_service.BatchCall(request, mock_context)
+
+        assert len(response.responses) == 0
+        mock_context.set_code.assert_called_once()
+        mock_context.set_details.assert_called_once_with("All requests in a batch must use the same network override")
+        assert rpc_service.get_metrics()["failed_requests"] == 2
+
+    @pytest.mark.asyncio
+    async def test_batch_threads_same_network_override_to_rpc_url(self, rpc_service, mock_context):
+        """BatchCall forwards a shared per-request network override to RPC URL resolution."""
+        request = gateway_pb2.RpcBatchRequest(
+            chain="arbitrum",
+            requests=[
+                gateway_pb2.RpcRequest(method="eth_blockNumber", params="[]", id="1", network=" MainNet "),
+                gateway_pb2.RpcRequest(method="eth_chainId", params="[]", id="2", network="mainnet"),
+            ],
+        )
+
+        make_rpc_call = AsyncMock(side_effect=[("0x100", None), ("0xa4b1", None)])
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://mainnet") as get_rpc_url:
+            with patch.object(rpc_service, "_make_rpc_call", new=make_rpc_call):
+                response = await rpc_service.BatchCall(request, mock_context)
+
+        get_rpc_url.assert_called_once_with("arbitrum", network_override="mainnet")
+        assert [item.success for item in response.responses] == [True, True]
+
+    @pytest.mark.asyncio
+    async def test_batch_rejects_invalid_method_with_request_id(self, rpc_service, mock_context):
+        """BatchCall reports the offending request id when method validation fails."""
+        request = gateway_pb2.RpcBatchRequest(
+            chain="arbitrum",
+            requests=[
+                gateway_pb2.RpcRequest(method="eth_blockNumber", params="[]", id="ok-before"),
+                gateway_pb2.RpcRequest(method="debug_traceTransaction", params="[]", id="bad-method"),
+            ],
+        )
+
+        response = await rpc_service.BatchCall(request, mock_context)
+
+        assert len(response.responses) == 0
+        mock_context.set_code.assert_called_once()
+        mock_context.set_details.assert_called_once()
+        assert "Request bad-method:" in mock_context.set_details.call_args.args[0]
+        assert rpc_service.get_metrics()["failed_requests"] == 2
+
+    @pytest.mark.asyncio
+    async def test_batch_missing_rpc_url_fails_after_rate_limit_without_recording(self, rpc_service, mock_context):
+        """Missing RPC URL is checked after the batch rate-limit check but before slot recording."""
+
+        class TrackingLimiter:
+            def __init__(self):
+                self.checked_count = None
+                self.recorded = 0
+
+            async def check_rate_limit(self, count=1):
+                self.checked_count = count
+                return True, 0.0
+
+            async def record_request(self):
+                self.recorded += 1
+
+        limiter = TrackingLimiter()
+        request = gateway_pb2.RpcBatchRequest(
+            chain="arbitrum",
+            requests=[
+                gateway_pb2.RpcRequest(method="eth_blockNumber", params="[]", id="1"),
+                gateway_pb2.RpcRequest(method="eth_chainId", params="[]", id="2"),
+            ],
+        )
+
+        with patch.object(rpc_service, "_get_rate_limiter", return_value=limiter):
+            with patch.object(rpc_service, "_get_rpc_url", return_value=None):
+                response = await rpc_service.BatchCall(request, mock_context)
+
+        assert len(response.responses) == 0
+        assert limiter.checked_count == 2
+        assert limiter.recorded == 0
+        mock_context.set_code.assert_called_once()
+        mock_context.set_details.assert_called_once_with("Chain 'arbitrum' is not configured")
+        assert rpc_service.get_metrics()["failed_requests"] == 2
+
+    @pytest.mark.asyncio
+    async def test_batch_invalid_params_preserve_order_and_consume_rate_slots(self, rpc_service, mock_context):
+        """Invalid params produce an in-place error response while valid calls still execute."""
+        request = gateway_pb2.RpcBatchRequest(
+            chain="arbitrum",
+            requests=[
+                gateway_pb2.RpcRequest(method="eth_blockNumber", params="{", id="bad-json"),
+                gateway_pb2.RpcRequest(method="eth_chainId", params="[]", id="ok"),
+            ],
+        )
+
+        make_rpc_call = AsyncMock(return_value=("0xa4b1", None))
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(rpc_service, "_make_rpc_call", new=make_rpc_call):
+                response = await rpc_service.BatchCall(request, mock_context)
+
+        assert [item.id for item in response.responses] == ["bad-json", "ok"]
+        assert response.responses[0].success is False
+        assert json.loads(response.responses[0].error)["code"] == -32700
+        assert response.responses[1].success is True
+        assert json.loads(response.responses[1].result) == "0xa4b1"
+        make_rpc_call.assert_called_once()
+        metrics = rpc_service.get_metrics()
+        assert metrics["successful_requests"] == 1
+        assert metrics["failed_requests"] == 1
+
+    @pytest.mark.asyncio
+    async def test_batch_builds_per_request_errors_from_exceptions_and_rpc_errors(self, rpc_service, mock_context):
+        """BatchCall maps gathered exceptions and JSON-RPC errors to per-request failures."""
+        rpc_error = {"code": -32000, "message": "upstream failed"}
+        request = gateway_pb2.RpcBatchRequest(
+            chain="arbitrum",
+            requests=[
+                gateway_pb2.RpcRequest(method="eth_blockNumber", params="[]", id="raises"),
+                gateway_pb2.RpcRequest(method="eth_chainId", params="[]", id="rpc-error"),
+                gateway_pb2.RpcRequest(method="eth_getBalance", params='["0x0000000000000000000000000000000000000001","latest"]', id="ok"),
+            ],
+        )
+
+        make_rpc_call = AsyncMock(side_effect=[RuntimeError("boom"), (None, rpc_error), ("0x1", None)])
+        with patch.object(rpc_service, "_get_rpc_url", return_value="http://test"):
+            with patch.object(rpc_service, "_make_rpc_call", new=make_rpc_call):
+                response = await rpc_service.BatchCall(request, mock_context)
+
+        assert [item.id for item in response.responses] == ["raises", "rpc-error", "ok"]
+        assert json.loads(response.responses[0].error) == {"code": -32603, "message": "Internal error: boom"}
+        assert json.loads(response.responses[1].error) == rpc_error
+        assert response.responses[2].success is True
+        metrics = rpc_service.get_metrics()
+        assert metrics["successful_requests"] == 1
+        assert metrics["failed_requests"] == 2
+
+    @pytest.mark.asyncio
+    async def test_batch_rate_limit_rejection_counts_rate_limited_not_failed(self, rpc_service, mock_context):
+        """A batch rate-limit rejection increments the rate-limited counter only."""
+
+        class RejectingLimiter:
+            async def check_rate_limit(self, count=1):
+                self.count = count
+                return False, 1.25
+
+            async def record_request(self):
+                msg = "rate-limited batch must not record requests"
+                raise AssertionError(msg)
+
+        limiter = RejectingLimiter()
+        request = gateway_pb2.RpcBatchRequest(
+            chain="arbitrum",
+            requests=[
+                gateway_pb2.RpcRequest(method="eth_blockNumber", params="[]", id="1"),
+                gateway_pb2.RpcRequest(method="eth_chainId", params="[]", id="2"),
+            ],
+        )
+
+        with patch.object(rpc_service, "_get_rate_limiter", return_value=limiter):
+            with patch.object(rpc_service, "_get_rpc_url") as get_rpc_url:
+                response = await rpc_service.BatchCall(request, mock_context)
+
+        assert len(response.responses) == 0
+        assert limiter.count == 2
+        get_rpc_url.assert_not_called()
+        mock_context.set_details.assert_called_once_with("Rate limited, retry after 1.25s")
+        metrics = rpc_service.get_metrics()
+        assert metrics["rate_limited_requests"] == 2
+        assert metrics["failed_requests"] == 0
+
 
 class TestRpcServiceMetrics:
     """Tests for RpcService metrics."""
@@ -687,8 +865,6 @@ class TestMakeRpcCallErrorMessages:
 
     def _make_client_error_session(self, error_cls, *args):
         """Build a mock aiohttp session whose post() raises a ClientError from __aenter__."""
-        import aiohttp
-
         mock_cm = MagicMock()
         mock_cm.__aenter__ = AsyncMock(side_effect=error_cls(*args))
         mock_cm.__aexit__ = AsyncMock(return_value=False)

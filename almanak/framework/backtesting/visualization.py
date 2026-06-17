@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.models import BacktestResult, EquityPoint, TradeRecord
@@ -700,8 +700,232 @@ def plot_equity_curve(  # noqa: C901
         )
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
-def plot_equity_curve_interactive(  # noqa: C901
+def _interactive_equity_output_path(
+    result: "BacktestResult",
+    output_path: Path | str | None,
+) -> Path:
+    if output_path is None:
+        safe_id = result.deployment_id.replace("/", "_").replace("\\", "_")
+        return Path(f"equity_curve_{safe_id}.html")
+    if isinstance(output_path, str):
+        return Path(output_path)
+    return output_path
+
+
+def _interactive_equity_drawdowns(
+    show_drawdown: bool,
+    timestamps: list[datetime],
+    values: list[float],
+    min_drawdown_pct: float,
+) -> list[DrawdownPeriod]:
+    if not show_drawdown:
+        return []
+    return _detect_drawdown_periods(timestamps, values, min_drawdown_pct)
+
+
+def _add_interactive_equity_drawdowns(fig: Any, drawdown_periods: list[DrawdownPeriod]) -> None:
+    for period in drawdown_periods:
+        fig.add_vrect(
+            x0=period.start,
+            x1=period.end,
+            fillcolor="rgba(244, 67, 54, 0.2)",
+            layer="below",
+            line_width=0,
+        )
+
+
+def _add_interactive_benchmark_trace(
+    fig: Any,
+    go: Any,
+    benchmark_curve: list["EquityPoint"] | None,
+    benchmark_label: str,
+) -> None:
+    if not benchmark_curve:
+        return
+
+    benchmark_timestamps, benchmark_values = _extract_equity_chart_series(benchmark_curve)
+    fig.add_trace(
+        go.Scatter(
+            x=benchmark_timestamps,
+            y=benchmark_values,
+            name=benchmark_label,
+            line={"color": "#757575", "dash": "dash"},
+            hovertemplate="<b>%{x}</b><br>" + benchmark_label + ": $%{y:,.2f}<extra></extra>",
+        )
+    )
+
+
+def _add_interactive_strategy_trace(
+    fig: Any,
+    go: Any,
+    timestamps: list[datetime],
+    values: list[float],
+) -> None:
+    fig.add_trace(
+        go.Scatter(
+            x=timestamps,
+            y=values,
+            name="Strategy",
+            line={"color": "#2196F3", "width": 2},
+            fill="tozeroy",
+            fillcolor="rgba(33, 150, 243, 0.1)",
+            hovertemplate="<b>%{x}</b><br>Value: $%{y:,.2f}<extra></extra>",
+        )
+    )
+
+
+def _interactive_trade_markers(result: "BacktestResult", show_trades: bool) -> list[TradeMarker]:
+    if show_trades and hasattr(result, "trades") and result.trades:
+        return _extract_trade_markers(result.trades, result.equity_curve)
+    return []
+
+
+def _interactive_marker_color(marker: TradeMarker, color_by_pnl: bool) -> str:
+    if color_by_pnl and marker.pnl_usd is not None:
+        return "#4CAF50" if marker.pnl_usd >= 0 else "#F44336"
+    return "#4CAF50" if marker.is_entry else "#F44336"
+
+
+def _interactive_marker_customdata(markers: list[TradeMarker]) -> list[dict[str, float | str | None]]:
+    return [
+        {
+            "type": marker.trade_type,
+            "pnl": float(marker.pnl_usd) if marker.pnl_usd is not None else None,
+        }
+        for marker in markers
+    ]
+
+
+def _add_interactive_trade_marker_trace(
+    fig: Any,
+    go: Any,
+    markers: list[TradeMarker],
+    *,
+    name: str,
+    symbol: str,
+    colors: list[str],
+    hovertemplate: str,
+) -> None:
+    fig.add_trace(
+        go.Scatter(
+            x=[marker.timestamp for marker in markers],
+            y=[float(marker.value_usd) for marker in markers],
+            mode="markers",
+            name=name,
+            marker={
+                "symbol": symbol,
+                "size": 12,
+                "color": colors,
+                "line": {"color": "white", "width": 1},
+            },
+            hovertemplate=hovertemplate,
+            customdata=_interactive_marker_customdata(markers),
+        )
+    )
+
+
+def _add_interactive_trade_traces(
+    fig: Any,
+    go: Any,
+    trade_markers: list[TradeMarker],
+    color_by_pnl: bool,
+) -> None:
+    entry_markers, exit_markers = _split_trade_markers(trade_markers)
+    if entry_markers:
+        _add_interactive_trade_marker_trace(
+            fig,
+            go,
+            entry_markers,
+            name="Entry",
+            symbol="triangle-up",
+            colors=[_interactive_marker_color(marker, color_by_pnl) for marker in entry_markers],
+            hovertemplate="<b>%{x}</b><br>Entry<br>Value: $%{y:,.2f}<br><extra></extra>",
+        )
+    if exit_markers:
+        _add_interactive_trade_marker_trace(
+            fig,
+            go,
+            exit_markers,
+            name="Exit",
+            symbol="triangle-down",
+            colors=[_interactive_marker_color(marker, color_by_pnl) for marker in exit_markers],
+            hovertemplate="<b>%{x}</b><br>Exit<br>Value: $%{y:,.2f}<br><extra></extra>",
+        )
+
+
+def _apply_interactive_equity_layout(fig: Any, chart_title: str) -> None:
+    fig.update_layout(
+        title={
+            "text": chart_title,
+            "x": 0.5,
+            "xanchor": "center",
+            "font": {"size": 18, "color": "#333"},
+        },
+        xaxis_title="Time",
+        yaxis_title="Portfolio Value (USD)",
+        yaxis_tickprefix="$",
+        yaxis_tickformat=",.0f",
+        hovermode="x unified",
+        legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 0.01},
+        template="plotly_white",
+        margin={"l": 60, "r": 30, "t": 60, "b": 60},
+    )
+    fig.update_xaxes(
+        rangeslider_visible=True,
+        rangeselector={
+            "buttons": [
+                {"count": 7, "label": "1w", "step": "day", "stepmode": "backward"},
+                {"count": 1, "label": "1m", "step": "month", "stepmode": "backward"},
+                {"count": 3, "label": "3m", "step": "month", "stepmode": "backward"},
+                {"step": "all", "label": "All"},
+            ]
+        },
+    )
+
+
+def _build_interactive_equity_figure(
+    go: Any,
+    result: "BacktestResult",
+    title: str | None,
+    benchmark_curve: list["EquityPoint"] | None,
+    benchmark_label: str,
+    show_drawdown: bool,
+    min_drawdown_pct: float,
+    show_trades: bool,
+    color_by_pnl: bool,
+) -> tuple[Any, list[DrawdownPeriod], list[TradeMarker]]:
+    timestamps, values = _extract_equity_chart_series(result.equity_curve)
+    drawdown_periods = _interactive_equity_drawdowns(show_drawdown, timestamps, values, min_drawdown_pct)
+    trade_markers = _interactive_trade_markers(result, show_trades)
+
+    fig = go.Figure()
+    _add_interactive_equity_drawdowns(fig, drawdown_periods)
+    _add_interactive_benchmark_trace(fig, go, benchmark_curve, benchmark_label)
+    _add_interactive_strategy_trace(fig, go, timestamps, values)
+    _add_interactive_trade_traces(fig, go, trade_markers, color_by_pnl)
+    _apply_interactive_equity_layout(fig, title or f"Equity Curve - {result.deployment_id}")
+    return fig, drawdown_periods, trade_markers
+
+
+def _log_interactive_equity_result(
+    output_path: Path,
+    benchmark_curve: list["EquityPoint"] | None,
+    benchmark_label: str,
+    show_drawdown: bool,
+    drawdown_periods: list[DrawdownPeriod],
+    show_trades: bool,
+    trade_markers: list[TradeMarker],
+) -> None:
+    logger.info("Created interactive equity curve plot: %s", output_path)
+    if benchmark_curve:
+        logger.info("Added benchmark comparison: %s", benchmark_label)
+    if show_drawdown:
+        logger.info("Highlighted %d drawdown period(s)", len(drawdown_periods))
+    if show_trades:
+        logger.info("Marked %d trade(s) on chart", len(trade_markers))
+
+
+def plot_equity_curve_interactive(
     result: "BacktestResult",
     output_path: Path | str | None = None,
     title: str | None = None,
@@ -763,188 +987,33 @@ def plot_equity_curve_interactive(  # noqa: C901
             format="html",
         )
 
-    # Determine output path
-    if output_path is None:
-        safe_id = result.deployment_id.replace("/", "_").replace("\\", "_")
-        output_path = Path(f"equity_curve_{safe_id}.html")
-    elif isinstance(output_path, str):
-        output_path = Path(output_path)
+    output_path = _interactive_equity_output_path(result, output_path)
 
     # Ensure parent directory exists
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Extract data from equity curve
-        timestamps: list[datetime] = []
-        values: list[float] = []
-
-        for point in result.equity_curve:
-            timestamps.append(point.timestamp)
-            if isinstance(point.value_usd, Decimal):
-                values.append(float(point.value_usd))
-            else:
-                values.append(point.value_usd)
-
-        # Detect drawdown periods
-        drawdown_periods: list[DrawdownPeriod] = []
-        if show_drawdown:
-            drawdown_periods = _detect_drawdown_periods(timestamps, values, min_drawdown_pct)
-
-        # Create figure
-        fig = go.Figure()
-
-        # Add drawdown shading first (behind other elements)
-        if show_drawdown and drawdown_periods:
-            for period in drawdown_periods:
-                fig.add_vrect(
-                    x0=period.start,
-                    x1=period.end,
-                    fillcolor="rgba(244, 67, 54, 0.2)",
-                    layer="below",
-                    line_width=0,
-                )
-
-        # Add benchmark curve if provided
-        if benchmark_curve:
-            benchmark_timestamps: list[datetime] = []
-            benchmark_values: list[float] = []
-            for point in benchmark_curve:
-                benchmark_timestamps.append(point.timestamp)
-                if isinstance(point.value_usd, Decimal):
-                    benchmark_values.append(float(point.value_usd))
-                else:
-                    benchmark_values.append(point.value_usd)
-
-            fig.add_trace(
-                go.Scatter(
-                    x=benchmark_timestamps,
-                    y=benchmark_values,
-                    name=benchmark_label,
-                    line={"color": "#757575", "dash": "dash"},
-                    hovertemplate="<b>%{x}</b><br>" + benchmark_label + ": $%{y:,.2f}<extra></extra>",
-                )
-            )
-
-        # Add main strategy equity curve
-        fig.add_trace(
-            go.Scatter(
-                x=timestamps,
-                y=values,
-                name="Strategy",
-                line={"color": "#2196F3", "width": 2},
-                fill="tozeroy",
-                fillcolor="rgba(33, 150, 243, 0.1)",
-                hovertemplate="<b>%{x}</b><br>Value: $%{y:,.2f}<extra></extra>",
-            )
+        fig, drawdown_periods, trade_markers = _build_interactive_equity_figure(
+            go,
+            result,
+            title,
+            benchmark_curve,
+            benchmark_label,
+            show_drawdown,
+            min_drawdown_pct,
+            show_trades,
+            color_by_pnl,
         )
-
-        # Add trade markers
-        trade_markers: list[TradeMarker] = []
-        if show_trades and hasattr(result, "trades") and result.trades:
-            trade_markers = _extract_trade_markers(result.trades, result.equity_curve)
-
-            if trade_markers:
-                # Group markers by type for different symbols
-                entry_markers = [m for m in trade_markers if m.is_entry]
-                exit_markers = [m for m in trade_markers if not m.is_entry]
-
-                def get_color(marker: TradeMarker) -> str:
-                    if color_by_pnl and marker.pnl_usd is not None:
-                        return "#4CAF50" if marker.pnl_usd >= 0 else "#F44336"
-                    return "#4CAF50" if marker.is_entry else "#F44336"
-
-                # Entry markers
-                if entry_markers:
-                    fig.add_trace(
-                        go.Scatter(
-                            x=[m.timestamp for m in entry_markers],
-                            y=[float(m.value_usd) for m in entry_markers],
-                            mode="markers",
-                            name="Entry",
-                            marker={
-                                "symbol": "triangle-up",
-                                "size": 12,
-                                "color": [get_color(m) for m in entry_markers],
-                                "line": {"color": "white", "width": 1},
-                            },
-                            hovertemplate=("<b>%{x}</b><br>Entry<br>Value: $%{y:,.2f}<br><extra></extra>"),
-                            customdata=[
-                                {
-                                    "type": m.trade_type,
-                                    "pnl": float(m.pnl_usd) if m.pnl_usd else None,
-                                }
-                                for m in entry_markers
-                            ],
-                        )
-                    )
-
-                # Exit markers
-                if exit_markers:
-                    fig.add_trace(
-                        go.Scatter(
-                            x=[m.timestamp for m in exit_markers],
-                            y=[float(m.value_usd) for m in exit_markers],
-                            mode="markers",
-                            name="Exit",
-                            marker={
-                                "symbol": "triangle-down",
-                                "size": 12,
-                                "color": [get_color(m) for m in exit_markers],
-                                "line": {"color": "white", "width": 1},
-                            },
-                            hovertemplate=("<b>%{x}</b><br>Exit<br>Value: $%{y:,.2f}<br><extra></extra>"),
-                            customdata=[
-                                {
-                                    "type": m.trade_type,
-                                    "pnl": float(m.pnl_usd) if m.pnl_usd else None,
-                                }
-                                for m in exit_markers
-                            ],
-                        )
-                    )
-
-        # Set layout
-        chart_title = title or f"Equity Curve - {result.deployment_id}"
-        fig.update_layout(
-            title={
-                "text": chart_title,
-                "x": 0.5,
-                "xanchor": "center",
-                "font": {"size": 18, "color": "#333"},
-            },
-            xaxis_title="Time",
-            yaxis_title="Portfolio Value (USD)",
-            yaxis_tickprefix="$",
-            yaxis_tickformat=",.0f",
-            hovermode="x unified",
-            legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 0.01},
-            template="plotly_white",
-            margin={"l": 60, "r": 30, "t": 60, "b": 60},
-        )
-
-        # Add range slider and buttons for time navigation
-        fig.update_xaxes(
-            rangeslider_visible=True,
-            rangeselector={
-                "buttons": [
-                    {"count": 7, "label": "1w", "step": "day", "stepmode": "backward"},
-                    {"count": 1, "label": "1m", "step": "month", "stepmode": "backward"},
-                    {"count": 3, "label": "3m", "step": "month", "stepmode": "backward"},
-                    {"step": "all", "label": "All"},
-                ]
-            },
-        )
-
-        # Save as HTML
         fig.write_html(str(output_path), include_plotlyjs=True, full_html=True)
-
-        logger.info("Created interactive equity curve plot: %s", output_path)
-        if benchmark_curve:
-            logger.info("Added benchmark comparison: %s", benchmark_label)
-        if show_drawdown:
-            logger.info("Highlighted %d drawdown period(s)", len(drawdown_periods))
-        if show_trades:
-            logger.info("Marked %d trade(s) on chart", len(trade_markers))
+        _log_interactive_equity_result(
+            output_path,
+            benchmark_curve,
+            benchmark_label,
+            show_drawdown,
+            drawdown_periods,
+            show_trades,
+            trade_markers,
+        )
 
         return ChartResult(
             chart_type="equity_curve",
@@ -1726,7 +1795,173 @@ def plot_intent_pie(
         )
 
 
-# crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~2%)
+def _load_equity_chart_plotly() -> Any | None:
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        logger.warning("plotly not installed (pip install 'almanak[backtest]') - cannot generate equity chart")
+        return None
+    return go
+
+
+def _extract_equity_chart_series(equity_curve: list["EquityPoint"]) -> tuple[list[datetime], list[float]]:
+    timestamps: list[datetime] = []
+    values: list[float] = []
+    for point in equity_curve:
+        timestamps.append(point.timestamp)
+        values.append(float(point.value_usd) if isinstance(point.value_usd, Decimal) else point.value_usd)
+    return timestamps, values
+
+
+def _equity_chart_drawdowns(
+    show_drawdown: bool,
+    timestamps: list[datetime],
+    values: list[float],
+) -> list[DrawdownPeriod]:
+    if not show_drawdown:
+        return []
+    return _detect_drawdown_periods(timestamps, values, 0.01)
+
+
+def _add_embedded_equity_drawdowns(fig: Any, drawdown_periods: list[DrawdownPeriod]) -> None:
+    for period in drawdown_periods:
+        fig.add_vrect(
+            x0=period.start,
+            x1=period.end,
+            fillcolor="rgba(244, 67, 54, 0.15)",
+            layer="below",
+            line_width=0,
+        )
+
+
+def _add_embedded_equity_curve_trace(
+    fig: Any,
+    go: Any,
+    timestamps: list[datetime],
+    values: list[float],
+) -> None:
+    fig.add_trace(
+        go.Scatter(
+            x=timestamps,
+            y=values,
+            name="Portfolio Value",
+            line={"color": "#2196F3", "width": 2},
+            fill="tozeroy",
+            fillcolor="rgba(33, 150, 243, 0.1)",
+            hovertemplate="<b>%{x}</b><br>Value: $%{y:,.2f}<extra></extra>",
+        )
+    )
+
+
+def _embedded_equity_trade_markers(result: "BacktestResult", show_trades: bool) -> list[TradeMarker]:
+    trades = getattr(result, "trades", None)
+    if not show_trades or not trades:
+        return []
+    return _extract_trade_markers(trades, result.equity_curve)
+
+
+def _split_trade_markers(trade_markers: list[TradeMarker]) -> tuple[list[TradeMarker], list[TradeMarker]]:
+    entry_markers = [marker for marker in trade_markers if marker.is_entry]
+    exit_markers = [marker for marker in trade_markers if not marker.is_entry]
+    return entry_markers, exit_markers
+
+
+def _entry_marker_colors(markers: list[TradeMarker]) -> list[str]:
+    return ["#4CAF50" if (marker.pnl_usd is None or marker.pnl_usd >= 0) else "#F44336" for marker in markers]
+
+
+def _exit_marker_colors(markers: list[TradeMarker]) -> list[str]:
+    return ["#4CAF50" if (marker.pnl_usd is not None and marker.pnl_usd >= 0) else "#F44336" for marker in markers]
+
+
+def _add_embedded_trade_marker_trace(
+    fig: Any,
+    go: Any,
+    markers: list[TradeMarker],
+    *,
+    name: str,
+    symbol: str,
+    colors: list[str],
+    hovertemplate: str,
+) -> None:
+    fig.add_trace(
+        go.Scatter(
+            x=[marker.timestamp for marker in markers],
+            y=[float(marker.value_usd) for marker in markers],
+            mode="markers",
+            name=name,
+            marker={
+                "symbol": symbol,
+                "size": 10,
+                "color": colors,
+                "line": {"color": "white", "width": 1},
+            },
+            hovertemplate=hovertemplate,
+        )
+    )
+
+
+def _add_embedded_equity_trade_traces(fig: Any, go: Any, trade_markers: list[TradeMarker]) -> None:
+    entry_markers, exit_markers = _split_trade_markers(trade_markers)
+    if entry_markers:
+        _add_embedded_trade_marker_trace(
+            fig,
+            go,
+            entry_markers,
+            name="Entry",
+            symbol="triangle-up",
+            colors=_entry_marker_colors(entry_markers),
+            hovertemplate="<b>%{x}</b><br>Entry<br>Value: $%{y:,.2f}<extra></extra>",
+        )
+    if exit_markers:
+        _add_embedded_trade_marker_trace(
+            fig,
+            go,
+            exit_markers,
+            name="Exit",
+            symbol="triangle-down",
+            colors=_exit_marker_colors(exit_markers),
+            hovertemplate="<b>%{x}</b><br>Exit<br>Value: $%{y:,.2f}<extra></extra>",
+        )
+
+
+def _apply_embedded_equity_layout(fig: Any, title: str | None, height: int) -> None:
+    chart_title = title or "Equity Curve"
+    fig.update_layout(
+        title={"text": chart_title, "x": 0.5, "xanchor": "center", "font": {"size": 16}},
+        xaxis_title="Time",
+        yaxis_title="Portfolio Value (USD)",
+        yaxis_tickprefix="$",
+        yaxis_tickformat=",.0f",
+        hovermode="x unified",
+        legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 0.01},
+        template="plotly_white",
+        height=height,
+        margin={"l": 60, "r": 30, "t": 50, "b": 50},
+    )
+    fig.update_xaxes(rangeslider_visible=True, rangeslider_thickness=0.05)
+
+
+def _build_embedded_equity_chart_figure(
+    go: Any,
+    result: "BacktestResult",
+    title: str | None,
+    show_drawdown: bool,
+    show_trades: bool,
+    height: int,
+) -> Any:
+    timestamps, values = _extract_equity_chart_series(result.equity_curve)
+    drawdown_periods = _equity_chart_drawdowns(show_drawdown, timestamps, values)
+    trade_markers = _embedded_equity_trade_markers(result, show_trades)
+
+    fig = go.Figure()
+    _add_embedded_equity_drawdowns(fig, drawdown_periods)
+    _add_embedded_equity_curve_trace(fig, go, timestamps, values)
+    _add_embedded_equity_trade_traces(fig, go, trade_markers)
+    _apply_embedded_equity_layout(fig, title, height)
+    return fig
+
+
 def generate_equity_chart_html(
     result: "BacktestResult",
     title: str | None = None,
@@ -1754,10 +1989,8 @@ def generate_equity_chart_html(
         chart_html = generate_equity_chart_html(result)
         # Use in Jinja2 template: {{ chart_html | safe }}
     """
-    try:
-        import plotly.graph_objects as go
-    except ImportError:
-        logger.warning("plotly not installed (pip install 'almanak[backtest]') - cannot generate equity chart")
+    go = _load_equity_chart_plotly()
+    if go is None:
         return ""
 
     if not result.equity_curve:
@@ -1765,109 +1998,7 @@ def generate_equity_chart_html(
         return ""
 
     try:
-        # Extract data
-        timestamps: list[datetime] = []
-        values: list[float] = []
-        for point in result.equity_curve:
-            timestamps.append(point.timestamp)
-            values.append(float(point.value_usd) if isinstance(point.value_usd, Decimal) else point.value_usd)
-
-        # Detect drawdown periods
-        drawdown_periods: list[DrawdownPeriod] = []
-        if show_drawdown:
-            drawdown_periods = _detect_drawdown_periods(timestamps, values, 0.01)
-
-        # Create figure
-        fig = go.Figure()
-
-        # Add drawdown shading
-        if show_drawdown and drawdown_periods:
-            for period in drawdown_periods:
-                fig.add_vrect(
-                    x0=period.start,
-                    x1=period.end,
-                    fillcolor="rgba(244, 67, 54, 0.15)",
-                    layer="below",
-                    line_width=0,
-                )
-
-        # Add equity curve
-        fig.add_trace(
-            go.Scatter(
-                x=timestamps,
-                y=values,
-                name="Portfolio Value",
-                line={"color": "#2196F3", "width": 2},
-                fill="tozeroy",
-                fillcolor="rgba(33, 150, 243, 0.1)",
-                hovertemplate="<b>%{x}</b><br>Value: $%{y:,.2f}<extra></extra>",
-            )
-        )
-
-        # Add trade markers
-        if show_trades and hasattr(result, "trades") and result.trades:
-            trade_markers = _extract_trade_markers(result.trades, result.equity_curve)
-            if trade_markers:
-                entry_markers = [m for m in trade_markers if m.is_entry]
-                exit_markers = [m for m in trade_markers if not m.is_entry]
-
-                if entry_markers:
-                    colors = ["#4CAF50" if (m.pnl_usd is None or m.pnl_usd >= 0) else "#F44336" for m in entry_markers]
-                    fig.add_trace(
-                        go.Scatter(
-                            x=[m.timestamp for m in entry_markers],
-                            y=[float(m.value_usd) for m in entry_markers],
-                            mode="markers",
-                            name="Entry",
-                            marker={
-                                "symbol": "triangle-up",
-                                "size": 10,
-                                "color": colors,
-                                "line": {"color": "white", "width": 1},
-                            },
-                            hovertemplate="<b>%{x}</b><br>Entry<br>Value: $%{y:,.2f}<extra></extra>",
-                        )
-                    )
-
-                if exit_markers:
-                    colors = [
-                        "#4CAF50" if (m.pnl_usd is not None and m.pnl_usd >= 0) else "#F44336" for m in exit_markers
-                    ]
-                    fig.add_trace(
-                        go.Scatter(
-                            x=[m.timestamp for m in exit_markers],
-                            y=[float(m.value_usd) for m in exit_markers],
-                            mode="markers",
-                            name="Exit",
-                            marker={
-                                "symbol": "triangle-down",
-                                "size": 10,
-                                "color": colors,
-                                "line": {"color": "white", "width": 1},
-                            },
-                            hovertemplate="<b>%{x}</b><br>Exit<br>Value: $%{y:,.2f}<extra></extra>",
-                        )
-                    )
-
-        # Configure layout
-        chart_title = title or "Equity Curve"
-        fig.update_layout(
-            title={"text": chart_title, "x": 0.5, "xanchor": "center", "font": {"size": 16}},
-            xaxis_title="Time",
-            yaxis_title="Portfolio Value (USD)",
-            yaxis_tickprefix="$",
-            yaxis_tickformat=",.0f",
-            hovermode="x unified",
-            legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 0.01},
-            template="plotly_white",
-            height=height,
-            margin={"l": 60, "r": 30, "t": 50, "b": 50},
-        )
-
-        # Add range slider
-        fig.update_xaxes(rangeslider_visible=True, rangeslider_thickness=0.05)
-
-        # Return embedded HTML (not full page)
+        fig = _build_embedded_equity_chart_figure(go, result, title, show_drawdown, show_trades, height)
         return fig.to_html(include_plotlyjs="cdn", full_html=False, div_id="equity-chart")
 
     except Exception as e:

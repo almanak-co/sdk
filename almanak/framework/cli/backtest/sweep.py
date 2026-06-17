@@ -1724,7 +1724,310 @@ def sweep_backtest(
 # =============================================================================
 
 
-# crap-allowlist: VIB-5088: pre-existing CC=37 in optimize CLI; touched only to drop the flat gas_price_gwei kwarg
+@dataclass
+class _OptimizationSettings:
+    objective: str
+    n_trials: int
+    patience: int | None
+    min_delta: float
+
+
+@dataclass
+class _OptimizationRunContext:
+    strategy: str
+    chain: str
+    token_list: list[str]
+    interval: int
+    initial_capital: float
+    output_label: str | None
+    output_path: Path | None
+    periods_spec: str | None
+    backtest_periods: list[Any]
+    param_ranges: dict[str, Any]
+    settings: _OptimizationSettings
+    seed: int | None
+    verbose: bool
+
+
+@dataclass
+class _OptimizationFactories:
+    strategy_factory: Any
+    data_provider_factory: Any
+    backtester_factory: Any
+
+
+def _load_optimization_inputs(
+    *,
+    config_file: str,
+    objective: str | None,
+    n_trials: int | None,
+    patience: int | None,
+) -> tuple[dict[str, Any], _OptimizationSettings]:
+    config_path = Path(config_file)
+    try:
+        opt_config = load_optimization_config(config_path)
+    except Exception as e:
+        click.echo(f"Error loading config file: {e}", err=True)
+        raise click.Abort() from None
+
+    try:
+        param_ranges = parse_param_ranges_from_config(opt_config)
+    except click.BadParameter as e:
+        click.echo(f"Error parsing config: {e}", err=True)
+        raise click.Abort() from None
+
+    if not param_ranges:
+        raise click.UsageError(
+            "No parameter ranges defined in config file. Add 'param_ranges' with at least one parameter."
+        )
+
+    settings = _OptimizationSettings(
+        objective=objective or opt_config.get("objective", "sharpe_ratio"),
+        n_trials=n_trials or opt_config.get("n_trials", 50),
+        patience=patience or opt_config.get("patience"),
+        min_delta=opt_config.get("min_delta", 0.0),
+    )
+    return param_ranges, settings
+
+
+def _validate_optimization_strategy(strategy: str) -> None:
+    available_strategies = list_strategies_fn()
+    if strategy not in available_strategies and available_strategies:
+        click.echo(f"Error: Unknown strategy '{strategy}'", err=True)
+        click.echo(f"Available strategies: {', '.join(sorted(available_strategies))}", err=True)
+        raise click.Abort()
+
+
+def _build_optimization_context(
+    *,
+    strategy: str,
+    start: datetime | None,
+    end: datetime | None,
+    periods: str | None,
+    config_file: str,
+    objective: str | None,
+    n_trials: int | None,
+    patience: int | None,
+    interval: int,
+    initial_capital: float,
+    chain: str,
+    tokens: str,
+    output: str | None,
+    seed: int | None,
+    verbose: bool,
+) -> _OptimizationRunContext:
+    _, backtest_periods = _resolve_backtest_periods(periods, start, end)
+    param_ranges, settings = _load_optimization_inputs(
+        config_file=config_file,
+        objective=objective,
+        n_trials=n_trials,
+        patience=patience,
+    )
+    _validate_optimization_strategy(strategy)
+
+    return _OptimizationRunContext(
+        strategy=strategy,
+        chain=chain,
+        token_list=[t.strip().upper() for t in tokens.split(",")],
+        interval=interval,
+        initial_capital=initial_capital,
+        output_label=output,
+        output_path=Path(output) if output else None,
+        periods_spec=periods,
+        backtest_periods=backtest_periods,
+        param_ranges=param_ranges,
+        settings=settings,
+        seed=seed,
+        verbose=verbose,
+    )
+
+
+def _format_optimization_param_range(name: str, spec: Any) -> str:
+    if not hasattr(spec, "param_type"):
+        return f"  {name}: {spec}"
+    if spec.param_type.value == "categorical":
+        return f"  {name}: categorical {spec.choices}"
+    if spec.param_type.value == "discrete":
+        step_str = f", step={spec.step}" if spec.step else ""
+        return f"  {name}: discrete [{spec.low}, {spec.high}{step_str}]"
+    log_str = " (log)" if spec.log else ""
+    step_str = f", step={spec.step}" if spec.step else ""
+    return f"  {name}: continuous [{spec.low}, {spec.high}{step_str}]{log_str}"
+
+
+def _print_optimization_configuration(ctx: _OptimizationRunContext) -> None:
+    click.echo("=" * 60)
+    click.echo("BAYESIAN OPTIMIZATION CONFIGURATION")
+    click.echo("=" * 60)
+    click.echo(f"Strategy: {ctx.strategy}")
+    click.echo(f"Chain: {ctx.chain}")
+    if len(ctx.backtest_periods) > 1:
+        click.echo(f"Periods: {ctx.periods_spec} ({len(ctx.backtest_periods)} windows)")
+        for bp in ctx.backtest_periods:
+            click.echo(f"  - {bp.name}: {bp.start.date()} -> {bp.end.date()}")
+        click.echo("  (each trial scored on avg metric across all periods)")
+    else:
+        bp = ctx.backtest_periods[0]
+        click.echo(f"Period: {bp.start.date()} -> {bp.end.date()}")
+    click.echo(f"Interval: {ctx.interval}s ({ctx.interval / 3600:.1f} hours)")
+    click.echo(f"Initial Capital: ${ctx.initial_capital:,.2f}")
+    click.echo(f"Tokens: {', '.join(ctx.token_list)}")
+    click.echo()
+    click.echo(f"Objective: {ctx.settings.objective}")
+    click.echo(f"Trials: {ctx.settings.n_trials}")
+    if ctx.settings.patience:
+        click.echo(f"Early Stopping: patience={ctx.settings.patience}, min_delta={ctx.settings.min_delta}")
+    else:
+        click.echo("Early Stopping: disabled")
+    if ctx.seed:
+        click.echo(f"Random Seed: {ctx.seed}")
+    click.echo()
+    click.echo("Parameters to optimize:")
+    for name, spec in ctx.param_ranges.items():
+        click.echo(_format_optimization_param_range(name, spec))
+
+    if ctx.output_label:
+        click.echo(f"Output: {ctx.output_label}")
+
+    click.echo("=" * 60)
+
+
+def _handle_optimization_dry_run() -> None:
+    click.echo()
+    click.echo("Dry run - optimization not executed.")
+
+
+def _resolve_optimization_strategy_class(strategy: str) -> Any:
+    try:
+        return get_strategy(strategy)
+    except ValueError:
+        click.echo()
+        click.echo("Warning: No strategies registered in factory.", err=True)
+        click.echo("Running with mock strategy for demonstration.", err=True)
+        click.echo()
+
+        # Issue #1701: shared mock (preserves id "mock-optimize" exactly).
+        from ...backtesting import make_mock_strategy_class
+
+        return make_mock_strategy_class("mock-optimize")
+
+
+def _build_optimization_pnl_configs(ctx: _OptimizationRunContext) -> list[PnLBacktestConfig]:
+    pnl_configs: list[PnLBacktestConfig] = []
+    for bp in ctx.backtest_periods:
+        pnl_configs.append(
+            PnLBacktestConfig(
+                start_time=bp.start,
+                end_time=bp.end,
+                interval_seconds=ctx.interval,
+                initial_capital_usd=Decimal(str(ctx.initial_capital)),
+                chain=ctx.chain,
+                tokens=ctx.token_list,
+                # gas_price_gwei omitted: chain-aware default (VIB-5088)
+                include_gas_costs=True,
+                allow_degraded_data=True,
+                preflight_validation=(len(pnl_configs) == 0),
+                fail_on_preflight_error=False,
+            )
+        )
+    return pnl_configs
+
+
+def _build_optimization_factories(
+    *,
+    strategy_class: Any,
+    base_config: dict[str, Any],
+    chain: str,
+    token_addresses: dict[str, Any],
+) -> _OptimizationFactories:
+    def create_data_provider() -> CoinGeckoDataProvider:
+        return CoinGeckoDataProvider(token_addresses=token_addresses)
+
+    def create_strategy(config_overrides: dict[str, Any] | None = None) -> Any:
+        effective_config = {**base_config, **(config_overrides or {})}
+        return _create_backtest_strategy(strategy_class, effective_config, chain)
+
+    def create_backtester(
+        data_provider: Any,
+        fee_models: dict[str, Any],
+        slippage_models: dict[str, Any],
+    ) -> PnLBacktester:
+        return PnLBacktester(
+            data_provider=data_provider,
+            fee_models=fee_models,
+            slippage_models=slippage_models,
+        )
+
+    return _OptimizationFactories(
+        strategy_factory=create_strategy,
+        data_provider_factory=create_data_provider,
+        backtester_factory=create_backtester,
+    )
+
+
+def _create_optimization_tuner(ctx: _OptimizationRunContext) -> Any:
+    from ...backtesting.pnl.optuna_tuner import OptunaTuner
+
+    click.echo()
+    click.echo("Initializing Optuna optimizer...")
+    return OptunaTuner(
+        objective_metric=ctx.settings.objective,
+        sampler_seed=ctx.seed,
+        patience=ctx.settings.patience,
+        min_delta=ctx.settings.min_delta,
+        log_level="INFO" if ctx.verbose else "WARNING",
+    )
+
+
+def _run_optimization(
+    *,
+    ctx: _OptimizationRunContext,
+    tuner: Any,
+    factories: _OptimizationFactories,
+    pnl_configs: list[PnLBacktestConfig],
+    base_config: dict[str, Any],
+) -> Any:
+    multi_period = len(pnl_configs) > 1
+    if multi_period:
+        click.echo(
+            f"Starting multi-period Bayesian optimization ({ctx.settings.n_trials} trials x {len(pnl_configs)} periods)..."
+        )
+    else:
+        click.echo(f"Starting Bayesian optimization ({ctx.settings.n_trials} trials)...")
+    click.echo()
+
+    try:
+        return asyncio.run(
+            tuner.optimize(
+                strategy_factory=factories.strategy_factory,
+                data_provider_factory=factories.data_provider_factory,
+                backtester_factory=factories.backtester_factory,
+                base_config=pnl_configs[0],
+                param_ranges=ctx.param_ranges,
+                n_trials=ctx.settings.n_trials,
+                show_progress=ctx.verbose,
+                patience=ctx.settings.patience,
+                min_delta=ctx.settings.min_delta,
+                extra_configs=pnl_configs[1:] if multi_period else None,
+                strategy_config=base_config,
+            )
+        )
+    except Exception as e:
+        click.echo(f"Error during optimization: {e}", err=True)
+        sys.exit(1)
+
+
+def _write_optimization_history(output_path: Path | None, tuner: Any) -> None:
+    if output_path is None:
+        return
+    try:
+        history = tuner.export_history()
+        history.save(output_path)
+        click.echo(f"Optimization history written to: {output_path}")
+    except Exception as e:
+        click.echo(f"Warning: Could not save history: {e}", err=True)
+
+
 @backtest.command("optimize")
 @click.option(
     "--strategy",
@@ -1845,7 +2148,7 @@ def sweep_backtest(
     default=False,
     help="Show progress bar and detailed logging",
 )
-def optimize_backtest(  # noqa: C901
+def optimize_backtest(
     strategy: str,
     start: datetime | None,
     end: datetime | None,
@@ -1938,225 +2241,57 @@ def optimize_backtest(  # noqa: C901
             --periods "2024-quarterly" \\
             --config-file config.json --n-trials 100
     """
-    from ...backtesting.pnl.optuna_tuner import OptunaTuner
-    from ...backtesting.pnl.periods import BacktestPeriod, resolve_periods
+    ctx = _build_optimization_context(
+        strategy=strategy,
+        start=start,
+        end=end,
+        periods=periods,
+        config_file=config_file,
+        objective=objective,
+        n_trials=n_trials,
+        patience=patience,
+        interval=interval,
+        initial_capital=initial_capital,
+        chain=chain,
+        tokens=tokens,
+        output=output,
+        seed=seed,
+        verbose=verbose,
+    )
+    _print_optimization_configuration(ctx)
 
-    # Validate --start/--end vs --periods
-    if periods is not None:
-        if start is not None or end is not None:
-            raise click.UsageError("Cannot use --periods together with --start/--end. Use one or the other.")
-        try:
-            backtest_periods = resolve_periods(periods)
-        except (ValueError, json.JSONDecodeError) as e:
-            raise click.UsageError(str(e)) from e
-    else:
-        if start is None or end is None:
-            raise click.UsageError("Either --start and --end, or --periods is required.")
-        backtest_periods = [BacktestPeriod(name="single", start=start, end=end)]
-
-    # Load optimization config
-    config_path = Path(config_file)
-    try:
-        opt_config = load_optimization_config(config_path)
-    except Exception as e:
-        click.echo(f"Error loading config file: {e}", err=True)
-        raise click.Abort() from None
-
-    # Parse parameter ranges
-    try:
-        param_ranges = parse_param_ranges_from_config(opt_config)
-    except click.BadParameter as e:
-        click.echo(f"Error parsing config: {e}", err=True)
-        raise click.Abort() from None
-
-    if not param_ranges:
-        raise click.UsageError(
-            "No parameter ranges defined in config file. Add 'param_ranges' with at least one parameter."
-        )
-
-    # Determine settings (CLI args override config file)
-    effective_objective = objective or opt_config.get("objective", "sharpe_ratio")
-    effective_n_trials = n_trials or opt_config.get("n_trials", 50)
-    effective_patience = patience or opt_config.get("patience")
-    min_delta = opt_config.get("min_delta", 0.0)
-
-    # Validate strategy exists
-    available_strategies = list_strategies_fn()
-    if strategy not in available_strategies and available_strategies:
-        click.echo(f"Error: Unknown strategy '{strategy}'", err=True)
-        click.echo(f"Available strategies: {', '.join(sorted(available_strategies))}", err=True)
-        raise click.Abort()
-
-    # Parse tokens list
-    token_list = [t.strip().upper() for t in tokens.split(",")]
-
-    # Display configuration
-    click.echo("=" * 60)
-    click.echo("BAYESIAN OPTIMIZATION CONFIGURATION")
-    click.echo("=" * 60)
-    click.echo(f"Strategy: {strategy}")
-    click.echo(f"Chain: {chain}")
-    if len(backtest_periods) > 1:
-        click.echo(f"Periods: {periods} ({len(backtest_periods)} windows)")
-        for bp in backtest_periods:
-            click.echo(f"  - {bp.name}: {bp.start.date()} -> {bp.end.date()}")
-        click.echo("  (each trial scored on avg metric across all periods)")
-    else:
-        bp = backtest_periods[0]
-        click.echo(f"Period: {bp.start.date()} -> {bp.end.date()}")
-    click.echo(f"Interval: {interval}s ({interval / 3600:.1f} hours)")
-    click.echo(f"Initial Capital: ${initial_capital:,.2f}")
-    click.echo(f"Tokens: {', '.join(token_list)}")
-    click.echo()
-    click.echo(f"Objective: {effective_objective}")
-    click.echo(f"Trials: {effective_n_trials}")
-    if effective_patience:
-        click.echo(f"Early Stopping: patience={effective_patience}, min_delta={min_delta}")
-    else:
-        click.echo("Early Stopping: disabled")
-    if seed:
-        click.echo(f"Random Seed: {seed}")
-    click.echo()
-    click.echo("Parameters to optimize:")
-    for name, spec in param_ranges.items():
-        if hasattr(spec, "param_type"):
-            if spec.param_type.value == "categorical":
-                click.echo(f"  {name}: categorical {spec.choices}")
-            elif spec.param_type.value == "discrete":
-                step_str = f", step={spec.step}" if spec.step else ""
-                click.echo(f"  {name}: discrete [{spec.low}, {spec.high}{step_str}]")
-            else:
-                log_str = " (log)" if spec.log else ""
-                step_str = f", step={spec.step}" if spec.step else ""
-                click.echo(f"  {name}: continuous [{spec.low}, {spec.high}{step_str}]{log_str}")
-        else:
-            click.echo(f"  {name}: {spec}")
-
-    if output:
-        click.echo(f"Output: {output}")
-
-    click.echo("=" * 60)
-
-    # Handle dry run
     if dry_run:
-        click.echo()
-        click.echo("Dry run - optimization not executed.")
+        _handle_optimization_dry_run()
         return
 
-    # Load strategy
-    try:
-        strategy_class = get_strategy(strategy)
-    except ValueError:
-        click.echo()
-        click.echo("Warning: No strategies registered in factory.", err=True)
-        click.echo("Running with mock strategy for demonstration.", err=True)
-        click.echo()
-
-        # Issue #1701: shared mock (preserves id "mock-optimize" exactly).
-        from ...backtesting import make_mock_strategy_class
-
-        strategy_class = make_mock_strategy_class("mock-optimize")
-
-    # Load base strategy config
+    strategy_class = _resolve_optimization_strategy_class(strategy)
     base_config = load_strategy_config(strategy, chain)
-
-    # Create PnL backtest configs (one per period)
-    pnl_configs: list[PnLBacktestConfig] = []
-    for bp in backtest_periods:
-        pnl_configs.append(
-            PnLBacktestConfig(
-                start_time=bp.start,
-                end_time=bp.end,
-                interval_seconds=interval,
-                initial_capital_usd=Decimal(str(initial_capital)),
-                chain=chain,
-                tokens=token_list,
-                # gas_price_gwei omitted: chain-aware default (VIB-5088)
-                include_gas_costs=True,
-                allow_degraded_data=True,
-                preflight_validation=(len(pnl_configs) == 0),
-                fail_on_preflight_error=False,
-            )
-        )
-    pnl_config = pnl_configs[0]
+    pnl_configs = _build_optimization_pnl_configs(ctx)
 
     # Resolve the SYMBOL -> (chain, address) map once; reused by every provider
     # the factory builds (Refinement R1). Natives resolve via the chain registry.
     token_addresses = build_token_address_map(
         strategy_config=base_config,
-        tracked_tokens=token_list,
-        chain=chain,
+        tracked_tokens=ctx.token_list,
+        chain=ctx.chain,
     )
-
-    # Create factories
-    def create_data_provider() -> CoinGeckoDataProvider:
-        return CoinGeckoDataProvider(token_addresses=token_addresses)
-
-    def create_strategy(config_overrides: dict[str, Any] | None = None) -> Any:
-        effective_config = {**base_config, **(config_overrides or {})}
-        return _create_backtest_strategy(strategy_class, effective_config, chain)
-
-    def create_backtester(
-        data_provider: Any,
-        fee_models: dict[str, Any],
-        slippage_models: dict[str, Any],
-    ) -> PnLBacktester:
-        return PnLBacktester(
-            data_provider=data_provider,
-            fee_models=fee_models,
-            slippage_models=slippage_models,
-        )
-
-    # Create OptunaTuner
-    click.echo()
-    click.echo("Initializing Optuna optimizer...")
-    tuner = OptunaTuner(
-        objective_metric=effective_objective,
-        sampler_seed=seed,
-        patience=effective_patience,
-        min_delta=min_delta,
-        log_level="INFO" if verbose else "WARNING",
+    factories = _build_optimization_factories(
+        strategy_class=strategy_class,
+        base_config=base_config,
+        chain=ctx.chain,
+        token_addresses=token_addresses,
     )
-
-    # Run optimization
-    multi_period = len(pnl_configs) > 1
-    if multi_period:
-        click.echo(
-            f"Starting multi-period Bayesian optimization ({effective_n_trials} trials x {len(pnl_configs)} periods)..."
-        )
-    else:
-        click.echo(f"Starting Bayesian optimization ({effective_n_trials} trials)...")
-    click.echo()
-
-    try:
-        result = asyncio.run(
-            tuner.optimize(
-                strategy_factory=create_strategy,
-                data_provider_factory=create_data_provider,
-                backtester_factory=create_backtester,
-                base_config=pnl_config,
-                param_ranges=param_ranges,
-                n_trials=effective_n_trials,
-                show_progress=verbose,
-                patience=effective_patience,
-                min_delta=min_delta,
-                extra_configs=pnl_configs[1:] if multi_period else None,
-                strategy_config=base_config,
-            )
-        )
-    except Exception as e:
-        click.echo(f"Error during optimization: {e}", err=True)
-        sys.exit(1)
+    tuner = _create_optimization_tuner(ctx)
+    result = _run_optimization(
+        ctx=ctx,
+        tuner=tuner,
+        factories=factories,
+        pnl_configs=pnl_configs,
+        base_config=base_config,
+    )
 
     # Display results
-    print_optimization_results(result, effective_objective)
+    print_optimization_results(result, ctx.settings.objective)
 
     # Write output if requested
-    if output:
-        output_path = Path(output)
-        try:
-            history = tuner.export_history()
-            history.save(output_path)
-            click.echo(f"Optimization history written to: {output_path}")
-        except Exception as e:
-            click.echo(f"Warning: Could not save history: {e}", err=True)
+    _write_optimization_history(ctx.output_path, tuner)

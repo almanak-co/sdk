@@ -1,5 +1,6 @@
 """Unit tests for backtest visualization module."""
 
+import logging
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -14,9 +15,14 @@ from almanak.framework.backtesting.visualization import (
     DistributionStats,
     DrawdownPeriod,
     TradeMarker,
+    _build_embedded_equity_chart_figure,
     _detect_drawdown_periods,
+    _entry_marker_colors,
+    _exit_marker_colors,
     _extract_trade_markers,
+    _interactive_marker_customdata,
     calculate_distribution_stats,
+    generate_equity_chart_html,
     plot_duration_scatter,
     plot_equity_curve,
     plot_equity_curve_interactive,
@@ -692,6 +698,30 @@ class TestTradeMarker:
         assert marker.pnl_usd is None
 
 
+def test_interactive_marker_customdata_preserves_zero_pnl() -> None:
+    markers = [
+        TradeMarker(
+            timestamp=datetime(2024, 1, 1),
+            value_usd=Decimal("10000"),
+            is_entry=False,
+            trade_type="LP_CLOSE",
+            pnl_usd=Decimal("0"),
+        ),
+        TradeMarker(
+            timestamp=datetime(2024, 1, 2),
+            value_usd=Decimal("10000"),
+            is_entry=False,
+            trade_type="LP_CLOSE",
+            pnl_usd=None,
+        ),
+    ]
+
+    assert _interactive_marker_customdata(markers) == [
+        {"type": "LP_CLOSE", "pnl": 0.0},
+        {"type": "LP_CLOSE", "pnl": None},
+    ]
+
+
 class TestExtractTradeMarkers:
     """Tests for _extract_trade_markers helper function."""
 
@@ -987,6 +1017,9 @@ class TestPlotEquityCurveInteractive:
 
         assert result.success is True
         assert len(result.trade_markers) == 1
+        content = output_path.read_text()
+        assert "triangle-up" in content
+        assert "SWAP" in content
 
     def test_interactive_with_benchmark(
         self, result_with_trades: BacktestResult, tmp_path: Path
@@ -1009,6 +1042,7 @@ class TestPlotEquityCurveInteractive:
         )
 
         assert result.success is True
+        assert "ETH Hold" in output_path.read_text()
 
     def test_interactive_with_drawdown(
         self, result_with_trades: BacktestResult, tmp_path: Path
@@ -1055,6 +1089,186 @@ class TestPlotEquityCurveInteractive:
         assert result.success is True
         assert result.file_path is not None
         assert result.file_path.suffix == ".html"
+
+    def test_interactive_default_path_sanitizes_deployment_id(
+        self, result_with_trades: BacktestResult, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test default HTML path sanitizes path separators."""
+        monkeypatch.chdir(tmp_path)
+        result_with_trades.deployment_id = "team/desk\\strategy"
+
+        result = plot_equity_curve_interactive(result_with_trades)
+
+        assert result.success is True
+        assert result.file_path is not None
+        assert result.file_path.name == "equity_curve_team_desk_strategy.html"
+
+    def test_interactive_exit_marker_trace_and_customdata(
+        self, result_with_trades: BacktestResult, tmp_path: Path
+    ) -> None:
+        """Test interactive chart emits exit marker trace details."""
+        output_path = tmp_path / "equity_exit_trades.html"
+        result_with_trades.trades.append(
+            TradeRecord(
+                timestamp=datetime(2024, 1, 4, 0, 0),
+                intent_type=IntentType.LP_CLOSE,
+                executed_price=Decimal("2100"),
+                fee_usd=Decimal("5"),
+                slippage_usd=Decimal("2"),
+                gas_cost_usd=Decimal("3"),
+                pnl_usd=Decimal("-50"),
+                success=True,
+            )
+        )
+
+        result = plot_equity_curve_interactive(
+            result_with_trades,
+            output_path=output_path,
+            show_trades=True,
+        )
+
+        assert result.success is True
+        assert len(result.trade_markers) == 2
+        content = output_path.read_text()
+        assert "triangle-down" in content
+        assert "LP_CLOSE" in content
+        assert "#F44336" in content
+
+
+class TestGenerateEquityChartHtml:
+    """Tests for embedded equity chart HTML generation."""
+
+    @pytest.fixture
+    def result_with_entry_and_exit(self) -> BacktestResult:
+        equity_curve = [
+            EquityPoint(timestamp=datetime(2024, 1, 1, 0, 0), value_usd=Decimal("10000")),
+            EquityPoint(timestamp=datetime(2024, 1, 2, 0, 0), value_usd=Decimal("10500")),
+            EquityPoint(timestamp=datetime(2024, 1, 3, 0, 0), value_usd=Decimal("9000")),
+            EquityPoint(timestamp=datetime(2024, 1, 4, 0, 0), value_usd=Decimal("10600")),
+        ]
+        trades = [
+            TradeRecord(
+                timestamp=datetime(2024, 1, 2, 0, 0),
+                intent_type=IntentType.LP_OPEN,
+                executed_price=Decimal("2000"),
+                fee_usd=Decimal("5"),
+                slippage_usd=Decimal("2"),
+                gas_cost_usd=Decimal("3"),
+                pnl_usd=None,
+                success=True,
+            ),
+            TradeRecord(
+                timestamp=datetime(2024, 1, 3, 0, 0),
+                intent_type=IntentType.LP_CLOSE,
+                executed_price=Decimal("1900"),
+                fee_usd=Decimal("5"),
+                slippage_usd=Decimal("2"),
+                gas_cost_usd=Decimal("3"),
+                pnl_usd=Decimal("-25"),
+                success=True,
+            ),
+        ]
+        return BacktestResult(
+            engine="pnl",
+            deployment_id="embedded_equity_test",
+            start_time=datetime(2024, 1, 1),
+            end_time=datetime(2024, 1, 4),
+            metrics=BacktestMetrics(total_trades=2),
+            equity_curve=equity_curve,
+            trades=trades,
+            initial_capital_usd=Decimal("10000"),
+            final_capital_usd=Decimal("10600"),
+        )
+
+    def test_embedded_equity_chart_html_success(self, result_with_entry_and_exit: BacktestResult) -> None:
+        html = generate_equity_chart_html(
+            result_with_entry_and_exit,
+            title="Embedded Equity",
+            show_drawdown=False,
+            show_trades=False,
+            height=321,
+        )
+
+        assert "plotly" in html.lower()
+        assert "equity-chart" in html
+        assert "Embedded Equity" in html
+        assert "<html" not in html.lower()
+
+    def test_embedded_equity_chart_empty_data_logs_warning(
+        self, empty_backtest_result: BacktestResult, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            html = generate_equity_chart_html(empty_backtest_result)
+
+        assert html == ""
+        assert "No equity curve data - cannot generate chart" in caplog.text
+
+    def test_embedded_equity_chart_figure_drawdown_shape(self, result_with_entry_and_exit: BacktestResult) -> None:
+        import plotly.graph_objects as go
+
+        fig = _build_embedded_equity_chart_figure(
+            go,
+            result_with_entry_and_exit,
+            title=None,
+            show_drawdown=True,
+            show_trades=False,
+            height=400,
+        )
+
+        payload = fig.to_plotly_json()
+        assert len(payload["layout"]["shapes"]) == 1
+        assert payload["layout"]["shapes"][0]["fillcolor"] == "rgba(244, 67, 54, 0.15)"
+        assert [trace["name"] for trace in payload["data"]] == ["Portfolio Value"]
+
+    def test_embedded_equity_chart_figure_trade_traces(self, result_with_entry_and_exit: BacktestResult) -> None:
+        import plotly.graph_objects as go
+
+        fig = _build_embedded_equity_chart_figure(
+            go,
+            result_with_entry_and_exit,
+            title="Trades",
+            show_drawdown=False,
+            show_trades=True,
+            height=222,
+        )
+
+        payload = fig.to_plotly_json()
+        assert [trace["name"] for trace in payload["data"]] == ["Portfolio Value", "Entry", "Exit"]
+        assert payload["data"][1]["marker"]["symbol"] == "triangle-up"
+        assert payload["data"][1]["marker"]["size"] == 10
+        assert payload["data"][1]["marker"]["color"] == ["#4CAF50"]
+        assert payload["data"][2]["marker"]["symbol"] == "triangle-down"
+        assert payload["data"][2]["marker"]["color"] == ["#F44336"]
+        assert payload["layout"]["height"] == 222
+        assert payload["layout"]["title"]["text"] == "Trades"
+
+    def test_embedded_equity_marker_color_rules(self) -> None:
+        markers = [
+            TradeMarker(
+                timestamp=datetime(2024, 1, 1),
+                value_usd=Decimal("10000"),
+                is_entry=True,
+                trade_type="LP_OPEN",
+                pnl_usd=None,
+            ),
+            TradeMarker(
+                timestamp=datetime(2024, 1, 2),
+                value_usd=Decimal("10000"),
+                is_entry=False,
+                trade_type="LP_CLOSE",
+                pnl_usd=None,
+            ),
+            TradeMarker(
+                timestamp=datetime(2024, 1, 3),
+                value_usd=Decimal("10000"),
+                is_entry=False,
+                trade_type="LP_CLOSE",
+                pnl_usd=Decimal("0"),
+            ),
+        ]
+
+        assert _entry_marker_colors([markers[0]]) == ["#4CAF50"]
+        assert _exit_marker_colors(markers[1:]) == ["#F44336", "#4CAF50"]
 
 
 class TestSaveChart:

@@ -1,20 +1,14 @@
-"""Regression tests for the auto-refresh elapsed-time gate in ``app.main``.
+"""Regression tests for the auto-refresh loop in ``app.main``.
 
-Covers the behavioural change from issue #1715 where the ``time.sleep(0.1)``
-guard was removed from the auto-refresh block. The remaining contract is:
+Covers the auto-refresh contract where Streamlit needs a scheduled rerun for
+the countdown to advance:
 
-    ``st.rerun()`` fires only when
-    ``(now - last_refresh).total_seconds() >= refresh_interval``.
-
-Below the threshold the function must leave ``last_refresh`` untouched and
-never call ``st.rerun()``. Above (or at) the threshold it updates
-``last_refresh`` to the current time and reruns once. Removing the sleep
-means there is no longer a second defence against tight rerun loops, so
-these tests nail the elapsed-time gate as the single source of truth.
+    * below threshold: keep ``last_refresh`` unchanged, sleep briefly, rerun
+    * at/above threshold: update ``last_refresh`` to now, rerun immediately
 
 The tests drive ``app.main`` via ``streamlit.testing.AppTest.from_function``
-with session state seeded before the first run, and spy on
-``streamlit.rerun`` so we can assert it was (or was not) called.
+with session state seeded before the first run, and spy on ``time.sleep`` plus
+``streamlit.rerun`` so we can assert the selected branch.
 
 ``AppTest.from_function`` pickles the driver and executes it as the whole
 script body - so all imports must live *inside* the driver function, not at
@@ -27,7 +21,7 @@ from streamlit.testing.v1 import AppTest
 
 
 def _drive_below_threshold() -> None:
-    """Elapsed < refresh_interval -> no rerun, last_refresh unchanged."""
+    """Elapsed < refresh_interval -> countdown rerun, last_refresh unchanged."""
     from datetime import datetime, timedelta
     from unittest.mock import MagicMock, patch
 
@@ -44,6 +38,7 @@ def _drive_below_threshold() -> None:
     # the module level so imports inside ``main`` see the stubs.
     fake_now = last_refresh + timedelta(seconds=5)  # 5 < 30, well below threshold
     fake_rerun = MagicMock()
+    fake_sleep = MagicMock()
 
     class _FakeDatetime(datetime):
         @classmethod
@@ -52,6 +47,7 @@ def _drive_below_threshold() -> None:
 
     with (
         patch("almanak.framework.dashboard.app.datetime", _FakeDatetime),
+        patch("almanak.framework.dashboard.app._sleep", fake_sleep),
         patch("streamlit.rerun", fake_rerun),
         patch(
             "almanak.framework.dashboard.app.get_all_strategies",
@@ -62,8 +58,10 @@ def _drive_below_threshold() -> None:
 
         main()
 
-    # Below threshold: must not rerun, must not mutate last_refresh.
-    assert fake_rerun.call_count == 0, "rerun() fired below threshold"
+    # Below threshold: rerun once to advance the visible countdown, but do
+    # not mutate last_refresh until the configured interval has elapsed.
+    fake_sleep.assert_called_once_with(1)
+    assert fake_rerun.call_count == 1, "rerun() should keep countdown moving below threshold"
     assert st.session_state.last_refresh == last_refresh, (
         "last_refresh was mutated despite elapsed < refresh_interval"
     )
@@ -85,6 +83,7 @@ def _drive_above_threshold() -> None:
 
     fake_now = last_refresh + timedelta(seconds=45)  # 45 >= 30
     fake_rerun = MagicMock()
+    fake_sleep = MagicMock()
 
     class _FakeDatetime(datetime):
         @classmethod
@@ -93,6 +92,7 @@ def _drive_above_threshold() -> None:
 
     with (
         patch("almanak.framework.dashboard.app.datetime", _FakeDatetime),
+        patch("almanak.framework.dashboard.app._sleep", fake_sleep),
         patch("streamlit.rerun", fake_rerun),
         patch(
             "almanak.framework.dashboard.app.get_all_strategies",
@@ -115,6 +115,7 @@ def _drive_above_threshold() -> None:
     assert st.session_state.last_refresh == fake_now, (
         "last_refresh was not bumped to the current time after rerun"
     )
+    fake_sleep.assert_not_called()
     # Interval must remain untouched.
     assert st.session_state.refresh_interval == 30
 
@@ -124,8 +125,8 @@ def _drive_above_threshold() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_auto_refresh_below_threshold_does_not_rerun() -> None:
-    """Regression for #1715: elapsed < interval -> no rerun, state untouched."""
+def test_auto_refresh_below_threshold_schedules_countdown_rerun() -> None:
+    """Elapsed < interval -> sleep/rerun, last_refresh untouched."""
     at = AppTest.from_function(_drive_below_threshold).run(timeout=30)
 
     # Any assertion failure inside the driver surfaces as ``at.exception``.
@@ -135,8 +136,8 @@ def test_auto_refresh_below_threshold_does_not_rerun() -> None:
 def test_auto_refresh_at_or_above_threshold_reruns_exactly_once_per_tick() -> None:
     """Regression for #1715: elapsed >= interval -> rerun, last_refresh bumped.
 
-    Proves the elapsed-time gate is the single defence against tight loops
-    now that the ``time.sleep(0.1)`` fallback has been removed.
+    Proves the elapsed-time gate selects the immediate-refresh branch without
+    the countdown sleep.
     """
     at = AppTest.from_function(_drive_above_threshold).run(timeout=30)
 

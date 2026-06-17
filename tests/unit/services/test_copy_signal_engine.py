@@ -2,6 +2,7 @@
 
 import time
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -518,6 +519,186 @@ class TestMultiActionExtraction:
         signals = engine.process_events([event])
         assert len(signals) == 1
         assert signals[0].action_type == "SWAP"
+
+
+class TestPerpExtractionDetails:
+    """Characterization tests for CopySignalEngine._extract_perp."""
+
+    def _info(self) -> ContractInfo:
+        return ContractInfo(
+            protocol="gmx_v2",
+            contract_type="exchange_router",
+            parser_module="test.module",
+            parser_class_name="TestParser",
+            supported_actions=["PERP_OPEN", "PERP_CLOSE"],
+        )
+
+    def _event(self) -> LeaderEvent:
+        return LeaderEvent(
+            chain="arbitrum",
+            block_number=100,
+            tx_hash="0xperp",
+            log_index=0,
+            timestamp=1_000,
+            from_address="0xLeader",
+            to_address="0xGmxRouter",
+            receipt={"logs": [{"topics": ["0xperp_topic"], "data": "0x1234"}]},
+        )
+
+    def _engine(self, price_fn=None) -> CopySignalEngine:
+        return CopySignalEngine(registry=ContractRegistry(), price_fn=price_fn)
+
+    def test_legacy_perp_open_takes_priority_over_parse_receipt(self):
+        """Legacy extractor data returns immediately and parse_receipt is not consulted."""
+
+        class Parser:
+            def extract_perp_open(self, receipt):
+                return {"size": "1000", "is_long": True, "leverage": "5", "position_id": 123}
+
+            def parse_receipt(self, receipt):
+                raise AssertionError("legacy path should return before parse_receipt")
+
+        signal = self._engine()._extract_perp(
+            Parser(),
+            self._info(),
+            self._event(),
+            current_time=1_010,
+            action_type="PERP_OPEN",
+            current_block=105,
+        )
+
+        assert signal is not None
+        assert signal.action_type == "PERP_OPEN"
+        assert signal.tokens == []
+        assert signal.amounts == {}
+        assert signal.metadata["perp_data"] == {"size": "1000", "is_long": True, "leverage": "5", "position_id": 123}
+        assert signal.metadata["leader_lag_blocks"] == 5
+        assert signal.action_payload.market == "0xGmxRouter"
+        assert signal.action_payload.size_usd == Decimal("1000")
+        assert signal.action_payload.is_long is True
+        assert signal.action_payload.leverage == Decimal("5")
+        assert signal.action_payload.position_id == "123"
+
+    def test_parse_receipt_perp_open_uses_position_increase_fields(self):
+        """parse_receipt position increases populate payload, metadata, amounts, and notional."""
+        position = SimpleNamespace(
+            market="ETH-USD",
+            collateral_token="USDC",
+            size_delta_usd="1500",
+            collateral_delta_amount="75",
+            is_long=0,
+            leverage="2.5",
+            key="pos-key",
+        )
+
+        class Parser:
+            def parse_receipt(self, receipt):
+                return SimpleNamespace(position_increases=[position], position_decreases=[])
+
+        def price_fn(token: str, chain: str) -> Decimal | None:
+            return Decimal("1") if token == "USDC" and chain == "arbitrum" else None
+
+        signal = self._engine(price_fn=price_fn)._extract_perp(
+            Parser(),
+            self._info(),
+            self._event(),
+            current_time=1_010,
+            action_type="PERP_OPEN",
+        )
+
+        assert signal is not None
+        assert signal.tokens == ["USDC"]
+        assert signal.amounts == {"USDC": Decimal("75")}
+        assert signal.amounts_usd == {"USDC": Decimal("75"), "NOTIONAL_USD": Decimal("1500")}
+        assert signal.metadata["position"] == str(position)
+        assert signal.metadata["notional_usd"] == "1500"
+        assert signal.action_payload.market == "ETH-USD"
+        assert signal.action_payload.collateral_token == "USDC"
+        assert signal.action_payload.collateral_amount == Decimal("75")
+        assert signal.action_payload.size_usd == Decimal("1500")
+        assert signal.action_payload.is_long is False
+        assert signal.action_payload.leverage == Decimal("2.5")
+        assert signal.action_payload.position_id == "pos-key"
+
+    def test_parse_receipt_perp_close_uses_fallback_fields_and_position_id_extractor(self):
+        """PERP_CLOSE uses decrease data, fallback amount fields, and safe position id extraction."""
+        position = SimpleNamespace(
+            market=None,
+            collateral_token="USDC",
+            size_in_usd="900",
+            collateral_amount="12",
+            is_long=True,
+            leverage="1.5",
+        )
+
+        class Parser:
+            def parse_receipt(self, receipt):
+                return SimpleNamespace(position_increases=[], position_decreases=[position])
+
+            def extract_position_id(self, receipt):
+                return 987
+
+        signal = self._engine()._extract_perp(
+            Parser(),
+            self._info(),
+            self._event(),
+            current_time=1_010,
+            action_type="PERP_CLOSE",
+        )
+
+        assert signal is not None
+        assert signal.action_type == "PERP_CLOSE"
+        assert signal.amounts == {"USDC": Decimal("12")}
+        assert signal.amounts_usd == {"NOTIONAL_USD": Decimal("900")}
+        assert signal.action_payload.market == "0xGmxRouter"
+        assert signal.action_payload.collateral_amount == Decimal("12")
+        assert signal.action_payload.size_usd == Decimal("900")
+        assert signal.action_payload.is_long is True
+        assert signal.action_payload.position_id == "987"
+
+    def test_perp_price_extractor_fallback_requires_detected_price(self):
+        """Older parser APIs return None on missing price and build a sparse signal when price exists."""
+
+        class MissingEntryPriceParser:
+            def extract_entry_price(self, receipt):
+                return None
+
+        class ExitPriceParser:
+            def extract_exit_price(self, receipt):
+                return Decimal("2500")
+
+            def extract_position_id(self, receipt):
+                return "close-id"
+
+        engine = self._engine()
+
+        assert (
+            engine._extract_perp(
+                MissingEntryPriceParser(),
+                self._info(),
+                self._event(),
+                current_time=1_010,
+                action_type="PERP_OPEN",
+            )
+            is None
+        )
+
+        signal = engine._extract_perp(
+            ExitPriceParser(),
+            self._info(),
+            self._event(),
+            current_time=1_010,
+            action_type="PERP_CLOSE",
+        )
+
+        assert signal is not None
+        assert signal.action_type == "PERP_CLOSE"
+        assert signal.tokens == []
+        assert signal.amounts == {}
+        assert signal.amounts_usd == {}
+        assert signal.metadata == {"position": None, "notional_usd": None}
+        assert signal.action_payload.market == "0xGmxRouter"
+        assert signal.action_payload.position_id == "close-id"
 
 
 class TestLeaderLagBlocks:

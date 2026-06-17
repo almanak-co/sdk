@@ -152,6 +152,69 @@ ERROR_MESSAGE_KEYWORDS: dict[str, StuckReason] = {
 }
 
 
+def _detect_error_type_reason(error_context: ErrorContext) -> StuckReason | None:
+    return ERROR_TYPE_TO_REASON.get(error_context.error_type)
+
+
+def _detect_error_message_reason(error_context: ErrorContext) -> StuckReason | None:
+    error_msg_lower = error_context.error_message.lower()
+    for keyword, reason in ERROR_MESSAGE_KEYWORDS.items():
+        if keyword in error_msg_lower:
+            return reason
+    return None
+
+
+def _is_below_required(
+    value: Decimal | None,
+    required: Decimal | None,
+) -> bool:
+    return value is not None and required is not None and value < required
+
+
+def _detect_error_context_reason(error_context: ErrorContext) -> StuckReason | None:
+    if _is_below_required(error_context.allowance, error_context.required_allowance):
+        return StuckReason.ALLOWANCE_MISSING
+
+    if _is_below_required(error_context.balance, error_context.required_balance):
+        return StuckReason.INSUFFICIENT_BALANCE
+
+    if error_context.slippage_actual is not None and error_context.slippage_max is not None:
+        if error_context.slippage_actual > error_context.slippage_max:
+            return StuckReason.SLIPPAGE_EXCEEDED
+
+    if error_context.oracle_timestamp is not None:
+        age = (datetime.now(UTC) - error_context.oracle_timestamp).total_seconds()
+        if age > 3600:  # Oracle older than 1 hour
+            return StuckReason.ORACLE_STALE
+
+    if error_context.rpc_error:
+        return StuckReason.RPC_FAILURE
+
+    if error_context.protocol_status == "paused":
+        return StuckReason.PROTOCOL_PAUSED
+
+    if error_context.revert_reason:
+        return StuckReason.TRANSACTION_REVERTED
+
+    return None
+
+
+def _detect_strategy_state_reason(strategy_state: StrategyState) -> StuckReason | None:
+    if (
+        strategy_state.pending_tx_hash
+        and strategy_state.pending_tx_gas_price
+        and strategy_state.current_gas_price
+        and strategy_state.pending_tx_gas_price < strategy_state.current_gas_price
+    ):
+        return StuckReason.GAS_PRICE_BLOCKED
+
+    if strategy_state.pool_liquidity_usd is not None:
+        if strategy_state.pool_liquidity_usd < Decimal("1000"):
+            return StuckReason.POOL_LIQUIDITY_LOW
+
+    return None
+
+
 class OperatorCardGenerator:
     """Generates OperatorCards from strategy state and events.
 
@@ -244,7 +307,7 @@ class OperatorCardGenerator:
             auto_remediation=auto_remediation,
         )
 
-    def _detect_reason(  # noqa: C901
+    def _detect_reason(
         self,
         strategy_state: StrategyState,
         error_context: ErrorContext | None,
@@ -258,54 +321,15 @@ class OperatorCardGenerator:
         4. Default to UNKNOWN
         """
         if error_context:
-            # Try exact match on error type
-            if error_context.error_type in ERROR_TYPE_TO_REASON:
-                return ERROR_TYPE_TO_REASON[error_context.error_type]
-
-            # Try keyword match in error message
-            error_msg_lower = error_context.error_message.lower()
-            for keyword, reason in ERROR_MESSAGE_KEYWORDS.items():
-                if keyword in error_msg_lower:
+            for detector in (
+                _detect_error_type_reason,
+                _detect_error_message_reason,
+                _detect_error_context_reason,
+            ):
+                if reason := detector(error_context):
                     return reason
 
-            # Infer from context fields
-            if error_context.allowance is not None and error_context.required_allowance is not None:
-                if error_context.allowance < error_context.required_allowance:
-                    return StuckReason.ALLOWANCE_MISSING
-
-            if error_context.balance is not None and error_context.required_balance is not None:
-                if error_context.balance < error_context.required_balance:
-                    return StuckReason.INSUFFICIENT_BALANCE
-
-            if error_context.slippage_actual is not None and error_context.slippage_max is not None:
-                if error_context.slippage_actual > error_context.slippage_max:
-                    return StuckReason.SLIPPAGE_EXCEEDED
-
-            if error_context.oracle_timestamp is not None:
-                age = (datetime.now(UTC) - error_context.oracle_timestamp).total_seconds()
-                if age > 3600:  # Oracle older than 1 hour
-                    return StuckReason.ORACLE_STALE
-
-            if error_context.rpc_error:
-                return StuckReason.RPC_FAILURE
-
-            if error_context.protocol_status == "paused":
-                return StuckReason.PROTOCOL_PAUSED
-
-            if error_context.revert_reason:
-                return StuckReason.TRANSACTION_REVERTED
-
-        # Check strategy state for clues
-        if strategy_state.pending_tx_hash and strategy_state.pending_tx_gas_price:
-            if strategy_state.current_gas_price:
-                if strategy_state.pending_tx_gas_price < strategy_state.current_gas_price:
-                    return StuckReason.GAS_PRICE_BLOCKED
-
-        if strategy_state.pool_liquidity_usd is not None:
-            if strategy_state.pool_liquidity_usd < Decimal("1000"):
-                return StuckReason.POOL_LIQUIDITY_LOW
-
-        return StuckReason.UNKNOWN
+        return _detect_strategy_state_reason(strategy_state) or StuckReason.UNKNOWN
 
     def _build_position_summary(self, strategy_state: StrategyState) -> PositionSummary:
         """Build a PositionSummary from strategy state."""

@@ -115,7 +115,22 @@ def _row_timestamp_epoch(row: dict[str, Any]) -> int:
         return 0
 
 
-# crap-allowlist: VIB-4722 only collapsed accounting event identity mapping to deployment_id.
+def _row_text(row: dict[str, Any], key: str) -> Any:
+    return row.get(key) or ""
+
+
+def _row_int(row: dict[str, Any], key: str, default: int = 0) -> int:
+    return int(row.get(key) or default)
+
+
+def _item_text(row: Any, key: str, default: str = "") -> Any:
+    return row[key] or default
+
+
+def _item_int(row: Any, key: str, default: int = 0) -> int:
+    return int(row[key] or default)
+
+
 def _pg_row_to_accounting_event(row: Any) -> gateway_pb2.AccountingEvent:
     """Convert one Postgres asyncpg.Record to the proto wire shape.
 
@@ -124,23 +139,93 @@ def _pg_row_to_accounting_event(row: Any) -> gateway_pb2.AccountingEvent:
     contract. VIB-4721/4722: ``accounting_events`` has a single identity
     column, ``deployment_id``.
     """
-    payload_text = row["payload_text"] or "{}"
+    payload_text = _item_text(row, "payload_text", "{}")
     return gateway_pb2.AccountingEvent(
-        id=row["id"] or "",
-        deployment_id=row["deployment_id"] or "",
-        cycle_id=row["cycle_id"] or "",
-        execution_mode=row["execution_mode"] or "",
-        timestamp=int(row["ts_epoch"] or 0),
-        chain=row["chain"] or "",
-        protocol=row["protocol"] or "",
-        wallet_address=row["wallet_address"] or "",
-        event_type=row["event_type"] or "",
-        position_key=row["position_key"] or "",
-        ledger_entry_id=row["ledger_entry_id"] or "",
-        tx_hash=row["tx_hash"] or "",
-        confidence=row["confidence"] or "",
+        id=_item_text(row, "id"),
+        deployment_id=_item_text(row, "deployment_id"),
+        cycle_id=_item_text(row, "cycle_id"),
+        execution_mode=_item_text(row, "execution_mode"),
+        timestamp=_item_int(row, "ts_epoch"),
+        chain=_item_text(row, "chain"),
+        protocol=_item_text(row, "protocol"),
+        wallet_address=_item_text(row, "wallet_address"),
+        event_type=_item_text(row, "event_type"),
+        position_key=_item_text(row, "position_key"),
+        ledger_entry_id=_item_text(row, "ledger_entry_id"),
+        tx_hash=_item_text(row, "tx_hash"),
+        confidence=_item_text(row, "confidence"),
         payload_json=payload_text.encode("utf-8"),
-        schema_version=int(row["schema_version"] or 1),
+        schema_version=_item_int(row, "schema_version", 1),
+    )
+
+
+def _ledger_json_bytes(value: str | bytes | None) -> bytes:
+    if not value:
+        return b""
+    return value if isinstance(value, bytes) else value.encode("utf-8")
+
+
+def _set_ledger_slippage(entry: gateway_pb2.LedgerEntryData, slippage_raw: Any) -> None:
+    if slippage_raw is not None:
+        entry.slippage_bps = float(slippage_raw)
+
+
+def _ledger_entry_from_row(
+    row: Any,
+    *,
+    timestamp: int,
+    extracted_data_key: str,
+    price_inputs_key: str,
+    pre_state_key: str,
+    post_state_key: str,
+) -> gateway_pb2.LedgerEntryData:
+    entry = gateway_pb2.LedgerEntryData(
+        id=row.get("id") or "",
+        cycle_id=row.get("cycle_id") or "",
+        deployment_id=row.get("deployment_id") or "",
+        execution_mode=row.get("execution_mode") or "",
+        timestamp=timestamp,
+        intent_type=row.get("intent_type") or "",
+        token_in=row.get("token_in") or "",
+        amount_in=row.get("amount_in") or "",
+        token_out=row.get("token_out") or "",
+        amount_out=row.get("amount_out") or "",
+        effective_price=row.get("effective_price") or "",
+        gas_used=int(row.get("gas_used") or 0),
+        gas_usd=row.get("gas_usd") or "",
+        tx_hash=row.get("tx_hash") or "",
+        chain=row.get("chain") or "",
+        protocol=row.get("protocol") or "",
+        success=bool(row.get("success")),
+        error=row.get("error") or "",
+        extracted_data_json=_ledger_json_bytes(row.get(extracted_data_key)),
+        price_inputs_json=_ledger_json_bytes(row.get(price_inputs_key)),
+        pre_state_json=_ledger_json_bytes(row.get(pre_state_key)),
+        post_state_json=_ledger_json_bytes(row.get(post_state_key)),
+    )
+    _set_ledger_slippage(entry, row.get("slippage_bps"))
+    return entry
+
+
+def _pg_ledger_entry_row_to_proto(row: Any) -> gateway_pb2.LedgerEntryData:
+    return _ledger_entry_from_row(
+        row,
+        timestamp=int(row.get("ts_epoch") or 0),
+        extracted_data_key="extracted_data_text",
+        price_inputs_key="price_inputs_text",
+        pre_state_key="pre_state_text",
+        post_state_key="post_state_text",
+    )
+
+
+def _sqlite_ledger_entry_row_to_proto(row: dict[str, Any]) -> gateway_pb2.LedgerEntryData:
+    return _ledger_entry_from_row(
+        row,
+        timestamp=_row_timestamp_epoch(row),
+        extracted_data_key="extracted_data_json",
+        price_inputs_key="price_inputs_json",
+        pre_state_key="pre_state_json",
+        post_state_key="post_state_json",
     )
 
 
@@ -1120,7 +1205,92 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details("internal server error")
             return gateway_pb2.SaveMetricsResponse(success=False, error="internal server error")
 
-    # crap-allowlist: VIB-4722 only unified deployment identity fields in the existing metrics RPC.
+    @staticmethod
+    def _pg_portfolio_metrics_to_proto(row: Any) -> gateway_pb2.PortfolioMetricsData:
+        return gateway_pb2.PortfolioMetricsData(
+            initial_value_usd=row["initial_value_usd"],
+            initial_timestamp=int(row["initial_timestamp"].timestamp()),
+            deposits_usd=row["deposits_usd"] or "0",
+            withdrawals_usd=row["withdrawals_usd"] or "0",
+            gas_spent_usd=row["gas_spent_usd"] or "0",
+            updated_at=int(row["updated_at"].timestamp()),
+            found=True,
+            deployment_id=row["deployment_id"] or "",
+            cycle_id=row["cycle_id"] or "",
+            execution_mode=row["execution_mode"] or "",
+            is_complete=bool(row["is_complete"]) if row["is_complete"] is not None else True,
+        )
+
+    @staticmethod
+    def _sqlite_portfolio_metrics_to_proto(metrics: Any) -> gateway_pb2.PortfolioMetricsData:
+        return gateway_pb2.PortfolioMetricsData(
+            initial_value_usd=str(metrics.initial_value_usd),
+            initial_timestamp=int(metrics.timestamp.timestamp()),
+            deposits_usd=str(metrics.deposits_usd),
+            withdrawals_usd=str(metrics.withdrawals_usd),
+            gas_spent_usd=str(metrics.gas_spent_usd),
+            updated_at=int(metrics.timestamp.timestamp()),
+            found=True,
+            deployment_id=metrics.deployment_id,
+            cycle_id=getattr(metrics, "cycle_id", "") or "",
+            execution_mode=getattr(metrics, "execution_mode", "") or "",
+            is_complete=getattr(metrics, "is_complete", True),
+        )
+
+    def _portfolio_metrics_error_response(
+        self,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.PortfolioMetricsData:
+        context.set_code(grpc.StatusCode.INTERNAL)
+        context.set_details("internal server error")
+        return gateway_pb2.PortfolioMetricsData(found=False)
+
+    async def _get_portfolio_metrics_pg(
+        self,
+        deployment_id: str,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.PortfolioMetricsData:
+        try:
+            row = await self._snapshot_fetchrow(
+                """
+                SELECT initial_value_usd, initial_timestamp,
+                       deposits_usd, withdrawals_usd, gas_spent_usd,
+                       deployment_id, cycle_id, execution_mode, is_complete,
+                       updated_at
+                FROM portfolio_metrics
+                WHERE deployment_id = $1
+                """,
+                deployment_id,
+            )
+            if row is None:
+                return gateway_pb2.PortfolioMetricsData(found=False)
+            return self._pg_portfolio_metrics_to_proto(row)
+        except Exception as e:
+            logger.error("GetPortfolioMetrics failed for %s: %s", deployment_id, e)
+            return self._portfolio_metrics_error_response(context)
+
+    async def _get_portfolio_metrics_sqlite(
+        self,
+        deployment_id: str,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.PortfolioMetricsData:
+        # SQLite mode (local dev) — delegate to StateManager's SQLiteStore.
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+
+            warm = self._state_manager.warm_backend
+            if not warm or not hasattr(warm, "get_portfolio_metrics"):
+                return gateway_pb2.PortfolioMetricsData(found=False)
+
+            metrics = await warm.get_portfolio_metrics(deployment_id)
+            if metrics is None:
+                return gateway_pb2.PortfolioMetricsData(found=False)
+            return self._sqlite_portfolio_metrics_to_proto(metrics)
+        except Exception as e:
+            logger.error("GetPortfolioMetrics (SQLite) failed for %s: %s", deployment_id, e)
+            return self._portfolio_metrics_error_response(context)
+
     async def GetPortfolioMetrics(
         self,
         request: gateway_pb2.GetMetricsRequest,
@@ -1137,72 +1307,8 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         await self._ensure_snapshot_pool()
 
         if self._snapshot_pool is not None:
-            # PostgreSQL mode (deployed)
-            try:
-                row = await self._snapshot_fetchrow(
-                    """
-                    SELECT initial_value_usd, initial_timestamp,
-                           deposits_usd, withdrawals_usd, gas_spent_usd,
-                           deployment_id, cycle_id, execution_mode, is_complete,
-                           updated_at
-                    FROM portfolio_metrics
-                    WHERE deployment_id = $1
-                    """,
-                    deployment_id,
-                )
-                if row is None:
-                    return gateway_pb2.PortfolioMetricsData(found=False)
-
-                return gateway_pb2.PortfolioMetricsData(
-                    initial_value_usd=row["initial_value_usd"],
-                    initial_timestamp=int(row["initial_timestamp"].timestamp()),
-                    deposits_usd=row["deposits_usd"] or "0",
-                    withdrawals_usd=row["withdrawals_usd"] or "0",
-                    gas_spent_usd=row["gas_spent_usd"] or "0",
-                    updated_at=int(row["updated_at"].timestamp()),
-                    found=True,
-                    deployment_id=row["deployment_id"] or "",
-                    cycle_id=row["cycle_id"] or "",
-                    execution_mode=row["execution_mode"] or "",
-                    is_complete=bool(row["is_complete"]) if row["is_complete"] is not None else True,
-                )
-            except Exception as e:
-                logger.error("GetPortfolioMetrics failed for %s: %s", deployment_id, e)
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("internal server error")
-                return gateway_pb2.PortfolioMetricsData(found=False)
-        else:
-            # SQLite mode (local dev) — delegate to StateManager's SQLiteStore
-            try:
-                await self._ensure_initialized()
-                assert self._state_manager is not None
-
-                warm = self._state_manager.warm_backend
-                if warm and hasattr(warm, "get_portfolio_metrics"):
-                    metrics = await warm.get_portfolio_metrics(deployment_id)
-                    if metrics is None:
-                        return gateway_pb2.PortfolioMetricsData(found=False)
-
-                    return gateway_pb2.PortfolioMetricsData(
-                        initial_value_usd=str(metrics.initial_value_usd),
-                        initial_timestamp=int(metrics.timestamp.timestamp()),
-                        deposits_usd=str(metrics.deposits_usd),
-                        withdrawals_usd=str(metrics.withdrawals_usd),
-                        gas_spent_usd=str(metrics.gas_spent_usd),
-                        updated_at=int(metrics.timestamp.timestamp()),
-                        found=True,
-                        deployment_id=metrics.deployment_id,
-                        cycle_id=getattr(metrics, "cycle_id", "") or "",
-                        execution_mode=getattr(metrics, "execution_mode", "") or "",
-                        is_complete=getattr(metrics, "is_complete", True),
-                    )
-
-                return gateway_pb2.PortfolioMetricsData(found=False)
-            except Exception as e:
-                logger.error("GetPortfolioMetrics (SQLite) failed for %s: %s", deployment_id, e)
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("internal server error")
-                return gateway_pb2.PortfolioMetricsData(found=False)
+            return await self._get_portfolio_metrics_pg(deployment_id, context)
+        return await self._get_portfolio_metrics_sqlite(deployment_id, context)
 
     # =========================================================================
     # Transaction Ledger RPC (VIB-3201)
@@ -2269,7 +2375,108 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     # Read accounting events RPC (VIB-3503 Part 2c)
     # =========================================================================
 
-    # crap-allowlist: VIB-4722 only unified deployment identity fields in the existing accounting-events RPC.
+    def _invalid_get_accounting_events_response(
+        self,
+        context: grpc.aio.ServicerContext,
+        message: str,
+    ) -> gateway_pb2.GetAccountingEventsResponse:
+        context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+        context.set_details(message)
+        return gateway_pb2.GetAccountingEventsResponse(events=[])
+
+    def _validate_get_accounting_events_request(
+        self,
+        request: gateway_pb2.GetAccountingEventsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> str | gateway_pb2.GetAccountingEventsResponse:
+        try:
+            validate_deployment_id(request.deployment_id)
+        except ValidationError as e:
+            return self._invalid_get_accounting_events_response(context, str(e))
+
+        deployment_id = request.deployment_id.strip() if request.deployment_id else ""
+        if not deployment_id:
+            return self._invalid_get_accounting_events_response(context, "deployment_id is required")
+
+        # Reject negative limit / since_timestamp at the boundary so PG and
+        # SQLite paths never disagree on what they accept. limit=0 is the
+        # documented sentinel for "no limit"; negatives have no defined meaning.
+        if request.limit < 0:
+            return self._invalid_get_accounting_events_response(context, "limit must be >= 0")
+        if request.since_timestamp < 0:
+            return self._invalid_get_accounting_events_response(context, "since_timestamp must be >= 0")
+        return deployment_id
+
+    async def _get_accounting_events_pg(
+        self,
+        request: gateway_pb2.GetAccountingEventsRequest,
+        deployment_id: str,
+    ) -> gateway_pb2.GetAccountingEventsResponse:
+        try:
+            rows = await self._snapshot_fetch(
+                """
+                SELECT id, deployment_id, cycle_id, execution_mode,
+                       EXTRACT(EPOCH FROM timestamp)::bigint AS ts_epoch,
+                       chain, protocol, wallet_address, event_type,
+                       position_key, ledger_entry_id, tx_hash, confidence,
+                       payload_json::text AS payload_text, schema_version
+                FROM accounting_events
+                WHERE deployment_id = $1
+                  AND ($2 = '' OR position_key = $2)
+                  AND ($3 = '' OR event_type = $3)
+                  AND ($4 = 0 OR timestamp >= to_timestamp($4))
+                ORDER BY timestamp ASC
+                LIMIT NULLIF($5, 0)
+                """,
+                deployment_id,
+                request.position_key,
+                request.event_type,
+                request.since_timestamp,
+                request.limit,
+            )
+            events = [_pg_row_to_accounting_event(r) for r in rows]
+            return gateway_pb2.GetAccountingEventsResponse(events=events)
+        except Exception as e:
+            logger.warning("GetAccountingEvents PG failed for deployment=%s: %s", deployment_id, e)
+            return gateway_pb2.GetAccountingEventsResponse(events=[])
+
+    @staticmethod
+    def _filter_sqlite_accounting_event_rows(
+        rows: list[dict[str, Any]],
+        request: gateway_pb2.GetAccountingEventsRequest,
+    ) -> list[dict[str, Any]]:
+        if request.event_type:
+            rows = [r for r in rows if r.get("event_type") == request.event_type]
+        if request.since_timestamp > 0:
+            rows = [r for r in rows if _row_timestamp_epoch(r) >= request.since_timestamp]
+        if request.limit > 0:
+            rows = rows[: request.limit]
+        return rows
+
+    async def _get_accounting_events_sqlite(
+        self,
+        request: gateway_pb2.GetAccountingEventsRequest,
+        deployment_id: str,
+    ) -> gateway_pb2.GetAccountingEventsResponse:
+        # SQLite mode (local dev) — delegate to the warm backend's sync primitive.
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "get_accounting_events_sync"):
+                return gateway_pb2.GetAccountingEventsResponse(events=[])
+
+            rows = warm.get_accounting_events_sync(
+                deployment_id=deployment_id,
+                position_key=request.position_key or None,
+            )
+            rows = self._filter_sqlite_accounting_event_rows(rows, request)
+            events = [_sqlite_row_to_accounting_event(r) for r in rows]
+            return gateway_pb2.GetAccountingEventsResponse(events=events)
+        except Exception as e:
+            logger.warning("GetAccountingEvents SQLite failed: %s", e)
+            return gateway_pb2.GetAccountingEventsResponse(events=[])
+
     async def GetAccountingEvents(
         self,
         request: gateway_pb2.GetAccountingEventsRequest,
@@ -2293,96 +2500,15 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         means "no limit" -- FIFO reconstruction needs the full history
         from the opening event forward.
         """
-        try:
-            validate_deployment_id(request.deployment_id)
-        except ValidationError as e:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(e))
-            return gateway_pb2.GetAccountingEventsResponse(events=[])
-
-        deployment_id = request.deployment_id.strip() if request.deployment_id else ""
-        if not deployment_id:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("deployment_id is required")
-            return gateway_pb2.GetAccountingEventsResponse(events=[])
-
-        # Reject negative limit / since_timestamp at the boundary so PG and
-        # SQLite paths never disagree on what they accept. limit=0 is the
-        # documented sentinel for "no limit"; negatives have no defined
-        # meaning and would silently fall through to backend-specific
-        # behaviour (PG: empty result for limit=-1; SQLite: list[:negative]
-        # slices from the end).
-        if request.limit < 0:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("limit must be >= 0")
-            return gateway_pb2.GetAccountingEventsResponse(events=[])
-
-        if request.since_timestamp < 0:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("since_timestamp must be >= 0")
-            return gateway_pb2.GetAccountingEventsResponse(events=[])
+        validated = self._validate_get_accounting_events_request(request, context)
+        if isinstance(validated, gateway_pb2.GetAccountingEventsResponse):
+            return validated
+        deployment_id = validated
 
         await self._ensure_snapshot_pool()
-
         if self._snapshot_pool is not None:
-            try:
-                rows = await self._snapshot_fetch(
-                    """
-                    SELECT id, deployment_id, cycle_id, execution_mode,
-                           EXTRACT(EPOCH FROM timestamp)::bigint AS ts_epoch,
-                           chain, protocol, wallet_address, event_type,
-                           position_key, ledger_entry_id, tx_hash, confidence,
-                           payload_json::text AS payload_text, schema_version
-                    FROM accounting_events
-                    WHERE deployment_id = $1
-                      AND ($2 = '' OR position_key = $2)
-                      AND ($3 = '' OR event_type = $3)
-                      AND ($4 = 0 OR timestamp >= to_timestamp($4))
-                    ORDER BY timestamp ASC
-                    LIMIT NULLIF($5, 0)
-                    """,
-                    deployment_id,
-                    request.position_key,
-                    request.event_type,
-                    request.since_timestamp,
-                    request.limit,
-                )
-                events = [_pg_row_to_accounting_event(r) for r in rows]
-                return gateway_pb2.GetAccountingEventsResponse(events=events)
-            except Exception as e:
-                logger.warning("GetAccountingEvents PG failed for deployment=%s: %s", deployment_id, e)
-                return gateway_pb2.GetAccountingEventsResponse(events=[])
-
-        # SQLite mode (local dev) — delegate to the warm backend's sync primitive.
-        try:
-            await self._ensure_initialized()
-            assert self._state_manager is not None
-            warm = self._state_manager.warm_backend
-            if warm is None or not hasattr(warm, "get_accounting_events_sync"):
-                return gateway_pb2.GetAccountingEventsResponse(events=[])
-
-            position_key_filter = request.position_key or None
-            rows = warm.get_accounting_events_sync(
-                deployment_id=deployment_id,
-                position_key=position_key_filter,
-            )
-
-            # Apply event_type / since_timestamp / limit in Python -- the SQLite
-            # primitive only supports deployment_id + position_key. Pushing the
-            # other filters into SQLite is a separate concern; doing them in
-            # Python is fine because local-mode datasets are small.
-            if request.event_type:
-                rows = [r for r in rows if r.get("event_type") == request.event_type]
-            if request.since_timestamp > 0:
-                rows = [r for r in rows if _row_timestamp_epoch(r) >= request.since_timestamp]
-            if request.limit > 0:
-                rows = rows[: request.limit]
-
-            events = [_sqlite_row_to_accounting_event(r) for r in rows]
-            return gateway_pb2.GetAccountingEventsResponse(events=events)
-        except Exception as e:
-            logger.warning("GetAccountingEvents SQLite failed: %s", e)
-            return gateway_pb2.GetAccountingEventsResponse(events=[])
+            return await self._get_accounting_events_pg(request, deployment_id)
+        return await self._get_accounting_events_sqlite(request, deployment_id)
 
     # =========================================================================
     # Accounting Outbox RPCs — crash-safe durability for AccountingProcessor
@@ -2751,7 +2877,45 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             context.set_details("internal server error")
             return gateway_pb2.HasAccountingEventsForLedgerResponse(has_events=False)
 
-    # crap-allowlist: VIB-4722 only unified deployment identity fields in the existing ledger-entry RPC.
+    async def _get_ledger_entry_pg_response(
+        self,
+        ledger_entry_id: str,
+    ) -> gateway_pb2.GetLedgerEntryResponse:
+        row = await self._snapshot_fetchrow(
+            """
+            SELECT id, cycle_id, deployment_id, execution_mode,
+                   EXTRACT(EPOCH FROM timestamp)::bigint AS ts_epoch,
+                   intent_type, token_in, amount_in, token_out, amount_out,
+                   effective_price, slippage_bps, gas_used, gas_usd,
+                   tx_hash, chain, protocol, success, error,
+                   extracted_data_json::text AS extracted_data_text,
+                   price_inputs_json::text  AS price_inputs_text,
+                   pre_state_json::text      AS pre_state_text,
+                   post_state_json::text     AS post_state_text
+            FROM transaction_ledger
+            WHERE id = $1
+            LIMIT 1
+            """,
+            ledger_entry_id,
+        )
+        if row is None:
+            return gateway_pb2.GetLedgerEntryResponse(found=False)
+        return gateway_pb2.GetLedgerEntryResponse(found=True, entry=_pg_ledger_entry_row_to_proto(row))
+
+    async def _get_ledger_entry_sqlite_response(
+        self,
+        ledger_entry_id: str,
+    ) -> gateway_pb2.GetLedgerEntryResponse:
+        await self._ensure_initialized()
+        assert self._state_manager is not None
+        warm = self._state_manager.warm_backend
+        if warm is None or not hasattr(warm, "get_ledger_entry_by_id"):
+            return gateway_pb2.GetLedgerEntryResponse(found=False)
+        row = await warm.get_ledger_entry_by_id(ledger_entry_id)
+        if row is None:
+            return gateway_pb2.GetLedgerEntryResponse(found=False)
+        return gateway_pb2.GetLedgerEntryResponse(found=True, entry=_sqlite_ledger_entry_row_to_proto(row))
+
     async def GetLedgerEntry(
         self,
         request: gateway_pb2.GetLedgerEntryRequest,
@@ -2772,57 +2936,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
         if self._snapshot_pool is not None:
             try:
-                row = await self._snapshot_fetchrow(
-                    """
-                    SELECT id, cycle_id, deployment_id, execution_mode,
-                           EXTRACT(EPOCH FROM timestamp)::bigint AS ts_epoch,
-                           intent_type, token_in, amount_in, token_out, amount_out,
-                           effective_price, slippage_bps, gas_used, gas_usd,
-                           tx_hash, chain, protocol, success, error,
-                           extracted_data_json::text AS extracted_data_text,
-                           price_inputs_json::text  AS price_inputs_text,
-                           pre_state_json::text      AS pre_state_text,
-                           post_state_json::text     AS post_state_text
-                    FROM transaction_ledger
-                    WHERE id = $1
-                    LIMIT 1
-                    """,
-                    ledger_entry_id,
-                )
-                if row is None:
-                    return gateway_pb2.GetLedgerEntryResponse(found=False)
-
-                def _opt_bytes(text: str | None) -> bytes:
-                    return text.encode("utf-8") if text else b""
-
-                slippage_raw = row.get("slippage_bps")
-                entry = gateway_pb2.LedgerEntryData(
-                    id=row["id"] or "",
-                    cycle_id=row["cycle_id"] or "",
-                    deployment_id=row["deployment_id"] or "",
-                    execution_mode=row["execution_mode"] or "",
-                    timestamp=int(row["ts_epoch"] or 0),
-                    intent_type=row["intent_type"] or "",
-                    token_in=row["token_in"] or "",
-                    amount_in=row["amount_in"] or "",
-                    token_out=row["token_out"] or "",
-                    amount_out=row["amount_out"] or "",
-                    effective_price=row["effective_price"] or "",
-                    gas_used=int(row["gas_used"] or 0),
-                    gas_usd=row["gas_usd"] or "",
-                    tx_hash=row["tx_hash"] or "",
-                    chain=row["chain"] or "",
-                    protocol=row["protocol"] or "",
-                    success=bool(row["success"]),
-                    error=row["error"] or "",
-                    extracted_data_json=_opt_bytes(row.get("extracted_data_text")),
-                    price_inputs_json=_opt_bytes(row.get("price_inputs_text")),
-                    pre_state_json=_opt_bytes(row.get("pre_state_text")),
-                    post_state_json=_opt_bytes(row.get("post_state_text")),
-                )
-                if slippage_raw is not None:
-                    entry.slippage_bps = float(slippage_raw)
-                return gateway_pb2.GetLedgerEntryResponse(found=True, entry=entry)
+                return await self._get_ledger_entry_pg_response(ledger_entry_id)
             except Exception as e:
                 logger.error("GetLedgerEntry PG failed for id=%s: %s", ledger_entry_id, e)
                 context.set_code(grpc.StatusCode.INTERNAL)
@@ -2831,59 +2945,7 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
         # SQLite path
         try:
-            await self._ensure_initialized()
-            assert self._state_manager is not None
-            warm = self._state_manager.warm_backend
-            if warm is None or not hasattr(warm, "get_ledger_entry_by_id"):
-                return gateway_pb2.GetLedgerEntryResponse(found=False)
-            row = await warm.get_ledger_entry_by_id(ledger_entry_id)
-            if row is None:
-                return gateway_pb2.GetLedgerEntryResponse(found=False)
-
-            def _opt_bytes_sqlite(val: str | bytes | None) -> bytes:
-                if not val:
-                    return b""
-                return val if isinstance(val, bytes) else val.encode("utf-8")
-
-            ts_raw = row.get("timestamp")
-            if isinstance(ts_raw, str):
-                try:
-                    from datetime import datetime as _dt
-
-                    ts_epoch = int(_dt.fromisoformat(ts_raw).timestamp())
-                except Exception:
-                    ts_epoch = 0
-            else:
-                ts_epoch = int(ts_raw or 0)
-
-            entry = gateway_pb2.LedgerEntryData(
-                id=row.get("id") or "",
-                cycle_id=row.get("cycle_id") or "",
-                deployment_id=row.get("deployment_id") or "",
-                execution_mode=row.get("execution_mode") or "",
-                timestamp=ts_epoch,
-                intent_type=row.get("intent_type") or "",
-                token_in=row.get("token_in") or "",
-                amount_in=row.get("amount_in") or "",
-                token_out=row.get("token_out") or "",
-                amount_out=row.get("amount_out") or "",
-                effective_price=row.get("effective_price") or "",
-                gas_used=int(row.get("gas_used") or 0),
-                gas_usd=row.get("gas_usd") or "",
-                tx_hash=row.get("tx_hash") or "",
-                chain=row.get("chain") or "",
-                protocol=row.get("protocol") or "",
-                success=bool(row.get("success")),
-                error=row.get("error") or "",
-                extracted_data_json=_opt_bytes_sqlite(row.get("extracted_data_json")),
-                price_inputs_json=_opt_bytes_sqlite(row.get("price_inputs_json")),
-                pre_state_json=_opt_bytes_sqlite(row.get("pre_state_json")),
-                post_state_json=_opt_bytes_sqlite(row.get("post_state_json")),
-            )
-            slippage_raw = row.get("slippage_bps")
-            if slippage_raw is not None:
-                entry.slippage_bps = float(slippage_raw)
-            return gateway_pb2.GetLedgerEntryResponse(found=True, entry=entry)
+            return await self._get_ledger_entry_sqlite_response(ledger_entry_id)
         except Exception as e:
             logger.error("GetLedgerEntry SQLite failed: %s", e)
             context.set_code(grpc.StatusCode.INTERNAL)
@@ -3216,35 +3278,157 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             return value.isoformat()
         return str(value)
 
-    # crap-allowlist: VIB-4297 — projection-fanout from asyncpg.Record to MigrationStateData proto (cc=9 driven by 13 sibling `or ""` / `or 0` / `or 0` field fallbacks); same structural pattern as `_position_registry_row_dict_to_proto` (VIB-4283). Coverage will rise once unit tests in VIB-4297 hit the all-fields-populated + null-fields paths.
     @classmethod
     def _marshal_migration_state_pg_row(cls, row: Any) -> gateway_pb2.MigrationStateData:
         """Translate an asyncpg ``Record`` to ``MigrationStateData`` proto.
 
         Parallel sibling of :meth:`_marshal_migration_state_row` (which takes
-        the SQLite dataclass shape); centralizes the ``or ""`` / ``or 0``
-        Optional fallbacks and the ``notes::text`` → bytes re-encoding so
+        the SQLite dataclass shape); centralizes Optional fallbacks and the
+        ``notes::text`` → bytes re-encoding so
         :meth:`GetMigrationState` Postgres branch stays a thin
         fetch → marshal handler. Same wire shape as the SQLite branch.
         """
-        notes_text = row["notes_text"] or "{}"
+        notes_text = _item_text(row, "notes_text", "{}")
         return gateway_pb2.MigrationStateData(
-            deployment_id=row["deployment_id"] or "",
-            primitive=row["primitive"] or "",
-            cutover_key=row["cutover_key"] or "",
+            deployment_id=_item_text(row, "deployment_id"),
+            primitive=_item_text(row, "primitive"),
+            cutover_key=_item_text(row, "cutover_key"),
             position_registry_backfill_complete=bool(row["position_registry_backfill_complete"]),
             backfill_started_at=cls._pg_timestamp_to_iso(row["backfill_started_at"]),
             backfill_completed_at=cls._pg_timestamp_to_iso(row["backfill_completed_at"]),
-            backfill_source_table=row["backfill_source_table"] or "",
-            backfill_reader_version=int(row["backfill_reader_version"] or 0),
-            rows_synthesized=int(row["rows_synthesized"] or 0),
-            rows_skipped_already_present=int(row["rows_skipped_already_present"] or 0),
+            backfill_source_table=_item_text(row, "backfill_source_table"),
+            backfill_reader_version=_item_int(row, "backfill_reader_version"),
+            rows_synthesized=_item_int(row, "rows_synthesized"),
+            rows_skipped_already_present=_item_int(row, "rows_skipped_already_present"),
             notes=notes_text.encode("utf-8"),
             created_at=cls._pg_timestamp_to_iso(row["created_at"]),
             updated_at=cls._pg_timestamp_to_iso(row["updated_at"]),
         )
 
-    # crap-allowlist: VIB-4297 — gRPC handler boilerplate (cc=12 = 3 validation guards + dual-backend dispatch + 2 row-None checks + 2 try-except + 1 capability check). Pattern is structural to every dual-backend handler in this file; refactor target is collapsing the three required-field guards into one loop (drops cc to ~10). Same `crap-refactor.md` "undecomposable / structural" carve-out as VIB-4283.
+    @staticmethod
+    def _get_migration_state_error(
+        context: grpc.aio.ServicerContext,
+        code: grpc.StatusCode,
+        error: str,
+    ) -> gateway_pb2.GetMigrationStateResponse:
+        context.set_code(code)
+        context.set_details(error)
+        return gateway_pb2.GetMigrationStateResponse(found=False, error=error)
+
+    def _validate_get_migration_state_request(
+        self,
+        request: gateway_pb2.GetMigrationStateRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tuple[str, str, str] | gateway_pb2.GetMigrationStateResponse:
+        deployment_id, primitive, cutover_key = self._strip_required_triple(request)
+        for field, value in (
+            ("deployment_id", deployment_id),
+            ("primitive", primitive),
+            ("cutover_key", cutover_key),
+        ):
+            if value:
+                continue
+            return self._get_migration_state_error(
+                context,
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"{field} is required",
+            )
+        return deployment_id, primitive, cutover_key
+
+    async def _get_migration_state_pg(
+        self,
+        *,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetMigrationStateResponse:
+        try:
+            row = await self._snapshot_fetchrow(
+                """
+                SELECT deployment_id, primitive, cutover_key,
+                       position_registry_backfill_complete,
+                       backfill_started_at, backfill_completed_at,
+                       backfill_source_table, backfill_reader_version,
+                       rows_synthesized, rows_skipped_already_present,
+                       notes::text AS notes_text,
+                       created_at, updated_at
+                FROM migration_state
+                WHERE deployment_id = $1
+                  AND primitive = $2
+                  AND cutover_key = $3
+                """,
+                deployment_id,
+                primitive,
+                cutover_key,
+            )
+            if row is None:
+                return gateway_pb2.GetMigrationStateResponse(found=False)
+            return gateway_pb2.GetMigrationStateResponse(
+                found=True,
+                data=self._marshal_migration_state_pg_row(row),
+            )
+        except Exception as e:
+            logger.error(
+                "GetMigrationState PG failed (deployment=%s primitive=%s cutover_key=%s): %s",
+                deployment_id,
+                primitive,
+                cutover_key,
+                e,
+            )
+            return self._get_migration_state_error(
+                context,
+                grpc.StatusCode.INTERNAL,
+                "internal server error",
+            )
+
+    async def _get_migration_state_sqlite(
+        self,
+        *,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetMigrationStateResponse:
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "get_migration_state"):
+                error = "warm backend does not support get_migration_state"
+                logger.error(
+                    "GetMigrationState unsupported (deployment=%s primitive=%s cutover_key=%s): %s",
+                    deployment_id,
+                    primitive,
+                    cutover_key,
+                    error,
+                )
+                return self._get_migration_state_error(context, grpc.StatusCode.UNIMPLEMENTED, error)
+            row = await warm.get_migration_state(
+                deployment_id=deployment_id,
+                primitive=primitive,
+                cutover_key=cutover_key,
+            )
+            if row is None:
+                return gateway_pb2.GetMigrationStateResponse(found=False)
+            return gateway_pb2.GetMigrationStateResponse(
+                found=True,
+                data=self._marshal_migration_state_row(row),
+            )
+        except Exception as e:
+            logger.error(
+                "GetMigrationState SQLite failed (deployment=%s primitive=%s cutover_key=%s): %s",
+                deployment_id,
+                primitive,
+                cutover_key,
+                e,
+            )
+            return self._get_migration_state_error(
+                context,
+                grpc.StatusCode.INTERNAL,
+                "internal server error",
+            )
+
     async def GetMigrationState(
         self,
         request: gateway_pb2.GetMigrationStateRequest,
@@ -3262,19 +3446,10 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         indistinguishable from "row absent" so the explicit boolean flag
         is required.
         """
-        deployment_id, primitive, cutover_key = self._strip_required_triple(request)
-        if not deployment_id:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("deployment_id is required")
-            return gateway_pb2.GetMigrationStateResponse(found=False, error="deployment_id is required")
-        if not primitive:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("primitive is required")
-            return gateway_pb2.GetMigrationStateResponse(found=False, error="primitive is required")
-        if not cutover_key:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("cutover_key is required")
-            return gateway_pb2.GetMigrationStateResponse(found=False, error="cutover_key is required")
+        validated = self._validate_get_migration_state_request(request, context)
+        if isinstance(validated, gateway_pb2.GetMigrationStateResponse):
+            return validated
+        deployment_id, primitive, cutover_key = validated
 
         await self._ensure_snapshot_pool()
         if self._snapshot_pool is not None:
@@ -3285,171 +3460,160 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             #
             # VIB-4191-dep: ``notes::text`` cast assumes JSONB column type;
             # if Infra deploys TEXT, drop the cast (TEXT is already a string).
-            try:
-                row = await self._snapshot_fetchrow(
-                    """
-                    SELECT deployment_id, primitive, cutover_key,
-                           position_registry_backfill_complete,
-                           backfill_started_at, backfill_completed_at,
-                           backfill_source_table, backfill_reader_version,
-                           rows_synthesized, rows_skipped_already_present,
-                           notes::text AS notes_text,
-                           created_at, updated_at
-                    FROM migration_state
-                    WHERE deployment_id = $1
-                      AND primitive = $2
-                      AND cutover_key = $3
-                    """,
-                    deployment_id,
-                    primitive,
-                    cutover_key,
-                )
-                if row is None:
-                    return gateway_pb2.GetMigrationStateResponse(found=False)
-                data = self._marshal_migration_state_pg_row(row)
-                return gateway_pb2.GetMigrationStateResponse(found=True, data=data)
-            except Exception as e:
-                logger.error(
-                    "GetMigrationState PG failed (deployment=%s primitive=%s cutover_key=%s): %s",
-                    deployment_id,
-                    primitive,
-                    cutover_key,
-                    e,
-                )
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("internal server error")
-                return gateway_pb2.GetMigrationStateResponse(found=False, error="internal server error")
-
-        try:
-            await self._ensure_initialized()
-            assert self._state_manager is not None
-            warm = self._state_manager.warm_backend
-            if warm is None or not hasattr(warm, "get_migration_state"):
-                error = "warm backend does not support get_migration_state"
-                logger.error(
-                    "GetMigrationState unsupported (deployment=%s primitive=%s cutover_key=%s): %s",
-                    deployment_id,
-                    primitive,
-                    cutover_key,
-                    error,
-                )
-                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-                context.set_details(error)
-                return gateway_pb2.GetMigrationStateResponse(found=False, error=error)
-            row = await warm.get_migration_state(
+            return await self._get_migration_state_pg(
                 deployment_id=deployment_id,
                 primitive=primitive,
                 cutover_key=cutover_key,
+                context=context,
             )
-            if row is None:
-                return gateway_pb2.GetMigrationStateResponse(found=False)
-            data = self._marshal_migration_state_row(row)
-            return gateway_pb2.GetMigrationStateResponse(found=True, data=data)
+        return await self._get_migration_state_sqlite(
+            deployment_id=deployment_id,
+            primitive=primitive,
+            cutover_key=cutover_key,
+            context=context,
+        )
+
+    @staticmethod
+    def _update_migration_state_error(
+        context: grpc.aio.ServicerContext,
+        code: grpc.StatusCode,
+        err: str,
+    ) -> gateway_pb2.UpdateMigrationStateResponse:
+        context.set_code(code)
+        context.set_details(err)
+        return gateway_pb2.UpdateMigrationStateResponse(success=False, error=err)
+
+    def _validate_update_migration_state_request(
+        self,
+        request: gateway_pb2.UpdateMigrationStateRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tuple[str, str, str] | gateway_pb2.UpdateMigrationStateResponse:
+        deployment_id, primitive, cutover_key = self._strip_required_triple(request)
+        if not deployment_id or not primitive or not cutover_key:
+            return self._update_migration_state_error(
+                context,
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "deployment_id, primitive, and cutover_key are required",
+            )
+        return deployment_id, primitive, cutover_key
+
+    def _update_migration_state_pg_values(
+        self,
+        request: gateway_pb2.UpdateMigrationStateRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tuple[datetime | None, int | None, int | None] | gateway_pb2.UpdateMigrationStateResponse:
+        try:
+            backfill_started_at = self._parse_optional_iso_datetime(request.backfill_started_at)
+        except ValueError as e:
+            return self._update_migration_state_error(
+                context,
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"backfill_started_at must be ISO-8601: {e}",
+            )
+        return (
+            backfill_started_at,
+            self._optional_int_field(request, "rows_synthesized"),
+            self._optional_int_field(request, "rows_skipped_already_present"),
+        )
+
+    @staticmethod
+    def _update_migration_state_pg_statement(
+        *,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+        backfill_started_at: datetime | None,
+        rows_synthesized: int | None,
+        rows_skipped_already_present: int | None,
+    ) -> tuple[str, list[Any]] | None:
+        sets: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("backfill_started_at", backfill_started_at),
+            ("rows_synthesized", rows_synthesized),
+            ("rows_skipped_already_present", rows_skipped_already_present),
+        ):
+            if value is None:
+                continue
+            params.append(value)
+            sets.append(f"{column} = ${len(params)}")
+        if not sets:
+            return None
+
+        sets.append("updated_at = NOW()")
+        where_start = len(params) + 1
+        params.extend([deployment_id, primitive, cutover_key])
+        sql = (
+            f"UPDATE migration_state SET {', '.join(sets)} "
+            f"WHERE deployment_id = ${where_start} "
+            f"AND primitive = ${where_start + 1} "
+            f"AND cutover_key = ${where_start + 2}"
+        )
+        return sql, params
+
+    async def _update_migration_state_pg(
+        self,
+        *,
+        request: gateway_pb2.UpdateMigrationStateRequest,
+        context: grpc.aio.ServicerContext,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+    ) -> gateway_pb2.UpdateMigrationStateResponse:
+        # PostgreSQL mode (T19 / VIB-4205). Dynamic SET clause matches the
+        # SQLite backend's partial-update semantics (sqlite.py:4066).
+        values = self._update_migration_state_pg_values(request, context)
+        if isinstance(values, gateway_pb2.UpdateMigrationStateResponse):
+            return values
+        statement = self._update_migration_state_pg_statement(
+            deployment_id=deployment_id,
+            primitive=primitive,
+            cutover_key=cutover_key,
+            backfill_started_at=values[0],
+            rows_synthesized=values[1],
+            rows_skipped_already_present=values[2],
+        )
+        if statement is None:
+            # Empty request -> no-op (mirrors sqlite.py:4077).
+            return gateway_pb2.UpdateMigrationStateResponse(success=True)
+
+        sql, params = statement
+        try:
+            await self._snapshot_execute(sql, *params)
+            return gateway_pb2.UpdateMigrationStateResponse(success=True)
         except Exception as e:
             logger.error(
-                "GetMigrationState SQLite failed (deployment=%s primitive=%s cutover_key=%s): %s",
+                "UpdateMigrationState PG failed (deployment=%s primitive=%s cutover_key=%s): %s",
                 deployment_id,
                 primitive,
                 cutover_key,
                 e,
             )
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("internal server error")
-            return gateway_pb2.GetMigrationStateResponse(found=False, error="internal server error")
+            return self._update_migration_state_error(
+                context,
+                grpc.StatusCode.INTERNAL,
+                "internal server error",
+            )
 
-    # crap-allowlist: VIB-4297 — gRPC handler boilerplate (cc=16: 3 validation guards + dynamic SET-clause build + dual-backend dispatch + per-branch error handling). Same structural carve-out as GetMigrationState above; covered by VIB-4297 follow-up which will collapse the three required-field guards into one loop + share dynamic-update helper across siblings.
-    async def UpdateMigrationState(
+    async def _update_migration_state_sqlite(
         self,
+        *,
         request: gateway_pb2.UpdateMigrationStateRequest,
         context: grpc.aio.ServicerContext,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
     ) -> gateway_pb2.UpdateMigrationStateResponse:
-        """Partial update of migration_state in-flight progress columns.
-
-        ``backfill_started_at`` is a string with "" sentinel for "don't
-        touch". The counters are ``optional int64`` so 0 stays
-        distinguishable from "not supplied".
-
-        Both backends programmatically build the SET clause from supplied
-        fields; an empty request (no fields set) is a no-op.
-        """
-        deployment_id, primitive, cutover_key = self._strip_required_triple(request)
-        if not deployment_id or not primitive or not cutover_key:
-            err = "deployment_id, primitive, and cutover_key are required"
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(err)
-            return gateway_pb2.UpdateMigrationStateResponse(success=False, error=err)
-
-        await self._ensure_snapshot_pool()
-        if self._snapshot_pool is not None:
-            # PostgreSQL mode (T19 / VIB-4205). Dynamic SET clause matches
-            # the SQLite backend's partial-update semantics (sqlite.py:4066).
-            #
-            # ``backfill_started_at`` is bound as a ``datetime`` so asyncpg's
-            # TIMESTAMPTZ codec accepts it. asyncpg type-checks parameter
-            # bindings client-side and rejects raw strings even with a
-            # ``::timestamptz`` SQL cast (VIB-4313).
-            try:
-                backfill_started_at = self._parse_optional_iso_datetime(request.backfill_started_at)
-            except ValueError as e:
-                err = f"backfill_started_at must be ISO-8601: {e}"
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details(err)
-                return gateway_pb2.UpdateMigrationStateResponse(success=False, error=err)
-            rows_synthesized = self._optional_int_field(request, "rows_synthesized")
-            rows_skipped_already_present = self._optional_int_field(request, "rows_skipped_already_present")
-
-            sets: list[str] = []
-            params: list[Any] = []
-            next_placeholder = 1
-            if backfill_started_at is not None:
-                sets.append(f"backfill_started_at = ${next_placeholder}")
-                params.append(backfill_started_at)
-                next_placeholder += 1
-            if rows_synthesized is not None:
-                sets.append(f"rows_synthesized = ${next_placeholder}")
-                params.append(int(rows_synthesized))
-                next_placeholder += 1
-            if rows_skipped_already_present is not None:
-                sets.append(f"rows_skipped_already_present = ${next_placeholder}")
-                params.append(int(rows_skipped_already_present))
-                next_placeholder += 1
-            if not sets:
-                # Empty request → no-op (mirrors sqlite.py:4077).
-                return gateway_pb2.UpdateMigrationStateResponse(success=True)
-            sets.append("updated_at = NOW()")
-            where_start = next_placeholder
-            params.extend([deployment_id, primitive, cutover_key])
-
-            sql = (
-                f"UPDATE migration_state SET {', '.join(sets)} "
-                f"WHERE deployment_id = ${where_start} "
-                f"AND primitive = ${where_start + 1} "
-                f"AND cutover_key = ${where_start + 2}"
-            )
-            try:
-                await self._snapshot_execute(sql, *params)
-                return gateway_pb2.UpdateMigrationStateResponse(success=True)
-            except Exception as e:
-                logger.error(
-                    "UpdateMigrationState PG failed (deployment=%s primitive=%s cutover_key=%s): %s",
-                    deployment_id,
-                    primitive,
-                    cutover_key,
-                    e,
-                )
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("internal server error")
-                return gateway_pb2.UpdateMigrationStateResponse(success=False, error="internal server error")
-
         try:
             await self._ensure_initialized()
             assert self._state_manager is not None
             warm = self._state_manager.warm_backend
             if warm is None or not hasattr(warm, "update_migration_state"):
-                err = "warm backend does not support update_migration_state"
-                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-                context.set_details(err)
-                return gateway_pb2.UpdateMigrationStateResponse(success=False, error=err)
+                return self._update_migration_state_error(
+                    context,
+                    grpc.StatusCode.UNIMPLEMENTED,
+                    "warm backend does not support update_migration_state",
+                )
             await warm.update_migration_state(
                 deployment_id=deployment_id,
                 primitive=primitive,
@@ -3467,36 +3631,213 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 cutover_key,
                 e,
             )
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("internal server error")
-            return gateway_pb2.UpdateMigrationStateResponse(success=False, error="internal server error")
+            return self._update_migration_state_error(
+                context,
+                grpc.StatusCode.INTERNAL,
+                "internal server error",
+            )
 
-    # crap-allowlist: VIB-4297 — gRPC handler boilerplate (cc=16: 3 validation guards + dual-backend dispatch + per-branch error handling + missing-row WARN). Same structural carve-out as GetMigrationState; covered by VIB-4297 follow-up.
+    async def UpdateMigrationState(
+        self,
+        request: gateway_pb2.UpdateMigrationStateRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.UpdateMigrationStateResponse:
+        """Partial update of migration_state in-flight progress columns.
+
+        ``backfill_started_at`` is a string with "" sentinel for "don't
+        touch". The counters are ``optional int64`` so 0 stays
+        distinguishable from "not supplied".
+
+        Both backends programmatically build the SET clause from supplied
+        fields; an empty request (no fields set) is a no-op.
+        """
+        validated = self._validate_update_migration_state_request(request, context)
+        if isinstance(validated, gateway_pb2.UpdateMigrationStateResponse):
+            return validated
+        deployment_id, primitive, cutover_key = validated
+
+        await self._ensure_snapshot_pool()
+        if self._snapshot_pool is not None:
+            return await self._update_migration_state_pg(
+                request=request,
+                context=context,
+                deployment_id=deployment_id,
+                primitive=primitive,
+                cutover_key=cutover_key,
+            )
+        return await self._update_migration_state_sqlite(
+            request=request,
+            context=context,
+            deployment_id=deployment_id,
+            primitive=primitive,
+            cutover_key=cutover_key,
+        )
+
+    @staticmethod
+    def _mark_backfill_complete_error(
+        context: grpc.aio.ServicerContext,
+        code: grpc.StatusCode,
+        err: str,
+    ) -> gateway_pb2.MarkBackfillCompleteResponse:
+        context.set_code(code)
+        context.set_details(err)
+        return gateway_pb2.MarkBackfillCompleteResponse(success=False, error=err)
+
+    def _validate_mark_backfill_complete_request(
+        self,
+        request: gateway_pb2.MarkBackfillCompleteRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tuple[str, str, str, str, datetime] | gateway_pb2.MarkBackfillCompleteResponse:
+        deployment_id, primitive, cutover_key = self._strip_required_triple(request)
+        if not deployment_id or not primitive or not cutover_key:
+            return self._mark_backfill_complete_error(
+                context,
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "deployment_id, primitive, and cutover_key are required",
+            )
+
+        backfill_completed_at_str = (request.backfill_completed_at or "").strip()
+        if not backfill_completed_at_str:
+            return self._mark_backfill_complete_error(
+                context,
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "backfill_completed_at is required",
+            )
+        try:
+            backfill_completed_at = self._parse_iso_datetime(backfill_completed_at_str)
+        except ValueError as e:
+            return self._mark_backfill_complete_error(
+                context,
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"backfill_completed_at must be ISO-8601: {e}",
+            )
+        return deployment_id, primitive, cutover_key, backfill_completed_at_str, backfill_completed_at
+
+    @staticmethod
+    def _pg_update_rowcount(status: Any) -> int | None:
+        if not isinstance(status, str) or not status.startswith("UPDATE "):
+            return None
+        try:
+            return int(status.split(" ", 1)[1])
+        except (ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def _warn_mark_backfill_complete_zero_rows(
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+    ) -> None:
+        logger.warning(
+            "MarkBackfillComplete PG matched 0 rows "
+            "(deployment=%s primitive=%s cutover_key=%s) — "
+            "UpsertMigrationState was supposed to seed the baseline; "
+            "this is a contract violation, not infra failure",
+            deployment_id,
+            primitive,
+            cutover_key,
+        )
+
+    async def _mark_backfill_complete_pg(
+        self,
+        *,
+        request: gateway_pb2.MarkBackfillCompleteRequest,
+        context: grpc.aio.ServicerContext,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+        backfill_completed_at: datetime,
+    ) -> gateway_pb2.MarkBackfillCompleteResponse:
+        try:
+            status = await self._snapshot_execute(
+                """
+                UPDATE migration_state
+                SET position_registry_backfill_complete = TRUE,
+                    rows_synthesized = $4,
+                    rows_skipped_already_present = $5,
+                    backfill_completed_at = $6,
+                    updated_at = NOW()
+                WHERE deployment_id = $1
+                  AND primitive = $2
+                  AND cutover_key = $3
+                """,
+                deployment_id,
+                primitive,
+                cutover_key,
+                int(request.rows_synthesized),
+                int(request.rows_skipped_already_present),
+                backfill_completed_at,
+            )
+            if self._pg_update_rowcount(status) == 0:
+                self._warn_mark_backfill_complete_zero_rows(deployment_id, primitive, cutover_key)
+            return gateway_pb2.MarkBackfillCompleteResponse(success=True)
+        except Exception as e:
+            logger.error(
+                "MarkBackfillComplete PG failed (deployment=%s primitive=%s cutover_key=%s): %s",
+                deployment_id,
+                primitive,
+                cutover_key,
+                e,
+            )
+            return self._mark_backfill_complete_error(
+                context,
+                grpc.StatusCode.INTERNAL,
+                "internal server error",
+            )
+
+    async def _mark_backfill_complete_sqlite(
+        self,
+        *,
+        request: gateway_pb2.MarkBackfillCompleteRequest,
+        context: grpc.aio.ServicerContext,
+        deployment_id: str,
+        primitive: str,
+        cutover_key: str,
+        backfill_completed_at_str: str,
+    ) -> gateway_pb2.MarkBackfillCompleteResponse:
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "mark_backfill_complete"):
+                return self._mark_backfill_complete_error(
+                    context,
+                    grpc.StatusCode.UNIMPLEMENTED,
+                    "warm backend does not support mark_backfill_complete",
+                )
+            await warm.mark_backfill_complete(
+                deployment_id=deployment_id,
+                primitive=primitive,
+                cutover_key=cutover_key,
+                rows_synthesized=int(request.rows_synthesized),
+                rows_skipped_already_present=int(request.rows_skipped_already_present),
+                backfill_completed_at=backfill_completed_at_str,
+            )
+            return gateway_pb2.MarkBackfillCompleteResponse(success=True)
+        except Exception as e:
+            logger.error(
+                "MarkBackfillComplete SQLite failed (deployment=%s primitive=%s cutover_key=%s): %s",
+                deployment_id,
+                primitive,
+                cutover_key,
+                e,
+            )
+            return self._mark_backfill_complete_error(
+                context,
+                grpc.StatusCode.INTERNAL,
+                "internal server error",
+            )
+
     async def MarkBackfillComplete(
         self,
         request: gateway_pb2.MarkBackfillCompleteRequest,
         context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.MarkBackfillCompleteResponse:
         """Terminal flip — set complete=1 + final counters + completed_at."""
-        deployment_id, primitive, cutover_key = self._strip_required_triple(request)
-        if not deployment_id or not primitive or not cutover_key:
-            err = "deployment_id, primitive, and cutover_key are required"
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(err)
-            return gateway_pb2.MarkBackfillCompleteResponse(success=False, error=err)
-        backfill_completed_at_str = (request.backfill_completed_at or "").strip()
-        if not backfill_completed_at_str:
-            err = "backfill_completed_at is required"
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(err)
-            return gateway_pb2.MarkBackfillCompleteResponse(success=False, error=err)
-        try:
-            backfill_completed_at = self._parse_iso_datetime(backfill_completed_at_str)
-        except ValueError as e:
-            err = f"backfill_completed_at must be ISO-8601: {e}"
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(err)
-            return gateway_pb2.MarkBackfillCompleteResponse(success=False, error=err)
+        validated = self._validate_mark_backfill_complete_request(request, context)
+        if isinstance(validated, gateway_pb2.MarkBackfillCompleteResponse):
+            return validated
+        deployment_id, primitive, cutover_key, backfill_completed_at_str, backfill_completed_at = validated
 
         await self._ensure_snapshot_pool()
         if self._snapshot_pool is not None:
@@ -3515,87 +3856,126 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             # ``backfill_completed_at`` is bound as a ``datetime`` so asyncpg's
             # TIMESTAMPTZ codec accepts it. asyncpg rejects raw strings client-side
             # before any ``::timestamptz`` SQL cast would run (VIB-4313).
-            try:
-                status = await self._snapshot_execute(
-                    """
-                    UPDATE migration_state
-                    SET position_registry_backfill_complete = TRUE,
-                        rows_synthesized = $4,
-                        rows_skipped_already_present = $5,
-                        backfill_completed_at = $6,
-                        updated_at = NOW()
-                    WHERE deployment_id = $1
-                      AND primitive = $2
-                      AND cutover_key = $3
-                    """,
-                    deployment_id,
-                    primitive,
-                    cutover_key,
-                    int(request.rows_synthesized),
-                    int(request.rows_skipped_already_present),
-                    backfill_completed_at,
-                )
-                # asyncpg's execute() returns a status string like
-                # "UPDATE 1" / "UPDATE 0"; parse rowcount for the WARN.
-                if isinstance(status, str) and status.startswith("UPDATE "):
-                    try:
-                        rowcount = int(status.split(" ", 1)[1])
-                    except (ValueError, IndexError):
-                        rowcount = -1
-                    if rowcount == 0:
-                        logger.warning(
-                            "MarkBackfillComplete PG matched 0 rows "
-                            "(deployment=%s primitive=%s cutover_key=%s) — "
-                            "UpsertMigrationState was supposed to seed the baseline; "
-                            "this is a contract violation, not infra failure",
-                            deployment_id,
-                            primitive,
-                            cutover_key,
-                        )
-                return gateway_pb2.MarkBackfillCompleteResponse(success=True)
-            except Exception as e:
-                logger.error(
-                    "MarkBackfillComplete PG failed (deployment=%s primitive=%s cutover_key=%s): %s",
-                    deployment_id,
-                    primitive,
-                    cutover_key,
-                    e,
-                )
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("internal server error")
-                return gateway_pb2.MarkBackfillCompleteResponse(success=False, error="internal server error")
+            return await self._mark_backfill_complete_pg(
+                request=request,
+                context=context,
+                deployment_id=deployment_id,
+                primitive=primitive,
+                cutover_key=cutover_key,
+                backfill_completed_at=backfill_completed_at,
+            )
+        return await self._mark_backfill_complete_sqlite(
+            request=request,
+            context=context,
+            deployment_id=deployment_id,
+            primitive=primitive,
+            cutover_key=cutover_key,
+            backfill_completed_at_str=backfill_completed_at_str,
+        )
 
+    @staticmethod
+    def _position_events_filtered_error(
+        context: grpc.aio.ServicerContext,
+        code: grpc.StatusCode,
+        err: str,
+    ) -> gateway_pb2.GetPositionEventsFilteredResponse:
+        context.set_code(code)
+        context.set_details(err)
+        return gateway_pb2.GetPositionEventsFilteredResponse(error=err)
+
+    @staticmethod
+    def _pg_position_event_row_dict(row: Any) -> dict[str, Any]:
+        row_dict = dict(row)
+        # Normalize the ``attribution_text`` alias back to the
+        # ``attribution_json`` key the proto helper expects. VIB-4191-dep:
+        # ``attribution_json::text`` cast assumes JSONB column; if Infra
+        # deploys TEXT, drop the cast and remove this alias remap.
+        row_dict["attribution_json"] = row_dict.pop("attribution_text", None) or "{}"
+        return row_dict
+
+    @staticmethod
+    def _position_events_filtered_response(
+        rows: Iterable[dict[str, Any]],
+    ) -> gateway_pb2.GetPositionEventsFilteredResponse:
+        response = gateway_pb2.GetPositionEventsFilteredResponse()
+        for row in rows:
+            response.events.append(_position_event_row_to_proto(row))
+        return response
+
+    async def _get_position_events_filtered_pg(
+        self,
+        *,
+        deployment_id: str,
+        position_types: frozenset[str],
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetPositionEventsFilteredResponse:
+        # PostgreSQL mode (T19 / VIB-4205). Empty position_types -> empty list
+        # without hitting the DB (matches sqlite.py:4173).
+        if not position_types:
+            return gateway_pb2.GetPositionEventsFilteredResponse()
+
+        try:
+            rows = await self._snapshot_fetch(
+                """
+                SELECT id, deployment_id, cycle_id, execution_mode,
+                       position_id, position_type, event_type,
+                       EXTRACT(EPOCH FROM timestamp)::bigint AS timestamp,
+                       protocol, chain,
+                       token0, token1, amount0, amount1, value_usd, liquidity,
+                       fees_token0, fees_token1, leverage, entry_price, mark_price,
+                       unrealized_pnl, tx_hash, gas_usd, ledger_entry_id,
+                       protocol_fees_usd,
+                       attribution_json::text AS attribution_text,
+                       attribution_version,
+                       tick_lower, tick_upper, in_range, is_long
+                FROM position_events
+                WHERE deployment_id = $1
+                  AND position_type = ANY($2::text[])
+                ORDER BY position_id ASC, timestamp ASC, id ASC
+                """,
+                deployment_id,
+                list(position_types),
+            )
+            row_dicts = [self._pg_position_event_row_dict(row) for row in rows]
+            return self._position_events_filtered_response(row_dicts)
+        except Exception as e:
+            logger.error("GetPositionEventsFiltered PG failed: %s", e)
+            return self._position_events_filtered_error(
+                context,
+                grpc.StatusCode.INTERNAL,
+                "internal server error",
+            )
+
+    async def _get_position_events_filtered_sqlite(
+        self,
+        *,
+        deployment_id: str,
+        position_types: frozenset[str],
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetPositionEventsFilteredResponse:
         try:
             await self._ensure_initialized()
             assert self._state_manager is not None
             warm = self._state_manager.warm_backend
-            if warm is None or not hasattr(warm, "mark_backfill_complete"):
-                err = "warm backend does not support mark_backfill_complete"
-                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-                context.set_details(err)
-                return gateway_pb2.MarkBackfillCompleteResponse(success=False, error=err)
-            await warm.mark_backfill_complete(
+            if warm is None or not hasattr(warm, "get_position_events_filtered"):
+                return self._position_events_filtered_error(
+                    context,
+                    grpc.StatusCode.UNIMPLEMENTED,
+                    "warm backend does not support get_position_events_filtered",
+                )
+            rows = await warm.get_position_events_filtered(
                 deployment_id=deployment_id,
-                primitive=primitive,
-                cutover_key=cutover_key,
-                rows_synthesized=int(request.rows_synthesized),
-                rows_skipped_already_present=int(request.rows_skipped_already_present),
-                backfill_completed_at=backfill_completed_at_str,
+                position_types=position_types,
             )
-            return gateway_pb2.MarkBackfillCompleteResponse(success=True)
+            return self._position_events_filtered_response(rows)
         except Exception as e:
-            logger.error(
-                "MarkBackfillComplete SQLite failed (deployment=%s primitive=%s cutover_key=%s): %s",
-                deployment_id,
-                primitive,
-                cutover_key,
-                e,
+            logger.error("GetPositionEventsFiltered SQLite failed: %s", e)
+            return self._position_events_filtered_error(
+                context,
+                grpc.StatusCode.INTERNAL,
+                "internal server error",
             )
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("internal server error")
-            return gateway_pb2.MarkBackfillCompleteResponse(success=False, error="internal server error")
 
-    # crap-allowlist: VIB-4297 — gRPC handler boilerplate (cc=15: deployment_id validation + position_types empty-list short-circuit + dual-backend dispatch + per-row proto projection loop + error handling). Same structural carve-out as GetMigrationState; covered by VIB-4297 follow-up.
     async def GetPositionEventsFiltered(
         self,
         request: gateway_pb2.GetPositionEventsFilteredRequest,
@@ -3625,99 +4005,25 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             # empty list without hitting the DB (matches sqlite.py:4173;
             # cutover spec §2.4 "no migration needed" fast path on fresh
             # deployments).
-            if not types:
-                return gateway_pb2.GetPositionEventsFilteredResponse()
-            # Order-by triple is the cutover spec §3.5 fold determinism
-            # requirement; identical to SQLite (sqlite.py:4187).
-            # ``= ANY($2::text[])`` is asyncpg's idiomatic IN-with-list
-            # binding — cleaner than dynamic placeholder generation.
-            try:
-                # ``EXTRACT(EPOCH FROM timestamp)::bigint AS timestamp``
-                # mirrors :meth:`GetLedgerEntry` / :meth:`GetAccountingEvents`
-                # so the row dict's ``timestamp`` key is the Unix epoch
-                # integer ``_row_timestamp_epoch`` expects. Selecting the
-                # raw TIMESTAMPTZ column would deliver an asyncpg
-                # ``datetime`` that ``_row_timestamp_epoch`` cannot fold —
-                # the helper's ``isinstance(ts, int | float)`` branch
-                # would miss, and the ``str(ts).fromisoformat`` fallback
-                # is fragile across Python / asyncpg versions. Gemini
-                # high-priority finding on PR #2239.
-                rows = await self._snapshot_fetch(
-                    """
-                    SELECT id, deployment_id, cycle_id, execution_mode,
-                           position_id, position_type, event_type,
-                           EXTRACT(EPOCH FROM timestamp)::bigint AS timestamp,
-                           protocol, chain,
-                           token0, token1, amount0, amount1, value_usd, liquidity,
-                           fees_token0, fees_token1, leverage, entry_price, mark_price,
-                           unrealized_pnl, tx_hash, gas_usd, ledger_entry_id,
-                           protocol_fees_usd,
-                           attribution_json::text AS attribution_text,
-                           attribution_version,
-                           tick_lower, tick_upper, in_range, is_long
-                    FROM position_events
-                    WHERE deployment_id = $1
-                      AND position_type = ANY($2::text[])
-                    ORDER BY position_id ASC, timestamp ASC, id ASC
-                    """,
-                    deployment_id,
-                    list(types),
-                )
-                response = gateway_pb2.GetPositionEventsFilteredResponse()
-                for row in rows:
-                    row_dict = dict(row)
-                    # Normalize the ``attribution_text`` alias back to
-                    # the ``attribution_json`` key the proto helper expects.
-                    # VIB-4191-dep: ``attribution_json::text`` cast assumes
-                    # JSONB column; if Infra deploys TEXT, drop the cast
-                    # and remove this alias remap.
-                    row_dict["attribution_json"] = row_dict.pop("attribution_text", None) or "{}"
-                    response.events.append(_position_event_row_to_proto(row_dict))
-                return response
-            except Exception as e:
-                logger.error("GetPositionEventsFiltered PG failed: %s", e)
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("internal server error")
-                return gateway_pb2.GetPositionEventsFilteredResponse(error="internal server error")
-
-        try:
-            await self._ensure_initialized()
-            assert self._state_manager is not None
-            warm = self._state_manager.warm_backend
-            if warm is None or not hasattr(warm, "get_position_events_filtered"):
-                err = "warm backend does not support get_position_events_filtered"
-                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-                context.set_details(err)
-                return gateway_pb2.GetPositionEventsFilteredResponse(error=err)
-            rows = await warm.get_position_events_filtered(
+            return await self._get_position_events_filtered_pg(
                 deployment_id=deployment_id,
                 position_types=types,
+                context=context,
             )
-            response = gateway_pb2.GetPositionEventsFilteredResponse()
-            for row in rows:
-                response.events.append(_position_event_row_to_proto(row))
-            return response
-        except Exception as e:
-            logger.error("GetPositionEventsFiltered SQLite failed: %s", e)
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("internal server error")
-            return gateway_pb2.GetPositionEventsFilteredResponse(error="internal server error")
+        return await self._get_position_events_filtered_sqlite(
+            deployment_id=deployment_id,
+            position_types=types,
+            context=context,
+        )
 
-    # crap-allowlist: VIB-4283 — public-contract chokepoint, dict→proto projection-fanout (cc=21 driven by 20 sibling `or ""` / `or 0` field fallbacks); structural per .claude/rules/crap-refactor.md "undecomposable public contract / hot-path budget". Same precedent as `GatewayStateManager.save_accounting_event` (VIB-4196).
     @staticmethod
     def _position_registry_row_dict_to_proto(row: dict[str, Any]) -> gateway_pb2.PositionRegistryRow:
         """Map a WARM-backend row dict to the proto message.
 
         Pure projection — every field defaults to its proto-3 zero value
         when missing. ``payload`` re-serializes the dict to canonical JSON
-        bytes (sort_keys=True for determinism); on the unlikely failure
-        path we emit ``b"{}"`` so the wire stays valid.
-
-        cc is dominated by the 20 sibling ``or ""`` / ``or 0`` short-circuits
-        — one per proto field. Allowlisted because the alternative (typed
-        getter helpers called 20 times) is mechanically simpler per radon
-        but objectively worse to read; see VIB-4283 for the planned
-        follow-up (raise coverage to ≥90% OR introduce schema-driven helper).
+        bytes (sort_keys=True for determinism); on payload serialization
+        failure we emit ``b"{}"`` so the wire stays valid.
         """
         payload_obj = row.get("payload") or {}
         try:
@@ -3725,28 +4031,175 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         except (TypeError, ValueError):
             payload_bytes = b"{}"
         return gateway_pb2.PositionRegistryRow(
-            deployment_id=row.get("deployment_id") or "",
-            chain=row.get("chain") or "",
-            primitive=row.get("primitive") or "",
-            accounting_category=row.get("accounting_category") or "",
-            physical_identity_hash=row.get("physical_identity_hash") or "",
-            semantic_grouping_key=row.get("semantic_grouping_key") or "",
-            grouping_policy_version=row.get("grouping_policy_version") or "",
-            handle=row.get("handle") or "",
-            status=row.get("status") or "",
+            deployment_id=_row_text(row, "deployment_id"),
+            chain=_row_text(row, "chain"),
+            primitive=_row_text(row, "primitive"),
+            accounting_category=_row_text(row, "accounting_category"),
+            physical_identity_hash=_row_text(row, "physical_identity_hash"),
+            semantic_grouping_key=_row_text(row, "semantic_grouping_key"),
+            grouping_policy_version=_row_text(row, "grouping_policy_version"),
+            handle=_row_text(row, "handle"),
+            status=_row_text(row, "status"),
             payload=payload_bytes,
-            opened_at_block=int(row.get("opened_at_block") or 0),
-            opened_tx=row.get("opened_tx") or "",
-            closed_at_block=int(row.get("closed_at_block") or 0),
-            closed_tx=row.get("closed_tx") or "",
-            last_reconciled_at_block=int(row.get("last_reconciled_at_block") or 0),
-            matching_policy_version=int(row.get("matching_policy_version") or 1),
-            payload_raw=row.get("payload_raw") or "",
-            payload_decode_error=row.get("payload_decode_error") or "",
-            payload_shape_error=row.get("payload_shape_error") or "",
+            opened_at_block=_row_int(row, "opened_at_block"),
+            opened_tx=_row_text(row, "opened_tx"),
+            closed_at_block=_row_int(row, "closed_at_block"),
+            closed_tx=_row_text(row, "closed_tx"),
+            last_reconciled_at_block=_row_int(row, "last_reconciled_at_block"),
+            matching_policy_version=_row_int(row, "matching_policy_version", 1),
+            payload_raw=_row_text(row, "payload_raw"),
+            payload_decode_error=_row_text(row, "payload_decode_error"),
+            payload_shape_error=_row_text(row, "payload_shape_error"),
         )
 
-    # crap-allowlist: VIB-4297 — gRPC handler with dynamic WHERE-clause build (cc=18: deployment_id validation + 3 optional filter branches for chain/primitive/accounting_category + dual-backend dispatch + payload JSON shape coercion + per-row proto projection). Same structural carve-out as GetMigrationState; covered by VIB-4297 follow-up. Coverage is low (25%) because the integration test needs real Postgres (marked `@pytest.mark.requires_postgres`).
+    @staticmethod
+    def _position_registry_open_rows_query(
+        deployment_id: str,
+        *,
+        chain: str | None,
+        primitive: str | None,
+        accounting_category: str | None,
+    ) -> tuple[str, list[Any]]:
+        sql_parts = [
+            "SELECT deployment_id, chain, primitive, accounting_category,",
+            "       physical_identity_hash, semantic_grouping_key,",
+            "       grouping_policy_version, handle, status,",
+            "       payload::text AS payload_text,",
+            "       opened_at_block, opened_tx,",
+            "       closed_at_block, closed_tx,",
+            "       last_reconciled_at_block, matching_policy_version",
+            "FROM position_registry",
+            "WHERE deployment_id = $1 AND status = 'open'",
+        ]
+        params: list[Any] = [deployment_id]
+        for column, value in (
+            ("chain", chain),
+            ("primitive", primitive),
+            ("accounting_category", accounting_category),
+        ):
+            if value is None:
+                continue
+            params.append(value)
+            sql_parts.append(f"  AND {column} = ${len(params)}")
+
+        # SQLite default ASC ordering places NULLs FIRST. Postgres defaults
+        # NULLs LAST for ASC, so pin the hosted path for cross-backend fold order.
+        sql_parts.append("ORDER BY opened_at_block ASC NULLS FIRST, opened_tx ASC NULLS FIRST")
+        return "\n".join(sql_parts), params
+
+    @staticmethod
+    def _pg_position_registry_row_dict(row: Any) -> dict[str, Any]:
+        # Mirror the dict-shape guard in SQLite (sqlite.py:3819-3866):
+        # parse payload text, surface diagnostic fields on failures, and
+        # coerce to {} so downstream callers can always ``.get(...)``.
+        row_dict: dict[str, Any] = dict(row)
+        payload_text = row_dict.pop("payload_text", None) or "{}"
+        try:
+            parsed = json.loads(payload_text)
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "position_registry.payload JSON decode failed (PG) for "
+                "deployment_id=%s chain=%s primitive=%s "
+                "physical_identity_hash=%s: %s",
+                row["deployment_id"],
+                row["chain"],
+                row["primitive"],
+                row["physical_identity_hash"],
+                exc,
+            )
+            row_dict["payload_raw"] = payload_text
+            row_dict["payload_decode_error"] = str(exc)
+            row_dict["payload"] = {}
+            return row_dict
+
+        if isinstance(parsed, dict):
+            row_dict["payload"] = parsed
+            return row_dict
+
+        logger.warning(
+            "position_registry.payload is not a JSON object (PG, got %s) for "
+            "deployment_id=%s chain=%s primitive=%s "
+            "physical_identity_hash=%s — coercing to {}.",
+            type(parsed).__name__,
+            row["deployment_id"],
+            row["chain"],
+            row["primitive"],
+            row["physical_identity_hash"],
+        )
+        row_dict["payload_raw"] = payload_text
+        row_dict["payload_shape_error"] = f"expected JSON object, got {type(parsed).__name__}"
+        row_dict["payload"] = {}
+        return row_dict
+
+    def _position_registry_open_rows_response(
+        self,
+        rows: Iterable[dict[str, Any]],
+    ) -> gateway_pb2.GetPositionRegistryOpenRowsResponse:
+        response = gateway_pb2.GetPositionRegistryOpenRowsResponse()
+        for row in rows:
+            response.rows.append(self._position_registry_row_dict_to_proto(row))
+        return response
+
+    async def _get_position_registry_open_rows_pg(
+        self,
+        *,
+        deployment_id: str,
+        chain: str | None,
+        primitive: str | None,
+        accounting_category: str | None,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetPositionRegistryOpenRowsResponse:
+        # PostgreSQL mode (T19 / VIB-4205). Dynamic WHERE additions mirror
+        # the SQLite accessor (sqlite.py:3805-3813); empty-string filters were
+        # normalized to None by ``_strip_optional`` before dispatch.
+        try:
+            sql, params = self._position_registry_open_rows_query(
+                deployment_id,
+                chain=chain,
+                primitive=primitive,
+                accounting_category=accounting_category,
+            )
+            rows = await self._snapshot_fetch(sql, *params)
+            row_dicts = [self._pg_position_registry_row_dict(row) for row in rows]
+            return self._position_registry_open_rows_response(row_dicts)
+        except Exception as e:
+            logger.error("GetPositionRegistryOpenRows PG failed: %s", e)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.GetPositionRegistryOpenRowsResponse(error="internal server error")
+
+    async def _get_position_registry_open_rows_sqlite(
+        self,
+        *,
+        deployment_id: str,
+        chain: str | None,
+        primitive: str | None,
+        accounting_category: str | None,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.GetPositionRegistryOpenRowsResponse:
+        try:
+            await self._ensure_initialized()
+            assert self._state_manager is not None
+            warm = self._state_manager.warm_backend
+            if warm is None or not hasattr(warm, "get_position_registry_open_rows"):
+                error = "warm backend does not support get_position_registry_open_rows"
+                logger.error("GetPositionRegistryOpenRows unsupported: %s", error)
+                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+                context.set_details(error)
+                return gateway_pb2.GetPositionRegistryOpenRowsResponse(error=error)
+            rows = await warm.get_position_registry_open_rows(
+                deployment_id,
+                chain=chain,
+                primitive=primitive,
+                accounting_category=accounting_category,
+            )
+            return self._position_registry_open_rows_response(rows)
+        except Exception as e:
+            logger.error("GetPositionRegistryOpenRows SQLite failed: %s", e)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("internal server error")
+            return gateway_pb2.GetPositionRegistryOpenRowsResponse(error="internal server error")
+
     async def GetPositionRegistryOpenRows(
         self,
         request: gateway_pb2.GetPositionRegistryOpenRowsRequest,
@@ -3756,8 +4209,8 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
         Routes to the WARM backend's ``get_position_registry_open_rows`` on
         SQLite. Filters are forwarded as-is — the empty string sentinel
-        means "no filter on that column". Returns gRPC UNIMPLEMENTED on
-        Postgres (T19 / VIB-4205 lands the hosted half).
+        means "no filter on that column". In Postgres mode, the gateway builds
+        the same filter shape against hosted ``position_registry``.
 
         The proto wire shape mirrors the dict returned by the SQLite
         accessor — the framework client adapter re-materializes the dict
@@ -3778,129 +4231,20 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
         await self._ensure_snapshot_pool()
         if self._snapshot_pool is not None:
-            # PostgreSQL mode (T19 / VIB-4205). Dynamic WHERE additions
-            # mirror the SQLite accessor (sqlite.py:3805–3813); empty-string
-            # filters were normalized to None by ``_strip_optional`` above.
-            #
-            # VIB-4191-dep: ``payload::text`` cast assumes JSONB column type;
-            # if Infra deploys TEXT, drop the cast (TEXT is already a string).
-            try:
-                sql_parts = [
-                    "SELECT deployment_id, chain, primitive, accounting_category,",
-                    "       physical_identity_hash, semantic_grouping_key,",
-                    "       grouping_policy_version, handle, status,",
-                    "       payload::text AS payload_text,",
-                    "       opened_at_block, opened_tx,",
-                    "       closed_at_block, closed_tx,",
-                    "       last_reconciled_at_block, matching_policy_version",
-                    "FROM position_registry",
-                    "WHERE deployment_id = $1 AND status = 'open'",
-                ]
-                params: list[Any] = [deployment_id]
-                next_placeholder = 2
-                if chain is not None:
-                    sql_parts.append(f"  AND chain = ${next_placeholder}")
-                    params.append(chain)
-                    next_placeholder += 1
-                if primitive is not None:
-                    sql_parts.append(f"  AND primitive = ${next_placeholder}")
-                    params.append(primitive)
-                    next_placeholder += 1
-                if accounting_category is not None:
-                    sql_parts.append(f"  AND accounting_category = ${next_placeholder}")
-                    params.append(accounting_category)
-                    next_placeholder += 1
-                # SQLite default ASC ordering places NULLs FIRST (see
-                # ``SQLiteStore.get_position_registry_open_rows``:
-                # ``ORDER BY opened_at_block ASC, opened_tx ASC`` with no
-                # NULLS qualifier → SQLite default = NULLs first). Postgres
-                # defaults the opposite way (NULLs last on ASC), so we
-                # MUST pin ``NULLS FIRST`` explicitly here to preserve
-                # cross-backend determinism for the fold-order contract
-                # (codex P2 + CodeRabbit on PR #2239).
-                sql_parts.append("ORDER BY opened_at_block ASC NULLS FIRST, opened_tx ASC NULLS FIRST")
-                rows = await self._snapshot_fetch("\n".join(sql_parts), *params)
-
-                response = gateway_pb2.GetPositionRegistryOpenRowsResponse()
-                for row in rows:
-                    # Mirror the dict-shape guard in SQLite (sqlite.py:3819–3866):
-                    # parse the payload text, surface diagnostic fields on
-                    # decode-error or non-dict shape, and coerce to {} so
-                    # downstream callers can always ``.get(...)``.
-                    #
-                    # ``dict(row)`` faithfully reflects every column in
-                    # the SELECT (gemini medium-priority finding on
-                    # PR #2239); we pop the ``payload_text`` alias here
-                    # so it doesn't shadow the parsed ``payload`` dict
-                    # below.
-                    row_dict: dict[str, Any] = dict(row)
-                    payload_text = row_dict.pop("payload_text", None) or "{}"
-                    try:
-                        parsed = json.loads(payload_text)
-                    except (TypeError, ValueError) as exc:
-                        logger.warning(
-                            "position_registry.payload JSON decode failed (PG) for "
-                            "deployment_id=%s chain=%s primitive=%s "
-                            "physical_identity_hash=%s: %s",
-                            row["deployment_id"],
-                            row["chain"],
-                            row["primitive"],
-                            row["physical_identity_hash"],
-                            exc,
-                        )
-                        row_dict["payload_raw"] = payload_text
-                        row_dict["payload_decode_error"] = str(exc)
-                        row_dict["payload"] = {}
-                    else:
-                        if isinstance(parsed, dict):
-                            row_dict["payload"] = parsed
-                        else:
-                            logger.warning(
-                                "position_registry.payload is not a JSON object (PG, got %s) for "
-                                "deployment_id=%s chain=%s primitive=%s "
-                                "physical_identity_hash=%s — coercing to {}.",
-                                type(parsed).__name__,
-                                row["deployment_id"],
-                                row["chain"],
-                                row["primitive"],
-                                row["physical_identity_hash"],
-                            )
-                            row_dict["payload_raw"] = payload_text
-                            row_dict["payload_shape_error"] = f"expected JSON object, got {type(parsed).__name__}"
-                            row_dict["payload"] = {}
-                    response.rows.append(self._position_registry_row_dict_to_proto(row_dict))
-                return response
-            except Exception as e:
-                logger.error("GetPositionRegistryOpenRows PG failed: %s", e)
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("internal server error")
-                return gateway_pb2.GetPositionRegistryOpenRowsResponse(error="internal server error")
-
-        try:
-            await self._ensure_initialized()
-            assert self._state_manager is not None
-            warm = self._state_manager.warm_backend
-            if warm is None or not hasattr(warm, "get_position_registry_open_rows"):
-                error = "warm backend does not support get_position_registry_open_rows"
-                logger.error("GetPositionRegistryOpenRows unsupported: %s", error)
-                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-                context.set_details(error)
-                return gateway_pb2.GetPositionRegistryOpenRowsResponse(error=error)
-            rows = await warm.get_position_registry_open_rows(
-                deployment_id,
+            return await self._get_position_registry_open_rows_pg(
+                deployment_id=deployment_id,
                 chain=chain,
                 primitive=primitive,
                 accounting_category=accounting_category,
+                context=context,
             )
-            response = gateway_pb2.GetPositionRegistryOpenRowsResponse()
-            for row in rows:
-                response.rows.append(self._position_registry_row_dict_to_proto(row))
-            return response
-        except Exception as e:
-            logger.error("GetPositionRegistryOpenRows SQLite failed: %s", e)
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("internal server error")
-            return gateway_pb2.GetPositionRegistryOpenRowsResponse(error="internal server error")
+        return await self._get_position_registry_open_rows_sqlite(
+            deployment_id=deployment_id,
+            chain=chain,
+            primitive=primitive,
+            accounting_category=accounting_category,
+            context=context,
+        )
 
     # =========================================================================
     # SaveLedgerAndRegistry helpers (extracted to keep the handler under the
@@ -4224,7 +4568,65 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
     # uses a different name, change the constraint_name string here.
     _AUTO_MODE_INDEX_NAME = "ix_registry_auto_mode"
 
-    # crap-allowlist: VIB-4297 — atomic Postgres commit primitive (cc=19: explicit async-with conn.transaction() + 3-write atomic block + UniqueViolation/constraint classification + RegistryAutoCollisionError vs AccountingPersistenceError dispatch + handle-backfill UPDATE + same-status priority guard). The transaction-anti-bypass invariant from VIB-4205 acceptance forbids decomposition: ledger + registry + handle backfill MUST share one transaction context. Coverage=3% because the integration test requires a real Postgres docker-compose harness (`@pytest.mark.requires_postgres`); covered by VIB-4297 follow-up which adds the docker-compose CI lane.
+    async def _set_pg_transaction_search_path(self, conn: Any) -> None:
+        # search_path MUST be set INSIDE the transaction so the
+        # ``is_local=true`` (3rd arg) SET is scoped to the transaction
+        # that owns the writes below. If set before ``conn.transaction()``,
+        # asyncpg wraps the SET in its own implicit transaction, which
+        # commits-and-reverts the search_path before the atomic block.
+        if not self._snapshot_schema:
+            return
+        await conn.fetchval(
+            "SELECT pg_catalog.set_config('search_path', $1, true)",
+            self._snapshot_schema,
+        )
+
+    async def _classify_pg_save_ledger_registry_unique_violation(
+        self,
+        *,
+        uve: BaseException,
+        effective_handle: str | None,
+        ledger_id: str,
+        deployment_id: str,
+        registry: Any,
+        category_str: str,
+    ) -> gateway_pb2.SaveLedgerAndRegistryResponse:
+        # VIB-4200 / UAT D3.F1, F8, F10: distinguish auto-mode collision
+        # from other UNIQUE-constraint violations. Handle-bearing rows cannot
+        # trip ``ix_registry_auto_mode`` because the partial index is defined
+        # over ``status='open' AND handle IS NULL``.
+        if effective_handle is not None:
+            return _wrap_pg_persistence_error(uve, ledger_id)
+        if getattr(uve, "constraint_name", None) != self._AUTO_MODE_INDEX_NAME:
+            return _wrap_pg_persistence_error(uve, ledger_id)
+
+        existing_pih, existing_tx = await self._lookup_auto_mode_collision_partner(
+            deployment_id=deployment_id,
+            chain=registry.chain,
+            accounting_category=category_str,
+            semantic_grouping_key=registry.semantic_grouping_key,
+        )
+        if not existing_pih or existing_pih == registry.physical_identity_hash:
+            return _wrap_pg_persistence_error(uve, ledger_id)
+
+        from almanak.framework.state.registry_errors import (
+            RegistryAutoCollisionError,
+        )
+
+        return self._classify_save_ledger_and_registry_error(
+            RegistryAutoCollisionError(
+                semantic_grouping_key=registry.semantic_grouping_key,
+                existing_physical_identity_hash=existing_pih,
+                opened_tx=existing_tx or "",
+                accounting_category=category_str,
+            ),
+            ledger_id,
+        ) or gateway_pb2.SaveLedgerAndRegistryResponse(
+            success=False,
+            error="auto-mode collision",
+            error_class="RegistryAutoCollisionError",
+        )
+
     async def _save_ledger_and_registry_pg(
         self,
         *,
@@ -4283,13 +4685,6 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
 
         assert self._snapshot_pool is not None
 
-        primitive_str = registry.primitive_value()
-        category_str = registry.accounting_category_value()
-        payload_json = registry.payload_json()
-        deployment_id = registry.deployment_id
-        new_status_priority = 0 if registry.status == "open" else 1
-        _ = new_status_priority  # documented in SQLite path; computed for parity / debugging
-
         # T24 / VIB-4210: validate mode at the boundary. Same rule as the
         # SQLite path (sqlite.py:save_ledger_and_registry_atomic) — only
         # two values are accepted; anything else surfaces as ValueError
@@ -4298,7 +4693,202 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             raise ValueError(
                 f"_save_ledger_and_registry_pg: invalid mode={mode!r}; expected 'commit' or 'registry_reconciliation'."
             )
-        _skip_ledger = mode == "registry_reconciliation"
+        skip_ledger = mode == "registry_reconciliation"
+
+        primitive_str = registry.primitive_value()
+        category_str = registry.accounting_category_value()
+        payload_json = registry.payload_json()
+        deployment_id = registry.deployment_id
+
+        async def _upsert_ledger_row(conn: Any) -> None:
+            # 1) Ledger row — upsert keyed on id (matches the existing
+            # SaveLedgerEntry PG branch line 1207).
+            await conn.execute(
+                """
+                INSERT INTO transaction_ledger (
+                    id, cycle_id, deployment_id, execution_mode,
+                    timestamp, intent_type,
+                    token_in, amount_in, token_out, amount_out,
+                    effective_price, slippage_bps, gas_used, gas_usd,
+                    tx_hash, chain, protocol, success, error,
+                    extracted_data_json, price_inputs_json,
+                    pre_state_json, post_state_json
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                    $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+                    $20::jsonb, $21::jsonb, $22::jsonb, $23::jsonb
+                )
+                ON CONFLICT (id) DO UPDATE SET
+                    cycle_id = EXCLUDED.cycle_id,
+                    deployment_id = EXCLUDED.deployment_id,
+                    execution_mode = EXCLUDED.execution_mode,
+                    timestamp = EXCLUDED.timestamp,
+                    intent_type = EXCLUDED.intent_type,
+                    token_in = EXCLUDED.token_in,
+                    amount_in = EXCLUDED.amount_in,
+                    token_out = EXCLUDED.token_out,
+                    amount_out = EXCLUDED.amount_out,
+                    effective_price = EXCLUDED.effective_price,
+                    slippage_bps = EXCLUDED.slippage_bps,
+                    gas_used = EXCLUDED.gas_used,
+                    gas_usd = EXCLUDED.gas_usd,
+                    tx_hash = EXCLUDED.tx_hash,
+                    chain = EXCLUDED.chain,
+                    protocol = EXCLUDED.protocol,
+                    success = EXCLUDED.success,
+                    error = EXCLUDED.error,
+                    extracted_data_json = EXCLUDED.extracted_data_json,
+                    price_inputs_json = EXCLUDED.price_inputs_json,
+                    pre_state_json = EXCLUDED.pre_state_json,
+                    post_state_json = EXCLUDED.post_state_json
+                """,
+                ledger.id,
+                ledger.cycle_id,
+                getattr(ledger, "deployment_id", "") or "",
+                getattr(ledger, "execution_mode", "") or "",
+                ledger.timestamp,
+                ledger.intent_type,
+                ledger.token_in,
+                ledger.amount_in,
+                ledger.token_out,
+                ledger.amount_out,
+                ledger.effective_price,
+                ledger.slippage_bps,
+                ledger.gas_used,
+                ledger.gas_usd,
+                ledger.tx_hash,
+                ledger.chain,
+                ledger.protocol,
+                ledger.success,
+                ledger.error,
+                ledger.extracted_data_json or None,
+                ledger.price_inputs_json or None,
+                ledger.pre_state_json or None,
+                ledger.post_state_json or None,
+            )
+
+        async def _release_reusable_terminal_handle(conn: Any) -> None:
+            # 2a) Handle reuse after close (VIB-5051, mirrors the SQLite
+            # branch). Release only TERMINAL rows inside this transaction so
+            # the handle tracks the CURRENT physical position.
+            if effective_handle is None:
+                return
+            await conn.execute(
+                """
+                UPDATE position_registry
+                SET handle = NULL
+                WHERE deployment_id = $1
+                  AND accounting_category = $2
+                  AND handle = $3
+                  AND status IN ('closed', 'reorg_invalidated')
+                  AND physical_identity_hash != $4
+                """,
+                deployment_id,
+                category_str,
+                effective_handle,
+                registry.physical_identity_hash,
+            )
+
+        async def _upsert_registry_row(conn: Any) -> None:
+            # 2) Registry row with priority-gated UPSERT. The CASE expression
+            # materializes the priority inline so the comparison is atomic with
+            # the existing row. Mapping kept in lock-step with blueprint 28 §4.3.
+            await conn.execute(
+                """
+                INSERT INTO position_registry (
+                    deployment_id, chain, primitive, accounting_category,
+                    physical_identity_hash, semantic_grouping_key,
+                    grouping_policy_version,
+                    handle, status, payload,
+                    opened_at_block, opened_tx,
+                    closed_at_block, closed_tx,
+                    last_reconciled_at_block, matching_policy_version
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb,
+                    $11, $12, $13, $14, $15, $16
+                )
+                ON CONFLICT (deployment_id, chain, primitive, physical_identity_hash)
+                DO UPDATE SET
+                    status = EXCLUDED.status,
+                    payload = EXCLUDED.payload,
+                    handle = COALESCE(position_registry.handle, EXCLUDED.handle),
+                    closed_at_block = COALESCE(EXCLUDED.closed_at_block, position_registry.closed_at_block),
+                    closed_tx = COALESCE(EXCLUDED.closed_tx, position_registry.closed_tx),
+                    last_reconciled_at_block = COALESCE(
+                        EXCLUDED.last_reconciled_at_block,
+                        position_registry.last_reconciled_at_block
+                    ),
+                    grouping_policy_version = EXCLUDED.grouping_policy_version,
+                    matching_policy_version = EXCLUDED.matching_policy_version,
+                    semantic_grouping_key = EXCLUDED.semantic_grouping_key,
+                    accounting_category = EXCLUDED.accounting_category
+                WHERE
+                    (CASE EXCLUDED.status
+                        WHEN 'open' THEN 0
+                        WHEN 'closed' THEN 1
+                        WHEN 'reorg_invalidated' THEN 1
+                        ELSE -1
+                    END)
+                    >
+                    (CASE position_registry.status
+                        WHEN 'open' THEN 0
+                        WHEN 'closed' THEN 1
+                        WHEN 'reorg_invalidated' THEN 1
+                        ELSE -1
+                    END)
+                """,
+                deployment_id,
+                registry.chain,
+                primitive_str,
+                category_str,
+                registry.physical_identity_hash,
+                registry.semantic_grouping_key,
+                registry.grouping_policy_version,
+                effective_handle,
+                registry.status,
+                payload_json,
+                registry.opened_at_block,
+                registry.opened_tx,
+                registry.closed_at_block,
+                registry.closed_tx,
+                registry.last_reconciled_at_block,
+                registry.matching_policy_version,
+            )
+
+        async def _backfill_same_status_handle(conn: Any) -> None:
+            # 3) Same-status retry handle backfill (matches sqlite.py:3065).
+            # The priority-gated WHERE above skips the DO UPDATE entirely when
+            # status doesn't strictly increase, so a row landed with handle=NULL
+            # stays NULL forever without this idempotent UPDATE.
+            if effective_handle is None:
+                return
+            await conn.execute(
+                """
+                UPDATE position_registry
+                SET handle = $1
+                WHERE deployment_id = $2
+                  AND chain = $3
+                  AND primitive = $4
+                  AND physical_identity_hash = $5
+                  AND handle IS NULL
+                """,
+                effective_handle,
+                deployment_id,
+                registry.chain,
+                primitive_str,
+                registry.physical_identity_hash,
+            )
+
+        async def _write_atomic_rows(conn: Any) -> None:
+            await self._set_pg_transaction_search_path(conn)
+            # T24 / VIB-4210: under mode='registry_reconciliation' the ledger
+            # INSERT is skipped, but the transaction stays open so registry
+            # UPSERT + handle backfill still commit atomically.
+            if not skip_ledger:
+                await _upsert_ledger_row(conn)
+            await _release_reusable_terminal_handle(conn)
+            await _upsert_registry_row(conn)
+            await _backfill_same_status_handle(conn)
 
         # VIB-4191-dep: JSONB / TIMESTAMPTZ assumptions match the
         # SaveLedgerEntry PG branch above; ``::jsonb`` casts on the four
@@ -4308,260 +4898,17 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
         try:
             async with self._snapshot_pool.acquire() as conn:
                 async with conn.transaction():
-                    # search_path MUST be set INSIDE the transaction so the
-                    # ``is_local=true`` (3rd arg) SET is scoped to the
-                    # transaction that owns the three writes below. If set
-                    # before ``conn.transaction()``, asyncpg wraps the SET
-                    # in its own implicit transaction, which commits-and-
-                    # reverts the search_path before the atomic block
-                    # starts — and the writes then resolve table names
-                    # against the wrong schema (``public`` instead of the
-                    # ``?schema=...`` query-param value). Codex (PR #2239)
-                    # flagged this on the original placement.
-                    if self._snapshot_schema:
-                        await conn.fetchval(
-                            "SELECT pg_catalog.set_config('search_path', $1, true)",
-                            self._snapshot_schema,
-                        )
-                    # 1) Ledger row — upsert keyed on id (matches the
-                    # existing SaveLedgerEntry PG branch line 1207).
-                    #
-                    # T24 / VIB-4210: under mode='registry_reconciliation'
-                    # the ledger INSERT is SKIPPED. The transaction stays
-                    # open so the registry UPSERT + handle backfill below
-                    # still commit atomically — but no ledger row is
-                    # written (ADR §2.3 #1+#2; reconciliation re-derives
-                    # registry from chain truth, never replays / writes
-                    # the immutable intent history).
-                    if not _skip_ledger:
-                        await conn.execute(
-                            """
-                            INSERT INTO transaction_ledger (
-                                id, cycle_id, deployment_id, execution_mode,
-                                timestamp, intent_type,
-                                token_in, amount_in, token_out, amount_out,
-                                effective_price, slippage_bps, gas_used, gas_usd,
-                                tx_hash, chain, protocol, success, error,
-                                extracted_data_json, price_inputs_json,
-                                pre_state_json, post_state_json
-                            ) VALUES (
-                                $1, $2, $3, $4, $5, $6, $7, $8, $9,
-                                $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
-                                $20::jsonb, $21::jsonb, $22::jsonb, $23::jsonb
-                            )
-                            ON CONFLICT (id) DO UPDATE SET
-                                cycle_id = EXCLUDED.cycle_id,
-                                deployment_id = EXCLUDED.deployment_id,
-                                execution_mode = EXCLUDED.execution_mode,
-                                timestamp = EXCLUDED.timestamp,
-                                intent_type = EXCLUDED.intent_type,
-                                token_in = EXCLUDED.token_in,
-                                amount_in = EXCLUDED.amount_in,
-                                token_out = EXCLUDED.token_out,
-                                amount_out = EXCLUDED.amount_out,
-                                effective_price = EXCLUDED.effective_price,
-                                slippage_bps = EXCLUDED.slippage_bps,
-                                gas_used = EXCLUDED.gas_used,
-                                gas_usd = EXCLUDED.gas_usd,
-                                tx_hash = EXCLUDED.tx_hash,
-                                chain = EXCLUDED.chain,
-                                protocol = EXCLUDED.protocol,
-                                success = EXCLUDED.success,
-                                error = EXCLUDED.error,
-                                extracted_data_json = EXCLUDED.extracted_data_json,
-                                price_inputs_json = EXCLUDED.price_inputs_json,
-                                pre_state_json = EXCLUDED.pre_state_json,
-                                post_state_json = EXCLUDED.post_state_json
-                            """,
-                            ledger.id,
-                            ledger.cycle_id,
-                            getattr(ledger, "deployment_id", "") or "",
-                            getattr(ledger, "execution_mode", "") or "",
-                            ledger.timestamp,
-                            ledger.intent_type,
-                            ledger.token_in,
-                            ledger.amount_in,
-                            ledger.token_out,
-                            ledger.amount_out,
-                            ledger.effective_price,
-                            ledger.slippage_bps,
-                            ledger.gas_used,
-                            ledger.gas_usd,
-                            ledger.tx_hash,
-                            ledger.chain,
-                            ledger.protocol,
-                            ledger.success,
-                            ledger.error,
-                            ledger.extracted_data_json or None,
-                            ledger.price_inputs_json or None,
-                            ledger.pre_state_json or None,
-                            ledger.post_state_json or None,
-                        )
-
-                    # 2a) Handle reuse after close (VIB-5051, mirrors the
-                    # SQLite branch): a reopen of the same logical slot mints
-                    # a NEW physical position, so the physical-identity
-                    # conflict key does not fire and the INSERT would trip
-                    # ``ix_registry_handle`` against the old TERMINAL row
-                    # still holding the handle. Release it inside this same
-                    # transaction so the handle tracks the CURRENT physical
-                    # position. A handle held by a still-OPEN row is NOT
-                    # released — that collision keeps failing loud below. The
-                    # physical-identity guard keeps an idempotent retry of
-                    # the same row from clearing its own handle.
-                    if effective_handle is not None:
-                        await conn.execute(
-                            """
-                            UPDATE position_registry
-                            SET handle = NULL
-                            WHERE deployment_id = $1
-                              AND accounting_category = $2
-                              AND handle = $3
-                              AND status IN ('closed', 'reorg_invalidated')
-                              AND physical_identity_hash != $4
-                            """,
-                            deployment_id,
-                            category_str,
-                            effective_handle,
-                            registry.physical_identity_hash,
-                        )
-
-                    # 2) Registry row with priority-gated UPSERT. The
-                    # CASE expression materializes the priority inline
-                    # so the comparison is atomic with the existing row.
-                    # Mapping kept in lock-step with blueprint 28 §4.3
-                    # (matches sqlite.py:3012–3024).
-                    await conn.execute(
-                        """
-                        INSERT INTO position_registry (
-                            deployment_id, chain, primitive, accounting_category,
-                            physical_identity_hash, semantic_grouping_key,
-                            grouping_policy_version,
-                            handle, status, payload,
-                            opened_at_block, opened_tx,
-                            closed_at_block, closed_tx,
-                            last_reconciled_at_block, matching_policy_version
-                        ) VALUES (
-                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb,
-                            $11, $12, $13, $14, $15, $16
-                        )
-                        ON CONFLICT (deployment_id, chain, primitive, physical_identity_hash)
-                        DO UPDATE SET
-                            status = EXCLUDED.status,
-                            payload = EXCLUDED.payload,
-                            handle = COALESCE(position_registry.handle, EXCLUDED.handle),
-                            closed_at_block = COALESCE(EXCLUDED.closed_at_block, position_registry.closed_at_block),
-                            closed_tx = COALESCE(EXCLUDED.closed_tx, position_registry.closed_tx),
-                            last_reconciled_at_block = COALESCE(
-                                EXCLUDED.last_reconciled_at_block,
-                                position_registry.last_reconciled_at_block
-                            ),
-                            grouping_policy_version = EXCLUDED.grouping_policy_version,
-                            matching_policy_version = EXCLUDED.matching_policy_version,
-                            semantic_grouping_key = EXCLUDED.semantic_grouping_key,
-                            accounting_category = EXCLUDED.accounting_category
-                        WHERE
-                            (CASE EXCLUDED.status
-                                WHEN 'open' THEN 0
-                                WHEN 'closed' THEN 1
-                                WHEN 'reorg_invalidated' THEN 1
-                                ELSE -1
-                            END)
-                            >
-                            (CASE position_registry.status
-                                WHEN 'open' THEN 0
-                                WHEN 'closed' THEN 1
-                                WHEN 'reorg_invalidated' THEN 1
-                                ELSE -1
-                            END)
-                        """,
-                        deployment_id,
-                        registry.chain,
-                        primitive_str,
-                        category_str,
-                        registry.physical_identity_hash,
-                        registry.semantic_grouping_key,
-                        registry.grouping_policy_version,
-                        effective_handle,
-                        registry.status,
-                        payload_json,
-                        registry.opened_at_block,
-                        registry.opened_tx,
-                        registry.closed_at_block,
-                        registry.closed_tx,
-                        registry.last_reconciled_at_block,
-                        registry.matching_policy_version,
-                    )
-
-                    # 3) Same-status retry handle backfill (matches
-                    # sqlite.py:3065). The priority-gated WHERE above skips
-                    # the DO UPDATE entirely when status doesn't strictly
-                    # increase, so a row landed with handle=NULL stays
-                    # NULL forever without this idempotent UPDATE.
-                    if effective_handle is not None:
-                        await conn.execute(
-                            """
-                            UPDATE position_registry
-                            SET handle = $1
-                            WHERE deployment_id = $2
-                              AND chain = $3
-                              AND primitive = $4
-                              AND physical_identity_hash = $5
-                              AND handle IS NULL
-                            """,
-                            effective_handle,
-                            deployment_id,
-                            registry.chain,
-                            primitive_str,
-                            registry.physical_identity_hash,
-                        )
+                    await _write_atomic_rows(conn)
             return gateway_pb2.SaveLedgerAndRegistryResponse(success=True)
         except asyncpg.UniqueViolationError as uve:
-            # VIB-4200 / UAT D3.F1, F8, F10: distinguish auto-mode
-            # collision from other UNIQUE-constraint violations.
-            #
-            # Layer 1: handle short-circuit. The auto-mode partial index
-            # is defined ``WHERE status = 'open' AND handle IS NULL`` —
-            # it cannot fire on an INSERT whose row carries a handle.
-            # Mirrors sqlite.py:3165.
-            if effective_handle is not None:
-                return _wrap_pg_persistence_error(uve, ledger_id)
-            # Layer 2: constraint-name match.
-            # VIB-4191-dep: see _AUTO_MODE_INDEX_NAME above.
-            constraint_name = getattr(uve, "constraint_name", None)
-            if constraint_name == self._AUTO_MODE_INDEX_NAME:
-                # Auto-mode collision — surface the typed error with the
-                # opposing row's PIH + opened_tx for the strategy author.
-                # The transaction was already rolled back by asyncpg
-                # when the exception propagated out of conn.transaction().
-                existing_pih, existing_tx = await self._lookup_auto_mode_collision_partner(
-                    deployment_id=deployment_id,
-                    chain=registry.chain,
-                    accounting_category=category_str,
-                    semantic_grouping_key=registry.semantic_grouping_key,
-                )
-                if existing_pih and existing_pih != registry.physical_identity_hash:
-                    from almanak.framework.state.registry_errors import (
-                        RegistryAutoCollisionError,
-                    )
-
-                    return self._classify_save_ledger_and_registry_error(
-                        RegistryAutoCollisionError(
-                            semantic_grouping_key=registry.semantic_grouping_key,
-                            existing_physical_identity_hash=existing_pih,
-                            opened_tx=existing_tx or "",
-                            accounting_category=category_str,
-                        ),
-                        ledger_id,
-                    ) or gateway_pb2.SaveLedgerAndRegistryResponse(
-                        success=False,
-                        error="auto-mode collision",
-                        error_class="RegistryAutoCollisionError",
-                    )
-                # Constraint matched but row-existence lookup didn't
-                # find a competing PIH (race or non-collision) — fall
-                # through to AccountingPersistenceError.
-            return _wrap_pg_persistence_error(uve, ledger_id)
+            return await self._classify_pg_save_ledger_registry_unique_violation(
+                uve=uve,
+                effective_handle=effective_handle,
+                ledger_id=ledger_id,
+                deployment_id=deployment_id,
+                registry=registry,
+                category_str=category_str,
+            )
         except asyncpg.PostgresError as pe:
             # CHECK / NOT NULL / FK / OperationalError / connection drop /
             # anything else PG-typed — wrap as AccountingPersistenceError.
