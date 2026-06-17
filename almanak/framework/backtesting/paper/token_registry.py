@@ -7,7 +7,7 @@ This module enables Paper Trader to display human-readable token symbols
 instead of raw addresses in portfolio reports and trade records.
 
 Internally delegates to TokenResolver for unified token resolution, with
-TOKEN_REGISTRY as a local fallback for backward compatibility.
+TOKEN_REGISTRY exposed as a resolver-backed compatibility view.
 
 Example:
     >>> from almanak.framework.backtesting.paper.token_registry import (
@@ -32,9 +32,12 @@ Example:
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import chain_name_for_id
 
 if TYPE_CHECKING:
@@ -54,7 +57,7 @@ def _get_resolver():
 
         return get_token_resolver()
     except Exception:
-        logger.debug("TokenResolver not available, using local TOKEN_REGISTRY only")
+        logger.debug("TokenResolver not available")
         return None
 
 
@@ -97,579 +100,73 @@ class TokenInfo:
 
 
 # =============================================================================
-# Token Registry
+# Token Registry compatibility view
 # =============================================================================
-# Structure: chain_id -> lowercase_address -> TokenInfo
-# Addresses are stored lowercase for case-insensitive matching
 
-TOKEN_REGISTRY: dict[int, dict[str, TokenInfo]] = {
-    # =========================================================================
-    # Ethereum Mainnet (Chain ID: 1)
-    # =========================================================================
-    CHAIN_ID_ETHEREUM: {
-        # Native ETH (sentinel address)
-        NATIVE_ETH_ADDRESS: TokenInfo(
-            symbol="ETH",
-            decimals=18,
-            address=NATIVE_ETH_ADDRESS,
-        ),
-        # WETH - Wrapped Ether
-        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": TokenInfo(
-            symbol="WETH",
-            decimals=18,
-            address="0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        ),
-        # Stablecoins
-        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": TokenInfo(
-            symbol="USDC",
-            decimals=6,
-            address="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-        ),
-        "0xdac17f958d2ee523a2206206994597c13d831ec7": TokenInfo(
-            symbol="USDT",
-            decimals=6,
-            address="0xdac17f958d2ee523a2206206994597c13d831ec7",
-        ),
-        "0x6b175474e89094c44da98b954eedeac495271d0f": TokenInfo(
-            symbol="DAI",
-            decimals=18,
-            address="0x6b175474e89094c44da98b954eedeac495271d0f",
-        ),
-        "0x853d955acef822db058eb8505911ed77f175b99e": TokenInfo(
-            symbol="FRAX",
-            decimals=18,
-            address="0x853d955acef822db058eb8505911ed77f175b99e",
-        ),
-        "0x5f98805a4e8be255a32880fdec7f6728c6568ba0": TokenInfo(
-            symbol="LUSD",
-            decimals=18,
-            address="0x5f98805a4e8be255a32880fdec7f6728c6568ba0",
-        ),
-        "0x83f20f44975d03b1b09e64809b757c47f942beea": TokenInfo(
-            symbol="sDAI",
-            decimals=18,
-            address="0x83f20f44975d03b1b09e64809b757c47f942beea",
-        ),
-        # WBTC - Wrapped Bitcoin
-        "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": TokenInfo(
-            symbol="WBTC",
-            decimals=8,
-            address="0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
-        ),
-        # Liquid Staking Tokens
-        "0xae7ab96520de3a18e5e111b5eaab095312d7fe84": TokenInfo(
-            symbol="stETH",
-            decimals=18,
-            address="0xae7ab96520de3a18e5e111b5eaab095312d7fe84",
-        ),
-        "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0": TokenInfo(
-            symbol="wstETH",
-            decimals=18,
-            address="0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
-        ),
-        "0xae78736cd615f374d3085123a210448e74fc6393": TokenInfo(
-            symbol="rETH",
-            decimals=18,
-            address="0xae78736cd615f374d3085123a210448e74fc6393",
-        ),
-        "0xbe9895146f7af43049ca1c1ae358b0541ea49704": TokenInfo(
-            symbol="cbETH",
-            decimals=18,
-            address="0xbe9895146f7af43049ca1c1ae358b0541ea49704",
-        ),
-        # Protocol Tokens
-        "0x514910771af9ca656af840dff83e8264ecf986ca": TokenInfo(
-            symbol="LINK",
-            decimals=18,
-            address="0x514910771af9ca656af840dff83e8264ecf986ca",
-        ),
-        "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984": TokenInfo(
-            symbol="UNI",
-            decimals=18,
-            address="0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
-        ),
-        "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9": TokenInfo(
-            symbol="AAVE",
-            decimals=18,
-            address="0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
-        ),
-        "0xc00e94cb662c3520282e6f5717214004a7f26888": TokenInfo(
-            symbol="COMP",
-            decimals=18,
-            address="0xc00e94cb662c3520282e6f5717214004a7f26888",
-        ),
-        "0xd533a949740bb3306d119cc777fa900ba034cd52": TokenInfo(
-            symbol="CRV",
-            decimals=18,
-            address="0xd533a949740bb3306d119cc777fa900ba034cd52",
-        ),
-        "0xba100000625a3754423978a60c9317c58a424e3d": TokenInfo(
-            symbol="BAL",
-            decimals=18,
-            address="0xba100000625a3754423978a60c9317c58a424e3d",
-        ),
-        "0x9f8f72aa9304c8b593d555f12ef6589cc3a579a2": TokenInfo(
-            symbol="MKR",
-            decimals=18,
-            address="0x9f8f72aa9304c8b593d555f12ef6589cc3a579a2",
-        ),
-    },
-    # =========================================================================
-    # Arbitrum One (Chain ID: 42161)
-    # =========================================================================
-    CHAIN_ID_ARBITRUM: {
-        # Native ETH (sentinel address)
-        NATIVE_ETH_ADDRESS: TokenInfo(
-            symbol="ETH",
-            decimals=18,
-            address=NATIVE_ETH_ADDRESS,
-        ),
-        # WETH - Wrapped Ether
-        "0x82af49447d8a07e3bd95bd0d56f35241523fbab1": TokenInfo(
-            symbol="WETH",
-            decimals=18,
-            address="0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
-        ),
-        # Stablecoins
-        "0xaf88d065e77c8cc2239327c5edb3a432268e5831": TokenInfo(
-            symbol="USDC",
-            decimals=6,
-            address="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
-        ),
-        "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8": TokenInfo(
-            symbol="USDC.e",
-            decimals=6,
-            address="0xff970a61a04b1ca14834a43f5de4533ebddb5cc8",
-        ),
-        "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9": TokenInfo(
-            symbol="USDT",
-            decimals=6,
-            address="0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
-        ),
-        "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1": TokenInfo(
-            symbol="DAI",
-            decimals=18,
-            address="0xda10009cbd5d07dd0cecc66161fc93d7c9000da1",
-        ),
-        "0x17fc002b466eec40dae837fc4be5c67993ddbd6f": TokenInfo(
-            symbol="FRAX",
-            decimals=18,
-            address="0x17fc002b466eec40dae837fc4be5c67993ddbd6f",
-        ),
-        "0x93b346b6bc2548da6a1e7d98e9a421b42541425b": TokenInfo(
-            symbol="LUSD",
-            decimals=18,
-            address="0x93b346b6bc2548da6a1e7d98e9a421b42541425b",
-        ),
-        # WBTC - Wrapped Bitcoin
-        "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f": TokenInfo(
-            symbol="WBTC",
-            decimals=8,
-            address="0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f",
-        ),
-        # Liquid Staking Tokens
-        "0x5979d7b546e38e414f7e9822514be443a4800529": TokenInfo(
-            symbol="wstETH",
-            decimals=18,
-            address="0x5979d7b546e38e414f7e9822514be443a4800529",
-        ),
-        "0xec70dcb4a1efa46b8f2d97c310c9c4790ba5ffa8": TokenInfo(
-            symbol="rETH",
-            decimals=18,
-            address="0xec70dcb4a1efa46b8f2d97c310c9c4790ba5ffa8",
-        ),
-        # Protocol Tokens
-        "0x912ce59144191c1204e64559fe8253a0e49e6548": TokenInfo(
-            symbol="ARB",
-            decimals=18,
-            address="0x912ce59144191c1204e64559fe8253a0e49e6548",
-        ),
-        "0xfc5a1a6eb076a2c7ad06ed22c90d7e710e35ad0a": TokenInfo(
-            symbol="GMX",
-            decimals=18,
-            address="0xfc5a1a6eb076a2c7ad06ed22c90d7e710e35ad0a",
-        ),
-        "0xf97f4df75117a78c1a5a0dbb814af92458539fb4": TokenInfo(
-            symbol="LINK",
-            decimals=18,
-            address="0xf97f4df75117a78c1a5a0dbb814af92458539fb4",
-        ),
-        "0xfa7f8980b0f1e64a2062791cc3b0871572f1f7f0": TokenInfo(
-            symbol="UNI",
-            decimals=18,
-            address="0xfa7f8980b0f1e64a2062791cc3b0871572f1f7f0",
-        ),
-    },
-    # =========================================================================
-    # Base (Chain ID: 8453)
-    # =========================================================================
-    CHAIN_ID_BASE: {
-        # Native ETH (sentinel address)
-        NATIVE_ETH_ADDRESS: TokenInfo(
-            symbol="ETH",
-            decimals=18,
-            address=NATIVE_ETH_ADDRESS,
-        ),
-        # WETH - Wrapped Ether
-        "0x4200000000000000000000000000000000000006": TokenInfo(
-            symbol="WETH",
-            decimals=18,
-            address="0x4200000000000000000000000000000000000006",
-        ),
-        # Stablecoins
-        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": TokenInfo(
-            symbol="USDC",
-            decimals=6,
-            address="0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
-        ),
-        "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca": TokenInfo(
-            symbol="USDbC",
-            decimals=6,
-            address="0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca",
-        ),
-        "0x50c5725949a6f0c72e6c4a641f24049a917db0cb": TokenInfo(
-            symbol="DAI",
-            decimals=18,
-            address="0x50c5725949a6f0c72e6c4a641f24049a917db0cb",
-        ),
-        # Liquid Staking Tokens
-        "0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452": TokenInfo(
-            symbol="wstETH",
-            decimals=18,
-            address="0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452",
-        ),
-        "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22": TokenInfo(
-            symbol="cbETH",
-            decimals=18,
-            address="0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22",
-        ),
-        # Protocol Tokens - Aerodrome
-        "0x940181a94a35a4569e4529a3cdfb74e38fd98631": TokenInfo(
-            symbol="AERO",
-            decimals=18,
-            address="0x940181a94a35a4569e4529a3cdfb74e38fd98631",
-        ),
-    },
-    # =========================================================================
-    # Optimism (Chain ID: 10)
-    # =========================================================================
-    CHAIN_ID_OPTIMISM: {
-        # Native ETH (sentinel address)
-        NATIVE_ETH_ADDRESS: TokenInfo(
-            symbol="ETH",
-            decimals=18,
-            address=NATIVE_ETH_ADDRESS,
-        ),
-        # WETH - Wrapped Ether
-        "0x4200000000000000000000000000000000000006": TokenInfo(
-            symbol="WETH",
-            decimals=18,
-            address="0x4200000000000000000000000000000000000006",
-        ),
-        # Stablecoins
-        "0x0b2c639c533813f4aa9d7837caf62653d097ff85": TokenInfo(
-            symbol="USDC",
-            decimals=6,
-            address="0x0b2c639c533813f4aa9d7837caf62653d097ff85",
-        ),
-        "0x7f5c764cbc14f9669b88837ca1490cca17c31607": TokenInfo(
-            symbol="USDC.e",
-            decimals=6,
-            address="0x7f5c764cbc14f9669b88837ca1490cca17c31607",
-        ),
-        "0x94b008aa00579c1307b0ef2c499ad98a8ce58e58": TokenInfo(
-            symbol="USDT",
-            decimals=6,
-            address="0x94b008aa00579c1307b0ef2c499ad98a8ce58e58",
-        ),
-        "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1": TokenInfo(
-            symbol="DAI",
-            decimals=18,
-            address="0xda10009cbd5d07dd0cecc66161fc93d7c9000da1",
-        ),
-        "0x2e3d870790dc77a83dd1d18184acc7439a53f475": TokenInfo(
-            symbol="FRAX",
-            decimals=18,
-            address="0x2e3d870790dc77a83dd1d18184acc7439a53f475",
-        ),
-        "0xc40f949f8a4e094d1b49a23ea9241d289b7b2819": TokenInfo(
-            symbol="LUSD",
-            decimals=18,
-            address="0xc40f949f8a4e094d1b49a23ea9241d289b7b2819",
-        ),
-        # WBTC - Wrapped Bitcoin
-        "0x68f180fcce6836688e9084f035309e29bf0a2095": TokenInfo(
-            symbol="WBTC",
-            decimals=8,
-            address="0x68f180fcce6836688e9084f035309e29bf0a2095",
-        ),
-        # Liquid Staking Tokens
-        "0x1f32b1c2345538c0c6f582fcb022739c4a194ebb": TokenInfo(
-            symbol="wstETH",
-            decimals=18,
-            address="0x1f32b1c2345538c0c6f582fcb022739c4a194ebb",
-        ),
-        "0x9bcef72be871e61ed4fbbc7630889bee758eb81d": TokenInfo(
-            symbol="rETH",
-            decimals=18,
-            address="0x9bcef72be871e61ed4fbbc7630889bee758eb81d",
-        ),
-        # Protocol Tokens
-        "0x4200000000000000000000000000000000000042": TokenInfo(
-            symbol="OP",
-            decimals=18,
-            address="0x4200000000000000000000000000000000000042",
-        ),
-        "0x350a791bfc2c21f9ed5d10980dad2e2638ffa7f6": TokenInfo(
-            symbol="LINK",
-            decimals=18,
-            address="0x350a791bfc2c21f9ed5d10980dad2e2638ffa7f6",
-        ),
-        # Velodrome
-        "0x9560e827af36c94d2ac33a39bce1fe78631088db": TokenInfo(
-            symbol="VELO",
-            decimals=18,
-            address="0x9560e827af36c94d2ac33a39bce1fe78631088db",
-        ),
-    },
-    # =========================================================================
-    # Polygon (Chain ID: 137)
-    # =========================================================================
-    CHAIN_ID_POLYGON: {
-        # Native POL (formerly MATIC; same sentinel address)
-        NATIVE_MATIC_ADDRESS: TokenInfo(
-            symbol="POL",
-            decimals=18,
-            address=NATIVE_MATIC_ADDRESS,
-        ),
-        # WMATIC - Wrapped MATIC
-        "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270": TokenInfo(
-            symbol="WMATIC",
-            decimals=18,
-            address="0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270",
-        ),
-        # WETH - Wrapped Ether
-        "0x7ceb23fd6bc0add59e62ac25578270cff1b9f619": TokenInfo(
-            symbol="WETH",
-            decimals=18,
-            address="0x7ceb23fd6bc0add59e62ac25578270cff1b9f619",
-        ),
-        # Stablecoins
-        "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359": TokenInfo(
-            symbol="USDC",
-            decimals=6,
-            address="0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
-        ),
-        "0x2791bca1f2de4661ed88a30c99a7a9449aa84174": TokenInfo(
-            symbol="USDC.e",
-            decimals=6,
-            address="0x2791bca1f2de4661ed88a30c99a7a9449aa84174",
-        ),
-        "0xc2132d05d31c914a87c6611c10748aeb04b58e8f": TokenInfo(
-            symbol="USDT",
-            decimals=6,
-            address="0xc2132d05d31c914a87c6611c10748aeb04b58e8f",
-        ),
-        "0x8f3cf7ad23cd3cadbd9735aff958023239c6a063": TokenInfo(
-            symbol="DAI",
-            decimals=18,
-            address="0x8f3cf7ad23cd3cadbd9735aff958023239c6a063",
-        ),
-        "0x45c32fa6df82ead1e2ef74d17b76547eddfaff89": TokenInfo(
-            symbol="FRAX",
-            decimals=18,
-            address="0x45c32fa6df82ead1e2ef74d17b76547eddfaff89",
-        ),
-        # WBTC - Wrapped Bitcoin
-        "0x1bfd67037b42cf73acf2047067bd4f2c47d9bfd6": TokenInfo(
-            symbol="WBTC",
-            decimals=8,
-            address="0x1bfd67037b42cf73acf2047067bd4f2c47d9bfd6",
-        ),
-        # Liquid Staking Tokens
-        "0x03b54a6e9a984069379fae1a4fc4dbae93b3bccd": TokenInfo(
-            symbol="wstETH",
-            decimals=18,
-            address="0x03b54a6e9a984069379fae1a4fc4dbae93b3bccd",
-        ),
-        "0x0266f4f08d82372cf0fcbccc0ff74309089c74d1": TokenInfo(
-            symbol="stMATIC",
-            decimals=18,
-            address="0x0266f4f08d82372cf0fcbccc0ff74309089c74d1",
-        ),
-        # Protocol Tokens
-        "0x53e0bca35ec356bd5dddfebbd1fc0fd03fabad39": TokenInfo(
-            symbol="LINK",
-            decimals=18,
-            address="0x53e0bca35ec356bd5dddfebbd1fc0fd03fabad39",
-        ),
-        "0xb33eaad8d922b1083446dc23f610c2567fb5180f": TokenInfo(
-            symbol="UNI",
-            decimals=18,
-            address="0xb33eaad8d922b1083446dc23f610c2567fb5180f",
-        ),
-        "0xd6df932a45c0f255f85145f286ea0b292b21c90b": TokenInfo(
-            symbol="AAVE",
-            decimals=18,
-            address="0xd6df932a45c0f255f85145f286ea0b292b21c90b",
-        ),
-    },
-    # =========================================================================
-    # Avalanche C-Chain (Chain ID: 43114)
-    # =========================================================================
-    CHAIN_ID_AVALANCHE: {
-        # Native AVAX (sentinel address)
-        NATIVE_AVAX_ADDRESS: TokenInfo(
-            symbol="AVAX",
-            decimals=18,
-            address=NATIVE_AVAX_ADDRESS,
-        ),
-        # WAVAX - Wrapped AVAX
-        "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7": TokenInfo(
-            symbol="WAVAX",
-            decimals=18,
-            address="0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7",
-        ),
-        # WETH - Wrapped Ether
-        "0x49d5c2bdffac6ce2bfdb6640f4f80f226bc10bab": TokenInfo(
-            symbol="WETH.e",
-            decimals=18,
-            address="0x49d5c2bdffac6ce2bfdb6640f4f80f226bc10bab",
-        ),
-        # Stablecoins
-        "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e": TokenInfo(
-            symbol="USDC",
-            decimals=6,
-            address="0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
-        ),
-        "0xa7d7079b0fead91f3e65f86e8915cb59c1a4c664": TokenInfo(
-            symbol="USDC.e",
-            decimals=6,
-            address="0xa7d7079b0fead91f3e65f86e8915cb59c1a4c664",
-        ),
-        "0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7": TokenInfo(
-            symbol="USDT",
-            decimals=6,
-            address="0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7",
-        ),
-        "0xc7198437980c041c805a1edcba50c1ce5db95118": TokenInfo(
-            symbol="USDT.e",
-            decimals=6,
-            address="0xc7198437980c041c805a1edcba50c1ce5db95118",
-        ),
-        "0xd586e7f844cea2f87f50152665bcbc2c279d8d70": TokenInfo(
-            symbol="DAI.e",
-            decimals=18,
-            address="0xd586e7f844cea2f87f50152665bcbc2c279d8d70",
-        ),
-        "0xd24c2ad096400b6fbcd2ad8b24e7acbc21a1da64": TokenInfo(
-            symbol="FRAX",
-            decimals=18,
-            address="0xd24c2ad096400b6fbcd2ad8b24e7acbc21a1da64",
-        ),
-        # WBTC - Wrapped Bitcoin
-        "0x50b7545627a5162f82a992c33b87adc75187b218": TokenInfo(
-            symbol="WBTC.e",
-            decimals=8,
-            address="0x50b7545627a5162f82a992c33b87adc75187b218",
-        ),
-        "0x152b9d0fdc40c096757f570a51e494bd4b943e50": TokenInfo(
-            symbol="BTC.b",
-            decimals=8,
-            address="0x152b9d0fdc40c096757f570a51e494bd4b943e50",
-        ),
-        # Liquid Staking Tokens
-        "0x2b2c81e08f1af8835a78bb2a90ae924ace0ea4be": TokenInfo(
-            symbol="sAVAX",
-            decimals=18,
-            address="0x2b2c81e08f1af8835a78bb2a90ae924ace0ea4be",
-        ),
-        # Protocol Tokens
-        "0x5947bb275c521040051d82396192181b413227a3": TokenInfo(
-            symbol="LINK.e",
-            decimals=18,
-            address="0x5947bb275c521040051d82396192181b413227a3",
-        ),
-        "0x6e84a6216ea6dacc71ee8e6b0a5b7322eebc0fdd": TokenInfo(
-            symbol="JOE",
-            decimals=18,
-            address="0x6e84a6216ea6dacc71ee8e6b0a5b7322eebc0fdd",
-        ),
-    },
-    # =========================================================================
-    # Binance Smart Chain (Chain ID: 56)
-    # =========================================================================
-    CHAIN_ID_BSC: {
-        # Native BNB (sentinel address)
-        NATIVE_BNB_ADDRESS: TokenInfo(
-            symbol="BNB",
-            decimals=18,
-            address=NATIVE_BNB_ADDRESS,
-        ),
-        # WBNB - Wrapped BNB
-        "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c": TokenInfo(
-            symbol="WBNB",
-            decimals=18,
-            address="0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
-        ),
-        # WETH - Wrapped Ether
-        "0x2170ed0880ac9a755fd29b2688956bd959f933f8": TokenInfo(
-            symbol="ETH",
-            decimals=18,
-            address="0x2170ed0880ac9a755fd29b2688956bd959f933f8",
-        ),
-        # Stablecoins
-        "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d": TokenInfo(
-            symbol="USDC",
-            decimals=18,
-            address="0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d",
-        ),
-        "0x55d398326f99059ff775485246999027b3197955": TokenInfo(
-            symbol="USDT",
-            decimals=18,
-            address="0x55d398326f99059ff775485246999027b3197955",
-        ),
-        "0xe9e7cea3dedca5984780bafc599bd69add087d56": TokenInfo(
-            symbol="BUSD",
-            decimals=18,
-            address="0xe9e7cea3dedca5984780bafc599bd69add087d56",
-        ),
-        "0x1af3f329e8be154074d8769d1ffa4ee058b1dbc3": TokenInfo(
-            symbol="DAI",
-            decimals=18,
-            address="0x1af3f329e8be154074d8769d1ffa4ee058b1dbc3",
-        ),
-        # BTCB - Bitcoin BEP-20
-        "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c": TokenInfo(
-            symbol="BTCB",
-            decimals=18,
-            address="0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c",
-        ),
-        # Protocol Tokens
-        "0xf8a0bf9cf54bb92f17374d9e9a321e6a111a51bd": TokenInfo(
-            symbol="LINK",
-            decimals=18,
-            address="0xf8a0bf9cf54bb92f17374d9e9a321e6a111a51bd",
-        ),
-        "0xbf5140a22578168fd562dccf235e5d43a02ce9b1": TokenInfo(
-            symbol="UNI",
-            decimals=18,
-            address="0xbf5140a22578168fd562dccf235e5d43a02ce9b1",
-        ),
-        "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82": TokenInfo(
-            symbol="CAKE",
-            decimals=18,
-            address="0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82",
-        ),
-    },
-}
+
+class _ResolverTokenRegistry(Mapping[int, Mapping[str, TokenInfo]]):
+    """Read-only ``TOKEN_REGISTRY`` view backed by ``TokenResolver``.
+
+    Older paper-trading callers import ``TOKEN_REGISTRY`` directly and expect a
+    ``chain_id -> lowercase_address -> TokenInfo`` mapping. Keep that shape,
+    but derive it from the canonical JSON-backed resolver instead of carrying a
+    second address table in framework code.
+    """
+
+    def __init__(self) -> None:
+        self._snapshot: dict[int, Mapping[str, TokenInfo]] | None = None
+
+    def refresh(self) -> None:
+        """Clear the cached snapshot so the next read reflects resolver state."""
+        self._snapshot = None
+
+    def _data(self) -> dict[int, Mapping[str, TokenInfo]]:
+        if self._snapshot is None:
+            self._snapshot = self._build_snapshot()
+        return self._snapshot
+
+    def _build_snapshot(self) -> dict[int, Mapping[str, TokenInfo]]:
+        resolver = _get_resolver()
+        if resolver is None:
+            return {}
+
+        snapshot: dict[int, Mapping[str, TokenInfo]] = {}
+        for chain_name, resolved_by_address in resolver.known_static_tokens_by_chain().items():
+            descriptor = ChainRegistry.try_resolve(chain_name)
+            if descriptor is None or descriptor.chain_id == 0:
+                continue
+
+            chain_tokens = {
+                resolved.address.lower(): TokenInfo(
+                    symbol=resolved.symbol,
+                    decimals=resolved.decimals,
+                    address=resolved.address.lower(),
+                )
+                for resolved in resolved_by_address.values()
+            }
+            if chain_tokens:
+                snapshot[descriptor.chain_id] = MappingProxyType(chain_tokens)
+
+        return snapshot
+
+    def __getitem__(self, chain_id: int) -> Mapping[str, TokenInfo]:
+        return self._data()[chain_id]
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(self._data())
+
+    def __len__(self) -> int:
+        return len(self._data())
+
+
+TOKEN_REGISTRY: Mapping[int, Mapping[str, TokenInfo]] = _ResolverTokenRegistry()
 
 
 def get_token_info(chain_id: int, address: str) -> TokenInfo | None:
     """Look up token info from the registry.
 
-    Delegates to TokenResolver for unified resolution, falls back to
-    local TOKEN_REGISTRY if resolver is unavailable.
+    Delegates to TokenResolver for unified resolution, then falls back to
+    the resolver-backed ``TOKEN_REGISTRY`` compatibility view.
 
     Args:
         chain_id: EIP-155 chain ID (e.g., 1 for Ethereum, 42161 for Arbitrum)
@@ -691,16 +188,16 @@ def get_token_info(chain_id: int, address: str) -> TokenInfo | None:
         resolver = _get_resolver()
         if resolver:
             try:
-                resolved = resolver.resolve(normalized_address, chain_name)
+                resolved = resolver.resolve(normalized_address, chain_name, skip_gateway=True)
                 return TokenInfo(
                     symbol=resolved.symbol,
                     decimals=resolved.decimals,
                     address=resolved.address.lower(),
                 )
             except Exception:
-                pass  # Fall through to local registry
+                pass  # Fall through to compatibility view
 
-    # Fallback to local TOKEN_REGISTRY
+    # Fallback to resolver-backed TOKEN_REGISTRY compatibility view.
     chain_registry = TOKEN_REGISTRY.get(chain_id)
     if chain_registry is None:
         return None
@@ -936,7 +433,7 @@ async def get_token_symbol_with_fallback(
 
     Attempts to resolve token address to symbol using the following priority:
     1. TokenResolver lookup (unified resolution via cache/registry/gateway)
-    2. Local TOKEN_REGISTRY lookup (fallback)
+    2. TOKEN_REGISTRY compatibility view
     3. On-chain ERC-20 symbol() call (requires RPC, skipped if rpc_url is None)
     4. Checksummed address as fallback (always succeeds)
 

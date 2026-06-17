@@ -61,6 +61,8 @@ from typing import Any
 
 import click
 
+from almanak.framework.anvil.accounts import ANVIL_DEFAULT_ADDRESS
+
 logger = logging.getLogger(__name__)
 
 
@@ -335,7 +337,7 @@ def _instantiate_strategy(
 
     # Use the well-known Anvil account so addresses are syntactically valid
     # without requiring a real key. No execution happens during ``check``.
-    wallet = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    wallet = ANVIL_DEFAULT_ADDRESS
 
     # Wrap dict config so attribute access inside __init__ doesn't raise.
     wrapped_config: Any = config if config is not None else {}

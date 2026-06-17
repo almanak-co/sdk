@@ -2,25 +2,54 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from typing import Final
 
-# Well-known MetaMorpho vault addresses.
-# Used by both synthetic_intents.py (to build synthetic VaultDeposit/Redeem)
-# and morpho_vault/permission_hints.py (to build static ERC-4626 permissions).
-METAMORPHO_VAULTS: Final[dict[str, dict[str, str]]] = {
-    "ethereum": {
-        "vault": "0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB",  # Steakhouse USDC
-        "underlying": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",  # USDC
-    },
-    "base": {
-        "vault": "0xc1256Ae5FF1cf2719D4937adb3bbCCab2E00A2Ca",  # Moonwell USDC
-        "underlying": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",  # USDC
-    },
-}
+from almanak.connectors._strategy_base.vault_representatives import VaultRepresentativeRegistry
 
-# Per-protocol vault registry for synthetic intent generation.
-# Each entry maps chain → {vault, underlying}. Add a new entry when registering
-# a vault adapter via almanak.connectors._strategy_base.vaults.register_vault_adapter.
-VAULT_PROTOCOL_REPRESENTATIVE: Final[dict[str, dict[str, dict[str, str]]]] = {
-    "metamorpho": METAMORPHO_VAULTS,
-}
+
+class _RepresentativeVaultMapping(Mapping[str, Mapping[str, Mapping[str, str]]]):
+    """Lazy view over connector-owned representative vault metadata."""
+
+    def _data(self) -> Mapping[str, Mapping[str, Mapping[str, str]]]:
+        return VaultRepresentativeRegistry.all()
+
+    def __getitem__(self, key: str) -> Mapping[str, Mapping[str, str]]:
+        return self._data()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data())
+
+    def __len__(self) -> int:
+        return len(self._data())
+
+
+class _ProtocolVaultMapping(Mapping[str, Mapping[str, str]]):
+    """Lazy view over one protocol's representative vault metadata."""
+
+    def __init__(self, protocol: str) -> None:
+        self._protocol = protocol
+
+    def _data(self) -> Mapping[str, Mapping[str, str]]:
+        return VaultRepresentativeRegistry.table(self._protocol)
+
+    def __getitem__(self, key: str) -> Mapping[str, str]:
+        return self._data()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data())
+
+    def __len__(self) -> int:
+        return len(self._data())
+
+
+# Per-protocol vault registry for synthetic intent generation, derived lazily
+# from connector-owned representative vault declarations.
+# Each entry maps chain -> {vault, underlying}.
+VAULT_PROTOCOL_REPRESENTATIVE: Final[Mapping[str, Mapping[str, Mapping[str, str]]]] = _RepresentativeVaultMapping()
+
+# Backwards-compatible public view for callers/tests that need MetaMorpho's
+# representative vaults directly.
+METAMORPHO_VAULTS: Final[Mapping[str, Mapping[str, str]]] = _ProtocolVaultMapping("metamorpho")
+
+__all__ = ["METAMORPHO_VAULTS", "VAULT_PROTOCOL_REPRESENTATIVE"]

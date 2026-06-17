@@ -405,7 +405,17 @@ class ChainlinkFeeds:
 # routers, …) do NOT belong here — they live on the owning connector's
 # address tables (AddressRegistry); this map is only for chain-level
 # infrastructure contracts the framework itself signs against.
-KNOWN_CONTRACT_KEYS: frozenset[str] = frozenset({"safe_multisend"})
+KNOWN_CONTRACT_KEYS: frozenset[str] = frozenset(
+    {
+        "safe_multisend",
+        "safe_proxy_factory_v1_4_1",
+        "safe_l2_singleton_v1_4_1",
+        "zodiac_module_proxy_factory",
+        "zodiac_roles_modifier_singleton",
+        "enso_delegate_primary",
+        "enso_delegate_secondary",
+    }
+)
 
 
 @dataclass(frozen=True)

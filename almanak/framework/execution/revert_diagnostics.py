@@ -69,43 +69,6 @@ ESTIMATED_GAS_COSTS: dict[str, Decimal] = {
     "default": Decimal("0.0002"),
 }
 
-# Well-known token addresses by chain
-TOKEN_ADDRESSES: dict[str, dict[str, str]] = {
-    "arbitrum": {
-        "WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-        "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-        "USDC.e": "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",
-        "USDT": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
-        "ARB": "0x912CE59144191C1204E64559FE8253a0e49E6548",
-        "GMX": "0xfc5A1A6EB076a2C7aD06eD22C90d7E710E35ad0a",
-        "WBTC": "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
-    },
-    "base": {
-        "WETH": "0x4200000000000000000000000000000000000006",
-        "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        "USDbC": "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",
-    },
-    "ethereum": {
-        "WETH": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-        "USDC": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-        "USDT": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
-        "WBTC": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
-    },
-}
-
-# Token decimals
-TOKEN_DECIMALS: dict[str, int] = {
-    "WETH": 18,
-    "ETH": 18,
-    "USDC": 6,
-    "USDC.e": 6,
-    "USDbC": 6,
-    "USDT": 6,
-    "ARB": 18,
-    "GMX": 18,
-    "WBTC": 8,
-}
-
 
 @dataclass
 class TokenRequirement:
@@ -260,8 +223,26 @@ class RevertDiagnostic:
 
 def get_token_address(symbol: str, chain: str) -> str | None:
     """Get the token address for a symbol on a chain."""
-    chain_tokens = TOKEN_ADDRESSES.get(chain, {})
-    return chain_tokens.get(symbol) or chain_tokens.get(symbol.upper())
+    resolved = _resolve_token_for_diagnostic(symbol, chain)
+    return resolved.address if resolved is not None else None
+
+
+def _resolve_token_for_diagnostic(symbol: str, chain: str) -> Any | None:
+    """Best-effort static token resolution for revert diagnostics."""
+    try:
+        from almanak.framework.data.tokens import get_token_resolver
+
+        resolver = get_token_resolver()
+        return resolver.resolve(symbol, chain, log_errors=False, skip_gateway=True)
+    except Exception:
+        logger.debug("Could not resolve diagnostic token metadata for symbol=%s chain=%s", symbol, chain)
+        return None
+
+
+def _get_token_decimals(symbol: str, chain: str) -> int:
+    """Return resolved token decimals, preserving diagnostics for unknown tokens."""
+    resolved = _resolve_token_for_diagnostic(symbol, chain)
+    return resolved.decimals if resolved is not None else 18
 
 
 def _lp_open_requirements(intent: "LPOpenIntent", chain: str) -> list[TokenRequirement]:
@@ -284,7 +265,7 @@ def _lp_open_requirements(intent: "LPOpenIntent", chain: str) -> list[TokenRequi
                 symbol=symbol,
                 amount=amount,
                 address=get_token_address(symbol, chain),
-                decimals=TOKEN_DECIMALS.get(symbol, 18),
+                decimals=_get_token_decimals(symbol, chain),
             )
         )
 
@@ -332,7 +313,7 @@ def extract_token_requirements(
                     symbol=symbol,
                     amount=intent.amount,
                     address=get_token_address(symbol, chain),
-                    decimals=TOKEN_DECIMALS.get(symbol, 18),
+                    decimals=_get_token_decimals(symbol, chain),
                 )
             )
         # Note: amount_usd requires price lookup which we skip here
@@ -348,7 +329,7 @@ def extract_token_requirements(
                     symbol=intent.token,
                     amount=intent.amount,
                     address=get_token_address(intent.token, chain),
-                    decimals=TOKEN_DECIMALS.get(intent.token, 18),
+                    decimals=_get_token_decimals(intent.token, chain),
                 )
             )
 
@@ -360,7 +341,7 @@ def extract_token_requirements(
                     symbol=intent.token,
                     amount=intent.amount,
                     address=get_token_address(intent.token, chain),
-                    decimals=TOKEN_DECIMALS.get(intent.token, 18),
+                    decimals=_get_token_decimals(intent.token, chain),
                 )
             )
 
@@ -373,7 +354,7 @@ def extract_token_requirements(
                     symbol=intent.collateral_token,
                     amount=intent.collateral_amount,
                     address=get_token_address(intent.collateral_token, chain),
-                    decimals=TOKEN_DECIMALS.get(intent.collateral_token, 18),
+                    decimals=_get_token_decimals(intent.collateral_token, chain),
                 )
             )
 

@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from almanak.core.chains import DEFAULT_CHAIN
+from almanak.framework.data.tokens.defaults import DEFAULT_TOKENS
+from almanak.framework.data.tokens.models import Token
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,55 @@ def _contract_address(protocol: str, chain: str, kinds: tuple[str, ...] | str, *
         message = f"Unsupported chain: {chain}. Supported chains: {supported}"
         raise ValueError(f"{message}. {hint}" if hint else message)
     return address
+
+
+def _address_table(protocol: str, chain: str) -> dict[str, str]:
+    """Resolve a connector-owned address/asset table for ``(protocol, chain)``."""
+    from almanak.connectors._strategy_base.address_registry import AddressRegistry
+
+    return AddressRegistry.addresses_for(protocol, chain)
+
+
+def _static_token(symbol: str, chain: str) -> Token:
+    """Resolve static token metadata from the token catalogue."""
+    symbol_upper = symbol.upper()
+    for token in DEFAULT_TOKENS:
+        if token.symbol.upper() != symbol_upper:
+            continue
+        if token.has_address_on(chain):
+            return token
+    raise RuntimeError(f"Missing static token metadata for {symbol} on {chain}")
+
+
+def _static_token_by_address(address: str, chain: str) -> Token:
+    """Resolve static token metadata by chain address."""
+    address_lower = address.lower()
+    for token in DEFAULT_TOKENS:
+        token_address = token.get_address(chain)
+        if token_address and token_address.lower() == address_lower:
+            return token
+    raise RuntimeError(f"Missing static token metadata for {address} on {chain}")
+
+
+def _static_token_address(symbol: str, chain: str) -> str:
+    """Resolve a static token address from the token catalogue."""
+    address = _static_token(symbol, chain).get_address(chain)
+    if address is None:
+        raise RuntimeError(f"Missing static token metadata for {symbol} on {chain}")
+    return address
+
+
+def _static_token_decimals(symbol: str, chain: str) -> int:
+    """Resolve token decimals from the token catalogue."""
+    return _static_token(symbol, chain).get_decimals(chain)
+
+
+def _static_asset_decimals(symbol: str, chain: str, address: str) -> int:
+    """Resolve token decimals by symbol, falling back to connector address aliases."""
+    try:
+        return _static_token_decimals(symbol, chain)
+    except RuntimeError:
+        return _static_token_by_address(address, chain).get_decimals(chain)
 
 
 # Function selectors for NonfungiblePositionManager
@@ -514,38 +565,71 @@ def _parse_position_result(result: bytes, token_id: int) -> UniswapV3Position | 
 # GMX V2 reader / data-store addresses resolve through AddressRegistry
 # (roles "reader" / "data_store" on the gmx_v2 connector).
 
-# GMX V2 markets (index token -> market address)
-GMX_V2_MARKETS: dict[str, dict[str, str]] = {
-    "arbitrum": {
-        "ETH/USD": "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336",
-        "BTC/USD": "0x47c031236e19d024b42f8AE6780E44A573170703",
-        "LINK/USD": "0x7f1fa204bb700853D36994DA19F830b6Ad18455C",
-        "ARB/USD": "0xC25cEf6061Cf5dE5eb761b50E4743c1F5D7E5407",
-        "SOL/USD": "0x09400D9DB990D5ed3f35D7be61DfAEB900Af03C9",
-    },
+_GMX_V2_POSITION_QUERY_MARKETS: dict[str, tuple[str, ...]] = {
+    "arbitrum": ("ETH/USD", "BTC/USD", "LINK/USD", "ARB/USD", "SOL/USD"),
 }
 
-# Common collateral tokens for GMX V2
-GMX_V2_COLLATERAL_TOKENS: dict[str, dict[str, str]] = {
-    "arbitrum": {
-        "WETH": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
-        "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-        "USDC.e": "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",
-        "USDT": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
-    },
+_GMX_V2_POSITION_QUERY_COLLATERALS: dict[str, tuple[str, ...]] = {
+    "arbitrum": ("WETH", "USDC", "USDC.e", "USDT"),
 }
 
-# GMX V2 index token decimals per market
-# Most tokens have 18 decimals, but BTC uses 8
-GMX_V2_INDEX_TOKEN_DECIMALS: dict[str, dict[str, int]] = {
-    "arbitrum": {
-        "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336": 18,  # ETH/USD
-        "0x47c031236e19d024b42f8AE6780E44A573170703": 8,  # BTC/USD
-        "0x7f1fa204bb700853D36994DA19F830b6Ad18455C": 18,  # LINK/USD
-        "0xC25cEf6061Cf5dE5eb761b50E4743c1F5D7E5407": 18,  # ARB/USD
-        "0x09400D9DB990D5ed3f35D7be61DfAEB900Af03C9": 9,  # SOL/USD
-    },
-}
+
+def _build_gmx_v2_markets() -> dict[str, dict[str, str]]:
+    """Filter connector-owned GMX markets to the paper reader's coverage."""
+    markets: dict[str, dict[str, str]] = {}
+    for chain, symbols in _GMX_V2_POSITION_QUERY_MARKETS.items():
+        connector_markets = _address_table("gmx_v2_markets", chain)
+        missing = [symbol for symbol in symbols if symbol not in connector_markets]
+        if missing:
+            raise RuntimeError(f"GMX V2 connector market catalogue missing {missing} on {chain}")
+        markets[chain] = {symbol: connector_markets[symbol] for symbol in symbols}
+    return markets
+
+
+def _build_gmx_v2_collateral_tokens() -> dict[str, dict[str, str]]:
+    """Resolve GMX paper-reader collateral tokens from owned metadata."""
+    collaterals: dict[str, dict[str, str]] = {}
+    for chain, symbols in _GMX_V2_POSITION_QUERY_COLLATERALS.items():
+        connector_tokens = _address_table("gmx_v2_tokens", chain)
+        collaterals[chain] = {
+            symbol: connector_tokens.get(symbol) or _static_token_address(symbol, chain) for symbol in symbols
+        }
+    return collaterals
+
+
+def _build_gmx_v2_index_token_decimals() -> dict[str, dict[str, int]]:
+    """Filter connector-owned GMX market decimals to the paper reader's coverage."""
+    from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
+
+    decimals_by_chain: dict[str, dict[str, int]] = {}
+    for chain, markets in GMX_V2_MARKETS.items():
+        resolved: dict[str, int] = {}
+        missing: list[str] = []
+        for address in markets.values():
+            meta = PerpsReadRegistry.market_metadata("gmx_v2", address, chain)
+            if meta is None:
+                missing.append(address)
+            else:
+                resolved[address.lower()] = meta.index_token_decimals
+        if missing:
+            raise RuntimeError(f"GMX V2 connector index-decimal catalogue missing {missing} on {chain}")
+        decimals_by_chain[chain] = resolved
+    return decimals_by_chain
+
+
+GMX_V2_MARKETS: dict[str, dict[str, str]] = _build_gmx_v2_markets()
+GMX_V2_COLLATERAL_TOKENS: dict[str, dict[str, str]] = _build_gmx_v2_collateral_tokens()
+GMX_V2_INDEX_TOKEN_DECIMALS: dict[str, dict[str, int]] = _build_gmx_v2_index_token_decimals()
+
+
+def _gmx_v2_index_token_decimals(chain: str, market: str) -> int | None:
+    """Return the GMX index-token decimals for a market address."""
+    chain_decimals = GMX_V2_INDEX_TOKEN_DECIMALS.get(chain, {})
+    market_key = market.lower()
+    if market_key not in chain_decimals:
+        return None
+    return chain_decimals[market_key]
+
 
 # Function selector for getPositionInfo
 # getPositionInfo(DataStore dataStore, IReferralStorage referralStorage, bytes32 positionKey,
@@ -959,8 +1043,9 @@ async def _query_gmx_position(
         entry_price = 0
         if size_in_tokens > 0:
             # Look up the correct decimals for this market's index token
-            index_decimals = GMX_V2_INDEX_TOKEN_DECIMALS.get(chain, {}).get(market, 18)
-            entry_price = (size_in_usd * 10**index_decimals) // size_in_tokens
+            index_decimals = _gmx_v2_index_token_decimals(chain, market)
+            if index_decimals is not None:
+                entry_price = (size_in_usd * 10**index_decimals) // size_in_tokens
 
         return GMXv2Position(
             position_key=position_key,
@@ -1020,8 +1105,9 @@ def _query_gmx_position_sync(
         entry_price = 0
         if size_in_tokens > 0:
             # Look up the correct decimals for this market's index token
-            index_decimals = GMX_V2_INDEX_TOKEN_DECIMALS.get(chain, {}).get(market, 18)
-            entry_price = (size_in_usd * 10**index_decimals) // size_in_tokens
+            index_decimals = _gmx_v2_index_token_decimals(chain, market)
+            if index_decimals is not None:
+                entry_price = (size_in_usd * 10**index_decimals) // size_in_tokens
 
         return GMXv2Position(
             position_key=position_key,
@@ -1151,77 +1237,46 @@ def _compute_position_storage_key(position_key: str, field_name: str) -> str:
 # Aave V3 pool-data-provider addresses resolve through AddressRegistry
 # (role "pool_data_provider" on the aave_v3 connector).
 
-# Common tokens supported by Aave V3 per chain (asset address -> symbol)
-AAVE_V3_TOKENS: dict[str, dict[str, str]] = {
-    "arbitrum": {
-        "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1": "WETH",
-        "0xaf88d065e77c8cC2239327C5EDb3A432268e5831": "USDC",
-        "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8": "USDC.e",
-        "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9": "USDT",
-        "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1": "DAI",
-        "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f": "WBTC",
-        "0xf97f4df75117a78c1A5a0DBb814Af92458539FB4": "LINK",
-        "0x912CE59144191C1204E64559FE8253a0e49E6548": "ARB",
-        "0x5979D7b546E38E414F7E9822514be443A4800529": "wstETH",
-    },
-    "ethereum": {
-        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2": "WETH",
-        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48": "USDC",
-        "0xdAC17F958D2ee523a2206206994597C13D831ec7": "USDT",
-        "0x6B175474E89094C44Da98b954EedeAC495271d0F": "DAI",
-        "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599": "WBTC",
-        "0x514910771AF9Ca656af840dff83E8264EcF986CA": "LINK",
-        "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0": "wstETH",
-    },
-    "optimism": {
-        "0x4200000000000000000000000000000000000006": "WETH",
-        "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85": "USDC",
-        "0x7F5c764cBc14f9669B88837ca1490cCa17c31607": "USDC.e",
-        "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58": "USDT",
-        "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1": "DAI",
-        "0x1F32b1c2345538c0c6f582fCB022739c4A194Ebb": "wstETH",
-    },
-    "polygon": {
-        "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270": "WMATIC",
-        "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619": "WETH",
-        "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359": "USDC",
-        "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174": "USDC.e",
-        "0xc2132D05D31c914a87C6611C10748AEb04B58e8F": "USDT",
-        "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063": "DAI",
-        "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6": "WBTC",
-    },
-    "base": {
-        "0x4200000000000000000000000000000000000006": "WETH",
-        "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913": "USDC",
-        "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22": "cbETH",
-        "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452": "wstETH",
-    },
-    "avalanche": {
-        "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7": "WAVAX",
-        "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB": "WETH.e",
-        "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E": "USDC",
-        "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7": "USDT",
-        "0xd586E7F844cEa2F87f50152665BCbc2C279D8d70": "DAI.e",
-    },
+_AAVE_V3_POSITION_QUERY_SYMBOLS: dict[str, tuple[str, ...]] = {
+    "arbitrum": ("WETH", "USDC", "USDC.e", "USDT", "DAI", "WBTC", "LINK", "ARB", "wstETH"),
+    "ethereum": ("WETH", "USDC", "USDT", "DAI", "WBTC", "LINK", "wstETH"),
+    "optimism": ("WETH", "USDC", "USDC.e", "USDT", "DAI", "wstETH"),
+    "polygon": ("WMATIC", "WETH", "USDC", "USDC.e", "USDT", "DAI", "WBTC"),
+    "base": ("WETH", "USDC", "cbETH", "wstETH"),
+    "avalanche": ("WAVAX", "WETH.e", "USDC", "USDT", "DAI.e"),
 }
 
-# Token decimals for Aave V3 assets
-AAVE_V3_TOKEN_DECIMALS: dict[str, int] = {
-    "WETH": 18,
-    "WETH.e": 18,
-    "USDC": 6,
-    "USDC.e": 6,
-    "USDT": 6,
-    "DAI": 18,
-    "DAI.e": 18,
-    "WBTC": 8,
-    "LINK": 18,
-    "ARB": 18,
-    "wstETH": 18,
-    "cbETH": 18,
-    "WMATIC": 18,
-    "WAVAX": 18,
-}
+
+def _build_aave_v3_tokens() -> dict[str, dict[str, str]]:
+    """Invert the connector-owned Aave token catalogue for reserve lookups."""
+    tokens: dict[str, dict[str, str]] = {}
+    for chain, symbols in _AAVE_V3_POSITION_QUERY_SYMBOLS.items():
+        connector_tokens = _address_table("aave_v3_tokens", chain)
+        missing = [symbol for symbol in symbols if symbol not in connector_tokens]
+        if missing:
+            raise RuntimeError(f"Aave V3 connector token catalogue missing {missing} on {chain}")
+        tokens[chain] = {connector_tokens[symbol]: symbol for symbol in symbols}
+    return tokens
+
+
+def _build_aave_v3_token_decimals() -> dict[str, int]:
+    """Derive Aave reserve decimals from the token catalogue."""
+    decimals: dict[str, int] = {}
+    for chain, symbols in _AAVE_V3_POSITION_QUERY_SYMBOLS.items():
+        connector_tokens = _address_table("aave_v3_tokens", chain)
+        for symbol in symbols:
+            address = connector_tokens[symbol]
+            symbol_decimals = _static_asset_decimals(symbol, chain, address)
+            previous = decimals.setdefault(symbol, symbol_decimals)
+            if previous != symbol_decimals:
+                raise RuntimeError(
+                    f"Aave V3 token {symbol} has inconsistent decimals: {previous} and {symbol_decimals}"
+                )
+    return decimals
+
+
+AAVE_V3_TOKENS: dict[str, dict[str, str]] = _build_aave_v3_tokens()
+AAVE_V3_TOKEN_DECIMALS: dict[str, int] = _build_aave_v3_token_decimals()
 
 # Function selector for getUserReserveData(address asset, address user)
 GET_USER_RESERVE_DATA_SELECTOR = "0x28dd2d01"

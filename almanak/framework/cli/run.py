@@ -38,6 +38,7 @@ import click
 from almanak.config.cli_options import gateway_client_options
 from almanak.config.cli_runtime import CliRuntimeConfig
 from almanak.core.chains import DEFAULT_CHAIN
+from almanak.framework.anvil import accounts as _anvil_accounts
 from almanak.gateway.data.balance import Web3BalanceProvider
 from almanak.gateway.data.price import CoinGeckoPriceSource, PriceAggregator
 
@@ -86,9 +87,8 @@ from ._strategy_config import DictConfigWrapper  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-# Well-known Anvil default account #0 (used when no private key is configured)
-ANVIL_DEFAULT_ADDRESS = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-ANVIL_DEFAULT_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"  # gitleaks:allow
+ANVIL_DEFAULT_ADDRESS = _anvil_accounts.ANVIL_DEFAULT_ADDRESS
+ANVIL_DEFAULT_PRIVATE_KEY = _anvil_accounts.ANVIL_DEFAULT_PRIVATE_KEY
 
 
 # =============================================================================

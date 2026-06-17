@@ -159,6 +159,18 @@ MULTISEND_CREATE2 = "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"
 FROZEN_MULTISEND_CHAINS = frozenset(
     {"ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "gnosis", "bsc", "mantle", "xlayer"}
 )
+FROZEN_SAFE_STACK_CHAINS = FROZEN_MULTISEND_CHAINS - {"gnosis", "mantle", "xlayer"}
+FROZEN_SAFE_SIGNER_CONTRACTS: dict[str, str] = {
+    "safe_proxy_factory_v1_4_1": "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67",
+    "safe_l2_singleton_v1_4_1": "0x29fcB43b46531BcA003ddC8FCB67FFE91900C762",
+    "zodiac_module_proxy_factory": "0x000000000000aDdB49795b0f9bA5BC298cDda236",
+    "zodiac_roles_modifier_singleton": "0x9646fDAD06d3e24444381f44362a3B0eB343D337",
+}
+FROZEN_ENSO_DELEGATES: dict[str, str] = {
+    "enso_delegate_primary": "0x7663fd40081dccd47805c00e613b6beac3b87f08",
+    "enso_delegate_secondary": "0xa2f4f9c6ec598ca8c633024f8851c79ca5f43e48",
+}
+FROZEN_ENSO_PRIMARY_CHAINS = frozenset({"ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche", "bsc"})
 
 FROZEN_LP_UNISWAP: dict[str, str] = {
     "ethereum": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
@@ -269,6 +281,51 @@ class TestSafeMultisendInversion:
 
         for chain in sorted(FROZEN_MULTISEND_CHAINS - {"gnosis"}):
             assert get_multisend_address(chain) == MULTISEND_CREATE2
+
+
+class TestSafeSignerAddressInversion:
+    def test_safe_and_zodiac_contract_maps_match_verified_safe_chains(self) -> None:
+        for key, expected in FROZEN_SAFE_SIGNER_CONTRACTS.items():
+            derived = dict(contract_address_map(key))
+            assert set(derived) == FROZEN_SAFE_STACK_CHAINS
+            assert set(derived.values()) == {expected}
+
+    def test_legacy_safe_constants_derive_from_descriptor_contracts(self) -> None:
+        from almanak.framework.execution.signer.safe.constants import (
+            MODULE_PROXY_FACTORY,
+            ROLES_MODIFIER_SINGLETON,
+            SAFE_L2_SINGLETON_V1_4_1,
+            SAFE_PROXY_FACTORY_V1_4_1,
+        )
+
+        assert SAFE_PROXY_FACTORY_V1_4_1 == FROZEN_SAFE_SIGNER_CONTRACTS["safe_proxy_factory_v1_4_1"]
+        assert SAFE_L2_SINGLETON_V1_4_1 == FROZEN_SAFE_SIGNER_CONTRACTS["safe_l2_singleton_v1_4_1"]
+        assert MODULE_PROXY_FACTORY == FROZEN_SAFE_SIGNER_CONTRACTS["zodiac_module_proxy_factory"]
+        assert ROLES_MODIFIER_SINGLETON == FROZEN_SAFE_SIGNER_CONTRACTS["zodiac_roles_modifier_singleton"]
+
+    def test_enso_delegate_contract_maps_match_legacy_membership(self) -> None:
+        primary = dict(contract_address_map("enso_delegate_primary"))
+        secondary = dict(contract_address_map("enso_delegate_secondary"))
+
+        assert set(primary) == FROZEN_ENSO_PRIMARY_CHAINS
+        assert {address.lower() for address in primary.values()} == {FROZEN_ENSO_DELEGATES["enso_delegate_primary"]}
+        assert {chain: address.lower() for chain, address in secondary.items()} == {
+            "ethereum": FROZEN_ENSO_DELEGATES["enso_delegate_secondary"]
+        }
+
+    def test_enso_delegate_operation_decision_derives_from_descriptor_contracts(self) -> None:
+        from almanak.framework.execution.signer.safe.constants import (
+            ENSO_DELEGATE_ADDRESSES,
+            SafeOperation,
+            get_operation_type,
+            is_enso_delegate,
+        )
+
+        assert ENSO_DELEGATE_ADDRESSES == set(FROZEN_ENSO_DELEGATES.values())
+        for address in FROZEN_ENSO_DELEGATES.values():
+            assert is_enso_delegate(address.upper())
+            assert get_operation_type(address) == SafeOperation.DELEGATE_CALL
+        assert get_operation_type("0x0000000000000000000000000000000000000001") == SafeOperation.CALL
 
 
 class TestLPPositionManagerInversion:

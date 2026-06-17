@@ -149,10 +149,15 @@ def test_market_metadata_resolves_symbol_and_decimals(market, symbol, decimals):
     assert gmx_perps._gmx_market_metadata(market.lower(), "arbitrum") == meta
 
 
-def test_market_metadata_none_when_decimals_uncatalogued_or_unknown():
-    # DOGE has a symbol but no decimals row -> None (NOT the adapter's default-18),
-    # preserving the framework's pre-refactor "decimals missing -> fall back" behaviour.
-    assert gmx_perps._gmx_market_metadata(_DOGE_MARKET, "arbitrum") is None
+def test_market_metadata_resolves_previously_uncatalogued_market_decimals():
+    # DOGE is explicitly catalogued now so the adapter never falls back to 18 decimals.
+    meta = gmx_perps._gmx_market_metadata(_DOGE_MARKET, "arbitrum")
+    assert meta is not None
+    assert meta.index_token_symbol == "DOGE"
+    assert meta.index_token_decimals == 8
+
+
+def test_market_metadata_none_for_unknown_market_or_chain():
     # Unknown market / unknown chain -> None.
     assert gmx_perps._gmx_market_metadata("0x" + "ab" * 20, "arbitrum") is None
     assert gmx_perps._gmx_market_metadata(_ETH_MARKET, "ethereum") is None

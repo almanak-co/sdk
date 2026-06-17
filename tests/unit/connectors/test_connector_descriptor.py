@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import importlib
 import re
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -87,6 +88,7 @@ from almanak.connectors._strategy_base.swap_quote_registry import (
 from almanak.connectors._strategy_base.swap_route_inference_registry import (
     SwapRouteInferenceConnector,
 )
+from almanak.connectors._strategy_base.vault_representatives import VaultRepresentativeSpec
 from almanak.connectors._strategy_base.vault_tool_registry import (
     VaultToolConnector,
 )
@@ -731,7 +733,7 @@ EXPECTED_ADDRESS_TABLE_MODULES = {
 }
 
 EXPECTED_ADDRESS_TABLE_PROTOCOLS = {
-    "aave_v3": ("aave_v3",),
+    "aave_v3": ("aave_v3", "aave_v3_tokens"),
     "aerodrome": ("aerodrome",),
     "aster_perps": ("aster_perps",),
     "balancer_v2": ("balancer_v2",),
@@ -740,7 +742,7 @@ EXPECTED_ADDRESS_TABLE_PROTOCOLS = {
     "fluid": ("fluid",),
     "fluid_vault": ("fluid_vault",),
     "fluid_dex_lp": ("fluid_dex_lp",),
-    "gmx_v2": ("gmx_v2",),
+    "gmx_v2": ("gmx_v2", "gmx_v2_markets", "gmx_v2_tokens"),
     "morpho_blue": ("morpho_blue",),
     "pancakeswap_perps": ("pancakeswap_perps",),
     "pancakeswap_v3": ("pancakeswap_v3",),
@@ -1774,6 +1776,67 @@ def test_connector_address_tables_are_not_hardcoded_in_address_registry() -> Non
         assert module not in source
 
 
+def test_vault_representative_specs_load_from_descriptors() -> None:
+    """Representative vault metadata is published through connectors."""
+    CONNECTOR_REGISTRY.clear()
+
+    connectors: dict[str, tuple[str, ...]] = {}
+    for connector_manifest in CONNECTOR_REGISTRY.with_vault_representatives():
+        assert connector_manifest.vault_representatives is not None
+        specs = connector_manifest.vault_representatives
+
+        assert specs
+        assert all(isinstance(spec, VaultRepresentativeSpec) for spec in specs)
+        connectors[connector_manifest.name] = tuple(spec.protocol for spec in specs)
+        for spec in specs:
+            table = spec.load_table()
+            assert table
+            assert all({"vault", "underlying"} <= set(row) for row in table.values())
+
+    assert connectors == {"morpho_vault": ("metamorpho",)}
+
+
+def test_vault_representative_spec_rejects_blank_row_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    module_name = "tests.fake_blank_vault_representatives"
+    monkeypatch.setitem(
+        sys.modules,
+        module_name,
+        SimpleNamespace(TABLE={"base": {"vault": " ", "underlying": "0x" + "11" * 20}}),
+    )
+    spec = VaultRepresentativeSpec(protocol="fake", module=module_name, attribute="TABLE")
+
+    with pytest.raises(TypeError, match="invalid row"):
+        spec.load_table()
+
+
+def test_vault_representative_spec_rejects_duplicate_normalized_chains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module_name = "tests.fake_duplicate_vault_representatives"
+    monkeypatch.setitem(
+        sys.modules,
+        module_name,
+        SimpleNamespace(
+            TABLE={
+                "Base": {"vault": "0x" + "11" * 20, "underlying": "0x" + "22" * 20},
+                " base ": {"vault": "0x" + "33" * 20, "underlying": "0x" + "44" * 20},
+            }
+        ),
+    )
+    spec = VaultRepresentativeSpec(protocol="fake", module=module_name, attribute="TABLE")
+
+    with pytest.raises(ValueError, match="duplicate chain"):
+        spec.load_table()
+
+
+def test_vault_representatives_are_not_hardcoded_in_framework_permissions() -> None:
+    """The permission layer discovers representative vaults instead of naming connectors."""
+    repo_root = Path(__file__).resolve().parents[3]
+    source = (repo_root / "almanak/framework/permissions/constants.py").read_text()
+
+    assert "almanak.connectors.morpho_vault" not in source
+
+
 def test_solana_program_specs_load_from_descriptors() -> None:
     """Solana validator clone specs are published through connector manifests."""
     CONNECTOR_REGISTRY.clear()
@@ -1916,10 +1979,10 @@ def test_fluid_vault_runner_hook_resolves_to_operate_enrichment_capability() -> 
     stub published under the fluid_vault key; the nftId persistence path
     (VIB-5031) depends on the actual result-enrichment capability class.
     """
+    from almanak.connectors._fluid_core.runner_hooks import FluidVaultRunnerHookConnector
     from almanak.connectors._strategy_base.runner_hook_registry import (
         RunnerResultEnrichmentCapability,
     )
-    from almanak.connectors._fluid_core.runner_hooks import FluidVaultRunnerHookConnector
 
     CONNECTOR_REGISTRY.clear()
 

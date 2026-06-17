@@ -26,6 +26,9 @@ from typing import TYPE_CHECKING, Any
 
 from almanak.framework.data.tokens.exceptions import TokenResolutionError
 
+from .addresses import GMX_V2_INDEX_TOKEN_DECIMALS as _GMX_V2_INDEX_TOKEN_DECIMALS
+from .addresses import GMX_V2_MARKETS
+
 if TYPE_CHECKING:
     from almanak.framework.data.tokens.resolver import TokenResolver as TokenResolverType
     from almanak.framework.gateway_client import GatewayClient
@@ -96,55 +99,6 @@ GMX_V2_ADDRESSES: dict[str, dict[str, str]] = {
         "withdrawal_vault": "0xf5F30B10141E1F63FC11eD772931A8294a591996",
         "router": "0x820F5FfC5b525cD4d88Cd91aCf2c28F16530Cc68",
         "event_emitter": "0xDb17B211c34240B014ab6d61d4A31FA0C0e20c26",
-    },
-}
-
-# GMX v2 markets (index token -> market address)
-GMX_V2_MARKETS: dict[str, dict[str, str]] = {
-    "arbitrum": {
-        "ETH/USD": "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336",  # ETH market
-        "BTC/USD": "0x47c031236e19d024b42f8AE6780E44A573170703",  # BTC market
-        "LINK/USD": "0x7f1fa204bb700853D36994DA19F830b6Ad18455C",
-        "ARB/USD": "0xC25cEf6061Cf5dE5eb761b50E4743c1F5D7E5407",
-        "SOL/USD": "0x09400D9DB990D5ed3f35D7be61DfAEB900Af03C9",
-        "UNI/USD": "0xC7aBb2C5F3bf3CEB389df0Ebb3cFE90EcE8A1bAa",
-        "DOGE/USD": "0x6853EA96FF216fAb11D2d930CE3C508556A4bdc4",
-        "LTC/USD": "0xD9535bB5f58A1a75032416F2dFe7880C30575a41",
-        "XRP/USD": "0x0CCB4fAa6f1F1B30911619f1184082aB4E25813c",
-        "ATOM/USD": "0x248C35760068cE009a13076D573ed3497A47bCD4",
-        "NEAR/USD": "0x63Dc80EE90F26363B3FCD609007CC9e14c8991BE",
-        "AAVE/USD": "0x1CbBa6346F110c8A5ea739ef2d1eb182990e4EB2",
-        "AVAX/USD": "0xB7e69749E3d2EDd90ea59A4932EFEa2D41E245d7",
-        "OP/USD": "0xb56E5E2eB50cf5383342914b0C85Fe62DbD861C8",
-        "GMX/USD": "0x55391D178Ce46e7AC8eaAEa50A72D1A5a8A622Da",
-    },
-    "avalanche": {
-        "AVAX/USD": "0xD996ff47A1F763E1e55415BC4437c59292D1F415",
-        "ETH/USD": "0xB7e69749E3d2EDd90ea59A4932EFEa2D41E245d7",
-        "BTC/USD": "0xFb02132333A79C8B5Bd0b64E3AbccA5f7fAf2937",
-        "SOL/USD": "0x91ccF2053d79e16beE6B8c4b9F8e67Ba64669B98",
-        "LTC/USD": "0x7e0d5dc8C0c4F04c37568a5E3C2B29cA6C54a8e7",
-    },
-}
-
-
-# Index token decimals per market address.
-# GMX V2 size_in_tokens uses the index token's native decimals.
-# Mirrored from almanak.framework.backtesting.paper.position_queries for consistency.
-_GMX_V2_INDEX_TOKEN_DECIMALS: dict[str, dict[str, int]] = {
-    "arbitrum": {
-        "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336": 18,  # ETH/USD (WETH)
-        "0x47c031236e19d024b42f8AE6780E44A573170703": 8,  # BTC/USD (WBTC)
-        "0x7f1fa204bb700853D36994DA19F830b6Ad18455C": 18,  # LINK/USD
-        "0xC25cEf6061Cf5dE5eb761b50E4743c1F5D7E5407": 18,  # ARB/USD
-        "0x09400D9DB990D5ed3f35D7be61DfAEB900Af03C9": 9,  # SOL/USD
-    },
-    "avalanche": {
-        "0xD996ff47A1F763E1e55415BC4437c59292D1F415": 18,  # AVAX/USD (WAVAX)
-        "0xB7e69749E3d2EDd90ea59A4932EFEa2D41E245d7": 18,  # ETH/USD (WETH.e)
-        "0xFb02132333A79C8B5Bd0b64E3AbccA5f7fAf2937": 8,  # BTC/USD (WBTC.e)
-        "0x91ccF2053d79e16beE6B8c4b9F8e67Ba64669B98": 9,  # SOL/USD
-        "0x7e0d5dc8C0c4F04c37568a5E3C2B29cA6C54a8e7": 18,  # LTC/USD
     },
 }
 
@@ -1276,7 +1230,7 @@ class GMXv2Adapter:
             Index token decimals for the market
         """
         chain_markets = _GMX_V2_INDEX_TOKEN_DECIMALS.get(self.chain, {})
-        decimals = chain_markets.get(market_address)
+        decimals = chain_markets.get(market_address.lower())
         if decimals is not None:
             return decimals
         logger.warning(

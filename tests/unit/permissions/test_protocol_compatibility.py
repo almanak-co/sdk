@@ -337,6 +337,15 @@ class TestVaultCompatibility:
         permissions, warnings = discover_permissions(chain, [protocol], ["VAULT_DEPOSIT", "VAULT_REDEEM"])
         _assert_permissions_or_known_gap(protocol, "VAULT_DEPOSIT", chain, permissions, warnings)
 
+    def test_vault_synthetic_intents_do_not_require_generic_token_pair(self):
+        with patch(
+            "almanak.framework.permissions.synthetic_intents._get_token_pair_or_none",
+            return_value=None,
+        ):
+            intents = build_synthetic_intents("metamorpho", "VAULT_DEPOSIT", "base")
+
+        assert len(intents) == 1
+
 
 # ---------------------------------------------------------------------------
 # Cross-cutting: negative cases

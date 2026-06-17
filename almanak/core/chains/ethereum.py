@@ -7,6 +7,7 @@ chain_id is the on-the-wire identifier owned by ``metrics-database``.
 
 from almanak.core.enums import Chain, ChainFamily
 
+from ._contracts import safe_stack_contracts
 from ._descriptor import (
     AnvilProfile,
     ChainDescriptor,
@@ -124,7 +125,7 @@ DESCRIPTOR = register_chain(
         # Safe MultiSendCallOnly v1.4.1 — CREATE2, same address on every
         # chain Safe deploys to; presence here == deployment-verified
         # (legacy MULTISEND_ADDRESSES membership, VIB-4851 CS-5).
-        contracts={"safe_multisend": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"},
+        contracts=safe_stack_contracts(enso_delegate_primary=True, enso_delegate_secondary=True),
         # Managed-Anvil fork-test funding facts (VIB-4851 CS-6) — moved
         # verbatim from framework/anvil/fork_manager.py (display-case keys).
         anvil=AnvilProfile(

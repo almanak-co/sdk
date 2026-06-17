@@ -59,6 +59,8 @@ COMPOUND_V3_COMET_ADDRESSES: dict[str, dict[str, str]] = {
     },
     "base": {
         "usdc": "0xb125E6687d4313864e53df431d5425969c15Eb2F",
+        # Comet-only USDbC market; account-state params can be added when the framework needs it.
+        "usdbc": "0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf",
         "weth": "0x46e6b214b524310239732D51387075E0e70970bf",
         "aero": "0x784efeB622244d2348d4F2522f8860B96fbEcE89",
     },
@@ -72,6 +74,8 @@ COMPOUND_V3_COMET_ADDRESSES: dict[str, dict[str, str]] = {
         "usdc_e": "0xF25212E676D1F7F89Cd72fFEe66158f541246445",
         # Alias used by rate monitor (USDC.e -> usdc_bridged mapping in _COMPOUND_V3_TOKEN_TO_MARKET)
         "usdc_bridged": "0xF25212E676D1F7F89Cd72fFEe66158f541246445",
+        # Comet-only USDT market; account-state params can be added when the framework needs it.
+        "usdt": "0xaeB318360f27748Acb200CE616E389A6C9409a07",
     },
 }
 

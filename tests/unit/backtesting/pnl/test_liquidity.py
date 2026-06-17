@@ -10,6 +10,7 @@ from almanak.framework.backtesting.pnl.fee_models.liquidity import (
     DEFAULT_LIQUIDITY_USD,
     KNOWN_POOLS,
     PoolLiquidityResult,
+    _known_pools_from_reference,
     estimate_liquidity_for_trade,
     get_pool_address,
 )
@@ -77,6 +78,27 @@ class TestKnownPools:
         """Polygon should have known pool addresses."""
         assert "polygon" in KNOWN_POOLS
         assert "WETH/USDC" in KNOWN_POOLS["polygon"]
+
+    def test_known_pools_follow_token_to_pool_reference(self, monkeypatch) -> None:
+        reference = {
+            "pools": {
+                "arbitrum": {
+                    "WETH/USDC-500": "0x0000000000000000000000000000000000000001",
+                    "WETH/USDC-3000": "0x0000000000000000000000000000000000000002",
+                }
+            },
+            "token_to_pool": {"ETH": {"arbitrum": "WETH/USDC-3000"}},
+        }
+        monkeypatch.setattr(
+            "almanak.connectors._strategy_base.dex_volume_registry.DexVolumeRegistry.twap_reference_pools",
+            lambda: reference,
+        )
+
+        pools = _known_pools_from_reference()
+
+        assert pools == {
+            "arbitrum": {"WETH/USDC": "0x0000000000000000000000000000000000000002"}
+        }
 
     def test_pool_addresses_are_checksummed(self) -> None:
         """Pool addresses should start with 0x."""

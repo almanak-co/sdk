@@ -77,33 +77,45 @@ DEFAULT_LIQUIDITY_USD: dict[str, Decimal] = {
 }
 
 
-# Known pool addresses for common pairs (chain -> token_pair -> pool_address)
-KNOWN_POOLS: dict[str, dict[str, str]] = {
-    "ethereum": {
-        "WETH/USDC": "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",  # 0.05%
-        "WETH/USDT": "0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36",  # 0.3%
-        "WBTC/WETH": "0xCBCdF9626bC03E24f779434178A73a0B4bad62eD",  # 0.3%
-        "USDC/USDT": "0x3416cF6C708Da44DB2624D63ea0AAef7113527C6",  # 0.01%
-    },
-    "arbitrum": {
-        "WETH/USDC": "0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",  # 0.05%
-        "ARB/USDC": "0xc473e2aEE3441BF9240Be85eb122aBB059A3B57c",  # 0.05%
-        "WBTC/WETH": "0x2f5e87C9312fa29aed5c179E456625D79015299c",  # 0.05%
-        "GMX/WETH": "0x80A9ae39310abf666A87C743d6ebBD0E8C42158E",  # 0.3%
-    },
-    "base": {
-        "WETH/USDC": "0xd0b53D9277642d899DF5C87A3966A349A798F224",  # 0.05%
-        "CBETH/WETH": "0x10648BA41B8565907Cfa1496765fA4D95390aa0d",  # 0.05%
-    },
-    "optimism": {
-        "WETH/USDC": "0x85149247691df622eaF1a8Bd0CaFd40BC45154a9",  # 0.05%
-        "OP/USDC": "0x1C3140aB59d6cAf9fa7459C6f83D4B52ba881d36",  # 0.3%
-    },
-    "polygon": {
-        "WETH/USDC": "0x45dDa9cb7c25131DF268515131f647d726f50608",  # 0.05%
-        "MATIC/USDC": "0xA374094527e1673A86dE625aa59517c5dE346d32",  # 0.05%
-    },
-}
+def _pool_pair_from_key(pool_key: str) -> str | None:
+    """Extract ``TOKEN0/TOKEN1`` from a reference pool key."""
+    pair, separator, _fee = pool_key.rpartition("-")
+    if not separator:
+        pair = pool_key
+    token0, separator, token1 = pair.partition("/")
+    if not separator or not token0 or not token1:
+        return None
+    return f"{token0.upper()}/{token1.upper()}"
+
+
+def _known_pools_from_reference() -> dict[str, dict[str, str]]:
+    """Build the legacy ``chain -> token_pair -> pool_address`` view."""
+    from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
+
+    reference = DexVolumeRegistry.twap_reference_pools()
+    pools_by_chain: dict[str, dict[str, str]] = reference["pools"]
+    token_to_pool: dict[str, dict[str, str]] = reference["token_to_pool"]
+    out: dict[str, dict[str, str]] = {}
+    for chain, pools in pools_by_chain.items():
+        chain_pools = out.setdefault(chain, {})
+        for pool_key, address in sorted(pools.items()):
+            pair = _pool_pair_from_key(pool_key)
+            if pair is None or pair in chain_pools:
+                continue
+            chain_pools[pair] = address
+    for chain_map in token_to_pool.values():
+        for chain, pool_key in chain_map.items():
+            pool_address = pools_by_chain.get(chain, {}).get(pool_key)
+            pair = _pool_pair_from_key(pool_key)
+            if pool_address is None or pair is None:
+                continue
+            out.setdefault(chain, {})[pair] = pool_address
+    return out
+
+
+# Known pool addresses for common pairs (chain -> token_pair -> pool_address).
+# Connector-owned TWAP reference pools are the source of truth.
+KNOWN_POOLS: dict[str, dict[str, str]] = _known_pools_from_reference()
 
 
 # =============================================================================

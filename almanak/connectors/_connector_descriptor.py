@@ -26,6 +26,7 @@ from almanak.connectors._base.types import ProtocolKind, ProtocolName
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
 from almanak.connectors._strategy_base.protocol_ownership import CapabilitiesSpec, SupportedChainsSpec
 from almanak.connectors._strategy_base.solana_program import SolanaProgramSpec
+from almanak.connectors._strategy_base.vault_representatives import VaultRepresentativeSpec
 
 # Recognised vendor keys for ``Connector.external_ids`` (VIB-4851 B1, plan 024).
 # Mirrors ``almanak.core.chains._descriptor.KNOWN_VENDORS`` for the protocol
@@ -52,6 +53,7 @@ __all__ = [
     "PerpsReadDecl",
     "StrategyMatrixEntry",
     "SupportedChainsSpec",
+    "VaultRepresentativeSpec",
     "vendor_protocol_map",
 ]
 
@@ -645,6 +647,7 @@ class Connector:
     kind: ProtocolKind
     aliases: tuple[str, ...] = field(default_factory=tuple)
     address_tables: tuple[AddressTableSpec, ...] | None = None
+    vault_representatives: tuple[VaultRepresentativeSpec, ...] | None = None
     solana_programs: tuple[SolanaProgramSpec, ...] | None = None
     receipt_parser_protocols: tuple[str, ...] | None = None
     receipt_parser_connector: ImportRef | None = None
@@ -723,6 +726,7 @@ class Connector:
         if self.name in self.aliases:
             raise ValueError(f"Connector.aliases must not include canonical name {self.name!r}")
         self._validate_address_tables()
+        self._validate_vault_representatives()
         self._validate_solana_programs()
         self._validate_gateway_connectors()
         self._validate_receipt_parser_protocols()
@@ -783,6 +787,24 @@ class Connector:
         protocols = [spec.protocol for spec in self.address_tables]
         if len(set(protocols)) != len(protocols):
             raise ValueError(f"Connector.address_tables contains duplicate protocols: {protocols!r}")
+
+    def _validate_vault_representatives(self) -> None:
+        """Validate strategy-side representative vault metadata selectors."""
+        if self.vault_representatives is None:
+            return
+        if not isinstance(self.vault_representatives, tuple) or not self.vault_representatives:
+            raise ValueError(
+                "Connector.vault_representatives must be None or a non-empty tuple[VaultRepresentativeSpec, ...], "
+                f"got {self.vault_representatives!r}"
+            )
+        bad_specs = [spec for spec in self.vault_representatives if not isinstance(spec, VaultRepresentativeSpec)]
+        if bad_specs:
+            raise ValueError(
+                f"Connector.vault_representatives must contain only VaultRepresentativeSpec values, got {bad_specs!r}"
+            )
+        protocols = [spec.protocol for spec in self.vault_representatives]
+        if len(set(protocols)) != len(protocols):
+            raise ValueError(f"Connector.vault_representatives contains duplicate protocols: {protocols!r}")
 
     def _validate_solana_programs(self) -> None:
         """Validate connector-owned Solana program clone specs."""
@@ -1395,6 +1417,10 @@ class ConnectorRegistry:
     def with_address_tables(self) -> tuple[Connector, ...]:
         """Return connectors that publish strategy-side address-table specs."""
         return tuple(d for d in self.all() if d.address_tables is not None)
+
+    def with_vault_representatives(self) -> tuple[Connector, ...]:
+        """Return connectors that publish representative vault metadata."""
+        return tuple(d for d in self.all() if d.vault_representatives is not None)
 
     def with_solana_programs(self) -> tuple[Connector, ...]:
         """Return connectors that publish local Solana program clone specs."""

@@ -21,7 +21,11 @@ from almanak.framework.intents.vocabulary import (
     WithdrawIntent,
 )
 from almanak.framework.permissions.hints import get_permission_hints
-from almanak.framework.permissions.synthetic_intents import build_synthetic_intents
+from almanak.framework.permissions.synthetic_intents import (
+    _candidate_stable_symbols,
+    _candidate_wrapped_native_symbols,
+    build_synthetic_intents,
+)
 
 
 class TestSwapIntents:
@@ -45,6 +49,20 @@ class TestSwapIntents:
         # Second synthetic: native-in (ETH → USDC). The compiler sets value > 0
         # for native-from, which the discovery loop translates to send_allowed.
         assert intents[1].from_token == "ETH"
+
+    def test_chain_display_tokens_are_filtered_to_stables(self):
+        """Chain display defaults include natives, but synthetic ERC20 input must not."""
+        symbols = _candidate_stable_symbols("arbitrum")
+
+        assert symbols[0] == "USDC"
+        assert "ETH" not in symbols
+        assert "WETH" not in symbols
+
+    def test_weth_pair_asset_is_preferred_when_available(self):
+        """Synthetic discovery should use liquid WETH pairs before native wrappers."""
+        assert _candidate_wrapped_native_symbols("polygon")[0] == "WETH"
+        assert _candidate_wrapped_native_symbols("mantle")[0] == "WETH"
+        assert _candidate_wrapped_native_symbols("plasma")[0] == "WXPL"
 
     def test_aerodrome_base(self):
         """aerodrome on base should produce a SwapIntent.

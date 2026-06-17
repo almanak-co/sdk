@@ -9,6 +9,7 @@ This module tests the ChainlinkDataProvider class, covering:
 - Edge cases and error handling
 """
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
@@ -20,6 +21,7 @@ from almanak.framework.backtesting.pnl.providers.chainlink import (
     CHAINLINK_PRICE_FEEDS,
     DECIMALS_SELECTOR,
     LATEST_ROUND_DATA_SELECTOR,
+    MAX_MULTICALL_BATCH_SIZE,
     TOKEN_TO_PAIR,
     CachedPrice,
     ChainlinkDataProvider,
@@ -78,6 +80,40 @@ class TestChainlinkProviderInitialization:
         """Test provider uses default priority."""
         provider = ChainlinkDataProvider()
         assert provider.priority == ChainlinkDataProvider.DEFAULT_PRIORITY
+
+
+class TestBatchRoundQueries:
+    @pytest.mark.asyncio
+    async def test_batch_round_queries_preserve_bounded_concurrency(self):
+        provider = ChainlinkDataProvider(rpc_url="https://eth-mainnet.example.com")
+        in_flight = 0
+        max_in_flight = 0
+        calls: list[int] = []
+
+        async def fake_query_round_data(feed_address: str, round_id: int) -> ChainlinkRoundData:
+            nonlocal in_flight, max_in_flight
+            assert feed_address == "0xfeed"
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0)
+            calls.append(round_id)
+            in_flight -= 1
+            return ChainlinkRoundData(
+                round_id=round_id,
+                answer=round_id * 100,
+                started_at=0,
+                updated_at=0,
+                answered_in_round=round_id,
+            )
+
+        provider._query_round_data = fake_query_round_data  # type: ignore[method-assign]
+        round_ids = list(range(1, MAX_MULTICALL_BATCH_SIZE + 3))
+
+        results = await provider._batch_query_rounds("0xfeed", round_ids)
+
+        assert sorted(calls) == round_ids
+        assert [result.round_id if result else None for result in results] == round_ids
+        assert max_in_flight == MAX_MULTICALL_BATCH_SIZE
 
 
 class TestFeedConfiguration:

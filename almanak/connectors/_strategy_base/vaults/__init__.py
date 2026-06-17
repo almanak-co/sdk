@@ -103,10 +103,9 @@ def register_vault_adapter(
             are stored lowercased.
 
     NOTE: Registering here enables intent compilation and portfolio valuation.
-    For Safe/Zodiac permission discovery to work you must ALSO add a
-    representative vault entry to
+    For Safe/Zodiac permission discovery to work you must ALSO expose a
+    connector-owned representative vault entry and include it in
     ``almanak.framework.permissions.constants.VAULT_PROTOCOL_REPRESENTATIVE``.
-    See its inline comment for the required format.
     """
     chains: frozenset[str] | None
     if supported_chains is None:

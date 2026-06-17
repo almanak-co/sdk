@@ -11,12 +11,10 @@ Key Components:
         - Zodiac module deployment: ModuleProxyFactory.deployModule
         - Zodiac Roles v2: setUp, assignRoles, setDefaultRole,
           allowTarget, scopeTarget, allowFunction, revokeTarget,
-          execTransactionWithRole
-    - Canonical addresses: Safe v1.4.1 factory + singleton,
-      ModuleProxyFactory, Roles Modifier master copy — all CREATE2-
-      deployed at identical addresses on every supported EVM chain
-    - MULTISEND_ADDRESSES: Chain-specific MultiSend contract addresses
-    - ENSO_DELEGATE_ADDRESSES: Known Enso delegates requiring DELEGATECALL
+      execTransactionWithRole
+    - Registry-derived addresses: Safe v1.4.1 factory + singleton,
+      ModuleProxyFactory, Roles Modifier master copy, MultiSend, and
+      known Enso delegates requiring DELEGATECALL
 """
 
 from collections.abc import Mapping
@@ -318,18 +316,30 @@ ROLES_REVOKE_TARGET_ABI: Final[list[dict]] = [
 # Canonical Deployment Addresses (CREATE2 — same address on every EVM chain)
 # =============================================================================
 
-# Gnosis Safe v1.4.1 singletons + factory. Canonical (CREATE2) addresses — identical on all
-# EVM chains where they're deployed. Source: safe-global/safe-deployments v1.4.1.
-SAFE_PROXY_FACTORY_V1_4_1: Final[str] = "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67"
-SAFE_L2_SINGLETON_V1_4_1: Final[str] = "0x29fcB43b46531BcA003ddC8FCB67FFE91900C762"
 
-# Gnosis Guild ModuleProxyFactory (v1.2.0) — deploys Zodiac module clones via CREATE2.
-# Source: gnosisguild/zodiac master/sdk/contracts.ts (KnownContracts.FACTORY)
-MODULE_PROXY_FACTORY: Final[str] = "0x000000000000aDdB49795b0f9bA5BC298cDda236"
+def _contract_address_values(key: str) -> frozenset[str]:
+    return frozenset(contract_address_map(key).values())
 
-# Zodiac Roles Modifier v2.1.0 master copy (the post-V1 rewrite with bytes32 roleKey).
-# Source: gnosisguild/zodiac master/sdk/contracts.ts (KnownContracts.ROLES_V2)
-ROLES_MODIFIER_SINGLETON: Final[str] = "0x9646fDAD06d3e24444381f44362a3B0eB343D337"
+
+def _canonical_contract_address(key: str) -> str:
+    addresses = _contract_address_values(key)
+    if len(addresses) != 1:
+        raise RuntimeError(f"Contract key {key!r} must resolve to exactly one canonical address, got {addresses!r}")
+    return next(iter(addresses))
+
+
+def _contract_address_set(*keys: str) -> set[str]:
+    return {address.lower() for key in keys for address in contract_address_map(key).values()}
+
+
+# Gnosis Safe v1.4.1 singletons + factory. Canonical CREATE2 addresses derive
+# from ChainDescriptor.contracts for chains where the Safe stack is verified.
+SAFE_PROXY_FACTORY_V1_4_1: Final[str] = _canonical_contract_address("safe_proxy_factory_v1_4_1")
+SAFE_L2_SINGLETON_V1_4_1: Final[str] = _canonical_contract_address("safe_l2_singleton_v1_4_1")
+
+# Gnosis Guild Zodiac infrastructure, derived from ChainDescriptor.contracts.
+MODULE_PROXY_FACTORY: Final[str] = _canonical_contract_address("zodiac_module_proxy_factory")
+ROLES_MODIFIER_SINGLETON: Final[str] = _canonical_contract_address("zodiac_roles_modifier_singleton")
 
 
 # =============================================================================
@@ -355,12 +365,13 @@ MULTISEND_ADDRESSES: Final[Mapping[str, str]] = contract_address_map("safe_multi
 # Enso Delegate Addresses
 # =============================================================================
 
-# Known Enso delegate addresses that require DELEGATECALL
-# These are trusted contracts that execute swaps/actions in the Safe's context
-ENSO_DELEGATE_ADDRESSES: Final[set[str]] = {
-    "0x7663fd40081dccd47805c00e613b6beac3b87f08",  # Delegate 1 (multiple chains)
-    "0xa2f4f9c6ec598ca8c633024f8851c79ca5f43e48",  # Delegate 2 (Ethereum mainnet)
-}
+# Known Enso delegate addresses that require DELEGATECALL, derived from
+# ChainDescriptor.contracts. These trusted contracts execute swaps/actions in
+# the Safe's context.
+ENSO_DELEGATE_ADDRESSES: Final[set[str]] = _contract_address_set(
+    "enso_delegate_primary",
+    "enso_delegate_secondary",
+)
 
 
 # =============================================================================

@@ -30,6 +30,8 @@ from almanak.framework.data.price.dex_twap import (
     TWAPCache,
     TWAPObservation,
     TWAPResult,
+    _legacy_uniswap_v3_pools,
+    _quote_token_from_pool_key,
 )
 
 
@@ -892,6 +894,42 @@ class TestConstants:
         assert "polygon" in UNISWAP_V3_POOLS
         assert "avalanche" in UNISWAP_V3_POOLS
 
+    @pytest.mark.parametrize(
+        ("pool_key", "quote"),
+        [
+            ("WETH/USDC-500", "USDC"),
+            ("weth/usdt-3000", "USDT"),
+            ("WBTC/WETH", "WETH"),
+            ("malformed", None),
+            ("WETH/-500", None),
+        ],
+    )
+    def test_quote_token_from_pool_key(self, pool_key: str, quote: str | None):
+        assert _quote_token_from_pool_key(pool_key) == quote
+
+    def test_legacy_uniswap_v3_pools_uses_token_to_pool_reference(self, monkeypatch):
+        reference = {
+            "pools": {
+                "arbitrum": {
+                    "WETH/USDC-500": "0x0000000000000000000000000000000000000001",
+                    "WETH/USDC-3000": "0x0000000000000000000000000000000000000002",
+                }
+            },
+            "token_to_pool": {"ETH": {"arbitrum": "WETH/USDC-3000"}},
+        }
+        monkeypatch.setattr(
+            "almanak.framework.data.price.dex_twap._reference_pools",
+            lambda: reference,
+        )
+
+        pools = _legacy_uniswap_v3_pools()
+
+        assert pools == {
+            "arbitrum": {
+                "ETH": {"USDC": "0x0000000000000000000000000000000000000002"}
+            }
+        }
+
 
 class TestGetPriceMethod:
     """Tests for get_price method."""
@@ -1113,9 +1151,7 @@ class TestEdgeCases:
             assert "very long" in caplog.text
 
     def test_placeholder_pool_address_returns_none(self):
-        """Test placeholder pool addresses are handled."""
+        """Test absent placeholder pool addresses return None."""
         provider = DEXTWAPDataProvider(chain="avalanche")
-        # ETH/USDC on Avalanche has placeholder address
         address = provider.get_pool_address("ETH", "USDC")
-        # Note: The address exists but is all zeros
-        assert address == "0x0000000000000000000000000000000000000000"
+        assert address is None

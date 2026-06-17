@@ -16,7 +16,7 @@ connector, as **pure** data + functions (no gateway, no egress):
   empty book (Empty≠Zero).
 * ``_gmx_market_metadata`` — the relocated index-token symbol + decimals lookup
   (from the framework portfolio valuer), reading the connector's own
-  ``GMX_V2_MARKETS`` / ``_GMX_V2_INDEX_TOKEN_DECIMALS`` tables.
+  ``GMX_V2_MARKETS`` / ``GMX_V2_INDEX_TOKEN_DECIMALS`` tables.
 * ``value_perps_position`` — the relocated GMX mark-to-market formula
   (byte-identical to the framework perp valuer).
 
@@ -45,8 +45,8 @@ from almanak.connectors._strategy_base.perps_read_base import (
     PerpsReadResult,
     PerpsReadSpec,
 )
-from almanak.connectors.gmx_v2.adapter import (
-    _GMX_V2_INDEX_TOKEN_DECIMALS,
+from almanak.connectors.gmx_v2.addresses import (
+    GMX_V2_INDEX_TOKEN_DECIMALS,
     GMX_V2_MARKETS,
 )
 
@@ -148,7 +148,7 @@ def _gmx_market_metadata(market_address: str, chain: str) -> PerpsMarketMeta | N
 
     Combines the relocated framework helpers ``_resolve_perps_index_token`` (name
     table ``GMX_V2_MARKETS``) and ``_get_perps_index_decimals`` (decimals table
-    ``_GMX_V2_INDEX_TOKEN_DECIMALS``). Both lookups are case-insensitive on the
+    ``GMX_V2_INDEX_TOKEN_DECIMALS``). Both lookups are case-insensitive on the
     market address. Returns ``None`` when the market is unknown **or** its index
     decimals are not catalogued — valuation needs both, and the framework already
     fell back to the strategy value whenever either was missing (preserves the
@@ -164,7 +164,7 @@ def _gmx_market_metadata(market_address: str, chain: str) -> PerpsMarketMeta | N
     if not symbol:
         return None
 
-    for addr, decimals in _GMX_V2_INDEX_TOKEN_DECIMALS.get(chain, {}).items():
+    for addr, decimals in GMX_V2_INDEX_TOKEN_DECIMALS.get(chain, {}).items():
         if addr.lower() == addr_lower:
             return PerpsMarketMeta(index_token_symbol=symbol, index_token_decimals=decimals)
     return None

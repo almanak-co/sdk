@@ -11,7 +11,7 @@ Key Features:
     - Supports multiple chains (Ethereum, Arbitrum, Base, etc.)
     - Implements binary search for efficient timestamp-to-round mapping (O(log n))
     - Uses archive RPC nodes via ARCHIVE_RPC_URL_{CHAIN} environment variables
-    - Supports batch RPC calls via multicall for efficiency
+    - Supports bounded batch RPC calls for efficiency
     - Configurable persistent cache for round data
     - Implements staleness checks (flags data older than 1 hour)
     - Handles decimals conversion properly
@@ -58,12 +58,6 @@ ARCHIVE_RPC_URL_ENV_PATTERN = "ARCHIVE_RPC_URL_{chain}"
 
 # Supported chains for archive RPC URLs
 ARCHIVE_RPC_CHAINS = ["ETHEREUM", "ARBITRUM", "BASE", "OPTIMISM", "POLYGON", "AVALANCHE"]
-
-# Multicall3 contract address (same on all EVM chains)
-MULTICALL3_ADDRESS = "0xcA11bde05977b3631167028862bE2a173976CA11"
-
-# Multicall3 aggregate3 function selector
-MULTICALL3_AGGREGATE3_SELECTOR = "0x82ad56cb"
 
 # Default cache directory for persistent round data
 DEFAULT_CACHE_DIR = ".almanak_cache/chainlink"
@@ -1102,7 +1096,7 @@ class ChainlinkDataProvider:
         )
 
     # =========================================================================
-    # Batch RPC Calls via Multicall3
+    # Batch RPC Calls
     # =========================================================================
 
     async def _batch_query_rounds(
@@ -1110,10 +1104,10 @@ class ChainlinkDataProvider:
         feed_address: str,
         round_ids: list[int],
     ) -> list[ChainlinkRoundData | None]:
-        """Query multiple rounds in a single batch using Multicall3.
+        """Query multiple rounds in bounded batches.
 
-        Uses Multicall3 contract for efficient batching of getRoundData calls.
-        Falls back to sequential calls if Multicall3 fails.
+        Uses bounded asynchronous batches of getRoundData calls so large
+        historical backfills do not create unbounded in-flight RPC work.
 
         Args:
             feed_address: Address of the Chainlink aggregator contract
@@ -1126,54 +1120,33 @@ class ChainlinkDataProvider:
             return [None] * len(round_ids)
 
         try:
-            from web3 import AsyncHTTPProvider, AsyncWeb3
-
-            from almanak.gateway.utils.ssl_context import build_ssl_context
-
-            web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url, request_kwargs={"ssl": build_ssl_context()}))
-            feed_checksum = web3.to_checksum_address(feed_address)
-            # Note: multicall_address reserved for future true multicall implementation
-            # multicall_address = web3.to_checksum_address(MULTICALL3_ADDRESS)
-
-            results: list[ChainlinkRoundData | None] = []
-
-            # Process in batches to avoid gas limits
-            for batch_start in range(0, len(round_ids), MAX_MULTICALL_BATCH_SIZE):
-                batch_round_ids = round_ids[batch_start : batch_start + MAX_MULTICALL_BATCH_SIZE]
-
-                # Build multicall3 aggregate3 calldata
-                # struct Call3 { address target; bool allowFailure; bytes callData; }
-                calls = []
-                for round_id in batch_round_ids:
-                    round_id_bytes = round_id.to_bytes(32, byteorder="big")
-                    calldata = bytes.fromhex(GET_ROUND_DATA_SELECTOR[2:]) + round_id_bytes
-                    # Encode Call3 struct
-                    calls.append(
-                        {
-                            "target": feed_checksum,
-                            "allowFailure": True,
-                            "callData": calldata.hex(),
-                        }
-                    )
-
-                # Encode calls array for aggregate3
-                # We'll use a simpler approach - make individual calls in a batch
-                # since proper ABI encoding for aggregate3 is complex
-                batch_results = await self._batch_query_rounds_sequential(feed_address, batch_round_ids)
-                results.extend(batch_results)
-
-            return results
+            return await self._batch_query_rounds_concurrent(feed_address, round_ids)
 
         except Exception as e:
-            logger.warning(f"Multicall batch query failed, falling back to sequential: {e}")
+            logger.warning(f"Batch round query failed, falling back to serial round queries: {e}")
             return await self._batch_query_rounds_sequential(feed_address, round_ids)
+
+    async def _batch_query_rounds_concurrent(
+        self,
+        feed_address: str,
+        round_ids: list[int],
+    ) -> list[ChainlinkRoundData | None]:
+        """Query rounds concurrently, bounded by ``MAX_MULTICALL_BATCH_SIZE``."""
+        import asyncio
+
+        results: list[ChainlinkRoundData | None] = []
+        for batch_start in range(0, len(round_ids), MAX_MULTICALL_BATCH_SIZE):
+            batch_round_ids = round_ids[batch_start : batch_start + MAX_MULTICALL_BATCH_SIZE]
+            tasks = [self._query_round_data(feed_address, round_id) for round_id in batch_round_ids]
+            results.extend(await asyncio.gather(*tasks))
+        return results
 
     async def _batch_query_rounds_sequential(
         self,
         feed_address: str,
         round_ids: list[int],
     ) -> list[ChainlinkRoundData | None]:
-        """Sequential fallback for batch round queries.
+        """Serial fallback for unexpected batch helper failures.
 
         Args:
             feed_address: Address of the Chainlink aggregator contract
@@ -1182,10 +1155,10 @@ class ChainlinkDataProvider:
         Returns:
             List of ChainlinkRoundData (or None for failed queries)
         """
-        import asyncio
-
-        tasks = [self._query_round_data(feed_address, round_id) for round_id in round_ids]
-        return list(await asyncio.gather(*tasks))
+        results: list[ChainlinkRoundData | None] = []
+        for round_id in round_ids:
+            results.append(await self._query_round_data(feed_address, round_id))
+        return results
 
     async def prefetch_rounds_for_range(
         self,
@@ -2124,6 +2097,4 @@ __all__ = [
     # Environment variable configuration
     "ARCHIVE_RPC_URL_ENV_PATTERN",
     "ARCHIVE_RPC_CHAINS",
-    # Multicall
-    "MULTICALL3_ADDRESS",
 ]

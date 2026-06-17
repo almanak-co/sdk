@@ -65,7 +65,7 @@ Examples:
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, MutableMapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -75,8 +75,10 @@ if TYPE_CHECKING:
     from almanak.framework.data.indicators.rsi import RSICalculator
     from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
+from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import chain_name_for_id as _chain_name_for_id
 from almanak.core.chains._helpers import chainlink_usd_feeds_map
+from almanak.framework.anvil.accounts import ANVIL_DEFAULT_ADDRESS, ANVIL_DEFAULT_PRIVATE_KEY
 from almanak.framework.anvil.fork_manager import TOKEN_ADDRESSES, RollingForkManager
 from almanak.framework.backtesting.models import (
     BacktestMetrics,
@@ -177,120 +179,104 @@ def _get_resolver():
 
         return get_token_resolver()
     except Exception:
-        logger.debug("TokenResolver not available, using local TOKEN_DECIMALS only")
+        logger.debug("TokenResolver not available")
         return None
 
 
-# Token decimals registry: (chain_id, lowercase_address) -> decimals
-# Addresses are stored lowercase for case-insensitive matching
-TOKEN_DECIMALS: dict[tuple[int, str], int] = {
-    # =========================================================================
-    # Native ETH (sentinel address)
-    # =========================================================================
-    # Ethereum
-    (CHAIN_ID_ETHEREUM, "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"): 18,
-    # Arbitrum
-    (CHAIN_ID_ARBITRUM, "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"): 18,
-    # Base
-    (CHAIN_ID_BASE, "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"): 18,
-    # =========================================================================
-    # WETH (18 decimals)
-    # =========================================================================
-    # Ethereum
-    (CHAIN_ID_ETHEREUM, "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"): 18,
-    # Arbitrum
-    (CHAIN_ID_ARBITRUM, "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"): 18,
-    # Base
-    (CHAIN_ID_BASE, "0x4200000000000000000000000000000000000006"): 18,
-    # =========================================================================
-    # USDC (6 decimals)
-    # =========================================================================
-    # Ethereum
-    (CHAIN_ID_ETHEREUM, "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"): 6,
-    # Arbitrum (native USDC)
-    (CHAIN_ID_ARBITRUM, "0xaf88d065e77c8cc2239327c5edb3a432268e5831"): 6,
-    # Arbitrum (bridged USDC.e)
-    (CHAIN_ID_ARBITRUM, "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8"): 6,
-    # Base
-    (CHAIN_ID_BASE, "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"): 6,
-    # =========================================================================
-    # USDT (6 decimals)
-    # =========================================================================
-    # Ethereum
-    (CHAIN_ID_ETHEREUM, "0xdac17f958d2ee523a2206206994597c13d831ec7"): 6,
-    # Arbitrum
-    (CHAIN_ID_ARBITRUM, "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"): 6,
-    # =========================================================================
-    # DAI (18 decimals)
-    # =========================================================================
-    # Ethereum
-    (CHAIN_ID_ETHEREUM, "0x6b175474e89094c44da98b954eedeac495271d0f"): 18,
-    # Arbitrum
-    (CHAIN_ID_ARBITRUM, "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1"): 18,
-    # Base
-    (CHAIN_ID_BASE, "0x50c5725949a6f0c72e6c4a641f24049a917db0cb"): 18,
-    # =========================================================================
-    # WBTC (8 decimals)
-    # =========================================================================
-    # Ethereum
-    (CHAIN_ID_ETHEREUM, "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"): 8,
-    # Arbitrum
-    (CHAIN_ID_ARBITRUM, "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f"): 8,
-    # =========================================================================
-    # ARB (18 decimals)
-    # =========================================================================
-    # Ethereum
-    (CHAIN_ID_ETHEREUM, "0xb50721bcf8d664c30412cfbc6cf7a15145234ad1"): 18,
-    # Arbitrum
-    (CHAIN_ID_ARBITRUM, "0x912ce59144191c1204e64559fe8253a0e49e6548"): 18,
-    # =========================================================================
-    # LINK (18 decimals)
-    # =========================================================================
-    # Ethereum
-    (CHAIN_ID_ETHEREUM, "0x514910771af9ca656af840dff83e8264ecf986ca"): 18,
-    # Arbitrum
-    (CHAIN_ID_ARBITRUM, "0xf97f4df75117a78c1a5a0dbb814af92458539fb4"): 18,
-    # Base
-    (CHAIN_ID_BASE, "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196"): 18,
-    # =========================================================================
-    # UNI (18 decimals)
-    # =========================================================================
-    # Ethereum
-    (CHAIN_ID_ETHEREUM, "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984"): 18,
-    # Arbitrum
-    (CHAIN_ID_ARBITRUM, "0xfa7f8980b0f1e64a2062791cc3b0871572f1f7f0"): 18,
-    # Base
-    (CHAIN_ID_BASE, "0xc3de830ea07524a0761646a6a4e4be0e114a3c83"): 18,
-    # =========================================================================
-    # AAVE (18 decimals)
-    # =========================================================================
-    # Ethereum
-    (CHAIN_ID_ETHEREUM, "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9"): 18,
-    # Arbitrum
-    (CHAIN_ID_ARBITRUM, "0xba5ddd1f9d7f570dc94a51479a000e3bce967196"): 18,
-    # Base
-    (CHAIN_ID_BASE, "0x18c11fd286c5ec11c3b683caa813b77f5163a122"): 18,
-    # =========================================================================
-    # GMX (18 decimals) - Arbitrum only
-    # =========================================================================
-    (CHAIN_ID_ARBITRUM, "0xfc5a1a6eb076a2c7ad06ed22c90d7e710e35ad0a"): 18,
-    # =========================================================================
-    # CRV (18 decimals)
-    # =========================================================================
-    # Ethereum
-    (CHAIN_ID_ETHEREUM, "0xd533a949740bb3306d119cc777fa900ba034cd52"): 18,
-    # Arbitrum
-    (CHAIN_ID_ARBITRUM, "0x11cdb42b0eb46d95f990bedd4695a6e3fa034978"): 18,
-    # Base
-    (CHAIN_ID_BASE, "0x8ee73c484a26e0a5df2ee2a4960b789967dd0415"): 18,
-}
+class _TokenDecimalsCache(MutableMapping[tuple[int, str], int]):
+    """Mutable measured-decimals cache layered over ``TokenResolver``.
+
+    Known token metadata is resolved dynamically from the canonical token
+    catalogue. Values written into this mapping are only measurements learned at
+    runtime from ERC20 ``decimals()`` calls for unknown tokens.
+    """
+
+    def __init__(self) -> None:
+        self._measured: dict[tuple[int, str], int] = {}
+        self._deleted: set[tuple[int, str]] = set()
+
+    @staticmethod
+    def _normalize_key(key: tuple[int, str]) -> tuple[int, str]:
+        chain_id, address = key
+        return chain_id, address.lower()
+
+    @staticmethod
+    def _resolve_dynamic(chain_id: int, address: str) -> int | None:
+        chain_name = _chain_name_for_id(chain_id)
+        if chain_name is None:
+            return None
+
+        resolver = _get_resolver()
+        if resolver is None:
+            return None
+
+        try:
+            return resolver.get_decimals(chain_name, address)
+        except Exception:
+            return None
+
+    def _static_snapshot(self) -> dict[tuple[int, str], int]:
+        resolver = _get_resolver()
+        if resolver is None:
+            return {}
+
+        snapshot: dict[tuple[int, str], int] = {}
+        for chain_name, resolved_by_address in resolver.known_static_tokens_by_chain().items():
+            descriptor = ChainRegistry.try_resolve(chain_name)
+            if descriptor is None or descriptor.chain_id == 0:
+                continue
+            for resolved in resolved_by_address.values():
+                snapshot[(descriptor.chain_id, resolved.address.lower())] = resolved.decimals
+        return snapshot
+
+    def get_measured(self, key: tuple[int, str]) -> int | None:
+        """Return only decimals measured at runtime via ERC20 calls."""
+        return self._measured.get(self._normalize_key(key))
+
+    def __getitem__(self, key: tuple[int, str]) -> int:
+        normalized = self._normalize_key(key)
+        if normalized in self._deleted:
+            raise KeyError(key)
+        if normalized in self._measured:
+            return self._measured[normalized]
+
+        resolved = self._resolve_dynamic(*normalized)
+        if resolved is None:
+            raise KeyError(key)
+        return resolved
+
+    def __setitem__(self, key: tuple[int, str], value: int) -> None:
+        normalized = self._normalize_key(key)
+        self._deleted.discard(normalized)
+        self._measured[normalized] = value
+
+    def __delitem__(self, key: tuple[int, str]) -> None:
+        normalized = self._normalize_key(key)
+        if normalized in self._measured:
+            del self._measured[normalized]
+            self._deleted.add(normalized)
+            return
+        if self._resolve_dynamic(*normalized) is None:
+            raise KeyError(key)
+        self._deleted.add(normalized)
+
+    def __iter__(self) -> Iterator[tuple[int, str]]:
+        keys = set(self._static_snapshot()) - self._deleted
+        keys.update(self._measured)
+        return iter(keys)
+
+    def __len__(self) -> int:
+        return len((set(self._static_snapshot()) - self._deleted) | set(self._measured))
+
+
+TOKEN_DECIMALS: MutableMapping[tuple[int, str], int] = _TokenDecimalsCache()
 
 
 def get_token_decimals(chain_id: int, token_address: str) -> int | None:
     """Get the number of decimals for a token on a specific chain.
 
-    Delegates to TokenResolver for unified resolution, falls back to
-    the local TOKEN_DECIMALS registry if resolver is unavailable.
+    Delegates to TokenResolver for unified resolution, then checks the
+    runtime measured-decimals cache populated from ERC20 ``decimals()`` calls.
     Returns None if the token is not found.
 
     For dynamic lookup with ERC20 fallback, use get_token_decimals_with_fallback().
@@ -320,9 +306,12 @@ def get_token_decimals(chain_id: int, token_address: str) -> int | None:
             try:
                 return resolver.get_decimals(chain_name, normalized_address)
             except Exception:
-                pass  # Fall through to local registry
+                pass  # Fall through to measured cache
 
-    # Fallback to local TOKEN_DECIMALS
+    # Fallback only to values measured from ERC20 decimals() calls. A normal
+    # TOKEN_DECIMALS.get(...) read would invoke the resolver a second time.
+    if isinstance(TOKEN_DECIMALS, _TokenDecimalsCache):
+        return TOKEN_DECIMALS.get_measured((chain_id, normalized_address))
     return TOKEN_DECIMALS.get((chain_id, normalized_address))
 
 
@@ -409,7 +398,7 @@ async def get_token_decimals_with_fallback(
     Resolution order:
     1. Native ETH sentinel (0xeee...eee) -> 18 (native-token invariant)
     2. TokenResolver (unified cache/registry/gateway resolution)
-    3. Local TOKEN_DECIMALS registry
+    3. Runtime measured-decimals cache
     4. ERC20 decimals() on-chain query (requires RPC URL)
     5. ``None`` -- decimals could not be measured
 
@@ -452,9 +441,9 @@ async def get_token_decimals_with_fallback(
             try:
                 return resolver.get_decimals(chain_name, normalized_address)
             except Exception:
-                pass  # Fall through to local registry and ERC20 fallback
+                pass  # Fall through to measured cache and ERC20 fallback
 
-    # 3. Check local TOKEN_DECIMALS registry
+    # 3. Check runtime measured-decimals cache
     registry_result = TOKEN_DECIMALS.get((chain_id, normalized_address))
     if registry_result is not None:
         return registry_result
@@ -472,7 +461,7 @@ async def get_token_decimals_with_fallback(
     decimals = await _fetch_erc20_decimals(rpc_url, token_address)
 
     if decimals is not None:
-        # Cache result in local registry for future lookups
+        # Cache measured result for future lookups in this process.
         TOKEN_DECIMALS[(chain_id, normalized_address)] = decimals
         logger.info(f"Cached decimals for {token_address[:10]}... on chain {chain_id}: {decimals}")
         return decimals
@@ -1364,6 +1353,9 @@ class PaperTrader:
             # Fund the on-chain wallet with initial balances (first startup)
             await self._sync_wallet_to_fork(use_initial=True)
 
+    # crap-allowlist: VIB-4062 - pre-existing fork-bootstrap complexity. This PR only replaces
+    # the default Anvil wallet literal with ANVIL_DEFAULT_ADDRESS; refactor + coverage uplift
+    # is tracked with the broader paper-engine CRAP cleanup.
     async def _sync_wallet_to_fork(self, *, use_initial: bool = False) -> None:
         """Fund the on-chain wallet to match tracked portfolio balances.
 
@@ -1379,9 +1371,9 @@ class PaperTrader:
         Args:
             use_initial: Force using config initial balances (for first startup).
         """
-        # Use the hardcoded Anvil account #0 address
+        # Use Anvil account #0 by default.
         # TODO: Support custom private key via PaperTraderConfig
-        wallet_address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+        wallet_address = ANVIL_DEFAULT_ADDRESS
 
         # Use tracker's current balances if available, otherwise config initial
         if not use_initial and self.portfolio_tracker.current_balances:
@@ -1501,8 +1493,7 @@ class PaperTrader:
         # Create signer with test private key (for fork only)
         # Note: This uses a deterministic test key for Anvil (first default Anvil account)
         # TODO: Support custom private key via PaperTraderConfig for non-default Anvil wallets
-        test_private_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-        signer = LocalKeySigner(private_key=test_private_key)
+        signer = LocalKeySigner(private_key=ANVIL_DEFAULT_PRIVATE_KEY)
 
         # Create submitter connected to fork
         submitter = PublicMempoolSubmitter(rpc_url=fork_rpc)
@@ -2145,6 +2136,9 @@ class PaperTrader:
         if self.fork_manager.is_running:
             logger.info(f"[{self._backtest_id}] Fork refreshed to block {self.fork_manager.current_block}")
 
+    # crap-allowlist: VIB-4062 - pre-existing persistent-fork advancement complexity. This PR
+    # only replaces the default Anvil wallet literal with ANVIL_DEFAULT_ADDRESS; refactor +
+    # coverage uplift is tracked with the broader paper-engine CRAP cleanup.
     async def _advance_persistent_fork(self) -> None:
         """Advance time on a persistent fork between ticks.
 
@@ -2164,7 +2158,7 @@ class PaperTrader:
 
         # Execute YieldPoker poke hooks to trigger interest accrual
         if self.config.yield_poker_enabled and self._yield_poker is not None:
-            wallet = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+            wallet = ANVIL_DEFAULT_ADDRESS
             try:
                 rpc_url = self.fork_manager.get_rpc_url() or self.config.fork_rpc_url
                 poke_results = await self._yield_poker.poke_all(self.config.chain, rpc_url, wallet)
@@ -2225,7 +2219,7 @@ class PaperTrader:
                 logger.debug("[%s] web3 not available, skipping reconciler", self._backtest_id)
                 return
 
-            wallet = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+            wallet = ANVIL_DEFAULT_ADDRESS
             tolerance = self.config.position_reconciler_tolerance_pct
             self._reconciler_checks += 1
 

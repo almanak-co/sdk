@@ -9,6 +9,7 @@ import pytest
 from almanak._version import __version__
 from almanak.core.chains import ChainRegistry
 from almanak.core.models.quote_asset import QuoteAsset
+from almanak.framework.anvil.accounts import anvil_default_address
 from almanak.framework.cli.new_strategy import (
     StrategyTemplate,
     generate_config_json,
@@ -466,6 +467,19 @@ def test_config_json_emits_chain_as_first_key(chain: str) -> None:
     config = json.loads(config_str)
     assert list(config.keys())[0] == "chain", "chain must be the first top-level key"
     assert config["chain"] == chain
+
+
+def test_copy_trader_config_uses_second_anvil_account_as_leader() -> None:
+    config_str = generate_config_json(
+        name="Copy Trader Test",
+        template=StrategyTemplate.COPY_TRADER,
+        chain="arbitrum",
+    )
+    config = json.loads(config_str)
+
+    assert config["copy_trading"]["leaders"] == [
+        {"address": anvil_default_address(1), "chain": "arbitrum"}
+    ]
 
 
 # ---------------------------------------------------------------------------

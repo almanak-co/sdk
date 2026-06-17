@@ -10,19 +10,24 @@ Part of US-065d: Symbol mapping integration tests (P0-4).
 
 import logging
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.framework.backtesting.paper import token_registry as token_registry_module
 from almanak.framework.backtesting.paper.token_registry import (
     CHAIN_ID_ARBITRUM,
     CHAIN_ID_BASE,
+    CHAIN_ID_BSC,
     CHAIN_ID_ETHEREUM,
+    CHAIN_ID_OPTIMISM,
     CHAIN_ID_POLYGON,
     NATIVE_MATIC_ADDRESS,
     TOKEN_REGISTRY,
     _checksum_address,
     get_token_info,
+    get_token_decimals,
     get_token_symbol,
     get_token_symbol_with_fallback,
 )
@@ -69,6 +74,22 @@ class TestUSDCAddressMapping:
         assert info.decimals == 6
         assert info.address == USDC_ETHEREUM
 
+    def test_get_token_info_uses_static_resolver_lookup(self, monkeypatch):
+        calls: list[tuple[str, str, dict[str, object]]] = []
+
+        class FakeResolver:
+            def resolve(self, address: str, chain: str, **kwargs):
+                calls.append((address, chain, kwargs))
+                return SimpleNamespace(symbol="USDC", decimals=6, address=address)
+
+        monkeypatch.setattr(token_registry_module, "_get_resolver", lambda: FakeResolver())
+
+        info = token_registry_module.get_token_info(CHAIN_ID_ARBITRUM, USDC_ARBITRUM)
+
+        assert info is not None
+        assert info.symbol == "USDC"
+        assert calls == [(USDC_ARBITRUM, "arbitrum", {"skip_gateway": True})]
+
     def test_weth_maps_to_symbol(self):
         """Test WETH maps to correct symbol."""
         symbol = get_token_symbol(CHAIN_ID_ETHEREUM, WETH_ETHEREUM)
@@ -78,6 +99,31 @@ class TestUSDCAddressMapping:
         """Polygon native sentinel resolves to POL canonically."""
         symbol = get_token_symbol(CHAIN_ID_POLYGON, NATIVE_MATIC_ADDRESS)
         assert symbol == "POL"
+
+    @pytest.mark.parametrize(
+        ("chain_id", "address", "expected_symbol"),
+        [
+            (CHAIN_ID_ETHEREUM, "0x83f20f44975d03b1b09e64809b757c47f942beea", "SDAI"),
+            (CHAIN_ID_ETHEREUM, "0x9f8f72aa9304c8b593d555f12ef6589cc3a579a2", "MKR"),
+            (CHAIN_ID_ARBITRUM, "0xec70dcb4a1efa46b8f2d97c310c9c4790ba5ffa8", "RETH"),
+            (CHAIN_ID_OPTIMISM, "0x9bcef72be871e61ed4fbbc7630889bee758eb81d", "RETH"),
+            (CHAIN_ID_OPTIMISM, "0x1f32b1c2345538c0c6f582fcb022739c4a194ebb", "WSTETH"),
+            (CHAIN_ID_POLYGON, "0x0266f4f08d82372cf0fcbccc0ff74309089c74d1", "STMATIC"),
+            (CHAIN_ID_BSC, "0xe9e7cea3dedca5984780bafc599bd69add087d56", "BUSD"),
+        ],
+    )
+    def test_legacy_paper_registry_tokens_resolve_from_canonical_json(
+        self, chain_id, address, expected_symbol
+    ):
+        """Resolver-backed registry keeps legacy paper-token coverage."""
+        info = get_token_info(chain_id, address)
+
+        assert info is not None
+        assert info.symbol == expected_symbol
+        assert info.decimals == 18
+        assert info.address == address
+        assert get_token_symbol(chain_id, address.upper()) == expected_symbol
+        assert get_token_decimals(chain_id, address) == 18
 
 
 class TestSwapExecutionShowsSymbols:

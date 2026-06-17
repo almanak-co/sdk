@@ -40,19 +40,22 @@ Example:
         eth_price = market_state.get_price("ETH")
 """
 
+from __future__ import annotations
+
 import logging
 import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from almanak.framework.backtesting.pnl.data_provider import (
-    OHLCV,
-    HistoricalDataConfig,
-    MarketState,
-)
+if TYPE_CHECKING:
+    from almanak.framework.backtesting.pnl.data_provider import (
+        OHLCV,
+        HistoricalDataConfig,
+        MarketState,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -79,64 +82,46 @@ LIQUIDITY_SELECTOR = "0x1a686502"
 # Uniswap V3 Pool Addresses by Chain
 # =============================================================================
 
-# Major trading pairs for TWAP calculation
-# Format: {token: {quote_token: pool_address}}
-# Using ETH/USDC 0.05% fee tier pools as primary reference
 
-ETHEREUM_POOLS: dict[str, dict[str, str]] = {
-    "ETH": {"USDC": "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"},  # ETH/USDC 0.05%
-    "WETH": {"USDC": "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"},
-    "WBTC": {"USDC": "0x99ac8cA7087fA4A2A1FB6357269965A2014ABc35"},  # WBTC/USDC 0.3%
-    "BTC": {"USDC": "0x99ac8cA7087fA4A2A1FB6357269965A2014ABc35"},
-    "LINK": {"WETH": "0xa6Cc3C2531FdaA6Ae1A3CA84c2855806728693e8"},  # LINK/ETH 0.3%
-    "UNI": {"WETH": "0x1d42064Fc4Beb5F8aAF85F4617AE8b3b5B8Bd801"},  # UNI/ETH 0.3%
-    "AAVE": {"WETH": "0x5aB53EE1d50eeF2C1DD3d5402789cd27bB52c1bB"},  # AAVE/ETH 0.3%
-}
+def _reference_pools() -> dict[str, dict]:
+    """Connector-declared TWAP reference pools."""
+    from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
 
-ARBITRUM_POOLS: dict[str, dict[str, str]] = {
-    "ETH": {"USDC": "0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443"},  # ETH/USDC 0.05%
-    "WETH": {"USDC": "0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443"},
-    "ARB": {"USDC": "0xc473e2aEE3441BF9240Be85eb122aBB059A3B57c"},  # ARB/USDC 0.05%
-    "WBTC": {"WETH": "0x2f5e87C9312fa29aed5c179E456625D79015299c"},  # WBTC/ETH 0.05%
-    "GMX": {"WETH": "0x80A9ae39310abf666A87C743d6ebBD0E8C42158E"},  # GMX/ETH 0.3%
-    "LINK": {"WETH": "0x468b88941e7Cc0B88c1869d68ab6b570bCEF62Ff"},  # LINK/ETH 0.3%
-}
+    return DexVolumeRegistry.twap_reference_pools()
 
-BASE_POOLS: dict[str, dict[str, str]] = {
-    "ETH": {"USDC": "0xd0b53D9277642d899DF5C87A3966A349A798F224"},  # ETH/USDC 0.05%
-    "WETH": {"USDC": "0xd0b53D9277642d899DF5C87A3966A349A798F224"},
-    "CBETH": {"WETH": "0x10648BA41B8565907Cfa1496765fA4D95390aa0d"},  # cbETH/WETH 0.05%
-}
 
-OPTIMISM_POOLS: dict[str, dict[str, str]] = {
-    "ETH": {"USDC": "0x85149247691df622eaF1a8Bd0CaFd40BC45154a9"},  # ETH/USDC 0.05%
-    "WETH": {"USDC": "0x85149247691df622eaF1a8Bd0CaFd40BC45154a9"},
-    "OP": {"USDC": "0x1C3140aB59d6cAf9fa7459C6f83D4B52ba881d36"},  # OP/USDC 0.3%
-    "WBTC": {"WETH": "0x73B14a78a0D396C521f954532d43fd5fFe385216"},  # WBTC/WETH 0.05%
-}
+def _quote_token_from_pool_key(pool_key: str) -> str | None:
+    """Extract the quote token from a pool key like ``WETH/USDC-500``."""
+    pair, separator, _fee = pool_key.rpartition("-")
+    if not separator:
+        pair = pool_key
+    base, separator, quote = pair.partition("/")
+    if not separator or not base or not quote:
+        return None
+    return quote.upper()
 
-POLYGON_POOLS: dict[str, dict[str, str]] = {
-    "ETH": {"USDC": "0x45dDa9cb7c25131DF268515131f647d726f50608"},  # WETH/USDC 0.05%
-    "WETH": {"USDC": "0x45dDa9cb7c25131DF268515131f647d726f50608"},
-    "MATIC": {"USDC": "0xA374094527e1673A86dE625aa59517c5dE346d32"},  # MATIC/USDC 0.05%
-    "WBTC": {"WETH": "0x50eaEDB835021E4A108B7290636d62E9765cc6d7"},  # WBTC/WETH 0.05%
-}
 
-AVALANCHE_POOLS: dict[str, dict[str, str]] = {
-    "AVAX": {"USDC": "0xfAe3f424a0a47706811521E3ee268f00cFb5c45E"},  # WAVAX/USDC 0.3%
-    "WAVAX": {"USDC": "0xfAe3f424a0a47706811521E3ee268f00cFb5c45E"},
-    "ETH": {"USDC": "0x0000000000000000000000000000000000000000"},  # Placeholder
-}
+def _legacy_uniswap_v3_pools() -> dict[str, dict[str, dict[str, str]]]:
+    """Build the legacy ``chain -> token -> quote -> address`` view."""
+    reference = _reference_pools()
+    pools_by_chain: dict[str, dict[str, str]] = reference["pools"]
+    token_to_pool: dict[str, dict[str, str]] = reference["token_to_pool"]
+    out: dict[str, dict[str, dict[str, str]]] = {}
 
-# Combined pools by chain
-UNISWAP_V3_POOLS: dict[str, dict[str, dict[str, str]]] = {
-    "ethereum": ETHEREUM_POOLS,
-    "arbitrum": ARBITRUM_POOLS,
-    "base": BASE_POOLS,
-    "optimism": OPTIMISM_POOLS,
-    "polygon": POLYGON_POOLS,
-    "avalanche": AVALANCHE_POOLS,
-}
+    for token, chain_map in token_to_pool.items():
+        token_upper = token.upper()
+        for chain, pool_key in chain_map.items():
+            pool_address = pools_by_chain.get(chain, {}).get(pool_key)
+            quote = _quote_token_from_pool_key(pool_key)
+            if pool_address is None or quote is None:
+                continue
+            out.setdefault(chain, {}).setdefault(token_upper, {})[quote] = pool_address
+    return out
+
+
+# Backward-compatible public view; connector-owned reference pools are the
+# source of truth.
+UNISWAP_V3_POOLS: dict[str, dict[str, dict[str, str]]] = _legacy_uniswap_v3_pools()
 
 # Token decimals for price conversion
 TOKEN_DECIMALS: dict[str, int] = {
@@ -1083,6 +1068,8 @@ class DEXTWAPDataProvider:
         Raises:
             ValueError: If data is not available
         """
+        from almanak.framework.backtesting.pnl.data_provider import OHLCV
+
         token_upper = token.upper()
 
         if token_upper not in self._pools:
@@ -1138,6 +1125,8 @@ class DEXTWAPDataProvider:
         Yields:
             Tuples of (timestamp, MarketState) for each time point
         """
+        from almanak.framework.backtesting.pnl.data_provider import OHLCV, MarketState
+
         logger.info(
             f"Starting DEX TWAP iteration from {config.start_time} to {config.end_time} "
             f"with {config.interval_seconds}s interval for tokens: {config.tokens}"
@@ -1264,7 +1253,7 @@ class DEXTWAPDataProvider:
         """Close any resources (for API compatibility)."""
         pass
 
-    async def __aenter__(self) -> "DEXTWAPDataProvider":
+    async def __aenter__(self) -> DEXTWAPDataProvider:
         """Async context manager entry."""
         return self
 

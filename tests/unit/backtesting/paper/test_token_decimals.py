@@ -92,6 +92,42 @@ class TestGetTokenDecimals:
         )
         assert result is None
 
+    def test_deleted_static_token_stays_deleted_until_reassigned(self):
+        """TOKEN_DECIMALS behaves like a MutableMapping for static resolver entries."""
+        token_address = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        key = (CHAIN_ID_ARBITRUM, token_address)
+
+        assert TOKEN_DECIMALS[key] == 6
+        del TOKEN_DECIMALS[key]
+        try:
+            assert TOKEN_DECIMALS.get(key) is None
+            assert key not in TOKEN_DECIMALS
+        finally:
+            TOKEN_DECIMALS[key] = 6
+
+        assert get_token_decimals(CHAIN_ID_ARBITRUM, token_address) == 6
+
+    def test_resolver_miss_does_not_reenter_token_decimals_cache(self, monkeypatch):
+        """Fallback after resolver failure must not invoke the resolver a second time."""
+        from almanak.framework.backtesting.paper import engine as engine_module
+
+        calls = 0
+
+        class ResolverMiss:
+            def get_decimals(self, chain_name: str, address: str) -> int:
+                nonlocal calls
+                calls += 1
+                raise LookupError(f"{chain_name}:{address}")
+
+        monkeypatch.setattr(engine_module, "_get_resolver", lambda: ResolverMiss())
+
+        result = engine_module.get_token_decimals(
+            CHAIN_ID_ETHEREUM, "0x1234567890123456789012345678901234567890"
+        )
+
+        assert result is None
+        assert calls == 1
+
 
 class TestFetchERC20Decimals:
     """Tests for the ERC20 decimals() fallback fetch."""

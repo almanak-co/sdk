@@ -239,6 +239,8 @@ class Token:
         is_stablecoin: Whether this token is a stablecoin (affects pricing logic)
         chain_overrides: Dictionary mapping chain names to ChainTokenConfig for
                         chain-specific overrides (e.g., different decimals or bridge type)
+        approve_zero_first_chains: Chains where this token requires allowance to
+                                  be reset to zero before approving a new amount
 
     Example:
         usdc = Token(
@@ -269,6 +271,7 @@ class Token:
     coingecko_id: str | None = None
     is_stablecoin: bool = False
     chain_overrides: dict[str, ChainTokenConfig] = field(default_factory=dict)
+    approve_zero_first_chains: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate token data."""
@@ -278,6 +281,11 @@ class Token:
             raise ValueError(f"Invalid decimals: {self.decimals}. Must be 0-77.")
         # Normalize symbol to uppercase
         object.__setattr__(self, "symbol", self.symbol.upper())
+        object.__setattr__(
+            self,
+            "approve_zero_first_chains",
+            tuple(chain.strip().lower() for chain in self.approve_zero_first_chains if chain.strip()),
+        )
 
     def get_address(self, chain: str) -> str | None:
         """Get the token address for a specific chain.
@@ -356,6 +364,7 @@ class Token:
                 }
                 for chain, config in self.chain_overrides.items()
             },
+            "approve_zero_first_chains": list(self.approve_zero_first_chains),
         }
 
     @classmethod
@@ -378,6 +387,7 @@ class Token:
             coingecko_id=data.get("coingecko_id"),
             is_stablecoin=data.get("is_stablecoin", False),
             chain_overrides=chain_overrides,
+            approve_zero_first_chains=tuple(data.get("approve_zero_first_chains", ())),
         )
 
 

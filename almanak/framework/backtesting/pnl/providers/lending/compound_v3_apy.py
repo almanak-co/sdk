@@ -52,6 +52,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from almanak.connectors._strategy_base.address_registry import AddressRegistry
 from almanak.core.enums import Chain
 
 from ....exceptions import DataSourceUnavailableError
@@ -90,34 +91,35 @@ DATA_SOURCE = "compound_v3_subgraph"
 DEFAULT_SUPPLY_APY_FALLBACK = Decimal("0.03")  # 3% APY
 DEFAULT_BORROW_APY_FALLBACK = Decimal("0.05")  # 5% APY
 
-# Known Comet (market) addresses by chain and base asset
-# These are the main Compound V3 market addresses
-KNOWN_COMET_ADDRESSES: dict[Chain, dict[str, str]] = {
-    Chain.ETHEREUM: {
-        "USDC": "0xc3d688B66703497DAA19211EEdff47f25384cdc3",
-        "WETH": "0xA17581A9E3356d9A858b789D68B4d866e593aE94",
-        "USDT": "0x3Afdc9BCA9213A35503b077a6072F3D0d5AB0840",
-    },
-    Chain.ARBITRUM: {
-        # Verified on-chain 2026-06-13 (VIB-2630): baseToken() of 0x9c4e... is
-        # native USDC (0xaf88...) and 0xA5ED... is bridged USDC.e (0xFF97...).
-        # Matches COMPOUND_V3_COMET_ADDRESSES in almanak/connectors/compound_v3/addresses.py.
-        "USDC": "0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf",
-        "USDC.e": "0xA5EDBDD9646f8dFF606d7448e414884C7d905dCA",
-        "USDT": "0xd98Be00b5D27fc98112BdE293e487f8D4cA57d07",
-        "WETH": "0x6f7D514bbD4aFf3BcD1140B7344b32f063dEe486",
-    },
-    Chain.POLYGON: {
-        "USDC": "0xF25212E676D1F7F89Cd72fFEe66158f541246445",
-        "USDT": "0xaeB318360f27748Acb200CE616E389A6C9409a07",
-    },
-    Chain.BASE: {
-        "USDC": "0xb125E6687d4313864e53df431d5425969c15Eb2F",
-        "USDbC": "0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf",
-        "WETH": "0x46e6b214b524310239732D51387075E0e70970bf",
-        "AERO": "0x784efeB622244d2348d4F2522f8860B96fbEcE89",
-    },
+_COMET_MARKET_SYMBOLS: dict[str, tuple[str, ...]] = {
+    "usdc_bridged": ("USDC.e",),
+    "usdc_e": ("USDC",),
+    "usdbc": ("USDbC",),
+    "wsteth": ("wstETH",),
 }
+
+
+def _compound_v3_known_comet_addresses() -> dict[Chain, dict[str, str]]:
+    """Return the provider's legacy symbol-keyed view of connector-owned Comets."""
+    by_chain: dict[Chain, dict[str, str]] = {}
+    for chain_key in AddressRegistry.address_chains_ordered("compound_v3"):
+        try:
+            chain = Chain[chain_key.upper()]
+        except KeyError:
+            continue
+
+        markets: dict[str, str] = {}
+        for market_id, address in AddressRegistry.addresses_for("compound_v3", chain_key).items():
+            symbols = _COMET_MARKET_SYMBOLS.get(market_id, (market_id.upper(),))
+            for symbol in symbols:
+                markets[symbol] = address
+        by_chain[chain] = markets
+    return by_chain
+
+
+# Backward-compatible public view: connector-owned market ids keyed by the
+# provider's historical asset symbols.
+KNOWN_COMET_ADDRESSES: dict[Chain, dict[str, str]] = _compound_v3_known_comet_addresses()
 
 # Safety valve for cursor pagination (VIB-5089). Daily snapshots: 100 pages
 # of 1000 covers ~270 years, so real windows never hit the valve.

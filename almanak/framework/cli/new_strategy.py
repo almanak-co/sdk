@@ -17,6 +17,7 @@ from pathlib import Path
 import click
 
 from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
+from almanak.framework.anvil.accounts import anvil_default_address
 from almanak.framework.cli.chain_resolution import cli_chain_choices
 
 
@@ -3392,7 +3393,7 @@ def generate_config_json(
         data.update(
             {
                 "copy_trading": {
-                    "leaders": [{"address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8", "chain": chain}],
+                    "leaders": [{"address": anvil_default_address(1), "chain": chain}],
                     "sizing": {"mode": "fixed_usd", "fixed_usd": 100},
                     "risk": {"max_trade_usd": 1000, "max_slippage": "0.01"},
                 },

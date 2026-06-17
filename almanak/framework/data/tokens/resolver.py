@@ -54,7 +54,9 @@ import logging
 import re
 import threading
 import time
+from collections.abc import Mapping
 from datetime import datetime
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.chains import ChainRegistry
@@ -1589,6 +1591,42 @@ class TokenResolver:
         """
         resolved = self.resolve(token, chain)
         return resolved.decimals
+
+    def known_static_tokens_by_chain(self) -> Mapping[str, Mapping[str, ResolvedToken]]:
+        """Return a read-only snapshot of static token metadata by chain/address.
+
+        This is intentionally static-only: it exposes the JSON-backed token
+        catalogue plus connector-published synthetic metadata that was registered
+        into the resolver at construction time. Gateway-discovered and manually
+        registered runtime tokens remain available through ``resolve()``.
+        """
+        snapshot: dict[str, Mapping[str, ResolvedToken]] = {}
+        with self._lock:
+            for chain_lower, tokens_by_address in self._static_address_index.items():
+                descriptor = ChainRegistry.try_resolve(chain_lower)
+                if descriptor is None:
+                    continue
+
+                chain_tokens: dict[str, ResolvedToken] = {}
+                for address, token in tokens_by_address.items():
+                    try:
+                        chain_tokens[address] = self._token_to_resolved(
+                            token,
+                            descriptor.name,
+                            descriptor.enum,
+                            source="static",
+                        )
+                    except TokenNotFoundError:
+                        logger.debug(
+                            "Skipping static token snapshot row with no chain address: chain=%s symbol=%s",
+                            descriptor.name,
+                            token.symbol,
+                        )
+
+                if chain_tokens:
+                    snapshot[descriptor.name] = MappingProxyType(chain_tokens)
+
+        return MappingProxyType(snapshot)
 
     def get_address(self, chain: str | Chain, symbol: str) -> str:
         """Get the address for a token symbol on a specific chain.

@@ -32,6 +32,11 @@ CONNECTOR = Connector(
             module="almanak.connectors.aave_v3.addresses",
             attribute="AAVE_V3",
         ),
+        AddressTableSpec(
+            protocol="aave_v3_tokens",
+            module="almanak.connectors.aave_v3.addresses",
+            attribute="AAVE_V3_TOKENS",
+        ),
     ),
     gateway_connector=ImportRef(
         module="almanak.connectors.aave_v3.gateway.provider",

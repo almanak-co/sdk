@@ -11,7 +11,7 @@ ERC-4626 function selectors:
 - approve(address,uint256)           = 0x095ea7b3
 """
 
-from almanak.framework.permissions.constants import METAMORPHO_VAULTS
+from almanak.connectors.morpho_vault.addresses import METAMORPHO_VAULTS
 from almanak.framework.permissions.hints import PermissionHints, StaticPermissionEntry
 
 

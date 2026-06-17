@@ -7,8 +7,11 @@ All symbols remain importable from ``almanak.framework.intents.compiler``.
 from __future__ import annotations
 
 import functools
+import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
+
+from almanak.framework.data.tokens.defaults import DEFAULT_TOKENS
 
 if TYPE_CHECKING:
     # NpmView is imported lazily inside the NPM-view builders (it lives in the
@@ -33,6 +36,9 @@ if TYPE_CHECKING:
     UNIV3_NFT_POSITION_MANAGERS: dict[str, str]
     PANCAKESWAP_V3_NFT_POSITION_MANAGERS: dict[str, str]
     SLIPSTREAM_NFT_POSITION_MANAGERS: dict[str, str]
+    UNIV4_NFT_POSITION_MANAGERS: dict[str, str]
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Constants
@@ -834,32 +840,20 @@ ERC20_ALLOWANCE_SELECTOR = "0xdd62ed3e"  # allowance(address,address)
 ERC20_TRANSFER_SELECTOR = "0xa9059cbb"  # transfer(address,uint256)
 ERC20_TRANSFER_FROM_SELECTOR = "0x23b872dd"  # transferFrom(address,address,uint256)
 
-# Tokens that require approve(0) before approving a new amount if allowance > 0
-# This is a security feature in USDC/USDT to prevent certain attack vectors
-APPROVE_ZERO_FIRST_TOKENS: set[str] = {
-    # Avalanche USDC
-    "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E".lower(),
-    # Avalanche USDC.e (bridged)
-    "0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664".lower(),
-    # Avalanche USDT
-    "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7".lower(),
-    # Arbitrum USDC
-    "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".lower(),
-    # Arbitrum USDC.e (bridged)
-    "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8".lower(),
-    # Arbitrum USDT
-    "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9".lower(),
-    # Ethereum USDC
-    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".lower(),
-    # Ethereum USDT
-    "0xdAC17F958D2ee523a2206206994597C13D831ec7".lower(),
-    # Base USDC
-    "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".lower(),
-    # Optimism USDC
-    "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85".lower(),
-    # Optimism USDC.e (bridged)
-    "0x7F5c764cBc14f9669B88837ca1490cCa17c31607".lower(),
-}
+
+def _build_approve_zero_first_tokens() -> set[str]:
+    tokens: set[str] = set()
+    for token in DEFAULT_TOKENS:
+        for chain in token.approve_zero_first_chains:
+            address = token.get_address(chain)
+            if address is None:
+                logger.debug("Could not resolve approve-zero token %s on %s", token.symbol, chain)
+                continue
+            tokens.add(address.lower())
+    return tokens
+
+
+APPROVE_ZERO_FIRST_TOKENS: set[str] = _build_approve_zero_first_tokens()
 
 # Uniswap V3 NonfungiblePositionManager function selectors
 # mint(MintParams): create new position

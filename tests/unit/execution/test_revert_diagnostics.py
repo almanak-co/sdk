@@ -15,11 +15,16 @@ from decimal import Decimal
 from almanak.framework.execution.revert_diagnostics import (
     BalanceCheck,
     NativeETHCheck,
+    NativeETHRequirement,
+    RevertDiagnostic,
+    TokenRequirement,
+    _get_token_decimals,
     _get_weth_address,
     determine_likely_cause,
     extract_token_requirements,
+    get_token_address,
 )
-from almanak.framework.intents.vocabulary import Intent
+from almanak.framework.intents.vocabulary import Intent, IntentType
 
 
 def _get_cause(error: str) -> tuple[str, list[str]]:
@@ -164,6 +169,78 @@ def _insufficient(symbol: str, shortfall: Decimal = Decimal("1.0")) -> BalanceCh
         sufficient=False,
         shortfall=shortfall,
     )
+
+
+class TestRevertDiagnosticModels:
+    def test_native_eth_requirement_total_adds_gas_and_execution_fee(self):
+        requirement = NativeETHRequirement(
+            gas_estimate=Decimal("0.001"),
+            execution_fee=Decimal("0.002"),
+            protocol="gmx_v2",
+        )
+
+        assert requirement.total == Decimal("0.003")
+
+    def test_balance_check_format_handles_decimal_shortfall(self):
+        check = BalanceCheck(
+            symbol="USDC",
+            required=Decimal("10"),
+            actual=Decimal("4"),
+            sufficient=False,
+            shortfall=Decimal("6"),
+        )
+
+        assert "USDC" in check.format()
+        assert "short 6.000000" in check.format()
+
+    def test_revert_diagnostic_format_includes_native_eth_check(self):
+        diagnostic = RevertDiagnostic(
+            intent_type=IntentType.SWAP,
+            chain="arbitrum",
+            wallet="0x" + "11" * 20,
+            balance_checks=[
+                BalanceCheck(
+                    symbol="USDC",
+                    required=Decimal("1"),
+                    actual=Decimal("1"),
+                    sufficient=True,
+                    shortfall=Decimal("0"),
+                )
+            ],
+            native_eth_check=NativeETHCheck(
+                required=Decimal("0.01"),
+                actual=Decimal("0"),
+                sufficient=False,
+                shortfall=Decimal("0.01"),
+                breakdown="gas",
+            ),
+            likely_cause="Insufficient native ETH",
+            suggestions=["Fund wallet"],
+        )
+
+        formatted = diagnostic.format()
+
+        assert "Native ETH (gas + execution fees)" in formatted
+        assert "Insufficient native ETH" in formatted
+
+
+class TestDiagnosticTokenMetadata:
+    def test_get_token_address_and_decimals_use_static_resolver(self):
+        assert (
+            get_token_address("USDC", "arbitrum").lower()
+            == "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+        )
+        assert _get_token_decimals("USDC", "arbitrum") == 6
+
+    def test_token_requirement_carries_dynamic_decimals(self):
+        requirement = TokenRequirement(
+            symbol="USDC",
+            amount=Decimal("1"),
+            address=get_token_address("USDC", "arbitrum"),
+            decimals=_get_token_decimals("USDC", "arbitrum"),
+        )
+
+        assert requirement.decimals == 6
 
 
 class TestDetermineLikelyCauseCharacterization:

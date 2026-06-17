@@ -42,8 +42,16 @@ from typing import Any, Protocol, TypeVar
 
 from almanak.core.chains import DEFAULT_CHAIN
 from almanak.core.chains._helpers import anvil_funding_tokens_map
+from almanak.framework.anvil.accounts import synthetic_evm_address
 
 logger = logging.getLogger(__name__)
+
+_SYNTHETIC_TEST_WALLET = synthetic_evm_address(1)
+_SYNTHETIC_TEST_ACCOUNTS = (
+    synthetic_evm_address(1),
+    synthetic_evm_address(2),
+    synthetic_evm_address(3),
+)
 
 
 # =============================================================================
@@ -503,11 +511,7 @@ class TestContext:
     def __post_init__(self) -> None:
         """Initialize default test accounts and tokens."""
         if not self.test_accounts:
-            self.test_accounts = [
-                "0x1234567890123456789012345678901234567890",
-                "0x2345678901234567890123456789012345678901",
-                "0x3456789012345678901234567890123456789012",
-            ]
+            self.test_accounts = list(_SYNTHETIC_TEST_ACCOUNTS)
 
         if not self.test_tokens:
             # Derived from the descriptor-owned Anvil funding catalogue
@@ -800,7 +804,7 @@ def generate_config_validation_tests[ConfigT](
             ValueError,
             config_class,
             chain="invalid_chain",
-            wallet_address="0x1234567890123456789012345678901234567890",
+            wallet_address=_SYNTHETIC_TEST_WALLET,
             message="Should raise ValueError for invalid chain",
         )
         return tracker.all_passed
@@ -1010,7 +1014,7 @@ class ProtocolTestHarness[AdapterT: AdapterProtocol, ConfigT]:
     def create_adapter(
         self,
         chain: str = DEFAULT_CHAIN,
-        wallet_address: str = "0x1234567890123456789012345678901234567890",
+        wallet_address: str = _SYNTHETIC_TEST_WALLET,
         **kwargs: Any,
     ) -> AdapterT:
         """Create an adapter instance for testing.

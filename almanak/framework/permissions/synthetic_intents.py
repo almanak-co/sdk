@@ -15,9 +15,9 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Literal, cast
 
+from ..data.tokens.defaults import DEFAULT_TOKENS
 from ..intents.compiler import (
     _CHAIN_NATIVE_SYMBOLS,
-    CHAIN_TOKENS,
     DEFAULT_SWAP_FEE_TIER,
     LENDING_POOL_ADDRESSES,
     LP_POSITION_MANAGERS,
@@ -262,16 +262,108 @@ def get_protocol_intent_matrix() -> dict[str, frozenset[IntentType]]:
     return {proto: frozenset(types) for proto, types in matrix.items()}
 
 
-def _get_token_pair(chain: str) -> tuple[str, str]:
-    """Get a known token pair for a chain (usdc, weth-equivalent).
+def _resolve_synthetic_token_address(symbols: tuple[str, ...], chain: str) -> str | None:
+    """Resolve the first available token symbol for synthetic discovery."""
+    try:
+        from almanak.framework.data.tokens import get_token_resolver
 
-    Returns addresses from CHAIN_TOKENS in the compiler, falling back
-    to well-known USDC/WETH addresses for arbitrum.
-    """
-    tokens = CHAIN_TOKENS.get(chain, {})
-    usdc = tokens.get("usdc", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
-    weth = tokens.get("weth") or tokens.get("wavax") or tokens.get("wbnb", "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1")
+        resolver = get_token_resolver()
+    except Exception:
+        logger.debug("TokenResolver not available for synthetic discovery")
+        return None
+
+    for symbol in symbols:
+        try:
+            return resolver.resolve(symbol, chain, log_errors=False, skip_gateway=True).address
+        except Exception:
+            continue
+    return None
+
+
+def _candidate_stable_symbols(chain: str) -> tuple[str, ...]:
+    """Return stablecoin symbols available on ``chain`` in deterministic order."""
+    symbols: list[str] = []
+    seen: set[str] = set()
+
+    try:
+        from almanak.core.chains import ChainRegistry
+
+        descriptor = ChainRegistry.try_resolve(chain)
+    except Exception:
+        descriptor = None
+
+    token_chain = descriptor.name if descriptor is not None else chain
+    stable_symbols = {
+        token.symbol.upper() for token in DEFAULT_TOKENS if token.is_stablecoin and token.has_address_on(token_chain)
+    }
+
+    if descriptor is not None and descriptor.default_display_tokens:
+        for symbol in descriptor.default_display_tokens:
+            key = symbol.upper()
+            if key not in stable_symbols:
+                continue
+            if key not in seen:
+                seen.add(key)
+                symbols.append(symbol)
+
+    for token in DEFAULT_TOKENS:
+        if not token.is_stablecoin or not token.has_address_on(token_chain):
+            continue
+        key = token.symbol.upper()
+        if key not in seen:
+            seen.add(key)
+            symbols.append(token.symbol)
+
+    return tuple(symbols)
+
+
+def _candidate_wrapped_native_symbols(chain: str) -> tuple[str, ...]:
+    """Return preferred volatile pair symbols available on ``chain``."""
+    try:
+        from almanak.core.chains import ChainRegistry
+
+        descriptor = ChainRegistry.try_resolve(chain)
+    except Exception:
+        return ()
+
+    token_chain = descriptor.name if descriptor is not None else chain
+    symbols: list[str] = []
+    seen: set[str] = set()
+
+    def add(symbol: str | None) -> None:
+        if symbol is None:
+            return
+        key = symbol.upper()
+        if key in seen:
+            return
+        seen.add(key)
+        symbols.append(symbol)
+
+    if any(token.symbol == "WETH" and token.has_address_on(token_chain) for token in DEFAULT_TOKENS):
+        add("WETH")
+
+    if descriptor is not None:
+        add(descriptor.native.wrapped_symbol)
+
+    return tuple(symbols)
+
+
+def _get_token_pair_or_none(chain: str) -> tuple[str, str] | None:
+    """Get a known token pair for a chain, returning ``None`` on misses."""
+    usdc = _resolve_synthetic_token_address(_candidate_stable_symbols(chain), chain)
+    weth = _resolve_synthetic_token_address(_candidate_wrapped_native_symbols(chain), chain)
+    if usdc is None or weth is None:
+        logger.debug("Could not resolve synthetic token pair for chain=%r", chain)
+        return None
     return usdc, weth
+
+
+def _get_token_pair(chain: str) -> tuple[str, str]:
+    """Get a known token pair for a chain (usdc, weth-equivalent)."""
+    pair = _get_token_pair_or_none(chain)
+    if pair is None:
+        raise ValueError(f"Could not resolve synthetic token pair for chain={chain!r}")
+    return pair
 
 
 def _resolve_lp_pair(hints: PermissionHints, chain: str) -> tuple[str, str]:
@@ -323,38 +415,45 @@ def build_synthetic_intents(
         logger.debug("Unknown intent type: %s", intent_type)
         return []
 
-    protocol_lower = protocol.lower()
-    usdc, weth = _get_token_pair(chain)
-
-    if it == IntentType.SWAP:
-        return _build_swap_intents(protocol_lower, chain, usdc, weth)
-    elif it == IntentType.LP_OPEN:
-        return _build_lp_open_intents(protocol_lower, chain)
-    elif it == IntentType.LP_CLOSE:
-        return _build_lp_close_intents(protocol_lower, chain)
-    elif it == IntentType.LP_COLLECT_FEES:
-        return _build_lp_collect_fees_intents(protocol_lower, chain)
-    elif it == IntentType.SUPPLY:
-        return _build_supply_intents(protocol_lower, chain, usdc, weth)
-    elif it == IntentType.WITHDRAW:
-        return _build_withdraw_intents(protocol_lower, chain, usdc, weth)
-    elif it == IntentType.BORROW:
-        return _build_borrow_intents(protocol_lower, chain, usdc, weth)
-    elif it == IntentType.REPAY:
-        return _build_repay_intents(protocol_lower, chain, usdc, weth)
-    elif it == IntentType.PERP_OPEN:
-        return _build_perp_open_intents(protocol_lower, chain, usdc)
-    elif it == IntentType.PERP_CLOSE:
-        return _build_perp_close_intents(protocol_lower, chain, usdc)
-    elif it == IntentType.FLASH_LOAN:
-        return _build_flash_loan_intents(protocol_lower, chain, usdc)
-    elif it == IntentType.VAULT_DEPOSIT:
-        return _build_vault_deposit_intents(protocol_lower, chain)
-    elif it == IntentType.VAULT_REDEEM:
-        return _build_vault_redeem_intents(protocol_lower, chain)
+    if it in {IntentType.VAULT_DEPOSIT, IntentType.VAULT_REDEEM}:
+        token_pair = ("", "")
     else:
+        resolved_pair = _get_token_pair_or_none(chain)
+        if resolved_pair is None:
+            return []
+        token_pair = resolved_pair
+
+    protocol_lower = protocol.lower()
+    return _dispatch_synthetic_intents(it, protocol_lower, chain, *token_pair)
+
+
+def _dispatch_synthetic_intents(
+    intent_type: IntentType,
+    protocol: str,
+    chain: str,
+    usdc: str,
+    weth: str,
+) -> list[AnyIntent]:
+    builders: dict[IntentType, Callable[[], list[AnyIntent]]] = {
+        IntentType.SWAP: lambda: _build_swap_intents(protocol, chain, usdc, weth),
+        IntentType.LP_OPEN: lambda: _build_lp_open_intents(protocol, chain),
+        IntentType.LP_CLOSE: lambda: _build_lp_close_intents(protocol, chain),
+        IntentType.LP_COLLECT_FEES: lambda: _build_lp_collect_fees_intents(protocol, chain),
+        IntentType.SUPPLY: lambda: _build_supply_intents(protocol, chain, usdc, weth),
+        IntentType.WITHDRAW: lambda: _build_withdraw_intents(protocol, chain, usdc, weth),
+        IntentType.BORROW: lambda: _build_borrow_intents(protocol, chain, usdc, weth),
+        IntentType.REPAY: lambda: _build_repay_intents(protocol, chain, usdc, weth),
+        IntentType.PERP_OPEN: lambda: _build_perp_open_intents(protocol, chain, usdc),
+        IntentType.PERP_CLOSE: lambda: _build_perp_close_intents(protocol, chain, usdc),
+        IntentType.FLASH_LOAN: lambda: _build_flash_loan_intents(protocol, chain, usdc),
+        IntentType.VAULT_DEPOSIT: lambda: _build_vault_deposit_intents(protocol, chain),
+        IntentType.VAULT_REDEEM: lambda: _build_vault_redeem_intents(protocol, chain),
+    }
+    builder = builders.get(intent_type)
+    if builder is None:
         logger.debug("Intent type %s not supported for permission discovery", intent_type)
         return []
+    return builder()
 
 
 def _build_swap_intents(protocol: str, chain: str, usdc: str, weth: str) -> list[AnyIntent]:

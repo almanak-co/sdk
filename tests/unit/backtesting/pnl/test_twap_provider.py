@@ -178,7 +178,7 @@ class TestPoolConfiguration:
         """Test getting pool key for ARB on Arbitrum."""
         provider = TWAPDataProvider(chain="arbitrum")
         pool_key = provider.get_pool_key("ARB")
-        assert pool_key == "ARB/WETH-3000"
+        assert pool_key == "ARB/USDC-500"
 
 
 class TestSupportedTokensAndChains:
@@ -497,9 +497,9 @@ class TestTokenBaseDetection:
         assert provider._is_token_base("WETH/USDC-500", "USDC") is False
 
     def test_is_token_base_arb_in_arb_weth(self):
-        """Test ARB is base in ARB/WETH pool."""
+        """Test ARB is base in ARB/USDC pool."""
         provider = TWAPDataProvider()
-        assert provider._is_token_base("ARB/WETH-3000", "ARB") is True
+        assert provider._is_token_base("ARB/USDC-500", "ARB") is True
 
 
 class TestExceptions:
