@@ -936,10 +936,20 @@ class TestInlineTeardownAmountResolution:
         )
 
         resolved_intent = _make_intent()
-        with patch(
-            "almanak.framework.intents.vocabulary.Intent.set_resolved_amount",
-            return_value=resolved_intent,
-        ) as mock_set:
+        # ALM-2766: the inline lane now clamps the swap-back to the strategy's
+        # tracked inventory. Supply a tracked map where PT-wstETH ≥ the live
+        # balance so the clamp PROCEEDS at the full live amount (min == live),
+        # preserving the original resolve-and-execute behaviour this test pins.
+        with (
+            patch(
+                "almanak.framework.teardown.swap_clamp.read_tracked_swap_inventory",
+                return_value={"PT-WSTETH": Decimal("5")},
+            ),
+            patch(
+                "almanak.framework.intents.vocabulary.Intent.set_resolved_amount",
+                return_value=resolved_intent,
+            ) as mock_set,
+        ):
             result = await runner._execute_teardown_inline(
                 strategy=strategy,
                 teardown_intents=[intent],
@@ -955,6 +965,95 @@ class TestInlineTeardownAmountResolution:
         # Verify the resolved intent (not original) was executed
         called_kwargs = runner._execute_single_chain.call_args.kwargs
         assert called_kwargs["intent"] is resolved_intent
+
+    @pytest.mark.asyncio
+    async def test_inline_swap_back_clamps_to_tracked(self):
+        """ALM-2766: inline swap-back clamps to min(tracked, live). Tracked 0.5 <
+        live 1.5 → the swap executes for 0.5 (the TRACKED quantity), not the full
+        wallet 1.5."""
+        runner = _make_runner()
+        strategy = _make_strategy()
+
+        intent = MagicMock()
+        intent.intent_type = SimpleNamespace(value="SWAP")
+        intent.chain = "arbitrum"
+        intent.is_chained_amount = True
+        intent.from_token = "PT-wstETH"
+
+        mock_market = MagicMock()
+        mock_market.balance.return_value = MagicMock(balance=Decimal("1.5"))
+
+        runner._execute_single_chain = AsyncMock(
+            return_value=IterationResult(
+                status=IterationStatus.SUCCESS,
+                intent=intent,
+                deployment_id="test_strat",
+                duration_ms=100,
+            )
+        )
+
+        resolved_intent = _make_intent()
+        with (
+            patch(
+                "almanak.framework.teardown.swap_clamp.read_tracked_swap_inventory",
+                return_value={"PT-WSTETH": Decimal("0.5")},
+            ),
+            patch(
+                "almanak.framework.intents.vocabulary.Intent.set_resolved_amount",
+                return_value=resolved_intent,
+            ) as mock_set,
+        ):
+            result = await runner._execute_teardown_inline(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_market=mock_market,
+                start_time=datetime.now(UTC),
+                request=None,
+                state_manager=MagicMock(),
+            )
+
+        assert result.status == IterationStatus.TEARDOWN
+        runner._execute_single_chain.assert_called_once()
+        # Clamped to the tracked 0.5, NOT the full live 1.5.
+        mock_set.assert_called_once_with(intent, Decimal("0.5"))
+
+    @pytest.mark.asyncio
+    async def test_inline_untracked_swap_back_skipped(self):
+        """ALM-2766: an inline swap-back of an UNTRACKED token is skipped — the
+        commingled wallet balance is never swept, and execution is bypassed."""
+        runner = _make_runner()
+        strategy = _make_strategy()
+
+        intent = MagicMock()
+        intent.intent_type = SimpleNamespace(value="SWAP")
+        intent.chain = "arbitrum"
+        intent.is_chained_amount = True
+        intent.from_token = "PT-wstETH"
+
+        mock_market = MagicMock()
+        mock_market.balance.return_value = MagicMock(balance=Decimal("1.5"))
+
+        runner._execute_single_chain = AsyncMock()
+
+        with (
+            patch(
+                "almanak.framework.teardown.swap_clamp.read_tracked_swap_inventory",
+                return_value={"WETH": Decimal("9")},  # PT-wstETH NOT tracked
+            ),
+            patch("almanak.framework.intents.vocabulary.Intent.set_resolved_amount") as mock_set,
+        ):
+            result = await runner._execute_teardown_inline(
+                strategy=strategy,
+                teardown_intents=[intent],
+                teardown_market=mock_market,
+                start_time=datetime.now(UTC),
+                request=None,
+                state_manager=MagicMock(),
+            )
+
+        assert result.status == IterationStatus.TEARDOWN
+        runner._execute_single_chain.assert_not_called()  # commingled funds NOT swept
+        mock_set.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

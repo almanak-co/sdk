@@ -117,6 +117,17 @@ token-consolidation phase to resolve the ``entry_token`` policy's
 earliest-SWAP fallback (VIB-5011). Best-effort: returns ``[]`` on any
 failure."""
 
+GetTrackedSwapInventory = Callable[..., dict[str, Any] | None]
+"""Sync ``(strategy) -> {canonical_symbol: Decimal} | None``. Deployment-scoped
+tracked wallet inventory (Σ open wallet-basis lot ``remaining`` per token, all
+sources) used by the ALM-2766 teardown swap-back clamp: a default teardown may
+swap back only ``min(tracked, live_balance)``, never the full commingled wallet.
+``None`` is the UNMEASURED sentinel (empty deployment id / unreadable events /
+FIFO replay failure) and the clamp then fails closed. Bound via
+:func:`build_runner_helpers` against the runner's **accounting** StateManager
+(``runner.state_manager``) — the teardown lifecycle SM does not expose
+``get_accounting_events_sync``. Read-only; never raises."""
+
 DiscoverLpPositions = Callable[..., Awaitable[Any]]
 """Async ``(strategy) -> LpDiscoveryResult``. Runs BOUNDED on-chain LP
 discovery (VIB-5138) for the strategy's wallet/chain via the gateway
@@ -171,6 +182,7 @@ class TeardownRunnerHelpers:
     warn_sweep_non_strategy_balance: WarnSweepNonStrategyBalance | None = None
     get_token_universe: GetTokenUniverse | None = None
     get_accounting_events: GetAccountingEvents | None = None
+    get_tracked_swap_inventory: GetTrackedSwapInventory | None = None
     discover_lp_positions: DiscoverLpPositions | None = None
     get_deployment_lp_ownership: GetDeploymentLpOwnership | None = None
 
@@ -219,6 +231,11 @@ class TeardownRunnerHelpers:
     def has_accounting_events(self) -> bool:
         """True iff the accounting-events accessor is wired (VIB-5011)."""
         return self.get_accounting_events is not None
+
+    @property
+    def has_tracked_inventory(self) -> bool:
+        """True iff the ALM-2766 tracked-inventory accessor is wired."""
+        return self.get_tracked_swap_inventory is not None
 
     @property
     def has_lp_discovery(self) -> bool:
@@ -315,6 +332,18 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
             logger.debug("accounting-event read for consolidation failed (non-fatal)", exc_info=True)
             return []
 
+    def _get_tracked_swap_inventory(strategy: Any) -> dict[str, Any] | None:
+        # ALM-2766 — deployment-scoped tracked wallet inventory for the
+        # teardown swap-back clamp. Reads the runner's accounting StateManager
+        # and replays FIFO lots; returns the UNMEASURED sentinel (None) on any
+        # failure (the clamp then fails closed). Never raises.
+        from .swap_clamp import read_tracked_swap_inventory
+
+        return read_tracked_swap_inventory(
+            state_manager=getattr(runner, "state_manager", None),
+            deployment_id=(getattr(strategy, "deployment_id", "") or ""),
+        )
+
     async def _snapshot_intent_lending_state(strategy: Any, intent: Any) -> Any | None:
         # VIB-3934 — capture lending pre-state via the runner's safe wrapper
         # so REPAY/WITHDRAW/DELEVERAGE teardown rows carry collateral/debt/HF
@@ -375,6 +404,7 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
         discover_lp_positions=partial(_discover_lp_for_teardown, runner),
         get_deployment_lp_ownership=partial(_deployment_lp_ownership, runner),
         get_accounting_events=_get_accounting_events,
+        get_tracked_swap_inventory=_get_tracked_swap_inventory,
     )
 
 
@@ -543,6 +573,7 @@ __all__ = [
     "GetAccountingEvents",
     "GetDeploymentLpOwnership",
     "GetTokenUniverse",
+    "GetTrackedSwapInventory",
     "ReconcilePostBalances",
     "SnapshotIntentBalances",
     "SnapshotIntentLendingState",

@@ -54,6 +54,7 @@ from almanak.framework.teardown.slippage_manager import (
     EscalatingSlippageManager,
     ExecutionAttempt,
 )
+from almanak.framework.teardown.swap_clamp import SwapClampDecision, decide_swap_clamp
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +213,75 @@ def _zero_balance_swap_skip_reason(intent: Any, market: Any) -> str | None:
     return None
 
 
+def _clampable_swap_from_token(intent: Any, market: Any) -> str | None:
+    """Return the ``from_token`` if ``intent`` is an ``amount='all'`` wallet SWAP
+    eligible for the ALM-2766 tracked-quantity clamp, else ``None``.
+
+    Mirrors the gating of :func:`_zero_balance_swap_skip_reason` exactly — SWAP
+    only (WITHDRAW / REPAY / LP_CLOSE / ... resolve ``all`` against protocol or
+    cross-chain balances, NOT the wallet), not ``withdraw_all``, and a token to
+    resolve. ``market is None`` disqualifies (the clamp needs a live read).
+    """
+    if market is None:
+        return None
+    is_dict = isinstance(intent, dict)
+    amount = intent.get("amount") if is_dict else getattr(intent, "amount", None)
+    if amount != "all":
+        return None
+    intent_type_val = intent.get("intent_type") if is_dict else getattr(intent, "intent_type", None)
+    intent_type_str = str(intent_type_val).upper() if intent_type_val is not None else ""
+    if "SWAP" not in intent_type_str:
+        return None
+    withdraw_all = intent.get("withdraw_all") if is_dict else getattr(intent, "withdraw_all", False)
+    if withdraw_all:
+        return None
+    from_token = (
+        (intent.get("from_token") or intent.get("token"))
+        if is_dict
+        else (getattr(intent, "from_token", None) or getattr(intent, "token", None))
+    )
+    return from_token or None
+
+
+def _read_live_wallet_balance(market: Any, token: str) -> Decimal | None:
+    """Fresh live wallet balance for ``token`` as a ``Decimal``, or ``None``.
+
+    Evicts the memoized balance first (VIB-5074): an earlier teardown intent
+    (a REPAY consuming the debt token, a prior sweep) changed the wallet after
+    the snapshot was built, so the clamp must resolve against the live
+    post-intent value. Returns ``None`` (unmeasured) on any read failure — the
+    ALM-2766 clamp then fails closed rather than sweeping.
+    """
+    invalidate = getattr(market, "invalidate_balance", None)
+    if callable(invalidate):
+        try:
+            invalidate(token)
+        except Exception:  # noqa: BLE001 — fall back to the cached value.
+            logger.debug("invalidate_balance(%s) failed in clamp read; using cached balance", token, exc_info=True)
+    try:
+        bal = market.balance(token)
+    except Exception:  # noqa: BLE001 — token may not be registered yet.
+        return None
+    balance_value = bal.balance if hasattr(bal, "balance") else bal
+    try:
+        return Decimal(str(balance_value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _set_intent_resolved_amount(intent: Any, amount: Decimal) -> Any:
+    """Resolve an intent's ``amount`` to a concrete value (ALM-2766 clamp).
+
+    Mirrors the in-closure resolution: dict intents (resume path) take a string
+    amount; object intents go through :meth:`Intent.set_resolved_amount`.
+    """
+    if isinstance(intent, dict):
+        return {**intent, "amount": str(amount)}
+    from almanak.framework.intents import Intent as _Intent
+
+    return _Intent.set_resolved_amount(intent, amount)
+
+
 def _serialize_intent_for_state(intent: Any) -> Any:
     """JSON-safe serialization of an intent for ``pending_intents_json``.
 
@@ -266,6 +336,40 @@ def _warm_oracle_best_effort(market: Any, executable: list[Any], chain: str | No
     but a still-incomplete oracle only logs and the warmed dict is returned.
     """
     return warm_and_validate_oracle(market, executable, chain, raise_on_missing=False)
+
+
+def _warm_oracle_risk_first(market: Any, intents: list[Any], *, fail_loud: bool) -> dict[str, Any] | None:
+    """Warm the price oracle, failing loud ONLY for risk-reducing intents.
+
+    ALM-2766 (CodeRabbit CR#3): the VIB-4842 fail-loud pre-flight warm runs on
+    the FULL closing-intent list before ``_execute_intents``. A clampable
+    swap-back (``amount='all'`` wallet SWAP) is NON-risk-reducing and may be
+    clamp-SKIPPED downstream, so requiring its price would let an unpriceable
+    commingled swap-back raise and block the EARLIER risk-reducing intents
+    (REPAY / WITHDRAW / LP_CLOSE) — violating "teardown's first job is to remove
+    on-chain risk". So the fail-closed clamp is authoritative over pricing:
+    swap-backs are warmed BEST-EFFORT (a proceeding tracked swap-back still gets
+    a price when one is available; a missing price degrades only that swap, never
+    the closing intents), and only the risk-reducing remainder is warmed
+    fail-loud (when ``fail_loud``; the resume-past-progress lane passes False).
+
+    Builds on ``_intents_requiring_pricing`` (zero-balance no-op swaps already
+    excluded) and ``_clampable_swap_from_token``.
+    """
+    executable = _intents_requiring_pricing(intents, market)
+    swap_backs = [i for i in executable if _clampable_swap_from_token(i, market)]
+    risk_intents = [i for i in executable if _clampable_swap_from_token(i, market) is None]
+
+    if fail_loud:
+        oracle = warm_and_validate_oracle(market, risk_intents, _teardown_chain(risk_intents))
+    else:
+        oracle = _warm_oracle_best_effort(market, risk_intents, _teardown_chain(risk_intents))
+
+    if swap_backs:
+        warmed = _warm_oracle_best_effort(market, swap_backs, _teardown_chain(swap_backs))
+        if warmed:
+            oracle = {**(oracle or {}), **warmed}
+    return oracle
 
 
 def _fold_max_receipt_block(current: int | None, execution_result: Any) -> int | None:
@@ -554,8 +658,10 @@ class TeardownManager:
             # loud here cannot strand a partially-unwound position. Only warm
             # tokens for intents that will actually execute (zero-balance no-op
             # swaps are skipped downstream, so their tokens are not required).
-            executable = _intents_requiring_pricing(intents, market)
-            price_oracle = warm_and_validate_oracle(market, executable, _teardown_chain(executable))
+            # ALM-2766 (CR#3): clampable swap-backs are warmed best-effort, NOT
+            # fail-loud — a swap-back we may clamp-skip must never block the
+            # risk-reducing closing intents on an unpriceable commingled token.
+            price_oracle = _warm_oracle_risk_first(market, intents, fail_loud=True)
 
             # Step 6: Execute intents with safety guardrails
             result = await self._execute_intents(
@@ -874,8 +980,6 @@ class TeardownManager:
         # Any progress → warm best-effort (populate the cache for the remaining
         # intents) but DO NOT raise: fall back to the legacy lenient fetch so a
         # still-incomplete oracle cannot halt the unwind.
-        executable = _intents_requiring_pricing(intents_data, market)
-        teardown_chain = _teardown_chain(executable)
         if had_prior_progress:
             logger.info(
                 "Resuming teardown %s past prior progress (current completed=%d, intent index=%d) — "
@@ -885,9 +989,14 @@ class TeardownManager:
                 state.completed_intents,
                 state.current_intent_index,
             )
-            price_oracle = _warm_oracle_best_effort(market, executable, teardown_chain)
+            # ALM-2766 (CR#3): clampable swap-backs are warmed best-effort here
+            # too (already non-fail-loud on this resume path).
+            price_oracle = _warm_oracle_risk_first(market, intents_data, fail_loud=False)
         else:
-            price_oracle = warm_and_validate_oracle(market, executable, teardown_chain)
+            # ALM-2766 (CR#3): only the risk-reducing intents are warmed
+            # fail-loud; clampable swap-backs are best-effort so an unpriceable
+            # commingled swap-back cannot block the risk-reducing closers.
+            price_oracle = _warm_oracle_risk_first(market, intents_data, fail_loud=True)
 
         # Continue execution from where we left off
         positions = strategy.get_open_positions()
@@ -1089,6 +1198,21 @@ class TeardownManager:
                 is_auto_mode=is_auto_mode,
                 price_oracle=oracle_for_swaps,
                 market=market,
+                # ALM-2766: consent to a full-wallet consolidation sweep ONLY on
+                # an operator-initiated (manual) teardown. Consolidation also
+                # runs on AUTOMATIC teardowns (risk-guard / auto-protect /
+                # config-reload carry a non-None request, so
+                # ``_teardown_config_from_request`` leaves consolidation enabled
+                # and they run SOFT mode) — and an automatic teardown has NO
+                # operator present to consent to sweeping commingled / sibling-
+                # deployment balances. So the clamp must STAY ON for auto-mode
+                # consolidation; only a manual teardown (``is_auto_mode`` False
+                # → ``requested_by`` in {cli, dashboard, dashboard_api}) is the
+                # consented full-wallet sweep. ``TeardownRequest.asset_policy``
+                # defaults to TARGET_TOKEN, so it carries NO distinguishable
+                # explicit-consent signal — manual-vs-auto is the only reliable
+                # operator-initiated signal (derive_teardown_auto_mode).
+                consolidation_consent=not is_auto_mode,
             )
 
             # _execute_intents counts only the loop it ran (offset onward),
@@ -1135,6 +1259,7 @@ class TeardownManager:
         is_auto_mode: bool = False,
         price_oracle: dict | None = None,
         market: Any = None,
+        consolidation_consent: bool = False,
     ) -> TeardownResult:
         """Execute intents with escalating slippage.
 
@@ -1149,6 +1274,15 @@ class TeardownManager:
             on_progress: Callback for progress
             start_from_index: Index to start from (for resumption)
             is_auto_mode: Whether this is auto-protect mode
+            consolidation_consent: ALM-2766 — when True, the ``amount='all'``
+                swap-back clamp is SKIPPED (full-wallet sweep preserved). Set
+                by the VIB-5011 token-consolidation lane ONLY for
+                operator-initiated (MANUAL) teardowns (``not is_auto_mode``).
+                Consolidation also runs on AUTOMATIC teardowns (risk-guard /
+                auto-protect / config-reload), but those have no operator
+                present to consent to a wallet-scoped sweep, so the clamp STAYS
+                ON for them (consent False). All non-consolidation closing-
+                intent calls leave it False (clamp on). See blueprint 14 §4.5.
 
         Returns:
             TeardownResult with execution outcome
@@ -1222,6 +1356,107 @@ class TeardownManager:
                 if self.state_manager:
                     await self.state_manager.save_teardown_state(teardown_state)
                 continue
+
+            # ALM-2766: clamp an ``amount='all'`` swap-back to the strategy's
+            # TRACKED quantity so a DEFAULT teardown never sweeps commingled
+            # wallet funds (a shared wallet's sibling balances, or pre-existing
+            # holdings the strategy never owned). ``tracked_qty = Σ open
+            # wallet-basis lot remaining`` (SWAP / BORROW / WITHDRAW sources —
+            # so a looping teardown's withdrawn collateral counts), and we swap
+            # ``min(tracked_qty, live)``. Fail-closed on an unprovable quantity
+            # (skip the swap, flag degraded) — a swap-back is never the
+            # risk-reducing intent, so skipping it strands no on-chain risk.
+            #
+            # SKIPPED entirely under ``consolidation_consent`` — set ONLY by the
+            # VIB-5011 consolidation lane for an operator-initiated (MANUAL)
+            # teardown (§4.5). Automatic teardowns (risk-guard / auto-protect /
+            # config-reload) DO run consolidation, but with consent False so the
+            # clamp stays on (no operator present to consent to a wallet sweep).
+            #
+            # Placed at loop scope (not inside ``execute_at_slippage``) so a
+            # skip can ``continue`` the loop — the same pattern as the
+            # zero-balance skip above; a skip from inside the per-slippage
+            # closure would be miscounted as a failure and pointlessly escalate
+            # slippage. Once a clampable swap is identified here, this branch
+            # OWNS the outcome (proceed-clamped or skip): the swap never falls
+            # through to the closure's full-``all`` resolution, fully closing
+            # the sweep bypass.
+            if not consolidation_consent:
+                clamp_token = _clampable_swap_from_token(intent, market)
+                if clamp_token:
+                    live_balance = _read_live_wallet_balance(market, clamp_token)
+                    if live_balance is None:
+                        # Unmeasured live balance → cannot prove the clamp.
+                        # Fail closed: skip rather than risk a full sweep, and
+                        # flag degraded for reconciliation.
+                        decision = SwapClampDecision(None, True, True, "live_balance_unmeasured")
+                    else:
+                        tracked_map = (
+                            self.runner_helpers.get_tracked_swap_inventory(strategy)  # type: ignore[misc]
+                            if self.runner_helpers.has_tracked_inventory
+                            else None
+                        )
+                        decision = decide_swap_clamp(
+                            live_balance=live_balance,
+                            tracked_map=tracked_map,
+                            from_token=clamp_token,
+                        )
+                    if decision.degraded:
+                        accounting_degraded_records.append(
+                            {
+                                "kind": "swap_clamp_degraded",
+                                "intent_index": i,
+                                "token": clamp_token,
+                                "reason": decision.reason,
+                            }
+                        )
+                    if decision.skip:
+                        # Preserve the VIB-4587 sweep WARNING as the operator
+                        # signal — especially for the untracked-token skip
+                        # (this is exactly the commingled-funds case it warns
+                        # about). Best-effort; never blocks the unwind.
+                        if self.runner_helpers.has_sweep_warning:
+                            try:
+                                self.runner_helpers.warn_sweep_non_strategy_balance(  # type: ignore[misc]
+                                    strategy,
+                                    intent,
+                                    clamp_token,
+                                    live_balance if live_balance is not None else Decimal("0"),
+                                )
+                            except Exception:  # noqa: BLE001
+                                logger.debug("sweep-warning helper raised in clamp skip; ignored", exc_info=True)
+                        logger.warning(
+                            "🛑 ALM-2766 teardown swap-back clamp: SKIPPING %s swap "
+                            "(reason=%s, degraded=%s) — not sweeping commingled wallet funds.",
+                            clamp_token,
+                            decision.reason,
+                            decision.degraded,
+                        )
+                        # No-op success (nothing of ours to swap) — preserves
+                        # the ``intents_total = succeeded + failed`` invariant
+                        # and does not mark the teardown failed. Persist the
+                        # ABSOLUTE completed count (see the zero-balance skip).
+                        succeeded += 1
+                        skipped += 1
+                        if on_progress:
+                            await on_progress(
+                                progress_pct, f"Skipped step {i + 1}/{len(intents)}: clamp {decision.reason}"
+                            )
+                        teardown_state.completed_intents = start_from_index + succeeded
+                        teardown_state.updated_at = datetime.now(UTC)
+                        if self.state_manager:
+                            await self.state_manager.save_teardown_state(teardown_state)
+                        continue
+                    # Proceed with the clamped amount: resolve the intent here so
+                    # the per-slippage closure's ``amount='all'`` branch is
+                    # bypassed and every retry uses the clamped quantity.
+                    intent = _set_intent_resolved_amount(intent, decision.amount)  # type: ignore[arg-type]
+                    logger.info(
+                        "🛑 ALM-2766 clamped %s swap-back to tracked qty %s (live wallet %s).",
+                        clamp_token,
+                        decision.amount,
+                        live_balance,
+                    )
 
             # Execute with escalating slippage
             async def execute_at_slippage(  # noqa: C901

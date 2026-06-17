@@ -166,7 +166,19 @@ def _make_commit_helpers(*, commit_outcomes: list[TeardownCommitOutcome] | None 
         except StopIteration:
             return TeardownCommitOutcome(ledger_entry_id="ledger-x", accounting_degraded=False, degraded_reason=None)
 
-    return TeardownRunnerHelpers(commit=_commit), commit_calls
+    # ALM-2766: these execution-mechanics tests drive consolidation under
+    # ``is_auto_mode=True`` (which now keeps the swap-back clamp ON). The
+    # residual tokens consolidated here ARE the strategy's tracked inventory, so
+    # wire a tracked map whose per-token amounts exceed any wallet balance —
+    # ``min(tracked, live) == live`` → the clamp proceeds at the full live
+    # balance, exercising the real clamp PROCEED path while preserving the
+    # full-sweep execution behaviour these tests assert. (The
+    # untracked/skip/auto-mode-not-swept cases are covered in
+    # test_teardown_swap_clamp.py.)
+    def _tracked_swap_inventory(_strategy):
+        return {sym: Decimal("1e9") for sym in ("WETH", "WBTC", "USDC", "USDT", "DAI")}
+
+    return TeardownRunnerHelpers(commit=_commit, get_tracked_swap_inventory=_tracked_swap_inventory), commit_calls
 
 
 def _result(*, success: bool, succeeded: int = 1, failed: int = 0, total: int = 1) -> TeardownResult:

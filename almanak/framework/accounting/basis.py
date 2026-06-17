@@ -905,6 +905,61 @@ class FIFOBasisStore:
                     cost_for_remaining = cost_usd * (remaining / amount)
                 yield position_key, token, remaining, cost_for_remaining
 
+    def iter_open_wallet_basis_lots(self) -> Iterable[tuple[str, str, Decimal, Decimal | None]]:
+        """Yield every open wallet-basis lot, REGARDLESS of source (ALM-2766).
+
+        Source-agnostic twin of :meth:`iter_open_swap_lots`: same
+        ``swap:<chain>:<wallet>``-keyed pool, same ``(position_key, token,
+        remaining, cost_for_remaining)`` shape, but WITHOUT the
+        ``source == "SWAP"`` filter. Borrowed-then-held (``source="BORROW"``)
+        and withdrawn-then-held (``source="WITHDRAW"``) tokens (VIB-3964) ARE
+        genuine wallet inventory and MUST be counted — a looping teardown's
+        swap-back of withdrawn collateral would otherwise be treated as
+        untracked and stranded.
+
+        This is deliberately broader than :meth:`iter_open_swap_lots`, whose
+        SWAP-only scope exists so VIB-4984's *swap-inventory* dashboard tile
+        does not mislabel transient borrowed-token MTM as swap PnL. The
+        teardown clamp is the opposite question — "how much of this wallet
+        balance is OURS (tracked) to swap back?" — so every wallet-basis lot
+        counts.
+
+        Lending (``supply:``) and prediction keys are excluded (they are not
+        wallet inventory). Read-only; does not mutate lot state.
+        """
+        marker = ":swap:"
+        for composite_key, lots in self._lots.items():
+            idx = composite_key.find(marker)
+            if idx < 0:
+                continue
+            remainder = composite_key[idx + 1 :]  # "swap:<chain>:<wallet>:<token>"
+            last_colon = remainder.rfind(":")
+            if last_colon <= 0:
+                continue
+            position_key = remainder[:last_colon]
+            token = remainder[last_colon + 1 :]
+            if not position_key.startswith("swap:") or not token:
+                continue
+            for lot in lots:
+                # No source filter (ALM-2766) — SWAP / BORROW / WITHDRAW lots
+                # all count as tracked wallet inventory.
+                remaining = lot.get("remaining")
+                if not isinstance(remaining, Decimal):
+                    remaining = _parse_decimal(remaining)
+                if remaining is None or remaining <= 0:
+                    continue
+                amount = lot.get("amount")
+                if not isinstance(amount, Decimal):
+                    amount = _parse_decimal(amount)
+                cost_usd: Decimal | None = lot.get("cost_usd")
+                if cost_usd is not None and not isinstance(cost_usd, Decimal):
+                    cost_usd = _parse_decimal(cost_usd)
+                if cost_usd is None or amount is None or amount <= 0:
+                    cost_for_remaining: Decimal | None = None
+                else:
+                    cost_for_remaining = cost_usd * (remaining / amount)
+                yield position_key, token, remaining, cost_for_remaining
+
     def record_prediction_buy(
         self,
         deployment_id: str,
@@ -1134,6 +1189,52 @@ class FIFOBasisStore:
             return None, remaining
 
         return cost_consumed, remaining
+
+
+def canonical_symbol(symbol: Any) -> str:
+    """Case-insensitive canonical key for token-symbol matching (ALM-2766).
+
+    Identical to ``inventory_revaluation._canonical`` — a stable, dependency-free
+    upper-case of the trimmed string. Defined here (the lower layer) so the
+    teardown clamp and the wallet-basis summer key on EXACTLY the same form;
+    ``inventory_revaluation`` lives above ``basis`` and cannot be imported from
+    here without a cycle.
+    """
+    return str(symbol or "").strip().upper()
+
+
+def sum_open_wallet_basis_by_token(
+    events: list[dict[str, Any]],
+    deployment_id: str,
+) -> dict[str, Decimal] | None:
+    """Tracked wallet inventory per token for ``deployment_id`` (ALM-2766).
+
+    Reconstructs FIFO lots from ``events`` via
+    :meth:`FIFOBasisStore.reconstruct_from_events` and sums ``remaining`` across
+    ALL wallet-basis lots (:meth:`FIFOBasisStore.iter_open_wallet_basis_lots` —
+    SWAP / BORROW / WITHDRAW sources all count), keyed by
+    :func:`canonical_symbol`. This is the quantity a default teardown is allowed
+    to swap back: ``min(this, live_balance)`` never touches commingled funds.
+
+    Deployment-scoped: only events whose ``deployment_id`` matches are replayed
+    (a shared wallet's sibling-strategy lots are not ours). An empty / missing
+    ``deployment_id`` returns the UNMEASURED sentinel ``None`` (Empty ≠ Zero) —
+    NOT ``{}`` — so the caller fails closed rather than treating "we can't scope
+    this" as "nothing is tracked". A scoped-but-empty event set returns ``{}``
+    (measured: this deployment has no tracked wallet inventory).
+    """
+    if not deployment_id:
+        return None
+    scoped = [ev for ev in events if isinstance(ev, dict) and ev.get("deployment_id") == deployment_id]
+    store = FIFOBasisStore()
+    store.reconstruct_from_events(scoped)
+    by_token: dict[str, Decimal] = {}
+    for _position_key, token, remaining, _cost in store.iter_open_wallet_basis_lots():
+        sym = canonical_symbol(token)
+        if not sym:
+            continue
+        by_token[sym] = by_token.get(sym, Decimal("0")) + remaining
+    return by_token
 
 
 # Per-event-type dispatch table for reconstruct_from_events. Unknown types

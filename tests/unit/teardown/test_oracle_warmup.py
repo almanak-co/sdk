@@ -347,9 +347,16 @@ async def test_execute_warms_oracle_before_compile():
 
 @pytest.mark.asyncio
 async def test_execute_raises_named_preflight_error_for_unpriceable():
-    """execute() surfaces the named teardown pre-flight error, not a bare ValueError."""
+    """execute() surfaces the named teardown pre-flight error, not a bare ValueError.
+
+    ALM-2766 (CR#3): the fail-loud pre-flight warm now applies only to
+    risk-reducing intents — clampable ``amount='all'`` swap-backs are warmed
+    best-effort so an unpriceable commingled swap-back cannot block the closers.
+    This test therefore uses a FIXED-amount swap (NOT a clampable swap-back) to
+    exercise the named pre-flight error for the intents that still fail loud.
+    """
     market = _FakeMarket({"USDC": Decimal("1"), "ETH": Decimal("3400")})
-    intent = Intent.swap(from_token="ARB", to_token="USDC", amount="all", chain="arbitrum")
+    intent = Intent.swap(from_token="ARB", to_token="USDC", amount=Decimal("100"), chain="arbitrum")
     strategy = _make_strategy([intent])
 
     execute_called = []

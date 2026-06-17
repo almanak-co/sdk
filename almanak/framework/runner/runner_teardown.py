@@ -1209,6 +1209,76 @@ async def execute_teardown_inline(
             set_cycle_id(saved_ctx_cycle_id)
 
 
+def _apply_inline_swap_clamp(
+    runner: Any,
+    intent: Any,
+    balance_token: str,
+    balance_value: Any,
+    deployment_id: str,
+) -> tuple[bool, bool, Any]:
+    """ALM-2766 inline-lane swap-back clamp — delegates to ``decide_swap_clamp``.
+
+    Clamps an ``amount='all'`` swap-back to the strategy's TRACKED quantity so a
+    default teardown never sweeps commingled wallet funds. The inline lane never
+    runs token consolidation (blueprint 14 §4.5 "Known gaps"), so there is no
+    consent opt-out — every swap-back is clamped to ``min(tracked, live)``.
+
+    The decision is computed by the SAME shared pure helper the manager lane uses
+    (``swap_clamp.decide_swap_clamp``), so the two lanes cannot drift. Extracted
+    out of ``_execute_teardown_inline_body`` to keep that function's branches —
+    and its CRAP score — bounded.
+
+    Returns ``(skip, degraded, resolved_balance)``:
+      * non-SWAP intents → ``(False, False, balance_value)`` (no clamp applies).
+      * a fail-closed skip → fires the VIB-4587 sweep WARNING and returns
+        ``(True, decision.degraded, None)``.
+      * a proceeding clamp → ``(False, False, min(tracked, live))``.
+    """
+    from ..teardown.swap_clamp import SwapClampDecision, decide_swap_clamp, read_tracked_swap_inventory
+
+    itype = getattr(getattr(intent, "intent_type", None), "value", getattr(intent, "intent_type", None))
+    if not (isinstance(itype, str) and itype.rsplit(".", 1)[-1].upper() == "SWAP"):
+        return False, False, balance_value
+
+    try:
+        live = Decimal(str(balance_value))
+    except (InvalidOperation, TypeError, ValueError):
+        live = None
+
+    if live is None:
+        decision = SwapClampDecision(None, True, True, "live_balance_unmeasured")
+    else:
+        decision = decide_swap_clamp(
+            live_balance=live,
+            tracked_map=read_tracked_swap_inventory(
+                state_manager=getattr(runner, "state_manager", None),
+                deployment_id=deployment_id,
+            ),
+            from_token=balance_token,
+        )
+
+    if not decision.skip:
+        return False, False, decision.amount
+
+    # Keep the VIB-4587 sweep WARNING firing as the operator signal (esp. the
+    # untracked-token / commingled case).
+    warn_if_sweep_non_strategy_balance(
+        state_manager=getattr(runner, "state_manager", None),
+        deployment_id=deployment_id,
+        intent=intent,
+        balance_token=balance_token,
+        balance_value=balance_value,
+    )
+    logger.warning(
+        "🛑 ALM-2766 inline teardown swap-back clamp: SKIPPING %s swap "
+        "(reason=%s, degraded=%s) — not sweeping commingled wallet funds.",
+        balance_token,
+        decision.reason,
+        decision.degraded,
+    )
+    return True, decision.degraded, None
+
+
 async def _execute_teardown_inline_body(  # noqa: C901
     runner: Any,
     strategy: StrategyProtocol,
@@ -1290,6 +1360,19 @@ async def _execute_teardown_inline_body(  # noqa: C901
                 balance_value = bal.balance if hasattr(bal, "balance") else bal
                 if balance_value <= 0:
                     logger.info(f"🛑 Teardown intent {i + 1}: {balance_token} balance is 0, skipping (already closed)")
+                    continue
+                # ALM-2766: clamp an amount='all' swap-back to the strategy's
+                # TRACKED quantity so a default teardown never sweeps commingled
+                # wallet funds. The decision is delegated to the SHARED
+                # ``decide_swap_clamp`` helper (same source as the manager lane,
+                # so the two lanes cannot drift) via ``_apply_inline_swap_clamp``;
+                # on a fail-closed skip the swap is bypassed (loud, degraded
+                # counted), else ``balance_value`` is set to ``min(tracked, live)``.
+                _skip, _degraded, balance_value = _apply_inline_swap_clamp(
+                    runner, intent, balance_token, balance_value, deployment_id
+                )
+                if _skip:
+                    inline_degraded_count += int(_degraded)
                     continue
                 # VIB-4587 / F5 — emit DX warning before sweeping when the
                 # from-token wasn't seen in this strategy's accounting history.
