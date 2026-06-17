@@ -156,6 +156,40 @@ def _apply_risk_metrics(
         hydrated["borrow_assets"] = {borrow_token: float(borrowed_value)}
 
 
+def _has_debt(session_state: dict[str, Any]) -> bool:
+    """True when the snapshot carries a positive borrowed value."""
+    return _as_decimal(session_state.get("borrowed_value_usd")) > 0
+
+
+def _resolve_ltv(session_state: dict[str, Any]) -> float | None:
+    """Live LTV (borrowed / collateral), or ``None`` when unmeasured.
+
+    Prefers an explicit ``ltv`` if the snapshot carries one; otherwise derives
+    it from the USD collateral/borrow values already present. Returns ``None``
+    when there is no measured collateral — the render path shows an explicit
+    "unavailable" rather than a fabricated ratio. Never substitutes a
+    placeholder such as ``0.5`` (ALM-2789).
+    """
+    explicit = _decimal_or_none(session_state.get("ltv"))
+    if explicit is not None:
+        return float(explicit)
+    collateral = _as_decimal(session_state.get("collateral_value_usd"))
+    if collateral > 0:
+        return float(_as_decimal(session_state.get("borrowed_value_usd")) / collateral)
+    return None
+
+
+def _resolve_health_factor(session_state: dict[str, Any]) -> float | None:
+    """Authoritative health factor, or ``None`` when unmeasured (ALM-2789).
+
+    Never substitutes a placeholder ``2.0``. A missing health factor with no
+    debt is surfaced by the caller as "no liquidation risk", distinct from a
+    measured reading.
+    """
+    hf = _decimal_or_none(session_state.get("health_factor"))
+    return float(hf) if hf is not None else None
+
+
 def prepare_lending_session_state(
     api_client: Any,
     *,
@@ -265,23 +299,36 @@ def render_lending_dashboard(
 
     with col1:
         if config.show_health_factor:
-            health_factor = float(session_state.get("health_factor", 2.0))
-            fig = plot_health_factor_gauge(
-                health_factor=health_factor,
-                liquidation_threshold=config.liquidation_threshold,
-                safe_threshold=config.safe_threshold,
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            health_factor = _resolve_health_factor(session_state)
+            if health_factor is not None:
+                fig = plot_health_factor_gauge(
+                    health_factor=health_factor,
+                    liquidation_threshold=config.liquidation_threshold,
+                    safe_threshold=config.safe_threshold,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            elif _has_debt(session_state):
+                # Debt with no measured HF: do NOT paint a fake "safe" 2.0 gauge.
+                st.metric("Health Factor", "—")
+                st.caption("Health factor unavailable for this snapshot.")
+            else:
+                st.metric("Health Factor", "∞")
+                st.caption("No debt — no liquidation risk.")
 
     with col2:
         if config.show_ltv:
-            current_ltv = float(session_state.get("ltv", 0.5))
-            fig = plot_ltv_ratio(
-                current_ltv=current_ltv,
-                max_ltv=config.max_ltv,
-                liquidation_ltv=config.liquidation_ltv,
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            current_ltv = _resolve_ltv(session_state)
+            if current_ltv is not None:
+                fig = plot_ltv_ratio(
+                    current_ltv=current_ltv,
+                    max_ltv=config.max_ltv,
+                    liquidation_ltv=config.liquidation_ltv,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                # No measured collateral: an explicit blank beats a fake 50%.
+                st.metric("LTV", "—")
+                st.caption("LTV unavailable — no collateral measured for this snapshot.")
 
     st.divider()
 

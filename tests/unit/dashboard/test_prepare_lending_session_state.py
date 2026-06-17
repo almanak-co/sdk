@@ -20,6 +20,9 @@ from typing import Any
 
 from almanak.framework.dashboard.templates.lending_dashboard import (
     LendingDashboardConfig,
+    _has_debt,
+    _resolve_health_factor,
+    _resolve_ltv,
     prepare_lending_session_state,
 )
 
@@ -184,3 +187,39 @@ def test_debt_free_skips_health_factor_entirely() -> None:
         strategy_config={"chain": "arbitrum"},
     )
     assert "health_factor" not in out
+
+
+class TestRenderResolversNoPlaceholders:
+    """ALM-2789: HF/LTV gauges must never fall back to fabricated values.
+
+    The render path previously used ``session_state.get("health_factor", 2.0)``
+    and ``session_state.get("ltv", 0.5)`` — so a snapshot lacking those fields
+    painted a fake "safe HF=2.0 / LTV=50%" gauge. These resolvers return the
+    measured value, derive LTV from collateral/borrow when possible, or ``None``
+    so the caller renders an explicit "unavailable".
+    """
+
+    def test_resolve_ltv_prefers_explicit(self) -> None:
+        assert _resolve_ltv({"ltv": "0.62"}) == 0.62
+
+    def test_resolve_ltv_derives_from_values_when_absent(self) -> None:
+        ltv = _resolve_ltv({"collateral_value_usd": "1000", "borrowed_value_usd": "400"})
+        assert ltv == 0.4
+
+    def test_resolve_ltv_none_without_collateral(self) -> None:
+        # No measured collateral -> None, NOT the old 0.5 placeholder.
+        assert _resolve_ltv({"borrowed_value_usd": "400"}) is None
+        assert _resolve_ltv({}) is None
+
+    def test_resolve_health_factor_uses_measured(self) -> None:
+        assert _resolve_health_factor({"health_factor": "1.85"}) == 1.85
+
+    def test_resolve_health_factor_none_when_absent(self) -> None:
+        # Absent HF -> None, NOT the old 2.0 placeholder.
+        assert _resolve_health_factor({}) is None
+        assert _resolve_health_factor({"health_factor": ""}) is None
+
+    def test_has_debt(self) -> None:
+        assert _has_debt({"borrowed_value_usd": "1"}) is True
+        assert _has_debt({"borrowed_value_usd": "0"}) is False
+        assert _has_debt({}) is False
