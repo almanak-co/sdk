@@ -821,6 +821,36 @@ def test_compute_pnl_summary_nets_real_portfolio_snapshot():
     assert abs(open_position_nav - pnl.deployed_capital_usd) < Decimal("0.01")  # flat, not −7.82
 
 
+def test_lifetime_pnl_excludes_borrowed_amount_for_lending_loop():
+    """REGRESSION (ALM-2789): the "Wallet lifetime PnL" tile must NOT count the
+    borrowed principal as profit. ``lifetime_pnl_usd = wallet_nav − deployed`` and
+    ``wallet_nav`` reads ``total_value_usd`` (positive-position-scoped — the BORROW
+    leg is dropped) plus cash, so without debt-netting an open lending loop reads a
+    phantom GAIN equal to the borrowed amount.
+
+    Anchor the deployed capital to the loop's net equity (a flat loop) and assert
+    lifetime PnL is ~$0 — NOT the +debt_mark the un-netted surface used to report.
+    """
+    snap = _real_leverage_snapshot()
+    # Net equity NAV = 8.48915941 (proven netted in the sibling tests). Anchor
+    # deployed capital to that same equity so the loop is flat end-to-end.
+    metrics = SimpleNamespace(
+        initial_value_usd="8.48915941",
+        deposits_usd="0",
+        withdrawals_usd="0",
+        initial_timestamp=None,
+    )
+    pnl = compute_pnl_summary(
+        portfolio_metrics=metrics, snapshots=[snap], ledger_entries=[], accounting_events=[]
+    )
+    assert pnl.deployed_usd == Decimal("8.48915941")
+    assert pnl.nav_usd == Decimal("8.48915941")  # debt-netted, NOT 12.39737441 gross
+    # Flat loop → ~$0 lifetime PnL. The un-netted surface would read
+    # 12.39737441 − 8.48915941 = +3.90821500 (exactly the borrowed amount).
+    assert pnl.lifetime_pnl_usd == Decimal("0")
+    assert pnl.lifetime_pnl_usd != Decimal("3.90821500")  # the borrowed-amount phantom
+
+
 def test_snapshot_net_debt_reads_typed_positions():
     """``_snapshot_net_debt`` prefers the typed ``positions`` list and returns the
     debt mark, debt cost, and the signed net equity cost computed directly."""
