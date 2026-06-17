@@ -39,7 +39,9 @@ from almanak.connectors._strategy_base.perps_read_base import (
     PerpsPositionValue,
 )
 from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
-from almanak.connectors.aster_perps import perps_read as aster_perps
+# perps_read internals (private helpers like _aster_market_metadata, _POSITION_TUPLE)
+# now live in the shared _aster_perps_core foundation; test them at their home.
+from almanak.connectors._aster_perps_core import perps_read as aster_perps
 from almanak.connectors.aster_perps.addresses import ASTER_PERPS_MARKETS
 from almanak.connectors.aster_perps.sdk import (
     PRICE_DECIMALS,

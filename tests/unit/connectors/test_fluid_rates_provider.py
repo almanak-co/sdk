@@ -136,7 +136,7 @@ class TestFluidRatesProvider:
         """Provider initializes successfully with gateway_client but no rpc_url."""
         gateway_client = MagicMock()
         provider = FluidRatesProvider(chain="arbitrum", rpc_url=None, gateway_client=gateway_client)
-        with patch("almanak.connectors.fluid.rates_provider.FluidSDK") as mock_sdk_cls:
+        with patch("almanak.connectors._fluid_core.rates_provider.FluidSDK") as mock_sdk_cls:
             mock_sdk_cls.return_value = MagicMock()
             sdk = provider._get_sdk()
             # FluidSDK should be constructed with the gateway_client threaded through.

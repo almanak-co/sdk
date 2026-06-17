@@ -24,7 +24,7 @@ CONNECTOR = Connector(
         attribute="PancakeSwapPerpsReceiptParserConnector",
     ),
     compiler=ImportRef(
-        module="almanak.connectors.aster_perps.compiler",
+        module="almanak.connectors._aster_perps_core.compiler",
         attribute="AsterPerpsCompiler",
     ),
     strategy_intents=("PERP_OPEN", "PERP_CLOSE"),

@@ -152,7 +152,7 @@ class TestValidatePayload:
 class TestDiskCache:
     def test_read_disk_cache_returns_none_when_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "almanak.connectors.fluid.gateway.market_lookup.CACHE_PATH",
+            "almanak.connectors._fluid_core.gateway.market_lookup.CACHE_PATH",
             tmp_path / "nope.json",
         )
         lookup = FluidMarketLookup()
@@ -166,7 +166,7 @@ class TestDiskCache:
 
         os.utime(cache_path, (stale_mtime, stale_mtime))
         monkeypatch.setattr(
-            "almanak.connectors.fluid.gateway.market_lookup.CACHE_PATH", cache_path
+            "almanak.connectors._fluid_core.gateway.market_lookup.CACHE_PATH", cache_path
         )
         lookup = FluidMarketLookup()
         assert lookup._read_disk_cache() is None
@@ -175,7 +175,7 @@ class TestDiskCache:
         cache_path = tmp_path / "fluid_market_cache.json"
         cache_path.write_text(json.dumps(SAMPLE_DATA))
         monkeypatch.setattr(
-            "almanak.connectors.fluid.gateway.market_lookup.CACHE_PATH", cache_path
+            "almanak.connectors._fluid_core.gateway.market_lookup.CACHE_PATH", cache_path
         )
         lookup = FluidMarketLookup()
         data = lookup._read_disk_cache()
@@ -185,7 +185,7 @@ class TestDiskCache:
     def test_write_disk_cache_atomic(self, tmp_path, monkeypatch):
         cache_path = tmp_path / "fluid_market_cache.json"
         monkeypatch.setattr(
-            "almanak.connectors.fluid.gateway.market_lookup.CACHE_PATH", cache_path
+            "almanak.connectors._fluid_core.gateway.market_lookup.CACHE_PATH", cache_path
         )
         lookup = FluidMarketLookup()
         lookup._write_disk_cache(SAMPLE_DATA)
@@ -199,7 +199,7 @@ class TestLoadFlow:
         cache_path = tmp_path / "fluid_market_cache.json"
         cache_path.write_text(json.dumps(SAMPLE_DATA))
         monkeypatch.setattr(
-            "almanak.connectors.fluid.gateway.market_lookup.CACHE_PATH", cache_path
+            "almanak.connectors._fluid_core.gateway.market_lookup.CACHE_PATH", cache_path
         )
         lookup = FluidMarketLookup()
 

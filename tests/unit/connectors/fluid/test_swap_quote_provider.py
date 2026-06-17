@@ -42,7 +42,7 @@ def _ctx() -> SimpleNamespace:
 
 def _quote(request, sdk=None, sdk_cls_side_effect=None):
     """Run quote_swap with the SDK class patched at its import source."""
-    with patch("almanak.connectors.fluid.sdk.FluidSDK") as mock_cls:
+    with patch("almanak.connectors._fluid_core.sdk.FluidSDK") as mock_cls:
         if sdk_cls_side_effect is not None:
             mock_cls.side_effect = sdk_cls_side_effect
         else:
@@ -102,7 +102,7 @@ class TestQuoteSwapSuccess:
         sdk = MagicMock()
         sdk.find_pool_for_pair.return_value = (POOL, True)
         sdk.get_swap_quote.return_value = 1
-        with patch("almanak.connectors.fluid.sdk.FluidSDK") as mock_cls:
+        with patch("almanak.connectors._fluid_core.sdk.FluidSDK") as mock_cls:
             mock_cls.return_value = sdk
             FluidSwapQuoteConnector().quote_swap(_ctx(), _request())
             kwargs = mock_cls.call_args.kwargs

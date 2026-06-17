@@ -36,6 +36,9 @@ from almanak.connectors._strategy_base.contract_role_registry import (
 CONNECTORS_DIR = Path(__file__).resolve().parents[3] / "almanak" / "connectors"
 
 # Infrastructure dirs hold shared base classes, not a concrete connector.
+# Underscore-prefixed packages (``_base``, ``_strategy_base``, protocol-core
+# packages like ``_fluid_core``, …) are foundation, not connectors — skipped by
+# the ``_``-prefix rule below (the convention used by connector discovery).
 EXCLUDED_DIRS = {"_base", "_strategy_base", "__pycache__"}
 
 
@@ -53,6 +56,9 @@ def _discover_contract_role_modules() -> list[str]:
     for roles_file in sorted(CONNECTORS_DIR.rglob("contract_roles.py")):
         rel_parts = roles_file.relative_to(CONNECTORS_DIR).with_suffix("").parts
         if any(part in EXCLUDED_DIRS for part in rel_parts):
+            continue
+        # Foundation packages are underscore-prefixed and are not connectors.
+        if any(part.startswith("_") for part in rel_parts):
             continue
         modules.append("almanak.connectors." + ".".join(rel_parts))
     return modules

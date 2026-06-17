@@ -1,12 +1,13 @@
-"""Backwards-compatibility submodule re-exporting aster_perps.sdk.
+"""Backwards-compatibility submodule re-exporting the shared Aster perp SDK.
 
 Exists so callers using ``from almanak.connectors.pancakeswap_perps.sdk
-import ...`` keep working after the VIB-3044 extraction. New code should import
-from ``almanak.connectors.aster_perps.sdk``.
+import ...`` keep working after the VIB-3044 extraction. Re-exports from the
+shared ``_aster_perps_core.sdk`` foundation (not the sibling ``aster_perps``
+leaf). New code should import from ``almanak.connectors.aster_perps.sdk``.
 """
 
-from almanak.connectors.aster_perps.sdk import *  # noqa: F401,F403 — intentional re-export
-from almanak.connectors.aster_perps.sdk import (  # noqa: F401 — keep back-compat list explicit
+from almanak.connectors._aster_perps_core.sdk import *  # noqa: F401,F403 — intentional re-export
+from almanak.connectors._aster_perps_core.sdk import (  # noqa: F401 — keep back-compat list explicit
     ASTER_BROKER_RAW,
     EVENT_CLOSE_TRADE_RECEIVED,
     EVENT_CLOSE_TRADE_SUCCESSFUL,

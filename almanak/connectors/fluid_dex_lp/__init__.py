@@ -32,8 +32,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from almanak.connectors.fluid.dex_lp_compiler import FluidDexLpCompiler
-    from almanak.connectors.fluid.smart_lending_sdk import FluidSmartLendingSDK
+    from almanak.connectors._fluid_core.dex_lp_compiler import FluidDexLpCompiler
+    from almanak.connectors._fluid_core.smart_lending_sdk import FluidSmartLendingSDK
 
 __all__ = [
     "FluidDexLpCompiler",
@@ -41,8 +41,8 @@ __all__ = [
 ]
 
 _LAZY: dict[str, tuple[str, str]] = {
-    "FluidDexLpCompiler": ("almanak.connectors.fluid.dex_lp_compiler", "FluidDexLpCompiler"),
-    "FluidSmartLendingSDK": ("almanak.connectors.fluid.smart_lending_sdk", "FluidSmartLendingSDK"),
+    "FluidDexLpCompiler": ("almanak.connectors._fluid_core.dex_lp_compiler", "FluidDexLpCompiler"),
+    "FluidSmartLendingSDK": ("almanak.connectors._fluid_core.smart_lending_sdk", "FluidSmartLendingSDK"),
 }
 
 

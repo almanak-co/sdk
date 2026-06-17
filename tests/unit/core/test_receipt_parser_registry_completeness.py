@@ -37,7 +37,10 @@ from almanak.connectors._strategy_receipt_registry import (
 CONNECTORS_DIR = Path(__file__).resolve().parents[3] / "almanak" / "connectors"
 
 # The base/ directory contains shared infrastructure (BaseReceiptParser),
-# not a protocol-specific parser.
+# not a protocol-specific parser. Underscore-prefixed packages (``_base``,
+# ``_strategy_base``, ``_aster_perps_core``, ``_fluid_core``, …) are foundation,
+# not discoverable connectors — they are skipped below by the ``_``-prefix rule
+# (the same convention used by connector discovery and check_connector_registry).
 EXCLUDED_DIRS = {"base", "__pycache__"}
 
 
@@ -56,6 +59,9 @@ def _discover_connector_parsers() -> list[tuple[str, ...]]:
         if not rel_parts:
             continue
         if any(part in EXCLUDED_DIRS for part in rel_parts):
+            continue
+        # Foundation packages are underscore-prefixed and are not connectors.
+        if any(part.startswith("_") for part in rel_parts):
             continue
         parsers.append(tuple(rel_parts))
     return parsers

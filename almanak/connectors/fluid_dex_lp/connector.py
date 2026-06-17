@@ -27,16 +27,16 @@ CONNECTOR = Connector(
     address_tables=(
         AddressTableSpec(
             protocol="fluid_dex_lp",
-            module="almanak.connectors.fluid.addresses",
+            module="almanak.connectors._fluid_core.addresses",
             attribute="FLUID_DEX_LP",
         ),
     ),
     compiler=ImportRef(
-        module="almanak.connectors.fluid.dex_lp_compiler",
+        module="almanak.connectors._fluid_core.dex_lp_compiler",
         attribute="FluidDexLpCompiler",
     ),
     receipt_parser_connector=ImportRef(
-        module="almanak.connectors.fluid.receipt_parser_provider",
+        module="almanak.connectors.fluid_dex_lp.receipt_parser_provider",
         attribute="FluidDexLpReceiptParserConnector",
     ),
     strategy_intents=("LP_OPEN", "LP_CLOSE"),

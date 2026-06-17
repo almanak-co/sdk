@@ -533,7 +533,7 @@ class TestReadFailuresFailClosed:
         gateway = MagicMock()
         gateway.is_connected = False
         ctx = _ctx(_services(_arb_tokens()), gateway_client=gateway)
-        with patch("almanak.connectors.fluid.vault_compiler.FluidVaultSDK") as sdk_cls:
+        with patch("almanak.connectors._fluid_core.vault_compiler.FluidVaultSDK") as sdk_cls:
             result = FluidVaultCompiler().compile(ctx, _supply_intent())
         assert result.status is CompilationStatus.FAILED
         assert "DISCONNECTED" in result.error

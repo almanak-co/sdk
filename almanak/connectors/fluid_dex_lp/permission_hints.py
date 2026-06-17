@@ -66,7 +66,7 @@ the wrapper is later re-enabled.
 
 from __future__ import annotations
 
-from almanak.connectors.fluid.addresses import (
+from almanak.connectors._fluid_core.addresses import (
     FLUID_DEX_LP_NATIVE_SENTINEL,
     FLUID_SMARTLENDING_MARKETS,
     is_native_leg,

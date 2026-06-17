@@ -638,7 +638,7 @@ def test_valuation_measured_zero_for_empty_position():
 
     sdk = MagicMock()
     sdk.get_share_balance.return_value = 0
-    with patch("almanak.connectors.fluid.smart_lending_sdk.FluidSmartLendingSDK", return_value=sdk):
+    with patch("almanak.connectors._fluid_core.smart_lending_sdk.FluidSmartLendingSDK", return_value=sdk):
         pos = dex_lp_valuation.read_fungible_lp_position(MagicMock(), "arbitrum", FSL9, WALLET)
     assert pos is not None
     assert pos.shares_wei == 0
@@ -651,7 +651,7 @@ def test_valuation_active_position_token_amounts():
     sdk = MagicMock()
     sdk.get_share_balance.return_value = 945 * 10**18
     sdk.position_token_amounts.return_value = (683 * 10**18, 1255 * 10**6)
-    with patch("almanak.connectors.fluid.smart_lending_sdk.FluidSmartLendingSDK", return_value=sdk):
+    with patch("almanak.connectors._fluid_core.smart_lending_sdk.FluidSmartLendingSDK", return_value=sdk):
         pos = dex_lp_valuation.read_fungible_lp_position(MagicMock(), "arbitrum", FSL9, WALLET)
     assert pos.is_active
     assert pos.amount0_wei == 683 * 10**18

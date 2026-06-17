@@ -15,7 +15,7 @@ WALLET = "0x" + "a" * 40
 
 def _make_adapter(chain: str = "arbitrum"):
     config = FluidConfig(chain=chain, wallet_address=WALLET, rpc_url="https://fake")
-    with patch("almanak.connectors.fluid.adapter.FluidSDK") as mock_cls:
+    with patch("almanak.connectors._fluid_core.adapter.FluidSDK") as mock_cls:
         mock_sdk = MagicMock()
         mock_cls.return_value = mock_sdk
         adapter = FluidAdapter(config, token_resolver=MagicMock())

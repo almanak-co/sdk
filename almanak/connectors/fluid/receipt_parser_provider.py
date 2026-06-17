@@ -1,4 +1,10 @@
-"""Strategy-side receipt-parser connector for Fluid (VIB-4854 / W2)."""
+"""Strategy-side receipt-parser connector for Fluid (VIB-4854 / W2).
+
+Leaf-owned provider for the ``fluid`` (swap + fToken lending) surface; the
+parser implementation lives in the shared ``_fluid_core`` foundation. The vault
+and DEX-LP surfaces own their providers in ``fluid_vault`` / ``fluid_dex_lp`` so
+each leaf is independently deletable.
+"""
 
 from __future__ import annotations
 
@@ -28,52 +34,9 @@ class FluidReceiptParserConnector(ReceiptParserConnector, ReceiptParserCapabilit
         return frozenset({"fluid", "fluid_lending"})
 
     def receipt_parser_class(self, key: str) -> type:
-        from almanak.connectors.fluid.receipt_parser import FluidReceiptParser
+        from almanak.connectors._fluid_core.receipt_parser import FluidReceiptParser
 
         return FluidReceiptParser
 
 
-class FluidVaultReceiptParserConnector(ReceiptParserConnector, ReceiptParserCapability):
-    """Vault NFT-CDP receipts (VIB-5031) — declared on the ``fluid_vault``
-    manifest so the Result Enrichment contract (blueprints 02/19) routes
-    SUPPLY/BORROW/REPAY/WITHDRAW/DELEVERAGE receipts compiled under
-    ``protocol="fluid_vault"`` to the vault parser (factory-gated nftId +
-    signed LogOperate deltas), never the DEX/fToken parser."""
-
-    protocol: ClassVar[ProtocolName] = ProtocolName("fluid_vault")
-    kind: ClassVar[ProtocolKind] = ProtocolKind.LENDING
-
-    def receipt_parser_keys(self) -> frozenset[str]:
-        # No aliases: nothing aliases to fluid_vault (fluid_lending stays
-        # on the fToken surface — ADR r2 Q0).
-        return frozenset({"fluid_vault"})
-
-    def receipt_parser_class(self, key: str) -> type:
-        from almanak.connectors.fluid.receipt_parser import FluidVaultReceiptParser
-
-        return FluidVaultReceiptParser
-
-
-class FluidDexLpReceiptParserConnector(ReceiptParserConnector, ReceiptParserCapability):
-    """DEX LP (SmartLending) receipts (VIB-5032) — declared on the
-    ``fluid_dex_lp`` manifest so LP_OPEN/LP_CLOSE receipts compiled under
-    ``protocol="fluid_dex_lp"`` route to the fungible-LP parser (wrapper share
-    mint/burn + token-leg Transfers), never the DEX/fToken or vault parser."""
-
-    protocol: ClassVar[ProtocolName] = ProtocolName("fluid_dex_lp")
-    kind: ClassVar[ProtocolKind] = ProtocolKind.LP
-
-    def receipt_parser_keys(self) -> frozenset[str]:
-        return frozenset({"fluid_dex_lp"})
-
-    def receipt_parser_class(self, key: str) -> type:
-        from almanak.connectors.fluid.dex_lp_receipt_parser import FluidDexLpReceiptParser
-
-        return FluidDexLpReceiptParser
-
-
-__all__ = [
-    "FluidDexLpReceiptParserConnector",
-    "FluidReceiptParserConnector",
-    "FluidVaultReceiptParserConnector",
-]
+__all__ = ["FluidReceiptParserConnector"]

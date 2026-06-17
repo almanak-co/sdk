@@ -361,7 +361,7 @@ EXPECTED_GATEWAY_PROVIDER_MODULES = {
     "aave_v3": "almanak.connectors.aave_v3.gateway.provider",
     "aerodrome": "almanak.connectors.aerodrome.gateway.provider",
     "agni_finance": "almanak.connectors.uniswap_v3.gateway.agni_provider",
-    "aster_perps": "almanak.connectors.aster_perps.gateway.provider",
+    "aster_perps": "almanak.connectors._aster_perps_core.gateway.provider",
     "balancer_v2": "almanak.connectors.balancer_v2.gateway.provider",
     "beefy": "almanak.connectors.beefy.gateway.provider",
     "benqi": "almanak.connectors.benqi.gateway.provider",
@@ -369,7 +369,7 @@ EXPECTED_GATEWAY_PROVIDER_MODULES = {
     "curve": "almanak.connectors.curve.gateway.provider",
     "enso": "almanak.connectors.enso.gateway.provider",
     "ethena": "almanak.connectors.ethena.gateway.provider",
-    "fluid": "almanak.connectors.fluid.gateway.provider",
+    "fluid": "almanak.connectors._fluid_core.gateway.provider",
     "gmx_v2": "almanak.connectors.gmx_v2.gateway.provider",
     "hyperliquid": "almanak.connectors.hyperliquid.gateway.provider",
     "jupiter": "almanak.connectors.jupiter.gateway.provider",
@@ -491,10 +491,10 @@ EXPECTED_COMPILER_MODULES = {
     "fluid": ("almanak.connectors.fluid.compiler", "FluidCompiler"),
     # VIB-5031: the vault NFT-CDP surface is a SECOND thin manifest over the
     # fluid package (one codebase, two manifests — ADR r2 Q0).
-    "fluid_vault": ("almanak.connectors.fluid.vault_compiler", "FluidVaultCompiler"),
+    "fluid_vault": ("almanak.connectors._fluid_core.vault_compiler", "FluidVaultCompiler"),
     # VIB-5032: the DEX LP (SmartLending) surface is a THIRD thin manifest over
     # the fluid package (one codebase, three manifests).
-    "fluid_dex_lp": ("almanak.connectors.fluid.dex_lp_compiler", "FluidDexLpCompiler"),
+    "fluid_dex_lp": ("almanak.connectors._fluid_core.dex_lp_compiler", "FluidDexLpCompiler"),
     "gimo": ("almanak.connectors.gimo.compiler", "GimoCompiler"),
     "gmx_v2": ("almanak.connectors.gmx_v2.compiler", "GMXV2Compiler"),
     "hyperliquid": ("almanak.connectors.hyperliquid.compiler", "HyperliquidCompiler"),
@@ -507,7 +507,7 @@ EXPECTED_COMPILER_MODULES = {
     "morpho_blue": ("almanak.connectors.morpho_blue.compiler", "MorphoBlueCompiler"),
     "morpho_vault": ("almanak.connectors.morpho_vault.compiler", "MorphoVaultCompiler"),
     "orca": ("almanak.connectors.orca.compiler", "OrcaCompiler"),
-    "pancakeswap_perps": ("almanak.connectors.aster_perps.compiler", "AsterPerpsCompiler"),
+    "pancakeswap_perps": ("almanak.connectors._aster_perps_core.compiler", "AsterPerpsCompiler"),
     "pancakeswap_v3": ("almanak.connectors.uniswap_v3.compiler", "UniswapV3Compiler"),
     "pendle": ("almanak.connectors.pendle.compiler", "PendleCompiler"),
     "polymarket": ("almanak.connectors.polymarket.compiler", "PolymarketCompiler"),
@@ -640,7 +640,7 @@ EXPECTED_VAULT_TOOL_PROVIDER_MODULES = {
 EXPECTED_RUNNER_HOOK_PROVIDER_MODULES = {
     # VIB-5031: stamps FluidVaultOperateData (the nftId home) into
     # extracted_data before the ledger write.
-    "fluid_vault": "almanak.connectors.fluid.runner_hooks",
+    "fluid_vault": "almanak.connectors._fluid_core.runner_hooks",
     "uniswap_v3": "almanak.connectors.uniswap_v3.runner_hooks",
     "uniswap_v4": "almanak.connectors.uniswap_v4.runner_hooks",
 }
@@ -669,7 +669,7 @@ EXPECTED_DEFERRED_REFRESH_MODULES = {
 EXPECTED_SWAP_QUOTE_MODULES = {
     "aerodrome": "almanak.connectors.aerodrome.swap_quote_provider",
     "curve": "almanak.connectors.curve.swap_quote_provider",
-    "fluid": "almanak.connectors.fluid.swap_quote_provider",
+    "fluid": "almanak.connectors._fluid_core.swap_quote_provider",
     "uniswap_v3": "almanak.connectors.uniswap_v3.swap_quote_provider",
     "uniswap_v4": "almanak.connectors.uniswap_v4.swap_quote_provider",
 }
@@ -716,8 +716,8 @@ EXPECTED_ADDRESS_TABLE_MODULES = {
     "camelot": "almanak.connectors.camelot.addresses",
     "compound_v3": "almanak.connectors.compound_v3.addresses",
     "fluid": "almanak.connectors.fluid.addresses",
-    "fluid_vault": "almanak.connectors.fluid.addresses",
-    "fluid_dex_lp": "almanak.connectors.fluid.addresses",
+    "fluid_vault": "almanak.connectors._fluid_core.addresses",
+    "fluid_dex_lp": "almanak.connectors._fluid_core.addresses",
     "gmx_v2": "almanak.connectors.gmx_v2.addresses",
     "morpho_blue": "almanak.connectors.morpho_blue.addresses",
     "pancakeswap_perps": "almanak.connectors.pancakeswap_perps.addresses",
@@ -1919,7 +1919,7 @@ def test_fluid_vault_runner_hook_resolves_to_operate_enrichment_capability() -> 
     from almanak.connectors._strategy_base.runner_hook_registry import (
         RunnerResultEnrichmentCapability,
     )
-    from almanak.connectors.fluid.runner_hooks import FluidVaultRunnerHookConnector
+    from almanak.connectors._fluid_core.runner_hooks import FluidVaultRunnerHookConnector
 
     CONNECTOR_REGISTRY.clear()
 

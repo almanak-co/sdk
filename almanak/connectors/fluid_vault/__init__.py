@@ -34,8 +34,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from almanak.connectors.fluid.vault_compiler import FluidVaultCompiler
-    from almanak.connectors.fluid.vault_sdk import FluidVaultSDK
+    from almanak.connectors._fluid_core.vault_compiler import FluidVaultCompiler
+    from almanak.connectors._fluid_core.vault_sdk import FluidVaultSDK
 
 __all__ = [
     "FluidVaultCompiler",
@@ -43,8 +43,8 @@ __all__ = [
 ]
 
 _LAZY: dict[str, tuple[str, str]] = {
-    "FluidVaultCompiler": ("almanak.connectors.fluid.vault_compiler", "FluidVaultCompiler"),
-    "FluidVaultSDK": ("almanak.connectors.fluid.vault_sdk", "FluidVaultSDK"),
+    "FluidVaultCompiler": ("almanak.connectors._fluid_core.vault_compiler", "FluidVaultCompiler"),
+    "FluidVaultSDK": ("almanak.connectors._fluid_core.vault_sdk", "FluidVaultSDK"),
 }
 
 

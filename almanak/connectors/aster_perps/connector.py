@@ -21,7 +21,7 @@ CONNECTOR = Connector(
         ),
     ),
     gateway_connector=ImportRef(
-        module="almanak.connectors.aster_perps.gateway.provider",
+        module="almanak.connectors._aster_perps_core.gateway.provider",
         attribute="AsterPerpsGatewayConnector",
         order=28,
     ),

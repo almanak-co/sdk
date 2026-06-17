@@ -29,24 +29,24 @@ CONNECTOR = Connector(
     address_tables=(
         AddressTableSpec(
             protocol="fluid_vault",
-            module="almanak.connectors.fluid.addresses",
+            module="almanak.connectors._fluid_core.addresses",
             attribute="FLUID_VAULT",
         ),
     ),
     compiler=ImportRef(
-        module="almanak.connectors.fluid.vault_compiler",
+        module="almanak.connectors._fluid_core.vault_compiler",
         attribute="FluidVaultCompiler",
     ),
     # Vault receipts (factory-gated nftId + signed LogOperate deltas) route
     # to their own parser — never the DEX/fToken parser.
     receipt_parser_connector=ImportRef(
-        module="almanak.connectors.fluid.receipt_parser_provider",
+        module="almanak.connectors.fluid_vault.receipt_parser_provider",
         attribute="FluidVaultReceiptParserConnector",
     ),
     # Pre-ledger result enrichment: stamps FluidVaultOperateData (the §6.3
     # nftId home) into transaction_ledger.extracted_data_json.
     runner_hook_connector=ImportRef(
-        module="almanak.connectors.fluid.runner_hooks",
+        module="almanak.connectors._fluid_core.runner_hooks",
         attribute="FluidVaultRunnerHookConnector",
     ),
     # Zodiac role surface (ADR §7.1): operate() on each pinned vault
@@ -62,18 +62,18 @@ CONNECTOR = Connector(
     # intents without the vault address (Morpho Blue isolated-market shape).
     capabilities=CapabilitiesSpec(
         keys=("fluid_vault",),
-        module="almanak.connectors.fluid.capabilities",
+        module="almanak.connectors._fluid_core.capabilities",
     ),
     # Bespoke positionsByUser account-state read (ADR §3.2): vault-oracle
     # protocol-truth HF + injected-seam USD legs. The market table doubles as
     # the pinned type-1 vault universe the compiler enforces.
     lending_read=LendingReadDecl(
         account_state=ImportRef(
-            module="almanak.connectors.fluid.vault_lending_read",
+            module="almanak.connectors._fluid_core.vault_lending_read",
             attribute="ACCOUNT_STATE_READ_SPEC",
         ),
         market_table=ImportRef(
-            module="almanak.connectors.fluid.addresses",
+            module="almanak.connectors._fluid_core.addresses",
             attribute="FLUID_VAULT_MARKETS",
         ),
         aliases=(),

@@ -19,7 +19,7 @@ import warnings
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from almanak.connectors.aster_perps import (
+    from almanak.connectors._aster_perps_core import (
         AsterPerpsConfig,
         AsterPerpsTx,
         PerpOpenOrderResult,
@@ -55,8 +55,14 @@ def _register_once() -> None:
 
 
 def _aster_symbol(name: str) -> Any:
-    """Resolve one public symbol from the canonical Aster connector."""
-    module = importlib.import_module("almanak.connectors.aster_perps")
+    """Resolve one public symbol from the shared Aster implementation core.
+
+    Resolves from ``_aster_perps_core`` (foundation), not the sibling
+    ``aster_perps`` leaf connector, so this shim does not import another
+    concrete connector (self-containment: deleting ``aster_perps/`` must not
+    break ``pancakeswap_perps/``).
+    """
+    module = importlib.import_module("almanak.connectors._aster_perps_core")
     return getattr(module, name)
 
 

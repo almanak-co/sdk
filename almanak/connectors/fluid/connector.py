@@ -33,7 +33,7 @@ CONNECTOR = Connector(
         ),
     ),
     gateway_connector=ImportRef(
-        module="almanak.connectors.fluid.gateway.provider",
+        module="almanak.connectors._fluid_core.gateway.provider",
         attribute="FluidGatewayConnector",
         order=4,
     ),
@@ -42,7 +42,7 @@ CONNECTOR = Connector(
         attribute="FluidReceiptParserConnector",
     ),
     swap_quote_connector=ImportRef(
-        module="almanak.connectors.fluid.swap_quote_provider",
+        module="almanak.connectors._fluid_core.swap_quote_provider",
         attribute="FluidSwapQuoteConnector",
     ),
     contract_roles=ImportRef(

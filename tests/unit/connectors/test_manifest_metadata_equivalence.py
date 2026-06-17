@@ -55,7 +55,7 @@ FROZEN_CAPABILITIES_LOADERS = {
     "orca_whirlpools": "almanak.connectors.orca.capabilities",
     # VIB-5031: the vault NFT-CDP key (requires_market_id) — scoped to
     # fluid_vault ONLY; fluid/fluid_lending deliberately have no entry.
-    "fluid_vault": "almanak.connectors.fluid.capabilities",
+    "fluid_vault": "almanak.connectors._fluid_core.capabilities",
 }
 
 # almanak/connectors/_strategy_base/supported_chains_registry.py
@@ -145,7 +145,7 @@ FROZEN_LENDING_ACCOUNT_STATE_LOADERS = {
     "fluid": ("almanak.connectors.fluid.lending_read", "ACCOUNT_STATE_READ_SPEC"),
     # VIB-5031: the vault NFT-CDP positionsByUser read — its own manifest
     # slot (the registry holds one account_state per manifest name).
-    "fluid_vault": ("almanak.connectors.fluid.vault_lending_read", "ACCOUNT_STATE_READ_SPEC"),
+    "fluid_vault": ("almanak.connectors._fluid_core.vault_lending_read", "ACCOUNT_STATE_READ_SPEC"),
 }
 FROZEN_LENDING_MARKET_HEALTH_LOADERS = {
     "compound_v3": ("almanak.connectors.compound_v3.lending_read", "read_compound_v3_market_health"),
@@ -159,7 +159,7 @@ FROZEN_LENDING_MARKET_TABLE_LOADERS = {
     # VIB-5030: per-chain underlying-symbol -> fToken catalogue.
     "fluid": ("almanak.connectors.fluid.lending_read", "FLUID_FTOKEN_MARKETS"),
     # VIB-5031: the pinned type-1 vault universe (vault address -> params).
-    "fluid_vault": ("almanak.connectors.fluid.addresses", "FLUID_VAULT_MARKETS"),
+    "fluid_vault": ("almanak.connectors._fluid_core.addresses", "FLUID_VAULT_MARKETS"),
 }
 # B3 (VIB-4851) deliberately WIDENED the lending aliases beyond the legacy
 # registry table: the spellings previously private to
