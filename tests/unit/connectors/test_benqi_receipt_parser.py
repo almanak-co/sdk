@@ -9,6 +9,7 @@ from almanak.connectors.benqi.receipt_parser import (
     BenqiEventType,
     BenqiReceiptParser,
 )
+from almanak.framework.execution.extract_result import ExtractError
 
 
 @pytest.fixture
@@ -154,6 +155,55 @@ class TestBenqiReceiptParserTransfer:
         assert result.success is True
         assert len(result.events) == 1
         assert result.events[0].event_type == BenqiEventType.TRANSFER
+
+
+class TestBenqiReceiptParserCompoundFailure:
+    """Compound V2 soft-fail receipts must not book successful lending amounts."""
+
+    def test_parse_failure_event_marks_receipt_unsuccessful(self, parser):
+        data = "0x" + f"{3:064x}" + f"{17:064x}" + f"{42:064x}"
+
+        result = parser.parse_receipt(_make_receipt([_make_log("Failure", data)]))
+
+        assert result.success is False
+        assert len(result.events) == 1
+        assert result.events[0].event_type == BenqiEventType.FAILURE
+        assert result.events[0].data == {"error": 3, "info": 17, "detail": 42}
+        assert result.error is not None
+        assert "CompoundV2 Failure(error=3, info=17, detail=42" in result.error
+
+    def test_amount_result_treats_failure_as_extract_error_even_with_success_event(self, parser):
+        failure_data = "0x" + f"{3:064x}" + f"{17:064x}" + f"{42:064x}"
+        minter = "0000000000000000000000001234567890123456789012345678901234567890"
+        mint_data = "0x" + minter + f"{1000_000_000:064x}" + f"{50_000_000_000:064x}"
+        receipt = _make_receipt([_make_log("Failure", failure_data), _make_log("Mint", mint_data)])
+
+        result = parser.extract_supply_amount_result(receipt)
+
+        assert isinstance(result, ExtractError)
+        assert "CompoundV2 Failure(error=3, info=17, detail=42" in result.error
+        assert parser.extract_supply_amount(receipt) is None
+
+    @pytest.mark.parametrize(
+        "result_method, raw_method",
+        [
+            ("extract_supply_amount_result", "extract_supply_amount"),
+            ("extract_withdraw_amount_result", "extract_withdraw_amount"),
+            ("extract_borrow_amount_result", "extract_borrow_amount"),
+            ("extract_repay_amount_result", "extract_repay_amount"),
+        ],
+    )
+    def test_all_lending_paths_fail_closed_on_failure_event(self, parser, result_method, raw_method):
+        """The fix claims fail-closed applies to supply/withdraw/borrow/repay — assert each
+        ``*_amount_result`` extractor surfaces ``ExtractError`` on a Failure receipt and the
+        legacy raw extractor returns ``None`` (Empty, never a fabricated zero)."""
+        failure_data = "0x" + f"{3:064x}" + f"{17:064x}" + f"{42:064x}"
+        receipt = _make_receipt([_make_log("Failure", failure_data)])
+
+        result = getattr(parser, result_method)(receipt)
+        assert isinstance(result, ExtractError)
+        assert "CompoundV2 Failure(error=3, info=17, detail=42" in result.error
+        assert getattr(parser, raw_method)(receipt) is None
 
 
 class TestBenqiReceiptParserFiltering:

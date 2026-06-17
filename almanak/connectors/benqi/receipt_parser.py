@@ -41,6 +41,11 @@ EVENT_TOPICS: dict[str, str] = {
     "Redeem": "0xe5b754fb1abb7f01b499791d0b820ae3b6af3424ac1c59768edb53f4ec31a929",
     "Borrow": "0x13ed6866d4e1ee6da46f845c46d7e54120883d75c5ea9a2dacc1c4ca8984ab80",
     "RepayBorrow": "0x1a2a22cb034d26d1854bdc6666a5b91fe25efbbb5dcad3b0355478d6f5c362a1",
+    # Compound V2 semantic soft-fail. The EVM transaction can succeed while the
+    # market emits Failure(error, info, detail) instead of the intended action
+    # event; accounting must treat that as extraction-critical, never as a
+    # missing benign amount.
+    "Failure": "0x45b96fe442630264581b197e84bbada861235052c5a1aadfff9ea4e40a969aa0",
     # Liquidation
     "LiquidateBorrow": "0x298637f684da70674f26509b10f07ec2fbc77a335ab1e7a6fff849315571e826",
     # ERC20 events
@@ -63,6 +68,7 @@ class BenqiEventType(Enum):
     REDEEM = "REDEEM"
     BORROW = "BORROW"
     REPAY_BORROW = "REPAY_BORROW"
+    FAILURE = "FAILURE"
     LIQUIDATE_BORROW = "LIQUIDATE_BORROW"
     TRANSFER = "TRANSFER"
     APPROVAL = "APPROVAL"
@@ -74,6 +80,7 @@ EVENT_NAME_TO_TYPE: dict[str, BenqiEventType] = {
     "Redeem": BenqiEventType.REDEEM,
     "Borrow": BenqiEventType.BORROW,
     "RepayBorrow": BenqiEventType.REPAY_BORROW,
+    "Failure": BenqiEventType.FAILURE,
     "LiquidateBorrow": BenqiEventType.LIQUIDATE_BORROW,
     "Transfer": BenqiEventType.TRANSFER,
     "Approval": BenqiEventType.APPROVAL,
@@ -220,7 +227,10 @@ class BenqiReceiptParser:
         # Aggregate amounts
         result = ParseResult(success=True, events=events)
         for event in events:
-            if event.event_type == BenqiEventType.MINT:
+            if event.event_type == BenqiEventType.FAILURE:
+                result.success = False
+                result.error = self._format_failure_error(event)
+            elif event.event_type == BenqiEventType.MINT:
                 result.supply_amount += Decimal(str(event.data.get("mint_amount", 0)))
                 result.qi_tokens_minted += Decimal(str(event.data.get("mint_tokens", 0)))
             elif event.event_type == BenqiEventType.REDEEM:
@@ -248,6 +258,9 @@ class BenqiReceiptParser:
                 continue
 
             topic0 = topics[0]
+            if isinstance(topic0, bytes):
+                topic0 = "0x" + topic0.hex()
+            topic0 = str(topic0).lower()
             event_name = TOPIC_TO_EVENT.get(topic0)
             if not event_name:
                 continue
@@ -339,6 +352,13 @@ class BenqiReceiptParser:
                 data["account_borrows"] = str(Decimal(account_borrows_raw) / Decimal(10**self.underlying_decimals))
                 data["total_borrows"] = str(Decimal(total_borrows_raw) / Decimal(10**self.underlying_decimals))
 
+        elif event_name == "Failure":
+            # Failure(uint256 error, uint256 info, uint256 detail)
+            if len(hex_data) >= 192:
+                data["error"] = HexDecoder.decode_uint256(hex_data[0:64])
+                data["info"] = HexDecoder.decode_uint256(hex_data[64:128])
+                data["detail"] = HexDecoder.decode_uint256(hex_data[128:192])
+
         elif event_name == "LiquidateBorrow":
             # LiquidateBorrow(address liquidator, address borrower, uint256 repayAmount,
             #                  address cTokenCollateral, uint256 seizeTokens)
@@ -370,6 +390,19 @@ class BenqiReceiptParser:
                 data["value"] = str(HexDecoder.decode_uint256(hex_data[0:64]))
 
         return data
+
+    @staticmethod
+    def _format_failure_error(event: BenqiEvent) -> str:
+        """Compact diagnostic for Compound V2 Failure events."""
+        return (
+            "CompoundV2 Failure("
+            f"error={event.data.get('error')}, "
+            f"info={event.data.get('info')}, "
+            f"detail={event.data.get('detail')}, "
+            f"log_index={event.log_index}, "
+            f"market={event.contract_address}"
+            ")"
+        )
 
     # =========================================================================
     # Extraction Methods for Result Enrichment
@@ -496,6 +529,21 @@ class BenqiReceiptParser:
         "RepayBorrow": 2,
     }
 
+    def _compound_failure_error(self, receipt: dict[str, Any]) -> str | None:
+        """Return the Compound V2 soft-fail diagnostic if a receipt carries one."""
+        if not isinstance(receipt, dict):
+            return None
+        logs = receipt.get("logs")
+        if not isinstance(logs, list) or not logs:
+            return None
+        try:
+            parsed = self.parse_receipt(receipt)
+        except Exception as exc:  # noqa: BLE001 - malformed Failure payload is extraction-critical elsewhere
+            return f"failed to inspect CompoundV2 Failure event: {type(exc).__name__}: {exc}"
+        if parsed.success:
+            return None
+        return parsed.error or "CompoundV2 Failure event present"
+
     def _sum_raw_amount(self, receipt: dict[str, Any], event_name: str) -> int | None:
         """Sum the RAW underlying amount across every ``event_name`` log in a receipt.
 
@@ -508,6 +556,9 @@ class BenqiReceiptParser:
         # TypeError before the structured ExtractResult path can classify it).
         if not isinstance(receipt, dict):
             return None
+        failure_error = self._compound_failure_error(receipt)
+        if failure_error is not None:
+            raise ValueError(failure_error)
         logs = receipt.get("logs")
         if not isinstance(logs, list) or not logs:
             return None
