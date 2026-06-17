@@ -839,6 +839,32 @@ class PostgresStore:
         # SELECT DESC then reverse, so the caller gets oldest-first.
         return [_pg_row_to_portfolio_snapshot(row) for row in reversed(rows)]
 
+    async def get_first_snapshot(self, deployment_id: str) -> "PortfolioSnapshot | None":
+        """The earliest persisted snapshot for a strategy."""
+        if not self._initialized:
+            await self.initialize()
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT timestamp, iteration_number, total_value_usd,
+                       available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
+                       value_confidence, positions_json::text AS positions_text,
+                       token_prices_json::text AS token_prices_text,
+                       wallet_balances_json::text AS wallet_balances_text,
+                       chain,
+                       deployment_id, cycle_id, execution_mode
+                FROM portfolio_snapshots
+                WHERE deployment_id = $1
+                ORDER BY timestamp ASC, id ASC
+                LIMIT 1
+                """,
+                deployment_id,
+            )
+        if row is None:
+            return None
+        return _pg_row_to_portfolio_snapshot(row)
+
     async def get_snapshots_in_window(
         self,
         deployment_id: str,
@@ -2733,6 +2759,31 @@ class StateManager:
             latency = (time.perf_counter() - start) * 1000
             self._record_metrics(StateTier.WARM, "get_latest_snapshot", latency, False, str(e))
             logger.error(f"Failed to get latest snapshot: {e}")
+            return None
+
+    async def get_first_snapshot(self, deployment_id: str) -> "PortfolioSnapshot | None":
+        """Get earliest portfolio snapshot for a strategy."""
+        if not self._initialized:
+            await self.initialize()
+
+        if not self._warm:
+            logger.warning("Cannot get first portfolio snapshot: no WARM backend configured")
+            return None
+
+        if not hasattr(self._warm, "get_first_snapshot"):
+            logger.warning("WARM backend does not support first portfolio snapshot reads")
+            return None
+
+        start = time.perf_counter()
+        try:
+            result = await self._warm.get_first_snapshot(deployment_id)  # type: ignore[attr-defined]
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_first_snapshot", latency, True)
+            return result
+        except Exception as e:
+            latency = (time.perf_counter() - start) * 1000
+            self._record_metrics(StateTier.WARM, "get_first_snapshot", latency, False, str(e))
+            logger.error(f"Failed to get first snapshot: {e}")
             return None
 
     async def get_snapshots_since(

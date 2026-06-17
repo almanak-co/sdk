@@ -2315,6 +2315,34 @@ class SQLiteStore:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_get)
 
+    async def get_first_snapshot(self, deployment_id: str) -> "PortfolioSnapshot | None":
+        """Get the earliest persisted portfolio snapshot for a strategy."""
+        if not self._initialized:
+            await self.initialize()
+
+        def _sync_get() -> "PortfolioSnapshot | None":
+            cursor = self._conn.execute(  # type: ignore[union-attr]
+                """
+                SELECT timestamp, iteration_number, total_value_usd,
+                       available_cash_usd, deployed_capital_usd, wallet_total_value_usd,
+                       value_confidence, positions_json,
+                       token_prices_json, wallet_balances_json, chain,
+                       deployment_id, cycle_id, execution_mode
+                FROM portfolio_snapshots
+                WHERE deployment_id = ?
+                ORDER BY timestamp ASC, id ASC
+                LIMIT 1
+                """,
+                (deployment_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return self._row_to_portfolio_snapshot(row)
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_get)
+
     async def get_recent_snapshots(
         self,
         deployment_id: str,

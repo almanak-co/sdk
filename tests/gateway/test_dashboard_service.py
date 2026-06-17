@@ -2110,6 +2110,42 @@ class TestGetAuditPosture:
         # PASS or FAIL (G6 must never appear to pass on zero rows).
         assert response.g6_status in ("", "NA")
 
+    @pytest.mark.asyncio
+    async def test_reconciliation_endpoints_use_lifetime_first_snapshot(self, dashboard_service):
+        """G6 inventory revaluation must not anchor to the oldest recent-window row."""
+        first = PortfolioSnapshot(
+            timestamp=datetime(2026, 6, 1, tzinfo=UTC),
+            deployment_id="test_strategy",
+            total_value_usd=Decimal("0"),
+            available_cash_usd=Decimal("0"),
+            wallet_balances=[TokenBalance(symbol="USDC", balance=Decimal("100"), value_usd=Decimal("100"), price_usd=Decimal("1"))],
+        )
+        recent_oldest = PortfolioSnapshot(
+            timestamp=datetime(2026, 6, 16, tzinfo=UTC),
+            deployment_id="test_strategy",
+            total_value_usd=Decimal("0"),
+            available_cash_usd=Decimal("0"),
+            wallet_balances=[TokenBalance(symbol="USDC", balance=Decimal("50"), value_usd=Decimal("50"), price_usd=Decimal("1"))],
+        )
+        latest = PortfolioSnapshot(
+            timestamp=datetime(2026, 6, 17, tzinfo=UTC),
+            deployment_id="test_strategy",
+            total_value_usd=Decimal("0"),
+            available_cash_usd=Decimal("0"),
+            wallet_balances=[TokenBalance(symbol="USDC", balance=Decimal("75"), value_usd=Decimal("75"), price_usd=Decimal("1"))],
+        )
+        dashboard_service._state_manager = MagicMock()
+        dashboard_service._state_manager.get_first_snapshot = AsyncMock(return_value=first)
+
+        initial, final = await dashboard_service._get_reconciliation_endpoint_snapshots(
+            "test_strategy",
+            [recent_oldest, latest],
+        )
+
+        assert json.loads(initial["wallet_balances_json"])[0]["balance"] == "100"
+        assert json.loads(final["wallet_balances_json"])[0]["balance"] == "75"
+        dashboard_service._state_manager.get_first_snapshot.assert_awaited_once_with("test_strategy")
+
 
 class TestGetTradeTape:
     """Smoke tests for GetTradeTape RPC.

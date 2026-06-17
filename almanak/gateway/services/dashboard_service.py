@@ -1224,6 +1224,60 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             logger.debug("Failed to get latest snapshot for %s", deployment_id, exc_info=True)
             return None
 
+    async def _get_first_snapshot(self, deployment_id: str) -> PortfolioSnapshot | None:
+        """Get the earliest portfolio snapshot for lifetime reconciliation."""
+        if self._state_manager is None:
+            return None
+        try:
+            return await self._state_manager.get_first_snapshot(deployment_id)
+        except Exception:
+            logger.debug("Failed to get first snapshot for %s", deployment_id, exc_info=True)
+            return None
+
+    @staticmethod
+    def _snapshot_for_inventory_revaluation(snapshot: PortfolioSnapshot | None) -> dict[str, Any] | None:
+        """Serialize a typed snapshot into the persisted-column shape G6 reads.
+
+        ``compute_inventory_revaluation`` deliberately consumes the same JSON
+        columns the Accountant Test reads from SQLite/Postgres rows. Hosted
+        dashboard callers receive typed ``PortfolioSnapshot`` instances from the
+        StateManager facade, so convert only the persisted wallet/price payloads
+        needed for that read-only calculation. Empty lists/maps stay explicit
+        empty JSON, not fabricated zero values.
+        """
+        if snapshot is None:
+            return None
+        wallet_balances = []
+        for balance in getattr(snapshot, "wallet_balances", []) or []:
+            price_usd = getattr(balance, "price_usd", None)
+            wallet_balances.append(
+                {
+                    "symbol": str(getattr(balance, "symbol", "") or ""),
+                    "balance": str(getattr(balance, "balance", "") or ""),
+                    "value_usd": str(getattr(balance, "value_usd", "") or ""),
+                    "address": str(getattr(balance, "address", "") or ""),
+                    "price_usd": None if price_usd is None else str(price_usd),
+                }
+            )
+        # ``compute_inventory_revaluation`` reads marks exclusively from
+        # ``wallet_balances_json[].price_usd``; it never consumes ``token_prices_json``.
+        # Emitting only the field the calculation reads keeps this serializer aligned
+        # with the docstring's "only ... needed" contract.
+        return {"wallet_balances_json": json.dumps(wallet_balances)}
+
+    async def _get_reconciliation_endpoint_snapshots(
+        self,
+        deployment_id: str,
+        recent_snapshots: list[PortfolioSnapshot],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Return lifetime initial/final snapshots for G6 inventory revaluation."""
+        first = await self._get_first_snapshot(deployment_id)
+        latest = recent_snapshots[-1] if recent_snapshots else await self._get_latest_snapshot(deployment_id)
+        return (
+            self._snapshot_for_inventory_revaluation(first),
+            self._snapshot_for_inventory_revaluation(latest),
+        )
+
     @staticmethod
     def _snapshot_is_fresh(
         snapshot: PortfolioSnapshot | None,
@@ -2665,11 +2719,18 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         )
         cost_stack = compute_cost_stack(ledger_stats, accounting_events)
         audit_trail = compute_audit_trail(ledger_stats, accounting_events)
+        snapshot_initial, snapshot_final = await self._get_reconciliation_endpoint_snapshots(
+            deployment_id,
+            snapshots,
+        )
         reconciliation = compute_reconciliation(
             initial_value_usd=pnl.deployed_usd,
             nav_usd=pnl.nav_usd,
             cost_stack=cost_stack,
             accounting_events=accounting_events,
+            snapshot_initial=snapshot_initial,
+            snapshot_final=snapshot_final,
+            deployment_id=deployment_id,
         )
         primitive = _detect_primitive(accounting_events)
         posture = evaluate_posture(
