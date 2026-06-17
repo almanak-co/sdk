@@ -245,7 +245,7 @@ class UniswapV4Adapter:
             SwapResult with transactions list. ``success=False`` (no transactions)
             when the executable quote is unavailable online (fail-closed, C1), the
             executable quote returns zero output (C1), or the price impact exceeds
-            tolerance (C2) — see ``docs/internal/VIB-2058-v4-swap-quote-safety.md``.
+            tolerance (C2) — see VIB-2058 (https://linear.app/almanak/issue/VIB-2058).
 
         Raises:
             ValueError: for *permanent* compilation failures that should halt the

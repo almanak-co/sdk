@@ -7,7 +7,7 @@ fail-closed skip, and the grouping-key collision handle synthesis — proving V4
 parity with the V3 registry discipline and that the two families never
 cross-pollinate.
 
-Design authority: ``docs/internal/VIB-4583-v4-registry-design.md``.
+Design authority: VIB-4583 (https://linear.app/almanak/issue/VIB-4583).
 """
 
 from __future__ import annotations

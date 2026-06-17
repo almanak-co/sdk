@@ -27,7 +27,7 @@ All four synthetic shapes below were verified to compile offline via the real
 ``IntentCompiler`` (``allow_placeholder_prices=True``, ``permission_discovery=True``,
 no RPC) and to emit the expected targets: token + Permit2 approvals, the
 UniversalRouter (``execute`` ``0x3593564c``) for SWAP, and the PositionManager
-(``0xdd46508f``) for the LP trio. See ``docs/internal/VIB-4421-v4-zodiac-matrix.md``.
+(``0xdd46508f``) for the LP trio. See VIB-4421 (https://linear.app/almanak/issue/VIB-4421).
 
 ``supports_native_in_swap`` is deliberately left ``False``: it models the
 V3-style ``SwapRouter02`` ``msg.value`` auto-wrap that flips ``send_allowed`` on
