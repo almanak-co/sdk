@@ -64,11 +64,10 @@ logger = logging.getLogger(__name__)
 # 1 = 0.01%, 5 = 0.05%, 10 = 0.1%, 15 = 0.15%, 25 = 0.25%, 50 = 0.5%, 100 = 1%
 BIN_STEPS: list[int] = [1, 5, 10, 15, 20, 25, 50, 100]
 
-# Default gas estimates
-# Note: add_liquidity for 11 bins uses ~600K gas, so 700K provides safety margin.
-# TODO (follow-up): add_liquidity has the same latent per-bin scaling issue as
-# remove_liquidity (VIB-5136).  At very wide opens (>20 bins) 700K will also OOG.
-# The fix mirrors VIB-5136: max(700_000, base + per_bin * len(delta_ids)).
+# Default (flat) gas budgets per operation. ``add_liquidity`` and
+# ``remove_liquidity`` are *floors* only — the real budget scales with the
+# number of bins touched (see ``LIQUIDITY_GAS_*`` constants below), because
+# Liquidity Book mints/burns LB tokens per bin.
 DEFAULT_GAS_ESTIMATES: dict[str, int] = {
     "approve": 50_000,
     "swap": 200_000,
@@ -76,6 +75,21 @@ DEFAULT_GAS_ESTIMATES: dict[str, int] = {
     "remove_liquidity": 400_000,
     "collect_fees": 200_000,
 }
+
+# Per-bin gas scaling for Liquidity Book add/remove (VIB-5136 / ALM-2807 L1).
+# ``removeLiquidity`` and ``addLiquidity`` gas scale with the number of bins
+# burned / minted; a fixed budget OOGs on wide (multi-bin) positions. The
+# estimate is ``max(flat_floor, base + per_bin * n_bins)`` so narrow positions
+# keep today's flat floor (no regression) while wide ones scale.
+#
+# Validated on-chain (ALM-2807, avalanche WAVAX/USDC): a 23-bin
+# ``removeLiquidity`` used 505_028 gas (the fixed 400k floor reverted OOG); an
+# 11-bin ``addLiquidity`` used ~600k. ``add`` mints per bin and is heavier than
+# the ``remove`` burn, so it carries a larger base and per-bin term.
+REMOVE_LIQUIDITY_GAS_BASE = 150_000
+REMOVE_LIQUIDITY_GAS_PER_BIN = 25_000
+ADD_LIQUIDITY_GAS_BASE = 200_000
+ADD_LIQUIDITY_GAS_PER_BIN = 50_000
 
 # TraderJoe V2 constants
 MAX_UINT256 = 2**256 - 1
@@ -723,10 +737,20 @@ class TraderJoeV2SDK:
 
         to_addr = Web3.to_checksum_address(to)
 
+        # Gas scales with the number of bins minted: each bin adds Liquidity Book
+        # mint cost on top of a base.  A fixed 700k budget OOGs on wide (>~10-bin)
+        # opens (ALM-2807 L1, mirrors the removeLiquidity fix VIB-5136).  Take the
+        # larger of the flat floor and the per-bin estimate so narrow opens keep
+        # today's budget and are not penalised.
+        add_gas = max(
+            DEFAULT_GAS_ESTIMATES["add_liquidity"],
+            ADD_LIQUIDITY_GAS_BASE + ADD_LIQUIDITY_GAS_PER_BIN * len(delta_ids),
+        )
+
         tx = self._router_contract.functions.addLiquidity(liquidity_params).build_transaction(
             {
                 "from": to_addr,
-                "gas": DEFAULT_GAS_ESTIMATES["add_liquidity"],
+                "gas": add_gas,
                 "nonce": self.web3.eth.get_transaction_count(to_addr),
             }
         )
@@ -777,7 +801,7 @@ class TraderJoeV2SDK:
         # per-bin estimate so that narrow (1–2 bin) closes are not penalised.
         remove_gas = max(
             DEFAULT_GAS_ESTIMATES["remove_liquidity"],
-            150_000 + 25_000 * len(ids),
+            REMOVE_LIQUIDITY_GAS_BASE + REMOVE_LIQUIDITY_GAS_PER_BIN * len(ids),
         )
 
         tx = self._router_contract.functions.removeLiquidity(

@@ -486,15 +486,24 @@ class TestBuilders:
         assert gas == 50_000
         pair_ct.functions.approveForAll.assert_called_once()
 
-    def test_build_add_liquidity(self) -> None:
+    def _build_add_liquidity_with_n_bins(self, n: int) -> tuple[dict, int]:
+        """Helper: build_add_liquidity over ``n`` bins; returns (tx, gas).
+
+        Verifies the gas the SDK passes into ``build_transaction`` matches the
+        per-bin scaling formula (ALM-2807 L1).
+        """
         sdk = _bare_sdk()
         router = self._setup_router(sdk)
+        expected_gas = max(DEFAULT_GAS_ESTIMATES["add_liquidity"], 200_000 + 50_000 * n)
         router.functions.addLiquidity.return_value.build_transaction.return_value = {
             "to": "0xrouter",
             "data": "0xa3c7271a",
             "value": 0,
-            "gas": 700_000,
+            "gas": expected_gas,
         }
+        # Symmetric delta_ids around the active bin; distributions are irrelevant
+        # to the gas estimate (which keys on len(delta_ids)).
+        delta_ids = list(range(n))
         tx, gas = sdk.build_add_liquidity(
             token_x=TOKEN_X,
             token_y=TOKEN_Y,
@@ -505,13 +514,42 @@ class TestBuilders:
             amount_y_min=0,
             active_id_desired=BIN_ID_OFFSET,
             id_slippage=50,
-            delta_ids=[-1, 0, 1],
-            distribution_x=[0, 0, 10**18],
-            distribution_y=[10**18, 0, 0],
+            delta_ids=delta_ids,
+            distribution_x=[10**18 // n] * n,
+            distribution_y=[10**18 // n] * n,
             to=WALLET,
             refund_to=WALLET,
         )
+        build_tx_call_kwargs = router.functions.addLiquidity.return_value.build_transaction.call_args[0][0]
+        assert build_tx_call_kwargs["gas"] == expected_gas
+        return tx, gas
+
+    def test_build_add_liquidity(self) -> None:
+        """3-bin open: formula gives 350k, floor kicks in, gas = 700k."""
+        _, gas = self._build_add_liquidity_with_n_bins(3)
+        # max(700_000, 200_000 + 50_000 * 3) == 700_000
         assert gas == 700_000
+
+    def test_build_add_liquidity_narrow_open_uses_default_floor(self) -> None:
+        """10-bin open: 200k + 500k = 700k == floor, no scaling yet."""
+        _, gas = self._build_add_liquidity_with_n_bins(10)
+        # max(700_000, 200_000 + 50_000 * 10) == 700_000
+        assert gas == 700_000
+
+    def test_build_add_liquidity_crossover_point_is_at_11_bins(self) -> None:
+        """11 bins is the first width where the formula overtakes the 700k floor."""
+        # 10 bins: max(700_000, 200_000 + 500_000) = 700_000
+        _, gas_10 = self._build_add_liquidity_with_n_bins(10)
+        assert gas_10 == 700_000
+        # 11 bins: max(700_000, 200_000 + 550_000) = 750_000
+        _, gas_11 = self._build_add_liquidity_with_n_bins(11)
+        assert gas_11 == 750_000
+
+    def test_build_add_liquidity_wide_open_scales_gas(self) -> None:
+        """23-bin open: formula gives 1.35M, well above the 700k floor (ALM-2807 L1)."""
+        _, gas = self._build_add_liquidity_with_n_bins(23)
+        # max(700_000, 200_000 + 50_000 * 23) = max(700_000, 1_350_000) == 1_350_000
+        assert gas == 1_350_000
 
     def _build_remove_liquidity_with_ids(self, ids: list[int]) -> tuple[dict, int]:
         """Helper: build_remove_liquidity with a specific ids list; returns (tx, gas)."""
