@@ -217,6 +217,80 @@ x = {"aave_v3": "lending", "other": "stuff"}
 
 
 # ---------------------------------------------------------------------------
+# Compare detector -- casing-method unwrap (protocol.lower() == "x")
+# ---------------------------------------------------------------------------
+
+
+def test_compare_method_call_lower() -> None:
+    """``if protocol.lower() == "morpho_blue"`` unwraps to the receiver name."""
+    fps = _fps('if protocol.lower() == "morpho_blue": pass')
+    assert fps == ["compare:protocol:morpho_blue"]
+
+
+def test_compare_method_call_chained_in() -> None:
+    """``venue.strip().upper()`` unwraps through chained casing calls."""
+    fps = _fps('if venue.strip().casefold() in ("aave_v3", "morpho"): pass')
+    assert fps == ["compare:venue:aave_v3,morpho"]
+
+
+def test_compare_non_casing_method_not_unwrapped() -> None:
+    """A non-casing method call (``protocol.encode()``) is NOT a domain operand."""
+    fps = _fps('if protocol.encode() == "aave_v3": pass')
+    assert fps == []
+
+
+# ---------------------------------------------------------------------------
+# Collection detector -- protocol enumerations
+# ---------------------------------------------------------------------------
+
+
+def test_collection_set_protocol_names() -> None:
+    """Bare set literal with >= 2 protocol names is flagged."""
+    fps = _fps('PROTOCOLS = {"aave_v3", "morpho", "uniswap_v3"}')
+    assert fps == ["collection:protocol:aave_v3,morpho,uniswap_v3"]
+
+
+def test_collection_frozenset_inner_set() -> None:
+    """``frozenset({...})`` is caught via its inner set literal."""
+    fps = _fps('PROTOCOLS = frozenset({"aave_v3", "morpho"})')
+    assert fps == ["collection:protocol:aave_v3,morpho"]
+
+
+def test_collection_list_protocol_names() -> None:
+    """Bare list literal with >= 2 protocol names is flagged."""
+    fps = _fps('v3 = ["uniswap_v3", "pancakeswap_v3", "sushiswap_v3"]')
+    assert fps == ["collection:protocol:pancakeswap_v3,sushiswap_v3,uniswap_v3"]
+
+
+def test_collection_single_protocol_not_flagged() -> None:
+    """A collection with only ONE known protocol name is NOT flagged."""
+    fps = _fps('x = ["aave_v3", "something_else"]')
+    assert fps == []
+
+
+def test_collection_chain_names_not_flagged() -> None:
+    """Collection detector is protocol-scoped: bare chain lists are NOT flagged.
+
+    Chain abbreviations collide with token symbols, so chain-collections are
+    intentionally out of scope (see the scanner module docstring).
+    """
+    fps = _fps('x = ["arbitrum", "ethereum", "optimism"]')
+    assert fps == []
+
+
+def test_collection_in_compare_not_double_counted() -> None:
+    """A collection that is a Compare operand is counted once (by compare)."""
+    fps = _fps('if protocol in {"aave_v3", "morpho"}: pass')
+    assert fps == ["compare:protocol:aave_v3,morpho"]
+
+
+def test_collection_parameter_default_not_flagged() -> None:
+    """A protocol collection in a parameter default is excluded."""
+    fps = _fps('def f(p=("aave_v3", "morpho")): pass')
+    assert fps == []
+
+
+# ---------------------------------------------------------------------------
 # Docstring non-hit (string constants in expression context)
 # ---------------------------------------------------------------------------
 

@@ -317,7 +317,7 @@ class TestCompileLPOpenInversion:
         assert tick_calls[0] == Decimal("3000")
         assert tick_calls[1] == Decimal("4000")
 
-    @patch("almanak.connectors.uniswap_v3.pool_validation.fetch_v3_pool_sqrt_price_x96")
+    @patch("almanak.connectors._strategy_base.v3_pool_validation.fetch_v3_pool_sqrt_price_x96")
     @patch("almanak.framework.intents.lp_math.recompute_lp_amounts")
     @patch("almanak.connectors.uniswap_v3.pool_validation.validate_v3_pool")
     @patch("almanak.connectors.uniswap_v3.adapter.UniswapV3LPAdapter")

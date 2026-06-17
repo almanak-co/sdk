@@ -33,7 +33,9 @@ from almanak.framework.intents.compiler import CompilationStatus
 SWAP_ADAPTER_CLS = "almanak.framework.intents.compiler.DefaultSwapAdapter"
 LP_ADAPTER_CLS = "almanak.connectors.uniswap_v3.adapter.UniswapV3LPAdapter"
 VALIDATE_V3_POOL = "almanak.connectors.uniswap_v3.pool_validation.validate_v3_pool"
-FETCH_SLOT0 = "almanak.connectors.uniswap_v3.pool_validation.fetch_v3_pool_sqrt_price_x96"
+# slot0 read moved to the shared CL compiler base, which imports it from the
+# connector foundation; patch it where _fetch_lp_pool_slot0 looks it up.
+FETCH_SLOT0 = "almanak.connectors._strategy_base.v3_pool_validation.fetch_v3_pool_sqrt_price_x96"
 REGISTRY_QUOTE = "almanak.connectors.uniswap_v3.compiler.UniswapV3Compiler._quote_swap_via_registry"
 
 
@@ -1300,7 +1302,7 @@ class TestCompileLPOpenSlipstreamSlot0Recompute:
     """
 
     @patch("almanak.connectors.aerodrome.AerodromeAdapter")
-    @patch("almanak.connectors.uniswap_v3.pool_validation.fetch_v3_pool_sqrt_price_x96")
+    @patch("almanak.connectors._strategy_base.v3_pool_validation.fetch_v3_pool_sqrt_price_x96")
     @patch("almanak.connectors.aerodrome.pool_validation.validate_aerodrome_cl_pool")
     def test_slot0_recompute_flows_into_adapter_and_metadata(
         self,

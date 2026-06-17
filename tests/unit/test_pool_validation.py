@@ -32,7 +32,11 @@ from almanak.connectors.aerodrome.pool_validation import (
     validate_aerodrome_pool,
 )
 from almanak.connectors.traderjoe_v2.pool_validation import validate_traderjoe_pool
-from almanak.connectors.uniswap_v3.pool_validation import (
+# The V3-family validator + slot0 reader moved to the shared connector
+# foundation (almanak.connectors._strategy_base.v3_pool_validation); the
+# uniswap_v3 module re-exports the public surface. Test the internals (and
+# patch eth_call) at their new home.
+from almanak.connectors._strategy_base.v3_pool_validation import (
     _encode_get_pool_v3,
     fetch_v3_pool_sqrt_price_x96,
     validate_v3_pool,
@@ -40,7 +44,7 @@ from almanak.connectors.uniswap_v3.pool_validation import (
 
 # eth_call patch targets — the connector validators call the base ``eth_call``
 # through the name imported into their own module namespace.
-V3_ETH_CALL = "almanak.connectors.uniswap_v3.pool_validation.eth_call"
+V3_ETH_CALL = "almanak.connectors._strategy_base.v3_pool_validation.eth_call"
 AERODROME_ETH_CALL = "almanak.connectors.aerodrome.pool_validation.eth_call"
 TRADERJOE_ETH_CALL = "almanak.connectors.traderjoe_v2.pool_validation.eth_call"
 

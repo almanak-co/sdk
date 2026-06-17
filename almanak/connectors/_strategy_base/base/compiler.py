@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from almanak.connectors._strategy_base.base.swap_adapter import DefaultSwapAdapter
@@ -211,6 +214,43 @@ class BaseConcentratedLiquidityCompiler(BaseProtocolCompiler[CLCompilerContext])
     """
 
     context_type: ClassVar[type[BaseCompilerContext]] = CLCompilerContext
+
+    @staticmethod
+    def _fetch_lp_pool_slot0(ctx: CLCompilerContext, pool_check: Any) -> tuple[int, int] | None:
+        """Read a V3-style pool's ``slot0()`` (sqrtPriceX96, tick) for LP sizing.
+
+        Shared by every V3-family CL compiler (Uniswap V3 and its forks) so the
+        forks do not import each other's compilers. Returns ``None`` (caller
+        falls back to oracle-derived amounts) on any failure.
+        """
+        if not pool_check.pool_address:
+            return None
+        gateway_connected = ctx.gateway_client is not None and ctx.gateway_client.is_connected
+        if not (ctx.rpc_url or gateway_connected):
+            return None
+        from almanak.connectors._strategy_base.v3_pool_validation import fetch_v3_pool_sqrt_price_x96
+
+        try:
+            slot0_result = fetch_v3_pool_sqrt_price_x96(
+                pool_check.pool_address,
+                ctx.rpc_url,
+                chain=ctx.chain,
+                gateway_client=ctx.gateway_client,
+            )
+        except Exception as exc:
+            logger.warning(
+                "LP slot0 lookup failed for pool %s; proceeding with oracle-derived amounts "
+                "which may cause 'Price slippage check' revert if oracle/pool prices diverge: %s",
+                pool_check.pool_address,
+                exc,
+            )
+            return None
+        if slot0_result is None:
+            return None
+        sqrt_price_x96, current_tick = slot0_result
+        if sqrt_price_x96 is None or sqrt_price_x96 <= 0 or current_tick is None:
+            return None
+        return sqrt_price_x96, current_tick
 
     def build_default_swap_adapter_factory(
         self,

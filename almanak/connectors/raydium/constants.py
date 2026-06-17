@@ -60,16 +60,17 @@ CLOSE_POSITION_DISCRIMINATOR = bytes.fromhex("7b86510031446262")
 # Tick math constants
 # =========================================================================
 
-# Minimum and maximum tick indices
-MIN_TICK = -443636
-MAX_TICK = 443636
-
-# Q64.64 fixed-point constants
-Q64 = 1 << 64
-
-# Min/max sqrt prices (Q64.64)
-MIN_SQRT_PRICE_X64 = 4295048016
-MAX_SQRT_PRICE_X64 = 79226673521066979257578248091
+# Shared Solana CLMM tick-math constants now live in the connector foundation
+# (almanak.connectors._strategy_base.solana_clmm_math) alongside the maths that
+# uses them. Re-exported here so almanak.connectors.raydium.constants stays a
+# stable import surface.
+from almanak.connectors._strategy_base.solana_clmm_math import (  # noqa: E402,F401
+    MAX_SQRT_PRICE_X64,
+    MAX_TICK,
+    MIN_SQRT_PRICE_X64,
+    MIN_TICK,
+    Q64,
+)
 
 # =========================================================================
 # Raydium API

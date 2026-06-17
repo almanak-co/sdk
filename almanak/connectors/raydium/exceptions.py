@@ -1,5 +1,7 @@
 """Raydium CLMM exceptions."""
 
+from almanak.connectors._strategy_base.solana_clmm_math import SolanaCLMMTickError
+
 
 class RaydiumError(Exception):
     """Base exception for Raydium operations."""
@@ -31,5 +33,9 @@ class RaydiumPoolError(RaydiumError):
     """Error with pool state or operations."""
 
 
-class RaydiumTickError(RaydiumError):
-    """Error with tick calculations."""
+# Tick maths moved to the shared Solana CLMM foundation
+# (almanak.connectors._strategy_base.solana_clmm_math), which raises
+# SolanaCLMMTickError. RaydiumTickError is retained as a public back-compat
+# alias of that foundation error so existing `except RaydiumTickError` /
+# `pytest.raises(RaydiumTickError)` callers keep working.
+RaydiumTickError = SolanaCLMMTickError

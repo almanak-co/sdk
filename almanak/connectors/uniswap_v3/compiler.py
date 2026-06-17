@@ -869,36 +869,9 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
             )
         return tick_lower, tick_upper, tick_spacing
 
-    @staticmethod
-    def _fetch_lp_pool_slot0(ctx: CLCompilerContext, pool_check: Any) -> tuple[int, int] | None:
-        if not pool_check.pool_address:
-            return None
-        gateway_connected = ctx.gateway_client is not None and ctx.gateway_client.is_connected
-        if not (ctx.rpc_url or gateway_connected):
-            return None
-        from almanak.connectors.uniswap_v3.pool_validation import fetch_v3_pool_sqrt_price_x96
-
-        try:
-            slot0_result = fetch_v3_pool_sqrt_price_x96(
-                pool_check.pool_address,
-                ctx.rpc_url,
-                chain=ctx.chain,
-                gateway_client=ctx.gateway_client,
-            )
-        except Exception as exc:
-            logger.warning(
-                "LP slot0 lookup failed for pool %s; proceeding with oracle-derived amounts "
-                "which may cause 'Price slippage check' revert if oracle/pool prices diverge: %s",
-                pool_check.pool_address,
-                exc,
-            )
-            return None
-        if slot0_result is None:
-            return None
-        sqrt_price_x96, current_tick = slot0_result
-        if sqrt_price_x96 is None or sqrt_price_x96 <= 0 or current_tick is None:
-            return None
-        return sqrt_price_x96, current_tick
+    # _fetch_lp_pool_slot0 is inherited from BaseConcentratedLiquidityCompiler
+    # (shared V3-family slot0 read); the override was lifted to the base so the
+    # V3 forks reuse it without importing this connector.
 
     @staticmethod
     def _preflight_lp_liquidity(

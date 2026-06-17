@@ -139,9 +139,9 @@ class _AerodromeCompileImpl:
         return self._ctx.services.query_erc20_balance(token_address, wallet_address)
 
     def _fetch_lp_pool_slot0(self, pool_check: Any) -> Any:
-        from almanak.connectors.uniswap_v3.compiler import UniswapV3Compiler
-
-        return UniswapV3Compiler()._fetch_lp_pool_slot0(self._ctx, pool_check)
+        # Shared V3-family slot0 read, lifted to the CL compiler base so
+        # slipstream reuses it without importing the Uniswap V3 connector.
+        return BaseConcentratedLiquidityCompiler._fetch_lp_pool_slot0(self._ctx, pool_check)
 
     def _get_aerodrome_pool_address(self, token_a: str, token_b: str, stable: bool) -> str | None:
         return get_aerodrome_pool_address(self, token_a, token_b, stable)

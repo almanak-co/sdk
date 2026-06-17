@@ -4,8 +4,9 @@ Provides LP operations on Orca Whirlpool pools on Solana:
 - Open concentrated liquidity positions
 - Close positions (decrease liquidity + burn NFT)
 
-Uses the same Q64.64 tick math as Raydium CLMM (reused from
-connectors/raydium/math.py) and Anchor-style instruction encoding.
+Uses the same Q64.64 tick math as Raydium CLMM (the shared Solana CLMM maths
+in connectors/_strategy_base/solana_clmm_math.py) and Anchor-style instruction
+encoding.
 
 Reference: https://github.com/orca-so/whirlpools
 """

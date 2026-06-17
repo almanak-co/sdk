@@ -120,12 +120,12 @@ class PancakeSwapV3GatewayConnector(
 
         PancakeSwap V3 is a Uniswap V3 fork — the pool ABI is identical
         for ``observe`` / ``slot0`` / ``token0`` / ``token1`` / ``decimals``.
-        We reuse the shared TWAP-observation helper from the Uniswap V3
-        connector rather than duplicating the request/decode pipeline.
+        We reuse the shared TWAP-observation helper from the gateway-side
+        connector foundation rather than duplicating the request/decode pipeline.
         """
-        from almanak.connectors.uniswap_v3.gateway.provider import _fetch_uniswap_v3_twap_observation
+        from almanak.connectors._base.v3_gateway_twap import fetch_v3_twap_observation
 
-        return await _fetch_uniswap_v3_twap_observation(
+        return await fetch_v3_twap_observation(
             servicer,
             chain=chain,
             pool_address=pool_address,

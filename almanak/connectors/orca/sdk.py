@@ -10,8 +10,10 @@ Key operations:
 - decrease_liquidity: Remove tokens from a position
 - close_position: Close a position (burn NFT, recover rent)
 
-Reuses Raydium CLMM math module for Q64.64 tick calculations since
-Orca Whirlpools uses the identical concentrated liquidity model.
+Uses the shared Solana CLMM foundation math
+(``almanak.connectors._strategy_base.solana_clmm_math``) for Q64.64 tick
+calculations, since Orca Whirlpools uses the identical concentrated-liquidity
+model as Raydium CLMM.
 
 Reference: https://github.com/orca-so/whirlpools
 """
@@ -30,7 +32,7 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from urllib3.util.retry import Retry
 
-from almanak.connectors.raydium.math import (
+from almanak.connectors._strategy_base.solana_clmm_math import (
     align_tick_to_spacing,
     get_liquidity_from_amounts,
     price_to_tick,
