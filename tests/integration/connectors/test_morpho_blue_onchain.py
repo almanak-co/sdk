@@ -22,6 +22,8 @@ from tests.conftest_gateway import AnvilFixture
 # Import fixtures for pytest discovery
 pytest_plugins = ["tests.conftest_gateway"]
 
+pytestmark = pytest.mark.integration
+
 # =============================================================================
 # Constants
 # =============================================================================
