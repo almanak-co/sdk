@@ -846,15 +846,16 @@ class PostgresStore:
         to_ts: datetime | None,
         *,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None]], bool]:
+    ) -> tuple[list[tuple[datetime, str | None, str | None, str | None]], bool]:
         """Projected NAV samples inside a time window (VIB-5059 P2). Postgres twin
         of :meth:`SQLiteStore.get_snapshots_in_window` — identical contract.
 
         Returns ``(rows, truncated)`` with ``rows`` = ``(timestamp,
-        total_value_usd_text, value_confidence_text)`` oldest-first. Projects only
-        the three chart columns (no JSON blobs) and casts ``total_value_usd::text``
-        so the caller owns the Empty≠Zero decision. Newest ``scan_cap`` in-window
-        rows; ``truncated`` when the window held more.
+        total_value_usd_text, value_confidence_text, positions_json_text)``
+        oldest-first. Projects the chart columns plus ``positions_json`` (VIB-5170,
+        for per-row BORROW debt netting), casting text columns ``::text`` so the
+        caller owns the Empty≠Zero decision. Newest ``scan_cap`` in-window rows;
+        ``truncated`` when the window held more.
         """
         if scan_cap <= 0:
             raise ValueError(f"scan_cap must be positive, got {scan_cap}")
@@ -875,7 +876,8 @@ class PostgresStore:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT timestamp, total_value_usd::text AS total_value_text, value_confidence
+                SELECT timestamp, total_value_usd::text AS total_value_text, value_confidence,
+                       positions_json::text AS positions_text
                 FROM portfolio_snapshots
                 WHERE {" AND ".join(clauses)}
                 ORDER BY timestamp DESC, id DESC
@@ -887,7 +889,9 @@ class PostgresStore:
         if truncated:
             rows = rows[:scan_cap]  # newest scan_cap (DESC order)
         # DESC fetch -> emit oldest-first.
-        return [(r["timestamp"], r["total_value_text"], r["value_confidence"]) for r in reversed(rows)], truncated
+        return [
+            (r["timestamp"], r["total_value_text"], r["value_confidence"], r["positions_text"]) for r in reversed(rows)
+        ], truncated
 
     async def get_nav_series(
         self,
@@ -895,15 +899,15 @@ class PostgresStore:
         *,
         since: tuple[datetime, int] | None = None,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None, int]], bool]:
+    ) -> tuple[list[tuple[datetime, str | None, str | None, int, str | None]], bool]:
         """NAV-component series for lifetime drawdown (VIB-5118/5134). Postgres twin
         of :meth:`SQLiteStore.get_nav_series` — identical contract.
 
         Returns ``(rows, truncated)`` with ``rows`` = ``(timestamp,
-        total_value_usd_text, available_cash_usd_text, id)`` oldest-first. Projects
-        only the two NAV columns (no JSON blobs) plus the row ``id`` cursor
-        tiebreaker, and casts the NAV columns ``::text`` so the caller owns the
-        Empty≠Zero decision.
+        total_value_usd_text, available_cash_usd_text, id, positions_json_text)``
+        oldest-first. Projects the two NAV columns plus the row ``id`` cursor
+        tiebreaker and ``positions_json`` (VIB-5170 debt-netting input), casting
+        all to ``::text`` so the caller owns the Empty≠Zero decision.
 
         Two fetch modes (VIB-5134), mirroring the SQLite twin:
 
@@ -948,7 +952,8 @@ class PostgresStore:
                 SELECT timestamp,
                        total_value_usd::text AS total_value_text,
                        available_cash_usd::text AS available_cash_text,
-                       id
+                       id,
+                       positions_json::text AS positions_text
                 FROM portfolio_snapshots
                 WHERE {" AND ".join(clauses)}
                 ORDER BY timestamp {order}
@@ -961,7 +966,15 @@ class PostgresStore:
             rows = rows[:scan_cap]  # newest (DESC) / oldest-after-cursor (ASC) scan_cap
         # Incremental (ASC) is already oldest-first; full (DESC) is reversed.
         ordered = rows if since is not None else list(reversed(rows))
-        return [(r["timestamp"], r["total_value_text"], r["available_cash_text"], r["id"]) for r in ordered], truncated
+        # VIB-5170: positions_json::text rides along (5th element) so the lifetime
+        # drawdown fold can debt-net the BORROW leg per row, byte-identical to the
+        # SQLite twin (whose column is TEXT). Without it the lifetime drawdown —
+        # preferred over the recent window on the main PnL surface — overstates
+        # drawdown for a leverage loop on hosted Postgres too.
+        return [
+            (r["timestamp"], r["total_value_text"], r["available_cash_text"], r["id"], r["positions_text"])
+            for r in ordered
+        ], truncated
 
     async def get_snapshot_at(
         self,
@@ -2809,7 +2822,7 @@ class StateManager:
         to_ts: datetime | None,
         *,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None]], bool]:
+    ) -> tuple[list[tuple[datetime, str | None, str | None, str | None]], bool]:
         """Projected NAV samples inside a time window, for windowed charts (VIB-5059 P2).
 
         Returns ``(rows, truncated)`` — see the backend method for the row shape.
@@ -2849,7 +2862,7 @@ class StateManager:
         *,
         since: tuple[datetime, int] | None = None,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None, int]], bool]:
+    ) -> tuple[list[tuple[datetime, str | None, str | None, int, str | None]], bool]:
         """NAV-component series for lifetime drawdown / high-watermark (VIB-5118/5134).
 
         Returns ``(rows, truncated)`` — see the backend method for the row shape and

@@ -2160,3 +2160,74 @@ class TestGetTradeTape:
         assert response.has_more is False
         # before_timestamp=0 means "no cursor" — the call still went through.
         sm.get_ledger_entries.assert_awaited_once()
+
+
+class TestPnLHistoryDebtNetting:
+    """VIB-5170: both PnL-history builders must debt-net the BORROW leg so the
+    chart matches the debt-netted "NAV now" tile for leveraged-lending loops."""
+
+    @staticmethod
+    def _leverage_snapshot() -> PortfolioSnapshot:
+        def _p(t, v, c):
+            return {
+                "position_type": t,
+                "protocol": "aave_v3",
+                "chain": "arbitrum",
+                "value_usd": v,
+                "cost_basis_usd": c,
+                "label": t,
+                "tokens": [],
+                "details": {},
+            }
+
+        return PortfolioSnapshot.from_dict(
+            {
+                "timestamp": datetime(2026, 1, 1, 1, tzinfo=UTC).isoformat(),
+                "deployment_id": "d",
+                "total_value_usd": "9.79845700",
+                "available_cash_usd": "2.59891741",
+                "deployed_capital_usd": "13.70649500",
+                "wallet_total_value_usd": "12.4",
+                "value_confidence": "HIGH",
+                "positions": [
+                    _p("SUPPLY", "9.77047300", "9.77036500"),
+                    _p("BORROW", "-3.90821500", "3.90814600"),
+                    _p("TOKEN", "0.02798400", "0.02798400"),
+                ],
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_recent_pnl_history_nets_borrow_leg(self, dashboard_service):
+        sm = AsyncMock()
+        sm.get_recent_snapshots = AsyncMock(return_value=[self._leverage_snapshot()])
+        sm.get_portfolio_metrics = AsyncMock(return_value=MagicMock(initial_value_usd=Decimal("0")))
+        dashboard_service._state_manager = sm
+
+        points = await dashboard_service._build_pnl_history_recent("d")
+
+        assert len(points) == 1
+        # total_value_usd 9.79845700 − BORROW 3.90821500 = 5.89024200 (netted, NOT gross 9.80).
+        assert points[0].value_usd == "5.89024200"
+
+    @pytest.mark.asyncio
+    async def test_windowed_pnl_history_nets_borrow_leg(self, dashboard_service):
+        import json as _json
+
+        positions_json = self._leverage_snapshot().to_positions_payload()
+
+        sm = AsyncMock()
+        sm.get_snapshots_in_window = AsyncMock(
+            return_value=(
+                [(datetime(2026, 1, 1, 1, tzinfo=UTC), "9.79845700", "HIGH", _json.dumps(positions_json))],
+                False,
+            )
+        )
+        sm.get_portfolio_metrics = AsyncMock(return_value=MagicMock(initial_value_usd=Decimal("0")))
+        dashboard_service._state_manager = sm
+
+        points = await dashboard_service._build_pnl_history_windowed("d", None, None, 1500)
+
+        assert len(points) == 1
+        # Windowed value nets the BORROW leg too: 9.79845700 − 3.90821500 = 5.89024200.
+        assert points[0].value_usd == "5.89024200"

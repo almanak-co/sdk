@@ -478,6 +478,7 @@ class TestPersistenceRoundTrip:
 
         s = snap_with([BUY_WBTC], PRICES, BALANCES)
         payload = json.loads(json.dumps(s.to_positions_payload(), default=str))
-        count, debt_to_net = _open_positions_and_net_debt(payload)
+        count, debt_to_net, debt_cost = _open_positions_and_net_debt(payload)
         assert count == 1
         assert debt_to_net == Decimal("0")
+        assert debt_cost == Decimal("0")

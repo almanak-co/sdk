@@ -21,8 +21,10 @@ from almanak.framework.dashboard.quant_aggregations import (
     PnLSummary,
     _apply_primary_risk_gauge,
     _detect_primitive,
+    _drawdowns,
     _open_position_cost_basis,
     _open_positions_and_net_debt,
+    _snapshot_net_debt,
     _wallet_value_at_first_action,
     build_quant_header,
     compute_audit_trail,
@@ -30,6 +32,7 @@ from almanak.framework.dashboard.quant_aggregations import (
     compute_inventory_unrealized,
     compute_pnl_summary,
     compute_reconciliation,
+    lifetime_drawdowns_from_nav_text,
 )
 
 
@@ -563,17 +566,19 @@ def test_lifetime_pnl_phantom_gas_when_deployed_excludes_native_gas():
 
 
 def test_open_positions_and_net_debt_sums_negative_legs():
-    """The helper returns (count, Σ|negative value_usd|) — the BORROW debt —
-    and ignores positive legs (collateral) for the debt total."""
+    """The helper returns (count, Σ|negative value_usd|, Σ|cost_basis of those
+    debt legs|) — the BORROW mark and cost — and ignores positive legs
+    (collateral) for both debt totals."""
     raw = json.dumps(
         [
-            {"position_type": "SUPPLY", "value_usd": "6.75"},
-            {"position_type": "BORROW", "value_usd": "-1.56"},
+            {"position_type": "SUPPLY", "value_usd": "6.75", "cost_basis_usd": "6.75"},
+            {"position_type": "BORROW", "value_usd": "-1.56", "cost_basis_usd": "1.55"},
         ]
     )
-    count, debt = _open_positions_and_net_debt(raw)
+    count, debt_mark, debt_cost = _open_positions_and_net_debt(raw)
     assert count == 2
-    assert debt == Decimal("1.56")
+    assert debt_mark == Decimal("1.56")
+    assert debt_cost == Decimal("1.55")
 
 
 def test_open_positions_and_net_debt_no_debt_is_zero():
@@ -581,13 +586,14 @@ def test_open_positions_and_net_debt_no_debt_is_zero():
     zero debt — the byte-identical guard for non-leveraged strategies."""
     raw = json.dumps(
         [
-            {"position_type": "LP", "value_usd": "12.34"},
-            {"position_type": "SUPPLY", "value_usd": "5.00"},
+            {"position_type": "LP", "value_usd": "12.34", "cost_basis_usd": "12.00"},
+            {"position_type": "SUPPLY", "value_usd": "5.00", "cost_basis_usd": "5.00"},
         ]
     )
-    count, debt = _open_positions_and_net_debt(raw)
+    count, debt_mark, debt_cost = _open_positions_and_net_debt(raw)
     assert count == 2
-    assert debt == Decimal("0")
+    assert debt_mark == Decimal("0")
+    assert debt_cost == Decimal("0")
 
 
 def test_open_positions_and_net_debt_unmeasured_is_skipped():
@@ -595,7 +601,7 @@ def test_open_positions_and_net_debt_unmeasured_is_skipped():
     never coerced to a measured zero (and never crashes the helper)."""
     raw = json.dumps(
         [
-            {"position_type": "BORROW", "value_usd": "-2.00"},
+            {"position_type": "BORROW", "value_usd": "-2.00", "cost_basis_usd": "2.00"},
             {"position_type": "BORROW", "value_usd": None},
             {"position_type": "BORROW", "value_usd": ""},
             {"position_type": "BORROW"},  # missing key
@@ -603,37 +609,285 @@ def test_open_positions_and_net_debt_unmeasured_is_skipped():
             "malformed-non-dict",
         ]
     )
-    count, debt = _open_positions_and_net_debt(raw)
+    count, debt_mark, debt_cost = _open_positions_and_net_debt(raw)
     assert count == 6
-    assert debt == Decimal("2.00")
+    assert debt_mark == Decimal("2.00")
+    assert debt_cost == Decimal("2.00")
+
+
+def test_open_positions_and_net_debt_debt_leg_missing_cost_is_skipped():
+    """Empty≠Zero asymmetry: a measured-negative leg whose cost_basis_usd is
+    absent/unparsable still nets its mark (the liability is real) but is skipped
+    for the cost total (fabricating a 0 cost would over-net deployed capital)."""
+    raw = json.dumps(
+        [
+            {"position_type": "BORROW", "value_usd": "-3.00"},  # no cost_basis_usd
+            {"position_type": "BORROW", "value_usd": "-1.00", "cost_basis_usd": ""},
+            {"position_type": "BORROW", "value_usd": "-1.00", "cost_basis_usd": "x"},
+            {"position_type": "BORROW", "value_usd": "-2.00", "cost_basis_usd": "1.90"},
+        ]
+    )
+    count, debt_mark, debt_cost = _open_positions_and_net_debt(raw)
+    assert count == 4
+    assert debt_mark == Decimal("7.00")  # all four measured-negative marks
+    assert debt_cost == Decimal("1.90")  # only the one measured cost
 
 
 def test_open_positions_and_net_debt_malformed_payload_is_zero():
-    """A malformed / empty / non-list-non-dict payload yields (0, 0) without
+    """A malformed / empty / non-list-non-dict payload yields (0, 0, 0) without
     raising."""
-    assert _open_positions_and_net_debt(None) == (0, Decimal("0"))
-    assert _open_positions_and_net_debt("") == (0, Decimal("0"))
-    assert _open_positions_and_net_debt("not json") == (0, Decimal("0"))
+    assert _open_positions_and_net_debt(None) == (0, Decimal("0"), Decimal("0"))
+    assert _open_positions_and_net_debt("") == (0, Decimal("0"), Decimal("0"))
+    assert _open_positions_and_net_debt("not json") == (0, Decimal("0"), Decimal("0"))
 
 
 def test_open_positions_and_net_debt_accepts_preparsed_payload():
     """VIB-4983 (Gemini review): hosted Postgres JSON/JSONB columns (and some
     test mocks) hand back an ALREADY-deserialized list/dict. json.loads on it
-    would TypeError → the (0, 0) bypass → debt-netting silently skipped and the
-    phantom loss resurrected on the hosted path. The helper must net the debt
-    from a pre-parsed payload identically to the JSON-string path."""
+    would TypeError → the (0, 0, 0) bypass → debt-netting silently skipped and
+    the phantom loss resurrected on the hosted path. The helper must net the
+    debt from a pre-parsed payload identically to the JSON-string path."""
     positions = [
-        {"position_type": "SUPPLY", "value_usd": "6.75"},
-        {"position_type": "BORROW", "value_usd": "-1.56"},
+        {"position_type": "SUPPLY", "value_usd": "6.75", "cost_basis_usd": "6.75"},
+        {"position_type": "BORROW", "value_usd": "-1.56", "cost_basis_usd": "1.55"},
     ]
     # Pre-parsed bare list (not json.dumps'd).
-    assert _open_positions_and_net_debt(positions) == (2, Decimal("1.56"))
+    assert _open_positions_and_net_debt(positions) == (2, Decimal("1.56"), Decimal("1.55"))
     # Pre-parsed VIB-3923 envelope dict.
     assert _open_positions_and_net_debt({"schema_version": 1, "positions": positions}) == (
         2,
         Decimal("1.56"),
+        Decimal("1.55"),
     )
-    assert _open_positions_and_net_debt(json.dumps({"no": "positions"})) == (0, Decimal("0"))
+    assert _open_positions_and_net_debt(json.dumps({"no": "positions"})) == (
+        0,
+        Decimal("0"),
+        Decimal("0"),
+    )
+
+
+# ─── VIB-4983 follow-up: cost-basis + drawdown debt-netting consistency ─────
+
+
+# Real Arbitrum-mainnet looping snapshot that rendered the phantom −28.89% on
+# the dashboard (quant-user run 20260616-0945). Collateral USDC supply, USDT
+# borrow, plus a dust swap-inventory token. Net equity is ~flat; the gross
+# Open-cost-basis column double-counts the borrow as a positive asset.
+_LEVERAGE_LOOP_POSITIONS = json.dumps(
+    [
+        {"position_type": "SUPPLY", "value_usd": "9.77047300", "cost_basis_usd": "9.77036500"},
+        {"position_type": "BORROW", "value_usd": "-3.90821500", "cost_basis_usd": "3.90814600"},
+        {"position_type": "TOKEN", "value_usd": "0.02798400", "cost_basis_usd": "0.02798400"},
+    ]
+)
+# Writer convention (portfolio_valuer.py): total_value_usd EXCLUDES the negative
+# borrow leg (= 9.77047300 + 0.02798400); deployed_capital_usd = Σ abs(cost) so it
+# INCLUDES the borrow cost as a positive term (= 9.77036500 + 3.90814600 + 0.02798400).
+_LEVERAGE_TOTAL_VALUE = "9.79845700"
+_LEVERAGE_DEPLOYED_CAPITAL = "13.70649500"
+_LEVERAGE_CASH = "2.59891741"
+
+
+def _leverage_snapshot() -> SimpleNamespace:
+    return SimpleNamespace(
+        total_value_usd=_LEVERAGE_TOTAL_VALUE,
+        available_cash_usd=_LEVERAGE_CASH,
+        value_confidence="HIGH",
+        deployed_capital_usd=_LEVERAGE_DEPLOYED_CAPITAL,
+        positions_json=_LEVERAGE_LOOP_POSITIONS,
+        timestamp=datetime.now(tz=UTC),
+    )
+
+
+def test_compute_pnl_summary_nets_cost_basis_for_open_leverage_loop():
+    """VIB-4983 follow-up: an OPEN leveraged-lending loop must read a debt-netted
+    Open cost basis, not the gross Σ abs(cost) column — otherwise Strategy PnL
+    (open NAV − cost basis) reads netted-NAV minus gross-cost = a phantom −debt
+    loss on a flat position. Verified against the real −28.89% snapshot: the
+    headline phantom was −$7.82; after netting both sides the position is flat."""
+    pnl = compute_pnl_summary(
+        portfolio_metrics=None,
+        snapshots=[_leverage_snapshot()],
+        ledger_entries=[],
+        accounting_events=[],
+    )
+    # NAV nets the debt mark ONCE (total_value_usd excluded it): 9.79845700 - 3.90821500.
+    assert pnl.nav_usd == Decimal("8.48915941")
+    # Open cost basis = net equity cost computed directly from the legs
+    # (collateral cost + token cost − borrow cost) = 9.77036500 + 0.02798400 − 3.90814600.
+    assert pnl.deployed_capital_usd == Decimal("5.89020300")
+    # Strategy-PnL building blocks (mirrors _detail_header._strategy_pnl_usd):
+    open_position_nav = pnl.nav_usd - pnl.available_cash_usd
+    unrealized = open_position_nav - pnl.deployed_capital_usd
+    assert abs(unrealized) < Decimal("0.01")  # flat, NOT the −$7.82 phantom
+
+
+def test_compute_pnl_summary_non_leveraged_cost_basis_unchanged():
+    """Byte-identity guard: a position set with no negative leg leaves the
+    Open-cost-basis column exactly as the writer persisted it (no spurious
+    netting for LP / swap / single-supply)."""
+    snap = SimpleNamespace(
+        total_value_usd="17.00",
+        available_cash_usd="3.00",
+        value_confidence="HIGH",
+        deployed_capital_usd="16.00",
+        positions_json=json.dumps(
+            [
+                {"position_type": "LP", "value_usd": "12.00", "cost_basis_usd": "11.50"},
+                {"position_type": "SUPPLY", "value_usd": "5.00", "cost_basis_usd": "4.50"},
+            ]
+        ),
+        timestamp=datetime.now(tz=UTC),
+    )
+    pnl = compute_pnl_summary(portfolio_metrics=None, snapshots=[snap], ledger_entries=[], accounting_events=[])
+    assert pnl.nav_usd == Decimal("20.00")  # 17 + 3, debt 0
+    assert pnl.deployed_capital_usd == Decimal("16.00")  # untouched
+
+
+def test_drawdowns_net_debt_across_leverage_lifecycle():
+    """VIB-4983 follow-up: the recent-window drawdown must net the borrow leg
+    per-snapshot. Un-netted, wallet NAV phantom-spikes up by the borrow when the
+    loop opens and collapses at teardown, manufacturing a large lifecycle
+    drawdown on a flat equity loop. Netted, the equity series is ~flat."""
+    pre_open = SimpleNamespace(
+        total_value_usd="0",
+        available_cash_usd="8.50",
+        positions_json="[]",
+        timestamp=datetime.now(tz=UTC),
+    )
+    opened = _leverage_snapshot()  # net equity ≈ 8.49, gross collateral+cash ≈ 12.40
+    torn_down = SimpleNamespace(
+        total_value_usd="0",
+        available_cash_usd="8.49",
+        positions_json="[]",
+        timestamp=datetime.now(tz=UTC),
+    )
+    max_dd, _current = _drawdowns([pre_open, opened, torn_down])
+    # Netted equity stays ~8.5 throughout → negligible drawdown. The un-netted
+    # series would peak at ~12.4 (open) and fall to ~8.5 (teardown) ≈ 31% phantom.
+    assert max_dd < Decimal("1.0")
+
+
+def _real_leverage_snapshot():
+    """A REAL ``PortfolioSnapshot`` (the production shape from
+    ``StateManager.get_recent_snapshots``) — typed ``positions``, NO
+    ``positions_json`` attribute. This is the object the dashboard actually
+    receives; the prior ``getattr(snap, "positions_json")`` read returned None on
+    it, silently no-op'ing the netting in production (the inert-feature bug)."""
+    from almanak.framework.portfolio.models import PortfolioSnapshot
+
+    def _p(t, v, c):
+        return {
+            "position_type": t,
+            "protocol": "aave_v3",
+            "chain": "arbitrum",
+            "value_usd": v,
+            "cost_basis_usd": c,
+            "label": t,
+            "tokens": [],
+            "details": {},
+        }
+
+    return PortfolioSnapshot.from_dict(
+        {
+            "timestamp": datetime.now(tz=UTC).isoformat(),
+            "deployment_id": "d",
+            "total_value_usd": _LEVERAGE_TOTAL_VALUE,
+            "available_cash_usd": _LEVERAGE_CASH,
+            "deployed_capital_usd": _LEVERAGE_DEPLOYED_CAPITAL,
+            "wallet_total_value_usd": "12.4",
+            "value_confidence": "HIGH",
+            "positions": [
+                _p("SUPPLY", "9.77047300", "9.77036500"),
+                _p("BORROW", "-3.90821500", "3.90814600"),
+                _p("TOKEN", "0.02798400", "0.02798400"),
+            ],
+        }
+    )
+
+
+def test_compute_pnl_summary_nets_real_portfolio_snapshot():
+    """REGRESSION (the inert-feature bug): a real ``PortfolioSnapshot`` carries a
+    typed ``positions`` list and has NO ``positions_json`` attribute. The netting
+    MUST activate off ``.positions`` — reading ``positions_json`` returned None
+    and made VIB-4983's NAV netting (and the cost/PnL netting) silently no-op in
+    production. Verified against the live −28.89% looping snapshot."""
+    snap = _real_leverage_snapshot()
+    assert getattr(snap, "positions_json", None) is None  # the trap this test guards
+    pnl = compute_pnl_summary(portfolio_metrics=None, snapshots=[snap], ledger_entries=[], accounting_events=[])
+    assert pnl.nav_usd == Decimal("8.48915941")  # netted, NOT 12.40 gross
+    assert pnl.deployed_capital_usd == Decimal("5.89020300")  # net equity, NOT 13.71 gross
+    open_position_nav = pnl.nav_usd - pnl.available_cash_usd
+    assert abs(open_position_nav - pnl.deployed_capital_usd) < Decimal("0.01")  # flat, not −7.82
+
+
+def test_snapshot_net_debt_reads_typed_positions():
+    """``_snapshot_net_debt`` prefers the typed ``positions`` list and returns the
+    debt mark, debt cost, and the signed net equity cost computed directly."""
+    snap = _real_leverage_snapshot()
+    count, debt_mark, debt_cost, net_cost = _snapshot_net_debt(snap)
+    assert count == 3
+    assert debt_mark == Decimal("3.90821500")
+    assert debt_cost == Decimal("3.90814600")
+    # net equity cost = collateral cost + token cost − borrow cost
+    assert net_cost == Decimal("9.77036500") + Decimal("0.02798400") - Decimal("3.90814600")
+
+
+def test_cost_basis_netting_correct_when_column_zero_reconstruction_path():
+    """REGRESSION (Codex/pr-auditor P2): when the snapshot's deployed_capital_usd
+    column is 0 the basis is rebuilt from accounting events (collateral-only, no
+    BORROW term). The old ``-= 2×debt_cost`` would under-net by a debt leg on that
+    path, flipping a flat loop to a phantom GAIN. Computing the net equity cost
+    DIRECTLY from the position legs is source-independent, so the leverage loop
+    reads flat whether the basis came from the gross column or the reconstruction."""
+    from almanak.framework.portfolio.models import PortfolioSnapshot
+
+    def _p(t, v, c):
+        return {
+            "position_type": t, "protocol": "aave_v3", "chain": "arbitrum",
+            "value_usd": v, "cost_basis_usd": c, "label": t, "tokens": [], "details": {},
+        }
+
+    snap = PortfolioSnapshot.from_dict(
+        {
+            "timestamp": datetime.now(tz=UTC).isoformat(), "deployment_id": "d",
+            "total_value_usd": _LEVERAGE_TOTAL_VALUE, "available_cash_usd": _LEVERAGE_CASH,
+            "deployed_capital_usd": "0",  # force the reconstruction fallback
+            "wallet_total_value_usd": "12.4", "value_confidence": "HIGH",
+            "positions": [
+                _p("SUPPLY", "9.77047300", "9.77036500"),
+                _p("BORROW", "-3.90821500", "3.90814600"),
+                _p("TOKEN", "0.02798400", "0.02798400"),
+            ],
+        }
+    )
+    pnl = compute_pnl_summary(
+        portfolio_metrics=None, snapshots=[snap], ledger_entries=[], accounting_events=[]
+    )
+    # Net equity cost from the legs directly — not under-netted, not negative.
+    assert pnl.deployed_capital_usd == Decimal("5.89020300")
+    open_position_nav = pnl.nav_usd - pnl.available_cash_usd
+    assert abs(open_position_nav - pnl.deployed_capital_usd) < Decimal("0.01")  # flat
+
+
+def test_lifetime_drawdown_nets_borrow_leg_across_open_teardown():
+    """REGRESSION (Codex finding): the lifetime drawdown is PREFERRED over the
+    recent window on the main PnL surface, and reads ``get_nav_series`` text rows
+    that now carry ``positions_json`` (5th element). Without per-row netting the
+    series phantom-spikes by the borrow at open and collapses at teardown,
+    reporting a large drawdown on a flat leverage loop. Rows are
+    ``(ts, total, cash, id, positions_json)`` oldest-first."""
+    leverage_pj = _LEVERAGE_LOOP_POSITIONS
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    rows = [
+        (base, "0", "8.50", 1, "[]"),  # pre-open: cash only
+        (base.replace(hour=1), _LEVERAGE_TOTAL_VALUE, _LEVERAGE_CASH, 2, leverage_pj),  # open loop
+        (base.replace(hour=2), "0", "8.49", 3, "[]"),  # torn down: cash ~equity
+    ]
+    max_dd, _current = lifetime_drawdowns_from_nav_text(rows)
+    # Netted equity stays ~8.5 throughout → small drawdown. Un-netted the open row
+    # would read ~12.4 (Codex measured ~31.5% phantom). Assert it is netted.
+    assert max_dd < Decimal("1.0")
 
 
 # ─── VIB-4983: _apply_primary_risk_gauge extraction — branch coverage ──────
@@ -1148,10 +1402,22 @@ _DEP = "Strat:abc"
 def test_inventory_unrealized_no_inventory_returns_none():
     # All acquired inventory disposed (net-flat round-trip leaves no residual).
     events = [
-        _swap_event(deployment_id=_DEP, token_in="USDC", amount_in="2000", token_out="WETH",
-                    amount_out="1.0", amount_out_usd="2000"),
-        _swap_event(deployment_id=_DEP, token_in="WETH", amount_in="1.0", token_out="USDC",
-                    amount_out="2000", amount_out_usd="2000"),
+        _swap_event(
+            deployment_id=_DEP,
+            token_in="USDC",
+            amount_in="2000",
+            token_out="WETH",
+            amount_out="1.0",
+            amount_out_usd="2000",
+        ),
+        _swap_event(
+            deployment_id=_DEP,
+            token_in="WETH",
+            amount_in="1.0",
+            token_out="USDC",
+            amount_out="2000",
+            amount_out_usd="2000",
+        ),
     ]
     prices = _price("arbitrum", "0xweth", "WETH", "2000")
     assert compute_inventory_unrealized(events, _DEP, prices) is None
@@ -1164,8 +1430,14 @@ def test_inventory_unrealized_empty_events_returns_none():
 def test_inventory_unrealized_trending_gain_positive():
     # Net-long 1 WETH at cost 2000; mark 2100 → +100.
     events = [
-        _swap_event(deployment_id=_DEP, token_in="USDC", amount_in="2000", token_out="WETH",
-                    amount_out="1.0", amount_out_usd="2000"),
+        _swap_event(
+            deployment_id=_DEP,
+            token_in="USDC",
+            amount_in="2000",
+            token_out="WETH",
+            amount_out="1.0",
+            amount_out_usd="2000",
+        ),
     ]
     prices = _price("arbitrum", "0xweth", "WETH", "2100")
     result = compute_inventory_unrealized(events, _DEP, prices)
@@ -1176,10 +1448,16 @@ def test_inventory_unrealized_live_rsi_trending_loss():
     # Live RSI shape: net-long ~0.0064 WETH, FIFO cost 11.9105, mark 11.9067.
     # Acquire 0.0064 WETH for 11.9105 USD; price = 11.9067 / 0.0064.
     events = [
-        _swap_event(deployment_id=_DEP, token_in="USDC", amount_in="12", token_out="WETH",
-                    amount_out="0.0064", amount_out_usd="11.9105"),
+        _swap_event(
+            deployment_id=_DEP,
+            token_in="USDC",
+            amount_in="12",
+            token_out="WETH",
+            amount_out="0.0064",
+            amount_out_usd="11.9105",
+        ),
     ]
-    mark = (Decimal("11.9067") / Decimal("0.0064"))
+    mark = Decimal("11.9067") / Decimal("0.0064")
     prices = _price("arbitrum", "0xweth", "WETH", str(mark))
     result = compute_inventory_unrealized(events, _DEP, prices)
     # 0.0064 * mark - 11.9105 = 11.9067 - 11.9105 = -0.0038
@@ -1190,10 +1468,22 @@ def test_inventory_unrealized_live_rsi_trending_loss():
 def test_inventory_unrealized_multi_token_sums():
     # Two net-long legs: WETH (+100) and WBTC (-50).
     events = [
-        _swap_event(deployment_id=_DEP, token_in="USDC", amount_in="2000", token_out="WETH",
-                    amount_out="1.0", amount_out_usd="2000"),
-        _swap_event(deployment_id=_DEP, token_in="USDC", amount_in="1000", token_out="WBTC",
-                    amount_out="0.02", amount_out_usd="1000"),
+        _swap_event(
+            deployment_id=_DEP,
+            token_in="USDC",
+            amount_in="2000",
+            token_out="WETH",
+            amount_out="1.0",
+            amount_out_usd="2000",
+        ),
+        _swap_event(
+            deployment_id=_DEP,
+            token_in="USDC",
+            amount_in="1000",
+            token_out="WBTC",
+            amount_out="0.02",
+            amount_out_usd="1000",
+        ),
     ]
     prices = {}
     prices.update(_price("arbitrum", "0xweth", "WETH", "2100"))  # +100
@@ -1206,10 +1496,22 @@ def test_inventory_unrealized_shared_wallet_isolation():
     # Two deployments trading the same wallet — each marks only its own lots.
     other = "Other:zzz"
     events = [
-        _swap_event(deployment_id=_DEP, token_in="USDC", amount_in="2000", token_out="WETH",
-                    amount_out="1.0", amount_out_usd="2000"),
-        _swap_event(deployment_id=other, token_in="USDC", amount_in="9000", token_out="WETH",
-                    amount_out="5.0", amount_out_usd="9000"),
+        _swap_event(
+            deployment_id=_DEP,
+            token_in="USDC",
+            amount_in="2000",
+            token_out="WETH",
+            amount_out="1.0",
+            amount_out_usd="2000",
+        ),
+        _swap_event(
+            deployment_id=other,
+            token_in="USDC",
+            amount_in="9000",
+            token_out="WETH",
+            amount_out="5.0",
+            amount_out_usd="9000",
+        ),
     ]
     prices = _price("arbitrum", "0xweth", "WETH", "2100")
     # _DEP: 1 WETH, cost 2000, mark 2100 → +100 (NOT affected by other's 5 WETH).
@@ -1222,10 +1524,22 @@ def test_inventory_unrealized_missing_deployment_id_fails_closed():
     # inventory. Fail closed (None ⇒ "—"), NOT an unscoped sum. (CodeRabbit)
     other = "Other:zzz"
     events = [
-        _swap_event(deployment_id=_DEP, token_in="USDC", amount_in="2000", token_out="WETH",
-                    amount_out="1.0", amount_out_usd="2000"),
-        _swap_event(deployment_id=other, token_in="USDC", amount_in="9000", token_out="WETH",
-                    amount_out="5.0", amount_out_usd="9000"),
+        _swap_event(
+            deployment_id=_DEP,
+            token_in="USDC",
+            amount_in="2000",
+            token_out="WETH",
+            amount_out="1.0",
+            amount_out_usd="2000",
+        ),
+        _swap_event(
+            deployment_id=other,
+            token_in="USDC",
+            amount_in="9000",
+            token_out="WETH",
+            amount_out="5.0",
+            amount_out_usd="9000",
+        ),
     ]
     prices = _price("arbitrum", "0xweth", "WETH", "2100")
     assert compute_inventory_unrealized(events, "", prices) is None
@@ -1254,7 +1568,13 @@ def test_inventory_unrealized_missing_basis_returns_none():
 def test_inventory_unrealized_missing_mark_price_returns_none():
     # Net-long WETH but no mark price in token_prices → degrade (no fetch).
     events = [
-        _swap_event(deployment_id=_DEP, token_in="USDC", amount_in="2000", token_out="WETH",
-                    amount_out="1.0", amount_out_usd="2000"),
+        _swap_event(
+            deployment_id=_DEP,
+            token_in="USDC",
+            amount_in="2000",
+            token_out="WETH",
+            amount_out="1.0",
+            amount_out_usd="2000",
+        ),
     ]
     assert compute_inventory_unrealized(events, _DEP, {}) is None

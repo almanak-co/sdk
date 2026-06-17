@@ -1542,15 +1542,17 @@ async def test_get_ledger_quant_stats_sql_shape_and_conversion():
 @pytest.mark.asyncio
 async def test_get_ledger_quant_stats_zero_rows_documented_mapping():
     """NULL/zero-row mapping pinned per field: counts 0, sum 0, anchor None."""
-    conn = _FakeConn(fetchrow_row=_quant_stats_row(
-        total=0,
-        with_tx_hash=0,
-        with_cycle_id=0,
-        with_price_inputs=0,
-        with_pre_post_state=0,
-        with_positive_gas_usd=0,
-        gas_usd_sum="0",
-    ))
+    conn = _FakeConn(
+        fetchrow_row=_quant_stats_row(
+            total=0,
+            with_tx_hash=0,
+            with_cycle_id=0,
+            with_price_inputs=0,
+            with_pre_post_state=0,
+            with_positive_gas_usd=0,
+            gas_usd_sum="0",
+        )
+    )
     store = _make_store(conn)
 
     stats = await store.get_ledger_quant_stats(_DEPLOYMENT_ID)
@@ -1589,12 +1591,14 @@ def test_pg_finite_numeric_guard_semantics():
 @pytest.mark.asyncio
 async def test_get_ledger_anchor_candidates_sql_shape_and_conversion():
     rows = [
-        _DictRow({
-            "id": "ledger-row-1",
-            "timestamp": datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC),
-            "pre_state_text": '{"wallet_balances": {"USDC": "1000"}}',
-            "price_inputs_text": '{"USDC": {"price_usd": "1.0"}}',
-        }),
+        _DictRow(
+            {
+                "id": "ledger-row-1",
+                "timestamp": datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC),
+                "pre_state_text": '{"wallet_balances": {"USDC": "1000"}}',
+                "price_inputs_text": '{"USDC": {"price_usd": "1.0"}}',
+            }
+        ),
     ]
     conn = _FakeConn(fetch_rows=rows)
     store = _make_store(conn)
@@ -1654,7 +1658,7 @@ async def test_get_ledger_anchor_candidates_zero_limit_short_circuits():
 _NAV_BASE_TS = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)
 
 
-def _nav_row(minute: int, total: str | None, cash: str | None, id_: int) -> _DictRow:
+def _nav_row(minute: int, total: str | None, cash: str | None, id_: int, positions: str | None = "[]") -> _DictRow:
     """asyncpg-shaped row for get_nav_series (column aliases as the SELECT emits)."""
     return _DictRow(
         {
@@ -1662,6 +1666,8 @@ def _nav_row(minute: int, total: str | None, cash: str | None, id_: int) -> _Dic
             "total_value_text": total,
             "available_cash_text": cash,
             "id": id_,
+            # VIB-5170: positions_json::text rides along for per-row debt netting.
+            "positions_text": positions,
         }
     )
 
@@ -1677,9 +1683,10 @@ async def test_get_nav_series_full_scan_sql_shape_and_oldest_first():
     rows, truncated = await store.get_nav_series(_DEPLOYMENT_ID)
 
     assert truncated is False
-    # Reversed to oldest-first; 4-tuple shape (ts, total_text, cash_text, id).
+    # Reversed to oldest-first; 5-tuple shape (ts, total_text, cash_text, id,
+    # positions_json_text) — VIB-5170 adds positions_json for per-row debt netting.
     assert [r[3] for r in rows] == [1, 3]
-    assert rows[0] == (_NAV_BASE_TS, "100", "0", 1)
+    assert rows[0] == (_NAV_BASE_TS, "100", "0", 1, "[]")
 
     kind, sql, args = conn.calls[0]
     assert kind == "fetch"
@@ -1691,8 +1698,9 @@ async def test_get_nav_series_full_scan_sql_shape_and_oldest_first():
     assert "available_cash_usd::text AS available_cash_text" in select_clause
     # id projected raw (it is the cursor tiebreaker, not a money value → no cast).
     assert "id" in select_clause
-    # No JSON-blob columns (transfer-size discipline).
-    assert "positions_json" not in sql
+    # VIB-5170: positions_json::text projected for debt netting; other JSON blobs
+    # still excluded (transfer-size discipline).
+    assert "positions_json::text AS positions_text" in select_clause
     assert "token_prices_json" not in sql
     assert "wallet_balances_json" not in sql
     # Full scan: no cursor predicate, newest-first ordering, scan_cap+1 bound.

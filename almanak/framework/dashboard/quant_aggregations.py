@@ -1078,6 +1078,14 @@ def _drawdowns(snapshots: list[Any]) -> tuple[Decimal, Decimal]:
     matching the "NAV now" header tile. Pre-VIB-3884 this read the
     deployed-only column, which produced spurious "drawdown 100%"
     readings whenever the strategy was fully un-deployed.
+
+    VIB-4983 follow-up: net the BORROW debt leg per-snapshot so the series
+    matches the debt-netted "NAV now" tile (``compute_pnl_summary``). The
+    recent-window snapshots carry ``positions_json`` (``get_recent_snapshots``
+    selects it), so the un-netted phantom — wallet NAV spiking up by the borrow
+    at open and collapsing at teardown, manufacturing a large lifecycle
+    drawdown on a flat equity loop — is removed here. Non-leveraged snapshots
+    subtract ``Decimal("0")`` (no negative leg) and stay byte-identical.
     """
     values: list[Decimal] = []
     for snap in snapshots:
@@ -1087,7 +1095,8 @@ def _drawdowns(snapshots: list[Any]) -> tuple[Decimal, Decimal]:
         cash = getattr(snap, "available_cash_usd", None)
         if cash is None and isinstance(snap, dict):
             cash = snap.get("available_cash_usd")
-        wallet_nav = _to_decimal(v) + _to_decimal(cash)
+        _count, debt_mark, _debt_cost, _net_cost = _snapshot_net_debt(snap)
+        wallet_nav = _to_decimal(v) - debt_mark + _to_decimal(cash)
         if wallet_nav > Decimal("0"):
             values.append(wallet_nav)
     return _drawdown_stats(values)
@@ -1157,17 +1166,28 @@ def fold_drawdowns(state: DrawdownState, navs: Iterable[Decimal]) -> DrawdownSta
 
 
 def _wallet_navs_from_nav_text(rows: Iterable[tuple[Any, ...]]) -> list[Decimal]:
-    """Positive wallet-NAVs from ``get_nav_series`` rows (the Empty≠Zero filter).
+    """Positive, debt-netted wallet-NAVs from ``get_nav_series`` rows (Empty≠Zero).
 
     Reads ``total_value_usd`` / ``available_cash_usd`` by position (row[1], row[2])
-    so it is tolerant of the row arity — the reader now appends ``id`` (VIB-5134)
-    but legacy 3-tuples still extract identically. Each wallet-NAV is
-    ``_to_decimal(total) + _to_decimal(cash)`` (matching :func:`_drawdowns`),
-    filtered to ``> 0`` so ``""`` / ``None`` / garbage (unmeasured) drop out.
+    so it is tolerant of the row arity — the reader appends ``id`` (row[3],
+    VIB-5134) and ``positions_json`` text (row[4], VIB-5170); legacy 3-/4-tuples
+    still extract the NAV columns identically and simply skip the debt netting.
+
+    Each wallet-NAV is ``total − debt_mark + cash`` — the BORROW leg
+    (Σ|negative value_usd| from ``positions_json``) is netted per row so the
+    lifetime drawdown matches the debt-netted "NAV now" tile and
+    :func:`_drawdowns`. Without it the lifetime series (preferred over the recent
+    window on the main PnL surface) phantom-spikes at open and collapses at
+    teardown for a flat leverage loop. Filtered to ``> 0`` so ``""`` / ``None`` /
+    garbage (unmeasured) drop out; a row with no ``positions_json`` (short tuple)
+    nets ``Decimal("0")`` debt — byte-identical to the pre-VIB-5170 behaviour.
     """
     navs: list[Decimal] = []
     for row in rows:
-        wallet_nav = _to_decimal(row[1]) + _to_decimal(row[2])
+        debt_mark = Decimal("0")
+        if len(row) > 4:
+            _count, debt_mark, _debt_cost = _open_positions_and_net_debt(row[4])
+        wallet_nav = _to_decimal(row[1]) - debt_mark + _to_decimal(row[2])
         if wallet_nav > Decimal("0"):
             navs.append(wallet_nav)
     return navs
@@ -1272,62 +1292,137 @@ def _strategy_age_days(portfolio_metrics: Any) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _open_positions_and_net_debt(positions_json: Any) -> tuple[int, Decimal]:
-    """Parse a snapshot's ``positions_json`` → ``(open_count, debt_to_net)``.
+def _read_position_decimal(pos: Any, key: str) -> Decimal | None:
+    """Read ``key`` off a position that is EITHER a typed ``PositionValue``
+    dataclass (production ``PortfolioSnapshot.positions``) OR a dict (the
+    ``positions_json`` text / envelope path).
 
-    The payload is either the legacy bare list or the VIB-3923 envelope
-    ``{schema_version, positions, metadata, reconciliation}`` — both are
-    unwrapped so the BORROW debt leg is netted on enveloped writes too, not
-    only on the legacy shape.
+    Returns ``None`` for an absent / empty / unparsable value — Empty≠Zero: an
+    unmeasured field is never coerced to a measured ``Decimal("0")``. A non
+    dict / non-object item (e.g. a stray string in a malformed payload) also
+    yields ``None``.
+    """
+    raw = pos.get(key) if isinstance(pos, dict) else getattr(pos, key, None)
+    if raw is None or raw == "":
+        return None
+    try:
+        return Decimal(str(raw))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
 
-    ``debt_to_net`` is Σ|negative value_usd| across the positions. A negative
-    ``value_usd`` is the on-chain debt/liability sign convention (BORROW legs;
-    portfolio_valuer.py:1443-1446) that ``total_value_usd``
-    (positive-position-scoped, VIB-3614) drops; the caller subtracts it from the
-    deployed value so an open leverage loop's NAV reads ``collateral − debt``
-    instead of ``collateral`` alone.
 
-    Empty≠Zero: a position whose ``value_usd`` is absent or unparsable is
-    skipped (unmeasured), never coerced to a measured zero. A malformed / empty
-    payload — or any position set with no negative leg — yields a zero
-    ``debt_to_net`` so non-leveraged strategies (LP, swap, single-supply) are
-    byte-identical to before.
+def _net_from_position_items(items: Any) -> tuple[int, Decimal, Decimal, Decimal]:
+    """Core debt-netting over a position sequence → ``(count, debt_mark,
+    debt_cost, net_cost)``.
+
+    ``items`` is an iterable of typed ``PositionValue`` dataclasses
+    (``PortfolioSnapshot.positions``, the PRODUCTION dashboard path) and/or
+    dicts (the ``positions_json`` text / envelope path used by the lifetime
+    drawdown reader and legacy callers). The negative ``value_usd`` legs are the
+    on-chain debt/liability convention (BORROW; portfolio_valuer.py:1443-1446).
+
+    * ``debt_mark`` = Σ|negative value_usd|. ``total_value_usd`` is
+      positive-position-scoped (VIB-3614; portfolio_valuer.py:746-757) and drops
+      the negative legs, so the NAV caller subtracts ``debt_mark`` **once** to
+      read an open loop's NAV as ``collateral − debt`` (VIB-4983).
+    * ``debt_cost`` = Σ|cost_basis_usd| over those same negative legs (kept for
+      callers that only need the debt magnitude).
+    * ``net_cost`` = Σ signed cost basis: asset legs (value ≥ 0) add ``+|cost|``,
+      debt legs (value < 0) add ``−|cost|``. This is the **net equity cost
+      basis** (collateral cost − borrow cost) the Strategy-PnL tile differences
+      against the debt-netted open NAV. Computing it directly from the legs
+      avoids the writer's ``Σ abs(cost_basis_usd)`` gross convention
+      (portfolio_valuer.py:702-705, which counts the borrow cost as a positive
+      asset) and is correct regardless of whether the snapshot column or the
+      accounting-events reconstruction supplied the gross basis.
+
+    Empty≠Zero: a leg with absent/unparsable ``value_usd`` is skipped entirely
+    (unmeasured). A leg with a measured value but absent/unparsable
+    ``cost_basis_usd`` still nets its ``debt_mark`` (the liability is real) but
+    contributes to neither ``debt_cost`` nor ``net_cost`` — fabricating a zero
+    cost would distort equity. ``count`` is the total item count (matching the
+    legacy ``len(positions)`` contract), including malformed entries.
+    """
+    items_list = list(items)
+    debt_mark = Decimal("0")
+    debt_cost = Decimal("0")
+    net_cost = Decimal("0")
+    for pos in items_list:
+        value = _read_position_decimal(pos, "value_usd")
+        if value is None:
+            continue
+        cost = _read_position_decimal(pos, "cost_basis_usd")
+        if value < 0:
+            debt_mark += -value
+            if cost is not None:
+                debt_cost += abs(cost)
+                net_cost -= abs(cost)
+        elif cost is not None:
+            net_cost += abs(cost)
+    return len(items_list), debt_mark, debt_cost, net_cost
+
+
+def _parse_positions_payload(positions_json: Any) -> list:
+    """Unwrap a ``positions_json`` payload to its bare position list.
+
+    Accepts the legacy bare list, the VIB-3923 envelope
+    ``{schema_version, positions, metadata, reconciliation}``, a JSON string of
+    either, OR an already-deserialized list/dict (hosted Postgres JSON/JSONB
+    columns and some test mocks hand back parsed objects — calling json.loads on
+    those would TypeError and silently drop the debt). Returns ``[]`` for an
+    empty / malformed / non-list-non-dict payload.
     """
     if not positions_json:
-        return 0, Decimal("0")
+        return []
     if isinstance(positions_json, list | dict):
-        # Hosted Postgres JSON/JSONB columns (and some test mocks) hand back an
-        # already-deserialized payload. Calling json.loads on it would raise
-        # TypeError and silently drop into the (0, 0) bypass below — resurrecting
-        # the un-netted-debt phantom on the hosted path. Accept the parsed shape
-        # directly. (VIB-4983, Gemini review)
         parsed = positions_json
     else:
         try:
             parsed = json.loads(positions_json)
         except (json.JSONDecodeError, TypeError):
-            return 0, Decimal("0")
+            return []
     if isinstance(parsed, list):
-        positions = parsed
-    elif isinstance(parsed, dict) and isinstance(parsed.get("positions"), list):
-        positions = parsed["positions"]
-    else:
-        return 0, Decimal("0")
+        return parsed
+    if isinstance(parsed, dict) and isinstance(parsed.get("positions"), list):
+        return parsed["positions"]
+    return []
 
-    debt = Decimal("0")
-    for pos in positions:
-        if not isinstance(pos, dict):
-            continue
-        raw = pos.get("value_usd")
-        if raw is None or raw == "":
-            continue
-        try:
-            value = Decimal(str(raw))
-        except (InvalidOperation, ValueError, TypeError):
-            continue
-        if value < 0:
-            debt += -value
-    return len(positions), debt
+
+def _open_positions_and_net_debt(positions_json: Any) -> tuple[int, Decimal, Decimal]:
+    """``positions_json`` text/dict/list → ``(open_count, debt_mark, debt_cost)``.
+
+    The text-payload entry point — used by the lifetime-drawdown reader
+    (``_wallet_navs_from_nav_text``, which only has raw ``positions_json`` text
+    from ``get_nav_series``) and legacy/dict callers. Production snapshot callers
+    use :func:`_snapshot_net_debt`, which reads the typed ``positions`` list
+    directly (a real ``PortfolioSnapshot`` has NO ``positions_json`` attribute —
+    reading it returned ``None`` and silently no-op'd the netting; that was the
+    inert-feature bug behind the persisted leverage phantom).
+    """
+    count, debt_mark, debt_cost, _net_cost = _net_from_position_items(_parse_positions_payload(positions_json))
+    return count, debt_mark, debt_cost
+
+
+def _snapshot_net_debt(snap: Any) -> tuple[int, Decimal, Decimal, Decimal]:
+    """``(count, debt_mark, debt_cost, net_cost)`` for one snapshot.
+
+    Prefers the typed ``PortfolioSnapshot.positions`` list (the production shape
+    returned by ``StateManager.get_recent_snapshots`` / ``get_latest_snapshot``)
+    — these dataclasses carry ``value_usd`` / ``cost_basis_usd`` directly. Falls
+    back to a ``positions_json`` attribute/key (dicts, ``SimpleNamespace`` test
+    mocks, legacy callers). A bare dict carrying a ``positions`` list is handled
+    too.
+    """
+    positions = getattr(snap, "positions", None)
+    if positions is not None and not isinstance(snap, dict):
+        return _net_from_position_items(positions)
+    if isinstance(snap, dict):
+        payload = snap.get("positions_json")
+        if payload is None:
+            payload = snap.get("positions")
+    else:
+        payload = getattr(snap, "positions_json", None)
+    return _net_from_position_items(_parse_positions_payload(payload))
 
 
 # ---------------------------------------------------------------------------
@@ -1359,6 +1454,7 @@ def compute_pnl_summary(
 
     # ── Latest snapshot first: needed to compute wallet NAV (VIB-3884) ───
     deployed_value_usd = Decimal("0")
+    _debt_cost_to_net = Decimal("0")
     if snapshots:
         latest = snapshots[-1]
         pnl.available_cash_usd = _to_decimal(getattr(latest, "available_cash_usd", "0"))
@@ -1377,8 +1473,13 @@ def compute_pnl_summary(
         # collateral + cash (which manufactures a phantom −debt loss). A
         # position set with no negative leg subtracts Decimal("0") — non-
         # leveraged strategies are byte-identical to before.
-        positions_json = getattr(latest, "positions_json", None)
-        pnl.open_position_count, _debt_to_net = _open_positions_and_net_debt(positions_json)
+        # Read the TYPED positions list (PortfolioSnapshot.positions) — a real
+        # snapshot has no ``positions_json`` attribute, so the prior
+        # getattr(..., "positions_json") returned None and silently no-op'd the
+        # netting in production (the inert-feature bug behind the persisted
+        # leverage phantom). _snapshot_net_debt prefers .positions, falling back
+        # to positions_json for dict / legacy callers.
+        pnl.open_position_count, _debt_to_net, _debt_cost_to_net, _net_cost = _snapshot_net_debt(latest)
         deployed_value_usd -= _debt_to_net
 
     # VIB-3914: Anchor "Deployed" to the wallet snapshot the strategy
@@ -1428,6 +1529,22 @@ def compute_pnl_summary(
             pnl.deployed_capital_usd = reconstructed
             if pnl.open_position_count == 0:
                 pnl.open_position_count = 1
+
+    # VIB-4983 follow-up: net the BORROW cost basis out of the Open-cost-basis
+    # tile, the sibling of the NAV netting above. The writer sums
+    # ``deployed_capital_usd`` as Σ abs(cost_basis_usd) (portfolio_valuer.py:702-705)
+    # — counting the BORROW cost as a *positive* asset — while the accounting-events
+    # reconstruction fallback above sums collateral cost only. Rather than guess
+    # which gross convention produced the number and subtract 1x or 2x, replace it
+    # with the net equity cost computed DIRECTLY from the position legs
+    # (collateral cost − borrow cost == ``_net_cost``). Without this the Strategy-PnL
+    # tile (open NAV − cost basis, _detail_header.py:_strategy_pnl_usd) reads
+    # netted-NAV minus gross-cost = a phantom −debt loss on a flat position. Only
+    # applied when a debt leg exists so non-leveraged snapshots keep the writer's
+    # column byte-identically. Clamped at 0 so corrupt data can never surface a
+    # negative basis (which would invert APR / Strategy-PnL sign).
+    if _debt_cost_to_net > Decimal("0"):
+        pnl.deployed_capital_usd = max(Decimal("0"), _net_cost)
 
     # VIB-5118: prefer the lifetime drawdown (computed by the gateway over the
     # FULL snapshot history via ``get_nav_series``) when supplied. ``snapshots``

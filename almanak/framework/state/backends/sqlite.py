@@ -2415,14 +2415,15 @@ class SQLiteStore:
         to_ts: datetime | None,
         *,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None]], bool]:
+    ) -> tuple[list[tuple[datetime, str | None, str | None, str | None]], bool]:
         """Projected NAV samples inside a time window, for windowed charts (VIB-5059 P2).
 
         Returns ``(rows, truncated)`` where ``rows`` is ``(timestamp,
-        total_value_usd_text, value_confidence_text)`` oldest-first. Only the
-        three chart-relevant columns are projected — the JSON blob columns
-        (``positions_json`` / ``token_prices_json`` / ``wallet_balances_json``)
-        dominate transfer size and the NAV line does not need them.
+        total_value_usd_text, value_confidence_text, positions_json_text)``
+        oldest-first. The chart-relevant columns plus ``positions_json`` (VIB-5170,
+        for per-row BORROW debt netting) are projected; the other JSON blobs
+        (``token_prices_json`` / ``wallet_balances_json``) are still excluded as
+        they dominate transfer size and the NAV line does not need them.
 
         ``total_value_usd`` is returned as its **raw stored text** (not parsed to
         ``Decimal``) so the caller owns the Empty≠Zero decision: ``""`` / ``None``
@@ -2440,7 +2441,7 @@ class SQLiteStore:
         if not self._initialized:
             await self.initialize()
 
-        def _sync_get() -> tuple[list[tuple[datetime, str | None, str | None]], bool]:
+        def _sync_get() -> tuple[list[tuple[datetime, str | None, str | None, str | None]], bool]:
             clauses = ["deployment_id = ?"]
             params: list[object] = [deployment_id]
             if from_ts is not None:
@@ -2452,7 +2453,7 @@ class SQLiteStore:
             params.append(scan_cap + 1)
             cursor = self._conn.execute(  # type: ignore[union-attr]
                 f"""
-                SELECT timestamp, total_value_usd, value_confidence
+                SELECT timestamp, total_value_usd, value_confidence, positions_json
                 FROM portfolio_snapshots
                 WHERE {" AND ".join(clauses)}
                 ORDER BY timestamp DESC, id DESC
@@ -2467,12 +2468,12 @@ class SQLiteStore:
                 # them first, so the surplus (oldest) tail is dropped.
                 fetched = fetched[:scan_cap]
 
-            rows: list[tuple[datetime, str | None, str | None]] = []
+            rows: list[tuple[datetime, str | None, str | None, str | None]] = []
             for row in reversed(fetched):  # DESC fetch -> emit oldest-first
                 ts = row["timestamp"]
                 if isinstance(ts, str):
                     ts = datetime.fromisoformat(ts)
-                rows.append((ts, row["total_value_usd"], row["value_confidence"]))
+                rows.append((ts, row["total_value_usd"], row["value_confidence"], row["positions_json"]))
             return rows, truncated
 
         loop = asyncio.get_event_loop()
@@ -2484,11 +2485,12 @@ class SQLiteStore:
         *,
         since: tuple[datetime, int] | None = None,
         scan_cap: int = 200_000,
-    ) -> tuple[list[tuple[datetime, str | None, str | None, int]], bool]:
+    ) -> tuple[list[tuple[datetime, str | None, str | None, int, str | None]], bool]:
         """NAV-component series for lifetime drawdown / high-watermark (VIB-5118/5134).
 
         Returns ``(rows, truncated)`` where ``rows`` is ``(timestamp,
-        total_value_usd_text, available_cash_usd_text, id)`` oldest-first. Unlike
+        total_value_usd_text, available_cash_usd_text, id, positions_json_text)``
+        oldest-first (``positions_json`` is the VIB-5170 debt-netting input). Unlike
         :meth:`get_recent_snapshots` (newest 168 rows — a ~14h window at the
         5-min cadence), the default (``since=None``) projects the **whole**
         history so a lifetime peak or drawdown older than the recent window is no
@@ -2523,7 +2525,7 @@ class SQLiteStore:
         if not self._initialized:
             await self.initialize()
 
-        def _sync_get() -> tuple[list[tuple[datetime, str | None, str | None, int]], bool]:
+        def _sync_get() -> tuple[list[tuple[datetime, str | None, str | None, int, str | None]], bool]:
             params: list[object] = [deployment_id]
             where = "deployment_id = ?"
             if since is not None:
@@ -2556,7 +2558,7 @@ class SQLiteStore:
             with self._db_lock:
                 cursor = self._conn.execute(  # type: ignore[union-attr]
                     f"""
-                    SELECT timestamp, total_value_usd, available_cash_usd, id
+                    SELECT timestamp, total_value_usd, available_cash_usd, id, positions_json
                     FROM portfolio_snapshots
                     WHERE {where}
                     ORDER BY timestamp {order}
@@ -2574,12 +2576,18 @@ class SQLiteStore:
             # Incremental (ASC) is already oldest-first; full (DESC) is reversed.
             ordered = fetched if since is not None else list(reversed(fetched))
 
-            rows: list[tuple[datetime, str | None, str | None, int]] = []
+            rows: list[tuple[datetime, str | None, str | None, int, str | None]] = []
             for row in ordered:
                 ts = row["timestamp"]
                 if isinstance(ts, str):
                     ts = datetime.fromisoformat(ts)
-                rows.append((ts, row["total_value_usd"], row["available_cash_usd"], row["id"]))
+                # VIB-5170: positions_json rides along (raw text, 5th element) so
+                # the lifetime-drawdown fold can debt-net the BORROW leg per row
+                # (the dashboard layer owns the parse + Empty≠Zero). Without it the
+                # lifetime drawdown — preferred over the recent window on the main
+                # PnL surface — overstates drawdown for a leverage loop whose NAV
+                # phantom-spikes at open and collapses at teardown.
+                rows.append((ts, row["total_value_usd"], row["available_cash_usd"], row["id"], row["positions_json"]))
             return rows, truncated
 
         loop = asyncio.get_event_loop()

@@ -1092,6 +1092,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         returns the latest window. Backend errors degrade to an empty series (the
         default render has other panels); the windowed path is the loud one.
         """
+        from almanak.framework.dashboard.quant_aggregations import _snapshot_net_debt
         from almanak.gateway.proto import gateway_pb2
 
         pnl_points: list[gateway_pb2.PnLDataPoint] = []
@@ -1108,11 +1109,18 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 ts = snap.timestamp
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=UTC)
-                pnl = snap.total_value_usd - initial_value if initial_value > 0 else Decimal("0")
+                # VIB-4983 follow-up: net the BORROW debt leg so the chart NAV
+                # matches the debt-netted "NAV now" tile. Reads the TYPED
+                # PortfolioSnapshot.positions (a real snapshot has no
+                # positions_json attribute); non-leveraged snapshots net
+                # Decimal("0") and stay byte-identical.
+                _count, debt_mark, _debt_cost, _net_cost = _snapshot_net_debt(snap)
+                net_value = snap.total_value_usd - debt_mark
+                pnl = net_value - initial_value if initial_value > 0 else Decimal("0")
                 pnl_points.append(
                     gateway_pb2.PnLDataPoint(
                         timestamp=int(ts.timestamp()),
-                        value_usd=str(snap.total_value_usd),
+                        value_usd=str(net_value),
                         pnl_usd=str(pnl),
                     )
                 )
@@ -1152,12 +1160,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         rows, truncated = await self._state_manager.get_snapshots_in_window(deployment_id, from_dt, to_dt)
 
+        from almanak.framework.dashboard.quant_aggregations import _open_positions_and_net_debt
+
         points: list[NavPoint] = []
         dropped = 0
         # value_confidence is carried in the store projection (the minimal chart
         # column set) for forthcoming confidence-aware NAV rendering; PnLDataPoint
         # has no confidence field yet, so it is intentionally unused here.
-        for ts, value_text, _confidence in rows:
+        for ts, value_text, _confidence, positions_text in rows:
             if not value_text:  # "" or None -> Empty != Zero (unmeasured); never $0
                 dropped += 1
                 continue
@@ -1166,6 +1176,12 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             except (InvalidOperation, ValueError, TypeError):
                 dropped += 1
                 continue
+            # VIB-5170: net the BORROW debt leg per point so the windowed chart
+            # matches the debt-netted "NAV now" tile and the recent-window chart.
+            # positions_json (raw text, projected by get_snapshots_in_window) is the
+            # netting input; non-leveraged points net Decimal("0") (byte-identical).
+            _count, debt_mark, _debt_cost = _open_positions_and_net_debt(positions_text)
+            value -= debt_mark
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=UTC)
             points.append(NavPoint(ts, value))
@@ -2398,7 +2414,9 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         cursor: tuple[datetime, int] | None = None
         if nav_rows:
             state = fold_nav_text(state, nav_rows)
-            last_ts, _total, _cash, last_id = nav_rows[-1]
+            # VIB-5170: rows are (ts, total, cash, id, positions_json); slice the
+            # cursor fields so the trailing positions_json column is ignored here.
+            last_ts, _total, _cash, last_id = nav_rows[-1][:4]
             cursor = (last_ts, last_id)
             if truncated:
                 logger.warning(
@@ -2439,7 +2457,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         if not new_rows:
             return ckpt
         state = fold_nav_text(ckpt.state, new_rows)
-        last_ts, _total, _cash, last_id = new_rows[-1]
+        # VIB-5170: rows carry a trailing positions_json column — slice the cursor fields.
+        last_ts, _total, _cash, last_id = new_rows[-1][:4]
         return _LifetimeDrawdownCheckpoint(
             state=state,
             cursor=(last_ts, last_id),
