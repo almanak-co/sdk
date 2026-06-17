@@ -149,6 +149,44 @@ class TestStateManagerConfiguration:
 
 
 # =============================================================================
+# ACCOUNTING-BACKEND CAPABILITY PROBE (VIB-5173)
+# =============================================================================
+
+
+class TestHasAccountingEventBackend:
+    """``has_accounting_event_backend`` — the structural probe the teardown
+    swap-back clamp uses to distinguish "backend absent" (UNMEASURED) from
+    "backend present, no events" (measured zero). It MUST mirror the guard
+    ``get_accounting_events_sync`` runs internally so a capability check can
+    never diverge from the read it gates (Empty ≠ Zero, VIB-5173)."""
+
+    @pytest.mark.asyncio
+    async def test_true_when_sqlite_warm_backend_wired(self, state_manager):
+        # SQLite warm backend exposes get_accounting_events_sync.
+        assert state_manager.has_accounting_event_backend() is True
+
+    @pytest.mark.asyncio
+    async def test_false_when_no_warm_backend(self):
+        # enable_warm=False → _warm is None → backend structurally absent.
+        config = StateManagerConfig(enable_warm=False)
+        manager = StateManager(config)
+        await manager.initialize()
+        assert manager.has_accounting_event_backend() is False
+        # And the shared [] read contract is unchanged (Empty ≠ Zero is the
+        # CALLER's job — the read still returns []).
+        assert manager.get_accounting_events_sync("deployment:x") == []
+        await manager.close()
+
+    @pytest.mark.asyncio
+    async def test_probe_and_read_agree(self, state_manager):
+        # The read gates on the SAME probe — when the probe is True the read
+        # does not take the unimplemented-fallthrough branch.
+        assert state_manager.has_accounting_event_backend() is True
+        # No events for an unknown deployment → genuinely-empty measured zero.
+        assert state_manager.get_accounting_events_sync("deployment:unknown") == []
+
+
+# =============================================================================
 # CRUD TESTS
 # =============================================================================
 

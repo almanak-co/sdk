@@ -116,32 +116,61 @@ def read_tracked_swap_inventory(
     """Deployment-scoped tracked wallet inventory, or the UNMEASURED sentinel.
 
     Returns ``None`` (unmeasured) when the deployment id is empty, the state
-    manager cannot supply accounting events, or any read / replay fails. Never
-    raises — fail-closed handling lives in :func:`decide_swap_clamp`. Only the
-    accounting ``StateManager`` (``runner.state_manager``) exposes
-    ``get_accounting_events_sync``; the teardown lifecycle state manager does
-    not, so a wrong-flavour manager simply yields the sentinel.
+    manager cannot supply accounting events (no accounting backend wired), or
+    any read / replay fails. Never raises — fail-closed handling lives in
+    :func:`decide_swap_clamp`. Only the accounting ``StateManager``
+    (``runner.state_manager``) exposes ``get_accounting_events_sync``; the
+    teardown lifecycle state manager does not, so a wrong-flavour manager
+    simply yields the sentinel.
 
-    KNOWN LIMITATION (P2, ALM-2766 follow-up VibeCoders/AGI-Strategist):
-    ``StateManager.get_accounting_events_sync`` collapses THREE cases into an
-    empty list — warm backend structurally absent (e.g. hosted before the
-    metrics-database migration), backend raised, and genuinely-no-events —
-    because that shared contract serves PortfolioValuer and others. So a
-    deployment WITH real tracked inventory but a momentarily-absent backend
-    yields ``{}`` here (measured-zero), not the UNMEASURED sentinel: the clamp
-    then SKIPS every swap-back as ``untracked_token`` WITHOUT flagging
-    ``accounting_degraded`` — Empty wrongly treated as Zero. The DIRECTION is
-    safe (under-sweep: we never sweep commingled funds, we just strand the
-    strategy's own tracked tokens unswapped), but the missing degraded flag is
-    an observability gap. Distinguishing absent-vs-empty here cleanly requires
-    changing the shared ``get_accounting_events_sync`` contract (or reaching
-    into ``StateManager._warm`` internals), so it is deferred rather than
-    hacked.
+    EMPTY ≠ ZERO at the backend boundary (VIB-5173). ``StateManager``
+    collapses THREE cases inside ``get_accounting_events_sync`` into an empty
+    list — backend structurally absent (e.g. hosted before the metrics-database
+    migration, or no warm store), backend raised, genuinely-no-events — because
+    that shared contract serves PortfolioValuer and others and must NOT change.
+    Reading the empty list directly would feed ``sum_open_wallet_basis_by_token``
+    a ``{}`` (measured-zero) on the absent-backend case, so a deployment WITH
+    real tracked inventory but an absent backend would skip every swap-back as
+    ``untracked_token`` WITHOUT flagging ``accounting_degraded`` — Empty wrongly
+    treated as Zero. To fix this WITHOUT touching the shared ``[]`` contract we
+    probe ``StateManager.has_accounting_event_backend()`` (the SAME structural
+    guard the read runs internally) BEFORE reading: a ``False`` probe means the
+    backend is absent, so we return the UNMEASURED sentinel ``None`` and the
+    clamp fails closed + flags ``accounting_degraded`` instead of silently
+    under-sweeping.
+
+    Backends that do not expose the probe (e.g. ``GatewayStateManager``, whose
+    pre-migration empty read is a swallowed gRPC error rather than a structural
+    absence the SM can see) keep the prior behaviour — they read when they can
+    supply events. Cleanly distinguishing absent-vs-empty on the gateway path
+    needs a backend-side signal over the proto and is out of scope here
+    (residual follow-up).
     """
     if not deployment_id:
         return None
+    # Require the read method up front: a manager that cannot supply accounting
+    # events (None, or a wrong-flavour/lifecycle manager) yields the sentinel.
+    # Guaranteeing the method exists here also means the capability-probe branch
+    # below can never fall through to an AttributeError on the read call.
     if state_manager is None or not hasattr(state_manager, "get_accounting_events_sync"):
         return None
+    # VIB-5173 capability probe: distinguish a structurally-absent accounting
+    # backend (UNMEASURED) from a genuinely-empty event set (measured zero).
+    probe = getattr(state_manager, "has_accounting_event_backend", None)
+    if callable(probe):
+        try:
+            backend_present = probe()
+        except Exception:  # noqa: BLE001 — read-only DX guard; never block the unwind.
+            return None
+        if not backend_present:
+            # Backend absent → an empty read is unmeasured, not zero. Fail
+            # closed so the clamp flags accounting_degraded (Empty ≠ Zero).
+            logger.warning(
+                "ALM-2766 tracked-inventory read for %s: accounting backend absent "
+                "(has_accounting_event_backend=False) — swap-back clamp will fail closed (unmeasured)",
+                deployment_id,
+            )
+            return None
     try:
         events = state_manager.get_accounting_events_sync(deployment_id)
         return sum_open_wallet_basis_by_token(events, deployment_id)

@@ -3811,6 +3811,25 @@ class StateManager:
             logger.error("Failed to save accounting event: %s", e)
             raise
 
+    def has_accounting_event_backend(self) -> bool:
+        """True iff a warm backend able to serve accounting events is wired.
+
+        Single source of truth for the structural guard that
+        :meth:`get_accounting_events_sync` runs internally — the read consults
+        THIS probe, so a capability check can never drift from the read it
+        gates. Callers that must distinguish "backend structurally absent"
+        (Empty ≠ Zero — UNMEASURED) from "backend present, no events"
+        (measured zero) probe this BEFORE reading: a ``False`` here means an
+        empty read is unmeasured, not zero — e.g. hosted before the
+        metrics-database migration, or a runner with no warm store. This is
+        exactly what the ALM-2766 / VIB-5173 teardown swap-back clamp needs to
+        decide whether to fail closed and flag ``accounting_degraded``.
+
+        Read-only and side-effect-free: does not touch the warm backend and
+        never raises.
+        """
+        return self._warm is not None and hasattr(self._warm, "get_accounting_events_sync")
+
     def get_accounting_events_sync(
         self,
         deployment_id: str,
@@ -3822,12 +3841,24 @@ class StateManager:
         cost_basis_usd / unrealized_pnl_usd / realized_pnl_usd at snapshot time.
         Returns [] when no warm backend or the backend predates this method.
         No LIMIT is applied: accurate cost basis requires the full event history.
+
+        The structural guard is :meth:`has_accounting_event_backend` so the
+        capability probe and this read can never diverge. The ``[]`` return
+        contract is unchanged (PortfolioValuer and other sync consumers rely on
+        it); callers that need the absent-vs-empty distinction probe first.
         """
-        if not self._warm or not hasattr(self._warm, "get_accounting_events_sync"):
+        if not self.has_accounting_event_backend():
             self._unimplemented_warn("get_accounting_events_sync", deployment_id)
             return []
+        # has_accounting_event_backend() is the single structural guard (it
+        # checks exactly ``_warm is not None and hasattr(...)``); restate the
+        # SAME predicate as a local assert so the type-checker can narrow across
+        # the method-call boundary. This cannot diverge from the probe — it is
+        # the identical check — and is runtime-guaranteed to hold here.
+        warm = self._warm
+        assert warm is not None and hasattr(warm, "get_accounting_events_sync")
         try:
-            return self._warm.get_accounting_events_sync(
+            return warm.get_accounting_events_sync(
                 deployment_id=deployment_id,
                 position_key=position_key,
             )
