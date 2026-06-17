@@ -1772,6 +1772,36 @@ class IntentCompiler:
         )
         return self._validate_pool(pool_check, intent_id)
 
+    def _unsupported_lp_compilation_error(
+        self, intent: "LPOpenIntent | LPCloseIntent", intent_label: str
+    ) -> CompilationResult:
+        """Build a capability-scoped FAILED result for an unroutable LP intent.
+
+        Beyond the bare "not supported on <chain>" message, list the protocols
+        that DO support this LP verb so the user can correct the selection.
+        This closes the docs/runtime capability mismatch where the support
+        matrix advertises a protocol generically (e.g. Balancer, which is
+        flash-loan-only) while its LP intents are not routable (ALM-2729).
+
+        Mirrors the existing LP_COLLECT_FEES capability error and uses the same
+        ``CompilerRegistry`` — the registry connector compilers populate as they
+        register, so it reflects what is actually routable in this process.
+        """
+        from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
+
+        protocol = self._resolve_protocol(intent.protocol)
+        message = f"Protocol '{protocol}' is not supported for {intent_label} on {self.chain}."
+
+        supporting = CompilerRegistry.protocols_for_intent(intent.intent_type)
+        if supporting:
+            message += f" Protocols supporting {intent_label}: {', '.join(supporting)}."
+
+        return CompilationResult(
+            status=CompilationStatus.FAILED,
+            intent_id=intent.intent_id,
+            error=message,
+        )
+
     def _compile_lp_open(self, intent: LPOpenIntent) -> CompilationResult:
         """Compile an LP_OPEN intent into an ActionBundle.
 
@@ -1796,11 +1826,7 @@ class IntentCompiler:
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            intent_id=intent.intent_id,
-            error=f"Protocol '{protocol}' is not supported for LP_OPEN on {self.chain}.",
-        )
+        return self._unsupported_lp_compilation_error(intent, "LP_OPEN")
 
     def _dispatch_lp_open_protocol_route(self, intent: LPOpenIntent) -> CompilationResult | None:
         """Route an LP_OPEN intent to the correct protocol-specific compiler.
@@ -1900,11 +1926,7 @@ class IntentCompiler:
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
-        return CompilationResult(
-            status=CompilationStatus.FAILED,
-            intent_id=intent.intent_id,
-            error=f"Protocol '{protocol}' is not supported for LP_CLOSE on {self.chain}.",
-        )
+        return self._unsupported_lp_compilation_error(intent, "LP_CLOSE")
 
     def _dispatch_lp_close_protocol_route(self, intent: LPCloseIntent) -> CompilationResult | None:
         """Route an LP_CLOSE intent to the correct protocol-specific compiler.
