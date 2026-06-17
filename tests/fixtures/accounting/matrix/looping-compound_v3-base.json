@@ -1,0 +1,45 @@
+{
+  "_provenance": {
+    "row_id": "looping-compound_v3-base",
+    "fixture": "looping_compound",
+    "chain": "base",
+    "primitive": "looping",
+    "captured_from": "docs/internal/notes/.tmp/vib5168-matrix/looping-compound_v3-base/accountant.json",
+    "captured_at": "2026-06-17T03:57:46.161381+00:00",
+    "captured_at_commit": "2b1487ce5fe17a890c625f3ccc5c87f38beae024",
+    "post_fix_for": [
+      "VIB-5168"
+    ],
+    "note": "Real-Anvil Track-C L2/L3/L5 coverage for Compound V3 + Morpho Blue (PR #2857 seam); Morpho L5=FAIL until VIB-5040 (on-chain live rate)"
+  },
+  "cells": {
+    "G1": "FAIL",
+    "G10": "PASS",
+    "G11": "SKIP",
+    "G12": "PASS",
+    "G13": "PASS",
+    "G14": "PASS",
+    "G15": "PASS",
+    "G2": "PASS",
+    "G3": "PASS",
+    "G4": "PASS",
+    "G5": "PASS",
+    "G6": "FAIL",
+    "G7": "PASS",
+    "G8": "PASS",
+    "G9": "PASS",
+    "L1": "XFAIL",
+    "L2": "PASS",
+    "L3": "PASS",
+    "L4": "PASS",
+    "L5": "PASS",
+    "L5_22": "XFAIL",
+    "L6": "FAIL"
+  },
+  "scores": {
+    "passed": 16,
+    "failed": 3,
+    "xfailed": 2,
+    "total": 22
+  }
+}
