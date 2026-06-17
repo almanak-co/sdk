@@ -377,11 +377,13 @@ def _decide_token(
     # value_usd=3.58" two seconds after the swap that emptied it), or see a
     # stale zero and strand a real residual (the VIB-5011 mechanism). Same
     # eviction the execution lane performs (_zero_balance_swap_skip_reason).
-    # Best-effort: a failed eviction falls back to the cached value rather
-    # than blocking the phase — but LOUDLY (warning in the plan's audit
-    # trail), because a decision made on a possibly-stale cache is exactly
-    # the incident class this eviction exists to prevent. No-op on
-    # provider-less (paper) snapshots.
+    # Best-effort eviction. If it FAILS we cannot trust the cached balance, so
+    # we fail CLOSED: skip this token (balance_unavailable) rather than decide
+    # on a possibly-stale cache (VIB-5196). Deciding on the stale value could
+    # emit a SWAP for a token the closure already sold — a real money-path
+    # action off untrusted data; skipping only strands recoverable dust. Loud
+    # (warning + audit trail) but non-blocking, matching teardown's inverted
+    # failure semantics. No-op on provider-less (paper) snapshots.
     # NOTE: eviction must stay symbol/protocol-symmetric with the read below —
     # both use the bare symbol (protocol=None). If a future change passes
     # protocol= into market.balance() here, mirror it in the eviction or the
@@ -390,16 +392,18 @@ def _decide_token(
     if callable(invalidate):
         try:
             invalidate(token)
-        except Exception as exc:  # noqa: BLE001 — fall back to the cached value
+        except Exception as exc:  # noqa: BLE001 — fail closed: never decide on an un-evicted cache
             warnings.append(
                 f"could not refresh {token} balance (invalidate_balance failed: {exc}) — "
-                f"deciding on the possibly-stale cached value"
+                f"skipping consolidation for it (fail-closed; will not swap on a possibly-stale balance)"
             )
             logger.warning(
-                "invalidate_balance(%s) failed in consolidation planner; deciding on cached balance",
+                "invalidate_balance(%s) failed in consolidation planner; skipping token "
+                "(fail-closed, no swap on possibly-stale balance)",
                 token,
                 exc_info=True,
             )
+            return _skip(token, "balance_unavailable")
 
     try:
         bal = market.balance(token, chain=chain) if chain else market.balance(token)

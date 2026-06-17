@@ -506,26 +506,36 @@ class TestStaleBalanceMemoVIB5074:
         assert weth.action == "swap"
         assert weth.value_usd == Decimal("0.011") * Decimal("1650")
 
-    def test_invalidate_failure_falls_back_to_cached_balance(self):
-        """Eviction is best-effort: a raising invalidate_balance must not
-        block the phase — the planner proceeds on the cached value, but
-        LOUDLY: the possibly-stale decision must surface in the plan's
-        warning audit trail (Phase 1 spec critique: a silent fallback would
-        recreate the incident class under an eviction-failure path)."""
+    def test_invalidate_failure_fails_closed_never_swaps(self):
+        """VIB-5196: when invalidate_balance() RAISES, the planner can no
+        longer trust the cached balance, so it must fail CLOSED — skip the
+        token (balance_unavailable) and NEVER decide a swap off the
+        possibly-stale memo. The dangerous direction: the closure already sold
+        the token (live 0), but the eviction that would reveal that failed, so
+        the memo still serves a stale-positive balance worth well above the
+        dust floor. Emitting a swap there is a real money-path action for a
+        token the wallet no longer holds; skipping only strands recoverable
+        dust. This is the residual VIB-5074 made loud but left reachable."""
         market = MemoMarket(
-            memo={"WETH": Decimal("0.011")},
-            live={"WETH": Decimal("0.011")},
+            memo={"WETH": Decimal("0.011")},  # stale-positive: pre-closure (~$18)
+            live={"WETH": Decimal("0")},  # truth: the closing swap sold it all
             prices={"WETH": Decimal("1650")},
-            invalidate_raises=True,
+            invalidate_raises=True,  # eviction fails → live truth unreachable
         )
         plan = _plan(market=market, universe={"WETH"})
 
+        # Eviction was attempted, but on failure we skip BEFORE reading the
+        # untrusted balance — fail closed, no swap even though the stale value
+        # (~$18.15) is far above the $5 dust floor.
         assert market.invalidate_calls == ["WETH"]
-        assert _swap_tokens(plan) == [("WETH", "USDC")]
-        # Loud-but-non-blocking: the stale-cache fallback names the token and
-        # the condition in the plan warnings — never a silent degrade.
-        stale = [w for w in plan.warnings if "WETH" in w and "stale" in w.lower()]
-        assert stale, f"expected a loud stale-cache warning, got {plan.warnings}"
+        assert market.balance_calls == []
+        assert _swap_tokens(plan) == []
+        weth = _decision(plan, "WETH")
+        assert weth.action == "skip"
+        assert weth.reason == "balance_unavailable"
+        # Loud-but-non-blocking: the failure names the token in the audit trail.
+        failclosed = [w for w in plan.warnings if "WETH" in w and "invalidate_balance failed" in w]
+        assert failclosed, f"expected a loud fail-closed warning, got {plan.warnings}"
 
     def test_multi_token_universe_evicts_every_token_memo(self):
         """Eviction is per-token across the WHOLE universe — not special-cased
