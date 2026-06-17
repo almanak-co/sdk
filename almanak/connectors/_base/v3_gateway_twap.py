@@ -56,6 +56,22 @@ def _encode_observe_call(seconds_agos: list[int]) -> str:
     return calldata
 
 
+def _read_word(result: bytes, start: int, *, signed: bool = False) -> int:
+    """Read a 32-byte big-endian word at ``start``, raising on a short payload.
+
+    ``int.from_bytes(b"", ...)`` silently returns ``0``, so without an explicit
+    bounds check a truncated ``observe()`` return would decode array lengths /
+    elements as zero instead of failing. Raise ``ValueError`` so the caller
+    (``_twap_call_observe``) normalises it to a typed ``RateHistoryUnavailable``
+    rather than fabricating a price from a malformed payload. Defense-in-depth
+    on top of the caller's try/except (Gemini PR-review feedback, PR #2856).
+    """
+    end = start + 32
+    if end > len(result):
+        raise ValueError(f"observe() response truncated: need bytes [{start}:{end}), have {len(result)}")
+    return int.from_bytes(result[start:end], byteorder="big", signed=signed)
+
+
 def _decode_observe_response(result: bytes) -> tuple[list[int], list[int]]:
     """Decode ``observe`` return data into ``(tickCumulatives, secondsPerLiquidityX128s)``.
 
@@ -63,39 +79,59 @@ def _decode_observe_response(result: bytes) -> tuple[list[int], list[int]]:
     only consume ``tickCumulatives`` to compute TWAP, but
     ``secondsPerLiquidity`` is returned alongside for future callers
     that may want it (liquidity-weighted price impact, etc.).
+
+    Every slice goes through :func:`_read_word`, which bounds-checks the
+    payload before each 32-byte read — a truncated return (array offsets /
+    lengths that point past the data) raises ``ValueError`` instead of
+    silently decoding to zero.
     """
     if len(result) < 128:
         raise ValueError(f"observe() response too short: {len(result)} bytes")
 
-    offset_ticks = int.from_bytes(result[0:32], byteorder="big")
-    offset_liquidity = int.from_bytes(result[32:64], byteorder="big")
+    offset_ticks = _read_word(result, 0)
+    offset_liquidity = _read_word(result, 32)
 
     # tickCumulatives array.
-    tick_array_start = offset_ticks
-    tick_array_len = int.from_bytes(result[tick_array_start : tick_array_start + 32], byteorder="big")
+    tick_array_len = _read_word(result, offset_ticks)
     tick_cumulatives: list[int] = []
     for i in range(tick_array_len):
-        element_start = tick_array_start + 32 + (i * 32)
+        element_start = offset_ticks + 32 + (i * 32)
         # int56 stored signed in the low 7 bytes; read as int256 with
         # sign extension. Empirically, V3 pools return values that fit
         # comfortably in int56 but the codec is int256 on the wire.
-        raw_value = int.from_bytes(
-            result[element_start : element_start + 32],
-            byteorder="big",
-            signed=True,
-        )
-        tick_cumulatives.append(raw_value)
+        tick_cumulatives.append(_read_word(result, element_start, signed=True))
 
     # secondsPerLiquidityCumulativeX128s array.
-    liq_array_start = offset_liquidity
-    liq_array_len = int.from_bytes(result[liq_array_start : liq_array_start + 32], byteorder="big")
+    liq_array_len = _read_word(result, offset_liquidity)
     liquidity_cumulatives: list[int] = []
     for i in range(liq_array_len):
-        element_start = liq_array_start + 32 + (i * 32)
-        raw_value = int.from_bytes(result[element_start : element_start + 32], byteorder="big")
-        liquidity_cumulatives.append(raw_value)
+        element_start = offset_liquidity + 32 + (i * 32)
+        liquidity_cumulatives.append(_read_word(result, element_start))
 
     return tick_cumulatives, liquidity_cumulatives
+
+
+def _twap_tick_from_cumulatives(tick_diff: int, seconds_elapsed: int) -> int:
+    """Average tick over the window, matching on-chain Uniswap V3 oracle semantics.
+
+    The on-chain oracle computes ``tickCumulativeDelta / secondsElapsed`` in
+    Solidity, where integer division **truncates toward zero**. Python's ``//``
+    **floors toward negative infinity**, so for a negative ``tick_diff`` not
+    divisible by ``seconds_elapsed`` the two disagree by one tick (~1bp of
+    price). Reproduce the Solidity truncation exactly with pure integer
+    arithmetic.
+
+    ``int(tick_diff / seconds_elapsed)`` would also truncate toward zero but
+    routes through float division, losing precision on large ``int56``
+    ``tick_cumulatives`` — so we stay in integer space via ``divmod``.
+
+    ``seconds_elapsed`` is guaranteed ``> 0`` by the caller's window
+    validation, so ``divmod`` yields a non-negative remainder and ``q`` is the
+    floor; nudging it up by one for a negative, non-divisible numerator
+    recovers truncation-toward-zero.
+    """
+    q, r = divmod(tick_diff, seconds_elapsed)
+    return q + 1 if (r != 0 and tick_diff < 0) else q
 
 
 def _tick_to_price(
@@ -138,6 +174,17 @@ async def _fetch_pool_tokens_and_decimals(
         {"to": pool_address, "data": f"0x{_TOKEN1_SELECTOR}"},
         block_identifier=block_identifier,
     )
+
+    # An empty / truncated token0()/token1() return (pool address isn't a
+    # contract, or the node returned partial data) would slice ``[-20:]`` over
+    # fewer than 20 bytes and surface as a confusing checksum-address
+    # ValueError. Validate the 32-byte word length first so the failure names
+    # the real cause. Gemini PR-review feedback (PR #2856).
+    if len(t0_data) < 32 or len(t1_data) < 32:
+        raise ValueError(
+            f"token0()/token1() returned truncated data for pool {pool_address!r} "
+            f"(token0={len(t0_data)} bytes, token1={len(t1_data)} bytes)"
+        )
 
     # Each token() return is a single 32-byte word: address right-padded.
     t0_address = web3.to_checksum_address("0x" + t0_data[-20:].hex())
@@ -314,7 +361,7 @@ async def fetch_v3_twap_observation(
     )
 
     tick_diff = tick_cumulatives[1] - tick_cumulatives[0]
-    tick_twap = tick_diff // seconds_elapsed
+    tick_twap = _twap_tick_from_cumulatives(tick_diff, seconds_elapsed)
 
     t0_decimals, t1_decimals = await _twap_resolve_pool_decimals(
         web3,

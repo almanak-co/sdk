@@ -45,6 +45,16 @@ class TestPriceTickRoundtrip:
         with pytest.raises(SolanaCLMMTickError, match="positive"):
             price_to_tick(Decimal("-1"), 9, 6)
 
+    def test_price_to_tick_rejects_float_underflow(self) -> None:
+        """A positive price that underflows to 0.0 once cast to float raises a
+        typed error, not an opaque ``math domain error`` from ``math.log(0)``.
+
+        A tiny Decimal price combined with a large negative decimal adjustment
+        (``decimals_b - decimals_a``) collapses to ``0.0`` in float space.
+        """
+        with pytest.raises(SolanaCLMMTickError, match="underflow"):
+            price_to_tick(Decimal("1e-200"), decimals_a=200, decimals_b=0)
+
 
 class TestAlignTickToSpacing:
     @pytest.mark.parametrize("spacing", [1, 10, 60, 120])

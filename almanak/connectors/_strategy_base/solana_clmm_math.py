@@ -65,6 +65,16 @@ def price_to_tick(price: Decimal, decimals_a: int, decimals_b: int) -> int:
     decimal_adjustment = Decimal(10) ** (decimals_b - decimals_a)
     adjusted_price = float(price * decimal_adjustment)
 
+    # A positive ``price`` can still underflow to ``0.0`` once cast to ``float``
+    # (tiny Decimal × a large negative decimal adjustment), which would make
+    # ``math.log`` raise an opaque ``ValueError: math domain error``. Raise the
+    # typed CLMM error instead so callers get a clear, attributable failure.
+    if adjusted_price <= 0:
+        raise SolanaCLMMTickError(
+            f"Price {price} underflows to a non-positive adjusted price "
+            f"(decimals_a={decimals_a}, decimals_b={decimals_b})"
+        )
+
     tick = math.floor(math.log(adjusted_price) / math.log(1.0001))
 
     if tick < MIN_TICK or tick > MAX_TICK:
