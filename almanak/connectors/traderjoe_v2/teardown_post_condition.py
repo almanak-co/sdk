@@ -7,12 +7,24 @@ from typing import Any
 from almanak.connectors._strategy_base.teardown_post_condition import ClosureCheckResult
 
 
+def _has_pool_descriptor(details: dict[str, Any]) -> bool:
+    """True when ``details`` carries ``token_x`` + ``token_y`` + ``bin_step``.
+
+    These three keys are the minimal LB-pair descriptor: combined with the
+    on-chain ``LBFactory`` they resolve to a single LBPair address, so the
+    post-condition can derive the pool itself instead of fail-closing when a
+    strategy reports the pair by its tokens rather than by a pre-resolved
+    42-char address (ALM-2807 L3).
+    """
+    return all(details.get(key) not in (None, "") for key in ("token_x", "token_y", "bin_step"))
+
+
 def _resolve_tj_v2_target(
     position: Any,
     gateway_client: Any | None,
     protocol: str,
     position_id: str,
-) -> ClosureCheckResult | tuple[str, str]:
+) -> ClosureCheckResult | tuple[str | None, str]:
     """Run the fail-closed input guards and resolve the on-chain LB-pair target.
 
     Returns a short-circuit ``ClosureCheckResult`` — a non-LP scope skip
@@ -21,6 +33,13 @@ def _resolve_tj_v2_target(
     no ``gateway_client`` — or the validated ``(pool_address, chain)`` pair when
     the position is eligible for an on-chain balance check. Never raises: an
     unverifiable position must surface as ``closed=False``, not an exception.
+
+    ``pool_address`` in the returned pair is ``None`` when the position carries
+    no explicit 42-char address but DOES carry a ``token_x``/``token_y``/
+    ``bin_step`` descriptor: the caller then derives the LBPair on-chain. This
+    is what lets a strategy whose ``get_open_positions()`` reports only the
+    token pair (e.g. ``demo_traderjoe_crisis_lp`` / ``demo_traderjoe_pnl_lp``)
+    still be on-chain verified instead of fail-closing (ALM-2807 L3).
     """
     # ``protocol="traderjoe_v2"`` is shared between LP positions and TOKEN
     # positions reported by swap-only strategies. The LB-pair-shaped check must
@@ -42,28 +61,43 @@ def _resolve_tj_v2_target(
 
     details = getattr(position, "details", None) or {}
     pool_address = details.get("pool_address") or details.get("pool_addr") or details.get("pool")
-    if not pool_address:
-        return ClosureCheckResult(
-            closed=False,
-            protocol=protocol,
-            position_id=position_id,
-            error=(
-                "TraderJoe V2 post-condition needs position.details['pool_address'] "
-                "(or 'pool', 'pool_addr'); none found"
-            ),
-        )
+    explicit_is_valid = isinstance(pool_address, str) and pool_address.startswith("0x") and len(pool_address) == 42
 
-    if not (isinstance(pool_address, str) and pool_address.startswith("0x") and len(pool_address) == 42):
-        return ClosureCheckResult(
-            closed=False,
-            protocol=protocol,
-            position_id=position_id,
-            error=(
-                f"TraderJoe V2 post-condition: position.details pool_address must be a "
-                f"42-char hex address (got {pool_address!r}). Strategies must populate "
-                "details['pool_address'] with the LB pair contract address, not a symbol."
-            ),
-        )
+    if not explicit_is_valid:
+        # No usable explicit address. Two acceptable fallbacks before we
+        # fail closed:
+        #   1. A token_x/token_y/bin_step descriptor → derive the LBPair
+        #      on-chain (the caller does this once it has an adapter). This
+        #      is what lets strategies that report only the token pair be
+        #      verified (ALM-2807 L3).
+        #   2. Nothing usable → fail closed, preserving the precise error so
+        #      operators know exactly what to populate.
+        if _has_pool_descriptor(details):
+            pool_address = None  # caller derives from token_x/token_y/bin_step
+        elif pool_address:
+            return ClosureCheckResult(
+                closed=False,
+                protocol=protocol,
+                position_id=position_id,
+                error=(
+                    f"TraderJoe V2 post-condition: position.details pool_address must be a "
+                    f"42-char hex address (got {pool_address!r}), or supply "
+                    "details['token_x']/['token_y']/['bin_step'] to derive it. Strategies "
+                    "must populate details with the LB pair contract address or its token pair, "
+                    "not a symbol triple alone."
+                ),
+            )
+        else:
+            return ClosureCheckResult(
+                closed=False,
+                protocol=protocol,
+                position_id=position_id,
+                error=(
+                    "TraderJoe V2 post-condition needs position.details['pool_address'] "
+                    "(or 'pool', 'pool_addr'), or a 'token_x'/'token_y'/'bin_step' "
+                    "descriptor to derive it; none found"
+                ),
+            )
 
     # Fail closed on a missing chain rather than guessing "avalanche": the LB
     # pair address is chain-scoped, so verifying against the wrong chain would
@@ -159,6 +193,29 @@ def traderjoe_v2_post_condition(
         )
 
     details = getattr(position, "details", None) or {}
+
+    # Derive the LBPair address from the token_x/token_y/bin_step descriptor
+    # when the strategy did not pre-resolve a 42-char pool_address (ALM-2807
+    # L3). The LBFactory pair address is immutable and the read routes through
+    # the same adapter (gateway in hosted, rpc_url locally) as the balance
+    # check below — no extra egress. Fail closed if the pair cannot be
+    # resolved: an unverifiable position must never report "closed".
+    if pool_address is None:
+        try:
+            token_x_addr = adapter.resolve_token_address(str(details["token_x"]))
+            token_y_addr = adapter.resolve_token_address(str(details["token_y"]))
+            pool_address = sdk.get_pool_address(token_x_addr, token_y_addr, int(details["bin_step"]))
+        except Exception as exc:  # noqa: BLE001 — fail closed on unresolvable pair
+            return ClosureCheckResult(
+                closed=False,
+                protocol=protocol,
+                position_id=position_id,
+                error=(
+                    "TraderJoe V2 post-condition could not derive the LBPair address from "
+                    f"details token_x={details.get('token_x')!r} token_y={details.get('token_y')!r} "
+                    f"bin_step={details.get('bin_step')!r}: {exc}"
+                ),
+            )
     bin_ids_raw = details.get("bin_ids") or []
     try:
         known_bin_ids = [int(b) for b in bin_ids_raw]

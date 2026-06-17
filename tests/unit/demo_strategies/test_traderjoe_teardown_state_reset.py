@@ -87,3 +87,29 @@ def test_open_sets_active(strategy_class):
     strat.on_intent_executed(_FakeIntent("LP_OPEN"), success=True, result=None)
 
     assert strat._state == "active"
+
+
+@pytest.mark.parametrize("strategy_class", STRATEGIES)
+def test_open_positions_carry_verifiable_descriptor(strategy_class):
+    """ALM-2807 Layer 3: get_open_positions() must hand the TraderJoe V2
+    teardown post-condition enough to verify on-chain — the token descriptor
+    (token_x/token_y/bin_step, from which the LBPair is derived) AND the
+    captured bin_ids (for an exact per-bin balanceOf instead of the weak
+    active-id +/-50 fallback scan). Previously crisis omitted bin_ids and the
+    verifier could not even derive the pool, so a fully-drained position was
+    reported "still open".
+    """
+    strat = _make(strategy_class)
+    strat._state = "active"
+    strat._position_bin_ids = [8375873, 8375874, 8375875]
+
+    summary = strat.get_open_positions()
+    assert summary.positions, "active position must be reported for teardown"
+    details = summary.positions[0].details
+
+    # Token descriptor → the post-condition derives the LBPair on-chain.
+    assert details["token_x"] == "WAVAX"
+    assert details["token_y"] == "USDC"
+    assert int(details["bin_step"]) == 20
+    # Captured bin_ids → strong per-bin verification.
+    assert details["bin_ids"] == [8375873, 8375874, 8375875]

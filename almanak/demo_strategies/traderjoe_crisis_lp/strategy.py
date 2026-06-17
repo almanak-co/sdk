@@ -125,8 +125,7 @@ class TraderJoeCrisisLPStrategy(IntentStrategy):
         self._rebalance_count = 0
 
         logger.info(
-            "TraderJoeCrisisLP initialized: pool=%s/%s/%d, "
-            "amounts=%s %s + %s %s, bins=%d, rebalance_threshold=%s",
+            "TraderJoeCrisisLP initialized: pool=%s/%s/%d, amounts=%s %s + %s %s, bins=%d, rebalance_threshold=%s",
             self.token_x,
             self.token_y,
             self.bin_step,
@@ -165,9 +164,7 @@ class TraderJoeCrisisLPStrategy(IntentStrategy):
 
             total_usd = x_usd + y_usd
             if total_usd < self.min_position_usd:
-                return Intent.hold(
-                    reason=f"Total ${total_usd:.2f} below min_position_usd ${self.min_position_usd:.2f}"
-                )
+                return Intent.hold(reason=f"Total ${total_usd:.2f} below min_position_usd ${self.min_position_usd:.2f}")
 
             swap_intent = self._rebalance_swap_intent(x_usd, y_usd, total_usd)
             if swap_intent is not None:
@@ -223,9 +220,7 @@ class TraderJoeCrisisLPStrategy(IntentStrategy):
 
                 close_kwargs: dict[str, Any] = {}
                 if self._position_bin_ids:
-                    close_kwargs["protocol_params"] = {
-                        "bin_ids": list(self._position_bin_ids)
-                    }
+                    close_kwargs["protocol_params"] = {"bin_ids": list(self._position_bin_ids)}
                 return Intent.lp_close(
                     position_id="traderjoe_crisis_lp_0",
                     pool=f"{self.token_x}/{self.token_y}/{self.bin_step}",
@@ -251,9 +246,7 @@ class TraderJoeCrisisLPStrategy(IntentStrategy):
 
         return Intent.hold(reason=f"Holding (state={self._state}, price={base_price:.2f})")
 
-    def _rebalance_swap_intent(
-        self, x_usd: Decimal, y_usd: Decimal, total_usd: Decimal
-    ) -> Intent | None:
+    def _rebalance_swap_intent(self, x_usd: Decimal, y_usd: Decimal, total_usd: Decimal) -> Intent | None:
         """Swap the heavy side toward a ~50/50 USD split before (re)opening.
 
         Returns a SWAP intent when inventory is skewed beyond a 10% tolerance
@@ -365,9 +358,7 @@ class TraderJoeCrisisLPStrategy(IntentStrategy):
         self._entry_price = Decimal(ep) if ep else None
         # safe_int_list: drop malformed entries with a warning rather
         # than aborting load_persistent_state on bad data (VIB-3757).
-        self._position_bin_ids = safe_int_list(
-            state.get("position_bin_ids"), name="position_bin_ids"
-        )
+        self._position_bin_ids = safe_int_list(state.get("position_bin_ids"), name="position_bin_ids")
         self._rebalance_count = state.get("rebalance_count", 0)
 
     # =========================================================================
@@ -397,6 +388,12 @@ class TraderJoeCrisisLPStrategy(IntentStrategy):
                         "token_x": self.token_x,
                         "token_y": self.token_y,
                         "bin_step": self.bin_step,
+                        # The TraderJoe V2 teardown post-condition derives the
+                        # LBPair from token_x/token_y/bin_step; passing the
+                        # captured bin_ids upgrades verification from the
+                        # active-id +/-50 fallback scan to an exact per-bin
+                        # balanceOf check (ALM-2807 L3).
+                        "bin_ids": list(self._position_bin_ids),
                         "rebalance_count": self._rebalance_count,
                     },
                 )

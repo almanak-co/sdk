@@ -29,6 +29,8 @@ from almanak.framework.teardown.post_conditions import (
 
 WALLET = "0x1111111111111111111111111111111111111111"
 POOL = "0x2222222222222222222222222222222222222222"
+TOKEN_X = "0x3333333333333333333333333333333333333333"
+TOKEN_Y = "0x4444444444444444444444444444444444444444"
 
 
 def _make_position(
@@ -213,6 +215,120 @@ class TestTraderJoeV2PostCondition:
         assert result.closed is False
         assert "42-char hex address" in (result.error or "")
         assert "WAVAX/USDC/20" in (result.error or "")
+
+    # -- ALM-2807 L3: derive the LBPair from a token_x/token_y/bin_step
+    #    descriptor when no explicit pool_address is supplied. ----------------
+    @staticmethod
+    def _patch_adapter_for_derive(adapter_cls: MagicMock, sdk: MagicMock) -> None:
+        """Wire a mocked adapter so token symbols resolve and sdk is swapped in."""
+        adapter = adapter_cls.return_value
+        adapter.sdk = sdk
+        adapter.resolve_token_address.side_effect = lambda sym: {
+            "WAVAX": TOKEN_X,
+            "USDC": TOKEN_Y,
+        }[sym]
+
+    def test_derives_pool_from_token_descriptor_strong_mode(self) -> None:
+        """A position reporting only token_x/token_y/bin_step (+ bin_ids) and NO
+        pool_address must derive the LBPair on-chain and verify per-bin, not
+        fail closed. This is the demo_traderjoe_crisis_lp / pnl_lp shape.
+        """
+        sdk = MagicMock()
+        sdk.get_pool_address.return_value = POOL
+        sdk.get_position_balances_for_ids.return_value = {}
+
+        with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls:
+            self._patch_adapter_for_derive(adapter_cls, sdk)
+            position = SimpleNamespace(
+                protocol="traderjoe_v2",
+                position_id="tj-derive",
+                chain="avalanche",
+                details={"token_x": "WAVAX", "token_y": "USDC", "bin_step": 20, "bin_ids": [100, 101]},
+            )
+            result = traderjoe_v2_post_condition(
+                position=position,
+                wallet_address=WALLET,
+                rpc_url="http://localhost:8545",
+            )
+
+        assert result.closed is True
+        assert result.residual == {}
+        sdk.get_pool_address.assert_called_once_with(TOKEN_X, TOKEN_Y, 20)
+        sdk.get_position_balances_for_ids.assert_called_once_with(POOL, WALLET, [100, 101])
+
+    def test_derives_pool_then_detects_residual(self) -> None:
+        """Derivation path still catches real residual liquidity (closed=False)."""
+        sdk = MagicMock()
+        sdk.get_pool_address.return_value = POOL
+        sdk.get_position_balances_for_ids.return_value = {100: 42}
+
+        with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls:
+            self._patch_adapter_for_derive(adapter_cls, sdk)
+            position = SimpleNamespace(
+                protocol="traderjoe_v2",
+                position_id="tj-derive-residual",
+                chain="avalanche",
+                details={"token_x": "WAVAX", "token_y": "USDC", "bin_step": 20, "bin_ids": [100]},
+            )
+            result = traderjoe_v2_post_condition(
+                position=position,
+                wallet_address=WALLET,
+                rpc_url="http://localhost:8545",
+            )
+
+        assert result.closed is False
+        assert result.residual["bin_balances"] == {100: 42}
+        assert result.residual["pool_address"] == POOL
+
+    def test_derives_pool_fallback_scan_when_no_bin_ids(self) -> None:
+        """Derive the pool from tokens, then fall back to the active-id +/-50
+        scan (weak mode) when bin_ids are absent — still verifies, never
+        fail-closes on a token-only descriptor.
+        """
+        sdk = MagicMock()
+        sdk.get_pool_address.return_value = POOL
+        sdk.get_position_balances.return_value = {}
+
+        with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls:
+            self._patch_adapter_for_derive(adapter_cls, sdk)
+            position = SimpleNamespace(
+                protocol="traderjoe_v2",
+                position_id="tj-derive-fallback",
+                chain="avalanche",
+                details={"token_x": "WAVAX", "token_y": "USDC", "bin_step": 20},
+            )
+            result = traderjoe_v2_post_condition(
+                position=position,
+                wallet_address=WALLET,
+                rpc_url="http://localhost:8545",
+            )
+
+        assert result.closed is True
+        assert "fallback_scan" in result.residual
+        sdk.get_pool_address.assert_called_once_with(TOKEN_X, TOKEN_Y, 20)
+        sdk.get_position_balances.assert_called_once_with(POOL, WALLET)
+
+    def test_derive_failure_fails_closed(self) -> None:
+        """An unresolvable token pair must fail closed (never report closed)."""
+        sdk = MagicMock()
+        sdk.get_pool_address.side_effect = RuntimeError("pool not found")
+
+        with patch("almanak.connectors.traderjoe_v2.TraderJoeV2Adapter") as adapter_cls:
+            self._patch_adapter_for_derive(adapter_cls, sdk)
+            position = SimpleNamespace(
+                protocol="traderjoe_v2",
+                position_id="tj-derive-fail",
+                chain="avalanche",
+                details={"token_x": "WAVAX", "token_y": "USDC", "bin_step": 20},
+            )
+            result = traderjoe_v2_post_condition(
+                position=position,
+                wallet_address=WALLET,
+                rpc_url="http://localhost:8545",
+            )
+
+        assert result.closed is False
+        assert "could not derive" in (result.error or "")
 
     def test_sdk_init_failure_returns_error(self) -> None:
         with patch(
