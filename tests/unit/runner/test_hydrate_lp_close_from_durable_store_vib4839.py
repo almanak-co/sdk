@@ -11,11 +11,13 @@ contract is cheap to regress-test without standing up the full emit chokepoint.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from almanak.framework.accounting.position_context_provider import PositionContextProvider
 from almanak.framework.runner.strategy_runner import RunnerConfig, StrategyRunner
 
 
@@ -206,7 +208,7 @@ async def test_returns_none_and_warns_when_backend_raises(caplog) -> None:
 
 @pytest.mark.asyncio
 async def test_payload_shape_matches_cache_entry_contract() -> None:
-    """The returned dict has exactly the 8 keys the in-memory cache writes,
+    """The returned dict has exactly the keys the in-memory cache writes,
     so consumers (``_apply_lp_close_columns``) can't tell the source apart.
     """
     sm = MagicMock()
@@ -223,6 +225,8 @@ async def test_payload_shape_matches_cache_entry_contract() -> None:
         "liquidity",
         "token0",
         "token1",
+        "amount0",
+        "amount1",
     }
 
 
@@ -239,6 +243,49 @@ async def test_payload_coerces_string_fields_to_str() -> None:
     assert payload["liquidity"] == "99999"
     assert payload["ledger_entry_id"] == "42"
     assert payload["value_usd"] == "3.14"
+
+
+@pytest.mark.asyncio
+async def test_payload_numeric_fields_preserve_empty_not_zero() -> None:
+    """Numeric fields (``value_usd``/``liquidity``/``amount0``/``amount1``) feed valuation,
+    so the coercion must keep Empty≠Zero: a measured zero survives as ``"0"`` while
+    ``None``/``""`` become ``""`` (unmeasured), matching the in-memory
+    ``_update_recent_open_events_cache`` twin. A naive ``or ""`` would collapse a falsy
+    ``Decimal("0")`` / ``0`` into ``""``."""
+    sm = MagicMock()
+    sm.get_position_history = AsyncMock(
+        return_value=[_open_row(value_usd=Decimal("0"), liquidity=0, amount0="0", amount1=None)]
+    )
+    runner = _Runner(state_manager=sm)
+    payload = await runner._hydrate_lp_close_from_durable_store(deployment_id="d", position_id="p1")
+    assert payload is not None
+    assert payload["value_usd"] == "0"
+    assert payload["liquidity"] == "0"
+    assert payload["amount0"] == "0"
+    assert payload["amount1"] == ""
+
+
+@pytest.mark.asyncio
+async def test_provider_bounds_open_selection_by_close_timestamp() -> None:
+    """Repair-style callers can avoid leaking a later reopen onto an earlier CLOSE."""
+    sm = MagicMock()
+    sm.get_position_history = AsyncMock(
+        return_value=[
+            _open_row(timestamp="2026-05-22T10:00:00", value_usd="1"),
+            _close_row(timestamp="2026-05-22T11:00:00"),
+            _open_row(timestamp="2026-05-22T12:00:00", value_usd="2"),
+        ]
+    )
+    provider = PositionContextProvider(sm)
+
+    payload = await provider.lp_close_open_payload(
+        deployment_id="d",
+        position_id="5500290",
+        close_timestamp="2026-05-22T10:30:00",
+    )
+
+    assert payload is not None
+    assert payload["value_usd"] == "1"
 
 
 @pytest.mark.asyncio

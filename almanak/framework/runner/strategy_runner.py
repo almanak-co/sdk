@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from ..vault.lifecycle import VaultLifecycleManager
     from .teardown_commit import TeardownCommitOutcome
 
+from ..accounting.position_context_provider import PositionContextProvider
 from ..alerting.alert_manager import AlertManager
 from ..api.timeline import TimelineEvent, TimelineEventType, add_event
 from ..data.interfaces import BalanceProvider, PriceOracle
@@ -2645,59 +2646,12 @@ class StrategyRunner:
         carry-forward path in ``build_position_event_from_intent`` picks
         it up transparently.
         """
-        sm = getattr(self, "state_manager", None)
-        if sm is None or not hasattr(sm, "get_position_history"):
-            # VIB-4839 — UAT-card criterion 5 (loud + durable per blueprint
-            # 27 §14.1).  A missing durable surface is the silent-failure
-            # shape that hid the hosted GSM hydration gap; surface it so any
-            # future backend regression that drops ``get_position_history``
-            # is uniformly observable.  We still fall through to the
-            # "no durable OPEN" path (Empty != Zero); never raise here.
-            logger.warning(
-                "lp_close_durable_hydration.unavailable deployment_id=%s position_id=%s "
-                "reason=state_manager_or_method_absent has_state_manager=%s has_method=%s",
-                deployment_id,
-                position_id,
-                sm is not None,
-                hasattr(sm, "get_position_history") if sm is not None else False,
-            )
-            return None
-        try:
-            history = await sm.get_position_history(deployment_id, position_id)
-        except Exception as exc:  # noqa: BLE001 — fail-closed: cache stays empty
-            logger.warning(
-                "lp_close_durable_hydration.failed deployment_id=%s position_id=%s err=%s",
-                deployment_id,
-                position_id,
-                exc,
-            )
-            return None
-        if not history:
-            return None
-        # get_position_history returns rows ASC by timestamp; the most-recent
-        # OPEN is the one we want to mirror (re-opens of the same id are
-        # rare on LP NFTs, but if they happen the later OPEN wins — same
-        # ordering rule as _collect_open_positions in _run_loop_helpers.py).
-        # VIB-4896 — selection rule extracted to ``select_open_for_lp_close``
-        # (pnl_attributor) so the offline repair CLI shares it. ``close_
-        # timestamp=None`` preserves the runner's no-upper-bound behaviour.
-        from almanak.framework.observability.pnl_attributor import (
-            select_open_for_lp_close,
+        provider = PositionContextProvider(getattr(self, "state_manager", None), log=logger)
+        return await provider.lp_close_open_payload(
+            deployment_id=deployment_id,
+            position_id=position_id,
+            close_timestamp=None,
         )
-
-        latest_open = select_open_for_lp_close(history, close_timestamp=None)
-        if latest_open is None:
-            return None
-        return {
-            "value_usd": str(latest_open.get("value_usd") or ""),
-            "ledger_entry_id": str(latest_open.get("ledger_entry_id") or ""),
-            "timestamp": str(latest_open.get("timestamp") or ""),
-            "tick_lower": latest_open.get("tick_lower"),
-            "tick_upper": latest_open.get("tick_upper"),
-            "liquidity": str(latest_open.get("liquidity") or ""),
-            "token0": str(latest_open.get("token0") or ""),
-            "token1": str(latest_open.get("token1") or ""),
-        }
 
     def _maybe_enrich_result_with_runner_hooks(self, result: Any, chain: str) -> None:
         """Run connector-owned best-effort result enrichment before ledger writes."""
