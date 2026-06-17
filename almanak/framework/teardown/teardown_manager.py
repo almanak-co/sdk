@@ -47,6 +47,7 @@ from almanak.framework.teardown.models import (
     TeardownState,
     TeardownStatus,
     calculate_max_acceptable_loss,
+    encode_consolidation_consent,
 )
 from almanak.framework.teardown.oracle_warmup import warm_and_validate_oracle
 from almanak.framework.teardown.safety_guard import SafetyGuard
@@ -934,6 +935,19 @@ class TeardownManager:
             # (same plan, e.g. completed_intents=1/current_intent_index=0) must
             # keep ``completed_intents`` so it still skips finished intents.
             state.completed_intents = 0
+            # VIB-5174: the regenerated plan is a brand-new CLOSING plan, NOT the
+            # consolidation tail the operator consent was stamped for. Operator
+            # consent (set True only by ``run_token_consolidation`` for a MANUAL
+            # consolidation) must NOT carry over to this fresh closing plan — its
+            # ``amount='all'`` swap-backs would otherwise run UNCLAMPED (the
+            # ALM-2766 clamp is gated loop-wide on ``consolidation_consent``),
+            # sweeping commingled wallet funds. Reset to the fail-safe default so
+            # the regenerated swap-backs re-clamp (safe under-sweep direction).
+            # Reset BOTH the field AND the ``config_json`` reserved key, because
+            # the save-site OR-merge (``consolidation_consent or decode(config_json)``)
+            # would otherwise resurrect True from the snapshot on the next save.
+            state.consolidation_consent = False
+            state.config_json = encode_consolidation_consent(state.config_json, False)
 
         # Parse intents from state
         intents_data = json.loads(state.pending_intents_json) if state.pending_intents_json else []
@@ -1032,6 +1046,14 @@ class TeardownManager:
             start_from_index=resume_from_index,
             price_oracle=price_oracle,
             market=market,
+            # VIB-5174: thread the persisted consent so a resumed MANUAL
+            # consolidation tail does NOT re-clamp the operator-consented
+            # full-wallet sweep. Default False (closing-phase resume, or an
+            # AUTOMATIC teardown, or a pre-feature row) keeps the clamp ON.
+            # Safe either way: the resume index is past every closing intent,
+            # so consent only ever reaches the consolidation swaps it was
+            # stamped for.
+            consolidation_consent=state.consolidation_consent,
         )
 
     async def run_token_consolidation(
@@ -1171,6 +1193,20 @@ class TeardownManager:
             teardown_state.pending_intents_json = json.dumps([*existing, *serialized])
             teardown_state.total_intents = start_from_index + len(plan.intents)
             teardown_state.status = TeardownStatus.EXECUTING
+            # VIB-5174: persist the consent decision ALONGSIDE the extended plan so
+            # a crash mid-consolidation resumes with the same consent. The closing
+            # intents at [0, start_from_index) are already complete, so on resume
+            # ``_execute_intents`` only re-touches the consolidation tail — stamping
+            # the teardown-level flag never disables the clamp for a closing-intent
+            # swap-back. Mirrors the in-process ``consolidation_consent=`` arg below.
+            teardown_state.consolidation_consent = not is_auto_mode
+            # Keep the in-memory ``config_json`` snapshot in sync with the field so
+            # the two never diverge in-process (the save layer OR-merges anyway, but
+            # an in-process reader of ``config_json`` must see the same grant). This
+            # is the in-memory mirror of the regeneration reset in ``resume()``.
+            teardown_state.config_json = encode_consolidation_consent(
+                teardown_state.config_json, teardown_state.consolidation_consent
+            )
             teardown_state.updated_at = datetime.now(UTC)
             if self.state_manager:
                 await self.state_manager.save_teardown_state(teardown_state)
