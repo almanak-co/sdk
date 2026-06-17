@@ -496,6 +496,86 @@ def _get_all_tx_results(row: TradeTapeRow) -> list[dict]:
     return [tx for tx in txs if isinstance(tx, dict)]
 
 
+def _get_sub_transactions(row: TradeTapeRow) -> list[dict]:
+    """Pull the ``sub_transactions`` array off a row, defensively.
+
+    VIB-4087 emits ``sub_transactions`` for *every* row that executed at
+    least one tx — single-tx included — with a per-leg ``status``
+    (``"success"`` / ``"failure"``) derived from ``int(receipt.status)``
+    (``observability.ledger._build_sub_transactions``). This is the
+    authoritative on-chain per-leg verdict and is present on far more
+    rows than the multi-tx-only ``all_tx_results``.
+    """
+    data = _parse_extracted_data(row)
+    txs = data.get("sub_transactions")
+    if not isinstance(txs, list):
+        return []
+    return [tx for tx in txs if isinstance(tx, dict)]
+
+
+def _leg_landed(tx: dict) -> bool | None:
+    """On-chain success of a single sub-tx, or ``None`` if unmeasured.
+
+    Empty != Zero: a leg with neither ``status`` nor ``success`` is
+    *unmeasured*, not failed — we return ``None`` so the caller can
+    decide to defer rather than invent a verdict.
+    """
+    status = tx.get("status")
+    if status is not None:
+        return str(status).lower() == "success"
+    success = tx.get("success")
+    if success is not None:
+        return bool(success)
+    return None
+
+
+def _classify_downgrade_reason(error: str | None) -> str:
+    """Bucket a framework downgrade error into a short, operator-readable reason.
+
+    Mirrors the runner's ``_classify_failure_reason`` keyword buckets for
+    the two paths that write ``transaction_ledger.success=False`` on a
+    tx that *did* land on-chain: the slippage circuit-breaker and the
+    reconciliation-failure finalizer (``strategy_runner.py``).
+    """
+    text = (error or "").lower()
+    if "slippage" in text:
+        return "slippage breach"
+    if "reconcil" in text or text.startswith("recon"):
+        return "reconciliation downgraded"
+    return "flagged post-execution"
+
+
+def _resolve_onchain_display_status(row: TradeTapeRow) -> tuple[bool | None, str | None]:
+    """Resolve the tape's headline status from on-chain per-leg receipts.
+
+    ALM-2759 — ``transaction_ledger.success`` is the *framework verdict*
+    ("iteration completed cleanly: execution + slippage gate +
+    reconciliation"), deliberately written ``False`` on the
+    slippage-breach and reconciliation-failure paths even when the tx
+    LANDED on-chain. Rendering the tape headline off that verdict shows a
+    red ✗ for a trade that actually executed — the bug this fixes.
+
+    Returns ``(landed, flagged_reason)``:
+
+    - ``landed`` — ``True`` if every measured per-leg receipt succeeded,
+      ``False`` if any measured leg failed, ``None`` if the row carries
+      no per-leg receipt data at all (older / unmeasured rows). ``None``
+      signals the caller to fall back to the framework ``success`` verdict
+      rather than fabricate a green ✓ for a genuinely unknown status.
+    - ``flagged_reason`` — set only when the tx landed on-chain
+      (``landed is True``) but the framework downgraded the iteration
+      (``row.success`` is ``False``); a short bucketed reason for the
+      amber "landed but flagged" badge. ``None`` otherwise.
+    """
+    legs = _get_sub_transactions(row) or _get_all_tx_results(row)
+    measured = [v for v in (_leg_landed(tx) for tx in legs) if v is not None]
+    if not measured:
+        return None, None
+    landed = all(measured)
+    flagged_reason = _classify_downgrade_reason(row.error) if landed and not row.success else None
+    return landed, flagged_reason
+
+
 def _parse_accounting_payload(row: TradeTapeRow) -> dict[str, Any]:
     """Decode ``accounting_payload_json`` for a row, or ``{}`` on any failure.
 
@@ -626,7 +706,17 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
     icon = _INTENT_ICONS.get(row.intent_type, "•")
     chain_color = get_chain_color(row.chain) if row.chain else "#888888"
     chain_badge = format_chain_badge(row.chain, chain_color) if row.chain else ""
-    success_marker = "<span style='color:#00c853;'>✓</span>" if row.success else "<span style='color:#f44336;'>✗</span>"
+
+    # ALM-2759 — headline ✓/✗ reflects on-chain LANDED status, not the
+    # framework verdict. A slippage-breach / reconciliation-downgraded
+    # iteration writes ``ledger.success=False`` even though the tx landed;
+    # rendering that as a red ✗ misreports an executed trade as failed.
+    # ``landed is None`` => no per-leg receipt data (older/unmeasured rows)
+    # => fall back to the framework verdict (today's behaviour) rather than
+    # invent a green ✓ for a genuinely unknown on-chain status.
+    landed, flagged_reason = _resolve_onchain_display_status(row)
+    onchain_ok = row.success if landed is None else landed
+    success_marker = "<span style='color:#00c853;'>✓</span>" if onchain_ok else "<span style='color:#f44336;'>✗</span>"
     confidence_color, confidence_label = _CONFIDENCE_BADGES.get(row.confidence, ("#888888", _e(row.confidence) or ""))
     registry_handle = _registry_handle_from_payload(row.accounting_payload_json)
 
@@ -703,8 +793,10 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
     # Time
     time_str = row.timestamp.strftime("%H:%M:%S") if row.timestamp else ""
 
-    # Headline card
-    intent_color = "#00c853" if row.success else "#f44336"
+    # Headline card — left-border colour tracks on-chain LANDED status
+    # (ALM-2759), matching the headline ✓/✗ above. A landed-but-flagged
+    # row stays green; only a genuinely failed tx (no leg landed) is red.
+    intent_color = "#00c853" if onchain_ok else "#f44336"
     confidence_chip = ""
     if confidence_label:
         # confidence_color comes from a hardcoded map; confidence_label
@@ -722,11 +814,27 @@ def _render_tape_row(row: TradeTapeRow, *, show_approvals: bool) -> None:
             f"<div style='color:#ff9800;font-size:0.78rem;margin-top:0.2rem;'>⚠️ {_e(row.unavailable_reason)}</div>"
         )
 
-    # Error reason for failed intents — surface ledger ``error`` so the
-    # operator sees the revert/raise-string without opening the expander.
-    # ``title`` carries the full message for hover when truncated.
+    # Error reason — surface ledger ``error`` so the operator sees the
+    # revert/raise-string without opening the expander. ``title`` carries
+    # the full message for hover when truncated.
+    #
+    # ALM-2759 — two visually distinct chips, depending on whether the tx
+    # LANDED on-chain:
+    #  * ``flagged_reason`` set => the tx landed but the framework
+    #    downgraded the iteration (slippage circuit-breaker /
+    #    reconciliation incident). Render an AMBER "landed but flagged"
+    #    chip — never a red ⛔ — so this row no longer looks identical to
+    #    a hard revert. Full ledger error stays in the hover ``title``.
+    #  * genuine failure (no leg landed) => the existing red ⛔ chip.
     error_chip = ""
-    if not row.success and row.error:
+    if flagged_reason:
+        full = (row.error or "").strip()
+        error_chip = (
+            f"<div style='color:#ff9800;font-size:0.82rem;margin-top:0.25rem;"
+            f"font-family:monospace;word-break:break-word;' title='{_e(full)}'>"
+            f"<span style='font-family:inherit;'>⚠</span> landed on-chain · flagged: {_e(flagged_reason)}</div>"
+        )
+    elif not onchain_ok and row.error:
         full = row.error.strip()
         short = full if len(full) <= 200 else full[:197] + "…"
         error_chip = (
