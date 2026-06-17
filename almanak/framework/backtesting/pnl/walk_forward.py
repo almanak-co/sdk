@@ -917,6 +917,292 @@ class WalkForwardResult:
 # =============================================================================
 
 
+_COMPUTED_CONFIG_KEYS = ("duration_seconds", "duration_days", "estimated_ticks")
+
+
+def _window_config_dict(
+    base_config: PnLBacktestConfig,
+    start_time: datetime,
+    end_time: datetime,
+) -> dict[str, Any]:
+    """Build a per-window config payload without computed fields."""
+    config_dict = base_config.to_dict()
+    for key in _COMPUTED_CONFIG_KEYS:
+        config_dict.pop(key, None)
+    config_dict["start_time"] = start_time.isoformat()
+    config_dict["end_time"] = end_time.isoformat()
+    return config_dict
+
+
+def _build_window_config(
+    config_cls: Any,
+    base_config: PnLBacktestConfig,
+    start_time: datetime,
+    end_time: datetime,
+    overrides: dict[str, Any] | None = None,
+) -> PnLBacktestConfig:
+    """Create a PnL backtest config for one walk-forward window."""
+    config_dict = _window_config_dict(base_config, start_time, end_time)
+    if overrides:
+        config_dict.update(overrides)
+    return config_cls.from_dict(config_dict)
+
+
+def _partition_best_params(
+    base_config: PnLBacktestConfig,
+    best_params: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split optimized params into backtest config overrides and strategy overrides."""
+    valid_config_fields = {f for f in vars(base_config) if not f.startswith("_")}
+    config_overrides: dict[str, Any] = {}
+    strategy_overrides: dict[str, Any] = {}
+
+    for param_name, param_value in best_params.items():
+        if param_name in valid_config_fields:
+            config_overrides[param_name] = param_value
+        else:
+            strategy_overrides[param_name] = param_value
+
+    return config_overrides, strategy_overrides
+
+
+async def _optimize_training_window(
+    tuner_cls: Any,
+    strategy_factory: Callable[..., Any],
+    data_provider_factory: Callable[[], Any],
+    backtester_factory: Callable[[Any, dict[str, Any], dict[str, Any]], Any],
+    train_config: PnLBacktestConfig,
+    param_ranges: OptunaParamRanges,
+    objective_metric: str,
+    n_trials_per_window: int,
+    patience: int | None,
+    fee_models: dict[str, Any],
+    slippage_models: dict[str, Any],
+    show_progress: bool,
+    strategy_config: dict[str, Any] | None,
+) -> OptimizationResult:
+    """Optimize strategy/config params for one training window."""
+    tuner = tuner_cls(
+        objective_metric=objective_metric,
+        patience=patience,
+    )
+    return await tuner.optimize(
+        strategy_factory=strategy_factory,
+        data_provider_factory=data_provider_factory,
+        backtester_factory=backtester_factory,
+        base_config=train_config,
+        param_ranges=param_ranges,
+        n_trials=n_trials_per_window,
+        fee_models=fee_models,
+        slippage_models=slippage_models,
+        show_progress=show_progress,
+        patience=patience,
+        strategy_config=strategy_config,
+    )
+
+
+def _build_strategy_for_test(
+    strategy_factory: Callable[..., Any],
+    strategy_config: dict[str, Any] | None,
+    strategy_overrides: dict[str, Any],
+) -> Any:
+    """Construct the out-of-sample strategy with the current factory arity."""
+    if strategy_config is not None:
+        merged_strat_config = {**strategy_config, **strategy_overrides}
+        return strategy_factory(merged_strat_config)
+    if strategy_overrides:
+        return strategy_factory(strategy_overrides)
+    return strategy_factory()
+
+
+async def _run_test_window_backtest(
+    config_cls: Any,
+    strategy_factory: Callable[..., Any],
+    data_provider_factory: Callable[[], Any],
+    backtester_factory: Callable[[Any, dict[str, Any], dict[str, Any]], Any],
+    base_config: PnLBacktestConfig,
+    window: WalkForwardWindow,
+    optimization_result: OptimizationResult,
+    objective_metric: str,
+    fee_models: dict[str, Any],
+    slippage_models: dict[str, Any],
+    strategy_config: dict[str, Any] | None,
+) -> tuple[BacktestResult, float]:
+    """Backtest one out-of-sample window using optimized params."""
+    config_overrides, strategy_overrides = _partition_best_params(base_config, optimization_result.best_params)
+    test_config = _build_window_config(
+        config_cls,
+        base_config,
+        window.test_start,
+        window.test_end,
+        overrides=config_overrides,
+    )
+    strategy = _build_strategy_for_test(strategy_factory, strategy_config, strategy_overrides)
+    data_provider = data_provider_factory()
+    backtester = backtester_factory(data_provider, fee_models, slippage_models)
+    test_result = await backtester.backtest(strategy, test_config)
+    test_objective_value = float(getattr(test_result.metrics, objective_metric))
+    return test_result, test_objective_value
+
+
+async def _run_walk_forward_window(
+    config_cls: Any,
+    tuner_cls: Any,
+    window: WalkForwardWindow,
+    total_windows: int,
+    strategy_factory: Callable[..., Any],
+    data_provider_factory: Callable[[], Any],
+    backtester_factory: Callable[[Any, dict[str, Any], dict[str, Any]], Any],
+    base_config: PnLBacktestConfig,
+    param_ranges: OptunaParamRanges,
+    objective_metric: str,
+    n_trials_per_window: int,
+    patience: int | None,
+    fee_models: dict[str, Any],
+    slippage_models: dict[str, Any],
+    show_progress: bool,
+    strategy_config: dict[str, Any] | None,
+) -> WalkForwardWindowResult:
+    """Run training optimization and out-of-sample validation for one window."""
+    logger.info(
+        f"Processing window {window.window_index + 1}/{total_windows}: "
+        f"Train {window.train_start.date()} to {window.train_end.date()}, "
+        f"Test {window.test_start.date()} to {window.test_end.date()}"
+    )
+    train_config = _build_window_config(config_cls, base_config, window.train_start, window.train_end)
+    optimization_result = await _optimize_training_window(
+        tuner_cls=tuner_cls,
+        strategy_factory=strategy_factory,
+        data_provider_factory=data_provider_factory,
+        backtester_factory=backtester_factory,
+        train_config=train_config,
+        param_ranges=param_ranges,
+        objective_metric=objective_metric,
+        n_trials_per_window=n_trials_per_window,
+        patience=patience,
+        fee_models=fee_models,
+        slippage_models=slippage_models,
+        show_progress=show_progress,
+        strategy_config=strategy_config,
+    )
+    train_objective_value = optimization_result.best_value
+    logger.info(
+        f"Window {window.window_index + 1} training complete: best {objective_metric}={train_objective_value:.4f}"
+    )
+
+    test_result, test_objective_value = await _run_test_window_backtest(
+        config_cls=config_cls,
+        strategy_factory=strategy_factory,
+        data_provider_factory=data_provider_factory,
+        backtester_factory=backtester_factory,
+        base_config=base_config,
+        window=window,
+        optimization_result=optimization_result,
+        objective_metric=objective_metric,
+        fee_models=fee_models,
+        slippage_models=slippage_models,
+        strategy_config=strategy_config,
+    )
+    logger.info(
+        f"Window {window.window_index + 1} test complete: "
+        f"{objective_metric}={test_objective_value:.4f} "
+        f"(train was {train_objective_value:.4f})"
+    )
+
+    return WalkForwardWindowResult(
+        window=window,
+        optimization_result=optimization_result,
+        test_result=test_result,
+        train_objective_value=train_objective_value,
+        test_objective_value=test_objective_value,
+        objective_metric=objective_metric,
+    )
+
+
+def _empty_walk_forward_result(
+    wf_config: WalkForwardConfig,
+    objective_metric: str,
+    total_windows: int,
+) -> WalkForwardResult:
+    """Return the existing empty result shape for no successful windows."""
+    return WalkForwardResult(
+        windows=[],
+        config=wf_config,
+        objective_metric=objective_metric,
+        total_windows=total_windows,
+        successful_windows=0,
+        avg_train_objective=0.0,
+        avg_test_objective=0.0,
+        avg_overfitting_ratio=0.0,
+        combined_test_pnl_usd=Decimal("0"),
+        combined_test_return_pct=Decimal("0"),
+    )
+
+
+def _average_objective(
+    window_results: list[WalkForwardWindowResult],
+    attr_name: str,
+    successful_windows: int,
+) -> float:
+    """Average a numeric objective value across successful windows."""
+    return sum(getattr(window_result, attr_name) for window_result in window_results) / successful_windows
+
+
+def _average_finite_overfitting_ratio(window_results: list[WalkForwardWindowResult]) -> float:
+    """Average finite overfitting ratios while preserving the infinite fallback."""
+    overfitting_ratios = [w.overfitting_ratio for w in window_results if w.overfitting_ratio != float("inf")]
+    if overfitting_ratios:
+        return sum(overfitting_ratios) / len(overfitting_ratios)
+    return float("inf")
+
+
+def _sum_test_metric(window_results: list[WalkForwardWindowResult], attr_name: str) -> Decimal:
+    """Sum a Decimal-valued test metric across walk-forward windows."""
+    return sum((getattr(w.test_result.metrics, attr_name) for w in window_results), Decimal(0))
+
+
+def _aggregate_walk_forward_result(
+    window_results: list[WalkForwardWindowResult],
+    wf_config: WalkForwardConfig,
+    objective_metric: str,
+    total_windows: int,
+) -> WalkForwardResult:
+    """Aggregate per-window walk-forward results into the public result object."""
+    successful_windows = len(window_results)
+
+    return WalkForwardResult(
+        windows=window_results,
+        config=wf_config,
+        objective_metric=objective_metric,
+        total_windows=total_windows,
+        successful_windows=successful_windows,
+        avg_train_objective=_average_objective(window_results, "train_objective_value", successful_windows),
+        avg_test_objective=_average_objective(window_results, "test_objective_value", successful_windows),
+        avg_overfitting_ratio=_average_finite_overfitting_ratio(window_results),
+        combined_test_pnl_usd=_sum_test_metric(window_results, "net_pnl_usd"),
+        combined_test_return_pct=_sum_test_metric(window_results, "total_return_pct"),
+        parameter_stability=calculate_parameter_stability(window_results),
+    )
+
+
+def _log_walk_forward_summary(result: WalkForwardResult, objective_metric: str) -> None:
+    """Log final walk-forward instability warnings and completion summary."""
+    if result.has_parameter_instability:
+        logger.warning(
+            f"Parameter instability detected: {', '.join(result.unstable_parameters)}. "
+            f"Optimal parameters vary significantly across windows."
+        )
+
+    logger.info(
+        f"Walk-forward optimization complete: "
+        f"{result.successful_windows}/{result.total_windows} windows, "
+        f"avg train {objective_metric}={result.avg_train_objective:.4f}, "
+        f"avg test {objective_metric}={result.avg_test_objective:.4f}, "
+        f"overfitting ratio={result.avg_overfitting_ratio:.2f}x, "
+        f"avg param CV={result.avg_parameter_cv:.2%}"
+    )
+
+
 async def run_walk_forward_optimization(
     strategy_factory: Callable[..., Any],
     data_provider_factory: Callable[[], Any],
@@ -1014,184 +1300,36 @@ async def run_walk_forward_optimization(
     )
 
     window_results: list[WalkForwardWindowResult] = []
+    total_windows = len(windows)
     fee_models = fee_models or {}
     slippage_models = slippage_models or {}
 
     for window in windows:
-        logger.info(
-            f"Processing window {window.window_index + 1}/{len(windows)}: "
-            f"Train {window.train_start.date()} to {window.train_end.date()}, "
-            f"Test {window.test_start.date()} to {window.test_end.date()}"
-        )
-
-        # =========================================================
-        # Phase 1: Optimize on training window
-        # =========================================================
-
-        # Create training config with window dates
-        train_config_dict = base_config.to_dict()
-        # Remove computed properties
-        for key in ["duration_seconds", "duration_days", "estimated_ticks"]:
-            train_config_dict.pop(key, None)
-        train_config_dict["start_time"] = window.train_start.isoformat()
-        train_config_dict["end_time"] = window.train_end.isoformat()
-        train_config = PnLBacktestConfig.from_dict(train_config_dict)
-
-        # Create fresh OptunaTuner for this window
-        tuner = OptunaTuner(
-            objective_metric=objective_metric,
-            patience=patience,
-        )
-
-        # Run optimization on training data
-        optimization_result = await tuner.optimize(
+        window_result = await _run_walk_forward_window(
+            config_cls=PnLBacktestConfig,
+            tuner_cls=OptunaTuner,
+            window=window,
+            total_windows=total_windows,
             strategy_factory=strategy_factory,
             data_provider_factory=data_provider_factory,
             backtester_factory=backtester_factory,
-            base_config=train_config,
+            base_config=base_config,
             param_ranges=param_ranges,
-            n_trials=n_trials_per_window,
+            objective_metric=objective_metric,
+            n_trials_per_window=n_trials_per_window,
+            patience=patience,
             fee_models=fee_models,
             slippage_models=slippage_models,
             show_progress=show_progress,
-            patience=patience,
             strategy_config=strategy_config,
-        )
-
-        train_objective_value = optimization_result.best_value
-
-        logger.info(
-            f"Window {window.window_index + 1} training complete: best {objective_metric}={train_objective_value:.4f}"
-        )
-
-        # =========================================================
-        # Phase 2: Test on out-of-sample window with optimal params
-        # =========================================================
-
-        # Create test config with window dates and optimal parameters
-        test_config_dict = base_config.to_dict()
-        # Remove computed properties
-        for key in ["duration_seconds", "duration_days", "estimated_ticks"]:
-            test_config_dict.pop(key, None)
-        test_config_dict["start_time"] = window.test_start.isoformat()
-        test_config_dict["end_time"] = window.test_end.isoformat()
-
-        # Separate best_params into config params and strategy params
-        valid_config_fields = {f for f in vars(base_config) if not f.startswith("_")}
-        strategy_overrides: dict[str, Any] = {}
-        for param_name, param_value in optimization_result.best_params.items():
-            if param_name in valid_config_fields:
-                test_config_dict[param_name] = param_value
-            else:
-                strategy_overrides[param_name] = param_value
-
-        test_config = PnLBacktestConfig.from_dict(test_config_dict)
-
-        # Run backtest on test window with optimal parameters
-        # Pass strategy overrides if the factory supports them
-        if strategy_config is not None:
-            merged_strat_config = {**strategy_config, **strategy_overrides}
-            strategy = strategy_factory(merged_strat_config)
-        elif strategy_overrides:
-            strategy = strategy_factory(strategy_overrides)
-        else:
-            strategy = strategy_factory()
-        data_provider = data_provider_factory()
-        backtester = backtester_factory(data_provider, fee_models, slippage_models)
-
-        test_result = await backtester.backtest(strategy, test_config)
-
-        # Extract test objective value
-        test_objective_value = float(getattr(test_result.metrics, objective_metric))
-
-        logger.info(
-            f"Window {window.window_index + 1} test complete: "
-            f"{objective_metric}={test_objective_value:.4f} "
-            f"(train was {train_objective_value:.4f})"
-        )
-
-        # Create window result
-        window_result = WalkForwardWindowResult(
-            window=window,
-            optimization_result=optimization_result,
-            test_result=test_result,
-            train_objective_value=train_objective_value,
-            test_objective_value=test_objective_value,
-            objective_metric=objective_metric,
         )
         window_results.append(window_result)
 
-    # =========================================================
-    # Aggregate results across all windows
-    # =========================================================
+    if not window_results:
+        return _empty_walk_forward_result(wf_config, objective_metric, total_windows)
 
-    successful_windows = len(window_results)
-    total_windows = len(windows)
-
-    if successful_windows == 0:
-        # No successful windows - return empty result
-        return WalkForwardResult(
-            windows=[],
-            config=wf_config,
-            objective_metric=objective_metric,
-            total_windows=total_windows,
-            successful_windows=0,
-            avg_train_objective=0.0,
-            avg_test_objective=0.0,
-            avg_overfitting_ratio=0.0,
-            combined_test_pnl_usd=Decimal("0"),
-            combined_test_return_pct=Decimal("0"),
-        )
-
-    # Calculate aggregate statistics
-    avg_train_objective = sum(w.train_objective_value for w in window_results) / successful_windows
-
-    avg_test_objective = sum(w.test_objective_value for w in window_results) / successful_windows
-
-    # Calculate overfitting ratios (filter out inf values)
-    overfitting_ratios = [w.overfitting_ratio for w in window_results if w.overfitting_ratio != float("inf")]
-    avg_overfitting_ratio = sum(overfitting_ratios) / len(overfitting_ratios) if overfitting_ratios else float("inf")
-
-    # Combine test period performance
-    combined_test_pnl_usd = sum((w.test_result.metrics.net_pnl_usd for w in window_results), Decimal(0))
-
-    # Calculate combined return (geometric linking would be more accurate,
-    # but simple sum is a reasonable approximation for similar-sized periods)
-    combined_test_return_pct = sum((w.test_result.metrics.total_return_pct for w in window_results), Decimal(0))
-
-    # Calculate parameter stability across windows
-    param_stability = calculate_parameter_stability(window_results)
-
-    result = WalkForwardResult(
-        windows=window_results,
-        config=wf_config,
-        objective_metric=objective_metric,
-        total_windows=total_windows,
-        successful_windows=successful_windows,
-        avg_train_objective=avg_train_objective,
-        avg_test_objective=avg_test_objective,
-        avg_overfitting_ratio=avg_overfitting_ratio,
-        combined_test_pnl_usd=combined_test_pnl_usd,
-        combined_test_return_pct=combined_test_return_pct,
-        parameter_stability=param_stability,
-    )
-
-    # Log instability warnings
-    if result.has_parameter_instability:
-        logger.warning(
-            f"Parameter instability detected: {', '.join(result.unstable_parameters)}. "
-            f"Optimal parameters vary significantly across windows."
-        )
-
-    logger.info(
-        f"Walk-forward optimization complete: "
-        f"{successful_windows}/{total_windows} windows, "
-        f"avg train {objective_metric}={avg_train_objective:.4f}, "
-        f"avg test {objective_metric}={avg_test_objective:.4f}, "
-        f"overfitting ratio={avg_overfitting_ratio:.2f}x, "
-        f"avg param CV={result.avg_parameter_cv:.2%}"
-    )
-
+    result = _aggregate_walk_forward_result(window_results, wf_config, objective_metric, total_windows)
+    _log_walk_forward_summary(result, objective_metric)
     return result
 
 

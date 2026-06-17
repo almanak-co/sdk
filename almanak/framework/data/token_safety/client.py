@@ -311,17 +311,9 @@ class TokenSafetyClient:
             logger.warning("GoPlus returned error: %s", data.get("message"))
             return None
 
-        result_data = data.get("result", {})
-        # GoPlus keys by mint address
-        token_data = result_data.get(mint_address, {})
-        if not token_data:
-            # Try case-insensitive match
-            for key, val in result_data.items():
-                if key.lower() == mint_address.lower():
-                    token_data = val
-                    break
-            if not token_data:
-                return None
+        token_data = _find_goplus_token_data(data.get("result", {}), mint_address)
+        if token_data is None:
+            return None
 
         # Parse authority-based fields (status "1" = capability exists = risky)
         mintable = _goplus_status(token_data.get("mintable"))
@@ -333,19 +325,10 @@ class TokenSafetyClient:
         metadata_mutable = _goplus_status(token_data.get("metadata_mutable"))
 
         # Transfer fee check
-        transfer_fee = token_data.get("transfer_fee", {})
-        has_transfer_fee = False
-        if isinstance(transfer_fee, dict) and transfer_fee:
-            fee_rate = transfer_fee.get("fee_rate")
-            current_rate = transfer_fee.get("current_fee_rate")
-            if fee_rate and str(fee_rate) != "0":
-                has_transfer_fee = True
-            elif current_rate and str(current_rate) != "0":
-                has_transfer_fee = True
+        has_transfer_fee = _has_nonzero_goplus_transfer_fee(token_data.get("transfer_fee", {}))
 
         # Transfer hook check
-        transfer_hook = token_data.get("transfer_hook", [])
-        has_hook = bool(transfer_hook) if isinstance(transfer_hook, list) else bool(transfer_hook)
+        has_hook = bool(token_data.get("transfer_hook", []))
 
         # Non-transferable
         non_transferable = str(token_data.get("non_transferable", "0")) == "1"
@@ -359,13 +342,7 @@ class TokenSafetyClient:
 
         # Holder stats
         holder_count = int(token_data.get("holder_count", 0) or 0)
-        top_holder_pct = 0.0
-        holders = token_data.get("holders", [])
-        if holders and isinstance(holders, list):
-            try:
-                top_holder_pct = float(holders[0].get("percent", 0)) if holders else 0.0
-            except (ValueError, TypeError, IndexError):
-                pass
+        top_holder_pct = _goplus_top_holder_pct(token_data.get("holders", []))
 
         return GoPlusResult(
             mintable=mintable,
@@ -400,174 +377,19 @@ class TokenSafetyClient:
         sources: list[str] = []
         risk_levels: list[RiskLevel] = []
 
-        # --- RugCheck flags ---
         if rugcheck is not None:
             sources.append("rugcheck")
-            flags.extend(rugcheck.risks)
+            rugcheck_flags, rugcheck_levels = _rugcheck_flags_and_levels(rugcheck)
+            flags.extend(rugcheck_flags)
+            risk_levels.extend(rugcheck_levels)
 
-            if rugcheck.rugged:
-                flags.append(
-                    RiskFlag(
-                        name="already_rugged",
-                        description="Token has been confirmed as a rug pull",
-                        level=RiskLevel.CRITICAL,
-                        source="rugcheck",
-                    )
-                )
-                risk_levels.append(RiskLevel.CRITICAL)
-
-            # Map RugCheck score to risk level
-            rc_level = _rugcheck_score_to_level(rugcheck.score)
-            risk_levels.append(rc_level)
-
-        # --- GoPlus flags ---
         if goplus is not None:
             sources.append("goplus")
+            goplus_flags, goplus_levels = _goplus_flags_and_levels(goplus)
+            flags.extend(goplus_flags)
+            risk_levels.extend(goplus_levels)
 
-            if goplus.mintable:
-                flags.append(
-                    RiskFlag(
-                        name="mint_authority_enabled",
-                        description="Token supply can be increased by mint authority",
-                        level=RiskLevel.HIGH,
-                        source="goplus",
-                    )
-                )
-                risk_levels.append(RiskLevel.HIGH)
-
-            if goplus.freezable:
-                flags.append(
-                    RiskFlag(
-                        name="freeze_authority_enabled",
-                        description="Token accounts can be frozen by authority",
-                        level=RiskLevel.HIGH,
-                        source="goplus",
-                    )
-                )
-                risk_levels.append(RiskLevel.HIGH)
-
-            if goplus.closable:
-                flags.append(
-                    RiskFlag(
-                        name="close_authority_enabled",
-                        description="Token program can be closed (destroying all tokens)",
-                        level=RiskLevel.CRITICAL,
-                        source="goplus",
-                    )
-                )
-                risk_levels.append(RiskLevel.CRITICAL)
-
-            if goplus.balance_mutable:
-                flags.append(
-                    RiskFlag(
-                        name="balance_mutable",
-                        description="Authority can modify token balances directly",
-                        level=RiskLevel.CRITICAL,
-                        source="goplus",
-                    )
-                )
-                risk_levels.append(RiskLevel.CRITICAL)
-
-            if goplus.has_transfer_fee:
-                flags.append(
-                    RiskFlag(
-                        name="transfer_fee",
-                        description="Token has a non-zero transfer fee (potential sell tax)",
-                        level=RiskLevel.HIGH,
-                        source="goplus",
-                    )
-                )
-                risk_levels.append(RiskLevel.HIGH)
-
-            if goplus.transfer_hook:
-                flags.append(
-                    RiskFlag(
-                        name="transfer_hook_active",
-                        description="External transfer hook attached (can block/modify transfers)",
-                        level=RiskLevel.HIGH,
-                        source="goplus",
-                    )
-                )
-                risk_levels.append(RiskLevel.HIGH)
-
-            if goplus.non_transferable:
-                flags.append(
-                    RiskFlag(
-                        name="non_transferable",
-                        description="Token is soulbound / non-transferable",
-                        level=RiskLevel.CRITICAL,
-                        source="goplus",
-                    )
-                )
-                risk_levels.append(RiskLevel.CRITICAL)
-
-            if goplus.default_account_state_frozen:
-                flags.append(
-                    RiskFlag(
-                        name="default_account_frozen",
-                        description="New token accounts start in frozen state",
-                        level=RiskLevel.HIGH,
-                        source="goplus",
-                    )
-                )
-                risk_levels.append(RiskLevel.HIGH)
-
-            if goplus.holder_count < 100:
-                flags.append(
-                    RiskFlag(
-                        name="low_holder_count",
-                        description=f"Very few holders ({goplus.holder_count})",
-                        level=RiskLevel.MEDIUM,
-                        source="goplus",
-                    )
-                )
-                risk_levels.append(RiskLevel.MEDIUM)
-
-            if goplus.top_holder_pct > 50.0:
-                flags.append(
-                    RiskFlag(
-                        name="concentrated_holdings",
-                        description=f"Top holder owns {goplus.top_holder_pct:.1f}% of supply",
-                        level=RiskLevel.HIGH,
-                        source="goplus",
-                    )
-                )
-                risk_levels.append(RiskLevel.HIGH)
-            elif goplus.top_holder_pct > 20.0:
-                flags.append(
-                    RiskFlag(
-                        name="high_holder_concentration",
-                        description=f"Top holder owns {goplus.top_holder_pct:.1f}% of supply",
-                        level=RiskLevel.MEDIUM,
-                        source="goplus",
-                    )
-                )
-                risk_levels.append(RiskLevel.MEDIUM)
-
-            if goplus.trusted_token:
-                risk_levels.append(RiskLevel.SAFE)
-
-        # --- Compute overall risk ---
-        if not risk_levels:
-            overall = RiskLevel.UNKNOWN
-        else:
-            # Take the worst (highest severity)
-            level_order = {
-                RiskLevel.SAFE: 0,
-                RiskLevel.LOW: 1,
-                RiskLevel.MEDIUM: 2,
-                RiskLevel.HIGH: 3,
-                RiskLevel.CRITICAL: 4,
-                RiskLevel.UNKNOWN: 2,  # treat unknown as medium
-            }
-            overall = max(risk_levels, key=lambda lvl: level_order.get(lvl, 2))
-
-            # For GoPlus-trusted tokens (e.g. USDC, USDT), cap risk at MEDIUM.
-            # Authorities like mint/freeze are expected for regulated stablecoins
-            # and shouldn't flag them as dangerous.
-            is_trusted = goplus is not None and goplus.trusted_token
-            if is_trusted and level_order.get(overall, 0) > level_order[RiskLevel.MEDIUM]:
-                overall = RiskLevel.MEDIUM
+        overall = _overall_risk_level(risk_levels, goplus)
 
         # Normalized risk score (0.0 = safest, 1.0 = most dangerous)
         risk_score = _compute_risk_score(rugcheck, goplus, flags)
@@ -588,6 +410,172 @@ class TokenSafetyClient:
 # ---------------------------------------------------------------------------
 
 
+_RISK_LEVEL_ORDER = {
+    RiskLevel.SAFE: 0,
+    RiskLevel.LOW: 1,
+    RiskLevel.MEDIUM: 2,
+    RiskLevel.HIGH: 3,
+    RiskLevel.CRITICAL: 4,
+    RiskLevel.UNKNOWN: 2,
+}
+
+_GOPLUS_BOOLEAN_FLAG_SPECS = (
+    (
+        "mintable",
+        "mint_authority_enabled",
+        "Token supply can be increased by mint authority",
+        RiskLevel.HIGH,
+    ),
+    (
+        "freezable",
+        "freeze_authority_enabled",
+        "Token accounts can be frozen by authority",
+        RiskLevel.HIGH,
+    ),
+    (
+        "closable",
+        "close_authority_enabled",
+        "Token program can be closed (destroying all tokens)",
+        RiskLevel.CRITICAL,
+    ),
+    (
+        "balance_mutable",
+        "balance_mutable",
+        "Authority can modify token balances directly",
+        RiskLevel.CRITICAL,
+    ),
+    (
+        "has_transfer_fee",
+        "transfer_fee",
+        "Token has a non-zero transfer fee (potential sell tax)",
+        RiskLevel.HIGH,
+    ),
+    (
+        "transfer_hook",
+        "transfer_hook_active",
+        "External transfer hook attached (can block/modify transfers)",
+        RiskLevel.HIGH,
+    ),
+    (
+        "non_transferable",
+        "non_transferable",
+        "Token is soulbound / non-transferable",
+        RiskLevel.CRITICAL,
+    ),
+    (
+        "default_account_state_frozen",
+        "default_account_frozen",
+        "New token accounts start in frozen state",
+        RiskLevel.HIGH,
+    ),
+)
+
+
+def _rugcheck_flags_and_levels(rugcheck: RugCheckResult) -> tuple[list[RiskFlag], list[RiskLevel]]:
+    """Build RugCheck-derived flags and risk levels."""
+    flags = list(rugcheck.risks)
+    risk_levels: list[RiskLevel] = []
+
+    if rugcheck.rugged:
+        flags.append(
+            RiskFlag(
+                name="already_rugged",
+                description="Token has been confirmed as a rug pull",
+                level=RiskLevel.CRITICAL,
+                source="rugcheck",
+            )
+        )
+        risk_levels.append(RiskLevel.CRITICAL)
+
+    risk_levels.append(_rugcheck_score_to_level(rugcheck.score))
+    return flags, risk_levels
+
+
+def _goplus_boolean_flags(goplus: GoPlusResult) -> tuple[list[RiskFlag], list[RiskLevel]]:
+    """Build GoPlus flags for simple boolean capability checks."""
+    flags: list[RiskFlag] = []
+    risk_levels: list[RiskLevel] = []
+
+    for field_name, flag_name, description, risk_level in _GOPLUS_BOOLEAN_FLAG_SPECS:
+        if getattr(goplus, field_name):
+            flags.append(
+                RiskFlag(
+                    name=flag_name,
+                    description=description,
+                    level=risk_level,
+                    source="goplus",
+                )
+            )
+            risk_levels.append(risk_level)
+
+    return flags, risk_levels
+
+
+def _goplus_holder_flags(goplus: GoPlusResult) -> tuple[list[RiskFlag], list[RiskLevel]]:
+    """Build GoPlus holder-count and concentration flags."""
+    flags: list[RiskFlag] = []
+    risk_levels: list[RiskLevel] = []
+
+    if goplus.holder_count < 100:
+        flags.append(
+            RiskFlag(
+                name="low_holder_count",
+                description=f"Very few holders ({goplus.holder_count})",
+                level=RiskLevel.MEDIUM,
+                source="goplus",
+            )
+        )
+        risk_levels.append(RiskLevel.MEDIUM)
+
+    if goplus.top_holder_pct > 50.0:
+        flags.append(
+            RiskFlag(
+                name="concentrated_holdings",
+                description=f"Top holder owns {goplus.top_holder_pct:.1f}% of supply",
+                level=RiskLevel.HIGH,
+                source="goplus",
+            )
+        )
+        risk_levels.append(RiskLevel.HIGH)
+    elif goplus.top_holder_pct > 20.0:
+        flags.append(
+            RiskFlag(
+                name="high_holder_concentration",
+                description=f"Top holder owns {goplus.top_holder_pct:.1f}% of supply",
+                level=RiskLevel.MEDIUM,
+                source="goplus",
+            )
+        )
+        risk_levels.append(RiskLevel.MEDIUM)
+
+    return flags, risk_levels
+
+
+def _goplus_flags_and_levels(goplus: GoPlusResult) -> tuple[list[RiskFlag], list[RiskLevel]]:
+    """Build all GoPlus-derived flags and risk levels."""
+    flags, risk_levels = _goplus_boolean_flags(goplus)
+    holder_flags, holder_levels = _goplus_holder_flags(goplus)
+    flags.extend(holder_flags)
+    risk_levels.extend(holder_levels)
+
+    if goplus.trusted_token:
+        risk_levels.append(RiskLevel.SAFE)
+
+    return flags, risk_levels
+
+
+def _overall_risk_level(risk_levels: list[RiskLevel], goplus: GoPlusResult | None) -> RiskLevel:
+    """Select the final risk level with the GoPlus trusted-token cap."""
+    if not risk_levels:
+        return RiskLevel.UNKNOWN
+
+    overall = max(risk_levels, key=lambda lvl: _RISK_LEVEL_ORDER.get(lvl, 2))
+    is_trusted = goplus is not None and goplus.trusted_token
+    if is_trusted and _RISK_LEVEL_ORDER.get(overall, 0) > _RISK_LEVEL_ORDER[RiskLevel.MEDIUM]:
+        return RiskLevel.MEDIUM
+    return overall
+
+
 def _goplus_status(field: Any) -> bool:
     """Parse a GoPlus authority field. Returns True if the capability exists (risky)."""
     if field is None:
@@ -596,6 +584,43 @@ def _goplus_status(field: Any) -> bool:
         status = field.get("status", "0")
         return str(status) == "1"
     return str(field) == "1"
+
+
+def _find_goplus_token_data(result_data: Any, mint_address: str) -> Any | None:
+    """Find the GoPlus token payload, preserving legacy lookup semantics."""
+    token_data = result_data.get(mint_address, {})
+    if token_data:
+        return token_data
+
+    for key, val in result_data.items():
+        if key.lower() == mint_address.lower():
+            token_data = val
+            break
+    if not token_data:
+        return None
+    return token_data
+
+
+def _has_nonzero_goplus_transfer_fee(transfer_fee: Any) -> bool:
+    """Return True when GoPlus reports a truthy non-zero transfer fee."""
+    if not isinstance(transfer_fee, dict) or not transfer_fee:
+        return False
+
+    fee_rate = transfer_fee.get("fee_rate")
+    current_rate = transfer_fee.get("current_fee_rate")
+    if fee_rate and str(fee_rate) != "0":
+        return True
+    return bool(current_rate and str(current_rate) != "0")
+
+
+def _goplus_top_holder_pct(holders: Any) -> float:
+    """Parse the top holder percentage, keeping malformed percent values soft."""
+    if holders and isinstance(holders, list):
+        try:
+            return float(holders[0].get("percent", 0)) if holders else 0.0
+        except (ValueError, TypeError, IndexError):
+            pass
+    return 0.0
 
 
 def _parse_risk_level(level_str: str) -> RiskLevel:

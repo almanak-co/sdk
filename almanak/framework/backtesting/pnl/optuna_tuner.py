@@ -847,6 +847,15 @@ class OptimizationResult:
 OptunaParamRanges = dict[str, list[Any] | tuple[Any, ...] | ParamRange]
 
 
+@dataclass(frozen=True)
+class _PreparedParamRanges:
+    """Typed optimizer ranges split by destination."""
+
+    typed_ranges: TypedParamRanges
+    typed_config_ranges: TypedParamRanges
+    typed_strategy_ranges: TypedParamRanges
+
+
 class OptunaTuner:
     """Bayesian optimization tuner using Optuna.
 
@@ -1150,6 +1159,168 @@ class OptunaTuner:
 
         return objective
 
+    def _partition_param_ranges(
+        self,
+        base_config: PnLBacktestConfig,
+        param_ranges: OptunaParamRanges,
+    ) -> tuple[OptunaParamRanges, OptunaParamRanges]:
+        """Split tunable ranges into PnLBacktestConfig and strategy params."""
+        valid_config_fields = {f for f in vars(base_config) if not f.startswith("_")}
+        config_param_ranges: OptunaParamRanges = {}
+        strategy_param_ranges: OptunaParamRanges = {}
+
+        for field_name, field_range in param_ranges.items():
+            if field_name in valid_config_fields:
+                config_param_ranges[field_name] = field_range
+            else:
+                strategy_param_ranges[field_name] = field_range
+
+        return config_param_ranges, strategy_param_ranges
+
+    def _log_param_range_groups(
+        self,
+        config_param_ranges: OptunaParamRanges,
+        strategy_param_ranges: OptunaParamRanges,
+    ) -> None:
+        """Log which optimizer ranges target config vs strategy construction."""
+        if strategy_param_ranges:
+            logger.info(
+                f"Strategy params to optimize: {sorted(strategy_param_ranges.keys())} "
+                f"(will be passed to strategy factory)"
+            )
+        if config_param_ranges:
+            logger.info(f"Backtest config params to optimize: {sorted(config_param_ranges.keys())}")
+
+    def _convert_param_ranges(self, param_ranges: OptunaParamRanges) -> TypedParamRanges:
+        """Convert legacy optimizer range declarations to typed ParamRange objects."""
+        return {name: _convert_legacy_param(name, value) for name, value in param_ranges.items()}
+
+    def _prepare_param_ranges(
+        self,
+        base_config: PnLBacktestConfig,
+        param_ranges: OptunaParamRanges,
+    ) -> _PreparedParamRanges:
+        """Validate, partition, log, and type optimizer parameter ranges."""
+        if not param_ranges:
+            raise ValueError("param_ranges cannot be empty")
+
+        config_param_ranges, strategy_param_ranges = self._partition_param_ranges(base_config, param_ranges)
+        self._log_param_range_groups(config_param_ranges, strategy_param_ranges)
+
+        return _PreparedParamRanges(
+            typed_ranges=self._convert_param_ranges(param_ranges),
+            typed_config_ranges=self._convert_param_ranges(config_param_ranges),
+            typed_strategy_ranges=self._convert_param_ranges(strategy_param_ranges),
+        )
+
+    def _store_objective_state(
+        self,
+        prepared_ranges: _PreparedParamRanges,
+        base_config: PnLBacktestConfig,
+        strategy_config: dict[str, Any] | None,
+    ) -> None:
+        """Store optimizer state consumed by the per-trial objective."""
+        self._param_ranges = prepared_ranges.typed_ranges
+        self._config_param_ranges = prepared_ranges.typed_config_ranges
+        self._strategy_param_ranges = prepared_ranges.typed_strategy_ranges
+        self._base_config = base_config
+        self._strategy_config = strategy_config
+
+    def _build_early_stopping_callbacks(
+        self,
+        patience: int | None,
+        min_delta: float | None,
+    ) -> list[Callable[[Study, optuna.trial.FrozenTrial], None]]:
+        """Build Optuna callbacks, preserving method-arg override precedence."""
+        effective_patience = patience if patience is not None else self.config.patience
+        effective_min_delta = min_delta if min_delta is not None else self.config.min_delta
+        callbacks: list[Callable[[Study, optuna.trial.FrozenTrial], None]] = []
+
+        if effective_patience is not None:
+            self._early_stopping_callback = EarlyStoppingCallback(
+                patience=effective_patience,
+                min_delta=effective_min_delta,
+                direction=self.config.direction or "maximize",
+                verbose=True,
+            )
+            callbacks.append(self._early_stopping_callback)
+            logger.info(f"Early stopping enabled: patience={effective_patience}, min_delta={effective_min_delta}")
+
+        return callbacks
+
+    def _log_optimization_start(self, n_trials: int) -> None:
+        logger.info(
+            f"Starting Optuna optimization: {n_trials} trials, "
+            f"metric={self.config.objective_metric}, direction={self.config.direction}"
+        )
+
+    async def _run_study_optimization(
+        self,
+        objective: Callable[[Trial], float],
+        n_trials: int,
+        timeout: float | None,
+        show_progress: bool,
+        callbacks: list[Callable[[Study, optuna.trial.FrozenTrial], None]],
+    ) -> None:
+        """Run Optuna's synchronous study loop without blocking the event loop."""
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: self.study.optimize(
+                objective,
+                n_trials=n_trials,
+                timeout=timeout,
+                show_progress_bar=show_progress,
+                callbacks=callbacks if callbacks else None,
+            ),
+        )
+
+    def _read_early_stopping_state(self) -> tuple[bool, int]:
+        """Return whether early stopping fired and the final stale-trial count."""
+        if self._early_stopping_callback is None:
+            return False, 0
+        return (
+            self._early_stopping_callback.stopped_early,
+            self._early_stopping_callback.trials_without_improvement,
+        )
+
+    def _best_params_with_decimal_restored(self, typed_ranges: TypedParamRanges) -> dict[str, Any]:
+        """Restore Decimal-valued best params from Optuna's float representation."""
+        best_params: dict[str, Any] = {}
+        for name, value in self.study.best_params.items():
+            param = typed_ranges.get(name)
+            if param is not None and param.is_decimal:
+                best_params[name] = Decimal(str(round(value, 6)))
+            else:
+                best_params[name] = value
+        return best_params
+
+    def _log_optimization_complete(self, stopped_early: bool) -> None:
+        completion_reason = "early stopping" if stopped_early else "completed all trials"
+        logger.info(
+            f"Optimization {completion_reason}. Best {self.config.objective_metric}: "
+            f"{self.study.best_value:.4f} (trial {self.study.best_trial.number})"
+        )
+
+    def _build_optimization_result(
+        self,
+        best_params: dict[str, Any],
+        stopped_early: bool,
+        trials_without_improvement: int,
+    ) -> OptimizationResult:
+        """Assemble the public optimization result from the Optuna study."""
+        return OptimizationResult(
+            best_params=best_params,
+            best_value=self.study.best_value,
+            best_trial_number=self.study.best_trial.number,
+            n_trials=len(self.study.trials),
+            study_name=self.study.study_name,
+            objective_metric=self.config.objective_metric,
+            direction=self.config.direction or "maximize",
+            stopped_early=stopped_early,
+            trials_without_improvement=trials_without_improvement,
+        )
+
     async def optimize(
         self,
         strategy_factory: Callable[..., Any],
@@ -1218,51 +1389,8 @@ class OptunaTuner:
                 patience=10,  # Stop if no improvement for 10 trials
             )
         """
-        # Validate param_ranges
-        if not param_ranges:
-            raise ValueError("param_ranges cannot be empty")
-
-        # Partition param_ranges into config params (PnLBacktestConfig fields)
-        # and strategy params (everything else, passed to strategy factory)
-        valid_config_fields = {f for f in vars(base_config) if not f.startswith("_")}
-        config_param_ranges: OptunaParamRanges = {}
-        strategy_param_ranges: OptunaParamRanges = {}
-
-        for field_name, field_range in param_ranges.items():
-            if field_name in valid_config_fields:
-                config_param_ranges[field_name] = field_range
-            else:
-                strategy_param_ranges[field_name] = field_range
-
-        if strategy_param_ranges:
-            logger.info(
-                f"Strategy params to optimize: {sorted(strategy_param_ranges.keys())} "
-                f"(will be passed to strategy factory)"
-            )
-        if config_param_ranges:
-            logger.info(f"Backtest config params to optimize: {sorted(config_param_ranges.keys())}")
-
-        # Convert all param_ranges to TypedParamRanges (ParamRange objects)
-        typed_ranges: TypedParamRanges = {}
-        for name, value in param_ranges.items():
-            typed_ranges[name] = _convert_legacy_param(name, value)
-
-        typed_config_ranges: TypedParamRanges = {}
-        for name, value in config_param_ranges.items():
-            typed_config_ranges[name] = _convert_legacy_param(name, value)
-
-        typed_strategy_ranges: TypedParamRanges = {}
-        for name, value in strategy_param_ranges.items():
-            typed_strategy_ranges[name] = _convert_legacy_param(name, value)
-
-        # Store for use in objective
-        self._param_ranges = typed_ranges
-        self._config_param_ranges = typed_config_ranges
-        self._strategy_param_ranges = typed_strategy_ranges
-        self._base_config = base_config
-        self._strategy_config = strategy_config
-
-        # Create objective function
+        prepared_ranges = self._prepare_param_ranges(base_config, param_ranges)
+        self._store_objective_state(prepared_ranges, base_config, strategy_config)
         objective = self._create_objective(
             strategy_factory=strategy_factory,
             data_provider_factory=data_provider_factory,
@@ -1271,77 +1399,20 @@ class OptunaTuner:
             slippage_models=slippage_models or {},
             extra_configs=extra_configs,
         )
+        callbacks = self._build_early_stopping_callbacks(patience, min_delta)
 
-        # Determine patience and min_delta (method args override config)
-        effective_patience = patience if patience is not None else self.config.patience
-        effective_min_delta = min_delta if min_delta is not None else self.config.min_delta
-
-        # Set up callbacks
-        callbacks: list[Callable[[Study, optuna.trial.FrozenTrial], None]] = []
-
-        if effective_patience is not None:
-            self._early_stopping_callback = EarlyStoppingCallback(
-                patience=effective_patience,
-                min_delta=effective_min_delta,
-                direction=self.config.direction or "maximize",
-                verbose=True,
-            )
-            callbacks.append(self._early_stopping_callback)
-            logger.info(f"Early stopping enabled: patience={effective_patience}, min_delta={effective_min_delta}")
-
-        logger.info(
-            f"Starting Optuna optimization: {n_trials} trials, "
-            f"metric={self.config.objective_metric}, direction={self.config.direction}"
+        self._log_optimization_start(n_trials)
+        await self._run_study_optimization(
+            objective=objective,
+            n_trials=n_trials,
+            timeout=timeout,
+            show_progress=show_progress,
+            callbacks=callbacks,
         )
-
-        # Run optimization (Optuna's optimize is synchronous)
-        # Run in executor to avoid blocking
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: self.study.optimize(
-                objective,
-                n_trials=n_trials,
-                timeout=timeout,
-                show_progress_bar=show_progress,
-                callbacks=callbacks if callbacks else None,
-            ),
-        )
-
-        # Check if early stopping was triggered
-        stopped_early = False
-        trials_without_improvement = 0
-        if self._early_stopping_callback is not None:
-            stopped_early = self._early_stopping_callback.stopped_early
-            trials_without_improvement = self._early_stopping_callback.trials_without_improvement
-
-        # Extract best parameters, converting any Decimal values
-        best_params = {}
-        for name, value in self.study.best_params.items():
-            # Check if the original param range needs Decimal conversion
-            param = typed_ranges.get(name)
-            if param is not None and param.is_decimal:
-                best_params[name] = Decimal(str(round(value, 6)))
-            else:
-                best_params[name] = value
-
-        completion_reason = "early stopping" if stopped_early else "completed all trials"
-        logger.info(
-            f"Optimization {completion_reason}. Best {self.config.objective_metric}: "
-            f"{self.study.best_value:.4f} (trial {self.study.best_trial.number})"
-        )
-
-        return OptimizationResult(
-            best_params=best_params,
-            best_value=self.study.best_value,
-            best_trial_number=self.study.best_trial.number,
-            n_trials=len(self.study.trials),
-            study_name=self.study.study_name,
-            objective_metric=self.config.objective_metric,
-            direction=self.config.direction or "maximize",
-            stopped_early=stopped_early,
-            trials_without_improvement=trials_without_improvement,
-        )
+        stopped_early, trials_without_improvement = self._read_early_stopping_state()
+        best_params = self._best_params_with_decimal_restored(prepared_ranges.typed_ranges)
+        self._log_optimization_complete(stopped_early)
+        return self._build_optimization_result(best_params, stopped_early, trials_without_improvement)
 
     def optimize_sync(
         self,

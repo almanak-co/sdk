@@ -23,6 +23,7 @@ from almanak.framework.backtesting.visualization import (
     _interactive_marker_customdata,
     calculate_distribution_stats,
     generate_equity_chart_html,
+    generate_pnl_distribution_html,
     plot_duration_scatter,
     plot_equity_curve,
     plot_equity_curve_interactive,
@@ -2292,6 +2293,95 @@ class TestPnlHistogramInteractive:
 
         content = output_path.read_text()
         assert "Custom PnL Distribution" in content
+
+
+class TestGeneratePnlDistributionHtml:
+    """Tests for embedded PnL distribution chart generation."""
+
+    def _trade(self, pnl_usd: Decimal | None, minute: int) -> TradeRecord:
+        return TradeRecord(
+            timestamp=datetime(2024, 1, 1, 0, minute),
+            intent_type=IntentType.SWAP,
+            executed_price=Decimal("2000"),
+            fee_usd=Decimal("5"),
+            slippage_usd=Decimal("2"),
+            gas_cost_usd=Decimal("3"),
+            pnl_usd=pnl_usd,
+            success=True,
+        )
+
+    def _result_with_pnls(self, pnl_values: list[Decimal | None]) -> BacktestResult:
+        return BacktestResult(
+            engine="pnl",
+            deployment_id="embedded_distribution",
+            start_time=datetime(2024, 1, 1),
+            end_time=datetime(2024, 1, 2),
+            metrics=BacktestMetrics(total_trades=len(pnl_values)),
+            equity_curve=[],
+            initial_capital_usd=Decimal("10000"),
+            final_capital_usd=Decimal("10100"),
+            trades=[self._trade(pnl, minute) for minute, pnl in enumerate(pnl_values)],
+        )
+
+    def test_embedded_pnl_distribution_success(self) -> None:
+        result = self._result_with_pnls(
+            [
+                Decimal("100"),
+                Decimal("-50"),
+                Decimal("200"),
+                Decimal("-25"),
+                Decimal("150"),
+            ]
+        )
+
+        html = generate_pnl_distribution_html(result, title="Embedded PnL", bins=5, height=275)
+
+        assert html != ""
+        assert "pnl-distribution-chart" in html
+        assert "Embedded PnL" in html
+        assert "Losses" in html
+        assert "Profits" in html
+        assert "Statistics" in html
+
+    def test_embedded_pnl_distribution_no_trades_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        result = self._result_with_pnls([])
+
+        with caplog.at_level(logging.WARNING):
+            html = generate_pnl_distribution_html(result)
+
+        assert html == ""
+        assert "No trades data - cannot generate PnL distribution chart" in caplog.text
+
+    def test_embedded_pnl_distribution_no_realized_pnl_returns_empty(self) -> None:
+        result = self._result_with_pnls([None, None])
+
+        html = generate_pnl_distribution_html(result)
+
+        assert html == ""
+
+    def test_embedded_pnl_distribution_all_same_pnl_uses_default_bin_size(self) -> None:
+        result = self._result_with_pnls(
+            [
+                Decimal("42"),
+                Decimal("42"),
+                Decimal("42"),
+                Decimal("42"),
+            ]
+        )
+
+        html = generate_pnl_distribution_html(result, bins=4)
+
+        assert html != ""
+        assert "pnl-distribution-chart" in html
+
+    def test_embedded_pnl_distribution_invalid_bins_returns_empty(self, caplog: pytest.LogCaptureFixture) -> None:
+        result = self._result_with_pnls([Decimal("-1"), Decimal("0"), Decimal("1")])
+
+        with caplog.at_level(logging.ERROR):
+            html = generate_pnl_distribution_html(result, bins=0)
+
+        assert html == ""
+        assert "Failed to generate embedded PnL distribution chart" in caplog.text
 
 
 class TestAttributionCharts:

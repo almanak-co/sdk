@@ -148,6 +148,68 @@ class ApproveParams(Params):
         return f"ApproveParams(token_address={self.token_address}, spender_address={self.spender_address}, from_address={self.from_address}, amount={self.amount})"
 
 
+_SWAP_NON_NEGATIVE_LIMITS = (
+    ("amountOutMinimum", "amountOutMinimum must be non-negative if provided"),
+    ("amountInMaximum", "amountInMaximum must be non-negative if provided"),
+    ("sqrtPriceLimitX96", "sqrtPriceLimitX96 must be non-negative if provided"),
+)
+_SWAP_SLIPPAGE_EXCLUSIVE_LIMITS = (
+    ("amountOutMinimum", "Only one of amountOutMinimum or slippage should be provided, not both"),
+    ("amountInMaximum", "Only one of amountInMaximum or slippage should be provided, not both"),
+)
+_SWAP_SIDE_LIMIT_RULES = {
+    SwapSide.SELL: (
+        "amountInMaximum",
+        "amountOutMinimum",
+        "amountInMaximum should not be provided for sell side",
+        "Either amountOutMinimum or slippage must be provided",
+    ),
+    SwapSide.BUY: (
+        "amountOutMinimum",
+        "amountInMaximum",
+        "amountOutMinimum should not be provided for buy side",
+        "Either amountInMaximum or slippage must be provided",
+    ),
+}
+
+
+def _negative_optional_swap_limit_error(params: "SwapParams") -> str | None:
+    for field_name, message in _SWAP_NON_NEGATIVE_LIMITS:
+        value = getattr(params, field_name)
+        if value is not None and value < 0:
+            return message
+    return None
+
+
+def _side_forbidden_swap_limit_error(params: "SwapParams") -> str | None:
+    if params.side is None:
+        return None
+    rule = _SWAP_SIDE_LIMIT_RULES[params.side]
+    forbidden_field, _required_field, message, _missing_message = rule
+    if getattr(params, forbidden_field) is not None:
+        return message
+    return None
+
+
+def _swap_slippage_conflict_error(params: "SwapParams") -> str | None:
+    if params.slippage is None:
+        return None
+    for field_name, message in _SWAP_SLIPPAGE_EXCLUSIVE_LIMITS:
+        if getattr(params, field_name) is not None:
+            return message
+    return None
+
+
+def _missing_side_swap_protection_error(params: "SwapParams") -> str | None:
+    if params.side is None or params.slippage is not None:
+        return None
+    rule = _SWAP_SIDE_LIMIT_RULES[params.side]
+    _forbidden_field, required_field, _forbidden_message, message = rule
+    if getattr(params, required_field) is None:
+        return message
+    return None
+
+
 class SwapParams(Params):
     type: ActionType = ActionType.SWAP
     tokenIn: str
@@ -179,24 +241,14 @@ class SwapParams(Params):
         return v
 
     def validate_params(self):
-        if self.amountOutMinimum is not None and self.amountOutMinimum < 0:
-            raise ValueError("amountOutMinimum must be non-negative if provided")
-        if self.amountInMaximum is not None and self.amountInMaximum < 0:
-            raise ValueError("amountInMaximum must be non-negative if provided")
-        if self.sqrtPriceLimitX96 is not None and self.sqrtPriceLimitX96 < 0:
-            raise ValueError("sqrtPriceLimitX96 must be non-negative if provided")
-        if self.amountInMaximum is not None and self.side == SwapSide.SELL:
-            raise ValueError("amountInMaximum should not be provided for sell side")
-        if self.amountOutMinimum is not None and self.side == SwapSide.BUY:
-            raise ValueError("amountOutMinimum should not be provided for buy side")
-        if self.amountOutMinimum is not None and self.slippage is not None:
-            raise ValueError("Only one of amountOutMinimum or slippage should be provided, not both")
-        if self.amountInMaximum is not None and self.slippage is not None:
-            raise ValueError("Only one of amountInMaximum or slippage should be provided, not both")
-        if self.amountOutMinimum is None and self.side == SwapSide.SELL and self.slippage is None:
-            raise ValueError("Either amountOutMinimum or slippage must be provided")
-        if self.amountInMaximum is None and self.side == SwapSide.BUY and self.slippage is None:
-            raise ValueError("Either amountInMaximum or slippage must be provided")
+        error = (
+            _negative_optional_swap_limit_error(self)
+            or _side_forbidden_swap_limit_error(self)
+            or _swap_slippage_conflict_error(self)
+            or _missing_side_swap_protection_error(self)
+        )
+        if error is not None:
+            raise ValueError(error)
 
     def __str__(self):
         side_str = f"side={self.side.value}" if self.side else "side=None"

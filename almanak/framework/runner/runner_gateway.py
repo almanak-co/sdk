@@ -198,59 +198,83 @@ def gateway_heartbeat(runner: Any, deployment_id: str, positions: list | None = 
         logger.debug(f"Failed to send heartbeat to gateway (non-fatal): {e}")
 
 
-def collect_position_snapshot(runner: Any, strategy: StrategyProtocol) -> list | None:  # noqa: C901
+_POSITION_OPTIONAL_FIELDS = (
+    "entry_price",
+    "current_price",
+    "unrealized_pnl_usd",
+    "unrealized_pnl_pct",
+    "direction",
+    "size_usd",
+    "collateral_usd",
+    "leverage",
+)
+
+
+def _position_value(value: Any) -> str:
+    return str(value.value) if hasattr(value, "value") else str(value)
+
+
+def _can_collect_position_snapshot(runner: Any, strategy: StrategyProtocol) -> bool:
+    return runner._get_gateway_client() is not None and hasattr(strategy, "get_open_positions")
+
+
+def _summary_positions(strategy: StrategyProtocol) -> Any | None:
+    summary = strategy.get_open_positions()
+    if summary is None or not hasattr(summary, "positions") or not summary.positions:
+        return None
+    return summary.positions
+
+
+def _copy_position_details(proto: Any, position: Any) -> None:
+    if not position.details:
+        return
+    for key, value in position.details.items():
+        proto.details[str(key)] = str(value)
+
+
+def _copy_optional_position_field(proto: Any, position: Any, field_name: str) -> None:
+    value = getattr(position, field_name)
+    if value is not None:
+        setattr(proto, field_name, str(value))
+
+
+def _copy_optional_position_fields(proto: Any, position: Any) -> None:
+    if position.health_factor is not None:
+        proto.health_factor = str(position.health_factor)
+    _copy_position_details(proto, position)
+    for field_name in _POSITION_OPTIONAL_FIELDS:
+        _copy_optional_position_field(proto, position, field_name)
+
+
+def _build_strategy_position_proto(gateway_pb2: Any, position: Any) -> Any:
+    proto = gateway_pb2.StrategyPosition(
+        position_type=_position_value(position.position_type),
+        position_id=str(position.position_id),
+        chain=_position_value(position.chain),
+        protocol=str(position.protocol),
+        value_usd=str(position.value_usd),
+        liquidation_risk=bool(position.liquidation_risk),
+    )
+    _copy_optional_position_fields(proto, position)
+    return proto
+
+
+def collect_position_snapshot(runner: Any, strategy: StrategyProtocol) -> list | None:
     """Call strategy.get_open_positions() and convert to proto messages.
 
     Non-fatal: returns None on any error so heartbeat still fires.
     """
-    if runner._get_gateway_client() is None:
-        return None
-    if not hasattr(strategy, "get_open_positions"):
+    if not _can_collect_position_snapshot(runner, strategy):
         return None
 
     try:
-        summary = strategy.get_open_positions()
-        if summary is None or not hasattr(summary, "positions") or not summary.positions:
+        positions = _summary_positions(strategy)
+        if positions is None:
             return None
 
         from almanak.gateway.proto import gateway_pb2
 
-        protos = []
-        for pos in summary.positions:
-            sp = gateway_pb2.StrategyPosition(
-                position_type=str(pos.position_type.value)
-                if hasattr(pos.position_type, "value")
-                else str(pos.position_type),
-                position_id=str(pos.position_id),
-                chain=str(pos.chain.value) if hasattr(pos.chain, "value") else str(pos.chain),
-                protocol=str(pos.protocol),
-                value_usd=str(pos.value_usd),
-                liquidation_risk=bool(pos.liquidation_risk),
-            )
-            if pos.health_factor is not None:
-                sp.health_factor = str(pos.health_factor)
-            if pos.details:
-                for k, v in pos.details.items():
-                    sp.details[str(k)] = str(v)
-            # Optional monitoring fields
-            if pos.entry_price is not None:
-                sp.entry_price = str(pos.entry_price)
-            if pos.current_price is not None:
-                sp.current_price = str(pos.current_price)
-            if pos.unrealized_pnl_usd is not None:
-                sp.unrealized_pnl_usd = str(pos.unrealized_pnl_usd)
-            if pos.unrealized_pnl_pct is not None:
-                sp.unrealized_pnl_pct = str(pos.unrealized_pnl_pct)
-            if pos.direction is not None:
-                sp.direction = str(pos.direction)
-            if pos.size_usd is not None:
-                sp.size_usd = str(pos.size_usd)
-            if pos.collateral_usd is not None:
-                sp.collateral_usd = str(pos.collateral_usd)
-            if pos.leverage is not None:
-                sp.leverage = str(pos.leverage)
-            protos.append(sp)
-        return protos
+        return [_build_strategy_position_proto(gateway_pb2, position) for position in positions]
     except Exception as e:
         logger.debug(f"Failed to collect position snapshot (non-fatal): {e}")
         return None

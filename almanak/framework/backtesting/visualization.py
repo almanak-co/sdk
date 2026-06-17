@@ -2006,7 +2006,163 @@ def generate_equity_chart_html(
         return ""
 
 
-# crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~3%)
+def _load_pnl_distribution_plotly() -> Any | None:
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        logger.warning(
+            "plotly not installed (pip install 'almanak[backtest]') - cannot generate PnL distribution chart"
+        )
+        return None
+    return go
+
+
+def _trade_pnl_value(trade: Any) -> Any | None:
+    pnl_usd = getattr(trade, "pnl_usd", None)
+    if pnl_usd is None:
+        return None
+    return float(pnl_usd)
+
+
+def _extract_pnl_distribution_values(trades: Any) -> list[float]:
+    pnl_values: list[float] = []
+    for trade in trades:
+        pnl_usd = _trade_pnl_value(trade)
+        if pnl_usd is not None:
+            pnl_values.append(pnl_usd)
+    return pnl_values
+
+
+def _split_pnl_distribution_values(pnl_values: list[float]) -> tuple[list[float], list[float]]:
+    profits = [value for value in pnl_values if value >= 0]
+    losses = [value for value in pnl_values if value < 0]
+    return profits, losses
+
+
+def _pnl_distribution_xbins(pnl_values: list[float], bins: int) -> dict[str, float]:
+    all_min = min(pnl_values)
+    all_max = max(pnl_values)
+    bin_size = (all_max - all_min) / bins if all_max != all_min else 1
+    return {"start": all_min, "end": all_max, "size": bin_size}
+
+
+def _add_pnl_distribution_histogram_trace(
+    fig: Any,
+    go: Any,
+    values: list[float],
+    *,
+    name: str,
+    marker_color: str,
+    xbins: dict[str, float],
+) -> None:
+    fig.add_trace(
+        go.Histogram(
+            x=values,
+            name=name,
+            marker_color=marker_color,
+            xbins=xbins,
+            hovertemplate="PnL: $%{x:,.2f}<br>Count: %{y}<extra></extra>",
+        )
+    )
+
+
+def _add_pnl_distribution_histograms(fig: Any, go: Any, pnl_values: list[float], bins: int) -> None:
+    profits, losses = _split_pnl_distribution_values(pnl_values)
+    xbins = _pnl_distribution_xbins(pnl_values, bins)
+
+    if losses:
+        _add_pnl_distribution_histogram_trace(
+            fig,
+            go,
+            losses,
+            name="Losses",
+            marker_color="rgba(244, 67, 54, 0.7)",
+            xbins=xbins,
+        )
+    if profits:
+        _add_pnl_distribution_histogram_trace(
+            fig,
+            go,
+            profits,
+            name="Profits",
+            marker_color="rgba(76, 175, 80, 0.7)",
+            xbins=xbins,
+        )
+
+
+def _add_pnl_distribution_reference_lines(fig: Any, stats: DistributionStats | None) -> None:
+    fig.add_vline(x=0, line_dash="dash", line_color="#757575", line_width=2)
+    if stats:
+        fig.add_vline(x=stats.mean, line_dash="dashdot", line_color="#1976D2", line_width=1.5)
+
+
+def _apply_pnl_distribution_layout(fig: Any, title: str | None, height: int) -> None:
+    chart_title = title or "PnL Distribution"
+    fig.update_layout(
+        title={"text": chart_title, "x": 0.5, "xanchor": "center", "font": {"size": 16}},
+        xaxis_title="PnL (USD)",
+        yaxis_title="Number of Trades",
+        xaxis_tickprefix="$",
+        xaxis_tickformat=",.0f",
+        barmode="overlay",
+        hovermode="x unified",
+        legend={"yanchor": "top", "y": 0.99, "xanchor": "right", "x": 0.99},
+        template="plotly_white",
+        height=height,
+        margin={"l": 60, "r": 30, "t": 50, "b": 50},
+    )
+
+
+def _pnl_distribution_stats_text(stats: DistributionStats) -> str:
+    return (
+        f"<b>Statistics</b><br>"
+        f"Mean: ${stats.mean:,.2f}<br>"
+        f"Median: ${stats.median:,.2f}<br>"
+        f"Std Dev: ${stats.std_dev:,.2f}<br>"
+        f"Skew: {stats.skewness:.2f} | Kurt: {stats.kurtosis:.2f}"
+    )
+
+
+def _add_pnl_distribution_stats_annotation(fig: Any, stats: DistributionStats | None) -> None:
+    if not stats:
+        return
+
+    fig.add_annotation(
+        text=_pnl_distribution_stats_text(stats),
+        xref="paper",
+        yref="paper",
+        x=0.02,
+        y=0.98,
+        showarrow=False,
+        font={"size": 10, "family": "monospace"},
+        align="left",
+        bgcolor="rgba(255, 255, 255, 0.9)",
+        bordercolor="#ccc",
+        borderwidth=1,
+        borderpad=6,
+    )
+
+
+def _build_pnl_distribution_figure(
+    go: Any,
+    trades: Any,
+    title: str | None,
+    bins: int,
+    height: int,
+) -> Any | None:
+    pnl_values = _extract_pnl_distribution_values(trades)
+    if not pnl_values:
+        return None
+
+    stats = calculate_distribution_stats(pnl_values)
+    fig = go.Figure()
+    _add_pnl_distribution_histograms(fig, go, pnl_values, bins)
+    _add_pnl_distribution_reference_lines(fig, stats)
+    _apply_pnl_distribution_layout(fig, title, height)
+    _add_pnl_distribution_stats_annotation(fig, stats)
+    return fig
+
+
 def generate_pnl_distribution_html(
     result: "BacktestResult",
     title: str | None = None,
@@ -2031,112 +2187,19 @@ def generate_pnl_distribution_html(
         chart_html = generate_pnl_distribution_html(result)
         # Use in Jinja2 template: {{ chart_html | safe }}
     """
-    try:
-        import plotly.graph_objects as go
-    except ImportError:
-        logger.warning(
-            "plotly not installed (pip install 'almanak[backtest]') - cannot generate PnL distribution chart"
-        )
+    go = _load_pnl_distribution_plotly()
+    if go is None:
         return ""
 
-    if not hasattr(result, "trades") or not result.trades:
+    trades = getattr(result, "trades", None)
+    if not trades:
         logger.warning("No trades data - cannot generate PnL distribution chart")
         return ""
 
     try:
-        # Extract PnL values
-        pnl_values: list[float] = []
-        for trade in result.trades:
-            if hasattr(trade, "pnl_usd") and trade.pnl_usd is not None:
-                pnl_values.append(float(trade.pnl_usd) if isinstance(trade.pnl_usd, Decimal) else trade.pnl_usd)
-
-        if not pnl_values:
+        fig = _build_pnl_distribution_figure(go, trades, title, bins, height)
+        if fig is None:
             return ""
-
-        # Calculate statistics
-        stats = calculate_distribution_stats(pnl_values)
-
-        # Separate profits and losses
-        profits = [x for x in pnl_values if x >= 0]
-        losses = [x for x in pnl_values if x < 0]
-
-        # Calculate bin parameters
-        all_min = min(pnl_values)
-        all_max = max(pnl_values)
-        bin_size = (all_max - all_min) / bins if all_max != all_min else 1
-
-        # Create figure
-        fig = go.Figure()
-
-        # Add losses histogram (red)
-        if losses:
-            fig.add_trace(
-                go.Histogram(
-                    x=losses,
-                    name="Losses",
-                    marker_color="rgba(244, 67, 54, 0.7)",
-                    xbins={"start": all_min, "end": all_max, "size": bin_size},
-                    hovertemplate="PnL: $%{x:,.2f}<br>Count: %{y}<extra></extra>",
-                )
-            )
-
-        # Add profits histogram (green)
-        if profits:
-            fig.add_trace(
-                go.Histogram(
-                    x=profits,
-                    name="Profits",
-                    marker_color="rgba(76, 175, 80, 0.7)",
-                    xbins={"start": all_min, "end": all_max, "size": bin_size},
-                    hovertemplate="PnL: $%{x:,.2f}<br>Count: %{y}<extra></extra>",
-                )
-            )
-
-        # Add vertical lines
-        fig.add_vline(x=0, line_dash="dash", line_color="#757575", line_width=2)
-
-        if stats:
-            fig.add_vline(x=stats.mean, line_dash="dashdot", line_color="#1976D2", line_width=1.5)
-
-        # Configure layout
-        chart_title = title or "PnL Distribution"
-        fig.update_layout(
-            title={"text": chart_title, "x": 0.5, "xanchor": "center", "font": {"size": 16}},
-            xaxis_title="PnL (USD)",
-            yaxis_title="Number of Trades",
-            xaxis_tickprefix="$",
-            xaxis_tickformat=",.0f",
-            barmode="overlay",
-            hovermode="x unified",
-            legend={"yanchor": "top", "y": 0.99, "xanchor": "right", "x": 0.99},
-            template="plotly_white",
-            height=height,
-            margin={"l": 60, "r": 30, "t": 50, "b": 50},
-        )
-
-        # Add stats annotation
-        if stats:
-            stats_text = (
-                f"<b>Statistics</b><br>"
-                f"Mean: ${stats.mean:,.2f}<br>"
-                f"Median: ${stats.median:,.2f}<br>"
-                f"Std Dev: ${stats.std_dev:,.2f}<br>"
-                f"Skew: {stats.skewness:.2f} | Kurt: {stats.kurtosis:.2f}"
-            )
-            fig.add_annotation(
-                text=stats_text,
-                xref="paper",
-                yref="paper",
-                x=0.02,
-                y=0.98,
-                showarrow=False,
-                font={"size": 10, "family": "monospace"},
-                align="left",
-                bgcolor="rgba(255, 255, 255, 0.9)",
-                bordercolor="#ccc",
-                borderwidth=1,
-                borderpad=6,
-            )
 
         return fig.to_html(include_plotlyjs="cdn", full_html=False, div_id="pnl-distribution-chart")
 

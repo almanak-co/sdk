@@ -1353,9 +1353,85 @@ class PaperTrader:
             # Fund the on-chain wallet with initial balances (first startup)
             await self._sync_wallet_to_fork(use_initial=True)
 
-    # crap-allowlist: VIB-4062 - pre-existing fork-bootstrap complexity. This PR only replaces
-    # the default Anvil wallet literal with ANVIL_DEFAULT_ADDRESS; refactor + coverage uplift
-    # is tracked with the broader paper-engine CRAP cleanup.
+    def _has_explicit_bootstrap_tokens(self) -> bool:
+        return bool(self.config.bootstrap.get(self.config.chain, {})) or bool(self.config.initial_tokens)
+
+    def _sync_wallet_balances(self, *, use_initial: bool) -> dict[str, Decimal]:
+        if not use_initial and self.portfolio_tracker.current_balances:
+            return dict(self.portfolio_tracker.current_balances)
+
+        explicit_balances = self.config.get_initial_balances()
+        balances = dict(explicit_balances)
+        if use_initial and self._current_strategy is not None:
+            self._apply_bootstrap_inference(balances, explicit_balances)
+        return balances
+
+    def _apply_bootstrap_inference(
+        self,
+        balances: dict[str, Decimal],
+        explicit_balances: dict[str, Decimal],
+    ) -> None:
+        from almanak.framework.backtesting.paper.bootstrap_inference import infer_token_requirements
+
+        inferred = infer_token_requirements(self._current_strategy, self.config.chain)
+        if not inferred:
+            return
+
+        if self._has_explicit_bootstrap_tokens():
+            from almanak.framework.backtesting.paper.bootstrap_inference import check_divergence
+
+            check_divergence(explicit_balances, inferred)
+            return
+
+        self._merge_inferred_bootstrap_balances(balances, inferred)
+
+    def _merge_inferred_bootstrap_balances(
+        self,
+        balances: dict[str, Decimal],
+        inferred: dict[str, Decimal],
+    ) -> None:
+        for token, amount in inferred.items():
+            balances.setdefault(token, amount)
+            self._remember_inferred_bootstrap_balance(token, amount)
+
+    def _remember_inferred_bootstrap_balance(self, token: str, amount: Decimal) -> None:
+        portfolio_tracker = getattr(self, "portfolio_tracker", None)
+        if portfolio_tracker is None or token in portfolio_tracker.current_balances:
+            return
+        portfolio_tracker.current_balances[token] = amount
+        portfolio_tracker.initial_balances[token] = amount
+
+    async def _fund_sync_wallet_eth(self, wallet_address: str, eth_amount: Decimal | None) -> None:
+        if not eth_amount or eth_amount <= 0:
+            return
+
+        success = await self.fork_manager.fund_wallet(wallet_address, eth_amount)
+        if not success:
+            logger.warning(f"[{self._backtest_id}] Failed to fund wallet with {eth_amount} ETH")
+
+    async def _fund_sync_wallet_tokens(
+        self,
+        wallet_address: str,
+        balances: dict[str, Decimal],
+    ) -> None:
+        if not balances:
+            return
+
+        success = await self.fork_manager.fund_tokens(wallet_address, balances)
+        if not success:
+            logger.warning(f"[{self._backtest_id}] Failed to fund some ERC-20 tokens")
+
+    async def _fund_sync_wallet_balances(
+        self,
+        wallet_address: str,
+        balances: dict[str, Decimal],
+    ) -> dict[str, Decimal]:
+        token_balances = dict(balances)
+        eth_amount = token_balances.pop("ETH", None)
+        await self._fund_sync_wallet_eth(wallet_address, eth_amount)
+        await self._fund_sync_wallet_tokens(wallet_address, token_balances)
+        return token_balances
+
     async def _sync_wallet_to_fork(self, *, use_initial: bool = False) -> None:
         """Fund the on-chain wallet to match tracked portfolio balances.
 
@@ -1371,61 +1447,14 @@ class PaperTrader:
         Args:
             use_initial: Force using config initial balances (for first startup).
         """
-        # Use Anvil account #0 by default.
         # TODO: Support custom private key via PaperTraderConfig
         wallet_address = ANVIL_DEFAULT_ADDRESS
-
-        # Use tracker's current balances if available, otherwise config initial
-        if not use_initial and self.portfolio_tracker.current_balances:
-            balances = dict(self.portfolio_tracker.current_balances)
-        else:
-            explicit_balances = self.config.get_initial_balances()
-            balances = dict(explicit_balances)
-
-            # VIB-2376: Dry-run inference when no explicit bootstrap tokens configured
-            if use_initial and self._current_strategy is not None:
-                has_explicit_tokens = bool(self.config.bootstrap.get(self.config.chain, {})) or bool(
-                    self.config.initial_tokens
-                )
-                if not has_explicit_tokens:
-                    from almanak.framework.backtesting.paper.bootstrap_inference import infer_token_requirements
-
-                    inferred = infer_token_requirements(self._current_strategy, self.config.chain)
-                    if inferred:
-                        for token, amount in inferred.items():
-                            balances.setdefault(token, amount)
-                            # Keep portfolio tracker in sync so fork resets re-fund correctly
-                            if hasattr(self, "portfolio_tracker") and self.portfolio_tracker is not None:
-                                if token not in self.portfolio_tracker.current_balances:
-                                    self.portfolio_tracker.current_balances[token] = amount
-                                    self.portfolio_tracker.initial_balances[token] = amount
-                else:
-                    # Divergence check when both explicit and inference exist
-                    from almanak.framework.backtesting.paper.bootstrap_inference import (
-                        check_divergence,
-                        infer_token_requirements,
-                    )
-
-                    inferred = infer_token_requirements(self._current_strategy, self.config.chain)
-                    if inferred:
-                        check_divergence(explicit_balances, inferred)
-
-        # Fund ETH
-        eth_amount = balances.pop("ETH", None)
-        if eth_amount and eth_amount > 0:
-            success = await self.fork_manager.fund_wallet(wallet_address, eth_amount)
-            if not success:
-                logger.warning(f"[{self._backtest_id}] Failed to fund wallet with {eth_amount} ETH")
-
-        # Fund ERC-20 tokens
-        if balances:
-            success = await self.fork_manager.fund_tokens(wallet_address, balances)
-            if not success:
-                logger.warning(f"[{self._backtest_id}] Failed to fund some ERC-20 tokens")
+        balances = self._sync_wallet_balances(use_initial=use_initial)
+        token_balances = await self._fund_sync_wallet_balances(wallet_address, balances)
 
         # Two-tier bootstrap validation (VIB-2377)
-        if use_initial and balances:
-            await self._validate_bootstrap(wallet_address, balances)
+        if use_initial and token_balances:
+            await self._validate_bootstrap(wallet_address, token_balances)
 
     async def _validate_bootstrap(self, wallet_address: str, requested_tokens: dict[str, Decimal]) -> None:
         """Validate that the wallet was funded correctly after bootstrap.

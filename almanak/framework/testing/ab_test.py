@@ -650,6 +650,172 @@ def _t_critical_value(alpha: float, df: float) -> float:
         return critical_values.get((0.05, closest_df), 1.96)
 
 
+def _empty_comparison() -> VariantComparison:
+    """Return the empty comparison shape used when no active test exists."""
+    return VariantComparison(
+        variant_a_metrics=VariantMetrics(
+            variant_id="",
+            variant_name="A",
+            capital_allocated_usd=Decimal("0"),
+            metrics=PerformanceMetrics(),
+            is_control=True,
+        ),
+        variant_b_metrics=VariantMetrics(
+            variant_id="",
+            variant_name="B",
+            capital_allocated_usd=Decimal("0"),
+            metrics=PerformanceMetrics(),
+            is_control=False,
+        ),
+        recommendation_reason="No test data available",
+    )
+
+
+def _has_sufficient_samples(
+    metrics_a: VariantMetrics,
+    metrics_b: VariantMetrics,
+    config: ABTestConfig,
+) -> bool:
+    """Return whether both variants meet the configured sample floor."""
+    return metrics_a.trade_count >= config.min_sample_size and metrics_b.trade_count >= config.min_sample_size
+
+
+def _comparison_means(
+    metrics_a: VariantMetrics,
+    metrics_b: VariantMetrics,
+) -> tuple[float, float, Decimal, Decimal | None]:
+    """Calculate comparison means and relative improvement."""
+    mean_a = float(metrics_a.average_pnl_per_trade)
+    mean_b = float(metrics_b.average_pnl_per_trade)
+    mean_difference = Decimal(str(mean_b - mean_a))
+    relative_improvement: Decimal | None = None
+    if mean_a != 0:
+        relative_improvement = Decimal(str((mean_b - mean_a) / abs(mean_a)))
+    return mean_a, mean_b, mean_difference, relative_improvement
+
+
+def _build_statistical_result(
+    metrics_a: VariantMetrics,
+    metrics_b: VariantMetrics,
+    config: ABTestConfig,
+    mean_a: float,
+    mean_b: float,
+) -> StatisticalResult:
+    """Perform Welch's t-test and package the statistical result."""
+    var_a = float(metrics_a.pnl_variance)
+    var_b = float(metrics_b.pnl_variance)
+    n_a = metrics_a.trade_count
+    n_b = metrics_b.trade_count
+
+    t_stat, df = _welch_t_test(mean_a, mean_b, var_a, var_b, n_a, n_b)
+    p_value = 2 * (1 - _t_cdf(abs(t_stat), df))
+
+    alpha = 1 - config.confidence_level
+    t_critical = _t_critical_value(alpha, df)
+    se_diff = math.sqrt(var_a / n_a + var_b / n_b) if n_a > 0 and n_b > 0 else 0
+    ci_lower = (mean_b - mean_a) - t_critical * se_diff
+    ci_upper = (mean_b - mean_a) + t_critical * se_diff
+
+    pooled_std = math.sqrt((var_a + var_b) / 2) if (var_a + var_b) > 0 else 1
+    effect_size = (mean_b - mean_a) / pooled_std if pooled_std > 0 else 0
+
+    return StatisticalResult(
+        t_statistic=t_stat,
+        degrees_of_freedom=df,
+        p_value=p_value,
+        confidence_interval_lower=ci_lower,
+        confidence_interval_upper=ci_upper,
+        is_significant=p_value < alpha,
+        effect_size=effect_size,
+    )
+
+
+def _insufficient_data_reason(
+    metrics_a: VariantMetrics,
+    metrics_b: VariantMetrics,
+    config: ABTestConfig,
+) -> str:
+    """Build the insufficient-sample recommendation reason."""
+    return (
+        f"Insufficient data: A has {metrics_a.trade_count} trades, "
+        f"B has {metrics_b.trade_count} trades, "
+        f"minimum required is {config.min_sample_size}"
+    )
+
+
+def _significant_recommendation(
+    statistical_result: StatisticalResult,
+    mean_a: float,
+    mean_b: float,
+) -> tuple[str, str]:
+    """Build the winner and reason for a significant result."""
+    if mean_b > mean_a:
+        return (
+            "variant_b",
+            f"Variant B significantly outperforms A "
+            f"(p={statistical_result.p_value:.4f}, "
+            f"effect size={statistical_result.effect_size:.3f})",
+        )
+    return (
+        "variant_a",
+        f"Variant A significantly outperforms B "
+        f"(p={statistical_result.p_value:.4f}, "
+        f"effect size={statistical_result.effect_size:.3f})",
+    )
+
+
+def _comparison_recommendation(
+    has_sufficient_data: bool,
+    statistical_result: StatisticalResult | None,
+    metrics_a: VariantMetrics,
+    metrics_b: VariantMetrics,
+    config: ABTestConfig,
+    mean_a: float,
+    mean_b: float,
+) -> tuple[str | None, str]:
+    """Determine the recommended winner and explanation."""
+    if not has_sufficient_data:
+        return None, _insufficient_data_reason(metrics_a, metrics_b, config)
+    if not statistical_result:
+        return None, ""
+    if not statistical_result.is_significant:
+        return None, f"No significant difference detected (p={statistical_result.p_value:.4f})"
+    return _significant_recommendation(statistical_result, mean_a, mean_b)
+
+
+def _build_comparison(
+    metrics_a: VariantMetrics,
+    metrics_b: VariantMetrics,
+    config: ABTestConfig,
+) -> VariantComparison:
+    """Build the full variant comparison from current metric snapshots."""
+    has_sufficient_data = _has_sufficient_samples(metrics_a, metrics_b, config)
+    mean_a, mean_b, mean_difference, relative_improvement = _comparison_means(metrics_a, metrics_b)
+    statistical_result = (
+        _build_statistical_result(metrics_a, metrics_b, config, mean_a, mean_b) if has_sufficient_data else None
+    )
+    recommended_winner, recommendation_reason = _comparison_recommendation(
+        has_sufficient_data,
+        statistical_result,
+        metrics_a,
+        metrics_b,
+        config,
+        mean_a,
+        mean_b,
+    )
+
+    return VariantComparison(
+        variant_a_metrics=metrics_a,
+        variant_b_metrics=metrics_b,
+        mean_difference_usd=mean_difference,
+        relative_improvement=relative_improvement,
+        pnl_statistical_result=statistical_result,
+        recommended_winner=recommended_winner,
+        recommendation_reason=recommendation_reason,
+        has_sufficient_data=has_sufficient_data,
+    )
+
+
 class ABTestManager:
     """Manages A/B tests for strategy variant comparison.
 
@@ -901,125 +1067,31 @@ class ABTestManager:
         Returns:
             VariantComparison with metrics and statistical analysis
         """
-        if not self.test or not self.test.variant_a_metrics or not self.test.variant_b_metrics:
-            # Return empty comparison
-            return VariantComparison(
-                variant_a_metrics=VariantMetrics(
-                    variant_id="",
-                    variant_name="A",
-                    capital_allocated_usd=Decimal("0"),
-                    metrics=PerformanceMetrics(),
-                    is_control=True,
-                ),
-                variant_b_metrics=VariantMetrics(
-                    variant_id="",
-                    variant_name="B",
-                    capital_allocated_usd=Decimal("0"),
-                    metrics=PerformanceMetrics(),
-                    is_control=False,
-                ),
-                recommendation_reason="No test data available",
-            )
+        return self._compare(auto_end=True)
 
-        metrics_a = self.test.variant_a_metrics
-        metrics_b = self.test.variant_b_metrics
-        config = self.test.config
+    def _compare(self, *, auto_end: bool) -> VariantComparison:
+        """Compare variants, optionally applying auto-end side effects."""
+        if not self.test:
+            return _empty_comparison()
 
-        # Check if we have sufficient data
-        has_sufficient_data = (
-            metrics_a.trade_count >= config.min_sample_size and metrics_b.trade_count >= config.min_sample_size
-        )
+        test = self.test
+        if not test.variant_a_metrics or not test.variant_b_metrics:
+            return _empty_comparison()
 
-        # Calculate mean difference
-        mean_a = float(metrics_a.average_pnl_per_trade)
-        mean_b = float(metrics_b.average_pnl_per_trade)
-        mean_difference = Decimal(str(mean_b - mean_a))
+        metrics_a = test.variant_a_metrics
+        metrics_b = test.variant_b_metrics
+        comparison = _build_comparison(metrics_a, metrics_b, test.config)
+        self._record_comparison(comparison)
+        self._emit_comparison_event(comparison)
+        self._notify_comparison_callback(test)
+        if auto_end:
+            self._maybe_auto_end_on_significance(comparison)
+        return comparison
 
-        # Calculate relative improvement
-        relative_improvement: Decimal | None = None
-        if mean_a != 0:
-            relative_improvement = Decimal(str((mean_b - mean_a) / abs(mean_a)))
-
-        # Perform statistical analysis if we have enough data
-        statistical_result: StatisticalResult | None = None
-        if has_sufficient_data:
-            var_a = float(metrics_a.pnl_variance)
-            var_b = float(metrics_b.pnl_variance)
-            n_a = metrics_a.trade_count
-            n_b = metrics_b.trade_count
-
-            # Perform Welch's t-test
-            t_stat, df = _welch_t_test(mean_a, mean_b, var_a, var_b, n_a, n_b)
-
-            # Calculate p-value (two-tailed)
-            p_value = 2 * (1 - _t_cdf(abs(t_stat), df))
-
-            # Calculate confidence interval for the difference
-            alpha = 1 - config.confidence_level
-            t_critical = _t_critical_value(alpha, df)
-            se_diff = math.sqrt(var_a / n_a + var_b / n_b) if n_a > 0 and n_b > 0 else 0
-            ci_lower = (mean_b - mean_a) - t_critical * se_diff
-            ci_upper = (mean_b - mean_a) + t_critical * se_diff
-
-            # Check significance
-            is_significant = p_value < alpha
-
-            # Calculate effect size (Cohen's d)
-            pooled_std = math.sqrt((var_a + var_b) / 2) if (var_a + var_b) > 0 else 1
-            effect_size = (mean_b - mean_a) / pooled_std if pooled_std > 0 else 0
-
-            statistical_result = StatisticalResult(
-                t_statistic=t_stat,
-                degrees_of_freedom=df,
-                p_value=p_value,
-                confidence_interval_lower=ci_lower,
-                confidence_interval_upper=ci_upper,
-                is_significant=is_significant,
-                effect_size=effect_size,
-            )
-
-        # Determine recommendation
-        recommended_winner: str | None = None
-        recommendation_reason = ""
-
-        if not has_sufficient_data:
-            recommendation_reason = (
-                f"Insufficient data: A has {metrics_a.trade_count} trades, "
-                f"B has {metrics_b.trade_count} trades, "
-                f"minimum required is {config.min_sample_size}"
-            )
-        elif statistical_result:
-            if statistical_result.is_significant:
-                if mean_b > mean_a:
-                    recommended_winner = "variant_b"
-                    recommendation_reason = (
-                        f"Variant B significantly outperforms A "
-                        f"(p={statistical_result.p_value:.4f}, "
-                        f"effect size={statistical_result.effect_size:.3f})"
-                    )
-                else:
-                    recommended_winner = "variant_a"
-                    recommendation_reason = (
-                        f"Variant A significantly outperforms B "
-                        f"(p={statistical_result.p_value:.4f}, "
-                        f"effect size={statistical_result.effect_size:.3f})"
-                    )
-            else:
-                recommendation_reason = f"No significant difference detected (p={statistical_result.p_value:.4f})"
-
-        # Create comparison
-        comparison = VariantComparison(
-            variant_a_metrics=metrics_a,
-            variant_b_metrics=metrics_b,
-            mean_difference_usd=mean_difference,
-            relative_improvement=relative_improvement,
-            pnl_statistical_result=statistical_result,
-            recommended_winner=recommended_winner,
-            recommendation_reason=recommendation_reason,
-            has_sufficient_data=has_sufficient_data,
-        )
-
-        # Record comparison in history
+    def _record_comparison(self, comparison: VariantComparison) -> None:
+        """Record a comparison in the active test history."""
+        if not self.test:
+            return
         self.test.comparison_history.append(
             {
                 "timestamp": datetime.now(UTC).isoformat(),
@@ -1027,35 +1099,39 @@ class ABTestManager:
             }
         )
 
-        # Emit comparison event
+    def _emit_comparison_event(self, comparison: VariantComparison) -> None:
+        """Emit the timeline event for a completed comparison."""
         self._emit_event(
             ABTestEventType.AB_TEST_COMPARISON_UPDATED,
-            f"A/B test comparison: {recommendation_reason}",
+            f"A/B test comparison: {comparison.recommendation_reason}",
             {
-                "has_sufficient_data": has_sufficient_data,
-                "mean_difference_usd": str(mean_difference),
-                "recommended_winner": recommended_winner,
+                "has_sufficient_data": comparison.has_sufficient_data,
+                "mean_difference_usd": str(comparison.mean_difference_usd),
+                "recommended_winner": comparison.recommended_winner,
             },
         )
 
-        # Call comparison callback
+    def _notify_comparison_callback(self, test: ABTest) -> None:
+        """Invoke the comparison callback without aborting comparison flow."""
         if self._on_comparison:
             try:
-                self._on_comparison(self.test)
+                self._on_comparison(test)
             except Exception as e:
                 logger.error(f"Comparison callback failed: {e}")
 
-        # Auto-end if configured and significant
+    def _maybe_auto_end_on_significance(self, comparison: VariantComparison) -> None:
+        """End the active test if the comparison satisfies auto-end criteria."""
+        if not self.test:
+            return
+        statistical_result = comparison.pnl_statistical_result
         if (
-            config.auto_end_on_significance
+            self.test.config.auto_end_on_significance
             and statistical_result
             and statistical_result.is_significant
-            and recommended_winner
+            and comparison.recommended_winner
         ):
             logger.info("Auto-ending test due to statistical significance")
-            self.end_test(select_winner=recommended_winner)
-
-        return comparison
+            self.end_test(select_winner=comparison.recommended_winner)
 
     def end_test(self, select_winner: str | None = None) -> EndTestResult:
         """End the A/B test and optionally select a winner.
@@ -1085,7 +1161,7 @@ class ABTestManager:
             )
 
         # Get final comparison
-        final_comparison = self.compare()
+        final_comparison = self._compare(auto_end=False)
 
         # Update test state
         self.test.ended_at = datetime.now(UTC)
@@ -1174,7 +1250,7 @@ class ABTestManager:
         return EndTestResult(
             success=True,
             winner=None,
-            final_comparison=self.compare() if self.test.variant_a_metrics else None,
+            final_comparison=self._compare(auto_end=False) if self.test.variant_a_metrics else None,
         )
 
     # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.

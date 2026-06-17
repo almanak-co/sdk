@@ -629,56 +629,80 @@ class KrakenAdapter:
         Returns:
             ExecutionDetails with operation result
         """
-        chain = action.metadata.get("chain", context.chain)
-
         if action.type == ActionType.CEX_SWAP:
-            if key.order_id is None or key.userref is None:
-                raise ValueError("Swap resolution requires order_id and userref on idempotency key")
-            if action.asset_in is None or action.asset_out is None:
-                raise ValueError("Swap resolution requires asset_in and asset_out")
-            if action.decimals_in is None or action.decimals_out is None:
-                raise ValueError("Swap resolution requires decimals_in and decimals_out")
-            return await self.receipt_resolver.resolve_swap(
-                txid=key.order_id,
-                userref=key.userref,
-                asset_in=action.asset_in,
-                asset_out=action.asset_out,
-                decimals_in=action.decimals_in,
-                decimals_out=action.decimals_out,
-                chain=chain,
-                idempotency_key=key,
-            )
+            return await self._resolve_swap_action(action, key, context)
         elif action.type == ActionType.CEX_WITHDRAW:
-            if key.refid is None:
-                raise ValueError("Withdrawal resolution requires refid on idempotency key")
-            if action.asset is None or action.chain is None:
-                raise ValueError("Withdrawal resolution requires asset and chain")
-            if action.decimals is None or action.to_address is None or action.amount is None:
-                raise ValueError("Withdrawal resolution requires decimals, to_address, and amount")
-            return await self.receipt_resolver.resolve_withdrawal(
-                refid=key.refid,
-                asset=action.asset,
-                chain=action.chain,
-                decimals=action.decimals,
-                to_address=action.to_address,
-                amount=action.amount,
-                idempotency_key=key,
-            )
+            return await self._resolve_withdraw_action(action, key)
         elif action.type == ActionType.CEX_DEPOSIT:
-            if action.tx_hash is None or action.asset is None or action.from_chain is None:
-                raise ValueError("Deposit resolution requires tx_hash, asset, and from_chain")
-            if action.decimals is None or action.amount is None:
-                raise ValueError("Deposit resolution requires decimals and amount")
-            return await self.receipt_resolver.resolve_deposit(
-                tx_hash=action.tx_hash,
-                asset=action.asset,
-                chain=action.from_chain,
-                decimals=action.decimals,
-                amount=action.amount,
-                idempotency_key=key,
-            )
+            return await self._resolve_deposit_action(action, key)
         else:
             raise ValueError(f"Unknown action type: {action.type}")
+
+    async def _resolve_swap_action(
+        self,
+        action: CEXAction,
+        key: CEXIdempotencyKey,
+        context: ExecutionContext,
+    ) -> ExecutionDetails:
+        """Resolve a Kraken swap action."""
+        chain = action.metadata.get("chain", context.chain)
+        if key.order_id is None or key.userref is None:
+            raise ValueError("Swap resolution requires order_id and userref on idempotency key")
+        if action.asset_in is None or action.asset_out is None:
+            raise ValueError("Swap resolution requires asset_in and asset_out")
+        if action.decimals_in is None or action.decimals_out is None:
+            raise ValueError("Swap resolution requires decimals_in and decimals_out")
+        return await self.receipt_resolver.resolve_swap(
+            txid=key.order_id,
+            userref=key.userref,
+            asset_in=action.asset_in,
+            asset_out=action.asset_out,
+            decimals_in=action.decimals_in,
+            decimals_out=action.decimals_out,
+            chain=chain,
+            idempotency_key=key,
+        )
+
+    async def _resolve_withdraw_action(
+        self,
+        action: CEXAction,
+        key: CEXIdempotencyKey,
+    ) -> ExecutionDetails:
+        """Resolve a Kraken withdrawal action."""
+        if key.refid is None:
+            raise ValueError("Withdrawal resolution requires refid on idempotency key")
+        if action.asset is None or action.chain is None:
+            raise ValueError("Withdrawal resolution requires asset and chain")
+        if action.decimals is None or action.to_address is None or action.amount is None:
+            raise ValueError("Withdrawal resolution requires decimals, to_address, and amount")
+        return await self.receipt_resolver.resolve_withdrawal(
+            refid=key.refid,
+            asset=action.asset,
+            chain=action.chain,
+            decimals=action.decimals,
+            to_address=action.to_address,
+            amount=action.amount,
+            idempotency_key=key,
+        )
+
+    async def _resolve_deposit_action(
+        self,
+        action: CEXAction,
+        key: CEXIdempotencyKey,
+    ) -> ExecutionDetails:
+        """Resolve a Kraken deposit action."""
+        if action.tx_hash is None or action.asset is None or action.from_chain is None:
+            raise ValueError("Deposit resolution requires tx_hash, asset, and from_chain")
+        if action.decimals is None or action.amount is None:
+            raise ValueError("Deposit resolution requires decimals and amount")
+        return await self.receipt_resolver.resolve_deposit(
+            tx_hash=action.tx_hash,
+            asset=action.asset,
+            chain=action.from_chain,
+            decimals=action.decimals,
+            amount=action.amount,
+            idempotency_key=key,
+        )
 
 
 __all__ = [
