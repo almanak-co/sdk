@@ -2435,10 +2435,22 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
                 request.limit,
             )
             events = [_pg_row_to_accounting_event(r) for r in rows]
-            return gateway_pb2.GetAccountingEventsResponse(events=events)
+            # VIB-5185: read succeeded against a present backend → MEASURED. An
+            # empty list here is a real zero, not an unmeasured gap.
+            return gateway_pb2.GetAccountingEventsResponse(
+                events=events,
+                backend_status=gateway_pb2.ACCOUNTING_BACKEND_STATUS_AVAILABLE,
+            )
         except Exception as e:
             logger.warning("GetAccountingEvents PG failed for deployment=%s: %s", deployment_id, e)
-            return gateway_pb2.GetAccountingEventsResponse(events=[])
+            # VIB-5185: the read errored (e.g. hosted before the metrics-database
+            # migration adds the accounting_events table). Empty ≠ Zero — report
+            # ERRORED so the client treats the empty list as UNMEASURED and the
+            # teardown swap-back clamp fails closed.
+            return gateway_pb2.GetAccountingEventsResponse(
+                events=[],
+                backend_status=gateway_pb2.ACCOUNTING_BACKEND_STATUS_ERRORED,
+            )
 
     @staticmethod
     def _filter_sqlite_accounting_event_rows(
@@ -2464,7 +2476,13 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             assert self._state_manager is not None
             warm = self._state_manager.warm_backend
             if warm is None or not hasattr(warm, "get_accounting_events_sync"):
-                return gateway_pb2.GetAccountingEventsResponse(events=[])
+                # VIB-5185: no warm backend able to serve accounting events →
+                # the backend is structurally ABSENT. Empty ≠ Zero: report
+                # ABSENT so the client treats the empty list as UNMEASURED.
+                return gateway_pb2.GetAccountingEventsResponse(
+                    events=[],
+                    backend_status=gateway_pb2.ACCOUNTING_BACKEND_STATUS_ABSENT,
+                )
 
             rows = warm.get_accounting_events_sync(
                 deployment_id=deployment_id,
@@ -2472,10 +2490,18 @@ class StateServiceServicer(gateway_pb2_grpc.StateServiceServicer):
             )
             rows = self._filter_sqlite_accounting_event_rows(rows, request)
             events = [_sqlite_row_to_accounting_event(r) for r in rows]
-            return gateway_pb2.GetAccountingEventsResponse(events=events)
+            # VIB-5185: read succeeded against a present backend → MEASURED.
+            return gateway_pb2.GetAccountingEventsResponse(
+                events=events,
+                backend_status=gateway_pb2.ACCOUNTING_BACKEND_STATUS_AVAILABLE,
+            )
         except Exception as e:
             logger.warning("GetAccountingEvents SQLite failed: %s", e)
-            return gateway_pb2.GetAccountingEventsResponse(events=[])
+            # VIB-5185: the read raised → UNMEASURED, not measured-zero.
+            return gateway_pb2.GetAccountingEventsResponse(
+                events=[],
+                backend_status=gateway_pb2.ACCOUNTING_BACKEND_STATUS_ERRORED,
+            )
 
     async def GetAccountingEvents(
         self,

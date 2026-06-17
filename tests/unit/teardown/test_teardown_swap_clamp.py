@@ -258,25 +258,40 @@ class TestIterOpenWalletBasisLots:
 # ──────────────────────────────────────────────────────────────────────────
 
 
+def _probe_sm() -> MagicMock:
+    """A StateManager-flavoured mock for the VIB-5173 *fallback* path.
+
+    The local ``StateManager`` exposes ``has_accounting_event_backend`` +
+    ``get_accounting_events_sync`` but NOT the VIB-5185 per-read measured
+    signal, so neutralise ``read_accounting_events_measured`` (a bare MagicMock
+    would auto-vivify it as a callable and spuriously take the preferred path).
+    """
+    sm = MagicMock()
+    sm.read_accounting_events_measured = None
+    return sm
+
+
 class TestReadTrackedSwapInventory:
+    """VIB-5173 fallback path — local ``StateManager`` structural probe."""
+
     def test_none_state_manager_returns_sentinel(self):
         assert read_tracked_swap_inventory(state_manager=None, deployment_id=_DEP) is None
 
     def test_empty_deployment_returns_sentinel(self):
-        sm = MagicMock()
+        sm = _probe_sm()
         assert read_tracked_swap_inventory(state_manager=sm, deployment_id="") is None
 
     def test_state_manager_without_method_returns_sentinel(self):
-        sm = SimpleNamespace()  # no get_accounting_events_sync
+        sm = SimpleNamespace()  # no get_accounting_events_sync, no measured reader
         assert read_tracked_swap_inventory(state_manager=sm, deployment_id=_DEP) is None
 
     def test_exception_returns_sentinel(self):
-        sm = MagicMock()
+        sm = _probe_sm()
         sm.get_accounting_events_sync.side_effect = RuntimeError("db locked")
         assert read_tracked_swap_inventory(state_manager=sm, deployment_id=_DEP) is None
 
     def test_success_returns_tracked_map(self):
-        sm = MagicMock()
+        sm = _probe_sm()
         sm.has_accounting_event_backend.return_value = True
         sm.get_accounting_events_sync.return_value = [_swap_event(_DEP, "USDC", "12")]
         assert read_tracked_swap_inventory(state_manager=sm, deployment_id=_DEP) == {"USDC": Decimal("12")}
@@ -290,7 +305,7 @@ class TestReadTrackedSwapInventory:
         # shared read would return [] (→ {} measured-zero), the probe short-
         # circuits to the UNMEASURED sentinel so the clamp fails closed + flags
         # accounting_degraded instead of silently under-sweeping.
-        sm = MagicMock()
+        sm = _probe_sm()
         sm.has_accounting_event_backend.return_value = False
         sm.get_accounting_events_sync.return_value = []  # would be measured-zero
         assert read_tracked_swap_inventory(state_manager=sm, deployment_id=_DEP) is None
@@ -298,13 +313,12 @@ class TestReadTrackedSwapInventory:
 
     def test_read_raising_fails_closed_via_wrapper_guard(self):
         # CASE 2 — the read path raises. This exercises read_tracked_swap_inventory's
-        # OWN defensive try/except (the wrapper guard), NOT a reachable production
-        # backend-error scenario: the real StateManager AND GatewayStateManager both
-        # swallow read exceptions internally and return [] (measured-zero), so a live
-        # backend would yield {} here, never propagate. The wrapper guard still fails
-        # closed to the UNMEASURED sentinel if anything in the read/replay does raise
-        # (e.g. a future non-swallowing backend, or sum_open_wallet_basis_by_token).
-        sm = MagicMock()
+        # OWN defensive try/except (the wrapper guard) on the fallback path: the
+        # local StateManager swallows read exceptions internally and returns []
+        # (measured-zero), so a live backend would yield {} here. The wrapper guard
+        # still fails closed to the UNMEASURED sentinel if anything in the
+        # read/replay does raise.
+        sm = _probe_sm()
         sm.has_accounting_event_backend.return_value = True
         sm.get_accounting_events_sync.side_effect = RuntimeError("db locked")
         assert read_tracked_swap_inventory(state_manager=sm, deployment_id=_DEP) is None
@@ -313,24 +327,87 @@ class TestReadTrackedSwapInventory:
         # CASE 3 — backend present (probe True) and genuinely no events for the
         # deployment → measured zero {} (NOT the sentinel). The clamp then
         # treats the from-token as untracked (skip, NOT degraded).
-        sm = MagicMock()
+        sm = _probe_sm()
         sm.has_accounting_event_backend.return_value = True
         sm.get_accounting_events_sync.return_value = []
         assert read_tracked_swap_inventory(state_manager=sm, deployment_id=_DEP) == {}
 
     def test_probe_raising_fails_closed_to_sentinel(self):
         # A probe that itself raises is unmeasured — never block the unwind.
-        sm = MagicMock()
+        sm = _probe_sm()
         sm.has_accounting_event_backend.side_effect = RuntimeError("boom")
         assert read_tracked_swap_inventory(state_manager=sm, deployment_id=_DEP) is None
 
-    def test_backcompat_no_probe_reads_when_method_present(self):
-        # A backend WITHOUT the probe (e.g. GatewayStateManager) keeps the
-        # prior behaviour — reads when it can supply events.
+    def test_backcompat_no_probe_no_measured_reader_reads_when_method_present(self):
+        # A backend with NEITHER the probe NOR the measured reader (a minimal
+        # legacy manager) keeps the prior behaviour — reads when it can supply
+        # events.
         sm = SimpleNamespace(
             get_accounting_events_sync=lambda deployment_id, position_key=None: [_swap_event(_DEP, "USDC", "5")]
         )
         assert read_tracked_swap_inventory(state_manager=sm, deployment_id=_DEP) == {"USDC": Decimal("5")}
+
+
+class TestReadTrackedSwapInventoryMeasuredReader:
+    """VIB-5185 production path — ``GatewayStateManager.read_accounting_events_measured``.
+
+    This is the only path that fires on a real ``strat run`` (the runner's
+    state_manager is always ``GatewayStateManager``). The ``(events, measured)``
+    tuple carries the gateway ``backend_status`` proto signal so absent / errored
+    / empty are no longer collapsed into one clamp outcome.
+    """
+
+    @staticmethod
+    def _reader_sm(result):
+        # SimpleNamespace so only the measured reader is present — no
+        # auto-vivified has_accounting_event_backend / get_accounting_events_sync.
+        return SimpleNamespace(
+            read_accounting_events_measured=lambda deployment_id, position_key=None: result
+        )
+
+    def test_available_nonempty_returns_tracked_map(self):
+        # measured=True with events → real tracked inventory.
+        sm = self._reader_sm(([_swap_event(_DEP, "USDC", "7")], True))
+        assert read_tracked_swap_inventory(state_manager=sm, deployment_id=_DEP) == {"USDC": Decimal("7")}
+
+    def test_available_empty_returns_measured_zero(self):
+        # CASE 3 (gateway) — AVAILABLE + genuinely no events → measured zero {},
+        # NOT the sentinel. Clamp treats the from-token as untracked (skip, not
+        # degraded).
+        sm = self._reader_sm(([], True))
+        assert read_tracked_swap_inventory(state_manager=sm, deployment_id=_DEP) == {}
+
+    def test_absent_backend_unmeasured_returns_sentinel(self):
+        # CASE 1 (gateway) — ABSENT (e.g. hosted pre-metrics-database migration)
+        # surfaces as measured=False with []. Empty ≠ Zero → UNMEASURED sentinel,
+        # NOT measured-zero. Fails closed + flags accounting_degraded.
+        sm = self._reader_sm(([], False))
+        assert read_tracked_swap_inventory(state_manager=sm, deployment_id=_DEP) is None
+
+    def test_errored_read_unmeasured_returns_sentinel(self):
+        # CASE 2 (gateway) — present-but-errored read surfaces as measured=False
+        # (gateway reported ERRORED). The pre-VIB-5185 code collapsed this into []
+        # and treated it as measured-zero; now it is the UNMEASURED sentinel.
+        sm = self._reader_sm(([], False))
+        assert read_tracked_swap_inventory(state_manager=sm, deployment_id=_DEP) is None
+
+    def test_reader_raising_fails_closed_to_sentinel(self):
+        # A measured reader that itself raises is unmeasured — never block unwind.
+        def _boom(deployment_id, position_key=None):
+            raise RuntimeError("rpc gone")
+
+        sm = SimpleNamespace(read_accounting_events_measured=_boom)
+        assert read_tracked_swap_inventory(state_manager=sm, deployment_id=_DEP) is None
+
+    def test_measured_reader_preferred_over_probe(self):
+        # When BOTH surfaces exist, the per-read measured signal wins (it also
+        # catches the errored case a pre-read structural probe cannot).
+        sm = MagicMock()
+        sm.read_accounting_events_measured.return_value = ([], False)
+        sm.has_accounting_event_backend.return_value = True  # would say "present"
+        sm.get_accounting_events_sync.return_value = []  # would be measured-zero
+        assert read_tracked_swap_inventory(state_manager=sm, deployment_id=_DEP) is None
+        sm.get_accounting_events_sync.assert_not_called()
 
 
 # ──────────────────────────────────────────────────────────────────────────

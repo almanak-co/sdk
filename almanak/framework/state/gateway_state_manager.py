@@ -1756,10 +1756,35 @@ class GatewayStateManager:
             so PortfolioValuer's duck-typed access (``e.get("event_type")``,
             ``e.get("payload_json")`` etc.) is unchanged.
         """
+        rows, _measured = self._fetch_accounting_events(deployment_id, position_key)
+        return rows
+
+    def _fetch_accounting_events(
+        self,
+        deployment_id: str,
+        position_key: str | None = None,
+    ) -> tuple[list[dict], bool]:
+        """Single gateway round-trip for accounting events + a MEASURED flag.
+
+        Shared engine for :meth:`get_accounting_events_sync` (which drops the
+        flag, keeping its ``[]``-on-any-failure contract) and
+        :meth:`read_accounting_events_measured` (which surfaces it).
+
+        Returns ``(rows, measured)`` where ``measured`` is ``True`` ONLY when
+        the gateway reports ``ACCOUNTING_BACKEND_STATUS_AVAILABLE`` — backend
+        present AND the read succeeded, so an empty ``rows`` is a real measured
+        zero. Every other status (VIB-5185: ``ABSENT`` / ``ERRORED``, the
+        UNSPECIFIED default of an OLD gateway that predates the signal, or a
+        transport-level gRPC error) yields ``measured=False`` — UNMEASURED, the
+        Empty ≠ Zero fail-closed direction. Never raises.
+        """
         deployment_id = (deployment_id or "").strip()
         if not deployment_id:
-            logger.warning("get_accounting_events_sync called with empty deployment_id — returning []")
-            return []
+            logger.warning("GetAccountingEvents called with empty deployment_id — returning []")
+            # An empty deployment id is a caller error, not a backend read —
+            # UNMEASURED, so the swap-back clamp fails closed rather than
+            # treating it as a measured-zero inventory.
+            return [], False
         try:
             request = gateway_pb2.GetAccountingEventsRequest(
                 deployment_id=deployment_id,
@@ -1769,7 +1794,11 @@ class GatewayStateManager:
             rows = [_proto_event_to_dict(e) for e in response.events]
             # Stable ordering for deterministic FIFO replay; secondary key on id breaks timestamp ties.
             rows.sort(key=lambda r: (r.get("timestamp") or "", r.get("id") or ""))
-            return rows
+            # VIB-5185: trust an empty list as a measured zero ONLY when the
+            # gateway affirmatively reports AVAILABLE. UNSPECIFIED (old gateway),
+            # ABSENT, and ERRORED all mean UNMEASURED.
+            measured = response.backend_status == gateway_pb2.ACCOUNTING_BACKEND_STATUS_AVAILABLE
+            return rows, measured
         except Exception as e:
             # VIB-3944: was debug; bumped to warning so an empty result on a
             # startup-critical call (FIFO basis-store reconstruction, lending
@@ -1778,7 +1807,32 @@ class GatewayStateManager:
             # the operator can now see WHY the downstream caller saw an empty
             # event list.
             logger.warning("GetAccountingEvents via gateway failed: %s", e)
-            return []
+            # Transport-level failure → UNMEASURED.
+            return [], False
+
+    def read_accounting_events_measured(
+        self,
+        deployment_id: str,
+        position_key: str | None = None,
+    ) -> tuple[list[dict], bool]:
+        """Accounting events plus whether the read is MEASURED (VIB-5185).
+
+        Returns ``(rows, measured)``. ``measured=True`` means the gateway
+        reported ``ACCOUNTING_BACKEND_STATUS_AVAILABLE`` (backend present AND
+        the read succeeded), so an empty ``rows`` is an authoritative zero.
+        ``measured=False`` means UNMEASURED — backend structurally absent (e.g.
+        hosted before the metrics-database migration), the read errored, or an
+        old gateway that does not emit the signal.
+
+        This is the production wiring for the ALM-2766 / VIB-5173 teardown
+        swap-back clamp: it carries the absent-vs-errored-vs-empty distinction
+        end-to-end over the gateway proto, in the SAME read that returns the
+        events (no separate structural probe, so no TOCTOU and a single
+        round-trip). Callers MUST map ``measured=False`` to the UNMEASURED
+        ``None`` sentinel (fail closed → ``accounting_degraded``), never to
+        measured-zero inventory. Never raises.
+        """
+        return self._fetch_accounting_events(deployment_id, position_key)
 
 
 def _proto_position_event_to_dict(event: "gateway_pb2.PositionEventData") -> dict:

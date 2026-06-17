@@ -139,23 +139,55 @@ def read_tracked_swap_inventory(
     clamp fails closed + flags ``accounting_degraded`` instead of silently
     under-sweeping.
 
-    Backends that do not expose the probe (e.g. ``GatewayStateManager``, whose
-    pre-migration empty read is a swallowed gRPC error rather than a structural
-    absence the SM can see) keep the prior behaviour — they read when they can
-    supply events. Cleanly distinguishing absent-vs-empty on the gateway path
-    needs a backend-side signal over the proto and is out of scope here
-    (residual follow-up).
+    PRODUCTION PATH (VIB-5185). The runner's ``state_manager`` is always
+    ``GatewayStateManager`` for a real ``strat run`` (local AND hosted), so the
+    structural probe above never fires in production — the absent-vs-empty
+    distinction has to cross the gateway. ``GatewayStateManager`` exposes
+    ``read_accounting_events_measured`` which returns ``(events, measured)`` in a
+    SINGLE read: ``measured`` is the gateway's ``backend_status`` proto signal,
+    ``True`` only when the backend is present AND the read succeeded. A
+    ``measured=False`` (structurally absent — e.g. hosted before the
+    metrics-database migration — OR a present-but-errored read, both previously
+    collapsed into ``[]``) returns the UNMEASURED sentinel ``None`` here, so the
+    clamp fails closed + flags ``accounting_degraded``. One read also means no
+    structural-probe / read TOCTOU and no extra round-trip.
     """
-    if not deployment_id:
+    if not deployment_id or state_manager is None:
         return None
-    # Require the read method up front: a manager that cannot supply accounting
-    # events (None, or a wrong-flavour/lifecycle manager) yields the sentinel.
-    # Guaranteeing the method exists here also means the capability-probe branch
-    # below can never fall through to an AttributeError on the read call.
-    if state_manager is None or not hasattr(state_manager, "get_accounting_events_sync"):
+    # VIB-5185 preferred path: a backend that reports MEASURED vs UNMEASURED in
+    # the SAME read it returns events from (GatewayStateManager over the gateway
+    # ``backend_status`` proto signal). This is the only path that fires in
+    # production, and unlike a pre-read structural probe it also catches a
+    # present-but-errored read (Empty ≠ Zero for BOTH absent and errored).
+    measured_reader = getattr(state_manager, "read_accounting_events_measured", None)
+    if callable(measured_reader):
+        try:
+            events, measured = measured_reader(deployment_id)
+        except Exception:  # noqa: BLE001 — read-only DX guard; never block the unwind.
+            logger.warning(
+                "ALM-2766 tracked-inventory measured-read failed for %s — swap-back clamp will fail closed",
+                deployment_id,
+                exc_info=True,
+            )
+            return None
+        if not measured:
+            # Backend absent or read errored → an empty read is unmeasured, not
+            # zero. Fail closed so the clamp flags accounting_degraded.
+            logger.warning(
+                "ALM-2766 tracked-inventory read for %s: accounting backend UNMEASURED "
+                "(absent or errored) — swap-back clamp will fail closed",
+                deployment_id,
+            )
+            return None
+        return sum_open_wallet_basis_by_token(events, deployment_id)
+    # VIB-5173 fallback (local ``StateManager``): no per-read measured signal,
+    # but a cheap structural probe distinguishes a structurally-absent backend
+    # (UNMEASURED) from a genuinely-empty event set (measured zero). Require the
+    # read method up front so the probe branch can never fall through to an
+    # AttributeError on the read call (``state_manager`` is non-None here — the
+    # ``is None`` guard ran at the top alongside the deployment-id check).
+    if not hasattr(state_manager, "get_accounting_events_sync"):
         return None
-    # VIB-5173 capability probe: distinguish a structurally-absent accounting
-    # backend (UNMEASURED) from a genuinely-empty event set (measured zero).
     probe = getattr(state_manager, "has_accounting_event_backend", None)
     if callable(probe):
         try:

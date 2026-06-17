@@ -439,3 +439,135 @@ def test_gsm_get_accounting_events_sync_empty_deployment_id_returns_empty() -> N
     gsm = _make_gsm(events=[])
     result = gsm.get_accounting_events_sync("")
     assert result == []
+
+
+# ---------------------------------------------------------------------------
+# VIB-5185 — gateway backend_status signal (Empty ≠ Zero end-to-end)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_backend_status_sqlite_available_on_success() -> None:
+    # Present backend, read OK (even with rows) → AVAILABLE → MEASURED.
+    servicer = _make_servicer(warm_rows=[])
+    ctx = _make_context()
+    req = gateway_pb2.GetAccountingEventsRequest(deployment_id=_DEPLOYMENT_ID)
+    resp = await servicer.GetAccountingEvents(req, ctx)
+    assert resp.backend_status == gateway_pb2.ACCOUNTING_BACKEND_STATUS_AVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_backend_status_sqlite_absent_when_backend_missing_method() -> None:
+    # CASE 1 — warm backend cannot serve accounting events → ABSENT (UNMEASURED).
+    servicer = _make_servicer(warm_rows=None)
+    ctx = _make_context()
+    req = gateway_pb2.GetAccountingEventsRequest(deployment_id=_DEPLOYMENT_ID)
+    resp = await servicer.GetAccountingEvents(req, ctx)
+    assert len(resp.events) == 0
+    assert resp.backend_status == gateway_pb2.ACCOUNTING_BACKEND_STATUS_ABSENT
+
+
+@pytest.mark.asyncio
+async def test_backend_status_sqlite_errored_on_exception() -> None:
+    # CASE 2 — present-but-errored read → ERRORED (UNMEASURED), not measured-zero.
+    servicer = _make_servicer(raise_exc=RuntimeError("db is gone"))
+    ctx = _make_context()
+    req = gateway_pb2.GetAccountingEventsRequest(deployment_id=_DEPLOYMENT_ID)
+    resp = await servicer.GetAccountingEvents(req, ctx)
+    assert len(resp.events) == 0
+    assert resp.backend_status == gateway_pb2.ACCOUNTING_BACKEND_STATUS_ERRORED
+
+
+@pytest.mark.asyncio
+async def test_backend_status_pg_available_on_success() -> None:
+    servicer = _make_pg_servicer(rows=[])
+    ctx = _make_context()
+    req = gateway_pb2.GetAccountingEventsRequest(deployment_id=_DEPLOYMENT_ID)
+    resp = await servicer.GetAccountingEvents(req, ctx)
+    assert resp.backend_status == gateway_pb2.ACCOUNTING_BACKEND_STATUS_AVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_backend_status_pg_errored_on_exception() -> None:
+    # Hosted before the metrics-database migration adds accounting_events: the PG
+    # query raises → ERRORED (UNMEASURED), so the swap-back clamp fails closed.
+    servicer = _make_pg_servicer(raise_exc=RuntimeError("relation does not exist"))
+    ctx = _make_context()
+    req = gateway_pb2.GetAccountingEventsRequest(deployment_id=_DEPLOYMENT_ID)
+    resp = await servicer.GetAccountingEvents(req, ctx)
+    assert len(resp.events) == 0
+    assert resp.backend_status == gateway_pb2.ACCOUNTING_BACKEND_STATUS_ERRORED
+
+
+def _make_gsm_with_status(status: int, events: list | None = None):
+    """GatewayStateManager whose gateway returns a response with ``backend_status``."""
+    from almanak.framework.state.gateway_state_manager import GatewayStateManager
+
+    response = gateway_pb2.GetAccountingEventsResponse(
+        events=events or [],
+        backend_status=status,
+    )
+    mock_client = MagicMock()
+    mock_client.state.GetAccountingEvents = MagicMock(return_value=response)
+    return GatewayStateManager(client=mock_client)
+
+
+def test_gsm_measured_available_empty_is_measured_zero() -> None:
+    # CASE 3 — AVAILABLE + no events → ([], measured=True): a real measured zero.
+    gsm = _make_gsm_with_status(gateway_pb2.ACCOUNTING_BACKEND_STATUS_AVAILABLE)
+    rows, measured = gsm.read_accounting_events_measured("dep-1")
+    assert rows == []
+    assert measured is True
+
+
+def test_gsm_measured_available_with_events() -> None:
+    ev = gateway_pb2.AccountingEvent(id="e1", deployment_id="dep-1", event_type="SWAP")
+    gsm = _make_gsm_with_status(gateway_pb2.ACCOUNTING_BACKEND_STATUS_AVAILABLE, events=[ev])
+    rows, measured = gsm.read_accounting_events_measured("dep-1")
+    assert len(rows) == 1
+    assert measured is True
+
+
+def test_gsm_measured_absent_is_unmeasured() -> None:
+    # CASE 1 — ABSENT → ([], measured=False): UNMEASURED.
+    gsm = _make_gsm_with_status(gateway_pb2.ACCOUNTING_BACKEND_STATUS_ABSENT)
+    rows, measured = gsm.read_accounting_events_measured("dep-1")
+    assert rows == []
+    assert measured is False
+
+
+def test_gsm_measured_errored_is_unmeasured() -> None:
+    # CASE 2 — ERRORED → measured=False even though events is [].
+    gsm = _make_gsm_with_status(gateway_pb2.ACCOUNTING_BACKEND_STATUS_ERRORED)
+    _rows, measured = gsm.read_accounting_events_measured("dep-1")
+    assert measured is False
+
+
+def test_gsm_measured_old_gateway_unspecified_is_unmeasured() -> None:
+    # Version-compat: an OLD gateway never sets backend_status → UNSPECIFIED (0).
+    # The SAFE default is UNMEASURED, so the clamp fails closed (under-sweep).
+    gsm = _make_gsm_with_status(gateway_pb2.ACCOUNTING_BACKEND_STATUS_UNSPECIFIED)
+    _rows, measured = gsm.read_accounting_events_measured("dep-1")
+    assert measured is False
+
+
+def test_gsm_measured_rpc_exception_is_unmeasured() -> None:
+    gsm = _make_gsm(raise_exc=RuntimeError("rpc gone"))
+    rows, measured = gsm.read_accounting_events_measured("dep-1")
+    assert rows == []
+    assert measured is False
+
+
+def test_gsm_measured_empty_deployment_id_is_unmeasured() -> None:
+    gsm = _make_gsm_with_status(gateway_pb2.ACCOUNTING_BACKEND_STATUS_AVAILABLE)
+    rows, measured = gsm.read_accounting_events_measured("")
+    assert rows == []
+    assert measured is False
+
+
+def test_gsm_get_accounting_events_sync_ignores_backend_status() -> None:
+    # The shared []-contract for PortfolioValuer / FIFO reconstruction is
+    # unchanged: get_accounting_events_sync returns rows regardless of status.
+    ev = gateway_pb2.AccountingEvent(id="e1", deployment_id="dep-1", event_type="SWAP")
+    gsm = _make_gsm_with_status(gateway_pb2.ACCOUNTING_BACKEND_STATUS_ERRORED, events=[ev])
+    assert len(gsm.get_accounting_events_sync("dep-1")) == 1

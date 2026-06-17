@@ -19,6 +19,47 @@ else:
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
+class _AccountingBackendStatus:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _AccountingBackendStatusEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_AccountingBackendStatus.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    ACCOUNTING_BACKEND_STATUS_UNSPECIFIED: _AccountingBackendStatus.ValueType  # 0
+    """old gateway / unknown → UNMEASURED (fail closed)"""
+    ACCOUNTING_BACKEND_STATUS_AVAILABLE: _AccountingBackendStatus.ValueType  # 1
+    """backend present AND read OK → events MEASURED ([] = real zero)"""
+    ACCOUNTING_BACKEND_STATUS_ABSENT: _AccountingBackendStatus.ValueType  # 2
+    """backend structurally absent → UNMEASURED"""
+    ACCOUNTING_BACKEND_STATUS_ERRORED: _AccountingBackendStatus.ValueType  # 3
+    """backend present but read raised → UNMEASURED"""
+
+class AccountingBackendStatus(_AccountingBackendStatus, metaclass=_AccountingBackendStatusEnumTypeWrapper):
+    """VIB-5185: distinguishes a MEASURED-empty accounting read (backend present,
+    read succeeded, genuinely no events → a REAL zero) from an UNMEASURED one
+    (backend structurally absent — e.g. hosted before the metrics-database
+    migration, or no warm store — OR the read errored). Empty ≠ Zero: the
+    teardown swap-back clamp (ALM-2766 / VIB-5173) MUST map every UNMEASURED
+    status to the ``None`` sentinel (fail closed → ``accounting_degraded``), and
+    NEVER to measured-zero inventory, or it silently under-/over-sweeps.
+
+    SAFE DEFAULT: the zero value is ``*_UNSPECIFIED``. An OLD gateway that never
+    sets this field — or any response built without it — decodes as UNSPECIFIED,
+    which the client treats as UNMEASURED (the under-sweep / fail-closed
+    direction). ONLY an explicit ``*_AVAILABLE`` lets the client trust an empty
+    event list as a measured zero. Uncertainty therefore fails closed.
+    """
+
+ACCOUNTING_BACKEND_STATUS_UNSPECIFIED: AccountingBackendStatus.ValueType  # 0
+"""old gateway / unknown → UNMEASURED (fail closed)"""
+ACCOUNTING_BACKEND_STATUS_AVAILABLE: AccountingBackendStatus.ValueType  # 1
+"""backend present AND read OK → events MEASURED ([] = real zero)"""
+ACCOUNTING_BACKEND_STATUS_ABSENT: AccountingBackendStatus.ValueType  # 2
+"""backend structurally absent → UNMEASURED"""
+ACCOUNTING_BACKEND_STATUS_ERRORED: AccountingBackendStatus.ValueType  # 3
+"""backend present but read raised → UNMEASURED"""
+Global___AccountingBackendStatus: _TypeAlias = AccountingBackendStatus  # noqa: Y015
+
 class _Resolution:
     ValueType = _typing.NewType("ValueType", _builtins.int)
     V: _TypeAlias = ValueType  # noqa: Y015
@@ -2214,14 +2255,22 @@ class GetAccountingEventsResponse(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     EVENTS_FIELD_NUMBER: _builtins.int
+    BACKEND_STATUS_FIELD_NUMBER: _builtins.int
+    backend_status: Global___AccountingBackendStatus.ValueType
+    """VIB-5185 — see AccountingBackendStatus. Consumers that need Empty ≠ Zero
+    (teardown swap-back clamp) MUST gate on this; read-path-only, no stored
+    column. Other readers (PortfolioValuer, FIFO reconstruction) ignore it and
+    keep treating ``events`` as before.
+    """
     @_builtins.property
     def events(self) -> _containers.RepeatedCompositeFieldContainer[Global___AccountingEvent]: ...
     def __init__(
         self,
         *,
         events: _abc.Iterable[Global___AccountingEvent] | None = ...,
+        backend_status: Global___AccountingBackendStatus.ValueType = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["events", b"events"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["backend_status", b"backend_status", "events", b"events"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___GetAccountingEventsResponse: _TypeAlias = GetAccountingEventsResponse  # noqa: Y015
