@@ -176,13 +176,29 @@ class TestIntentProperties:
         intent = strategy.decide(market)
         assert intent.amount_usd == Decimal("100")
 
-    def test_trades_counter_increments(self, strategy):
+    def test_trades_counter_increments_on_execution_not_decision(self, strategy):
+        """The counter counts EXECUTED trades, gated on on_intent_executed
+        success — not decisions. A decide() that returns an intent which never
+        lands (or reverts) must not bump the counter (ALM-2808)."""
         strategy.force_action = "buy"
         market = _mock_market()
         assert strategy._trades_executed == 0
-        strategy.decide(market)
+
+        # decide() alone does not count a trade
+        intent = strategy.decide(market)
+        assert strategy._trades_executed == 0
+
+        # a failed execution does not count a trade
+        strategy.on_intent_executed(intent, success=False, result=None)
+        assert strategy._trades_executed == 0
+
+        # a successful execution counts the trade
+        strategy.on_intent_executed(intent, success=True, result=None)
         assert strategy._trades_executed == 1
-        strategy.decide(market)
+
+        # second successful swap
+        sell_intent = strategy._create_sell_intent()
+        strategy.on_intent_executed(sell_intent, success=True, result=None)
         assert strategy._trades_executed == 2
 
 

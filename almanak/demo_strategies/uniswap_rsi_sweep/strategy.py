@@ -123,7 +123,8 @@ class UniswapRSISweepStrategy(IntentStrategy):
                 f"| Buying {format_usd(self.trade_size_usd)} of {self.base_token}"
             )
             self._consecutive_holds = 0
-            self._total_trades += 1
+            # _total_trades is incremented in on_intent_executed on a SUCCESSFUL
+            # swap, not here — a decision is not an execution (ALM-2808).
 
             return Intent.swap(
                 from_token=self.quote_token,
@@ -150,7 +151,8 @@ class UniswapRSISweepStrategy(IntentStrategy):
             f"| Selling {format_usd(self.trade_size_usd)} of {self.base_token}"
         )
         self._consecutive_holds = 0
-        self._total_trades += 1
+        # _total_trades is incremented in on_intent_executed on a SUCCESSFUL
+        # swap, not here — a decision is not an execution (ALM-2808).
 
         return Intent.swap(
             from_token=self.base_token,
@@ -161,7 +163,13 @@ class UniswapRSISweepStrategy(IntentStrategy):
         )
 
     def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
-        """Latch the acted signal only on a successful swap (drives neutral re-arm)."""
+        """Latch the acted signal and count the trade only on a successful swap.
+
+        Trade-side state (the executed-trade counter and the buy/sell re-arm
+        latch) is mutated here, post-execution — never in decide(), where the
+        swap has not yet landed (ALM-2808). _consecutive_holds stays in decide()
+        because it counts HOLD *decisions*, not executions.
+        """
         if not success:
             return
         intent_type = getattr(intent, "intent_type", None)
@@ -169,8 +177,10 @@ class UniswapRSISweepStrategy(IntentStrategy):
             return
         if getattr(intent, "to_token", None) == self.base_token:
             self._last_signal = "buy"
+            self._total_trades += 1
         elif getattr(intent, "from_token", None) == self.base_token:
             self._last_signal = "sell"
+            self._total_trades += 1
 
     def get_persistent_state(self) -> dict[str, Any]:
         return {

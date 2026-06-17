@@ -272,7 +272,8 @@ class EnsoRSIStrategy(IntentStrategy):
             f"slippage={self.max_slippage_pct}%"
         )
 
-        self._trades_executed += 1
+        # NOTE: _trades_executed is incremented in on_intent_executed on a
+        # SUCCESSFUL swap, not here — a decision is not an execution (ALM-2808).
 
         # Create swap intent with Enso protocol
         # This is the key difference from uniswap_rsi
@@ -299,7 +300,8 @@ class EnsoRSIStrategy(IntentStrategy):
             f"Creating SELL intent via Enso: {self.base_token} -> {self.quote_token}, slippage={self.max_slippage_pct}%"
         )
 
-        self._trades_executed += 1
+        # NOTE: _trades_executed is incremented in on_intent_executed on a
+        # SUCCESSFUL swap, not here — a decision is not an execution (ALM-2808).
 
         return Intent.swap(
             from_token=self.base_token,  # e.g., "WETH"
@@ -314,12 +316,18 @@ class EnsoRSIStrategy(IntentStrategy):
     # =========================================================================
 
     def on_intent_executed(self, intent: Intent, success: bool, result: Any) -> None:
-        """Latch the acted signal only on a successful swap (drives neutral re-arm)."""
+        """Latch the acted signal and count the trade only on a successful swap.
+
+        Trade-side state (the executed-trade counter and the buy/sell re-arm
+        latch) is mutated here, post-execution — never in decide()/intent
+        creation, where the swap has not yet landed (ALM-2808).
+        """
         if not success:
             return
         intent_type = getattr(intent, "intent_type", None)
         if not intent_type or intent_type.value != "SWAP":
             return
+        self._trades_executed += 1
         if getattr(intent, "to_token", None) == self.base_token:
             self._last_signal = "buy"
         elif getattr(intent, "from_token", None) == self.base_token:
