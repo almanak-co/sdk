@@ -113,8 +113,13 @@ def align_tick_to_spacing(tick: int, tick_spacing: int, round_up: bool = False) 
         if not round_up and tick % tick_spacing != 0:
             aligned -= tick_spacing
 
-    # Clamp to valid range
-    return max(MIN_TICK, min(MAX_TICK, aligned))
+    # Clamp to valid range. MIN_TICK / MAX_TICK are not guaranteed to be multiples
+    # of tick_spacing, so clamping to them directly could return an unaligned tick at
+    # the extremes. Clamp to the nearest in-bounds spacing-aligned bounds instead:
+    # the smallest aligned tick >= MIN_TICK and the largest aligned tick <= MAX_TICK.
+    min_aligned = -((-MIN_TICK) // tick_spacing) * tick_spacing
+    max_aligned = (MAX_TICK // tick_spacing) * tick_spacing
+    return max(min_aligned, min(max_aligned, aligned))
 
 
 def tick_to_sqrt_price_x64(tick: int) -> int:
@@ -224,7 +229,20 @@ def get_amounts_from_liquidity(
 
     Returns:
         Tuple of (amount_a, amount_b) in smallest units.
+
+    Raises:
+        SolanaCLMMTickError: If any sqrt price is non-positive, or the range is
+            inverted / zero-width (lower >= upper).
     """
+    # Validate inputs before any division. An inverted or zero-width range yields
+    # negative amounts (e.g. a negative width in the below/above-range branches),
+    # and a non-positive sqrt price divides by zero in the in-range / below-range
+    # denominators. Mirror get_liquidity_from_amounts, which guards lower < upper.
+    if sqrt_price_x64 <= 0 or sqrt_price_lower_x64 <= 0 or sqrt_price_upper_x64 <= 0:
+        raise SolanaCLMMTickError("Sqrt prices must be positive")
+    if sqrt_price_lower_x64 >= sqrt_price_upper_x64:
+        raise SolanaCLMMTickError("Lower sqrt price must be less than upper sqrt price")
+
     if sqrt_price_x64 <= sqrt_price_lower_x64:
         # Below range: only token A
         amount_a = (

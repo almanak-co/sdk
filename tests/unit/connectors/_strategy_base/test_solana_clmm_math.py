@@ -62,6 +62,35 @@ class TestAlignTickToSpacing:
         with pytest.raises(SolanaCLMMTickError, match="tick_spacing"):
             align_tick_to_spacing(100, 0)
 
+    @pytest.mark.parametrize("spacing", [10, 60, 120])
+    def test_clamped_extremes_stay_spacing_aligned(self, spacing: int) -> None:
+        # MIN_TICK / MAX_TICK are not multiples of these spacings, so clamping at the
+        # extremes must land on a spacing-aligned bound -- never on the raw constant.
+        for tick in (MIN_TICK - 5000, MIN_TICK, MAX_TICK, MAX_TICK + 5000):
+            for round_up in (False, True):
+                aligned = align_tick_to_spacing(tick, spacing, round_up=round_up)
+                assert aligned % spacing == 0
+                assert MIN_TICK <= aligned <= MAX_TICK
+
+    def test_max_tick_not_overshot_when_unaligned(self) -> None:
+        # spacing=60 does not divide MAX_TICK (443636 % 60 == 56). Rounding up at the
+        # ceiling must clamp to the largest in-bounds multiple, not exceed MAX_TICK.
+        spacing = 60
+        assert MAX_TICK % spacing != 0  # guard the premise
+        aligned = align_tick_to_spacing(MAX_TICK, spacing, round_up=True)
+        assert aligned == (MAX_TICK // spacing) * spacing
+        assert aligned <= MAX_TICK
+        assert aligned % spacing == 0
+
+    def test_min_tick_not_undershot_when_unaligned(self) -> None:
+        # Symmetric to the MAX_TICK case: rounding down at the floor stays in bounds.
+        spacing = 60
+        assert MIN_TICK % spacing != 0  # guard the premise
+        aligned = align_tick_to_spacing(MIN_TICK, spacing, round_up=False)
+        assert aligned == -((-MIN_TICK) // spacing) * spacing
+        assert aligned >= MIN_TICK
+        assert aligned % spacing == 0
+
 
 class TestSqrtPriceConversion:
     def test_tick_zero_is_q64_scale(self) -> None:
@@ -113,6 +142,30 @@ class TestLiquidityMath:
     def test_rejects_inverted_range(self) -> None:
         with pytest.raises(SolanaCLMMTickError, match="Lower sqrt price"):
             get_liquidity_from_amounts(self.cur, self.upper, self.lower, 1, 1)
+
+    def test_amounts_rejects_inverted_range(self) -> None:
+        # Inverse mirrors the forward guard: an inverted range would otherwise yield
+        # negative amounts from the negative width in the below/above-range branches.
+        with pytest.raises(SolanaCLMMTickError, match="Lower sqrt price"):
+            get_amounts_from_liquidity(self.cur, self.upper, self.lower, 1_000_000)
+
+    def test_amounts_rejects_zero_width_range(self) -> None:
+        # lower == upper is degenerate (division by a zero width); reject it.
+        with pytest.raises(SolanaCLMMTickError, match="Lower sqrt price"):
+            get_amounts_from_liquidity(self.cur, self.lower, self.lower, 1_000_000)
+
+    def test_amounts_rejects_non_positive_sqrt_prices(self) -> None:
+        # A non-positive sqrt price divides by zero in the in-range / below-range
+        # denominators; each position is guarded.
+        for bad_args in (
+            (0, self.lower, self.upper),  # current
+            (self.cur, 0, self.upper),  # lower
+            (self.cur, self.lower, 0),  # upper
+            (self.cur, self.lower, -5),  # negative upper
+            (-1, self.lower, self.upper),  # negative current
+        ):
+            with pytest.raises(SolanaCLMMTickError, match="positive"):
+                get_amounts_from_liquidity(*bad_args, 1_000_000)
 
 
 class TestTickArrayStartIndex:
