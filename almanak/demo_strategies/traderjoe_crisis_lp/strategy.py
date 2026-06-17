@@ -311,7 +311,12 @@ class TraderJoeCrisisLPStrategy(IntentStrategy):
                 logger.warning("LP_CLOSE failed, reverting to active")
             return
 
-        if self._state == "opening":
+        # Terminal state is keyed on the INTENT, not the prior _state. A teardown
+        # LP_CLOSE fires while _state=="active" (it bypasses the decide()-driven
+        # "active"->"closing" transition), so keying the reset on _state=="closing"
+        # left the position phantom-open after teardown and failed post-teardown
+        # verification (ALM-2807 Layer 2).
+        if intent_type == "LP_OPEN":
             self._state = "active"
             bin_ids = getattr(result, "bin_ids", None) if result is not None else None
             if not bin_ids and result is not None:
@@ -324,12 +329,16 @@ class TraderJoeCrisisLPStrategy(IntentStrategy):
                 len(self._position_bin_ids),
             )
 
-        elif self._state == "closing":
+        else:  # LP_CLOSE — decide()-driven rebalance close OR teardown close
+            was_rebalance = self._state == "closing"
             self._state = "idle"
             self._entry_price = None
             self._position_bin_ids = []
-            self._rebalance_count += 1
-            logger.info("LP closed. Rebalance #%d. State -> idle", self._rebalance_count)
+            if was_rebalance:
+                self._rebalance_count += 1
+                logger.info("LP closed. Rebalance #%d. State -> idle", self._rebalance_count)
+            else:
+                logger.info("LP closed (teardown). State -> idle")
 
     def get_status(self) -> dict[str, Any]:
         return {

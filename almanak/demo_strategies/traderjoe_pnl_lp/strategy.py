@@ -273,7 +273,12 @@ class TraderJoePnLLPStrategy(IntentStrategy):
                 logger.warning("LP_CLOSE failed, reverting to active")
             return
 
-        if self._state == "opening":
+        # Terminal state is keyed on the INTENT, not the prior _state. A teardown
+        # LP_CLOSE fires while _state=="active" (it bypasses the decide()-driven
+        # "active"->"closing" transition), so keying the reset on _state=="closing"
+        # left the position phantom-open after teardown and failed post-teardown
+        # verification (ALM-2807 Layer 2).
+        if intent_type == "LP_OPEN":
             self._state = "active"
             # ResultEnricher stores protocol-specific fields in extracted_data.
             # Some adapters also project them onto the result directly, but we
@@ -286,14 +291,18 @@ class TraderJoePnLLPStrategy(IntentStrategy):
                     bin_ids = extracted.get("bin_ids")
             if bin_ids:
                 self._position_bin_ids = list(bin_ids)
-            logger.info(f"LP opened successfully. State -> active")
+            logger.info("LP opened successfully. State -> active")
 
-        elif self._state == "closing":
+        else:  # LP_CLOSE — decide()-driven rebalance close OR teardown close
+            was_rebalance = self._state == "closing"
             self._state = "idle"
             self._entry_price = None
             self._position_bin_ids = []
-            self._rebalance_count += 1
-            logger.info(f"LP closed. Rebalance #{self._rebalance_count}. State -> idle")
+            if was_rebalance:
+                self._rebalance_count += 1
+                logger.info(f"LP closed. Rebalance #{self._rebalance_count}. State -> idle")
+            else:
+                logger.info("LP closed (teardown). State -> idle")
 
     def get_status(self) -> dict[str, Any]:
         return {
