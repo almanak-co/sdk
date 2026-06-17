@@ -749,6 +749,8 @@ class TestBorrowCompile:
         assert result.status is CompilationStatus.FAILED
         assert "collateral factor" in result.error
         assert "Vault__PositionAboveCF" in result.error
+        # A CF breach is a PERMANENT failure — never retried by teardown.
+        assert result.is_transient is False
         sdk.build_operate_tx.assert_not_called()
 
     def test_borrow_includes_existing_position_in_cf_preflight(self):
@@ -781,6 +783,9 @@ class TestBorrowCompile:
         assert "99999999" in result.error, "must name the currently available amount"
         assert "time/utilization-gated" in result.error
         assert "11011" in result.error
+        # Retryable means TRANSIENT: the teardown manager keys ``retryable`` off
+        # this so a time/utilization-gated borrow is re-attempted, not abandoned.
+        assert result.is_transient is True
         # DISTINCT from the CF hard failure — strategies branch on this.
         assert "Vault__PositionAboveCF" not in result.error
         assert "collateral factor" not in result.error
@@ -819,6 +824,8 @@ class TestWithdrawCompile:
         result, sdk = _compile(_withdraw_intent(amount=Decimal("0.9")))
         assert result.status is CompilationStatus.FAILED
         assert "withdrawable" in result.error
+        # CF-aware cap breach is a PERMANENT failure (repay first) — not retryable.
+        assert result.is_transient is False
         sdk.build_operate_tx.assert_not_called()
 
     def test_withdraw_amount_all_unresolved_fails(self):
@@ -846,6 +853,8 @@ class TestWithdrawCompile:
         assert "limit-gated (retryable)" in result.error, "must be distinguishable from hard failures"
         assert str(10**17) in result.error, "must name the currently available amount"
         assert "time/utilization-gated" in result.error
+        # Retryable means TRANSIENT (teardown re-attempts rather than abandons).
+        assert result.is_transient is True
         # DISTINCT from the CF-aware hard failure — strategies branch on this.
         assert "Repay debt" not in result.error
         assert "collateral factor" not in result.error

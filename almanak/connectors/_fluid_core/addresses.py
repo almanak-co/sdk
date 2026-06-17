@@ -209,13 +209,19 @@ def is_native_leg(entry: dict[str, Any]) -> bool:
     compiler refuses). Both consumers MUST agree on this definition, so it lives
     here next to ``FLUID_SMARTLENDING_MARKETS`` rather than being re-derived in
     each module. A wrapper is native-leg when ``native_token1`` is set OR
-    ``token0`` equals ``FLUID_DEX_LP_NATIVE_SENTINEL`` (case-insensitive).
+    ``token0`` OR ``token1`` equals ``FLUID_DEX_LP_NATIVE_SENTINEL``
+    (case-insensitive). Both token slots are compared — not only ``token0``
+    plus the flag — so a row carrying the sentinel in ``token1`` but a
+    missing/incorrect ``native_token1`` flag is still classified native
+    (fail-safe: a native leg the compiler must refuse, VIB-5121).
     """
-    native_t1 = bool(entry.get("native_token1"))
-    # ``or ""`` (not the get-default) so an explicit ``None`` token0 compares as
-    # "" rather than the string "None" — robust against a malformed config row.
-    native_t0 = str(entry.get("token0") or "").lower() == FLUID_DEX_LP_NATIVE_SENTINEL.lower()
-    return native_t0 or native_t1
+    native_t1_flag = bool(entry.get("native_token1"))
+    # ``or ""`` (not the get-default) so an explicit ``None`` token slot compares
+    # as "" rather than the string "None" — robust against a malformed config row.
+    sentinel = FLUID_DEX_LP_NATIVE_SENTINEL.lower()
+    native_t0 = str(entry.get("token0") or "").lower() == sentinel
+    native_t1 = str(entry.get("token1") or "").lower() == sentinel
+    return native_t0 or native_t1 or native_t1_flag
 
 
 __all__ = [

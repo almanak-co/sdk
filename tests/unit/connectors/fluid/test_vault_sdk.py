@@ -10,6 +10,7 @@ exact verified shapes (97-word VaultEntireData / 12-word UserPosition).
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -51,6 +52,45 @@ class TestConstructorGuards:
     def test_no_transport_raises(self):
         with pytest.raises(FluidSDKError, match="rpc_url"):
             FluidVaultSDK(chain="arbitrum")
+
+
+class TestEnsureGatewayConnected:
+    """Re-check gateway connectivity before EACH resolver read (CodeRabbit #2856).
+
+    The constructor's ``is_connected`` guard is point-in-time: a GatewayClient
+    can drop its channel afterward. Every resolver read must fast-fail with a
+    typed error rather than an opaque provider error on the wire.
+    """
+
+    def _gateway_sdk(self, *, connected: bool) -> FluidVaultSDK:
+        # Build via rpc_url (no live provider needed), then attach a gateway
+        # client whose connectivity we control; the guard reads is_connected.
+        sdk = _sdk()
+        sdk._gateway_client = SimpleNamespace(is_connected=connected)
+        return sdk
+
+    def test_no_op_for_rpc_only_sdk(self):
+        # The rpc_url path holds no gateway client — the guard must never raise.
+        _sdk()._ensure_gateway_connected()
+
+    def test_connected_gateway_passes(self):
+        self._gateway_sdk(connected=True)._ensure_gateway_connected()
+
+    @pytest.mark.parametrize(
+        ("method", "args"),
+        [
+            ("get_vault_entire_data", (ARB_VAULT_1,)),
+            ("position_by_nft_id", (12542,)),
+            ("positions_by_user", (WALLET,)),
+        ],
+    )
+    def test_stale_gateway_fast_fails_before_read(self, method: str, args: tuple):
+        sdk = self._gateway_sdk(connected=False)
+        # "not connected" is unique to the guard; a resolver .call() that slipped
+        # past it would raise a DIFFERENT error (no node at localhost), so this
+        # pins that the guard fires BEFORE the on-chain read.
+        with pytest.raises(FluidSDKError, match="not connected"):
+            getattr(sdk, method)(*args)
 
 
 def _user_position_tuple(nft_id: int = 12542, supply: int = 10**18, borrow: int = 500_000_001):

@@ -218,6 +218,23 @@ class TestCompileSwapFailures:
         assert result.status is CompilationStatus.FAILED
         assert "amount='all'" in result.error
 
+    def test_amount_rounding_to_zero_base_units_fails_before_quote(self):
+        # USDC has 6 decimals: 0.0000001 USDC -> int(0.1) == 0 base units. The
+        # guard must fail closed BEFORE pool/quote assembly, never quote a
+        # 0-input swap against the resolver (CodeRabbit PR #2856).
+        from_token = _token("USDC", USDC_ADDR)
+        to_token = _token("USDT", USDT_ADDR)
+        services = _services(from_token, to_token)
+        sdk = _mock_sdk()
+        with patch.object(FluidCompiler, "_build_sdk", return_value=sdk):
+            result = FluidCompiler().compile_swap(_ctx(services), _swap_intent(amount=Decimal("0.0000001")))
+        assert result.status is CompilationStatus.FAILED
+        assert "0 base units" in result.error
+        assert "USDC" in result.error
+        # Short-circuits before any quote/tx assembly.
+        services.calculate_expected_output.assert_not_called()
+        sdk.find_pool_for_pair.assert_not_called()
+
 
 class TestCompileDispatch:
     def test_lp_open_unsupported(self):

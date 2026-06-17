@@ -344,12 +344,29 @@ class FluidVaultSDK:
             abi=VAULT_RESOLVER_ABI,
         )
 
+    def _ensure_gateway_connected(self) -> None:
+        """Fast-fail if the gateway client disconnected after construction.
+
+        The constructor's ``is_connected`` guard is a point-in-time check: a
+        GatewayClient can drop its channel between SDK construction and a
+        resolver read. Re-check before each on-chain ``.call()`` so a stale
+        channel raises a typed ``FluidSDKError`` instead of an opaque provider
+        error from ``GatewayWeb3Provider`` (repo convention: guard on-chain
+        reads on GatewayClient connectivity). No-op for the direct-RPC path.
+        """
+        if self._gateway_client is not None and not getattr(self._gateway_client, "is_connected", False):
+            raise FluidSDKError(
+                "FluidVaultSDK gateway_client is not connected — the gateway channel "
+                "dropped after SDK construction; reconnect before reading vault state"
+            )
+
     # =========================================================================
     # Resolver reads (typed-ABI decode only)
     # =========================================================================
 
     def get_vault_entire_data(self, vault: str) -> FluidVaultData:
         """``VaultResolver.getVaultEntireData(vault)`` — 97-word typed decode."""
+        self._ensure_gateway_connected()
         try:
             raw = self._resolver.functions.getVaultEntireData(Web3.to_checksum_address(vault)).call()
         except Exception as e:
@@ -358,6 +375,7 @@ class FluidVaultSDK:
 
     def position_by_nft_id(self, nft_id: int) -> tuple[FluidVaultPosition, FluidVaultData]:
         """``VaultResolver.positionByNftId(nftId)`` — (12 + 97)-word typed decode."""
+        self._ensure_gateway_connected()
         try:
             raw_position, raw_vault = self._resolver.functions.positionByNftId(int(nft_id)).call()
         except Exception as e:
@@ -373,6 +391,7 @@ class FluidVaultSDK:
         lowercased vault address. No pagination exists; cost is bounded by
         the one-NFT-per-(wallet,vault) invariant.
         """
+        self._ensure_gateway_connected()
         try:
             raw_positions, raw_vaults = self._resolver.functions.positionsByUser(
                 Web3.to_checksum_address(wallet)

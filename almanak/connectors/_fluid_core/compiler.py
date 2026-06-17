@@ -350,6 +350,22 @@ class FluidCompiler(BaseProtocolCompiler[SwapCompilerContext]):
                 intent_id=intent.intent_id,
             )
 
+        # Reject a non-positive base-unit amount BEFORE quote/tx assembly: a
+        # tiny ``amount`` / ``amount_usd`` can round to 0 base units (int() floor
+        # at L345 / usd_to_token_amount), and the DexReservesResolver would
+        # otherwise be quoted for a 0-input swap (revert / nonsense quote). Fail
+        # closed with an actionable message instead.
+        if amount_in <= 0:
+            return CompilationResult(
+                status=CompilationStatus.FAILED,
+                error=(
+                    f"Swap amount resolves to {amount_in} base units of {from_token.symbol} "
+                    f"(rounded down to zero). Increase amount/amount_usd above one base unit "
+                    f"(1e-{from_token.decimals} {from_token.symbol})."
+                ),
+                intent_id=intent.intent_id,
+            )
+
         try:
             expected_output = ctx.services.calculate_expected_output(amount_in, from_token, to_token)
         except ValueError as e:

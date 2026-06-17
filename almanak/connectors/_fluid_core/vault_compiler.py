@@ -93,11 +93,19 @@ def _exact_erc20_approve_txs(token_address: str, spender: str, amount: int, chai
     ]
 
 
-def _failed(intent: Any, error: str) -> CompilationResult:
+def _failed(intent: Any, error: str, *, is_transient: bool = False) -> CompilationResult:
+    """Build a FAILED result.
+
+    ``is_transient=True`` marks a retryable (orchestration-level) failure so
+    the teardown manager treats it as ``retryable`` rather than a hard,
+    permanent failure — used for the time/utilization-gated Liquidity-layer
+    limit branches whose messages say "limit-gated (retryable)".
+    """
     return CompilationResult(
         status=CompilationStatus.FAILED,
         error=error,
         intent_id=getattr(intent, "intent_id", ""),
+        is_transient=is_transient,
     )
 
 
@@ -623,6 +631,7 @@ class FluidVaultCompiler(BaseLendingCompiler):
                 f"on-chain operate() would revert (UserModule__MaxUtilizationReached, errorId "
                 f"11011) and Fluid's Liquidity-layer limits expand over time, so retry later or "
                 f"reduce borrow_amount. Not a hard failure; no position risk.",
+                is_transient=True,
             )
         return None
 
@@ -921,6 +930,7 @@ class FluidVaultCompiler(BaseLendingCompiler):
                 f"{token.symbol} on Fluid vault {setup.vault} (nftId={nft_id}). This cap is "
                 f"time/utilization-gated — Fluid's Liquidity-layer limits expand over time, so "
                 f"retry later or reduce the amount. Not a hard failure; no position risk.",
+                is_transient=True,
             )
         transactions = [
             self._operate_transaction(

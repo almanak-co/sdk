@@ -33,6 +33,7 @@ from almanak.connectors._fluid_core.sdk import (
     FluidSDKError,
     decode_fluid_revert,
     fluid_error_id,
+    fluid_error_module,
 )
 
 if TYPE_CHECKING:
@@ -42,6 +43,10 @@ logger = logging.getLogger(__name__)
 
 # ``UserSupplyInNotOn`` — the per-pool "deposits disabled" gate (Phase-0 §V4).
 _DEX_USER_SUPPLY_IN_NOT_ON = 51013
+# The Fluid module that wraps DexT1 errors (FLUID_MODULE_ERROR_SELECTORS in
+# sdk.py). DexT1 error ids are only meaningful TOGETHER with this module —
+# the 51013 deposit-disabled match is gated on it.
+_DEX_ERROR_MODULE = "FluidDexError"
 
 # DEX deposit estimate revert-carrier selector (carries shares in word 0).
 _DEX_PERFECT_OUTPUT_SELECTOR = "0xe8d35d06"
@@ -368,7 +373,15 @@ class FluidSmartLendingSDK:
             return  # would-succeed → enabled
         except Exception as e:  # noqa: BLE001
             revert = _extract_revert_data(e)
-            if revert and fluid_error_id(revert) == _DEX_USER_SUPPLY_IN_NOT_ON:
+            # Guard the 51013 match by MODULE, not error-id alone: Fluid error
+            # ids are module-local (DexT1 id 51013 != a numerically-equal id from
+            # FluidVaultError/FluidLiquidityError), so a non-Dex revert that
+            # happens to carry 51013 must not be misread as deposit-disabled.
+            if (
+                revert
+                and fluid_error_module(revert) == _DEX_ERROR_MODULE
+                and fluid_error_id(revert) == _DEX_USER_SUPPLY_IN_NOT_ON
+            ):
                 raise FluidDexLpDepositDisabledError(
                     f"Fluid SmartLending pool {wrapper} has deposits disabled "
                     f"(DexT1__UserSupplyInNotOn / {_DEX_USER_SUPPLY_IN_NOT_ON}) — limit-gated (retryable)"

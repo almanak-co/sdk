@@ -39,8 +39,12 @@ _ZERO_ADDR = "0x0000000000000000000000000000000000000000"
 _NATIVE_SENTINEL = FLUID_DEX_LP_NATIVE_SENTINEL.lower()
 
 # Flatten the wrapper universe once: lowercased wrapper -> market entry.
+# Lowercase the key explicitly: ``_transfers()`` lowercases every emitter before
+# the ``_WRAPPERS.get(emitter)`` lookup, so a checksum/mixed-case wrapper key
+# would be unreachable. FLUID_SMARTLENDING_MARKETS already lowercases its keys,
+# but this guards against a future source row that is not pre-lowercased.
 _WRAPPERS: dict[str, dict[str, Any]] = {
-    wrapper: entry for rows in FLUID_SMARTLENDING_MARKETS.values() for wrapper, entry in rows.items()
+    str(wrapper).lower(): entry for rows in FLUID_SMARTLENDING_MARKETS.values() for wrapper, entry in rows.items()
 }
 
 

@@ -484,6 +484,51 @@ def test_quote_deposit_shares_unexpected_revert_raises():
 
 
 # ----------------------------------------------------------------------------
+# check_deposit_enabled — 51013 detection is MODULE-guarded (CodeRabbit #2856)
+# ----------------------------------------------------------------------------
+
+# Fluid module-error selectors (sdk.FLUID_MODULE_ERROR_SELECTORS).
+_FLUID_DEX_ERROR_SELECTOR = "0x2fee3e0e"  # FluidDexError (wraps DexT1 ids)
+_FLUID_VAULT_ERROR_SELECTOR = "0x60121cca"  # FluidVaultError (different module)
+_USER_SUPPLY_IN_NOT_ON = 51013
+
+
+def _deposit_revert_sdk(revert_payload: str) -> FluidSmartLendingSDK:
+    """A real SDK whose wrapper ``deposit(...).call()`` reverts with ``payload``."""
+    sdk = _raw_sdk()
+    err = Exception(f"execution reverted {revert_payload}")
+    err.data = revert_payload  # type: ignore[attr-defined]
+    wc = MagicMock()
+    wc.functions.deposit.return_value.call.side_effect = err
+    sdk._wrapper = MagicMock(return_value=wc)  # type: ignore[method-assign]
+    return sdk
+
+
+def test_check_deposit_enabled_disabled_when_dex_module_51013():
+    # FluidDexError(51013) IS the deposit-disabled gate -> raise.
+    payload = _FLUID_DEX_ERROR_SELECTOR + f"{_USER_SUPPLY_IN_NOT_ON:064x}"
+    sdk = _deposit_revert_sdk(payload)
+    with pytest.raises(FluidDexLpDepositDisabledError, match="deposits disabled"):
+        sdk.check_deposit_enabled(FSL12, 0, 2000 * 10**6, WALLET)
+
+
+def test_check_deposit_enabled_ignores_51013_from_other_module():
+    # The SAME numeric id 51013 from FluidVaultError is a DIFFERENT error (Fluid
+    # ids are module-local). It must NOT be misread as deposit-disabled — the
+    # supply gate is treated as PASSED (enabled), so no raise.
+    payload = _FLUID_VAULT_ERROR_SELECTOR + f"{_USER_SUPPLY_IN_NOT_ON:064x}"
+    sdk = _deposit_revert_sdk(payload)
+    assert sdk.check_deposit_enabled(FSL12, 0, 2000 * 10**6, WALLET) is None
+
+
+def test_check_deposit_enabled_non_dex_revert_treated_as_enabled():
+    # An unrelated revert (e.g. the unapproved-token FluidSafeTransferError path)
+    # means the supply gate PASSED -> enabled, no raise.
+    sdk = _deposit_revert_sdk("0xdeadbeef")
+    assert sdk.check_deposit_enabled(FSL12, 0, 2000 * 10**6, WALLET) is None
+
+
+# ----------------------------------------------------------------------------
 # _extract_revert_data / _scrub_hex_payload — contiguous hex only
 # ----------------------------------------------------------------------------
 
@@ -763,6 +808,57 @@ def test_fungible_valuer_nonpositive_address_price_falls_back_to_symbol():
     value_usd, _ = result
     # sUSDai priced via symbol fallback (1.02), USDC via address (1).
     assert value_usd == Decimal("683") * Decimal("1.02") + Decimal("1255")
+
+
+# ----------------------------------------------------------------------------
+# is_native_leg — both token slots compared (CodeRabbit #2856)
+# ----------------------------------------------------------------------------
+
+
+def test_is_native_leg_detects_sentinel_in_token1_without_flag():
+    """A row carrying the native sentinel in token1 but a missing/incorrect
+    native_token1 flag must STILL be native-leg — otherwise the compiler would
+    not refuse a native wrapper and the native leg mis-accounts (VIB-5121)."""
+    from almanak.connectors.fluid.addresses import FLUID_DEX_LP_NATIVE_SENTINEL, is_native_leg
+
+    sentinel = FLUID_DEX_LP_NATIVE_SENTINEL
+    # token1 sentinel, flag ABSENT -> native (the bug this fix closes).
+    assert is_native_leg({"token0": USDC, "token1": sentinel}) is True
+    # token1 sentinel, flag explicitly (incorrectly) False -> still native.
+    assert is_native_leg({"token0": USDC, "token1": sentinel, "native_token1": False}) is True
+    # case-insensitive: a lowercased/mixed-case sentinel in token1 still matches.
+    assert is_native_leg({"token0": USDC, "token1": sentinel.lower()}) is True
+
+
+def test_is_native_leg_existing_paths_unchanged():
+    from almanak.connectors.fluid.addresses import FLUID_DEX_LP_NATIVE_SENTINEL, is_native_leg
+
+    sentinel = FLUID_DEX_LP_NATIVE_SENTINEL
+    # token0 sentinel (pre-existing path) still native.
+    assert is_native_leg({"token0": sentinel, "token1": USDC}) is True
+    # native_token1 flag alone (pre-existing path) still native.
+    assert is_native_leg({"token0": USDC, "token1": USDC, "native_token1": True}) is True
+    # genuinely non-native: no sentinel, no flag.
+    assert is_native_leg({"token0": USDC, "token1": SUSDAI}) is False
+    # malformed None slots don't crash and aren't misread as native.
+    assert is_native_leg({"token0": None, "token1": None}) is False
+
+
+# ----------------------------------------------------------------------------
+# _WRAPPERS — keys lowercased so _transfers() emitter lookups hit (#2856)
+# ----------------------------------------------------------------------------
+
+
+def test_wrappers_keys_are_lowercased():
+    """``_transfers()`` lowercases every emitter before ``_WRAPPERS.get(emitter)``,
+    so a checksum/mixed-case wrapper key would be permanently unreachable. Every
+    flattened key must be lowercase."""
+    from almanak.connectors.fluid.dex_lp_receipt_parser import _WRAPPERS
+
+    assert _WRAPPERS, "wrapper universe must be non-empty"
+    assert all(key == key.lower() for key in _WRAPPERS), "all _WRAPPERS keys must be lowercased"
+    # The pinned wrappers resolve via their lowercased form (the _transfers path).
+    assert FSL9.lower() in _WRAPPERS
 
 
 if __name__ == "__main__":
