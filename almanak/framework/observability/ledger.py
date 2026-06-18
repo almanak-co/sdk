@@ -14,6 +14,11 @@ return a piece of the final ``LedgerEntry``:
 
     alpha  _extract_intent_type          : enum-or-string dispatch
     beta   _extract_tokens_and_amounts   : dispatch between sub-helpers:
+             _extract_from_declared_legs      (VIB-5218 / US-009: a connector-
+                                               DECLARED PrimitiveMoneyLegs on the
+                                               result — preferred over every guess
+                                               when present; no-op until US-010/011
+                                               migrate the first connectors)
              _extract_from_swap_amounts       (SwapAmounts + intent fallback
                                                for empty token sides)
              _extract_from_lp_open           (LP_OPEN: LPOpenData amounts +
@@ -21,12 +26,15 @@ return a piece of the final ``LedgerEntry``:
              _extract_from_lp_close          (LP_CLOSE: LPCloseData collected
                                                amounts + currency0/1 symbols,
                                                VIB-5132)
-             _extract_from_intent_fallback    (intent-attr precedence chain
-                                               from_token > borrow_token >
-                                               supply_token > token;
+             _extract_from_intent_fallback    (LEGACY guesser — intent-attr
+                                               precedence chain from_token >
+                                               borrow_token > supply_token > token;
                                                amount > borrow_amount >
                                                supply_amount — amount_usd is
-                                               deliberately excluded, VIB-5060).
+                                               deliberately excluded, VIB-5060.
+                                               Emits a WARN + ledger_intent_
+                                               fallback_total metric per money row
+                                               so its shrink is trackable, VIB-5218).
     gamma  _extract_tx_and_gas           : first tx_hash + total gas + gas USD
     delta  _coalesce_error               : failure + empty-error -> result.error
     epsilon _build_extracted_data_json   : serialize + multi-tx augmentation
@@ -318,8 +326,53 @@ def _extract_from_swap_amounts(swap_amounts: Any, intent: Any) -> _TokensAndAmou
     )
 
 
-def _extract_from_intent_fallback(intent: Any) -> _TokensAndAmounts:
-    """Phase beta-fallback -- no swap_amounts; walk the intent-attr chain.
+def _intent_fallback_token_in(intent: Any) -> str:
+    """The legacy intent-attr ``token_in`` precedence chain (pure, no side effects).
+
+    Token precedence:
+        ``from_token > borrow_token > supply_token > token``
+
+    Extracted so the lending helper can REUSE the precedence chain to resolve a
+    token symbol WITHOUT triggering the fallback's WARN+metric observability
+    (VIB-5218): when the lending lane resolves the row, the intent-fallback
+    guesser did NOT produce it, so it must not be counted against the fallback.
+    """
+    return (
+        getattr(intent, "from_token", "")
+        or getattr(intent, "borrow_token", "")
+        or getattr(intent, "supply_token", "")
+        or getattr(intent, "token", "")
+        or ""
+    )
+
+
+def _record_intent_fallback_money_row(intent_type: str, token_in: str, amount_in: str) -> None:
+    """Emit the WARN + metric for a fallback-attributed money row (VIB-5218).
+
+    The two halves of the fallback-observability contract: a structured WARNING
+    (human-readable, names the intent type for diagnosis) and the
+    ``ledger_intent_fallback_total`` counter (operator-dashboard, tracks the
+    shrink as connectors migrate to declared ``PrimitiveMoneyLeg`` sets). Called
+    only when the fallback yields a money-bearing row — see
+    :func:`_extract_from_intent_fallback`.
+    """
+    logger.warning(
+        "ledger intent_fallback produced a money row (intent_type=%s, token_in=%s, amount_in=%s): "
+        "no connector-declared PrimitiveMoneyLeg available, used the legacy intent-attribute guesser "
+        "(VIB-5218). Migrate the connector to declare money legs (blueprint 05 §7 / 27 §6.6).",
+        intent_type or "<unknown>",
+        token_in or "<empty>",
+        amount_in or "<empty>",
+    )
+    # Lazy import (house style — mirrors decimal_guards' record_raw_wei_suspected
+    # call site) so the observability module's import graph stays unchanged.
+    from almanak.framework.observability.metrics import record_ledger_intent_fallback
+
+    record_ledger_intent_fallback(intent_type=intent_type)
+
+
+def _extract_from_intent_fallback(intent: Any, *, intent_type: str = "") -> _TokensAndAmounts:
+    """Phase beta-fallback -- no declared legs / no swap_amounts; walk the intent-attr chain.
 
     Token precedence:
         ``from_token > borrow_token > supply_token > token``
@@ -336,14 +389,17 @@ def _extract_from_intent_fallback(intent: Any) -> _TokensAndAmounts:
     ``token_in="WBTC"`` (~$126k notional on the trade tape). When only USD
     sizing is known the token amount is unmeasured: leave ``""``
     (Empty != Zero).
+
+    VIB-5218 — this is the LEGACY guesser the dispatcher now prefers a
+    connector-declared ``PrimitiveMoneyLeg`` set over. When it produces a
+    money-bearing row (a non-empty ``token_in`` or ``amount_in``) it emits a
+    WARN + ``ledger_intent_fallback_total`` metric (tagged with ``intent_type``)
+    so the fallback's usage is measurable and its shrink trackable as connectors
+    migrate. ``intent_type`` is threaded by the caller for the diagnostic label;
+    it defaults to ``""`` so the historical positional-only call sites and the
+    direct unit tests keep working.
     """
-    token_in = (
-        getattr(intent, "from_token", "")
-        or getattr(intent, "borrow_token", "")
-        or getattr(intent, "supply_token", "")
-        or getattr(intent, "token", "")
-        or ""
-    )
+    token_in = _intent_fallback_token_in(intent)
     token_out = getattr(intent, "to_token", "") or ""
     # First NON-None link wins — ``or``-truthiness would collapse a measured
     # ``Decimal("0")`` into the unmeasured ``""`` sentinel (Empty != Zero;
@@ -361,6 +417,10 @@ def _extract_from_intent_fallback(intent: Any) -> _TokensAndAmounts:
     # value-bearing string or a measured ``Decimal("0")``. A real ``Decimal``
     # (incl. measured zero) still serializes to its canonical string.
     amount_in = _measured_amount_to_row(amt)
+    # VIB-5218 — only a money-bearing row counts: an all-empty fallback (a truly
+    # money-less intent) is not the patch-hub signal we track.
+    if token_in or amount_in:
+        _record_intent_fallback_money_row(intent_type, token_in, amount_in)
     return (token_in, token_out, amount_in, "", "", None)
 
 
@@ -668,7 +728,7 @@ def _extract_from_lending(
         raw = extracted.get(key)
 
     if raw is None:
-        return _extract_from_intent_fallback(intent)
+        return _extract_from_intent_fallback(intent, intent_type=intent_type)
 
     try:
         raw_int = int(raw)
@@ -676,15 +736,17 @@ def _extract_from_lending(
         # Receipt produced a non-int value (shouldn't happen for these
         # extractors, but fail-open to the intent-attr path rather than
         # pretending we have a value). Empty != zero, so don't substitute.
-        return _extract_from_intent_fallback(intent)
+        return _extract_from_intent_fallback(intent, intent_type=intent_type)
 
     # CodeRabbit 2026-05-04: reuse the existing intent-attr precedence chain
     # (``from_token`` > ``borrow_token`` > ``supply_token`` > ``token``) so
     # connectors that name the lending asset under ``borrow_token`` /
     # ``supply_token`` (rather than the generic ``token``) still get
-    # decimals resolved. ``_extract_from_intent_fallback`` returns the full
-    # 6-tuple; we only need ``token_in`` here.
-    token_in = _extract_from_intent_fallback(intent)[0]
+    # decimals resolved. VIB-5218 — call the PURE precedence helper, not
+    # ``_extract_from_intent_fallback``: the lending lane (not the fallback
+    # guesser) is producing this row, so it must NOT trip the fallback's
+    # WARN+metric observability.
+    token_in = _intent_fallback_token_in(intent)
 
     # Convert raw on-chain integer to human units. Without a chain or a
     # resolvable token we can't scale safely — Empty != zero, so leave
@@ -716,24 +778,145 @@ def _extract_from_lending(
     return (token_in, "", _measured_amount_to_row(scaled), "", "", None)
 
 
+# VIB-5218 — the reserved ``result.extracted_data`` key (and forward-compatible
+# typed attribute name) a connector uses to DECLARE its money legs for the ledger.
+# Connectors deposit a ``PrimitiveMoneyLegs`` here from their extraction path
+# (blueprint 05 §7) the same way they deposit ``lp_open_data`` / ``lp_close_data``;
+# the dispatcher prefers it over the legacy guesser when present. No connector
+# populates it yet (US-010 / US-011 migrate the first ones), so the prefer-if-
+# present gate is a no-op for every canonical protocol today — their ledger rows
+# stay byte-identical.
+_PRIMITIVE_MONEY_LEGS_KEY = "primitive_money_legs"
+
+
+def _declared_money_legs(result: Any) -> Any:
+    """Return the connector-DECLARED ``PrimitiveMoneyLegs`` for this result, or None.
+
+    Prefer-if-present (VIB-5218 / US-009): a connector that has been migrated to
+    the ``PrimitiveMoneyLeg`` contract (US-008) declares its money legs from its
+    extraction path, either as a typed ``result.primitive_money_legs`` attribute
+    or under ``result.extracted_data["primitive_money_legs"]`` (the same flexible
+    dict that already carries ``lp_open_data`` / ``lp_close_data``). This resolver
+    looks in both places and returns the typed object so the dispatcher can map it
+    onto the flat ledger columns instead of guessing.
+
+    Strictly typed: anything that is not a ``PrimitiveMoneyLegs`` is ignored
+    (returns ``None`` → the dispatcher falls back to the legacy path) rather than
+    crashing the accounting write hot path on a malformed declaration. No connector
+    declares legs yet, so this returns ``None`` for every canonical protocol and
+    the legacy dispatch is reached unchanged (byte-compatible rows).
+    """
+    if not result:
+        return None
+    legs = getattr(result, _PRIMITIVE_MONEY_LEGS_KEY, None)
+    if legs is None:
+        extracted = getattr(result, "extracted_data", None)
+        if isinstance(extracted, dict):
+            legs = extracted.get(_PRIMITIVE_MONEY_LEGS_KEY)
+    if legs is None:
+        return None
+    # Deferred import: connector value types must never load at module import
+    # (the framework -> connector boundary; mirrors ``_fungible_lp_protocols``).
+    from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
+
+    if isinstance(legs, PrimitiveMoneyLegs):
+        return legs
+    logger.debug(
+        "ledger: ignoring non-PrimitiveMoneyLegs value under %r (got %s); falling back to legacy extraction.",
+        _PRIMITIVE_MONEY_LEGS_KEY,
+        type(legs).__name__,
+    )
+    return None
+
+
+def _leg_amount_to_row(amount: Any) -> str:
+    """Serialize a leg's ``MeasuredMoney`` amount to its ``transaction_ledger`` row form.
+
+    Measured (a real ``Decimal``, INCLUDING measured zero) → canonical ``str``;
+    unmeasured / absent → ``""`` (Empty != Zero, §10.10). Mirrors the row
+    semantics of :func:`_measured_amount_to_row` but for an already-typed
+    ``MeasuredMoney`` (the contract carries the three states by construction, so
+    no re-classification is needed).
+    """
+    return str(amount.value) if amount.is_measured else ""
+
+
+def _extract_from_declared_legs(legs: Any) -> _TokensAndAmounts:
+    """Project a connector-declared ``PrimitiveMoneyLegs`` onto the flat ledger tuple.
+
+    The role → column mapping (blueprint 27 §6.6): ``INPUT`` / ``PRINCIPAL`` →
+    ``token_in`` / ``amount_in``; ``OUTPUT`` → ``token_out`` / ``amount_out``.
+    Slot assignment honours the documented per-primitive projection while staying
+    a single general rule:
+
+    * Two-sided action (SWAP, STAKE: one input + one output) → first input → in,
+      first output → out.
+    * Same-role pair (LP_OPEN: two inputs; LP_CLOSE: two outputs) → the two legs
+      fill the in / out slots positionally, for lane symmetry with
+      :func:`_extract_from_lp_open` / :func:`_extract_from_lp_close`
+      (leg0 → in, leg1 → out).
+    * One-sided action (PERP_OPEN / REPAY / WITHDRAW: a single principal/input) →
+      in slot only; out stays empty.
+
+    ``effective_price`` / ``slippage_bps`` are trade-quality metadata, explicitly
+    out of scope for the money-leg contract (§6.6), so they are ``""`` / ``None``.
+    Amounts carry Empty != Zero by construction (``MeasuredMoney``), so an
+    unmeasured / absent leg projects to ``""`` — never a fabricated zero.
+    """
+    from almanak.connectors._strategy_base.primitive_money_leg import MoneyLegRole
+
+    inputs = [leg for leg in legs.legs if leg.role in (MoneyLegRole.INPUT, MoneyLegRole.PRINCIPAL)]
+    outputs = [leg for leg in legs.legs if leg.role is MoneyLegRole.OUTPUT]
+
+    if inputs and outputs:
+        in_leg: Any = inputs[0]
+        out_leg: Any = outputs[0]
+    elif inputs:
+        in_leg = inputs[0]
+        out_leg = inputs[1] if len(inputs) > 1 else None
+    elif outputs:
+        in_leg = outputs[0]
+        out_leg = outputs[1] if len(outputs) > 1 else None
+    else:
+        in_leg = out_leg = None
+
+    token_in = in_leg.token if in_leg is not None else ""
+    token_out = out_leg.token if out_leg is not None else ""
+    amount_in = _leg_amount_to_row(in_leg.amount) if in_leg is not None else ""
+    amount_out = _leg_amount_to_row(out_leg.amount) if out_leg is not None else ""
+    return (token_in, token_out, amount_in, amount_out, "", None)
+
+
 def _extract_tokens_and_amounts(
     intent: Any,
     result: Any,
     chain: str = "",
 ) -> _TokensAndAmounts:
-    """Phase beta -- dispatch between SwapAmounts, LP_OPEN, PERP_OPEN,
-    lending (REPAY/WITHDRAW), and intent-attr fallback.
+    """Phase beta -- dispatch between connector-DECLARED legs, SwapAmounts,
+    LP_OPEN, PERP_OPEN, lending (REPAY/WITHDRAW), and the intent-attr fallback.
 
-    A truthy ``result.swap_amounts`` drives every field (used by SWAP,
-    LP_CLOSE, and anything whose receipt parser emits SwapAmounts). LP_OPEN
-    intents carry amounts in ``LPOpenData`` and have no ``from_token`` /
-    ``to_token``, so they get a dedicated extraction path. PERP_OPEN collateral
-    lives at ``intent.collateral_token`` / ``intent.collateral_amount``, not the
-    standard from_token/to_token chain. REPAY/WITHDRAW route through the
-    lending helper so the receipt-resolved amount (post-uint256.max
-    decoding by Aave) lands on ``transaction_ledger.amount_in`` (VIB-3939).
-    Everything else walks the intent-attr precedence chain.
+    VIB-5218 (US-009) — control-flow inversion: when a connector DECLARES its
+    money legs (a ``PrimitiveMoneyLegs`` on the result, US-008), that typed fact
+    is authoritative and drives every column — checked FIRST, before any guess.
+    No connector declares legs yet (US-010 / US-011 migrate the first ones), so
+    for every canonical protocol this gate is a no-op and the legacy dispatch
+    below runs unchanged (byte-identical rows).
+
+    Legacy dispatch (unchanged): a truthy ``result.swap_amounts`` drives every
+    field (used by SWAP, LP_CLOSE, and anything whose receipt parser emits
+    SwapAmounts). LP_OPEN intents carry amounts in ``LPOpenData`` and have no
+    ``from_token`` / ``to_token``, so they get a dedicated extraction path.
+    PERP_OPEN collateral lives at ``intent.collateral_token`` /
+    ``intent.collateral_amount``, not the standard from_token/to_token chain.
+    REPAY/WITHDRAW route through the lending helper so the receipt-resolved amount
+    (post-uint256.max decoding by Aave) lands on ``transaction_ledger.amount_in``
+    (VIB-3939). Everything else walks the intent-attr precedence chain, which now
+    emits a WARN + ``ledger_intent_fallback_total`` metric when it produces a
+    money row so the fallback's shrink is trackable (VIB-5218).
     """
+    declared_legs = _declared_money_legs(result)
+    if declared_legs is not None:
+        return _extract_from_declared_legs(declared_legs)
     swap_amounts = getattr(result, "swap_amounts", None) if result else None
     if swap_amounts:
         return _extract_from_swap_amounts(swap_amounts, intent)
@@ -762,7 +945,7 @@ def _extract_tokens_and_amounts(
         # intent-attr fallback and lands ``amount_in=""`` despite the receipt
         # carrying the resolved repaid amount.
         return _extract_from_lending(intent, result, intent_type, chain)
-    return _extract_from_intent_fallback(intent)
+    return _extract_from_intent_fallback(intent, intent_type=intent_type)
 
 
 def _extract_tx_and_gas(

@@ -165,6 +165,53 @@ def record_onchain_read_fallback(
     ).inc()
 
 
+# VIB-5218 — transaction-ledger intent-fallback observability.
+#
+# The ledger dispatcher (``almanak.framework.observability.ledger
+# ._extract_tokens_and_amounts``) prefers a connector-DECLARED ``PrimitiveMoneyLeg``
+# set (VIB-5212 / US-008) when one is present, and only otherwise walks the legacy
+# ``_extract_from_intent_fallback`` guesser. That guesser is the "patch-hub" failure
+# mode the VIB-5200 epic is closing: every primitive whose shape it can't guess
+# re-emits empty money columns until a follow-up patch.
+#
+# Contract: each time the fallback produces a MONEY-BEARING row (a non-empty
+# ``token_in`` or ``amount_in``) the ledger MUST increment this counter (labelled
+# by intent type) AND emit a structured WARNING. A shrinking
+# ``rate(ledger_intent_fallback_total[…])`` as connectors migrate to declared legs
+# is the success signal for the accounting contract layer; a non-zero rate on a
+# given ``intent_type`` is the operator-visible "this primitive still guesses".
+#
+# ``intent_type`` is a bounded vocabulary (SWAP / LP_OPEN / REPAY / …), so it is a
+# safe label value — never a user-supplied or unbounded string.
+LEDGER_INTENT_FALLBACK_TOTAL = Counter(
+    "ledger_intent_fallback_total",
+    "Total transaction_ledger money rows attributed by the legacy intent-attribute "
+    "fallback guesser instead of a connector-declared PrimitiveMoneyLeg, by intent "
+    "type (VIB-5218). A shrinking rate is the accounting-contract-layer success signal.",
+    ["intent_type"],
+    registry=FRAMEWORK_REGISTRY,
+)
+
+
+def record_ledger_intent_fallback(*, intent_type: str) -> None:
+    """Increment ``ledger_intent_fallback_total`` for one fallback-attributed row.
+
+    Call this at the exact site where the ledger's
+    :func:`almanak.framework.observability.ledger._extract_from_intent_fallback`
+    produces a money-bearing row because no connector-declared
+    :class:`~almanak.connectors._strategy_base.primitive_money_leg.PrimitiveMoneyLegs`
+    was available (VIB-5218). It is the metric half of the fallback-observability
+    contract; the WARNING at the call site is the human-readable half.
+
+    Args:
+        intent_type: The intent category whose row the fallback produced (e.g.
+            ``"SWAP"``, ``"STAKE"``). A bounded vocabulary — empty / unknown is
+            defaulted to ``"unknown"`` so a missing value never spawns a divergent
+            Prometheus time-series.
+    """
+    LEDGER_INTENT_FALLBACK_TOTAL.labels(intent_type=(intent_type or "unknown") or "unknown").inc()
+
+
 def record_v4_lp_parser_drop(*, chain: str, reason: V4LPDropReason | str, outcome: V4LPDropOutcome) -> None:
     """Increment the ``v4_lp_parser_drops_total`` counter.
 
@@ -215,11 +262,13 @@ def record_raw_wei_suspected(
 __all__ = [
     "ACCOUNTING_RAW_WEI_SUSPECTED_TOTAL",
     "FRAMEWORK_REGISTRY",
+    "LEDGER_INTENT_FALLBACK_TOTAL",
     "ONCHAIN_READ_FALLBACK_TOTAL",
     "OnchainReadFallbackReason",
     "V4_LP_PARSER_DROPS_TOTAL",
     "V4LPDropOutcome",
     "V4LPDropReason",
+    "record_ledger_intent_fallback",
     "record_onchain_read_fallback",
     "record_raw_wei_suspected",
     "record_v4_lp_parser_drop",

@@ -637,3 +637,287 @@ class TestIntentFallbackLaunderingVIB5214:
         intent = self._make_intent(token="WETH", amount="all")
         _, _, amount_in, *_ = _extract_from_intent_fallback(intent)
         assert amount_in == ""
+
+
+class TestDeclaredMoneyLegsVIB5218:
+    """VIB-5218 (US-009) — the dispatcher prefers a connector-DECLARED
+    ``PrimitiveMoneyLegs`` over the legacy guesser, and the intent-fallback path
+    is observable (WARN + ``ledger_intent_fallback_total`` metric).
+
+    (a) declared legs present → dispatcher uses them;
+    (b) absent → falls back to legacy AND emits WARN + metric;
+    (c) the canonical category-dispatched paths (swap_amounts / lending) are
+        byte-unchanged AND do NOT trip the fallback observability.
+    """
+
+    # -- builders ---------------------------------------------------------------
+
+    def _legs(self, *legs):
+        from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
+
+        return PrimitiveMoneyLegs.of(*legs)
+
+    def _input(self, token: str, amount):
+        from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLeg
+
+        return PrimitiveMoneyLeg.input(token, amount)
+
+    def _output(self, token: str, amount):
+        from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLeg
+
+        return PrimitiveMoneyLeg.output(token, amount)
+
+    def _principal(self, token: str, amount):
+        from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLeg
+
+        return PrimitiveMoneyLeg.principal(token, amount)
+
+    def _measured(self, value: str):
+        from almanak.framework.accounting.measured import MeasuredMoney
+
+        return MeasuredMoney.measured(Decimal(value))
+
+    def _unmeasured(self):
+        from almanak.framework.accounting.measured import MeasuredMoney
+
+        return MeasuredMoney.unmeasured()
+
+    def _result(self, **attrs):
+        import types
+
+        base = {"swap_amounts": None, "extracted_data": {}}
+        base.update(attrs)
+        return types.SimpleNamespace(**base)
+
+    def _intent(self, intent_type: str = "SWAP", **attrs):
+        from unittest.mock import MagicMock
+
+        intent = MagicMock()
+        intent.intent_type = MagicMock()
+        intent.intent_type.value = intent_type
+        for name in (
+            "from_token",
+            "to_token",
+            "borrow_token",
+            "supply_token",
+            "token",
+            "amount",
+            "borrow_amount",
+            "supply_amount",
+            "amount_usd",
+            "collateral_token",
+            "collateral_amount",
+        ):
+            setattr(intent, name, None)
+        for name, value in attrs.items():
+            setattr(intent, name, value)
+        return intent
+
+    def _fallback_counter(self, intent_type: str) -> float:
+        from almanak.framework.observability.metrics import LEDGER_INTENT_FALLBACK_TOTAL
+
+        return LEDGER_INTENT_FALLBACK_TOTAL.labels(intent_type=intent_type or "unknown")._value.get()
+
+    # -- (a) declared legs are used + projected onto the flat columns -----------
+
+    def test_swap_declared_legs_project_input_output(self):
+        """A two-sided declaration (one input + one output) → in/out by role."""
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        legs = self._legs(
+            self._input("USDC", self._measured("100")),
+            self._output("WETH", self._measured("0.03")),
+        )
+        result = self._result(primitive_money_legs=legs)
+        assert _extract_tokens_and_amounts(object(), result) == ("USDC", "WETH", "100", "0.03", "", None)
+
+    def test_lp_open_two_inputs_fill_in_out_positionally(self):
+        """Two INPUT legs (LP_OPEN deposits) fill the in/out slots positionally
+        (leg0 → in, leg1 → out) — lane symmetry with ``_extract_from_lp_open``."""
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        legs = self._legs(
+            self._input("WETH", self._measured("1")),
+            self._input("USDC", self._measured("2000")),
+        )
+        result = self._result(primitive_money_legs=legs)
+        assert _extract_tokens_and_amounts(object(), result) == ("WETH", "USDC", "1", "2000", "", None)
+
+    def test_lp_close_two_outputs_fill_in_out_positionally(self):
+        """Two OUTPUT legs (LP_CLOSE proceeds) fill in/out positionally — lane
+        symmetry with ``_extract_from_lp_close`` (leg0 → in, leg1 → out)."""
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        legs = self._legs(
+            self._output("WETH", self._measured("1")),
+            self._output("USDC", self._measured("2000")),
+        )
+        result = self._result(primitive_money_legs=legs)
+        assert _extract_tokens_and_amounts(object(), result) == ("WETH", "USDC", "1", "2000", "", None)
+
+    def test_principal_only_fills_in_slot(self):
+        """A single PRINCIPAL leg (perp collateral / lending) → in slot only."""
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        legs = self._legs(self._principal("USDC", self._measured("50")))
+        result = self._result(primitive_money_legs=legs)
+        assert _extract_tokens_and_amounts(object(), result) == ("USDC", "", "50", "", "", None)
+
+    def test_unmeasured_leg_amount_is_empty_not_zero(self):
+        """An unmeasured leg amount projects to ``""`` — never a fabricated zero."""
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        legs = self._legs(self._input("USDC", self._unmeasured()))
+        result = self._result(primitive_money_legs=legs)
+        token_in, _, amount_in, *_ = _extract_tokens_and_amounts(object(), result)
+        assert token_in == "USDC"
+        assert amount_in == ""
+
+    def test_measured_zero_leg_amount_preserved(self):
+        """A measured ``Decimal("0")`` leg amount is preserved as ``"0"`` (Empty≠Zero)."""
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        legs = self._legs(self._input("USDC", self._measured("0")))
+        result = self._result(primitive_money_legs=legs)
+        _, _, amount_in, *_ = _extract_tokens_and_amounts(object(), result)
+        assert amount_in == "0"
+
+    def test_declared_legs_via_extracted_data_key(self):
+        """A connector may declare under ``extracted_data["primitive_money_legs"]``
+        (the same flexible dict as lp_open_data / lp_close_data)."""
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        legs = self._legs(
+            self._input("USDC", self._measured("100")),
+            self._output("WETH", self._measured("0.03")),
+        )
+        result = self._result(extracted_data={"primitive_money_legs": legs})
+        assert _extract_tokens_and_amounts(object(), result) == ("USDC", "WETH", "100", "0.03", "", None)
+
+    def test_declared_legs_take_precedence_over_swap_amounts(self):
+        """Declared legs are authoritative — preferred over a truthy swap_amounts."""
+        from almanak.framework.execution.extracted_data import SwapAmounts
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        swap = SwapAmounts(
+            amount_in=999,
+            amount_out=9,
+            token_in="DAI",
+            token_out="WBTC",
+            amount_in_decimal=Decimal("999"),
+            amount_out_decimal=Decimal("9"),
+        )
+        legs = self._legs(
+            self._input("USDC", self._measured("100")),
+            self._output("WETH", self._measured("0.03")),
+        )
+        result = self._result(swap_amounts=swap, primitive_money_legs=legs)
+        # Declared legs win — the swap_amounts DAI/WBTC row is NOT used.
+        assert _extract_tokens_and_amounts(object(), result) == ("USDC", "WETH", "100", "0.03", "", None)
+
+    def test_non_primitive_legs_value_is_ignored_and_falls_back(self):
+        """A malformed (non-PrimitiveMoneyLegs) value under the key is ignored;
+        the dispatcher falls back to the legacy path rather than crashing."""
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        result = self._result(extracted_data={"primitive_money_legs": "garbage"})
+        intent = self._intent("SWAP", from_token="USDC", to_token="WETH", amount=Decimal("5"))
+        token_in, token_out, amount_in, *_ = _extract_tokens_and_amounts(intent, result)
+        assert (token_in, token_out, amount_in) == ("USDC", "WETH", "5")
+
+    def test_declared_path_does_not_emit_fallback_observability(self, caplog):
+        """When declared legs drive the row, the fallback WARN + metric must NOT fire."""
+        import logging
+
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        legs = self._legs(
+            self._input("USDC", self._measured("100")),
+            self._output("WETH", self._measured("0.03")),
+        )
+        result = self._result(primitive_money_legs=legs)
+        before = self._fallback_counter("SWAP")
+        with caplog.at_level(logging.WARNING):
+            _extract_tokens_and_amounts(object(), result)
+        assert self._fallback_counter("SWAP") == before
+        assert "intent_fallback" not in caplog.text
+
+    # -- (b) fallback is observable (WARN + metric) ----------------------------
+
+    def test_fallback_money_row_emits_warn_and_metric(self, caplog):
+        """No declared legs / no swap_amounts → legacy fallback fires WARN + metric,
+        tagged with the intent type for diagnosis."""
+        import logging
+
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        intent = self._intent("SWAP", token="USDC", amount=Decimal("3.5"))
+        before = self._fallback_counter("SWAP")
+        with caplog.at_level(logging.WARNING):
+            token_in, _, amount_in, *_ = _extract_tokens_and_amounts(intent, None)
+        assert (token_in, amount_in) == ("USDC", "3.5")
+        assert self._fallback_counter("SWAP") == before + 1
+        assert "intent_fallback produced a money row" in caplog.text
+        assert "intent_type=SWAP" in caplog.text
+
+    def test_fallback_empty_row_does_not_emit(self, caplog):
+        """A money-less fallback row (no token, no amount) is NOT the patch-hub
+        signal — no WARN, no metric."""
+        import logging
+
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        intent = self._intent("SWAP")  # every money attr nulled
+        before = self._fallback_counter("SWAP")
+        with caplog.at_level(logging.WARNING):
+            token_in, _, amount_in, *_ = _extract_tokens_and_amounts(intent, None)
+        assert (token_in, amount_in) == ("", "")
+        assert self._fallback_counter("SWAP") == before
+        assert "intent_fallback" not in caplog.text
+
+    # -- (c) canonical category-dispatched paths unchanged + no false emission --
+
+    def test_swap_amounts_row_unchanged_and_no_fallback_emission(self, caplog):
+        """The swap_amounts category path is byte-unchanged AND must not trip the
+        fallback observability (it is not a guess)."""
+        import logging
+
+        from almanak.framework.execution.extracted_data import SwapAmounts
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        swap = SwapAmounts(
+            amount_in=100,
+            amount_out=3,
+            token_in="USDC",
+            token_out="WETH",
+            amount_in_decimal=Decimal("100"),
+            amount_out_decimal=Decimal("0.03"),
+            effective_price=Decimal("0.0003"),
+            slippage_bps=12.0,
+        )
+        result = self._result(swap_amounts=swap)
+        intent = self._intent("SWAP")
+        before = self._fallback_counter("SWAP")
+        with caplog.at_level(logging.WARNING):
+            row = _extract_tokens_and_amounts(intent, result)
+        assert row == ("USDC", "WETH", "100", "0.03", "0.0003", 12.0)
+        assert self._fallback_counter("SWAP") == before
+        assert "intent_fallback" not in caplog.text
+
+    def test_lending_token_reuse_does_not_emit_fallback(self, caplog):
+        """REPAY with a receipt-resolved amount routes through the lending lane,
+        which reuses the PURE token-precedence helper — it must NOT trip the
+        fallback observability (VIB-5218 anti-double-count)."""
+        import logging
+
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        intent = self._intent("REPAY", token="USDC", amount=Decimal("0"))
+        result = self._result(extracted_data={"repay_amount": 2_000_001})
+        before = self._fallback_counter("REPAY")
+        with caplog.at_level(logging.WARNING):
+            token_in, _, amount_in, *_ = _extract_tokens_and_amounts(intent, result, chain="arbitrum")
+        assert token_in == "USDC"
+        assert amount_in == "2.000001"  # lending lane produced the row
+        assert self._fallback_counter("REPAY") == before
+        assert "intent_fallback" not in caplog.text
