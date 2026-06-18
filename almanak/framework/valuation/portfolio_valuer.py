@@ -2568,18 +2568,25 @@ class PortfolioValuer:
                 asset=token_symbol,
             )
 
+            # USD legs are MeasuredMoney (VIB-5216). The price is guarded measured
+            # above, so ``.value_or`` returns the real value here; an unmeasured
+            # price would yield Decimal("0") rather than a wrong sign — but it
+            # cannot occur on this path (guarded), keeping the wire bytes identical.
             if position.position_type == PositionType.BORROW:
-                result_value = -valued.debt_value_usd
+                result_value = (-valued.debt_value_usd).value_or(Decimal("0"))
             else:
-                result_value = valued.net_value_usd
+                result_value = valued.net_value_usd.value_or(Decimal("0"))
 
+            # Serialize the USD legs through the MeasuredMoney payload codec
+            # (measured→str, unmeasured→None) so persistence stays byte-compatible
+            # and a non-measured value is never fabricated as "0".
             enriched = {
                 "supply_balance": str(valued.supply_balance),
-                "supply_value_usd": str(valued.supply_value_usd),
+                "supply_value_usd": valued.supply_value_usd.to_payload(),
                 "stable_debt_balance": str(valued.stable_debt_balance),
                 "variable_debt_balance": str(valued.variable_debt_balance),
-                "debt_value_usd": str(valued.debt_value_usd),
-                "net_value_usd": str(valued.net_value_usd),
+                "debt_value_usd": valued.debt_value_usd.to_payload(),
+                "net_value_usd": valued.net_value_usd.to_payload(),
                 "collateral_enabled": valued.collateral_enabled,
                 "valuation_source": "on_chain",
             }
@@ -3374,18 +3381,20 @@ class PortfolioValuer:
             # For SUPPLY positions: return net value (supply - debt).
             # For BORROW positions: return negative debt value so it
             # reduces the portfolio total when summed in _get_positions.
+            # USD legs are MeasuredMoney (VIB-5216); price is guarded measured
+            # above so ``.value_or`` returns the real value here (byte-identical).
             if position.position_type == PositionType.BORROW:
-                result = -valued.debt_value_usd
+                result = (-valued.debt_value_usd).value_or(Decimal("0"))
             else:
-                result = valued.net_value_usd
+                result = valued.net_value_usd.value_or(Decimal("0"))
 
             logger.debug(
                 "Lending re-priced: position=%s type=%s value=$%s (supply=$%s debt=$%s) collateral=%s",
                 position.position_id,
                 position.position_type.value,
                 result,
-                valued.supply_value_usd,
-                valued.debt_value_usd,
+                valued.supply_value_usd.value_or(Decimal("0")),
+                valued.debt_value_usd.value_or(Decimal("0")),
                 valued.collateral_enabled,
             )
 

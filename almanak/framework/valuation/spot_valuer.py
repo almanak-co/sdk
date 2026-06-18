@@ -5,6 +5,7 @@ Pure deterministic math. No I/O, no gateway calls.
 
 from decimal import Decimal
 
+from almanak.framework.accounting.measured import MeasuredMoney
 from almanak.framework.portfolio.models import TokenBalance
 
 
@@ -49,5 +50,15 @@ def value_tokens(
 
 
 def total_value(token_balances: list[TokenBalance]) -> Decimal:
-    """Sum USD value across all token balances."""
-    return sum((tb.value_usd for tb in token_balances), Decimal("0"))
+    """Sum USD value across all token balances.
+
+    Seeded with ``MeasuredMoney.measured(Decimal("0"))`` and folded with
+    MeasuredMoney addition (VIB-5216 / Empty≠Zero): a measured-zero seed never
+    masquerades as unmeasured, and the finite-Decimal contract is enforced at the
+    boundary. ``value_tokens`` already drops unpriced tokens, so every balance
+    here is measured — the result is byte-identical to the prior raw-Decimal sum.
+    """
+    total = MeasuredMoney.measured(Decimal("0"))
+    for tb in token_balances:
+        total = total + MeasuredMoney.measured(tb.value_usd)
+    return total.value_or(Decimal("0"))

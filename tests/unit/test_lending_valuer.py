@@ -13,11 +13,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from almanak.framework.valuation.lending_valuer import (
-    LendingPositionValue,
-    value_lending_portfolio,
-    value_lending_position,
-)
 from almanak.framework.valuation.lending_position_reader import (
     LendingPositionOnChain,
     LendingPositionReader,
@@ -25,7 +20,10 @@ from almanak.framework.valuation.lending_position_reader import (
     _pad_address,
     _parse_user_reserve_data_hex,
 )
-
+from almanak.framework.valuation.lending_valuer import (
+    value_lending_portfolio,
+    value_lending_position,
+)
 
 # =============================================================================
 # TestValueLendingPosition — pure math
@@ -33,7 +31,11 @@ from almanak.framework.valuation.lending_position_reader import (
 
 
 class TestValueLendingPosition:
-    """Pure math tests for value_lending_position."""
+    """Pure math tests for value_lending_position.
+
+    USD outputs are MeasuredMoney (VIB-5216): a measured value's ``.value`` is the
+    Decimal; a price-unavailable position is unmeasured, never a fabricated $0.
+    """
 
     def test_supply_only(self):
         """Position with supply, no debt."""
@@ -47,9 +49,9 @@ class TestValueLendingPosition:
             asset="USDC",
         )
         assert result.supply_balance == Decimal("1500")
-        assert result.supply_value_usd == Decimal("1500")
-        assert result.debt_value_usd == Decimal("0")
-        assert result.net_value_usd == Decimal("1500")
+        assert result.supply_value_usd.value == Decimal("1500")
+        assert result.debt_value_usd.value == Decimal("0")
+        assert result.net_value_usd.value == Decimal("1500")
         assert result.collateral_enabled is True
 
     def test_borrow_only(self):
@@ -63,10 +65,10 @@ class TestValueLendingPosition:
             asset="WETH",
         )
         assert result.supply_balance == Decimal("0")
-        assert result.supply_value_usd == Decimal("0")
+        assert result.supply_value_usd.value == Decimal("0")
         assert result.variable_debt_balance == Decimal("0.5")
-        assert result.debt_value_usd == Decimal("1500")
-        assert result.net_value_usd == Decimal("-1500")
+        assert result.debt_value_usd.value == Decimal("1500")
+        assert result.net_value_usd.value == Decimal("-1500")
 
     def test_supply_and_borrow(self):
         """Typical Aave position: supply collateral, borrow against it."""
@@ -78,9 +80,9 @@ class TestValueLendingPosition:
             token_decimals=18,
             asset="WETH",
         )
-        assert result.supply_value_usd == Decimal("3000")
-        assert result.debt_value_usd == Decimal("1500")
-        assert result.net_value_usd == Decimal("1500")
+        assert result.supply_value_usd.value == Decimal("3000")
+        assert result.debt_value_usd.value == Decimal("1500")
+        assert result.net_value_usd.value == Decimal("1500")
 
     def test_stable_and_variable_debt(self):
         """Position with both stable and variable debt."""
@@ -94,11 +96,11 @@ class TestValueLendingPosition:
         )
         assert result.stable_debt_balance == Decimal("2000")
         assert result.variable_debt_balance == Decimal("3000")
-        assert result.debt_value_usd == Decimal("5000")
-        assert result.net_value_usd == Decimal("5000")  # 10000 - 5000
+        assert result.debt_value_usd.value == Decimal("5000")
+        assert result.net_value_usd.value == Decimal("5000")  # 10000 - 5000
 
     def test_zero_everything(self):
-        """Empty position."""
+        """Empty position — a genuine measured zero (price WAS available)."""
         result = value_lending_position(
             atoken_balance=0,
             stable_debt=0,
@@ -106,9 +108,10 @@ class TestValueLendingPosition:
             token_price_usd=Decimal("3000"),
             token_decimals=18,
         )
-        assert result.net_value_usd == Decimal("0")
-        assert result.supply_value_usd == Decimal("0")
-        assert result.debt_value_usd == Decimal("0")
+        assert result.net_value_usd.is_measured
+        assert result.net_value_usd.value == Decimal("0")
+        assert result.supply_value_usd.value == Decimal("0")
+        assert result.debt_value_usd.value == Decimal("0")
 
     def test_wbtc_8_decimals(self):
         """WBTC with 8 decimals."""
@@ -121,7 +124,7 @@ class TestValueLendingPosition:
             asset="WBTC",
         )
         assert result.supply_balance == Decimal("0.5")
-        assert result.supply_value_usd == Decimal("30000")
+        assert result.supply_value_usd.value == Decimal("30000")
 
     def test_underwater_position(self):
         """Net value is negative when debt > supply (same asset borrow)."""
@@ -132,7 +135,7 @@ class TestValueLendingPosition:
             token_price_usd=Decimal("1.0"),
             token_decimals=6,
         )
-        assert result.net_value_usd == Decimal("-100")
+        assert result.net_value_usd.value == Decimal("-100")
 
     def test_frozen_dataclass(self):
         """LendingPositionValue is immutable."""
@@ -146,9 +149,54 @@ class TestValueLendingPosition:
         with pytest.raises(AttributeError):
             result.net_value_usd = Decimal("999")
 
+    # -- VIB-5216: price-unavailable ⇒ unmeasured, never a fabricated $0 --------
+
+    def test_price_unavailable_yields_unmeasured_not_zero(self):
+        """A price-unavailable reserve is unmeasured (the #2866 placeholder class
+        is closed) — the USD legs must NOT be a fabricated measured zero even
+        though the position holds a real, non-zero balance."""
+        result = value_lending_position(
+            atoken_balance=1_000_000_000_000_000_000,  # 1 WETH supplied
+            stable_debt=0,
+            variable_debt=500_000_000_000_000_000,  # 0.5 WETH borrowed
+            token_price_usd=None,  # price could not be fetched
+            token_decimals=18,
+            asset="WETH",
+        )
+        # Balances are still measured (on-chain read succeeded) ...
+        assert result.supply_balance == Decimal("1")
+        assert result.variable_debt_balance == Decimal("0.5")
+        # ... but the USD valuations are unmeasured, NOT Decimal("0").
+        assert result.supply_value_usd.is_unmeasured
+        assert result.debt_value_usd.is_unmeasured
+        assert result.net_value_usd.is_unmeasured
+        assert result.net_value_usd.value_or(Decimal("-1")) == Decimal("-1")
+
+    def test_unmeasured_price_distinct_from_measured_zero_price(self):
+        """Empty≠Zero at the valuation boundary: a measured $0 price is a measured
+        value; an absent price is unmeasured."""
+        zero_priced = value_lending_position(
+            atoken_balance=1_000_000,
+            stable_debt=0,
+            variable_debt=0,
+            token_price_usd=Decimal("0"),  # measured: the token is worth $0
+            token_decimals=6,
+        )
+        assert zero_priced.supply_value_usd.is_measured
+        assert zero_priced.supply_value_usd.value == Decimal("0")
+
+        unpriced = value_lending_position(
+            atoken_balance=1_000_000,
+            stable_debt=0,
+            variable_debt=0,
+            token_price_usd=None,  # unmeasured: price unavailable
+            token_decimals=6,
+        )
+        assert unpriced.supply_value_usd.is_unmeasured
+
 
 class TestValueLendingPortfolio:
-    """Tests for aggregating multiple lending positions."""
+    """Tests for aggregating multiple lending positions (MeasuredMoney totals)."""
 
     def test_single_position(self):
         """Portfolio with one position."""
@@ -160,9 +208,9 @@ class TestValueLendingPortfolio:
             token_decimals=18,
         )
         total_supply, total_debt, total_net = value_lending_portfolio([pos])
-        assert total_supply == Decimal("3000")
-        assert total_debt == Decimal("0")
-        assert total_net == Decimal("3000")
+        assert total_supply.value == Decimal("3000")
+        assert total_debt.value == Decimal("0")
+        assert total_net.value == Decimal("3000")
 
     def test_multi_asset_portfolio(self):
         """Portfolio: supply WETH, borrow USDC."""
@@ -183,16 +231,41 @@ class TestValueLendingPortfolio:
             asset="USDC",
         )
         total_supply, total_debt, total_net = value_lending_portfolio([weth_supply, usdc_borrow])
-        assert total_supply == Decimal("6000")  # 2 WETH * 3000
-        assert total_debt == Decimal("3000")  # 3000 USDC
-        assert total_net == Decimal("3000")
+        assert total_supply.value == Decimal("6000")  # 2 WETH * 3000
+        assert total_debt.value == Decimal("3000")  # 3000 USDC
+        assert total_net.value == Decimal("3000")
 
     def test_empty_portfolio(self):
-        """Empty portfolio."""
+        """Empty portfolio — measured zero (seeded with measured(0))."""
         total_supply, total_debt, total_net = value_lending_portfolio([])
-        assert total_supply == Decimal("0")
-        assert total_debt == Decimal("0")
-        assert total_net == Decimal("0")
+        assert total_supply.is_measured
+        assert total_supply.value == Decimal("0")
+        assert total_debt.value == Decimal("0")
+        assert total_net.value == Decimal("0")
+
+    def test_one_unmeasured_leg_poisons_total(self):
+        """Empty≠Zero propagation: a single unmeasured (price-unavailable) leg
+        makes the portfolio totals unmeasured rather than silently summing a
+        fabricated zero into a measured total."""
+        priced = value_lending_position(
+            atoken_balance=1_000_000_000_000_000_000,  # 1 WETH supplied
+            stable_debt=0,
+            variable_debt=0,
+            token_price_usd=Decimal("3000"),
+            token_decimals=18,
+            asset="WETH",
+        )
+        unpriced = value_lending_position(
+            atoken_balance=1_000_000,
+            stable_debt=0,
+            variable_debt=0,
+            token_price_usd=None,
+            token_decimals=6,
+            asset="USDC",
+        )
+        total_supply, total_debt, total_net = value_lending_portfolio([priced, unpriced])
+        assert total_supply.is_unmeasured
+        assert total_net.is_unmeasured
 
 
 # =============================================================================
@@ -992,9 +1065,7 @@ class TestVib5006LendingTrackCEnrichment:
                 lltv=Decimal("0.86"),
             )
 
-        monkeypatch.setattr(
-            "almanak.framework.accounting.lending_reads.read_lending_account_state", _as
-        )
+        monkeypatch.setattr("almanak.framework.accounting.lending_reads.read_lending_account_state", _as)
         market = MagicMock()
         market.price.return_value = Decimal("2000")
         out = valuer._enrich_lending_trackc_fields(position, "ethereum", {}, {}, market)
@@ -1239,18 +1310,14 @@ class TestCompoundV3LendingTrackCEnrichment:
         ``market`` and the owner from the deployment wallet, then fire the read.
         (Regression for the Anvil finding: all-NULL Compound Track-C rows.)"""
         valuer = self._valuer()
-        position = self._make_position(
-            "SUPPLY", details={"asset": "WETH", "market": "usdc", "type": "collateral"}
-        )
+        position = self._make_position("SUPPLY", details={"asset": "WETH", "market": "usdc", "type": "collateral"})
         captured: dict = {}
 
         def _mh(**kw):
             captured.update(kw)
             return self._market_state(Decimal("2.7"))
 
-        monkeypatch.setattr(
-            "almanak.framework.accounting.lending_reads.read_lending_market_health", _mh
-        )
+        monkeypatch.setattr("almanak.framework.accounting.lending_reads.read_lending_market_health", _mh)
         out = valuer._enrich_lending_trackc_fields(
             position, "base", {}, {}, self._market(), strategy_wallet="0xDEPLOYMENTWALLET"
         )
