@@ -1,4 +1,4 @@
-.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-strategy-taxonomy check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline
+.PHONY: all help clean test test-unit test-acceptance-pack test-connectors test-intents test-integration test-all test-ci test-coverage crap crap-fresh crap-diff crap-diff-fresh test-nightly-visual test-gateway test-backtest-service test-demo-strategies test-demo-quick test-demo-single test-accounting-matrix test-accounting-matrix-quick list-demo-strategies check-pendle-expiry set-almanak-code-version build-platform-wheels build-platform-runner build publish lint lint-check format format-check security docs docs-cli docs-generated docs-serve docs-clean install install-dev version-bump-patch version-bump-minor version-bump-major version-undo update-setup-version proto proto-check gateway dashboard dashboard-only anvil-dev typecheck typecheck-report docker-workstation-build docker-workstation-run docker-workstation-exec docker-workstation-stop audit-intent-paths check-xfail-hygiene check-config-boundary check-connector-registry check-strategy-taxonomy check-connector-chains check-intent-coverage check-deployment-scoped-tables check-deployment-id-proto-surface check-gateway-isolation check-decimal-policy check-decimal-policy-baseline regen-contract-baselines check-accounting-ratchet check-accounting-merge-gate scan-coupling scan-coupling-report scan-coupling-baseline check-hardcoded-addresses check-hardcoded-addresses-baseline
 
 # Load .env file if it exists
 -include .env
@@ -149,6 +149,22 @@ regen-contract-baselines:
 # sweep stays nightly (make test-accounting-matrix).
 check-accounting-ratchet:
 	uv run python scripts/ci/check_accounting_ratchet.py --check --verbose
+
+# Accounting-lane merge gate (VIB-5226 / US-017 + VIB-5227 / US-018). For PRs
+# that touch accounting / dashboard / valuation paths, enforces two rules the
+# fixture ratchet can't see:
+#   US-018 — the PR body declares cell-moved / invariant-added / waiver
+#            (Accounting-Impact trailer); no silent accounting PRs.
+#   US-017 — a PR hitting a high-risk trigger (swaps a canonical read path,
+#            changes leg extraction, deletes legacy valuation math, or modifies
+#            drawdown-reachable netting) needs a real-fork round-trip proof
+#            (Real-fork-proof trailer or the accounting:real-fork-verified label),
+#            not fixture-green alone. Closes the inert-fix loophole that hid VIB-4983.
+# Trigger classification runs locally; the PR-body gates evaluate in CI (they
+# need the PR payload). See docs/internal/bypass-inventory-vib-5202.md for the
+# trigger-(d) scope.
+check-accounting-merge-gate:
+	uv run python scripts/ci/check_accounting_merge_gate.py --check
 
 # Chain/protocol coupling scanner (VIB-4851 / VIB-4852). Re-scans the
 # repo for chain- and protocol-coupled code outside its canonical home
