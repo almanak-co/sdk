@@ -7,6 +7,11 @@ strategy.get_open_positions() as a supplementary source.
 
 This is the single source of truth for portfolio valuation at runtime.
 The framework owns both discovery and math.
+
+The projection contract (what total_value_usd / deployed_capital_usd / debt_mark /
+NAV each mean, and the lending signed-leg convention) is documented and
+invariant-tested per blueprint 27 §7.11 "PortfolioValuer projection contract"
+(VIB-5206) — see tests/unit/valuation/test_portfoliovaluer_contract.py.
 """
 
 import json
