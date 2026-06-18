@@ -228,6 +228,46 @@ def _extract_intent_type(intent: Any) -> str:
 _TokensAndAmounts = tuple[str, str, str, str, str, float | None]
 
 
+def _measured_amount_to_row(value: "Decimal | str | None") -> str:
+    """The single sanctioned conversion of a raw extracted amount to its
+    ``transaction_ledger`` row string, routed through ``MeasuredMoney`` so the
+    three Empty≠Zero states can never be conflated at this boundary (VIB-5214,
+    US-005 gate (b)).
+
+    This BANS the ad-hoc ``str(x) if x is not None else ""`` idiom the extraction
+    helpers used to type amounts. That idiom let the ``intent_fallback`` path
+    launder a non-measured value into the ledger: an ABSENT field (or a
+    fabricated non-numeric placeholder — the #2885 / #2895 bug class) was booked
+    as a value-bearing string, and a measured ``Decimal("0")`` could not be told
+    apart from "no value" by the bare ``is not None`` check. Routing through
+    :meth:`MeasuredMoney.from_raw` makes the state explicit and impossible to
+    misclassify.
+
+    Serialization back to the existing row form (byte-compatible for the
+    Decimal-typed amounts these helpers produce — see the VIB-5214 unit tests):
+
+    - **measured** (a real ``Decimal``, INCLUDING ``Decimal("0")`` — measured
+      zero is a value) → ``str(value)``. For a canonical ``Decimal`` this is
+      byte-identical to the legacy ``str(amt)``; ``Decimal`` ↔ ``str`` round-trips.
+    - **unmeasured** (``None``) / **absent** (``""`` / whitespace-only) → ``""``,
+      the existing row form for "no amount".
+    - a value OUTSIDE the ``Decimal | str | None`` money domain (e.g. a stray
+      ``int`` / ``float``), or a non-numeric string (e.g. an unresolved ``"all"``
+      placeholder) → unmeasured ``""``. It is NOT a measured number, so
+      Empty≠Zero forbids booking it as one. ``from_raw`` raises on these; we map
+      the raise to the unmeasured row form rather than crash the ledger write.
+    """
+    from almanak.framework.accounting.measured import MeasuredMoney
+
+    try:
+        money = MeasuredMoney.from_raw(value)
+    except (ValueError, TypeError):
+        # Outside the documented money domain (non-numeric string / int / float):
+        # not a measured value -> unmeasured row form. Never launder to a number.
+        return ""
+    return str(money.value) if money.is_measured else ""
+
+
 def _extract_from_swap_amounts(swap_amounts: Any, intent: Any) -> _TokensAndAmounts:
     """Phase beta-primary -- all fields from ``result.swap_amounts``.
 
@@ -254,8 +294,10 @@ def _extract_from_swap_amounts(swap_amounts: Any, intent: Any) -> _TokensAndAmou
     amt_out = getattr(swap_amounts, "amount_out_decimal", None)
     amt_in_resolved = getattr(swap_amounts, "amount_in_decimal_resolved", True)
     amt_out_resolved = getattr(swap_amounts, "amount_out_decimal_resolved", True)
-    amount_in = str(amt_in) if amt_in is not None and amt_in_resolved else ""
-    amount_out = str(amt_out) if amt_out is not None and amt_out_resolved else ""
+    # An unresolved-decimals leg is UNMEASURED (Empty != Zero): pass ``None`` so
+    # the sanctioned conversion records ``""`` rather than a measured value.
+    amount_in = _measured_amount_to_row(amt_in if amt_in_resolved else None)
+    amount_out = _measured_amount_to_row(amt_out if amt_out_resolved else None)
     # ``effective_price`` mirrors ``amount_in`` / ``amount_out``: an
     # unresolved input-decimals row carries ``effective_price=None`` from
     # the parser, but we also gate on ``amt_in_resolved`` so any future
@@ -313,7 +355,12 @@ def _extract_from_intent_fallback(intent: Any) -> _TokensAndAmounts:
         if value is not None:
             amt = value
             break
-    amount_in = str(amt) if amt is not None else ""
+    # VIB-5214 — route through the sanctioned MeasuredMoney conversion so an
+    # unresolved amount (``None``, ``""``, or a non-numeric placeholder) is
+    # recorded as UNMEASURED/ABSENT (``""``) and can NEVER be laundered into a
+    # value-bearing string or a measured ``Decimal("0")``. A real ``Decimal``
+    # (incl. measured zero) still serializes to its canonical string.
+    amount_in = _measured_amount_to_row(amt)
     return (token_in, token_out, amount_in, "", "", None)
 
 
@@ -413,17 +460,13 @@ def _extract_from_lp_open(intent: Any, result: Any, chain: str = "") -> _TokensA
         raw1 = getattr(lp_open_data, "amount1", None)
         amount_in = _lp_amount_to_human(raw0, token_in, chain)
         if amount_in is None:
-            intent_amt0 = getattr(intent, "amount0", None)
-            amount_in = str(intent_amt0) if intent_amt0 is not None else ""
+            amount_in = _measured_amount_to_row(getattr(intent, "amount0", None))
         amount_out = _lp_amount_to_human(raw1, token_out, chain)
         if amount_out is None:
-            intent_amt1 = getattr(intent, "amount1", None)
-            amount_out = str(intent_amt1) if intent_amt1 is not None else ""
+            amount_out = _measured_amount_to_row(getattr(intent, "amount1", None))
     else:
-        intent_amt0 = getattr(intent, "amount0", None)
-        intent_amt1 = getattr(intent, "amount1", None)
-        amount_in = str(intent_amt0) if intent_amt0 is not None else ""
-        amount_out = str(intent_amt1) if intent_amt1 is not None else ""
+        amount_in = _measured_amount_to_row(getattr(intent, "amount0", None))
+        amount_out = _measured_amount_to_row(getattr(intent, "amount1", None))
 
     return (token_in, token_out, amount_in, amount_out, "", None)
 
@@ -565,10 +608,11 @@ def _extract_from_lp_close(intent: Any, result: Any, chain: str = "") -> _Tokens
     # Token is address-aligned (above), so the decimals are the leg's own.
     raw0 = getattr(lp_close_data, "amount0_collected", None)
     raw1 = getattr(lp_close_data, "amount1_collected", None)
-    amount_in = _lp_amount_to_human(raw0, token_in, chain)
-    amount_out = _lp_amount_to_human(raw1, token_out, chain)
-    amount_in = amount_in if amount_in is not None else ""
-    amount_out = amount_out if amount_out is not None else ""
+    # ``_lp_amount_to_human`` returns a human str (incl. "0" for measured zero)
+    # or ``None`` (UNMEASURED). Route through the sanctioned conversion so the
+    # ``None`` leg records the absent/unmeasured ``""`` row form (Empty != Zero).
+    amount_in = _measured_amount_to_row(_lp_amount_to_human(raw0, token_in, chain))
+    amount_out = _measured_amount_to_row(_lp_amount_to_human(raw1, token_out, chain))
 
     # Yielded nothing usable -> let the caller take the intent-attr fallback.
     if not any((token_in, token_out, amount_in, amount_out)):
@@ -669,7 +713,7 @@ def _extract_from_lending(
         )
         return (token_in, "", "", "", "", None)
 
-    return (token_in, "", str(scaled), "", "", None)
+    return (token_in, "", _measured_amount_to_row(scaled), "", "", None)
 
 
 def _extract_tokens_and_amounts(
@@ -708,8 +752,7 @@ def _extract_tokens_and_amounts(
             return lp_close
     if intent_type == "PERP_OPEN":
         token_in = getattr(intent, "collateral_token", "") or ""
-        collateral_amount = getattr(intent, "collateral_amount", None)
-        amount_in = str(collateral_amount) if collateral_amount is not None else ""
+        amount_in = _measured_amount_to_row(getattr(intent, "collateral_amount", None))
         return (token_in, "", amount_in, "", "", None)
     if intent_type in ("REPAY", "WITHDRAW", "DELEVERAGE"):
         # DELEVERAGE is structurally a repay (closes borrow exposure) — the

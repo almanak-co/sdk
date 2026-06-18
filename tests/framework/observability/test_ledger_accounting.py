@@ -497,3 +497,143 @@ class TestRepayWithdrawAmountIn:
         assert entry.intent_type == "DELEVERAGE"
         assert entry.token_in == "USDT"
         assert entry.amount_in == "1.9995"
+
+
+class TestMeasuredAmountToRowVIB5214:
+    """VIB-5214 (US-005, gate (b)) — MeasuredMoney at the ledger-extraction boundary.
+
+    Before this story the extraction helpers typed amounts with the ad-hoc
+    ``str(x) if x is not None else ""`` idiom. That let the ``intent_fallback``
+    path LAUNDER a non-measured value into the ledger: an ABSENT field, or a
+    fabricated non-numeric placeholder (the #2885 / #2895 blank-token bug class),
+    was booked as a value-bearing string; and a measured ``Decimal("0")`` could
+    not be told apart from "no value" by a bare ``is not None`` check.
+
+    The fix routes every amount through ``_measured_amount_to_row`` →
+    ``MeasuredMoney.from_raw``: the three Empty≠Zero states are explicit, an
+    unresolved amount becomes the unmeasured/absent ``""`` row form (NEVER a
+    value-bearing string, NEVER a measured zero), and a real ``Decimal`` (incl.
+    measured zero) still serializes byte-identically to the legacy ``str(amt)``.
+    """
+
+    def test_measured_decimal_serializes_to_canonical_str(self):
+        """A real Decimal → measured → ``str(value)`` (byte-compatible row form)."""
+        from almanak.framework.observability.ledger import _measured_amount_to_row
+
+        assert _measured_amount_to_row(Decimal("2.000001")) == "2.000001"
+        assert _measured_amount_to_row(Decimal("0.5")) == "0.5"
+
+    def test_measured_zero_is_preserved_as_zero(self):
+        """``Decimal("0")`` is a MEASURED value (measured zero) → ``"0"``, not ``""``."""
+        from almanak.framework.observability.ledger import _measured_amount_to_row
+
+        assert _measured_amount_to_row(Decimal("0")) == "0"
+
+    def test_none_is_unmeasured_empty_not_zero(self):
+        """``None`` (unmeasured) → ``""`` — NEVER laundered to a measured ``"0"``."""
+        from almanak.framework.observability.ledger import _measured_amount_to_row
+
+        assert _measured_amount_to_row(None) == ""
+
+    def test_empty_string_is_absent_empty_not_zero(self):
+        """``""`` (absent — parser didn't emit) → ``""``, never a measured ``"0"``."""
+        from almanak.framework.observability.ledger import _measured_amount_to_row
+
+        assert _measured_amount_to_row("") == ""
+        assert _measured_amount_to_row("   ") == ""
+
+    def test_numeric_string_round_trips_byte_compatible(self):
+        """A numeric string (e.g. ``_lp_amount_to_human`` output) round-trips
+        byte-identically through the MeasuredMoney conversion."""
+        from almanak.framework.observability.ledger import _measured_amount_to_row
+
+        for s in ("0", "1.5", "0.000001", "1E-18"):
+            assert _measured_amount_to_row(s) == s
+
+    def test_non_numeric_placeholder_is_not_laundered(self):
+        """A fabricated non-numeric placeholder (e.g. an unresolved ``"all"``)
+        is NOT a measured number → unmeasured ``""``. Closes the value-bearing
+        placeholder laundering (#2885 / #2895 bug class) and never crashes the
+        ledger write."""
+        from almanak.framework.observability.ledger import _measured_amount_to_row
+
+        assert _measured_amount_to_row("all") == ""
+        assert _measured_amount_to_row("n/a") == ""
+
+    def test_out_of_domain_type_is_fail_safe_unmeasured(self):
+        """A value outside the Decimal|str|None money domain (stray int/float)
+        maps to unmeasured ``""`` rather than raising on the ledger hot path."""
+        from almanak.framework.observability.ledger import _measured_amount_to_row
+
+        assert _measured_amount_to_row(5) == ""  # type: ignore[arg-type]
+        assert _measured_amount_to_row(1.5) == ""  # type: ignore[arg-type]
+
+
+class TestIntentFallbackLaunderingVIB5214:
+    """VIB-5214 — the named ``intent_fallback`` ``""``-laundering path.
+
+    These assert behaviour through ``_extract_from_intent_fallback`` directly:
+    the BEFORE/AFTER delta the story closes.
+    """
+
+    def _make_intent(self, **attrs):
+        from unittest.mock import MagicMock
+
+        intent = MagicMock()
+        # Null out the whole precedence chain so only the attrs we set are seen
+        # (otherwise auto-generated MagicMock attributes read as truthy garbage).
+        for name in (
+            "from_token",
+            "to_token",
+            "borrow_token",
+            "supply_token",
+            "token",
+            "amount",
+            "borrow_amount",
+            "supply_amount",
+            "amount_usd",
+        ):
+            setattr(intent, name, None)
+        for name, value in attrs.items():
+            setattr(intent, name, value)
+        return intent
+
+    def test_resolved_amount_is_measured(self):
+        """A fully-resolved intent amount yields the measured value (correct)."""
+        from almanak.framework.observability.ledger import _extract_from_intent_fallback
+
+        intent = self._make_intent(token="USDC", amount=Decimal("3.5"))
+        token_in, token_out, amount_in, amount_out, eff, slip = _extract_from_intent_fallback(intent)
+        assert token_in == "USDC"
+        assert amount_in == "3.5"
+        assert amount_out == ""  # always-absent out leg
+
+    def test_measured_zero_amount_preserved(self):
+        """A measured ``Decimal("0")`` amount is preserved as ``"0"`` (Empty≠Zero)."""
+        from almanak.framework.observability.ledger import _extract_from_intent_fallback
+
+        intent = self._make_intent(token="USDC", amount=Decimal("0"))
+        _, _, amount_in, *_ = _extract_from_intent_fallback(intent)
+        assert amount_in == "0"
+
+    def test_unresolved_amount_is_empty_not_zero(self):
+        """No amount on any precedence link → unmeasured ``""`` (never ``"0"``)."""
+        from almanak.framework.observability.ledger import _extract_from_intent_fallback
+
+        intent = self._make_intent(token="USDC")  # amount stays None
+        _, _, amount_in, *_ = _extract_from_intent_fallback(intent)
+        assert amount_in == ""
+
+    def test_placeholder_amount_is_not_booked_as_money(self):
+        """A fabricated non-numeric placeholder amount must NOT be booked as a
+        value-bearing string (the #2885 / #2895 bug class). It becomes ``""``.
+
+        Pre-fix: ``str("all")`` → ``amount_in="all"`` (a non-money string on the
+        trade tape, laundered downstream into a measured ``Decimal("0")`` by the
+        aggregation's lenient parse). Post-fix: unmeasured ``""``.
+        """
+        from almanak.framework.observability.ledger import _extract_from_intent_fallback
+
+        intent = self._make_intent(token="WETH", amount="all")
+        _, _, amount_in, *_ = _extract_from_intent_fallback(intent)
+        assert amount_in == ""
