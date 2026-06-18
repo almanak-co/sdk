@@ -61,6 +61,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
+from typing import Any
 
 from almanak.framework.accounting.measured import MeasuredMoney
 
@@ -155,6 +156,20 @@ class PrimitiveMoneyLeg:
         """The notional the action operates on (collateral / lending amount)."""
         return cls(MoneyLegRole.PRINCIPAL, token, amount)
 
+    # -- serialization ---------------------------------------------------------
+
+    def to_dict(self) -> dict[str, Any]:
+        """A JSON-safe view for the ``transaction_ledger.extracted_data`` blob.
+
+        Mirrors the ``to_dict()`` convention the other typed extracted-data
+        objects follow (``SwapAmounts`` / ``LPOpenData`` / …) so
+        ``serialize_extracted_data`` records a clean, queryable dict (tagged with
+        ``_type``) instead of a Python ``repr`` string. The amount serializes via
+        :meth:`MeasuredMoney.to_payload` so the three Empty≠Zero states survive
+        the blob: measured → ``str(amount)``, unmeasured → ``None``, absent → ``""``.
+        """
+        return {"role": self.role.value, "token": self.token, "amount": self.amount.to_payload()}
+
 
 @dataclass(frozen=True, slots=True)
 class PrimitiveMoneyLegs:
@@ -197,6 +212,34 @@ class PrimitiveMoneyLegs:
     def of(cls, *legs: PrimitiveMoneyLeg) -> PrimitiveMoneyLegs:
         """Build from positional legs: ``PrimitiveMoneyLegs.of(a, b, c)``."""
         return cls(legs)
+
+    @classmethod
+    def stake_mint(
+        cls,
+        *,
+        staked_token: str,
+        staked_amount: MeasuredMoney,
+        minted_token: str,
+        minted_amount: MeasuredMoney,
+    ) -> PrimitiveMoneyLegs:
+        """The canonical stake/mint money-leg pair: an INPUT staked asset and an
+        OUTPUT minted receipt token.
+
+        The shape is the *pattern*, not the protocol — any stake-and-mint connector
+        (Lido ETH→stETH/wstETH, Ethena USDe→sUSDe, …) declares its STAKE legs with
+        this one constructor rather than re-deriving the role layout. It projects
+        onto the flat ledger as a two-sided action (INPUT → ``token_in`` /
+        ``amount_in``; OUTPUT → ``token_out`` / ``amount_out``) via
+        :func:`~almanak.framework.observability.ledger._extract_from_declared_legs`.
+
+        Amounts are :class:`MeasuredMoney`, so Empty≠Zero is carried by
+        construction: an unresolved mint amount stays unmeasured and projects to
+        ``""`` — never a fabricated measured zero (blueprint 27 §10.10).
+        """
+        return cls.of(
+            PrimitiveMoneyLeg.input(staked_token, staked_amount),
+            PrimitiveMoneyLeg.output(minted_token, minted_amount),
+        )
 
     # -- role views ------------------------------------------------------------
 
@@ -261,6 +304,17 @@ class PrimitiveMoneyLegs:
     def total_principal(self) -> MeasuredMoney:
         """Total of the PRINCIPAL legs (measured iff every principal leg is measured)."""
         return self.total(MoneyLegRole.PRINCIPAL)
+
+    # -- serialization ---------------------------------------------------------
+
+    def to_dict(self) -> dict[str, Any]:
+        """A JSON-safe view (list of leg dicts) for the ledger extracted-data blob.
+
+        Lets ``serialize_extracted_data`` (``observability/ledger.py``) record the
+        declared legs as a clean, tagged dict — the same ``to_dict()`` contract the
+        other typed extracted-data objects honour — rather than a ``repr`` string.
+        """
+        return {"legs": [leg.to_dict() for leg in self.legs]}
 
 
 __all__ = [

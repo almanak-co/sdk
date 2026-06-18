@@ -862,6 +862,15 @@ def _extract_from_declared_legs(legs: Any) -> _TokensAndAmounts:
     out of scope for the money-leg contract (§6.6), so they are ``""`` / ``None``.
     Amounts carry Empty != Zero by construction (``MeasuredMoney``), so an
     unmeasured / absent leg projects to ``""`` — never a fabricated zero.
+
+    HARDENING (VIB-5220 — Lido STAKE is the first real consumer of this path,
+    which US-009 shipped dormant): the flat ledger tuple carries exactly TWO money
+    slots (in / out). The canonical 1- and 2-leg primitives above always fit. A
+    connector that declares MORE money-bearing legs than fit would have the surplus
+    SILENTLY dropped here — a money-leg loss that must be observable, not silent
+    (the Empty != Zero spirit). When that happens we emit a WARN naming the dropped
+    legs so the lossiness surfaces instead of corrupting the trade tape quietly;
+    the canonical projection itself is unchanged.
     """
     from almanak.connectors._strategy_base.primitive_money_leg import MoneyLegRole
 
@@ -879,6 +888,22 @@ def _extract_from_declared_legs(legs: Any) -> _TokensAndAmounts:
         out_leg = outputs[1] if len(outputs) > 1 else None
     else:
         in_leg = out_leg = None
+
+    # Observability: surface any money-bearing leg the 2-slot projection could not
+    # carry (e.g. an INPUT + OUTPUT + PRINCIPAL declaration) rather than dropping
+    # it silently. ``in_leg`` / ``out_leg`` are the two assigned legs; any other
+    # leg is dropped. Identity comparison so duplicate-valued legs are not masked.
+    assigned = [leg for leg in (in_leg, out_leg) if leg is not None]
+    dropped = [leg for leg in legs.legs if all(leg is not a for a in assigned)]
+    if dropped:
+        logger.warning(
+            "ledger declared-legs projection dropped %d money leg(s) that do not fit the "
+            "flat (in/out) ledger tuple (assigned=%s, dropped=%s). The connector declared more "
+            "money-bearing legs than the trade tape can carry (VIB-5220).",
+            len(dropped),
+            [(leg.role.value, leg.token) for leg in assigned],
+            [(leg.role.value, leg.token) for leg in dropped],
+        )
 
     token_in = in_leg.token if in_leg is not None else ""
     token_out = out_leg.token if out_leg is not None else ""

@@ -329,6 +329,18 @@ class ResultEnricher:
         "compound_v3": {
             "SUPPLY": ["supply_collateral_amount"],
         },
+        # VIB-5220 — Lido is the first connector migrated onto the
+        # ``PrimitiveMoneyLeg`` contract. Its parser's
+        # ``extract_primitive_money_legs`` returns a typed ``PrimitiveMoneyLegs``
+        # (INPUT=ETH staked, OUTPUT=stETH/wstETH minted); this overlay surfaces it
+        # under ``extracted_data["primitive_money_legs"]`` — the seam the US-009
+        # ledger dispatcher (``_extract_tokens_and_amounts``) prefers over the
+        # legacy intent-attribute guesser. Kept under the lido overlay (not the
+        # generic STAKE spec) so other staking connectors that have not yet
+        # migrated (ethena / gimo) emit no spurious SUPPORTED_EXTRACTIONS warning.
+        "lido": {
+            "STAKE": ["primitive_money_legs"],
+        },
     }
 
     # VIB-4434 W2 — Per-protocol REMOVE table; companion to

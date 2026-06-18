@@ -716,3 +716,100 @@ class TestExtractWstethReceived:
         assert wsteth_amt is not None
         # shares_received returns wstETH amount when wraps exist (existing behavior)
         assert shares == wsteth_amt
+
+
+# =============================================================================
+# extract_primitive_money_legs Tests (VIB-5220)
+# =============================================================================
+
+_STETH = "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+_WSTETH = "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
+_USER = "0x000000000000000000000000abcdefabcdefabcdefabcdefabcdefabcdefabcd"
+_ZERO_TOPIC = "0x" + "0" * 64
+_ONE_ETH_DATA = "0x" + "0000000000000000000000000000000000000000000000000de0b6b3a7640000" + "0" * 64
+_ONE_ETH_VALUE = "0x0000000000000000000000000000000000000000000000000de0b6b3a7640000"  # 1.0 (18dp)
+_085_VALUE = "0x0000000000000000000000000000000000000000000000000bcbce7f1b150000"  # 0.85 (18dp)
+
+
+def _submitted_log() -> dict:
+    """A Lido ``Submitted`` (1 ETH staked) log on the stETH contract."""
+    return {"address": _STETH, "topics": [EVENT_TOPICS["Submitted"], _USER], "data": _ONE_ETH_DATA}
+
+
+def _steth_mint_log(value_hex: str = _ONE_ETH_VALUE) -> dict:
+    """A stETH mint ``Transfer(0x0 -> staker)`` log — the plain-stake output leg."""
+    return {"address": _STETH, "topics": [EVENT_TOPICS["Transfer"], _ZERO_TOPIC, _USER], "data": value_hex}
+
+
+def _wsteth_mint_log(value_hex: str = _085_VALUE) -> dict:
+    """A wstETH wrap-mint ``Transfer(0x0 -> staker)`` log — the wrapped-stake output."""
+    return {"address": _WSTETH, "topics": [EVENT_TOPICS["Transfer"], _ZERO_TOPIC, _USER], "data": value_hex}
+
+
+class TestParseStethMint:
+    """The stETH mint Transfer(0x0 -> staker) is captured as a measured output leg."""
+
+    def test_steth_mint_captured_as_stake_output(self, parser: LidoReceiptParser) -> None:
+        receipt = {"transactionHash": "0xmint", "blockNumber": 1, "logs": [_submitted_log(), _steth_mint_log()]}
+        result = parser.parse_receipt(receipt)
+        assert len(result.stake_outputs) == 1
+        assert result.stake_outputs[0].amount == Decimal("1")
+        assert result.stake_outputs[0].recipient.lower().endswith("abcd")
+        assert result.stake_outputs[0].token == _STETH.lower()
+
+    def test_no_steth_mint_for_plain_submit_only(self, parser: LidoReceiptParser) -> None:
+        receipt = {"transactionHash": "0xsub", "blockNumber": 1, "logs": [_submitted_log()]}
+        result = parser.parse_receipt(receipt)
+        assert result.stake_outputs == []
+
+
+class TestExtractPrimitiveMoneyLegs:
+    """VIB-5220 — Lido declares STAKE money legs (INPUT=ETH, OUTPUT=stETH/wstETH)
+    as a typed ``PrimitiveMoneyLegs`` for the US-009 ledger dispatcher."""
+
+    def _roles(self, legs):
+        return [(leg.role.value, leg.token) for leg in legs.legs]
+
+    def test_plain_stake_declares_eth_in_steth_out(self, parser: LidoReceiptParser) -> None:
+        """Repro of the #2897 case: stETH mint Transfer(0x0 -> staker) books as the
+        measured OUTPUT leg; INPUT is the submitted ETH."""
+        from almanak.framework.accounting.measured import MeasuredMoney
+
+        receipt = {"transactionHash": "0xplain", "blockNumber": 1, "logs": [_submitted_log(), _steth_mint_log()]}
+        legs = parser.extract_primitive_money_legs(receipt)
+        assert legs is not None
+        assert self._roles(legs) == [("input", "ETH"), ("output", "stETH")]
+        assert legs.total_input() == MeasuredMoney.measured(Decimal("1"))
+        assert legs.total_output() == MeasuredMoney.measured(Decimal("1"))
+
+    def test_wrapped_stake_declares_eth_in_wsteth_out(self, parser: LidoReceiptParser) -> None:
+        """receive_wrapped=True: the OUTPUT leg is the measured wstETH wrap-mint."""
+        from almanak.framework.accounting.measured import MeasuredMoney
+
+        receipt = {
+            "transactionHash": "0xwrap",
+            "blockNumber": 1,
+            "logs": [_submitted_log(), _steth_mint_log(), _wsteth_mint_log()],
+        }
+        legs = parser.extract_primitive_money_legs(receipt)
+        assert legs is not None
+        assert self._roles(legs) == [("input", "ETH"), ("output", "wstETH")]
+        assert legs.total_input() == MeasuredMoney.measured(Decimal("1"))
+        assert legs.total_output() == MeasuredMoney.measured(Decimal("0.85"))
+
+    def test_missing_mint_output_is_unmeasured_not_zero(self, parser: LidoReceiptParser) -> None:
+        """No mint Transfer in the receipt → OUTPUT token known (stETH) but amount
+        UNMEASURED — never an ETH-input proxy, never a fabricated measured zero."""
+        receipt = {"transactionHash": "0xsubonly", "blockNumber": 1, "logs": [_submitted_log()]}
+        legs = parser.extract_primitive_money_legs(receipt)
+        assert legs is not None
+        out = legs.output_legs[0]
+        assert out.token == "stETH"
+        assert out.amount.is_unmeasured
+        # INPUT still measured from the Submitted event.
+        assert legs.input_legs[0].amount.is_measured
+
+    def test_non_stake_receipt_returns_none(self, parser: LidoReceiptParser) -> None:
+        """No Submitted event → not a stake → None (dispatcher falls back)."""
+        receipt = {"transactionHash": "0xnone", "blockNumber": 1, "logs": []}
+        assert parser.extract_primitive_money_legs(receipt) is None

@@ -177,3 +177,61 @@ def test_by_role_rejects_non_enum_role() -> None:
     legs = _swap_legs()
     with pytest.raises(TypeError):
         legs.by_role("output")  # type: ignore[arg-type]
+
+
+# -- stake/mint generic constructor + serialization (VIB-5220) ----------------
+
+
+def test_stake_mint_builds_input_output_pair() -> None:
+    """The generic stake/mint constructor declares one INPUT (staked) + one OUTPUT
+    (minted) leg in that order — the reusable shape for any stake-and-mint connector."""
+    legs = PrimitiveMoneyLegs.stake_mint(
+        staked_token="ETH",
+        staked_amount=MeasuredMoney.measured(Decimal("1")),
+        minted_token="stETH",
+        minted_amount=MeasuredMoney.measured(Decimal("1")),
+    )
+    assert [(leg.role, leg.token) for leg in legs.legs] == [
+        (MoneyLegRole.INPUT, "ETH"),
+        (MoneyLegRole.OUTPUT, "stETH"),
+    ]
+    assert legs.total_input().value == Decimal("1")
+    assert legs.total_output().value == Decimal("1")
+
+
+def test_stake_mint_carries_unmeasured_output() -> None:
+    """An unresolved mint amount stays unmeasured — never a fabricated measured zero."""
+    legs = PrimitiveMoneyLegs.stake_mint(
+        staked_token="ETH",
+        staked_amount=MeasuredMoney.measured(Decimal("1")),
+        minted_token="stETH",
+        minted_amount=MeasuredMoney.unmeasured(),
+    )
+    assert legs.input_legs[0].amount.is_measured
+    assert legs.output_legs[0].amount.is_unmeasured
+
+
+def test_leg_to_dict_serializes_empty_neq_zero_states() -> None:
+    """``to_dict`` maps the three MeasuredMoney states onto the payload form:
+    measured → str, unmeasured → None, absent → ''."""
+    measured = PrimitiveMoneyLeg.input("ETH", MeasuredMoney.measured(Decimal("0")))
+    unmeasured = PrimitiveMoneyLeg.output("stETH", MeasuredMoney.unmeasured())
+    absent = PrimitiveMoneyLeg.output("stETH", MeasuredMoney.absent())
+    assert measured.to_dict() == {"role": "input", "token": "ETH", "amount": "0"}
+    assert unmeasured.to_dict() == {"role": "output", "token": "stETH", "amount": None}
+    assert absent.to_dict() == {"role": "output", "token": "stETH", "amount": ""}
+
+
+def test_legs_to_dict_lists_each_leg() -> None:
+    legs = PrimitiveMoneyLegs.stake_mint(
+        staked_token="ETH",
+        staked_amount=MeasuredMoney.measured(Decimal("1")),
+        minted_token="wstETH",
+        minted_amount=MeasuredMoney.measured(Decimal("0.85")),
+    )
+    assert legs.to_dict() == {
+        "legs": [
+            {"role": "input", "token": "ETH", "amount": "1"},
+            {"role": "output", "token": "wstETH", "amount": "0.85"},
+        ]
+    }

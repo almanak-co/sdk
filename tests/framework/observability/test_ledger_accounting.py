@@ -782,6 +782,66 @@ class TestDeclaredMoneyLegsVIB5218:
         _, _, amount_in, *_ = _extract_tokens_and_amounts(object(), result)
         assert amount_in == "0"
 
+    def test_stake_mint_projects_input_output(self):
+        """VIB-5220 — a stake/mint declaration (INPUT=ETH, OUTPUT=stETH) projects
+        onto in/out by role, the Lido STAKE shape the dispatcher now routes."""
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        legs = self._legs(
+            self._input("ETH", self._measured("0.5")),
+            self._output("stETH", self._measured("0.5")),
+        )
+        result = self._result(primitive_money_legs=legs)
+        assert _extract_tokens_and_amounts(object(), result) == ("ETH", "stETH", "0.5", "0.5", "", None)
+
+    def test_stake_mint_unmeasured_output_is_empty(self):
+        """VIB-5220 — an unmeasured mint amount projects to ``""`` (Empty≠Zero),
+        with the OUTPUT token identity preserved."""
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        legs = self._legs(
+            self._input("ETH", self._measured("0.5")),
+            self._output("stETH", self._unmeasured()),
+        )
+        result = self._result(primitive_money_legs=legs)
+        assert _extract_tokens_and_amounts(object(), result) == ("ETH", "stETH", "0.5", "", "", None)
+
+    def test_surplus_legs_dropped_emit_warn(self, caplog):
+        """VIB-5220 hardening — a declaration with MORE money legs than the flat
+        (in/out) tuple can carry emits a WARN naming the dropped legs (the
+        projection itself still fills the two slots positionally)."""
+        import logging
+
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        legs = self._legs(
+            self._input("ETH", self._measured("1")),
+            self._output("stETH", self._measured("1")),
+            self._principal("USDC", self._measured("5")),
+        )
+        result = self._result(primitive_money_legs=legs)
+        with caplog.at_level(logging.WARNING):
+            token_in, token_out, *_ = _extract_tokens_and_amounts(object(), result)
+        # The two slots are still filled by role; only the surplus PRINCIPAL drops.
+        assert (token_in, token_out) == ("ETH", "stETH")
+        assert "dropped" in caplog.text
+        assert "USDC" in caplog.text
+
+    def test_fitting_legs_emit_no_drop_warn(self, caplog):
+        """The canonical two-slot declarations must NOT emit the drop WARN."""
+        import logging
+
+        from almanak.framework.observability.ledger import _extract_tokens_and_amounts
+
+        legs = self._legs(
+            self._input("ETH", self._measured("1")),
+            self._output("stETH", self._measured("1")),
+        )
+        result = self._result(primitive_money_legs=legs)
+        with caplog.at_level(logging.WARNING):
+            _extract_tokens_and_amounts(object(), result)
+        assert "dropped" not in caplog.text
+
     def test_declared_legs_via_extracted_data_key(self):
         """A connector may declare under ``extracted_data["primitive_money_legs"]``
         (the same flexible dict as lp_open_data / lp_close_data)."""

@@ -8,9 +8,12 @@ import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
+
+if TYPE_CHECKING:
+    from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +105,30 @@ class StakeEventData:
 
 
 @dataclass
+class StakeOutputEventData:
+    """stETH minted to the staker on a Lido ``submit`` (the stake's output leg).
+
+    A plain ETH stake mints stETH via ``Transfer(0x0 -> staker)`` on the stETH
+    contract. This is the *measured* output of the stake — distinct from the
+    ``Submitted.amount`` input ETH carried by :class:`StakeEventData`. Captured so
+    the connector can DECLARE its STAKE output leg (``extract_primitive_money_legs``)
+    with an on-chain measured amount rather than an input-ETH proxy (VIB-5220).
+    """
+
+    recipient: str
+    amount: Decimal
+    token: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "recipient": self.recipient,
+            "amount": str(self.amount),
+            "token": self.token,
+        }
+
+
+@dataclass
 class WrapEventData:
     """Parsed data from wrap operation (Transfer event on wstETH)."""
 
@@ -185,6 +212,7 @@ class ParseResult:
 
     success: bool
     stakes: list[StakeEventData] = field(default_factory=list)
+    stake_outputs: list[StakeOutputEventData] = field(default_factory=list)
     wraps: list[WrapEventData] = field(default_factory=list)
     unwraps: list[UnwrapEventData] = field(default_factory=list)
     withdrawal_requests: list[WithdrawalRequestedEventData] = field(default_factory=list)
@@ -198,6 +226,7 @@ class ParseResult:
         return {
             "success": self.success,
             "stakes": [s.to_dict() for s in self.stakes],
+            "stake_outputs": [o.to_dict() for o in self.stake_outputs],
             "wraps": [w.to_dict() for w in self.wraps],
             "unwraps": [u.to_dict() for u in self.unwraps],
             "withdrawal_requests": [wr.to_dict() for wr in self.withdrawal_requests],
@@ -263,6 +292,7 @@ class LidoReceiptParser:
                 )
 
             stakes: list[StakeEventData] = []
+            stake_outputs: list[StakeOutputEventData] = []
             wraps: list[WrapEventData] = []
             unwraps: list[UnwrapEventData] = []
             withdrawal_requests: list[WithdrawalRequestedEventData] = []
@@ -333,6 +363,24 @@ class LidoReceiptParser:
                                         token=contract_address,
                                     )
                                 )
+                    elif contract_address == self.steth_address:
+                        # Transfer on the stETH contract. A ``submit`` mints stETH
+                        # via ``Transfer(0x0 -> staker)`` — that mint is the stake's
+                        # measured output leg (VIB-5220). A wrapped stake also emits
+                        # a ``staker -> wstETH`` stETH Transfer, but ``from`` is the
+                        # staker there (not 0x0), so only the mint is captured here.
+                        transfer_data = self._parse_transfer_log(topics, data, contract_address)
+                        if transfer_data:
+                            from_addr = transfer_data["from_address"].lower()
+                            zero_addr = "0x" + "0" * 40
+                            if from_addr == zero_addr:
+                                stake_outputs.append(
+                                    StakeOutputEventData(
+                                        recipient=transfer_data["to_address"],
+                                        amount=transfer_data["amount"],
+                                        token=contract_address,
+                                    )
+                                )
 
                 elif event_name == "WithdrawalRequested":
                     # WithdrawalRequested event from withdrawal queue
@@ -350,13 +398,15 @@ class LidoReceiptParser:
 
             logger.info(
                 f"Parsed Lido receipt: tx={tx_hash[:10]}..., "
-                f"stakes={len(stakes)}, wraps={len(wraps)}, unwraps={len(unwraps)}, "
+                f"stakes={len(stakes)}, stake_outputs={len(stake_outputs)}, "
+                f"wraps={len(wraps)}, unwraps={len(unwraps)}, "
                 f"withdrawal_requests={len(withdrawal_requests)}, withdrawal_claims={len(withdrawal_claims)}"
             )
 
             return ParseResult(
                 success=True,
                 stakes=stakes,
+                stake_outputs=stake_outputs,
                 wraps=wraps,
                 unwraps=unwraps,
                 withdrawal_requests=withdrawal_requests,
@@ -678,6 +728,82 @@ class LidoReceiptParser:
             logger.warning(f"Failed to extract wstETH received: {e}")
             return None
 
+    def extract_primitive_money_legs(self, receipt: dict[str, Any]) -> "PrimitiveMoneyLegs | None":
+        """Declare the STAKE money legs for the transaction ledger (VIB-5220).
+
+        This is the connector's authoritative, typed declaration of the money an
+        ETH stake moves — the contract the US-009 ledger dispatcher prefers over
+        its legacy intent-attribute guesser. It inverts the old control flow: the
+        connector states its legs instead of the ledger reverse-engineering them
+        from ``StakeIntent`` attributes (whose ``token_in`` the fallback chain
+        ``from_token > borrow_token > supply_token > token`` never matched, so a
+        STAKE row used to land with empty ``token_in`` / ``token_out`` /
+        ``amount_out`` — the F4 / #2897 defect).
+
+        Built from the receipt's measured on-chain events as a generic stake/mint
+        pair (:meth:`PrimitiveMoneyLegs.stake_mint`):
+
+        * INPUT  — ETH submitted (``Submitted`` event); token ``"ETH"`` (Lido's
+          native stake asset).
+        * OUTPUT — the minted liquid-staking token: ``wstETH`` from a wstETH
+          wrap-mint when ``receive_wrapped`` was set, else ``stETH`` from the
+          stETH mint ``Transfer(0x0 -> staker)``.
+
+        Empty≠Zero (blueprint 27 §10.10): amounts are :class:`MeasuredMoney`. When
+        the stETH mint ``Transfer`` is absent from the receipt (a degenerate /
+        log-stripped receipt), the output token identity is still known (``stETH``)
+        but its amount is UNMEASURED — never an input-ETH proxy and never a
+        fabricated measured zero.
+
+        Returns ``None`` when the receipt carries no ``Submitted`` (stake) event,
+        so the dispatcher falls back to its legacy path for non-stake receipts.
+
+        Args:
+            receipt: Transaction receipt dict with a ``logs`` field.
+
+        Returns:
+            A :class:`PrimitiveMoneyLegs` declaring the INPUT/OUTPUT legs, or
+            ``None`` when the receipt is not a stake.
+        """
+        from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
+        from almanak.framework.accounting.measured import MeasuredMoney
+
+        try:
+            result = self.parse_receipt(receipt)
+        except Exception as e:
+            logger.warning(f"Failed to extract primitive money legs: {e}")
+            return None
+
+        if not result.stakes:
+            # Not a stake receipt (no Submitted event) — let the dispatcher fall
+            # back rather than declaring an input-less / fabricated leg set.
+            return None
+
+        # INPUT: ETH submitted (measured human amount from the Submitted event).
+        staked_amount = MeasuredMoney.measured(result.stakes[0].amount)
+
+        # OUTPUT: the minted receipt token, preferring the on-chain measured mint.
+        if result.wraps:
+            # receive_wrapped=True: the staker ends holding wstETH (wrap-mint).
+            minted_token = "wstETH"
+            minted_amount = MeasuredMoney.measured(result.wraps[0].amount)
+        elif result.stake_outputs:
+            # Plain stake: the stETH mint Transfer(0x0 -> staker) is the output.
+            minted_token = "stETH"
+            minted_amount = MeasuredMoney.measured(result.stake_outputs[0].amount)
+        else:
+            # Mint Transfer absent (degenerate receipt): token known, amount not
+            # measurable. UNMEASURED — never an ETH-input proxy, never measured 0.
+            minted_token = "stETH"
+            minted_amount = MeasuredMoney.unmeasured()
+
+        return PrimitiveMoneyLegs.stake_mint(
+            staked_token="ETH",
+            staked_amount=staked_amount,
+            minted_token=minted_token,
+            minted_amount=minted_amount,
+        )
+
     def extract_unstake_amount(self, receipt: dict[str, Any]) -> int | None:
         """Extract unstake amount from transaction receipt.
 
@@ -723,6 +849,7 @@ __all__ = [
     "LidoReceiptParser",
     "LidoEventType",
     "StakeEventData",
+    "StakeOutputEventData",
     "WrapEventData",
     "UnwrapEventData",
     "WithdrawalRequestedEventData",
