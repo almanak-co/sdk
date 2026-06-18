@@ -1,0 +1,53 @@
+# Platform Backtest Runner container
+#
+# Cloud Run Job entrypoint used by the platform backend. The job clones a user's
+# strategy repo at a pinned commit, runs the SDK PnL backtester, uploads the JSON
+# result to GCS, and calls the platform completion callback.
+#
+# Build:
+#   docker build -f almanak/services/backtest/Dockerfile.platform-runner -t almanak-backtest-runner:local .
+
+# ---------------------------------------------------------------------------
+# Stage 1: Build
+# ---------------------------------------------------------------------------
+FROM python:3.12-slim AS builder
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir uv
+
+COPY pyproject.toml uv.lock PYPI.md ./
+COPY almanak ./almanak
+
+RUN uv sync --frozen --no-cache --extra platform-runner
+
+# ---------------------------------------------------------------------------
+# Stage 2: Runtime
+# ---------------------------------------------------------------------------
+FROM python:3.12-slim AS runtime
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --gid 1000 almanak && \
+    useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash almanak && \
+    mkdir -p /workspace/strategy && \
+    chown -R almanak:almanak /app /workspace
+
+COPY --from=builder --chown=almanak:almanak /app/.venv /app/.venv
+COPY --from=builder --chown=almanak:almanak /app/almanak /app/almanak
+COPY --from=builder --chown=almanak:almanak /app/pyproject.toml /app/
+COPY --chown=almanak:almanak scripts/platform_backtest_runner.py /app/runner.py
+
+USER almanak
+
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONPATH="/app"
+ENV ALMANAK_ENABLE_BACKTESTING=1
+
+CMD ["python", "/app/runner.py"]

@@ -101,6 +101,11 @@ backtest = [
     "optuna>=3.5.0",
 ]
 
+# Cloud Run Job entrypoint for platform-triggered strategy PnL backtests.
+platform-runner = [
+    "google-cloud-storage>=2.18.0,<4.0.0",
+]
+
 # Python LSP for the `almanak code` native binary, which spawns
 # `pyright-langserver` from PATH (falls back to npx when absent).
 code = [
