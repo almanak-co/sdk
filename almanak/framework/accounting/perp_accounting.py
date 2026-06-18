@@ -16,6 +16,7 @@ from typing import Any
 from uuid import uuid4
 
 from almanak.framework.accounting.ids import make_accounting_event_id
+from almanak.framework.accounting.measured import encode_money_payload
 from almanak.framework.accounting.models import AccountingConfidence, AccountingIdentity, PerpEventType
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,9 @@ class PerpAccountingEvent:
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
             if isinstance(v, Decimal):
-                return str(v)
+                # VIB-5213 (US-007): money crosses the serialization seam as a
+                # MeasuredMoney. Byte-identical to ``str(v)`` for finite Decimals.
+                return encode_money_payload(v)
             return v
 
         return json.dumps(

@@ -244,6 +244,68 @@ class MeasuredMoney:
             return NotImplemented
         return self + (-other)
 
+    # -- payload boundary codec (VIB-5213) -------------------------------------
+
+    def to_payload(self) -> str | None:
+        """Serialize to the legacy persisted accounting-payload money form.
+
+        The inverse of :meth:`from_payload` / :meth:`from_raw` and the write
+        half of the accounting-payload boundary codec (VIB-5213 / US-007). It
+        maps the three states onto the EXISTING on-the-wire column semantics so
+        persistence stays byte-compatible — the richer type is in-memory only:
+
+        * measured   → ``str(amount)`` (``Decimal("0")`` → ``"0"``, a value)
+        * unmeasured → ``None``  (JSON ``null`` — "not measured")
+        * absent     → ``""``    (the parser-didn't-emit marker)
+
+        It NEVER fabricates a ``"0"`` for a non-measured value: an unmeasured
+        value stays ``None`` and an absent value stays ``""``, so the Empty≠Zero
+        distinction survives the round-trip into a typed accounting event.
+        """
+        if self.state is MeasuredState.MEASURED:
+            # __post_init__ guarantees a finite Decimal for the MEASURED state.
+            assert self.amount is not None
+            return str(self.amount)
+        if self.state is MeasuredState.ABSENT:
+            return ""
+        return None
+
+    @classmethod
+    def from_payload(cls, raw: int | float | str | Decimal | None) -> MeasuredMoney:
+        """Deserialize a persisted accounting-payload money value (VIB-5213).
+
+        The inverse of :meth:`to_payload` and the read half of the
+        accounting-payload boundary codec. Money is canonically ``Decimal``-/
+        string-typed on the wire (never a JSON number — see blueprint 27 "All
+        monetary fields use Decimal or string, never float"), so the canonical
+        persisted input domain is ``str | None``:
+
+        * non-empty ``str`` → measured (``"0"`` → measured zero)
+        * ``""``            → absent
+        * ``None``          → unmeasured
+
+        Delegates to :meth:`from_raw`, inheriting its total, never-``""``→0
+        contract. ``from_raw`` also accepts a ``Decimal`` so a value that was
+        not JSON-decoded round-trips unchanged.
+
+        This is the *read* boundary, so it is deliberately more liberal than
+        :meth:`from_raw`: it also accepts legacy payloads that stored money as a
+        raw JSON number (``int`` / ``float``) and converts via ``Decimal(str(x))``
+        (avoiding float binary-repr artifacts) before measuring. The historical
+        decode was ``Decimal(v)``, which accepted ``int`` / ``float``; rejecting
+        them here would crash on reads of such legacy rows. ``from_raw``'s
+        stricter in-memory contract (which rejects ``int`` / ``float`` / ``bool``)
+        is preserved for construction sites; ``bool`` still falls through to
+        ``from_raw`` and raises its typed ``TypeError``.
+        """
+        if isinstance(raw, bool):
+            # bool is an int subclass but is never a money value — let from_raw
+            # raise its typed TypeError rather than coercing True/False.
+            return cls.from_raw(raw)  # type: ignore[arg-type]
+        if isinstance(raw, int | float):
+            return cls.from_raw(Decimal(str(raw)))
+        return cls.from_raw(raw)
+
     # -- representation --------------------------------------------------------
 
     def __repr__(self) -> str:
@@ -257,9 +319,54 @@ class MeasuredMoney:
 MeasuredDecimal: Final = MeasuredMoney
 
 
+def encode_money_payload(value: Decimal | None) -> str | None:
+    """Serialize a legacy ``Decimal | None`` accounting money field to the
+    persisted wire form *through* :class:`MeasuredMoney` (VIB-5213 / US-007).
+
+    The accounting-payload boundary codec, write direction. The typed event
+    models keep their ``Decimal | None`` field type (so no construction site
+    changes), but every money field crosses the serialization seam as a
+    :class:`MeasuredMoney`: a ``Decimal`` (incl. ``Decimal("0")``) becomes a
+    measured value → ``str``; ``None`` becomes unmeasured → ``None``.
+
+    Byte-identical to the historical ``str(v) if isinstance(v, Decimal) else
+    None`` encoding for every finite Decimal, while routing the value through
+    the Empty≠Zero type so a non-finite (NaN/Inf) money value fails closed at
+    construction instead of silently persisting ``"NaN"`` into the books (the
+    event builders already guarantee finiteness, so production write-bytes are
+    unchanged).
+    """
+    return MeasuredMoney.from_raw(value).to_payload()
+
+
+def decode_money_payload(raw: int | float | str | Decimal | None) -> Decimal | None:
+    """Deserialize a persisted accounting money value back to the legacy
+    ``Decimal | None`` field *through* :class:`MeasuredMoney` (VIB-5213).
+
+    The accounting-payload boundary codec, read direction. A non-empty ``str``
+    → measured ``Decimal``; ``None`` → unmeasured → ``None``; ``""``
+    (parser-absent) → ``None``. The legacy ``Decimal | None`` field has no
+    distinct "absent" slot, so absent collapses to ``None`` at the field — but
+    it is NEVER coerced to ``Decimal("0")``, preserving Empty≠Zero. The full
+    three-state distinction is preserved by :meth:`MeasuredMoney.from_payload`
+    itself (proven by the boundary round-trip tests); this helper is the thin
+    adapter onto the two-state legacy field.
+
+    Byte-compatible with the historical ``Decimal(v) if v is not None else
+    None`` decode for string inputs, and additionally robust to a stray ``""``
+    (which the old decode crashed on with ``InvalidOperation``) and to legacy
+    rows that stored money as a raw JSON number (``int`` / ``float``) — see
+    :meth:`MeasuredMoney.from_payload`.
+    """
+    mm = MeasuredMoney.from_payload(raw)
+    return mm.value if mm.is_measured else None
+
+
 __all__ = [
     "MeasuredDecimal",
     "MeasuredMoney",
     "MeasuredState",
     "UnmeasuredValueError",
+    "decode_money_payload",
+    "encode_money_payload",
 ]

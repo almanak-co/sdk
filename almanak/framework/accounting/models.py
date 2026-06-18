@@ -26,6 +26,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
+from almanak.framework.accounting.measured import decode_money_payload, encode_money_payload
+
 
 class AccountingConfidence(StrEnum):
     HIGH = "HIGH"
@@ -221,8 +223,16 @@ def _validate_primitive_version(data: dict[str, Any], model_name: str) -> int:
 
 
 def _dec(v: Any) -> Decimal | None:
-    """Convert a string/number value to Decimal, or return None."""
-    return Decimal(v) if v is not None else None
+    """Convert a persisted money value to ``Decimal``, or return ``None``.
+
+    VIB-5213 (US-007): the accounting-payload read boundary. Delegates to
+    :func:`decode_money_payload` so every money field crosses the
+    deserialization seam as a :class:`MeasuredMoney` and the Empty≠Zero
+    distinction is applied at the boundary — ``""`` (parser-absent) maps to
+    ``None``, NEVER to ``Decimal("0")``. Byte-compatible with the historical
+    ``Decimal(v) if v is not None else None`` for string / null inputs.
+    """
+    return decode_money_payload(v)
 
 
 @dataclass
@@ -265,7 +275,9 @@ class LendingAccountingEvent:
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
             if isinstance(v, Decimal):
-                return str(v)
+                # VIB-5213 (US-007): money crosses the serialization seam as a
+                # MeasuredMoney. Byte-identical to ``str(v)`` for finite Decimals.
+                return encode_money_payload(v)
             if isinstance(v, AccountingConfidence | LendingEventType):
                 return v.value
             return v
@@ -364,7 +376,9 @@ class PendleAccountingEvent:
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
             if isinstance(v, Decimal):
-                return str(v)
+                # VIB-5213 (US-007): money crosses the serialization seam as a
+                # MeasuredMoney. Byte-identical to ``str(v)`` for finite Decimals.
+                return encode_money_payload(v)
             if isinstance(v, datetime):
                 return v.isoformat()
             if isinstance(v, AccountingConfidence | PendleEventType):
@@ -495,7 +509,9 @@ class SwapAccountingEvent:
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
             if isinstance(v, Decimal):
-                return str(v)
+                # VIB-5213 (US-007): money crosses the serialization seam as a
+                # MeasuredMoney. Byte-identical to ``str(v)`` for finite Decimals.
+                return encode_money_payload(v)
             if isinstance(v, AccountingConfidence | SwapEventType):
                 return v.value
             return v
@@ -541,11 +557,14 @@ class SwapAccountingEvent:
             protocol=d.get("protocol", ""),
             token_in=d.get("token_in", ""),
             token_out=d.get("token_out", ""),
-            amount_in=Decimal(d["amount_in"]) if d.get("amount_in") is not None else None,
-            amount_out=Decimal(d["amount_out"]) if d.get("amount_out") is not None else None,
+            # VIB-5213 (US-007): money decodes through the MeasuredMoney boundary
+            # codec (via ``_dec``) — byte-compatible with the prior inline
+            # ``Decimal(...) if ... is not None else None``.
+            amount_in=_dec(d.get("amount_in")),
+            amount_out=_dec(d.get("amount_out")),
             amount_in_usd=_dec(d.get("amount_in_usd")),
             amount_out_usd=_dec(d.get("amount_out_usd")),
-            effective_price=Decimal(d["effective_price"]) if d.get("effective_price") is not None else None,
+            effective_price=_dec(d.get("effective_price")),
             slippage_bps=d.get("slippage_bps"),
             realized_pnl_usd=_dec(d.get("realized_pnl_usd")),
             # VIB-4905 (F1): additive — ``.get(..., None)`` keeps v1 payloads
@@ -626,7 +645,9 @@ class PredictionAccountingEvent:
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
             if isinstance(v, Decimal):
-                return str(v)
+                # VIB-5213 (US-007): money crosses the serialization seam as a
+                # MeasuredMoney. Byte-identical to ``str(v)`` for finite Decimals.
+                return encode_money_payload(v)
             if isinstance(v, AccountingConfidence | PredictionEventType):
                 return v.value
             return v
@@ -750,7 +771,9 @@ class TransferAccountingEvent:
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
             if isinstance(v, Decimal):
-                return str(v)
+                # VIB-5213 (US-007): money crosses the serialization seam as a
+                # MeasuredMoney. Byte-identical to ``str(v)`` for finite Decimals.
+                return encode_money_payload(v)
             if isinstance(v, AccountingConfidence | TransferEventType | TransferSettlementStatus):
                 return v.value
             return v
