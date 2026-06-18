@@ -392,8 +392,7 @@ class TestAccountingStoreFailure:
         assert meta and "unavailable" in json.dumps(meta).lower(), meta
         assert meta.get("status") != "applied"
         assert any(
-            "swap inventory" in r.getMessage().lower() or "accounting" in r.getMessage().lower()
-            for r in caplog.records
+            "swap inventory" in r.getMessage().lower() or "accounting" in r.getMessage().lower() for r in caplog.records
         )
 
 
@@ -472,13 +471,13 @@ class TestPersistenceRoundTrip:
         open_position_count tile follows (a pure swap strategy mid-position
         renders count >= 1 where it previously rendered 0) and the inventory
         row never registers as debt."""
-        from almanak.framework.dashboard.quant_aggregations import (
-            _open_positions_and_net_debt,
+        from almanak.framework.valuation.net_debt import (
+            net_debt_from_positions_json,
         )
 
         s = snap_with([BUY_WBTC], PRICES, BALANCES)
         payload = json.loads(json.dumps(s.to_positions_payload(), default=str))
-        count, debt_to_net, debt_cost = _open_positions_and_net_debt(payload)
+        count, debt_to_net, debt_cost = net_debt_from_positions_json(payload)
         assert count == 1
         assert debt_to_net == Decimal("0")
         assert debt_cost == Decimal("0")

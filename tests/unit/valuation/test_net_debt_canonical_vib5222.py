@@ -1,17 +1,20 @@
-"""VIB-5222 (US-015): canonical net-debt projection routing + parity.
+"""VIB-5222 (US-015) + VIB-5225 (US-016): canonical net-debt projection + parity.
 
 The lending primitive's NAV / cost / PnL / drawdown netting was lifted out of the
 dashboard (``quant_aggregations._net_from_position_items``) into the canonical
 valuation layer (``valuation/net_debt.py::compute_net_debt_projection``) — the home
-that owns the PortfolioValuer projection contract (blueprint 27 §7.11). This test
+that owns the PortfolioValuer projection contract (blueprint 27 §7.11). US-015 made the
+dashboard helpers delegating shims; US-016 then DELETED those shims and moved the typed
+position-sourcing accessors (``net_debt_from_snapshot`` / ``net_debt_from_positions_json``)
+into the canonical module, so there is exactly ONE netting implementation. This test
 proves:
 
-  1. The dashboard helper now *routes through* the canonical implementation (it is a
-     delegating shim, not a second copy of the math).
-  2. The canonical projection is byte-identical to the prior dashboard math on the
-     VIB-5201 leveraged baseline (collateral +$40k / debt −$32k → NAV $8k, net-equity
-     cost $7,200), on the net-leg landmine, and on the LP/perp zero-discrepancy
-     controls.
+  1. The dashboard module no longer defines duplicate netting helpers, and the canonical
+     accessors route through the single ``compute_net_debt_projection`` (one copy of the
+     math, not a second).
+  2. The canonical projection holds the VIB-5201 leveraged baseline (collateral +$40k /
+     debt −$32k → NAV $8k, net-equity cost $7,200), the net-leg landmine, and the LP/perp
+     zero-discrepancy controls.
   3. Empty≠Zero discipline (unmeasured legs skipped; debt with absent cost still nets
      ``debt_mark``) and the MeasuredMoney-seeded zero aggregate survive the move.
 """
@@ -21,12 +24,11 @@ from __future__ import annotations
 from decimal import Decimal
 
 from almanak.framework.dashboard import quant_aggregations
-from almanak.framework.dashboard.quant_aggregations import _net_from_position_items
 from almanak.framework.portfolio.models import PositionValue
 from almanak.framework.teardown.models import PositionType
 from almanak.framework.valuation.net_debt import (
     compute_net_debt_projection,
-    read_position_decimal,
+    net_debt_from_snapshot,
 )
 
 # VIB-5201 leveraged baseline economics.
@@ -55,18 +57,27 @@ def _total_value_usd(positions: list[PositionValue]) -> Decimal:
     return sum((p.value_usd for p in positions if p.value_usd > 0), Decimal("0"))
 
 
-def test_dashboard_helper_delegates_to_canonical():
-    """The dashboard's ``_net_from_position_items`` routes through the canonical
-    ``valuation/net_debt`` implementation — not a second copy of the netting math."""
-    assert quant_aggregations._compute_net_debt_projection is compute_net_debt_projection
-    assert quant_aggregations._read_position_decimal_canonical is read_position_decimal
+def test_dashboard_has_no_duplicate_netting_helpers():
+    """US-016: the dashboard's duplicate netting wrappers are DELETED — the netting
+    math + accessors live only in ``valuation/net_debt``. The typed accessors route
+    through the single ``compute_net_debt_projection`` (not a second copy)."""
+    for deleted in (
+        "_net_from_position_items",
+        "_snapshot_net_debt",
+        "_open_positions_and_net_debt",
+        "_parse_positions_payload",
+        "_read_position_decimal",
+    ):
+        assert not hasattr(quant_aggregations, deleted), f"{deleted} should be deleted (US-016)"
+    # The snapshot accessor delegates to the canonical math: a typed-positions snapshot
+    # nets identically to calling the projection on its positions directly.
+    snap = type("Snap", (), {"positions": _LEVERAGED})()
+    assert net_debt_from_snapshot(snap) == compute_net_debt_projection(_LEVERAGED)
 
 
 def test_canonical_matches_dashboard_on_leveraged_baseline():
-    """Byte-identical projection + NAV $8k / net-cost $7,200 on the leveraged loop."""
+    """Canonical projection + NAV $8k / net-cost $7,200 on the leveraged loop."""
     canonical = compute_net_debt_projection(_LEVERAGED)
-    dashboard = _net_from_position_items(_LEVERAGED)
-    assert canonical == dashboard
 
     count, debt_mark, debt_cost, net_cost = canonical
     assert count == 2
@@ -100,7 +111,8 @@ def test_canonical_matches_dashboard_on_net_leg_landmine():
         ),
     ]
     canonical = compute_net_debt_projection(positions)
-    assert canonical == _net_from_position_items(positions)
+    snap = type("Snap", (), {"positions": positions})()
+    assert canonical == net_debt_from_snapshot(snap)
     _count, debt_mark, _debt_cost, _net_cost = canonical
     # total_value_usd is the already-net 8000; subtracting debt again = -24000.
     assert _total_value_usd(positions) - debt_mark == Decimal("-24000")
@@ -121,7 +133,8 @@ def test_lp_perp_zero_discrepancy_controls():
         ]
         count, debt_mark, debt_cost, net_cost = compute_net_debt_projection(positions)
         assert (count, debt_mark, debt_cost, net_cost) == (1, Decimal("0"), Decimal("0"), cost)
-        assert compute_net_debt_projection(positions) == _net_from_position_items(positions)
+        snap = type("Snap", (), {"positions": positions})()
+        assert net_debt_from_snapshot(snap) == compute_net_debt_projection(positions)
 
 
 def test_empty_aggregate_is_measured_zero():

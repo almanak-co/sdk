@@ -3,7 +3,7 @@ parity harness, discussion 2026-06-17).
 
 This pins the debt-netting convention in the accounting/dashboard layer by
 driving the REAL aggregation function
-``almanak.framework.dashboard.quant_aggregations._net_from_position_items`` over
+``almanak.framework.dashboard.quant_aggregations.compute_net_debt_projection`` over
 an Aave-style leveraged loop expressed in the two representations a connector
 could persist, and diffing NAV against the documented contract.
 
@@ -26,7 +26,7 @@ Two representations:
     that breaks canonical parity) must fail this test.
 
 NAV contract facts (do NOT re-derive — verified against source):
-  * ``_net_from_position_items(positions)`` → ``(count, debt_mark, debt_cost, net_cost)``.
+  * ``compute_net_debt_projection(positions)`` → ``(count, debt_mark, debt_cost, net_cost)``.
     ``debt_mark`` = Σ|negative value_usd|; ``net_cost`` = signed net-equity cost;
     legs with absent value_usd are skipped (Empty≠Zero).
   * ``nav = total_value_usd - debt_mark`` where ``total_value_usd`` = Σ positive
@@ -37,9 +37,9 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from almanak.framework.dashboard.quant_aggregations import _net_from_position_items
 from almanak.framework.portfolio.models import PositionValue
 from almanak.framework.teardown.models import PositionType
+from almanak.framework.valuation.net_debt import compute_net_debt_projection
 
 # --- true economics (ground truth) -----------------------------------------
 TRUE_NET_EQUITY_NAV = Decimal("8000")
@@ -114,7 +114,7 @@ def _nav_via_contract(positions: list[PositionValue]) -> Decimal:
     """The documented NAV contract (VIB-4983), using the REAL aggregation fn for
     the debt_mark term: ``nav = total_value_usd - debt_mark``.
     """
-    _count, debt_mark, _debt_cost, _net_cost = _net_from_position_items(positions)
+    _count, debt_mark, _debt_cost, _net_cost = compute_net_debt_projection(positions)
     return _valuer_total_value_usd(positions) - debt_mark
 
 
@@ -125,7 +125,7 @@ def test_canonical_separate_reserves_nav_parity():
     NAV contract for the shape connectors actually persist.
     """
     positions = _canonical_separate_reserves()
-    count, debt_mark, _debt_cost, _net_cost = _net_from_position_items(positions)
+    count, debt_mark, _debt_cost, _net_cost = compute_net_debt_projection(positions)
 
     assert count == 2
     # debt_mark = Σ|negative value_usd| = $32,000, subtracted exactly once.
@@ -145,7 +145,7 @@ def test_net_supply_plus_borrow_double_subtracts_debt():
     decision rather than a silent convention drift.
     """
     positions = _net_supply_plus_borrow()
-    _count, debt_mark, _debt_cost, _net_cost = _net_from_position_items(positions)
+    _count, debt_mark, _debt_cost, _net_cost = compute_net_debt_projection(positions)
 
     assert debt_mark == Decimal("32000")
     # Σ positive value_usd is the already-net 8000; subtracting debt again = -24000.
@@ -169,7 +169,7 @@ def test_cost_basis_representations_pinned():
     noticed rather than silently merged.
     """
     positions = _canonical_separate_reserves()
-    _count, _debt_mark, debt_cost, net_cost = _net_from_position_items(positions)
+    _count, _debt_mark, debt_cost, net_cost = compute_net_debt_projection(positions)
 
     # aggregation: signed net-equity cost = 39000 - 31800
     assert net_cost == TRUE_NET_EQUITY_COST

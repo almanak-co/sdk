@@ -11,7 +11,7 @@ deterministic function of it.
 Where the full ``PortfolioValuer`` needs gateway context to run, we assert against the
 documented projection conventions over ``PositionValue`` legs constructed by hand (same
 approach as ``tests/unit/dashboard/test_netting_parity.py``) AND drive the REAL dashboard
-netting helper ``_net_from_position_items`` for the ``debt_mark`` term — so the NAV
+netting helper ``compute_net_debt_projection`` for the ``debt_mark`` term — so the NAV
 invariant is anchored to production code, not a re-implementation.
 
 Source conventions under test (verified against HEAD; do NOT re-derive):
@@ -21,7 +21,7 @@ Source conventions under test (verified against HEAD; do NOT re-derive):
   * lending sign convention: BORROW ``value_usd = -debt_value_usd``; SUPPLY
     ``value_usd = net_value_usd`` — ``portfolio_valuer.py:2571-2574``.
   * NAV = ``total_value_usd - debt_mark`` where ``debt_mark`` = Σ |negative value_usd|
-    (``_net_from_position_items``); ties to true net equity for the canonical
+    (``compute_net_debt_projection``); ties to true net equity for the canonical
     separate-reserve shape (VIB-4983 / VIB-5201).
 
 Economics (the VIB-5201 baseline): supply 10 wstETH @ $4000 = $40,000 collateral
@@ -34,9 +34,9 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from almanak.framework.dashboard.quant_aggregations import _net_from_position_items
 from almanak.framework.portfolio.models import PositionValue
 from almanak.framework.teardown.models import PositionType
+from almanak.framework.valuation.net_debt import compute_net_debt_projection
 
 # --- true economics (ground truth) -----------------------------------------
 TRUE_NET_EQUITY_NAV = Decimal("8000")
@@ -113,7 +113,7 @@ def _nav_via_contract(positions: list[PositionValue]) -> Decimal:
     """The documented NAV contract (blueprint 27 §7.11, VIB-4983), using the REAL dashboard
     aggregation fn for the ``debt_mark`` term: ``nav = total_value_usd - debt_mark``.
     """
-    _count, debt_mark, _debt_cost, _net_cost = _net_from_position_items(positions)
+    _count, debt_mark, _debt_cost, _net_cost = compute_net_debt_projection(positions)
     return _valuer_total_value_usd(positions) - debt_mark
 
 
@@ -154,7 +154,7 @@ def test_nav_ties_to_net_equity_on_canonical_shape():
     persist.
     """
     positions = _canonical_separate_reserves()
-    count, debt_mark, _debt_cost, _net_cost = _net_from_position_items(positions)
+    count, debt_mark, _debt_cost, _net_cost = compute_net_debt_projection(positions)
 
     assert count == 2
     assert debt_mark == Decimal("32000")  # Σ |negative value_usd|, subtracted once
@@ -171,7 +171,7 @@ def test_net_leg_shape_double_subtracts_debt():
     test red, forcing a deliberate decision rather than silent convention drift.
     """
     positions = _net_supply_plus_borrow()
-    _count, debt_mark, _debt_cost, _net_cost = _net_from_position_items(positions)
+    _count, debt_mark, _debt_cost, _net_cost = compute_net_debt_projection(positions)
 
     assert debt_mark == Decimal("32000")
     assert _valuer_total_value_usd(positions) == Decimal("8000")  # already-net positive leg
@@ -189,7 +189,7 @@ def test_deployed_capital_usd_is_gross():
     it means a convention change to either is noticed.
     """
     positions = _canonical_separate_reserves()
-    _count, _debt_mark, debt_cost, net_cost = _net_from_position_items(positions)
+    _count, _debt_mark, debt_cost, net_cost = compute_net_debt_projection(positions)
 
     # GROSS: borrow cost counted positive.
     assert _valuer_deployed_capital_usd(positions) == Decimal("70800")

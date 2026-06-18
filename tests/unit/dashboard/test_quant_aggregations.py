@@ -23,8 +23,6 @@ from almanak.framework.dashboard.quant_aggregations import (
     _detect_primitive,
     _drawdowns,
     _open_position_cost_basis,
-    _open_positions_and_net_debt,
-    _snapshot_net_debt,
     _wallet_value_at_first_action,
     build_quant_header,
     compute_audit_trail,
@@ -33,6 +31,10 @@ from almanak.framework.dashboard.quant_aggregations import (
     compute_pnl_summary,
     compute_reconciliation,
     lifetime_drawdowns_from_nav_text,
+)
+from almanak.framework.valuation.net_debt import (
+    net_debt_from_positions_json,
+    net_debt_from_snapshot,
 )
 
 
@@ -565,7 +567,7 @@ def test_lifetime_pnl_phantom_gas_when_deployed_excludes_native_gas():
 # ─── VIB-4983: debt-netted NAV for open leveraged-lending positions ───────
 
 
-def test_open_positions_and_net_debt_sums_negative_legs():
+def test_net_debt_from_positions_json_sums_negative_legs():
     """The helper returns (count, Σ|negative value_usd|, Σ|cost_basis of those
     debt legs|) — the BORROW mark and cost — and ignores positive legs
     (collateral) for both debt totals."""
@@ -575,13 +577,13 @@ def test_open_positions_and_net_debt_sums_negative_legs():
             {"position_type": "BORROW", "value_usd": "-1.56", "cost_basis_usd": "1.55"},
         ]
     )
-    count, debt_mark, debt_cost = _open_positions_and_net_debt(raw)
+    count, debt_mark, debt_cost = net_debt_from_positions_json(raw)
     assert count == 2
     assert debt_mark == Decimal("1.56")
     assert debt_cost == Decimal("1.55")
 
 
-def test_open_positions_and_net_debt_no_debt_is_zero():
+def test_net_debt_from_positions_json_no_debt_is_zero():
     """A position set with no negative leg (LP / swap / single-supply) nets
     zero debt — the byte-identical guard for non-leveraged strategies."""
     raw = json.dumps(
@@ -590,13 +592,13 @@ def test_open_positions_and_net_debt_no_debt_is_zero():
             {"position_type": "SUPPLY", "value_usd": "5.00", "cost_basis_usd": "5.00"},
         ]
     )
-    count, debt_mark, debt_cost = _open_positions_and_net_debt(raw)
+    count, debt_mark, debt_cost = net_debt_from_positions_json(raw)
     assert count == 2
     assert debt_mark == Decimal("0")
     assert debt_cost == Decimal("0")
 
 
-def test_open_positions_and_net_debt_unmeasured_is_skipped():
+def test_net_debt_from_positions_json_unmeasured_is_skipped():
     """Empty≠Zero: an absent/unparsable value_usd is unmeasured and skipped,
     never coerced to a measured zero (and never crashes the helper)."""
     raw = json.dumps(
@@ -609,13 +611,13 @@ def test_open_positions_and_net_debt_unmeasured_is_skipped():
             "malformed-non-dict",
         ]
     )
-    count, debt_mark, debt_cost = _open_positions_and_net_debt(raw)
+    count, debt_mark, debt_cost = net_debt_from_positions_json(raw)
     assert count == 6
     assert debt_mark == Decimal("2.00")
     assert debt_cost == Decimal("2.00")
 
 
-def test_open_positions_and_net_debt_debt_leg_missing_cost_is_skipped():
+def test_net_debt_from_positions_json_debt_leg_missing_cost_is_skipped():
     """Empty≠Zero asymmetry: a measured-negative leg whose cost_basis_usd is
     absent/unparsable still nets its mark (the liability is real) but is skipped
     for the cost total (fabricating a 0 cost would over-net deployed capital)."""
@@ -627,21 +629,21 @@ def test_open_positions_and_net_debt_debt_leg_missing_cost_is_skipped():
             {"position_type": "BORROW", "value_usd": "-2.00", "cost_basis_usd": "1.90"},
         ]
     )
-    count, debt_mark, debt_cost = _open_positions_and_net_debt(raw)
+    count, debt_mark, debt_cost = net_debt_from_positions_json(raw)
     assert count == 4
     assert debt_mark == Decimal("7.00")  # all four measured-negative marks
     assert debt_cost == Decimal("1.90")  # only the one measured cost
 
 
-def test_open_positions_and_net_debt_malformed_payload_is_zero():
+def test_net_debt_from_positions_json_malformed_payload_is_zero():
     """A malformed / empty / non-list-non-dict payload yields (0, 0, 0) without
     raising."""
-    assert _open_positions_and_net_debt(None) == (0, Decimal("0"), Decimal("0"))
-    assert _open_positions_and_net_debt("") == (0, Decimal("0"), Decimal("0"))
-    assert _open_positions_and_net_debt("not json") == (0, Decimal("0"), Decimal("0"))
+    assert net_debt_from_positions_json(None) == (0, Decimal("0"), Decimal("0"))
+    assert net_debt_from_positions_json("") == (0, Decimal("0"), Decimal("0"))
+    assert net_debt_from_positions_json("not json") == (0, Decimal("0"), Decimal("0"))
 
 
-def test_open_positions_and_net_debt_accepts_preparsed_payload():
+def test_net_debt_from_positions_json_accepts_preparsed_payload():
     """VIB-4983 (Gemini review): hosted Postgres JSON/JSONB columns (and some
     test mocks) hand back an ALREADY-deserialized list/dict. json.loads on it
     would TypeError → the (0, 0, 0) bypass → debt-netting silently skipped and
@@ -652,14 +654,14 @@ def test_open_positions_and_net_debt_accepts_preparsed_payload():
         {"position_type": "BORROW", "value_usd": "-1.56", "cost_basis_usd": "1.55"},
     ]
     # Pre-parsed bare list (not json.dumps'd).
-    assert _open_positions_and_net_debt(positions) == (2, Decimal("1.56"), Decimal("1.55"))
+    assert net_debt_from_positions_json(positions) == (2, Decimal("1.56"), Decimal("1.55"))
     # Pre-parsed VIB-3923 envelope dict.
-    assert _open_positions_and_net_debt({"schema_version": 1, "positions": positions}) == (
+    assert net_debt_from_positions_json({"schema_version": 1, "positions": positions}) == (
         2,
         Decimal("1.56"),
         Decimal("1.55"),
     )
-    assert _open_positions_and_net_debt(json.dumps({"no": "positions"})) == (
+    assert net_debt_from_positions_json(json.dumps({"no": "positions"})) == (
         0,
         Decimal("0"),
         Decimal("0"),
@@ -840,9 +842,7 @@ def test_lifetime_pnl_excludes_borrowed_amount_for_lending_loop():
         withdrawals_usd="0",
         initial_timestamp=None,
     )
-    pnl = compute_pnl_summary(
-        portfolio_metrics=metrics, snapshots=[snap], ledger_entries=[], accounting_events=[]
-    )
+    pnl = compute_pnl_summary(portfolio_metrics=metrics, snapshots=[snap], ledger_entries=[], accounting_events=[])
     assert pnl.deployed_usd == Decimal("8.48915941")
     assert pnl.nav_usd == Decimal("8.48915941")  # debt-netted, NOT 12.39737441 gross
     # Flat loop → ~$0 lifetime PnL. The un-netted surface would read
@@ -851,11 +851,11 @@ def test_lifetime_pnl_excludes_borrowed_amount_for_lending_loop():
     assert pnl.lifetime_pnl_usd != Decimal("3.90821500")  # the borrowed-amount phantom
 
 
-def test_snapshot_net_debt_reads_typed_positions():
-    """``_snapshot_net_debt`` prefers the typed ``positions`` list and returns the
+def test_net_debt_from_snapshot_reads_typed_positions():
+    """``net_debt_from_snapshot`` prefers the typed ``positions`` list and returns the
     debt mark, debt cost, and the signed net equity cost computed directly."""
     snap = _real_leverage_snapshot()
-    count, debt_mark, debt_cost, net_cost = _snapshot_net_debt(snap)
+    count, debt_mark, debt_cost, net_cost = net_debt_from_snapshot(snap)
     assert count == 3
     assert debt_mark == Decimal("3.90821500")
     assert debt_cost == Decimal("3.90814600")
@@ -874,16 +874,25 @@ def test_cost_basis_netting_correct_when_column_zero_reconstruction_path():
 
     def _p(t, v, c):
         return {
-            "position_type": t, "protocol": "aave_v3", "chain": "arbitrum",
-            "value_usd": v, "cost_basis_usd": c, "label": t, "tokens": [], "details": {},
+            "position_type": t,
+            "protocol": "aave_v3",
+            "chain": "arbitrum",
+            "value_usd": v,
+            "cost_basis_usd": c,
+            "label": t,
+            "tokens": [],
+            "details": {},
         }
 
     snap = PortfolioSnapshot.from_dict(
         {
-            "timestamp": datetime.now(tz=UTC).isoformat(), "deployment_id": "d",
-            "total_value_usd": _LEVERAGE_TOTAL_VALUE, "available_cash_usd": _LEVERAGE_CASH,
+            "timestamp": datetime.now(tz=UTC).isoformat(),
+            "deployment_id": "d",
+            "total_value_usd": _LEVERAGE_TOTAL_VALUE,
+            "available_cash_usd": _LEVERAGE_CASH,
             "deployed_capital_usd": "0",  # force the reconstruction fallback
-            "wallet_total_value_usd": "12.4", "value_confidence": "HIGH",
+            "wallet_total_value_usd": "12.4",
+            "value_confidence": "HIGH",
             "positions": [
                 _p("SUPPLY", "9.77047300", "9.77036500"),
                 _p("BORROW", "-3.90821500", "3.90814600"),
@@ -891,9 +900,7 @@ def test_cost_basis_netting_correct_when_column_zero_reconstruction_path():
             ],
         }
     )
-    pnl = compute_pnl_summary(
-        portfolio_metrics=None, snapshots=[snap], ledger_entries=[], accounting_events=[]
-    )
+    pnl = compute_pnl_summary(portfolio_metrics=None, snapshots=[snap], ledger_entries=[], accounting_events=[])
     # Net equity cost from the legs directly — not under-netted, not negative.
     assert pnl.deployed_capital_usd == Decimal("5.89020300")
     open_position_nav = pnl.nav_usd - pnl.available_cash_usd

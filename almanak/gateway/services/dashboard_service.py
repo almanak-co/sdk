@@ -1092,7 +1092,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         returns the latest window. Backend errors degrade to an empty series (the
         default render has other panels); the windowed path is the loud one.
         """
-        from almanak.framework.dashboard.quant_aggregations import _snapshot_net_debt
+        from almanak.framework.valuation.net_debt import net_debt_from_snapshot
         from almanak.gateway.proto import gateway_pb2
 
         pnl_points: list[gateway_pb2.PnLDataPoint] = []
@@ -1114,7 +1114,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 # PortfolioSnapshot.positions (a real snapshot has no
                 # positions_json attribute); non-leveraged snapshots net
                 # Decimal("0") and stay byte-identical.
-                _count, debt_mark, _debt_cost, _net_cost = _snapshot_net_debt(snap)
+                _count, debt_mark, _debt_cost, _net_cost = net_debt_from_snapshot(snap)
                 net_value = snap.total_value_usd - debt_mark
                 pnl = net_value - initial_value if initial_value > 0 else Decimal("0")
                 pnl_points.append(
@@ -1160,7 +1160,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         rows, truncated = await self._state_manager.get_snapshots_in_window(deployment_id, from_dt, to_dt)
 
-        from almanak.framework.dashboard.quant_aggregations import _open_positions_and_net_debt
+        from almanak.framework.valuation.net_debt import net_debt_from_positions_json
 
         points: list[NavPoint] = []
         dropped = 0
@@ -1180,7 +1180,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             # matches the debt-netted "NAV now" tile and the recent-window chart.
             # positions_json (raw text, projected by get_snapshots_in_window) is the
             # netting input; non-leveraged points net Decimal("0") (byte-identical).
-            _count, debt_mark, _debt_cost = _open_positions_and_net_debt(positions_text)
+            _count, debt_mark, _debt_cost = net_debt_from_positions_json(positions_text)
             value -= debt_mark
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=UTC)

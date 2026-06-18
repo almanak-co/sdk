@@ -3,7 +3,7 @@ projections vs the AccountantTest DB-derived / dashboard-aggregation values.
 
 This module is a **shadow / observation** layer. It swaps NO read path and
 mutates nothing: it imports the REAL dashboard netting helper
-(``quant_aggregations._net_from_position_items``) and the REAL valuer
+(``quant_aggregations.compute_net_debt_projection``) and the REAL valuer
 wallet-exclusion predicates (``portfolio_valuer._is_swap_inventory_row`` /
 ``_token_overlaps_wallet_index`` / ``_build_wallet_match_index``), then diffs the
 two projection conventions over a snapshot's typed positions. The output is an
@@ -28,8 +28,8 @@ The two projection conventions under shadow (verified against HEAD; blueprint 27
     ``portfolio_valuer.py:707-710``.
   * Valuer NAV (derived, not stamped) = ``total_value_usd - debt_mark`` where
     ``debt_mark`` = Σ |negative ``value_usd``| computed by the READ path
-    ``_net_from_position_items`` — blueprint 27 §7.11, VIB-4983 / VIB-5201.
-  * Dashboard / DB-derived aggregation = ``_net_from_position_items`` →
+    ``compute_net_debt_projection`` — blueprint 27 §7.11, VIB-4983 / VIB-5201.
+  * Dashboard / DB-derived aggregation = ``compute_net_debt_projection`` →
     ``(count, debt_mark, debt_cost, net_cost)`` where ``net_cost`` is signed
     net-equity cost (collateral cost − borrow cost), the dashboard's cost basis.
 """
@@ -43,11 +43,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from almanak.framework.dashboard.quant_aggregations import (
-    _net_from_position_items,
-    _parse_positions_payload,
-)
 from almanak.framework.teardown.models import PositionType
+from almanak.framework.valuation.net_debt import (
+    compute_net_debt_projection,
+    parse_positions_payload,
+)
 from almanak.framework.valuation.portfolio_valuer import (
     _build_wallet_match_index,
     _is_swap_inventory_row,
@@ -61,7 +61,7 @@ def _read_decimal(pos: Any, key: str) -> Decimal | None:
     """Read ``key`` off a typed ``PositionValue`` OR a ``positions_json`` dict as a
     Decimal, honoring Empty≠Zero (absent/empty/unparsable → ``None``).
 
-    Mirrors ``quant_aggregations._read_position_decimal`` so the shadow side reads
+    Mirrors ``net_debt.read_position_decimal`` so the shadow side reads
     positions exactly as the production dashboard path does.
     """
     raw = pos.get(key) if isinstance(pos, dict) else getattr(pos, key, None)
@@ -135,7 +135,7 @@ class ShadowParityResult:
     deployed_capital_usd: Decimal
     debt_mark: Decimal
     nav: Decimal
-    # DB-derived / dashboard aggregation (_net_from_position_items).
+    # DB-derived / dashboard aggregation (compute_net_debt_projection).
     agg_debt_mark: Decimal
     agg_debt_cost: Decimal
     agg_net_cost: Decimal
@@ -192,7 +192,7 @@ def compute_shadow_parity(
     ``positions`` may be typed ``PositionValue`` dataclasses (the production
     ``PortfolioSnapshot.positions``) and/or ``positions_json`` dicts (the DB
     payload the AccountantTest scores) — both are accepted, mirroring
-    ``_net_from_position_items``.
+    ``compute_net_debt_projection``.
     """
     wallet_index = _build_wallet_match_index(wallet_balances or [])
 
@@ -200,7 +200,7 @@ def compute_shadow_parity(
     deployed_capital_usd = _valuer_deployed_capital_usd(positions)
 
     # REAL dashboard read-path aggregation for the debt-netting terms.
-    count, agg_debt_mark, agg_debt_cost, agg_net_cost = _net_from_position_items(positions)
+    count, agg_debt_mark, agg_debt_cost, agg_net_cost = compute_net_debt_projection(positions)
 
     # Valuer NAV is derived, never stamped: total_value_usd − debt_mark
     # (blueprint 27 §7.11). The debt_mark term comes from the read path above.
@@ -270,7 +270,7 @@ def positions_from_sqlite(
     round-trip fixture DB and return its bare position list (dicts).
 
     Read-only: opens the SQLite file, SELECTs the most recent snapshot, and
-    unwraps the payload with the REAL ``_parse_positions_payload``. Used when a
+    unwraps the payload with the REAL ``parse_positions_payload``. Used when a
     fixture DB is present (live Anvil/mainnet round-trip); returns ``[]`` when the
     table/column/payload is absent. This is the production-realistic shadow path —
     the same payload the AccountantTest scores.
@@ -300,9 +300,9 @@ def positions_from_sqlite(
         conn.close()
     if not row:
         return []
-    # ``_parse_positions_payload`` natively unwraps a JSON string OR an
+    # ``parse_positions_payload`` natively unwraps a JSON string OR an
     # already-deserialized list/dict, so pass the raw column through directly.
     try:
-        return _parse_positions_payload(row["positions_json"])
+        return parse_positions_payload(row["positions_json"])
     except Exception:
         return []

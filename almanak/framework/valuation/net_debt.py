@@ -14,12 +14,24 @@ Historically the netting math lived inside the dashboard
 duplicated by the CLI/report lane (``accounting/lending_nav.py::compute_lending_nav``)
 — the VIB-5202 bypass inventory (`docs/internal/bypass-inventory-vib-5202.md` §2.1 / §4
 Tier 1) and the VIB-5217 shadow-parity report flagged lending as the *only* primitive
-where the representation choice changes the answer. VIB-5222 (US-015) lifts the netting
+where the representation choice changes the answer. VIB-5222 (US-015) lifted the netting
 math out of the dashboard into the valuation layer — its canonical home alongside the
-valuer whose contract it implements — so the lending NAV / cost / PnL / drawdown read
-paths all route through ONE implementation. The dashboard helpers remain as thin
-delegating shims (kept, not deleted, for the gateway import + test surfaces) until
-US-016 collapses them once cross-primitive parity is proven.
+valuer whose contract it implements — and VIB-5225 (US-016) then deleted the dashboard
+delegating shims entirely and moved the typed position-sourcing accessors here too, so
+this module is the **single** home for both the netting math AND its accessors. Every
+lending NAV / cost / PnL / drawdown read path (dashboard read path + gateway
+``dashboard_service`` history builders) routes through ONE implementation; there is no
+duplicate netting math anywhere else.
+
+Two thin typed accessors over :func:`compute_net_debt_projection` live here so callers
+never re-derive the position-sourcing convention:
+
+* :func:`net_debt_from_snapshot` — resolves a snapshot's typed ``PortfolioSnapshot.positions``
+  list (production shape), falling back to a ``positions_json`` attribute/key (dict /
+  ``SimpleNamespace`` / legacy callers), then nets.
+* :func:`net_debt_from_positions_json` — the raw ``positions_json`` text/dict/list entry
+  point (the lifetime-drawdown + windowed-PnL readers, which only have raw text), via
+  :func:`parse_positions_payload`.
 
 **The canonical money representation is the signed leg** (§7.11): a position's
 ``value_usd`` carries its economic sign — collateral / supply / long exposure positive,
@@ -48,6 +60,7 @@ dashboard read path can import it without an import-cost or circular-import pena
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -55,6 +68,9 @@ from almanak.framework.accounting.measured import MeasuredMoney
 
 __all__ = [
     "compute_net_debt_projection",
+    "net_debt_from_positions_json",
+    "net_debt_from_snapshot",
+    "parse_positions_payload",
     "read_position_decimal",
 ]
 
@@ -113,3 +129,68 @@ def compute_net_debt_projection(items: Any) -> tuple[int, Decimal, Decimal, Deci
         elif cost is not None:
             net_cost = net_cost + MeasuredMoney.measured(abs(cost))
     return len(items_list), debt_mark.value, debt_cost.value, net_cost.value
+
+
+def parse_positions_payload(positions_json: Any) -> list:
+    """Unwrap a ``positions_json`` payload to its bare position list.
+
+    Accepts the legacy bare list, the VIB-3923 envelope
+    ``{schema_version, positions, metadata, reconciliation}``, a JSON string of
+    either, OR an already-deserialized list/dict (hosted Postgres JSON/JSONB
+    columns and some test mocks hand back parsed objects — calling ``json.loads``
+    on those would ``TypeError`` and silently drop the debt). Returns ``[]`` for an
+    empty / malformed / non-list-non-dict payload.
+    """
+    if not positions_json:
+        return []
+    if isinstance(positions_json, list | dict):
+        parsed = positions_json
+    else:
+        try:
+            parsed = json.loads(positions_json)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict) and isinstance(parsed.get("positions"), list):
+        return parsed["positions"]
+    return []
+
+
+def net_debt_from_positions_json(positions_json: Any) -> tuple[int, Decimal, Decimal]:
+    """``positions_json`` text/dict/list → ``(open_count, debt_mark, debt_cost)``.
+
+    The raw-text entry point — used by the lifetime-drawdown reader
+    (``quant_aggregations._wallet_navs_from_nav_text``, which only has raw
+    ``positions_json`` text from ``get_nav_series``) and the gateway's windowed-PnL
+    history builder. Unwraps the payload (:func:`parse_positions_payload`) and nets
+    via :func:`compute_net_debt_projection`, dropping the signed ``net_cost`` term
+    those callers do not consume.
+    """
+    count, debt_mark, debt_cost, _net_cost = compute_net_debt_projection(parse_positions_payload(positions_json))
+    return count, debt_mark, debt_cost
+
+
+def net_debt_from_snapshot(snap: Any) -> tuple[int, Decimal, Decimal, Decimal]:
+    """``(count, debt_mark, debt_cost, net_cost)`` for one snapshot.
+
+    Prefers the typed ``PortfolioSnapshot.positions`` list (the production shape
+    returned by ``StateManager.get_recent_snapshots`` / ``get_latest_snapshot``) —
+    these dataclasses carry ``value_usd`` / ``cost_basis_usd`` directly. Falls back
+    to a ``positions_json`` attribute/key (dicts, ``SimpleNamespace`` test mocks,
+    legacy callers); a bare dict carrying a ``positions`` list is handled too. A
+    real ``PortfolioSnapshot`` has NO ``positions_json`` attribute — reading it
+    returned ``None`` and silently no-op'd the netting; that was the inert-feature
+    bug (VIB-5170) behind the persisted leverage phantom, fixed by preferring
+    ``.positions`` here.
+    """
+    positions = getattr(snap, "positions", None)
+    if positions is not None and not isinstance(snap, dict):
+        return compute_net_debt_projection(positions)
+    if isinstance(snap, dict):
+        payload = snap.get("positions_json")
+        if payload is None:
+            payload = snap.get("positions")
+    else:
+        payload = getattr(snap, "positions_json", None)
+    return compute_net_debt_projection(parse_positions_payload(payload))

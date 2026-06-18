@@ -1,7 +1,7 @@
 """VIB-5219 [US-013]: canonical cost-basis convention per consuming tile.
 
 US-012 (``test_netting_parity.py``) pinned the gross-vs-net cost-basis divergence
-at the **aggregation-helper** level (``_net_from_position_items.net_cost`` vs the
+at the **aggregation-helper** level (``compute_net_debt_projection.net_cost`` vs the
 valuer's ``Σ abs(cost_basis_usd)`` mirror). This file pins the convention one
 layer up — at each **consuming surface** — so a tile can never silently read the
 wrong quantity. It is the executable form of the per-consumer contract documented
@@ -25,7 +25,7 @@ The two consumers and their DECLARED conventions
     - "Strategy APR"     (``_detail_header._strategy_apr_pct``  — PnL ÷ cost)
 
 OQ-3 resolution (traced, not assumed): there is NO tile reading the wrong
-convention. Consumer A is an internal projection (re-netted by ``_snapshot_net_debt``
+convention. Consumer A is an internal projection (re-netted by ``net_debt_from_snapshot``
 / ``compute_pnl_summary`` before display); Consumer B is uniformly NET across all
 four tiles. The gateway emits the netted ``pnl.deployed_capital_usd`` to the proto
 (``dashboard_service.py:2578``), so the wire value the dashboard renders is NET.
@@ -49,11 +49,9 @@ from almanak.framework.dashboard.pages._detail_header import (
     _strategy_apr_pct,
     _strategy_pnl_usd,
 )
-from almanak.framework.dashboard.quant_aggregations import (
-    _net_from_position_items,
-    compute_pnl_summary,
-)
+from almanak.framework.dashboard.quant_aggregations import compute_pnl_summary
 from almanak.framework.portfolio.models import PortfolioSnapshot
+from almanak.framework.valuation.net_debt import compute_net_debt_projection
 
 # --- canonical fixture economics (ground truth) ----------------------------
 GROSS_DEPLOYED_CAPITAL = Decimal("70800")  # Consumer A: Σ abs(cost) = 39000 + 31800
@@ -179,7 +177,7 @@ def test_aggregation_helper_pins_both_conventions():
     same fixture the tile tests use).
     """
     snap = _canonical_leverage_snapshot()
-    count, debt_mark, debt_cost, net_cost = _net_from_position_items(snap.positions)
+    count, debt_mark, debt_cost, net_cost = compute_net_debt_projection(snap.positions)
     assert count == 2
     assert debt_mark == DEBT_MARK
     assert debt_cost == Decimal("31800")

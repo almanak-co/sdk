@@ -36,10 +36,8 @@ from typing import Any
 
 from almanak.framework.observability.ledger import LedgerQuantStats, lenient_ledger_decimal
 from almanak.framework.valuation.net_debt import (
-    compute_net_debt_projection as _compute_net_debt_projection,
-)
-from almanak.framework.valuation.net_debt import (
-    read_position_decimal as _read_position_decimal_canonical,
+    net_debt_from_positions_json,
+    net_debt_from_snapshot,
 )
 
 logger = logging.getLogger(__name__)
@@ -1101,7 +1099,7 @@ def _drawdowns(snapshots: list[Any]) -> tuple[Decimal, Decimal]:
         cash = getattr(snap, "available_cash_usd", None)
         if cash is None and isinstance(snap, dict):
             cash = snap.get("available_cash_usd")
-        _count, debt_mark, _debt_cost, _net_cost = _snapshot_net_debt(snap)
+        _count, debt_mark, _debt_cost, _net_cost = net_debt_from_snapshot(snap)
         wallet_nav = _to_decimal(v) - debt_mark + _to_decimal(cash)
         if wallet_nav > Decimal("0"):
             values.append(wallet_nav)
@@ -1192,7 +1190,7 @@ def _wallet_navs_from_nav_text(rows: Iterable[tuple[Any, ...]]) -> list[Decimal]
     for row in rows:
         debt_mark = Decimal("0")
         if len(row) > 4:
-            _count, debt_mark, _debt_cost = _open_positions_and_net_debt(row[4])
+            _count, debt_mark, _debt_cost = net_debt_from_positions_json(row[4])
         wallet_nav = _to_decimal(row[1]) - debt_mark + _to_decimal(row[2])
         if wallet_nav > Decimal("0"):
             navs.append(wallet_nav)
@@ -1279,116 +1277,21 @@ def _strategy_age_days(portfolio_metrics: Any) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Debt-netting for leveraged-lending NAV (VIB-4983)
+# Debt-netting for leveraged-lending NAV (VIB-4983).
 #
-# ``portfolio_snapshots.total_value_usd`` is positive-position-scoped
-# (VIB-3614 / portfolio_valuer.py:484-492): it sums only positions whose
-# ``value_usd > 0``. Aave SUPPLY collateral is counted; the BORROW debt leg
-# — carried in the SAME ``positions_json`` with a *negative* ``value_usd``
-# (the on-chain liability sign, portfolio_valuer.py:1443-1446) — is dropped.
-# So ``nav_usd = total_value_usd + cash`` overstates an open leverage loop by
-# the un-netted debt, manufacturing a phantom loss against deployed capital.
-#
-# VIB-4975 fixed the same root cause for ``strat pnl`` via the debt-netted
-# ``compute_lending_nav`` (which reads typed ``PositionValue`` objects off a
-# ``PortfolioSnapshot``). The dashboard aggregator instead reads the raw
-# ``positions_json`` dicts already parsed below, so we net the debt from those
-# dicts directly here — confined to the dashboard layer, mutating nothing the
-# snapshot writer persisted (HARD SCOPE CONSTRAINT, VIB-4975).
+# ``portfolio_snapshots.total_value_usd`` is positive-position-scoped (VIB-3614):
+# it sums only positions whose ``value_usd > 0`` (Aave SUPPLY collateral counted;
+# the BORROW debt leg — same ``positions_json``, *negative* ``value_usd`` — dropped),
+# so ``nav_usd = total_value_usd + cash`` overstates an open leverage loop by the
+# un-netted debt. The netting that recovers ``collateral − debt`` is the canonical
+# ``valuation/net_debt.py::compute_net_debt_projection`` (the PortfolioValuer
+# projection contract, blueprint 27 §7.11). VIB-5225 (US-016) deleted this module's
+# duplicate ``_net_from_position_items`` / ``_snapshot_net_debt`` /
+# ``_open_positions_and_net_debt`` wrappers and routes the read paths above
+# (``_drawdowns``, ``_wallet_navs_from_nav_text``, ``compute_pnl_summary``) directly
+# through ``net_debt.net_debt_from_snapshot`` / ``net_debt_from_positions_json`` — the
+# single home for both the netting math and its typed accessors.
 # ---------------------------------------------------------------------------
-
-
-def _read_position_decimal(pos: Any, key: str) -> Decimal | None:
-    """Empty≠Zero reader for a typed ``PositionValue`` / dict position field.
-
-    VIB-5222: the canonical implementation now lives in
-    ``almanak.framework.valuation.net_debt`` (the valuation layer that owns the
-    PortfolioValuer projection contract, blueprint 27 §7.11). This thin shim is
-    kept so the dashboard's public helper surface is unchanged; it delegates
-    rather than re-implementing the Empty≠Zero parse.
-    """
-    return _read_position_decimal_canonical(pos, key)
-
-
-def _net_from_position_items(items: Any) -> tuple[int, Decimal, Decimal, Decimal]:
-    """Core debt-netting over a position sequence → ``(count, debt_mark,
-    debt_cost, net_cost)``.
-
-    VIB-5222 (US-015): the netting math is now owned by the canonical valuation
-    layer — ``almanak.framework.valuation.net_debt.compute_net_debt_projection`` —
-    which implements the PortfolioValuer projection contract (blueprint 27 §7.11,
-    the ``debt_mark`` / net-equity-cost read-path terms). Lending NAV / cost / PnL
-    / drawdown route through that single implementation; this dashboard helper is
-    retained as a delegating shim (kept, not deleted, for the gateway import and
-    the netting-parity / shadow-parity test surfaces) until US-016 collapses it
-    once cross-primitive parity is proven. LP / perp carry no negative leg, so the
-    projection is byte-identical to the prior inline math for them (the VIB-5217
-    zero-discrepancy controls).
-    """
-    return _compute_net_debt_projection(items)
-
-
-def _parse_positions_payload(positions_json: Any) -> list:
-    """Unwrap a ``positions_json`` payload to its bare position list.
-
-    Accepts the legacy bare list, the VIB-3923 envelope
-    ``{schema_version, positions, metadata, reconciliation}``, a JSON string of
-    either, OR an already-deserialized list/dict (hosted Postgres JSON/JSONB
-    columns and some test mocks hand back parsed objects — calling json.loads on
-    those would TypeError and silently drop the debt). Returns ``[]`` for an
-    empty / malformed / non-list-non-dict payload.
-    """
-    if not positions_json:
-        return []
-    if isinstance(positions_json, list | dict):
-        parsed = positions_json
-    else:
-        try:
-            parsed = json.loads(positions_json)
-        except (json.JSONDecodeError, TypeError):
-            return []
-    if isinstance(parsed, list):
-        return parsed
-    if isinstance(parsed, dict) and isinstance(parsed.get("positions"), list):
-        return parsed["positions"]
-    return []
-
-
-def _open_positions_and_net_debt(positions_json: Any) -> tuple[int, Decimal, Decimal]:
-    """``positions_json`` text/dict/list → ``(open_count, debt_mark, debt_cost)``.
-
-    The text-payload entry point — used by the lifetime-drawdown reader
-    (``_wallet_navs_from_nav_text``, which only has raw ``positions_json`` text
-    from ``get_nav_series``) and legacy/dict callers. Production snapshot callers
-    use :func:`_snapshot_net_debt`, which reads the typed ``positions`` list
-    directly (a real ``PortfolioSnapshot`` has NO ``positions_json`` attribute —
-    reading it returned ``None`` and silently no-op'd the netting; that was the
-    inert-feature bug behind the persisted leverage phantom).
-    """
-    count, debt_mark, debt_cost, _net_cost = _net_from_position_items(_parse_positions_payload(positions_json))
-    return count, debt_mark, debt_cost
-
-
-def _snapshot_net_debt(snap: Any) -> tuple[int, Decimal, Decimal, Decimal]:
-    """``(count, debt_mark, debt_cost, net_cost)`` for one snapshot.
-
-    Prefers the typed ``PortfolioSnapshot.positions`` list (the production shape
-    returned by ``StateManager.get_recent_snapshots`` / ``get_latest_snapshot``)
-    — these dataclasses carry ``value_usd`` / ``cost_basis_usd`` directly. Falls
-    back to a ``positions_json`` attribute/key (dicts, ``SimpleNamespace`` test
-    mocks, legacy callers). A bare dict carrying a ``positions`` list is handled
-    too.
-    """
-    positions = getattr(snap, "positions", None)
-    if positions is not None and not isinstance(snap, dict):
-        return _net_from_position_items(positions)
-    if isinstance(snap, dict):
-        payload = snap.get("positions_json")
-        if payload is None:
-            payload = snap.get("positions")
-    else:
-        payload = getattr(snap, "positions_json", None)
-    return _net_from_position_items(_parse_positions_payload(payload))
 
 
 # ---------------------------------------------------------------------------
@@ -1443,9 +1346,9 @@ def compute_pnl_summary(
         # snapshot has no ``positions_json`` attribute, so the prior
         # getattr(..., "positions_json") returned None and silently no-op'd the
         # netting in production (the inert-feature bug behind the persisted
-        # leverage phantom). _snapshot_net_debt prefers .positions, falling back
-        # to positions_json for dict / legacy callers.
-        pnl.open_position_count, _debt_to_net, _debt_cost_to_net, _net_cost = _snapshot_net_debt(latest)
+        # leverage phantom). net_debt_from_snapshot prefers .positions, falling
+        # back to positions_json for dict / legacy callers.
+        pnl.open_position_count, _debt_to_net, _debt_cost_to_net, _net_cost = net_debt_from_snapshot(latest)
         deployed_value_usd -= _debt_to_net
 
     # VIB-3914: Anchor "Deployed" to the wallet snapshot the strategy

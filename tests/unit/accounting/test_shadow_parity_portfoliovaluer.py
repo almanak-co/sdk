@@ -3,7 +3,7 @@ AccountantTest round-trip fixtures' DB-derived / dashboard-aggregation values.
 
 READ-ONLY shadow. This test swaps NO read path and changes no behavior: it drives
 :mod:`tests.unit.accounting.shadow_parity_harness`, which diffs the two projection
-conventions (valuer vs ``_net_from_position_items``) over each primitive's typed
+conventions (valuer vs ``net_debt.compute_net_debt_projection``) over each primitive's typed
 positions, and PINS the enumerated discrepancies so a convention drift on either
 side flips red. The enumerated list is the input to US-015 (migrate one
 primitive's netting behind the canonical contract).
