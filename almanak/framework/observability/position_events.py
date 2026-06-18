@@ -432,6 +432,41 @@ def _pair_tokens_from_intent(intent: Any) -> tuple[str | None, str | None]:
     return (str(t0) if t0 else None, str(t1) if t1 else None)
 
 
+def _pair_tokens_from_declared_legs(extracted: Any) -> tuple[str | None, str | None]:
+    """Read the LP pair ``(token0, token1)`` from a connector-DECLARED
+    ``PrimitiveMoneyLegs`` (VIB-5221 / US-011), when present.
+
+    The typed money-leg contract (blueprint 27 §6.6) supersedes the #2894
+    ``_pair_tokens_from_intent`` threading: a migrated connector declares its
+    LP_CLOSE proceeds as two OUTPUT legs in ``token0`` / ``token1`` order on
+    ``extracted_data["primitive_money_legs"]`` (TraderJoe V2 builds them from the
+    on-chain WithdrawnFromBins legs — chain truth, independent of the intent and
+    the ``position_id``). Reading the pair from the contract makes the close
+    event's token columns a property of what actually moved on-chain rather than
+    of the intent's pool descriptor.
+
+    Returns ``(None, None)`` when no declared legs are present (a non-migrated
+    connector) or a leg's identity is unknown (``""``), so the caller falls back
+    to ``_pair_tokens_from_intent``. A leg whose token identity is ``""`` (Empty ≠
+    Zero) yields ``None`` for that slot — never a fabricated symbol.
+    """
+    if not isinstance(extracted, dict):
+        return (None, None)
+    legs = extracted.get("primitive_money_legs")
+    if legs is None:
+        return (None, None)
+    # Deferred import: connector value types must never load at module import
+    # (framework → connector boundary; mirrors the ledger dispatcher's resolver).
+    from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
+
+    if not isinstance(legs, PrimitiveMoneyLegs):
+        return (None, None)
+    outputs = legs.output_legs
+    t0 = outputs[0].token if len(outputs) >= 1 and outputs[0].token else None
+    t1 = outputs[1].token if len(outputs) >= 2 and outputs[1].token else None
+    return (t0, t1)
+
+
 def _apply_lp_open(event: PositionEvent, ctx: IntentEventContext) -> None:
     """Phase γ — enrich with lp_open_data.
 
@@ -1405,11 +1440,22 @@ def _apply_lp_close_columns(
     # Zero — unmeasured, not a fabricated zero). Fills empty slots only, so the
     # cache stays authoritative for every path that already resolves it.
     if not event.token0 or not event.token1:
-        it0, it1 = _pair_tokens_from_intent(ctx.intent)
-        if not event.token0 and it0:
-            event.token0 = it0
-        if not event.token1 and it1:
-            event.token1 = it1
+        # VIB-5221 — prefer the connector-DECLARED PrimitiveMoneyLegs (the typed
+        # contract) over the #2894 intent-pool-descriptor threading. For a
+        # migrated connector (TraderJoe V2) the close pair comes from the OUTPUT
+        # legs built off the on-chain withdrawal; ``_pair_tokens_from_intent``
+        # stays the fallback for not-yet-migrated connectors and for any slot the
+        # contract leaves unknown. Fills empty slots only — the cache carry-
+        # forward above stays authoritative for every path that already resolved.
+        t0, t1 = _pair_tokens_from_declared_legs(ctx.extracted)
+        if not t0 or not t1:
+            it0, it1 = _pair_tokens_from_intent(ctx.intent)
+            t0 = t0 or it0
+            t1 = t1 or it1
+        if not event.token0 and t0:
+            event.token0 = t0
+        if not event.token1 and t1:
+            event.token1 = t1
     # in_range is unambiguously False post-close (NFT burned / liquidity
     # withdrawn). The dashboard reads ``in_range=None`` as "unknown" and
     # ``False`` as "out of range". Either is honest; False is more

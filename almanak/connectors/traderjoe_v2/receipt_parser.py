@@ -15,6 +15,7 @@ from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
 from almanak.framework.data.tokens import get_token_resolver
 
 if TYPE_CHECKING:
+    from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLeg, PrimitiveMoneyLegs
     from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData, ProtocolFees, SwapAmounts
 from almanak.framework.utils.log_formatters import format_gas_cost, format_tx_hash
 
@@ -1094,6 +1095,122 @@ class TraderJoeV2ReceiptParser:
 
         except Exception as e:  # noqa: BLE001  # Defensive: graceful degradation for extraction
             logger.warning(f"Failed to extract lp_close_data: {e}")
+            return None
+
+    def _build_close_output_leg(self, token_address: str | None, raw_amount: Any) -> "PrimitiveMoneyLeg":
+        """Build one OUTPUT money leg for an LP_CLOSE proceeds token (VIB-5221).
+
+        Token identity is the chain-truth ERC-20 symbol resolved FROM the on-chain
+        transfer's emitting contract address — self-describing, so it never
+        depends on the intent or the ``position_id`` (the fungible-LP synthetic-id
+        problem #2894 had to patch around). An unresolved identity is ``""``,
+        never a fabricated symbol.
+
+        Amount is a human-unit ``MeasuredMoney`` (the VIB-5036 ledger contract)
+        carrying Empty ≠ Zero (blueprint 27 §10.10) by construction:
+
+        * a measured raw ``0`` → measured zero (principal kept on-chain);
+        * a non-zero raw whose token decimals cannot be strictly resolved →
+          UNMEASURED (never a wrongly-scaled value — mirrors the ledger's
+          ``_lp_amount_to_human`` discipline, NOT the 18-decimal fallback
+          ``_resolve_token_decimals`` uses for best-effort logging);
+        * a non-integer / missing raw → UNMEASURED.
+        """
+        from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLeg
+        from almanak.framework.accounting.measured import MeasuredMoney
+
+        symbol = ""
+        decimals: int | None = None
+        if token_address and self._chain:
+            try:
+                resolver = get_token_resolver()
+                # skip_gateway/log_errors: accounting write hot path — resolve the
+                # symbol AND decimals from the static registry without risking a
+                # gateway round-trip stall (mirrors ledger ``_lp_amount_to_human``).
+                info = resolver.resolve(token_address, self._chain, log_errors=False, skip_gateway=True)
+                symbol = getattr(info, "symbol", "") or ""
+                decimals = getattr(info, "decimals", None)
+            except Exception as exc:  # noqa: BLE001 — fail to unmeasured, never raise on the accounting path
+                logger.debug(
+                    "TJ V2 close leg: token resolve failed for %s on %s: %s",
+                    token_address,
+                    self._chain,
+                    exc,
+                )
+
+        try:
+            raw_int: int | None = int(raw_amount)
+        except (TypeError, ValueError):
+            raw_int = None
+
+        if raw_int is None:
+            amount = MeasuredMoney.unmeasured()
+        elif raw_int == 0:
+            amount = MeasuredMoney.measured(Decimal(0))
+        elif isinstance(decimals, int) and decimals >= 0:
+            amount = MeasuredMoney.measured(Decimal(raw_int) / Decimal(10**decimals))
+        else:
+            amount = MeasuredMoney.unmeasured()
+        return PrimitiveMoneyLeg.output(symbol, amount)
+
+    def extract_primitive_money_legs(self, receipt: dict[str, Any]) -> "PrimitiveMoneyLegs | None":
+        """VIB-5221 (US-011) — declare the LP_CLOSE money legs as a typed
+        ``PrimitiveMoneyLegs`` the ledger dispatcher consumes directly.
+
+        Inverts the legacy control flow (blueprint 27 §6.6, 05 §7): instead of the
+        ledger reverse-engineering an LP_CLOSE's ``token0`` / ``token1`` from the
+        intent's pool descriptor (the #2894 / VIB-5195 ``_pair_tokens_from_intent``
+        threading), the connector DECLARES the two proceeds tokens it actually
+        withdrew on-chain. Legs are built FROM the LBPair → wallet
+        ``WithdrawnFromBins`` Transfer legs (chain truth), so they are independent
+        of the intent AND of the ``position_id`` — a fungible-LP close under a
+        synthetic id (``traderjoe_*_lp_0``) declares the same legs as an NFT close,
+        which is exactly the case #2894 had to special-case.
+
+        Two OUTPUT legs in tokenX-then-tokenY (``amount0`` / ``amount1``) emission
+        order — the dispatcher (``_extract_from_declared_legs``) projects leg0 →
+        ``token_in`` / ``amount_in`` and leg1 → ``token_out`` / ``amount_out``,
+        lane-symmetric with the legacy ``_extract_from_lp_close``. Amounts are
+        human-unit ``MeasuredMoney`` carrying Empty ≠ Zero (§10.10); see
+        ``_build_close_output_leg``.
+
+        Returns ``None`` (→ benign ``ExtractMissing``) when the receipt is not a
+        principal-withdrawal close (an add, a fees-only ``ClaimedFees`` collect, or
+        a degenerate zero-amount withdrawal), so the dispatcher falls through to the
+        legacy LP_CLOSE path unchanged. Never raises: any failure degrades to
+        ``None`` rather than halting the live accounting writer.
+        """
+        from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
+
+        try:
+            result = self.parse_receipt(receipt)
+            # Only a principal-withdrawal close declares output legs. ``is_add``
+            # (an LP_OPEN) and a missing ``liquidity_result`` (a fees-only
+            # ClaimedFees collect — principal stays on-chain) carry no proceeds.
+            if not result.liquidity_result or result.liquidity_result.is_add:
+                return None
+            # The WithdrawnFromBins emitter IS the LBPair — chain-truth pool addr.
+            pool_address = (result.liquidity_result.pool_address or "").lower()
+            withdraw_transfers = self._lbpair_transfers(result.events, pool_address, to_pool=False)
+
+            # Mirror ``extract_lp_close_data``: only declare legs for a REAL
+            # withdrawal (≥1 positive transfer). A zero-amount close returns None
+            # so the byte-for-byte legacy fallback (→ intent fallback, amount="")
+            # is preserved for that degenerate case.
+            def _positive(transfer: Any) -> bool:
+                try:
+                    return int(transfer.data.get("value", 0)) > 0
+                except (TypeError, ValueError):
+                    return False
+
+            if not any(_positive(t) for t in withdraw_transfers):
+                return None
+            legs = [
+                self._build_close_output_leg(t.contract_address, t.data.get("value", 0)) for t in withdraw_transfers[:2]
+            ]
+            return PrimitiveMoneyLegs.of(*legs)
+        except Exception as exc:  # noqa: BLE001 — never halt the accounting writer
+            logger.warning(f"Failed to extract primitive_money_legs: {exc}")
             return None
 
 

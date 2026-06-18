@@ -277,6 +277,16 @@ class ResultEnricher:
             # carrying only the pool_address for a ClaimedFees-only receipt).
             "LP_OPEN": ["bin_ids"],
             "LP_COLLECT_FEES": ["bin_ids", "lp_close_data"],
+            # VIB-5221 (US-011) — declare the LP_CLOSE money legs as a typed
+            # ``PrimitiveMoneyLegs`` (``TraderJoeV2ReceiptParser.extract_primitive_money_legs``).
+            # The enricher's generic ``extracted_data[field] = value`` lands it at
+            # ``extracted_data["primitive_money_legs"]`` — the exact key the US-009
+            # ledger dispatcher (``_declared_money_legs``) already prefers over the
+            # legacy guesser. This makes TJ V2 LP_CLOSE's token0/token1 + amounts a
+            # property of the typed contract instead of the #2894 intent-pool-
+            # descriptor threading (blueprint 27 §6.6 / 05 §7). Additive overlay:
+            # the base LP_CLOSE spec (lp_close_data / fees / protocol_fees) is kept.
+            "LP_CLOSE": ["primitive_money_legs"],
         },
         # VIB-4637 — a Uniswap V4 fees-only ``LP_COLLECT_FEES`` compiles to
         # ``DECREASE_LIQUIDITY(liquidity=0) + TAKE_PAIR``, so the PoolManager

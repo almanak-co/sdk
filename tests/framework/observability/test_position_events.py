@@ -1697,3 +1697,92 @@ class TestPairTokensFromIntent:
 
         # token0 explicit, token1 missing -> token1 recovered from pool, token0 untouched.
         assert _pair_tokens_from_intent(_PairIntent(token0="WETH", pool="FOO/USDC/500")) == ("WETH", "USDC")
+
+
+# ---------------------------------------------------------------------------
+# VIB-5221 (US-011) — the close event prefers connector-DECLARED PrimitiveMoneyLegs
+# (the typed contract) over the #2894 _pair_tokens_from_intent threading.
+# ---------------------------------------------------------------------------
+
+
+def _declared_close_legs(token0: str, token1: str):
+    from decimal import Decimal
+
+    from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLeg, PrimitiveMoneyLegs
+    from almanak.framework.accounting.measured import MeasuredMoney
+
+    return PrimitiveMoneyLegs.of(
+        PrimitiveMoneyLeg.output(token0, MeasuredMoney.measured(Decimal("1"))),
+        PrimitiveMoneyLeg.output(token1, MeasuredMoney.measured(Decimal("2"))),
+    )
+
+
+class TestPairTokensFromDeclaredLegs:
+    def test_reads_output_legs_token0_token1(self):
+        from almanak.framework.observability.position_events import _pair_tokens_from_declared_legs
+
+        legs = _declared_close_legs("WAVAX", "USDC")
+        assert _pair_tokens_from_declared_legs({"primitive_money_legs": legs}) == ("WAVAX", "USDC")
+
+    def test_absent_legs_yield_none(self):
+        from almanak.framework.observability.position_events import _pair_tokens_from_declared_legs
+
+        assert _pair_tokens_from_declared_legs({}) == (None, None)
+        assert _pair_tokens_from_declared_legs(None) == (None, None)
+
+    def test_non_primitive_value_ignored(self):
+        from almanak.framework.observability.position_events import _pair_tokens_from_declared_legs
+
+        assert _pair_tokens_from_declared_legs({"primitive_money_legs": "garbage"}) == (None, None)
+
+    def test_empty_token_identity_is_none_not_fabricated(self):
+        from almanak.framework.observability.position_events import _pair_tokens_from_declared_legs
+
+        # Empty ≠ Zero: an unknown leg identity ("") yields None for that slot.
+        legs = _declared_close_legs("", "USDC")
+        assert _pair_tokens_from_declared_legs({"primitive_money_legs": legs}) == (None, "USDC")
+
+
+class TestApplyLpCloseColumnsPrefersDeclaredLegs:
+    """The close-token resolution prefers the declared legs; _pair_tokens_from_intent
+    stays the fallback for slots the contract leaves unknown / non-migrated connectors."""
+
+    def _ctx(self, *, pool, extracted):
+        from almanak.framework.observability.position_events import IntentEventContext
+
+        return IntentEventContext(
+            intent=_PairIntent(pool=pool),
+            result=None,
+            extracted=extracted,
+            deployment_id="dep",
+            chain="avalanche",
+            ledger_entry_id="led",
+        )
+
+    def test_declared_legs_win_over_intent_pool_descriptor(self):
+        from almanak.framework.observability.position_events import PositionEvent, _apply_lp_close_columns
+
+        event = PositionEvent(deployment_id="dep", position_id="traderjoe_pnl_lp_0", event_type="CLOSE")
+        # Intent pool descriptor says FOO/BAR but the typed contract says WAVAX/USDC.
+        ctx = self._ctx(pool="FOO/BAR/20", extracted={"primitive_money_legs": _declared_close_legs("WAVAX", "USDC")})
+        _apply_lp_close_columns(event, ctx, recent_open_events=None, price_oracle=None)
+        assert (event.token0, event.token1) == ("WAVAX", "USDC")
+
+    def test_falls_back_to_intent_when_no_declared_legs(self):
+        from almanak.framework.observability.position_events import PositionEvent, _apply_lp_close_columns
+
+        event = PositionEvent(deployment_id="dep", position_id="traderjoe_pnl_lp_0", event_type="CLOSE")
+        ctx = self._ctx(pool="WAVAX/USDC/20", extracted={})
+        _apply_lp_close_columns(event, ctx, recent_open_events=None, price_oracle=None)
+        assert (event.token0, event.token1) == ("WAVAX", "USDC")
+
+    def test_partial_declared_legs_backfilled_from_intent(self):
+        from almanak.framework.observability.position_events import PositionEvent, _apply_lp_close_columns
+
+        # token0 known via contract (""→None for token1) → token1 recovered from intent.
+        event = PositionEvent(deployment_id="dep", position_id="traderjoe_pnl_lp_0", event_type="CLOSE")
+        ctx = self._ctx(
+            pool="WAVAX/USDC/20", extracted={"primitive_money_legs": _declared_close_legs("WAVAX", "")}
+        )
+        _apply_lp_close_columns(event, ctx, recent_open_events=None, price_oracle=None)
+        assert (event.token0, event.token1) == ("WAVAX", "USDC")

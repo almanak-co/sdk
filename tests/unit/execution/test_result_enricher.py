@@ -1324,6 +1324,21 @@ class TestExtractionSpecPerProtocolOverlay:
         merged_none = ResultEnricher._merge_spec_with_overlay("LP_OPEN", None)
         assert merged_none == base
 
+    def test_traderjoe_v2_lp_close_overlay_appends_primitive_money_legs(self) -> None:
+        """VIB-5221 (US-011) — TJ V2 LP_CLOSE declares ``primitive_money_legs``
+        (the typed money-leg contract). The additive overlay keeps the base
+        LP_CLOSE spec (lp_close_data / fees / protocol_fees) and appends the new
+        field at the tail, so the enricher lands it at
+        ``extracted_data["primitive_money_legs"]`` — the key the US-009 ledger
+        dispatcher prefers. Other protocols' LP_CLOSE spec is unchanged."""
+        base = list(ResultEnricher.EXTRACTION_SPECS["LP_CLOSE"])
+        merged = ResultEnricher._merge_spec_with_overlay("LP_CLOSE", "traderjoe_v2")
+        assert merged[: len(base)] == base, "base LP_CLOSE fields preserved first"
+        assert "primitive_money_legs" in merged
+        assert merged[-1] == "primitive_money_legs", "overlay field appended at tail"
+        # A non-migrated protocol's LP_CLOSE spec is untouched.
+        assert "primitive_money_legs" not in ResultEnricher._merge_spec_with_overlay("LP_CLOSE", "uniswap_v3")
+
     # ----- 8. Forward-compat guard: a parser that declares
     #         SUPPORTED_EXTRACTIONS with Uniswap-V3-style fields under
     #         protocol="sushiswap_v3" must not emit any bin_ids / fees0 /
