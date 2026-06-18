@@ -35,6 +35,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from almanak.framework.observability.ledger import LedgerQuantStats, lenient_ledger_decimal
+from almanak.framework.valuation.net_debt import (
+    compute_net_debt_projection as _compute_net_debt_projection,
+)
+from almanak.framework.valuation.net_debt import (
+    read_position_decimal as _read_position_decimal_canonical,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1293,73 +1299,33 @@ def _strategy_age_days(portfolio_metrics: Any) -> int:
 
 
 def _read_position_decimal(pos: Any, key: str) -> Decimal | None:
-    """Read ``key`` off a position that is EITHER a typed ``PositionValue``
-    dataclass (production ``PortfolioSnapshot.positions``) OR a dict (the
-    ``positions_json`` text / envelope path).
+    """Empty≠Zero reader for a typed ``PositionValue`` / dict position field.
 
-    Returns ``None`` for an absent / empty / unparsable value — Empty≠Zero: an
-    unmeasured field is never coerced to a measured ``Decimal("0")``. A non
-    dict / non-object item (e.g. a stray string in a malformed payload) also
-    yields ``None``.
+    VIB-5222: the canonical implementation now lives in
+    ``almanak.framework.valuation.net_debt`` (the valuation layer that owns the
+    PortfolioValuer projection contract, blueprint 27 §7.11). This thin shim is
+    kept so the dashboard's public helper surface is unchanged; it delegates
+    rather than re-implementing the Empty≠Zero parse.
     """
-    raw = pos.get(key) if isinstance(pos, dict) else getattr(pos, key, None)
-    if raw is None or raw == "":
-        return None
-    try:
-        return Decimal(str(raw))
-    except (InvalidOperation, ValueError, TypeError):
-        return None
+    return _read_position_decimal_canonical(pos, key)
 
 
 def _net_from_position_items(items: Any) -> tuple[int, Decimal, Decimal, Decimal]:
     """Core debt-netting over a position sequence → ``(count, debt_mark,
     debt_cost, net_cost)``.
 
-    ``items`` is an iterable of typed ``PositionValue`` dataclasses
-    (``PortfolioSnapshot.positions``, the PRODUCTION dashboard path) and/or
-    dicts (the ``positions_json`` text / envelope path used by the lifetime
-    drawdown reader and legacy callers). The negative ``value_usd`` legs are the
-    on-chain debt/liability convention (BORROW; portfolio_valuer.py:1443-1446).
-
-    * ``debt_mark`` = Σ|negative value_usd|. ``total_value_usd`` is
-      positive-position-scoped (VIB-3614; portfolio_valuer.py:746-757) and drops
-      the negative legs, so the NAV caller subtracts ``debt_mark`` **once** to
-      read an open loop's NAV as ``collateral − debt`` (VIB-4983).
-    * ``debt_cost`` = Σ|cost_basis_usd| over those same negative legs (kept for
-      callers that only need the debt magnitude).
-    * ``net_cost`` = Σ signed cost basis: asset legs (value ≥ 0) add ``+|cost|``,
-      debt legs (value < 0) add ``−|cost|``. This is the **net equity cost
-      basis** (collateral cost − borrow cost) the Strategy-PnL tile differences
-      against the debt-netted open NAV. Computing it directly from the legs
-      avoids the writer's ``Σ abs(cost_basis_usd)`` gross convention
-      (portfolio_valuer.py:702-705, which counts the borrow cost as a positive
-      asset) and is correct regardless of whether the snapshot column or the
-      accounting-events reconstruction supplied the gross basis.
-
-    Empty≠Zero: a leg with absent/unparsable ``value_usd`` is skipped entirely
-    (unmeasured). A leg with a measured value but absent/unparsable
-    ``cost_basis_usd`` still nets its ``debt_mark`` (the liability is real) but
-    contributes to neither ``debt_cost`` nor ``net_cost`` — fabricating a zero
-    cost would distort equity. ``count`` is the total item count (matching the
-    legacy ``len(positions)`` contract), including malformed entries.
+    VIB-5222 (US-015): the netting math is now owned by the canonical valuation
+    layer — ``almanak.framework.valuation.net_debt.compute_net_debt_projection`` —
+    which implements the PortfolioValuer projection contract (blueprint 27 §7.11,
+    the ``debt_mark`` / net-equity-cost read-path terms). Lending NAV / cost / PnL
+    / drawdown route through that single implementation; this dashboard helper is
+    retained as a delegating shim (kept, not deleted, for the gateway import and
+    the netting-parity / shadow-parity test surfaces) until US-016 collapses it
+    once cross-primitive parity is proven. LP / perp carry no negative leg, so the
+    projection is byte-identical to the prior inline math for them (the VIB-5217
+    zero-discrepancy controls).
     """
-    items_list = list(items)
-    debt_mark = Decimal("0")
-    debt_cost = Decimal("0")
-    net_cost = Decimal("0")
-    for pos in items_list:
-        value = _read_position_decimal(pos, "value_usd")
-        if value is None:
-            continue
-        cost = _read_position_decimal(pos, "cost_basis_usd")
-        if value < 0:
-            debt_mark += -value
-            if cost is not None:
-                debt_cost += abs(cost)
-                net_cost -= abs(cost)
-        elif cost is not None:
-            net_cost += abs(cost)
-    return len(items_list), debt_mark, debt_cost, net_cost
+    return _compute_net_debt_projection(items)
 
 
 def _parse_positions_payload(positions_json: Any) -> list:
