@@ -444,3 +444,88 @@ def test_main_posts_failed_callback_for_runtime_error(monkeypatch: pytest.Monkey
         "status": "FAILED",
         "error_message": "PlatformRunnerError: strategy not found",
     }
+
+
+def _patch_successful_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    """Wire run_platform_backtest dependencies so the run reaches the COMPLETED callback."""
+    order: list[str] = []
+
+    class Strategy:
+        __name__ = "Strategy"
+
+    class BacktestConfig:
+        chain = "base"
+
+        def to_dict(self) -> dict[str, str]:
+            return {"chain": self.chain}
+
+    class Backtester:
+        async def backtest(self, strategy: object, config: BacktestConfig) -> object:
+            return object()
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(runner, "post_start_callback", lambda current_env: order.append("start"))
+    monkeypatch.setattr(runner, "clone_strategy_repo", lambda current_env: tmp_path)
+    monkeypatch.setattr(runner, "load_effective_strategy_config", lambda repo_root, raw_config: {})
+    monkeypatch.setattr(runner, "prime_strategy_registry", lambda: None)
+    monkeypatch.setattr(runner.os, "chdir", lambda path: None)
+    monkeypatch.setattr(runner, "discover_strategy_class", lambda repo_root, strategy_config: Strategy)
+    monkeypatch.setattr(runner, "build_platform_backtest_config", lambda raw_config, strategy_config, strategy_class: BacktestConfig())
+    monkeypatch.setattr(runner, "instantiate_strategy", lambda strategy_class, strategy_config, chain: object())
+    monkeypatch.setattr(runner, "create_backtester", lambda: Backtester())
+    monkeypatch.setattr(runner, "serialize_result", lambda result: {"metrics": {}, "trades": []})
+    monkeypatch.setattr(runner, "upload_result_to_gcs", lambda bucket, object_path, payload: order.append("upload"))
+    return order
+
+
+def test_run_platform_backtest_raises_distinct_error_when_completed_callback_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env = _env(STRATEGY_WORKDIR=str(tmp_path / "strategy"))
+    order = _patch_successful_run(monkeypatch, tmp_path)
+
+    original = runner.requests.ConnectionError("callback unreachable")
+
+    def fail_completed_callback(current_env: runner.PlatformRunnerEnv, payload: dict[str, Any]) -> None:
+        order.append(payload["status"])
+        raise original
+
+    monkeypatch.setattr(runner, "post_callback", fail_completed_callback)
+
+    with pytest.raises(runner.CompletedCallbackDeliveryError) as exc_info:
+        asyncio.run(runner.run_platform_backtest(env))
+
+    # The result must have been uploaded before the callback was even attempted.
+    assert order == ["start", "upload", "COMPLETED"]
+    assert exc_info.value.gcs_result_path == env.gcs_result_path
+    assert exc_info.value.__cause__ is original
+    assert not isinstance(exc_info.value, runner.PlatformRunnerError)
+
+
+def test_main_does_not_post_failed_when_only_completed_callback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted: list[dict[str, Any]] = []
+    commit_sha = "a" * 40
+
+    monkeypatch.setenv("BACKTEST_ID", "test-123")
+    monkeypatch.setenv("COMMIT_SHA", commit_sha)
+    monkeypatch.setenv("GITHUB_CLONE_URL", "https://x-access-token:token@example/repo.git")
+    monkeypatch.setenv("STRATEGY_CONFIG", "{}")
+    monkeypatch.setenv("BACKTEST_CONFIG", "{}")
+    monkeypatch.setenv("GCS_BUCKET", "bucket")
+    monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
+    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
+
+    async def fake_run_platform_backtest(env: runner.PlatformRunnerEnv) -> dict[str, Any]:
+        raise runner.CompletedCallbackDeliveryError(env.gcs_result_path)
+
+    monkeypatch.setattr(runner, "run_platform_backtest", fake_run_platform_backtest)
+    monkeypatch.setattr(runner, "post_callback", lambda env, payload: posted.append(payload))
+    monkeypatch.setattr(runner, "post_callback_values", lambda **kwargs: posted.append(kwargs))
+
+    # Non-zero exit signals the platform to retry, but no FAILED verdict is posted.
+    assert runner.main() == 1
+    assert posted == []
