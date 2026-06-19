@@ -263,6 +263,67 @@ class TestSimulatedFill:
         assert trade.slippage_usd == Decimal("1")
         assert trade.gas_cost_usd == Decimal("0.50")
 
+    def test_fill_to_dict_keeps_none_optional_values(self, base_timestamp: datetime) -> None:
+        """Optional measured fields remain None when they were not measured."""
+        fill = SimulatedFill(
+            timestamp=base_timestamp,
+            intent_type=IntentType.SWAP,
+            protocol="uniswap_v3",
+            tokens=["USDC", "WETH"],
+            executed_price=Decimal("3000"),
+            amount_usd=Decimal("1000"),
+            fee_usd=Decimal("3"),
+            slippage_usd=Decimal("1"),
+            gas_cost_usd=Decimal("0.50"),
+            tokens_in={"WETH": Decimal("0.33")},
+            tokens_out={"USDC": Decimal("1000")},
+        )
+
+        data = fill.to_dict()
+
+        assert data["gas_price_gwei"] is None
+        assert data["estimated_mev_cost_usd"] is None
+        assert data["position_delta"] is None
+        assert data["position_reduce_amounts"] == {}
+
+    def test_fill_to_dict_preserves_measured_zero_values(self, base_timestamp: datetime) -> None:
+        """Measured zero gas/MEV values serialize as zero, not missing."""
+        position = SimulatedPosition.supply(
+            token="WETH",
+            amount=Decimal("1.0"),
+            apy=Decimal("0.05"),
+            entry_price=Decimal("3000"),
+            entry_time=base_timestamp,
+        )
+        fill = SimulatedFill(
+            timestamp=base_timestamp,
+            intent_type=IntentType.SUPPLY,
+            protocol="aave_v3",
+            tokens=["WETH"],
+            executed_price=Decimal("0"),
+            amount_usd=Decimal("3000"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            tokens_in={},
+            tokens_out={"WETH": Decimal("1.0")},
+            position_delta=position,
+            position_reduce_id="supply-1",
+            position_reduce_amounts={"WETH": Decimal("0")},
+            gas_price_gwei=Decimal("0"),
+            estimated_mev_cost_usd=Decimal("0"),
+        )
+
+        data = fill.to_dict()
+
+        assert data["executed_price"] == "0"
+        assert data["gas_cost_usd"] == "0"
+        assert data["gas_price_gwei"] == "0"
+        assert data["estimated_mev_cost_usd"] == "0"
+        assert data["position_delta"]["position_type"] == "SUPPLY"
+        assert data["position_reduce_id"] == "supply-1"
+        assert data["position_reduce_amounts"] == {"WETH": "0"}
+
 
 # =============================================================================
 # SimulatedPortfolio.apply_fill Tests
@@ -567,6 +628,108 @@ class TestPortfolioMarkToMarket:
         assert value < Decimal("11000")
         assert position.interest_accrued > Decimal("0")
 
+    def test_adapter_failure_falls_back_to_internal_position_mark(
+        self,
+        portfolio: SimulatedPortfolio,
+        base_timestamp: datetime,
+    ) -> None:
+        """Adapter valuation errors fall back without flipping borrow debt positive."""
+
+        class RaisingAdapter:
+            def value_position(self, *_args, **_kwargs):
+                raise RuntimeError("adapter unavailable")
+
+        position = SimulatedPosition.borrow(
+            token="USDC",
+            amount=Decimal("1000"),
+            apy=Decimal("0.08"),
+            entry_price=Decimal("1"),
+            entry_time=base_timestamp - timedelta(days=365),
+        )
+        portfolio.positions.append(position)
+        portfolio.cash_usd = Decimal("11000")
+        market_state = MarketState(
+            timestamp=base_timestamp,
+            prices={"USDC": Decimal("1")},
+        )
+
+        value = portfolio.mark_to_market(market_state, market_state.timestamp, adapter=RaisingAdapter())
+
+        assert value < Decimal("11000")
+        assert value == portfolio.equity_curve[-1].value_usd
+        assert position.interest_accrued > Decimal("0")
+
+    def test_mark_lp_position_requires_token_pair(
+        self,
+        portfolio: SimulatedPortfolio,
+        market_state: MarketState,
+        base_timestamp: datetime,
+    ) -> None:
+        position = SimulatedPosition.lp(
+            token0="WETH",
+            token1="USDC",
+            amount0=Decimal("0.5"),
+            amount1=Decimal("1500"),
+            liquidity=Decimal("1000"),
+            tick_lower=-887272,
+            tick_upper=887272,
+            fee_tier=Decimal("0.003"),
+            entry_price=Decimal("3000"),
+            entry_time=base_timestamp,
+        )
+        position.tokens = ["WETH"]
+
+        assert portfolio._mark_lp_position(position, market_state, base_timestamp) == Decimal("0")
+
+    def test_mark_lp_position_non_strict_falls_back_for_missing_prices(
+        self,
+        portfolio: SimulatedPortfolio,
+        base_timestamp: datetime,
+    ) -> None:
+        position = SimulatedPosition.lp(
+            token0="WETH",
+            token1="USDC",
+            amount0=Decimal("0.5"),
+            amount1=Decimal("1500"),
+            liquidity=Decimal("1000"),
+            tick_lower=-887272,
+            tick_upper=887272,
+            fee_tier=Decimal("0.003"),
+            entry_price=Decimal("3000"),
+            entry_time=base_timestamp - timedelta(days=1),
+        )
+        market_state = MarketState(timestamp=base_timestamp, prices={})
+
+        value = portfolio._mark_lp_position(position, market_state, base_timestamp)
+
+        assert value > Decimal("0")
+        assert position.amounts["WETH"] > Decimal("0")
+        assert position.amounts["USDC"] > Decimal("0")
+        assert position.fees_earned > Decimal("0")
+        assert position.last_updated == base_timestamp
+
+    def test_mark_lp_position_strict_missing_token0_raises(
+        self,
+        base_timestamp: datetime,
+    ) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"), strict_reproducibility=True)
+        position = SimulatedPosition.lp(
+            token0="WETH",
+            token1="USDC",
+            amount0=Decimal("0.5"),
+            amount1=Decimal("1500"),
+            liquidity=Decimal("1000"),
+            tick_lower=-887272,
+            tick_upper=887272,
+            fee_tier=Decimal("0.003"),
+            entry_price=Decimal("3000"),
+            entry_time=base_timestamp,
+        )
+        market_state = MarketState(timestamp=base_timestamp, prices={"USDC": Decimal("1")})
+
+        with pytest.raises(ValueError, match="Price unavailable for WETH"):
+            portfolio._mark_lp_position(position, market_state, base_timestamp)
+
 
 # =============================================================================
 # SimulatedPortfolio.get_metrics Tests
@@ -791,6 +954,113 @@ class TestPortfolioGetMetrics:
         assert metrics.losing_trades == 2
 
 
+class TestPortfolioDataCoverageMetrics:
+    """Tests for SimulatedPortfolio.calculate_data_coverage_metrics()."""
+
+    def test_counts_open_closed_positions_confidence_and_unique_sources(
+        self,
+        portfolio: SimulatedPortfolio,
+        base_timestamp: datetime,
+    ) -> None:
+        """Data coverage includes open/closed positions and normalizes unknown confidence."""
+        lp_open = SimulatedPosition.lp(
+            token0="WETH",
+            token1="USDC",
+            amount0=Decimal("1"),
+            amount1=Decimal("3000"),
+            liquidity=Decimal("1000"),
+            tick_lower=-887272,
+            tick_upper=887272,
+            fee_tier=Decimal("0.003"),
+            entry_price=Decimal("3000"),
+            entry_time=base_timestamp,
+        )
+        lp_open.fee_confidence = "high"
+        lp_open.slippage_confidence = "medium"
+        lp_open.metadata["data_source"] = "uniswap_v3_subgraph"
+
+        lp_closed = SimulatedPosition.lp(
+            token0="WETH",
+            token1="USDC",
+            amount0=Decimal("0.5"),
+            amount1=Decimal("1500"),
+            liquidity=Decimal("500"),
+            tick_lower=-887272,
+            tick_upper=887272,
+            fee_tier=Decimal("0.003"),
+            entry_price=Decimal("3000"),
+            entry_time=base_timestamp,
+        )
+        lp_closed.fee_confidence = "provider_specific"
+        lp_closed.slippage_confidence = "provider_specific"
+        lp_closed.metadata["data_source"] = "uniswap_v3_subgraph"
+
+        perp_open = SimulatedPosition.perp_long(
+            token="WETH",
+            collateral_usd=Decimal("1000"),
+            leverage=Decimal("3"),
+            entry_price=Decimal("3000"),
+            entry_time=base_timestamp,
+            protocol="gmx_v2",
+        )
+        perp_open.funding_confidence = "medium"
+        perp_open.funding_data_source = "gmx_v2_reader"
+
+        perp_closed = SimulatedPosition.perp_short(
+            token="BTC",
+            collateral_usd=Decimal("1000"),
+            leverage=Decimal("2"),
+            entry_price=Decimal("45000"),
+            entry_time=base_timestamp,
+            protocol="gmx_v2",
+        )
+        perp_closed.funding_confidence = "provider_specific"
+        perp_closed.funding_data_source = "gmx_v2_reader"
+
+        supply_open = SimulatedPosition.supply(
+            token="USDC",
+            amount=Decimal("1000"),
+            apy=Decimal("0.05"),
+            entry_price=Decimal("1"),
+            entry_time=base_timestamp,
+        )
+        supply_open.apy_confidence = "high"
+        supply_open.apy_data_source = "aave_v3_subgraph"
+
+        borrow_closed = SimulatedPosition.borrow(
+            token="USDC",
+            amount=Decimal("500"),
+            apy=Decimal("0.08"),
+            entry_price=Decimal("1"),
+            entry_time=base_timestamp,
+        )
+        borrow_closed.apy_confidence = "provider_specific"
+        borrow_closed.apy_data_source = "fallback:default_rate"
+
+        portfolio.positions.extend([lp_open, perp_open, supply_open])
+        portfolio._closed_positions.extend([lp_closed, perp_closed, borrow_closed])
+
+        metrics = portfolio.calculate_data_coverage_metrics()
+
+        assert metrics.lp_metrics.position_count == 2
+        assert metrics.lp_metrics.fee_confidence_breakdown == {"high": 1, "medium": 0, "low": 1}
+        assert metrics.lp_metrics.data_sources == ["uniswap_v3_subgraph"]
+        assert metrics.slippage_metrics.calculation_count == 2
+        assert metrics.slippage_metrics.slippage_confidence_breakdown == {"high": 0, "medium": 1, "low": 1}
+
+        assert metrics.perp_metrics.position_count == 2
+        assert metrics.perp_metrics.funding_confidence_breakdown == {"high": 0, "medium": 1, "low": 1}
+        assert metrics.perp_metrics.data_sources == ["gmx_v2_reader"]
+
+        assert metrics.lending_metrics.position_count == 2
+        assert metrics.lending_metrics.apy_confidence_breakdown == {"high": 1, "medium": 0, "low": 1}
+        assert metrics.lending_metrics.data_sources == ["aave_v3_subgraph", "fallback:default_rate"]
+
+        assert metrics.total_data_points == 8
+        assert metrics.high_confidence_data_points == 2
+        assert metrics.data_coverage_pct == 25.0
+
+
 # =============================================================================
 # SimulatedPortfolio Helper Method Tests
 # =============================================================================
@@ -879,7 +1149,46 @@ class TestPortfolioHelperMethods:
     ) -> None:
         """Test portfolio to_dict and from_dict."""
         portfolio.tokens["WETH"] = Decimal("1.0")
-        portfolio.equity_curve.append(EquityPoint(timestamp=base_timestamp, value_usd=Decimal("10000")))
+        portfolio.equity_curve.append(
+            EquityPoint(
+                timestamp=base_timestamp,
+                value_usd=Decimal("10000"),
+                eth_price_usd=Decimal("3000"),
+                spot_value_usd=Decimal("7000"),
+                position_value_usd=Decimal("3000"),
+                valuation_source="portfolio_valuer",
+                numeraire_price_usd=Decimal("3000"),
+            )
+        )
+        portfolio.trades.append(
+            TradeRecord(
+                timestamp=base_timestamp,
+                intent_type=IntentType.SWAP,
+                executed_price=Decimal("3000"),
+                fee_usd=Decimal("1"),
+                slippage_usd=Decimal("2"),
+                gas_cost_usd=Decimal("3"),
+                pnl_usd=Decimal("4"),
+                success=True,
+                amount_usd=Decimal("3000"),
+                protocol="uniswap_v3",
+                tokens=["USDC", "WETH"],
+                tx_hash="0xabc",
+                error=None,
+                metadata={"route": "direct"},
+                actual_amount_in=Decimal("3000"),
+                actual_amount_out=Decimal("1"),
+                expected_amount_in=Decimal("3000"),
+                expected_amount_out=Decimal("1.01"),
+                il_loss_usd=Decimal("-5"),
+                fees_earned_usd=Decimal("6"),
+                net_lp_pnl_usd=Decimal("7"),
+                gas_price_gwei=Decimal("0.1"),
+                estimated_mev_cost_usd=Decimal("0.2"),
+                delayed_at_end=True,
+                position_id="pos-1",
+            )
+        )
         position = SimulatedPosition.spot(
             token="WETH",
             amount=Decimal("1.0"),
@@ -896,6 +1205,67 @@ class TestPortfolioHelperMethods:
         assert restored.tokens == portfolio.tokens
         assert len(restored.positions) == 1
         assert len(restored.equity_curve) == 1
+        assert restored.equity_curve[0].eth_price_usd == Decimal("3000")
+        assert restored.equity_curve[0].spot_value_usd == Decimal("7000")
+        assert restored.equity_curve[0].position_value_usd == Decimal("3000")
+        assert restored.equity_curve[0].valuation_source == "portfolio_valuer"
+        assert restored.equity_curve[0].numeraire_price_usd == Decimal("3000")
+        restored_trade = restored.trades[0]
+        assert restored_trade.metadata == {"route": "direct"}
+        assert restored_trade.actual_amount_in == Decimal("3000")
+        assert restored_trade.actual_amount_out == Decimal("1")
+        assert restored_trade.expected_amount_in == Decimal("3000")
+        assert restored_trade.expected_amount_out == Decimal("1.01")
+        assert restored_trade.il_loss_usd == Decimal("-5")
+        assert restored_trade.fees_earned_usd == Decimal("6")
+        assert restored_trade.net_lp_pnl_usd == Decimal("7")
+        assert restored_trade.gas_price_gwei == Decimal("0.1")
+        assert restored_trade.estimated_mev_cost_usd == Decimal("0.2")
+        assert restored_trade.delayed_at_end is True
+        assert restored_trade.position_id == "pos-1"
+
+    def test_annualized_return_for_wiped_out_portfolio_is_zero(self, base_timestamp: datetime) -> None:
+        timestamps = [base_timestamp, base_timestamp + timedelta(days=30)]
+
+        annualized = SimulatedPortfolio._annualized_return(Decimal("-1"), timestamps)
+
+        assert annualized == Decimal("0")
+
+    def test_strict_token_holdings_value_raises_for_missing_price(self, base_timestamp: datetime) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"), strict_reproducibility=True)
+        portfolio.tokens["MISSING"] = Decimal("1")
+        market = MarketState(timestamp=base_timestamp, prices={})
+
+        with pytest.raises(KeyError):
+            portfolio._token_holdings_value(market)
+
+    def test_acquired_swap_basis_uses_one_allocation_mode_when_any_price_missing(
+        self,
+        base_timestamp: datetime,
+    ) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("1000"), cash_usd=Decimal("1000"))
+        fill = SimulatedFill(
+            timestamp=base_timestamp,
+            intent_type=IntentType.SWAP,
+            protocol="uniswap_v3",
+            tokens=["USDC", "AAA", "BBB"],
+            executed_price=Decimal("1"),
+            amount_usd=Decimal("100"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            tokens_in={"AAA": Decimal("1"), "BBB": Decimal("1")},
+            tokens_out={"USDC": Decimal("100")},
+        )
+        market = MarketState(
+            timestamp=base_timestamp,
+            prices={"USDC": Decimal("1"), "AAA": Decimal("50")},
+        )
+
+        portfolio.apply_fill(fill, market_state=market)
+
+        assert portfolio._cost_basis["AAA"] == Decimal("50")
+        assert portfolio._cost_basis["BBB"] == Decimal("50")
 
 
 # =============================================================================

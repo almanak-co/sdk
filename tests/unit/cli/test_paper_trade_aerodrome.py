@@ -23,7 +23,6 @@ from almanak.framework.backtesting.paper.config import PaperTraderConfig
 from almanak.framework.cli.backtest import backtest
 from almanak.framework.strategies import get_strategy, list_strategies
 
-
 # =============================================================================
 # Fixtures
 # =============================================================================

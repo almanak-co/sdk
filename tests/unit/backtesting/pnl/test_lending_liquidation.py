@@ -13,6 +13,8 @@ from decimal import Decimal
 import pytest
 
 from almanak.framework.backtesting.models import LendingLiquidationEvent
+from almanak.framework.backtesting.pnl.data_provider import MarketState
+from almanak.framework.backtesting.pnl.liquidation_simulator import update_health_factors
 from almanak.framework.backtesting.pnl.portfolio import (
     SimulatedPortfolio,
     SimulatedPosition,
@@ -410,14 +412,19 @@ class TestLiquidationEdgeCases:
         portfolio.positions = [supply, borrow]
 
         crash_market = MockMarketState({"WETH": Decimal("1400"), "USDC": Decimal("1")})
+        debt_before = borrow.total_amount + borrow.interest_accrued
         portfolio.mark_to_market(crash_market, timestamp)
 
         # Verify liquidation occurred and interest was considered
         liquidations = portfolio.get_lending_liquidations()
         assert len(liquidations) == 1
+        event = liquidations[0]
 
         # After liquidation, interest should be reduced proportionally
-        assert borrow.interest_accrued < Decimal("500")
+        assert borrow.total_amount == Decimal("7500.0")
+        assert borrow.interest_accrued == Decimal("250.0")
+        debt_after = borrow.total_amount + borrow.interest_accrued
+        assert debt_before - debt_after == pytest.approx(event.debt_repaid, rel=Decimal("0.01"))
 
     def test_liquidation_caps_collateral_at_available_amount(self):
         """Test that collateral seized is capped at available collateral."""
@@ -461,6 +468,142 @@ class TestLiquidationEdgeCases:
 
         # Collateral seized should not exceed available ($1,000)
         assert liquidations[0].collateral_seized <= Decimal("1000")
+
+    def test_multiple_borrows_do_not_double_count_same_collateral(self):
+        """Sequential liquidations in one tick must not reuse already-seized collateral."""
+        portfolio = SimulatedPortfolio(
+            initial_capital_usd=Decimal("10000"),
+            liquidation_penalty=Decimal("0.10"),
+        )
+        timestamp = datetime.now(UTC)
+        supply = SimulatedPosition.supply(
+            protocol="aave_v3",
+            token="WETH",
+            amount=Decimal("1"),
+            entry_price=Decimal("2000"),
+            entry_time=timestamp,
+            apy=Decimal("0.02"),
+        )
+        first_borrow = SimulatedPosition.borrow(
+            protocol="aave_v3",
+            token="USDC",
+            amount=Decimal("4000"),
+            entry_price=Decimal("1"),
+            entry_time=timestamp,
+            apy=Decimal("0.05"),
+            health_factor=Decimal("1.5"),
+        )
+        second_borrow = SimulatedPosition.borrow(
+            protocol="aave_v3",
+            token="USDC",
+            amount=Decimal("4000"),
+            entry_price=Decimal("1"),
+            entry_time=timestamp + timedelta(microseconds=1),
+            apy=Decimal("0.05"),
+            health_factor=Decimal("1.5"),
+        )
+        portfolio.positions = [supply, first_borrow, second_borrow]
+
+        market = MarketState(
+            timestamp=timestamp,
+            prices={"WETH": Decimal("1000"), "USDC": Decimal("1")},
+        )
+
+        update_health_factors(portfolio, market)
+
+        liquidations = portfolio.get_lending_liquidations()
+        assert len(liquidations) == 1
+        assert sum((event.collateral_seized for event in liquidations), Decimal("0")) == Decimal("1000")
+        assert first_borrow.health_factor == Decimal("0.20625")
+        assert second_borrow.health_factor == Decimal("0")
+        assert portfolio._health_factor_warnings == 2
+        assert portfolio._min_health_factor == Decimal("0")
+        assert supply.total_amount == Decimal("0")
+        assert supply.interest_accrued == Decimal("0")
+
+    def test_exhausted_collateral_does_not_skip_later_borrow_health_updates(self):
+        """Later borrow rows still get explicit HF=0 after earlier liquidation clears collateral."""
+        portfolio = SimulatedPortfolio(
+            initial_capital_usd=Decimal("20000"),
+            liquidation_penalty=Decimal("0"),
+        )
+        timestamp = datetime.now(UTC)
+        supply = SimulatedPosition.supply(
+            protocol="aave_v3",
+            token="WETH",
+            amount=Decimal("1"),
+            entry_price=Decimal("1000"),
+            entry_time=timestamp,
+            apy=Decimal("0.02"),
+        )
+        first_borrow = SimulatedPosition.borrow(
+            protocol="aave_v3",
+            token="USDC",
+            amount=Decimal("4000"),
+            entry_price=Decimal("1"),
+            entry_time=timestamp,
+            apy=Decimal("0.05"),
+            health_factor=Decimal("1.5"),
+        )
+        second_borrow = SimulatedPosition.borrow(
+            protocol="aave_v3",
+            token="USDC",
+            amount=Decimal("4000"),
+            entry_price=Decimal("1"),
+            entry_time=timestamp + timedelta(microseconds=1),
+            apy=Decimal("0.05"),
+            health_factor=Decimal("1.5"),
+        )
+        portfolio.positions = [supply, first_borrow, second_borrow]
+        market_time = timestamp + timedelta(hours=1)
+        market = MarketState(
+            timestamp=market_time,
+            prices={"WETH": Decimal("1000"), "USDC": Decimal("1")},
+        )
+
+        update_health_factors(portfolio, market)
+
+        assert first_borrow.health_factor < Decimal("1")
+        assert second_borrow.health_factor == Decimal("0")
+        assert portfolio._min_health_factor == Decimal("0")
+        assert portfolio._health_factor_warnings == 2
+        assert len(portfolio.get_lending_liquidations()) == 1
+        assert portfolio.get_lending_liquidations()[0].timestamp == market_time
+
+    def test_liquidation_without_market_timestamp_uses_position_timestamp(self):
+        """Timestamp fallback stays deterministic when market state has no timestamp."""
+        portfolio = SimulatedPortfolio(
+            initial_capital_usd=Decimal("20000"),
+            liquidation_penalty=Decimal("0.05"),
+        )
+        entry_time = datetime(2024, 1, 1, tzinfo=UTC)
+        last_updated = entry_time + timedelta(hours=2)
+        supply = SimulatedPosition.supply(
+            protocol="aave_v3",
+            token="WETH",
+            amount=Decimal("5"),
+            entry_price=Decimal("2000"),
+            entry_time=entry_time,
+            apy=Decimal("0.02"),
+        )
+        borrow = SimulatedPosition.borrow(
+            protocol="aave_v3",
+            token="USDC",
+            amount=Decimal("7000"),
+            entry_price=Decimal("1"),
+            entry_time=entry_time,
+            apy=Decimal("0.05"),
+            health_factor=Decimal("1.5"),
+        )
+        borrow.last_updated = last_updated
+        portfolio.positions = [supply, borrow]
+
+        update_health_factors(
+            portfolio,
+            MockMarketState({"WETH": Decimal("1000"), "USDC": Decimal("1")}),
+        )
+
+        assert portfolio.get_lending_liquidations()[0].timestamp == last_updated
 
     def test_multiple_supply_positions_liquidated_proportionally(self):
         """Test that multiple supply positions are liquidated proportionally."""

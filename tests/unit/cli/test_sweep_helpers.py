@@ -34,15 +34,23 @@ from almanak.framework.backtesting.models import (
     BacktestMetrics,
     BacktestResult,
 )
+from almanak.framework.backtesting.pnl.optuna_tuner import ParamRange, ParamType
 from almanak.framework.cli.backtest.helpers import SweepParameter, SweepResult
 from almanak.framework.cli.backtest.run_helpers import build_pnl_config
 from almanak.framework.cli.backtest.sweep import (
+    _build_sweep_data_provider,
+    _build_sweep_run_context,
     _compute_worker_count,
     _handle_sweep_dry_run,
+    _normalize_numeric_param_names,
     _parse_sweep_params,
+    _print_sweep_start,
     _resolve_backtest_periods,
     _SweepRunContext,
+    _validate_numeric_param_names,
+    _validate_sweep_strategy,
     _write_sweep_json,
+    parse_param_ranges_from_config,
 )
 
 # ---------------------------------------------------------------------------
@@ -233,6 +241,144 @@ class TestComputeWorkerCount:
         with patch("os.cpu_count", return_value=None):
             # max(1, 1-1) = 1
             assert _compute_worker_count(parallel=True, workers=None, total_runs=10) == 1
+
+
+class TestSweepContextSetup:
+    def test_normalize_numeric_param_names_strips_and_dedupes(self) -> None:
+        assert _normalize_numeric_param_names((" threshold ", "", "threshold", "window")) == frozenset(
+            {"threshold", "window"}
+        )
+
+    def test_validate_sweep_strategy_allows_empty_registry(self) -> None:
+        with patch("almanak.framework.cli.backtest.sweep.list_strategies_fn", return_value=[]):
+            _validate_sweep_strategy("mocked_strategy")
+
+    def test_validate_sweep_strategy_rejects_unknown_when_registry_present(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with (
+            patch("almanak.framework.cli.backtest.sweep.list_strategies_fn", return_value=["known"]),
+            pytest.raises(click.Abort),
+        ):
+            _validate_sweep_strategy("missing")
+
+        err = capsys.readouterr().err
+        assert "Error: Unknown strategy 'missing'" in err
+        assert "Available strategies: known" in err
+
+    def test_validate_numeric_param_names_rejects_unknown_names(self) -> None:
+        with pytest.raises(click.UsageError, match="unknown sweep parameter"):
+            _validate_numeric_param_names(
+                numeric_param_names=frozenset({"threshold", "missing"}),
+                sweep_params=[SweepParameter(name="threshold", values=["1"])],
+            )
+
+    def test_build_sweep_run_context_single_period(self) -> None:
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 2, 1, tzinfo=UTC)
+
+        with patch("almanak.framework.cli.backtest.sweep.list_strategies_fn", return_value=[]):
+            ctx = _build_sweep_run_context(
+                strategy="demo",
+                start=start,
+                end=end,
+                periods=None,
+                params=("threshold:0.1,0.2",),
+                numeric_params=("threshold",),
+                interval=1800,
+                initial_capital=1234.5,
+                chain="base",
+                tokens="weth, usdc",
+                output="/tmp/sweep.json",
+            )
+
+        assert ctx.strategy == "demo"
+        assert ctx.chain == "base"
+        assert ctx.token_list == ["WETH", "USDC"]
+        assert ctx.interval == 1800
+        assert ctx.initial_capital == 1234.5
+        assert ctx.output_path == Path("/tmp/sweep.json")
+        assert ctx.multi_period_mode is False
+        assert ctx.backtest_periods[0].start == start
+        assert ctx.backtest_periods[0].end == end
+        assert ctx.sweep_params == [SweepParameter(name="threshold", values=["0.1", "0.2"])]
+        assert ctx.combinations == [{"threshold": "0.1"}, {"threshold": "0.2"}]
+        assert ctx.numeric_param_names == frozenset({"threshold"})
+
+    def test_build_sweep_run_context_runs_ambiguous_warning_preflight(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 2, 1, tzinfo=UTC)
+
+        with patch("almanak.framework.cli.backtest.sweep.list_strategies_fn", return_value=[]):
+            _build_sweep_run_context(
+                strategy="demo",
+                start=start,
+                end=end,
+                periods=None,
+                params=("account:0001,0001",),
+                numeric_params=(),
+                interval=3600,
+                initial_capital=10000.0,
+                chain="arbitrum",
+                tokens="WETH",
+                output=None,
+            )
+
+        err = capsys.readouterr().err
+        assert err.count("account=0001") == 1
+
+    def test_build_sweep_data_provider_threads_token_addresses(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        ctx = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("single")],
+        )
+
+        with (
+            patch(
+                "almanak.framework.cli.backtest.sweep.build_token_address_map",
+                return_value={"USDC": ("arbitrum", "0xabc")},
+            ) as build_map,
+            patch("almanak.framework.cli.backtest.sweep.CoinGeckoDataProvider") as provider_cls,
+        ):
+            provider = _build_sweep_data_provider(ctx, {"token_funding": []})
+
+        build_map.assert_called_once_with(
+            strategy_config={"token_funding": []},
+            tracked_tokens=["WETH", "USDC"],
+            chain="arbitrum",
+        )
+        provider_cls.assert_called_once_with(token_addresses={"USDC": ("arbitrum", "0xabc")})
+        assert provider is provider_cls.return_value
+        assert "Initializing CoinGecko data provider..." in capsys.readouterr().out
+
+    def test_print_sweep_start_single_and_multi(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        single = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1", "2"])],
+            combinations=[{"a": "1"}, {"a": "2"}],
+            periods=[_make_period("single")],
+        )
+        _print_sweep_start(single, total_runs=2)
+        assert "Starting parameter sweep (2 combinations)..." in capsys.readouterr().out
+
+        multi = _make_ctx(
+            sweep_params=[SweepParameter(name="a", values=["1"])],
+            combinations=[{"a": "1"}],
+            periods=[_make_period("p1"), _make_period("p2", m1=3, m2=4)],
+            multi=True,
+        )
+        _print_sweep_start(multi, total_runs=2)
+        assert "Starting multi-period sweep (2 total runs)..." in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +579,49 @@ class TestBuildPnlConfig:
         assert cfg.gas_price_gwei == Decimal("42.5")
 
 
+class TestParseParamRangesFromConfig:
+    def test_parses_typed_and_legacy_param_ranges(self) -> None:
+        ranges = parse_param_ranges_from_config(
+            {
+                "param_ranges": {
+                    "threshold": {"type": "continuous", "min": "0.01", "max": "0.1", "log": True},
+                    "window": {"type": "discrete", "min": 10, "max": 30, "step": 10},
+                    "mode": {"type": "categorical", "choices": ["fast", "slow"]},
+                    "legacy_list": ["a", "b"],
+                    "legacy_tuple": (1, 3),
+                }
+            }
+        )
+
+        assert ranges["threshold"].param_type.value == "continuous"
+        assert ranges["threshold"].low == Decimal("0.01")
+        assert ranges["threshold"].high == Decimal("0.1")
+        assert ranges["threshold"].log is True
+        assert ranges["window"].param_type.value == "discrete"
+        assert ranges["window"].low == 10
+        assert ranges["window"].high == 30
+        assert ranges["window"].step == 10
+        assert ranges["mode"].choices == ["fast", "slow"]
+        assert ranges["legacy_list"] == ["a", "b"]
+        assert ranges["legacy_tuple"] == (1, 3)
+
+    @pytest.mark.parametrize(
+        ("name", "spec", "message"),
+        [
+            ("mode", {"type": "categorical", "choices": []}, "requires 'choices'"),
+            ("window", {"type": "discrete", "max": 30}, "requires 'min' and 'max'"),
+            ("threshold", {"type": "continuous", "min": 0.1}, "requires 'min' and 'max'"),
+            ("threshold", {"type": "mystery", "min": 0.1, "max": 1}, "Unknown parameter type"),
+            ("threshold", {"type": 1, "min": 0.1, "max": 1}, "must be a string"),
+            ("window", {"type": "discrete", "min": "low", "max": 30}, "integer bounds"),
+            ("bad", "not-a-spec", "Invalid parameter spec"),
+        ],
+    )
+    def test_rejects_malformed_param_ranges(self, name: str, spec: Any, message: str) -> None:
+        with pytest.raises(click.BadParameter, match=message):
+            parse_param_ranges_from_config({"param_ranges": {name: spec}})
+
+
 # ---------------------------------------------------------------------------
 # Phase 5B.4 extended coverage
 # ---------------------------------------------------------------------------
@@ -441,8 +630,13 @@ class TestBuildPnlConfig:
 from almanak.framework.cli.backtest.sweep import (  # noqa: E402
     _aggregate_multi_period_results,
     _display_sweep_results,
+    _format_optimization_param_range,
     _generate_sweep_report,
+    _load_optimization_inputs,
+    _OptimizationRunContext,
+    _OptimizationSettings,
     _print_multi_period_results,
+    _print_optimization_configuration,
     _print_sweep_configuration,
     _run_parallel_sweep,
     _run_sweep_over_periods,
@@ -450,6 +644,219 @@ from almanak.framework.cli.backtest.sweep import (  # noqa: E402
     print_sweep_results_table,
     run_sweep_backtest,
 )
+
+
+def _make_optimization_ctx(
+    *,
+    periods: list[Any],
+    periods_spec: str | None = None,
+    output_label: str | None = None,
+    patience: int | None = 5,
+    seed: int | None = 123,
+) -> _OptimizationRunContext:
+    return _OptimizationRunContext(
+        strategy="demo_strat",
+        chain="arbitrum",
+        token_list=["WETH", "USDC"],
+        interval=3600,
+        initial_capital=10000.0,
+        output_label=output_label,
+        output_path=Path(output_label) if output_label else None,
+        periods_spec=periods_spec,
+        backtest_periods=periods,
+        param_ranges={
+            "threshold": ParamRange(ParamType.CONTINUOUS, low=Decimal("0.01"), high=Decimal("0.1"), log=True),
+            "window": ParamRange(ParamType.DISCRETE, low=10, high=30, step=10),
+            "mode": ParamRange(ParamType.CATEGORICAL, choices=["fast", "slow"]),
+        },
+        settings=_OptimizationSettings(
+            objective="sharpe_ratio",
+            n_trials=25,
+            patience=patience,
+            min_delta=0.01,
+        ),
+        seed=seed,
+        verbose=False,
+    )
+
+
+class TestOptimizationConfiguration:
+    def test_load_optimization_inputs_applies_cli_overrides(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "optimization.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "param_ranges": {
+                        "threshold": {"type": "continuous", "min": "0.01", "max": "0.1"},
+                    },
+                    "objective": "total_return",
+                    "n_trials": 100,
+                    "patience": 10,
+                    "min_delta": 0.05,
+                }
+            )
+        )
+
+        ranges, settings = _load_optimization_inputs(
+            config_file=str(config_path),
+            objective="sharpe_ratio",
+            n_trials=25,
+            patience=4,
+        )
+
+        assert set(ranges) == {"threshold"}
+        assert ranges["threshold"].param_type == ParamType.CONTINUOUS
+        assert settings.objective == "sharpe_ratio"
+        assert settings.n_trials == 25
+        assert settings.patience == 4
+        assert settings.min_delta == 0.05
+
+    def test_load_optimization_inputs_uses_config_defaults(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "optimization.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "param_ranges": {
+                        "window": {"type": "discrete", "min": 10, "max": 30, "step": 10},
+                    },
+                    "objective": "total_return",
+                    "n_trials": 12,
+                    "patience": 3,
+                    "min_delta": 0.02,
+                }
+            )
+        )
+
+        _, settings = _load_optimization_inputs(
+            config_file=str(config_path),
+            objective=None,
+            n_trials=None,
+            patience=None,
+        )
+
+        assert settings.objective == "total_return"
+        assert settings.n_trials == 12
+        assert settings.patience == 3
+        assert settings.min_delta == 0.02
+
+    def test_load_optimization_inputs_missing_file_aborts(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with pytest.raises(click.Abort):
+            _load_optimization_inputs(
+                config_file=str(tmp_path / "missing.json"),
+                objective=None,
+                n_trials=None,
+                patience=None,
+            )
+
+        assert "Error loading config file:" in capsys.readouterr().err
+
+    def test_load_optimization_inputs_malformed_param_range_aborts(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        config_path = tmp_path / "bad.json"
+        config_path.write_text(json.dumps({"param_ranges": {"threshold": {"type": 1, "min": 0, "max": 1}}}))
+
+        with pytest.raises(click.Abort):
+            _load_optimization_inputs(
+                config_file=str(config_path),
+                objective=None,
+                n_trials=None,
+                patience=None,
+            )
+
+        err = capsys.readouterr().err
+        assert "Error parsing config:" in err
+        assert "type must be a string" in err
+
+    def test_load_optimization_inputs_empty_ranges_raise_usage_error(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "empty.json"
+        config_path.write_text(json.dumps({"param_ranges": {}}))
+
+        with pytest.raises(click.UsageError, match="No parameter ranges defined"):
+            _load_optimization_inputs(
+                config_file=str(config_path),
+                objective=None,
+                n_trials=None,
+                patience=None,
+            )
+
+    def test_format_optimization_param_range_variants(self) -> None:
+        assert (
+            _format_optimization_param_range(
+                "mode",
+                ParamRange(ParamType.CATEGORICAL, choices=["fast", "slow"]),
+            )
+            == "  mode: categorical ['fast', 'slow']"
+        )
+        assert (
+            _format_optimization_param_range(
+                "window",
+                ParamRange(ParamType.DISCRETE, low=10, high=30, step=10),
+            )
+            == "  window: discrete [10, 30, step=10]"
+        )
+        assert (
+            _format_optimization_param_range(
+                "threshold",
+                ParamRange(ParamType.CONTINUOUS, low=Decimal("0.01"), high=Decimal("0.1"), log=True),
+            )
+            == "  threshold: continuous [0.01, 0.1] (log)"
+        )
+        assert _format_optimization_param_range("legacy", ["a", "b"]) == "  legacy: ['a', 'b']"
+
+    def test_print_optimization_configuration_single_period(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        ctx = _make_optimization_ctx(
+            periods=[_make_period("single")],
+            output_label="optimization.json",
+        )
+
+        _print_optimization_configuration(ctx)
+
+        out = capsys.readouterr().out
+        assert "BAYESIAN OPTIMIZATION CONFIGURATION" in out
+        assert "Strategy: demo_strat" in out
+        assert "Chain: arbitrum" in out
+        assert "Period: 2024-01-01 -> 2024-02-01" in out
+        assert "Interval: 3600s (1.0 hours)" in out
+        assert "Initial Capital: $10,000.00" in out
+        assert "Tokens: WETH, USDC" in out
+        assert "Objective: sharpe_ratio" in out
+        assert "Trials: 25" in out
+        assert "Early Stopping: patience=5, min_delta=0.01" in out
+        assert "Random Seed: 123" in out
+        assert "Output: optimization.json" in out
+        assert "threshold: continuous [0.01, 0.1] (log)" in out
+
+    def test_print_optimization_configuration_multi_period_no_patience_or_seed(
+        self,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        ctx = _make_optimization_ctx(
+            periods=[_make_period("p1"), _make_period("p2", m1=3, m2=4)],
+            periods_spec="2024-quarterly",
+            patience=None,
+            seed=None,
+        )
+
+        _print_optimization_configuration(ctx)
+
+        out = capsys.readouterr().out
+        assert "Periods: 2024-quarterly (2 windows)" in out
+        assert "- p1: 2024-01-01 -> 2024-02-01" in out
+        assert "- p2: 2024-03-01 -> 2024-04-01" in out
+        assert "(each trial scored on avg metric across all periods)" in out
+        assert "Early Stopping: disabled" in out
+        assert "Random Seed:" not in out
+        assert "Output:" not in out
 
 
 class TestPrintSweepConfiguration:

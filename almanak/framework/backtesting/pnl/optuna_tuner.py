@@ -71,7 +71,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 
 def _actionable_optuna_import_error(exc: ImportError) -> ImportError:
@@ -431,6 +431,96 @@ class ParamType(Enum):
     CATEGORICAL = "categorical"
 
 
+def _numeric_bound(value: float | int | Decimal) -> float | int:
+    """Return a comparable numeric bound for validation."""
+    if type(value) is Decimal:
+        return float(value)
+    return cast(float | int, value)
+
+
+def _serialize_param_range_value(value: Any) -> Any:
+    """Serialize Decimal bounds without losing financial precision."""
+    return str(value) if type(value) is Decimal else value
+
+
+def _validate_positive_step(step: float | int) -> None:
+    """Reject step values Optuna will reject later."""
+    if step <= 0:
+        raise ValueError("'step' must be positive")
+
+
+def _validate_param_bounds(low: float | int | Decimal, high: float | int | Decimal) -> None:
+    """Validate lower/upper range ordering."""
+    if _numeric_bound(low) >= _numeric_bound(high):
+        raise ValueError(f"'low' ({low}) must be less than 'high' ({high})")
+
+
+def _validate_categorical_param_range(param: ParamRange) -> None:
+    """Validate categorical-only parameter fields."""
+    if _choices_empty(param):
+        raise ValueError("Categorical parameters require non-empty 'choices' list")
+    if param.low is not None or param.high is not None:
+        raise ValueError("Categorical parameters should not have 'low' or 'high'")
+
+
+def _choices_empty(param: ParamRange) -> bool:
+    """Return whether a categorical range has no usable choices."""
+    return param.choices is None or len(param.choices) == 0
+
+
+def _validate_bounded_param_range(param: ParamRange) -> tuple[float | int | Decimal, float | int | Decimal]:
+    """Validate fields shared by continuous and discrete ranges."""
+    if param.low is None or param.high is None:
+        raise ValueError(f"{param.param_type.value} parameters require 'low' and 'high'")
+    if param.choices is not None:
+        raise ValueError(f"{param.param_type.value} parameters should not have 'choices'")
+
+    if type(param.low) is Decimal or type(param.high) is Decimal:
+        object.__setattr__(param, "is_decimal", True)
+
+    _validate_param_bounds(param.low, param.high)
+    return param.low, param.high
+
+
+def _validate_discrete_param_range(param: ParamRange) -> None:
+    """Validate discrete integer range fields."""
+    if not isinstance(param.low, int) or not isinstance(param.high, int):
+        raise ValueError("Discrete parameters require integer 'low' and 'high'")
+    if param.step is not None:
+        if not isinstance(param.step, int):
+            raise ValueError("Discrete parameter 'step' must be an integer")
+        _validate_positive_step(param.step)
+    if param.log:
+        raise ValueError("Discrete parameters do not support 'log' scale")
+
+
+def _validate_continuous_param_range(param: ParamRange) -> None:
+    """Validate continuous numeric range fields."""
+    if param.log and param.step is not None:
+        raise ValueError("Log scale does not support 'step'")
+    if param.step is not None:
+        _validate_positive_step(param.step)
+    if param.log:
+        assert param.low is not None
+        if _numeric_bound(param.low) <= 0:
+            raise ValueError("Log scale requires positive 'low' value")
+
+
+def _param_range_optional_fields(param: ParamRange) -> dict[str, Any]:
+    """Return optional serialized fields for a ParamRange."""
+    fields = {
+        key: _serialize_param_range_value(value)
+        for key, value in (("low", param.low), ("high", param.high))
+        if value is not None
+    }
+    fields.update(
+        {key: value for key, value in (("choices", param.choices), ("step", param.step)) if value is not None}
+    )
+    if param.log:
+        fields["log"] = True
+    return fields
+
+
 @dataclass
 class ParamRange:
     """Typed parameter range for Optuna optimization.
@@ -476,51 +566,19 @@ class ParamRange:
     def __post_init__(self) -> None:
         """Validate the parameter range configuration."""
         if self.param_type == ParamType.CATEGORICAL:
-            if self.choices is None or len(self.choices) == 0:
-                raise ValueError("Categorical parameters require non-empty 'choices' list")
-            if self.low is not None or self.high is not None:
-                raise ValueError("Categorical parameters should not have 'low' or 'high'")
-        else:
-            if self.low is None or self.high is None:
-                raise ValueError(f"{self.param_type.value} parameters require 'low' and 'high'")
-            if self.choices is not None:
-                raise ValueError(f"{self.param_type.value} parameters should not have 'choices'")
-            # Check if Decimal for later conversion
-            if isinstance(self.low, Decimal) or isinstance(self.high, Decimal):
-                object.__setattr__(self, "is_decimal", True)
+            _validate_categorical_param_range(self)
+            return
 
-            # Validate discrete params
-            if self.param_type == ParamType.DISCRETE:
-                if not isinstance(self.low, int) or not isinstance(self.high, int):
-                    raise ValueError("Discrete parameters require integer 'low' and 'high'")
-                if self.step is not None and not isinstance(self.step, int):
-                    raise ValueError("Discrete parameter 'step' must be an integer")
-                if self.log:
-                    raise ValueError("Discrete parameters do not support 'log' scale")
-
-            # Validate bounds
-            low_val = float(self.low) if isinstance(self.low, Decimal) else self.low
-            high_val = float(self.high) if isinstance(self.high, Decimal) else self.high
-            if low_val >= high_val:
-                raise ValueError(f"'low' ({self.low}) must be less than 'high' ({self.high})")
-
-            # Log scale requires positive values
-            if self.log and low_val <= 0:
-                raise ValueError("Log scale requires positive 'low' value")
+        _validate_bounded_param_range(self)
+        if self.param_type == ParamType.DISCRETE:
+            _validate_discrete_param_range(self)
+        elif self.param_type == ParamType.CONTINUOUS:
+            _validate_continuous_param_range(self)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
         result: dict[str, Any] = {"param_type": self.param_type.value}
-        if self.low is not None:
-            result["low"] = str(self.low) if isinstance(self.low, Decimal) else self.low
-        if self.high is not None:
-            result["high"] = str(self.high) if isinstance(self.high, Decimal) else self.high
-        if self.choices is not None:
-            result["choices"] = self.choices
-        if self.step is not None:
-            result["step"] = self.step
-        if self.log:
-            result["log"] = self.log
+        result.update(_param_range_optional_fields(self))
         return result
 
     @classmethod
@@ -675,6 +733,61 @@ def log_uniform(low: float | Decimal, high: float | Decimal) -> ParamRange:
 # =============================================================================
 
 
+def _split_legacy_tuple(name: str, value: tuple[Any, ...]) -> tuple[Any, Any, Any | None]:
+    """Split a legacy tuple into bounds plus optional step."""
+    if len(value) == 2:
+        min_val, max_val = value
+        return min_val, max_val, None
+    if len(value) == 3:
+        min_val, max_val, step = value
+        return min_val, max_val, step
+    raise ValueError(f"Parameter '{name}' tuple must have 2 or 3 elements, got {len(value)}")
+
+
+def _is_decimal_range(min_val: Any, max_val: Any) -> bool:
+    """Return whether either legacy bound should preserve Decimal output."""
+    return type(min_val) is Decimal or type(max_val) is Decimal
+
+
+def _to_decimal_bound(value: Any) -> Decimal:
+    """Convert a legacy bound to Decimal without binary-float string expansion."""
+    return value if type(value) is Decimal else Decimal(str(value))
+
+
+def _is_integer_range(min_val: Any, max_val: Any) -> bool:
+    """Return whether both legacy bounds describe a discrete integer range."""
+    return isinstance(min_val, int) and isinstance(max_val, int)
+
+
+def _is_numeric_range(min_val: Any, max_val: Any) -> bool:
+    """Return whether both legacy bounds describe a continuous numeric range."""
+    numeric_types = (int, float)
+    return isinstance(min_val, numeric_types) and isinstance(max_val, numeric_types)
+
+
+def _continuous_legacy_step(step: Any | None) -> float | None:
+    """Convert optional legacy continuous steps to Optuna's float step."""
+    return None if step is None else float(step)
+
+
+def _convert_legacy_tuple(name: str, value: tuple[Any, ...]) -> ParamRange:
+    """Convert a legacy tuple range to a typed ParamRange."""
+    min_val, max_val, step = _split_legacy_tuple(name, value)
+
+    if _is_decimal_range(min_val, max_val):
+        return continuous(
+            _to_decimal_bound(min_val),
+            _to_decimal_bound(max_val),
+            step=_continuous_legacy_step(step),
+        )
+    if _is_integer_range(min_val, max_val):
+        return discrete(min_val, max_val, step=step)
+    if _is_numeric_range(min_val, max_val):
+        return continuous(float(min_val), float(max_val), step=_continuous_legacy_step(step))
+
+    raise ValueError(f"Parameter '{name}' range must be Decimal, int, or float, got {type(min_val).__name__}")
+
+
 def _convert_legacy_param(
     name: str,
     value: list[Any] | tuple[Any, ...] | ParamRange,
@@ -703,34 +816,51 @@ def _convert_legacy_param(
 
     # Tuple: range
     if isinstance(value, tuple):
-        if len(value) == 2:
-            min_val, max_val = value
-        elif len(value) == 3:
-            min_val, max_val, step = value
-        else:
-            raise ValueError(f"Parameter '{name}' tuple must have 2 or 3 elements, got {len(value)}")
-
-        # Determine type from min value
-        if isinstance(min_val, Decimal):
-            if len(value) == 3:
-                return continuous(min_val, max_val, step=float(step))
-            return continuous(min_val, max_val)
-        elif isinstance(min_val, int) and isinstance(max_val, int):
-            if len(value) == 3:
-                return discrete(min_val, max_val, step=step)
-            return discrete(min_val, max_val)
-        elif isinstance(min_val, float):
-            if len(value) == 3:
-                return continuous(min_val, max_val, step=step)
-            return continuous(min_val, max_val)
-        else:
-            raise ValueError(f"Parameter '{name}' range must be Decimal, int, or float, got {type(min_val).__name__}")
+        return _convert_legacy_tuple(name, value)
 
     raise ValueError(f"Parameter '{name}' must be list, tuple, or ParamRange, got {type(value).__name__}")
 
 
 # Type aliases for parameter ranges
 TypedParamRanges = dict[str, ParamRange]
+
+
+def _suggest_categorical_param(trial: Trial, name: str, param: ParamRange) -> Any:
+    """Suggest a categorical parameter value."""
+    assert param.choices is not None
+    return trial.suggest_categorical(name, param.choices)
+
+
+def _suggest_discrete_param(trial: Trial, name: str, param: ParamRange) -> int:
+    """Suggest a discrete integer parameter value."""
+    assert param.low is not None and param.high is not None
+    if param.step is not None:
+        return trial.suggest_int(name, int(param.low), int(param.high), step=int(param.step))
+    return trial.suggest_int(name, int(param.low), int(param.high))
+
+
+def _continuous_bounds(param: ParamRange) -> tuple[float, float]:
+    """Return continuous bounds in Optuna's float format."""
+    assert param.low is not None and param.high is not None
+    return float(param.low), float(param.high)
+
+
+def _suggest_continuous_float(trial: Trial, name: str, param: ParamRange) -> float:
+    """Suggest a continuous float parameter value."""
+    low, high = _continuous_bounds(param)
+    if param.log:
+        return trial.suggest_float(name, low, high, log=True)
+    if param.step is not None:
+        return trial.suggest_float(name, low, high, step=param.step)
+    return trial.suggest_float(name, low, high)
+
+
+def _suggest_continuous_param(trial: Trial, name: str, param: ParamRange) -> float | Decimal:
+    """Suggest a continuous parameter value, preserving Decimal ranges."""
+    suggested = _suggest_continuous_float(trial, name, param)
+    if param.is_decimal:
+        return Decimal(str(round(suggested, 6)))
+    return suggested
 
 
 @dataclass
@@ -848,6 +978,97 @@ OptunaParamRanges = dict[str, list[Any] | tuple[Any, ...] | ParamRange]
 
 
 @dataclass(frozen=True)
+class _TrialStateCounts:
+    """Counts of Optuna trial terminal states."""
+
+    complete: int
+    pruned: int
+    failed: int
+
+
+@dataclass(frozen=True)
+class _BestTrialSummary:
+    """Best-trial fields exported in OptimizationHistory."""
+
+    number: int | None
+    value: float | None
+    params: dict[str, Any] | None
+
+
+def _decimal_trial_value(value: Any) -> Decimal:
+    """Normalize Optuna float suggestions back to Decimal precision."""
+    return Decimal(str(round(value, 6)))
+
+
+def _convert_trial_param_value(name: str, value: Any, param_ranges: TypedParamRanges) -> Any:
+    """Convert an exported trial param according to its original range type."""
+    param_range = param_ranges.get(name)
+    if param_range is not None and param_range.is_decimal:
+        return _decimal_trial_value(value)
+    return value
+
+
+def _convert_trial_params(params: dict[str, Any], param_ranges: TypedParamRanges) -> dict[str, Any]:
+    """Convert all exported trial params according to typed parameter ranges."""
+    return {name: _convert_trial_param_value(name, value, param_ranges) for name, value in params.items()}
+
+
+def _trial_time_fields(trial: FrozenTrial) -> tuple[str | None, str | None, float | None]:
+    """Return serialized trial start, completion, and duration fields."""
+    if trial.datetime_start is None:
+        return None, None, None
+    datetime_start = trial.datetime_start.isoformat()
+    if trial.datetime_complete is None:
+        return datetime_start, None, None
+    datetime_complete = trial.datetime_complete.isoformat()
+    duration_seconds = (trial.datetime_complete - trial.datetime_start).total_seconds()
+    return datetime_start, datetime_complete, duration_seconds
+
+
+def _trial_history_entry(trial: FrozenTrial, param_ranges: TypedParamRanges) -> TrialHistoryEntry:
+    """Build one serializable optimization-history trial entry."""
+    datetime_start, datetime_complete, duration_seconds = _trial_time_fields(trial)
+    return TrialHistoryEntry(
+        trial_number=trial.number,
+        state=trial.state.name,
+        value=trial.value,
+        params=_convert_trial_params(trial.params, param_ranges),
+        datetime_start=datetime_start,
+        datetime_complete=datetime_complete,
+        duration_seconds=duration_seconds,
+        user_attrs=dict(trial.user_attrs),
+        system_attrs=dict(trial.system_attrs),
+    )
+
+
+def _trial_state_counts(trials: list[FrozenTrial]) -> _TrialStateCounts:
+    """Count completed, pruned, and failed trials."""
+    return _TrialStateCounts(
+        complete=sum(1 for trial in trials if trial.state == optuna.trial.TrialState.COMPLETE),
+        pruned=sum(1 for trial in trials if trial.state == optuna.trial.TrialState.PRUNED),
+        failed=sum(1 for trial in trials if trial.state == optuna.trial.TrialState.FAIL),
+    )
+
+
+def _best_trial_summary(study: Study, param_ranges: TypedParamRanges) -> _BestTrialSummary:
+    """Return best-trial fields, handling studies without completed trials."""
+    try:
+        best_trial = study.best_trial
+    except ValueError:
+        return _BestTrialSummary(number=None, value=None, params=None)
+    return _BestTrialSummary(
+        number=best_trial.number,
+        value=best_trial.value,
+        params=_convert_trial_params(best_trial.params, param_ranges),
+    )
+
+
+def _stopped_early(callback: EarlyStoppingCallback | None) -> bool:
+    """Return the exported early-stopping flag."""
+    return callback.stopped_early if callback is not None else False
+
+
+@dataclass(frozen=True)
 class _PreparedParamRanges:
     """Typed optimizer ranges split by destination."""
 
@@ -958,39 +1179,12 @@ class OptunaTuner:
             Suggested parameter value (Decimal converted back if needed)
         """
         if param.param_type == ParamType.CATEGORICAL:
-            # Categorical: use suggest_categorical
-            assert param.choices is not None
-            return trial.suggest_categorical(name, param.choices)
-
-        elif param.param_type == ParamType.DISCRETE:
-            # Discrete: use suggest_int
-            assert param.low is not None and param.high is not None
-            if param.step is not None:
-                return trial.suggest_int(name, int(param.low), int(param.high), step=int(param.step))
-            return trial.suggest_int(name, int(param.low), int(param.high))
-
-        elif param.param_type == ParamType.CONTINUOUS:
-            # Continuous: use suggest_float with optional log/step
-            assert param.low is not None and param.high is not None
-            low = float(param.low) if isinstance(param.low, Decimal) else param.low
-            high = float(param.high) if isinstance(param.high, Decimal) else param.high
-
-            # Suggest with appropriate options
-            if param.log:
-                # Log-uniform distribution (step not supported with log)
-                suggested = trial.suggest_float(name, low, high, log=True)
-            elif param.step is not None:
-                suggested = trial.suggest_float(name, low, high, step=param.step)
-            else:
-                suggested = trial.suggest_float(name, low, high)
-
-            # Convert back to Decimal if original was Decimal
-            if param.is_decimal:
-                return Decimal(str(round(suggested, 6)))
-            return suggested
-
-        else:
-            raise ValueError(f"Unknown param type: {param.param_type}")
+            return _suggest_categorical_param(trial, name, param)
+        if param.param_type == ParamType.DISCRETE:
+            return _suggest_discrete_param(trial, name, param)
+        if param.param_type == ParamType.CONTINUOUS:
+            return _suggest_continuous_param(trial, name, param)
+        raise ValueError(f"Unknown param type: {param.param_type}")
 
     def _suggest_param(self, trial: Trial, name: str, values: list[Any] | tuple[Any, ...] | ParamRange) -> Any:
         """Suggest a parameter value using Optuna trial.
@@ -1510,89 +1704,25 @@ class OptunaTuner:
             # Or get as dict
             data = history.to_dict()
         """
-        trials: list[TrialHistoryEntry] = []
-
-        for trial in self.study.trials:
-            # Calculate duration
-            duration_seconds: float | None = None
-            datetime_start: str | None = None
-            datetime_complete: str | None = None
-
-            if trial.datetime_start is not None:
-                datetime_start = trial.datetime_start.isoformat()
-                if trial.datetime_complete is not None:
-                    datetime_complete = trial.datetime_complete.isoformat()
-                    duration_seconds = (trial.datetime_complete - trial.datetime_start).total_seconds()
-
-            # Convert params, handling Decimal values
-            params: dict[str, Any] = {}
-            for name, value in trial.params.items():
-                # Check if original param range was Decimal
-                param_range = self._param_ranges.get(name)
-                if param_range is not None and param_range.is_decimal:
-                    params[name] = Decimal(str(round(value, 6)))
-                else:
-                    params[name] = value
-
-            entry = TrialHistoryEntry(
-                trial_number=trial.number,
-                state=trial.state.name,
-                value=trial.value,
-                params=params,
-                datetime_start=datetime_start,
-                datetime_complete=datetime_complete,
-                duration_seconds=duration_seconds,
-                user_attrs=dict(trial.user_attrs),
-                system_attrs=dict(trial.system_attrs),
-            )
-            trials.append(entry)
-
-        # Count trial states
-        n_complete = sum(1 for t in self.study.trials if t.state == optuna.trial.TrialState.COMPLETE)
-        n_pruned = sum(1 for t in self.study.trials if t.state == optuna.trial.TrialState.PRUNED)
-        n_failed = sum(1 for t in self.study.trials if t.state == optuna.trial.TrialState.FAIL)
-
-        # Get best trial info
-        best_trial_number: int | None = None
-        best_value: float | None = None
-        best_params: dict[str, Any] | None = None
-
-        try:
-            best_trial = self.study.best_trial
-            best_trial_number = best_trial.number
-            best_value = best_trial.value
-
-            # Convert best params
-            best_params = {}
-            for name, value in best_trial.params.items():
-                param_range = self._param_ranges.get(name)
-                if param_range is not None and param_range.is_decimal:
-                    best_params[name] = Decimal(str(round(value, 6)))
-                else:
-                    best_params[name] = value
-        except ValueError:
-            # No completed trials
-            pass
-
-        # Check early stopping status
-        stopped_early = False
-        if self._early_stopping_callback is not None:
-            stopped_early = self._early_stopping_callback.stopped_early
+        study_trials = list(self.study.trials)
+        trials = [_trial_history_entry(trial, self._param_ranges) for trial in study_trials]
+        counts = _trial_state_counts(study_trials)
+        best = _best_trial_summary(self.study, self._param_ranges)
 
         return OptimizationHistory(
             study_name=self.study.study_name,
             objective_metric=self.config.objective_metric,
             direction=self.config.direction or "maximize",
-            n_trials=len(self.study.trials),
-            n_complete=n_complete,
-            n_pruned=n_pruned,
-            n_failed=n_failed,
-            best_trial_number=best_trial_number,
-            best_value=best_value,
-            best_params=best_params,
+            n_trials=len(study_trials),
+            n_complete=counts.complete,
+            n_pruned=counts.pruned,
+            n_failed=counts.failed,
+            best_trial_number=best.number,
+            best_value=best.value,
+            best_params=best.params,
             param_names=list(self._param_ranges.keys()),
             trials=trials,
-            stopped_early=stopped_early,
+            stopped_early=_stopped_early(self._early_stopping_callback),
             export_timestamp=datetime.now().isoformat(),
         )
 

@@ -29,16 +29,27 @@ from typing import Any
 import pytest
 
 from almanak.framework.backtesting.models import (
+    AccuracyEstimate,
     AggregatedPortfolioView,
     BacktestEngine,
     BacktestMetrics,
     BacktestResult,
     CrisisMetrics,
+    DataCoverageMetrics,
     EquityPoint,
     GasPriceRecord,
     IntentType,
     LendingLiquidationEvent,
+    LendingMetrics,
+    LPMetrics,
+    ParameterSource,
+    ParameterSourceTracker,
+    PerpMetrics,
+    PreflightCheckResult,
+    PreflightReport,
     ReconciliationEvent,
+    SlippageMetrics,
+    StrategyType,
     TradeRecord,
 )
 
@@ -65,6 +76,81 @@ def _minimal_dict(**overrides: Any) -> dict[str, Any]:
     }
     base.update(overrides)
     return base
+
+
+def _sample_backtest_result(**overrides: Any) -> BacktestResult:
+    """Build a populated result for summary and round-trip characterization."""
+    result = BacktestResult(
+        engine=BacktestEngine.PNL,
+        deployment_id="round_trip_strategy",
+        start_time=datetime(2024, 1, 1),
+        end_time=datetime(2024, 1, 31),
+        metrics=BacktestMetrics(
+            total_pnl_usd=Decimal("123.45"),
+            net_pnl_usd=Decimal("123.45"),
+            total_return_pct=Decimal("10"),
+            annualized_return_pct=Decimal("20"),
+            sharpe_ratio=Decimal("1.5"),
+            sortino_ratio=Decimal("2.0"),
+            max_drawdown_pct=Decimal("0.05"),
+            calmar_ratio=Decimal("4"),
+            total_trades=5,
+            winning_trades=3,
+            losing_trades=2,
+            win_rate=Decimal("0.6"),
+            profit_factor=Decimal("1.8"),
+            avg_trade_pnl_usd=Decimal("24.69"),
+            largest_win_usd=Decimal("50"),
+            largest_loss_usd=Decimal("-10"),
+            total_fees_usd=Decimal("5"),
+            total_slippage_usd=Decimal("2"),
+            total_gas_usd=Decimal("3"),
+            correlation_risk=Decimal("0.5"),
+        ),
+        trades=[
+            TradeRecord(
+                timestamp=datetime(2024, 1, 2, 10, 30),
+                intent_type=IntentType.SWAP,
+                executed_price=Decimal("2500"),
+                fee_usd=Decimal("1"),
+                slippage_usd=Decimal("0.25"),
+                gas_cost_usd=Decimal("2"),
+                pnl_usd=Decimal("15"),
+                success=True,
+                amount_usd=Decimal("1000"),
+                protocol="uniswap_v3",
+                tokens=["ETH", "USDC"],
+            )
+        ],
+        equity_curve=[
+            EquityPoint(
+                timestamp=datetime(2024, 1, 1),
+                value_usd=Decimal("10000"),
+                valuation_source="simple",
+            ),
+            EquityPoint(
+                timestamp=datetime(2024, 1, 31),
+                value_usd=Decimal("11000"),
+                eth_price_usd=Decimal("2500"),
+                valuation_source="full",
+            ),
+        ],
+        initial_capital_usd=Decimal("10000"),
+        final_capital_usd=Decimal("11000"),
+        chain="arbitrum",
+        run_started_at=datetime(2024, 2, 1, 0, 0, 0),
+        run_ended_at=datetime(2024, 2, 1, 0, 5, 0),
+        run_duration_seconds=300.0,
+        config={"ticker": "ETH"},
+        errors=[{"error_type": "Test", "error_message": "Test message"}],
+        backtest_id="bt-abc123",
+        config_hash="deadbeef",
+        institutional_compliance=True,
+        preflight_passed=True,
+    )
+    for name, value in overrides.items():
+        setattr(result, name, value)
+    return result
 
 
 # -----------------------------------------------------------------------------
@@ -618,6 +704,145 @@ class TestNestedDataclassRehydration:
 
 
 # -----------------------------------------------------------------------------
+# Human-readable summary characterization
+# -----------------------------------------------------------------------------
+
+
+class TestBacktestSummary:
+    def test_summary_includes_base_sections_and_run_info(self) -> None:
+        result = _sample_backtest_result()
+
+        summary = result.summary()
+
+        assert "BACKTEST RESULTS - PNL ENGINE" in summary
+        assert "Strategy:           round_trip_strategy" in summary
+        assert "Chain:              arbitrum" in summary
+        assert "Duration:           30.0 days" in summary
+        assert "Initial Capital:    $10,000.00" in summary
+        assert "Final Capital:      $11,000.00" in summary
+        assert "Net PnL:            $123.45" in summary
+        assert "Total Trades:       5" in summary
+        assert "Total Costs:        $10.00" in summary
+        assert "Run Duration:       300.00s" in summary
+        assert "Compliant:          YES" in summary
+        assert "Preflight Passed:   YES" in summary
+
+    def test_summary_includes_error_summary_counts(self) -> None:
+        result = _sample_backtest_result(
+            error="strategy failed",
+            errors=[
+                {"classification": {"is_fatal": True}},
+                {"classification": {"is_recoverable": True}},
+                {"classification": {"is_non_critical": True}},
+            ],
+        )
+
+        summary = result.summary()
+
+        assert "ERROR" in summary
+        assert "strategy failed" in summary
+        assert "Total Errors:       3" in summary
+        assert "Fatal Errors:       1" in summary
+        assert "Recoverable Errors: 1" in summary
+        assert "Non-Critical Errors: 1" in summary
+
+    def test_summary_truncates_compliance_violations(self) -> None:
+        violations = [f"violation-{index}-" + ("x" * 80) for index in range(7)]
+        result = _sample_backtest_result(
+            institutional_compliance=False,
+            preflight_passed=False,
+            fallback_usage={"price": 2},
+            compliance_violations=violations,
+        )
+
+        summary = result.summary()
+
+        assert "Compliant:          NO" in summary
+        assert "Preflight Passed:   NO" in summary
+        assert "Used Fallbacks:     YES" in summary
+        assert "Violations (7):" in summary
+        assert "  - violation-0-" in summary
+        assert "... and 2 more" in summary
+
+    def test_summary_includes_parameter_sources_and_data_coverage(self) -> None:
+        sources = ParameterSourceTracker()
+        sources.record_parameter("slippage_bps", "30", ParameterSource.CONFIG_FILE, category="config")
+        sources.record_parameter("ltv", "0.8", ParameterSource.PROTOCOL_DEFAULT, category="liquidation")
+        sources.record_parameter("apy", "0.03", ParameterSource.HISTORICAL, category="apy_funding")
+        coverage = DataCoverageMetrics(
+            lp_metrics=LPMetrics(position_count=2, fee_confidence_breakdown={"high": 1, "medium": 1, "low": 0}),
+            perp_metrics=PerpMetrics(position_count=1, funding_confidence_breakdown={"high": 1, "medium": 0, "low": 0}),
+            lending_metrics=LendingMetrics(
+                position_count=1,
+                apy_confidence_breakdown={"high": 0, "medium": 1, "low": 0},
+            ),
+            slippage_metrics=SlippageMetrics(
+                calculation_count=2,
+                slippage_confidence_breakdown={"high": 1, "medium": 0, "low": 1},
+            ),
+        )
+        result = _sample_backtest_result(parameter_sources=sources, data_coverage_metrics=coverage)
+
+        summary = result.summary()
+
+        assert "PARAMETER SOURCES (Audit Trail)" in summary
+        assert "Total Tracked:      3" in summary
+        assert "Config Params:      1 tracked" in summary
+        assert "Liquidation Params: 1 tracked" in summary
+        assert "APY/Funding Params: 1 tracked" in summary
+        assert "  - config_file: 1" in summary
+        assert "  - historical: 1" in summary
+        assert "  - protocol_default: 1" in summary
+        assert "DATA COVERAGE METRICS" in summary
+        assert "Protocol Data Pts:  6" in summary
+        assert "HIGH Confidence:    3" in summary
+        assert "  LP Positions:     2 (HIGH: 50.0%)" in summary
+        assert "  Perp Positions:   1 (HIGH: 100.0%)" in summary
+        assert "  Lending Positions: 1 (HIGH: 0.0%)" in summary
+        assert "  Slippage Calcs:   2 (HIGH: 50.0%)" in summary
+
+
+class TestPreflightReportSummary:
+    def test_summary_includes_failed_checks_and_recommendations(self) -> None:
+        report = PreflightReport(
+            passed=False,
+            checks=[
+                PreflightCheckResult("price", False, "missing WETH", severity="error"),
+                PreflightCheckResult("archive", False, "archive unavailable", severity="warning"),
+            ],
+            estimated_coverage=Decimal("0.75"),
+            tokens_available=["USDC"],
+            tokens_unavailable=["WETH"],
+            recommendations=["Use a full provider"],
+        )
+
+        summary = report.summary()
+
+        assert "Preflight Validation: FAILED" in summary
+        assert "Estimated Coverage: 75.0%" in summary
+        assert "Tokens Available: 1/2" in summary
+        assert "Failed Checks: 2" in summary
+        assert "  - [ERROR] price: missing WETH" in summary
+        assert "  - [WARNING] archive: archive unavailable" in summary
+        assert "Recommendations:" in summary
+        assert "  - Use a full provider" in summary
+
+
+class TestAccuracyEstimateFromConfig:
+    def test_from_config_normalizes_unknown_data_quality_and_low_confidence(self) -> None:
+        estimate = AccuracyEstimate.from_config(
+            strategy_type=StrategyType.LP,
+            data_quality_tier="mystery",
+            detected_confidence="low",
+        )
+
+        assert estimate.strategy_type == "lp"
+        assert estimate.data_quality_tier == "current_only"
+        assert estimate.confidence_interval == "45-75%"
+        assert estimate.warnings == ["Low confidence in strategy type detection - accuracy range widened"]
+
+
+# -----------------------------------------------------------------------------
 # Full round-trip stability
 # -----------------------------------------------------------------------------
 
@@ -626,61 +851,7 @@ class TestRoundTripStability:
     """Serialized -> from_dict -> to_dict should be idempotent after the first load."""
 
     def _make_populated_result(self) -> BacktestResult:
-        return BacktestResult(
-            engine=BacktestEngine.PNL,
-            deployment_id="round_trip_strategy",
-            start_time=datetime(2024, 1, 1),
-            end_time=datetime(2024, 1, 31),
-            metrics=BacktestMetrics(
-                total_pnl_usd=Decimal("123.45"),
-                total_return_pct=Decimal("10"),
-                annualized_return_pct=Decimal("20"),
-                total_trades=5,
-                winning_trades=3,
-                losing_trades=2,
-                correlation_risk=Decimal("0.5"),
-            ),
-            trades=[
-                TradeRecord(
-                    timestamp=datetime(2024, 1, 2, 10, 30),
-                    intent_type=IntentType.SWAP,
-                    executed_price=Decimal("2500"),
-                    fee_usd=Decimal("1"),
-                    slippage_usd=Decimal("0.25"),
-                    gas_cost_usd=Decimal("2"),
-                    pnl_usd=Decimal("15"),
-                    success=True,
-                    amount_usd=Decimal("1000"),
-                    protocol="uniswap_v3",
-                    tokens=["ETH", "USDC"],
-                )
-            ],
-            equity_curve=[
-                EquityPoint(
-                    timestamp=datetime(2024, 1, 1),
-                    value_usd=Decimal("10000"),
-                    valuation_source="simple",
-                ),
-                EquityPoint(
-                    timestamp=datetime(2024, 1, 31),
-                    value_usd=Decimal("11000"),
-                    eth_price_usd=Decimal("2500"),
-                    valuation_source="full",
-                ),
-            ],
-            initial_capital_usd=Decimal("10000"),
-            final_capital_usd=Decimal("11000"),
-            chain="arbitrum",
-            run_started_at=datetime(2024, 2, 1, 0, 0, 0),
-            run_ended_at=datetime(2024, 2, 1, 0, 5, 0),
-            run_duration_seconds=300.0,
-            config={"ticker": "ETH"},
-            errors=[{"error_type": "Test", "error_message": "Test message"}],
-            backtest_id="bt-abc123",
-            config_hash="deadbeef",
-            institutional_compliance=True,
-            preflight_passed=True,
-        )
+        return _sample_backtest_result()
 
     def test_from_dict_of_to_dict_preserves_shape(self) -> None:
         """to_dict -> from_dict must preserve all populated fields."""

@@ -2262,14 +2262,8 @@ class BacktestResult:
         else:
             logger.info(f"Non-critical error at {timestamp}: {context_str}{error_type} - {error_message}{handled_str}")
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
-    def summary(self) -> str:
-        """Generate a human-readable summary of backtest results.
-
-        Returns:
-            Multi-line string with formatted backtest results
-        """
-        lines = [
+    def _summary_base_lines(self) -> list[str]:
+        return [
             "=" * 70,
             f"BACKTEST RESULTS - {self.engine.value.upper()} ENGINE",
             "=" * 70,
@@ -2313,15 +2307,17 @@ class BacktestResult:
             "",
         ]
 
+    def _summary_run_info_lines(self) -> list[str]:
         if self.run_duration_seconds > 0:
-            lines.extend(
-                [
-                    "RUN INFO",
-                    "-" * 70,
-                    f"Run Duration:       {self.run_duration_seconds:.2f}s",
-                ]
-            )
+            return [
+                "RUN INFO",
+                "-" * 70,
+                f"Run Duration:       {self.run_duration_seconds:.2f}s",
+            ]
+        return []
 
+    def _summary_error_lines(self) -> list[str]:
+        lines: list[str] = []
         if self.error:
             lines.extend(
                 [
@@ -2333,7 +2329,6 @@ class BacktestResult:
             )
 
         if self.errors:
-            # Count errors by category
             fatal_count = sum(1 for e in self.errors if e.get("classification", {}).get("is_fatal"))
             recoverable_count = sum(1 for e in self.errors if e.get("classification", {}).get("is_recoverable"))
             non_critical_count = sum(1 for e in self.errors if e.get("classification", {}).get("is_non_critical"))
@@ -2349,8 +2344,10 @@ class BacktestResult:
                     f"Non-Critical Errors: {non_critical_count}",
                 ]
             )
+        return lines
 
-        # Institutional compliance section
+    def _summary_institutional_lines(self) -> list[str]:
+        lines: list[str] = []
         lines.extend(
             [
                 "",
@@ -2368,8 +2365,10 @@ class BacktestResult:
                 lines.append(f"  - {violation[:60]}...")
             if len(self.compliance_violations) > 5:
                 lines.append(f"  ... and {len(self.compliance_violations) - 5} more")
+        return lines
 
-        # Parameter source tracking section
+    def _summary_parameter_source_lines(self) -> list[str]:
+        lines: list[str] = []
         if self.parameter_sources:
             sources_summary = self.parameter_sources.get_sources_summary()
             lines.extend(
@@ -2387,8 +2386,10 @@ class BacktestResult:
                 lines.append("By Source Type:")
                 for source, count in sorted(sources_summary.items()):
                     lines.append(f"  - {source}: {count}")
+        return lines
 
-        # Data coverage metrics section (only show when protocol data points exist)
+    def _summary_data_coverage_lines(self) -> list[str]:
+        lines: list[str] = []
         if self.data_coverage_metrics and self.data_coverage_metrics.total_data_points > 0:
             dcm = self.data_coverage_metrics
             lines.extend(
@@ -2422,6 +2423,20 @@ class BacktestResult:
                     f"  Slippage Calcs:   {dcm.slippage_metrics.calculation_count} "
                     f"(HIGH: {dcm.slippage_metrics.high_confidence_pct:.1f}%)"
                 )
+        return lines
+
+    def summary(self) -> str:
+        """Generate a human-readable summary of backtest results.
+
+        Returns:
+            Multi-line string with formatted backtest results
+        """
+        lines = self._summary_base_lines()
+        lines.extend(self._summary_run_info_lines())
+        lines.extend(self._summary_error_lines())
+        lines.extend(self._summary_institutional_lines())
+        lines.extend(self._summary_parameter_source_lines())
+        lines.extend(self._summary_data_coverage_lines())
 
         lines.append("=" * 70)
 

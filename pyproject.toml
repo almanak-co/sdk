@@ -285,11 +285,16 @@ omit = [
 #                missing, 40 928 tests passing, 12m19s with COVERAGE_CORE=sysmon).
 #                Bumped to 80 → 0.85 pt buffer. Meets the long-standing 80% target;
 #                the gate now holds that line.
+#   2026-06-18 — CI measured 82.62% on codex/fix-backtesting-crap-offenders
+#                (PR #2889, run 27740974846, test_pytest / test job: 187 479 stmts,
+#                154 897 covered, 32 582 missing). The backtesting CRAP cleanup added
+#                broad unit coverage across the backtesting layer. Bumped to 82
+#                → 0.62 pt buffer.
 #
 # fail_under is a no-regress gate, NOT the goal — the 80% target lives in
 # docs/internal/coverage-improvement-plan.md §3. Ratchet policy (each phase increments
 # fail_under to its exit-criteria number, never decrements) is in §8 Phase 0 of the same doc.
-fail_under = 80
+fail_under = 82
 show_missing = true
 skip_empty = true
 

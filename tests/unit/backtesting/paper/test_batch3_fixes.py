@@ -10,8 +10,6 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 
 class TestIndicatorFallback:
     """VIB-1955: Multi-source OHLCV provider replaces Binance-only."""
@@ -175,6 +173,86 @@ class TestForkRpcUrl:
 
         assert snapshot.fork_rpc_url == "http://127.0.0.1:8546"
         assert snapshot.fork_block == 42000
+
+    def test_create_market_snapshot_uses_case_insensitive_token_prices(self):
+        """Tracker token casing must not force a $1 fallback valuation."""
+        import asyncio
+
+        from almanak.framework.backtesting.paper.engine import create_market_snapshot_from_fork
+
+        fork_manager = MagicMock()
+        fork_manager.is_running = False
+        portfolio_tracker = SimpleNamespace(current_balances={"wstETH": Decimal("2")})
+
+        snapshot = asyncio.run(
+            create_market_snapshot_from_fork(
+                fork_manager=fork_manager,
+                chain="arbitrum",
+                wallet_address="0xabc",
+                portfolio_tracker=portfolio_tracker,
+                token_prices={"wstETH": Decimal("3500")},
+            )
+        )
+
+        balance = snapshot.balance("wstETH")
+        assert balance.balance == Decimal("2")
+        assert balance.balance_usd == Decimal("7000")
+
+    def test_create_market_snapshot_materializes_native_wrapped_alias(self):
+        """Native/wrapped aliases remain queryable for paper-funded balances."""
+        import asyncio
+
+        from almanak.framework.backtesting.paper.engine import create_market_snapshot_from_fork
+
+        fork_manager = MagicMock()
+        fork_manager.is_running = False
+        portfolio_tracker = SimpleNamespace(current_balances={"ETH": Decimal("1.5")})
+
+        snapshot = asyncio.run(
+            create_market_snapshot_from_fork(
+                fork_manager=fork_manager,
+                chain="arbitrum",
+                wallet_address="0xabc",
+                portfolio_tracker=portfolio_tracker,
+                token_prices={"ETH": Decimal("3000")},
+            )
+        )
+
+        balance = snapshot.balance("ETH")
+        assert balance.balance == Decimal("1.5")
+        assert balance.balance_usd == Decimal("4500.0")
+
+        alias_balance = snapshot.balance("WETH")
+        assert alias_balance.balance == Decimal("1.5")
+        assert alias_balance.balance_usd == Decimal("4500.0")
+
+    def test_create_market_snapshot_keeps_unpriced_balance_amount_queryable(self):
+        """Unpriced tokens keep their measured amount with unmeasured USD."""
+        import asyncio
+
+        from almanak.framework.backtesting.paper.engine import create_market_snapshot_from_fork
+
+        fork_manager = MagicMock()
+        fork_manager.is_running = False
+        portfolio_tracker = SimpleNamespace(current_balances={"ARB": Decimal("42")})
+
+        snapshot = asyncio.run(
+            create_market_snapshot_from_fork(
+                fork_manager=fork_manager,
+                chain="arbitrum",
+                wallet_address="0xabc",
+                portfolio_tracker=portfolio_tracker,
+                token_prices={},
+            )
+        )
+
+        balance = snapshot.balance("ARB")
+        assert balance.balance == Decimal("42")
+        assert balance.balance_usd == Decimal("0")
+
+        priced_balance = snapshot.balance("ARB", price=Decimal("2"))
+        assert priced_balance.balance == Decimal("42")
+        assert priced_balance.balance_usd == Decimal("84")
 
 
 class TestHealthTelemetry:

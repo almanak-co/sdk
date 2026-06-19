@@ -1202,7 +1202,8 @@
                     </thead>
                     <tbody id="trades-body">
                         {% for trade in trades %}
-                        <tr data-type="{{ trade.intent_type.value }}" data-status="{{ 'success' if trade.success else 'failed' }}" data-pnl="{{ 'positive' if trade.pnl_usd|float >= 0 else 'negative' }}">
+                        {% set trade_has_pnl = trade.pnl_usd != '-' %}
+                        <tr data-type="{{ trade.intent_type.value }}" data-status="{{ 'success' if trade.success else 'failed' }}" data-pnl="{% if not trade_has_pnl %}none{% elif trade.pnl_usd|float >= 0 %}positive{% else %}negative{% endif %}">
                             <td>{{ loop.index }}</td>
                             <td data-value="{{ trade.timestamp.timestamp() }}">{{ trade.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
                             <td>{{ trade.intent_type.value }}</td>
@@ -1213,8 +1214,12 @@
                             <td data-value="{{ trade.fee_usd|float }}">${{ "{:,.2f}".format(trade.fee_usd|float) }}</td>
                             <td data-value="{{ trade.slippage_usd|float }}">${{ "{:,.2f}".format(trade.slippage_usd|float) }}</td>
                             <td data-value="{{ trade.gas_cost_usd|float }}">${{ "{:,.2f}".format(trade.gas_cost_usd|float) }}</td>
-                            <td class="{% if trade.pnl_usd|float >= 0 %}pnl-positive{% else %}pnl-negative{% endif %}" data-value="{{ trade.pnl_usd|float }}">
+                            <td class="{% if not trade_has_pnl %}neutral{% elif trade.pnl_usd|float >= 0 %}pnl-positive{% else %}pnl-negative{% endif %}" data-value="{% if trade_has_pnl %}{{ trade.pnl_usd|float }}{% endif %}">
+                                {% if trade_has_pnl %}
                                 ${{ "{:,.2f}".format(trade.pnl_usd|float) }}
+                                {% else %}
+                                -
+                                {% endif %}
                             </td>
                             <td class="{% if trade.success %}success{% else %}failed{% endif %}">
                                 {{ 'Success' if trade.success else 'Failed' }}

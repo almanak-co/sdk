@@ -287,6 +287,36 @@ class TestInsufficientBalanceFailsFill:
         assert portfolio.positions == []
         assert portfolio.get_total_value_usd(market_state) == Decimal("10000")
 
+    def test_missing_close_position_rejects_without_crediting_inflow(
+        self, portfolio: SimulatedPortfolio, market_state: MarketState
+    ) -> None:
+        """A close fill must not credit returned assets unless a position closed."""
+        fill = SimulatedFill(
+            timestamp=TS,
+            intent_type=IntentType.LP_CLOSE,
+            protocol="uniswap_v3",
+            tokens=["WETH", "USDC"],
+            executed_price=WETH_PRICE,
+            amount_usd=Decimal("6000"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            tokens_in={"WETH": Decimal("1"), "USDC": Decimal("3000")},
+            tokens_out={},
+            position_close_id="missing-position",
+        )
+
+        applied = portfolio.apply_fill(fill, market_state=market_state)
+
+        assert applied is False
+        assert portfolio.cash_usd == Decimal("10000")
+        assert portfolio.tokens == {}
+        assert portfolio.positions == []
+        assert portfolio._closed_positions == []
+        trade = portfolio.trades[0]
+        assert trade.success is False
+        assert "not found for close" in trade.metadata["failure_reason"]
+
 
 class TestStableCashDebitMechanics:
     """Stable outflows draw from the token balance first, then cash_usd at $1."""

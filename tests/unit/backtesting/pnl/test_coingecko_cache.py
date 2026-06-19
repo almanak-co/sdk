@@ -19,11 +19,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.framework.backtesting.config import BacktestDataConfig
+from almanak.framework.backtesting.pnl.data_provider import OHLCV, HistoricalDataConfig
 from almanak.framework.backtesting.pnl.providers.coingecko import (
     CoinGeckoDataProvider,
+    CoinGeckoRateLimitError,
     HistoricalCacheEntry,
     HistoricalCacheStats,
     HistoricalPriceCache,
+    OHLCVCache,
     RetryConfig,
 )
 
@@ -76,6 +80,36 @@ class TestHistoricalCacheStats:
         assert result["cache_misses"] == 10
         assert result["cache_entries"] == 50
         assert result["hit_rate_percent"] == 90.0
+
+
+class TestCoinGeckoProviderInitialization:
+    """Tests for CoinGecko provider constructor setup."""
+
+    def test_data_config_rate_limit_overrides_api_tier_rate(self):
+        """BacktestDataConfig supplies the rate limit even when an API key is present."""
+        data_config = BacktestDataConfig(coingecko_rate_limit_per_minute=25)
+
+        provider = CoinGeckoDataProvider(api_key="test-key", data_config=data_config)
+
+        assert provider._rate_limit == 25
+        assert provider._rate_limiter.initial_requests_per_minute == 25
+        assert provider._min_request_interval == 0.2
+
+    def test_explicit_pro_request_interval_is_preserved(self):
+        """Only the default free-tier interval is auto-reduced for pro API keys."""
+        provider = CoinGeckoDataProvider(api_key="test-key", min_request_interval=0.75)
+
+        assert provider._min_request_interval == 0.75
+
+    def test_token_addresses_are_stored_with_uppercase_symbols(self):
+        """Address-backed token resolution should be case-insensitive by symbol."""
+        provider = CoinGeckoDataProvider(
+            token_addresses={"wstETH": ("arbitrum", "0x5979D7b546E38E414F7E9822514be443A4800529")}
+        )
+
+        assert provider._token_addresses == {
+            "WSTETH": ("arbitrum", "0x5979D7b546E38E414F7E9822514be443A4800529")
+        }
 
 
 class TestHistoricalPriceCache:
@@ -284,6 +318,64 @@ class TestHistoricalPriceCache:
         assert stats.hit_rate == 100.0
         assert stats.total_requests == 300
         assert stats.cache_hits == 300
+
+
+class TestOHLCVCache:
+    """Tests for CoinGecko OHLCV iteration cache semantics."""
+
+    def test_get_price_at_before_first_candle_returns_none(self):
+        """The cache must not use a future candle as a historical price."""
+        first_candle = OHLCV(
+            timestamp=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
+            open=Decimal("100"),
+            high=Decimal("110"),
+            low=Decimal("95"),
+            close=Decimal("105"),
+            volume=None,
+        )
+        cache = OHLCVCache(data={"ETH": [first_candle]}, fetched_at=datetime(2024, 1, 1, tzinfo=UTC))
+
+        price = cache.get_price_at("ETH", datetime(2024, 1, 1, 0, 0, tzinfo=UTC))
+
+        assert price is None
+
+
+class TestCoinGeckoIteration:
+    """Tests for CoinGecko historical market-state iteration."""
+
+    @pytest.mark.asyncio
+    async def test_iterate_does_not_emit_future_price_before_first_candle(self):
+        """Iteration should leave prices empty before the first prefetched candle."""
+        first_candle = OHLCV(
+            timestamp=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
+            open=Decimal("100"),
+            high=Decimal("110"),
+            low=Decimal("95"),
+            close=Decimal("105"),
+            volume=None,
+        )
+        provider = CoinGeckoDataProvider(retry_config=RetryConfig(max_retries=0))
+        provider._prefetch_ohlcv_data = AsyncMock(  # type: ignore[method-assign]
+            return_value=OHLCVCache(
+                data={"ETH": [first_candle]},
+                fetched_at=datetime(2024, 1, 1, tzinfo=UTC),
+            )
+        )
+        config = HistoricalDataConfig(
+            start_time=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            end_time=datetime(2024, 1, 1, 1, 0, tzinfo=UTC),
+            interval_seconds=3600,
+            tokens=["ETH"],
+            include_ohlcv=True,
+        )
+
+        data_points = [(timestamp, state) async for timestamp, state in provider.iterate(config)]
+
+        assert data_points[0][0] == datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        assert data_points[0][1].prices == {}
+        assert data_points[0][1].ohlcv == {}
+        assert data_points[1][1].prices == {"ETH": Decimal("105")}
+        assert data_points[1][1].ohlcv == {"ETH": first_candle}
 
 
 class TestCoinGeckoProviderCaching:
@@ -665,6 +757,38 @@ class TestCacheWarming:
             assert stats["hit_rate_percent"] == 100.0
             assert stats["hit_rate_percent"] > 90.0  # Explicit check for >90%
 
+        await provider.close()
+
+    @pytest.mark.asyncio
+    async def test_warm_cache_skips_unknown_token_without_fetching(self, provider):
+        """Unknown tokens are honest misses and do not trigger price fetches."""
+        provider.get_price = AsyncMock()  # type: ignore[method-assign]
+
+        cached = await provider.warm_cache(
+            tokens=["UNKNOWN"],
+            start_date=datetime(2024, 1, 1, tzinfo=UTC),
+            end_date=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+
+        assert cached == {"UNKNOWN": 0}
+        provider.get_price.assert_not_awaited()
+        await provider.close()
+
+    @pytest.mark.asyncio
+    async def test_warm_cache_stops_current_token_on_rate_limit(self, provider):
+        """Rate limits stop the current token without overstating cached days."""
+        provider.get_price = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[Decimal("2500"), CoinGeckoRateLimitError("rate limited")]
+        )
+
+        cached = await provider.warm_cache(
+            tokens=["WETH"],
+            start_date=datetime(2024, 1, 1, tzinfo=UTC),
+            end_date=datetime(2024, 1, 3, tzinfo=UTC),
+        )
+
+        assert cached == {"WETH": 1}
+        assert provider.get_price.await_count == 2
         await provider.close()
 
 

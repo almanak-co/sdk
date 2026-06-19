@@ -4,20 +4,18 @@ Verifies that the benchmark provider uses CoinGecko Pro API when
 COINGECKO_API_KEY is set, and falls back to the free API otherwise.
 """
 
-import asyncio
 from datetime import datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from almanak.framework.backtesting.pnl.providers import benchmark as benchmark_provider
 from almanak.framework.backtesting.pnl.providers.benchmark import (
     Benchmark,
+    BenchmarkPricePoint,
     _get_single_token_prices,
     _parse_coingecko_prices,
-    get_benchmark_price_series,
-    get_benchmark_returns,
-    get_benchmark_total_return,
 )
 
 
@@ -221,6 +219,82 @@ class TestParseCoingeckoPrices:
         """Should return empty list when 'prices' key is missing."""
         result = _parse_coingecko_prices({}, 86400)
         assert result == []
+
+
+class TestDefiIndexPrices:
+    """Tests for DeFi index basket construction."""
+
+    @pytest.mark.asyncio
+    async def test_defi_index_uses_latest_component_price_at_or_before_reference_timestamp(self):
+        """A component's future point must not leak into an earlier index timestamp."""
+        jan_1 = datetime(2024, 1, 1)
+        jan_2 = datetime(2024, 1, 2)
+        jan_3 = datetime(2024, 1, 3)
+        token_prices = {
+            "UNI": [
+                BenchmarkPricePoint(jan_1, Decimal("100")),
+                BenchmarkPricePoint(jan_2, Decimal("110")),
+            ],
+            "AAVE": [
+                BenchmarkPricePoint(jan_1, Decimal("200")),
+                BenchmarkPricePoint(jan_3, Decimal("300")),
+            ],
+        }
+
+        async def fake_single_token_prices(
+            token: str,
+            _start: datetime,
+            _end: datetime,
+            _interval_seconds: int,
+        ) -> list[BenchmarkPricePoint]:
+            return token_prices[token]
+
+        with (
+            patch.dict(
+                benchmark_provider.DEFI_INDEX_WEIGHTS,
+                {"UNI": Decimal("0.5"), "AAVE": Decimal("0.5")},
+                clear=True,
+            ),
+            patch.object(
+                benchmark_provider,
+                "_get_single_token_prices",
+                side_effect=fake_single_token_prices,
+            ),
+        ):
+            prices = await benchmark_provider._get_defi_index_prices(jan_1, jan_3, 86400)
+
+        assert [(point.timestamp, point.price) for point in prices] == [
+            (jan_1, Decimal("100")),
+            (jan_2, Decimal("105.00")),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_defi_index_returns_empty_when_components_are_unavailable(self):
+        """No component prices means no fabricated benchmark series."""
+
+        async def empty_single_token_prices(
+            _token: str,
+            _start: datetime,
+            _end: datetime,
+            _interval_seconds: int,
+        ) -> list[BenchmarkPricePoint]:
+            return []
+
+        with (
+            patch.dict(benchmark_provider.DEFI_INDEX_WEIGHTS, {"UNI": Decimal("1")}, clear=True),
+            patch.object(
+                benchmark_provider,
+                "_get_single_token_prices",
+                side_effect=empty_single_token_prices,
+            ),
+        ):
+            prices = await benchmark_provider._get_defi_index_prices(
+                datetime(2024, 1, 1),
+                datetime(2024, 1, 2),
+                86400,
+            )
+
+        assert prices == []
 
 
 class TestBenchmarkEnum:

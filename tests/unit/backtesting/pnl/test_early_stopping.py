@@ -15,6 +15,7 @@ import logging
 import tempfile
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import optuna
@@ -26,7 +27,11 @@ from almanak.framework.backtesting.pnl.optuna_tuner import (
     OptimizationResult,
     OptunaTuner,
     OptunaTunerConfig,
+    ParamType,
     TrialHistoryEntry,
+    _convert_legacy_param,
+    categorical,
+    continuous,
     discrete,
 )
 
@@ -564,6 +569,149 @@ class TestOptimizationHistory:
 
 
 # =============================================================================
+# ParamRange and Legacy Parameter Conversion Tests
+# =============================================================================
+
+
+class TestParamRangeValidation:
+    """Tests for Optuna parameter range validation."""
+
+    def test_to_dict_includes_all_optional_fields(self) -> None:
+        """Test ParamRange serialization for every supported field."""
+        param = continuous(Decimal("0.1"), Decimal("0.9"), step=0.1)
+
+        data = param.to_dict()
+
+        assert data == {
+            "param_type": "continuous",
+            "low": "0.1",
+            "high": "0.9",
+            "step": 0.1,
+        }
+
+    def test_log_continuous_rejects_step(self) -> None:
+        """Test log-scaled ranges cannot silently discard a configured step."""
+        with pytest.raises(ValueError, match="Log scale does not support 'step'"):
+            continuous(0.001, 0.1, step=0.001, log=True)
+
+    @pytest.mark.parametrize(
+        "param",
+        [
+            continuous,
+            discrete,
+        ],
+    )
+    def test_rejects_non_positive_step(self, param: Any) -> None:
+        """Test non-positive steps are rejected before Optuna sees the range."""
+        with pytest.raises(ValueError, match="'step' must be positive"):
+            param(1, 10, step=0)
+
+        with pytest.raises(ValueError, match="'step' must be positive"):
+            param(1, 10, step=-1)
+
+
+class TestConvertLegacyParam:
+    """Tests for legacy parameter range conversion."""
+
+    def test_returns_existing_param_range(self) -> None:
+        """Test an already typed range is returned unchanged."""
+        param = discrete(1, 5)
+
+        assert _convert_legacy_param("window", param) is param
+
+    def test_list_becomes_categorical(self) -> None:
+        """Test legacy lists become categorical choices."""
+        param = _convert_legacy_param("mode", ["a", "b"])
+
+        assert param == categorical(["a", "b"])
+
+    def test_integer_tuple_becomes_discrete(self) -> None:
+        """Test integer tuple ranges stay discrete."""
+        param = _convert_legacy_param("window", (1, 9, 2))
+
+        assert param == discrete(1, 9, step=2)
+
+    @pytest.mark.parametrize(
+        ("legacy", "expected_low", "expected_high"),
+        [
+            ((0.1, 0.9), 0.1, 0.9),
+            ((1, 2.5), 1.0, 2.5),
+            ((1, Decimal("2.5")), Decimal("1"), Decimal("2.5")),
+        ],
+    )
+    def test_numeric_tuple_becomes_continuous(
+        self,
+        legacy: tuple[Any, ...],
+        expected_low: float | Decimal,
+        expected_high: float | Decimal,
+    ) -> None:
+        """Test mixed numeric legacy ranges are accepted as continuous ranges."""
+        param = _convert_legacy_param("threshold", legacy)
+
+        assert param.param_type == ParamType.CONTINUOUS
+        assert param.low == expected_low
+        assert param.high == expected_high
+
+    def test_invalid_tuple_length_raises(self) -> None:
+        """Test invalid tuple arity reports the offending parameter."""
+        with pytest.raises(ValueError, match="Parameter 'threshold' tuple must have 2 or 3 elements"):
+            _convert_legacy_param("threshold", (1, 2, 3, 4))
+
+    def test_unsupported_legacy_type_raises(self) -> None:
+        """Test unsupported legacy values fail with parameter context."""
+        with pytest.raises(ValueError, match="Parameter 'threshold' must be list, tuple, or ParamRange"):
+            _convert_legacy_param("threshold", {"min": 1, "max": 2})  # type: ignore[arg-type]
+
+
+class TestOptunaTunerSuggestion:
+    """Tests for mapping ParamRange values onto Optuna suggest methods."""
+
+    def test_suggests_categorical(self) -> None:
+        """Test categorical ranges call suggest_categorical."""
+        tuner = OptunaTuner()
+        trial = MagicMock()
+        trial.suggest_categorical.return_value = "b"
+
+        value = tuner._suggest_from_param_range(trial, "mode", categorical(["a", "b"]))
+
+        assert value == "b"
+        trial.suggest_categorical.assert_called_once_with("mode", ["a", "b"])
+
+    def test_suggests_discrete_with_and_without_step(self) -> None:
+        """Test discrete ranges call suggest_int with the configured bounds."""
+        tuner = OptunaTuner()
+        trial = MagicMock()
+        trial.suggest_int.side_effect = [5, 7]
+
+        assert tuner._suggest_from_param_range(trial, "plain", discrete(1, 10)) == 5
+        assert tuner._suggest_from_param_range(trial, "stepped", discrete(1, 10, step=2)) == 7
+
+        assert trial.suggest_int.call_args_list[0].args == ("plain", 1, 10)
+        assert trial.suggest_int.call_args_list[1].args == ("stepped", 1, 10)
+        assert trial.suggest_int.call_args_list[1].kwargs == {"step": 2}
+
+    def test_suggests_continuous_variants(self) -> None:
+        """Test continuous ranges route default, stepped, log, and Decimal variants."""
+        tuner = OptunaTuner()
+        trial = MagicMock()
+        trial.suggest_float.side_effect = [0.5, 0.6, 0.01, 1234.5678912]
+
+        assert tuner._suggest_from_param_range(trial, "plain", continuous(0.0, 1.0)) == 0.5
+        assert tuner._suggest_from_param_range(trial, "stepped", continuous(0.0, 1.0, step=0.1)) == 0.6
+        assert tuner._suggest_from_param_range(trial, "log", continuous(0.001, 0.1, log=True)) == 0.01
+        decimal_value = tuner._suggest_from_param_range(
+            trial,
+            "capital",
+            continuous(Decimal("1000"), Decimal("2000")),
+        )
+
+        assert decimal_value == Decimal("1234.567891")
+        assert trial.suggest_float.call_args_list[0].args == ("plain", 0.0, 1.0)
+        assert trial.suggest_float.call_args_list[1].kwargs == {"step": 0.1}
+        assert trial.suggest_float.call_args_list[2].kwargs == {"log": True}
+
+
+# =============================================================================
 # OptunaTuner Integration Tests
 # =============================================================================
 
@@ -624,6 +772,43 @@ class TestOptunaTunerEarlyStoppingIntegration:
         assert history.best_trial_number is not None
         assert history.best_value is not None
         assert len(history.trials) == 3
+
+    def test_export_history_counts_all_trial_states_and_decimal_params(self) -> None:
+        """Test history export preserves failed/pruned state counts and Decimal params."""
+        tuner = OptunaTuner(objective_metric="sharpe_ratio")
+
+        def complete_objective(trial: optuna.trial.Trial) -> float:
+            trial.suggest_float("capital", 1000.0, 2000.0)
+            return 1.0
+
+        def pruned_objective(trial: optuna.trial.Trial) -> float:
+            trial.suggest_float("capital", 1000.0, 2000.0)
+            raise optuna.TrialPruned()
+
+        def failed_objective(trial: optuna.trial.Trial) -> float:
+            trial.suggest_float("capital", 1000.0, 2000.0)
+            raise RuntimeError("boom")
+
+        tuner.study.optimize(complete_objective, n_trials=1, show_progress_bar=False)
+        tuner.study.optimize(pruned_objective, n_trials=1, show_progress_bar=False)
+        tuner.study.optimize(
+            failed_objective,
+            n_trials=1,
+            show_progress_bar=False,
+            catch=(RuntimeError,),
+        )
+        tuner._param_ranges = {"capital": continuous(Decimal("1000"), Decimal("2000"))}
+
+        history = tuner.export_history()
+
+        assert history.n_trials == 3
+        assert history.n_complete == 1
+        assert history.n_pruned == 1
+        assert history.n_failed == 1
+        assert history.best_params is not None
+        assert isinstance(history.best_params["capital"], Decimal)
+        assert [trial.state for trial in history.trials] == ["COMPLETE", "PRUNED", "FAIL"]
+        assert all(isinstance(trial.params["capital"], Decimal) for trial in history.trials)
 
     def test_save_history(self) -> None:
         """Test save_history convenience method."""

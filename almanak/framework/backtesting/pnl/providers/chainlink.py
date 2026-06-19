@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from almanak.config.backtest import backtest_config_from_env
+from almanak.framework.data.interfaces import DataSourceUnavailable
 
 from ..data_provider import OHLCV, HistoricalDataCapability, HistoricalDataConfig, MarketState
 from ..types import DataConfidence, DataSourceInfo
@@ -86,6 +87,13 @@ MAX_ROUNDS_TO_FETCH = 50000
 ROUND_FETCH_PROGRESS_INTERVAL = 500
 MAX_BINARY_SEARCH_ITERATIONS = 50
 MAX_MULTICALL_BATCH_SIZE = 100
+CHAINLINK_ROUND_DATA_RESPONSE_BYTES = 160
+ROUND_GAP_SEARCH_RADIUS = 100
+
+
+def _chainlink_round_phase(round_id: int) -> int:
+    """Return the Chainlink phase encoded in an aggregator round id."""
+    return round_id >> 64
 
 
 # =============================================================================
@@ -212,6 +220,31 @@ class ChainlinkPriceResult:
     confidence: DataConfidence
     source_info: DataSourceInfo
     is_stale: bool = False
+
+
+@dataclass
+class _IterationStats:
+    """Mutable counters and provenance for Chainlink iteration."""
+
+    has_archive: bool
+    data_source: str
+    historical_price_hits: int = 0
+    fallback_price_hits: int = 0
+
+    def record_price_hit(self) -> None:
+        """Record one price hit on the active iteration source."""
+        if self.has_archive:
+            self.historical_price_hits += 1
+        else:
+            self.fallback_price_hits += 1
+
+    def metadata(self) -> dict[str, int | str]:
+        """Return metadata attached to each yielded market state."""
+        return {
+            "data_source": self.data_source,
+            "historical_price_hits": self.historical_price_hits,
+            "fallback_price_hits": self.fallback_price_hits,
+        }
 
 
 @dataclass
@@ -518,28 +551,19 @@ class ChainlinkDataProvider:
             return
 
         try:
-            with open(cache_path) as f:
-                cache_data = json.load(f)
-
-            # Check cache age
-            cache_time = datetime.fromisoformat(cache_data.get("cached_at", "1970-01-01T00:00:00+00:00"))
-            age_days = (datetime.now(UTC) - cache_time).days
+            cache_data = self._read_persistent_cache_file(cache_path)
+            age_days = self._persistent_cache_age_days(cache_data)
             if age_days > self._persistent_cache_config.max_age_days:
                 logger.info(f"Persistent cache expired ({age_days} days old), will refresh")
                 return
 
-            # Load round data
-            for feed_address, rounds in cache_data.get("rounds", {}).items():
-                self._round_cache[feed_address] = [
-                    (r["round_id"], r["updated_at"], Decimal(r["price"])) for r in rounds
-                ]
+            round_cache = self._decode_persistent_rounds(cache_data.get("rounds", {}))
+            decimals_cache = self._decode_persistent_decimals(cache_data.get("decimals", {}))
+            round_bounds_cache = self._decode_persistent_round_bounds(cache_data.get("round_bounds", {}))
 
-            # Load decimals
-            self._decimals_cache = cache_data.get("decimals", {})
-
-            # Load round bounds
-            for feed_address, bounds in cache_data.get("round_bounds", {}).items():
-                self._round_bounds_cache[feed_address] = (bounds["min"], bounds["max"])
+            self._round_cache = round_cache
+            self._decimals_cache = decimals_cache
+            self._round_bounds_cache = round_bounds_cache
 
             logger.info(
                 f"Loaded persistent cache for {self._chain}",
@@ -552,6 +576,39 @@ class ChainlinkDataProvider:
         except Exception as e:
             logger.warning(f"Failed to load persistent cache: {e}")
 
+    @staticmethod
+    def _read_persistent_cache_file(cache_path: Path) -> dict[str, Any]:
+        """Read a persistent cache JSON file."""
+        with cache_path.open() as f:
+            return json.load(f)
+
+    @staticmethod
+    def _persistent_cache_age_days(cache_data: dict[str, Any]) -> int:
+        """Return cache age in whole days."""
+        cache_time = datetime.fromisoformat(cache_data.get("cached_at", "1970-01-01T00:00:00+00:00"))
+        return (datetime.now(UTC) - cache_time).days
+
+    @staticmethod
+    def _decode_persistent_rounds(rounds_data: dict[str, Any]) -> dict[str, list[tuple[int, int, Decimal]]]:
+        """Decode round tuples from persistent cache JSON."""
+        return {
+            feed_address: [
+                (round_data["round_id"], round_data["updated_at"], Decimal(round_data["price"]))
+                for round_data in rounds
+            ]
+            for feed_address, rounds in rounds_data.items()
+        }
+
+    @staticmethod
+    def _decode_persistent_decimals(decimals_data: dict[str, Any]) -> dict[str, int]:
+        """Decode decimals cache from persistent cache JSON."""
+        return {feed_address: int(decimals) for feed_address, decimals in decimals_data.items()}
+
+    @staticmethod
+    def _decode_persistent_round_bounds(round_bounds_data: dict[str, Any]) -> dict[str, tuple[int, int]]:
+        """Decode round bounds from persistent cache JSON."""
+        return {feed_address: (bounds["min"], bounds["max"]) for feed_address, bounds in round_bounds_data.items()}
+
     def _save_persistent_cache(self) -> None:
         """Save round data to persistent cache file if enabled."""
         cache_path = self._persistent_cache_config.get_cache_path(self._chain)
@@ -559,26 +616,29 @@ class ChainlinkDataProvider:
             return
 
         try:
-            cache_data = {
-                "cached_at": datetime.now(UTC).isoformat(),
-                "chain": self._chain,
-                "rounds": {
-                    feed_address: [{"round_id": r[0], "updated_at": r[1], "price": str(r[2])} for r in rounds]
-                    for feed_address, rounds in self._round_cache.items()
-                },
-                "decimals": self._decimals_cache,
-                "round_bounds": {
-                    feed_address: {"min": bounds[0], "max": bounds[1]}
-                    for feed_address, bounds in self._round_bounds_cache.items()
-                },
-            }
-
-            with open(cache_path, "w") as f:
+            cache_data = self._persistent_cache_payload()
+            with cache_path.open("w") as f:
                 json.dump(cache_data, f, indent=2)
 
             logger.debug(f"Saved persistent cache to {cache_path}")
         except Exception as e:
             logger.warning(f"Failed to save persistent cache: {e}")
+
+    def _persistent_cache_payload(self) -> dict[str, Any]:
+        """Build the JSON payload for the persistent cache file."""
+        return {
+            "cached_at": datetime.now(UTC).isoformat(),
+            "chain": self._chain,
+            "rounds": {
+                feed_address: [{"round_id": r[0], "updated_at": r[1], "price": str(r[2])} for r in rounds]
+                for feed_address, rounds in self._round_cache.items()
+            },
+            "decimals": self._decimals_cache,
+            "round_bounds": {
+                feed_address: {"min": bounds[0], "max": bounds[1]}
+                for feed_address, bounds in self._round_bounds_cache.items()
+            },
+        }
 
     @property
     def priority(self) -> int:
@@ -636,6 +696,42 @@ class ChainlinkDataProvider:
     # On-Chain Query Methods
     # =========================================================================
 
+    @staticmethod
+    def _decode_round_data_response(
+        result: Any,
+        *,
+        context: str,
+        warn_on_short_response: bool = False,
+    ) -> ChainlinkRoundData | None:
+        """Decode a latestRoundData/getRoundData response into validated round data."""
+        if len(result) < CHAINLINK_ROUND_DATA_RESPONSE_BYTES:
+            if warn_on_short_response:
+                logger.warning("Unexpected response length from %s: %d", context, len(result))
+            return None
+
+        round_data = ChainlinkRoundData(
+            round_id=int.from_bytes(result[0:32], byteorder="big"),
+            answer=int.from_bytes(result[32:64], byteorder="big", signed=True),
+            started_at=int.from_bytes(result[64:96], byteorder="big"),
+            updated_at=int.from_bytes(result[96:128], byteorder="big"),
+            answered_in_round=int.from_bytes(result[128:160], byteorder="big"),
+        )
+        if not ChainlinkDataProvider._is_valid_round_data(round_data):
+            logger.debug(
+                "Invalid Chainlink round data from %s: round_id=%s answer=%s updated_at=%s",
+                context,
+                round_data.round_id,
+                round_data.answer,
+                round_data.updated_at,
+            )
+            return None
+        return round_data
+
+    @staticmethod
+    def _is_valid_round_data(round_data: ChainlinkRoundData) -> bool:
+        """Return whether decoded Chainlink round data carries a measured price."""
+        return round_data.answer > 0 and round_data.updated_at > 0
+
     async def _query_latest_round_data(
         self,
         feed_address: str,
@@ -662,23 +758,10 @@ class ChainlinkDataProvider:
             # Returns: (roundId, answer, startedAt, updatedAt, answeredInRound)
             result = web3.eth.call({"to": feed_checksum, "data": LATEST_ROUND_DATA_SELECTOR})  # type: ignore[typeddict-item]
 
-            if len(result) < 160:  # 5 * 32 bytes
-                logger.warning(f"Unexpected response length from {feed_address}: {len(result)}")
-                return None
-
-            # Decode the 5 uint256 values (each 32 bytes)
-            round_id = int.from_bytes(result[0:32], byteorder="big")
-            answer = int.from_bytes(result[32:64], byteorder="big", signed=True)
-            started_at = int.from_bytes(result[64:96], byteorder="big")
-            updated_at = int.from_bytes(result[96:128], byteorder="big")
-            answered_in_round = int.from_bytes(result[128:160], byteorder="big")
-
-            return ChainlinkRoundData(
-                round_id=round_id,
-                answer=answer,
-                started_at=started_at,
-                updated_at=updated_at,
-                answered_in_round=answered_in_round,
+            return self._decode_round_data_response(
+                result,
+                context=feed_address,
+                warn_on_short_response=True,
             )
 
         except Exception as e:
@@ -710,23 +793,10 @@ class ChainlinkDataProvider:
             # Call latestRoundData()
             result = web3.eth.call({"to": feed_checksum, "data": LATEST_ROUND_DATA_SELECTOR})  # type: ignore[typeddict-item]
 
-            if len(result) < 160:  # 5 * 32 bytes
-                logger.warning(f"Unexpected response length from {feed_address}: {len(result)}")
-                return None
-
-            # Decode the 5 uint256 values
-            round_id = int.from_bytes(result[0:32], byteorder="big")
-            answer = int.from_bytes(result[32:64], byteorder="big", signed=True)
-            started_at = int.from_bytes(result[64:96], byteorder="big")
-            updated_at = int.from_bytes(result[96:128], byteorder="big")
-            answered_in_round = int.from_bytes(result[128:160], byteorder="big")
-
-            return ChainlinkRoundData(
-                round_id=round_id,
-                answer=answer,
-                started_at=started_at,
-                updated_at=updated_at,
-                answered_in_round=answered_in_round,
+            return self._decode_round_data_response(
+                result,
+                context=feed_address,
+                warn_on_short_response=True,
             )
 
         except Exception as e:
@@ -849,26 +919,9 @@ class ChainlinkDataProvider:
 
             result = await web3.eth.call({"to": feed_checksum, "data": calldata.hex()})  # type: ignore[typeddict-item]
 
-            if len(result) < 160:  # 5 * 32 bytes
-                return None
-
-            # Decode the 5 uint256 values
-            returned_round_id = int.from_bytes(result[0:32], byteorder="big")
-            answer = int.from_bytes(result[32:64], byteorder="big", signed=True)
-            started_at = int.from_bytes(result[64:96], byteorder="big")
-            updated_at = int.from_bytes(result[96:128], byteorder="big")
-            answered_in_round = int.from_bytes(result[128:160], byteorder="big")
-
-            # Check for invalid/empty round
-            if answer == 0 or updated_at == 0:
-                return None
-
-            return ChainlinkRoundData(
-                round_id=returned_round_id,
-                answer=answer,
-                started_at=started_at,
-                updated_at=updated_at,
-                answered_in_round=answered_in_round,
+            return self._decode_round_data_response(
+                result,
+                context=f"{feed_address} round {round_id}",
             )
 
         except Exception as e:
@@ -935,7 +988,7 @@ class ChainlinkDataProvider:
         self._round_bounds_cache[feed_address] = (min_round_id, max_round_id)
         return (min_round_id, max_round_id)
 
-    async def _binary_search_round_for_timestamp(  # noqa: C901
+    async def _binary_search_round_for_timestamp(
         self,
         feed_address: str,
         target_timestamp: int,
@@ -958,20 +1011,51 @@ class ChainlinkDataProvider:
 
         min_round_id, max_round_id = bounds
 
-        # Edge case: target is after the latest round
         latest_round = await self._query_round_data(feed_address, max_round_id)
         if latest_round is None:
             return None
 
-        if target_timestamp >= latest_round.updated_at:
-            return BinarySearchResult(
-                round_id=max_round_id,
-                round_data=latest_round,
-                iterations=1,
-                exact_match=(target_timestamp == latest_round.updated_at),
-            )
+        latest_result = self._latest_round_result_if_target_reached(
+            max_round_id=max_round_id,
+            latest_round=latest_round,
+            target_timestamp=target_timestamp,
+        )
+        if latest_result is not None:
+            return latest_result
 
-        # Binary search for the target timestamp
+        return await self._search_round_range(
+            feed_address=feed_address,
+            target_timestamp=target_timestamp,
+            min_round_id=min_round_id,
+            max_round_id=max_round_id,
+        )
+
+    @staticmethod
+    def _latest_round_result_if_target_reached(
+        *,
+        max_round_id: int,
+        latest_round: ChainlinkRoundData,
+        target_timestamp: int,
+    ) -> BinarySearchResult | None:
+        """Return latest-round result when target is at or after latest data."""
+        if target_timestamp < latest_round.updated_at:
+            return None
+        return BinarySearchResult(
+            round_id=max_round_id,
+            round_data=latest_round,
+            iterations=1,
+            exact_match=(target_timestamp == latest_round.updated_at),
+        )
+
+    async def _search_round_range(
+        self,
+        *,
+        feed_address: str,
+        target_timestamp: int,
+        min_round_id: int,
+        max_round_id: int,
+    ) -> BinarySearchResult | None:
+        """Binary-search bounded round ids for the latest round before target."""
         left = min_round_id
         right = max_round_id
         best_round: ChainlinkRoundData | None = None
@@ -982,49 +1066,96 @@ class ChainlinkDataProvider:
             iterations += 1
             mid = (left + right) // 2
 
-            round_data = await self._query_round_data(feed_address, mid)
-
-            if round_data is None:
-                # Round doesn't exist - try to find nearest valid round
-                # Search in both directions
-                found_round = None
-                for offset in range(1, 100):
-                    if mid + offset <= right:
-                        found_round = await self._query_round_data(feed_address, mid + offset)
-                        if found_round is not None:
-                            mid = mid + offset
-                            round_data = found_round
-                            break
-                    if mid - offset >= left:
-                        found_round = await self._query_round_data(feed_address, mid - offset)
-                        if found_round is not None:
-                            mid = mid - offset
-                            round_data = found_round
-                            break
-                if round_data is None:
-                    # No valid round found in range
-                    break
+            candidate = await self._round_at_or_near(feed_address, mid, left, right)
+            if candidate is None:
+                break
+            mid, round_data = candidate
 
             if round_data.updated_at == target_timestamp:
-                # Exact match found
-                return BinarySearchResult(
-                    round_id=mid,
-                    round_data=round_data,
-                    iterations=iterations,
-                    exact_match=True,
-                )
+                return self._exact_binary_search_result(mid, round_data, iterations)
 
             if round_data.updated_at < target_timestamp:
-                # Round is before target, we need a later round
-                # But save this as the best candidate (most recent before target)
-                if best_round is None or round_data.updated_at > best_round.updated_at:
-                    best_round = round_data
-                    best_round_id = mid
+                best_round_id, best_round = self._newer_best_round(
+                    best_round_id=best_round_id,
+                    best_round=best_round,
+                    round_id=mid,
+                    round_data=round_data,
+                )
                 left = mid + 1
             else:
-                # Round is after target, we need an earlier round
                 right = mid - 1
 
+        return self._best_binary_search_result(best_round_id, best_round, iterations)
+
+    async def _round_at_or_near(
+        self,
+        feed_address: str,
+        round_id: int,
+        left: int,
+        right: int,
+    ) -> tuple[int, ChainlinkRoundData] | None:
+        """Return a round at the requested id or the nearest valid gap neighbor."""
+        round_data = await self._query_round_data(feed_address, round_id)
+        if round_data is not None:
+            return round_id, round_data
+        return await self._nearest_valid_round(feed_address, round_id, left, right)
+
+    async def _nearest_valid_round(
+        self,
+        feed_address: str,
+        round_id: int,
+        left: int,
+        right: int,
+    ) -> tuple[int, ChainlinkRoundData] | None:
+        """Search both directions for a valid round near a missing id."""
+        for offset in range(1, ROUND_GAP_SEARCH_RADIUS):
+            higher_round_id = round_id + offset
+            if higher_round_id <= right:
+                found_round = await self._query_round_data(feed_address, higher_round_id)
+                if found_round is not None:
+                    return higher_round_id, found_round
+
+            lower_round_id = round_id - offset
+            if lower_round_id >= left:
+                found_round = await self._query_round_data(feed_address, lower_round_id)
+                if found_round is not None:
+                    return lower_round_id, found_round
+        return None
+
+    @staticmethod
+    def _exact_binary_search_result(
+        round_id: int,
+        round_data: ChainlinkRoundData,
+        iterations: int,
+    ) -> BinarySearchResult:
+        """Build an exact-match binary search result."""
+        return BinarySearchResult(
+            round_id=round_id,
+            round_data=round_data,
+            iterations=iterations,
+            exact_match=True,
+        )
+
+    @staticmethod
+    def _newer_best_round(
+        *,
+        best_round_id: int,
+        best_round: ChainlinkRoundData | None,
+        round_id: int,
+        round_data: ChainlinkRoundData,
+    ) -> tuple[int, ChainlinkRoundData]:
+        """Return the newest best round before the target timestamp."""
+        if best_round is None or round_data.updated_at > best_round.updated_at:
+            return round_id, round_data
+        return best_round_id, best_round
+
+    @staticmethod
+    def _best_binary_search_result(
+        best_round_id: int,
+        best_round: ChainlinkRoundData | None,
+        iterations: int,
+    ) -> BinarySearchResult | None:
+        """Build a non-exact best-match result if one was found."""
         if best_round is not None:
             return BinarySearchResult(
                 round_id=best_round_id,
@@ -1202,7 +1333,11 @@ class ChainlinkDataProvider:
             return 0
 
         # Fetch all rounds in the range
-        round_ids = list(range(start_result.round_id, end_result.round_id + 1))
+        round_ids = self._prefetch_round_ids(start_result, end_result)
+        if not round_ids:
+            logger.warning(f"Could not build round range for {token}")
+            return 0
+
         logger.info(
             f"Pre-fetching {len(round_ids)} rounds for {token}",
             extra={"start_round": start_result.round_id, "end_round": end_result.round_id},
@@ -1212,28 +1347,61 @@ class ChainlinkDataProvider:
         rounds_data = await self._batch_query_rounds(feed_address, round_ids)
 
         # Cache the results
-        cached_count = 0
-        if feed_address not in self._round_cache:
-            self._round_cache[feed_address] = []
-
-        for round_id, round_data in zip(round_ids, rounds_data, strict=False):
-            if round_data is not None:
-                price = self._convert_price(round_data.answer, decimals)
-                self._round_cache[feed_address].append((round_id, round_data.updated_at, price))
-
-                # Also cache in historical cache for fast lookup
-                if token_upper not in self._historical_cache:
-                    self._historical_cache[token_upper] = {}
-                self._historical_cache[token_upper][round_data.updated_at] = price
-                cached_count += 1
-
-        # Sort round cache by timestamp
-        self._round_cache[feed_address].sort(key=lambda x: x[1])
+        cached_count = self._cache_prefetched_rounds(
+            token_upper=token_upper,
+            feed_address=feed_address,
+            decimals=decimals,
+            round_ids=round_ids,
+            rounds_data=rounds_data,
+        )
 
         # Save to persistent cache if enabled
         self._save_persistent_cache()
 
         logger.info(f"Pre-fetched and cached {cached_count} rounds for {token}")
+        return cached_count
+
+    @staticmethod
+    def _prefetch_round_ids(start_result: BinarySearchResult, end_result: BinarySearchResult) -> list[int]:
+        """Return inclusive round ids for a prefetch range."""
+        if start_result.round_id > end_result.round_id:
+            return []
+        if _chainlink_round_phase(start_result.round_id) != _chainlink_round_phase(end_result.round_id):
+            logger.warning(
+                "Skipping Chainlink round prefetch across phase boundary: start_round=%s end_round=%s",
+                start_result.round_id,
+                end_result.round_id,
+            )
+            return []
+        return list(range(start_result.round_id, end_result.round_id + 1))
+
+    def _cache_prefetched_rounds(
+        self,
+        *,
+        token_upper: str,
+        feed_address: str,
+        decimals: int,
+        round_ids: list[int],
+        rounds_data: list[ChainlinkRoundData | None],
+    ) -> int:
+        """Cache fetched rounds without duplicating existing round ids."""
+        existing_by_round_id = {
+            round_id: (round_id, updated_at, price)
+            for round_id, updated_at, price in self._round_cache.get(feed_address, [])
+        }
+        historical_cache = self._historical_cache.setdefault(token_upper, {})
+        cached_count = 0
+
+        for round_id, round_data in zip(round_ids, rounds_data, strict=False):
+            if round_data is None:
+                continue
+
+            price = self._convert_price(round_data.answer, decimals)
+            existing_by_round_id[round_id] = (round_id, round_data.updated_at, price)
+            historical_cache[round_data.updated_at] = price
+            cached_count += 1
+
+        self._round_cache[feed_address] = sorted(existing_by_round_id.values(), key=lambda item: item[1])
         return cached_count
 
     async def _fetch_historical_rounds(
@@ -1358,24 +1526,46 @@ class ChainlinkDataProvider:
         token_upper = token.upper()
         target_ts = int(timestamp.timestamp())
 
-        # Check historical cache first
-        if token_upper in self._historical_cache:
-            cache = self._historical_cache[token_upper]
-            # Find the closest timestamp <= target
-            best_ts = None
-            for ts in cache:
-                if ts <= target_ts and (best_ts is None or ts > best_ts):
-                    best_ts = ts
-            if best_ts is not None:
-                return cache[best_ts]
+        price = self._historical_cache_price(token_upper, target_ts)
+        if price is not None:
+            return price
 
-        # Also check the main cache
-        if self._cache is not None:
-            price = self._cache.get_price_at(token_upper, timestamp)
-            if price is not None:
-                return price
+        price = self._round_cache_price(token_upper, target_ts)
+        if price is not None:
+            return price
 
-        return None
+        return self._main_cache_price(token_upper, timestamp)
+
+    def _historical_cache_price(self, token_upper: str, target_ts: int) -> Decimal | None:
+        """Return latest historical-cache price at or before target timestamp."""
+        cache = self._historical_cache.get(token_upper)
+        if not cache:
+            return None
+
+        best_ts = max((ts for ts in cache if ts <= target_ts), default=None)
+        return cache[best_ts] if best_ts is not None else None
+
+    def _round_cache_price(self, token_upper: str, target_ts: int) -> Decimal | None:
+        """Return latest persistent round-cache price at or before target timestamp."""
+        feed = self.get_feed_config(token_upper)
+        if feed is None:
+            return None
+        rounds = self._round_cache.get(feed.address)
+        if not rounds:
+            return None
+
+        best = max(
+            (round_data for round_data in rounds if round_data[1] <= target_ts),
+            key=lambda item: item[1],
+            default=None,
+        )
+        return best[2] if best is not None else None
+
+    def _main_cache_price(self, token_upper: str, timestamp: datetime) -> Decimal | None:
+        """Return price from the main cache if available."""
+        if self._cache is None:
+            return None
+        return self._cache.get_price_at(token_upper, timestamp)
 
     def _convert_price(self, raw_answer: int, decimals: int) -> Decimal:
         """Convert raw Chainlink answer to Decimal price.
@@ -1484,12 +1674,7 @@ class ChainlinkDataProvider:
             logger.warning(f"Failed to query Chainlink data for {token}")
             return None
 
-        # Check for stale data
-        try:
-            self._check_staleness(round_data, token_upper, raise_on_stale)
-        except ChainlinkStaleDataError:
-            if raise_on_stale:
-                raise
+        if self._round_is_stale_for_request(round_data, token_upper, raise_on_stale):
             return None
 
         # Get decimals (could cache this, but query for accuracy)
@@ -1506,6 +1691,25 @@ class ChainlinkDataProvider:
 
         logger.debug(f"Chainlink price for {token}: ${price:.4f}")
         return price
+
+    def _round_is_stale_for_request(
+        self,
+        round_data: ChainlinkRoundData,
+        token_upper: str,
+        raise_on_stale: bool,
+    ) -> bool:
+        """Return True when stale data should be suppressed for this request."""
+        try:
+            is_stale, _age_seconds = self._check_staleness(
+                round_data,
+                token_upper,
+                raise_on_stale,
+            )
+        except ChainlinkStaleDataError:
+            if raise_on_stale:
+                raise
+            return True
+        return is_stale
 
     def get_latest_price_sync(
         self,
@@ -1548,11 +1752,7 @@ class ChainlinkDataProvider:
             logger.warning(f"Failed to query Chainlink data for {token}")
             return None
 
-        try:
-            self._check_staleness(round_data, token_upper, raise_on_stale)
-        except ChainlinkStaleDataError:
-            if raise_on_stale:
-                raise
+        if self._round_is_stale_for_request(round_data, token_upper, raise_on_stale):
             return None
 
         # Use default 8 decimals for sync version to avoid extra RPC call
@@ -1618,73 +1818,112 @@ class ChainlinkDataProvider:
             ValueError: If price data is not available for the token/timestamp
             ChainlinkStaleDataError: If live data is stale and raise_on_stale is True
         """
-        token_upper = token.upper()
-
-        # Check if token is supported
-        if token_upper not in TOKEN_TO_PAIR:
-            raise ValueError(f"Unknown token: {token}")
-
-        # Check if we have a feed for this token on this chain
-        feed = self.get_feed_config(token_upper)
-        if feed is None:
-            raise ValueError(f"No Chainlink feed available for {token} on {self._chain}")
-
-        # If timestamp is None or very recent, try to get live price
+        token_upper = self._validate_price_token(token)
         current_time = datetime.now(UTC)
-        if timestamp is None:
-            timestamp = current_time
+        timestamp = self._normalized_request_timestamp(timestamp, current_time)
 
-        # Normalize timestamp timezone
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=UTC)
+        if self._is_live_price_request(timestamp, current_time) and self._rpc_url:
+            return await self._latest_price_or_raise(token, raise_on_stale)
 
-        # Check if requesting "live" data (within last 5 minutes)
-        time_diff = abs((current_time - timestamp).total_seconds())
-        is_live_request = time_diff < 300  # 5 minutes
-
-        # Check cache first (both historical and main cache)
         historical_price = await self._get_historical_price(token_upper, timestamp)
         if historical_price is not None:
             return historical_price
 
-        if self._cache is not None:
-            cached_price = self._cache.get_price_at(token_upper, timestamp)
-            if cached_price is not None:
-                return cached_price
+        archive_price = await self._archive_price_at_timestamp(token_upper, timestamp)
+        if archive_price is not None:
+            return archive_price
 
-        # If live request and we have RPC, query on-chain
-        if is_live_request and self._rpc_url:
-            price = await self.get_latest_price(token, raise_on_stale=raise_on_stale)
-            if price is not None:
-                return price
+        raise self._historical_price_unavailable_error(token, timestamp)
 
-            # If price is None (stale data with raise_on_stale=False), raise error
-            raise ValueError(f"Chainlink price for {token} is stale or unavailable")
+    def _validate_price_token(self, token: str) -> str:
+        """Validate token support and return the uppercase symbol."""
+        token_upper = token.upper()
+        if token_upper not in TOKEN_TO_PAIR:
+            raise ValueError(f"Unknown token: {token}")
 
-        # For historical data, try native round traversal if archive is available
-        if self._rpc_url:
-            has_archive = await self._verify_archive_access()
-            if has_archive:
-                # Fetch a small time range around the target timestamp
-                buffer = timedelta(hours=1)
-                start_time = timestamp - buffer
-                end_time = timestamp + buffer
+        feed = self.get_feed_config(token_upper)
+        if feed is None:
+            raise ValueError(f"No Chainlink feed available for {token} on {self._chain}")
+        return token_upper
 
-                historical_prices = await self._fetch_historical_rounds(token_upper, start_time, end_time)
+    @staticmethod
+    def _normalized_request_timestamp(timestamp: datetime | None, current_time: datetime) -> datetime:
+        """Return a concrete timezone-aware timestamp for a price request."""
+        if timestamp is None:
+            return current_time
+        if timestamp.tzinfo is None:
+            return timestamp.replace(tzinfo=UTC)
+        return timestamp
 
-                if historical_prices:
-                    # Store in cache for future lookups
-                    if self._cache is not None:
-                        existing = self._cache.data.get(token_upper, [])
-                        self._cache.data[token_upper] = sorted(existing + historical_prices, key=lambda x: x[0])
+    @staticmethod
+    def _is_live_price_request(timestamp: datetime, current_time: datetime) -> bool:
+        """Return whether timestamp is close enough to now for live pricing."""
+        return abs((current_time - timestamp).total_seconds()) < 300
 
-                    # Find the price at or before the target timestamp
-                    price = await self._get_historical_price(token_upper, timestamp)
-                    if price is not None:
-                        return price
+    async def _latest_price_or_raise(self, token: str, raise_on_stale: bool) -> Decimal:
+        """Return live price or raise the legacy unavailable/stale error."""
+        price = await self.get_latest_price(token, raise_on_stale=raise_on_stale)
+        if price is not None:
+            return price
+        raise ValueError(f"Chainlink price for {token} is stale or unavailable")
 
-        # Historical data not available
-        raise ValueError(
+    async def _archive_price_at_timestamp(
+        self,
+        token_upper: str,
+        timestamp: datetime,
+    ) -> Decimal | None:
+        """Fetch historical rounds from archive RPC and return price at timestamp."""
+        if not self._rpc_url:
+            return None
+        if not await self._verify_archive_access():
+            return None
+
+        buffer = timedelta(hours=1)
+        historical_prices = await self._fetch_historical_rounds(
+            token_upper,
+            timestamp - buffer,
+            timestamp + buffer,
+        )
+        if not historical_prices:
+            return None
+
+        self._cache_archive_prices(token_upper, historical_prices)
+        cached_price = await self._get_historical_price(token_upper, timestamp)
+        if cached_price is not None:
+            return cached_price
+
+        return self._price_at_or_before(historical_prices, timestamp)
+
+    def _cache_archive_prices(
+        self,
+        token_upper: str,
+        historical_prices: list[tuple[datetime, Decimal]],
+    ) -> None:
+        """Merge archive-fetched prices into the optional main cache."""
+        if self._cache is None:
+            return
+
+        existing = self._cache.data.get(token_upper, [])
+        self._cache.data[token_upper] = sorted(existing + historical_prices, key=lambda x: x[0])
+
+    @staticmethod
+    def _price_at_or_before(
+        historical_prices: list[tuple[datetime, Decimal]],
+        timestamp: datetime,
+    ) -> Decimal | None:
+        """Return latest fetched price at or before timestamp without using cache."""
+        eligible_prices = [
+            (price_timestamp, price) for price_timestamp, price in historical_prices if price_timestamp <= timestamp
+        ]
+        if not eligible_prices:
+            return None
+        eligible_prices.sort(key=lambda x: x[0])
+        return eligible_prices[-1][1]
+
+    @staticmethod
+    def _historical_price_unavailable_error(token: str, timestamp: datetime) -> ValueError:
+        """Build the legacy unavailable historical price error."""
+        return ValueError(
             f"Historical price data for {token} at {timestamp} not available. "
             "Use an archive node RPC for historical queries, or pre-fetch data via "
             "set_historical_prices() or iterate() method."
@@ -1837,7 +2076,7 @@ class ChainlinkDataProvider:
             self._cache.ttl_seconds = ttl_seconds
         logger.debug(f"Updated cache TTL to {ttl_seconds}s")
 
-    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:  # noqa: C901
+    async def iterate(self, config: HistoricalDataConfig) -> AsyncIterator[tuple[datetime, MarketState]]:
         """Iterate through historical market states using native round traversal.
 
         When an archive node is available, this method fetches historical prices
@@ -1868,132 +2107,170 @@ class ChainlinkDataProvider:
             f"with {config.interval_seconds}s interval for tokens: {config.tokens}"
         )
 
-        # Initialize cache if not already done
-        if self._cache is None:
-            self._cache = PriceCache()
+        stats = await self._prepare_iteration(config)
+        current_time, end_time = self._iteration_time_bounds(config)
+        interval = timedelta(seconds=config.interval_seconds)
+        data_points = 0
 
-        # Check for archive access and fetch historical data if available
+        while current_time <= end_time:
+            market_state = await self._market_state_for_iteration_timestamp(config, current_time, stats)
+            yield (current_time, market_state)
+
+            current_time += interval
+            data_points += 1
+            self._log_iteration_progress(data_points, stats)
+
+        self._log_iteration_completed(data_points, stats)
+
+    async def _prepare_iteration(self, config: HistoricalDataConfig) -> _IterationStats:
+        """Prepare cache and source metadata for a Chainlink iteration."""
+        self._ensure_price_cache()
         has_archive = await self._verify_archive_access()
-        data_source = "chainlink_historical" if has_archive else "chainlink_cache"
-        historical_price_hits = 0
-        fallback_price_hits = 0
+        stats = _IterationStats(
+            has_archive=has_archive,
+            data_source="chainlink_historical" if has_archive else "chainlink_cache",
+        )
 
         if has_archive:
-            logger.info(
-                "Archive node available - fetching historical Chainlink rounds",
-                extra={"tokens": config.tokens},
-            )
-
-            # Normalize timestamps
-            start_time = config.start_time
-            if start_time.tzinfo is None:
-                start_time = start_time.replace(tzinfo=UTC)
-            end_time = config.end_time
-            if end_time.tzinfo is None:
-                end_time = end_time.replace(tzinfo=UTC)
-
-            # Fetch historical rounds for each token
-            for token in config.tokens:
-                token_upper = token.upper()
-
-                # Check if we already have data in cache
-                if self._cache.data.get(token_upper):
-                    logger.debug(f"Using existing cache for {token_upper}")
-                    continue
-
-                historical_prices = await self._fetch_historical_rounds(token_upper, start_time, end_time)
-
-                if historical_prices:
-                    # Store in main cache for iteration
-                    self._cache.data[token_upper] = historical_prices
-                    logger.info(f"Fetched {len(historical_prices)} historical prices for {token_upper}")
-                else:
-                    logger.warning(f"No historical prices found for {token_upper} via round traversal")
+            await self._preload_archive_prices_for_iteration(config)
         else:
             logger.warning(
                 "Archive node not available - using pre-loaded cache for Chainlink iteration. "
                 "Historical accuracy may be limited. Consider using an archive node RPC."
             )
 
-        # Generate timestamps at the specified interval
-        current_time = config.start_time
-        if current_time.tzinfo is None:
-            current_time = current_time.replace(tzinfo=UTC)
+        return stats
 
-        end_time = config.end_time
-        if end_time.tzinfo is None:
-            end_time = end_time.replace(tzinfo=UTC)
+    def _ensure_price_cache(self) -> PriceCache:
+        """Initialize and return the iteration price cache."""
+        if self._cache is None:
+            self._cache = PriceCache()
+        return self._cache
 
-        interval = timedelta(seconds=config.interval_seconds)
-        data_points = 0
+    async def _preload_archive_prices_for_iteration(self, config: HistoricalDataConfig) -> None:
+        """Fetch missing archive prices into the main cache for iteration."""
+        logger.info(
+            "Archive node available - fetching historical Chainlink rounds",
+            extra={"tokens": config.tokens},
+        )
 
-        while current_time <= end_time:
-            # Build prices dict from cache
-            prices: dict[str, Decimal] = {}
-            ohlcv_data: dict[str, OHLCV] = {}
+        start_time, end_time = self._iteration_time_bounds(config)
+        cache = self._ensure_price_cache()
 
-            for token in config.tokens:
-                token_upper = token.upper()
+        for token in config.tokens:
+            token_upper = token.upper()
+            if cache.data.get(token_upper):
+                logger.debug(f"Using existing cache for {token_upper}")
+                continue
 
-                # Try historical cache first (populated by round traversal)
-                price = await self._get_historical_price(token_upper, current_time)
+            historical_prices = await self._fetch_historical_rounds(token_upper, start_time, end_time)
+            if historical_prices:
+                cache.data[token_upper] = historical_prices
+                logger.info(f"Fetched {len(historical_prices)} historical prices for {token_upper}")
+            else:
+                logger.warning(f"No historical prices found for {token_upper} via round traversal")
 
-                if price is None:
-                    # Fall back to main cache
-                    price = self._cache.get_price_at(token_upper, current_time)
+    @classmethod
+    def _iteration_time_bounds(cls, config: HistoricalDataConfig) -> tuple[datetime, datetime]:
+        """Return UTC-aware start and end timestamps for iteration."""
+        return cls._ensure_utc_datetime(config.start_time), cls._ensure_utc_datetime(config.end_time)
 
-                if price is not None:
-                    prices[token_upper] = price
+    @staticmethod
+    def _ensure_utc_datetime(value: datetime) -> datetime:
+        """Attach UTC to naive datetimes used by historical iteration."""
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
 
-                    if has_archive:
-                        historical_price_hits += 1
-                    else:
-                        fallback_price_hits += 1
+    async def _market_state_for_iteration_timestamp(
+        self,
+        config: HistoricalDataConfig,
+        current_time: datetime,
+        stats: _IterationStats,
+    ) -> MarketState:
+        """Build one market state for a Chainlink iteration timestamp."""
+        prices, ohlcv_data = await self._iteration_price_data(config, current_time, stats)
+        if not prices:
+            raise DataSourceUnavailable(
+                source="chainlink",
+                reason=(
+                    f"No Chainlink prices available at {current_time.isoformat()} for tokens {config.tokens}; "
+                    "archive access or preloaded cache is required."
+                ),
+            )
+        return MarketState(
+            timestamp=current_time,
+            prices=prices,
+            ohlcv=ohlcv_data if config.include_ohlcv else {},
+            chain=config.chains[0] if config.chains else self._chain,
+            block_number=None,
+            gas_price_gwei=None,
+            metadata=stats.metadata(),
+        )
 
-                    # Generate pseudo-OHLCV if requested
-                    if config.include_ohlcv:
-                        ohlcv_data[token_upper] = OHLCV(
-                            timestamp=current_time,
-                            open=price,
-                            high=price,
-                            low=price,
-                            close=price,
-                            volume=None,
-                        )
+    async def _iteration_price_data(
+        self,
+        config: HistoricalDataConfig,
+        current_time: datetime,
+        stats: _IterationStats,
+    ) -> tuple[dict[str, Decimal], dict[str, OHLCV]]:
+        """Return price and optional pseudo-OHLCV data for one iteration timestamp."""
+        prices: dict[str, Decimal] = {}
+        ohlcv_data: dict[str, OHLCV] = {}
 
-            # Create MarketState for this timestamp
-            market_state = MarketState(
-                timestamp=current_time,
-                prices=prices,
-                ohlcv=ohlcv_data if config.include_ohlcv else {},
-                chain=config.chains[0] if config.chains else self._chain,
-                block_number=None,
-                gas_price_gwei=None,
-                metadata={
-                    "data_source": data_source,
-                    "historical_price_hits": historical_price_hits,
-                    "fallback_price_hits": fallback_price_hits,
-                },
+        for token in config.tokens:
+            token_upper = token.upper()
+            price = await self._iteration_token_price(token_upper, current_time)
+            if price is None:
+                continue
+
+            prices[token_upper] = price
+            stats.record_price_hit()
+            if config.include_ohlcv:
+                ohlcv_data[token_upper] = self._pseudo_ohlcv(current_time, price)
+
+        return prices, ohlcv_data
+
+    async def _iteration_token_price(self, token_upper: str, current_time: datetime) -> Decimal | None:
+        """Return the price available to iteration for one token and timestamp."""
+        price = await self._get_historical_price(token_upper, current_time)
+        if price is not None:
+            return price
+
+        if self._cache is None:
+            return None
+        return self._cache.get_price_at(token_upper, current_time)
+
+    @staticmethod
+    def _pseudo_ohlcv(current_time: datetime, price: Decimal) -> OHLCV:
+        """Build a pseudo-OHLCV bar from one Chainlink spot price."""
+        return OHLCV(
+            timestamp=current_time,
+            open=price,
+            high=price,
+            low=price,
+            close=price,
+            volume=None,
+        )
+
+    @staticmethod
+    def _log_iteration_progress(data_points: int, stats: _IterationStats) -> None:
+        """Log periodic Chainlink iteration progress."""
+        if data_points > 0 and data_points % 100 == 0:
+            logger.debug(
+                f"Chainlink iteration progress: {data_points} data points, "
+                f"historical_hits={stats.historical_price_hits}, fallback_hits={stats.fallback_price_hits}"
             )
 
-            yield (current_time, market_state)
-
-            current_time += interval
-            data_points += 1
-
-            # Log progress periodically
-            if data_points > 0 and data_points % 100 == 0:
-                logger.debug(
-                    f"Chainlink iteration progress: {data_points} data points, "
-                    f"historical_hits={historical_price_hits}, fallback_hits={fallback_price_hits}"
-                )
-
+    @staticmethod
+    def _log_iteration_completed(data_points: int, stats: _IterationStats) -> None:
+        """Log final Chainlink iteration counters."""
         logger.info(
             f"Completed Chainlink iteration with {data_points} data points",
             extra={
-                "historical_price_hits": historical_price_hits,
-                "fallback_price_hits": fallback_price_hits,
-                "data_source": data_source,
+                "historical_price_hits": stats.historical_price_hits,
+                "fallback_price_hits": stats.fallback_price_hits,
+                "data_source": stats.data_source,
             },
         )
 

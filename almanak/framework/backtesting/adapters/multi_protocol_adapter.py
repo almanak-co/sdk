@@ -52,6 +52,7 @@ from almanak.framework.backtesting.adapters.base import (
     get_adapter,
     register_adapter,
 )
+from almanak.framework.backtesting.pnl.position_models import PositionType
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.data_provider import MarketState
@@ -114,6 +115,23 @@ class ExecutionPriority(StrEnum):
     CLOSE_POSITIONS = "close_positions"
     OPEN_POSITIONS = "open_positions"
     WITHDRAWALS = "withdrawals"
+
+
+_POSITION_ADAPTER_BY_TYPE: dict[PositionType, str | None] = {
+    PositionType.LP: "lp",
+    PositionType.PERP_LONG: "perp",
+    PositionType.PERP_SHORT: "perp",
+    PositionType.SUPPLY: "lending",
+    PositionType.BORROW: "lending",
+    PositionType.SPOT: None,
+}
+
+_EXECUTION_PRIORITY_ORDER: tuple[ExecutionPriority, ...] = (
+    ExecutionPriority.COLLATERAL_FIRST,
+    ExecutionPriority.CLOSE_POSITIONS,
+    ExecutionPriority.OPEN_POSITIONS,
+    ExecutionPriority.WITHDRAWALS,
+)
 
 
 @dataclass
@@ -587,6 +605,12 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         )
         return None
 
+    def _sub_adapter_for_position(self, position: "SimulatedPosition") -> StrategyBacktestAdapter | None:
+        protocol_type = _POSITION_ADAPTER_BY_TYPE.get(position.position_type)
+        if protocol_type is None:
+            return None
+        return self._sub_adapters.get(protocol_type)
+
     def update_position(
         self,
         position: "SimulatedPosition",
@@ -606,45 +630,40 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
             timestamp: Simulation timestamp for deterministic updates. If None,
                 uses market_state.timestamp for reproducible backtests.
         """
-        from almanak.framework.backtesting.pnl.portfolio import PositionType
-
-        # Map position types to protocol adapter types
-        position_type_map = {
-            PositionType.LP: "lp",
-            PositionType.PERP_LONG: "perp",
-            PositionType.PERP_SHORT: "perp",
-            PositionType.SUPPLY: "lending",
-            PositionType.BORROW: "lending",
-            PositionType.SPOT: None,  # Spot doesn't need special handling
-        }
-
-        protocol_type = position_type_map.get(position.position_type)
-
-        if protocol_type and protocol_type in self._sub_adapters:
-            sub_adapter = self._sub_adapters[protocol_type]
+        sub_adapter = self._sub_adapter_for_position(position)
+        if sub_adapter is not None:
             sub_adapter.update_position(position, market_state, elapsed_seconds, timestamp)
-        else:
-            # Default update: just update timestamp using simulation time
-            # Prefer explicit timestamp > market_state.timestamp > datetime.now() (with warning)
-            if timestamp is not None:
-                update_time = timestamp
-            elif hasattr(market_state, "timestamp") and market_state.timestamp is not None:
-                update_time = market_state.timestamp
-            else:
-                if self._config.strict_reproducibility:
-                    msg = (
-                        f"No simulation timestamp available for position {position.position_id}. "
-                        "In strict reproducibility mode, timestamp must be provided. "
-                        "Either pass timestamp parameter or ensure market_state.timestamp is set."
-                    )
-                    raise ValueError(msg)
-                logger.warning(
-                    "No simulation timestamp available for position %s, "
-                    "falling back to datetime.now(). This breaks backtest reproducibility.",
-                    position.position_id,
-                )
-                update_time = datetime.now()
-            position.last_updated = update_time
+            return
+
+        position.last_updated = self._default_update_time(position, market_state, timestamp)
+
+    def _default_update_time(
+        self,
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+        timestamp: datetime | None,
+    ) -> datetime:
+        if timestamp is not None:
+            return timestamp
+
+        market_timestamp = getattr(market_state, "timestamp", None)
+        if market_timestamp is not None:
+            return market_timestamp
+
+        if self._config.strict_reproducibility:
+            msg = (
+                f"No simulation timestamp available for position {position.position_id}. "
+                "In strict reproducibility mode, timestamp must be provided. "
+                "Either pass timestamp parameter or ensure market_state.timestamp is set."
+            )
+            raise ValueError(msg)
+
+        logger.warning(
+            "No simulation timestamp available for position %s, "
+            "falling back to datetime.now(). This breaks backtest reproducibility.",
+            position.position_id,
+        )
+        return datetime.now()
 
     def value_position(
         self,
@@ -663,36 +682,38 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         Returns:
             Total position value in USD as a Decimal
         """
-        from almanak.framework.backtesting.pnl.portfolio import PositionType
-
-        # Map position types to protocol adapter types
-        position_type_map = {
-            PositionType.LP: "lp",
-            PositionType.PERP_LONG: "perp",
-            PositionType.PERP_SHORT: "perp",
-            PositionType.SUPPLY: "lending",
-            PositionType.BORROW: "lending",
-            PositionType.SPOT: None,
-        }
-
-        protocol_type = position_type_map.get(position.position_type)
-
-        if protocol_type and protocol_type in self._sub_adapters:
-            sub_adapter = self._sub_adapters[protocol_type]
+        sub_adapter = self._sub_adapter_for_position(position)
+        if sub_adapter is not None:
             return sub_adapter.value_position(position, market_state, timestamp)
 
-        # Default valuation: simple token amount * price
+        return self._default_position_value(position, market_state)
+
+    def _default_position_value(self, position: "SimulatedPosition", market_state: "MarketState") -> Decimal:
         total_value = Decimal("0")
         for token, amount in position.amounts.items():
-            try:
-                price = market_state.get_price(token)
-                if price and price > 0:
-                    total_value += amount * price
-            except KeyError:
-                if position.entry_price and position.entry_price > 0:
-                    total_value += amount * position.entry_price
-
+            total_value += self._default_token_value(position, market_state, token, amount)
         return total_value
+
+    def _default_token_value(
+        self,
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+        token: str,
+        amount: Decimal,
+    ) -> Decimal:
+        price = self._market_price_or_none(market_state, token)
+        if price is not None:
+            return amount * price if price > Decimal("0") else Decimal("0")
+        if position.entry_price and position.entry_price > Decimal("0"):
+            return amount * position.entry_price
+        return Decimal("0")
+
+    @staticmethod
+    def _market_price_or_none(market_state: "MarketState", token: str) -> Decimal | None:
+        try:
+            return market_state.get_price(token)
+        except KeyError:
+            return None
 
     def should_rebalance(
         self,
@@ -1064,16 +1085,7 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         if sync_positions:
             self.sync_positions_to_aggregator(portfolio)
 
-        # Build prices dict from market state
-        prices: dict[str, Decimal] = {}
-        for position in portfolio.positions:
-            for token in position.tokens:
-                try:
-                    price = market_state.get_price(token)
-                    if price:
-                        prices[token] = price
-                except KeyError:
-                    pass
+        prices = self._portfolio_prices(portfolio, market_state)
 
         # Use PortfolioAggregator's unified risk score calculation
         risk_score = self._portfolio_aggregator.calculate_unified_risk_score(
@@ -1083,10 +1095,44 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
             liquidation_proximity_threshold=Decimal("0.1"),  # 10% from liquidation
         )
 
-        # Store in history
-        self._unified_risk_scores.append(risk_score)
+        self._record_unified_risk_score(risk_score)
+        return risk_score
 
-        # Log warnings based on thresholds
+    def _portfolio_prices(
+        self,
+        portfolio: "SimulatedPortfolio",
+        market_state: "MarketState",
+    ) -> dict[str, Decimal]:
+        prices: dict[str, Decimal] = {}
+        for position in portfolio.positions:
+            self._add_position_prices(prices, position, market_state)
+        return prices
+
+    def _add_position_prices(
+        self,
+        prices: dict[str, Decimal],
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+    ) -> None:
+        for token in position.tokens:
+            price = self._market_price_or_none(market_state, token)
+            if price is not None:
+                prices[token] = price
+
+    def _record_unified_risk_score(self, risk_score: UnifiedRiskScore) -> None:
+        self._unified_risk_scores.append(risk_score)
+        self._log_unified_risk_warning(risk_score)
+
+        logger.debug(
+            "Unified risk score: %.4f, min_hf=%s, max_leverage=%.2fx, positions_at_risk=%d",
+            float(risk_score.score),
+            f"{float(risk_score.min_health_factor):.2f}" if risk_score.min_health_factor else "N/A",
+            float(risk_score.max_leverage),
+            risk_score.positions_at_risk,
+        )
+
+    @staticmethod
+    def _log_unified_risk_warning(risk_score: UnifiedRiskScore) -> None:
         if risk_score.score >= Decimal("0.8"):
             logger.warning(
                 "CRITICAL: Unified risk score %.2f is at critical level",
@@ -1097,16 +1143,6 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
                 "WARNING: Unified risk score %.2f is at high level",
                 float(risk_score.score),
             )
-
-        logger.debug(
-            "Unified risk score: %.4f, min_hf=%s, max_leverage=%.2fx, positions_at_risk=%d",
-            float(risk_score.score),
-            f"{float(risk_score.min_health_factor):.2f}" if risk_score.min_health_factor else "N/A",
-            float(risk_score.max_leverage),
-            risk_score.positions_at_risk,
-        )
-
-        return risk_score
 
     def get_net_exposure_by_asset(
         self,
@@ -1389,41 +1425,55 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
             CoordinatedExecution with all execution results and metadata
         """
         if not intents:
-            return CoordinatedExecution(
-                executions=[],
-                total_delay_seconds=0.0,
-                coordination_strategy="empty",
-                execution_order=[],
-                success=True,
-                partial_success=False,
-                failed_intents=[],
-            )
+            return self._empty_coordinated_execution()
 
         # If coordination is disabled, execute in original order
         if not self._config.execution_coordination_enabled:
             return self._execute_intents_sequential(intents, portfolio, market_state)
 
-        # Sort intents by priority
-        priority_order = [
-            ExecutionPriority.COLLATERAL_FIRST,
-            ExecutionPriority.CLOSE_POSITIONS,
-            ExecutionPriority.OPEN_POSITIONS,
-            ExecutionPriority.WITHDRAWALS,
-        ]
+        return self._execute_prioritized_plan(
+            self._priority_ordered_intents(intents),
+            portfolio,
+            market_state,
+            coordination_strategy="priority_ordered",
+            apply_delays=True,
+        )
 
-        # Group intents by priority
-        intent_by_priority: dict[ExecutionPriority, list[Any]] = {p: [] for p in priority_order}
+    @staticmethod
+    def _empty_coordinated_execution() -> CoordinatedExecution:
+        return CoordinatedExecution(
+            executions=[],
+            total_delay_seconds=0.0,
+            coordination_strategy="empty",
+            execution_order=[],
+            success=True,
+            partial_success=False,
+            failed_intents=[],
+        )
+
+    def _priority_ordered_intents(self, intents: list["Intent"]) -> list[tuple[Any, ExecutionPriority]]:
+        intent_by_priority = self._group_intents_by_priority(intents)
+        return [(intent, priority) for priority in _EXECUTION_PRIORITY_ORDER for intent in intent_by_priority[priority]]
+
+    def _group_intents_by_priority(
+        self,
+        intents: list["Intent"],
+    ) -> dict[ExecutionPriority, list[Any]]:
+        intent_by_priority: dict[ExecutionPriority, list[Any]] = {p: [] for p in _EXECUTION_PRIORITY_ORDER}
         for intent in intents:
             priority = self._get_intent_priority(intent)
             intent_by_priority[priority].append(intent)
+        return intent_by_priority
 
-        # Build sorted list by priority
-        sorted_intents: list[tuple[Any, ExecutionPriority]] = []
-        for priority in priority_order:
-            for intent in intent_by_priority[priority]:
-                sorted_intents.append((intent, priority))
-
-        # Execute in order with delays
+    def _execute_prioritized_plan(
+        self,
+        prioritized_intents: list[tuple[Any, ExecutionPriority]],
+        portfolio: "SimulatedPortfolio",
+        market_state: "MarketState",
+        *,
+        coordination_strategy: str,
+        apply_delays: bool,
+    ) -> CoordinatedExecution:
         executions: list[tuple[Any, Any, ExecutionPriority, float]] = []
         total_delay = 0.0
         execution_order: list[str] = []
@@ -1431,47 +1481,65 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         all_success = True
         any_success = False
 
-        for idx, (intent, priority) in enumerate(sorted_intents):
-            # Calculate delay for this execution
-            delay = self._calculate_execution_delay(intent, idx, len(sorted_intents))
+        for idx, (intent, priority) in enumerate(prioritized_intents):
+            delay = self._planned_execution_delay(intent, idx, len(prioritized_intents), apply_delays)
             total_delay += delay
-
-            # Execute the intent
             fill = self.execute_intent(intent, portfolio, market_state)
-
             intent_type = intent.__class__.__name__
+
+            executions.append((intent, fill, priority, delay))
             execution_order.append(intent_type)
 
-            if fill is None:
-                # No adapter handled it, mark as None fill (default execution)
-                executions.append((intent, None, priority, delay))
-                any_success = True
-            elif fill.success:
-                executions.append((intent, fill, priority, delay))
+            if self._execution_succeeded(fill):
                 any_success = True
             else:
-                executions.append((intent, fill, priority, delay))
                 failed_intents.append(intent_type)
                 all_success = False
 
-            logger.debug(
-                "Coordinated execution %d/%d: %s (priority=%s, delay=%.2fs, success=%s)",
-                idx + 1,
-                len(sorted_intents),
-                intent_type,
-                priority.value,
-                delay,
-                fill.success if fill else "delegated",
-            )
+            self._log_plan_execution(idx, len(prioritized_intents), intent_type, priority, delay, fill)
 
         return CoordinatedExecution(
             executions=executions,
             total_delay_seconds=total_delay,
-            coordination_strategy="priority_ordered",
+            coordination_strategy=coordination_strategy,
             execution_order=execution_order,
             success=all_success,
             partial_success=any_success and not all_success,
             failed_intents=failed_intents,
+        )
+
+    def _planned_execution_delay(
+        self,
+        intent: "Intent",
+        index: int,
+        total_intents: int,
+        apply_delays: bool,
+    ) -> float:
+        if not apply_delays:
+            return 0.0
+        return self._calculate_execution_delay(intent, index, total_intents)
+
+    @staticmethod
+    def _execution_succeeded(fill: Any) -> bool:
+        return fill is None or bool(getattr(fill, "success", False))
+
+    @staticmethod
+    def _log_plan_execution(
+        index: int,
+        total_intents: int,
+        intent_type: str,
+        priority: ExecutionPriority,
+        delay: float,
+        fill: Any,
+    ) -> None:
+        logger.debug(
+            "Coordinated execution %d/%d: %s (priority=%s, delay=%.2fs, success=%s)",
+            index + 1,
+            total_intents,
+            intent_type,
+            priority.value,
+            delay,
+            fill.success if fill else "delegated",
         )
 
     def _execute_intents_sequential(
@@ -1492,38 +1560,12 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         Returns:
             CoordinatedExecution with results
         """
-        executions: list[tuple[Any, Any, ExecutionPriority, float]] = []
-        execution_order: list[str] = []
-        failed_intents: list[str] = []
-        all_success = True
-        any_success = False
-
-        for intent in intents:
-            priority = self._get_intent_priority(intent)
-            fill = self.execute_intent(intent, portfolio, market_state)
-
-            intent_type = intent.__class__.__name__
-            execution_order.append(intent_type)
-
-            if fill is None:
-                executions.append((intent, None, priority, 0.0))
-                any_success = True
-            elif fill.success:
-                executions.append((intent, fill, priority, 0.0))
-                any_success = True
-            else:
-                executions.append((intent, fill, priority, 0.0))
-                failed_intents.append(intent_type)
-                all_success = False
-
-        return CoordinatedExecution(
-            executions=executions,
-            total_delay_seconds=0.0,
+        return self._execute_prioritized_plan(
+            [(intent, self._get_intent_priority(intent)) for intent in intents],
+            portfolio,
+            market_state,
             coordination_strategy="sequential",
-            execution_order=execution_order,
-            success=all_success,
-            partial_success=any_success and not all_success,
-            failed_intents=failed_intents,
+            apply_delays=False,
         )
 
     def execute_intent_sequence(

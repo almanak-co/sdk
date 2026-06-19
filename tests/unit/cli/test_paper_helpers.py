@@ -7,6 +7,7 @@ un-tested inner logic of the three Click commands.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
@@ -14,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import click
 import pytest
 
+from almanak.framework.cli.backtest import helpers as cli_helpers
 from almanak.framework.cli.backtest import paper_helpers as ph
 
 # ---------------------------------------------------------------------------
@@ -300,3 +302,28 @@ class TestPaperStatusHelpers:
         out = capsys.readouterr().out
         assert "No paper trading session found for 'missing'" in out
         assert "almanak strat backtest paper start -s missing" in out
+
+
+class TestListPaperSessions:
+    def test_missing_state_dir_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli_helpers, "PAPER_STATE_DIR", tmp_path / "missing")
+
+        assert cli_helpers.list_paper_sessions() == []
+
+    def test_lists_valid_sessions_marks_stale_and_skips_corrupt_json(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli_helpers, "PAPER_STATE_DIR", tmp_path)
+        (tmp_path / "running.json").write_text(json.dumps({"deployment_id": "running", "pid": 111, "status": "running"}))
+        (tmp_path / "stale.json").write_text(json.dumps({"deployment_id": "stale", "pid": 222, "status": "running"}))
+        (tmp_path / "broken.json").write_text("{not-json")
+
+        def fake_is_running(pid):
+            return pid == 111
+
+        monkeypatch.setattr(cli_helpers, "is_process_running", fake_is_running)
+
+        sessions = sorted(cli_helpers.list_paper_sessions(), key=lambda item: item["deployment_id"])
+
+        assert sessions == [
+            {"deployment_id": "running", "pid": 111, "status": "running"},
+            {"deployment_id": "stale", "pid": 222, "status": "stopped (process not found)"},
+        ]

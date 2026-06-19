@@ -337,6 +337,20 @@ class AaveV3APYProvider(HistoricalAPYProvider):
             ),
         )
 
+    def _normalize_date_range(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> tuple[datetime, datetime]:
+        """Normalize a query window to UTC datetimes."""
+        return self._normalize_datetime(start_date), self._normalize_datetime(end_date)
+
+    def _normalize_datetime(self, value: datetime) -> datetime:
+        """Normalize a single datetime to UTC."""
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
     async def _find_reserve_id(
         self,
         chain: Chain,
@@ -437,21 +451,10 @@ class AaveV3APYProvider(HistoricalAPYProvider):
             for apy in apys:
                 print(f"Supply: {apy.supply_apy:.4f}, Borrow: {apy.borrow_apy:.4f}")
         """
-        # Normalize inputs
         symbol = self._normalize_market_symbol(market)
         chain = _chain_override if _chain_override is not None else self._config.chain
+        start_date, end_date = self._normalize_date_range(start_date, end_date)
 
-        # Ensure timestamps are in UTC (convert if needed to avoid day off-by-one)
-        if start_date.tzinfo is None:
-            start_date = start_date.replace(tzinfo=UTC)
-        else:
-            start_date = start_date.astimezone(UTC)
-        if end_date.tzinfo is None:
-            end_date = end_date.replace(tzinfo=UTC)
-        else:
-            end_date = end_date.astimezone(UTC)
-
-        # Validate chain
         subgraph_id = self._get_subgraph_id(chain)
         if subgraph_id is None:
             logger.warning(
@@ -468,65 +471,36 @@ class AaveV3APYProvider(HistoricalAPYProvider):
             end_date,
         )
 
+        return await self._get_apy_or_fallback(
+            subgraph_id=subgraph_id,
+            chain=chain,
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    async def _get_apy_or_fallback(
+        self,
+        *,
+        subgraph_id: str,
+        chain: Chain,
+        symbol: str,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> list[APYResult]:
+        """Fetch Aave APY data, degrading only expected subgraph failures."""
         try:
-            # Find the reserve ID for the symbol
-            reserve_id = await self._find_reserve_id(chain, symbol)
-            if reserve_id is None:
-                logger.warning(
-                    "Reserve not found: chain=%s, symbol=%s. Returning fallback.",
-                    chain.value,
-                    symbol,
-                )
-                return self._generate_fallback_results(start_date, end_date)
-
-            # Convert to timestamps
-            start_timestamp = int(start_date.timestamp())
-            end_timestamp = int(end_date.timestamp())
-
-            # Query subgraph with cursor pagination on timestamp (VIB-5089):
-            # windows with >1000 rate snapshots span multiple pages instead
-            # of silently truncating at the first 1000.
-            history_items = await self._client.query_with_pagination(
+            results = await self._fetch_apy_results(
                 subgraph_id=subgraph_id,
-                query=RESERVE_PARAMS_HISTORY_QUERY,
-                variables={
-                    "reserveId": reserve_id,
-                    "startTimestamp": start_timestamp,
-                    "endTimestamp": end_timestamp,
-                },
-                data_path="reserveParamsHistoryItems",
-                max_pages=MAX_PAGINATION_PAGES,
-                cursor_field="timestamp",
-                cursor_variable="startTimestamp",
+                chain=chain,
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
             )
-
-            if not history_items:
-                logger.warning(
-                    "No APY history from subgraph: chain=%s, market=%s, range=%s to %s",
-                    chain.value,
-                    symbol,
-                    start_date,
-                    end_date,
-                )
-                return self._generate_fallback_results(start_date, end_date)
-
-            # Parse results
-            results = [self._parse_apy_data(item) for item in history_items]
-
-            logger.info(
-                "Fetched %d APY data points: chain=%s, market=%s",
-                len(results),
-                chain.value,
-                symbol,
-            )
-
-            return results
-
         except DataSourceUnavailableError:
             # Pagination overflow must stay loud (VIB-5089): a partial series
             # silently swapped for fallback would be silent truncation.
             raise
-
         except SubgraphRateLimitError as e:
             logger.warning(
                 "Subgraph rate limit exceeded: chain=%s, market=%s: %s",
@@ -535,7 +509,6 @@ class AaveV3APYProvider(HistoricalAPYProvider):
                 str(e),
             )
             return self._generate_fallback_results(start_date, end_date)
-
         except SubgraphQueryError as e:
             logger.error(
                 "Subgraph query error: chain=%s, market=%s: %s",
@@ -544,7 +517,6 @@ class AaveV3APYProvider(HistoricalAPYProvider):
                 str(e),
             )
             return self._generate_fallback_results(start_date, end_date)
-
         except Exception as e:
             logger.error(
                 "Unexpected error fetching APY: chain=%s, market=%s: %s",
@@ -553,6 +525,62 @@ class AaveV3APYProvider(HistoricalAPYProvider):
                 str(e),
             )
             return self._generate_fallback_results(start_date, end_date)
+
+        if results is None:
+            return self._generate_fallback_results(start_date, end_date)
+        return results
+
+    async def _fetch_apy_results(
+        self,
+        *,
+        subgraph_id: str,
+        chain: Chain,
+        symbol: str,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> list[APYResult] | None:
+        """Fetch and parse measured Aave APY rows, or None for no data."""
+        reserve_id = await self._find_reserve_id(chain, symbol)
+        if reserve_id is None:
+            logger.warning(
+                "Reserve not found: chain=%s, symbol=%s. Returning fallback.",
+                chain.value,
+                symbol,
+            )
+            return None
+
+        history_items = await self._client.query_with_pagination(
+            subgraph_id=subgraph_id,
+            query=RESERVE_PARAMS_HISTORY_QUERY,
+            variables={
+                "reserveId": reserve_id,
+                "startTimestamp": int(start_date.timestamp()),
+                "endTimestamp": int(end_date.timestamp()),
+            },
+            data_path="reserveParamsHistoryItems",
+            max_pages=MAX_PAGINATION_PAGES,
+            cursor_field="timestamp",
+            cursor_variable="startTimestamp",
+        )
+
+        if not history_items:
+            logger.warning(
+                "No APY history from subgraph: chain=%s, market=%s, range=%s to %s",
+                chain.value,
+                symbol,
+                start_date,
+                end_date,
+            )
+            return None
+
+        results = [self._parse_apy_data(item) for item in history_items]
+        logger.info(
+            "Fetched %d APY data points: chain=%s, market=%s",
+            len(results),
+            chain.value,
+            symbol,
+        )
+        return results
 
     def _generate_fallback_results(
         self,

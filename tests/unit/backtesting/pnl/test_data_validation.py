@@ -433,6 +433,44 @@ class TestValidatePriceData:
         # Should be sorted and validated correctly
         assert result.total_data_points == 3
         assert result.gaps_found == 0
+        assert any(
+            issue.issue_type == DataQualityIssueType.INVALID_ORDER
+            for issue in result.issues
+        )
+
+    def test_duplicate_timestamps_do_not_inflate_coverage(self) -> None:
+        """Coverage is unique timestamp coverage, not raw row count."""
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+        price_data = [
+            (base_time, Decimal("2500")),
+            (base_time, Decimal("2501")),
+            (base_time + timedelta(hours=1), Decimal("2502")),
+        ]
+
+        result = validate_price_data(
+            price_data,
+            expected_interval_seconds=3600,
+            log_warnings=False,
+        )
+
+        assert result.total_data_points == 3
+        assert result.expected_data_points == 2
+        assert result.coverage_percent == 100.0
+
+    def test_invalid_expected_interval_raises_value_error(self) -> None:
+        """A zero or negative expected interval is an invalid validator config."""
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+        price_data = [
+            (base_time, Decimal("2500")),
+            (base_time + timedelta(hours=1), Decimal("2501")),
+        ]
+
+        with pytest.raises(ValueError, match="expected_interval_seconds"):
+            validate_price_data(
+                price_data,
+                expected_interval_seconds=0,
+                log_warnings=False,
+            )
 
     def test_logs_warnings_for_gaps(
         self, caplog: pytest.LogCaptureFixture
@@ -558,6 +596,11 @@ class TestDetectOutliers:
         """Test outlier detection with empty data."""
         outliers = detect_outliers([], log_warnings=False)
         assert len(outliers) == 0
+
+    def test_rolling_window_size_must_be_positive(self) -> None:
+        """Invalid rolling windows fail before statistical window math."""
+        with pytest.raises(ValueError, match="rolling_window_size must be positive"):
+            detect_outliers([], rolling_window_size=0, log_warnings=False)
 
     def test_single_data_point(self) -> None:
         """Test outlier detection with single data point."""
@@ -849,6 +892,25 @@ class TestDetectOutliers:
         # Zero price should be skipped, no rapid change outlier for this transition
         rapid_changes = [o for o in outliers if o.details.get("outlier_type") == "rapid_change"]
         assert len(rapid_changes) == 0
+        invalid_prices = [o for o in outliers if o.details.get("outlier_type") == "invalid_price"]
+        assert len(invalid_prices) == 1
+        assert invalid_prices[0].severity == DataQualitySeverity.ERROR
+
+    def test_non_finite_price_is_invalid_price_outlier(self) -> None:
+        """NaN/Infinity prices must be surfaced instead of disappearing from checks."""
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+        price_data = [
+            (base_time, Decimal("1000")),
+            (base_time + timedelta(hours=1), Decimal("NaN")),
+            (base_time + timedelta(hours=2), Decimal("1005")),
+        ]
+
+        outliers = detect_outliers(price_data, log_warnings=False)
+
+        invalid_prices = [o for o in outliers if o.details.get("outlier_type") == "invalid_price"]
+        assert len(invalid_prices) == 1
+        assert invalid_prices[0].timestamp == base_time + timedelta(hours=1)
+        assert invalid_prices[0].severity == DataQualitySeverity.ERROR
 
     def test_avoids_duplicate_flagging(self) -> None:
         """Test that same timestamp isn't flagged by both rapid change and statistical outlier."""

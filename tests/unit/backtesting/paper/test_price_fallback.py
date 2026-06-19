@@ -299,6 +299,30 @@ class TestPriceFallbackBehavior:
         )
 
     @pytest.mark.asyncio
+    async def test_non_positive_provider_price_uses_fallback(
+        self, trader_with_mock_aggregator, caplog
+    ):
+        """A zero provider price is invalid data, not a real valuation."""
+        trader = trader_with_mock_aggregator
+
+        mock_result = MagicMock()
+        mock_result.price = Decimal("0")
+        mock_result.stale = False
+        mock_result.confidence = 1.0
+        trader._price_aggregator.get_aggregated_price = AsyncMock(
+            return_value=mock_result
+        )
+
+        with caplog.at_level(logging.WARNING):
+            price = await trader._get_token_price("ETH")
+
+        assert price == Decimal("3000")
+        assert trader._price_cache["ETH"] == Decimal("3000")
+        assert any(
+            "non-positive" in record.message.lower() for record in caplog.records
+        )
+
+    @pytest.mark.asyncio
     async def test_stablecoins_return_one_dollar(self, trader_with_mock_aggregator):
         """Test that stablecoins always return $1 without calling providers."""
         trader = trader_with_mock_aggregator

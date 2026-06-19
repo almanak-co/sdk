@@ -98,6 +98,19 @@ class TestZeroBalanceForTrackedTokens:
         bal = snapshot.balance("WETH")
         assert bal.balance == Decimal("2.5")
 
+    def test_held_token_without_price_keeps_amount_with_zero_usd(self):
+        """Missing prices for held balances are exposed as unvalued, not dropped."""
+        state = _make_market_state({"WETH": Decimal("3000")})
+        portfolio = _make_portfolio(
+            cash_usd=Decimal("5000"),
+            tokens={"ARB": Decimal("100")},
+        )
+        snapshot = create_market_snapshot_from_state(state, portfolio=portfolio)
+
+        bal = snapshot.balance("ARB")
+        assert bal.balance == Decimal("100")
+        assert bal.balance_usd == Decimal("0")
+
     def test_multiple_tracked_tokens_all_zero(self):
         state = _make_market_state({
             "WETH": Decimal("3000"),

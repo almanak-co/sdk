@@ -1105,7 +1105,180 @@ class PositionReconciler:
 # =============================================================================
 
 
-def compare_positions(  # noqa: C901
+def _position_lookup(positions: list["SimulatedPosition"]) -> dict[str, "SimulatedPosition"]:
+    return {pos.position_id: pos for pos in positions}
+
+
+def _ordered_amount_tokens(
+    tracked_pos: "SimulatedPosition",
+    actual_pos: "SimulatedPosition",
+) -> list[str]:
+    ordered_tokens: list[str] = []
+    seen: set[str] = set()
+    for token in [*tracked_pos.tokens, *actual_pos.tokens, *tracked_pos.amounts, *actual_pos.amounts]:
+        if token in seen:
+            continue
+        seen.add(token)
+        ordered_tokens.append(token)
+    return ordered_tokens
+
+
+def _discrepancy_pct(expected: Decimal, actual: Decimal) -> Decimal:
+    if expected != Decimal("0"):
+        return abs(expected - actual) / expected
+    if actual != Decimal("0"):
+        return Decimal("1.0")
+    return Decimal("0")
+
+
+def _field_event_if_needed(
+    event_cls: type["ReconciliationEvent"],
+    timestamp: datetime,
+    position_id: str,
+    field_name: str,
+    expected: Decimal,
+    actual: Decimal,
+    tolerance_pct: Decimal,
+) -> "ReconciliationEvent | None":
+    if expected == actual:
+        return None
+
+    discrepancy = abs(expected - actual)
+    discrepancy_pct = _discrepancy_pct(expected, actual)
+    if discrepancy_pct <= tolerance_pct:
+        return None
+
+    return event_cls(
+        timestamp=timestamp,
+        position_id=position_id,
+        expected=expected,
+        actual=actual,
+        discrepancy=discrepancy,
+        discrepancy_pct=discrepancy_pct,
+        field_name=field_name,
+        auto_corrected=False,
+    )
+
+
+def _existence_event(
+    event_cls: type["ReconciliationEvent"],
+    timestamp: datetime,
+    position_id: str,
+    expected: Decimal,
+    actual: Decimal,
+) -> "ReconciliationEvent":
+    discrepancy = expected if actual == Decimal("0") else actual
+    return event_cls(
+        timestamp=timestamp,
+        position_id=position_id,
+        expected=expected,
+        actual=actual,
+        discrepancy=discrepancy,
+        discrepancy_pct=Decimal("1.0"),
+        field_name="existence",
+        auto_corrected=False,
+    )
+
+
+def _amount_mismatch_events(
+    event_cls: type["ReconciliationEvent"],
+    timestamp: datetime,
+    tracked_pos: "SimulatedPosition",
+    actual_pos: "SimulatedPosition",
+    tolerance_pct: Decimal,
+) -> list["ReconciliationEvent"]:
+    events: list[ReconciliationEvent] = []
+    for token in _ordered_amount_tokens(tracked_pos, actual_pos):
+        event = _field_event_if_needed(
+            event_cls,
+            timestamp,
+            tracked_pos.position_id,
+            f"amount_{token}",
+            tracked_pos.get_amount(token),
+            actual_pos.get_amount(token),
+            tolerance_pct,
+        )
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def _append_optional_event(
+    events: list["ReconciliationEvent"],
+    event: "ReconciliationEvent | None",
+) -> None:
+    if event is not None:
+        events.append(event)
+
+
+def _matching_position_events(
+    event_cls: type["ReconciliationEvent"],
+    timestamp: datetime,
+    tracked_pos: "SimulatedPosition",
+    actual_pos: "SimulatedPosition",
+    tolerance_pct: Decimal,
+) -> list["ReconciliationEvent"]:
+    events = _amount_mismatch_events(event_cls, timestamp, tracked_pos, actual_pos, tolerance_pct)
+
+    _append_optional_event(
+        events,
+        _field_event_if_needed(
+            event_cls,
+            timestamp,
+            tracked_pos.position_id,
+            "entry_price",
+            tracked_pos.entry_price,
+            actual_pos.entry_price,
+            tolerance_pct,
+        ),
+    )
+
+    if tracked_pos.is_lp and actual_pos.is_lp:
+        _append_optional_event(
+            events,
+            _field_event_if_needed(
+                event_cls,
+                timestamp,
+                tracked_pos.position_id,
+                "liquidity",
+                tracked_pos.liquidity,
+                actual_pos.liquidity,
+                tolerance_pct,
+            ),
+        )
+
+    if tracked_pos.is_perp and actual_pos.is_perp:
+        _append_optional_event(
+            events,
+            _field_event_if_needed(
+                event_cls,
+                timestamp,
+                tracked_pos.position_id,
+                "notional_usd",
+                tracked_pos.notional_usd,
+                actual_pos.notional_usd,
+                tolerance_pct,
+            ),
+        )
+
+    if tracked_pos.is_lending and actual_pos.is_lending:
+        _append_optional_event(
+            events,
+            _field_event_if_needed(
+                event_cls,
+                timestamp,
+                tracked_pos.position_id,
+                "interest_accrued",
+                tracked_pos.interest_accrued,
+                actual_pos.interest_accrued,
+                tolerance_pct,
+            ),
+        )
+
+    return events
+
+
+def compare_positions(
     tracked: list["SimulatedPosition"],
     actual: list["SimulatedPosition"],
     tolerance_pct: Decimal = Decimal("0.01"),
@@ -1147,186 +1320,50 @@ def compare_positions(  # noqa: C901
     """
     # Import at runtime to avoid circular imports
     from almanak.framework.backtesting.models import ReconciliationEvent
-    from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition  # noqa: F811
 
     events: list[ReconciliationEvent] = []
     timestamp = datetime.now(UTC)
 
     # Build lookup by position_id
-    tracked_by_id: dict[str, SimulatedPosition] = {pos.position_id: pos for pos in tracked}
-    actual_by_id: dict[str, SimulatedPosition] = {pos.position_id: pos for pos in actual}
+    tracked_by_id = _position_lookup(tracked)
+    actual_by_id = _position_lookup(actual)
 
     # Check for positions in tracked but not in actual (missing actual)
     for position_id, tracked_pos in tracked_by_id.items():
         if position_id not in actual_by_id:
-            # Position exists in tracked but not in actual
-            expected_value = tracked_pos.total_amount
             events.append(
-                ReconciliationEvent(
-                    timestamp=timestamp,
-                    position_id=position_id,
-                    expected=expected_value,
+                _existence_event(
+                    ReconciliationEvent,
+                    timestamp,
+                    position_id,
+                    expected=tracked_pos.total_amount,
                     actual=Decimal("0"),
-                    discrepancy=expected_value,
-                    discrepancy_pct=Decimal("1.0"),  # 100% missing
-                    field_name="existence",
-                    auto_corrected=False,
-                )
+                ),
             )
             continue
 
         # Position exists in both - compare fields
-        actual_pos = actual_by_id[position_id]
-
-        # Compare token amounts
-        all_tokens = set(tracked_pos.amounts.keys()) | set(actual_pos.amounts.keys())
-        for token in all_tokens:
-            tracked_amount = tracked_pos.get_amount(token)
-            actual_amount = actual_pos.get_amount(token)
-
-            if tracked_amount == actual_amount:
-                continue
-
-            discrepancy = abs(tracked_amount - actual_amount)
-
-            # Calculate percentage (handle zero case)
-            if tracked_amount != Decimal("0"):
-                discrepancy_pct = discrepancy / tracked_amount
-            elif actual_amount != Decimal("0"):
-                discrepancy_pct = Decimal("1.0")  # 100% if expected was 0 but actual is not
-            else:
-                continue  # Both zero, no discrepancy
-
-            # Only flag if exceeds tolerance
-            if discrepancy_pct > tolerance_pct:
-                events.append(
-                    ReconciliationEvent(
-                        timestamp=timestamp,
-                        position_id=position_id,
-                        expected=tracked_amount,
-                        actual=actual_amount,
-                        discrepancy=discrepancy,
-                        discrepancy_pct=discrepancy_pct,
-                        field_name=f"amount_{token}",
-                        auto_corrected=False,
-                    )
-                )
-
-        # Compare entry prices
-        if tracked_pos.entry_price != actual_pos.entry_price:
-            price_discrepancy = abs(tracked_pos.entry_price - actual_pos.entry_price)
-            if tracked_pos.entry_price != Decimal("0"):
-                price_pct = price_discrepancy / tracked_pos.entry_price
-            elif actual_pos.entry_price != Decimal("0"):
-                price_pct = Decimal("1.0")
-            else:
-                price_pct = Decimal("0")
-
-            if price_pct > tolerance_pct:
-                events.append(
-                    ReconciliationEvent(
-                        timestamp=timestamp,
-                        position_id=position_id,
-                        expected=tracked_pos.entry_price,
-                        actual=actual_pos.entry_price,
-                        discrepancy=price_discrepancy,
-                        discrepancy_pct=price_pct,
-                        field_name="entry_price",
-                        auto_corrected=False,
-                    )
-                )
-
-        # Compare LP-specific fields (liquidity)
-        if tracked_pos.is_lp and actual_pos.is_lp:
-            if tracked_pos.liquidity != actual_pos.liquidity:
-                liq_discrepancy = abs(tracked_pos.liquidity - actual_pos.liquidity)
-                if tracked_pos.liquidity != Decimal("0"):
-                    liq_pct = liq_discrepancy / tracked_pos.liquidity
-                elif actual_pos.liquidity != Decimal("0"):
-                    liq_pct = Decimal("1.0")
-                else:
-                    liq_pct = Decimal("0")
-
-                if liq_pct > tolerance_pct:
-                    events.append(
-                        ReconciliationEvent(
-                            timestamp=timestamp,
-                            position_id=position_id,
-                            expected=tracked_pos.liquidity,
-                            actual=actual_pos.liquidity,
-                            discrepancy=liq_discrepancy,
-                            discrepancy_pct=liq_pct,
-                            field_name="liquidity",
-                            auto_corrected=False,
-                        )
-                    )
-
-        # Compare perp-specific fields (notional_usd)
-        if tracked_pos.is_perp and actual_pos.is_perp:
-            if tracked_pos.notional_usd != actual_pos.notional_usd:
-                notional_discrepancy = abs(tracked_pos.notional_usd - actual_pos.notional_usd)
-                if tracked_pos.notional_usd != Decimal("0"):
-                    notional_pct = notional_discrepancy / tracked_pos.notional_usd
-                elif actual_pos.notional_usd != Decimal("0"):
-                    notional_pct = Decimal("1.0")
-                else:
-                    notional_pct = Decimal("0")
-
-                if notional_pct > tolerance_pct:
-                    events.append(
-                        ReconciliationEvent(
-                            timestamp=timestamp,
-                            position_id=position_id,
-                            expected=tracked_pos.notional_usd,
-                            actual=actual_pos.notional_usd,
-                            discrepancy=notional_discrepancy,
-                            discrepancy_pct=notional_pct,
-                            field_name="notional_usd",
-                            auto_corrected=False,
-                        )
-                    )
-
-        # Compare lending-specific fields (interest_accrued)
-        if tracked_pos.is_lending and actual_pos.is_lending:
-            if tracked_pos.interest_accrued != actual_pos.interest_accrued:
-                interest_discrepancy = abs(tracked_pos.interest_accrued - actual_pos.interest_accrued)
-                if tracked_pos.interest_accrued != Decimal("0"):
-                    interest_pct = interest_discrepancy / tracked_pos.interest_accrued
-                elif actual_pos.interest_accrued != Decimal("0"):
-                    interest_pct = Decimal("1.0")
-                else:
-                    interest_pct = Decimal("0")
-
-                if interest_pct > tolerance_pct:
-                    events.append(
-                        ReconciliationEvent(
-                            timestamp=timestamp,
-                            position_id=position_id,
-                            expected=tracked_pos.interest_accrued,
-                            actual=actual_pos.interest_accrued,
-                            discrepancy=interest_discrepancy,
-                            discrepancy_pct=interest_pct,
-                            field_name="interest_accrued",
-                            auto_corrected=False,
-                        )
-                    )
+        events.extend(
+            _matching_position_events(
+                ReconciliationEvent,
+                timestamp,
+                tracked_pos,
+                actual_by_id[position_id],
+                tolerance_pct,
+            )
+        )
 
     # Check for positions in actual but not in tracked (missing tracked)
     for position_id, actual_pos in actual_by_id.items():
         if position_id not in tracked_by_id:
-            # Position exists in actual but not in tracked
-            actual_value = actual_pos.total_amount
             events.append(
-                ReconciliationEvent(
-                    timestamp=timestamp,
-                    position_id=position_id,
+                _existence_event(
+                    ReconciliationEvent,
+                    timestamp,
+                    position_id,
                     expected=Decimal("0"),
-                    actual=actual_value,
-                    discrepancy=actual_value,
-                    discrepancy_pct=Decimal("1.0"),  # 100% unexpected
-                    field_name="existence",
-                    auto_corrected=False,
-                )
+                    actual=actual_pos.total_amount,
+                ),
             )
 
     logger.debug(
@@ -1342,6 +1379,132 @@ def compare_positions(  # noqa: C901
 # =============================================================================
 # Auto-Correct and Alerting Functions
 # =============================================================================
+
+
+def _should_auto_correct(event: "ReconciliationEvent", alert_threshold_pct: Decimal) -> bool:
+    return event.discrepancy_pct >= alert_threshold_pct
+
+
+def _add_missing_tracked_position(
+    tracked: list["SimulatedPosition"],
+    tracked_by_id: dict[str, "SimulatedPosition"],
+    position_id: str,
+    actual_pos: "SimulatedPosition",
+) -> None:
+    tracked.append(actual_pos)
+    tracked_by_id[position_id] = actual_pos
+    logger.info(
+        "Auto-correct: Added missing position %s (actual=%s)",
+        position_id,
+        actual_pos.total_amount,
+    )
+
+
+def _remove_stale_tracked_position(
+    tracked: list["SimulatedPosition"],
+    tracked_by_id: dict[str, "SimulatedPosition"],
+    position_id: str,
+    tracked_pos: "SimulatedPosition",
+) -> None:
+    tracked.remove(tracked_pos)
+    del tracked_by_id[position_id]
+    logger.info(
+        "Auto-correct: Removed stale position %s (was=%s)",
+        position_id,
+        tracked_pos.total_amount,
+    )
+
+
+def _update_tracked_field(
+    tracked_pos: "SimulatedPosition",
+    actual_pos: "SimulatedPosition",
+    event: "ReconciliationEvent",
+) -> bool:
+    field_name = event.field_name
+    position_id = event.position_id
+
+    if field_name.startswith("amount_"):
+        token = field_name.replace("amount_", "")
+        tracked_pos.amounts[token] = actual_pos.get_amount(token)
+        logger.info(
+            "Auto-correct: Updated %s amount_%s from %s to %s",
+            position_id,
+            token,
+            event.expected,
+            event.actual,
+        )
+        return True
+
+    if field_name == "entry_price":
+        tracked_pos.entry_price = actual_pos.entry_price
+    elif field_name == "liquidity":
+        tracked_pos.liquidity = actual_pos.liquidity
+    elif field_name == "notional_usd":
+        tracked_pos.notional_usd = actual_pos.notional_usd
+    elif field_name == "interest_accrued":
+        tracked_pos.interest_accrued = actual_pos.interest_accrued
+    else:
+        return False
+
+    logger.info(
+        "Auto-correct: Updated %s %s from %s to %s",
+        position_id,
+        field_name,
+        event.expected,
+        event.actual,
+    )
+    return True
+
+
+def _apply_auto_correction_event(
+    tracked: list["SimulatedPosition"],
+    tracked_by_id: dict[str, "SimulatedPosition"],
+    actual_by_id: dict[str, "SimulatedPosition"],
+    event: "ReconciliationEvent",
+) -> bool:
+    position_id = event.position_id
+    tracked_pos = tracked_by_id.get(position_id)
+    actual_pos = actual_by_id.get(position_id)
+
+    if tracked_pos is None and actual_pos is not None:
+        _add_missing_tracked_position(tracked, tracked_by_id, position_id, actual_pos)
+        return True
+
+    if tracked_pos is not None and actual_pos is None:
+        _remove_stale_tracked_position(tracked, tracked_by_id, position_id, tracked_pos)
+        return True
+
+    if tracked_pos is not None and actual_pos is not None:
+        return _update_tracked_field(tracked_pos, actual_pos, event)
+
+    return False
+
+
+def _mark_event_auto_corrected(
+    event_cls: type["ReconciliationEvent"],
+    event: "ReconciliationEvent",
+) -> "ReconciliationEvent":
+    return event_cls(
+        timestamp=event.timestamp,
+        position_id=event.position_id,
+        expected=event.expected,
+        actual=event.actual,
+        discrepancy=event.discrepancy,
+        discrepancy_pct=event.discrepancy_pct,
+        field_name=event.field_name,
+        auto_corrected=True,
+    )
+
+
+def _updated_auto_correction_events(
+    event_cls: type["ReconciliationEvent"],
+    events: list["ReconciliationEvent"],
+    corrected_position_ids: set[str],
+) -> list["ReconciliationEvent"]:
+    return [
+        _mark_event_auto_corrected(event_cls, event) if event.position_id in corrected_position_ids else event
+        for event in events
+    ]
 
 
 def auto_correct_positions(
@@ -1375,121 +1538,24 @@ def auto_correct_positions(
     """
     # Import at runtime to avoid circular imports
     from almanak.framework.backtesting.models import ReconciliationEvent
-    from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition  # noqa: F811
 
     # Build lookup of actual positions by ID
-    actual_by_id: dict[str, SimulatedPosition] = {pos.position_id: pos for pos in actual}
-    tracked_by_id: dict[str, SimulatedPosition] = {pos.position_id: pos for pos in tracked}
+    actual_by_id = _position_lookup(actual)
+    tracked_by_id = _position_lookup(tracked)
 
     # Track which positions were corrected
     corrected_position_ids: set[str] = set()
 
     for event in events:
-        position_id = event.position_id
-
         # Only correct if discrepancy exceeds threshold
-        if event.discrepancy_pct < alert_threshold_pct:
+        if not _should_auto_correct(event, alert_threshold_pct):
             continue
 
-        # Get both positions
-        tracked_pos = tracked_by_id.get(position_id)
-        actual_pos = actual_by_id.get(position_id)
-
-        if tracked_pos is None and actual_pos is not None:
-            # Position missing from tracked - add it
-            tracked.append(actual_pos)
-            tracked_by_id[position_id] = actual_pos
-            corrected_position_ids.add(position_id)
-            logger.info(
-                "Auto-correct: Added missing position %s (actual=%s)",
-                position_id,
-                actual_pos.total_amount,
-            )
-        elif tracked_pos is not None and actual_pos is None:
-            # Position missing from actual (should be removed from tracked)
-            tracked.remove(tracked_pos)
-            del tracked_by_id[position_id]
-            corrected_position_ids.add(position_id)
-            logger.info(
-                "Auto-correct: Removed stale position %s (was=%s)",
-                position_id,
-                tracked_pos.total_amount,
-            )
-        elif tracked_pos is not None and actual_pos is not None:
-            # Both exist - update tracked to match actual
-            field_name = event.field_name
-
-            if field_name.startswith("amount_"):
-                # Update token amount
-                token = field_name.replace("amount_", "")
-                tracked_pos.amounts[token] = actual_pos.get_amount(token)
-                corrected_position_ids.add(position_id)
-                logger.info(
-                    "Auto-correct: Updated %s amount_%s from %s to %s",
-                    position_id,
-                    token,
-                    event.expected,
-                    event.actual,
-                )
-            elif field_name == "entry_price":
-                tracked_pos.entry_price = actual_pos.entry_price
-                corrected_position_ids.add(position_id)
-                logger.info(
-                    "Auto-correct: Updated %s entry_price from %s to %s",
-                    position_id,
-                    event.expected,
-                    event.actual,
-                )
-            elif field_name == "liquidity":
-                tracked_pos.liquidity = actual_pos.liquidity
-                corrected_position_ids.add(position_id)
-                logger.info(
-                    "Auto-correct: Updated %s liquidity from %s to %s",
-                    position_id,
-                    event.expected,
-                    event.actual,
-                )
-            elif field_name == "notional_usd":
-                tracked_pos.notional_usd = actual_pos.notional_usd
-                corrected_position_ids.add(position_id)
-                logger.info(
-                    "Auto-correct: Updated %s notional_usd from %s to %s",
-                    position_id,
-                    event.expected,
-                    event.actual,
-                )
-            elif field_name == "interest_accrued":
-                tracked_pos.interest_accrued = actual_pos.interest_accrued
-                corrected_position_ids.add(position_id)
-                logger.info(
-                    "Auto-correct: Updated %s interest_accrued from %s to %s",
-                    position_id,
-                    event.expected,
-                    event.actual,
-                )
-            elif field_name == "existence":
-                # Already handled above
-                pass
+        if _apply_auto_correction_event(tracked, tracked_by_id, actual_by_id, event):
+            corrected_position_ids.add(event.position_id)
 
     # Update events to mark which were auto-corrected
-    updated_events: list[ReconciliationEvent] = []
-    for event in events:
-        if event.position_id in corrected_position_ids:
-            # Create new event with auto_corrected=True
-            updated_events.append(
-                ReconciliationEvent(
-                    timestamp=event.timestamp,
-                    position_id=event.position_id,
-                    expected=event.expected,
-                    actual=event.actual,
-                    discrepancy=event.discrepancy,
-                    discrepancy_pct=event.discrepancy_pct,
-                    field_name=event.field_name,
-                    auto_corrected=True,
-                )
-            )
-        else:
-            updated_events.append(event)
+    updated_events = _updated_auto_correction_events(ReconciliationEvent, events, corrected_position_ids)
 
     logger.info(
         "Auto-correction complete: %d positions corrected",
@@ -1540,6 +1606,72 @@ class ReconciliationAlert:
         }
 
 
+def _alert_severity(discrepancy_pct: Decimal, critical_threshold_pct: Decimal) -> str:
+    if discrepancy_pct >= critical_threshold_pct:
+        return "CRITICAL"
+    return "WARNING"
+
+
+def _alert_message(event: "ReconciliationEvent") -> str:
+    if event.field_name == "existence":
+        if event.expected == Decimal("0"):
+            return f"Position {event.position_id} found on-chain but not tracked (value={event.actual})"
+        return f"Position {event.position_id} tracked but not found on-chain (expected={event.expected})"
+
+    pct_str = f"{float(event.discrepancy_pct) * 100:.1f}%"
+    return (
+        f"Position {event.position_id} has {pct_str} discrepancy in {event.field_name}: "
+        f"expected={event.expected}, actual={event.actual}"
+    )
+
+
+def _build_reconciliation_alert(
+    timestamp: datetime,
+    event: "ReconciliationEvent",
+    critical_threshold_pct: Decimal,
+) -> ReconciliationAlert:
+    severity = _alert_severity(event.discrepancy_pct, critical_threshold_pct)
+    return ReconciliationAlert(
+        timestamp=timestamp,
+        position_id=event.position_id,
+        field_name=event.field_name,
+        expected=event.expected,
+        actual=event.actual,
+        discrepancy_pct=event.discrepancy_pct,
+        severity=severity,
+        message=_alert_message(event),
+        auto_corrected=event.auto_corrected,
+    )
+
+
+def _log_reconciliation_alert(deployment_id: str, alert: ReconciliationAlert) -> None:
+    log_msg = f"[{deployment_id}] Reconciliation {alert.severity}: {alert.message}"
+    if alert.auto_corrected:
+        log_msg += " (auto-corrected)"
+
+    if alert.severity == "CRITICAL":
+        logger.error(log_msg)
+    else:
+        logger.warning(log_msg)
+
+
+def _log_reconciliation_alert_summary(deployment_id: str, alerts: list[ReconciliationAlert]) -> None:
+    if not alerts:
+        logger.debug(
+            "[%s] Reconciliation completed with no alerts above threshold",
+            deployment_id,
+        )
+        return
+
+    logger.info(
+        "[%s] Reconciliation generated %d alerts (%d CRITICAL, %d WARNING)",
+        deployment_id,
+        len(alerts),
+        sum(1 for a in alerts if a.severity == "CRITICAL"),
+        sum(1 for a in alerts if a.severity == "WARNING"),
+    )
+
+
 def emit_reconciliation_alerts(
     events: list["ReconciliationEvent"],
     alert_threshold_pct: Decimal = Decimal("0.05"),
@@ -1580,62 +1712,11 @@ def emit_reconciliation_alerts(
         if event.discrepancy_pct < alert_threshold_pct:
             continue
 
-        # Determine severity based on discrepancy magnitude
-        if event.discrepancy_pct >= critical_threshold_pct:
-            severity = "CRITICAL"
-        else:
-            severity = "WARNING"
-
-        # Generate human-readable message
-        pct_str = f"{float(event.discrepancy_pct) * 100:.1f}%"
-
-        if event.field_name == "existence":
-            if event.expected == Decimal("0"):
-                message = f"Position {event.position_id} found on-chain but not tracked (value={event.actual})"
-            else:
-                message = f"Position {event.position_id} tracked but not found on-chain (expected={event.expected})"
-        else:
-            message = (
-                f"Position {event.position_id} has {pct_str} discrepancy in {event.field_name}: "
-                f"expected={event.expected}, actual={event.actual}"
-            )
-
-        alert = ReconciliationAlert(
-            timestamp=timestamp,
-            position_id=event.position_id,
-            field_name=event.field_name,
-            expected=event.expected,
-            actual=event.actual,
-            discrepancy_pct=event.discrepancy_pct,
-            severity=severity,
-            message=message,
-            auto_corrected=event.auto_corrected,
-        )
+        alert = _build_reconciliation_alert(timestamp, event, critical_threshold_pct)
         alerts.append(alert)
+        _log_reconciliation_alert(deployment_id, alert)
 
-        # Log the alert
-        log_msg = f"[{deployment_id}] Reconciliation {severity}: {message}"
-        if event.auto_corrected:
-            log_msg += " (auto-corrected)"
-
-        if severity == "CRITICAL":
-            logger.error(log_msg)
-        else:
-            logger.warning(log_msg)
-
-    if alerts:
-        logger.info(
-            "[%s] Reconciliation generated %d alerts (%d CRITICAL, %d WARNING)",
-            deployment_id,
-            len(alerts),
-            sum(1 for a in alerts if a.severity == "CRITICAL"),
-            sum(1 for a in alerts if a.severity == "WARNING"),
-        )
-    else:
-        logger.debug(
-            "[%s] Reconciliation completed with no alerts above threshold",
-            deployment_id,
-        )
+    _log_reconciliation_alert_summary(deployment_id, alerts)
 
     return alerts
 

@@ -216,6 +216,8 @@ async def query_pool_liquidity(
     try:
         # Query liquidity
         liquidity = await _query_liquidity(web3, pool_checksum)
+        if liquidity is None:
+            raise RuntimeError("pool liquidity query returned no data")
         if liquidity == 0:
             logger.debug(f"Pool {pool_address} has zero liquidity")
 
@@ -271,6 +273,8 @@ def query_pool_liquidity_sync(
     try:
         # Query liquidity
         liquidity = _query_liquidity_sync(web3, pool_checksum)
+        if liquidity is None:
+            raise RuntimeError("pool liquidity query returned no data")
         if liquidity == 0:
             logger.debug(f"Pool {pool_address} has zero liquidity")
 
@@ -374,24 +378,34 @@ def _pad_address(addr: str) -> str:
     return addr.lower().replace("0x", "").zfill(64)
 
 
-async def _query_liquidity(web3: Any, pool_address: str) -> int:
+def _abi_word_or_none(result: bytes | bytearray, context: str) -> bytes | None:
+    """Return a single ABI word response, or None for malformed call data."""
+    if len(result) != 32:
+        logger.debug("Unexpected %s response length: %d", context, len(result))
+        return None
+    return bytes(result)
+
+
+async def _query_liquidity(web3: Any, pool_address: str) -> int | None:
     """Query pool liquidity via liquidity() function."""
     try:
         result = await web3.eth.call({"to": pool_address, "data": LIQUIDITY_SELECTOR})
-        return int.from_bytes(result, byteorder="big")
+        word = _abi_word_or_none(result, "liquidity")
+        return int.from_bytes(word, byteorder="big") if word is not None else None
     except Exception as e:
         logger.debug(f"Failed to query liquidity: {e}")
-        return 0
+        return None
 
 
-def _query_liquidity_sync(web3: Any, pool_address: str) -> int:
+def _query_liquidity_sync(web3: Any, pool_address: str) -> int | None:
     """Synchronous version of _query_liquidity."""
     try:
         result = web3.eth.call({"to": pool_address, "data": LIQUIDITY_SELECTOR})
-        return int.from_bytes(result, byteorder="big")
+        word = _abi_word_or_none(result, "liquidity")
+        return int.from_bytes(word, byteorder="big") if word is not None else None
     except Exception as e:
         logger.debug(f"Failed to query liquidity: {e}")
-        return 0
+        return None
 
 
 async def _query_slot0(web3: Any, pool_address: str) -> dict[str, Any] | None:
@@ -458,7 +472,8 @@ async def _query_fee(web3: Any, pool_address: str) -> int | None:
     """Query pool fee tier."""
     try:
         result = await web3.eth.call({"to": pool_address, "data": FEE_SELECTOR})
-        return int.from_bytes(result, byteorder="big")
+        word = _abi_word_or_none(result, "fee")
+        return int.from_bytes(word, byteorder="big") if word is not None else None
     except Exception as e:
         logger.debug(f"Failed to query fee: {e}")
         return None
@@ -468,7 +483,8 @@ def _query_fee_sync(web3: Any, pool_address: str) -> int | None:
     """Synchronous version of _query_fee."""
     try:
         result = web3.eth.call({"to": pool_address, "data": FEE_SELECTOR})
-        return int.from_bytes(result, byteorder="big")
+        word = _abi_word_or_none(result, "fee")
+        return int.from_bytes(word, byteorder="big") if word is not None else None
     except Exception as e:
         logger.debug(f"Failed to query fee: {e}")
         return None
@@ -504,59 +520,87 @@ def _estimate_liquidity_usd(
     if liquidity == 0:
         return Decimal("0")
 
-    # If we have sqrt_price_x96, use it for a better estimate
-    if sqrt_price_x96 and sqrt_price_x96 > 0:
-        # sqrtPriceX96 = sqrt(price) * 2^96
-        # price = (sqrtPriceX96 / 2^96)^2
-        sqrt_price = sqrt_price_x96 / (2**96)
+    if sqrt_price_x96 is not None and _has_positive_sqrt_price(sqrt_price_x96):
+        return _estimate_liquidity_from_sqrt_price(
+            liquidity=liquidity,
+            sqrt_price_x96=sqrt_price_x96,
+            current_price_usd=current_price_usd,
+            fee_tier=fee_tier,
+            strict_mode=strict_mode,
+        )
+    return _estimate_liquidity_from_magnitude(liquidity)
 
-        # Rough TVL estimate: liquidity * sqrt(price) * price_usd / 10^15
-        # This is highly simplified but gives a reasonable order of magnitude
-        if current_price_usd:
-            tvl = Decimal(str(liquidity * sqrt_price)) * current_price_usd / Decimal("1e15")
-        else:
-            # No USD price provided -- use a rough ETH reference price.
-            # Callers should pass current_price_usd for accurate results.
-            if strict_mode:
-                raise ValueError(
-                    "No current_price_usd provided for TVL estimate and strict_mode=True. "
-                    "Pass current_price_usd for accurate results."
-                )
-            global _eth_fallback_warned  # noqa: PLW0603
-            if not _eth_fallback_warned:
-                logger.warning(
-                    "No current_price_usd provided for TVL estimate; falling back to $%s ETH reference price. "
-                    "This warning is logged once per session.",
-                    _ETH_FALLBACK_PRICE,
-                )
-                _eth_fallback_warned = True
-            tvl = Decimal(str(liquidity * sqrt_price)) * _ETH_FALLBACK_PRICE / Decimal("1e15")
 
-        # Apply fee tier multiplier (lower fee = typically more liquidity)
-        if fee_tier:
-            if fee_tier == 100:  # 0.01%
-                tvl = tvl * Decimal("1.5")
-            elif fee_tier == 500:  # 0.05%
-                tvl = tvl * Decimal("1.2")
-            elif fee_tier == 10000:  # 1%
-                tvl = tvl * Decimal("0.5")
+def _has_positive_sqrt_price(sqrt_price_x96: int | None) -> bool:
+    return sqrt_price_x96 is not None and sqrt_price_x96 > 0
 
-        return max(tvl, Decimal("1000"))  # Minimum $1k
 
-    # Fallback: very rough estimate based on liquidity magnitude
-    # This is a heuristic based on typical pool sizes
+def _estimate_liquidity_from_sqrt_price(
+    liquidity: int,
+    sqrt_price_x96: int,
+    current_price_usd: Decimal | None,
+    fee_tier: int | None,
+    strict_mode: bool,
+) -> Decimal:
+    reference_price_usd = _resolve_reference_price_usd(current_price_usd, strict_mode)
+    if reference_price_usd == Decimal("0"):
+        return Decimal("0")
+
+    # sqrtPriceX96 = sqrt(price) * 2^96. This rough TVL estimate is
+    # intentionally order-of-magnitude; callers should pass a measured USD
+    # price when result fidelity matters.
+    sqrt_price = sqrt_price_x96 / (2**96)
+    tvl = Decimal(str(liquidity * sqrt_price)) * reference_price_usd / Decimal("1e15")
+    tvl = _apply_fee_tier_liquidity_multiplier(tvl, fee_tier)
+    return max(tvl, Decimal("1000"))  # Minimum $1k for positive estimates.
+
+
+def _resolve_reference_price_usd(current_price_usd: Decimal | None, strict_mode: bool) -> Decimal:
+    if current_price_usd is not None:
+        return current_price_usd
+    if strict_mode:
+        raise ValueError(
+            "No current_price_usd provided for TVL estimate and strict_mode=True. "
+            "Pass current_price_usd for accurate results."
+        )
+    return _fallback_reference_price_usd()
+
+
+def _fallback_reference_price_usd() -> Decimal:
+    global _eth_fallback_warned  # noqa: PLW0603
+    if not _eth_fallback_warned:
+        logger.warning(
+            "No current_price_usd provided for TVL estimate; falling back to $%s ETH reference price. "
+            "This warning is logged once per session.",
+            _ETH_FALLBACK_PRICE,
+        )
+        _eth_fallback_warned = True
+    return _ETH_FALLBACK_PRICE
+
+
+def _apply_fee_tier_liquidity_multiplier(tvl: Decimal, fee_tier: int | None) -> Decimal:
+    if fee_tier == 100:  # 0.01%
+        return tvl * Decimal("1.5")
+    if fee_tier == 500:  # 0.05%
+        return tvl * Decimal("1.2")
+    if fee_tier == 10000:  # 1%
+        return tvl * Decimal("0.5")
+    return tvl
+
+
+def _estimate_liquidity_from_magnitude(liquidity: int) -> Decimal:
+    # Fallback heuristic based on typical pool sizes.
     liquidity_log = len(str(liquidity))  # Order of magnitude
 
     if liquidity_log >= 25:
         return Decimal("50000000")  # $50M+
-    elif liquidity_log >= 22:
+    if liquidity_log >= 22:
         return Decimal("10000000")  # $10M
-    elif liquidity_log >= 19:
+    if liquidity_log >= 19:
         return Decimal("1000000")  # $1M
-    elif liquidity_log >= 16:
+    if liquidity_log >= 16:
         return Decimal("100000")  # $100k
-    else:
-        return Decimal("10000")  # $10k
+    return Decimal("10000")  # $10k
 
 
 def _get_default_liquidity_result(pool_address: str) -> PoolLiquidityResult:

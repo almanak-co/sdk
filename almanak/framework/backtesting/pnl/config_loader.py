@@ -24,8 +24,10 @@ Example:
 
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -111,54 +113,11 @@ def load_config_from_result(
         if result.metadata:
             print(f"Original SDK version: {result.metadata.get('sdk_version')}")
     """
-    path = Path(result_path)
-
-    # Check file exists
-    if not path.exists():
-        raise FileNotFoundError(f"Backtest result file not found: {path}")
-
-    if not path.is_file():
-        raise ConfigLoadError(f"Path is not a file: {path}")
-
-    # Read and parse JSON
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except json.JSONDecodeError as e:
-        raise ConfigLoadError(f"Invalid JSON in result file: {e}") from e
-    except OSError as e:
-        raise ConfigLoadError(f"Failed to read result file: {e}") from e
-
-    # Extract config from result
-    config_data = data.get("config")
-    if config_data is None:
-        raise ConfigLoadError(
-            f"Result file does not contain 'config' field: {path}\n"
-            "This may be an old result format or a different type of result file."
-        )
-
-    if not isinstance(config_data, dict):
-        raise ConfigLoadError(f"'config' field is not a dictionary: type={type(config_data).__name__}")
-
-    # Validate and load config
+    path = _resolve_result_file(result_path)
+    data = _read_result_json(path)
+    config_data = _extract_config_data(data, path)
     warnings: list[str] = []
-    metadata: dict[str, Any] = {}
-
-    # Extract metadata if present (from to_dict_with_metadata())
-    if "_metadata" in config_data:
-        metadata = config_data.get("_metadata", {})
-        logger.debug(f"Loaded config metadata: {metadata}")
-
-        # Check SDK version compatibility
-        original_sdk = metadata.get("sdk_version", "unknown")
-        current_sdk = PnLBacktestConfig._get_sdk_version()
-        if original_sdk != current_sdk and original_sdk != "unknown":
-            warning = (
-                f"SDK version mismatch: original={original_sdk}, current={current_sdk}. "
-                "Results may differ slightly due to SDK changes."
-            )
-            warnings.append(warning)
-            logger.warning(warning)
+    metadata = _extract_metadata(config_data, warnings)
 
     # Validate required fields
     validation_result = validate_loaded_config(config_data)
@@ -175,7 +134,7 @@ def load_config_from_result(
     # Create config from dict
     try:
         config = PnLBacktestConfig.from_dict(config_data)
-    except (KeyError, ValueError, TypeError) as e:
+    except (ArithmeticError, KeyError, ValueError, TypeError) as e:
         raise ConfigLoadError(f"Failed to create config from data: {e}") from e
 
     logger.info(f"Loaded config from {path}: {config}")
@@ -186,6 +145,69 @@ def load_config_from_result(
         source_path=path,
         warnings=warnings,
     )
+
+
+def _resolve_result_file(result_path: str | Path) -> Path:
+    path = Path(result_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Backtest result file not found: {path}")
+    if not path.is_file():
+        raise ConfigLoadError(f"Path is not a file: {path}")
+    return path
+
+
+def _read_result_json(path: Path) -> dict[str, Any]:
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ConfigLoadError(f"Invalid JSON in result file: {e}") from e
+    except OSError as e:
+        raise ConfigLoadError(f"Failed to read result file: {e}") from e
+
+    if not isinstance(data, dict):
+        raise ConfigLoadError(f"Result file root is not a dictionary: type={type(data).__name__}")
+    return data
+
+
+def _extract_config_data(data: Mapping[str, Any], path: Path) -> dict[str, Any]:
+    config_data = data.get("config")
+    if config_data is None:
+        raise ConfigLoadError(
+            f"Result file does not contain 'config' field: {path}\n"
+            "This may be an old result format or a different type of result file."
+        )
+    if not isinstance(config_data, dict):
+        raise ConfigLoadError(f"'config' field is not a dictionary: type={type(config_data).__name__}")
+    return config_data
+
+
+def _extract_metadata(config_data: Mapping[str, Any], warnings: list[str]) -> dict[str, Any]:
+    if "_metadata" not in config_data:
+        return {}
+
+    metadata_raw = config_data.get("_metadata", {})
+    if not isinstance(metadata_raw, Mapping):
+        raise ConfigLoadError(f"'_metadata' field is not a dictionary: type={type(metadata_raw).__name__}")
+
+    metadata = dict(metadata_raw)
+    logger.debug(f"Loaded config metadata: {metadata}")
+    _warn_on_sdk_version_mismatch(metadata, warnings)
+    return metadata
+
+
+def _warn_on_sdk_version_mismatch(metadata: Mapping[str, Any], warnings: list[str]) -> None:
+    original_sdk = metadata.get("sdk_version", "unknown")
+    current_sdk = PnLBacktestConfig._get_sdk_version()
+    if original_sdk == current_sdk or original_sdk == "unknown":
+        return
+
+    warning = (
+        f"SDK version mismatch: original={original_sdk}, current={current_sdk}. "
+        "Results may differ slightly due to SDK changes."
+    )
+    warnings.append(warning)
+    logger.warning(warning)
 
 
 @dataclass
@@ -227,103 +249,160 @@ def validate_loaded_config(config_data: dict[str, Any]) -> ValidationResult:  # 
         if result.warnings:
             print(f"Warnings: {result.warnings}")
     """
+    errors = _validate_config_errors(config_data)
+    warnings = _unknown_config_field_warnings(config_data)
+
+    return ValidationResult(errors=errors, warnings=warnings)
+
+
+def _validate_config_errors(config_data: Mapping[str, Any]) -> list[str]:
     errors: list[str] = []
-    warnings: list[str] = []
+    _validate_required_fields(config_data, errors)
+    _validate_datetime_fields(config_data, errors)
+    _validate_numeric_fields(config_data, errors)
+    _validate_margin_ratios(config_data, errors)
+    _validate_tokens(config_data, errors)
+    return errors
 
-    # Required fields for PnLBacktestConfig
-    required_fields = ["start_time", "end_time"]
 
-    for field in required_fields:
+def _validate_required_fields(config_data: Mapping[str, Any], errors: list[str]) -> None:
+    for field in ("start_time", "end_time", "initial_capital_usd"):
         if field not in config_data:
             errors.append(f"Missing required field: {field}")
 
-    # Validate datetime fields
-    for field in ["start_time", "end_time"]:
-        if field in config_data:
-            value = config_data[field]
-            if isinstance(value, str):
-                try:
-                    datetime.fromisoformat(value)
-                except ValueError:
-                    errors.append(f"Invalid datetime format for {field}: {value}")
 
-    # Validate start_time < end_time
-    if "start_time" in config_data and "end_time" in config_data:
+def _validate_datetime_fields(config_data: Mapping[str, Any], errors: list[str]) -> None:
+    start = _parse_datetime_field("start_time", config_data, errors)
+    end = _parse_datetime_field("end_time", config_data, errors)
+    if start is None or end is None:
+        return
+
+    try:
+        if end <= start:
+            errors.append(f"end_time ({end}) must be after start_time ({start})")
+    except TypeError:
+        errors.append("start_time and end_time must use comparable timezone awareness")
+
+
+def _parse_datetime_field(field: str, config_data: Mapping[str, Any], errors: list[str]) -> datetime | None:
+    if field not in config_data:
+        return None
+
+    value = config_data[field]
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
         try:
-            start = (
-                datetime.fromisoformat(config_data["start_time"])
-                if isinstance(config_data["start_time"], str)
-                else config_data["start_time"]
-            )
-            end = (
-                datetime.fromisoformat(config_data["end_time"])
-                if isinstance(config_data["end_time"], str)
-                else config_data["end_time"]
-            )
-            if end <= start:
-                errors.append(f"end_time ({end}) must be after start_time ({start})")
-        except (ValueError, TypeError):
-            pass  # Already reported above
+            return datetime.fromisoformat(value)
+        except ValueError:
+            errors.append(f"Invalid datetime format for {field}: {value}")
+            return None
 
-    # Validate numeric fields
-    numeric_fields = {
-        "interval_seconds": (1, None, "must be positive"),
-        "initial_capital_usd": (0, None, "must be positive"),
-        "gas_price_gwei": (0, None, "cannot be negative"),
-        "inclusion_delay_blocks": (0, None, "cannot be negative"),
-        "trading_days_per_year": (1, 366, "must be between 1 and 366"),
-    }
+    errors.append(f"Invalid datetime value for {field}: expected ISO string or datetime, got {type(value).__name__}")
+    return None
 
-    for field, (min_val, max_val, msg) in numeric_fields.items():
+
+_NUMERIC_FIELD_RULES: dict[str, tuple[Decimal | None, Decimal | None, bool, str]] = {
+    "interval_seconds": (Decimal("1"), None, True, "must be positive"),
+    "initial_capital_usd": (Decimal("0"), None, False, "must be positive"),
+    "gas_price_gwei": (Decimal("0"), None, True, "cannot be negative"),
+    "inclusion_delay_blocks": (Decimal("0"), None, True, "cannot be negative"),
+    "trading_days_per_year": (Decimal("1"), Decimal("366"), True, "must be between 1 and 366"),
+}
+
+
+def _validate_numeric_fields(config_data: Mapping[str, Any], errors: list[str]) -> None:
+    for field, rule in _NUMERIC_FIELD_RULES.items():
         if field in config_data:
-            try:
-                value = float(config_data[field])
-                if min_val is not None and value < min_val:
-                    errors.append(f"{field} {msg}: {value}")
-                if max_val is not None and value > max_val:
-                    errors.append(f"{field} {msg}: {value}")
-            except (ValueError, TypeError):
-                errors.append(f"Invalid numeric value for {field}: {config_data[field]}")
+            _validate_numeric_field(field, config_data[field], rule, errors)
 
-    # Validate margin ratios
-    margin_fields = ["initial_margin_ratio", "maintenance_margin_ratio"]
-    for field in margin_fields:
-        if field in config_data:
-            try:
-                value = float(config_data[field])
-                if not (0 < value <= 1):
-                    errors.append(f"{field} must be between 0 (exclusive) and 1 (inclusive): {value}")
-            except (ValueError, TypeError):
-                errors.append(f"Invalid numeric value for {field}: {config_data[field]}")
 
-    # Validate tokens list
-    if "tokens" in config_data:
-        tokens = config_data["tokens"]
-        if not isinstance(tokens, list):
-            errors.append(f"tokens must be a list, got {type(tokens).__name__}")
-        elif not tokens:
-            errors.append("tokens list cannot be empty")
+def _validate_numeric_field(
+    field: str,
+    raw_value: Any,
+    rule: tuple[Decimal | None, Decimal | None, bool, str],
+    errors: list[str],
+) -> None:
+    value = _parse_decimal_value(field, raw_value, errors)
+    if value is None:
+        return
 
-    # Derive known fields from PnLBacktestConfig dataclass to prevent schema drift.
-    # Previously this was a manually curated set that fell out of sync with to_dict().
-    known_fields = set(PnLBacktestConfig.__dataclass_fields__.keys()) | {
-        # Computed properties emitted by to_dict() (read-only, not used for loading)
-        "duration_seconds",
-        "duration_days",
-        "estimated_ticks",
-        # Properties emitted by to_dict_with_metadata()
-        "trading_days_per_year",
-        # Metadata section
-        "_metadata",
-        "_meta",
-    }
+    min_val, max_val, min_inclusive, message = rule
+    if min_val is not None and _violates_minimum(value, min_val, min_inclusive):
+        errors.append(f"{field} {message}: {value}")
+    if max_val is not None and value > max_val:
+        errors.append(f"{field} {message}: {value}")
 
+
+def _parse_decimal_value(field: str, raw_value: Any, errors: list[str]) -> Decimal | None:
+    if isinstance(raw_value, bool):
+        errors.append(f"Invalid numeric value for {field}: {raw_value}")
+        return None
+
+    try:
+        value = Decimal(str(raw_value))
+    except (InvalidOperation, ValueError):
+        errors.append(f"Invalid numeric value for {field}: {raw_value}")
+        return None
+
+    if not value.is_finite():
+        errors.append(f"Invalid numeric value for {field}: {raw_value}")
+        return None
+    return value
+
+
+def _violates_minimum(value: Decimal, min_val: Decimal, min_inclusive: bool) -> bool:
+    return value < min_val if min_inclusive else value <= min_val
+
+
+def _validate_margin_ratios(config_data: Mapping[str, Any], errors: list[str]) -> None:
+    parsed_ratios: dict[str, Decimal] = {}
+    for field in ("initial_margin_ratio", "maintenance_margin_ratio"):
+        if field not in config_data:
+            continue
+        value = _parse_decimal_value(field, config_data[field], errors)
+        if value is None:
+            continue
+        parsed_ratios[field] = value
+        if not (Decimal("0") < value <= Decimal("1")):
+            errors.append(f"{field} must be between 0 (exclusive) and 1 (inclusive): {value}")
+
+    initial_margin = parsed_ratios.get("initial_margin_ratio")
+    maintenance_margin = parsed_ratios.get("maintenance_margin_ratio")
+    if initial_margin is not None and maintenance_margin is not None and maintenance_margin > initial_margin:
+        errors.append("maintenance_margin_ratio must be <= initial_margin_ratio")
+
+
+def _validate_tokens(config_data: Mapping[str, Any], errors: list[str]) -> None:
+    if "tokens" not in config_data:
+        return
+
+    tokens = config_data["tokens"]
+    if not isinstance(tokens, list):
+        errors.append(f"tokens must be a list, got {type(tokens).__name__}")
+    elif not tokens:
+        errors.append("tokens list cannot be empty")
+
+
+def _unknown_config_field_warnings(config_data: Mapping[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    known_fields = _known_config_fields()
     for field in config_data:
         if field not in known_fields:
             logger.debug(f"Ignoring unknown field in config: {field}")
             warnings.append(f"Unknown field in config (will be ignored): {field}")
+    return warnings
 
-    return ValidationResult(errors=errors, warnings=warnings)
+
+def _known_config_fields() -> set[str]:
+    return set(PnLBacktestConfig.__dataclass_fields__.keys()) | {
+        "duration_seconds",
+        "duration_days",
+        "estimated_ticks",
+        "trading_days_per_year",
+        "_metadata",
+        "_meta",
+    }
 
 
 __all__ = [

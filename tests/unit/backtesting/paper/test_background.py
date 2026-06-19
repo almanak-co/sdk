@@ -9,8 +9,11 @@ This module tests the background Paper Trader functionality including:
 """
 
 import json
+import logging
 import os
 import signal
+import sys
+import types
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import patch
@@ -23,6 +26,9 @@ from almanak.framework.backtesting.paper.background import (
     PaperTraderState,
     PIDFile,
     TradeHistoryWriter,
+    _instantiate_background_strategy,
+    _write_new_error_records,
+    _write_new_trade_records,
 )
 from almanak.framework.backtesting.paper.config import PaperTraderConfig
 from almanak.framework.backtesting.paper.models import (
@@ -305,6 +311,139 @@ class TestTradeHistoryWriter:
         writer.truncate()
 
         assert not writer.path.exists()
+
+
+class TestBackgroundHelperFunctions:
+    """Focused tests for background entry-point helpers."""
+
+    @staticmethod
+    def _sample_trade() -> PaperTrade:
+        return PaperTrade(
+            timestamp=datetime.now(UTC),
+            block_number=100,
+            intent={"type": "SwapIntent"},
+            tx_hash="0xabc",
+            gas_used=21000,
+            gas_cost_usd=Decimal("0.50"),
+            tokens_in={"USDC": Decimal("100")},
+            tokens_out={"ETH": Decimal("0.05")},
+            protocol="uniswap_v3",
+            intent_type="SWAP",
+        )
+
+    @staticmethod
+    def _sample_error() -> PaperTradeError:
+        return PaperTradeError(
+            timestamp=datetime.now(UTC),
+            intent={"type": "SwapIntent"},
+            error_type=PaperTradeErrorType.INTERNAL_ERROR,
+            error_message="boom",
+        )
+
+    def test_instantiate_strategy_does_not_swallow_constructor_type_error(self):
+        class BuggyStrategy:
+            def __init__(self, config):
+                raise TypeError("real constructor bug")
+
+        with pytest.raises(TypeError, match="real constructor bug"):
+            _instantiate_background_strategy(
+                BuggyStrategy,
+                strategy_config={"x": 1},
+                config=PaperTraderConfig(
+                    chain="arbitrum",
+                    rpc_url="http://localhost:8545",
+                    deployment_id="paper-test",
+                ),
+            )
+
+    def test_instantiate_strategy_uses_full_signature_when_supported(self):
+        class FullSignatureStrategy:
+            def __init__(self, config, chain, wallet_address, risk_guard_config):
+                self.config = config
+                self.chain = chain
+                self.wallet_address = wallet_address
+                self.risk_guard_config = risk_guard_config
+
+        strategy = _instantiate_background_strategy(
+            FullSignatureStrategy,
+            strategy_config={"alpha": 1},
+            config=PaperTraderConfig(
+                chain="arbitrum",
+                rpc_url="http://localhost:8545",
+                deployment_id="paper-test",
+                wallet_address="0x" + "1" * 40,
+            ),
+        )
+
+        assert strategy.config == {"alpha": 1}
+        assert strategy.chain == "arbitrum"
+        assert strategy.wallet_address == "0x" + "1" * 40
+        assert strategy.risk_guard_config is None
+
+    def test_instantiate_strategy_uses_full_context_for_kwargs_constructor(self):
+        class KwargsStrategy:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        strategy = _instantiate_background_strategy(
+            KwargsStrategy,
+            strategy_config={"alpha": 1},
+            config=PaperTraderConfig(
+                chain="base",
+                rpc_url="http://localhost:8545",
+                deployment_id="paper-test",
+                wallet_address="0x" + "a" * 40,
+            ),
+        )
+
+        assert strategy.kwargs == {
+            "config": {"alpha": 1},
+            "chain": "base",
+            "wallet_address": "0x" + "a" * 40,
+            "risk_guard_config": None,
+        }
+
+    def test_write_new_trade_records_returns_last_successful_index(self):
+        class FailingWriter:
+            def __init__(self):
+                self.writes = 0
+
+            def write_trade(self, trade):
+                self.writes += 1
+                if self.writes == 2:
+                    raise OSError("disk full")
+
+        trades = [self._sample_trade(), self._sample_trade(), self._sample_trade()]
+
+        index = _write_new_trade_records(
+            trade_history=FailingWriter(),
+            trades=trades,
+            last_trade_count=0,
+            bg_logger=logging.getLogger("test"),
+        )
+
+        assert index == 1
+
+    def test_write_new_error_records_returns_last_successful_index(self):
+        class FailingWriter:
+            def __init__(self):
+                self.writes = 0
+
+            def write_error(self, error):
+                self.writes += 1
+                if self.writes == 2:
+                    raise OSError("disk full")
+
+        errors = [self._sample_error(), self._sample_error(), self._sample_error()]
+
+        index = _write_new_error_records(
+            trade_history=FailingWriter(),
+            errors=errors,
+            last_error_count=0,
+            bg_logger=logging.getLogger("test"),
+        )
+
+        assert index == 1
 
 
 class TestPaperTraderState:
@@ -667,6 +806,47 @@ class TestBackgroundPaperTrader:
 
         assert result is False
 
+    def test_stop_returns_true_after_graceful_sigterm(self, tmp_path):
+        """stop() releases the PID file when SIGTERM is enough."""
+        config = self.create_config()
+        bg_trader = BackgroundPaperTrader(
+            config=config,
+            state_dir=tmp_path,
+        )
+        bg_trader.pid_file_path.write_text(str(os.getpid()))
+
+        with patch.object(PIDFile, "_is_process_running", side_effect=[True, False]), patch(
+            "almanak.framework.backtesting.paper.background.os.kill"
+        ) as kill_mock, patch("almanak.framework.backtesting.paper.background.time.sleep") as sleep_mock:
+            result = bg_trader.stop(timeout=1)
+
+        assert result is True
+        kill_mock.assert_called_once_with(os.getpid(), signal.SIGTERM)
+        sleep_mock.assert_not_called()
+        assert not bg_trader.pid_file_path.exists()
+
+    def test_stop_uses_sigkill_when_sigterm_times_out(self, tmp_path):
+        """stop() escalates to SIGKILL after the graceful timeout."""
+        config = self.create_config()
+        bg_trader = BackgroundPaperTrader(
+            config=config,
+            state_dir=tmp_path,
+        )
+        bg_trader.pid_file_path.write_text(str(os.getpid()))
+
+        with patch.object(PIDFile, "_is_process_running", side_effect=[True, False]), patch(
+            "almanak.framework.backtesting.paper.background.os.kill"
+        ) as kill_mock, patch("almanak.framework.backtesting.paper.background.time.sleep") as sleep_mock:
+            result = bg_trader.stop(timeout=0)
+
+        assert result is True
+        assert [call.args for call in kill_mock.call_args_list] == [
+            (os.getpid(), signal.SIGTERM),
+            (os.getpid(), signal.SIGKILL),
+        ]
+        sleep_mock.assert_called_once_with(1)
+        assert not bg_trader.pid_file_path.exists()
+
     def test_resume_raises_if_no_state(self, tmp_path):
         """Test resume raises error when no saved state exists."""
         config = self.create_config()
@@ -708,6 +888,191 @@ class TestBackgroundPaperTrader:
 
         with pytest.raises(RuntimeError, match="already running"):
             bg_trader.resume(strategy_module="test_module")
+
+
+class TestBackgroundPaperTraderEntrypoint:
+    """Tests for the spawned-process entrypoint without launching Anvil."""
+
+    def test_entrypoint_runs_fresh_and_resumed_sessions(self, tmp_path, monkeypatch):
+        from almanak.framework.backtesting.paper.background import _run_background_paper_trader
+
+        config = PaperTraderConfig(
+            chain="arbitrum",
+            rpc_url="https://arb.example/rpc",
+            deployment_id="child_entrypoint_strategy",
+            initial_eth=Decimal("2"),
+            initial_tokens={"USDC": Decimal("25")},
+            tick_interval_seconds=0.001,
+            max_ticks=1,
+            anvil_port=8654,
+        )
+
+        strategy_module = types.ModuleType("child_entrypoint_strategy_module")
+        strategy_calls = {}
+
+        class Strategy:
+            def __init__(
+                self,
+                config=None,
+                chain=None,
+                wallet_address=None,
+                risk_guard_config=None,
+            ):
+                strategy_calls.update(
+                    {
+                        "config": config,
+                        "chain": chain,
+                        "wallet_address": wallet_address,
+                        "risk_guard_config": risk_guard_config,
+                    }
+                )
+
+        strategy_module.Strategy = Strategy
+        monkeypatch.setitem(sys.modules, strategy_module.__name__, strategy_module)
+
+        created = {"traders": []}
+
+        class FakeRollingForkManager:
+            def __init__(self, *, rpc_url, chain, anvil_port):
+                self.rpc_url = rpc_url
+                self.chain = chain
+                self.anvil_port = anvil_port
+                self.is_running = False
+                created["fork_manager"] = self
+
+        class FakePaperPortfolioTracker:
+            def __init__(self, *, deployment_id, initial_balances):
+                self.deployment_id = deployment_id
+                self.initial_balances = dict(initial_balances)
+                self.current_balances = dict(initial_balances)
+                created["portfolio_tracker"] = self
+
+        class FakePaperTrader:
+            def __init__(self, *, fork_manager, portfolio_tracker, config):
+                self.fork_manager = fork_manager
+                self.portfolio_tracker = portfolio_tracker
+                self.config = config
+                self._running = False
+                self._current_strategy = None
+                self._trades = []
+                self._errors = []
+                self._equity_curve = []
+                self._tick_count = 0
+                self._ticks_with_fork = 0
+                self._ticks_with_indicators = 0
+                self._ticks_with_action = 0
+                self._last_successful_decision_at = None
+                self._last_trade_at = None
+                self._last_market_snapshot = None
+                self._orchestrator = None
+                self.calls = []
+                created["trader"] = self
+                created["traders"].append(self)
+
+            async def _initialize_fork(self):
+                self.calls.append("initialize_fork")
+
+            async def _initialize_orchestrator(self):
+                self.calls.append("initialize_orchestrator")
+
+            async def _execute_tick(self, strategy):
+                self.calls.append(("execute_tick", strategy.__class__.__name__))
+                self._ticks_with_fork += 1
+                self._ticks_with_action += 1
+                self._last_successful_decision_at = datetime.now(UTC)
+
+            async def _sync_wallet_to_fork(self):
+                self.calls.append("sync_wallet_to_fork")
+
+            async def _cleanup(self):
+                self.calls.append("cleanup")
+
+        with patch("almanak.config.backtest.apply_ssl_cert_file"), patch(
+            "almanak.config.backtest.backtest_config_from_env"
+        ), patch("almanak.framework.backtesting.paper.background.atexit.register"), patch(
+            "almanak.framework.backtesting.paper.background.signal.signal"
+        ), patch(
+            "almanak.framework.anvil.fork_manager.RollingForkManager",
+            FakeRollingForkManager,
+        ), patch(
+            "almanak.framework.backtesting.paper.portfolio_tracker.PaperPortfolioTracker",
+            FakePaperPortfolioTracker,
+        ), patch(
+            "almanak.framework.backtesting.paper.engine.PaperTrader",
+            FakePaperTrader,
+        ):
+            _run_background_paper_trader(
+                config.to_dict(),
+                strategy_module.__name__,
+                "Strategy",
+                str(tmp_path),
+                save_interval_seconds=0,
+                raw_rpc_url=config.rpc_url,
+            )
+
+            resume_config = PaperTraderConfig(
+                chain="arbitrum",
+                rpc_url="https://arb.example/rpc",
+                deployment_id="child_entrypoint_strategy",
+                initial_eth=Decimal("2"),
+                initial_tokens={"USDC": Decimal("25")},
+                tick_interval_seconds=0.001,
+                max_ticks=4,
+                anvil_port=8654,
+            )
+            stopped_state = PaperTraderState(
+                deployment_id="child_entrypoint_strategy",
+                session_start=datetime.now(UTC),
+                last_save=datetime.now(UTC),
+                tick_count=3,
+                trades=[],
+                errors=[],
+                current_balances={"ETH": Decimal("1"), "USDC": Decimal("5")},
+                initial_balances={"ETH": Decimal("2"), "USDC": Decimal("25")},
+                equity_curve=[],
+                config=resume_config.to_dict(),
+                pid=12345,
+                status="stopped",
+                ticks_with_fork=7,
+                ticks_with_action=2,
+            )
+            stopped_state.save(tmp_path / "child_entrypoint_strategy.state.json")
+
+            _run_background_paper_trader(
+                resume_config.to_dict(),
+                strategy_module.__name__,
+                "Strategy",
+                str(tmp_path),
+                save_interval_seconds=0,
+                resume=True,
+                raw_rpc_url=resume_config.rpc_url,
+            )
+
+        state = PaperTraderState.load(tmp_path / "child_entrypoint_strategy.state.json")
+        assert state.status == "completed"
+        assert state.tick_count == 4
+        assert state.resume_count == 1
+        assert state.current_balances == {"ETH": Decimal("1"), "USDC": Decimal("5")}
+        assert not (tmp_path / "child_entrypoint_strategy.pid").exists()
+        assert created["traders"][0].calls == [
+            "initialize_fork",
+            "initialize_orchestrator",
+            ("execute_tick", "Strategy"),
+            "cleanup",
+        ]
+        assert created["traders"][1].calls == [
+            "initialize_fork",
+            "initialize_orchestrator",
+            "sync_wallet_to_fork",
+            ("execute_tick", "Strategy"),
+            "cleanup",
+        ]
+        assert strategy_calls == {
+            "config": {},
+            "chain": "arbitrum",
+            "wallet_address": "0x" + "0" * 40,
+            "risk_guard_config": None,
+        }
 
 
 class TestSignalHandling:
@@ -827,6 +1192,31 @@ class TestGracefulShutdown:
 class TestBatch1Fixes:
     """Tests for Paper Trading Batch 1 fixes (resume raw_rpc_url, hex crash, port contention)."""
 
+    class FakeSocket:
+        def __init__(self, assigned_port, binds):
+            self.assigned_port = assigned_port
+            self.binds = binds
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def bind(self, address):
+            self.binds.append(address)
+
+        def getsockname(self):
+            return ("127.0.0.1", self.assigned_port)
+
+    class FakeSocketFactory:
+        def __init__(self, assigned_ports):
+            self.assigned_ports = list(assigned_ports)
+            self.binds = []
+
+        def __call__(self, family, socket_type):
+            return TestBatch1Fixes.FakeSocket(self.assigned_ports.pop(0), self.binds)
+
     @staticmethod
     def create_config(**overrides) -> PaperTraderConfig:
         defaults = {
@@ -886,23 +1276,21 @@ class TestBatch1Fixes:
         """Fix #6: _find_free_port() returns a usable TCP port."""
         from almanak.framework.backtesting.paper.background import _find_free_port
 
-        port = _find_free_port()
+        fake_socket = self.FakeSocketFactory([8655])
+        with patch("almanak.framework.backtesting.paper.background.socket.socket", fake_socket):
+            port = _find_free_port()
+
         assert 1024 <= port <= 65535
-        # Port should be different from the default
-        # (very unlikely to be exactly 8546 on a random OS assignment)
+        assert fake_socket.binds == [("127.0.0.1", 0)]
 
     def test_find_free_port_avoids_used_ports(self):
         """Fix #3: _find_free_port() must not return a port that is already in use."""
-        import socket
-
         from almanak.framework.backtesting.paper.background import _find_free_port
 
-        port1 = _find_free_port()
-
-        # Bind to the first port to ensure it's in use
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", port1))
-
-            # The next call should return a different, free port
+        fake_socket = self.FakeSocketFactory([8655, 8656])
+        with patch("almanak.framework.backtesting.paper.background.socket.socket", fake_socket):
+            port1 = _find_free_port()
             port2 = _find_free_port()
-            assert port1 != port2
+
+        assert port1 != port2
+        assert fake_socket.binds == [("127.0.0.1", 0), ("127.0.0.1", 0)]

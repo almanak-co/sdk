@@ -283,6 +283,101 @@ class WalkForwardConfig:
         )
 
 
+def _resolve_walk_forward_config(
+    config: WalkForwardConfig | None,
+    train_size: timedelta | None,
+    test_size: timedelta | None,
+    step: timedelta | None,
+    gap: timedelta | None,
+    min_windows: int | None,
+) -> WalkForwardConfig:
+    if config is not None:
+        return config
+    if train_size is None or test_size is None:
+        raise ValueError("Either 'config' or both 'train_size' and 'test_size' must be provided")
+    return WalkForwardConfig(
+        train_size=train_size,
+        test_size=test_size,
+        step=step,
+        gap=gap if gap is not None else timedelta(0),
+        min_windows=min_windows if min_windows is not None else 2,
+    )
+
+
+def _validate_walk_forward_date_range(
+    start_date: datetime,
+    end_date: datetime,
+    config: WalkForwardConfig,
+) -> None:
+    if start_date >= end_date:
+        raise ValueError(f"start_date ({start_date}) must be before end_date ({end_date})")
+
+    total_duration = end_date - start_date
+    window_size = config.window_size
+    if total_duration < window_size:
+        raise ValueError(
+            f"Date range ({total_duration.days} days) is shorter than "
+            f"one window ({window_size.days} days = "
+            f"{config.train_size.days} train + {config.gap.days} gap + "
+            f"{config.test_size.days} test)"
+        )
+
+
+def _build_walk_forward_windows(
+    start_date: datetime,
+    end_date: datetime,
+    config: WalkForwardConfig,
+) -> list[WalkForwardWindow]:
+    windows: list[WalkForwardWindow] = []
+    window_index = 0
+    current_train_start = start_date
+
+    while True:
+        train_end = current_train_start + config.train_size
+        test_start = train_end + config.gap
+        test_end = test_start + config.test_size
+
+        if test_end > end_date:
+            break
+
+        windows.append(
+            WalkForwardWindow(
+                window_index=window_index,
+                train_start=current_train_start,
+                train_end=train_end,
+                test_start=test_start,
+                test_end=test_end,
+            )
+        )
+
+        assert config.step is not None
+        current_train_start += config.step
+        window_index += 1
+
+    return windows
+
+
+def _validate_min_walk_forward_windows(
+    windows: list[WalkForwardWindow],
+    min_windows: int,
+) -> None:
+    if len(windows) >= min_windows:
+        return
+    raise ValueError(
+        f"Only {len(windows)} windows can be created, but min_windows={min_windows}. "
+        f"Either extend the date range, reduce train_size/test_size, "
+        f"or lower min_windows."
+    )
+
+
+def _log_walk_forward_windows(windows: list[WalkForwardWindow], config: WalkForwardConfig) -> None:
+    logger.info(
+        f"Generated {len(windows)} walk-forward windows: "
+        f"train={config.train_size.days}d, test={config.test_size.days}d, "
+        f"step={config.step.days if config.step else 0}d, gap={config.gap.days}d"
+    )
+
+
 def split_walk_forward(
     start_date: datetime,
     end_date: datetime,
@@ -295,124 +390,22 @@ def split_walk_forward(
 ) -> list[WalkForwardWindow]:
     """Generate train/test window splits for walk-forward optimization.
 
-    Creates a sequence of non-overlapping or overlapping train/test windows
-    that advance through the date range. This is the core splitting function
-    for walk-forward validation.
-
-    Args:
-        start_date: Start of the overall backtest period
-        end_date: End of the overall backtest period
-        config: WalkForwardConfig object (if provided, other params ignored)
-        train_size: Duration of each training window
-        test_size: Duration of each test window
-        step: How far to advance between windows (default: test_size)
-        gap: Gap between train and test (default: 0)
-        min_windows: Minimum required windows (default: 2)
-
-    Returns:
-        List of WalkForwardWindow objects representing the splits.
-        Returns list of tuples (train_start, train_end, test_start, test_end).
-
-    Raises:
-        ValueError: If date range is too short for even min_windows splits
-
-    Example:
-        # Using config object
-        config = WalkForwardConfig.from_days(90, 30)
-        windows = split_walk_forward(
-            start_date=datetime(2023, 1, 1),
-            end_date=datetime(2024, 1, 1),
-            config=config,
-        )
-
-        # Using individual parameters
-        windows = split_walk_forward(
-            start_date=datetime(2023, 1, 1),
-            end_date=datetime(2024, 1, 1),
-            train_size=timedelta(days=90),
-            test_size=timedelta(days=30),
-        )
-
-        # Access results
-        for window in windows:
-            print(f"Window {window.window_index}:")
-            print(f"  Train: {window.train_start} to {window.train_end}")
-            print(f"  Test:  {window.test_start} to {window.test_end}")
-
-            # Or as tuple
-            train_start, train_end, test_start, test_end = window.to_tuple()
+    If ``config`` is provided, it owns all sizing fields and individual
+    ``train_size`` / ``test_size`` / ``step`` / ``gap`` / ``min_windows``
+    arguments are ignored.
     """
-    # Validate inputs
-    if start_date >= end_date:
-        raise ValueError(f"start_date ({start_date}) must be before end_date ({end_date})")
-
-    # Build config from individual params if not provided
-    if config is None:
-        if train_size is None or test_size is None:
-            raise ValueError("Either 'config' or both 'train_size' and 'test_size' must be provided")
-        config = WalkForwardConfig(
-            train_size=train_size,
-            test_size=test_size,
-            step=step,
-            gap=gap if gap is not None else timedelta(0),
-            min_windows=min_windows if min_windows is not None else 2,
-        )
-
-    total_duration = end_date - start_date
-    window_size = config.window_size
-
-    # Check if we have enough data for at least one window
-    if total_duration < window_size:
-        raise ValueError(
-            f"Date range ({total_duration.days} days) is shorter than "
-            f"one window ({window_size.days} days = "
-            f"{config.train_size.days} train + {config.gap.days} gap + "
-            f"{config.test_size.days} test)"
-        )
-
-    # Generate windows
-    windows: list[WalkForwardWindow] = []
-    window_index = 0
-    current_train_start = start_date
-
-    while True:
-        # Calculate window boundaries
-        train_end = current_train_start + config.train_size
-        test_start = train_end + config.gap
-        test_end = test_start + config.test_size
-
-        # Check if test window fits within date range
-        if test_end > end_date:
-            break
-
-        # Create window
-        window = WalkForwardWindow(
-            window_index=window_index,
-            train_start=current_train_start,
-            train_end=train_end,
-            test_start=test_start,
-            test_end=test_end,
-        )
-        windows.append(window)
-
-        # Advance to next window
-        assert config.step is not None
-        current_train_start += config.step
-        window_index += 1
-
-    # Validate minimum windows
-    if len(windows) < config.min_windows:
-        raise ValueError(
-            f"Only {len(windows)} windows can be created, but min_windows={config.min_windows}. "
-            f"Either extend the date range, reduce train_size/test_size, "
-            f"or lower min_windows."
-        )
-
-    logger.info(
-        f"Generated {len(windows)} walk-forward windows: "
-        f"train={config.train_size.days}d, test={config.test_size.days}d, "
-        f"step={config.step.days if config.step else 0}d, gap={config.gap.days}d"
+    resolved_config = _resolve_walk_forward_config(
+        config,
+        train_size,
+        test_size,
+        step,
+        gap,
+        min_windows,
     )
+    _validate_walk_forward_date_range(start_date, end_date, resolved_config)
+    windows = _build_walk_forward_windows(start_date, end_date, resolved_config)
+    _validate_min_walk_forward_windows(windows, resolved_config.min_windows)
+    _log_walk_forward_windows(windows, resolved_config)
 
     return windows
 
@@ -604,6 +597,102 @@ class ParameterStability:
         )
 
 
+def _collect_parameter_values(
+    window_results: list[WalkForwardWindowResult],
+) -> dict[str, list[Any]]:
+    param_values: dict[str, list[Any]] = {}
+    for window in window_results:
+        for param_name, value in window.optimization_result.best_params.items():
+            param_values.setdefault(param_name, []).append(value)
+    return param_values
+
+
+def _is_numeric_param_value(value: Any) -> bool:
+    return isinstance(value, Decimal | int | float)
+
+
+def _all_values_numeric(values: list[Any]) -> bool:
+    return all(_is_numeric_param_value(value) for value in values)
+
+
+def _numeric_cv(mean: float, std: float) -> float:
+    if abs(mean) > 1e-10:
+        return std / abs(mean)
+    return std if std > 0 else 0.0
+
+
+def _numeric_parameter_stability(
+    param_name: str,
+    values: list[Any],
+    stability_threshold: float,
+) -> ParameterStability:
+    numeric_values = [float(value) for value in values]
+
+    if len(numeric_values) == 1:
+        return ParameterStability(
+            param_name=param_name,
+            values=values,
+            mean=numeric_values[0],
+            std=0.0,
+            variance=0.0,
+            cv=0.0,
+            min_value=values[0],
+            max_value=values[0],
+            is_stable=True,
+            stability_threshold=stability_threshold,
+        )
+
+    mean = sum(numeric_values) / len(numeric_values)
+    variance = sum((value - mean) ** 2 for value in numeric_values) / len(numeric_values)
+    std = variance**0.5
+    cv = _numeric_cv(mean, std)
+
+    return ParameterStability(
+        param_name=param_name,
+        values=values,
+        mean=mean,
+        std=std,
+        variance=variance,
+        cv=cv,
+        min_value=min(values, key=float),
+        max_value=max(values, key=float),
+        is_stable=cv < stability_threshold,
+        stability_threshold=stability_threshold,
+    )
+
+
+def _categorical_parameter_stability(
+    param_name: str,
+    values: list[Any],
+    stability_threshold: float,
+) -> ParameterStability:
+    unique_values = {str(value) for value in values}
+    is_stable = len(unique_values) == 1
+
+    return ParameterStability(
+        param_name=param_name,
+        values=values,
+        mean=0.0,
+        std=0.0,
+        variance=0.0,
+        cv=0.0 if is_stable else float("inf"),
+        min_value=values[0],
+        max_value=values[-1],
+        is_stable=is_stable,
+        stability_threshold=stability_threshold,
+    )
+
+
+def _parameter_stability_for_values(
+    param_name: str,
+    values: list[Any],
+    stability_threshold: float,
+) -> ParameterStability:
+    if _all_values_numeric(values):
+        return _numeric_parameter_stability(param_name, values, stability_threshold)
+    return _categorical_parameter_stability(param_name, values, stability_threshold)
+
+
 def calculate_parameter_stability(
     window_results: list[WalkForwardWindowResult],
     stability_threshold: float = 0.3,
@@ -630,87 +719,15 @@ def calculate_parameter_stability(
     if not window_results:
         return {}
 
-    # Collect parameter values across windows
-    param_values: dict[str, list[Any]] = {}
-    for window in window_results:
-        best_params = window.optimization_result.best_params
-        for param_name, value in best_params.items():
-            if param_name not in param_values:
-                param_values[param_name] = []
-            param_values[param_name].append(value)
-
-    # Calculate stability metrics for each parameter
     stability_results: dict[str, ParameterStability] = {}
 
-    for param_name, values in param_values.items():
-        # Convert values to floats for statistical analysis
+    for param_name, values in _collect_parameter_values(window_results).items():
         try:
-            maybe_numeric = [float(v) if isinstance(v, Decimal | int | float) else None for v in values]
-            # Filter out None values (non-numeric)
-            numeric_values: list[float] = [v for v in maybe_numeric if v is not None]
-
-            if len(numeric_values) >= 2:
-                # Calculate statistics for numeric parameters
-                mean = sum(numeric_values) / len(numeric_values)
-                variance = sum((v - mean) ** 2 for v in numeric_values) / len(numeric_values)
-                std = variance**0.5
-
-                # Coefficient of variation (handle zero mean)
-                if abs(mean) > 1e-10:
-                    cv = std / abs(mean)
-                else:
-                    # If mean is ~0, use std as the CV indicator
-                    cv = std if std > 0 else 0.0
-
-                is_stable = cv < stability_threshold
-
-                stability_results[param_name] = ParameterStability(
-                    param_name=param_name,
-                    values=values,
-                    mean=mean,
-                    std=std,
-                    variance=variance,
-                    cv=cv,
-                    min_value=min(
-                        values, key=lambda x: float(x) if isinstance(x, Decimal | int | float) else float("inf")
-                    ),
-                    max_value=max(
-                        values, key=lambda x: float(x) if isinstance(x, Decimal | int | float) else float("-inf")
-                    ),
-                    is_stable=is_stable,
-                    stability_threshold=stability_threshold,
-                )
-            elif len(numeric_values) == 1:
-                # Single value - perfectly stable
-                stability_results[param_name] = ParameterStability(
-                    param_name=param_name,
-                    values=values,
-                    mean=numeric_values[0],
-                    std=0.0,
-                    variance=0.0,
-                    cv=0.0,
-                    min_value=values[0],
-                    max_value=values[0],
-                    is_stable=True,
-                    stability_threshold=stability_threshold,
-                )
-            else:
-                # Non-numeric parameter (categorical)
-                unique_values = {str(v) for v in values}
-                is_stable = len(unique_values) == 1
-
-                stability_results[param_name] = ParameterStability(
-                    param_name=param_name,
-                    values=values,
-                    mean=0.0,  # Not meaningful for categorical
-                    std=0.0,
-                    variance=0.0,
-                    cv=0.0 if is_stable else float("inf"),
-                    min_value=values[0],
-                    max_value=values[-1],
-                    is_stable=is_stable,
-                    stability_threshold=stability_threshold,
-                )
+            stability_results[param_name] = _parameter_stability_for_values(
+                param_name,
+                values,
+                stability_threshold,
+            )
         except (TypeError, ValueError):
             # Handle unexpected value types gracefully
             logger.warning(f"Could not analyze stability for parameter: {param_name}")

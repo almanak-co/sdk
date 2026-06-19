@@ -509,18 +509,8 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
                 print(f"Supply: {apy.supply_apy:.4f}, Borrow: {apy.borrow_apy:.4f}")
         """
         chain = _chain_override if _chain_override is not None else self._config.chain
+        start_date, end_date = self._normalize_date_range(start_date, end_date)
 
-        # Ensure timestamps are in UTC (convert if needed to avoid day off-by-one)
-        if start_date.tzinfo is None:
-            start_date = start_date.replace(tzinfo=UTC)
-        else:
-            start_date = start_date.astimezone(UTC)
-        if end_date.tzinfo is None:
-            end_date = end_date.replace(tzinfo=UTC)
-        else:
-            end_date = end_date.astimezone(UTC)
-
-        # Validate chain
         subgraph_id = self._get_subgraph_id(chain)
         if subgraph_id is None:
             logger.warning(
@@ -529,7 +519,89 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
             )
             return self._generate_fallback_results(start_date, end_date)
 
-        # Resolve market ID
+        return await self._get_apy_or_fallback(
+            subgraph_id=subgraph_id,
+            chain=chain,
+            market=market,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def _normalize_date_range(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> tuple[datetime, datetime]:
+        """Normalize a query window to UTC datetimes."""
+        return self._normalize_datetime(start_date), self._normalize_datetime(end_date)
+
+    def _normalize_datetime(self, value: datetime) -> datetime:
+        """Normalize a single datetime to UTC."""
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    async def _get_apy_or_fallback(
+        self,
+        *,
+        subgraph_id: str,
+        chain: Chain,
+        market: str,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> list[APYResult]:
+        """Fetch Morpho APY data, degrading only expected subgraph failures."""
+        try:
+            results = await self._fetch_apy_results(
+                subgraph_id=subgraph_id,
+                chain=chain,
+                market=market,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except DataSourceUnavailableError:
+            # Pagination overflow must stay loud (VIB-5089): a partial series
+            # silently swapped for fallback would be silent truncation.
+            raise
+        except SubgraphRateLimitError as e:
+            logger.warning(
+                "Subgraph rate limit exceeded: chain=%s, market=%s: %s",
+                chain.value,
+                market,
+                str(e),
+            )
+            return self._generate_fallback_results(start_date, end_date)
+        except SubgraphQueryError as e:
+            logger.error(
+                "Subgraph query error: chain=%s, market=%s: %s",
+                chain.value,
+                market,
+                str(e),
+            )
+            return self._generate_fallback_results(start_date, end_date)
+        except Exception as e:
+            logger.error(
+                "Unexpected error fetching APY: chain=%s, market=%s: %s",
+                chain.value,
+                market,
+                str(e),
+            )
+            return self._generate_fallback_results(start_date, end_date)
+
+        if results is None:
+            return self._generate_fallback_results(start_date, end_date)
+        return results
+
+    async def _fetch_apy_results(
+        self,
+        *,
+        subgraph_id: str,
+        chain: Chain,
+        market: str,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> list[APYResult] | None:
+        """Fetch and parse measured Morpho APY rows, or None for no data."""
         market_id = await self._resolve_market_id(chain, market)
         if market_id is None:
             logger.warning(
@@ -537,7 +609,7 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
                 chain.value,
                 market,
             )
-            return self._generate_fallback_results(start_date, end_date)
+            return None
 
         logger.info(
             "Fetching Morpho Blue APY: chain=%s, market=%s, start=%s, end=%s",
@@ -547,81 +619,38 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
             end_date,
         )
 
-        try:
-            # Convert dates to day numbers
-            start_day = self._date_to_day_number(start_date)
-            end_day = self._date_to_day_number(end_date)
+        daily_snapshots = await self._client.query_with_pagination(
+            subgraph_id=subgraph_id,
+            query=MARKET_DAILY_SNAPSHOTS_QUERY,
+            variables={
+                "marketId": market_id,
+                "startDay": self._date_to_day_number(start_date),
+                "endDay": self._date_to_day_number(end_date),
+            },
+            data_path="marketDailySnapshots",
+            max_pages=MAX_PAGINATION_PAGES,
+            cursor_field="days",
+            cursor_variable="startDay",
+        )
 
-            # Query subgraph with cursor pagination on days (VIB-5089):
-            # windows with >1000 daily snapshots span multiple pages instead
-            # of silently truncating at the first 1000.
-            daily_snapshots = await self._client.query_with_pagination(
-                subgraph_id=subgraph_id,
-                query=MARKET_DAILY_SNAPSHOTS_QUERY,
-                variables={
-                    "marketId": market_id,
-                    "startDay": start_day,
-                    "endDay": end_day,
-                },
-                data_path="marketDailySnapshots",
-                max_pages=MAX_PAGINATION_PAGES,
-                cursor_field="days",
-                cursor_variable="startDay",
-            )
-
-            if not daily_snapshots:
-                logger.warning(
-                    "No APY history from subgraph: chain=%s, market=%s, range=%s to %s",
-                    chain.value,
-                    market,
-                    start_date,
-                    end_date,
-                )
-                return self._generate_fallback_results(start_date, end_date)
-
-            # Parse results
-            results = [self._parse_apy_data(snapshot) for snapshot in daily_snapshots]
-
-            logger.info(
-                "Fetched %d APY data points: chain=%s, market=%s",
-                len(results),
-                chain.value,
-                market,
-            )
-
-            return results
-
-        except DataSourceUnavailableError:
-            # Pagination overflow must stay loud (VIB-5089): a partial series
-            # silently swapped for fallback would be silent truncation.
-            raise
-
-        except SubgraphRateLimitError as e:
+        if not daily_snapshots:
             logger.warning(
-                "Subgraph rate limit exceeded: chain=%s, market=%s: %s",
+                "No APY history from subgraph: chain=%s, market=%s, range=%s to %s",
                 chain.value,
                 market,
-                str(e),
+                start_date,
+                end_date,
             )
-            return self._generate_fallback_results(start_date, end_date)
+            return None
 
-        except SubgraphQueryError as e:
-            logger.error(
-                "Subgraph query error: chain=%s, market=%s: %s",
-                chain.value,
-                market,
-                str(e),
-            )
-            return self._generate_fallback_results(start_date, end_date)
-
-        except Exception as e:
-            logger.error(
-                "Unexpected error fetching APY: chain=%s, market=%s: %s",
-                chain.value,
-                market,
-                str(e),
-            )
-            return self._generate_fallback_results(start_date, end_date)
+        results = [self._parse_apy_data(snapshot) for snapshot in daily_snapshots]
+        logger.info(
+            "Fetched %d APY data points: chain=%s, market=%s",
+            len(results),
+            chain.value,
+            market,
+        )
+        return results
 
     def _generate_fallback_results(
         self,

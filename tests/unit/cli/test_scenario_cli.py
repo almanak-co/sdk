@@ -226,6 +226,21 @@ class TestScenarioParameterParsing:
         assert result.exit_code != 0
         assert "start" in result.output.lower() and "end" in result.output.lower()
 
+    def test_custom_scenario_end_before_start_shows_error(self, cli_runner: CliRunner) -> None:
+        """Test that custom scenarios reject non-positive date ranges."""
+        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
+            result = cli_runner.invoke(backtest, [
+                "scenario",
+                "--strategy", "test",
+                "--scenario", "custom",
+                "--start", "2023-03-15",
+                "--end", "2023-03-10",
+                "--dry-run",
+            ])
+
+        assert result.exit_code != 0
+        assert "after --start" in result.output
+
     def test_custom_scenario_with_dates_is_valid(self, cli_runner: CliRunner) -> None:
         """Test that custom scenario with dates passes validation."""
         with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
@@ -239,6 +254,20 @@ class TestScenarioParameterParsing:
             ])
         assert result.exit_code == 0
         assert "CRISIS SCENARIO BACKTEST CONFIGURATION" in result.output
+
+    def test_empty_token_entry_shows_error(self, cli_runner: CliRunner) -> None:
+        """Test that empty token entries are rejected before provider setup."""
+        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
+            result = cli_runner.invoke(backtest, [
+                "scenario",
+                "--strategy", "test",
+                "--scenario", "black_thursday",
+                "--tokens", "WETH,,USDC",
+                "--dry-run",
+            ])
+
+        assert result.exit_code != 0
+        assert "non-empty token symbols" in result.output
 
 
 # =============================================================================

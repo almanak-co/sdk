@@ -93,6 +93,14 @@ PROTOCOL_SUBGRAPH_IDS: dict[str, dict[Chain, str]] = {
     "balancer": BALANCER_SUBGRAPH_IDS,
 }
 
+LIQUIDITY_QUERY_METHOD_BY_FAMILY = {
+    "v3_concentrated": "_query_v3_liquidity",
+    "solidly_v2": "_query_v2_liquidity",
+    "liquidity_book": "_query_liquidity_book",
+    "weighted": "_query_balancer_liquidity",
+    "stableswap": "_query_curve_liquidity",
+}
+
 
 # Safety valve for cursor pagination (VIB-5089). Daily snapshots: 100 pages
 # of 1000 covers ~270 years, so real windows never hit the valve.
@@ -432,7 +440,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             source_info=DataSourceInfo(
                 source=DATA_SOURCE_FALLBACK,
                 confidence=DataConfidence.LOW,
-                timestamp=timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=UTC),
+                timestamp=self._ensure_utc_timestamp(timestamp),
             ),
         )
 
@@ -1043,76 +1051,26 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                 timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
             )  # Will use Aerodrome for Base chain
         """
-        # Normalize protocol identifier
-        protocol_id = self._get_protocol_id(protocol)
-
-        # If no protocol specified, try to detect from chain
+        timestamp = self._ensure_utc_timestamp(timestamp)
+        protocol_id = self._resolve_protocol_id(protocol, chain, pool_address)
         if protocol_id is None:
-            protocol_id = self._detect_protocol_from_chain(chain)
-            if protocol_id:
-                logger.info(
-                    "Auto-detected protocol %s for chain %s",
-                    protocol_id,
-                    chain.value,
-                )
-
-        # If still no protocol, return fallback
-        if protocol_id is None:
-            logger.warning(
-                "Could not determine protocol for chain=%s, pool=%s..., returning fallback",
-                chain.value,
-                pool_address[:10],
-            )
             return self._create_fallback_result(timestamp)
 
-        # Ensure timestamp has timezone
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=UTC)
-
-        # Check if chain is supported by this protocol
-        subgraph_ids = PROTOCOL_SUBGRAPH_IDS.get(protocol_id)
-        if subgraph_ids is None or chain not in subgraph_ids:
-            logger.warning(
-                "Chain %s not supported by protocol %s, returning fallback",
-                chain.value,
-                protocol_id,
-            )
+        if not self._protocol_supports_chain(protocol_id, chain):
             return self._create_fallback_result(timestamp)
-
-        # Route to the appropriate query method based on protocol type
-        logger.info(
-            "Querying liquidity depth: protocol=%s, chain=%s, pool=%s...",
-            protocol_id,
-            chain.value,
-            pool_address[:10],
-        )
 
         result: LiquidityResult | None = None
-
         try:
-            entry = DexVolumeRegistry.entry_for(protocol_id)
-            family = entry.amm_family if entry is not None else None
-            if family == "v3_concentrated":
-                result = await self._query_v3_liquidity(pool_address, chain, timestamp, protocol_id)
-            elif family == "solidly_v2":
-                result = await self._query_v2_liquidity(pool_address, chain, timestamp, protocol_id)
-            elif family == "liquidity_book":
-                result = await self._query_liquidity_book(pool_address, chain, timestamp, protocol_id)
-            elif family == "weighted":
-                result = await self._query_balancer_liquidity(pool_address, chain, timestamp, protocol_id)
-            elif family == "stableswap":
-                result = await self._query_curve_liquidity(pool_address, chain, timestamp, protocol_id)
-            else:
-                logger.warning(
-                    "Unknown protocol type for %s, returning fallback",
-                    protocol_id,
-                )
-
+            result = await self._query_liquidity_by_family(
+                pool_address=pool_address,
+                chain=chain,
+                timestamp=timestamp,
+                protocol_id=protocol_id,
+            )
         except DataSourceUnavailableError:
             # Pagination overflow must stay loud (VIB-5089): a partial series
             # silently swapped for fallback would be silent truncation.
             raise
-
         except Exception as e:
             logger.error(
                 "Unexpected error querying liquidity: protocol=%s, chain=%s, pool=%s...: %s",
@@ -1127,6 +1085,82 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             return result
 
         return self._create_fallback_result(timestamp)
+
+    @staticmethod
+    def _ensure_utc_timestamp(timestamp: datetime) -> datetime:
+        """Return timezone-aware UTC timestamp for result metadata."""
+        if timestamp.tzinfo is None:
+            return timestamp.replace(tzinfo=UTC)
+        return timestamp.astimezone(UTC)
+
+    def _resolve_protocol_id(
+        self,
+        protocol: Protocol | str | None,
+        chain: Chain,
+        pool_address: str,
+    ) -> str | None:
+        """Resolve explicit or chain-default protocol id for a liquidity lookup."""
+        protocol_id = self._get_protocol_id(protocol)
+        if protocol_id is not None:
+            return protocol_id
+
+        detected_protocol_id = self._detect_protocol_from_chain(chain)
+        if detected_protocol_id is not None:
+            logger.info(
+                "Auto-detected protocol %s for chain %s",
+                detected_protocol_id,
+                chain.value,
+            )
+            return detected_protocol_id
+
+        logger.warning(
+            "Could not determine protocol for chain=%s, pool=%s..., returning fallback",
+            chain.value,
+            pool_address[:10],
+        )
+        return None
+
+    @staticmethod
+    def _protocol_supports_chain(protocol_id: str, chain: Chain) -> bool:
+        """Return whether this protocol has a configured subgraph for chain."""
+        subgraph_ids = PROTOCOL_SUBGRAPH_IDS.get(protocol_id)
+        if subgraph_ids is not None and chain in subgraph_ids:
+            return True
+
+        logger.warning(
+            "Chain %s not supported by protocol %s, returning fallback",
+            chain.value,
+            protocol_id,
+        )
+        return False
+
+    async def _query_liquidity_by_family(
+        self,
+        *,
+        pool_address: str,
+        chain: Chain,
+        timestamp: datetime,
+        protocol_id: str,
+    ) -> LiquidityResult | None:
+        """Dispatch a supported protocol to its AMM-family query method."""
+        logger.info(
+            "Querying liquidity depth: protocol=%s, chain=%s, pool=%s...",
+            protocol_id,
+            chain.value,
+            pool_address[:10],
+        )
+
+        entry = DexVolumeRegistry.entry_for(protocol_id)
+        method_name = LIQUIDITY_QUERY_METHOD_BY_FAMILY.get(entry.amm_family) if entry is not None else None
+        if method_name is None:
+            logger.warning(
+                "Unknown protocol type for %s, returning fallback",
+                protocol_id,
+            )
+            return None
+
+        query_method = getattr(self, method_name)
+        return await query_method(pool_address, chain, timestamp, protocol_id)
 
     async def get_liquidity_depth_range(
         self,

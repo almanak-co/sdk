@@ -508,6 +508,83 @@ def configure_backtest_logging(
         existing_handler.setLevel(level)
 
 
+def _optional_str(value: Any | None) -> str | None:
+    """Stringify a measured value while preserving None as missing."""
+    return str(value) if value is not None else None
+
+
+def _trade_log_payload(
+    backtest_id: str,
+    timestamp: datetime,
+    intent_type: str,
+    protocol: str,
+    tokens: list[str],
+    amount_usd: Any,
+    fee_usd: Any,
+    slippage_usd: Any,
+    gas_cost_usd: Any,
+    executed_price: Any | None,
+    mev_cost_usd: Any | None,
+) -> dict[str, Any]:
+    """Build the structured trade-execution payload."""
+    return {
+        "event": "trade_execution",
+        "backtest_id": backtest_id,
+        "timestamp": timestamp.isoformat() if timestamp else None,
+        "intent_type": intent_type,
+        "protocol": protocol,
+        "tokens": tokens,
+        "amount_usd": str(amount_usd),
+        "fee_usd": str(fee_usd),
+        "slippage_usd": str(slippage_usd),
+        "gas_cost_usd": str(gas_cost_usd),
+        "executed_price": _optional_str(executed_price),
+        "mev_cost_usd": _optional_str(mev_cost_usd),
+    }
+
+
+def _trade_log_message_parts(
+    backtest_id: str,
+    timestamp: datetime,
+    intent_type: str,
+    protocol: str,
+    tokens: list[str],
+    amount_usd: Any,
+    fee_usd: Any,
+    slippage_usd: Any,
+    gas_cost_usd: Any,
+    executed_price: Any | None,
+    mev_cost_usd: Any | None,
+) -> list[str]:
+    """Build text log segments for a trade execution."""
+    tokens_str = " -> ".join(tokens) if tokens else "N/A"
+    msg_parts = [
+        f"[{backtest_id[:8]}]" if backtest_id else "",
+        f"TRADE at {timestamp.strftime('%Y-%m-%d %H:%M:%S') if timestamp else 'N/A'}:",
+        f"type={intent_type}",
+        f"protocol={protocol or 'default'}",
+        f"tokens={tokens_str}",
+        f"amount=${float(amount_usd):,.2f}",
+        f"fee=${float(fee_usd):,.2f}",
+        f"slippage=${float(slippage_usd):,.2f}",
+        f"gas=${float(gas_cost_usd):,.2f}",
+    ]
+    _append_optional_trade_segments(msg_parts, executed_price, mev_cost_usd)
+    return msg_parts
+
+
+def _append_optional_trade_segments(
+    msg_parts: list[str],
+    executed_price: Any | None,
+    mev_cost_usd: Any | None,
+) -> None:
+    """Append optional text fields while preserving measured zero values."""
+    if executed_price is not None:
+        msg_parts.append(f"price={float(executed_price):,.6f}")
+    if mev_cost_usd is not None:
+        msg_parts.append(f"mev=${float(mev_cost_usd):,.2f}")
+
+
 def log_trade_execution(
     logger: logging.Logger,
     backtest_id: str,
@@ -544,42 +621,32 @@ def log_trade_execution(
         json_format: If True, log as JSON for machine parsing
     """
     if json_format:
-        log_data = {
-            "event": "trade_execution",
-            "backtest_id": backtest_id,
-            "timestamp": timestamp.isoformat() if timestamp else None,
-            "intent_type": intent_type,
-            "protocol": protocol,
-            "tokens": tokens,
-            "amount_usd": str(amount_usd),
-            "fee_usd": str(fee_usd),
-            "slippage_usd": str(slippage_usd),
-            "gas_cost_usd": str(gas_cost_usd),
-            "executed_price": str(executed_price) if executed_price else None,
-            "mev_cost_usd": str(mev_cost_usd) if mev_cost_usd else None,
-        }
+        log_data = _trade_log_payload(
+            backtest_id=backtest_id,
+            timestamp=timestamp,
+            intent_type=intent_type,
+            protocol=protocol,
+            tokens=tokens,
+            amount_usd=amount_usd,
+            fee_usd=fee_usd,
+            slippage_usd=slippage_usd,
+            gas_cost_usd=gas_cost_usd,
+            executed_price=executed_price,
+            mev_cost_usd=mev_cost_usd,
+        )
         logger.debug(json.dumps(log_data))
     else:
-        # Format tokens for display
-        tokens_str = " -> ".join(tokens) if tokens else "N/A"
-
-        # Build the log message
-        msg_parts = [
-            f"[{backtest_id[:8]}]" if backtest_id else "",
-            f"TRADE at {timestamp.strftime('%Y-%m-%d %H:%M:%S') if timestamp else 'N/A'}:",
-            f"type={intent_type}",
-            f"protocol={protocol or 'default'}",
-            f"tokens={tokens_str}",
-            f"amount=${float(amount_usd):,.2f}",
-            f"fee=${float(fee_usd):,.2f}",
-            f"slippage=${float(slippage_usd):,.2f}",
-            f"gas=${float(gas_cost_usd):,.2f}",
-        ]
-
-        if executed_price:
-            msg_parts.append(f"price={float(executed_price):,.6f}")
-
-        if mev_cost_usd:
-            msg_parts.append(f"mev=${float(mev_cost_usd):,.2f}")
-
+        msg_parts = _trade_log_message_parts(
+            backtest_id=backtest_id,
+            timestamp=timestamp,
+            intent_type=intent_type,
+            protocol=protocol,
+            tokens=tokens,
+            amount_usd=amount_usd,
+            fee_usd=fee_usd,
+            slippage_usd=slippage_usd,
+            gas_cost_usd=gas_cost_usd,
+            executed_price=executed_price,
+            mev_cost_usd=mev_cost_usd,
+        )
         logger.debug(" ".join(msg_parts))

@@ -43,7 +43,9 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import Any
+from typing import Any, NamedTuple
+
+from almanak.framework.backtesting.exceptions import DataSourceUnavailableError, HistoricalDataUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +112,45 @@ ERROR_CATEGORY_MAP: dict[ErrorType, ErrorCategory] = {
     # Unknown defaults to fatal for safety
     ErrorType.UNKNOWN: ErrorCategory.FATAL,
 }
+
+
+class _ErrorPattern(NamedTuple):
+    """Ordered keyword match for an error classification."""
+
+    error_type: ErrorType
+    message_keywords: tuple[str, ...]
+    class_keywords: tuple[str, ...] = ()
+
+
+_FAIL_LOUD_DATA_ERRORS = (DataSourceUnavailableError, HistoricalDataUnavailableError)
+
+_ERROR_PATTERNS = (
+    _ErrorPattern(ErrorType.RATE_LIMIT, ("rate limit", "too many requests", "429", "throttl")),
+    _ErrorPattern(
+        ErrorType.TIMEOUT,
+        ("timeout", "timed out", "timedout"),
+        ("timeout", "timed out", "timedout"),
+    ),
+    _ErrorPattern(
+        ErrorType.CONNECTION_ERROR,
+        ("connection", "network", "socket", "refused", "reset", "broken pipe"),
+        ("connection", "network", "socket", "refused", "reset", "broken pipe"),
+    ),
+    _ErrorPattern(ErrorType.TEMPORARY_UNAVAILABLE, ("unavailable", "503", "502", "maintenance", "overload")),
+    _ErrorPattern(
+        ErrorType.RPC_ERROR, ("rpc", "jsonrpc", "web3", "node error"), ("rpc", "jsonrpc", "web3", "node error")
+    ),
+    _ErrorPattern(ErrorType.AUTHENTICATION_FAILED, ("auth", "401", "403", "forbidden", "api key", "token invalid")),
+    _ErrorPattern(
+        ErrorType.INVALID_CONFIG,
+        ("invalid config", "configuration error", "missing required", "invalid parameter"),
+    ),
+    _ErrorPattern(ErrorType.DATA_CORRUPTION, ("corrupt", "malformed", "invalid data", "parse error")),
+    _ErrorPattern(ErrorType.INSUFFICIENT_FUNDS, ("insufficient", "balance too low", "not enough")),
+    _ErrorPattern(ErrorType.MISSING_PRICE, ("no price", "price not found", "missing price", "unknown token")),
+    _ErrorPattern(ErrorType.STALE_DATA, ("stale", "outdated", "old data")),
+    _ErrorPattern(ErrorType.PARTIAL_DATA, ("partial", "incomplete", "missing field")),
+)
 
 
 @dataclass
@@ -229,82 +270,8 @@ def classify_error(error: Exception) -> ErrorClassification:
     Returns:
         ErrorClassification with type, category, and suggested action
     """
-    error_type = ErrorType.UNKNOWN
-    error_msg = str(error).lower()
-    error_class_name = type(error).__name__.lower()
-
-    # Check for rate limiting
-    if any(keyword in error_msg for keyword in ["rate limit", "too many requests", "429", "throttl"]):
-        error_type = ErrorType.RATE_LIMIT
-
-    # Check for timeouts
-    elif any(keyword in error_msg or keyword in error_class_name for keyword in ["timeout", "timed out", "timedout"]):
-        error_type = ErrorType.TIMEOUT
-
-    # Check for connection errors
-    elif any(
-        keyword in error_msg or keyword in error_class_name
-        for keyword in [
-            "connection",
-            "network",
-            "socket",
-            "refused",
-            "reset",
-            "broken pipe",
-        ]
-    ):
-        error_type = ErrorType.CONNECTION_ERROR
-
-    # Check for temporary unavailability
-    elif any(keyword in error_msg for keyword in ["unavailable", "503", "502", "maintenance", "overload"]):
-        error_type = ErrorType.TEMPORARY_UNAVAILABLE
-
-    # Check for RPC errors
-    elif any(
-        keyword in error_msg or keyword in error_class_name for keyword in ["rpc", "jsonrpc", "web3", "node error"]
-    ):
-        error_type = ErrorType.RPC_ERROR
-
-    # Check for authentication errors
-    elif any(keyword in error_msg for keyword in ["auth", "401", "403", "forbidden", "api key", "token invalid"]):
-        error_type = ErrorType.AUTHENTICATION_FAILED
-
-    # Check for configuration errors
-    elif any(
-        keyword in error_msg
-        for keyword in [
-            "invalid config",
-            "configuration error",
-            "missing required",
-            "invalid parameter",
-        ]
-    ):
-        error_type = ErrorType.INVALID_CONFIG
-
-    # Check for data corruption
-    elif any(keyword in error_msg for keyword in ["corrupt", "malformed", "invalid data", "parse error"]):
-        error_type = ErrorType.DATA_CORRUPTION
-
-    # Check for insufficient funds
-    elif any(keyword in error_msg for keyword in ["insufficient", "balance too low", "not enough"]):
-        error_type = ErrorType.INSUFFICIENT_FUNDS
-
-    # Check for missing price data
-    elif any(keyword in error_msg for keyword in ["no price", "price not found", "missing price", "unknown token"]):
-        error_type = ErrorType.MISSING_PRICE
-
-    # Check for stale data
-    elif any(keyword in error_msg for keyword in ["stale", "outdated", "old data"]):
-        error_type = ErrorType.STALE_DATA
-
-    # Check for partial data
-    elif any(keyword in error_msg for keyword in ["partial", "incomplete", "missing field"]):
-        error_type = ErrorType.PARTIAL_DATA
-
-    # Get category from map
+    error_type = _classify_error_type(error)
     category = ERROR_CATEGORY_MAP[error_type]
-
-    # Generate suggested action
     suggested_action = _get_suggested_action(error_type)
 
     return ErrorClassification(
@@ -312,6 +279,29 @@ def classify_error(error: Exception) -> ErrorClassification:
         category=category,
         suggested_action=suggested_action,
     )
+
+
+def _classify_error_type(error: Exception) -> ErrorType:
+    """Return the ordered keyword classification for an exception."""
+    if isinstance(error, _FAIL_LOUD_DATA_ERRORS):
+        return ErrorType.UNKNOWN
+
+    error_msg = str(error).lower()
+    error_class_name = type(error).__name__.lower()
+    for pattern in _ERROR_PATTERNS:
+        if _matches_error_pattern(error_msg, error_class_name, pattern):
+            return pattern.error_type
+    return ErrorType.UNKNOWN
+
+
+def _matches_error_pattern(error_msg: str, error_class_name: str, pattern: _ErrorPattern) -> bool:
+    """Return whether message or class keywords match an ordered pattern."""
+    return _contains_any(error_msg, pattern.message_keywords) or _contains_any(error_class_name, pattern.class_keywords)
+
+
+def _contains_any(value: str, keywords: tuple[str, ...]) -> bool:
+    """Return whether any keyword appears in value."""
+    return any(keyword in value for keyword in keywords)
 
 
 def _get_suggested_action(error_type: ErrorType) -> str:

@@ -24,6 +24,73 @@ logger = logging.getLogger(__name__)
 # "SOL-PERP" (Drift); bare symbols ("ETH", Hyperliquid) have no separator.
 _PERP_MARKET_SEPARATORS = ("/", "-", ":", "_")
 
+_CLASS_NAME_INTENT_TYPES: tuple[tuple[tuple[str, ...], IntentType], ...] = (
+    (("SWAP",), IntentType.SWAP),
+    (("LP_OPEN", "LPOPEN"), IntentType.LP_OPEN),
+    (("LP_CLOSE", "LPCLOSE"), IntentType.LP_CLOSE),
+    (("PERP_OPEN", "PERPOPEN"), IntentType.PERP_OPEN),
+    (("PERP_CLOSE", "PERPCLOSE"), IntentType.PERP_CLOSE),
+    (("SUPPLY",), IntentType.SUPPLY),
+    (("WITHDRAW",), IntentType.WITHDRAW),
+    (("BORROW",), IntentType.BORROW),
+    (("REPAY",), IntentType.REPAY),
+    (("BRIDGE",), IntentType.BRIDGE),
+    (("VAULTDEPOSIT", "VAULT_DEPOSIT"), IntentType.VAULT_DEPOSIT),
+    (("VAULTREDEEM", "VAULT_REDEEM"), IntentType.VAULT_REDEEM),
+    (("HOLD",), IntentType.HOLD),
+)
+
+_INTENT_TOKEN_ATTRIBUTES = (
+    "token",
+    "from_token",
+    "to_token",
+    "token0",
+    "token1",
+    "token_a",
+    "token_b",
+    "asset",
+    "collateral",
+    "borrow_token",
+    "supply_token",
+    "deposit_token",
+)
+
+_PROTOCOL_ATTRIBUTES = ("protocol", "protocol_name", "connector", "adapter")
+
+_STATIC_CLASS_NAME_PROTOCOLS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("uniswap",), "uniswap_v3"),
+    (("gmx",), "gmx"),
+    (("aave",), "aave_v3"),
+    (("hyperliquid",), "hyperliquid"),
+)
+
+_DIRECT_USD_AMOUNT_ATTRIBUTES = ("amount_usd", "notional_usd", "size_usd", "value_usd", "collateral_usd")
+_GENERIC_AMOUNT_ATTRIBUTES = ("amount", "amount_in", "amount_out", "collateral", "size", "shares")
+_GENERIC_TOKEN_ATTRIBUTES = ("token", "from_token", "asset", "collateral_token", "deposit_token")
+_POSITION_ID_ATTRIBUTES = ("position_id", "position_to_close", "close_position_id")
+
+_bridge_class_name_protocol_markers: tuple[str, ...] | None = None
+
+
+def _bridge_class_name_markers() -> tuple[str, ...]:
+    """Return connector-owned bridge identifiers used for class-name fallback."""
+    global _bridge_class_name_protocol_markers
+    if _bridge_class_name_protocol_markers is None:
+        from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+        markers: set[str] = set()
+        for connector in CONNECTOR_REGISTRY.with_bridge_adapter():
+            markers.update(connector.protocol_keys)
+        _bridge_class_name_protocol_markers = tuple(sorted(markers))
+    return _bridge_class_name_protocol_markers
+
+
+def _class_name_protocols() -> tuple[tuple[tuple[str, ...], str], ...]:
+    bridge_markers = _bridge_class_name_markers()
+    if not bridge_markers:
+        return _STATIC_CLASS_NAME_PROTOCOLS
+    return (*_STATIC_CLASS_NAME_PROTOCOLS, (bridge_markers, "bridge"))
+
 
 def _perp_market_base_token(market: str) -> str | None:
     """Parse the base token symbol from a perp market identifier.
@@ -93,6 +160,56 @@ def _decimal_or_none(value: Any) -> Decimal | None:
         return Decimal(str(value))
     except Exception:
         return None
+
+
+def _append_unique_token(tokens: list[str], value: Any) -> None:
+    if isinstance(value, str) and value:
+        token = value.upper()
+        if token not in tokens:
+            tokens.append(token)
+
+
+def _perp_market_tokens(intent: Any) -> tuple[list[str], bool]:
+    market = getattr(intent, "market", None)
+    if not isinstance(market, str) or not market:
+        return [], False
+
+    base_token = _perp_market_base_token(market)
+    if base_token is None:
+        logger.warning(
+            "Cannot resolve a token symbol from perp market %r; the simulated position will not be price-tracked",
+            market,
+        )
+        return ["UNKNOWN"], True
+
+    tokens: list[str] = []
+    _append_unique_token(tokens, base_token)
+    _append_unique_token(tokens, getattr(intent, "collateral_token", None))
+    return tokens, False
+
+
+def _append_lp_pool_tokens(tokens: list[str], intent: Any) -> None:
+    explicit_token0, explicit_token1 = lp_explicit_pair(intent)
+    if explicit_token0 is not None and explicit_token1 is not None:
+        return
+    pool_pair = lp_pool_tokens(getattr(intent, "pool", None))
+    if pool_pair is None:
+        return
+    for pool_token in pool_pair:
+        _append_unique_token(tokens, pool_token)
+
+
+def _append_attribute_tokens(tokens: list[str], intent: Any) -> None:
+    for attr in _INTENT_TOKEN_ATTRIBUTES:
+        _append_unique_token(tokens, getattr(intent, attr, None))
+
+
+def _append_list_tokens(tokens: list[str], intent: Any) -> None:
+    intent_tokens = getattr(intent, "tokens", None)
+    if not isinstance(intent_tokens, list):
+        return
+    for token in intent_tokens:
+        _append_unique_token(tokens, token)
 
 
 def intent_is_long(intent: Any) -> bool:
@@ -167,7 +284,7 @@ def is_hold_intent(intent: Any) -> bool:
     return False
 
 
-def get_intent_type(intent: Any) -> IntentType:  # noqa: C901
+def get_intent_type(intent: Any) -> IntentType:
     """Extract the IntentType from an intent object.
 
     Args:
@@ -194,34 +311,10 @@ def get_intent_type(intent: Any) -> IntentType:  # noqa: C901
         except ValueError:
             pass
 
-    # Check class name for common intent types
     class_name = intent.__class__.__name__.upper()
-    if "SWAP" in class_name:
-        return IntentType.SWAP
-    if "LP_OPEN" in class_name or "LPOPEN" in class_name:
-        return IntentType.LP_OPEN
-    if "LP_CLOSE" in class_name or "LPCLOSE" in class_name:
-        return IntentType.LP_CLOSE
-    if "PERP_OPEN" in class_name or "PERPOPEN" in class_name:
-        return IntentType.PERP_OPEN
-    if "PERP_CLOSE" in class_name or "PERPCLOSE" in class_name:
-        return IntentType.PERP_CLOSE
-    if "SUPPLY" in class_name:
-        return IntentType.SUPPLY
-    if "WITHDRAW" in class_name:
-        return IntentType.WITHDRAW
-    if "BORROW" in class_name:
-        return IntentType.BORROW
-    if "REPAY" in class_name:
-        return IntentType.REPAY
-    if "BRIDGE" in class_name:
-        return IntentType.BRIDGE
-    if "VAULTDEPOSIT" in class_name or "VAULT_DEPOSIT" in class_name:
-        return IntentType.VAULT_DEPOSIT
-    if "VAULTREDEEM" in class_name or "VAULT_REDEEM" in class_name:
-        return IntentType.VAULT_REDEEM
-    if "HOLD" in class_name:
-        return IntentType.HOLD
+    for markers, intent_type in _CLASS_NAME_INTENT_TYPES:
+        if any(marker in class_name for marker in markers):
+            return intent_type
 
     return IntentType.UNKNOWN
 
@@ -235,26 +328,16 @@ def get_intent_protocol(intent: Any) -> str:
     Returns:
         Protocol name string
     """
-    # Common attribute names for protocol
-    for attr in ["protocol", "protocol_name", "connector", "adapter"]:
-        if hasattr(intent, attr):
-            value = getattr(intent, attr)
-            if value and isinstance(value, str):
-                protocol_str: str = value.lower()
-                return protocol_str
+    for attr in _PROTOCOL_ATTRIBUTES:
+        value = getattr(intent, attr, None)
+        if value and isinstance(value, str):
+            protocol_str: str = value.lower()
+            return protocol_str
 
-    # Infer from class name
     class_name = intent.__class__.__name__.lower()
-    if "uniswap" in class_name:
-        return "uniswap_v3"
-    if "gmx" in class_name:
-        return "gmx"
-    if "aave" in class_name:
-        return "aave_v3"
-    if "hyperliquid" in class_name:
-        return "hyperliquid"
-    if "across" in class_name or "stargate" in class_name:
-        return "bridge"
+    for markers, protocol in _class_name_protocols():
+        if any(marker in class_name for marker in markers):
+            return protocol
 
     return "default"
 
@@ -284,56 +367,13 @@ def get_intent_tokens(intent: Any) -> list[str]:
     Returns:
         List of token symbols
     """
-    tokens: list[str] = []
+    tokens, stop = _perp_market_tokens(intent)
+    if stop:
+        return tokens
 
-    market = getattr(intent, "market", None)
-    if isinstance(market, str) and market:
-        base_token = _perp_market_base_token(market)
-        if base_token is None:
-            logger.warning(
-                "Cannot resolve a token symbol from perp market %r; the simulated position will not be price-tracked",
-                market,
-            )
-            return ["UNKNOWN"]
-        tokens.append(base_token)
-        collateral_token = getattr(intent, "collateral_token", None)
-        if isinstance(collateral_token, str) and collateral_token and collateral_token.upper() not in tokens:
-            tokens.append(collateral_token.upper())
-
-    explicit_token0, explicit_token1 = lp_explicit_pair(intent)
-    if explicit_token0 is None or explicit_token1 is None:
-        pool_pair = lp_pool_tokens(getattr(intent, "pool", None))
-        if pool_pair is not None:
-            tokens.extend(pool_token for pool_token in pool_pair if pool_token not in tokens)
-
-    # Common attribute names for tokens (token_a/token_b are LP aliases for
-    # token0/token1 -- see lp_explicit_pair)
-    for attr in [
-        "token",
-        "from_token",
-        "to_token",
-        "token0",
-        "token1",
-        "token_a",
-        "token_b",
-        "asset",
-        "collateral",
-        "borrow_token",
-        "supply_token",
-        "deposit_token",
-    ]:
-        if hasattr(intent, attr):
-            value = getattr(intent, attr)
-            if value and isinstance(value, str) and value not in tokens:
-                tokens.append(value.upper())
-
-    # Check for tokens list attribute
-    if hasattr(intent, "tokens"):
-        intent_tokens = intent.tokens
-        if isinstance(intent_tokens, list):
-            for t in intent_tokens:
-                if isinstance(t, str) and t.upper() not in tokens:
-                    tokens.append(t.upper())
+    _append_lp_pool_tokens(tokens, intent)
+    _append_attribute_tokens(tokens, intent)
+    _append_list_tokens(tokens, intent)
 
     return tokens if tokens else ["UNKNOWN"]
 
@@ -380,6 +420,67 @@ def get_lp_tick_range(intent: Any, price_to_tick: Callable[[Decimal], int]) -> t
     return price_to_tick(range_lower), price_to_tick(range_upper)
 
 
+def _lp_amount_pair(intent: Any) -> tuple[Decimal, Decimal] | None:
+    amount0 = _decimal_or_none(getattr(intent, "amount0", None))
+    amount1 = _decimal_or_none(getattr(intent, "amount1", None))
+    if amount0 is None or amount1 is None:
+        return None
+    return amount0, amount1
+
+
+def _lp_amount_tokens(intent: Any) -> tuple[str, str]:
+    tokens = get_intent_tokens(intent)
+    token0 = tokens[0] if len(tokens) > 0 else "UNKNOWN"
+    token1 = tokens[1] if len(tokens) > 1 else "UNKNOWN"
+    return token0, token1
+
+
+def _positive_market_price(market_state: MarketState, token: str) -> Decimal | None:
+    try:
+        price: Decimal | None = market_state.get_price(token)
+    except KeyError:
+        return None
+    return price if price is not None and price > 0 else None
+
+
+def _handle_unpriced_lp_leg(
+    token: str,
+    amount: Decimal,
+    strict_reproducibility: bool,
+    track_fallback: Callable[[str], None] | None,
+) -> None:
+    if strict_reproducibility:
+        msg = (
+            f"Cannot determine USD amount for LP intent: no positive price available "
+            f"for leg token '{token}'. Set strict_reproducibility=False to use zero as fallback."
+        )
+        raise ValueError(msg)
+    logger.warning(
+        "No positive price available for LP leg token '%s' to convert amount %s to USD. "
+        "Using zero as fallback to avoid misinterpreting token amounts as USD.",
+        token,
+        amount,
+    )
+    if track_fallback:
+        track_fallback("default_usd_amount")
+
+
+def _lp_leg_value_usd(
+    token: str,
+    amount: Decimal,
+    market_state: MarketState,
+    strict_reproducibility: bool,
+    track_fallback: Callable[[str], None] | None,
+) -> Decimal | None:
+    if amount == 0:
+        return Decimal("0")
+    price = _positive_market_price(market_state, token)
+    if price is not None:
+        return amount * price
+    _handle_unpriced_lp_leg(token, amount, strict_reproducibility, track_fallback)
+    return None
+
+
 def _lp_pair_amount_usd(
     intent: Any,
     market_state: MarketState,
@@ -395,42 +496,17 @@ def _lp_pair_amount_usd(
     strict mode and falls back to zero otherwise -- never a $1 guess,
     which would misprice the position (blueprint 31 section 4).
     """
-    amount0 = _decimal_or_none(getattr(intent, "amount0", None))
-    amount1 = _decimal_or_none(getattr(intent, "amount1", None))
-    if amount0 is None or amount1 is None:
+    amount_pair = _lp_amount_pair(intent)
+    if amount_pair is None:
         return None
 
-    tokens = get_intent_tokens(intent)
-    token0 = tokens[0] if len(tokens) > 0 else "UNKNOWN"
-    token1 = tokens[1] if len(tokens) > 1 else "UNKNOWN"
-
+    token0, token1 = _lp_amount_tokens(intent)
     total = Decimal("0")
-    for token, amount in ((token0, amount0), (token1, amount1)):
-        if amount == 0:
-            continue
-        try:
-            price: Decimal | None = market_state.get_price(token)
-        except KeyError:
-            price = None
-        if price is None or price <= 0:
-            # Zero/negative quotes are bad data, not a $0 valuation -- treat
-            # them exactly like a missing price.
-            if strict_reproducibility:
-                msg = (
-                    f"Cannot determine USD amount for LP intent: no positive price available "
-                    f"for leg token '{token}'. Set strict_reproducibility=False to use zero as fallback."
-                )
-                raise ValueError(msg)
-            logger.warning(
-                "No positive price available for LP leg token '%s' to convert amount %s to USD. "
-                "Using zero as fallback to avoid misinterpreting token amounts as USD.",
-                token,
-                amount,
-            )
-            if track_fallback:
-                track_fallback("default_usd_amount")
+    for token, amount in ((token0, amount_pair[0]), (token1, amount_pair[1])):
+        leg_value = _lp_leg_value_usd(token, amount, market_state, strict_reproducibility, track_fallback)
+        if leg_value is None:
             return Decimal("0")
-        total += amount * price
+        total += leg_value
     return total
 
 
@@ -495,7 +571,96 @@ def _borrow_amount_usd(
     return Decimal("0")
 
 
-def get_intent_amount_usd(  # noqa: C901
+def _direct_usd_amount(intent: Any) -> Decimal | None:
+    for attr in _DIRECT_USD_AMOUNT_ATTRIBUTES:
+        value = getattr(intent, attr, None)
+        if value is not None:
+            return Decimal(str(value))
+    return None
+
+
+def _generic_amount_and_token(intent: Any) -> tuple[Decimal | None, str | None]:
+    amount: Decimal | None = None
+    token: str | None = None
+
+    for amount_attr in _GENERIC_AMOUNT_ATTRIBUTES:
+        value = getattr(intent, amount_attr, None)
+        if value is None:
+            continue
+        str_value = str(value)
+        if str_value.lower() == "all":
+            continue
+        try:
+            amount = Decimal(str_value)
+        except Exception:
+            continue
+        break
+
+    for token_attr in _GENERIC_TOKEN_ATTRIBUTES:
+        value = getattr(intent, token_attr, None)
+        if value and isinstance(value, str):
+            token = value.upper()
+            break
+
+    return amount, token
+
+
+def _track_default_amount_fallback(track_fallback: Callable[[str], None] | None) -> None:
+    if track_fallback:
+        track_fallback("default_usd_amount")
+
+
+def _generic_amount_usd(
+    amount: Decimal | None,
+    token: str | None,
+    market_state: MarketState,
+    strict_reproducibility: bool,
+    track_fallback: Callable[[str], None] | None,
+) -> Decimal:
+    if amount is not None and token:
+        try:
+            price = market_state.get_price(token)
+            return amount * price
+        except KeyError as err:
+            if strict_reproducibility:
+                msg = (
+                    f"Cannot determine USD amount for intent: found amount={amount} for token '{token}' "
+                    "but no price available. Set strict_reproducibility=False to use zero as fallback."
+                )
+                raise ValueError(msg) from err
+            logger.warning(
+                f"No price available for token '{token}' to convert amount {amount} to USD. "
+                "Using zero as fallback to avoid misinterpreting token amount as USD."
+            )
+            _track_default_amount_fallback(track_fallback)
+            return Decimal("0")
+
+    if amount is not None:
+        if strict_reproducibility:
+            msg = (
+                f"Cannot determine USD amount for intent: found amount={amount} but no token "
+                "for price lookup. Set strict_reproducibility=False to use zero as fallback."
+            )
+            raise ValueError(msg)
+        logger.warning(
+            f"Intent has amount={amount} but no token for USD conversion. "
+            "Using zero as fallback to avoid misinterpreting token amount as USD."
+        )
+        _track_default_amount_fallback(track_fallback)
+        return Decimal("0")
+
+    if strict_reproducibility:
+        msg = (
+            "Cannot determine USD amount for intent: no USD amount field and no "
+            "token amount found. Set strict_reproducibility=False to use zero as fallback."
+        )
+        raise ValueError(msg)
+    logger.warning("Intent has no USD amount or token amount field. Using zero as fallback to avoid arbitrary values.")
+    _track_default_amount_fallback(track_fallback)
+    return Decimal("0")
+
+
+def get_intent_amount_usd(
     intent: Any,
     market_state: MarketState,
     strict_reproducibility: bool = False,
@@ -517,14 +682,9 @@ def get_intent_amount_usd(  # noqa: C901
         ValueError: If strict_reproducibility is True and USD amount cannot be
             determined (no USD field, no price available, or no amount field).
     """
-    # Check for direct USD amount. size_usd is the perp notional
-    # (PerpOpenIntent / PerpCloseIntent) — the fee and slippage base — and
-    # must rank above collateral_usd so collateral never shadows notional.
-    for attr in ["amount_usd", "notional_usd", "size_usd", "value_usd", "collateral_usd"]:
-        if hasattr(intent, attr):
-            value = getattr(intent, attr)
-            if value is not None:
-                return Decimal(str(value))
+    direct_amount = _direct_usd_amount(intent)
+    if direct_amount is not None:
+        return direct_amount
 
     # BORROW vocabulary intents (BorrowIntent) size the borrow via
     # borrow_amount of borrow_token; the generic scan below would price the
@@ -539,78 +699,8 @@ def get_intent_amount_usd(  # noqa: C901
     if lp_amount_usd is not None:
         return lp_amount_usd
 
-    # Check for amount + token (need to convert to USD)
-    amount: Decimal | None = None
-    token: str | None = None
-
-    for amount_attr in ["amount", "amount_in", "amount_out", "collateral", "size", "shares"]:
-        if hasattr(intent, amount_attr):
-            value = getattr(intent, amount_attr)
-            if value is not None:
-                str_value = str(value)
-                if str_value.lower() == "all":
-                    continue
-                try:
-                    amount = Decimal(str_value)
-                except Exception:
-                    continue
-                break
-
-    for token_attr in ["token", "from_token", "asset", "collateral_token", "deposit_token"]:
-        if hasattr(intent, token_attr):
-            value = getattr(intent, token_attr)
-            if value and isinstance(value, str):
-                token = value.upper()
-                break
-
-    if amount is not None and token:
-        try:
-            price = market_state.get_price(token)
-            return amount * price
-        except KeyError as err:
-            # Can't convert to USD without price - handle based on strict mode
-            if strict_reproducibility:
-                msg = (
-                    f"Cannot determine USD amount for intent: found amount={amount} for token '{token}' "
-                    "but no price available. Set strict_reproducibility=False to use zero as fallback."
-                )
-                raise ValueError(msg) from err
-            logger.warning(
-                f"No price available for token '{token}' to convert amount {amount} to USD. "
-                "Using zero as fallback to avoid misinterpreting token amount as USD."
-            )
-            if track_fallback:
-                track_fallback("default_usd_amount")
-            return Decimal("0")
-
-    # Could not determine USD amount - handle based on strict mode
-    if amount is not None:
-        # Have raw amount but no token for price lookup
-        if strict_reproducibility:
-            msg = (
-                f"Cannot determine USD amount for intent: found amount={amount} but no token "
-                "for price lookup. Set strict_reproducibility=False to use zero as fallback."
-            )
-            raise ValueError(msg)
-        logger.warning(
-            f"Intent has amount={amount} but no token for USD conversion. "
-            "Using zero as fallback to avoid misinterpreting token amount as USD."
-        )
-        if track_fallback:
-            track_fallback("default_usd_amount")
-        return Decimal("0")
-
-    # No amount found at all
-    if strict_reproducibility:
-        msg = (
-            "Cannot determine USD amount for intent: no USD amount field and no "
-            "token amount found. Set strict_reproducibility=False to use zero as fallback."
-        )
-        raise ValueError(msg)
-    logger.warning("Intent has no USD amount or token amount field. Using zero as fallback to avoid arbitrary values.")
-    if track_fallback:
-        track_fallback("default_usd_amount")
-    return Decimal("0")
+    amount, token = _generic_amount_and_token(intent)
+    return _generic_amount_usd(amount, token, market_state, strict_reproducibility, track_fallback)
 
 
 def _collateral_usd_from_intent(
@@ -686,6 +776,81 @@ def get_perp_open_params(
     return collateral_usd, leverage
 
 
+def _explicit_perp_close_match(
+    intent: Any,
+    positions: Sequence[Any],
+    is_long: bool,
+) -> tuple[bool, str | None]:
+    from almanak.framework.backtesting.pnl.position_models import PositionType
+
+    explicit_id = getattr(intent, "position_id", None)
+    if not isinstance(explicit_id, str) or not explicit_id:
+        return False, None
+
+    for position in positions:
+        if position.position_id != explicit_id:
+            continue
+        if not getattr(position, "is_perp", False):
+            logger.warning(
+                "PERP_CLOSE names position %s explicitly, but it is %s, not a perp; refusing the close target",
+                explicit_id,
+                getattr(getattr(position, "position_type", None), "value", "UNKNOWN"),
+            )
+            return True, None
+        if (position.position_type == PositionType.PERP_LONG) != is_long:
+            logger.warning(
+                "PERP_CLOSE names position %s explicitly, but its side does not match is_long=%s; "
+                "refusing the close target",
+                explicit_id,
+                is_long,
+            )
+            return True, None
+        return True, explicit_id
+    return False, None
+
+
+def _perp_close_base_token(market: Any) -> tuple[str | None, bool]:
+    if not isinstance(market, str) or not market:
+        return None, False
+    base_token = _perp_market_base_token(market)
+    if base_token is None:
+        logger.warning(
+            "PERP_CLOSE market %r cannot be resolved to a base token; refusing ambiguous close matching",
+            market,
+        )
+        return None, True
+    return base_token, False
+
+
+def _perp_close_candidates(
+    positions: Sequence[Any],
+    base_token: str | None,
+    is_long: bool,
+    protocol: str | None,
+) -> list[Any]:
+    from almanak.framework.backtesting.pnl.position_models import PositionType
+
+    candidates = []
+    for position in positions:
+        if not getattr(position, "is_perp", False):
+            continue
+        if (position.position_type == PositionType.PERP_LONG) != is_long:
+            continue
+        if base_token is not None:
+            position_token = position.tokens[0].upper() if position.tokens else ""
+            if position_token != base_token:
+                continue
+        if protocol and (not position.protocol or position.protocol.lower() != protocol):
+            continue
+        candidates.append(position)
+    return candidates
+
+
+def _normalized_intent_protocol(intent: Any) -> str | None:
+    protocol: str | None = get_intent_protocol(intent)
+    return None if protocol == "default" else protocol
+
+
 def find_perp_close_position_id(intent: Any, positions: Sequence[Any]) -> str | None:
     """Resolve the simulated position a PERP_CLOSE intent targets.
 
@@ -702,47 +867,19 @@ def find_perp_close_position_id(intent: Any, positions: Sequence[Any]) -> str | 
     Returns:
         The matched simulated position id, or None when nothing matches
     """
-    from almanak.framework.backtesting.pnl.position_models import PositionType
-
-    explicit_id = getattr(intent, "position_id", None)
-    if isinstance(explicit_id, str) and explicit_id:
-        for position in positions:
-            if position.position_id == explicit_id:
-                return explicit_id
+    is_long = intent_is_long(intent)
+    explicit_id_matched, explicit_id = _explicit_perp_close_match(intent, positions, is_long)
+    if explicit_id_matched:
+        return explicit_id
 
     market = getattr(intent, "market", None)
-    base_token = None
-    if isinstance(market, str) and market:
-        base_token = _perp_market_base_token(market)
-        if base_token is None:
-            # Fail closed: an unparseable (address-style) market cannot
-            # discriminate between open positions, and closing the wrong
-            # position silently corrupts the books.
-            logger.warning(
-                "PERP_CLOSE market %r cannot be resolved to a base token; refusing ambiguous close matching",
-                market,
-            )
-            return None
-    is_long = intent_is_long(intent)
+    base_token, unresolvable_market = _perp_close_base_token(market)
+    if unresolvable_market:
+        return None
     # Resolve protocol with the same resolver the open path used to stamp the
     # position, so protocol_name / connector / adapter spellings match too.
-    protocol: str | None = get_intent_protocol(intent)
-    if protocol == "default":
-        protocol = None
-
-    candidates = []
-    for position in positions:
-        if not getattr(position, "is_perp", False):
-            continue
-        if (position.position_type == PositionType.PERP_LONG) != is_long:
-            continue
-        if base_token is not None:
-            position_token = position.tokens[0].upper() if position.tokens else ""
-            if position_token != base_token:
-                continue
-        if protocol and position.protocol and position.protocol.lower() != protocol:
-            continue
-        candidates.append(position)
+    protocol = _normalized_intent_protocol(intent)
+    candidates = _perp_close_candidates(positions, base_token, is_long, protocol)
 
     if not candidates:
         logger.warning(
@@ -821,65 +958,54 @@ def find_borrow_close_position_id(intent: Any, positions: Sequence[Any]) -> str 
     return _find_lending_position_id(intent, positions, PositionType.BORROW, "REPAY", "borrow")
 
 
-def _find_lending_position_id(
+def _explicit_lending_position_match(
     intent: Any,
     positions: Sequence[Any],
     target_type: Any,
     intent_label: str,
     position_label: str,
-) -> str | None:
-    """Shared matcher behind the WITHDRAW/SUPPLY and REPAY/BORROW pairs.
-
-    Exact-id precedence, then FIFO-oldest by (token, protocol); only
-    positions of ``target_type`` qualify. See the public wrappers for the
-    documented fail-closed contract.
-    """
+) -> tuple[bool, str | None]:
     explicit_id_supplied = False
-    for attr in ("position_id", "position_to_close", "close_position_id"):
+    for attr in _POSITION_ID_ATTRIBUTES:
         explicit_id = getattr(intent, attr, None)
-        if isinstance(explicit_id, str) and explicit_id:
-            explicit_id_supplied = True
-            for position in positions:
-                if position.position_id == explicit_id:
-                    if position.position_type != target_type:
-                        logger.warning(
-                            "%s names position %s explicitly, but it is %s, not %s; "
-                            "refusing the close target (fail closed)",
-                            intent_label,
-                            explicit_id,
-                            position.position_type.value,
-                            target_type.value,
-                        )
-                        return None
-                    return explicit_id
+        if not isinstance(explicit_id, str) or not explicit_id:
+            continue
+        explicit_id_supplied = True
+        for position in positions:
+            if position.position_id != explicit_id:
+                continue
+            if position.position_type != target_type:
+                logger.warning(
+                    "%s names position %s explicitly, but it is %s, not %s; refusing the close target (fail closed)",
+                    intent_label,
+                    explicit_id,
+                    position.position_type.value,
+                    target_type.value,
+                )
+                return True, None
+            return True, explicit_id
 
-    # An explicit id that resolves to no open position must fail closed -- a
-    # typoed/stale id must NOT silently fall through to (token, protocol) FIFO
-    # matching and repay/withdraw the oldest position for that token instead
-    # (CodeRabbit, PR #2777). Exact-id intent => exact-id match or nothing.
     if explicit_id_supplied:
         logger.warning(
             "%s names an explicit %s position id that matches no open position; refusing FIFO fallback (fail closed)",
             intent_label,
             position_label,
         )
-        return None
+        return True, None
+    return False, None
 
+
+def _lending_close_token(intent: Any) -> str | None:
     token = getattr(intent, "token", getattr(intent, "asset", None))
-    token = token.upper() if isinstance(token, str) and token else None
-    if token is None:
-        logger.warning(
-            "%s carries no token/asset and no explicit %s position id; refusing protocol-only matching (fail closed)",
-            intent_label,
-            position_label,
-        )
-        return None
-    # Resolve protocol with the same resolver the open path used to stamp
-    # the position, so protocol_name / connector / adapter spellings match.
-    protocol: str | None = get_intent_protocol(intent)
-    if protocol == "default":
-        protocol = None
+    return token.upper() if isinstance(token, str) and token else None
 
+
+def _lending_position_candidates(
+    positions: Sequence[Any],
+    target_type: Any,
+    token: str,
+    protocol: str | None,
+) -> list[Any]:
     candidates = []
     for position in positions:
         if position.position_type != target_type:
@@ -894,6 +1020,44 @@ def _find_lending_position_id(
         if protocol and (not position.protocol or position.protocol.lower() != protocol):
             continue
         candidates.append(position)
+    return candidates
+
+
+def _find_lending_position_id(
+    intent: Any,
+    positions: Sequence[Any],
+    target_type: Any,
+    intent_label: str,
+    position_label: str,
+) -> str | None:
+    """Shared matcher behind the WITHDRAW/SUPPLY and REPAY/BORROW pairs.
+
+    Exact-id precedence, then FIFO-oldest by (token, protocol); only
+    positions of ``target_type`` qualify. See the public wrappers for the
+    documented fail-closed contract.
+    """
+    explicit_id_supplied, explicit_id = _explicit_lending_position_match(
+        intent,
+        positions,
+        target_type,
+        intent_label,
+        position_label,
+    )
+    if explicit_id_supplied:
+        return explicit_id
+
+    token = _lending_close_token(intent)
+    if token is None:
+        logger.warning(
+            "%s carries no token/asset and no explicit %s position id; refusing protocol-only matching (fail closed)",
+            intent_label,
+            position_label,
+        )
+        return None
+    # Resolve protocol with the same resolver the open path used to stamp
+    # the position, so protocol_name / connector / adapter spellings match.
+    protocol = _normalized_intent_protocol(intent)
+    candidates = _lending_position_candidates(positions, target_type, token, protocol)
 
     if not candidates:
         logger.warning(
@@ -961,6 +1125,28 @@ def _lp_position_pair(position: Any) -> frozenset[str] | None:
     return _lp_token_pair(tokens[0], tokens[1])
 
 
+def _lp_close_candidates(
+    positions: Sequence[Any],
+    pair: frozenset[str],
+    protocol: str | None,
+) -> list[Any]:
+    from almanak.framework.backtesting.pnl.position_models import PositionType
+
+    candidates = []
+    for position in positions:
+        if getattr(position, "position_type", None) != PositionType.LP:
+            continue
+        if _lp_position_pair(position) != pair:
+            continue
+        # A protocol-specific intent must not target a position whose protocol
+        # is unknown: skip on missing OR mismatched stamp (the lending-matcher
+        # convention -- every production LP producer stamps protocol).
+        if protocol and (not position.protocol or position.protocol.lower() != protocol):
+            continue
+        candidates.append(position)
+    return candidates
+
+
 def find_lp_close_position_id(intent: Any, positions: Sequence[Any]) -> str | None:
     """Resolve the simulated LP position an LP_CLOSE intent targets.
 
@@ -995,8 +1181,6 @@ def find_lp_close_position_id(intent: Any, positions: Sequence[Any]) -> str | No
         The matched simulated position id, or None when no open LP position
         matches the pair+protocol (the close is then rejected, never minted).
     """
-    from almanak.framework.backtesting.pnl.position_models import PositionType
-
     explicit_id = getattr(intent, "position_id", None)
     if isinstance(explicit_id, str) and explicit_id:
         for position in positions:
@@ -1014,22 +1198,8 @@ def find_lp_close_position_id(intent: Any, positions: Sequence[Any]) -> str | No
 
     # Resolve protocol with the same resolver the open path used to stamp the
     # position, so protocol_name / connector / adapter spellings match too.
-    protocol: str | None = get_intent_protocol(intent)
-    if protocol == "default":
-        protocol = None
-
-    candidates = []
-    for position in positions:
-        if getattr(position, "position_type", None) != PositionType.LP:
-            continue
-        if _lp_position_pair(position) != pair:
-            continue
-        # A protocol-specific intent must not target a position whose protocol
-        # is unknown: skip on missing OR mismatched stamp (the lending-matcher
-        # convention -- every production LP producer stamps protocol).
-        if protocol and (not position.protocol or position.protocol.lower() != protocol):
-            continue
-        candidates.append(position)
+    protocol = _normalized_intent_protocol(intent)
+    candidates = _lp_close_candidates(positions, pair, protocol)
 
     if not candidates:
         logger.warning(

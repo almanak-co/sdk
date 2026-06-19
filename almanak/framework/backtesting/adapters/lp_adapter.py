@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, cast
 
 from almanak.core.chains import DEFAULT_CHAIN, LEGACY_SERIALIZED_CHAIN
 from almanak.core.constants import STABLECOINS
@@ -71,6 +71,8 @@ from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
 )
 from almanak.framework.backtesting.pnl.types import DataConfidence
 
+FeeConfidence = Literal["high", "medium", "low"]
+
 if TYPE_CHECKING:
     from almanak.framework.backtesting.config import BacktestDataConfig
     from almanak.framework.backtesting.pnl.data_provider import MarketState
@@ -90,7 +92,7 @@ if TYPE_CHECKING:
         MultiDEXVolumeProvider,
     )
     from almanak.framework.backtesting.pnl.types import LiquidityResult, VolumeResult
-    from almanak.framework.intents.vocabulary import Intent
+    from almanak.framework.intents.vocabulary import Intent, LPOpenIntent
 
 logger = logging.getLogger(__name__)
 
@@ -386,6 +388,103 @@ class _VolumeResolution:
     volume_usd: Decimal
     source: Literal["explicit", "historical", "fallback"]
     confidence: DataConfidence
+
+
+@dataclass(frozen=True)
+class _LPUpdatePrices:
+    token0: str
+    token1: str
+    token0_price: Decimal
+    token1_price: Decimal
+    current_price: Decimal
+
+
+@dataclass(frozen=True)
+class _RangeStatusInputs:
+    prices: _LPUpdatePrices
+    tick_lower: int
+    tick_upper: int
+
+
+@dataclass(frozen=True)
+class _RangeDistances:
+    lower_pct: Decimal
+    upper_pct: Decimal
+
+
+@dataclass(frozen=True)
+class _LPUpdateAmounts:
+    il_pct: Decimal
+    token0_amount: Decimal
+    token1_amount: Decimal
+    position_value_usd: Decimal
+
+
+@dataclass(frozen=True)
+class _LPUpdatePlan:
+    prices: _LPUpdatePrices
+    amounts: _LPUpdateAmounts
+    update_time: datetime
+    fee_result: FeeAccrualResult | None
+
+
+@dataclass(frozen=True)
+class _LPCloseResult:
+    tokens_in: dict[str, Decimal]
+    total_value_received: Decimal
+    fees_earned_usd: Decimal
+    il_pct: Decimal
+    il_loss_usd: Decimal
+    initial_value_usd: Decimal
+    net_lp_pnl_usd: Decimal
+
+
+@dataclass(frozen=True)
+class _LPOpenPlan:
+    token0: str
+    token1: str
+    amount0: Decimal
+    amount1: Decimal
+    token0_price: Decimal
+    token1_price: Decimal
+    amount_usd: Decimal
+    entry_price: Decimal
+    range_lower: Decimal
+    range_upper: Decimal
+    tick_lower: int
+    tick_upper: int
+    protocol: str
+    fee_tier: Decimal
+    liquidity: Decimal
+
+
+@dataclass(frozen=True)
+class _FeeFormulaContext:
+    days_elapsed: Decimal
+    liquidity_share: Decimal
+    base_apr: Decimal
+    resolution: _VolumeResolution
+
+
+@dataclass(frozen=True)
+class _FeeAmountResult:
+    fees_usd: Decimal
+    fee_confidence: FeeConfidence
+    data_source: str
+    volume_usd: Decimal
+
+
+@dataclass(frozen=True)
+class _FeeTokenAttribution:
+    token0_amount: Decimal
+    token1_amount: Decimal
+
+
+@dataclass(frozen=True)
+class _FeeSlippageResult:
+    confidence: FeeConfidence | None = None
+    pct: Decimal | None = None
+    liquidity_usd: Decimal | None = None
 
 
 @dataclass
@@ -1370,49 +1469,94 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         Returns:
             SimulatedFill with the created LP position
         """
-        from almanak.framework.backtesting.models import IntentType
-        from almanak.framework.backtesting.pnl.portfolio import (
-            SimulatedFill,
-            SimulatedPosition,
-        )
         from almanak.framework.intents.vocabulary import LPOpenIntent
 
-        # Type narrowing
         if not isinstance(intent, LPOpenIntent):
-            # Return a failed fill if called with wrong intent type
-            return SimulatedFill(
-                timestamp=market_state.timestamp,
-                intent_type=IntentType.LP_OPEN,
+            return self._failed_lp_open_fill(
+                market_state=market_state,
                 protocol="unknown",
-                tokens=[],
-                executed_price=Decimal("0"),
-                amount_usd=Decimal("0"),
-                fee_usd=Decimal("0"),
-                slippage_usd=Decimal("0"),
-                gas_cost_usd=Decimal("0"),
-                tokens_in={},
-                tokens_out={},
-                success=False,
-                metadata={"failure_reason": "Invalid intent type"},
+                reason="Invalid intent type",
             )
 
-        # Extract pool identifier to get token symbols
-        # Pool format can be "TOKEN0/TOKEN1" or just an address
-        pool = intent.pool
-        if "/" in pool:
-            token0, token1 = pool.split("/")[:2]
-            token0 = token0.strip().upper()
-            token1 = token1.strip().upper()
-        else:
-            # Default to common pair if pool is an address
-            token0 = "WETH"
-            token1 = "USDC"
+        plan = self._build_lp_open_plan(intent, market_state)
+        position = self._lp_open_position(plan, market_state)
+        self._annotate_lp_open_position(position, intent.pool, plan)
+        self._log_lp_open(intent.pool, plan)
+        return self._lp_open_success_fill(intent.pool, market_state, position, plan)
 
-        # Extract amounts from intent
+    def _failed_lp_open_fill(
+        self,
+        market_state: "MarketState",
+        protocol: str,
+        reason: str,
+    ) -> "SimulatedFill":
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
+
+        return SimulatedFill(
+            timestamp=market_state.timestamp,
+            intent_type=IntentType.LP_OPEN,
+            protocol=protocol,
+            tokens=[],
+            executed_price=Decimal("0"),
+            amount_usd=Decimal("0"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            tokens_in={},
+            tokens_out={},
+            success=False,
+            metadata={"failure_reason": reason},
+        )
+
+    def _build_lp_open_plan(self, intent: "LPOpenIntent", market_state: "MarketState") -> _LPOpenPlan:
+        token0, token1 = self._lp_open_tokens(intent.pool)
         amount0 = Decimal(str(intent.amount0))
         amount1 = Decimal(str(intent.amount1))
+        token0_price, token1_price = self._lp_open_prices(token0, token1, market_state)
+        amount_usd = amount0 * token0_price + amount1 * token1_price
+        entry_price = token0_price / token1_price if token1_price > 0 else token0_price
+        range_lower, range_upper, tick_lower, tick_upper = self._lp_open_range(intent)
+        protocol = intent.protocol.lower()
+        fee_tier = self._lp_fee_tier_from_protocol(protocol)
+        liquidity = self._lp_open_liquidity(
+            amount_usd=amount_usd,
+            token1_price=token1_price,
+            entry_price=entry_price,
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
+        )
+        return _LPOpenPlan(
+            token0=token0,
+            token1=token1,
+            amount0=amount0,
+            amount1=amount1,
+            token0_price=token0_price,
+            token1_price=token1_price,
+            amount_usd=amount_usd,
+            entry_price=entry_price,
+            range_lower=range_lower,
+            range_upper=range_upper,
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
+            protocol=protocol,
+            fee_tier=fee_tier,
+            liquidity=liquidity,
+        )
 
-        # Get current prices
+    @staticmethod
+    def _lp_open_tokens(pool: str) -> tuple[str, str]:
+        if "/" in pool:
+            token0, token1 = pool.split("/")[:2]
+            return token0.strip().upper(), token1.strip().upper()
+        return "WETH", "USDC"
+
+    def _lp_open_prices(
+        self,
+        token0: str,
+        token1: str,
+        market_state: "MarketState",
+    ) -> tuple[Decimal, Decimal]:
         try:
             token0_price = market_state.get_price(token0)
         except KeyError:
@@ -1427,128 +1571,132 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             token0_price = self._price_fallback(token0, Decimal("1"), "execute_open")
         if token1_price is None or token1_price <= 0:
             token1_price = self._price_fallback(token1, Decimal("1"), "execute_open")
+        return token0_price, token1_price
 
-        # Calculate total USD value of position
-        amount_usd = amount0 * token0_price + amount1 * token1_price
-
-        # Calculate entry price ratio (token0 in terms of token1)
-        entry_price = token0_price / token1_price if token1_price > 0 else token0_price
-
-        # Convert price ranges to ticks
+    def _lp_open_range(self, intent: "LPOpenIntent") -> tuple[Decimal, Decimal, int, int]:
         range_lower = Decimal(str(intent.range_lower))
         range_upper = Decimal(str(intent.range_upper))
-
-        # Convert prices to ticks using Uniswap V3 formula: tick = floor(log(price) / log(1.0001))
         tick_lower = self._price_to_tick_int(range_lower)
         tick_upper = self._price_to_tick_int(range_upper)
         if tick_upper <= tick_lower:
             # Degenerate range (both bounds floor to the same tick): widen by
             # one tick so the position has a valid V3 range and non-zero value.
             tick_upper = tick_lower + 1
+        return range_lower, range_upper, tick_lower, tick_upper
 
-        # Get fee tier from protocol (default 0.3% for Uniswap V3)
-        # Use explicit suffix matching to avoid false positives (e.g., "uniswap_v1" matching "1")
-        protocol = intent.protocol.lower()
+    @staticmethod
+    def _lp_fee_tier_from_protocol(protocol: str) -> Decimal:
         if protocol.endswith("_0.01") or protocol.endswith("_1bps") or "_0.01_" in protocol:
-            fee_tier = Decimal("0.0001")  # 0.01% / 1 bps
-        elif protocol.endswith("_0.05") or protocol.endswith("_5bps") or "_0.05_" in protocol:
-            fee_tier = Decimal("0.0005")  # 0.05% / 5 bps
-        elif protocol.endswith("_1") or protocol.endswith("_100bps") or "_1_" in protocol:
-            fee_tier = Decimal("0.01")  # 1% / 100 bps
-        elif protocol.endswith("_0.3") or protocol.endswith("_30bps") or "_0.3_" in protocol:
-            fee_tier = Decimal("0.003")  # 0.3% / 30 bps
-        else:
-            fee_tier = Decimal("0.003")  # Default 0.3%
+            return Decimal("0.0001")
+        if protocol.endswith("_0.05") or protocol.endswith("_5bps") or "_0.05_" in protocol:
+            return Decimal("0.0005")
+        if protocol.endswith("_1") or protocol.endswith("_100bps") or "_1_" in protocol:
+            return Decimal("0.01")
+        return Decimal("0.003")
 
-        # VIB-5096: SimulatedPosition.liquidity holds TRUE Uniswap V3 L-units.
-        # Convert the USD deposit into L at the entry price ratio so the
-        # position is worth exactly the deposited notional on open (storing
-        # the USD notional here while calculate_il_v3 interprets the field as
-        # L-units minted ~27x on a $5K WETH/USDC open).
+    def _lp_open_liquidity(
+        self,
+        amount_usd: Decimal,
+        token1_price: Decimal,
+        entry_price: Decimal,
+        tick_lower: int,
+        tick_upper: int,
+    ) -> Decimal:
         value_token1 = amount_usd / token1_price if token1_price > 0 else amount_usd
-        liquidity = self._il_calculator.liquidity_for_target_value(
+        return self._il_calculator.liquidity_for_target_value(
             value_token1=value_token1,
             price=entry_price,
             tick_lower=tick_lower,
             tick_upper=tick_upper,
         )
 
-        # Create the LP position
+    @staticmethod
+    def _lp_open_pool_address(pool: str) -> str | None:
+        pool_lower = pool.lower()
+        if "/" not in pool and pool_lower.startswith("0x"):
+            return pool_lower
+        return None
+
+    def _lp_open_position(self, plan: _LPOpenPlan, market_state: "MarketState") -> "SimulatedPosition":
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
+
         position = SimulatedPosition.lp(
-            token0=token0,
-            token1=token1,
-            amount0=amount0,
-            amount1=amount1,
-            liquidity=liquidity,
-            tick_lower=tick_lower,
-            tick_upper=tick_upper,
-            fee_tier=fee_tier,
-            entry_price=entry_price,
+            token0=plan.token0,
+            token1=plan.token1,
+            amount0=plan.amount0,
+            amount1=plan.amount1,
+            liquidity=plan.liquidity,
+            tick_lower=plan.tick_lower,
+            tick_upper=plan.tick_upper,
+            fee_tier=plan.fee_tier,
+            entry_price=plan.entry_price,
             entry_time=market_state.timestamp,
-            protocol=protocol,
+            protocol=plan.protocol,
         )
-
-        # Store entry amounts in metadata for later IL calculation
-        position.metadata["entry_amounts"] = {
-            token0: str(amount0),
-            token1: str(amount1),
-        }
-        position.metadata["entry_price_ratio"] = str(entry_price)
-
-        # Store pool address for historical volume lookup in fee accrual
-        # The pool parameter can be either "TOKEN0/TOKEN1" format or a contract address
-        if "/" not in intent.pool and intent.pool.startswith("0x"):
-            position.metadata["pool_address"] = intent.pool.lower()
-        else:
-            # For token pair format, we can't automatically determine pool address
-            # Users should provide the actual pool address for historical volume lookup
-            position.metadata["pool_address"] = None
-
-        # Initialize fee accrual tracking
         position.accumulated_fees_usd = Decimal("0")
         position.fees_token0 = Decimal("0")
         position.fees_token1 = Decimal("0")
+        return position
 
+    def _annotate_lp_open_position(self, position: "SimulatedPosition", pool: str, plan: _LPOpenPlan) -> None:
+        position.metadata["entry_amounts"] = {
+            plan.token0: str(plan.amount0),
+            plan.token1: str(plan.amount1),
+        }
+        position.metadata["entry_price_ratio"] = str(plan.entry_price)
+        position.metadata["pool_address"] = self._lp_open_pool_address(pool)
+
+    @staticmethod
+    def _log_lp_open(pool: str, plan: _LPOpenPlan) -> None:
         logger.info(
             "LP_OPEN executed: pool=%s, amount_usd=%.2f, range=[%.6f, %.6f], ticks=[%d, %d], liquidity=%.2f",
-            intent.pool,
-            float(amount_usd),
-            float(range_lower),
-            float(range_upper),
-            tick_lower,
-            tick_upper,
-            float(liquidity),
+            pool,
+            float(plan.amount_usd),
+            float(plan.range_lower),
+            float(plan.range_upper),
+            plan.tick_lower,
+            plan.tick_upper,
+            float(plan.liquidity),
         )
 
-        # Create and return the SimulatedFill
+    def _lp_open_success_fill(
+        self,
+        pool: str,
+        market_state: "MarketState",
+        position: "SimulatedPosition",
+        plan: _LPOpenPlan,
+    ) -> "SimulatedFill":
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
+
         return SimulatedFill(
             timestamp=market_state.timestamp,
             intent_type=IntentType.LP_OPEN,
-            protocol=protocol,
-            tokens=[token0, token1],
-            executed_price=entry_price,
-            amount_usd=amount_usd,
+            protocol=plan.protocol,
+            tokens=[plan.token0, plan.token1],
+            executed_price=plan.entry_price,
+            amount_usd=plan.amount_usd,
             fee_usd=Decimal("0"),  # No protocol fee for LP open
             slippage_usd=Decimal("0"),  # No slippage for LP open
             # Gas is engine-owned: PnLBacktester._execute_intent stamps the
             # chain-aware resolved cost onto successful adapter fills.
             gas_cost_usd=Decimal("0"),
             tokens_in={},  # No tokens received on open
-            tokens_out={token0: amount0, token1: amount1},  # Tokens deposited
+            tokens_out={plan.token0: plan.amount0, plan.token1: plan.amount1},  # Tokens deposited
             success=True,
             position_delta=position,
             metadata={
-                "pool": intent.pool,
-                "range_lower": str(range_lower),
-                "range_upper": str(range_upper),
-                "tick_lower": tick_lower,
-                "tick_upper": tick_upper,
-                "fee_tier": str(fee_tier),
-                "liquidity": str(liquidity),
+                "pool": pool,
+                "range_lower": str(plan.range_lower),
+                "range_upper": str(plan.range_upper),
+                "tick_lower": plan.tick_lower,
+                "tick_upper": plan.tick_upper,
+                "fee_tier": str(plan.fee_tier),
+                "liquidity": str(plan.liquidity),
             },
         )
 
-    def _execute_lp_close(  # noqa: C901
+    def _execute_lp_close(
         self,
         intent: "Intent",
         portfolio: "SimulatedPortfolio",
@@ -1570,65 +1718,28 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             - IL loss calculated from entry to current price
             - PnL breakdown in metadata
         """
-        from almanak.framework.backtesting.models import IntentType
-        from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
         from almanak.framework.intents.vocabulary import LPCloseIntent
 
-        # Type narrowing
         if not isinstance(intent, LPCloseIntent):
-            # Return a failed fill if called with wrong intent type
-            return SimulatedFill(
-                timestamp=market_state.timestamp,
-                intent_type=IntentType.LP_CLOSE,
+            return self._failed_lp_close_fill(
+                market_state=market_state,
                 protocol="unknown",
                 tokens=[],
-                executed_price=Decimal("0"),
-                amount_usd=Decimal("0"),
-                fee_usd=Decimal("0"),
-                slippage_usd=Decimal("0"),
-                gas_cost_usd=Decimal("0"),
-                tokens_in={},
-                tokens_out={},
-                success=False,
-                metadata={"failure_reason": "Invalid intent type"},
+                reason="Invalid intent type",
             )
 
-        # Find the position to close in the portfolio. Fungible-LP protocols
-        # (Aerodrome, Uniswap-V2-style) emit LP_CLOSE with a pool-descriptor id
-        # ("TOKEN0/TOKEN1/pool_type") that never equals the engine's synthetic
-        # open id, so an exact-id match is not enough -- resolve via
-        # find_lp_close_position_id (exact-id precedence, then pair+protocol
-        # FIFO, mirroring the perp/lending matchers).
-        from almanak.framework.backtesting.pnl.intent_extraction import find_lp_close_position_id
-
-        matched_id = find_lp_close_position_id(intent, portfolio.positions)
-        position = None
-        if matched_id is not None:
-            for pos in portfolio.positions:
-                if pos.position_id == matched_id:
-                    position = pos
-                    break
-
+        position = self._find_lp_close_position(intent, portfolio)
         if position is None:
             logger.warning(
                 "LP_CLOSE failed: no open LP position matched %s in portfolio",
                 intent.position_id,
             )
-            return SimulatedFill(
-                timestamp=market_state.timestamp,
-                intent_type=IntentType.LP_CLOSE,
+            return self._failed_lp_close_fill(
+                market_state=market_state,
                 protocol=intent.protocol,
                 tokens=[],
-                executed_price=Decimal("0"),
-                amount_usd=Decimal("0"),
-                fee_usd=Decimal("0"),
-                slippage_usd=Decimal("0"),
-                gas_cost_usd=Decimal("0"),
-                tokens_in={},
-                tokens_out={},
-                success=False,
+                reason=f"Position {intent.position_id} not found",
                 position_close_id=intent.position_id,
-                metadata={"failure_reason": f"Position {intent.position_id} not found"},
             )
 
         if len(position.tokens) < 2:
@@ -1636,150 +1747,185 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
                 "LP_CLOSE failed: position %s has insufficient tokens",
                 intent.position_id,
             )
-            return SimulatedFill(
-                timestamp=market_state.timestamp,
-                intent_type=IntentType.LP_CLOSE,
+            return self._failed_lp_close_fill(
+                market_state=market_state,
                 protocol=intent.protocol,
                 tokens=position.tokens,
-                executed_price=Decimal("0"),
-                amount_usd=Decimal("0"),
-                fee_usd=Decimal("0"),
-                slippage_usd=Decimal("0"),
-                gas_cost_usd=Decimal("0"),
-                tokens_in={},
-                tokens_out={},
-                success=False,
+                reason="Position has fewer than 2 tokens",
                 position_close_id=position.position_id,
-                metadata={"failure_reason": "Position has fewer than 2 tokens"},
             )
 
-        token0 = position.tokens[0]
-        token1 = position.tokens[1]
+        prices = self._resolve_lp_position_prices(position, market_state, "execute_lp_close")
+        amounts = self._calculate_lp_update_amounts(position, prices)
+        close_result = self._build_lp_close_result(intent, position, prices, amounts)
+        self._log_lp_close(intent, prices, close_result)
+        return self._lp_close_success_fill(intent, market_state, position, prices, amounts, close_result)
 
-        # Get current prices
-        try:
-            token0_price = market_state.get_price(token0)
-        except KeyError:
-            token0_price = position.entry_price
+    def _failed_lp_close_fill(
+        self,
+        market_state: "MarketState",
+        protocol: str,
+        tokens: list[str],
+        reason: str,
+        position_close_id: str | None = None,
+    ) -> "SimulatedFill":
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
 
-        try:
-            token1_price = market_state.get_price(token1)
-        except KeyError:
-            token1_price = None
+        return SimulatedFill(
+            timestamp=market_state.timestamp,
+            intent_type=IntentType.LP_CLOSE,
+            protocol=protocol,
+            tokens=tokens,
+            executed_price=Decimal("0"),
+            amount_usd=Decimal("0"),
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            tokens_in={},
+            tokens_out={},
+            success=False,
+            position_close_id=position_close_id,
+            metadata={"failure_reason": reason},
+        )
 
-        if token0_price is None or token0_price <= 0:
-            token0_price = position.entry_price
-        if token1_price is None or token1_price <= 0:
-            token1_price = self._price_fallback(token1, Decimal("1"), "execute_lp_close")
+    @staticmethod
+    def _find_lp_close_position(
+        intent: Any,
+        portfolio: "SimulatedPortfolio",
+    ) -> "SimulatedPosition | None":
+        # Fungible-LP protocols (Aerodrome, Uniswap-V2-style) emit LP_CLOSE
+        # with a pool-descriptor id that differs from the synthetic open id.
+        from almanak.framework.backtesting.pnl.intent_extraction import find_lp_close_position_id
 
-        # Calculate current price ratio (token0 in terms of token1)
-        current_price_ratio = token0_price / token1_price if token1_price > 0 else position.entry_price
+        matched_id = find_lp_close_position_id(intent, portfolio.positions)
+        if matched_id is None:
+            return None
+        return next((pos for pos in portfolio.positions if pos.position_id == matched_id), None)
 
-        # Get tick bounds (default to full range if not set)
-        tick_lower = position.tick_lower if position.tick_lower is not None else -887272
-        tick_upper = position.tick_upper if position.tick_upper is not None else 887272
+    @staticmethod
+    def _lp_fees_earned(position: "SimulatedPosition") -> Decimal:
+        fees_earned_usd = position.accumulated_fees_usd
+        return position.fees_earned if fees_earned_usd == Decimal("0") else fees_earned_usd
 
-        # Use ImpermanentLossCalculator to get current token amounts and IL
-        il_pct, current_token0, current_token1 = self._il_calculator.calculate_il_v3(
+    def _lp_close_tokens_in(
+        self,
+        intent: Any,
+        prices: _LPUpdatePrices,
+        amounts: _LPUpdateAmounts,
+        fees_earned_usd: Decimal,
+    ) -> tuple[dict[str, Decimal], Decimal]:
+        tokens_in = {
+            prices.token0: amounts.token0_amount,
+            prices.token1: amounts.token1_amount,
+        }
+        if intent.collect_fees:
+            token0_ratio = self._token0_value_ratio(amounts, prices)
+            fee_token0_usd = fees_earned_usd * token0_ratio
+            fee_token1_usd = fees_earned_usd * (Decimal("1") - token0_ratio)
+            if prices.token0_price > 0:
+                tokens_in[prices.token0] += fee_token0_usd / prices.token0_price
+            if prices.token1_price > 0:
+                tokens_in[prices.token1] += fee_token1_usd / prices.token1_price
+            return tokens_in, amounts.position_value_usd + fees_earned_usd
+        return tokens_in, amounts.position_value_usd
+
+    @staticmethod
+    def _token0_value_ratio(amounts: _LPUpdateAmounts, prices: _LPUpdatePrices) -> Decimal:
+        if amounts.position_value_usd <= 0:
+            return Decimal("0.5")
+        token0_value = amounts.token0_amount * prices.token0_price
+        return token0_value / amounts.position_value_usd
+
+    def _lp_close_entry_amounts(
+        self,
+        position: "SimulatedPosition",
+        prices: _LPUpdatePrices,
+    ) -> tuple[Decimal, Decimal]:
+        entry_amounts = position.metadata.get("entry_amounts", {})
+        if entry_amounts:
+            return (
+                Decimal(str(entry_amounts.get(prices.token0, "0"))),
+                Decimal(str(entry_amounts.get(prices.token1, "0"))),
+            )
+
+        tick_lower, tick_upper = self._lp_tick_bounds_or_full_range(position)
+        _, entry_token0, entry_token1 = self._il_calculator.calculate_il_v3(
             entry_price=position.entry_price,
-            current_price=current_price_ratio,
+            current_price=position.entry_price,
             tick_lower=tick_lower,
             tick_upper=tick_upper,
             liquidity=position.liquidity,
         )
+        return entry_token0, entry_token1
 
-        # Calculate position value from current tokens
-        current_value = current_token0 * token0_price + current_token1 * token1_price
-
-        # Get accumulated fees
-        fees_earned_usd = position.accumulated_fees_usd
-        if fees_earned_usd == Decimal("0"):
-            # Fallback to fees_earned if accumulated_fees_usd not set
-            fees_earned_usd = position.fees_earned
-
-        # Calculate tokens received including fees if collect_fees=True
-        tokens_in = {token0: current_token0, token1: current_token1}
-
-        if intent.collect_fees:
-            # Add fee tokens to the received amounts
-            # Fee distribution follows position composition
-            total_value = current_token0 * token0_price + current_token1 * token1_price
-            if total_value > 0:
-                token0_ratio = (current_token0 * token0_price) / total_value
-            else:
-                token0_ratio = Decimal("0.5")
-
-            # Convert fee USD to token amounts
-            fee_token0_usd = fees_earned_usd * token0_ratio
-            fee_token1_usd = fees_earned_usd * (Decimal("1") - token0_ratio)
-
-            if token0_price > 0:
-                tokens_in[token0] += fee_token0_usd / token0_price
-            if token1_price > 0:
-                tokens_in[token1] += fee_token1_usd / token1_price
-
-            # Total value includes fees when collected
-            total_value_received = current_value + fees_earned_usd
-        else:
-            total_value_received = current_value
-
-        # Calculate IL loss in USD
-        # IL is calculated as percentage of hold value (what tokens would be worth if just held)
-        # Get entry amounts from metadata or calculate from IL
-        entry_amounts = position.metadata.get("entry_amounts", {})
-        if entry_amounts:
-            entry_token0 = Decimal(str(entry_amounts.get(token0, "0")))
-            entry_token1 = Decimal(str(entry_amounts.get(token1, "0")))
-        else:
-            # Use IL calculator to get entry amounts based on position
-            _, entry_token0, entry_token1 = self._il_calculator.calculate_il_v3(
-                entry_price=position.entry_price,
-                current_price=position.entry_price,
-                tick_lower=tick_lower,
-                tick_upper=tick_upper,
-                liquidity=position.liquidity,
-            )
-
-        # Hold value = entry tokens at current prices
-        hold_value = entry_token0 * token0_price + entry_token1 * token1_price
-        il_loss_usd = il_pct * hold_value
-
-        # Calculate initial value (entry amounts at entry prices)
+    def _build_lp_close_result(
+        self,
+        intent: Any,
+        position: "SimulatedPosition",
+        prices: _LPUpdatePrices,
+        amounts: _LPUpdateAmounts,
+    ) -> _LPCloseResult:
+        fees_earned_usd = self._lp_fees_earned(position)
+        tokens_in, total_value_received = self._lp_close_tokens_in(intent, prices, amounts, fees_earned_usd)
+        entry_token0, entry_token1 = self._lp_close_entry_amounts(position, prices)
+        hold_value = entry_token0 * prices.token0_price + entry_token1 * prices.token1_price
+        il_loss_usd = amounts.il_pct * hold_value
         # NOTE: This is an approximation using current token1 USD price as a proxy for entry price.
         # For more accurate PnL, entry_token0_price_usd and entry_token1_price_usd should be stored
         # in position metadata during LP_OPEN. The current approach is acceptable for backtesting
         # where token price changes over the position lifetime are typically small relative to IL.
-        initial_value = entry_token0 * position.entry_price * token1_price + entry_token1 * token1_price
+        initial_value = entry_token0 * position.entry_price * prices.token1_price + entry_token1 * prices.token1_price
+        net_lp_pnl_usd = total_value_received - initial_value
+        return _LPCloseResult(
+            tokens_in=tokens_in,
+            total_value_received=total_value_received,
+            fees_earned_usd=fees_earned_usd,
+            il_pct=amounts.il_pct,
+            il_loss_usd=il_loss_usd,
+            initial_value_usd=initial_value,
+            net_lp_pnl_usd=net_lp_pnl_usd,
+        )
 
-        # Net LP PnL = (Current Value + Fees) - Initial Value
-        net_lp_pnl_usd = (current_value + fees_earned_usd) - initial_value
-
+    @staticmethod
+    def _log_lp_close(intent: Any, prices: _LPUpdatePrices, close_result: _LPCloseResult) -> None:
         logger.info(
             "LP_CLOSE executed: position=%s, token0_out=%.6f, token1_out=%.6f, "
             "value_usd=%.2f, fees_usd=%.2f, il_pct=%.4f%%, net_pnl=%.2f",
             intent.position_id,
-            float(tokens_in.get(token0, 0)),
-            float(tokens_in.get(token1, 0)),
-            float(total_value_received),
-            float(fees_earned_usd),
-            float(il_pct * 100),
-            float(net_lp_pnl_usd),
+            float(close_result.tokens_in.get(prices.token0, Decimal("0"))),
+            float(close_result.tokens_in.get(prices.token1, Decimal("0"))),
+            float(close_result.total_value_received),
+            float(close_result.fees_earned_usd),
+            float(close_result.il_pct * 100),
+            float(close_result.net_lp_pnl_usd),
         )
 
-        # Create and return the SimulatedFill
+    def _lp_close_success_fill(
+        self,
+        intent: Any,
+        market_state: "MarketState",
+        position: "SimulatedPosition",
+        prices: _LPUpdatePrices,
+        amounts: _LPUpdateAmounts,
+        close_result: _LPCloseResult,
+    ) -> "SimulatedFill":
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
+
         return SimulatedFill(
             timestamp=market_state.timestamp,
             intent_type=IntentType.LP_CLOSE,
             protocol=intent.protocol,
-            tokens=[token0, token1],
-            executed_price=current_price_ratio,
-            amount_usd=total_value_received,
+            tokens=[prices.token0, prices.token1],
+            executed_price=prices.current_price,
+            amount_usd=close_result.total_value_received,
             fee_usd=Decimal("0"),  # Protocol fee for LP close (typically none)
             slippage_usd=Decimal("0"),  # No slippage for LP close
             # Gas is engine-owned: PnLBacktester._execute_intent stamps the
             # chain-aware resolved cost onto successful adapter fills.
             gas_cost_usd=Decimal("0"),
-            tokens_in=tokens_in,  # Tokens received from closing
+            tokens_in=close_result.tokens_in,  # Tokens received from closing
             tokens_out={},  # No tokens sent when closing
             success=True,
             # The matched simulated position id drives apply_fill's
@@ -1788,17 +1934,17 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             position_close_id=position.position_id,
             metadata={
                 "position_id": intent.position_id,
-                "pool": intent.pool or f"{token0}/{token1}",
+                "pool": intent.pool or f"{prices.token0}/{prices.token1}",
                 "collect_fees": intent.collect_fees,
-                "current_price_ratio": str(current_price_ratio),
-                "il_percentage": str(il_pct),
-                "il_loss_usd": str(il_loss_usd),
-                "fees_earned_usd": str(fees_earned_usd),
-                "net_lp_pnl_usd": str(net_lp_pnl_usd),
-                "initial_value_usd": str(initial_value),
-                "current_value_usd": str(current_value),
-                "token0_price_usd": str(token0_price),
-                "token1_price_usd": str(token1_price),
+                "current_price_ratio": str(prices.current_price),
+                "il_percentage": str(amounts.il_pct),
+                "il_loss_usd": str(close_result.il_loss_usd),
+                "fees_earned_usd": str(close_result.fees_earned_usd),
+                "net_lp_pnl_usd": str(close_result.net_lp_pnl_usd),
+                "initial_value_usd": str(close_result.initial_value_usd),
+                "current_value_usd": str(amounts.position_value_usd),
+                "token0_price_usd": str(prices.token0_price),
+                "token1_price_usd": str(prices.token1_price),
             },
         )
 
@@ -1827,7 +1973,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         except (ValueError, OverflowError):
             return MIN_TICK if float(price) < 1 else MAX_TICK
 
-    def update_position(  # noqa: C901
+    def update_position(
         self,
         position: "SimulatedPosition",
         market_state: "MarketState",
@@ -1858,21 +2004,56 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             This method only updates LP positions (position.is_lp == True).
             Non-LP positions are ignored.
         """
-        # Only process LP positions
-        if not position.is_lp:
+        if not position.is_lp or len(position.tokens) < 2:
             return
 
-        if len(position.tokens) < 2:
-            return
+        plan = self._build_lp_update_plan(position, market_state, elapsed_seconds, timestamp)
+        self._commit_lp_update(position, plan)
 
+    def _build_lp_update_plan(
+        self,
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+        elapsed_seconds: float,
+        timestamp: datetime | None,
+    ) -> _LPUpdatePlan:
+        prices = self._resolve_lp_update_prices(position, market_state)
+        amounts = self._calculate_lp_update_amounts(position, prices)
+        update_time = self._resolve_lp_update_time(position, market_state, timestamp)
+        fee_result = self._maybe_calculate_lp_fee_accrual(
+            position=position,
+            prices=prices,
+            amounts=amounts,
+            elapsed_seconds=elapsed_seconds,
+            update_time=update_time,
+        )
+        return _LPUpdatePlan(
+            prices=prices,
+            amounts=amounts,
+            update_time=update_time,
+            fee_result=fee_result,
+        )
+
+    def _resolve_lp_update_prices(
+        self,
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+    ) -> _LPUpdatePrices:
+        return self._resolve_lp_position_prices(position, market_state, "update_position")
+
+    def _resolve_lp_position_prices(
+        self,
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+        context: str,
+    ) -> _LPUpdatePrices:
         token0 = position.tokens[0]
         token1 = position.tokens[1]
 
-        # Get current prices
         try:
             token0_price = market_state.get_price(token0)
         except KeyError:
-            token0_price = position.entry_price
+            token0_price = None
 
         try:
             token1_price = market_state.get_price(token1)
@@ -1880,97 +2061,133 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             token1_price = None
 
         if token0_price is None or token0_price <= 0:
-            token0_price = position.entry_price
+            token0_price = self._price_fallback(token0, position.entry_price, context)
         if token1_price is None or token1_price <= 0:
-            token1_price = self._price_fallback(token1, Decimal("1"), "update_position")
+            token1_price = self._price_fallback(token1, Decimal("1"), context)
 
-        # Calculate current price ratio (token0 in terms of token1)
         current_price = token0_price / token1_price if token1_price > 0 else position.entry_price
+        return _LPUpdatePrices(
+            token0=token0,
+            token1=token1,
+            token0_price=token0_price,
+            token1_price=token1_price,
+            current_price=current_price,
+        )
 
-        # Get tick bounds (default to full range if not set)
+    def _calculate_lp_update_amounts(
+        self,
+        position: "SimulatedPosition",
+        prices: _LPUpdatePrices,
+    ) -> _LPUpdateAmounts:
         tick_lower = position.tick_lower if position.tick_lower is not None else -887272
         tick_upper = position.tick_upper if position.tick_upper is not None else 887272
 
-        # Use ImpermanentLossCalculator to compute IL and current token amounts
         il_pct, current_token0, current_token1 = self._il_calculator.calculate_il_v3(
             entry_price=position.entry_price,
-            current_price=current_price,
+            current_price=prices.current_price,
             tick_lower=tick_lower,
             tick_upper=tick_upper,
             liquidity=position.liquidity,
         )
 
-        # Update position's token amounts based on IL calculation
-        position.amounts[token0] = current_token0
-        position.amounts[token1] = current_token1
+        position_value = current_token0 * prices.token0_price + current_token1 * prices.token1_price
+        return _LPUpdateAmounts(
+            il_pct=il_pct,
+            token0_amount=current_token0,
+            token1_amount=current_token1,
+            position_value_usd=position_value,
+        )
 
-        # Store IL percentage in metadata for informational purposes
-        position.metadata["il_percentage"] = float(il_pct)
-        position.metadata["current_price_ratio"] = float(current_price)
-
-        # Calculate current position value (before fees)
-        position_value = current_token0 * token0_price + current_token1 * token1_price
-
-        # Determine the simulation timestamp for fee accrual and position update
+    def _resolve_lp_update_time(
+        self,
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+        timestamp: datetime | None,
+    ) -> datetime:
         if timestamp is not None:
-            update_time = timestamp
-        elif hasattr(market_state, "timestamp") and market_state.timestamp is not None:
-            update_time = market_state.timestamp
-        else:
-            if self._config.strict_reproducibility:
-                msg = (
-                    f"No simulation timestamp available for LP position {position.position_id}. "
-                    "In strict reproducibility mode, timestamp must be provided. "
-                    "Either pass timestamp parameter or ensure market_state.timestamp is set."
-                )
-                raise ValueError(msg)
-            logger.warning(
-                "No simulation timestamp available for LP position %s, "
-                "falling back to datetime.now(). This breaks backtest reproducibility.",
-                position.position_id,
+            return timestamp
+        if hasattr(market_state, "timestamp") and market_state.timestamp is not None:
+            return market_state.timestamp
+        if self._config.strict_reproducibility:
+            msg = (
+                f"No simulation timestamp available for LP position {position.position_id}. "
+                "In strict reproducibility mode, timestamp must be provided. "
+                "Either pass timestamp parameter or ensure market_state.timestamp is set."
             )
-            update_time = datetime.now()
+            raise ValueError(msg)
+        logger.warning(
+            "No simulation timestamp available for LP position %s, "
+            "falling back to datetime.now(). This breaks backtest reproducibility.",
+            position.position_id,
+        )
+        return datetime.now()
 
-        # Accrue fees if enabled
-        if self._config.fee_tracking_enabled and elapsed_seconds > 0:
-            # Get pool address from position metadata for historical volume lookup
-            pool_address = position.metadata.get("pool_address")
+    def _maybe_calculate_lp_fee_accrual(
+        self,
+        position: "SimulatedPosition",
+        prices: _LPUpdatePrices,
+        amounts: _LPUpdateAmounts,
+        elapsed_seconds: float,
+        update_time: datetime,
+    ) -> FeeAccrualResult | None:
+        if not self._config.fee_tracking_enabled or elapsed_seconds <= 0:
+            return None
 
-            fee_result = self._calculate_fee_accrual(
-                position=position,
-                position_value_usd=position_value,
-                elapsed_seconds=elapsed_seconds,
-                token0=token0,
-                token1=token1,
-                token0_price=token0_price,
-                token1_price=token1_price,
-                timestamp=update_time,
-                pool_address=pool_address,
-            )
+        return self._calculate_fee_accrual(
+            position=position,
+            position_value_usd=amounts.position_value_usd,
+            elapsed_seconds=elapsed_seconds,
+            token0=prices.token0,
+            token1=prices.token1,
+            token0_price=prices.token0_price,
+            token1_price=prices.token1_price,
+            timestamp=update_time,
+            pool_address=position.metadata.get("pool_address"),
+            amounts={
+                prices.token0: amounts.token0_amount,
+                prices.token1: amounts.token1_amount,
+            },
+        )
+
+    @staticmethod
+    def _downgrade_confidence(
+        current: Literal["high", "medium", "low"] | str | None,
+        new: Literal["high", "medium", "low"] | str | None,
+    ) -> Literal["high", "medium", "low"] | str | None:
+        if new is None:
+            return current
+        if current is None:
+            return new
+        if new == "low" and current != "low":
+            return "low"
+        if new == "medium" and current == "high":
+            return "medium"
+        return current
+
+    def _commit_lp_update(self, position: "SimulatedPosition", plan: _LPUpdatePlan) -> None:
+        prices = plan.prices
+        amounts = plan.amounts
+        position.amounts[prices.token0] = amounts.token0_amount
+        position.amounts[prices.token1] = amounts.token1_amount
+        position.metadata["il_percentage"] = float(amounts.il_pct)
+        position.metadata["current_price_ratio"] = float(prices.current_price)
+
+        if plan.fee_result is not None:
+            fee_result = plan.fee_result
             position.fees_earned += fee_result.fees_usd
+            position.accumulated_fees_usd += fee_result.fees_usd
+            position.fees_token0 += fee_result.fees_token0
+            position.fees_token1 += fee_result.fees_token1
+            position.fee_confidence = self._downgrade_confidence(
+                position.fee_confidence,
+                fee_result.fee_confidence,
+            )
+            position.slippage_confidence = self._downgrade_confidence(
+                position.slippage_confidence,
+                fee_result.slippage_confidence,
+            )
 
-            # Update fee confidence on position
-            # If already set, only downgrade confidence (never upgrade during a backtest)
-            if position.fee_confidence is None:
-                position.fee_confidence = fee_result.fee_confidence
-            elif fee_result.fee_confidence == "low" and position.fee_confidence != "low":
-                # Downgrade to low if any fee calculation used low confidence
-                position.fee_confidence = "low"
-            elif fee_result.fee_confidence == "medium" and position.fee_confidence == "high":
-                # Downgrade from high to medium
-                position.fee_confidence = "medium"
-
-            # Update slippage confidence on position (same downgrade-only logic)
-            if fee_result.slippage_confidence is not None:
-                if position.slippage_confidence is None:
-                    position.slippage_confidence = fee_result.slippage_confidence
-                elif fee_result.slippage_confidence == "low" and position.slippage_confidence != "low":
-                    position.slippage_confidence = "low"
-                elif fee_result.slippage_confidence == "medium" and position.slippage_confidence == "high":
-                    position.slippage_confidence = "medium"
-
-        # Update position timestamp
-        position.last_updated = update_time
+        position.last_updated = plan.update_time
 
     def _resolve_pool_volume(
         self,
@@ -2013,62 +2230,91 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             DataSourceUnavailableError: If no acceptable, non-fabricated volume
                 source is available and the heuristic fallback is not opted into.
         """
-        # 1. Explicit caller-provided volume wins outright.
-        # Empty != Zero: ``None`` means the caller supplied no volume (absent);
-        # ``Decimal("0")`` is a measured/intended zero-volume day and is a valid,
-        # trusted value -- use it directly (it simply yields zero fees). A negative
-        # value is nonsensical and is rejected as a configuration error.
+        explicit_resolution = self._explicit_pool_volume_resolution()
+        if explicit_resolution is not None:
+            return explicit_resolution
+
+        historical_resolution = self._historical_pool_volume_resolution(timestamp, pool_address, protocol)
+        if historical_resolution is not None:
+            return historical_resolution
+
+        fallback_resolution = self._fallback_pool_volume_resolution(position, position_value_usd)
+        if fallback_resolution is not None:
+            return fallback_resolution
+
+        self._raise_pool_volume_unavailable(position, pool_address)
+
+    def _explicit_pool_volume_resolution(self) -> _VolumeResolution | None:
         explicit_volume = self._explicit_pool_volume_usd_daily()
-        if explicit_volume is not None:
-            if explicit_volume < 0:
-                msg = (
-                    "explicit_pool_volume_usd_daily must be >= 0 (a measured zero is "
-                    f"valid, a negative value is not), got {explicit_volume}"
-                )
-                raise ValueError(msg)
-            return _VolumeResolution(
-                volume_usd=explicit_volume,
-                source="explicit",
-                confidence=DataConfidence.HIGH,
+        if explicit_volume is None:
+            return None
+        if explicit_volume < 0:
+            msg = (
+                "explicit_pool_volume_usd_daily must be >= 0 (a measured zero is "
+                f"valid, a negative value is not), got {explicit_volume}"
             )
+            raise ValueError(msg)
+        return _VolumeResolution(
+            volume_usd=explicit_volume,
+            source="explicit",
+            confidence=DataConfidence.HIGH,
+        )
 
-        # 2. Historical volume via the gateway DEX-volume lane (only when actually usable).
-        if timestamp is not None and pool_address and self._use_historical_volume():
-            actual_volume, volume_confidence = self._get_historical_volume(
-                pool_address=pool_address,
-                timestamp=timestamp,
-                protocol=protocol,
-            )
-            # Empty != Zero: a non-LOW-confidence ``Decimal("0")`` is a *measured*
-            # zero-volume day (real upstream observation) and is a valid value to
-            # use -- it yields zero fees for the tick. ``None`` means the lookup
-            # produced nothing (unmeasured) and must fall through.
-            if actual_volume is not None and actual_volume >= 0 and volume_confidence != DataConfidence.LOW:
-                return _VolumeResolution(
-                    volume_usd=actual_volume,
-                    source="historical",
-                    confidence=volume_confidence,
-                )
+    def _historical_pool_volume_resolution(
+        self,
+        timestamp: datetime | None,
+        pool_address: str | None,
+        protocol: str | None,
+    ) -> _VolumeResolution | None:
+        if timestamp is None or not pool_address or not self._use_historical_volume():
+            return None
 
-        # 3. Heuristic fallback -- only if the caller explicitly opted in.
-        if self._allow_volume_fallback():
-            multiplier = self._get_volume_fallback_multiplier()
-            estimated_daily_volume = position_value_usd * multiplier
+        actual_volume, volume_confidence = self._get_historical_volume(
+            pool_address=pool_address,
+            timestamp=timestamp,
+            protocol=protocol,
+        )
+        if actual_volume is None or actual_volume < 0 or volume_confidence == DataConfidence.LOW:
+            return None
+        return _VolumeResolution(
+            volume_usd=actual_volume,
+            source="historical",
+            confidence=volume_confidence,
+        )
+
+    def _fallback_pool_volume_resolution(
+        self,
+        position: "SimulatedPosition",
+        position_value_usd: Decimal,
+    ) -> _VolumeResolution | None:
+        if not self._allow_volume_fallback():
+            return None
+
+        multiplier = self._get_volume_fallback_multiplier()
+        if multiplier <= Decimal("0"):
             logger.warning(
-                "LP fee accrual using OPT-IN fallback volume multiplier (LOW confidence): "
-                "position=%s, multiplier=%.1fx, estimated_volume=$%.2f. "
-                "This is a rough estimate that can be off by an order of magnitude.",
+                "LP fee accrual fallback volume multiplier must be positive; got %s for position=%s",
+                multiplier,
                 position.position_id,
-                float(multiplier),
-                float(estimated_daily_volume),
             )
-            return _VolumeResolution(
-                volume_usd=estimated_daily_volume,
-                source="fallback",
-                confidence=DataConfidence.LOW,
-            )
+            return None
+        estimated_daily_volume = position_value_usd * multiplier
+        logger.warning(
+            "LP fee accrual using OPT-IN fallback volume multiplier (LOW confidence): "
+            "position=%s, multiplier=%.1fx, estimated_volume=$%.2f. "
+            "This is a rough estimate that can be off by an order of magnitude.",
+            position.position_id,
+            float(multiplier),
+            float(estimated_daily_volume),
+        )
+        return _VolumeResolution(
+            volume_usd=estimated_daily_volume,
+            source="fallback",
+            confidence=DataConfidence.LOW,
+        )
 
-        # 4. No acceptable source -- fail loud rather than fabricate.
+    @staticmethod
+    def _raise_pool_volume_unavailable(position: "SimulatedPosition", pool_address: str | None) -> NoReturn:
         raise DataSourceUnavailableError(
             data_type="volume",
             identifier=pool_address or f"position:{position.position_id}",
@@ -2094,6 +2340,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         timestamp: datetime | None = None,
         pool_address: str | None = None,
         protocol: str | None = None,
+        amounts: dict[str, Decimal] | None = None,
     ) -> FeeAccrualResult:
         """Calculate fee accrual for an LP position.
 
@@ -2116,32 +2363,92 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             timestamp: Simulation timestamp for historical data lookup
             pool_address: Pool contract address for the historical volume lookup
             protocol: Protocol identifier for routing to the correct DEX volume lane
+            amounts: Token amounts used for fee attribution. Defaults to the
+                position's current amounts.
 
         Returns:
             FeeAccrualResult with fees earned, confidence level, and data source
         """
         if position_value_usd <= 0 or elapsed_seconds <= 0:
-            return FeeAccrualResult(
-                fees_usd=Decimal("0"),
-                fee_confidence="low",
-                data_source="none:no_value_or_time",
-                fees_token0=Decimal("0"),
-                fees_token1=Decimal("0"),
-                volume_usd=None,
-                pool_address=pool_address,
-                timestamp=timestamp,
-            )
+            return self._empty_fee_accrual_result(pool_address, timestamp)
 
-        # Convert seconds to days
-        days_elapsed = Decimal(str(elapsed_seconds)) / Decimal("86400")
+        context = self._fee_formula_context(
+            position=position,
+            position_value_usd=position_value_usd,
+            elapsed_seconds=elapsed_seconds,
+            timestamp=timestamp,
+            pool_address=pool_address,
+            protocol=protocol,
+        )
+        fee_amount = self._fee_amount_from_resolution(position, position_value_usd, context, pool_address, timestamp)
+        attribution = self._attribute_lp_fees(
+            fees_usd=fee_amount.fees_usd,
+            amounts=amounts if amounts is not None else position.amounts,
+            token0=token0,
+            token1=token1,
+            token0_price=token0_price,
+            token1_price=token1_price,
+        )
+        slippage = self._fee_slippage_result(
+            fees_usd=fee_amount.fees_usd,
+            position_value_usd=position_value_usd,
+            timestamp=timestamp,
+            pool_address=pool_address,
+            protocol=protocol,
+        )
+        self._log_fee_accrual(position, fee_amount, attribution, slippage)
 
-        # Calculate liquidity share factor
-        # liquidity_share = min(1, position_value_usd / pool_liquidity)
-        # Prefer caller-provided real pool TVL; fall back to the base_liquidity
-        # placeholder only when no explicit value is supplied. Both
-        # denominators are USD figures, so the numerator must be the
-        # position's USD value — position.liquidity holds V3 L-units
-        # (VIB-5096) and dividing L by a USD TVL is unit nonsense.
+        return FeeAccrualResult(
+            fees_usd=fee_amount.fees_usd,
+            fee_confidence=fee_amount.fee_confidence,
+            data_source=fee_amount.data_source,
+            fees_token0=attribution.token0_amount,
+            fees_token1=attribution.token1_amount,
+            volume_usd=fee_amount.volume_usd,
+            pool_address=pool_address,
+            timestamp=timestamp,
+            slippage_confidence=slippage.confidence,
+            slippage_pct=slippage.pct,
+            liquidity_usd=slippage.liquidity_usd,
+        )
+
+    @staticmethod
+    def _empty_fee_accrual_result(pool_address: str | None, timestamp: datetime | None) -> FeeAccrualResult:
+        return FeeAccrualResult(
+            fees_usd=Decimal("0"),
+            fee_confidence="low",
+            data_source="none:no_value_or_time",
+            fees_token0=Decimal("0"),
+            fees_token1=Decimal("0"),
+            volume_usd=None,
+            pool_address=pool_address,
+            timestamp=timestamp,
+        )
+
+    def _fee_formula_context(
+        self,
+        position: "SimulatedPosition",
+        position_value_usd: Decimal,
+        elapsed_seconds: float,
+        timestamp: datetime | None,
+        pool_address: str | None,
+        protocol: str | None,
+    ) -> _FeeFormulaContext:
+        resolution = self._resolve_pool_volume(
+            position=position,
+            position_value_usd=position_value_usd,
+            timestamp=timestamp,
+            pool_address=pool_address,
+            protocol=protocol,
+        )
+        return _FeeFormulaContext(
+            days_elapsed=Decimal(str(elapsed_seconds)) / Decimal("86400"),
+            liquidity_share=self._lp_liquidity_share(position_value_usd),
+            base_apr=self._base_apr_for_fee_tier(position.fee_tier),
+            resolution=resolution,
+        )
+
+    def _lp_liquidity_share(self, position_value_usd: Decimal) -> Decimal:
         explicit_pool_liquidity = self._explicit_pool_liquidity_usd()
         pool_liquidity = explicit_pool_liquidity if explicit_pool_liquidity is not None else self._config.base_liquidity
         if pool_liquidity > 0:
@@ -2156,150 +2463,138 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             # spec: blueprint 31 §4.3 (fee attribution must scale with the
             # real liquidity share); guarded by the lp:fee_share_scaling
             # Trust Matrix cell.
-            liquidity_share = min(Decimal("1"), position_value_usd / pool_liquidity)
-        else:
-            # Pool TVL genuinely unknown (non-positive denominator, only
-            # reachable through a misconfigured base_liquidity). Fall back to a
-            # neutral 0.5 share rather than fabricating a precise number. This
-            # is the unknown-liquidity fallback, NOT a floor applied to a
-            # known-small share.
-            liquidity_share = Decimal("0.5")
+            return min(Decimal("1"), position_value_usd / pool_liquidity)
+        # Pool TVL genuinely unknown (non-positive denominator, only reachable
+        # through a misconfigured base_liquidity). Fall back to a neutral 0.5
+        # share rather than fabricating a precise number.
+        return Decimal("0.5")
 
-        # Determine base APR based on fee tier (used as fallback)
-        fee_tier_pct = position.fee_tier * Decimal("100")  # Convert to percentage
+    def _fee_amount_from_resolution(
+        self,
+        position: "SimulatedPosition",
+        position_value_usd: Decimal,
+        context: _FeeFormulaContext,
+        pool_address: str | None,
+        timestamp: datetime | None,
+    ) -> _FeeAmountResult:
+        resolution = context.resolution
+        volume_based_fees = resolution.volume_usd * position.fee_tier * context.liquidity_share * context.days_elapsed
+        apr_based_fees = position_value_usd * (context.base_apr / Decimal("365")) * context.days_elapsed
 
-        if fee_tier_pct <= Decimal("0.01"):
-            # Stablecoin pools: high volume, low APR
-            base_apr = Decimal("0.10")  # 10% APR
-        elif fee_tier_pct <= Decimal("0.05"):
-            # Blue chip pairs: medium-high volume
-            base_apr = Decimal("0.20")  # 20% APR
-        elif fee_tier_pct <= Decimal("0.30"):
-            # Volatile pairs: medium volume
-            base_apr = Decimal("0.25")  # 25% APR
-        else:
-            # Exotic pairs: low volume
-            base_apr = Decimal("0.10")  # 10% APR
+        if resolution.source == "fallback":
+            return _FeeAmountResult(
+                fees_usd=(volume_based_fees + apr_based_fees) / Decimal("2"),
+                fee_confidence="low",
+                data_source=f"fallback_multiplier:{self._get_volume_fallback_multiplier()}x",
+                volume_usd=resolution.volume_usd,
+            )
 
-        # Resolve the daily pool volume from the highest-trust source available.
-        # Raises DataSourceUnavailableError (rather than fabricating) when there is
-        # no acceptable source and the heuristic fallback was not opted into.
-        resolution = self._resolve_pool_volume(
-            position=position,
-            position_value_usd=position_value_usd,
-            timestamp=timestamp,
-            pool_address=pool_address,
-            protocol=protocol,
+        self._log_real_volume_fee_source(resolution, volume_based_fees, pool_address, timestamp)
+        data_source = "explicit_volume" if resolution.source == "explicit" else f"multi_dex:{self._config.chain}"
+        return _FeeAmountResult(
+            fees_usd=volume_based_fees,
+            fee_confidence=resolution.confidence.value,
+            data_source=data_source,
+            volume_usd=resolution.volume_usd,
         )
 
-        # Fee calculation: volume * fee_tier * liquidity_share (prorated for elapsed time)
-        volume_based_fees = resolution.volume_usd * position.fee_tier * liquidity_share * days_elapsed
+    @staticmethod
+    def _log_real_volume_fee_source(
+        resolution: _VolumeResolution,
+        volume_based_fees: Decimal,
+        pool_address: str | None,
+        timestamp: datetime | None,
+    ) -> None:
+        logger.info(
+            "LP fee accrual using %s volume: pool=%s..., date=%s, volume_usd=$%.2f, fees_usd=%.4f, confidence=%s",
+            resolution.source,
+            pool_address[:10] if pool_address else "unknown",
+            timestamp.date() if timestamp else "unknown",
+            float(resolution.volume_usd),
+            float(volume_based_fees),
+            resolution.confidence.value,
+        )
 
-        # APR-based fee calculation (fallback/comparison)
-        daily_fee_rate = base_apr / Decimal("365")
-        apr_based_fees = position_value_usd * daily_fee_rate * days_elapsed
-
-        # Determine fee confidence and data source based on how fees were calculated
-        if resolution.source == "fallback":
-            # Heuristic estimate -- average volume + APR approaches; lowest confidence.
-            fees_usd = (volume_based_fees + apr_based_fees) / Decimal("2")
-            fee_confidence: Literal["high", "medium", "low"] = "low"
-            data_source = f"fallback_multiplier:{self._get_volume_fallback_multiplier()}x"
-        else:
-            # Real (explicit or historical) volume -- trust it directly.
-            fees_usd = volume_based_fees
-            fee_confidence = resolution.confidence.value
-            data_source = "explicit_volume" if resolution.source == "explicit" else f"multi_dex:{self._config.chain}"
-            logger.info(
-                "LP fee accrual using %s volume: pool=%s..., date=%s, volume_usd=$%.2f, fees_usd=%.4f, confidence=%s",
-                resolution.source,
-                pool_address[:10] if pool_address else "unknown",
-                timestamp.date() if timestamp else "unknown",
-                float(resolution.volume_usd),
-                float(volume_based_fees),
-                resolution.confidence.value,
-            )
-        volume_for_result = resolution.volume_usd
-
-        # Update detailed fee tracking fields on position
-        position.accumulated_fees_usd += fees_usd
-
-        # Calculate fee attribution between tokens based on position composition
+    @staticmethod
+    def _attribute_lp_fees(
+        fees_usd: Decimal,
+        amounts: dict[str, Decimal],
+        token0: str,
+        token1: str,
+        token0_price: Decimal,
+        token1_price: Decimal,
+    ) -> _FeeTokenAttribution:
         total_value = (
-            position.amounts.get(token0, Decimal("0")) * token0_price
-            + position.amounts.get(token1, Decimal("0")) * token1_price
+            amounts.get(token0, Decimal("0")) * token0_price + amounts.get(token1, Decimal("0")) * token1_price
         )
 
         if total_value > 0:
-            token0_value = position.amounts.get(token0, Decimal("0")) * token0_price
+            token0_value = amounts.get(token0, Decimal("0")) * token0_price
             token0_ratio = token0_value / total_value
             token1_ratio = Decimal("1") - token0_ratio
         else:
             token0_ratio = Decimal("0.5")
             token1_ratio = Decimal("0.5")
 
-        # Attribute fees proportionally to each token
         fees_token0_usd = fees_usd * token0_ratio
         fees_token1_usd = fees_usd * token1_ratio
-
-        # Convert USD fees to token amounts
         fees_token0_amount = Decimal("0")
         fees_token1_amount = Decimal("0")
         if token0_price > 0:
             fees_token0_amount = fees_token0_usd / token0_price
-            position.fees_token0 += fees_token0_amount
         if token1_price > 0:
             fees_token1_amount = fees_token1_usd / token1_price
-            position.fees_token1 += fees_token1_amount
+        return _FeeTokenAttribution(fees_token0_amount, fees_token1_amount)
 
-        # Calculate slippage using historical liquidity depth if available
-        slippage_confidence: Literal["high", "medium", "low"] | None = None
-        slippage_pct: Decimal | None = None
-        liquidity_usd: Decimal | None = None
+    def _fee_slippage_result(
+        self,
+        fees_usd: Decimal,
+        position_value_usd: Decimal,
+        timestamp: datetime | None,
+        pool_address: str | None,
+        protocol: str | None,
+    ) -> _FeeSlippageResult:
+        if timestamp is None or not pool_address or not self._use_historical_liquidity():
+            return _FeeSlippageResult()
 
-        if timestamp is not None and pool_address and self._use_historical_liquidity():
-            # Use a representative trade size for slippage calculation
-            # This could be the average trade size based on volume, or a fraction of position value
-            representative_trade_usd = fees_usd * Decimal("10") if fees_usd > 0 else position_value_usd * Decimal("0.1")
+        trade_amount_usd = self._representative_fee_slippage_trade(fees_usd, position_value_usd)
+        if trade_amount_usd <= 0:
+            return _FeeSlippageResult()
 
-            if representative_trade_usd > 0:
-                slippage_result = self._calculate_slippage(
-                    trade_amount_usd=representative_trade_usd,
-                    pool_address=pool_address,
-                    timestamp=timestamp,
-                    protocol=protocol,
-                    pool_type="v3",  # LP positions are typically V3-style
-                )
+        slippage_result = self._calculate_slippage(
+            trade_amount_usd=trade_amount_usd,
+            pool_address=pool_address,
+            timestamp=timestamp,
+            protocol=protocol,
+            pool_type="v3",
+        )
+        return _FeeSlippageResult(
+            confidence=slippage_result.confidence.value,
+            pct=slippage_result.slippage,
+            liquidity_usd=slippage_result.liquidity_usd,
+        )
 
-                # Map DataConfidence enum to string
-                slippage_confidence = slippage_result.confidence.value
-                slippage_pct = slippage_result.slippage
-                liquidity_usd = slippage_result.liquidity_usd
+    @staticmethod
+    def _representative_fee_slippage_trade(fees_usd: Decimal, position_value_usd: Decimal) -> Decimal:
+        return fees_usd * Decimal("10") if fees_usd > 0 else position_value_usd * Decimal("0.1")
 
+    @staticmethod
+    def _log_fee_accrual(
+        position: "SimulatedPosition",
+        fee_amount: _FeeAmountResult,
+        attribution: _FeeTokenAttribution,
+        slippage: _FeeSlippageResult,
+    ) -> None:
         logger.debug(
             "LP fee accrual: position=%s, fees_usd=%.4f, token0_fees=%.6f, token1_fees=%.6f, "
             "fee_confidence=%s, slippage_confidence=%s, slippage_pct=%s",
             position.position_id,
-            float(fees_usd),
-            float(position.fees_token0),
-            float(position.fees_token1),
-            fee_confidence,
-            slippage_confidence,
-            f"{float(slippage_pct):.4f}" if slippage_pct else "N/A",
-        )
-
-        return FeeAccrualResult(
-            fees_usd=fees_usd,
-            fee_confidence=fee_confidence,
-            data_source=data_source,
-            fees_token0=fees_token0_amount,
-            fees_token1=fees_token1_amount,
-            volume_usd=volume_for_result,
-            pool_address=pool_address,
-            timestamp=timestamp,
-            slippage_confidence=slippage_confidence,
-            slippage_pct=slippage_pct,
-            liquidity_usd=liquidity_usd,
+            float(fee_amount.fees_usd),
+            float(attribution.token0_amount),
+            float(attribution.token1_amount),
+            fee_amount.fee_confidence,
+            slippage.confidence,
+            f"{float(slippage.pct):.4f}" if slippage.pct else "N/A",
         )
 
     def _base_apr_for_fee_tier(self, fee_tier: Decimal) -> Decimal:
@@ -2463,73 +2758,128 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         # Note: timestamp parameter accepted for interface consistency
         # LP valuation is based on current market prices, not time-dependent
         _ = timestamp
+        tokens = self._lp_position_tokens(position)
+        if tokens is None:
+            return self._simple_position_value(position, market_state)
+
+        prices = self._lp_valuation_prices(position, market_state, tokens)
+        amounts = self._calculate_lp_value_amounts(position, prices)
+        total_value = self._lp_value_with_fees(position, amounts.position_value_usd)
+        self._log_lp_position_value(position, amounts, total_value)
+        return total_value
+
+    @staticmethod
+    def _lp_position_tokens(position: "SimulatedPosition") -> tuple[str, str] | None:
         if len(position.tokens) < 2:
-            # Fall back to simple valuation for malformed positions
-            total_value = Decimal("0")
-            for token, amount in position.amounts.items():
-                price = market_state.get_price(token)
-                if price:
-                    total_value += amount * price
-            return total_value
+            return None
+        return position.tokens[0], position.tokens[1]
 
-        token0 = position.tokens[0]
-        token1 = position.tokens[1]
+    def _simple_position_value(self, position: "SimulatedPosition", market_state: "MarketState") -> Decimal:
+        total_value = Decimal("0")
+        for token, amount in position.amounts.items():
+            price = self._market_price_or_none(market_state, token)
+            if price is None or price <= 0:
+                if self._config.strict_reproducibility:
+                    self._price_fallback(token, Decimal("1"), "value_position")
+                continue
+            total_value += amount * price
+        return total_value
 
-        # Get current prices
+    @staticmethod
+    def _market_price_or_none(market_state: "MarketState", token: str) -> Decimal | None:
         try:
-            token0_price = market_state.get_price(token0)
+            return market_state.get_price(token)
         except KeyError:
-            token0_price = position.entry_price
+            return None
 
-        try:
-            token1_price = market_state.get_price(token1)
-        except KeyError:
-            token1_price = None
+    def _price_or_fallback(
+        self,
+        token: str,
+        price: Decimal | None,
+        fallback: Decimal,
+        context: str,
+    ) -> Decimal:
+        if price is None or price <= 0:
+            return self._price_fallback(token, fallback, context)
+        return price
 
-        if token0_price is None or token0_price <= 0:
-            token0_price = position.entry_price
-        if token1_price is None or token1_price <= 0:
-            token1_price = self._price_fallback(token1, Decimal("1"), "value_position")
-
-        # Calculate current price ratio (token0 in terms of token1)
+    def _lp_valuation_prices(
+        self,
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+        tokens: tuple[str, str],
+    ) -> _LPUpdatePrices:
+        token0, token1 = tokens
+        token0_price = self._price_or_fallback(
+            token=token0,
+            price=self._market_price_or_none(market_state, token0),
+            fallback=position.entry_price,
+            context="value_position",
+        )
+        token1_price = self._price_or_fallback(
+            token=token1,
+            price=self._market_price_or_none(market_state, token1),
+            fallback=Decimal("1"),
+            context="value_position",
+        )
         current_price = token0_price / token1_price if token1_price > 0 else position.entry_price
+        return _LPUpdatePrices(
+            token0=token0,
+            token1=token1,
+            token0_price=token0_price,
+            token1_price=token1_price,
+            current_price=current_price,
+        )
 
-        # Get tick bounds
+    @staticmethod
+    def _lp_tick_bounds_or_full_range(position: "SimulatedPosition") -> tuple[int, int]:
         tick_lower = position.tick_lower if position.tick_lower is not None else -887272
         tick_upper = position.tick_upper if position.tick_upper is not None else 887272
+        return tick_lower, tick_upper
 
-        # Use ImpermanentLossCalculator to get current token amounts
-        # This properly accounts for concentrated liquidity and IL
+    def _calculate_lp_value_amounts(
+        self,
+        position: "SimulatedPosition",
+        prices: _LPUpdatePrices,
+    ) -> _LPUpdateAmounts:
+        tick_lower, tick_upper = self._lp_tick_bounds_or_full_range(position)
         il_pct, current_token0, current_token1 = self._il_calculator.calculate_il_v3(
             entry_price=position.entry_price,
-            current_price=current_price,
+            current_price=prices.current_price,
             tick_lower=tick_lower,
             tick_upper=tick_upper,
             liquidity=position.liquidity,
         )
+        token_value = current_token0 * prices.token0_price + current_token1 * prices.token1_price
+        return _LPUpdateAmounts(
+            il_pct=il_pct,
+            token0_amount=current_token0,
+            token1_amount=current_token1,
+            position_value_usd=token_value,
+        )
 
-        # Calculate position value from current token amounts
-        token_value = current_token0 * token0_price + current_token1 * token1_price
-
-        # Add accumulated fees if tracking is enabled
+    def _lp_value_with_fees(self, position: "SimulatedPosition", token_value: Decimal) -> Decimal:
         if self._config.fee_tracking_enabled:
-            total_value = token_value + position.accumulated_fees_usd
-        else:
-            total_value = token_value
+            return token_value + position.accumulated_fees_usd
+        return token_value
 
+    @staticmethod
+    def _log_lp_position_value(
+        position: "SimulatedPosition",
+        amounts: _LPUpdateAmounts,
+        total_value: Decimal,
+    ) -> None:
         logger.debug(
             "LP position value: position=%s, token0=%.6f, token1=%.6f, "
             "token_value=%.2f, fees=%.2f, total=%.2f, il_pct=%.4f%%",
             position.position_id,
-            float(current_token0),
-            float(current_token1),
-            float(token_value),
+            float(amounts.token0_amount),
+            float(amounts.token1_amount),
+            float(amounts.position_value_usd),
             float(position.accumulated_fees_usd),
             float(total_value),
-            float(il_pct * 100),
+            float(amounts.il_pct * 100),
         )
-
-        return total_value
 
     def should_rebalance(
         self,
@@ -2617,84 +2967,115 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
             RangeStatusResult with detailed status information,
             or None if the position cannot be evaluated (not LP, missing data).
         """
-        # Only process LP positions
-        if not position.is_lp:
+        inputs = self._range_status_inputs(position, market_state)
+        if inputs is None:
             return None
 
-        if position.tick_lower is None or position.tick_upper is None:
-            return None
-
-        if len(position.tokens) < 2:
-            return None
-
-        token0 = position.tokens[0]
-        token1 = position.tokens[1]
-
-        # Get current prices for both tokens
-        try:
-            token0_price = market_state.get_price(token0)
-        except KeyError:
-            token0_price = None
-
-        try:
-            token1_price = market_state.get_price(token1)
-        except KeyError:
-            token1_price = None
-
-        # Need both prices to calculate ratio
-        if token0_price is None or token0_price <= 0:
-            return None
-        if token1_price is None or token1_price <= 0:
-            token1_price = self._price_fallback(token1, Decimal("1"), "get_range_status")
-
-        # Calculate current price ratio (token0 in terms of token1)
-        # This is what Uniswap V3 ticks represent
-        current_price_ratio = token0_price / token1_price
-
-        # Calculate tick range prices (these are also ratios)
-        price_lower = self._tick_to_price(position.tick_lower)
-        price_upper = self._tick_to_price(position.tick_upper)
-
-        # Calculate distances as percentages
-        # distance_to_lower: positive if above lower, negative if below
-        if price_lower > 0:
-            distance_to_lower_pct = ((current_price_ratio - price_lower) / price_lower) * Decimal("100")
-        else:
-            distance_to_lower_pct = Decimal("0")
-
-        # distance_to_upper: positive if below upper, negative if above
-        if price_upper > 0:
-            distance_to_upper_pct = ((price_upper - current_price_ratio) / price_upper) * Decimal("100")
-        else:
-            distance_to_upper_pct = Decimal("0")
-
-        # Determine range status
-        margin = self._config.boundary_margin_pct
-
-        if current_price_ratio < price_lower:
-            # Price is below the range - position is 100% token0
-            status = RangeStatus.BELOW_RANGE
-        elif current_price_ratio > price_upper:
-            # Price is above the range - position is 100% token1
-            status = RangeStatus.ABOVE_RANGE
-        elif distance_to_lower_pct >= 0 and distance_to_lower_pct < margin:
-            # Price is within range but approaching lower boundary
-            status = RangeStatus.PARTIAL_BELOW
-        elif distance_to_upper_pct >= 0 and distance_to_upper_pct < margin:
-            # Price is within range but approaching upper boundary
-            status = RangeStatus.PARTIAL_ABOVE
-        else:
-            # Price is comfortably within range
-            status = RangeStatus.IN_RANGE
-
+        current_price_ratio = inputs.prices.current_price
+        price_lower = self._tick_to_price(inputs.tick_lower)
+        price_upper = self._tick_to_price(inputs.tick_upper)
+        distances = self._range_distances(current_price_ratio, price_lower, price_upper)
+        status = self._classify_range_status(
+            current_price_ratio=current_price_ratio,
+            price_lower=price_lower,
+            price_upper=price_upper,
+            distances=distances,
+        )
         return RangeStatusResult(
             status=status,
             current_price_ratio=current_price_ratio,
             price_lower=price_lower,
             price_upper=price_upper,
-            distance_to_lower_pct=distance_to_lower_pct,
-            distance_to_upper_pct=distance_to_upper_pct,
+            distance_to_lower_pct=distances.lower_pct,
+            distance_to_upper_pct=distances.upper_pct,
         )
+
+    def _range_status_inputs(
+        self,
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+    ) -> _RangeStatusInputs | None:
+        if not position.is_lp:
+            return None
+
+        tick_bounds = self._range_tick_bounds(position)
+        tokens = self._lp_position_tokens(position)
+        if tick_bounds is None or tokens is None:
+            return None
+
+        token0, token1 = tokens
+        token0_price = self._range_token0_price(position, market_state, token0)
+        if token0_price is None:
+            return None
+
+        token1_price = self._price_or_fallback(
+            token=token1,
+            price=self._market_price_or_none(market_state, token1),
+            fallback=Decimal("1"),
+            context="get_range_status",
+        )
+        return _RangeStatusInputs(
+            prices=_LPUpdatePrices(
+                token0=token0,
+                token1=token1,
+                token0_price=token0_price,
+                token1_price=token1_price,
+                current_price=token0_price / token1_price,
+            ),
+            tick_lower=tick_bounds[0],
+            tick_upper=tick_bounds[1],
+        )
+
+    @staticmethod
+    def _range_tick_bounds(position: "SimulatedPosition") -> tuple[int, int] | None:
+        if position.tick_lower is None or position.tick_upper is None:
+            return None
+        return position.tick_lower, position.tick_upper
+
+    def _range_token0_price(
+        self,
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+        token0: str,
+    ) -> Decimal | None:
+        price = self._market_price_or_none(market_state, token0)
+        if price is not None and price > 0:
+            return price
+        if self._config.strict_reproducibility:
+            self._price_fallback(token0, position.entry_price, "get_range_status")
+        return None
+
+    @staticmethod
+    def _range_distances(
+        current_price_ratio: Decimal,
+        price_lower: Decimal,
+        price_upper: Decimal,
+    ) -> _RangeDistances:
+        lower_pct = (
+            ((current_price_ratio - price_lower) / price_lower) * Decimal("100") if price_lower > 0 else Decimal("0")
+        )
+        upper_pct = (
+            ((price_upper - current_price_ratio) / price_upper) * Decimal("100") if price_upper > 0 else Decimal("0")
+        )
+        return _RangeDistances(lower_pct=lower_pct, upper_pct=upper_pct)
+
+    def _classify_range_status(
+        self,
+        current_price_ratio: Decimal,
+        price_lower: Decimal,
+        price_upper: Decimal,
+        distances: _RangeDistances,
+    ) -> RangeStatus:
+        margin = self._config.boundary_margin_pct
+        if current_price_ratio < price_lower:
+            return RangeStatus.BELOW_RANGE
+        if current_price_ratio > price_upper:
+            return RangeStatus.ABOVE_RANGE
+        if Decimal("0") <= distances.lower_pct < margin:
+            return RangeStatus.PARTIAL_BELOW
+        if Decimal("0") <= distances.upper_pct < margin:
+            return RangeStatus.PARTIAL_ABOVE
+        return RangeStatus.IN_RANGE
 
     def _tick_to_price(self, tick: int) -> Decimal:
         """Convert a tick value to price ratio.

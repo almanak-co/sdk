@@ -37,6 +37,7 @@ class MockMarketState:
     """Mock market state for testing."""
 
     prices: dict[str, Decimal] = field(default_factory=dict)
+    timestamp: datetime | None = None
 
     def get_price(self, token: str) -> Decimal:
         """Get price for a token.
@@ -51,6 +52,57 @@ class MockMarketState:
     def get_prices(self, tokens: list[str]) -> dict[str, Decimal]:
         """Get prices for multiple tokens."""
         return {t: self.get_price(t) for t in tokens if t in self.prices}
+
+
+@dataclass
+class RecordingSubAdapter:
+    """Sub-adapter double that records update and valuation calls."""
+
+    value: Decimal = Decimal("0")
+    updated: list[tuple[SimulatedPosition, MockMarketState, float, datetime | None]] = field(default_factory=list)
+    valued: list[tuple[SimulatedPosition, MockMarketState, datetime | None]] = field(default_factory=list)
+
+    def update_position(
+        self,
+        position: SimulatedPosition,
+        market_state: MockMarketState,
+        elapsed_seconds: float,
+        timestamp: datetime | None = None,
+    ) -> None:
+        self.updated.append((position, market_state, elapsed_seconds, timestamp))
+
+    def value_position(
+        self,
+        position: SimulatedPosition,
+        market_state: MockMarketState,
+        timestamp: datetime | None = None,
+    ) -> Decimal:
+        self.valued.append((position, market_state, timestamp))
+        return self.value
+
+
+@dataclass
+class CapturingAggregator:
+    """PortfolioAggregator double that captures prices passed to risk scoring."""
+
+    captured_prices: dict[str, Decimal] | None = None
+
+    def calculate_unified_risk_score(
+        self,
+        prices: dict[str, Decimal],
+        health_factor_warning_threshold: Decimal,
+        leverage_warning_threshold: Decimal,
+        liquidation_proximity_threshold: Decimal,
+    ) -> UnifiedRiskScore:
+        self.captured_prices = prices
+        return UnifiedRiskScore(
+            score=Decimal("0"),
+            min_health_factor=None,
+            max_leverage=Decimal("0"),
+            avg_leverage=Decimal("0"),
+            positions_at_risk=0,
+            liquidation_risk_usd=Decimal("0"),
+        )
 
 
 # =============================================================================
@@ -406,6 +458,106 @@ class TestPositionAggregation:
 
 
 # =============================================================================
+# Position Update and Valuation Tests
+# =============================================================================
+
+
+class TestPositionUpdateAndValuation:
+    """Tests for sub-adapter delegation and default position handling."""
+
+    def test_update_position_delegates_lending_position_with_timestamp(self):
+        """Lending positions are updated by the lending sub-adapter."""
+        adapter = MultiProtocolBacktestAdapter()
+        recorder = RecordingSubAdapter()
+        adapter.sub_adapters["lending"] = recorder
+        position = create_supply_position()
+        market_state = MockMarketState(prices={"USDC": Decimal("1")})
+        timestamp = datetime(2024, 1, 2, 0, 0, tzinfo=UTC)
+
+        adapter.update_position(position, market_state, elapsed_seconds=60.0, timestamp=timestamp)
+
+        assert recorder.updated == [(position, market_state, 60.0, timestamp)]
+
+    def test_update_position_default_uses_market_timestamp_for_spot_position(self):
+        """Default updates use market_state.timestamp when no sub-adapter handles a position."""
+        adapter = MultiProtocolBacktestAdapter()
+        position = SimulatedPosition.spot(
+            token="ETH",
+            amount=Decimal("2"),
+            entry_price=Decimal("2000"),
+            entry_time=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+        )
+        market_timestamp = datetime(2024, 1, 2, 12, 0, tzinfo=UTC)
+        market_state = MockMarketState(prices={"ETH": Decimal("2100")}, timestamp=market_timestamp)
+
+        adapter.update_position(position, market_state, elapsed_seconds=3600.0)
+
+        assert position.last_updated == market_timestamp
+
+    def test_update_position_strict_mode_requires_simulation_timestamp_for_default_path(self):
+        """Strict reproducibility rejects fallback-to-now updates."""
+        config = MultiProtocolBacktestConfig(
+            strategy_type="multi_protocol",
+            strict_reproducibility=True,
+        )
+        adapter = MultiProtocolBacktestAdapter(config)
+        position = SimulatedPosition.spot(
+            token="ETH",
+            amount=Decimal("2"),
+            entry_price=Decimal("2000"),
+            entry_time=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+        )
+        market_state = MockMarketState(prices={"ETH": Decimal("2100")})
+
+        with pytest.raises(ValueError, match="No simulation timestamp available"):
+            adapter.update_position(position, market_state, elapsed_seconds=3600.0)
+
+    def test_value_position_delegates_perp_position_with_timestamp(self):
+        """Perp valuation delegates to the perp sub-adapter."""
+        adapter = MultiProtocolBacktestAdapter()
+        recorder = RecordingSubAdapter(value=Decimal("123.45"))
+        adapter.sub_adapters["perp"] = recorder
+        position = create_perp_long_position()
+        market_state = MockMarketState(prices={"ETH": Decimal("2100")})
+        timestamp = datetime(2024, 1, 2, 0, 0, tzinfo=UTC)
+
+        value = adapter.value_position(position, market_state, timestamp)
+
+        assert value == Decimal("123.45")
+        assert recorder.valued == [(position, market_state, timestamp)]
+
+    def test_value_position_default_falls_back_to_entry_price_when_price_missing(self):
+        """Default valuation uses entry price when market data is missing."""
+        adapter = MultiProtocolBacktestAdapter()
+        position = SimulatedPosition.spot(
+            token="ETH",
+            amount=Decimal("2"),
+            entry_price=Decimal("2000"),
+            entry_time=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+        )
+        market_state = MockMarketState(prices={})
+
+        value = adapter.value_position(position, market_state)
+
+        assert value == Decimal("4000")
+
+    def test_value_position_default_preserves_measured_zero_price(self):
+        """A measured zero price is not treated as missing for default valuation."""
+        adapter = MultiProtocolBacktestAdapter()
+        position = SimulatedPosition.spot(
+            token="ETH",
+            amount=Decimal("2"),
+            entry_price=Decimal("2000"),
+            entry_time=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+        )
+        market_state = MockMarketState(prices={"ETH": Decimal("0")})
+
+        value = adapter.value_position(position, market_state)
+
+        assert value == Decimal("0")
+
+
+# =============================================================================
 # Unified Risk Calculation Tests
 # =============================================================================
 
@@ -457,6 +609,24 @@ class TestUnifiedRiskCalculation:
         # Low health factor = health factor risk component
         assert risk_score.min_health_factor is not None
         assert risk_score.min_health_factor <= Decimal("1.5")
+
+    def test_calculate_unified_risk_preserves_measured_zero_prices(self):
+        """Measured zero prices must reach the aggregator instead of being omitted."""
+        adapter = MultiProtocolBacktestAdapter()
+        capturing_aggregator = CapturingAggregator()
+        adapter._portfolio_aggregator = capturing_aggregator
+        position = SimulatedPosition.spot(
+            token="ETH",
+            amount=Decimal("2"),
+            entry_price=Decimal("2000"),
+            entry_time=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+        )
+        portfolio = create_portfolio_with_positions(position)
+        market_state = MockMarketState(prices={"ETH": Decimal("0")})
+
+        adapter.calculate_unified_risk_score(portfolio, market_state, sync_positions=False)
+
+        assert capturing_aggregator.captured_prices == {"ETH": Decimal("0")}
 
     def test_unified_risk_history_tracking(self):
         """Test that unified risk scores are tracked in history."""

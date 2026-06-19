@@ -24,6 +24,65 @@ from .helpers import list_strategies_fn
 logger = logging.getLogger(__name__)
 
 
+def _funding_token_address_map(
+    strategy_config: dict[str, Any], chain: str, parse_token_funding: Any
+) -> dict[str, tuple[str, str]]:
+    funding_map: dict[str, tuple[str, str]] = {}
+    funding = parse_token_funding(strategy_config.get("token_funding"), strategy_chain=chain)
+    for entry in funding or []:
+        entry_chain = entry.chain or chain
+        if entry_chain.lower() != chain.lower():
+            continue
+        funding_map[entry.symbol.upper()] = (entry_chain, entry.address)
+    return funding_map
+
+
+def _native_symbol_set(native_coingecko_ids: Any) -> set[str]:
+    return {symbol.upper() for symbol in native_coingecko_ids()}
+
+
+def _resolve_registry_token_address(
+    *,
+    symbol: str,
+    chain: str,
+    resolver: Any,
+    token_resolution_error: type[Exception],
+) -> tuple[str, str] | None:
+    try:
+        resolved = resolver.resolve(symbol, chain)
+    except token_resolution_error:
+        logger.debug("No registry address for tracked token %s on %s; leaving as preflight miss", symbol, chain)
+        return None
+    if getattr(resolved, "is_native", False):
+        return None
+    return chain, resolved.address
+
+
+def _registry_token_address_map(
+    *,
+    tracked_tokens: list[str],
+    chain: str,
+    existing: dict[str, tuple[str, str]],
+    native_symbols: set[str],
+    resolver: Any,
+    token_resolution_error: type[Exception],
+) -> dict[str, tuple[str, str]]:
+    registry_map: dict[str, tuple[str, str]] = {}
+    for raw_symbol in tracked_tokens:
+        symbol = raw_symbol.upper()
+        if symbol in existing or symbol in native_symbols:
+            continue
+        resolved = _resolve_registry_token_address(
+            symbol=symbol,
+            chain=chain,
+            resolver=resolver,
+            token_resolution_error=token_resolution_error,
+        )
+        if resolved is not None:
+            registry_map[symbol] = resolved
+    return registry_map
+
+
 def build_token_address_map(
     strategy_config: dict[str, Any],
     tracked_tokens: list[str],
@@ -64,44 +123,28 @@ def build_token_address_map(
     from almanak.framework.data.tokens.exceptions import TokenResolutionError
     from almanak.framework.models.token_funding import parse_token_funding
 
-    address_map: dict[str, tuple[str, str]] = {}
-
     # Source 1: explicit token_funding entries for the ACTIVE chain only. A
     # multi-chain funding config can list the same symbol on several chains;
     # only the entry matching the run chain is relevant, and accepting others
     # would let a different chain's address overwrite the active one (the map is
     # symbol-keyed).
-    funding = parse_token_funding(strategy_config.get("token_funding"), strategy_chain=chain)
-    for entry in funding or []:
-        entry_chain = entry.chain or chain
-        if entry_chain.lower() != chain.lower():
-            continue
-        address_map[entry.symbol.upper()] = (entry_chain, entry.address)
+    address_map = _funding_token_address_map(strategy_config, chain, parse_token_funding)
 
     # Source 2: registry-resolve any remaining non-native tracked symbol.
     # The skip-set is exactly the provider's native projection
     # (``native_coingecko_ids`` covers natives + accepted aliases + wrapped
     # natives like WETH); those resolve via the chain registry inside the
     # provider, so they need no address and must not trigger a registry lookup.
-    native = {symbol.upper() for symbol in native_coingecko_ids()}
-    resolver = get_token_resolver()
-    for raw_symbol in tracked_tokens:
-        symbol = raw_symbol.upper()
-        if symbol in address_map or symbol in native:
-            continue
-        try:
-            resolved = resolver.resolve(symbol, chain)
-        except TokenResolutionError:
-            # Honest miss: no address. Leave it out so preflight surfaces it as
-            # an unavailable token rather than fabricating a price.
-            logger.debug("No registry address for tracked token %s on %s; leaving as preflight miss", symbol, chain)
-            continue
-        if getattr(resolved, "is_native", False):
-            # Native gas token under an alias the registry recognised — the
-            # provider resolves it via the chain registry, no address needed.
-            continue
-        address_map[symbol] = (chain, resolved.address)
-
+    address_map.update(
+        _registry_token_address_map(
+            tracked_tokens=tracked_tokens,
+            chain=chain,
+            existing=address_map,
+            native_symbols=_native_symbol_set(native_coingecko_ids),
+            resolver=get_token_resolver(),
+            token_resolution_error=TokenResolutionError,
+        )
+    )
     return address_map
 
 

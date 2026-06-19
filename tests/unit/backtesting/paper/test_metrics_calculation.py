@@ -11,7 +11,10 @@ Part of US-085b: [P1-AUDIT] Calculate Paper Trader win rate from actual PnL.
 
 from datetime import datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
+from almanak.framework.backtesting.models import BacktestMetrics
+from almanak.framework.backtesting.paper.engine import PaperTrader
 from almanak.framework.backtesting.paper.models import PaperTrade
 
 
@@ -56,6 +59,67 @@ def create_trade(
         tokens_out=tokens_out,
         token_prices_usd={"USDC": Decimal("1")},
     )
+
+
+def _paper_trader_for_metrics(
+    *,
+    equity_values: list[Decimal],
+    trades: list[PaperTrade] | None = None,
+    initial_capital: Decimal = Decimal("1000"),
+):
+    trader = PaperTrader.__new__(PaperTrader)
+    trader._equity_curve = [SimpleNamespace(value_usd=value) for value in equity_values]
+    trader._trades = list(trades or [])
+    trader._calculate_initial_capital = lambda: initial_capital
+    return trader
+
+
+class TestPaperTraderCalculateMetricsDirect:
+    """Direct coverage for PaperTrader._calculate_metrics."""
+
+    def test_empty_equity_curve_returns_default_metrics(self):
+        trader = _paper_trader_for_metrics(equity_values=[])
+
+        metrics = trader._calculate_metrics()
+
+        assert isinstance(metrics, BacktestMetrics)
+        assert metrics.total_trades == 0
+        assert metrics.total_pnl_usd == Decimal("0")
+
+    def test_mixed_trade_pnl_feeds_win_rate_and_profit_factor(self):
+        trades = [
+            create_trade(Decimal("150")),  # +145 after gas
+            create_trade(Decimal("-50")),  # -55 after gas
+            create_trade(Decimal("5"), gas_cost_usd=Decimal("5")),  # neutral
+        ]
+        trader = _paper_trader_for_metrics(
+            equity_values=[Decimal("1000"), Decimal("1100"), Decimal("1050"), Decimal("1200")],
+            trades=trades,
+        )
+
+        metrics = trader._calculate_metrics()
+
+        assert metrics.total_pnl_usd == Decimal("200")
+        assert metrics.net_pnl_usd == Decimal("200")
+        assert metrics.total_return_pct == Decimal("20.0")
+        assert metrics.total_gas_usd == Decimal("15")
+        assert metrics.total_trades == 3
+        assert metrics.winning_trades == 1
+        assert metrics.losing_trades == 1
+        assert metrics.win_rate == Decimal("0.5")
+        assert metrics.profit_factor == Decimal("145") / Decimal("55")
+        assert metrics.max_drawdown_pct > Decimal("0")
+
+    def test_zero_initial_equity_keeps_total_return_zero(self):
+        trader = _paper_trader_for_metrics(
+            equity_values=[Decimal("0"), Decimal("100")],
+            initial_capital=Decimal("0"),
+        )
+
+        metrics = trader._calculate_metrics()
+
+        assert metrics.total_pnl_usd == Decimal("100")
+        assert metrics.total_return_pct == Decimal("0")
 
 
 class TestWinRateCalculation:

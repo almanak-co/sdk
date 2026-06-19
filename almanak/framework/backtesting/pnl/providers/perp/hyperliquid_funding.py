@@ -27,7 +27,6 @@ Example:
         )
 """
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -40,7 +39,7 @@ from almanak.framework.data.interfaces import DataSourceUnavailable
 from ...types import DataConfidence, DataSourceInfo, FundingResult
 from ..base import HistoricalFundingProvider
 from ..rate_limiter import TokenBucketRateLimiter
-from ._gateway_history import FundingHistoryPoint, fetch_funding_points
+from ._gateway_history import FundingHistoryPoint, fetch_funding_points, run_sync_gateway_call
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +255,7 @@ class HyperliquidFundingProvider(HistoricalFundingProvider):
 
         await self._rate_limiter.acquire()
         try:
-            return await asyncio.to_thread(
+            return await run_sync_gateway_call(
                 fetch_funding_points,
                 venue=venue,
                 market=f"{coin}-USD",
@@ -331,6 +330,12 @@ class HyperliquidFundingProvider(HistoricalFundingProvider):
             current += timedelta(hours=FUNDING_INTERVAL_HOURS)
         return results
 
+    def _normalize_datetime(self, value: datetime) -> datetime:
+        """Normalize a request timestamp to UTC."""
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
     async def get_funding_rates(
         self,
         market: str,
@@ -366,41 +371,11 @@ class HyperliquidFundingProvider(HistoricalFundingProvider):
             end_date,
         )
 
-        # Ensure timestamps have timezone info
-        if start_date.tzinfo is None:
-            start_date = start_date.replace(tzinfo=UTC)
-        if end_date.tzinfo is None:
-            end_date = end_date.replace(tzinfo=UTC)
+        start_date = self._normalize_datetime(start_date)
+        end_date = self._normalize_datetime(end_date)
 
         try:
-            points = await self._fetch_points(
-                market=market,
-                start_ts=int(start_date.timestamp()),
-                end_ts=int(end_date.timestamp()),
-            )
-
-            if not points:
-                logger.warning(
-                    "No funding data returned for market=%s, returning fallback",
-                    market,
-                )
-                return self._generate_fallback_results(start_date, end_date)
-
-            results = [
-                self._create_result(
-                    rate=point.rate_hourly,
-                    timestamp=datetime.fromtimestamp(point.timestamp, tz=UTC),
-                    confidence=DataConfidence.HIGH,
-                )
-                for point in points
-            ]
-
-            logger.info(
-                "Fetched %d funding rate data points for market=%s",
-                len(results),
-                market,
-            )
-            return results
+            results = await self._fetch_funding_results(market, start_date, end_date)
 
         except HyperliquidAPIError as e:
             logger.error("Hyperliquid funding history error: %s", str(e))
@@ -409,6 +384,45 @@ class HyperliquidFundingProvider(HistoricalFundingProvider):
         except Exception as e:
             logger.error("Unexpected error fetching funding rates: %s", str(e))
             return self._generate_fallback_results(start_date, end_date)
+
+        if results is None:
+            return self._generate_fallback_results(start_date, end_date)
+        return results
+
+    async def _fetch_funding_results(
+        self,
+        market: str,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> list[FundingResult] | None:
+        """Fetch measured funding rows, or None when the gateway has no data."""
+        points = await self._fetch_points(
+            market=market,
+            start_ts=int(start_date.timestamp()),
+            end_ts=int(end_date.timestamp()),
+        )
+
+        if not points:
+            logger.warning(
+                "No funding data returned for market=%s, returning fallback",
+                market,
+            )
+            return None
+
+        results = [
+            self._create_result(
+                rate=point.rate_hourly,
+                timestamp=datetime.fromtimestamp(point.timestamp, tz=UTC),
+                confidence=DataConfidence.HIGH,
+            )
+            for point in points
+        ]
+        logger.info(
+            "Fetched %d funding rate data points for market=%s",
+            len(results),
+            market,
+        )
+        return results
 
     async def get_current_funding_rate(
         self,

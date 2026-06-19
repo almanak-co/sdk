@@ -481,6 +481,26 @@ class TestPerpCloseExecution:
         mismatched = SimpleNamespace(market="ETH/USD", is_long=True, protocol_name="hyperliquid")
         assert find_perp_close_position_id(mismatched, [position]) is None
 
+    def test_protocol_scoped_close_ignores_positions_without_protocol(self):
+        """A protocol-specific close must not match untagged legacy positions."""
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.pnl.intent_extraction import find_perp_close_position_id
+        from almanak.framework.backtesting.pnl.position_models import SimulatedPosition
+
+        position = SimulatedPosition.perp_long(
+            token="ETH",
+            collateral_usd=Decimal("1000"),
+            leverage=Decimal("5"),
+            entry_price=ETH_PRICE,
+            entry_time=T0,
+            protocol="gmx_v2",
+        )
+        position.protocol = None
+        intent = SimpleNamespace(market="ETH/USD", is_long=True, protocol="gmx_v2")
+
+        assert find_perp_close_position_id(intent, [position]) is None
+
     def test_exact_simulated_id_match_takes_precedence(self):
         """Adapter-managed (duck-typed) close intents may carry the simulated
         id directly; an exact match wins before market+side matching."""
@@ -509,6 +529,44 @@ class TestPerpCloseExecution:
         intent = SimpleNamespace(market="ETH/USD", is_long=True, protocol="gmx_v2", position_id=btc.position_id)
 
         assert find_perp_close_position_id(intent, [eth, btc]) == btc.position_id
+
+    def test_explicit_id_naming_non_perp_fails_closed(self):
+        """A malformed PERP_CLOSE must not close a non-perp position by id."""
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.pnl.intent_extraction import find_perp_close_position_id
+        from almanak.framework.backtesting.pnl.position_models import SimulatedPosition
+
+        supply = SimulatedPosition.supply(
+            token="ETH",
+            amount=Decimal("1"),
+            apy=Decimal("0.03"),
+            entry_price=ETH_PRICE,
+            entry_time=T0,
+            protocol="aave_v3",
+        )
+        intent = SimpleNamespace(market="ETH/USD", is_long=True, protocol="gmx_v2", position_id=supply.position_id)
+
+        assert find_perp_close_position_id(intent, [supply]) is None
+
+    def test_explicit_id_naming_wrong_perp_side_fails_closed(self):
+        """A PERP_CLOSE exact-id target must still match the requested side."""
+        from types import SimpleNamespace
+
+        from almanak.framework.backtesting.pnl.intent_extraction import find_perp_close_position_id
+        from almanak.framework.backtesting.pnl.position_models import SimulatedPosition
+
+        short = SimulatedPosition.perp_short(
+            token="ETH",
+            collateral_usd=Decimal("1000"),
+            leverage=Decimal("5"),
+            entry_price=ETH_PRICE,
+            entry_time=T0,
+            protocol="gmx_v2",
+        )
+        intent = SimpleNamespace(market="ETH/USD", is_long=True, protocol="gmx_v2", position_id=short.position_id)
+
+        assert find_perp_close_position_id(intent, [short]) is None
 
     @pytest.mark.asyncio
     async def test_close_creates_no_new_position(self):

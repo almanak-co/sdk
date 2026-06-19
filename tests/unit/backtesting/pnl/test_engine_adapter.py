@@ -157,10 +157,12 @@ class MockDataProvider:
 
 @pytest.fixture(autouse=True)
 def clean_registry():
-    """Clean registry before and after each test."""
+    """Isolate registry mutations without erasing built-in adapters for later modules."""
+    original_registry = AdapterRegistry._registry.copy()
     AdapterRegistry.clear()
     yield
     AdapterRegistry.clear()
+    AdapterRegistry._registry.update(original_registry)
 
 
 @pytest.fixture

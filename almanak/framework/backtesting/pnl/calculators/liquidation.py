@@ -47,6 +47,8 @@ from almanak.framework.backtesting.pnl.portfolio import PositionType, SimulatedP
 
 logger = logging.getLogger(__name__)
 
+_PERP_POSITION_TYPES = (PositionType.PERP_LONG, PositionType.PERP_SHORT)
+
 
 @dataclass
 class LiquidationWarning:
@@ -230,19 +232,14 @@ class LiquidationCalculator:
                 position=perp_long_position,
             )
         """
-        if position.position_type not in (PositionType.PERP_LONG, PositionType.PERP_SHORT):
+        if position.position_type not in _PERP_POSITION_TYPES:
             return None
-
-        # Use provided margin or get protocol default
-        margin = maintenance_margin or self.get_maintenance_margin_for_protocol(position.protocol)
-
-        is_long = position.position_type == PositionType.PERP_LONG
 
         return self.calculate_liquidation_price(
             entry_price=position.entry_price,
             leverage=position.leverage,
-            maintenance_margin=margin,
-            is_long=is_long,
+            maintenance_margin=self._maintenance_margin_for_position(position, maintenance_margin),
+            is_long=position.position_type == PositionType.PERP_LONG,
         )
 
     def update_position_liquidation_price(
@@ -300,55 +297,74 @@ class LiquidationCalculator:
             if warning:
                 print(warning.message)  # "[WARNING] Position ... is 2.9% from liquidation"
         """
-        # Get liquidation price
-        liq_price = position.liquidation_price
+        liq_price = self._liquidation_price_for_warning(position)
         if liq_price is None:
-            # Calculate if not set
-            liq_price = self.calculate_liquidation_price_for_position(position)
-            if liq_price is None:
-                return None
+            return None
+        distance = self._liquidation_distance(position, current_price, liq_price)
+        if distance is None:
+            return None
 
-        # Use provided thresholds or defaults
-        warn_thresh = warning_threshold or self.warning_threshold
-        crit_thresh = critical_threshold or self.critical_threshold
+        warn_thresh, crit_thresh = self._warning_thresholds(warning_threshold, critical_threshold)
+        if distance > warn_thresh:
+            return None
 
-        # Calculate distance to liquidation
-        is_long = position.position_type == PositionType.PERP_LONG
+        warning = LiquidationWarning(
+            position_id=position.position_id,
+            current_price=current_price,
+            liquidation_price=liq_price,
+            distance_pct=distance,
+            is_critical=distance <= crit_thresh,
+        )
+        self._emit_liquidation_warning(warning, emit_warning)
+        return warning
 
-        if is_long:
-            # For longs, liquidation is below current price
-            # Distance = (current - liq) / current
-            if current_price <= Decimal("0"):
-                return None
-            distance = (current_price - liq_price) / current_price
-        else:
-            # For shorts, liquidation is above current price
-            # Distance = (liq - current) / current
-            if current_price <= Decimal("0"):
-                return None
-            distance = (liq_price - current_price) / current_price
+    def _maintenance_margin_for_position(
+        self,
+        position: SimulatedPosition,
+        maintenance_margin: Decimal | None,
+    ) -> Decimal:
+        if maintenance_margin is not None:
+            return maintenance_margin
+        return self.get_maintenance_margin_for_protocol(position.protocol)
 
-        # Check if within warning threshold
-        if distance <= warn_thresh:
-            is_critical = distance <= crit_thresh
-            warning = LiquidationWarning(
-                position_id=position.position_id,
-                current_price=current_price,
-                liquidation_price=liq_price,
-                distance_pct=distance,
-                is_critical=is_critical,
-            )
+    def _liquidation_price_for_warning(self, position: SimulatedPosition) -> Decimal | None:
+        if position.position_type not in _PERP_POSITION_TYPES:
+            return None
+        if position.liquidation_price is not None:
+            return position.liquidation_price
+        return self.calculate_liquidation_price_for_position(position)
 
-            # Emit warning log if requested
-            if emit_warning:
-                if is_critical:
-                    logger.warning(warning.message)
-                else:
-                    logger.info(warning.message)
-
-            return warning
-
+    @staticmethod
+    def _liquidation_distance(
+        position: SimulatedPosition,
+        current_price: Decimal,
+        liquidation_price: Decimal | None,
+    ) -> Decimal | None:
+        if liquidation_price is None or current_price <= Decimal("0"):
+            return None
+        if position.position_type == PositionType.PERP_LONG:
+            return (current_price - liquidation_price) / current_price
+        if position.position_type == PositionType.PERP_SHORT:
+            return (liquidation_price - current_price) / current_price
         return None
+
+    def _warning_thresholds(
+        self,
+        warning_threshold: Decimal | None,
+        critical_threshold: Decimal | None,
+    ) -> tuple[Decimal, Decimal]:
+        warn_thresh = self.warning_threshold if warning_threshold is None else warning_threshold
+        crit_thresh = self.critical_threshold if critical_threshold is None else critical_threshold
+        return warn_thresh, crit_thresh
+
+    @staticmethod
+    def _emit_liquidation_warning(warning: LiquidationWarning, emit_warning: bool) -> None:
+        if not emit_warning:
+            return
+        if warning.is_critical:
+            logger.warning(warning.message)
+        else:
+            logger.info(warning.message)
 
     def get_maintenance_margin_for_protocol(self, protocol: str) -> Decimal:
         """Get the maintenance margin for a specific protocol.
@@ -393,7 +409,7 @@ class LiquidationCalculator:
             )
             # max_leverage ≈ 8x (liquidation at ~$1750, below $1800 stop)
         """
-        margin = maintenance_margin or self.default_maintenance_margin
+        margin = self.default_maintenance_margin if maintenance_margin is None else maintenance_margin
 
         if is_long:
             # For long: liq_price should be below stop_loss

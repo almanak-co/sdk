@@ -125,6 +125,51 @@ class TestAliasLookupViaLiquidationRegistry:
                 f"{venue}: margin {params.maintenance_margin!r} != {expected_margin!r}"
             )
 
+    def test_register_protocol_default_uses_global_defaults_for_new_protocol(self) -> None:
+        from almanak.framework.backtesting.pnl.calculators.liquidation_params import (
+            LiquidationParamRegistry,
+            LiquidationParamSource,
+        )
+
+        registry = LiquidationParamRegistry(
+            protocol_defaults={},
+            asset_params={},
+            global_default_threshold=Decimal("0.7"),
+            global_default_margin=Decimal("0.2"),
+            global_default_penalty=Decimal("0.1"),
+        )
+
+        params = registry.register_protocol_default("NewProtocol")
+
+        assert params.protocol == "newprotocol"
+        assert params.asset is None
+        assert params.liquidation_threshold == Decimal("0.7")
+        assert params.maintenance_margin == Decimal("0.2")
+        assert params.liquidation_penalty == Decimal("0.1")
+        assert params.source == LiquidationParamSource.PROTOCOL_DEFAULT
+        assert registry.get_params("newprotocol") == params
+
+    def test_register_protocol_default_preserves_existing_values_when_partial_update(self) -> None:
+        from almanak.framework.backtesting.pnl.calculators.liquidation_params import (
+            LiquidationParamRegistry,
+        )
+
+        registry = LiquidationParamRegistry(protocol_defaults={}, asset_params={})
+        initial = registry.register_protocol_default(
+            "Aave_V3",
+            liquidation_threshold=Decimal("0.8"),
+            maintenance_margin=Decimal("0.1"),
+            liquidation_penalty=Decimal("0.05"),
+        )
+
+        updated = registry.register_protocol_default("aave_v3", liquidation_penalty=Decimal("0.07"))
+
+        assert initial.protocol == "aave_v3"
+        assert updated.protocol == "aave_v3"
+        assert updated.liquidation_threshold == Decimal("0.8")
+        assert updated.maintenance_margin == Decimal("0.1")
+        assert updated.liquidation_penalty == Decimal("0.07")
+
 
 class TestBacktestRiskDeclValidation:
     """BacktestRiskDecl.__post_init__ rejects invalid inputs."""

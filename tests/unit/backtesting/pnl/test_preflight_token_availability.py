@@ -43,6 +43,20 @@ class TestClassifyTokenAvailability:
         provider.get_price.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_membership_cash_equivalent_is_available_without_membership(self) -> None:
+        """Cash-equivalent balances are priceable at face value even if unsupported."""
+        provider = MagicMock()
+        provider.supported_tokens = ["WETH"]
+        provider.resolution_based_availability = False
+        provider.get_price = AsyncMock(side_effect=AssertionError("must not probe cash-equivalents"))
+
+        available, unavailable = await classify_token_availability(provider, ["USDC", "ARB"], _TS)
+
+        assert available == ["USDC"]
+        assert unavailable == ["ARB"]
+        provider.get_price.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_resolution_based_probe_classifies_on_fetch(self) -> None:
         """Resolution-based provider probe-fetches: success -> available, ValueError -> unavailable."""
         provider = MagicMock()
@@ -165,6 +179,33 @@ class TestBuildTokenAddressMap:
 
         assert result["USDC"] == ("arbitrum", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
 
+    def test_token_funding_ignores_other_chain_entries(self, monkeypatch) -> None:
+        from almanak.framework.cli.backtest import run_helpers
+
+        self._patch_resolver(monkeypatch, {})
+
+        cfg = {
+            "token_funding": [
+                {
+                    "symbol": "USDC",
+                    "address": "0x0000000000000000000000000000000000000001",
+                    "chain": "base",
+                    "amount": "5000",
+                    "amount_type": "usd",
+                },
+                {
+                    "symbol": "USDC",
+                    "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+                    "chain": "arbitrum",
+                    "amount": "5000",
+                    "amount_type": "usd",
+                },
+            ]
+        }
+        result = run_helpers.build_token_address_map(cfg, ["USDC"], "arbitrum")
+
+        assert result["USDC"] == ("arbitrum", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
+
     def test_native_symbol_is_skipped(self, monkeypatch) -> None:
         from almanak.framework.cli.backtest import run_helpers
 
@@ -262,13 +303,25 @@ class _FakePriceProvider:
 
     provider_name = "fake"
 
-    def __init__(self, *, resolution_based: bool, unavailable: set[str]) -> None:
+    def __init__(
+        self,
+        *,
+        resolution_based: bool,
+        unavailable: set[str],
+        capability=None,
+        min_timestamp: datetime | None = None,
+        max_timestamp: datetime | None = None,
+    ) -> None:
         from almanak.framework.backtesting.pnl.data_provider import HistoricalDataCapability
 
-        self.historical_capability = HistoricalDataCapability.FULL
+        self.historical_capability = capability or HistoricalDataCapability.FULL
         self.resolution_based_availability = resolution_based
         self.supported_tokens: list[str] = []
         self._unavailable = {t.upper() for t in unavailable}
+        if min_timestamp is not None:
+            self.min_timestamp = min_timestamp
+        if max_timestamp is not None:
+            self.max_timestamp = max_timestamp
 
     async def get_price(self, token: str, ts: datetime) -> object:
         if token.upper() in self._unavailable:
@@ -282,16 +335,20 @@ def _preflight_backtester(provider: object):
     return PnLBacktester(data_provider=provider, fee_models={}, slippage_models={})
 
 
-def _config(tokens: list[str]):
+def _config(tokens: list[str], **overrides):
     from decimal import Decimal
 
     from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 
+    config_kwargs = {
+        "start_time": datetime(2024, 1, 1, tzinfo=UTC),
+        "end_time": datetime(2024, 2, 1, tzinfo=UTC),
+        "initial_capital_usd": Decimal("10000"),
+        "tokens": tokens,
+    }
+    config_kwargs.update(overrides)
     return PnLBacktestConfig(
-        start_time=datetime(2024, 1, 1, tzinfo=UTC),
-        end_time=datetime(2024, 2, 1, tzinfo=UTC),
-        initial_capital_usd=Decimal("10000"),
-        tokens=tokens,
+        **config_kwargs,
     )
 
 
@@ -336,6 +393,46 @@ class TestPriceabilityGuard:
 
         check = _token_check(report)
         assert check.severity == "warning"
+        assert report.passed is True
+
+    @pytest.mark.asyncio
+    async def test_current_only_provider_fails_in_institutional_mode(self) -> None:
+        """Institutional mode escalates CURRENT_ONLY providers to an error check."""
+        from almanak.framework.backtesting.pnl.data_provider import HistoricalDataCapability
+
+        provider = _FakePriceProvider(
+            resolution_based=True,
+            unavailable=set(),
+            capability=HistoricalDataCapability.CURRENT_ONLY,
+        )
+        report = await _preflight_backtester(provider).run_preflight_validation(
+            _config(["WETH", "USDC"], institutional_mode=True)
+        )
+
+        provider_check = next(c for c in report.checks if c.check_name == "provider_capability")
+        compliance_check = next(c for c in report.checks if c.check_name == "institutional_compliance")
+        assert provider_check.severity == "warning"
+        assert compliance_check.severity == "error"
+        assert compliance_check.passed is False
+        assert report.passed is False
+        assert any("FULL historical capability" in rec for rec in report.recommendations)
+
+    @pytest.mark.asyncio
+    async def test_time_range_warning_records_both_bounds(self) -> None:
+        """Preflight reports both provider bounds when the requested range exceeds both."""
+        provider = _FakePriceProvider(
+            resolution_based=True,
+            unavailable=set(),
+            min_timestamp=datetime(2024, 1, 2, tzinfo=UTC),
+            max_timestamp=datetime(2024, 1, 20, tzinfo=UTC),
+        )
+        report = await _preflight_backtester(provider).run_preflight_validation(_config(["WETH"]))
+
+        check = next(c for c in report.checks if c.check_name == "time_range_coverage")
+        assert check.severity == "warning"
+        assert check.passed is False
+        assert check.details["provider_min"] == "2024-01-02T00:00:00+00:00"
+        assert check.details["provider_max"] == "2024-01-20T00:00:00+00:00"
         assert report.passed is True
 
 

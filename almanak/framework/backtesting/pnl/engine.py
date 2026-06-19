@@ -117,6 +117,7 @@ from almanak.framework.backtesting.pnl.mev_simulator import (
 )
 from almanak.framework.backtesting.pnl.portfolio import (
     CASH_EQUIVALENT_STABLECOINS,
+    SimulatedFill,
     SimulatedPortfolio,
     SimulatedPosition,
 )
@@ -127,9 +128,36 @@ from almanak.framework.backtesting.pnl.simulated_result import (
 )
 
 # Import strategy-related types
-from almanak.framework.market import MarketSnapshot
+from almanak.framework.market import MarketSnapshot, TokenBalance
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _TokenAvailabilityConfig:
+    use_membership: bool
+    resolution_based: bool
+    membership_upper: frozenset[str]
+
+
+@dataclass(frozen=True)
+class _ProviderCapabilityPreflight:
+    check: PreflightCheckResult
+    capabilities: dict[str, str]
+    recommendations: list[str]
+
+
+@dataclass(frozen=True)
+class _ArchiveAccessPreflight:
+    check: PreflightCheckResult | None
+    accessible: bool | None
+    recommendations: list[str]
+
+
+@dataclass(frozen=True)
+class _TimeRangePreflight:
+    check: PreflightCheckResult
+    recommendations: list[str]
 
 
 # =============================================================================
@@ -424,74 +452,70 @@ def create_market_snapshot_from_state(
         wallet_address=wallet_address,
         timestamp=market_state.timestamp,
     )
+    _seed_snapshot_prices(snapshot, market_state)
+    if portfolio:
+        _seed_snapshot_balances(snapshot, market_state, portfolio)
+    return snapshot
 
-    # Populate prices from market state
+
+def _seed_snapshot_prices(snapshot: MarketSnapshot, market_state: MarketState) -> None:
     for token in market_state.available_tokens:
         try:
-            price = market_state.get_price(token)
-            snapshot.set_price(token, price)
+            snapshot.set_price(token, market_state.get_price(token))
         except KeyError:
-            pass
+            continue
 
-    # If we have a portfolio, simulate balances
-    if portfolio:
-        from almanak.framework.market import TokenBalance
 
-        # Add token balances from portfolio
-        for token, amount in portfolio.tokens.items():
-            try:
-                price = market_state.get_price(token)
-                balance_data = TokenBalance(
-                    symbol=token,
-                    balance=amount,
-                    balance_usd=amount * price,
-                )
-                snapshot.set_balance(token, balance_data)
-            except KeyError:
-                # If price not available, use 0 for balance_usd
-                balance_data = TokenBalance(
-                    symbol=token,
-                    balance=amount,
-                    balance_usd=Decimal("0"),
-                )
-                snapshot.set_balance(token, balance_data)
+def _seed_snapshot_balances(
+    snapshot: MarketSnapshot,
+    market_state: MarketState,
+    portfolio: SimulatedPortfolio,
+) -> None:
+    _seed_portfolio_token_balances(snapshot, market_state, portfolio)
+    _seed_cash_balances(snapshot, portfolio)
+    _seed_zero_balances_for_unheld_tokens(snapshot, market_state, portfolio)
 
-        # Add cash as USD balance
-        cash_balance = TokenBalance(
-            symbol="USD",
-            balance=portfolio.cash_usd,
-            balance_usd=portfolio.cash_usd,
-        )
-        snapshot.set_balance("USD", cash_balance)
 
-        # Expose cash under stablecoin symbols so strategies calling
-        # market.balance("USDC") get the cash balance instead of ValueError.
-        # Must stay in lockstep with the apply_fill cash model: these are the
-        # symbols whose outflows debit cash_usd.
-        from almanak.framework.backtesting.pnl.portfolio import CASH_EQUIVALENT_STABLECOINS
+def _seed_portfolio_token_balances(
+    snapshot: MarketSnapshot,
+    market_state: MarketState,
+    portfolio: SimulatedPortfolio,
+) -> None:
+    for token, amount in portfolio.tokens.items():
+        snapshot.set_balance(token, _token_balance_from_market_state(token, amount, market_state))
 
-        stablecoin_aliases = CASH_EQUIVALENT_STABLECOINS
-        for stable in stablecoin_aliases:
-            if stable not in portfolio.tokens:
-                stable_balance = TokenBalance(
-                    symbol=stable,
-                    balance=portfolio.cash_usd,
-                    balance_usd=portfolio.cash_usd,
-                )
-                snapshot.set_balance(stable, stable_balance)
 
-        # Expose zero balances for tracked tokens not in the portfolio
-        # so strategies calling market.balance("WETH") get zero instead of ValueError
-        for token in market_state.available_tokens:
-            if token not in portfolio.tokens and token not in stablecoin_aliases and token != "USD":
-                zero_balance = TokenBalance(
-                    symbol=token,
-                    balance=Decimal("0"),
-                    balance_usd=Decimal("0"),
-                )
-                snapshot.set_balance(token, zero_balance)
+def _token_balance_from_market_state(token: str, amount: Decimal, market_state: MarketState) -> TokenBalance:
+    try:
+        balance_usd = amount * market_state.get_price(token)
+    except KeyError:
+        balance_usd = Decimal("0")
+    return TokenBalance(symbol=token, balance=amount, balance_usd=balance_usd)
 
-    return snapshot
+
+def _seed_cash_balances(snapshot: MarketSnapshot, portfolio: SimulatedPortfolio) -> None:
+    snapshot.set_balance("USD", _face_value_balance("USD", portfolio.cash_usd))
+    for stable in CASH_EQUIVALENT_STABLECOINS:
+        if stable not in portfolio.tokens:
+            snapshot.set_balance(stable, _face_value_balance(stable, portfolio.cash_usd))
+
+
+def _face_value_balance(symbol: str, amount: Decimal) -> TokenBalance:
+    return TokenBalance(symbol=symbol, balance=amount, balance_usd=amount)
+
+
+def _seed_zero_balances_for_unheld_tokens(
+    snapshot: MarketSnapshot,
+    market_state: MarketState,
+    portfolio: SimulatedPortfolio,
+) -> None:
+    for token in market_state.available_tokens:
+        if _should_seed_zero_balance(token, portfolio):
+            snapshot.set_balance(token, TokenBalance(symbol=token, balance=Decimal("0"), balance_usd=Decimal("0")))
+
+
+def _should_seed_zero_balance(token: str, portfolio: SimulatedPortfolio) -> bool:
+    return token not in portfolio.tokens and token not in CASH_EQUIVALENT_STABLECOINS and token != "USD"
 
 
 async def classify_token_availability(
@@ -530,6 +554,69 @@ async def classify_token_availability(
         Exception: A transient error from a resolution-based provider's
             ``get_price`` (anything that is not ``ValueError``) propagates.
     """
+    availability_config = _token_availability_config(data_provider)
+    tokens_available: list[str] = []
+    tokens_unavailable: list[str] = []
+
+    for token in tokens:
+        token_upper = token.upper()
+        target = (
+            tokens_available
+            if await _is_token_available(data_provider, token, start_time, availability_config)
+            else tokens_unavailable
+        )
+        target.append(token_upper)
+
+    return tokens_available, tokens_unavailable
+
+
+def _token_availability_config(data_provider: Any) -> _TokenAvailabilityConfig:
+    supported_tokens = getattr(data_provider, "supported_tokens", [])
+    resolution_based = getattr(data_provider, "resolution_based_availability", False)
+    use_membership = bool(supported_tokens) and not resolution_based
+    membership_upper = frozenset(t.upper() for t in supported_tokens) if use_membership else frozenset()
+    return _TokenAvailabilityConfig(
+        use_membership=use_membership,
+        resolution_based=resolution_based,
+        membership_upper=membership_upper,
+    )
+
+
+async def _is_token_available(
+    data_provider: Any,
+    token: str,
+    start_time: datetime,
+    availability_config: _TokenAvailabilityConfig,
+) -> bool:
+    token_upper = token.upper()
+    if token_upper in CASH_EQUIVALENT_STABLECOINS:
+        return True
+    if availability_config.use_membership:
+        return token_upper in availability_config.membership_upper
+    if availability_config.resolution_based:
+        return await _resolution_probe_succeeded(data_provider, token, start_time)
+    return await _best_effort_probe_succeeded(data_provider, token, start_time)
+
+
+async def _resolution_probe_succeeded(data_provider: Any, token: str, start_time: datetime) -> bool:
+    try:
+        await data_provider.get_price(token, start_time)
+    except ValueError as exc:
+        _raise_if_provider_level_probe_error(exc)
+        return False
+    return True
+
+
+async def _best_effort_probe_succeeded(data_provider: Any, token: str, start_time: datetime) -> bool:
+    try:
+        await data_provider.get_price(token, start_time)
+    except Exception as exc:
+        _raise_if_provider_level_probe_error(exc)
+        return False
+    return True
+
+
+def _raise_if_provider_level_probe_error(exc: Exception) -> None:
     # _make_request surfaces transient timeout / network / 5xx failures AND
     # auth failures (401/403) as ValueError too (not just genuine misses), so
     # probe-fetch errors must be screened: a transient failure (retryable) or an
@@ -539,42 +626,8 @@ async def classify_token_availability(
     # (Refinement R3).
     from almanak.framework.backtesting.pnl.providers.coingecko import _is_auth_error, _is_transient_request_error
 
-    tokens_available: list[str] = []
-    tokens_unavailable: list[str] = []
-
-    supported_tokens = getattr(data_provider, "supported_tokens", [])
-    resolution_based = getattr(data_provider, "resolution_based_availability", False)
-    use_membership = bool(supported_tokens) and not resolution_based
-    membership_upper = {t.upper() for t in supported_tokens} if use_membership else set()
-
-    for token in tokens:
-        token_upper = token.upper()
-        if token_upper in CASH_EQUIVALENT_STABLECOINS:
-            # Valued as cash at $1 face value (no market price needed). Skip the
-            # provider probe entirely so a transient error on a stablecoin -- a
-            # token that does not need pricing -- can never abort preflight.
-            tokens_available.append(token_upper)
-            continue
-        if use_membership:
-            (tokens_available if token_upper in membership_upper else tokens_unavailable).append(token_upper)
-        elif resolution_based:
-            try:
-                await data_provider.get_price(token, start_time)
-                tokens_available.append(token_upper)
-            except ValueError as exc:
-                if _is_transient_request_error(exc) or _is_auth_error(exc):
-                    raise
-                tokens_unavailable.append(token_upper)
-        else:
-            try:
-                await data_provider.get_price(token, start_time)
-                tokens_available.append(token_upper)
-            except Exception as exc:
-                if _is_transient_request_error(exc) or _is_auth_error(exc):
-                    raise
-                tokens_unavailable.append(token_upper)
-
-    return tokens_available, tokens_unavailable
+    if _is_transient_request_error(exc) or _is_auth_error(exc):
+        raise exc
 
 
 def _build_token_availability_check(
@@ -716,6 +769,38 @@ class _CloseResolution:
     interest_usd: Decimal = Decimal("0")
     reduce_amounts: dict[str, Decimal] | None = None
     failure_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class _PositionValue:
+    principal_usd: Decimal
+    total_usd: Decimal
+
+
+@dataclass(frozen=True)
+class _GasGweiResolution:
+    gas_price_gwei: Decimal
+    source: str
+
+
+@dataclass(frozen=True)
+class _GenericIntentDetails:
+    intent_type: IntentType
+    protocol: str
+    tokens: list[str]
+    amount_usd: Decimal
+    close_resolution: _CloseResolution
+
+
+@dataclass(frozen=True)
+class _GenericExecutionCosts:
+    fee_usd: Decimal
+    slippage_pct: Decimal
+    slippage_usd: Decimal
+    gas_cost_usd: Decimal
+    gas_price_gwei: Decimal | None
+    gas_gwei_source: str | None
+    estimated_mev_cost_usd: Decimal | None
 
 
 @dataclass
@@ -946,15 +1031,41 @@ class PnLBacktester:
             ParameterSourceTracker populated with source records
         """
         tracker = ParameterSourceTracker()
+        default_config = self._default_source_tracking_config(config)
+        self._record_config_parameter_sources(tracker, config, default_config)
+        self._record_gas_parameter_sources(tracker, config)
+        self._record_liquidation_parameter_sources(tracker, config, default_config)
+        self._record_adapter_runtime_rate_sources(tracker, config)
+        return tracker
 
-        # Get default values from PnLBacktestConfig for comparison
-        default_config = PnLBacktestConfig(
-            start_time=config.start_time,  # Required fields
+    @staticmethod
+    def _default_source_tracking_config(config: PnLBacktestConfig) -> PnLBacktestConfig:
+        return PnLBacktestConfig(
+            start_time=config.start_time,
             end_time=config.end_time,
         )
 
-        # Track config parameters
-        config_params = [
+    def _record_config_parameter_sources(
+        self,
+        tracker: ParameterSourceTracker,
+        config: PnLBacktestConfig,
+        default_config: PnLBacktestConfig,
+    ) -> None:
+        for name, value, default_value in self._config_parameter_values(config, default_config):
+            tracker.record_parameter(
+                name,
+                value,
+                self._parameter_source_for_value(value, default_value),
+                category="config",
+            )
+        self._record_gas_price_gwei_source(tracker, config)
+
+    @staticmethod
+    def _config_parameter_values(
+        config: PnLBacktestConfig,
+        default_config: PnLBacktestConfig,
+    ) -> list[tuple[str, Any, Any]]:
+        return [
             ("initial_capital_usd", config.initial_capital_usd, default_config.initial_capital_usd),
             ("interval_seconds", config.interval_seconds, default_config.interval_seconds),
             ("fee_model", config.fee_model, default_config.fee_model),
@@ -976,19 +1087,19 @@ class PnLBacktester:
             ("preflight_validation", config.preflight_validation, default_config.preflight_validation),
         ]
 
-        for name, value, default_value in config_params:
-            # Determine source: if value equals default, it's DEFAULT; otherwise EXPLICIT
-            # Note: In a more sophisticated implementation, we could track if the value
-            # came from a config file or env var by inspecting how the config was created
-            source = ParameterSource.DEFAULT if value == default_value else ParameterSource.EXPLICIT
-            tracker.record_parameter(name, value, source, category="config")
+    @staticmethod
+    def _parameter_source_for_value(value: Any, default_value: Any) -> ParameterSource:
+        return ParameterSource.DEFAULT if value == default_value else ParameterSource.EXPLICIT
 
+    @staticmethod
+    def _record_gas_price_gwei_source(
+        tracker: ParameterSourceTracker,
+        config: PnLBacktestConfig,
+    ) -> None:
         # gas_price_gwei provenance comes from the config's own flag rather
         # than the value-equality heuristic above: the default is chain-aware
         # (VIB-5088), so comparing against a default_config built on
         # DEFAULT_CHAIN would mislabel defaults on other chains as explicit.
-        # The source stays DEFAULT for unset values -- the value just became
-        # honest -- preserving the audit trail's fabrication signal.
         tracker.record_parameter(
             "gas_price_gwei",
             config.gas_price_gwei,
@@ -996,7 +1107,11 @@ class PnLBacktester:
             category="config",
         )
 
-        # Track gas-related parameters
+    @staticmethod
+    def _record_gas_parameter_sources(
+        tracker: ParameterSourceTracker,
+        config: PnLBacktestConfig,
+    ) -> None:
         if config.gas_eth_price_override is not None:
             tracker.record_parameter(
                 "gas_eth_price_override",
@@ -1004,67 +1119,49 @@ class PnLBacktester:
                 ParameterSource.EXPLICIT,
                 category="gas",
             )
-        else:
-            # Will be determined at runtime - track as historical or provider
-            source = ParameterSource.HISTORICAL if config.use_historical_gas_prices else ParameterSource.PROVIDER
+            return
+        tracker.record_parameter(
+            "gas_eth_price",
+            "runtime_determined",
+            ParameterSource.HISTORICAL if config.use_historical_gas_prices else ParameterSource.PROVIDER,
+            category="gas",
+            fallback_chain=["historical_provider", "current_provider", "raise_if_unavailable"],
+        )
+
+    def _record_liquidation_parameter_sources(
+        self,
+        tracker: ParameterSourceTracker,
+        config: PnLBacktestConfig,
+        default_config: PnLBacktestConfig,
+    ) -> None:
+        for name in (
+            "initial_margin_ratio",
+            "maintenance_margin_ratio",
+            "reconciliation_alert_threshold_pct",
+        ):
+            value = getattr(config, name)
+            default_value = getattr(default_config, name)
             tracker.record_parameter(
-                "gas_eth_price",
-                "runtime_determined",
-                source,
-                category="gas",
-                # The legacy $3000 terminal fallback was removed -- the engine
-                # raises when no ETH/WETH price is available (VIB-5088 audit).
-                fallback_chain=["historical_provider", "current_provider", "raise_if_unavailable"],
+                name,
+                value,
+                self._parameter_source_for_value(value, default_value),
+                category="liquidation",
             )
 
-        # Track margin/liquidation parameters
-        tracker.record_parameter(
-            "initial_margin_ratio",
-            config.initial_margin_ratio,
-            ParameterSource.DEFAULT
-            if config.initial_margin_ratio == default_config.initial_margin_ratio
-            else ParameterSource.EXPLICIT,
-            category="liquidation",
-        )
-        tracker.record_parameter(
-            "maintenance_margin_ratio",
-            config.maintenance_margin_ratio,
-            ParameterSource.DEFAULT
-            if config.maintenance_margin_ratio == default_config.maintenance_margin_ratio
-            else ParameterSource.EXPLICIT,
-            category="liquidation",
-        )
-        tracker.record_parameter(
-            "reconciliation_alert_threshold_pct",
-            config.reconciliation_alert_threshold_pct,
-            ParameterSource.DEFAULT
-            if config.reconciliation_alert_threshold_pct == default_config.reconciliation_alert_threshold_pct
-            else ParameterSource.EXPLICIT,
-            category="liquidation",
-        )
-
-        # Track APY/funding rate sources - these are determined at runtime
-        # We record the config that will determine how they're fetched
-        if self._adapter is not None:
-            adapter_type = type(self._adapter).__name__
-            # Perp strategies have funding rates
-            if "perp" in adapter_type.lower():
-                tracker.record_parameter(
-                    "funding_rate_source",
-                    "historical" if config.strict_reproducibility else "provider",
-                    ParameterSource.HISTORICAL if config.strict_reproducibility else ParameterSource.PROVIDER,
-                    category="apy_funding",
-                )
-            # Lending strategies have APY rates
-            if "lending" in adapter_type.lower():
-                tracker.record_parameter(
-                    "apy_source",
-                    "historical" if config.strict_reproducibility else "provider",
-                    ParameterSource.HISTORICAL if config.strict_reproducibility else ParameterSource.PROVIDER,
-                    category="apy_funding",
-                )
-
-        return tracker
+    def _record_adapter_runtime_rate_sources(
+        self,
+        tracker: ParameterSourceTracker,
+        config: PnLBacktestConfig,
+    ) -> None:
+        if self._adapter is None:
+            return
+        adapter_type = type(self._adapter).__name__.lower()
+        rate_source = ParameterSource.HISTORICAL if config.strict_reproducibility else ParameterSource.PROVIDER
+        rate_value = "historical" if config.strict_reproducibility else "provider"
+        if "perp" in adapter_type:
+            tracker.record_parameter("funding_rate_source", rate_value, rate_source, category="apy_funding")
+        if "lending" in adapter_type:
+            tracker.record_parameter("apy_source", rate_value, rate_source, category="apy_funding")
 
     def _detect_strategy_type(
         self,
@@ -1309,7 +1406,7 @@ class PnLBacktester:
 
         return capabilities, warnings
 
-    async def run_preflight_validation(  # noqa: C901
+    async def run_preflight_validation(
         self,
         config: PnLBacktestConfig,
     ) -> PreflightReport:
@@ -1337,212 +1434,239 @@ class PnLBacktester:
         """
         import time
 
-        start_time = time.time()
-
-        checks: list[PreflightCheckResult] = []
-        tokens_available: list[str] = []
-        tokens_unavailable: list[str] = []
-        provider_capabilities: dict[str, str] = {}
-        recommendations: list[str] = []
-        archive_accessible: bool | None = None
-
-        # Get provider info. ``supported_tokens`` is read inside
-        # ``classify_token_availability`` (Check 2), not here.
+        validation_started = time.time()
         provider_name = getattr(self.data_provider, "provider_name", "unknown")
 
-        # Check 1: Data provider capability
+        provider_result = self._preflight_provider_capability(provider_name)
+        (
+            tokens_available,
+            tokens_unavailable,
+            token_check,
+            token_recommendations,
+        ) = await self._preflight_token_availability(config)
+        archive_result = await self._preflight_archive_access()
+        time_range_result = self._preflight_time_range(config)
+        institutional_check, institutional_recommendations = self._preflight_institutional_compliance(
+            config,
+            provider_result.capabilities,
+        )
+
+        checks = [provider_result.check, token_check]
+        if archive_result.check is not None:
+            checks.append(archive_result.check)
+        checks.append(time_range_result.check)
+        if institutional_check is not None:
+            checks.append(institutional_check)
+
+        recommendations = [
+            *provider_result.recommendations,
+            *token_recommendations,
+            *archive_result.recommendations,
+            *time_range_result.recommendations,
+            *institutional_recommendations,
+        ]
+
+        return PreflightReport(
+            passed=self._preflight_passed(checks),
+            checks=checks,
+            estimated_coverage=self._estimated_token_coverage(config, tokens_available),
+            tokens_available=tokens_available,
+            tokens_unavailable=tokens_unavailable,
+            provider_capabilities=provider_result.capabilities,
+            archive_node_accessible=archive_result.accessible,
+            recommendations=recommendations,
+            validation_time_seconds=time.time() - validation_started,
+        )
+
+    def _preflight_provider_capability(self, provider_name: str) -> _ProviderCapabilityPreflight:
         try:
-            capability = getattr(
-                self.data_provider,
-                "historical_capability",
-                HistoricalDataCapability.FULL,
+            capability = getattr(self.data_provider, "historical_capability", HistoricalDataCapability.FULL)
+            capability_value = capability.value
+        except Exception as exc:
+            return _ProviderCapabilityPreflight(
+                check=PreflightCheckResult(
+                    check_name="provider_capability",
+                    passed=False,
+                    message=f"Failed to check provider capability: {exc}",
+                    details={"error": str(exc)},
+                ),
+                capabilities={},
+                recommendations=[],
             )
-            provider_capabilities[provider_name] = capability.value
 
-            if capability == HistoricalDataCapability.FULL:
-                checks.append(
-                    PreflightCheckResult(
-                        check_name="provider_capability",
-                        passed=True,
-                        message=f"Provider '{provider_name}' has FULL historical data capability",
-                        details={"provider": provider_name, "capability": capability.value},
-                    )
-                )
-            elif capability == HistoricalDataCapability.CURRENT_ONLY:
-                checks.append(
-                    PreflightCheckResult(
-                        check_name="provider_capability",
-                        passed=False,
-                        message=(
-                            f"Provider '{provider_name}' has CURRENT_ONLY capability. "
-                            "Historical prices may be inaccurate."
-                        ),
-                        details={"provider": provider_name, "capability": capability.value},
-                        severity="warning",
-                    )
-                )
-                recommendations.append(
-                    "Consider using a provider with FULL historical capability "
-                    "(e.g., CoinGecko) for accurate backtesting"
-                )
-            elif capability == HistoricalDataCapability.PRE_CACHE:
-                checks.append(
-                    PreflightCheckResult(
-                        check_name="provider_capability",
-                        passed=True,
-                        message=(
-                            f"Provider '{provider_name}' requires PRE_CACHE. Ensure historical data is pre-fetched."
-                        ),
-                        details={"provider": provider_name, "capability": capability.value},
-                        severity="warning",
-                    )
-                )
-                recommendations.append("Pre-fetch historical data before running backtest for optimal performance")
+        check, recommendations = self._provider_capability_check(provider_name, capability, capability_value)
+        return _ProviderCapabilityPreflight(
+            check=check,
+            capabilities={provider_name: capability_value},
+            recommendations=recommendations,
+        )
 
-        except Exception as e:
-            checks.append(
+    @staticmethod
+    def _provider_capability_check(
+        provider_name: str,
+        capability: HistoricalDataCapability,
+        capability_value: str,
+    ) -> tuple[PreflightCheckResult, list[str]]:
+        details = {"provider": provider_name, "capability": capability_value}
+        if capability == HistoricalDataCapability.FULL:
+            return (
+                PreflightCheckResult(
+                    check_name="provider_capability",
+                    passed=True,
+                    message=f"Provider '{provider_name}' has FULL historical data capability",
+                    details=details,
+                ),
+                [],
+            )
+        if capability == HistoricalDataCapability.CURRENT_ONLY:
+            return (
                 PreflightCheckResult(
                     check_name="provider_capability",
                     passed=False,
-                    message=f"Failed to check provider capability: {e}",
-                    details={"error": str(e)},
-                )
+                    message=f"Provider '{provider_name}' has CURRENT_ONLY capability. Historical prices may be inaccurate.",
+                    details=details,
+                    severity="warning",
+                ),
+                [
+                    "Consider using a provider with FULL historical capability (e.g., CoinGecko) for accurate backtesting"
+                ],
             )
+        return (
+            PreflightCheckResult(
+                check_name="provider_capability",
+                passed=True,
+                message=f"Provider '{provider_name}' requires PRE_CACHE. Ensure historical data is pre-fetched.",
+                details=details,
+                severity="warning",
+            ),
+            ["Pre-fetch historical data before running backtest for optimal performance"],
+        )
 
-        # Check 2: Token availability. Both the classification (membership vs
-        # probe-fetch, R3 transient-vs-miss) and the priceability-guard severity
-        # decision (resolution-based hard-stop vs warning, cash exemption) live in
-        # tested module-level helpers so this orchestrator stays a thin sequencer.
+    async def _preflight_token_availability(
+        self,
+        config: PnLBacktestConfig,
+    ) -> tuple[list[str], list[str], PreflightCheckResult, list[str]]:
         tokens_available, tokens_unavailable = await classify_token_availability(
-            self.data_provider, list(config.tokens), config.start_time
+            self.data_provider,
+            list(config.tokens),
+            config.start_time,
         )
         token_check, token_recommendations = _build_token_availability_check(
-            self.data_provider, tokens_available, tokens_unavailable
+            self.data_provider,
+            tokens_available,
+            tokens_unavailable,
         )
-        checks.append(token_check)
-        recommendations.extend(token_recommendations)
+        return tokens_available, tokens_unavailable, token_check, token_recommendations
 
-        # Check 3: Archive node accessibility (if provider supports it)
-        if hasattr(self.data_provider, "verify_archive_access"):
-            try:
-                archive_accessible = await self.data_provider.verify_archive_access()
-                if archive_accessible:
-                    checks.append(
-                        PreflightCheckResult(
-                            check_name="archive_node_access",
-                            passed=True,
-                            message="Archive node is accessible for historical queries",
-                        )
-                    )
-                else:
-                    checks.append(
-                        PreflightCheckResult(
-                            check_name="archive_node_access",
-                            passed=False,
-                            message="Archive node is not accessible; historical queries may fail",
-                            severity="warning",
-                        )
-                    )
-                    recommendations.append(
-                        "Configure an archive node RPC URL for accurate historical TWAP/Chainlink data"
-                    )
-            except Exception as e:
-                checks.append(
-                    PreflightCheckResult(
-                        check_name="archive_node_access",
-                        passed=False,
-                        message=f"Failed to verify archive node access: {e}",
-                        details={"error": str(e)},
-                        severity="warning",
-                    )
-                )
+    async def _preflight_archive_access(self) -> _ArchiveAccessPreflight:
+        if not hasattr(self.data_provider, "verify_archive_access"):
+            return _ArchiveAccessPreflight(check=None, accessible=None, recommendations=[])
+        try:
+            archive_accessible = await self.data_provider.verify_archive_access()
+        except Exception as exc:
+            return _ArchiveAccessPreflight(
+                check=PreflightCheckResult(
+                    check_name="archive_node_access",
+                    passed=False,
+                    message=f"Failed to verify archive node access: {exc}",
+                    details={"error": str(exc)},
+                    severity="warning",
+                ),
+                accessible=None,
+                recommendations=[],
+            )
+        if archive_accessible:
+            return _ArchiveAccessPreflight(
+                check=PreflightCheckResult(
+                    check_name="archive_node_access",
+                    passed=True,
+                    message="Archive node is accessible for historical queries",
+                ),
+                accessible=True,
+                recommendations=[],
+            )
+        return _ArchiveAccessPreflight(
+            check=PreflightCheckResult(
+                check_name="archive_node_access",
+                passed=False,
+                message="Archive node is not accessible; historical queries may fail",
+                severity="warning",
+            ),
+            accessible=False,
+            recommendations=["Configure an archive node RPC URL for accurate historical TWAP/Chainlink data"],
+        )
 
-        # Check 4: Time range validation
+    def _preflight_time_range(self, config: PnLBacktestConfig) -> _TimeRangePreflight:
         provider_min_ts = getattr(self.data_provider, "min_timestamp", None)
         provider_max_ts = getattr(self.data_provider, "max_timestamp", None)
-
         time_range_valid = True
         time_range_details: dict[str, Any] = {
             "requested_start": config.start_time.isoformat(),
             "requested_end": config.end_time.isoformat(),
         }
-
         if provider_min_ts is not None and config.start_time < provider_min_ts:
             time_range_valid = False
             time_range_details["provider_min"] = provider_min_ts.isoformat()
-
         if provider_max_ts is not None and config.end_time > provider_max_ts:
             time_range_valid = False
             time_range_details["provider_max"] = provider_max_ts.isoformat()
-
         if time_range_valid:
-            checks.append(
-                PreflightCheckResult(
+            return _TimeRangePreflight(
+                check=PreflightCheckResult(
                     check_name="time_range_coverage",
                     passed=True,
                     message="Requested time range is within provider's data range",
                     details=time_range_details,
-                )
+                ),
+                recommendations=[],
             )
-        else:
-            checks.append(
+        return _TimeRangePreflight(
+            check=PreflightCheckResult(
+                check_name="time_range_coverage",
+                passed=False,
+                message="Requested time range extends beyond provider's data availability",
+                details=time_range_details,
+                severity="warning",
+            ),
+            recommendations=["Adjust backtest time range to match data provider's coverage"],
+        )
+
+    @staticmethod
+    def _preflight_institutional_compliance(
+        config: PnLBacktestConfig,
+        provider_capabilities: dict[str, str],
+    ) -> tuple[PreflightCheckResult | None, list[str]]:
+        if not config.institutional_mode:
+            return None, []
+        if any(cap == "current_only" for cap in provider_capabilities.values()):
+            return (
                 PreflightCheckResult(
-                    check_name="time_range_coverage",
+                    check_name="institutional_compliance",
                     passed=False,
-                    message="Requested time range extends beyond provider's data availability",
-                    details=time_range_details,
-                    severity="warning",
-                )
+                    message="CURRENT_ONLY provider not allowed in institutional mode",
+                    details={"provider_capabilities": provider_capabilities},
+                    severity="error",
+                ),
+                ["Use a provider with FULL historical capability for institutional mode"],
             )
-            recommendations.append("Adjust backtest time range to match data provider's coverage")
+        return (
+            PreflightCheckResult(
+                check_name="institutional_compliance",
+                passed=True,
+                message="Provider meets institutional mode requirements",
+            ),
+            [],
+        )
 
-        # Check 5: Institutional mode requirements
-        if config.institutional_mode:
-            # Check for CURRENT_ONLY providers in institutional mode
-            has_current_only = any(cap == "current_only" for cap in provider_capabilities.values())
-            if has_current_only:
-                checks.append(
-                    PreflightCheckResult(
-                        check_name="institutional_compliance",
-                        passed=False,
-                        message="CURRENT_ONLY provider not allowed in institutional mode",
-                        details={"provider_capabilities": provider_capabilities},
-                        severity="error",
-                    )
-                )
-                recommendations.append("Use a provider with FULL historical capability for institutional mode")
-            else:
-                checks.append(
-                    PreflightCheckResult(
-                        check_name="institutional_compliance",
-                        passed=True,
-                        message="Provider meets institutional mode requirements",
-                    )
-                )
-
-        # Calculate estimated coverage
+    @staticmethod
+    def _estimated_token_coverage(config: PnLBacktestConfig, tokens_available: list[str]) -> Decimal:
         total_tokens = len(config.tokens)
         available_count = len(tokens_available)
-        estimated_coverage = Decimal(available_count) / Decimal(total_tokens) if total_tokens > 0 else Decimal("1.0")
+        return Decimal(available_count) / Decimal(total_tokens) if total_tokens > 0 else Decimal("1.0")
 
-        # Determine overall pass/fail
-        # Passed if no error-severity checks failed
-        error_checks_failed = [c for c in checks if not c.passed and c.severity == "error"]
-        overall_passed = len(error_checks_failed) == 0
-
-        validation_time = time.time() - start_time
-
-        return PreflightReport(
-            passed=overall_passed,
-            checks=checks,
-            estimated_coverage=estimated_coverage,
-            tokens_available=tokens_available,
-            tokens_unavailable=tokens_unavailable,
-            provider_capabilities=provider_capabilities,
-            archive_node_accessible=archive_accessible,
-            recommendations=recommendations,
-            validation_time_seconds=validation_time,
-        )
+    @staticmethod
+    def _preflight_passed(checks: list[PreflightCheckResult]) -> bool:
+        return not any(not check.passed and check.severity == "error" for check in checks)
 
     async def backtest(
         self,
@@ -1721,77 +1845,89 @@ class PnLBacktester:
         if self._adapter is None:
             return
 
-        # Calculate elapsed time since last update
-        # Use the timestamp from the most recent equity curve point if available
-        elapsed_seconds = 0.0
-        if portfolio.equity_curve:
-            last_timestamp = portfolio.equity_curve[-1].timestamp
-            elapsed_seconds = (timestamp - last_timestamp).total_seconds()
-            if elapsed_seconds < 0:
-                elapsed_seconds = 0.0
-
-        # Update each position via the adapter
-        # Pass simulation timestamp for deterministic, reproducible updates
+        elapsed_seconds = self._portfolio_elapsed_since_last_mark(portfolio, timestamp)
         for position in portfolio.positions:
-            # Per-position clamp: a position accrued mid-tick (a partial
-            # WITHDRAW accrues lending interest through the fill instant via
-            # apply_fill) carries last_updated == this tick's timestamp; the
-            # equity-curve basis would re-accrue that same interval on the
-            # reduced principal. min() is a no-op for every other position:
-            # adapters stamp last_updated with the tick timestamp on each
-            # update (equal to the equity point), and positions never
-            # updated carry None or a stale value (where the equity basis
-            # is already the smaller elapsed).
-            per_position_elapsed = elapsed_seconds
-            if position.last_updated is not None:
-                position_elapsed = (timestamp - position.last_updated).total_seconds()
-                if position_elapsed >= 0:
-                    per_position_elapsed = min(per_position_elapsed, position_elapsed)
-            try:
-                self._adapter.update_position(position, market_state, per_position_elapsed, timestamp)
-            except DataSourceUnavailableError as e:
-                # VIB-4849: a missing-data signal is a *deliberate fail-loud* from the
-                # adapter -- it refused to fabricate a number. It must NEVER be
-                # downgraded to a DEBUG log and silently swallowed, or the position
-                # would accrue no fees this tick and the backtest would report a
-                # silently-wrong number. Surface it: route to the error handler if one
-                # is configured (so a stop policy is honoured), otherwise re-raise so
-                # the backtest fails loudly and clearly flags the missing volume.
-                logger.error(
-                    "Missing data source while updating position %s: %s",
-                    position.position_id,
-                    e,
-                )
-                if self._error_handler:
-                    result = self._error_handler.handle_error(
-                        e,
-                        context=f"adapter_update_position:{position.position_id}:{timestamp.isoformat()}",
-                    )
-                    if result.should_stop:
-                        raise
-                    # Handler explicitly chose to continue: do NOT silently re-raise,
-                    # but the loud ERROR above guarantees the gap is visible.
-                else:
-                    # No handler configured -> propagate. Never swallow a
-                    # missing-data signal into a DEBUG log.
-                    raise
-            except Exception as e:
-                # Use error handler for position update errors (typically non-critical)
-                if self._error_handler:
-                    result = self._error_handler.handle_error(
-                        e,
-                        context=f"adapter_update_position:{position.position_id}:{timestamp.isoformat()}",
-                    )
-                    if result.should_stop:
-                        logger.error(f"Fatal error updating position {position.position_id}: {e}")
-                        raise
-                    # Non-fatal: continue with other positions
-                else:
-                    logger.debug(
-                        "Adapter update_position failed for %s: %s",
-                        position.position_id,
-                        e,
-                    )
+            self._update_single_position_via_adapter(position, market_state, timestamp, elapsed_seconds)
+
+    @staticmethod
+    def _portfolio_elapsed_since_last_mark(portfolio: SimulatedPortfolio, timestamp: datetime) -> float:
+        if not portfolio.equity_curve:
+            return 0.0
+        elapsed_seconds = (timestamp - portfolio.equity_curve[-1].timestamp).total_seconds()
+        return max(elapsed_seconds, 0.0)
+
+    def _update_single_position_via_adapter(
+        self,
+        position: SimulatedPosition,
+        market_state: MarketState,
+        timestamp: datetime,
+        portfolio_elapsed_seconds: float,
+    ) -> None:
+        assert self._adapter is not None
+        try:
+            self._adapter.update_position(
+                position,
+                market_state,
+                self._position_update_elapsed(position, timestamp, portfolio_elapsed_seconds),
+                timestamp,
+            )
+        except DataSourceUnavailableError as exc:
+            self._handle_adapter_update_missing_data(position, timestamp, exc)
+        except Exception as exc:
+            self._handle_adapter_update_error(position, timestamp, exc)
+
+    @staticmethod
+    def _position_update_elapsed(
+        position: SimulatedPosition,
+        timestamp: datetime,
+        portfolio_elapsed_seconds: float,
+    ) -> float:
+        if position.last_updated is None:
+            return portfolio_elapsed_seconds
+        position_elapsed = (timestamp - position.last_updated).total_seconds()
+        return min(portfolio_elapsed_seconds, position_elapsed) if position_elapsed >= 0 else portfolio_elapsed_seconds
+
+    def _handle_adapter_update_missing_data(
+        self,
+        position: SimulatedPosition,
+        timestamp: datetime,
+        exc: DataSourceUnavailableError,
+    ) -> None:
+        logger.error(
+            "Missing data source while updating position %s: %s",
+            position.position_id,
+            exc,
+        )
+        if self._error_handler is None:
+            raise exc
+        result = self._error_handler.handle_error(
+            exc,
+            context=self._adapter_update_context(position, timestamp),
+        )
+        if result.should_stop:
+            raise exc
+
+    def _handle_adapter_update_error(
+        self,
+        position: SimulatedPosition,
+        timestamp: datetime,
+        exc: Exception,
+    ) -> None:
+        if self._error_handler is None:
+            logger.debug(
+                "Adapter update_position failed for %s: %s",
+                position.position_id,
+                exc,
+            )
+            return
+        result = self._error_handler.handle_error(exc, context=self._adapter_update_context(position, timestamp))
+        if result.should_stop:
+            logger.error(f"Fatal error updating position {position.position_id}: {exc}")
+            raise exc
+
+    @staticmethod
+    def _adapter_update_context(position: SimulatedPosition, timestamp: datetime) -> str:
+        return f"adapter_update_position:{position.position_id}:{timestamp.isoformat()}"
 
     async def _process_pending_intents(
         self,
@@ -1821,90 +1957,150 @@ class PnLBacktester:
         remaining: list[tuple[Any, datetime, int]] = []
 
         for intent, decision_time, blocks_remaining in pending_intents:
-            if blocks_remaining <= 0:
-                # Execute this intent
-                try:
-                    trade_record = await self._execute_intent(
-                        intent=intent,
-                        portfolio=portfolio,
-                        market_state=market_state,
-                        timestamp=market_state.timestamp,
-                        config=config,
-                        data_quality_tracker=data_quality_tracker,
-                    )
-                    # The portfolio may reject a fill (insufficient balance,
-                    # producer-failed) — trade_record.success is authoritative.
-                    if trade_record.success:
-                        # Record successful execution in error handler
-                        if self._error_handler:
-                            self._error_handler.record_success()
-                        logger.debug(
-                            f"Executed intent at {market_state.timestamp} "
-                            f"(decided at {decision_time}): "
-                            f"type={trade_record.intent_type.value}, "
-                            f"amount=${trade_record.amount_usd:,.2f}, "
-                            f"fee=${trade_record.fee_usd:,.2f}"
-                        )
-                    else:
-                        logger.warning(
-                            f"Intent rejected by portfolio at {market_state.timestamp} "
-                            f"(decided at {decision_time}): "
-                            f"type={trade_record.intent_type.value}, "
-                            f"reason={trade_record.metadata.get('failure_reason', 'fill rejected')}"
-                        )
-                    # Notify strategy with the real outcome so state machines
-                    # do not advance past a trade that never applied
-                    _engine_helpers.notify_intent_outcome(self, strategy, intent, trade_record, logger)
-                except DataSourceUnavailableError as e:
-                    # VIB-5088 (pattern from VIB-4849): a missing-data signal is a
-                    # deliberate fail-loud -- the engine refused to fabricate a
-                    # number (e.g. institutional mode rejecting the chain-default
-                    # gas price). It must never degrade to a warn-and-skip: the
-                    # trade would silently vanish from the results. Route to the
-                    # error handler if configured (so a stop policy is honoured),
-                    # otherwise re-raise so the backtest fails loudly.
-                    logger.error(
-                        "Missing data source while executing intent at %s: %s",
-                        market_state.timestamp.isoformat(),
-                        e,
-                    )
-                    # Notify the strategy of the failure (mirrors the generic
-                    # exception path below). Without this, a state machine
-                    # waiting on the intent never sees it fail when the error
-                    # handler chooses to continue -- the trade silently vanishes.
-                    self._notify_intent_failure(strategy, intent, e)
-                    if self._error_handler:
-                        result = self._error_handler.handle_error(
-                            e,
-                            context=f"execute_intent:{market_state.timestamp.isoformat()}:{type(intent).__name__}",
-                        )
-                        if result.should_stop:
-                            raise
-                        # Handler explicitly chose to continue: the loud ERROR
-                        # above guarantees the gap is visible.
-                    else:
-                        raise
-                except Exception as e:
-                    # Notify strategy of execution failure
-                    self._notify_intent_failure(strategy, intent, e)
-                    # Use error handler for intent execution errors
-                    if self._error_handler:
-                        result = self._error_handler.handle_error(
-                            e,
-                            context=f"execute_intent:{market_state.timestamp.isoformat()}:{type(intent).__name__}",
-                        )
-                        if result.should_stop:
-                            logger.error(f"Fatal error executing intent at {market_state.timestamp}: {e}")
-                            raise
-                        # Non-fatal: log warning and skip this intent
-                        logger.warning(f"Failed to execute intent at {market_state.timestamp}: {e} - skipping")
-                    else:
-                        logger.warning(f"Failed to execute intent at {market_state.timestamp}: {e}")
-            else:
-                # Still waiting, decrement counter
-                remaining.append((intent, decision_time, blocks_remaining - 1))
+            updated = await self._process_one_pending_intent(
+                intent=intent,
+                decision_time=decision_time,
+                blocks_remaining=blocks_remaining,
+                portfolio=portfolio,
+                market_state=market_state,
+                config=config,
+                data_quality_tracker=data_quality_tracker,
+                strategy=strategy,
+            )
+            if updated is not None:
+                remaining.append(updated)
 
         return remaining
+
+    async def _process_one_pending_intent(
+        self,
+        intent: Any,
+        decision_time: datetime,
+        blocks_remaining: int,
+        portfolio: SimulatedPortfolio,
+        market_state: MarketState,
+        config: PnLBacktestConfig,
+        data_quality_tracker: DataQualityTracker | None,
+        strategy: Any,
+    ) -> tuple[Any, datetime, int] | None:
+        if blocks_remaining > 0:
+            return intent, decision_time, blocks_remaining - 1
+        await self._execute_ready_pending_intent(
+            intent=intent,
+            decision_time=decision_time,
+            portfolio=portfolio,
+            market_state=market_state,
+            config=config,
+            data_quality_tracker=data_quality_tracker,
+            strategy=strategy,
+        )
+        return None
+
+    async def _execute_ready_pending_intent(
+        self,
+        intent: Any,
+        decision_time: datetime,
+        portfolio: SimulatedPortfolio,
+        market_state: MarketState,
+        config: PnLBacktestConfig,
+        data_quality_tracker: DataQualityTracker | None,
+        strategy: Any,
+    ) -> None:
+        try:
+            trade_record = await self._execute_intent(
+                intent=intent,
+                portfolio=portfolio,
+                market_state=market_state,
+                timestamp=market_state.timestamp,
+                config=config,
+                data_quality_tracker=data_quality_tracker,
+            )
+        except DataSourceUnavailableError as exc:
+            self._handle_pending_missing_data(intent, strategy, market_state.timestamp, exc)
+            return
+        except Exception as exc:
+            self._handle_pending_execution_error(intent, strategy, market_state.timestamp, exc)
+            return
+
+        self._log_pending_trade_outcome(trade_record, decision_time, market_state.timestamp)
+        # Notify strategy with the real outcome so state machines do not advance
+        # past a trade that never applied.
+        _engine_helpers.notify_intent_outcome(self, strategy, intent, trade_record, logger)
+
+    def _log_pending_trade_outcome(
+        self,
+        trade_record: TradeRecord,
+        decision_time: datetime,
+        timestamp: datetime,
+    ) -> None:
+        # The portfolio may reject a fill (insufficient balance,
+        # producer-failed) -- trade_record.success is authoritative.
+        if trade_record.success:
+            if self._error_handler:
+                self._error_handler.record_success()
+            logger.debug(
+                f"Executed intent at {timestamp} "
+                f"(decided at {decision_time}): "
+                f"type={trade_record.intent_type.value}, "
+                f"amount=${trade_record.amount_usd:,.2f}, "
+                f"fee=${trade_record.fee_usd:,.2f}"
+            )
+            return
+        logger.warning(
+            f"Intent rejected by portfolio at {timestamp} "
+            f"(decided at {decision_time}): "
+            f"type={trade_record.intent_type.value}, "
+            f"reason={trade_record.metadata.get('failure_reason', 'fill rejected')}"
+        )
+
+    def _handle_pending_missing_data(
+        self,
+        intent: Any,
+        strategy: Any,
+        timestamp: datetime,
+        exc: DataSourceUnavailableError,
+    ) -> None:
+        # VIB-5088 (pattern from VIB-4849): missing data is a deliberate
+        # fail-loud signal, not a warn-and-skip. Notify the strategy before
+        # consulting the error policy so state machines do not silently stall.
+        logger.error(
+            "Missing data source while executing intent at %s: %s",
+            timestamp.isoformat(),
+            exc,
+        )
+        self._notify_intent_failure(strategy, intent, exc)
+        if self._error_handler is None:
+            raise exc
+        result = self._error_handler.handle_error(
+            exc,
+            context=self._execute_intent_context(timestamp, intent),
+        )
+        if result.should_stop:
+            raise exc
+
+    def _handle_pending_execution_error(
+        self,
+        intent: Any,
+        strategy: Any,
+        timestamp: datetime,
+        exc: Exception,
+    ) -> None:
+        self._notify_intent_failure(strategy, intent, exc)
+        if self._error_handler is None:
+            logger.warning(f"Failed to execute intent at {timestamp}: {exc}")
+            return
+        result = self._error_handler.handle_error(
+            exc,
+            context=self._execute_intent_context(timestamp, intent),
+        )
+        if result.should_stop:
+            logger.error(f"Fatal error executing intent at {timestamp}: {exc}")
+            raise exc
+        logger.warning(f"Failed to execute intent at {timestamp}: {exc} - skipping")
+
+    @staticmethod
+    def _execute_intent_context(timestamp: datetime, intent: Any) -> str:
+        return f"execute_intent:{timestamp.isoformat()}:{type(intent).__name__}"
 
     def get_fee_model(self, protocol: str) -> FeeModel:
         """Get the fee model for a protocol.
@@ -1964,178 +2160,277 @@ class PnLBacktester:
         Returns:
             TradeRecord with all execution details including fees, slippage, and gas
         """
-        from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
-
-        # Try adapter-specific execution first
-        if self._adapter is not None:
-            adapter_fill = self._adapter.execute_intent(intent, portfolio, market_state)
-            if adapter_fill is not None:
-                # Adapter returned a SimulatedFill, use it
-                logger.debug(f"Using adapter '{self._adapter.adapter_name}' execution for intent")
-                # Set delayed_at_end flag on adapter fill
-                adapter_fill.delayed_at_end = delayed_at_end
-                # Gas is engine-owned: adapters own protocol math but have no
-                # access to the gas lane (config gas price, historical gas
-                # provider, data-quality tracking), so any adapter-side
-                # gas_cost_usd is replaced with the resolved value here --
-                # the LP adapter's old flat $20/$15 guesses overstated L2
-                # gas costs by ~200x. Failed fills are skipped: apply_fill
-                # zeroes their execution costs anyway, and resolving gas can
-                # raise when no ETH price is available.
-                if adapter_fill.success:
-                    (
-                        adapter_fill.gas_cost_usd,
-                        adapter_fill.gas_price_gwei,
-                        gas_gwei_source,
-                    ) = await self._resolve_gas_cost(
-                        intent_type=adapter_fill.intent_type,
-                        market_state=market_state,
-                        timestamp=timestamp,
-                        config=config,
-                        data_quality_tracker=data_quality_tracker,
-                    )
-                    if adapter_fill.metadata is None:
-                        adapter_fill.metadata = {}
-                    adapter_fill.metadata["gas_price_source"] = gas_gwei_source
-                # Apply the adapter's fill to the portfolio (the adapter is
-                # threaded through so a partial position reduction accrues
-                # lending interest through the fill instant). A False return
-                # means the fill was rejected: portfolio.apply_fill already
-                # recorded it (with zeroed costs) AND logged the reason at
-                # WARNING, so we skip the success-path execution log to avoid
-                # double-logging and surface the recorded trade unchanged.
-                applied = portfolio.apply_fill(adapter_fill, market_state=market_state, adapter=self._adapter)
-
-                if applied:
-                    # Log detailed trade execution
-                    log_trade_execution(
-                        logger=logger,
-                        backtest_id=self._current_backtest_id,
-                        timestamp=timestamp,
-                        intent_type=adapter_fill.intent_type.value,
-                        protocol=adapter_fill.protocol,
-                        tokens=adapter_fill.tokens,
-                        amount_usd=adapter_fill.amount_usd,
-                        fee_usd=adapter_fill.fee_usd,
-                        slippage_usd=adapter_fill.slippage_usd,
-                        gas_cost_usd=adapter_fill.gas_cost_usd,
-                        executed_price=adapter_fill.executed_price,
-                        mev_cost_usd=adapter_fill.estimated_mev_cost_usd,
-                    )
-
-                # Return the canonical record apply_fill appended to
-                # portfolio.trades (which feeds metrics): it already carries
-                # the realized pnl_usd attribution, so reusing it keeps the
-                # on_intent_executed callback in lockstep with the metrics
-                # layer instead of fabricating a second record with pnl=0.
-                return portfolio.trades[-1]
-
-            # Adapter returned None, fall back to generic execution
-            logger.debug(f"Adapter '{self._adapter.adapter_name}' returned None, using generic execution")
-
-        # Generic execution logic (fallback)
-        # Extract intent details
-        intent_type = self._get_intent_type(intent)
-        protocol = self._get_intent_protocol(intent)
-        tokens = self._get_intent_tokens(intent)
-        amount_usd = self._get_intent_amount_usd(
-            intent, market_state, strict_reproducibility=config.strict_reproducibility
-        )
-
-        # Close targets resolve before fee/slippage: a perp full close
-        # (size_usd=None) and a lending withdraw_all take their fee
-        # notional from the matched position.
-        close_resolution = self._resolve_position_close(intent, intent_type, portfolio, amount_usd, market_state)
-        position_close_id = close_resolution.position_close_id
-        amount_usd = close_resolution.amount_usd
-
-        # Get fee and slippage models for this protocol
-        fee_model = self.get_fee_model(protocol)
-        slippage_model = self.get_slippage_model(protocol)
-
-        # Calculate fee
-        fee_usd = fee_model.calculate_fee(
-            intent_type=intent_type,
-            amount_usd=amount_usd,
+        adapter_record = await self._execute_with_adapter_if_available(
+            intent=intent,
+            portfolio=portfolio,
             market_state=market_state,
-            protocol=protocol,
+            timestamp=timestamp,
+            config=config,
+            delayed_at_end=delayed_at_end,
+            data_quality_tracker=data_quality_tracker,
         )
+        if adapter_record is not None:
+            return adapter_record
 
-        # Calculate base slippage
-        slippage_pct = slippage_model.calculate_slippage(
-            intent_type=intent_type,
-            amount_usd=amount_usd,
+        details = self._generic_intent_details(intent, portfolio, market_state, config)
+        costs = await self._generic_execution_costs(
+            details=details,
             market_state=market_state,
-            protocol=protocol,
+            timestamp=timestamp,
+            config=config,
+            data_quality_tracker=data_quality_tracker,
         )
-
-        # A close that already failed resolution (e.g. a WITHDRAW with no
-        # matching open supply) is recorded as a rejected trade with zeroed
-        # execution costs by apply_fill. Resolve MEV/slippage/gas only for
-        # fills that will actually apply: gas resolution raises
-        # DataSourceUnavailableError when no ETH/WETH price is available
-        # (VIB-5088 fail-loud), which would crash the whole run before
-        # apply_fill could record the rejection -- undercounting failed_trades.
-        # Mirrors the adapter lane, which already gates gas behind fill.success
-        # (VIB-5083, CodeRabbit).
-        if close_resolution.failure_reason is not None:
-            estimated_mev_cost_usd = None
-            slippage_usd = Decimal("0")
-            gas_cost_usd = Decimal("0")
-            gas_price_gwei = None
-            gas_gwei_source = "rejected_fill"
-        else:
-            # Simulate MEV costs if enabled
-            estimated_mev_cost_usd, slippage_pct = self._simulate_mev_impact(
-                intent_type=intent_type,
-                tokens=tokens,
-                amount_usd=amount_usd,
-                slippage_pct=slippage_pct,
-                config=config,
-            )
-
-            slippage_usd = amount_usd * slippage_pct
-
-            # Calculate gas cost
-            gas_cost_usd, gas_price_gwei, gas_gwei_source = await self._resolve_gas_cost(
-                intent_type=intent_type,
-                market_state=market_state,
-                timestamp=timestamp,
-                config=config,
-                data_quality_tracker=data_quality_tracker,
-            )
-
-        # Get executed price (for swaps/perps, this is the price after slippage)
-        executed_price = self._get_executed_price(intent, market_state, slippage_pct, intent_type)
+        executed_price = self._get_executed_price(
+            intent,
+            market_state,
+            costs.slippage_pct,
+            details.intent_type,
+        )
 
         # Calculate token flows
         tokens_in, tokens_out = self._calculate_token_flows(
             intent=intent,
-            intent_type=intent_type,
-            amount_usd=amount_usd,
+            intent_type=details.intent_type,
+            amount_usd=details.amount_usd,
             executed_price=executed_price,
-            fee_usd=fee_usd,
-            slippage_usd=slippage_usd,
+            fee_usd=costs.fee_usd,
+            slippage_usd=costs.slippage_usd,
             market_state=market_state,
         )
 
         # Create position delta if this intent creates/modifies a position
         position_delta = self._create_position_delta(
             intent=intent,
-            intent_type=intent_type,
-            protocol=protocol,
-            tokens=tokens,
+            intent_type=details.intent_type,
+            protocol=details.protocol,
+            tokens=details.tokens,
             executed_price=executed_price,
             timestamp=timestamp,
             market_state=market_state,
             strict_reproducibility=config.strict_reproducibility,
         )
+        fill = self._build_generic_fill(
+            intent=intent,
+            details=details,
+            costs=costs,
+            timestamp=timestamp,
+            executed_price=executed_price,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            position_delta=position_delta,
+            delayed_at_end=delayed_at_end,
+        )
 
-        # Create the simulated fill. A failed close resolution (e.g. a
-        # WITHDRAW with no matching open supply position) is marked
-        # success=False so apply_fill records it as a rejected trade with
-        # zero state mutation -- crediting the inflow without a position
-        # to debit would mint value.
+        return self._apply_fill_and_return_trade(fill, portfolio, market_state, timestamp)
+
+    async def _execute_with_adapter_if_available(
+        self,
+        intent: Any,
+        portfolio: SimulatedPortfolio,
+        market_state: MarketState,
+        timestamp: datetime,
+        config: PnLBacktestConfig,
+        delayed_at_end: bool,
+        data_quality_tracker: DataQualityTracker | None,
+    ) -> TradeRecord | None:
+        if self._adapter is None:
+            return None
+
+        adapter_fill = self._adapter.execute_intent(intent, portfolio, market_state)
+        if adapter_fill is None:
+            logger.debug(f"Adapter '{self._adapter.adapter_name}' returned None, using generic execution")
+            return None
+
+        logger.debug(f"Using adapter '{self._adapter.adapter_name}' execution for intent")
+        await self._prepare_adapter_fill_for_engine(
+            adapter_fill,
+            market_state,
+            timestamp,
+            config,
+            delayed_at_end,
+            data_quality_tracker,
+        )
+        return self._apply_fill_and_return_trade(adapter_fill, portfolio, market_state, timestamp)
+
+    async def _prepare_adapter_fill_for_engine(
+        self,
+        adapter_fill: SimulatedFill,
+        market_state: MarketState,
+        timestamp: datetime,
+        config: PnLBacktestConfig,
+        delayed_at_end: bool,
+        data_quality_tracker: DataQualityTracker | None,
+    ) -> None:
+        adapter_fill.delayed_at_end = delayed_at_end
+        # Gas is engine-owned: adapters own protocol math but not the gas lane.
+        # Failed fills skip gas because apply_fill zeroes their execution costs,
+        # and gas resolution can raise when no ETH/WETH price exists.
+        if not adapter_fill.success:
+            return
+        (
+            adapter_fill.gas_cost_usd,
+            adapter_fill.gas_price_gwei,
+            gas_gwei_source,
+        ) = await self._resolve_gas_cost(
+            intent_type=adapter_fill.intent_type,
+            market_state=market_state,
+            timestamp=timestamp,
+            config=config,
+            data_quality_tracker=data_quality_tracker,
+        )
+        if adapter_fill.metadata is None:
+            adapter_fill.metadata = {}
+        adapter_fill.metadata["gas_price_source"] = gas_gwei_source
+
+    def _generic_intent_details(
+        self,
+        intent: Any,
+        portfolio: SimulatedPortfolio,
+        market_state: MarketState,
+        config: PnLBacktestConfig,
+    ) -> _GenericIntentDetails:
+        intent_type = self._get_intent_type(intent)
+        protocol = self._get_intent_protocol(intent)
+        tokens = self._get_intent_tokens(intent)
+        amount_usd = self._get_intent_amount_usd(
+            intent,
+            market_state,
+            strict_reproducibility=config.strict_reproducibility,
+        )
+
+        # Close targets resolve before fee/slippage: a perp full close
+        # (size_usd=None) and a lending withdraw_all take their fee notional
+        # from the matched position.
+        close_resolution = self._resolve_position_close(intent, intent_type, portfolio, amount_usd, market_state)
+        return _GenericIntentDetails(
+            intent_type=intent_type,
+            protocol=protocol,
+            tokens=tokens,
+            amount_usd=close_resolution.amount_usd,
+            close_resolution=close_resolution,
+        )
+
+    async def _generic_execution_costs(
+        self,
+        details: _GenericIntentDetails,
+        market_state: MarketState,
+        timestamp: datetime,
+        config: PnLBacktestConfig,
+        data_quality_tracker: DataQualityTracker | None,
+    ) -> _GenericExecutionCosts:
+        fee_usd = self.get_fee_model(details.protocol).calculate_fee(
+            intent_type=details.intent_type,
+            amount_usd=details.amount_usd,
+            market_state=market_state,
+            protocol=details.protocol,
+        )
+        slippage_pct = self.get_slippage_model(details.protocol).calculate_slippage(
+            intent_type=details.intent_type,
+            amount_usd=details.amount_usd,
+            market_state=market_state,
+            protocol=details.protocol,
+        )
+        if details.close_resolution.failure_reason is not None:
+            # Failed closes are recorded as rejected trades. Skip MEV/slippage/gas
+            # resolution so missing ETH data cannot hide the failed-trade record.
+            return _GenericExecutionCosts(
+                fee_usd=fee_usd,
+                slippage_pct=slippage_pct,
+                slippage_usd=Decimal("0"),
+                gas_cost_usd=Decimal("0"),
+                gas_price_gwei=None,
+                gas_gwei_source="rejected_fill",
+                estimated_mev_cost_usd=None,
+            )
+
+        estimated_mev_cost_usd, slippage_pct = self._simulate_mev_impact(
+            intent_type=details.intent_type,
+            tokens=details.tokens,
+            amount_usd=details.amount_usd,
+            slippage_pct=slippage_pct,
+            config=config,
+        )
+        gas_cost_usd, gas_price_gwei, gas_gwei_source = await self._resolve_gas_cost(
+            intent_type=details.intent_type,
+            market_state=market_state,
+            timestamp=timestamp,
+            config=config,
+            data_quality_tracker=data_quality_tracker,
+        )
+        return _GenericExecutionCosts(
+            fee_usd=fee_usd,
+            slippage_pct=slippage_pct,
+            slippage_usd=details.amount_usd * slippage_pct,
+            gas_cost_usd=gas_cost_usd,
+            gas_price_gwei=gas_price_gwei,
+            gas_gwei_source=gas_gwei_source,
+            estimated_mev_cost_usd=estimated_mev_cost_usd,
+        )
+
+    def _build_generic_fill(
+        self,
+        intent: Any,
+        details: _GenericIntentDetails,
+        costs: _GenericExecutionCosts,
+        timestamp: datetime,
+        executed_price: Decimal,
+        tokens_in: dict[str, Decimal],
+        tokens_out: dict[str, Decimal],
+        position_delta: SimulatedPosition | None,
+        delayed_at_end: bool,
+    ) -> SimulatedFill:
+        close_resolution = details.close_resolution
+        return SimulatedFill(
+            timestamp=timestamp,
+            intent_type=details.intent_type,
+            protocol=details.protocol,
+            tokens=details.tokens,
+            executed_price=executed_price,
+            amount_usd=details.amount_usd,
+            fee_usd=costs.fee_usd,
+            slippage_usd=costs.slippage_usd,
+            gas_cost_usd=costs.gas_cost_usd,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            success=close_resolution.failure_reason is None,
+            position_delta=position_delta,
+            position_close_id=close_resolution.position_close_id,
+            position_reduce_id=close_resolution.position_reduce_id,
+            position_reduce_amounts=self._generic_position_reduce_amounts(
+                details.intent_type,
+                close_resolution,
+                tokens_in,
+                tokens_out,
+            ),
+            metadata=self._generic_fill_metadata(intent, costs.slippage_pct, costs.gas_gwei_source, close_resolution),
+            gas_price_gwei=costs.gas_price_gwei,
+            estimated_mev_cost_usd=costs.estimated_mev_cost_usd,
+            delayed_at_end=delayed_at_end,
+        )
+
+    @staticmethod
+    def _generic_position_reduce_amounts(
+        intent_type: IntentType,
+        close_resolution: _CloseResolution,
+        tokens_in: dict[str, Decimal],
+        tokens_out: dict[str, Decimal],
+    ) -> dict[str, Decimal]:
+        # Ordinary partial lending reductions debit the position by the fill's
+        # flow on the position side. Boundary reductions carry an explicit
+        # principal map because the flow also realizes accrued interest.
+        if close_resolution.reduce_amounts is not None:
+            return close_resolution.reduce_amounts
+        if not close_resolution.position_reduce_id:
+            return {}
+        return dict(tokens_out if intent_type == IntentType.REPAY else tokens_in)
+
+    @staticmethod
+    def _generic_fill_metadata(
+        intent: Any,
+        slippage_pct: Decimal,
+        gas_gwei_source: str | None,
+        close_resolution: _CloseResolution,
+    ) -> dict[str, Any]:
         metadata: dict[str, Any] = {
             "intent": str(intent),
             "slippage_pct": str(slippage_pct),
@@ -2144,80 +2439,44 @@ class PnLBacktester:
         if close_resolution.failure_reason is not None:
             metadata["failure_reason"] = close_resolution.failure_reason
         if close_resolution.interest_usd != Decimal("0"):
-            # str() round-trips Decimal losslessly; _calculate_trade_pnl
-            # reads this back as the trade's realized interest PnL.
+            # str() round-trips Decimal losslessly; _calculate_trade_pnl reads
+            # this back as the trade's realized interest PnL.
             metadata["interest_usd"] = str(close_resolution.interest_usd)
-        fill = SimulatedFill(
-            timestamp=timestamp,
-            intent_type=intent_type,
-            protocol=protocol,
-            tokens=tokens,
-            executed_price=executed_price,
-            amount_usd=amount_usd,
-            fee_usd=fee_usd,
-            slippage_usd=slippage_usd,
-            gas_cost_usd=gas_cost_usd,
-            tokens_in=tokens_in,
-            tokens_out=tokens_out,
-            success=close_resolution.failure_reason is None,
-            position_delta=position_delta,
-            position_close_id=position_close_id,
-            position_reduce_id=close_resolution.position_reduce_id,
-            # Partial reductions debit the position by exactly the fill's
-            # flow on the position's side -- the credited inflow for a
-            # WITHDRAW (tokens leave the supply), the debited outflow for a
-            # REPAY (tokens extinguish the debt) -- keeping the reduction
-            # value-conserving by construction. A BOUNDARY reduce instead
-            # carries an explicit principal map (the flow also covers part of
-            # the accrued interest, which is realized rather than removed as
-            # principal -- VIB-5098); the gap is re-derived by the portfolio's
-            # conservation guard.
-            position_reduce_amounts=(
-                close_resolution.reduce_amounts
-                if close_resolution.reduce_amounts is not None
-                else (
-                    dict(tokens_out if intent_type == IntentType.REPAY else tokens_in)
-                    if close_resolution.position_reduce_id
-                    else {}
-                )
-            ),
-            metadata=metadata,
-            gas_price_gwei=gas_price_gwei,
-            estimated_mev_cost_usd=estimated_mev_cost_usd,
-            delayed_at_end=delayed_at_end,
-        )
+        return metadata
 
-        # Apply fill to portfolio. The adapter is threaded through so a
-        # partial position reduction can accrue lending interest through the
-        # fill instant with the adapter lane's own rate sources. A False
-        # return means the fill was rejected: apply_fill already recorded it
-        # (zeroed costs) AND logged the reason at WARNING, so the success-path
-        # execution log below is skipped to avoid double-logging.
+    def _apply_fill_and_return_trade(
+        self,
+        fill: SimulatedFill,
+        portfolio: SimulatedPortfolio,
+        market_state: MarketState,
+        timestamp: datetime,
+    ) -> TradeRecord:
+        # A False return means apply_fill already recorded a rejected trade
+        # (with zeroed costs) and logged the reason at WARNING, so the success
+        # execution log is skipped to avoid double-logging.
         applied = portfolio.apply_fill(fill, market_state=market_state, adapter=self._adapter)
-
         if applied:
-            # Log detailed trade execution (DEBUG level - visible in verbose mode)
-            log_trade_execution(
-                logger=logger,
-                backtest_id=self._current_backtest_id,
-                timestamp=timestamp,
-                intent_type=intent_type.value,
-                protocol=protocol,
-                tokens=tokens,
-                amount_usd=amount_usd,
-                fee_usd=fee_usd,
-                slippage_usd=slippage_usd,
-                gas_cost_usd=gas_cost_usd,
-                executed_price=executed_price,
-                mev_cost_usd=estimated_mev_cost_usd,
-            )
-
-        # Return the canonical record apply_fill appended to portfolio.trades
-        # (which feeds metrics): it already carries the realized pnl_usd
-        # attribution, so reusing it keeps the on_intent_executed callback in
-        # lockstep with the metrics layer instead of fabricating a second
-        # record with pnl=0.
+            self._log_applied_fill(fill, timestamp)
+        # Return the canonical record apply_fill appended to portfolio.trades.
+        # It carries realized pnl_usd attribution, keeping callbacks and metrics
+        # in lockstep instead of fabricating a second record with pnl=0.
         return portfolio.trades[-1]
+
+    def _log_applied_fill(self, fill: SimulatedFill, timestamp: datetime) -> None:
+        log_trade_execution(
+            logger=logger,
+            backtest_id=self._current_backtest_id,
+            timestamp=timestamp,
+            intent_type=fill.intent_type.value,
+            protocol=fill.protocol,
+            tokens=fill.tokens,
+            amount_usd=fill.amount_usd,
+            fee_usd=fill.fee_usd,
+            slippage_usd=fill.slippage_usd,
+            gas_cost_usd=fill.gas_cost_usd,
+            executed_price=fill.executed_price,
+            mev_cost_usd=fill.estimated_mev_cost_usd,
+        )
 
     def _simulate_mev_impact(
         self,
@@ -2475,74 +2734,98 @@ class PnLBacktester:
         """
         # config.gas_price_gwei is resolved to a Decimal in __post_init__.
         assert config.gas_price_gwei is not None
-        gas_price_gwei = config.gas_price_gwei  # Default
-        gas_gwei_source = "chain_default" if config.gas_price_gwei_is_default else "config"
-
+        default_resolution = _GasGweiResolution(
+            gas_price_gwei=config.gas_price_gwei,
+            source="chain_default" if config.gas_price_gwei_is_default else "config",
+        )
         if config.use_historical_gas_gwei and self.gas_provider is not None:
-            # Priority 1: Fetch historical gas price from provider
-            try:
-                historical_gas: GasPrice = await self.gas_provider.get_gas_price(
-                    timestamp=timestamp,
-                    chain=config.chain,
-                )
-                gas_price_gwei = historical_gas.effective_gas_price_gwei
-                gas_gwei_source = f"historical_gas:{historical_gas.source}"
-                logger.debug(
-                    "Gas gwei: Using historical gas price %.1f gwei (source: %s) at %s",
-                    gas_price_gwei,
-                    historical_gas.source,
-                    timestamp.isoformat(),
-                )
-            except Exception as e:
-                logger.warning(
-                    "Failed to get historical gas price, falling back to market_state/config: %s",
-                    str(e),
-                )
-                # Fall through to next priority
-                if market_state.gas_price_gwei is not None:
-                    gas_price_gwei = market_state.gas_price_gwei
-                    gas_gwei_source = "market_state"
-                # else keep config.gas_price_gwei default
-
-        elif config.use_historical_gas_gwei and self.gas_provider is None:
-            # Historical gas requested but no provider - try market_state
-            if market_state.gas_price_gwei is not None:
-                gas_price_gwei = market_state.gas_price_gwei
-                gas_gwei_source = "market_state"
-            else:
-                logger.warning(
-                    "use_historical_gas_gwei=True but no gas_provider and "
-                    "no gas_price_gwei in market_state, using config default %.1f gwei",
-                    config.gas_price_gwei,
-                )
-
-        elif market_state.gas_price_gwei is not None:
-            # Priority 2: Use market state gas price if available
-            gas_price_gwei = market_state.gas_price_gwei
-            gas_gwei_source = "market_state"
-
-        # VIB-5088: institutional mode never fabricates a gas price. The
-        # chain-aware default is an honest guess, but a guess nonetheless --
-        # match the strict_price_mode / data-coverage-gate precedent and
-        # fail loud instead of silently costing trades from a made-up number.
-        if gas_gwei_source == "chain_default" and config.institutional_mode:
-            raise DataSourceUnavailableError(
-                data_type="gas_price",
-                identifier=config.chain,
-                remediation=(
-                    "Set config.gas_price_gwei explicitly, enable "
-                    "use_historical_gas_gwei with a gas_provider, or use a "
-                    "data provider that populates MarketState.gas_price_gwei."
-                ),
-                message=(
-                    f"Institutional mode: gas price for '{config.chain}' at "
-                    f"{timestamp.isoformat()} would fall back to the chain-registry "
-                    f"default ({config.gas_price_gwei} gwei) and institutional mode "
-                    f"refuses to fabricate execution costs"
-                ),
+            resolution = await self._historical_gas_gwei_or_fallback(
+                config, market_state, timestamp, default_resolution
             )
+        elif config.use_historical_gas_gwei:
+            resolution = self._market_state_gas_gwei_or_default(
+                market_state,
+                default_resolution,
+                missing_provider_warning=True,
+            )
+        else:
+            resolution = self._market_state_gas_gwei_or_default(market_state, default_resolution)
 
-        return gas_price_gwei, gas_gwei_source
+        self._raise_if_institutional_gas_default(config, timestamp, resolution)
+        return resolution.gas_price_gwei, resolution.source
+
+    async def _historical_gas_gwei_or_fallback(
+        self,
+        config: PnLBacktestConfig,
+        market_state: MarketState,
+        timestamp: datetime,
+        default_resolution: _GasGweiResolution,
+    ) -> _GasGweiResolution:
+        gas_provider = self.gas_provider
+        assert gas_provider is not None
+        try:
+            historical_gas: GasPrice = await gas_provider.get_gas_price(
+                timestamp=timestamp,
+                chain=config.chain,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to get historical gas price, falling back to market_state/config: %s",
+                str(exc),
+            )
+            return self._market_state_gas_gwei_or_default(market_state, default_resolution)
+
+        logger.debug(
+            "Gas gwei: Using historical gas price %.1f gwei (source: %s) at %s",
+            historical_gas.effective_gas_price_gwei,
+            historical_gas.source,
+            timestamp.isoformat(),
+        )
+        return _GasGweiResolution(
+            gas_price_gwei=historical_gas.effective_gas_price_gwei,
+            source=f"historical_gas:{historical_gas.source}",
+        )
+
+    @staticmethod
+    def _market_state_gas_gwei_or_default(
+        market_state: MarketState,
+        default_resolution: _GasGweiResolution,
+        *,
+        missing_provider_warning: bool = False,
+    ) -> _GasGweiResolution:
+        if market_state.gas_price_gwei is not None:
+            return _GasGweiResolution(gas_price_gwei=market_state.gas_price_gwei, source="market_state")
+        if missing_provider_warning:
+            logger.warning(
+                "use_historical_gas_gwei=True but no gas_provider and "
+                "no gas_price_gwei in market_state, using config default %.1f gwei",
+                default_resolution.gas_price_gwei,
+            )
+        return default_resolution
+
+    @staticmethod
+    def _raise_if_institutional_gas_default(
+        config: PnLBacktestConfig,
+        timestamp: datetime,
+        resolution: _GasGweiResolution,
+    ) -> None:
+        if resolution.source != "chain_default" or not config.institutional_mode:
+            return
+        raise DataSourceUnavailableError(
+            data_type="gas_price",
+            identifier=config.chain,
+            remediation=(
+                "Set config.gas_price_gwei explicitly, enable "
+                "use_historical_gas_gwei with a gas_provider, or use a "
+                "data provider that populates MarketState.gas_price_gwei."
+            ),
+            message=(
+                f"Institutional mode: gas price for '{config.chain}' at "
+                f"{timestamp.isoformat()} would fall back to the chain-registry "
+                f"default ({config.gas_price_gwei} gwei) and institutional mode "
+                f"refuses to fabricate execution costs"
+            ),
+        )
 
     def _get_intent_type(self, intent: Any) -> IntentType:
         """Extract the IntentType from an intent object. Delegates to intent_extraction module."""
@@ -3004,81 +3287,18 @@ class PnLBacktester:
                 failure_reason="WITHDRAW matched no open supply position to withdraw from",
             )
 
-        # Price the principal the way every valuation path does
-        # (entry-price fallback when the market price is unavailable).
-        try:
-            price = market_state.get_price(position.primary_token)
-        except KeyError:
-            price = position.entry_price
-        if price <= Decimal("0"):
-            price = position.entry_price
-        principal_value = position.total_amount * price
-        total_supply = principal_value + position.interest_accrued
-
-        # Relative dust tolerance: an amount within Decimal round-trip error of
-        # the FULL balance (principal + accrued interest) is a full close, not a
-        # partial that strands dust principal. Thresholding on total_supply (not
-        # principal alone) mirrors the REPAY fix (VIB-5098 / CodeRabbit PR
-        # #2777): a withdraw that covers principal but only part of the earned
-        # interest must NOT full-close and over-credit the remaining interest.
-        full_close_floor = total_supply * (Decimal("1") - Decimal("1E-9"))
-        withdraw_all = bool(getattr(intent, "withdraw_all", False))
-
-        # FULL CLOSE: withdraw_all, an unresolvable / non-positive amount, or an
-        # amount that covers principal + all earned interest within dust.
-        # Notional = principal + interest; the interest realizes as POSITIVE PnL.
-        # NOTE: a zero-principal position is NOT force-closed here -- a withdraw
-        # >= its earned interest hits this branch via full_close_floor (= the
-        # interest), while a smaller withdraw is rejected below rather than
-        # over-crediting the whole interest (CodeRabbit PR #2777 round 2; mirror
-        # of the REPAY interest-only fix).
-        if withdraw_all or amount_usd <= Decimal("0") or amount_usd >= full_close_floor:
-            if amount_usd > total_supply:
-                logger.warning(
-                    "WITHDRAW amount $%s exceeds matched supply $%s (principal $%s + "
-                    "accrued interest $%s); capping to the full balance",
-                    amount_usd,
-                    total_supply,
-                    principal_value,
-                    position.interest_accrued,
-                )
-            return _CloseResolution(
-                amount_usd=total_supply,
-                position_close_id=position.position_id,
-                interest_usd=position.interest_accrued,
-            )
-
-        # SUB-PRINCIPAL PARTIAL (amount <= principal): the withdrawn inflow
-        # comes out of principal only; accrued interest stays on the position
-        # and realizes when it eventually closes in full.
-        if amount_usd <= principal_value:
-            return _CloseResolution(amount_usd=amount_usd, position_reduce_id=position.position_id)
-
-        # BOUNDARY PARTIAL (principal < amount < total_supply): the withdraw
-        # takes ALL principal plus PART of the earned interest. Remove the
-        # principal in full and realize the withdrawn interest as POSITIVE PnL;
-        # the position stays open carrying the unwithdrawn interest remainder.
-        principal_tokens = {token: amt for token, amt in position.amounts.items() if amt > Decimal("0")}
-        if not principal_tokens:
-            # Interest-only position (0 principal): no principal token to reduce,
-            # so a withdraw that does not cover the full earned interest cannot
-            # be partially settled. Reject (zero state mutation) rather than
-            # full-closing it, which would credit the entire interest, not the
-            # requested amount.
-            return _CloseResolution(
-                amount_usd=amount_usd,
-                failure_reason=(
-                    f"WITHDRAW ${amount_usd} cannot partially settle an interest-only supply position "
-                    f"(0 principal, ${position.interest_accrued} accrued interest); "
-                    f"withdraw >= the accrued interest to close it"
-                ),
-            )
-        interest_paid = amount_usd - principal_value
-        return _CloseResolution(
+        return self._resolve_interest_bearing_close(
+            action="WITHDRAW",
             amount_usd=amount_usd,
-            position_reduce_id=position.position_id,
-            interest_usd=interest_paid,
-            reduce_amounts=principal_tokens,
+            position=position,
+            value=self._position_value_with_interest(position, market_state),
+            force_full=bool(getattr(intent, "withdraw_all", False)),
+            interest_sign=Decimal("1"),
+            matched_label="matched supply",
+            full_label="full balance",
+            interest_label="accrued interest",
+            interest_only_label="supply position",
+            threshold_action="withdraw",
         )
 
     def _resolve_repay_close(
@@ -3120,83 +3340,139 @@ class PnLBacktester:
                 failure_reason="REPAY matched no open borrow position to repay",
             )
 
-        # Price the debt principal the way every valuation path does
-        # (entry-price fallback when the market price is unavailable).
+        return self._resolve_interest_bearing_close(
+            action="REPAY",
+            amount_usd=amount_usd,
+            position=position,
+            value=self._position_value_with_interest(position, market_state),
+            force_full=bool(getattr(intent, "repay_full", False)) or bool(getattr(intent, "repay_all", False)),
+            interest_sign=Decimal("-1"),
+            matched_label="matched debt",
+            full_label="full debt",
+            interest_label="accrued borrow interest",
+            interest_only_label="borrow position",
+            threshold_action="repay",
+        )
+
+    def _position_value_with_interest(self, position: SimulatedPosition, market_state: MarketState) -> _PositionValue:
+        price = self._position_principal_price(position, market_state)
+        principal_usd = position.total_amount * price
+        return _PositionValue(
+            principal_usd=principal_usd,
+            total_usd=principal_usd + position.interest_accrued,
+        )
+
+    @staticmethod
+    def _position_principal_price(position: SimulatedPosition, market_state: MarketState) -> Decimal:
         try:
             price = market_state.get_price(position.primary_token)
         except KeyError:
             price = position.entry_price
-        if price <= Decimal("0"):
-            price = position.entry_price
-        debt_value = position.total_amount * price
-        total_debt = debt_value + position.interest_accrued
+        return price if price > Decimal("0") else position.entry_price
 
-        # Relative dust tolerance: an amount within Decimal round-trip error of
-        # the FULL debt (principal + accrued interest) is a full close, not a
-        # partial that strands dust debt. Thresholding on total_debt (not
-        # principal alone) is the VIB-5098 fix: a repay that covers principal
-        # but only part of the interest must NOT full-close and overspend the
-        # remaining interest (CodeRabbit, PR #2777).
-        full_close_floor = total_debt * (Decimal("1") - Decimal("1E-9"))
-        repay_full = bool(getattr(intent, "repay_full", False)) or bool(getattr(intent, "repay_all", False))
-
-        # FULL CLOSE: repay_full, an unresolvable / non-positive amount, or an
-        # amount that covers principal + all accrued interest within dust.
-        # Notional = principal + interest; the interest realizes as NEGATIVE PnL
-        # (the cost of having borrowed). NOTE: a zero-principal position is NOT
-        # force-closed here -- a repay >= its accrued interest hits this branch
-        # via full_close_floor (= the interest), while a smaller repay is
-        # rejected below rather than over-paying the whole interest (CodeRabbit
-        # PR #2777 round 2; the same over-spend, applied to an interest-only
-        # remainder left by a prior boundary partial).
-        if repay_full or amount_usd <= Decimal("0") or amount_usd >= full_close_floor:
-            if amount_usd > total_debt:
-                logger.warning(
-                    "REPAY amount $%s exceeds matched debt $%s (principal $%s + "
-                    "accrued borrow interest $%s); capping to the full debt",
-                    amount_usd,
-                    total_debt,
-                    debt_value,
-                    position.interest_accrued,
-                )
+    def _resolve_interest_bearing_close(
+        self,
+        *,
+        action: str,
+        amount_usd: Decimal,
+        position: SimulatedPosition,
+        value: _PositionValue,
+        force_full: bool,
+        interest_sign: Decimal,
+        matched_label: str,
+        full_label: str,
+        interest_label: str,
+        interest_only_label: str,
+        threshold_action: str,
+    ) -> _CloseResolution:
+        full_close_floor = value.total_usd * (Decimal("1") - Decimal("1E-9"))
+        if force_full or amount_usd <= Decimal("0") or amount_usd >= full_close_floor:
+            self._warn_if_close_amount_exceeds_full_value(
+                action,
+                amount_usd,
+                value,
+                matched_label,
+                interest_label,
+                full_label,
+                position.interest_accrued,
+            )
             return _CloseResolution(
-                amount_usd=total_debt,
+                amount_usd=value.total_usd,
                 position_close_id=position.position_id,
-                interest_usd=-position.interest_accrued,
+                interest_usd=interest_sign * position.interest_accrued,
             )
 
-        # SUB-PRINCIPAL PARTIAL (amount <= principal): the repaid outflow
-        # extinguishes principal only; accrued borrow interest stays on the
-        # position and realizes when it eventually closes in full.
-        if amount_usd <= debt_value:
+        if amount_usd <= value.principal_usd:
             return _CloseResolution(amount_usd=amount_usd, position_reduce_id=position.position_id)
 
-        # BOUNDARY PARTIAL (principal < amount < total_debt): the repay covers
-        # ALL principal plus PART of the accrued interest. Remove the principal
-        # in full and realize the covered interest as NEGATIVE PnL; the position
-        # stays open carrying the unpaid interest remainder (VIB-5098).
-        principal_tokens = {token: amt for token, amt in position.amounts.items() if amt > Decimal("0")}
+        return self._resolve_boundary_interest_partial(
+            action=action,
+            amount_usd=amount_usd,
+            position=position,
+            principal_usd=value.principal_usd,
+            interest_sign=interest_sign,
+            interest_only_label=interest_only_label,
+            interest_label=interest_label,
+            threshold_action=threshold_action,
+        )
+
+    @staticmethod
+    def _warn_if_close_amount_exceeds_full_value(
+        action: str,
+        amount_usd: Decimal,
+        value: _PositionValue,
+        matched_label: str,
+        interest_label: str,
+        full_label: str,
+        interest_accrued: Decimal,
+    ) -> None:
+        if amount_usd <= value.total_usd:
+            return
+        logger.warning(
+            "%s amount $%s exceeds %s $%s (principal $%s + %s $%s); capping to the %s",
+            action,
+            amount_usd,
+            matched_label,
+            value.total_usd,
+            value.principal_usd,
+            interest_label,
+            interest_accrued,
+            full_label,
+        )
+
+    def _resolve_boundary_interest_partial(
+        self,
+        *,
+        action: str,
+        amount_usd: Decimal,
+        position: SimulatedPosition,
+        principal_usd: Decimal,
+        interest_sign: Decimal,
+        interest_only_label: str,
+        interest_label: str,
+        threshold_action: str,
+    ) -> _CloseResolution:
+        principal_tokens = self._positive_position_amounts(position)
         if not principal_tokens:
-            # Interest-only position (0 principal): there is no principal token
-            # to reduce, so a repay that does not cover the full accrued interest
-            # cannot be partially settled through the principal-reduce path.
-            # Reject (zero state mutation) rather than full-closing it, which
-            # would move the entire interest, not the requested amount.
             return _CloseResolution(
                 amount_usd=amount_usd,
                 failure_reason=(
-                    f"REPAY ${amount_usd} cannot partially settle an interest-only borrow position "
-                    f"(0 principal, ${position.interest_accrued} accrued interest); "
-                    f"repay >= the accrued interest to close it"
+                    f"{action} ${amount_usd} cannot partially settle an interest-only {interest_only_label} "
+                    f"(0 principal, ${position.interest_accrued} {interest_label}); "
+                    f"{threshold_action} >= the accrued interest to close it"
                 ),
             )
-        interest_paid = amount_usd - debt_value
+        interest_paid = amount_usd - principal_usd
         return _CloseResolution(
             amount_usd=amount_usd,
             position_reduce_id=position.position_id,
-            interest_usd=-interest_paid,
+            interest_usd=interest_sign * interest_paid,
             reduce_amounts=principal_tokens,
         )
+
+    @staticmethod
+    def _positive_position_amounts(position: SimulatedPosition) -> dict[str, Decimal]:
+        return {token: amount for token, amount in position.amounts.items() if amount > Decimal("0")}
 
     def _resolve_perp_close(
         self,

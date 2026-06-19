@@ -28,6 +28,7 @@ from almanak.framework.backtesting.paper.config import (
     ForkLifecycle,
     PaperTraderConfig,
 )
+from almanak.framework.backtesting.paper.engine import PaperTrader
 from almanak.framework.backtesting.paper.models import PaperTrade
 
 # ---------------------------------------------------------------------------
@@ -64,15 +65,7 @@ def _make_fake_trader(
 ) -> SimpleNamespace:
     """Build a lightweight duck-typed trader for helper tests."""
     if config is None:
-        # Minimal config: tick_interval trivially small so asyncio.sleep is instant.
-        if fork_lifecycle is None:
-            fork_lifecycle = ForkLifecycle.ROLLING_RESET
-        config = PaperTraderConfig(
-            chain="arbitrum",
-            rpc_url="https://arb.example/rpc",
-            deployment_id="t",
-            tick_interval_seconds=0.001,
-            price_source="coingecko",
+        config = _make_paper_config(
             fork_lifecycle=fork_lifecycle,
             position_reconciler_enabled=position_reconciler_enabled,
         )
@@ -174,6 +167,23 @@ def _make_fake_trader(
     trader._calculate_portfolio_value = _calculate_portfolio_value
     trader._value_portfolio_rich = _value_portfolio_rich
     return trader
+
+
+def _make_paper_config(
+    *,
+    fork_lifecycle: ForkLifecycle | None,
+    position_reconciler_enabled: bool,
+) -> PaperTraderConfig:
+    # Minimal config: tick_interval trivially small so asyncio.sleep is instant.
+    return PaperTraderConfig(
+        chain="arbitrum",
+        rpc_url="https://arb.example/rpc",
+        deployment_id="t",
+        tick_interval_seconds=0.001,
+        price_source="coingecko",
+        fork_lifecycle=fork_lifecycle or ForkLifecycle.ROLLING_RESET,
+        position_reconciler_enabled=position_reconciler_enabled,
+    )
 
 
 class _Strategy:
@@ -351,6 +361,127 @@ class TestSetupSession:
         await _engine_helpers.setup_session(trader)
 
         assert order == ["fork", "orch", "valuer", "seed", "record"]
+
+
+# ---------------------------------------------------------------------------
+# PaperTrader.tick
+# ---------------------------------------------------------------------------
+
+
+class TestPaperTraderTick:
+    @pytest.mark.asyncio
+    async def test_returns_none_when_trader_is_not_running(self) -> None:
+        trader = _make_fake_trader(running=False)
+        trader._current_strategy = _Strategy()
+
+        result = await PaperTrader.tick(trader)
+
+        assert result is None
+        assert trader.calls["should_refresh_fork"] == 0
+        assert trader.calls["execute_tick"] == 0
+        assert trader._tick_count == 0
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_strategy_is_missing(self) -> None:
+        trader = _make_fake_trader(running=True)
+
+        result = await PaperTrader.tick(trader)
+
+        assert result is None
+        assert trader.calls["should_refresh_fork"] == 0
+        assert trader.calls["execute_tick"] == 0
+        assert trader._tick_count == 0
+
+    @pytest.mark.asyncio
+    async def test_rolling_tick_refreshes_executes_and_skips_reconciler(self) -> None:
+        trader = _make_fake_trader(
+            running=True,
+            should_refresh=True,
+            fork_lifecycle=ForkLifecycle.ROLLING_RESET,
+            position_reconciler_enabled=True,
+        )
+        strategy = _Strategy()
+        trader._current_strategy = strategy
+        trade = object()
+
+        async def _execute_tick(strategy_arg: Any) -> object:
+            trader.calls["execute_tick"] += 1
+            assert strategy_arg is strategy
+            return trade
+
+        trader._execute_tick = _execute_tick
+
+        result = await PaperTrader.tick(trader)
+
+        assert result is trade
+        assert trader._tick_count == 1
+        assert trader.calls["should_refresh_fork"] == 1
+        assert trader.calls["refresh_fork"] == 1
+        assert trader.calls["advance_persistent_fork"] == 0
+        assert trader.calls["run_position_reconciler"] == 0
+
+    @pytest.mark.asyncio
+    async def test_persistent_first_tick_reconciles_without_advancing(self) -> None:
+        trader = _make_fake_trader(
+            running=True,
+            fork_lifecycle=ForkLifecycle.PERSISTENT,
+            position_reconciler_enabled=True,
+        )
+        trader._current_strategy = _Strategy()
+
+        await PaperTrader.tick(trader)
+
+        assert trader._tick_count == 1
+        assert trader.calls["advance_persistent_fork"] == 0
+        assert trader.calls["execute_tick"] == 1
+        assert trader.calls["run_position_reconciler"] == 1
+
+    @pytest.mark.asyncio
+    async def test_persistent_later_tick_advances_before_execute_and_reconcile(self) -> None:
+        trader = _make_fake_trader(
+            running=True,
+            tick_count=1,
+            fork_lifecycle=ForkLifecycle.PERSISTENT,
+            position_reconciler_enabled=True,
+        )
+        trader._current_strategy = _Strategy()
+        order: list[str] = []
+
+        async def _advance_persistent_fork() -> None:
+            trader.calls["advance_persistent_fork"] += 1
+            order.append("advance")
+
+        async def _execute_tick(strategy: Any) -> None:
+            trader.calls["execute_tick"] += 1
+            order.append("execute")
+
+        async def _run_position_reconciler() -> None:
+            trader.calls["run_position_reconciler"] += 1
+            order.append("reconcile")
+
+        trader._advance_persistent_fork = _advance_persistent_fork
+        trader._execute_tick = _execute_tick
+        trader._run_position_reconciler = _run_position_reconciler
+
+        await PaperTrader.tick(trader)
+
+        assert trader._tick_count == 2
+        assert order == ["advance", "execute", "reconcile"]
+
+    @pytest.mark.asyncio
+    async def test_reconciler_disabled_skips_persistent_reconciliation(self) -> None:
+        trader = _make_fake_trader(
+            running=True,
+            fork_lifecycle=ForkLifecycle.PERSISTENT,
+            position_reconciler_enabled=False,
+        )
+        trader._current_strategy = _Strategy()
+
+        await PaperTrader.tick(trader)
+
+        assert trader._tick_count == 1
+        assert trader.calls["execute_tick"] == 1
+        assert trader.calls["run_position_reconciler"] == 0
 
 
 # ---------------------------------------------------------------------------

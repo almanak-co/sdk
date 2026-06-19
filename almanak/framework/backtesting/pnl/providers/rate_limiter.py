@@ -131,6 +131,14 @@ class RateLimiterStats:
         }
 
 
+@dataclass(frozen=True)
+class _RetryBackoffConfig:
+    max_retries: int
+    base_delay_seconds: float
+    max_delay_seconds: float
+    is_rate_limit_error: Callable[[Exception], bool]
+
+
 class TokenBucketRateLimiter:
     """Token bucket rate limiter for controlling API request rates.
 
@@ -441,73 +449,71 @@ class TokenBucketRateLimiter:
 
             result = await limiter.retry_with_backoff(fetch_data)
         """
-        max_retries = max_retries if max_retries is not None else self.DEFAULT_MAX_RETRIES
-        base_delay = base_delay_seconds if base_delay_seconds is not None else self.DEFAULT_BASE_DELAY_SECONDS
-        max_delay = max_delay_seconds if max_delay_seconds is not None else self.DEFAULT_MAX_DELAY_SECONDS
+        config = self._retry_backoff_config(
+            max_retries=max_retries,
+            base_delay_seconds=base_delay_seconds,
+            max_delay_seconds=max_delay_seconds,
+            is_rate_limit_error=is_rate_limit_error,
+        )
 
-        def default_is_rate_limit(e: Exception) -> bool:
-            """Check if exception indicates a rate limit error."""
-            error_str = str(e).lower()
-            return "429" in error_str or "rate limit" in error_str or "too many requests" in error_str
-
-        is_rate_limit = is_rate_limit_error if is_rate_limit_error is not None else default_is_rate_limit
-
-        last_exception: Exception | None = None
-
-        for attempt in range(max_retries + 1):
+        for attempt in range(config.max_retries + 1):
             try:
-                # Acquire a token before making the request
                 await self.acquire()
-
-                # Execute the function
                 result = await func()
-
-                # Success! Update stats if this was a retry
-                if attempt > 0:
-                    self._stats.retry_successes += 1
-                    logger.info(
-                        "Request succeeded on retry attempt %d",
-                        attempt,
-                    )
-
+                self._record_retry_success(attempt)
                 return result
-
             except Exception as e:
-                last_exception = e
                 self._stats.retry_attempts += 1
-
-                if attempt >= max_retries:
-                    logger.error(
-                        "All %d retry attempts exhausted. Last error: %s",
-                        max_retries,
-                        str(e),
-                    )
+                if _retry_exhausted(attempt, config.max_retries):
+                    _log_retries_exhausted(config.max_retries, e)
                     raise
+                await self._sleep_before_retry(e, attempt, config)
 
-                # Check if this is a rate limit error
-                if is_rate_limit(e):
-                    await self.on_rate_limit_response()
-
-                # Calculate exponential backoff with jitter
-                delay = min(
-                    max_delay,
-                    base_delay * (2**attempt) + random.uniform(0, 1),
-                )
-
-                logger.warning(
-                    "Request failed (attempt %d/%d): %s. Retrying in %.2fs",
-                    attempt + 1,
-                    max_retries + 1,
-                    str(e),
-                    delay,
-                )
-
-                await asyncio.sleep(delay)
-
-        # This should never be reached, but satisfy type checker
-        if last_exception:
-            raise last_exception
         raise RuntimeError("Unexpected state in retry_with_backoff")
+
+    def _retry_backoff_config(
+        self,
+        *,
+        max_retries: int | None,
+        base_delay_seconds: float | None,
+        max_delay_seconds: float | None,
+        is_rate_limit_error: Callable[[Exception], bool] | None,
+    ) -> _RetryBackoffConfig:
+        config = _RetryBackoffConfig(
+            max_retries=max_retries if max_retries is not None else self.DEFAULT_MAX_RETRIES,
+            base_delay_seconds=(
+                base_delay_seconds if base_delay_seconds is not None else self.DEFAULT_BASE_DELAY_SECONDS
+            ),
+            max_delay_seconds=max_delay_seconds if max_delay_seconds is not None else self.DEFAULT_MAX_DELAY_SECONDS,
+            is_rate_limit_error=is_rate_limit_error or _default_is_rate_limit_error,
+        )
+        _validate_retry_backoff_config(config)
+        return config
+
+    def _record_retry_success(self, attempt: int) -> None:
+        if attempt <= 0:
+            return
+        self._stats.retry_successes += 1
+        logger.info("Request succeeded on retry attempt %d", attempt)
+
+    async def _sleep_before_retry(
+        self,
+        exc: Exception,
+        attempt: int,
+        config: _RetryBackoffConfig,
+    ) -> None:
+        if config.is_rate_limit_error(exc):
+            await self.on_rate_limit_response()
+
+        delay = _backoff_delay(attempt, config)
+        logger.warning(
+            "Request failed (attempt %d/%d): %s. Retrying in %.2fs",
+            attempt + 1,
+            config.max_retries + 1,
+            str(exc),
+            delay,
+        )
+        await asyncio.sleep(delay)
 
     def reset_stats(self) -> None:
         """Reset statistics to zero."""
@@ -620,6 +626,40 @@ class TokenBucketRateLimiter:
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         """Async context manager exit: nothing to do."""
         pass
+
+
+def _default_is_rate_limit_error(exc: Exception) -> bool:
+    """Check if exception indicates a rate limit error."""
+    error_str = str(exc).lower()
+    return "429" in error_str or "rate limit" in error_str or "too many requests" in error_str
+
+
+def _validate_retry_backoff_config(config: _RetryBackoffConfig) -> None:
+    if config.max_retries < 0:
+        raise ValueError("max_retries must be non-negative")
+    if config.base_delay_seconds < 0:
+        raise ValueError("base_delay_seconds cannot be negative")
+    if config.max_delay_seconds <= 0:
+        raise ValueError("max_delay_seconds must be positive")
+
+
+def _retry_exhausted(attempt: int, max_retries: int) -> bool:
+    return attempt >= max_retries
+
+
+def _log_retries_exhausted(max_retries: int, exc: Exception) -> None:
+    logger.error(
+        "All %d retry attempts exhausted. Last error: %s",
+        max_retries,
+        str(exc),
+    )
+
+
+def _backoff_delay(attempt: int, config: _RetryBackoffConfig) -> float:
+    return min(
+        config.max_delay_seconds,
+        config.base_delay_seconds * (2**attempt) + random.uniform(0, 1),
+    )
 
 
 # Convenience function to create a rate limiter for CoinGecko

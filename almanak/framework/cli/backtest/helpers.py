@@ -564,6 +564,19 @@ def is_process_running(pid: int) -> bool:
         return False
 
 
+def _load_paper_session_file(state_file: Path) -> dict[str, Any] | None:
+    try:
+        with open(state_file) as f:
+            state = json.load(f)
+    except Exception:
+        return None
+
+    pid = state.get("pid")
+    if pid and not is_process_running(pid):
+        state["status"] = "stopped (process not found)"
+    return state
+
+
 def list_paper_sessions() -> list[dict[str, Any]]:
     """List all paper trading sessions.
 
@@ -575,16 +588,9 @@ def list_paper_sessions() -> list[dict[str, Any]]:
 
     sessions = []
     for state_file in PAPER_STATE_DIR.glob("*.json"):
-        try:
-            with open(state_file) as f:
-                state = json.load(f)
-                # Check if process is still running
-                pid = state.get("pid")
-                if pid and not is_process_running(pid):
-                    state["status"] = "stopped (process not found)"
-                sessions.append(state)
-        except Exception:
-            pass
+        state = _load_paper_session_file(state_file)
+        if state is not None:
+            sessions.append(state)
 
     return sessions
 

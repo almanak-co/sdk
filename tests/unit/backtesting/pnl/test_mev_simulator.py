@@ -324,8 +324,6 @@ class TestTokenVulnerability:
     def test_case_insensitive(self) -> None:
         """Token symbols should be case insensitive."""
         simulator = MEVSimulator()
-        # Note: case normalization happens in simulate_mev_cost, not _calculate_token_vulnerability
-        # So we test through simulate_mev_cost
         result1 = simulator.simulate_mev_cost(
             trade_amount_usd=Decimal("10000"),
             token_in="usdc",
@@ -337,6 +335,29 @@ class TestTokenVulnerability:
             token_out="WETH",
         )
         assert result1.token_vulnerability_factor == result2.token_vulnerability_factor
+
+    def test_simulation_trims_token_symbols_before_classification(self) -> None:
+        """Whitespace around token symbols should not change MEV risk classification."""
+        simulator = MEVSimulator()
+
+        clean = simulator.simulate_mev_cost(
+            trade_amount_usd=Decimal("10000"),
+            token_in="USDC",
+            token_out="WETH",
+        )
+        padded = simulator.simulate_mev_cost(
+            trade_amount_usd=Decimal("10000"),
+            token_in=" usdc ",
+            token_out=" weth ",
+        )
+
+        assert padded.token_vulnerability_factor == clean.token_vulnerability_factor
+        assert padded.details["token_in"] == "USDC"
+        assert padded.details["token_out"] == "WETH"
+
+    def test_get_token_vulnerability_trims_token_symbols(self) -> None:
+        """The public helper should not overstate stable-stable risk due to whitespace."""
+        assert get_token_vulnerability(" usdc ", " dai ") == "low"
 
 
 class TestTokenSets:

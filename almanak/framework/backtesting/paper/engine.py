@@ -122,7 +122,7 @@ from almanak.framework.execution.orchestrator import (
     ExecutionResult,
 )
 from almanak.framework.execution.result_enricher import enrich_result
-from almanak.framework.market import MarketSnapshot
+from almanak.framework.market import MarketSnapshot, TokenBalance
 from almanak.framework.models.reproduction_bundle import ActionBundle, TransactionReceipt
 from almanak.gateway.data.price import CoinGeckoPriceSource, PriceAggregator
 from almanak.gateway.data.price.binance import BinancePriceSource
@@ -558,10 +558,140 @@ PaperTradeEventCallback = Callable[[str, dict[str, Any]], None]
 # =============================================================================
 
 
-# crap-allowlist: VIB-4062 — pre-existing complexity in fork-snapshot bridge.
-# Touched only to switch ``rsi_calculator`` kwarg → ``rsi_provider`` and to
-# replace dict balance storage with ``TokenBalance``; refactor / coverage
-# improvements are tracked separately.
+def _normalized_snapshot_prices(token_prices: dict[str, Decimal] | None) -> dict[str, Decimal]:
+    if not token_prices:
+        return {}
+    return {token.upper(): price for token, price in token_prices.items()}
+
+
+def _snapshot_price_for_token(token: str, normalized_prices: dict[str, Decimal]) -> Decimal | None:
+    token_upper = token.upper()
+    if token_upper in normalized_prices:
+        return normalized_prices[token_upper]
+    return None
+
+
+def _cache_snapshot_balance(
+    snapshot: MarketSnapshot,
+    *,
+    token: str,
+    amount: Decimal,
+    price: Decimal | None,
+) -> None:
+    if price is not None and price > Decimal("0"):
+        balance_usd = amount * price
+        token_balance = TokenBalance(symbol=token, balance=amount, balance_usd=balance_usd)
+        _seed_snapshot_balance(snapshot, token, token_balance, usd_measured=True)
+        logger.debug(f"Cached balance: {token} = {amount} (${balance_usd:.2f})")
+        return
+
+    token_balance = TokenBalance(symbol=token, balance=amount, balance_usd=Decimal("0"))
+    _seed_snapshot_balance(snapshot, token, token_balance, usd_measured=False)
+    logger.debug("Cached balance: %s = %s (USD unmeasured)", token, amount)
+
+
+def _seed_snapshot_balance(
+    snapshot: MarketSnapshot,
+    token: str,
+    balance: TokenBalance,
+    *,
+    usd_measured: bool,
+) -> None:
+    if usd_measured:
+        snapshot.seed_balance(token, balance)
+        return
+
+    snapshot.seed_balance_usd_unmeasured(token, balance)
+
+
+def _populate_tracker_balances(
+    snapshot: MarketSnapshot,
+    portfolio_tracker: PaperPortfolioTracker | None,
+    token_prices: dict[str, Decimal] | None,
+) -> None:
+    if portfolio_tracker is None:
+        return
+
+    normalized_prices = _normalized_snapshot_prices(token_prices)
+    for token, amount in portfolio_tracker.current_balances.items():
+        price = _snapshot_price_for_token(token, normalized_prices)
+        if price is None or price <= Decimal("0"):
+            logger.debug("Caching snapshot balance for %s with unmeasured USD value", token)
+            price = None
+        _cache_snapshot_balance(snapshot, token=token, amount=amount, price=price)
+
+
+def _native_wrapped_pair(chain: str) -> tuple[str, str] | None:
+    chain_lower = chain.lower() if isinstance(chain, str) else str(chain).lower()
+    descriptor = ChainRegistry.try_resolve(chain_lower)
+    chain_native = descriptor.native.symbol if descriptor is not None else None
+    if not chain_native:
+        return None
+
+    from almanak.framework.data.models import _NATIVE_TO_WRAPPED
+
+    chain_wrapped = _NATIVE_TO_WRAPPED.get(chain_native)
+    if not chain_wrapped:
+        return None
+    return chain_native, chain_wrapped
+
+
+def _snapshot_balance_or_none(snapshot: MarketSnapshot, token: str) -> TokenBalance | None:
+    try:
+        return snapshot.balance(token)
+    except ValueError:
+        return None
+
+
+def _balance_usd_is_unmeasured(snapshot: MarketSnapshot, token: str) -> bool:
+    return f"{token}@{snapshot.chain}" in snapshot._balance_usd_unmeasured or token in snapshot._balance_usd_unmeasured
+
+
+def _copy_snapshot_balance_alias(
+    snapshot: MarketSnapshot,
+    *,
+    source_symbol: str,
+    source_balance: TokenBalance,
+    alias_symbol: str,
+) -> None:
+    alias_balance = TokenBalance(
+        symbol=alias_symbol,
+        balance=source_balance.balance,
+        balance_usd=source_balance.balance_usd,
+    )
+    _seed_snapshot_balance(
+        snapshot,
+        alias_symbol,
+        alias_balance,
+        usd_measured=not _balance_usd_is_unmeasured(snapshot, source_symbol),
+    )
+
+
+def _add_native_wrapped_balance_aliases(snapshot: MarketSnapshot, chain: str) -> None:
+    pair = _native_wrapped_pair(chain)
+    if pair is None:
+        return
+
+    native_symbol, wrapped_symbol = pair
+    native_balance = _snapshot_balance_or_none(snapshot, native_symbol)
+    wrapped_balance = _snapshot_balance_or_none(snapshot, wrapped_symbol)
+
+    if native_balance is not None and wrapped_balance is None:
+        _copy_snapshot_balance_alias(
+            snapshot,
+            source_symbol=native_symbol,
+            source_balance=native_balance,
+            alias_symbol=wrapped_symbol,
+        )
+    elif wrapped_balance is not None and native_balance is None:
+        _copy_snapshot_balance_alias(
+            snapshot,
+            source_symbol=wrapped_symbol,
+            source_balance=wrapped_balance,
+            alias_symbol=native_symbol,
+        )
+
+
 async def create_market_snapshot_from_fork(
     fork_manager: RollingForkManager,
     chain: str,
@@ -605,61 +735,8 @@ async def create_market_snapshot_from_fork(
         snapshot._fork_block = fork_manager.current_block
         snapshot._fork_rpc_url = fork_manager.get_rpc_url()
 
-    # If we have a portfolio tracker, use its balances
-    if portfolio_tracker:
-        # Stablecoins known to be $1
-        stables = {"USDC", "USDT", "DAI", "FRAX", "LUSD", "BUSD", "USD", "USDC.E"}
-
-        for token, amount in portfolio_tracker.current_balances.items():
-            # Get price from provided prices dict, or use fallback logic
-            token_upper = token.upper()
-            if token_prices and token_upper in token_prices:
-                price = token_prices[token_upper]
-            elif token_upper in stables:
-                price = Decimal("1")
-            else:
-                # Fallback for unknown tokens without price data
-                price = Decimal("1")
-
-            balance_usd = amount * price
-
-            # Populate _balance_cache so market.balance() works without a provider.
-            # Use TokenBalance for full strategy compat (numeric comparisons, .balance_usd).
-            from almanak.framework.market import TokenBalance
-
-            tb = TokenBalance(symbol=token, balance=amount, balance_usd=balance_usd)
-            snapshot._balance_cache[token] = tb
-            # _balances is the pre-populated map consumed by `balance()` first
-            # (chain-agnostic); keep it in sync.
-            snapshot._balances[token] = tb
-            logger.debug(f"Cached balance: {token} = {amount} (${balance_usd:.2f})")
-
-        # Cross-populate native <-> wrapped alias for the snapshot's chain only.
-        # Strategies may query market.balance("WETH") when the engine funded "ETH" (or vice versa).
-        from almanak.core.chains import ChainRegistry
-
-        chain_lower = chain.lower() if isinstance(chain, str) else str(chain).lower()
-        descriptor = ChainRegistry.try_resolve(chain_lower)
-        chain_native = descriptor.native.symbol if descriptor is not None else None
-        if chain_native:
-            from almanak.framework.data.models import _NATIVE_TO_WRAPPED
-
-            chain_wrapped = _NATIVE_TO_WRAPPED.get(chain_native)
-            if chain_wrapped:
-                if chain_native in snapshot._balance_cache and chain_wrapped not in snapshot._balance_cache:
-                    src_bal: TokenBalance = snapshot._balance_cache[chain_native]
-                    alias_bal = TokenBalance(
-                        symbol=chain_wrapped, balance=src_bal.balance, balance_usd=src_bal.balance_usd
-                    )
-                    snapshot._balance_cache[chain_wrapped] = alias_bal
-                    snapshot._balances[chain_wrapped] = alias_bal
-                elif chain_wrapped in snapshot._balance_cache and chain_native not in snapshot._balance_cache:
-                    src_bal = snapshot._balance_cache[chain_wrapped]
-                    alias_bal = TokenBalance(
-                        symbol=chain_native, balance=src_bal.balance, balance_usd=src_bal.balance_usd
-                    )
-                    snapshot._balance_cache[chain_native] = alias_bal
-                    snapshot._balances[chain_native] = alias_bal
+    _populate_tracker_balances(snapshot, portfolio_tracker, token_prices)
+    _add_native_wrapped_balance_aliases(snapshot, chain)
     return snapshot
 
 
@@ -798,6 +875,7 @@ class PaperTrader:
     _tick_count: int = field(default=0, init=False, repr=False)
     _price_aggregator: PriceAggregator | None = field(default=None, init=False, repr=False)
     _price_cache: dict[str, Decimal] = field(default_factory=dict, init=False, repr=False)
+    _price_cache_sources: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _price_source_order: list[str] = field(default_factory=list, init=False, repr=False)
     _backtest_id: str | None = field(default=None, init=False, repr=False)
     _chainlink_provider: ChainlinkDataProvider | None = field(default=None, init=False, repr=False)
@@ -919,6 +997,55 @@ class PaperTrader:
         except Exception:
             logger.debug("[%s] Failed to seed initial market snapshot", self._backtest_id, exc_info=True)
 
+    def _rich_valuation_context(self) -> tuple[Any, Any] | None:
+        if not self._valuer_available or self._portfolio_valuer is None:
+            return None
+
+        strategy = self._current_strategy
+        market = self._last_market_snapshot
+        if strategy is None or market is None:
+            return None
+
+        from almanak.framework.valuation.portfolio_valuer import StrategyLike
+
+        if not isinstance(strategy, StrategyLike):
+            return None
+        return strategy, market
+
+    def _rich_snapshot_values(self, snapshot: Any) -> tuple[Decimal, Decimal, Decimal] | None:
+        if snapshot.value_confidence.value == "UNAVAILABLE":
+            return None
+        return snapshot.total_value_usd, snapshot.available_cash_usd, snapshot.position_value_usd
+
+    def _should_add_native_eth_value(
+        self,
+        total: Decimal,
+        eth_value: Decimal,
+        simple_total: Decimal,
+    ) -> bool:
+        return simple_total > 0 and abs(total + eth_value - simple_total) < abs(total - simple_total)
+
+    def _native_eth_value_adjustment(self, total: Decimal) -> Decimal:
+        eth_balance = self.portfolio_tracker.current_balances.get("ETH", Decimal("0"))
+        if eth_balance <= 0:
+            return Decimal("0")
+
+        eth_price = self._get_token_price_sync("ETH")
+        eth_value = eth_balance * eth_price
+        simple_total = self._calculate_portfolio_value()
+        if self._should_add_native_eth_value(total, eth_value, simple_total):
+            return eth_value
+        return Decimal("0")
+
+    def _adjust_rich_values_for_native_eth(self, total: Decimal, spot: Decimal) -> tuple[Decimal, Decimal]:
+        try:
+            eth_value = self._native_eth_value_adjustment(total)
+        except Exception:
+            logger.debug("[%s] ETH adjustment in rich valuation skipped", self._backtest_id, exc_info=True)
+            return total, spot
+
+        return total + eth_value, spot + eth_value
+
     def _value_portfolio_rich(self) -> tuple[Decimal, Decimal, Decimal] | None:
         """Calculate portfolio value using PortfolioValuer (LP + lending aware).
 
@@ -928,46 +1055,19 @@ class PaperTrader:
         VIB-2550: Also accounts for native ETH balance which PortfolioValuer
         may miss since it only tracks tokens from _get_tracked_tokens().
         """
-        if not self._valuer_available or self._portfolio_valuer is None:
+        context = self._rich_valuation_context()
+        if context is None or self._portfolio_valuer is None:
             return None
 
-        strategy = self._current_strategy
-        market = self._last_market_snapshot
-        if strategy is None or market is None:
-            return None
-
-        # PortfolioValuer requires StrategyLike (deployment_id, chain, _get_tracked_tokens)
-        from almanak.framework.valuation.portfolio_valuer import StrategyLike
-
-        if not isinstance(strategy, StrategyLike):
-            return None
-
+        strategy, market = context
         try:
             snapshot = self._portfolio_valuer.value(strategy, market, iteration_number=self._tick_count)
-            if snapshot.value_confidence.value == "UNAVAILABLE":
+            values = self._rich_snapshot_values(snapshot)
+            if values is None:
                 return None
 
-            total = snapshot.total_value_usd
-            spot = snapshot.available_cash_usd
-            positions = snapshot.position_value_usd
-
-            # VIB-2550: Add native ETH value if the valuer didn't include it.
-            # PortfolioValuer tracks strategy tokens but may skip native ETH
-            # used for gas. Check if ETH is in portfolio but not in the snapshot.
-            try:
-                eth_balance = self.portfolio_tracker.current_balances.get("ETH", Decimal("0"))
-                if eth_balance > 0:
-                    eth_price = self._get_token_price_sync("ETH")
-                    eth_value = eth_balance * eth_price
-                    # Only add if the valuer's total is missing ETH value.
-                    # Heuristic: if valuer total + ETH value ~ simple total, ETH was missing.
-                    simple_total = self._calculate_portfolio_value()
-                    if simple_total > 0 and abs(total + eth_value - simple_total) < abs(total - simple_total):
-                        total += eth_value
-                        spot += eth_value
-            except Exception:
-                logger.debug("[%s] ETH adjustment in rich valuation skipped", self._backtest_id, exc_info=True)
-
+            total, spot, positions = values
+            total, spot = self._adjust_rich_values_for_native_eth(total, spot)
             return (total, spot, positions)
         except Exception:
             logger.debug("[%s] Portfolio valuer failed, falling back to simple", self._backtest_id, exc_info=True)
@@ -1124,38 +1224,12 @@ class PaperTrader:
         return self._running
 
     async def tick(self) -> PaperTrade | None:
-        """Execute one trading cycle (tick) manually.
+        """Execute one manual trading cycle for an active paper session.
 
-        This method allows manual tick execution for testing or custom
-        integration. It performs one complete trading cycle:
-
-        1. Optionally resets fork to latest block (based on config)
-        2. Creates MarketSnapshot from current fork state
-        3. Calls strategy.decide(snapshot) to get intent
-        4. If intent returned (non-HOLD), executes via orchestrator on fork
-        5. Records trade result in portfolio_tracker
-        6. Handles and records errors gracefully
-
-        Prerequisites:
-            - PaperTrader must be initialized (call start() or run() first)
-            - A strategy must be set via _current_strategy
-
-        Returns:
-            PaperTrade if a trade was executed successfully, None otherwise
-            (including HOLD decisions, errors, or no strategy set)
-
-        Example:
-            # Manual tick control
-            trader = PaperTrader(fork_manager, portfolio_tracker, config)
-            await trader._initialize_fork()
-            await trader._initialize_orchestrator()
-            trader._current_strategy = my_strategy
-            trader._running = True
-
-            # Execute single tick
-            trade = await trader.tick()
-            if trade:
-                print(f"Trade executed: {trade.tx_hash}")
+        Returns the emitted ``PaperTrade`` when execution produces one, or
+        ``None`` for stopped sessions, missing strategies, HOLDs, or
+        non-fatal tick errors. Fatal tick errors emit an ERROR event, stop the
+        session, and are re-raised.
         """
         if not self._running:
             logger.warning(f"[{self._backtest_id}] tick() called but PaperTrader is not running")
@@ -1165,19 +1239,15 @@ class PaperTrader:
             logger.warning(f"[{self._backtest_id}] tick() called but no strategy is set")
             return None
 
-        # Check if fork needs refresh before tick
         if await self._should_refresh_fork():
             await self._refresh_fork()
 
-        # For persistent forks: advance time and poke protocols before tick
         if self.config.fork_lifecycle == ForkLifecycle.PERSISTENT and self._tick_count > 0:
             await self._advance_persistent_fork()
 
-        # Execute the tick
         result = await self._execute_tick(self._current_strategy)
         self._tick_count += 1
 
-        # For persistent forks: run reconciler after tick to detect divergence
         if self.config.position_reconciler_enabled and self.config.fork_lifecycle == ForkLifecycle.PERSISTENT:
             await self._run_position_reconciler()
         elif self.config.position_reconciler_enabled:
@@ -1456,6 +1526,88 @@ class PaperTrader:
         if use_initial and token_balances:
             await self._validate_bootstrap(wallet_address, token_balances)
 
+    @staticmethod
+    def _bootstrap_raw_token_address(token_key: str) -> str | None:
+        if isinstance(token_key, str) and token_key.startswith(("0x", "0X")) and len(token_key) == 42:
+            return token_key.lower()
+        return None
+
+    def _bootstrap_resolved_token_address(self, token_key: str, resolver: Any) -> str | None:
+        try:
+            resolved = resolver.resolve(token_key, self.config.chain)
+            return resolved.address
+        except Exception as exc:
+            logger.warning(
+                "[%s] Could not resolve bootstrap token %s on %s: %s",
+                self._backtest_id,
+                token_key,
+                self.config.chain,
+                exc,
+            )
+            return None
+
+    def _bootstrap_funding_table_address(self, token_key: str) -> str | None:
+        from almanak.framework.anvil.fork_manager import TOKEN_ADDRESSES
+
+        chain_tokens = TOKEN_ADDRESSES.get(self.config.chain, {})
+        chain_tokens_ci = {k.lower(): v for k, v in chain_tokens.items()}
+        return chain_tokens_ci.get(token_key.lower())
+
+    def _bootstrap_token_address(self, token_key: str, resolver: Any) -> str | None:
+        raw_address = self._bootstrap_raw_token_address(token_key)
+        if raw_address:
+            return raw_address
+
+        resolved_address = self._bootstrap_resolved_token_address(token_key, resolver)
+        if resolved_address:
+            return resolved_address
+
+        return self._bootstrap_funding_table_address(token_key)
+
+    async def _bootstrap_token_missing(self, token_key: str, token_address: str, wallet_address: str) -> bool:
+        try:
+            actual = await self.fork_manager._get_token_balance(token_address, wallet_address)
+            return actual == 0
+        except Exception:
+            logger.warning(f"[{self._backtest_id}] Could not verify balance for {token_key}")
+            return False
+
+    async def _bootstrap_missing_tokens(
+        self,
+        wallet_address: str,
+        requested_tokens: dict[str, Decimal],
+        resolver: Any,
+    ) -> list[str]:
+        missing: list[str] = []
+        for token_key, requested_amount in requested_tokens.items():
+            if requested_amount <= Decimal("0"):
+                continue
+
+            token_address = self._bootstrap_token_address(token_key, resolver)
+            if not token_address:
+                logger.warning(
+                    "[%s] Could not verify bootstrap funding for unresolved token %s", self._backtest_id, token_key
+                )
+                if self.config.strict_bootstrap:
+                    missing.append(token_key)
+                continue
+
+            if await self._bootstrap_token_missing(token_key, token_address, wallet_address):
+                missing.append(token_key)
+        return missing
+
+    def _handle_missing_bootstrap_tokens(self, missing: list[str]) -> None:
+        if not missing:
+            return
+
+        msg = (
+            f"[{self._backtest_id}] Bootstrap validation: tokens with ZERO balance "
+            f"after funding: {missing}. Check anvil_funding config and token addresses."
+        )
+        logger.error(msg)
+        if self.config.strict_bootstrap:
+            raise RuntimeError(msg)
+
     async def _validate_bootstrap(self, wallet_address: str, requested_tokens: dict[str, Decimal]) -> None:
         """Validate that the wallet was funded correctly after bootstrap.
 
@@ -1468,47 +1620,10 @@ class PaperTrader:
             requested_tokens: Dict of token_key -> requested_amount
         """
         from almanak.framework.data.tokens import get_token_resolver
-        from almanak.framework.data.tokens.exceptions import TokenNotFoundError
 
         resolver = get_token_resolver()
-        missing: list[str] = []
-
-        for token_key, _requested_amount in requested_tokens.items():
-            # Resolve token address for balance check
-            token_address: str | None = None
-            is_raw_address = isinstance(token_key, str) and token_key.startswith(("0x", "0X")) and len(token_key) == 42
-            if is_raw_address:
-                token_address = token_key.lower()
-            else:
-                try:
-                    resolved = resolver.resolve(token_key, self.config.chain)
-                    token_address = resolved.address
-                except TokenNotFoundError:
-                    # Fall back to Anvil funding tables (same lookup fund_tokens uses)
-                    from almanak.framework.anvil.fork_manager import TOKEN_ADDRESSES
-
-                    chain_tokens = TOKEN_ADDRESSES.get(self.config.chain, {})
-                    chain_tokens_ci = {k.lower(): v for k, v in chain_tokens.items()}
-                    token_address = chain_tokens_ci.get(token_key.lower())
-
-            if not token_address:
-                continue  # can't verify — already logged by fund_tokens
-
-            try:
-                actual = await self.fork_manager._get_token_balance(token_address, wallet_address)
-                if actual == 0:
-                    missing.append(token_key)
-            except Exception:
-                logger.warning(f"[{self._backtest_id}] Could not verify balance for {token_key}")
-
-        if missing:
-            msg = (
-                f"[{self._backtest_id}] Bootstrap validation: tokens with ZERO balance "
-                f"after funding: {missing}. Check anvil_funding config and token addresses."
-            )
-            logger.error(msg)
-            if self.config.strict_bootstrap:
-                raise RuntimeError(msg)
+        missing = await self._bootstrap_missing_tokens(wallet_address, requested_tokens, resolver)
+        self._handle_missing_bootstrap_tokens(missing)
 
     async def _initialize_orchestrator(self) -> None:
         """Initialize the execution orchestrator with fork connection."""
@@ -1585,11 +1700,171 @@ class PaperTrader:
         self._valuer_available = False
         self._last_market_snapshot = None
 
-    # crap-allowlist: VIB-4062 — pre-existing complexity in tick executor.
-    # Touched only to switch the canonical RSI cache key shape from string to
-    # ``(token, timeframe, period)`` tuple; refactor + coverage uplift is
-    # outside this PR's scope.
-    async def _execute_tick(self, strategy: PaperTradeableStrategy) -> PaperTrade | None:  # noqa: C901
+    async def _ensure_tick_fork_ready(self) -> bool:
+        if self.fork_manager.is_running:
+            self._ticks_with_fork += 1
+            return True
+
+        logger.warning(f"[{self._backtest_id}] Fork not running, attempting recovery...")
+        recovered = await self.fork_manager.reset_to_latest()
+        if not recovered:
+            logger.error(f"[{self._backtest_id}] Fork recovery failed, skipping tick")
+            return False
+
+        await self._initialize_orchestrator()
+        await self._sync_wallet_to_fork()
+        self._ticks_with_fork += 1
+        logger.info(f"[{self._backtest_id}] Fork recovered successfully")
+        return True
+
+    async def _create_tick_snapshot(
+        self,
+        wallet_address: str,
+        token_prices: dict[str, Decimal],
+    ) -> MarketSnapshot:
+        logger.info(f"[{self._backtest_id}] Creating market snapshot...")
+        snapshot = await create_market_snapshot_from_fork(
+            fork_manager=self.fork_manager,
+            chain=self.config.chain,
+            wallet_address=wallet_address,
+            portfolio_tracker=self.portfolio_tracker,
+            token_prices=token_prices,
+            price_oracle=self._price_aggregator,
+            rsi_calculator=self._rsi_calculator,
+        )
+        self._last_market_snapshot = snapshot
+        return snapshot
+
+    async def _precompute_tick_indicators(
+        self,
+        snapshot: MarketSnapshot,
+        token_prices: dict[str, Decimal],
+    ) -> None:
+        logger.info(f"[{self._backtest_id}] Snapshot created, pre-computing indicators...")
+        if not self._rsi_calculator:
+            return
+
+        from almanak.framework.market import RSIData
+
+        for token in list(token_prices.keys()):
+            for period in [14]:
+                for timeframe in ["1h", "4h", "1d"]:
+                    cache_key: tuple[str, str, int] = (token, timeframe, period)
+                    try:
+                        rsi_val = await self._rsi_calculator.calculate_rsi(token, period, timeframe)
+                        rsi_data = RSIData(value=Decimal(str(rsi_val)), period=period)
+                        snapshot._rsi_cache[cache_key] = rsi_data
+                        logger.debug(f"Pre-computed RSI({period},{timeframe}) for {token}: {rsi_val:.2f}")
+                    except Exception as e:
+                        logger.warning(f"RSI pre-compute failed for {token} ({timeframe}): {e}")
+
+        if snapshot._rsi_cache:
+            self._ticks_with_indicators += 1
+
+    def _decide_for_tick(self, strategy: PaperTradeableStrategy, snapshot: MarketSnapshot) -> Any:
+        logger.info(f"[{self._backtest_id}] Calling strategy.decide()...")
+        try:
+            decide_result = strategy.decide(snapshot)
+            if self._error_handler:
+                self._error_handler.record_success()
+            return decide_result
+        except Exception as e:
+            if self._error_handler:
+                result = self._error_handler.handle_error(e, context=f"strategy_decide:tick_{self._tick_count}")
+                if result.should_stop:
+                    logger.error(f"[{self._backtest_id}] Fatal error in strategy decide(): {e}")
+                    raise
+            else:
+                logger.warning(f"[{self._backtest_id}] Strategy decide() raised exception: {e}")
+            return None
+
+    def _emit_intent_decided(self, intent: Any | None) -> None:
+        self._emit_event(
+            PaperTradeEventType.INTENT_DECIDED,
+            {
+                "intent_type": self._get_intent_type(intent).value if intent else "HOLD",
+                "tick_number": self._tick_count,
+            },
+        )
+
+    async def _refresh_snapshot_after_trade(self, wallet_address: str) -> None:
+        self._cached_prices = await self._get_portfolio_prices()
+        self._last_market_snapshot = await create_market_snapshot_from_fork(
+            fork_manager=self.fork_manager,
+            chain=self.config.chain,
+            wallet_address=wallet_address,
+            portfolio_tracker=self.portfolio_tracker,
+            token_prices=self._cached_prices,
+            price_oracle=self._price_aggregator,
+            rsi_calculator=self._rsi_calculator,
+        )
+
+    async def _execute_action_intent_for_tick(
+        self,
+        strategy: PaperTradeableStrategy,
+        snapshot: MarketSnapshot,
+        intent: Any,
+        wallet_address: str,
+    ) -> PaperTrade | None:
+        self._ticks_with_action += 1
+        self._last_successful_decision_at = datetime.now(UTC)
+
+        trade_result = await self._execute_intent(intent, strategy, snapshot)
+        if trade_result is not None:
+            self._last_trade_at = datetime.now(UTC)
+
+        self._notify_strategy_callback(strategy, intent, trade_result)
+
+        if trade_result is not None and self._valuer_available:
+            await self._refresh_snapshot_after_trade(wallet_address)
+
+        return trade_result
+
+    def _handle_tick_exception(self, exc: Exception) -> None:
+        if self._error_handler:
+            result = self._error_handler.handle_error(exc, context=f"tick_execution:tick_{self._tick_count}")
+            if result.should_stop:
+                logger.error(f"[{self._backtest_id}] Fatal error during tick {self._tick_count}: {exc}")
+                error = PaperTradeError(
+                    timestamp=datetime.now(UTC),
+                    intent={},
+                    error_type=PaperTradeErrorType.INTERNAL_ERROR,
+                    error_message=str(exc),
+                    block_number=self.fork_manager.current_block if self.fork_manager.is_running else None,
+                    metadata={
+                        "exception_type": type(exc).__name__,
+                        "tick_number": self._tick_count,
+                    },
+                )
+                self._errors.append(error)
+                self._running = False
+                self._emit_event(
+                    PaperTradeEventType.ERROR,
+                    {"error": str(exc), "tick_number": self._tick_count},
+                )
+                raise exc
+            else:
+                logger.warning(f"[{self._backtest_id}] Non-critical error during tick {self._tick_count}: {exc}")
+        else:
+            logger.exception(f"[{self._backtest_id}] Error during tick {self._tick_count}: {exc}")
+
+        self._emit_event(
+            PaperTradeEventType.ERROR,
+            {"error": str(exc), "tick_number": self._tick_count},
+        )
+
+    def _emit_tick_ended(self, tick_start: datetime) -> None:
+        tick_end = datetime.now(UTC)
+        tick_duration = (tick_end - tick_start).total_seconds()
+        self._emit_event(
+            PaperTradeEventType.TICK_ENDED,
+            {
+                "tick_number": self._tick_count,
+                "duration_seconds": tick_duration,
+            },
+        )
+
+    async def _execute_tick(self, strategy: PaperTradeableStrategy) -> PaperTrade | None:
         """Execute a single trading tick.
 
         This method:
@@ -1607,7 +1882,6 @@ class PaperTrader:
         """
         tick_start = datetime.now(UTC)
         trade_result: PaperTrade | None = None
-
         self._emit_event(
             PaperTradeEventType.TICK_STARTED,
             {"tick_number": self._tick_count},
@@ -1615,167 +1889,48 @@ class PaperTrader:
 
         try:
             # Check fork is running, attempt recovery if dead
-            if not self.fork_manager.is_running:
-                logger.warning(f"[{self._backtest_id}] Fork not running, attempting recovery...")
-                recovered = await self.fork_manager.reset_to_latest()
-                if recovered:
-                    await self._initialize_orchestrator()
-                    await self._sync_wallet_to_fork()
-                    logger.info(f"[{self._backtest_id}] Fork recovered successfully")
-                else:
-                    logger.error(f"[{self._backtest_id}] Fork recovery failed, skipping tick")
-                    return None
-
-            # VIB-1957: Fork is healthy at this point
-            self._ticks_with_fork += 1
+            if not await self._ensure_tick_fork_ready():
+                return None
 
             # Fetch prices for portfolio tokens (cached for IntentCompiler use)
             token_prices = await self._get_portfolio_prices()
             self._cached_prices = token_prices
 
             # Create market snapshot from fork (with price oracle so strategies can call market.price())
-            logger.info(f"[{self._backtest_id}] Creating market snapshot...")
             wallet_address = self._orchestrator.signer.address if self._orchestrator else ""
-            snapshot = await create_market_snapshot_from_fork(
-                fork_manager=self.fork_manager,
-                chain=self.config.chain,
-                wallet_address=wallet_address,
-                portfolio_tracker=self.portfolio_tracker,
-                token_prices=token_prices,
-                price_oracle=self._price_aggregator,
-                rsi_calculator=self._rsi_calculator,
-            )
+            snapshot = await self._create_tick_snapshot(wallet_address, token_prices)
 
-            # Store for PortfolioValuer access in _record_equity_point
-            self._last_market_snapshot = snapshot
-
-            logger.info(f"[{self._backtest_id}] Snapshot created, pre-computing indicators...")
             # Pre-compute common indicators in async context for performance.
             # _run_async() handles the nested-loop case via ThreadPoolExecutor, so
             # uncached parameters won't deadlock -- but pre-computation avoids the
             # thread overhead. Covers default timeframes:
             #   - rsi() defaults to "4h"
             #   - sma/ema/macd/bollinger_bands/atr default to "1h"
-            if self._rsi_calculator:
-                from almanak.framework.market import RSIData
+            await self._precompute_tick_indicators(snapshot, token_prices)
 
-                for token in list(token_prices.keys()):
-                    for period in [14]:
-                        for timeframe in ["1h", "4h", "1d"]:
-                            # Canonical _rsi_cache key shape: (token, timeframe, period)
-                            cache_key: tuple[str, str, int] = (token, timeframe, period)
-                            try:
-                                rsi_val = await self._rsi_calculator.calculate_rsi(token, period, timeframe)
-                                rsi_data = RSIData(value=Decimal(str(rsi_val)), period=period)
-                                snapshot._rsi_cache[cache_key] = rsi_data
-                                logger.debug(f"Pre-computed RSI({period},{timeframe}) for {token}: {rsi_val:.2f}")
-                            except Exception as e:
-                                logger.warning(f"RSI pre-compute failed for {token} ({timeframe}): {e}")
-
-            # VIB-1957: Indicators computed if calculator exists and RSI cache was populated
-            if self._rsi_calculator is not None and snapshot._rsi_cache:
-                self._ticks_with_indicators += 1
-
-            logger.info(f"[{self._backtest_id}] Calling strategy.decide()...")
             # Call strategy decide
-            try:
-                decide_result = strategy.decide(snapshot)
-                if self._error_handler:
-                    self._error_handler.record_success()
-            except Exception as e:
-                if self._error_handler:
-                    result = self._error_handler.handle_error(e, context=f"strategy_decide:tick_{self._tick_count}")
-                    if result.should_stop:
-                        logger.error(f"[{self._backtest_id}] Fatal error in strategy decide(): {e}")
-                        raise
-                else:
-                    logger.warning(f"[{self._backtest_id}] Strategy decide() raised exception: {e}")
-                decide_result = None
+            decide_result = self._decide_for_tick(strategy, snapshot)
 
             # Extract intent
             intent = self._extract_intent(decide_result)
-
-            self._emit_event(
-                PaperTradeEventType.INTENT_DECIDED,
-                {
-                    "intent_type": self._get_intent_type(intent).value if intent else "HOLD",
-                    "tick_number": self._tick_count,
-                },
-            )
+            self._emit_intent_decided(intent)
 
             # Execute if not HOLD
             if intent is not None and not self._is_hold_intent(intent):
-                # VIB-1957: Strategy made a non-HOLD decision
-                self._ticks_with_action += 1
-                self._last_successful_decision_at = datetime.now(UTC)
-
-                trade_result = await self._execute_intent(intent, strategy, snapshot)
-
-                # VIB-1957: Track last successful trade
-                if trade_result is not None:
-                    self._last_trade_at = datetime.now(UTC)
-
-                # Notify strategy of execution result (VIB-1951: callback parity)
-                # StrategyRunner calls on_intent_executed after every intent execution.
-                # Paper engine must do the same so strategies can track position state.
-                self._notify_strategy_callback(strategy, intent, trade_result)
-
-                # Refresh market snapshot after trade so PortfolioValuer sees
-                # post-trade wallet balances (not pre-trade snapshot).
-                # Re-fetch prices in case the trade introduced new tokens.
-                if trade_result is not None and self._valuer_available:
-                    self._cached_prices = await self._get_portfolio_prices()
-                    self._last_market_snapshot = await create_market_snapshot_from_fork(
-                        fork_manager=self.fork_manager,
-                        chain=self.config.chain,
-                        wallet_address=wallet_address,
-                        portfolio_tracker=self.portfolio_tracker,
-                        token_prices=self._cached_prices,
-                        price_oracle=self._price_aggregator,
-                        rsi_calculator=self._rsi_calculator,
-                    )
+                trade_result = await self._execute_action_intent_for_tick(
+                    strategy,
+                    snapshot,
+                    intent,
+                    wallet_address,
+                )
 
             # Record equity point
             await self._record_equity_point()
 
         except Exception as e:
-            # Use error handler for consistent classification
-            if self._error_handler:
-                result = self._error_handler.handle_error(e, context=f"tick_execution:tick_{self._tick_count}")
-                if result.should_stop:
-                    logger.error(f"[{self._backtest_id}] Fatal error during tick {self._tick_count}: {e}")
-                    # Record as PaperTradeError for tracking
-                    error = PaperTradeError(
-                        timestamp=datetime.now(UTC),
-                        intent={},
-                        error_type=PaperTradeErrorType.INTERNAL_ERROR,
-                        error_message=str(e),
-                        block_number=self.fork_manager.current_block if self.fork_manager.is_running else None,
-                        metadata={
-                            "exception_type": type(e).__name__,
-                            "tick_number": self._tick_count,
-                        },
-                    )
-                    self._errors.append(error)
-                else:
-                    logger.warning(f"[{self._backtest_id}] Non-critical error during tick {self._tick_count}: {e}")
-            else:
-                logger.exception(f"[{self._backtest_id}] Error during tick {self._tick_count}: {e}")
-            self._emit_event(
-                PaperTradeEventType.ERROR,
-                {"error": str(e), "tick_number": self._tick_count},
-            )
-
-        tick_end = datetime.now(UTC)
-        tick_duration = (tick_end - tick_start).total_seconds()
-
-        self._emit_event(
-            PaperTradeEventType.TICK_ENDED,
-            {
-                "tick_number": self._tick_count,
-                "duration_seconds": tick_duration,
-            },
-        )
+            self._handle_tick_exception(e)
+        finally:
+            self._emit_tick_ended(tick_start)
 
         return trade_result
 
@@ -2165,9 +2320,6 @@ class PaperTrader:
         if self.fork_manager.is_running:
             logger.info(f"[{self._backtest_id}] Fork refreshed to block {self.fork_manager.current_block}")
 
-    # crap-allowlist: VIB-4062 - pre-existing persistent-fork advancement complexity. This PR
-    # only replaces the default Anvil wallet literal with ANVIL_DEFAULT_ADDRESS; refactor +
-    # coverage uplift is tracked with the broader paper-engine CRAP cleanup.
     async def _advance_persistent_fork(self) -> None:
         """Advance time on a persistent fork between ticks.
 
@@ -2178,29 +2330,56 @@ class PaperTrader:
         After time advancement, executes YieldPoker poke hooks if enabled.
         """
         seconds = self.config.tick_interval_seconds
+        if not await self._advance_fork_time(seconds):
+            return
+
+        await self._run_yield_poker_hooks()
+
+    async def _advance_fork_time(self, seconds: int) -> bool:
         success = await self.fork_manager.advance_time(seconds)
         if not success:
             logger.warning(f"[{self._backtest_id}] Failed to advance fork time by {seconds}s")
-            return
+            return False
 
         logger.info(f"[{self._backtest_id}] Advanced fork time by {seconds}s (block={self.fork_manager.current_block})")
+        return True
 
-        # Execute YieldPoker poke hooks to trigger interest accrual
-        if self.config.yield_poker_enabled and self._yield_poker is not None:
-            wallet = ANVIL_DEFAULT_ADDRESS
-            try:
-                rpc_url = self.fork_manager.get_rpc_url() or self.config.fork_rpc_url
-                poke_results = await self._yield_poker.poke_all(self.config.chain, rpc_url, wallet)
-                poked = sum(1 for r in poke_results if r.success)
-                failed = len(poke_results) - poked
-                if poked > 0:
-                    logger.info(f"[{self._backtest_id}] YieldPoker: {poked} pokes succeeded, {failed} failed")
-                if failed > 0:
-                    for r in poke_results:
-                        if not r.success:
-                            logger.warning(f"[{self._backtest_id}] Poke failed for {r.protocol}: {r.error}")
-            except Exception as e:
-                logger.warning(f"[{self._backtest_id}] YieldPoker failed: {e}")
+    async def _run_yield_poker_hooks(self) -> None:
+        if not self._should_poke_yield():
+            return
+
+        try:
+            poke_results = await self._yield_poker.poke_all(
+                self.config.chain,
+                self._yield_poker_rpc_url(),
+                ANVIL_DEFAULT_ADDRESS,
+            )
+        except Exception as e:
+            logger.warning(f"[{self._backtest_id}] YieldPoker failed: {e}")
+            return
+
+        self._log_yield_poke_results(poke_results)
+
+    def _should_poke_yield(self) -> bool:
+        return self.config.yield_poker_enabled and self._yield_poker is not None
+
+    def _yield_poker_rpc_url(self) -> str:
+        return self.fork_manager.get_rpc_url() or self.config.fork_rpc_url
+
+    def _log_yield_poke_results(self, poke_results: list[Any]) -> None:
+        poked = sum(1 for r in poke_results if r.success)
+        failed = len(poke_results) - poked
+
+        if poked > 0:
+            logger.info(f"[{self._backtest_id}] YieldPoker: {poked} pokes succeeded, {failed} failed")
+
+        if failed > 0:
+            self._log_failed_yield_pokes(poke_results)
+
+    def _log_failed_yield_pokes(self, poke_results: list[Any]) -> None:
+        for result in poke_results:
+            if not result.success:
+                logger.warning(f"[{self._backtest_id}] Poke failed for {result.protocol}: {result.error}")
 
     async def _run_position_reconciler(self) -> None:
         """Run the observe-only divergence detector after a tick (VIB-2634).
@@ -2648,51 +2827,60 @@ class PaperTrader:
 
         return False
 
+    _INTENT_TYPE_CLASS_MAPPINGS = {
+        "SWAP": IntentType.SWAP,
+        "LPOPEN": IntentType.LP_OPEN,
+        "LP_OPEN": IntentType.LP_OPEN,
+        "LPCLOSE": IntentType.LP_CLOSE,
+        "LP_CLOSE": IntentType.LP_CLOSE,
+        "PERPOPEN": IntentType.PERP_OPEN,
+        "PERP_OPEN": IntentType.PERP_OPEN,
+        "PERPCLOSE": IntentType.PERP_CLOSE,
+        "PERP_CLOSE": IntentType.PERP_CLOSE,
+        "SUPPLY": IntentType.SUPPLY,
+        "WITHDRAW": IntentType.WITHDRAW,
+        "BORROW": IntentType.BORROW,
+        "REPAY": IntentType.REPAY,
+        "BRIDGE": IntentType.BRIDGE,
+        "HOLD": IntentType.HOLD,
+    }
+
+    def _intent_type_from_value(self, intent_type_value: Any) -> IntentType | None:
+        if isinstance(intent_type_value, IntentType):
+            return intent_type_value
+
+        if hasattr(intent_type_value, "value"):
+            try:
+                return IntentType(intent_type_value.value)
+            except ValueError:
+                pass
+
+        try:
+            return IntentType(str(intent_type_value))
+        except ValueError:
+            return None
+
+    def _intent_type_from_attr(self, intent: Any) -> IntentType | None:
+        if not hasattr(intent, "intent_type"):
+            return None
+        return self._intent_type_from_value(intent.intent_type)
+
+    def _intent_type_from_class_name(self, intent: Any) -> IntentType:
+        class_name = intent.__class__.__name__.upper()
+        for key, intent_type in self._INTENT_TYPE_CLASS_MAPPINGS.items():
+            if key in class_name:
+                return intent_type
+        return IntentType.UNKNOWN
+
     def _get_intent_type(self, intent: Any) -> IntentType:
         """Extract IntentType from an intent object."""
         if intent is None:
             return IntentType.HOLD
 
-        # Check for intent_type attribute
-        if hasattr(intent, "intent_type"):
-            intent_type_value = intent.intent_type
-            if isinstance(intent_type_value, IntentType):
-                return intent_type_value
-            if hasattr(intent_type_value, "value"):
-                try:
-                    return IntentType(intent_type_value.value)
-                except ValueError:
-                    pass
-            try:
-                return IntentType(str(intent_type_value))
-            except ValueError:
-                pass
-
-        # Check class name for common intent types
-        class_name = intent.__class__.__name__.upper()
-        type_mappings = {
-            "SWAP": IntentType.SWAP,
-            "LPOPEN": IntentType.LP_OPEN,
-            "LP_OPEN": IntentType.LP_OPEN,
-            "LPCLOSE": IntentType.LP_CLOSE,
-            "LP_CLOSE": IntentType.LP_CLOSE,
-            "PERPOPEN": IntentType.PERP_OPEN,
-            "PERP_OPEN": IntentType.PERP_OPEN,
-            "PERPCLOSE": IntentType.PERP_CLOSE,
-            "PERP_CLOSE": IntentType.PERP_CLOSE,
-            "SUPPLY": IntentType.SUPPLY,
-            "WITHDRAW": IntentType.WITHDRAW,
-            "BORROW": IntentType.BORROW,
-            "REPAY": IntentType.REPAY,
-            "BRIDGE": IntentType.BRIDGE,
-            "HOLD": IntentType.HOLD,
-        }
-
-        for key, intent_type in type_mappings.items():
-            if key in class_name:
-                return intent_type
-
-        return IntentType.UNKNOWN
+        intent_type = self._intent_type_from_attr(intent)
+        if intent_type is not None:
+            return intent_type
+        return self._intent_type_from_class_name(intent)
 
     def _compile_intent(self, intent: Any) -> ActionBundle | None:
         """Compile an intent to an ActionBundle.
@@ -2823,32 +3011,49 @@ class PaperTrader:
         if intent is None:
             return {}
 
-        # Check if intent has a to_dict method
-        if hasattr(intent, "to_dict"):
-            try:
-                return intent.to_dict()
-            except Exception:
-                pass
+        to_dict_result = self._serialize_intent_to_dict(intent)
+        if to_dict_result is not None:
+            return to_dict_result
 
-        # Check if intent has __dict__
-        if hasattr(intent, "__dict__"):
-            try:
-                result = {}
-                for key, value in intent.__dict__.items():
-                    if not key.startswith("_"):
-                        # Convert Decimals and other types to strings
-                        if isinstance(value, Decimal):
-                            result[key] = str(value)
-                        elif hasattr(value, "value"):  # Enum
-                            result[key] = value.value
-                        else:
-                            result[key] = value
-                return result
-            except Exception:
-                pass
+        public_attrs = self._serialize_public_intent_attrs(intent)
+        if public_attrs is not None:
+            return public_attrs
 
         # Fallback to string representation
         return {"repr": str(intent)}
+
+    def _serialize_intent_to_dict(self, intent: Any) -> dict[str, Any] | None:
+        if not hasattr(intent, "to_dict"):
+            return None
+
+        try:
+            candidate = intent.to_dict()
+        except Exception:
+            return None
+
+        if isinstance(candidate, dict):
+            return candidate
+        return None
+
+    def _serialize_public_intent_attrs(self, intent: Any) -> dict[str, Any] | None:
+        if not hasattr(intent, "__dict__"):
+            return None
+
+        try:
+            return {
+                key: self._serialize_intent_value(value)
+                for key, value in intent.__dict__.items()
+                if not key.startswith("_")
+            }
+        except Exception:
+            return None
+
+    def _serialize_intent_value(self, value: Any) -> Any:
+        if isinstance(value, Decimal):
+            return str(value)
+        if hasattr(value, "value"):
+            return value.value
+        return value
 
     # =========================================================================
     # Balance-delta accounting (VIB-2550)
@@ -2885,6 +3090,43 @@ class PaperTrader:
                 return addr
         return None
 
+    def _intent_balance_tokens(self, intent: Any) -> set[str]:
+        if intent is None:
+            return set()
+
+        tokens: set[str] = set()
+        for attr in ("from_token", "to_token", "token", "asset", "token0", "token1", "token_a", "token_b"):
+            token_val = getattr(intent, attr, None)
+            if token_val:
+                tokens.add(str(token_val))
+        return tokens
+
+    def _tracked_balance_tokens(self, intent: Any = None) -> set[str]:
+        tracked_tokens = {str(token).upper() for token in self.portfolio_tracker.current_balances}
+        tracked_tokens |= {str(token).upper() for token in self.portfolio_tracker.initial_balances}
+        tracked_tokens |= self._intent_balance_tokens(intent)
+        return tracked_tokens
+
+    async def _snapshot_eth_balance(self, wallet_address: str) -> int | None:
+        eth_hex = await self.fork_manager._rpc_call("eth_getBalance", [wallet_address, "latest"])
+        if not eth_hex:
+            return None
+        return int(eth_hex, 16)
+
+    async def _snapshot_erc20_balance(self, symbol: str, wallet_address: str) -> int | None:
+        if symbol.upper() == "ETH":
+            return None
+
+        token_address = self._resolve_token_address(symbol)
+        if not token_address:
+            return None
+
+        try:
+            return await self.fork_manager._get_token_balance(token_address, wallet_address)
+        except Exception as e:
+            logger.debug(f"[{self._backtest_id}] Could not query balance for {symbol}: {e}")
+            return None
+
     async def _snapshot_balances(self, wallet_address: str, intent: Any = None) -> dict[str, int]:
         """Snapshot all tracked token balances on the fork (in smallest units).
 
@@ -2903,34 +3145,15 @@ class PaperTrader:
         balances: dict[str, int] = {}
 
         # 1. Native ETH balance
-        eth_hex = await self.fork_manager._rpc_call("eth_getBalance", [wallet_address, "latest"])
-        if eth_hex:
-            balances["ETH"] = int(eth_hex, 16)
+        eth_balance = await self._snapshot_eth_balance(wallet_address)
+        if eth_balance is not None:
+            balances["ETH"] = eth_balance
 
         # 2. ERC-20 balances for all tokens the portfolio currently tracks
-        tracked_tokens = set(self.portfolio_tracker.current_balances.keys())
-        # Also include tokens from initial_balances in case current is empty
-        tracked_tokens |= set(self.portfolio_tracker.initial_balances.keys())
-
-        # Also include tokens from the intent (e.g., to_token for a first-time buy)
-        if intent is not None:
-            for attr in ("from_token", "to_token", "token", "asset", "token0", "token1", "token_a", "token_b"):
-                token_val = getattr(intent, attr, None)
-                if token_val:
-                    tracked_tokens.add(str(token_val).upper())
-
-        for symbol in tracked_tokens:
-            if symbol.upper() == "ETH":
-                continue  # Already queried above
-            token_address = self._resolve_token_address(symbol)
-            if not token_address:
-                continue
-            try:
-                raw_balance = await self.fork_manager._get_token_balance(token_address, wallet_address)
-                # Preserve original case from tracker to avoid key mismatch (e.g., USDC.e vs USDC.E)
+        for symbol in self._tracked_balance_tokens(intent):
+            raw_balance = await self._snapshot_erc20_balance(symbol, wallet_address)
+            if raw_balance is not None:
                 balances[symbol] = raw_balance
-            except Exception as e:
-                logger.debug(f"[{self._backtest_id}] Could not query balance for {symbol}: {e}")
 
         return balances
 
@@ -3216,6 +3439,153 @@ class PaperTrader:
     # Price Provider Helpers
     # =========================================================================
 
+    def _price_source_order_for_config(self) -> list[str]:
+        price_source = self.config.price_source
+        if price_source == "auto":
+            return ["chainlink", "twap", "coingecko"]
+        return [price_source]
+
+    def _set_price_source_order(self) -> None:
+        self._price_source_order = self._price_source_order_for_config()
+        if self.config.price_source == "auto":
+            logger.info(
+                "[%s] Price source 'auto' selected, using fallback chain: Chainlink -> TWAP -> CoinGecko",
+                self._backtest_id,
+            )
+            return
+
+        logger.info(
+            "[%s] Price source '%s' selected as primary provider",
+            self._backtest_id,
+            self.config.price_source,
+        )
+
+    def _append_price_source(
+        self,
+        sources: list[BasePriceSource],
+        provider_name: str,
+        factory: Callable[[], BasePriceSource],
+    ) -> None:
+        try:
+            sources.append(factory())
+        except Exception as e:
+            logger.warning("[%s] Failed to initialize %s provider: %s", self._backtest_id, provider_name, e)
+
+    def _price_aggregator_sources(self) -> list[BasePriceSource]:
+        sources: list[BasePriceSource] = []
+        self._append_price_source(sources, "CoinGecko", CoinGeckoPriceSource)
+        self._append_price_source(
+            sources,
+            "Binance",
+            lambda: BinancePriceSource(cache_ttl=30, request_timeout=5.0),
+        )
+        self._append_price_source(
+            sources,
+            "DexScreener",
+            lambda: DexScreenerPriceSource(
+                default_chain_id=self.config.chain.lower(),
+                cache_ttl=30,
+                token_resolver=_get_resolver(),
+            ),
+        )
+        return sources
+
+    def _handle_no_price_aggregator_sources(self) -> None:
+        if self._error_handler:
+            self._error_handler.handle_error(
+                RuntimeError("All price source initializations failed"),
+                context="init_price_providers",
+            )
+        logger.warning("[%s] Failed to initialize any price provider", self._backtest_id)
+        self._price_aggregator = None
+
+    def _init_price_aggregator(self) -> None:
+        sources = self._price_aggregator_sources()
+        if sources:
+            self._price_aggregator = PriceAggregator(sources=sources)
+            source_names = [type(s).__name__ for s in sources]
+            logger.info(
+                "[%s] Initialized price provider with %d sources: %s",
+                self._backtest_id,
+                len(sources),
+                ", ".join(source_names),
+            )
+            return
+
+        self._handle_no_price_aggregator_sources()
+
+    def _price_source_chain(self) -> str | None:
+        return next(iter({self.config.chain} & _PRICE_SOURCE_CHAINS), None)
+
+    def _handle_onchain_price_provider_error(self, exc: Exception, *, context: str, provider_name: str) -> None:
+        if self._error_handler:
+            self._error_handler.handle_error(exc, context=context)
+        logger.warning(
+            "[%s] Failed to initialize %s provider: %s",
+            self._backtest_id,
+            provider_name,
+            str(exc),
+        )
+
+    def _init_chainlink_price_provider(self) -> None:
+        if "chainlink" not in self._price_source_order:
+            return
+
+        try:
+            chainlink_chain = self._price_source_chain()
+            if chainlink_chain:
+                self._chainlink_provider = ChainlinkDataProvider(
+                    chain=chainlink_chain,
+                    rpc_url=self.config.rpc_url,
+                    cache_ttl_seconds=60,
+                )
+                logger.info(
+                    "[%s] Initialized Chainlink price provider for chain=%s",
+                    self._backtest_id,
+                    chainlink_chain,
+                )
+                return
+
+            logger.warning(
+                "[%s] Chain '%s' not supported by Chainlink provider, will skip to next",
+                self._backtest_id,
+                self.config.chain,
+            )
+        except Exception as e:
+            self._handle_onchain_price_provider_error(
+                e,
+                context="init_chainlink_provider",
+                provider_name="Chainlink",
+            )
+
+    def _init_twap_price_provider(self) -> None:
+        if "twap" not in self._price_source_order:
+            return
+
+        try:
+            twap_chain = self._price_source_chain()
+            if twap_chain:
+                self._twap_provider = DEXTWAPDataProvider(
+                    chain=twap_chain,
+                    rpc_url=self.config.rpc_url,
+                    twap_window_seconds=300,  # 5 minute TWAP window
+                    cache_ttl_seconds=60,
+                )
+                logger.info(
+                    "[%s] Initialized DEX TWAP price provider for chain=%s (window=300s)",
+                    self._backtest_id,
+                    twap_chain,
+                )
+                return
+
+            logger.warning(
+                "[%s] Chain '%s' not supported by TWAP provider, will skip to next",
+                self._backtest_id,
+                self.config.chain,
+            )
+        except Exception as e:
+            self._handle_onchain_price_provider_error(e, context="init_twap_provider", provider_name="TWAP")
+
     def _init_price_provider(self) -> None:
         """Initialize price provider based on config.price_source setting.
 
@@ -3232,151 +3602,10 @@ class PaperTrader:
         The price provider is used for portfolio valuation and gas cost
         calculations throughout the paper trading session.
         """
-        price_source = self.config.price_source
-
-        # Define fallback order based on price_source setting
-        # For 'auto', use full fallback chain: Chainlink -> TWAP -> CoinGecko
-        # For specific sources, just use that source
-        if price_source == "auto":
-            self._price_source_order = ["chainlink", "twap", "coingecko"]
-            logger.info(
-                "[%s] Price source 'auto' selected, using fallback chain: Chainlink -> TWAP -> CoinGecko",
-                self._backtest_id,
-            )
-        else:
-            self._price_source_order = [price_source]
-            logger.info(
-                "[%s] Price source '%s' selected as primary provider",
-                self._backtest_id,
-                price_source,
-            )
-
-        # Initialize multi-source price aggregator (matching production gateway)
-        # Paper trading previously only used CoinGecko, which caused "Event loop
-        # is closed" failures after the first tick. Adding Binance + DexScreener
-        # provides the same resilience as the production MarketService.
-        # Initialize each source independently so partial failure doesn't kill all
-        sources: list[BasePriceSource] = []
-        try:
-            coingecko_source = CoinGeckoPriceSource()
-            sources.append(coingecko_source)
-        except Exception as e:
-            logger.warning("[%s] Failed to initialize CoinGecko provider: %s", self._backtest_id, e)
-
-        try:
-            binance_source = BinancePriceSource(cache_ttl=30, request_timeout=5.0)
-            sources.append(binance_source)
-        except Exception as e:
-            logger.warning("[%s] Failed to initialize Binance provider: %s", self._backtest_id, e)
-
-        try:
-            dexscreener_source = DexScreenerPriceSource(
-                default_chain_id=self.config.chain.lower(),
-                cache_ttl=30,
-                token_resolver=_get_resolver(),
-            )
-            sources.append(dexscreener_source)
-        except Exception as e:
-            logger.warning("[%s] Failed to initialize DexScreener provider: %s", self._backtest_id, e)
-
-        if sources:
-            self._price_aggregator = PriceAggregator(sources=sources)
-            source_names = [type(s).__name__ for s in sources]
-            logger.info(
-                "[%s] Initialized price provider with %d sources: %s",
-                self._backtest_id,
-                len(sources),
-                ", ".join(source_names),
-            )
-        else:
-            if self._error_handler:
-                self._error_handler.handle_error(
-                    RuntimeError("All price source initializations failed"),
-                    context="init_price_providers",
-                )
-            logger.warning("[%s] Failed to initialize any price provider", self._backtest_id)
-            self._price_aggregator = None
-
-        # Initialize Chainlink provider if needed
-        # Note: Chainlink requires RPC access for on-chain queries, which is
-        # available after fork initialization via self.config.rpc_url
-        if "chainlink" in self._price_source_order:
-            try:
-                # config.chain is already the canonical lowercase chain name.
-                # Gate on the paper-engine price-source allowlist (VIB-4861)
-                # instead of a duplicated inline chain-name dict. Unsupported
-                # chains yield None and skip to the next source, as before.
-                #
-                # NOTE: _PRICE_SOURCE_CHAINS == feeds ∩ TWAP pools (see its
-                # definition) — still a deliberate subset of the provider's
-                # full feed coverage.
-                # Branch-free membership gate (set intersection) keeps this hot
-                # init path's cyclomatic complexity at its pre-VIB-4861 level.
-                chainlink_chain = next(iter({self.config.chain} & _PRICE_SOURCE_CHAINS), None)
-                if chainlink_chain:
-                    self._chainlink_provider = ChainlinkDataProvider(
-                        chain=chainlink_chain,
-                        rpc_url=self.config.rpc_url,
-                        cache_ttl_seconds=60,
-                    )
-                    logger.info(
-                        "[%s] Initialized Chainlink price provider for chain=%s",
-                        self._backtest_id,
-                        chainlink_chain,
-                    )
-                else:
-                    logger.warning(
-                        "[%s] Chain '%s' not supported by Chainlink provider, will skip to next",
-                        self._backtest_id,
-                        self.config.chain,
-                    )
-            except Exception as e:
-                # Use error handler for consistent classification
-                if self._error_handler:
-                    self._error_handler.handle_error(e, context="init_chainlink_provider")
-                logger.warning(
-                    "[%s] Failed to initialize Chainlink provider: %s",
-                    self._backtest_id,
-                    str(e),
-                )
-
-        # Initialize TWAP provider if needed
-        if "twap" in self._price_source_order:
-            try:
-                # config.chain is already the canonical lowercase chain name.
-                # Gate on the shared paper-engine price-source allowlist
-                # (VIB-4861) instead of a duplicated inline chain-name dict.
-                # Unsupported chains yield None and skip to the next source.
-                # Branch-free membership gate (set intersection) keeps this hot
-                # init path's cyclomatic complexity at its pre-VIB-4861 level.
-                twap_chain = next(iter({self.config.chain} & _PRICE_SOURCE_CHAINS), None)
-                if twap_chain:
-                    self._twap_provider = DEXTWAPDataProvider(
-                        chain=twap_chain,
-                        rpc_url=self.config.rpc_url,
-                        twap_window_seconds=300,  # 5 minute TWAP window
-                        cache_ttl_seconds=60,
-                    )
-                    logger.info(
-                        "[%s] Initialized DEX TWAP price provider for chain=%s (window=300s)",
-                        self._backtest_id,
-                        twap_chain,
-                    )
-                else:
-                    logger.warning(
-                        "[%s] Chain '%s' not supported by TWAP provider, will skip to next",
-                        self._backtest_id,
-                        self.config.chain,
-                    )
-            except Exception as e:
-                # Use error handler for consistent classification
-                if self._error_handler:
-                    self._error_handler.handle_error(e, context="init_twap_provider")
-                logger.warning(
-                    "[%s] Failed to initialize TWAP provider: %s",
-                    self._backtest_id,
-                    str(e),
-                )
+        self._set_price_source_order()
+        self._init_price_aggregator()
+        self._init_chainlink_price_provider()
+        self._init_twap_price_provider()
 
     def _init_indicator_calculators(self) -> None:
         """Initialize indicator calculators (RSI, MACD, BB, ATR) with multi-source OHLCV.
@@ -3459,7 +3688,269 @@ class PaperTrader:
 
             return BinanceOHLCVProvider(cache_ttl=120)
 
-    async def _get_token_price(self, token: str, *, allow_hardcoded_fallback: bool = True) -> Decimal:  # noqa: C901
+    def _cached_or_stable_price(self, token_upper: str, allow_hardcoded_fallback: bool) -> Decimal | None:
+        if token_upper in self._price_cache:
+            source = self._price_cache_sources.get(token_upper)
+            if source in {"hardcoded_fallback", "stable_fallback"} and not allow_hardcoded_fallback:
+                return None
+            return self._price_cache[token_upper]
+
+        stables = {"USDC", "USDT", "DAI", "FRAX", "LUSD", "BUSD", "USD", "USDC.E"}
+        if token_upper in stables:
+            if not allow_hardcoded_fallback:
+                return None
+            self._price_cache[token_upper] = Decimal("1")
+            self._price_cache_sources[token_upper] = "stable_fallback"
+            logger.debug("[%s] Price for %s: $1.00 (stablecoin)", self._backtest_id, token_upper)
+            return Decimal("1")
+
+        return None
+
+    @staticmethod
+    def _price_lookup_token(token_upper: str) -> str:
+        if token_upper == "WETH":
+            return "ETH"
+        return token_upper
+
+    def _valid_provider_price(self, provider_name: str, token_upper: str, price: Decimal | None) -> Decimal | None:
+        if price is None:
+            return None
+        if price <= Decimal("0"):
+            logger.warning(
+                "[%s] %s returned non-positive price for %s: %s, trying next provider",
+                self._backtest_id,
+                provider_name,
+                token_upper,
+                price,
+            )
+            return None
+        return price
+
+    async def _chainlink_token_price(self, token_upper: str, lookup_token: str) -> tuple[Decimal | None, str | None]:
+        if self._chainlink_provider is None:
+            logger.debug(
+                "[%s] Chainlink provider not initialized for %s, trying next",
+                self._backtest_id,
+                token_upper,
+            )
+            return None, None
+
+        try:
+            chainlink_price = await self._chainlink_provider.get_latest_price(lookup_token, raise_on_stale=False)
+        except ChainlinkStaleDataError:
+            logger.debug(
+                "[%s] Chainlink data stale for %s, trying next provider",
+                self._backtest_id,
+                token_upper,
+            )
+            return None, None
+        except ValueError as e:
+            logger.debug(
+                "[%s] Chainlink: %s, trying next provider",
+                self._backtest_id,
+                str(e),
+            )
+            return None, None
+
+        price = self._valid_provider_price("Chainlink", token_upper, chainlink_price)
+        if price is None:
+            logger.debug(
+                "[%s] Chainlink returned stale or unavailable data for %s, trying next",
+                self._backtest_id,
+                token_upper,
+            )
+            return None, None
+
+        logger.debug(
+            "[%s] Chainlink price for %s: $%s",
+            self._backtest_id,
+            token_upper,
+            price,
+        )
+        return price, "chainlink"
+
+    async def _twap_token_price(self, token_upper: str, lookup_token: str) -> tuple[Decimal | None, str | None]:
+        if self._twap_provider is None:
+            logger.debug(
+                "[%s] TWAP provider not initialized for %s, trying next",
+                self._backtest_id,
+                token_upper,
+            )
+            return None, None
+
+        try:
+            twap_result = await self._twap_provider.calculate_twap(lookup_token, raise_on_low_liquidity=False)
+        except LowLiquidityWarning:
+            logger.debug(
+                "[%s] TWAP pool low liquidity for %s, trying next provider",
+                self._backtest_id,
+                token_upper,
+            )
+            return None, None
+        except ValueError as e:
+            logger.debug(
+                "[%s] TWAP: %s, trying next provider",
+                self._backtest_id,
+                str(e),
+            )
+            return None, None
+
+        if twap_result is None:
+            logger.debug(
+                "[%s] TWAP calculation failed for %s, trying next provider",
+                self._backtest_id,
+                token_upper,
+            )
+            return None, None
+
+        price = self._valid_provider_price("TWAP", token_upper, twap_result.price)
+        if price is None:
+            return None, None
+
+        provider_used = "twap (low_liquidity)" if twap_result.is_low_liquidity else "twap"
+        logger.debug(
+            "[%s] TWAP price for %s: $%s (tick=%d, window=%ds)",
+            self._backtest_id,
+            token_upper,
+            price,
+            twap_result.tick,
+            twap_result.window_seconds,
+        )
+        return price, provider_used
+
+    async def _coingecko_token_price(
+        self,
+        token_upper: str,
+        lookup_token: str,
+        source_index: int,
+    ) -> tuple[Decimal | None, str | None]:
+        if not self._price_aggregator:
+            return None, None
+
+        result = await self._price_aggregator.get_aggregated_price(lookup_token, "USD")
+        price = self._valid_provider_price("CoinGecko", token_upper, result.price)
+        if price is None:
+            return None, None
+
+        if result.stale:
+            logger.warning(
+                "[%s] CoinGecko returned stale data for %s (confidence: %.2f)",
+                self._backtest_id,
+                token_upper,
+                result.confidence,
+            )
+            if source_index == len(self._price_source_order) - 1:
+                return price, "coingecko (stale)"
+            return None, None
+
+        return price, "coingecko"
+
+    async def _price_from_source(
+        self,
+        source: str,
+        token_upper: str,
+        lookup_token: str,
+        source_index: int,
+    ) -> tuple[Decimal | None, str | None]:
+        if source == "chainlink":
+            return await self._chainlink_token_price(token_upper, lookup_token)
+        if source == "twap":
+            return await self._twap_token_price(token_upper, lookup_token)
+        if source == "coingecko":
+            return await self._coingecko_token_price(token_upper, lookup_token, source_index)
+        return None, None
+
+    async def _try_price_source(
+        self,
+        source: str,
+        token_upper: str,
+        lookup_token: str,
+        source_index: int,
+    ) -> tuple[Decimal | None, str | None]:
+        try:
+            return await self._price_from_source(source, token_upper, lookup_token, source_index)
+        except AllDataSourcesFailed as e:
+            if self._error_handler:
+                self._error_handler.handle_error(e, context=f"price_fetch:{source}:{token_upper}")
+            logger.warning(
+                "[%s] Price provider '%s' failed for %s: %s",
+                self._backtest_id,
+                source,
+                token_upper,
+                str(e),
+            )
+        except Exception as e:
+            if self._error_handler:
+                self._error_handler.handle_error(e, context=f"price_fetch:{source}:{token_upper}")
+            logger.warning(
+                "[%s] Unexpected error from '%s' price provider for %s: %s",
+                self._backtest_id,
+                source,
+                token_upper,
+                str(e),
+            )
+        return None, None
+
+    def _cache_provider_price(self, token_upper: str, price: Decimal, provider_used: str) -> Decimal:
+        self._price_cache[token_upper] = price
+        self._price_cache_sources[token_upper] = provider_used
+        logger.info(
+            "[%s] Price for %s: $%s (provider: %s)",
+            self._backtest_id,
+            token_upper,
+            price,
+            provider_used,
+        )
+        return price
+
+    def _raise_price_unavailable(self, token_upper: str, allow_hardcoded_fallback: bool) -> None:
+        reason = "strict_price_mode is enabled" if self.config.strict_price_mode else "this token is the numeraire"
+        if self.config.strict_price_mode and not allow_hardcoded_fallback:
+            reason = "strict_price_mode is enabled and this token is the numeraire"
+        error_msg = (
+            f"All price providers failed for {token_upper} on chain={self.config.chain} "
+            f"(chain_id={self.config.chain_id}) and {reason}. "
+            f"Providers attempted: chainlink, twap, coingecko. "
+            f"Ensure price providers can serve this token."
+        )
+        logger.error("[%s] %s", self._backtest_id, error_msg)
+        raise ValueError(error_msg)
+
+    def _hardcoded_token_price(self, token_upper: str) -> Decimal:
+        logger.warning(
+            "[%s] All price providers failed for %s on chain=%s, using hardcoded fallback. "
+            "Set strict_price_mode=True for institutional-grade backtests.",
+            self._backtest_id,
+            token_upper,
+            self.config.chain,
+        )
+        fallback_prices: dict[str, Decimal] = {
+            "ETH": Decimal("3000"),
+            "WETH": Decimal("3000"),
+            "BTC": Decimal("60000"),
+            "WBTC": Decimal("60000"),
+            "ARB": Decimal("1"),
+            "OP": Decimal("2"),
+            "AVAX": Decimal("35"),
+            "WAVAX": Decimal("35"),
+            "LINK": Decimal("15"),
+            "UNI": Decimal("10"),
+        }
+
+        price = fallback_prices.get(token_upper, Decimal("1"))
+        self._price_cache[token_upper] = price
+        self._price_cache_sources[token_upper] = "hardcoded_fallback"
+        logger.warning(
+            "[%s] Price for %s: $%s (provider: hardcoded_fallback) - This may produce inaccurate backtest results",
+            self._backtest_id,
+            token_upper,
+            price,
+        )
+        self._used_hardcoded_fallback = True
+        self._track_fallback("hardcoded_price")
+        return price
+
+    async def _get_token_price(self, token: str, *, allow_hardcoded_fallback: bool = True) -> Decimal:
         """Get token price in USD using the configured fallback chain.
 
         Implements a fallback chain for price sourcing. When price_source='auto',
@@ -3490,232 +3981,26 @@ class PaperTrader:
         """
         token_upper = token.upper()
 
-        # Check cache first
-        if token_upper in self._price_cache:
-            return self._price_cache[token_upper]
-
-        # Stablecoins always return $1
-        stables = {"USDC", "USDT", "DAI", "FRAX", "LUSD", "BUSD", "USD", "USDC.E"}
-        if token_upper in stables:
-            self._price_cache[token_upper] = Decimal("1")
-            logger.debug("[%s] Price for %s: $1.00 (stablecoin)", self._backtest_id, token_upper)
-            return Decimal("1")
+        cached_or_stable = self._cached_or_stable_price(token_upper, allow_hardcoded_fallback)
+        if cached_or_stable is not None:
+            return cached_or_stable
 
         # Map token symbols to supported ones
-        lookup_token = token_upper
-        if lookup_token == "WETH":
-            lookup_token = "ETH"
+        lookup_token = self._price_lookup_token(token_upper)
 
-        # Try each provider in the fallback chain order
-        provider_used: str | None = None
-        price: Decimal | None = None
-
-        for source in self._price_source_order:
-            try:
-                if source == "chainlink":
-                    # Try Chainlink provider if available
-                    if self._chainlink_provider is None:
-                        logger.debug(
-                            "[%s] Chainlink provider not initialized for %s, trying next",
-                            self._backtest_id,
-                            token_upper,
-                        )
-                        continue
-
-                    try:
-                        chainlink_price = await self._chainlink_provider.get_latest_price(
-                            lookup_token, raise_on_stale=False
-                        )
-                        if chainlink_price is not None:
-                            price = chainlink_price
-                            provider_used = "chainlink"
-                            logger.debug(
-                                "[%s] Chainlink price for %s: $%s",
-                                self._backtest_id,
-                                token_upper,
-                                price,
-                            )
-                            break
-                        else:
-                            logger.debug(
-                                "[%s] Chainlink returned stale or unavailable data for %s, trying next",
-                                self._backtest_id,
-                                token_upper,
-                            )
-                            continue
-                    except ChainlinkStaleDataError:
-                        logger.debug(
-                            "[%s] Chainlink data stale for %s, trying next provider",
-                            self._backtest_id,
-                            token_upper,
-                        )
-                        continue
-                    except ValueError as e:
-                        # Token not supported by Chainlink (no feed available)
-                        logger.debug(
-                            "[%s] Chainlink: %s, trying next provider",
-                            self._backtest_id,
-                            str(e),
-                        )
-                        continue
-
-                elif source == "twap":
-                    # Try TWAP provider if available
-                    if self._twap_provider is None:
-                        logger.debug(
-                            "[%s] TWAP provider not initialized for %s, trying next",
-                            self._backtest_id,
-                            token_upper,
-                        )
-                        continue
-
-                    try:
-                        twap_result = await self._twap_provider.calculate_twap(
-                            lookup_token, raise_on_low_liquidity=False
-                        )
-                        if twap_result is not None:
-                            price = twap_result.price
-                            if twap_result.is_low_liquidity:
-                                provider_used = "twap (low_liquidity)"
-                            else:
-                                provider_used = "twap"
-                            logger.debug(
-                                "[%s] TWAP price for %s: $%s (tick=%d, window=%ds)",
-                                self._backtest_id,
-                                token_upper,
-                                price,
-                                twap_result.tick,
-                                twap_result.window_seconds,
-                            )
-                            break
-                        else:
-                            logger.debug(
-                                "[%s] TWAP calculation failed for %s, trying next provider",
-                                self._backtest_id,
-                                token_upper,
-                            )
-                            continue
-                    except LowLiquidityWarning:
-                        logger.debug(
-                            "[%s] TWAP pool low liquidity for %s, trying next provider",
-                            self._backtest_id,
-                            token_upper,
-                        )
-                        continue
-                    except ValueError as e:
-                        # Token not supported by TWAP (no pool available)
-                        logger.debug(
-                            "[%s] TWAP: %s, trying next provider",
-                            self._backtest_id,
-                            str(e),
-                        )
-                        continue
-
-                elif source == "coingecko":
-                    if self._price_aggregator:
-                        result = await self._price_aggregator.get_aggregated_price(lookup_token, "USD")
-                        # Check if data is stale
-                        if result.stale:
-                            logger.warning(
-                                "[%s] CoinGecko returned stale data for %s (confidence: %.2f)",
-                                self._backtest_id,
-                                token_upper,
-                                result.confidence,
-                            )
-                            # Still use it if it's the last option
-                            if source == self._price_source_order[-1]:
-                                price = result.price
-                                provider_used = "coingecko (stale)"
-                            else:
-                                continue
-                        else:
-                            price = result.price
-                            provider_used = "coingecko"
-                        break
-            except AllDataSourcesFailed as e:
-                # Use error handler for consistent classification
-                if self._error_handler:
-                    self._error_handler.handle_error(e, context=f"price_fetch:{source}:{token_upper}")
-                logger.warning(
-                    "[%s] Price provider '%s' failed for %s: %s",
-                    self._backtest_id,
-                    source,
-                    token_upper,
-                    str(e),
-                )
-                continue
-            except Exception as e:
-                # Use error handler for consistent classification
-                if self._error_handler:
-                    self._error_handler.handle_error(e, context=f"price_fetch:{source}:{token_upper}")
-                logger.warning(
-                    "[%s] Unexpected error from '%s' price provider for %s: %s",
-                    self._backtest_id,
-                    source,
-                    token_upper,
-                    str(e),
-                )
-                continue
-
-        # If we got a price from a provider, cache and return it
-        if price is not None and provider_used is not None:
-            self._price_cache[token_upper] = price
-            logger.info(
-                "[%s] Price for %s: $%s (provider: %s)",
-                self._backtest_id,
-                token_upper,
-                price,
-                provider_used,
-            )
-            return price
+        for source_index, source in enumerate(self._price_source_order):
+            price, provider_used = await self._try_price_source(source, token_upper, lookup_token, source_index)
+            if price is not None and provider_used is not None:
+                return self._cache_provider_price(token_upper, price, provider_used)
 
         # All providers failed - fail instead of fabricating when strict price
         # mode is enabled OR the caller forbids the hardcoded fallback (the
         # numeraire token, VIB-5127).
         if self.config.strict_price_mode or not allow_hardcoded_fallback:
-            reason = "strict_price_mode is enabled" if self.config.strict_price_mode else "this token is the numeraire"
-            error_msg = (
-                f"All price providers failed for {token_upper} on chain={self.config.chain} "
-                f"(chain_id={self.config.chain_id}) and {reason}. "
-                f"Providers attempted: chainlink, twap, coingecko. "
-                f"Ensure price providers can serve this token."
-            )
-            logger.error("[%s] %s", self._backtest_id, error_msg)
-            raise ValueError(error_msg)
+            self._raise_price_unavailable(token_upper, allow_hardcoded_fallback)
 
         # Fallback prices for common tokens when all providers fail
-        logger.warning(
-            "[%s] All price providers failed for %s on chain=%s, using hardcoded fallback. "
-            "Set strict_price_mode=True for institutional-grade backtests.",
-            self._backtest_id,
-            token_upper,
-            self.config.chain,
-        )
-        fallback_prices: dict[str, Decimal] = {
-            "ETH": Decimal("3000"),
-            "WETH": Decimal("3000"),
-            "BTC": Decimal("60000"),
-            "WBTC": Decimal("60000"),
-            "ARB": Decimal("1"),
-            "OP": Decimal("2"),
-            "AVAX": Decimal("35"),
-            "WAVAX": Decimal("35"),
-            "LINK": Decimal("15"),
-            "UNI": Decimal("10"),
-        }
-
-        price = fallback_prices.get(token_upper, Decimal("1"))
-        self._price_cache[token_upper] = price
-        logger.warning(
-            "[%s] Price for %s: $%s (provider: hardcoded_fallback) - This may produce inaccurate backtest results",
-            self._backtest_id,
-            token_upper,
-            price,
-        )
-        # Track that we used a hardcoded fallback for compliance reporting
-        self._used_hardcoded_fallback = True
-        self._track_fallback("hardcoded_price")
-        return price
+        return self._hardcoded_token_price(token_upper)
 
     def _get_token_price_sync(self, token: str) -> Decimal:
         """Get token price synchronously (for non-async contexts).
@@ -3790,6 +4075,7 @@ class PaperTrader:
     def _clear_price_cache(self) -> None:
         """Clear the price cache to force fresh fetches."""
         self._price_cache.clear()
+        self._price_cache_sources.clear()
 
     async def _get_portfolio_prices(self) -> dict[str, Decimal]:
         """Fetch prices for all tokens in the portfolio.
@@ -3863,6 +4149,42 @@ class PaperTrader:
     # Metrics Calculation
     # =========================================================================
 
+    def _metric_equity_values(self) -> list[Decimal]:
+        return [point.value_usd for point in self._equity_curve]
+
+    def _metric_total_return(self, initial_value: Decimal, final_value: Decimal) -> Decimal:
+        if initial_value <= Decimal("0"):
+            return Decimal("0")
+        return (final_value - initial_value) / initial_value
+
+    def _metric_trade_pnl_stats(self) -> tuple[Decimal, Decimal, int, int]:
+        gross_profit = Decimal("0")
+        gross_loss = Decimal("0")
+        winning_trades_count = 0
+        losing_trades_count = 0
+
+        for trade in self._trades:
+            trade_pnl = trade.net_pnl_usd
+            if trade_pnl > Decimal("0"):
+                gross_profit += trade_pnl
+                winning_trades_count += 1
+            elif trade_pnl < Decimal("0"):
+                gross_loss += abs(trade_pnl)
+                losing_trades_count += 1
+
+        return gross_profit, gross_loss, winning_trades_count, losing_trades_count
+
+    def _metric_win_rate(self, winning_trades_count: int, losing_trades_count: int) -> Decimal:
+        trades_with_pnl = winning_trades_count + losing_trades_count
+        if trades_with_pnl == 0:
+            return Decimal("0")
+        return Decimal(winning_trades_count) / Decimal(trades_with_pnl)
+
+    def _metric_profit_factor(self, gross_profit: Decimal, gross_loss: Decimal) -> Decimal:
+        if gross_loss <= Decimal("0"):
+            return Decimal("0")
+        return gross_profit / gross_loss
+
     def _calculate_metrics(self) -> BacktestMetrics:
         """Calculate comprehensive backtest metrics.
 
@@ -3881,7 +4203,7 @@ class PaperTrader:
 
         # Extract equity values
         initial_capital = self._calculate_initial_capital()
-        equity_values = [p.value_usd for p in self._equity_curve]
+        equity_values = self._metric_equity_values()
         initial_value = equity_values[0] if equity_values else initial_capital
         final_value = equity_values[-1] if equity_values else initial_capital
 
@@ -3897,9 +4219,7 @@ class PaperTrader:
         net_pnl = total_pnl
 
         # Total return (as ratio for internal use; convert to percentage when assigning to BacktestMetrics per VIB-2915)
-        total_return = Decimal("0")
-        if initial_value > Decimal("0"):
-            total_return = (final_value - initial_value) / initial_value
+        total_return = self._metric_total_return(initial_value, final_value)
 
         # Calculate returns for risk metrics
         returns = calculate_returns(equity_values)
@@ -3915,31 +4235,13 @@ class PaperTrader:
         total_trades_count = len(self._trades)
 
         # Calculate win rate and profit factor from per-trade PnL (including gas)
-        gross_profit = Decimal("0")
-        gross_loss = Decimal("0")
-        winning_trades_count = 0
-        losing_trades_count = 0
-
-        for trade in self._trades:
-            trade_pnl = trade.net_pnl_usd
-            if trade_pnl > Decimal("0"):
-                gross_profit += trade_pnl
-                winning_trades_count += 1
-            elif trade_pnl < Decimal("0"):
-                gross_loss += abs(trade_pnl)
-                losing_trades_count += 1
-            # Zero PnL trades are neutral - don't count as win or loss
+        gross_profit, gross_loss, winning_trades_count, losing_trades_count = self._metric_trade_pnl_stats()
 
         # Win rate = winning trades / total trades with non-zero PnL
-        trades_with_pnl = winning_trades_count + losing_trades_count
-        win_rate = Decimal("0")
-        if trades_with_pnl > 0:
-            win_rate = Decimal(winning_trades_count) / Decimal(trades_with_pnl)
+        win_rate = self._metric_win_rate(winning_trades_count, losing_trades_count)
 
         # Profit factor = gross profit / gross loss
-        profit_factor = Decimal("0")
-        if gross_loss > Decimal("0"):
-            profit_factor = gross_profit / gross_loss
+        profit_factor = self._metric_profit_factor(gross_profit, gross_loss)
 
         return BacktestMetrics(
             total_pnl_usd=total_pnl,

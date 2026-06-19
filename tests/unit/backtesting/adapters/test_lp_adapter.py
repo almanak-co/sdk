@@ -384,6 +384,18 @@ class TestGetRangeStatus:
         result = adapter.get_range_status(position, market)
         assert result is None
 
+    def test_strict_missing_token0_price_raises(self) -> None:
+        """Strict mode must not silently skip range checks when token0 is missing."""
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        adapter = LPBacktestAdapter(LPBacktestConfig(strategy_type="lp", strict_reproducibility=True))
+
+        position = create_lp_position()
+        market = MockMarketState(prices={"USDC": Decimal("1")})
+
+        with pytest.raises(HistoricalDataUnavailableError, match="ETH"):
+            adapter.get_range_status(position, market)
+
     def test_range_status_result_to_dict(self) -> None:
         """Test RangeStatusResult serialization."""
         result = RangeStatusResult(
@@ -578,6 +590,23 @@ class TestLPStrategyAccuracy:
         # Value should include the accumulated fees
         # The exact token amounts depend on IL calculation, but fees should be added
         assert value > Decimal("0")
+
+    def test_value_position_strict_missing_token0_price_raises(self) -> None:
+        """Strict valuation must not silently reuse entry price for missing token0."""
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        config = LPBacktestConfig(
+            strategy_type="lp",
+            fee_tracking_enabled=False,
+            strict_reproducibility=True,
+        )
+        adapter = LPBacktestAdapter(config)
+
+        position = create_lp_position()
+        market = MockMarketState(prices={"USDC": Decimal("1")})
+
+        with pytest.raises(HistoricalDataUnavailableError, match="ETH"):
+            adapter.value_position(position, market)
 
     def test_update_position_accrues_fees(self) -> None:
         """Test that update_position accrues fees over time."""
@@ -777,6 +806,17 @@ class TestEdgeCases:
         # Should use USDC=$1 assumption, giving ratio=1
         assert result.current_price_ratio == Decimal("1")
         assert result.status == RangeStatus.IN_RANGE
+
+    def test_malformed_value_position_skips_missing_prices(self) -> None:
+        """Simple fallback valuation should use measured prices and skip missing ones."""
+        adapter = LPBacktestAdapter()
+
+        position = create_lp_position()
+        position.tokens = ["ETH"]
+        position.amounts = {"ETH": Decimal("2"), "MISSING": Decimal("5")}
+        market = MockMarketState(prices={"ETH": Decimal("1000")})
+
+        assert adapter.value_position(position, market) == Decimal("2000")
 
     def test_extreme_tick_values(self) -> None:
         """Test handling of extreme tick values."""
@@ -1165,6 +1205,39 @@ class TestExecuteIntentLPClose:
         assert amount_with_fees > amount_no_fees
         assert fill_no_fees.metadata.get("collect_fees") is False
 
+    def test_execute_lp_close_excludes_uncollected_fees_from_net_pnl(self) -> None:
+        """Uncollected fees are reported but not realized into close PnL."""
+        from almanak.framework.intents.vocabulary import LPCloseIntent
+
+        adapter = LPBacktestAdapter()
+
+        position = create_lp_position()
+        position.accumulated_fees_usd = Decimal("100")
+        position.metadata["entry_amounts"] = {"ETH": "1", "USDC": "2000"}
+
+        portfolio = MockPortfolio()
+        portfolio.positions = [position]
+
+        intent = LPCloseIntent(
+            position_id=position.position_id,
+            collect_fees=False,
+            protocol="uniswap_v3",
+        )
+        market = MockMarketStateWithTimestamp(
+            prices={"ETH": Decimal("2000"), "USDC": Decimal("1")},
+            timestamp=datetime.now(),
+        )
+
+        fill = adapter.execute_intent(intent, portfolio, market)
+
+        assert fill is not None
+        assert fill.success is True
+        initial_value = Decimal(fill.metadata["initial_value_usd"])
+        current_value = Decimal(fill.metadata["current_value_usd"])
+        assert fill.amount_usd == current_value
+        assert Decimal(fill.metadata["fees_earned_usd"]) == Decimal("100")
+        assert Decimal(fill.metadata["net_lp_pnl_usd"]) == current_value - initial_value
+
     def test_execute_lp_close_calculates_il(self) -> None:
         """Test LP close calculates impermanent loss correctly."""
         from almanak.framework.intents.vocabulary import LPCloseIntent
@@ -1521,6 +1594,31 @@ class TestHistoricalVolumeIntegration:
         assert "pool_address" in fill.position_delta.metadata
         assert fill.position_delta.metadata["pool_address"] == "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443"
 
+    def test_adapter_normalizes_uppercase_pool_address_in_metadata(self) -> None:
+        """Pool-address detection is case-insensitive and stores lowercase."""
+        from almanak.framework.intents.vocabulary import LPOpenIntent
+
+        adapter = LPBacktestAdapter()
+        intent = LPOpenIntent(
+            pool="0XC31E54C7A869B9FCBECC14363CF510D1C41FA443",
+            amount0=Decimal("1"),
+            amount1=Decimal("2000"),
+            range_lower=Decimal("0.5"),
+            range_upper=Decimal("2.0"),
+            protocol="uniswap_v3",
+        )
+        market = MockMarketStateWithTimestamp(
+            prices={"WETH": Decimal("2000"), "USDC": Decimal("1")},
+            timestamp=datetime.now(),
+        )
+        portfolio = MockPortfolio()
+
+        fill = adapter.execute_intent(intent, portfolio, market)
+
+        assert fill is not None
+        assert fill.position_delta is not None
+        assert fill.position_delta.metadata["pool_address"] == "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443"
+
     def test_adapter_pool_address_none_for_token_format(self) -> None:
         """Test LP open with token format pool has None pool_address."""
         from almanak.framework.intents.vocabulary import LPOpenIntent
@@ -1581,6 +1679,50 @@ class TestHistoricalVolumeIntegration:
         assert "subgraph_api_key" not in message
         # And it must NOT have fabricated any fees.
         assert position.accumulated_fees_usd == Decimal("0")
+
+    def test_update_position_missing_volume_is_atomic(self) -> None:
+        """A missing-volume failure must not leave token amounts half-updated."""
+        config = LPBacktestConfig(
+            strategy_type="lp",
+            use_historical_volume=False,
+            fee_tracking_enabled=True,
+        )
+        adapter = LPBacktestAdapter(config)
+
+        position = create_lp_position(
+            entry_price=Decimal("2000"),
+            amounts={"ETH": Decimal("1"), "USDC": Decimal("2000")},
+        )
+        before_amounts = dict(position.amounts)
+        before_metadata = dict(position.metadata)
+        before_last_updated = position.last_updated
+        before_fees = (
+            position.fees_earned,
+            position.accumulated_fees_usd,
+            position.fees_token0,
+            position.fees_token1,
+            position.fee_confidence,
+            position.slippage_confidence,
+        )
+        market = MockMarketStateWithTimestamp(
+            prices={"ETH": Decimal("2200"), "USDC": Decimal("1")},
+            timestamp=datetime.now(),
+        )
+
+        with pytest.raises(DataSourceUnavailableError):
+            adapter.update_position(position, market, elapsed_seconds=86400)
+
+        assert position.amounts == before_amounts
+        assert position.metadata == before_metadata
+        assert position.last_updated == before_last_updated
+        assert (
+            position.fees_earned,
+            position.accumulated_fees_usd,
+            position.fees_token0,
+            position.fees_token1,
+            position.fee_confidence,
+            position.slippage_confidence,
+        ) == before_fees
 
     def test_fee_accrual_uses_estimated_volume_with_optin(self, caplog: pytest.LogCaptureFixture) -> None:
         """Fee accrual uses the heuristic when the caller explicitly opts in."""
@@ -1651,6 +1793,38 @@ class TestHistoricalVolumeIntegration:
         assert position.accumulated_fees_usd > Decimal("0")
         # Explicit volume is a trusted source -> not LOW confidence.
         assert position.fee_confidence != "low"
+
+    def test_fee_slippage_result_records_fractional_units(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fee slippage metadata uses fractional units, not display percentage."""
+        from almanak.framework.backtesting.pnl.fee_models.slippage_guard import HistoricalSlippageResult
+        from almanak.framework.backtesting.pnl.types import DataConfidence
+
+        adapter = LPBacktestAdapter(LPBacktestConfig(strategy_type="lp"))
+
+        def fake_calculate_slippage(**_kwargs):
+            return HistoricalSlippageResult(
+                slippage=Decimal("0.0125"),
+                slippage_bps=125,
+                liquidity_usd=Decimal("2500000"),
+                confidence=DataConfidence.HIGH,
+                data_source="test",
+                pool_type="v3",
+                was_fallback=False,
+            )
+
+        monkeypatch.setattr(adapter, "_calculate_slippage", fake_calculate_slippage)
+
+        result = adapter._fee_slippage_result(
+            fees_usd=Decimal("10"),
+            position_value_usd=Decimal("10000"),
+            timestamp=datetime(2024, 1, 15),
+            pool_address="0x0000000000000000000000000000000000000001",
+            protocol="uniswap_v3",
+        )
+
+        assert result.confidence == "high"
+        assert result.pct == Decimal("0.0125")
+        assert result.liquidity_usd == Decimal("2500000")
 
     def test_adapter_caches_volume_lookups(self) -> None:
         """Test that volume lookups are cached."""
@@ -2063,6 +2237,24 @@ class TestVolumePolicyViaDataConfig:
         assert resolution.confidence == DataConfidence.LOW
         # position_value * volume_fallback_multiplier (data_config default 10)
         assert resolution.volume_usd == Decimal("100000")
+
+    def test_non_positive_fallback_multiplier_disables_heuristic(self) -> None:
+        """A zero multiplier is not a measured volume; it disables fabricated fallback."""
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        adapter = LPBacktestAdapter(
+            config=LPBacktestConfig(strategy_type="lp", use_historical_volume=False),
+            data_config=BacktestDataConfig(
+                use_historical_volume=False,
+                allow_volume_fallback=True,
+                volume_fallback_multiplier=Decimal("0"),
+            ),
+        )
+        position = create_lp_position()
+
+        resolution = adapter._fallback_pool_volume_resolution(position, Decimal("10000"))
+
+        assert resolution is None
 
     def test_default_data_config_does_not_revoke_adapter_optin(self) -> None:
         """OR semantics: a default data_config never withdraws a config-level opt-in."""

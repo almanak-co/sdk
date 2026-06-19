@@ -453,28 +453,35 @@ class PnLBacktestConfig:
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
-        # Time validation
+        self._validate_time_config()
+        self._validate_capital_config()
+        self._resolve_and_validate_gas_price()
+        self._validate_execution_config()
+        self._validate_tokens_config()
+        self._validate_margin_ratios()
+        self._validate_reconciliation_config()
+        self._validate_data_quality_config()
+        self._apply_institutional_mode_defaults()
+
+    def _validate_time_config(self) -> None:
         if self.end_time <= self.start_time:
             raise ValueError("end_time must be after start_time")
         if self.interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
 
-        # Capital validation
+    def _validate_capital_config(self) -> None:
         if self.initial_capital_usd <= Decimal("0"):
             raise ValueError("initial_capital_usd must be positive")
 
-        # Gas configuration: resolve + validate (VIB-5088).
-        self._resolve_and_validate_gas_price()
-
-        # Inclusion delay validation
+    def _validate_execution_config(self) -> None:
         if self.inclusion_delay_blocks < 0:
             raise ValueError("inclusion_delay_blocks cannot be negative")
 
-        # Ensure tokens is not empty
+    def _validate_tokens_config(self) -> None:
         if not self.tokens:
             raise ValueError("tokens list cannot be empty")
 
-        # Margin ratio validation
+    def _validate_margin_ratios(self) -> None:
         if self.initial_margin_ratio <= Decimal("0") or self.initial_margin_ratio > Decimal("1"):
             raise ValueError("initial_margin_ratio must be between 0 and 1 (exclusive/inclusive)")
         if self.maintenance_margin_ratio <= Decimal("0") or self.maintenance_margin_ratio > Decimal("1"):
@@ -482,33 +489,27 @@ class PnLBacktestConfig:
         if self.maintenance_margin_ratio > self.initial_margin_ratio:
             raise ValueError("maintenance_margin_ratio must be <= initial_margin_ratio")
 
-        # Reconciliation configuration validation
+    def _validate_reconciliation_config(self) -> None:
         if self.reconciliation_alert_threshold_pct < Decimal("0"):
             raise ValueError("reconciliation_alert_threshold_pct cannot be negative")
 
-        # Data quality configuration validation
+    def _validate_data_quality_config(self) -> None:
         if self.staleness_threshold_seconds < 0:
             raise ValueError("staleness_threshold_seconds cannot be negative")
 
-        # Institutional mode configuration validation
         if self.min_data_coverage < Decimal("0") or self.min_data_coverage > Decimal("1"):
             raise ValueError("min_data_coverage must be between 0 and 1")
 
-        # Institutional mode enforcement: set strict defaults
-        # When institutional_mode=True, automatically enforce stricter settings
-        # for regulated/compliance-critical deployments
-        if self.institutional_mode:
-            # Enforce strict reproducibility for audit trails
-            object.__setattr__(self, "strict_reproducibility", True)
-            # Disable degraded data to ensure data quality
-            object.__setattr__(self, "allow_degraded_data", False)
-            # Disable hardcoded fallback prices for accurate valuations
-            object.__setattr__(self, "allow_hardcoded_fallback", False)
-            # Require symbol mapping for clear audit trails
-            object.__setattr__(self, "require_symbol_mapping", True)
-            # Ensure minimum data coverage is at least 98%
-            if self.min_data_coverage < Decimal("0.98"):
-                object.__setattr__(self, "min_data_coverage", Decimal("0.98"))
+    def _apply_institutional_mode_defaults(self) -> None:
+        if not self.institutional_mode:
+            return
+
+        object.__setattr__(self, "strict_reproducibility", True)
+        object.__setattr__(self, "allow_degraded_data", False)
+        object.__setattr__(self, "allow_hardcoded_fallback", False)
+        object.__setattr__(self, "require_symbol_mapping", True)
+        if self.min_data_coverage < Decimal("0.98"):
+            object.__setattr__(self, "min_data_coverage", Decimal("0.98"))
 
     def _resolve_and_validate_gas_price(self) -> None:
         """Resolve the chain-aware gas default and validate the result.

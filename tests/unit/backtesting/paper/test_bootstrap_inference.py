@@ -12,8 +12,6 @@ import logging
 from decimal import Decimal
 from unittest.mock import MagicMock
 
-import pytest
-
 from almanak.framework.backtesting.paper.bootstrap_inference import (
     SAFETY_BUFFER,
     _extract_tokens_from_intent,
@@ -102,6 +100,22 @@ class TestExtractTokensFromIntent:
         tokens = _extract_tokens_from_intent(intent)
         assert "USDC" in tokens
 
+    def test_lp_open_extracts_pool_legs_and_skips_zero_leg(self):
+        """LPOpenIntent extracts positive pool-token legs for bootstrap funding."""
+        from almanak.framework.intents.vocabulary import LPOpenIntent
+
+        intent = LPOpenIntent(
+            pool="WETH/USDC/500",
+            amount0=Decimal("0"),
+            amount1=Decimal("1000"),
+            range_lower=Decimal("1500"),
+            range_upper=Decimal("2500"),
+        )
+
+        tokens = _extract_tokens_from_intent(intent)
+
+        assert tokens == {"USDC": Decimal("1000")}
+
     def test_unknown_intent_returns_empty(self):
         """Unknown intent types return empty dict."""
         mock_intent = MagicMock()
@@ -127,8 +141,7 @@ class TestExtractTokensFromResult:
 
     def test_intent_sequence(self):
         """IntentSequence extracts tokens from all steps."""
-        from almanak.framework.intents.vocabulary import IntentSequence
-        from almanak.framework.intents.vocabulary import SwapIntent
+        from almanak.framework.intents.vocabulary import IntentSequence, SwapIntent
 
         seq = IntentSequence(
             intents=[
@@ -139,6 +152,27 @@ class TestExtractTokensFromResult:
         tokens = _extract_tokens_from_result(seq)
         assert "USDC" in tokens
         assert "WETH" in tokens
+
+    def test_nested_intent_sequence_flattens_recursively(self):
+        """Nested IntentSequence values are flattened before token extraction."""
+        from almanak.framework.intents.vocabulary import IntentSequence, SwapIntent
+
+        inner = IntentSequence(
+            intents=[
+                SwapIntent(from_token="USDC", to_token="WETH", amount_usd=Decimal("1000")),
+            ],
+        )
+        outer = IntentSequence(
+            intents=[
+                inner,
+                SwapIntent(from_token="WETH", to_token="DAI", amount=Decimal("0.5")),
+            ],
+        )
+
+        tokens = _extract_tokens_from_result(outer)
+
+        assert tokens["USDC"] == Decimal("1000")
+        assert tokens["WETH"] == Decimal("0.5")
 
     def test_list_of_intents(self):
         """List of intents extracts tokens from all items."""

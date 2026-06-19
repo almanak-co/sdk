@@ -6,6 +6,7 @@ import importlib
 import json
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import click
 import pytest
@@ -16,6 +17,7 @@ from almanak.framework.cli.backtest.advanced import (
     _build_walk_forward_context,
     _format_walk_forward_param_range,
     _resolve_walk_forward_strategy_class,
+    print_walk_forward_results,
 )
 from almanak.framework.cli.backtest.sweep import parse_param_ranges_from_config
 
@@ -87,6 +89,88 @@ def test_walk_forward_param_range_formatting(tmp_path: Path) -> None:
         "  mode: categorical ['fast', 'slow']"
     )
     assert _format_walk_forward_param_range("legacy", ["a", "b"]) == "  legacy: ['a', 'b']"
+
+
+def test_print_walk_forward_results_warns_on_overfit_and_unstable_parameters(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    window = SimpleNamespace(
+        window_index=1,
+        train_start=datetime(2024, 1, 1),
+        test_end=datetime(2024, 2, 1),
+    )
+    result = SimpleNamespace(
+        total_windows=1,
+        successful_windows=1,
+        avg_train_objective=1.25,
+        avg_test_objective=0.75,
+        avg_overfitting_ratio=1.67,
+        avg_generalization_score=0.6,
+        combined_test_pnl_usd=1234.56,
+        combined_test_return_pct=12.34,
+        is_overfit=True,
+        parameter_stability={
+            "threshold": SimpleNamespace(
+                cv=0.42,
+                stability_threshold=0.25,
+                mean=0.05,
+                std=0.02,
+                is_stable=False,
+            ),
+            "mode": SimpleNamespace(
+                cv=float("inf"),
+                stability_threshold=0.25,
+                mean=0,
+                std=0,
+                is_stable=False,
+            ),
+        },
+        has_parameter_instability=True,
+        unstable_parameters=["threshold"],
+        windows=[
+            SimpleNamespace(
+                window=window,
+                train_objective_value=1.25,
+                test_objective_value=0.75,
+                overfitting_ratio=1.67,
+            )
+        ],
+    )
+
+    print_walk_forward_results(result, "sharpe_ratio")
+
+    output = capsys.readouterr().out
+    assert "Potential overfitting detected" in output
+    assert "threshold: CV=42.00%" in output
+    assert "mode: categorical" in output
+    assert "PER-WINDOW RESULTS" in output
+
+
+def test_print_walk_forward_results_handles_stable_empty_parameters(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = SimpleNamespace(
+        total_windows=0,
+        successful_windows=0,
+        avg_train_objective=0,
+        avg_test_objective=0,
+        avg_overfitting_ratio=0,
+        avg_generalization_score=0,
+        combined_test_pnl_usd=0,
+        combined_test_return_pct=0,
+        is_overfit=False,
+        parameter_stability={},
+        has_parameter_instability=False,
+        unstable_parameters=[],
+        windows=[],
+    )
+
+    print_walk_forward_results(result, "net_pnl_usd")
+
+    output = capsys.readouterr().out
+    assert "No significant overfitting detected" in output
+    assert "PARAMETER STABILITY" not in output
+    assert "PER-WINDOW RESULTS" in output
 
 
 def test_walk_forward_fallback_strategy_uses_bound_mock(monkeypatch: pytest.MonkeyPatch) -> None:

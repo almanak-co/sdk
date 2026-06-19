@@ -216,6 +216,30 @@ class TestLoadConfigFromResult:
             load_config_from_result(path, strict=True)
         assert "Strict mode" in str(exc_info.value)
 
+    def test_non_mapping_metadata_raises_config_load_error(self, valid_result_dict: dict, tmp_path: Path) -> None:
+        """Malformed metadata is a config error, not an AttributeError leak."""
+        valid_result_dict["config"]["_metadata"] = "not-a-dict"
+        result_file = tmp_path / "bad_metadata.json"
+        result_file.write_text(json.dumps(valid_result_dict))
+
+        with pytest.raises(ConfigLoadError) as exc_info:
+            load_config_from_result(result_file)
+
+        assert "_metadata" in str(exc_info.value)
+
+    def test_non_finite_numeric_value_raises_config_load_error(
+        self, valid_result_dict: dict, tmp_path: Path
+    ) -> None:
+        """Non-finite capital must fail validation before Decimal internals leak."""
+        valid_result_dict["config"]["initial_capital_usd"] = "NaN"
+        result_file = tmp_path / "nan_capital.json"
+        result_file.write_text(json.dumps(valid_result_dict))
+
+        with pytest.raises(ConfigLoadError) as exc_info:
+            load_config_from_result(result_file)
+
+        assert "initial_capital_usd" in str(exc_info.value)
+
     def test_accepts_string_path(self, temp_result_file: Path) -> None:
         """Test that string path works."""
         result = load_config_from_result(str(temp_result_file))
@@ -263,6 +287,17 @@ class TestValidateLoadedConfig:
         assert not result.is_valid
         assert any("end_time" in e for e in result.errors)
 
+    def test_missing_initial_capital(self) -> None:
+        """Test error for missing initial capital before construction."""
+        config = {
+            "start_time": "2024-01-01T00:00:00+00:00",
+            "end_time": "2024-06-01T00:00:00+00:00",
+        }
+        result = validate_loaded_config(config)
+
+        assert not result.is_valid
+        assert any("initial_capital_usd" in e for e in result.errors)
+
     def test_invalid_datetime_format(self) -> None:
         """Test error for invalid datetime format."""
         config = {
@@ -284,6 +319,31 @@ class TestValidateLoadedConfig:
 
         assert not result.is_valid
         assert any("must be after" in e for e in result.errors)
+
+    def test_non_datetime_start_time_is_invalid(self) -> None:
+        """Numeric timestamps are not accepted by the replay config schema."""
+        config = {
+            "start_time": 1,
+            "end_time": 2,
+        }
+
+        result = validate_loaded_config(config)
+
+        assert not result.is_valid
+        assert any("start_time" in e for e in result.errors)
+        assert any("end_time" in e for e in result.errors)
+
+    def test_mixed_timezone_datetimes_are_invalid(self) -> None:
+        """Naive and aware datetime values cannot be safely ordered."""
+        config = {
+            "start_time": "2024-01-01T00:00:00+00:00",
+            "end_time": "2024-01-02T00:00:00",
+        }
+
+        result = validate_loaded_config(config)
+
+        assert not result.is_valid
+        assert any("comparable timezone" in e for e in result.errors)
 
     def test_negative_interval(self) -> None:
         """Test error for negative interval."""
@@ -308,6 +368,44 @@ class TestValidateLoadedConfig:
 
         assert not result.is_valid
         assert any("initial_capital" in e for e in result.errors)
+
+    def test_zero_capital_is_invalid(self) -> None:
+        """Initial capital is explicitly positive, not non-negative."""
+        config = {
+            "start_time": "2024-01-01T00:00:00+00:00",
+            "end_time": "2024-06-01T00:00:00+00:00",
+            "initial_capital_usd": "0",
+        }
+        result = validate_loaded_config(config)
+
+        assert not result.is_valid
+        assert any("initial_capital" in e for e in result.errors)
+
+    def test_maintenance_margin_cannot_exceed_initial_margin(self) -> None:
+        """Margin-ratio relationship is validated before config construction."""
+        config = {
+            "start_time": "2024-01-01T00:00:00+00:00",
+            "end_time": "2024-06-01T00:00:00+00:00",
+            "initial_capital_usd": "10000",
+            "initial_margin_ratio": "0.1",
+            "maintenance_margin_ratio": "0.2",
+        }
+        result = validate_loaded_config(config)
+
+        assert not result.is_valid
+        assert "maintenance_margin_ratio must be <= initial_margin_ratio" in result.errors
+
+    def test_non_finite_numeric_value_is_invalid(self) -> None:
+        """NaN/Infinity values must not pass numeric validation."""
+        config = {
+            "start_time": "2024-01-01T00:00:00+00:00",
+            "end_time": "2024-06-01T00:00:00+00:00",
+            "gas_price_gwei": "Infinity",
+        }
+        result = validate_loaded_config(config)
+
+        assert not result.is_valid
+        assert any("gas_price_gwei" in e for e in result.errors)
 
     def test_invalid_margin_ratio_low(self) -> None:
         """Test error for margin ratio <= 0."""

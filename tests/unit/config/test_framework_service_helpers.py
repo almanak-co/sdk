@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from almanak.config import load_config
 from almanak.config.backtest import (
     DEFAULT_BACKTEST_LOG_LEVEL,
     DEFAULT_BACKTEST_MAX_JOBS,
@@ -15,7 +16,6 @@ from almanak.config.backtest import (
     DEFAULT_BACKTEST_SERVICE_WORKERS,
     backtest_service_config_from_env,
 )
-from almanak.config import load_config
 from almanak.config.framework import framework_config_from_env
 from almanak.config.safe_signer import safe_signer_service_config_from_env
 from almanak.config.simulation import (
@@ -124,6 +124,25 @@ def test_backtest_service_config_reads_overrides(monkeypatch: pytest.MonkeyPatch
     assert cfg.max_concurrent_backtest_jobs == 8
     assert cfg.max_concurrent_paper_sessions == 5
     assert cfg.log_level == "debug"
+
+
+@pytest.mark.parametrize(
+    "env_var",
+    [
+        "BACKTEST_SERVICE_PORT",
+        "BACKTEST_SERVICE_WORKERS",
+        "BACKTEST_MAX_JOBS",
+        "BACKTEST_MAX_PAPER_SESSIONS",
+    ],
+)
+def test_backtest_service_config_rejects_malformed_integer_env(
+    monkeypatch: pytest.MonkeyPatch,
+    env_var: str,
+) -> None:
+    monkeypatch.setenv(env_var, "not-an-int")
+
+    with pytest.raises(ValueError):
+        backtest_service_config_from_env()
 
 
 def test_simulation_config_defaults() -> None:

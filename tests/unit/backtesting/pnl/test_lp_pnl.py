@@ -24,6 +24,113 @@ from almanak.framework.backtesting.pnl.portfolio import (
 )
 
 
+class TestLPFeeCollectionAccounting:
+    """Adapter-stamped LP closes realize only the value returned by the close fill."""
+
+    @staticmethod
+    def _position_with_fees() -> SimulatedPosition:
+        position = SimulatedPosition.lp(
+            token0="ETH",
+            token1="USDC",
+            amount0=Decimal("1"),
+            amount1=Decimal("2000"),
+            liquidity=Decimal("4000"),
+            tick_lower=MIN_TICK,
+            tick_upper=MAX_TICK,
+            fee_tier=Decimal("0.003"),
+            entry_price=Decimal("2000"),
+            entry_time=datetime(2024, 1, 1, tzinfo=UTC),
+            protocol="uniswap_v3",
+        )
+        position.accumulated_fees_usd = Decimal("100")
+        position.fees_earned = Decimal("100")
+        return position
+
+    @staticmethod
+    def _close_fill(
+        position: SimulatedPosition,
+        tokens_in: dict[str, Decimal],
+        amount_usd: Decimal,
+        collect_fees: bool,
+    ) -> SimulatedFill:
+        return SimulatedFill(
+            timestamp=datetime(2024, 1, 15, tzinfo=UTC),
+            intent_type=IntentType.LP_CLOSE,
+            protocol="uniswap_v3",
+            tokens=["ETH", "USDC"],
+            executed_price=Decimal("2000"),
+            amount_usd=amount_usd,
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            tokens_in=tokens_in,
+            tokens_out={},
+            success=True,
+            position_close_id=position.position_id,
+            metadata={
+                "collect_fees": collect_fees,
+                "token0_price_usd": Decimal("2000"),
+                "token1_price_usd": Decimal("1"),
+            },
+        )
+
+    @staticmethod
+    def _close_value(fill: SimulatedFill) -> Decimal:
+        return fill.tokens_in["ETH"] * Decimal("2000") + fill.tokens_in["USDC"]
+
+    def _expected_net_pnl(
+        self,
+        portfolio: SimulatedPortfolio,
+        position: SimulatedPosition,
+        fill: SimulatedFill,
+    ) -> Decimal:
+        close_value = self._close_value(fill)
+        initial_value, _ = portfolio._lp_entry_value_and_il(
+            position,
+            fill,
+            close_value,
+            Decimal("2000"),
+            Decimal("1"),
+        )
+        return close_value - initial_value
+
+    def test_collected_fee_tokens_are_not_double_counted_in_trade_pnl(self) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+        position = self._position_with_fees()
+        portfolio.positions.append(position)
+        fill = self._close_fill(
+            position,
+            tokens_in={"ETH": Decimal("1.025"), "USDC": Decimal("2050")},
+            amount_usd=Decimal("4100"),
+            collect_fees=True,
+        )
+        expected_net_pnl = self._expected_net_pnl(portfolio, position, fill)
+
+        assert portfolio.apply_fill(fill)
+
+        trade = portfolio.trades[0]
+        assert trade.fees_earned_usd == Decimal("100")
+        assert trade.net_lp_pnl_usd == expected_net_pnl
+
+    def test_uncollected_fees_are_not_realized_in_trade_pnl(self) -> None:
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+        position = self._position_with_fees()
+        portfolio.positions.append(position)
+        fill = self._close_fill(
+            position,
+            tokens_in={"ETH": Decimal("1"), "USDC": Decimal("2000")},
+            amount_usd=Decimal("4000"),
+            collect_fees=False,
+        )
+        expected_net_pnl = self._expected_net_pnl(portfolio, position, fill)
+
+        assert portfolio.apply_fill(fill)
+
+        trade = portfolio.trades[0]
+        assert trade.fees_earned_usd == Decimal("100")
+        assert trade.net_lp_pnl_usd == expected_net_pnl
+
+
 class TestLPPnLWithPriceIncrease:
     """Tests for LP PnL calculation when price increases (token0 appreciates)."""
 

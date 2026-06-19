@@ -133,6 +133,62 @@ class PositionMetricsAggregate:
     liquidation_losses_usd: Decimal
 
 
+@dataclass(frozen=True)
+class _DebitPlan:
+    token_debits: dict[str, Decimal]
+    cash_debit: Decimal
+    conversions: dict[str, Decimal]
+
+
+@dataclass(frozen=True)
+class _PositionEffects:
+    closed_position: SimulatedPosition | None = None
+
+
+@dataclass(frozen=True)
+class _TradePnlComponents:
+    pnl_usd: Decimal | None
+    il_loss_usd: Decimal | None = None
+    fees_earned_usd: Decimal | None = None
+    net_lp_pnl_usd: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class _ReductionFlow:
+    amounts: dict[str, Decimal]
+    label: str
+    verb: str
+
+
+@dataclass(frozen=True)
+class _LpFeeTierModel:
+    volume_multiplier: Decimal
+    base_apr: Decimal
+
+
+@dataclass(frozen=True)
+class _EquitySummary:
+    total_pnl: Decimal
+    total_return: Decimal
+    annualized_return: Decimal
+
+
+@dataclass(frozen=True)
+class _ExecutionCostTotals:
+    fees: Decimal
+    slippage: Decimal
+    gas: Decimal
+
+
+@dataclass(frozen=True)
+class _RiskMetrics:
+    volatility: Decimal
+    sharpe: Decimal
+    sortino: Decimal
+    max_drawdown: Decimal
+    calmar: Decimal
+
+
 @dataclass
 class SimulatedPortfolio:
     """Portfolio tracker for PnL backtesting.
@@ -292,18 +348,38 @@ class SimulatedPortfolio:
             when they consume ``trade_record.success`` downstream instead.
         """
         if not fill.success:
-            self._record_failed_fill(
+            return self._reject_fill(
                 fill,
                 fill.metadata.get("failure_reason", "fill marked failed by producer"),
             )
-            return False
 
+        debit_plan, failure_reason = self._build_debit_plan(fill, market_state)
+        if failure_reason is not None:
+            return self._reject_fill(fill, failure_reason)
+        assert debit_plan is not None
+
+        self._annotate_implicit_conversions(fill, debit_plan.conversions)
+        self._apply_token_flows(fill, debit_plan.token_debits, debit_plan.cash_debit, market_state)
+        position_effects = self._apply_position_effects(fill, market_state, adapter)
+        components = self._trade_pnl_components(fill, position_effects.closed_position)
+        self._record_successful_fill(fill, components)
+
+        return True
+
+    def _reject_fill(self, fill: SimulatedFill, reason: str) -> bool:
+        self._record_failed_fill(fill, reason)
+        return False
+
+    def _build_debit_plan(
+        self,
+        fill: SimulatedFill,
+        market_state: MarketState | None,
+    ) -> tuple[_DebitPlan | None, str | None]:
         token_debits, cash_debit, conversions, failure_reason = self._plan_token_debits(
             fill.tokens_out, fill.intent_type, market_state
         )
         if failure_reason is not None:
-            self._record_failed_fill(fill, failure_reason)
-            return False
+            return None, failure_reason
 
         # Aggregate cash check: planned stablecoin/conversion debits and
         # perp-open collateral draw from the same cash_usd, so they must be
@@ -311,28 +387,32 @@ class SimulatedPortfolio:
         # overdraw) before any state mutation.
         funding_failure = self._cash_funding_failure(fill, cash_debit)
         if funding_failure is not None:
-            self._record_failed_fill(fill, funding_failure)
-            return False
+            return None, funding_failure
 
         reduce_failure = self._position_reduce_failure(fill)
         if reduce_failure is not None:
-            self._record_failed_fill(fill, reduce_failure)
-            return False
+            return None, reduce_failure
 
+        close_failure = self._position_close_failure(fill)
+        if close_failure is not None:
+            return None, close_failure
+
+        return _DebitPlan(token_debits, cash_debit, conversions), None
+
+    @staticmethod
+    def _annotate_implicit_conversions(fill: SimulatedFill, conversions: dict[str, Decimal]) -> None:
         if conversions:
             fill.metadata["implicit_conversions"] = {token: str(amount) for token, amount in conversions.items()}
 
-        self._apply_token_flows(fill, token_debits, cash_debit, market_state)
-
-        # Initialize LP PnL breakdown fields
-        il_loss_usd: Decimal | None = None
-        fees_earned_usd: Decimal | None = None
-        net_lp_pnl_usd: Decimal | None = None
+    def _apply_position_effects(
+        self,
+        fill: SimulatedFill,
+        market_state: MarketState | None,
+        adapter: "StrategyBacktestAdapter | None",
+    ) -> _PositionEffects:
         closed_position: SimulatedPosition | None = None
 
-        # Handle position changes
         if fill.position_close_id:
-            # Close an existing position and capture it for LP PnL calculation
             closed_position = self._close_position(fill.position_close_id, fill.timestamp)
         elif fill.position_reduce_id:
             # Partially reduce a position (validated in _position_reduce_failure).
@@ -360,16 +440,22 @@ class SimulatedPortfolio:
                 self.cash_usd -= fill.position_delta.collateral_usd
             self.positions.append(fill.position_delta)
 
-        # Calculate PnL for this trade. ``None`` means "no realized PnL yet"
-        # (an opening / inventory-building trade) -- distinct from a measured
-        # zero (Empty != Zero, VIB-5083). The metrics layer excludes ``None``
-        # from win/loss stats.
-        pnl_usd = self._calculate_trade_pnl(fill)
+        return _PositionEffects(closed_position=closed_position)
 
-        # Calculate LP PnL breakdown if this is an LP_CLOSE with a valid closed position
+    def _trade_pnl_components(
+        self,
+        fill: SimulatedFill,
+        closed_position: SimulatedPosition | None,
+    ) -> _TradePnlComponents:
+        # ``None`` means "no realized PnL yet" (an opening /
+        # inventory-building trade) -- distinct from a measured zero.
+        pnl_usd = self._calculate_trade_pnl(fill)
+        il_loss_usd: Decimal | None = None
+        fees_earned_usd: Decimal | None = None
+        net_lp_pnl_usd: Decimal | None = None
+
         if fill.intent_type == IntentType.LP_CLOSE and closed_position and closed_position.is_lp:
             il_loss_usd, fees_earned_usd, net_lp_pnl_usd = self._calculate_lp_pnl_breakdown(closed_position, fill)
-            # Update pnl_usd with the net LP PnL if not already set from metadata
             if (pnl_usd is None or pnl_usd == Decimal("0")) and net_lp_pnl_usd is not None:
                 pnl_usd = net_lp_pnl_usd
 
@@ -378,27 +464,24 @@ class SimulatedPortfolio:
         if closed_position is not None and closed_position.is_perp and fill.success:
             pnl_usd = self._apply_perp_close_credit(closed_position, fill, pnl_usd or Decimal("0"))
 
-        # Record the trade with LP PnL breakdown if applicable
+        return _TradePnlComponents(pnl_usd, il_loss_usd, fees_earned_usd, net_lp_pnl_usd)
+
+    def _record_successful_fill(self, fill: SimulatedFill, components: _TradePnlComponents) -> None:
         trade = fill.to_trade_record(
-            pnl_usd=pnl_usd,
-            il_loss_usd=il_loss_usd,
-            fees_earned_usd=fees_earned_usd,
-            net_lp_pnl_usd=net_lp_pnl_usd,
+            pnl_usd=components.pnl_usd,
+            il_loss_usd=components.il_loss_usd,
+            fees_earned_usd=components.fees_earned_usd,
+            net_lp_pnl_usd=components.net_lp_pnl_usd,
         )
         self.trades.append(trade)
+        self._accumulate_realized_pnl(fill, components.pnl_usd)
 
-        # Accumulate realized PnL into the portfolio-level total.
-        # - Position closes lock in their PnL here (guarded by position_close_id).
-        # - SWAP disposals also realize PnL (proceeds - units x avg_cost, carried
-        #   via metadata["realized_pnl_usd"] -> _calculate_trade_pnl); without
-        #   this their gain/loss would surface per-trade but be missing from
-        #   BacktestMetrics.realized_pnl, understating it (VIB-5083, CodeRabbit).
-        # Inventory-building buys realize nothing (pnl_usd is None) and are skipped.
+    def _accumulate_realized_pnl(self, fill: SimulatedFill, pnl_usd: Decimal | None) -> None:
+        # Position closes lock in their PnL here (guarded by position_close_id).
+        # SWAP disposals carry realized PnL via metadata["realized_pnl_usd"].
         realizes_pnl = bool(fill.position_close_id) or fill.intent_type == IntentType.SWAP
         if realizes_pnl and pnl_usd is not None and pnl_usd != Decimal("0"):
             self._realized_pnl += pnl_usd
-
-        return True
 
     def _apply_token_flows(
         self,
@@ -449,6 +532,88 @@ class SimulatedPortfolio:
         # Deduct gas and non-embedded venue costs (fee/slippage) from cash
         self.cash_usd -= fill.gas_cost_usd + self._venue_cash_costs(fill)
 
+    def _swap_disposed_tokens(
+        self,
+        token_debits: dict[str, Decimal],
+        proceeds_unpriceable: bool,
+    ) -> dict[str, Decimal]:
+        if proceeds_unpriceable:
+            return {}
+        return {
+            token: debit
+            for token, debit in token_debits.items()
+            if debit > Decimal("0") and not self._is_cash_equivalent(token)
+        }
+
+    def _swap_realized_pnl(
+        self,
+        disposed: dict[str, Decimal],
+        in_value: Decimal,
+        market_state: MarketState | None,
+    ) -> Decimal | None:
+        disposed_units_value = self._leg_usd_value(disposed, market_state)
+        disposed_prices = {token: self._token_price(token, market_state) for token in disposed}
+        use_even_split = disposed_units_value <= Decimal("0") or any(
+            price is None for price in disposed_prices.values()
+        )
+
+        realized = Decimal("0")
+        realized_any = False
+        for token, debit in disposed.items():
+            avg_cost = self._cost_basis.get(token)
+            if avg_cost is None:
+                continue
+            if use_even_split:
+                # No single priced basis to weight by: split proceeds evenly so
+                # a single-leg sale still nets proceeds - cost exactly.
+                proceeds = in_value / Decimal(str(len(disposed)))
+            else:
+                unit_value = disposed_prices[token]
+                assert unit_value is not None  # use_even_split is False -> all priced
+                proceeds = in_value * (debit * unit_value / disposed_units_value)
+            realized += proceeds - debit * avg_cost
+            realized_any = True
+        return realized if realized_any else None
+
+    def _record_acquired_swap_basis(
+        self,
+        fill: SimulatedFill,
+        out_value: Decimal,
+        market_state: MarketState | None,
+    ) -> None:
+        acquired = {
+            token: amount
+            for token, amount in fill.tokens_in.items()
+            if amount > Decimal("0") and not self._is_cash_equivalent(token)
+        }
+        acquired_prices = {token: self._token_price(token, market_state) for token in acquired}
+        use_even_split = any(price is None for price in acquired_prices.values())
+        acquired_units_value = Decimal("0")
+        if not use_even_split:
+            for token, amount in acquired.items():
+                unit_value = acquired_prices[token]
+                assert unit_value is not None
+                acquired_units_value += amount * unit_value
+            use_even_split = acquired_units_value <= Decimal("0")
+
+        for token, amount in acquired.items():
+            if out_value <= Decimal("0"):
+                # The paid leg could not be priced: seeding a zero cost basis
+                # would make a later sale realize the full proceeds as a
+                # fabricated gain. Leave the basis unset (unknown) instead
+                # (VIB-5083, CodeRabbit).
+                continue
+            if use_even_split:
+                # No price to anchor a basis: fall back to the leg's own
+                # notional per unit so a later sale still nets to zero rather
+                # than fabricating a gain.
+                share = out_value / Decimal(str(len(acquired)))
+            else:
+                unit_value = acquired_prices[token]
+                assert unit_value is not None
+                share = out_value * (amount * unit_value / acquired_units_value)
+            self._add_to_cost_basis(token, amount, share)
+
     def _record_swap_cost_basis(
         self,
         fill: SimulatedFill,
@@ -495,18 +660,7 @@ class SimulatedPortfolio:
         # tokens by market value -- symmetric with the acquired-leg split
         # below -- so a multi-token-out swap does not count the full proceeds
         # once per disposed leg.
-        realized = Decimal("0")
-        realized_any = False
-        disposed = (
-            {}
-            if proceeds_unpriceable
-            else {
-                token: debit
-                for token, debit in token_debits.items()
-                if debit > Decimal("0") and not self._is_cash_equivalent(token)
-            }
-        )
-        disposed_units_value = self._leg_usd_value(disposed, market_state)
+        disposed = self._swap_disposed_tokens(token_debits, proceeds_unpriceable)
         # Pick ONE allocation mode for the whole disposed set so the per-leg
         # shares always sum to in_value. Mixing modes (pro-rata for priced
         # legs, even-split for unpriced ones) let priced tokens claim the full
@@ -514,51 +668,13 @@ class SimulatedPortfolio:
         # over-allocating proceeds (CodeRabbit PR #2805). Even-split when any
         # disposed leg lacks a price or the set has no positive value;
         # otherwise pro-rata by market value.
-        disposed_prices = {token: self._token_price(token, market_state) for token in disposed}
-        use_even_split = disposed_units_value <= Decimal("0") or any(
-            price is None for price in disposed_prices.values()
-        )
-        for token, debit in disposed.items():
-            avg_cost = self._cost_basis.get(token)
-            if avg_cost is None:
-                continue
-            if use_even_split:
-                # No single priced basis to weight by: split proceeds evenly so
-                # a single-leg sale still nets proceeds - cost exactly.
-                proceeds = in_value / Decimal(str(len(disposed)))
-            else:
-                unit_value = disposed_prices[token]
-                assert unit_value is not None  # use_even_split is False -> all priced
-                proceeds = in_value * (debit * unit_value / disposed_units_value)
-            realized += proceeds - debit * avg_cost
-            realized_any = True
+        realized = self._swap_realized_pnl(disposed, in_value, market_state)
 
         # Acquired non-cash legs raise their weighted-average cost by the USD
         # paid on the outflow leg (split pro-rata when multiple are acquired).
-        acquired = {
-            token: amount
-            for token, amount in fill.tokens_in.items()
-            if amount > Decimal("0") and not self._is_cash_equivalent(token)
-        }
-        acquired_units_value = self._leg_usd_value(acquired, market_state)
-        for token, amount in acquired.items():
-            if out_value <= Decimal("0"):
-                # The paid leg could not be priced: seeding a zero cost basis
-                # would make a later sale realize the full proceeds as a
-                # fabricated gain. Leave the basis unset (unknown) instead
-                # (VIB-5083, CodeRabbit).
-                continue
-            unit_value = self._token_price(token, market_state)
-            if unit_value is None or acquired_units_value <= Decimal("0"):
-                # No price to anchor a basis: fall back to the leg's own
-                # notional per unit so a later sale still nets to zero rather
-                # than fabricating a gain.
-                share = out_value / Decimal(str(len(acquired)))
-            else:
-                share = out_value * (amount * unit_value / acquired_units_value)
-            self._add_to_cost_basis(token, amount, share)
+        self._record_acquired_swap_basis(fill, out_value, market_state)
 
-        if realized_any:
+        if realized is not None:
             fill.metadata["realized_pnl_usd"] = str(realized)
 
     def _add_to_cost_basis(self, token: str, units: Decimal, cost_usd: Decimal) -> None:
@@ -827,6 +943,90 @@ class SimulatedPortfolio:
                 return closed
         return None
 
+    def _position_close_failure(self, fill: SimulatedFill) -> str | None:
+        """Reason this fill's full position close cannot apply, or None."""
+        if fill.position_close_id is None:
+            return None
+        if self.get_position(fill.position_close_id) is None:
+            return f"position {fill.position_close_id} not found for close"
+        return None
+
+    @staticmethod
+    def _positive_amounts(amounts: dict[str, Decimal]) -> dict[str, Decimal]:
+        return {token: amount for token, amount in amounts.items() if amount > Decimal("0")}
+
+    @staticmethod
+    def _reduction_flow_for_position(fill: SimulatedFill, position: SimulatedPosition) -> _ReductionFlow:
+        if position.position_type == PositionType.BORROW:
+            return _ReductionFlow(fill.tokens_out, "debited outflow", "debits")
+        return _ReductionFlow(fill.tokens_in, "credited inflow", "credits")
+
+    @staticmethod
+    def _reduction_key_failure(
+        position_id: str,
+        tied: dict[str, Decimal],
+        reduced: dict[str, Decimal],
+        flow_label: str,
+    ) -> str | None:
+        if not reduced:
+            return f"position {position_id} missing positive partial-reduction amounts"
+        if tied.keys() != reduced.keys():
+            return (
+                f"position {position_id} partial reduction tokens {sorted(reduced)} "
+                f"do not match {flow_label} tokens {sorted(tied)}"
+            )
+        return None
+
+    def _reduction_interest_tokens(
+        self,
+        fill: SimulatedFill,
+        tied: dict[str, Decimal],
+        realized_interest_usd: Decimal,
+    ) -> Decimal:
+        if len(tied) == 1 and realized_interest_usd > Decimal("0") and fill.executed_price > Decimal("0"):
+            return realized_interest_usd / fill.executed_price
+        return Decimal("0")
+
+    @staticmethod
+    def _reduction_interest_note(realized_interest_usd: Decimal, interest_tokens: Decimal) -> str:
+        if interest_tokens <= Decimal("0"):
+            return ""
+        return f" (net of ${realized_interest_usd} realized interest)"
+
+    def _reduction_amount_tie_failure(
+        self,
+        fill: SimulatedFill,
+        tied: dict[str, Decimal],
+        reduced: dict[str, Decimal],
+        flow_verb: str,
+    ) -> str | None:
+        realized_interest_usd = abs(self._fill_realized_interest_usd(fill))
+        interest_tokens = self._reduction_interest_tokens(fill, tied, realized_interest_usd)
+        for token, tied_amount in tied.items():
+            reduced_amount = reduced[token]
+            expected = tied_amount - interest_tokens
+            tolerance = max(tied_amount, reduced_amount) * _DEBIT_DUST_RELATIVE_TOLERANCE
+            if abs(reduced_amount - expected) > tolerance:
+                interest_note = self._reduction_interest_note(realized_interest_usd, interest_tokens)
+                return (
+                    f"position {fill.position_reduce_id} {flow_verb} {tied_amount} {token}{interest_note} "
+                    f"but reduces {reduced_amount}"
+                )
+        return None
+
+    @staticmethod
+    def _reduction_holdings_failure(
+        position: SimulatedPosition,
+        reduced: dict[str, Decimal],
+        position_id: str,
+    ) -> str | None:
+        for token, amount in reduced.items():
+            held = position.get_amount(token)
+            shortfall = amount - held
+            if shortfall > amount * _DEBIT_DUST_RELATIVE_TOLERANCE:
+                return f"position {position_id} holds {held} {token}, cannot reduce by {amount}"
+        return None
+
     def _position_reduce_failure(self, fill: SimulatedFill) -> str | None:
         """Reason this fill's partial position reduction cannot apply, or None.
 
@@ -852,19 +1052,12 @@ class SimulatedPortfolio:
         position = self.get_position(fill.position_reduce_id)
         if position is None:
             return f"position {fill.position_reduce_id} not found for partial reduction"
-        if position.position_type == PositionType.BORROW:
-            flow, flow_label, flow_verb = fill.tokens_out, "debited outflow", "debits"
-        else:
-            flow, flow_label, flow_verb = fill.tokens_in, "credited inflow", "credits"
-        tied = {token: amount for token, amount in flow.items() if amount > Decimal("0")}
-        reduced = {token: amount for token, amount in fill.position_reduce_amounts.items() if amount > Decimal("0")}
-        if not reduced:
-            return f"position {fill.position_reduce_id} missing positive partial-reduction amounts"
-        if tied.keys() != reduced.keys():
-            return (
-                f"position {fill.position_reduce_id} partial reduction tokens {sorted(reduced)} "
-                f"do not match {flow_label} tokens {sorted(tied)}"
-            )
+        flow = self._reduction_flow_for_position(fill, position)
+        tied = self._positive_amounts(flow.amounts)
+        reduced = self._positive_amounts(fill.position_reduce_amounts)
+        key_failure = self._reduction_key_failure(fill.position_reduce_id, tied, reduced, flow.label)
+        if key_failure is not None:
+            return key_failure
         # A reduce may legitimately fall SHORT of the flow by exactly the
         # realized-interest slice: a BOUNDARY repay/withdraw's flow covers
         # principal + part of the accrued interest, but only the principal
@@ -873,28 +1066,10 @@ class SimulatedPortfolio:
         # |interest_usd| / executed_price (single-token lending position). Any
         # OTHER shortfall -- and ANY excess (reduced > flow, the original
         # minting class) -- is still rejected.
-        realized_interest_usd = abs(self._fill_realized_interest_usd(fill))
-        interest_tokens = Decimal("0")
-        if len(tied) == 1 and realized_interest_usd > Decimal("0") and fill.executed_price > Decimal("0"):
-            interest_tokens = realized_interest_usd / fill.executed_price
-        for token, tied_amount in tied.items():
-            reduced_amount = reduced[token]
-            expected = tied_amount - interest_tokens
-            tolerance = max(tied_amount, reduced_amount) * _DEBIT_DUST_RELATIVE_TOLERANCE
-            if abs(reduced_amount - expected) > tolerance:
-                interest_note = (
-                    f" (net of ${realized_interest_usd} realized interest)" if interest_tokens > Decimal("0") else ""
-                )
-                return (
-                    f"position {fill.position_reduce_id} {flow_verb} {tied_amount} {token}{interest_note} "
-                    f"but reduces {reduced_amount}"
-                )
-        for token, amount in reduced.items():
-            held = position.get_amount(token)
-            shortfall = amount - held
-            if shortfall > amount * _DEBIT_DUST_RELATIVE_TOLERANCE:
-                return f"position {fill.position_reduce_id} holds {held} {token}, cannot reduce by {amount}"
-        return None
+        amount_failure = self._reduction_amount_tie_failure(fill, tied, reduced, flow.verb)
+        if amount_failure is not None:
+            return amount_failure
+        return self._reduction_holdings_failure(position, reduced, fill.position_reduce_id)
 
     def _accrue_interest_through_fill(
         self,
@@ -1413,6 +1588,81 @@ class SimulatedPortfolio:
 
         return None
 
+    @staticmethod
+    def _lp_fees_earned(position: SimulatedPosition) -> Decimal:
+        fees_earned_usd = position.accumulated_fees_usd
+        return position.fees_earned if fees_earned_usd == Decimal("0") else fees_earned_usd
+
+    @staticmethod
+    def _metadata_decimal(value: Any) -> Decimal:
+        return value if type(value) is Decimal else Decimal(str(value))
+
+    def _lp_close_prices(
+        self,
+        fill: SimulatedFill,
+        token1: str,
+    ) -> tuple[Decimal, Decimal]:
+        token0_price = self._metadata_decimal(fill.metadata.get("token0_price_usd", fill.executed_price))
+        token1_price = fill.metadata.get("token1_price_usd")
+        if token1_price is None:
+            token1_price = self._stablecoin_fallback(token1, "record_lp_close")
+        return token0_price, self._metadata_decimal(token1_price)
+
+    @staticmethod
+    def _lp_close_value(
+        position: SimulatedPosition,
+        fill: SimulatedFill,
+        token0: str,
+        token1: str,
+        token0_price: Decimal,
+        token1_price: Decimal,
+    ) -> Decimal:
+        current_token0 = fill.tokens_in.get(token0, position.amounts.get(token0, Decimal("0")))
+        current_token1 = fill.tokens_in.get(token1, position.amounts.get(token1, Decimal("0")))
+        return current_token0 * token0_price + current_token1 * token1_price
+
+    @staticmethod
+    def _lp_realized_close_value(fill: SimulatedFill, close_value: Decimal, fees_earned_usd: Decimal) -> Decimal:
+        collect_fees = fill.metadata.get("collect_fees")
+        if collect_fees is True or collect_fees is False:
+            return close_value
+        return close_value + fees_earned_usd
+
+    @staticmethod
+    def _lp_tick_bounds(position: SimulatedPosition) -> tuple[int, int]:
+        tick_lower = position.tick_lower if position.tick_lower is not None else -887272
+        tick_upper = position.tick_upper if position.tick_upper is not None else 887272
+        return tick_lower, tick_upper
+
+    def _lp_entry_value_and_il(
+        self,
+        position: SimulatedPosition,
+        fill: SimulatedFill,
+        current_value: Decimal,
+        token0_price: Decimal,
+        token1_price: Decimal,
+    ) -> tuple[Decimal, Decimal]:
+        if position.entry_price <= 0:
+            initial_value = fill.amount_usd if fill.amount_usd > 0 else current_value
+            return initial_value, Decimal("0")
+
+        from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
+            ImpermanentLossCalculator,
+        )
+
+        tick_lower, tick_upper = self._lp_tick_bounds(position)
+        current_price_ratio = token0_price / token1_price if token1_price > 0 else position.entry_price
+        il_pct, entry_token0, entry_token1 = ImpermanentLossCalculator().calculate_il_v3(
+            entry_price=position.entry_price,
+            current_price=current_price_ratio,
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
+            liquidity=position.liquidity,
+        )
+        initial_value = entry_token0 * position.entry_price * token1_price + entry_token1 * token1_price
+        hold_value = entry_token0 * token0_price + entry_token1 * token1_price
+        return initial_value, il_pct * hold_value
+
     def _calculate_lp_pnl_breakdown(
         self,
         position: SimulatedPosition,
@@ -1438,79 +1688,23 @@ class SimulatedPortfolio:
             - fees_earned_usd: Total fees earned in USD
             - net_lp_pnl_usd: Net PnL = (Current Value + Fees) - Initial Value
         """
-        # Lazy import to avoid circular dependency
-        from almanak.framework.backtesting.pnl.calculators.impermanent_loss import (
-            ImpermanentLossCalculator,
-        )
-
-        # Extract fees earned from the position
-        fees_earned_usd = position.accumulated_fees_usd
-        if fees_earned_usd == Decimal("0"):
-            # Fall back to fees_earned if accumulated_fees_usd not set
-            fees_earned_usd = position.fees_earned
-
-        # Calculate initial value at entry (token amounts * entry price)
-        # For LP positions, entry amounts are tracked separately from current amounts
-        # We need to calculate what the position was worth at entry
+        fees_earned_usd = self._lp_fees_earned(position)
         if len(position.tokens) < 2:
             return Decimal("0"), fees_earned_usd, Decimal("0")
 
         token0 = position.tokens[0]
         token1 = position.tokens[1]
-
-        # Get prices - use fill metadata, executed_price, or fall back to entry price
-        token0_price = fill.metadata.get("token0_price_usd", fill.executed_price)
-        if not isinstance(token0_price, Decimal):
-            token0_price = Decimal(str(token0_price))
-
-        # Token1 is typically the quote token (USDC, etc.)
-        token1_price = fill.metadata.get("token1_price_usd")
-        if token1_price is None:
-            token1_price = self._stablecoin_fallback(token1, "record_lp_close")
-        if not isinstance(token1_price, Decimal):
-            token1_price = Decimal(str(token1_price))
-
-        # Calculate current value from tokens received (tokens_in from the close)
-        current_token0 = fill.tokens_in.get(token0, position.amounts.get(token0, Decimal("0")))
-        current_token1 = fill.tokens_in.get(token1, position.amounts.get(token1, Decimal("0")))
-        current_value = current_token0 * token0_price + current_token1 * token1_price
-
-        # Use ImpermanentLossCalculator to get entry token amounts and IL
-        il_calculator = ImpermanentLossCalculator()
-
-        # Get tick bounds
-        tick_lower = position.tick_lower if position.tick_lower is not None else -887272
-        tick_upper = position.tick_upper if position.tick_upper is not None else 887272
-
-        # Calculate price ratio (current price relative to entry price in token1 terms)
-        if position.entry_price > 0:
-            current_price_ratio = token0_price / token1_price if token1_price > 0 else position.entry_price
-
-            # Calculate IL percentage
-            il_pct, entry_token0, entry_token1 = il_calculator.calculate_il_v3(
-                entry_price=position.entry_price,
-                current_price=current_price_ratio,
-                tick_lower=tick_lower,
-                tick_upper=tick_upper,
-                liquidity=position.liquidity,
-            )
-
-            # Calculate initial value (what the position was worth at entry)
-            # Use entry amounts calculated by IL calculator
-            initial_value = entry_token0 * position.entry_price * token1_price + entry_token1 * token1_price
-
-            # IL in USD = IL percentage * hold value
-            # hold_value is what we would have if we just held entry tokens at current prices
-            hold_value = entry_token0 * token0_price + entry_token1 * token1_price
-            il_loss_usd = il_pct * hold_value
-        else:
-            # Fallback if no entry price - use fill amount_usd as initial value estimate
-            initial_value = fill.amount_usd if fill.amount_usd > 0 else current_value
-            il_loss_usd = Decimal("0")
-
-        # Net LP PnL = (Current Value + Fees) - Initial Value
-        # This captures: price appreciation/depreciation, IL, and fee earnings
-        net_lp_pnl_usd = (current_value + fees_earned_usd) - initial_value
+        token0_price, token1_price = self._lp_close_prices(fill, token1)
+        current_value = self._lp_close_value(position, fill, token0, token1, token0_price, token1_price)
+        initial_value, il_loss_usd = self._lp_entry_value_and_il(
+            position,
+            fill,
+            current_value,
+            token0_price,
+            token1_price,
+        )
+        realized_value = self._lp_realized_close_value(fill, current_value, fees_earned_usd)
+        net_lp_pnl_usd = realized_value - initial_value
 
         return il_loss_usd, fees_earned_usd, net_lp_pnl_usd
 
@@ -1924,6 +2118,44 @@ class SimulatedPortfolio:
             liquidation_losses_usd=perp_liquidation_losses + lending_liquidation_losses,
         )
 
+    def _equity_summary(self, equity_values: list[Decimal], timestamps: list[datetime]) -> _EquitySummary:
+        initial_value = equity_values[0] if equity_values else self.initial_capital_usd
+        final_value = equity_values[-1] if equity_values else self.initial_capital_usd
+        total_pnl = final_value - initial_value
+        total_return = (final_value - initial_value) / initial_value if initial_value > 0 else Decimal("0")
+        annualized_return = self._annualized_return(total_return, timestamps)
+        return _EquitySummary(total_pnl, total_return, annualized_return)
+
+    @staticmethod
+    def _annualized_return(total_return: Decimal, timestamps: list[datetime]) -> Decimal:
+        if len(timestamps) < 2:
+            return Decimal("0")
+        duration_days = (timestamps[-1] - timestamps[0]).total_seconds() / (24 * 3600)
+        if duration_days <= 0:
+            return Decimal("0")
+        years = Decimal(str(duration_days)) / Decimal("365")
+        if years <= 0:
+            return Decimal("0")
+        if total_return <= Decimal("-1"):
+            return Decimal("0")
+        return (Decimal("1") + total_return) ** (Decimal("1") / years) - Decimal("1")
+
+    def _execution_cost_totals(self) -> _ExecutionCostTotals:
+        return _ExecutionCostTotals(
+            fees=sum((t.fee_usd for t in self.trades), Decimal("0")),
+            slippage=sum((t.slippage_usd for t in self.trades), Decimal("0")),
+            gas=sum((t.gas_cost_usd for t in self.trades), Decimal("0")),
+        )
+
+    def _risk_metrics(self, equity_values: list[Decimal], annualized_return: Decimal) -> _RiskMetrics:
+        returns = self._calculate_returns(equity_values)
+        volatility = self._calculate_volatility(returns)
+        sharpe = self._calculate_sharpe(returns, volatility)
+        sortino = self._calculate_sortino(returns)
+        max_drawdown = self._calculate_max_drawdown(equity_values)
+        calmar = annualized_return / max_drawdown if max_drawdown > 0 else Decimal("0")
+        return _RiskMetrics(volatility, sharpe, sortino, max_drawdown, calmar)
+
     def get_metrics(self) -> BacktestMetrics:
         """Calculate backtest metrics from equity curve and trades.
 
@@ -1940,58 +2172,17 @@ class SimulatedPortfolio:
         if not self.equity_curve:
             return BacktestMetrics()
 
-        # Extract values for calculations
         equity_values = [p.value_usd for p in self.equity_curve]
         timestamps = [p.timestamp for p in self.equity_curve]
-
-        # Total PnL
-        initial_value = equity_values[0] if equity_values else self.initial_capital_usd
-        final_value = equity_values[-1] if equity_values else self.initial_capital_usd
-
-        total_pnl = final_value - initial_value
+        equity = self._equity_summary(equity_values, timestamps)
 
         # Execution costs (informational breakdown only -- the equity curve
         # is already net of them: gas and venue fee/slippage are debited from
         # cash in apply_fill, SWAP fee/slippage are netted into tokens_in).
         # Subtracting them from total_pnl again would double-count every
         # cost, so net_pnl == total_pnl (same contract as calculate_metrics).
-        total_fees = sum((t.fee_usd for t in self.trades), Decimal("0"))
-        total_slippage = sum((t.slippage_usd for t in self.trades), Decimal("0"))
-        total_gas = sum((t.gas_cost_usd for t in self.trades), Decimal("0"))
-        net_pnl = total_pnl
-
-        # Returns
-        total_return = (final_value - initial_value) / initial_value if initial_value > 0 else Decimal("0")
-
-        # Annualized return (if we have timestamps)
-        annualized_return = Decimal("0")
-        if len(timestamps) >= 2:
-            duration_days = (timestamps[-1] - timestamps[0]).total_seconds() / (24 * 3600)
-            if duration_days > 0:
-                years = Decimal(str(duration_days)) / Decimal("365")
-                if years > 0:
-                    # (1 + total_return) ^ (1/years) - 1
-                    annualized_return = (Decimal("1") + total_return) ** (Decimal("1") / years) - Decimal("1")
-
-        # Calculate returns series for volatility/Sharpe
-        returns = self._calculate_returns(equity_values)
-
-        # Volatility (annualized std dev of returns)
-        volatility = self._calculate_volatility(returns)
-
-        # Sharpe ratio (assuming 0 risk-free rate)
-        sharpe = self._calculate_sharpe(returns, volatility)
-
-        # Sortino ratio
-        sortino = self._calculate_sortino(returns)
-
-        # Max drawdown
-        max_drawdown = self._calculate_max_drawdown(equity_values)
-
-        # Calmar ratio
-        calmar = Decimal("0")
-        if max_drawdown > 0:
-            calmar = annualized_return / max_drawdown
+        costs = self._execution_cost_totals()
+        risk = self._risk_metrics(equity_values, equity.annualized_return)
 
         # Trade statistics (VIB-5083): shared with calculate_metrics so the
         # win/loss / realized-PnL discipline lives in one place. Lazy import
@@ -2007,10 +2198,10 @@ class SimulatedPortfolio:
         pos = self.aggregate_position_metrics()
 
         return BacktestMetrics(
-            total_pnl_usd=total_pnl,
-            net_pnl_usd=net_pnl,
-            sharpe_ratio=sharpe,
-            max_drawdown_pct=max_drawdown,
+            total_pnl_usd=equity.total_pnl,
+            net_pnl_usd=equity.total_pnl,
+            sharpe_ratio=risk.sharpe,
+            max_drawdown_pct=risk.max_drawdown,
             win_rate=stats.win_rate,
             # Successful trades only -- rejected fills are reported separately
             # as failed_trades and must stay out of the performance denominator
@@ -2020,11 +2211,11 @@ class SimulatedPortfolio:
             # VIB-2915: `*_return_pct` fields store actual percentages (e.g. 10 for 10%),
             # not decimal ratios. Local `total_return`/`annualized_return` stay as ratios
             # so the calmar calculation above (which divides by `max_drawdown`, still a ratio) stays correct.
-            total_return_pct=total_return * Decimal("100"),
-            annualized_return_pct=annualized_return * Decimal("100"),
-            total_fees_usd=total_fees,
-            total_slippage_usd=total_slippage,
-            total_gas_usd=total_gas,
+            total_return_pct=equity.total_return * Decimal("100"),
+            annualized_return_pct=equity.annualized_return * Decimal("100"),
+            total_fees_usd=costs.fees,
+            total_slippage_usd=costs.slippage,
+            total_gas_usd=costs.gas,
             winning_trades=stats.winning_trades,
             losing_trades=stats.losing_trades,
             trades_with_realized_pnl=stats.trades_with_realized_pnl,
@@ -2034,9 +2225,9 @@ class SimulatedPortfolio:
             largest_loss_usd=stats.largest_loss,
             avg_win_usd=stats.avg_win,
             avg_loss_usd=stats.avg_loss,
-            volatility=volatility,
-            sortino_ratio=sortino,
-            calmar_ratio=calmar,
+            volatility=risk.volatility,
+            sortino_ratio=risk.sortino,
+            calmar_ratio=risk.calmar,
             total_fees_earned_usd=pos.total_fees_earned_usd,
             fees_by_pool=pos.fees_by_pool,
             lp_fee_confidence_breakdown=pos.lp_fee_confidence_breakdown,
@@ -2053,7 +2244,75 @@ class SimulatedPortfolio:
             liquidation_losses_usd=pos.liquidation_losses_usd,
         )
 
-    def calculate_data_coverage_metrics(self) -> DataCoverageMetrics:  # noqa: C901
+    @staticmethod
+    def _empty_confidence_breakdown() -> dict[str, int]:
+        return {"high": 0, "medium": 0, "low": 0}
+
+    @staticmethod
+    def _record_confidence(breakdown: dict[str, int], confidence: str | None) -> None:
+        if confidence is None:
+            return
+        bucket = confidence if confidence in breakdown else "low"
+        breakdown[bucket] += 1
+
+    @staticmethod
+    def _append_unique_source(data_sources: list[str], source: Any) -> None:
+        if source and source not in data_sources:
+            data_sources.append(source)
+
+    def _tracked_positions(self) -> list[SimulatedPosition]:
+        return list(self.positions) + list(self._closed_positions)
+
+    @classmethod
+    def _confidence_breakdown(cls, positions: list[SimulatedPosition], attr: str) -> dict[str, int]:
+        breakdown = cls._empty_confidence_breakdown()
+        for position in positions:
+            confidence = getattr(position, attr, None)
+            cls._record_confidence(breakdown, confidence)
+        return breakdown
+
+    @classmethod
+    def _unique_sources_from_attr(cls, positions: list[SimulatedPosition], attr: str) -> list[str]:
+        data_sources: list[str] = []
+        for position in positions:
+            cls._append_unique_source(data_sources, getattr(position, attr, None))
+        return data_sources
+
+    @classmethod
+    def _unique_sources_from_metadata(cls, positions: list[SimulatedPosition], key: str) -> list[str]:
+        data_sources: list[str] = []
+        for position in positions:
+            cls._append_unique_source(data_sources, position.metadata.get(key))
+        return data_sources
+
+    def _lp_data_coverage_metrics(self, lp_positions: list[SimulatedPosition]) -> LPMetrics:
+        return LPMetrics(
+            position_count=len(lp_positions),
+            fee_confidence_breakdown=self._confidence_breakdown(lp_positions, "fee_confidence"),
+            data_sources=self._unique_sources_from_metadata(lp_positions, "data_source"),
+        )
+
+    def _perp_data_coverage_metrics(self, perp_positions: list[SimulatedPosition]) -> PerpMetrics:
+        return PerpMetrics(
+            position_count=len(perp_positions),
+            funding_confidence_breakdown=self._confidence_breakdown(perp_positions, "funding_confidence"),
+            data_sources=self._unique_sources_from_attr(perp_positions, "funding_data_source"),
+        )
+
+    def _lending_data_coverage_metrics(self, lending_positions: list[SimulatedPosition]) -> LendingMetrics:
+        return LendingMetrics(
+            position_count=len(lending_positions),
+            apy_confidence_breakdown=self._confidence_breakdown(lending_positions, "apy_confidence"),
+            data_sources=self._unique_sources_from_attr(lending_positions, "apy_data_source"),
+        )
+
+    def _slippage_data_coverage_metrics(self, lp_positions: list[SimulatedPosition]) -> SlippageMetrics:
+        return SlippageMetrics(
+            calculation_count=sum(1 for position in lp_positions if position.slippage_confidence is not None),
+            slippage_confidence_breakdown=self._confidence_breakdown(lp_positions, "slippage_confidence"),
+        )
+
+    def calculate_data_coverage_metrics(self) -> DataCoverageMetrics:
         """Calculate data coverage metrics across all position types.
 
         Aggregates confidence levels and data sources from all positions
@@ -2063,90 +2322,16 @@ class SimulatedPortfolio:
         Returns:
             DataCoverageMetrics with breakdown by position type and overall coverage.
         """
-        # LP metrics
-        lp_positions = [p for p in list(self.positions) + list(self._closed_positions) if p.is_lp]
-        lp_confidence_breakdown: dict[str, int] = {"high": 0, "medium": 0, "low": 0}
-        lp_data_sources: list[str] = []
-
-        for position in lp_positions:
-            if position.fee_confidence in lp_confidence_breakdown:
-                lp_confidence_breakdown[position.fee_confidence] += 1
-            elif position.fee_confidence is not None:
-                lp_confidence_breakdown["low"] += 1
-            # Track data sources (from metadata or position fields)
-            if hasattr(position, "metadata") and position.metadata.get("data_source"):
-                source = position.metadata["data_source"]
-                if source not in lp_data_sources:
-                    lp_data_sources.append(source)
-
-        lp_metrics = LPMetrics(
-            position_count=len(lp_positions),
-            fee_confidence_breakdown=lp_confidence_breakdown,
-            data_sources=lp_data_sources,
-        )
-
-        # Perp metrics
-        perp_positions = [p for p in list(self.positions) + list(self._closed_positions) if p.is_perp]
-        perp_confidence_breakdown: dict[str, int] = {"high": 0, "medium": 0, "low": 0}
-        perp_data_sources: list[str] = []
-
-        for position in perp_positions:
-            if position.funding_confidence in perp_confidence_breakdown:
-                perp_confidence_breakdown[position.funding_confidence] += 1
-            elif position.funding_confidence is not None:
-                perp_confidence_breakdown["low"] += 1
-            # Track funding data sources
-            if position.funding_data_source and position.funding_data_source not in perp_data_sources:
-                perp_data_sources.append(position.funding_data_source)
-
-        perp_metrics = PerpMetrics(
-            position_count=len(perp_positions),
-            funding_confidence_breakdown=perp_confidence_breakdown,
-            data_sources=perp_data_sources,
-        )
-
-        # Lending metrics
-        lending_positions = [p for p in list(self.positions) + list(self._closed_positions) if p.is_lending]
-        lending_confidence_breakdown: dict[str, int] = {"high": 0, "medium": 0, "low": 0}
-        lending_data_sources: list[str] = []
-
-        for position in lending_positions:
-            if position.apy_confidence in lending_confidence_breakdown:
-                lending_confidence_breakdown[position.apy_confidence] += 1
-            elif position.apy_confidence is not None:
-                lending_confidence_breakdown["low"] += 1
-            # Track APY data sources
-            if position.apy_data_source and position.apy_data_source not in lending_data_sources:
-                lending_data_sources.append(position.apy_data_source)
-
-        lending_metrics = LendingMetrics(
-            position_count=len(lending_positions),
-            apy_confidence_breakdown=lending_confidence_breakdown,
-            data_sources=lending_data_sources,
-        )
-
-        # Slippage metrics - collect from all LP positions (slippage confidence tracked there)
-        slippage_confidence_breakdown: dict[str, int] = {"high": 0, "medium": 0, "low": 0}
-        slippage_calculation_count = 0
-
-        for position in lp_positions:
-            if position.slippage_confidence is not None:
-                slippage_calculation_count += 1
-                if position.slippage_confidence in slippage_confidence_breakdown:
-                    slippage_confidence_breakdown[position.slippage_confidence] += 1
-                else:
-                    slippage_confidence_breakdown["low"] += 1
-
-        slippage_metrics = SlippageMetrics(
-            calculation_count=slippage_calculation_count,
-            slippage_confidence_breakdown=slippage_confidence_breakdown,
-        )
+        tracked_positions = self._tracked_positions()
+        lp_positions = [position for position in tracked_positions if position.is_lp]
+        perp_positions = [position for position in tracked_positions if position.is_perp]
+        lending_positions = [position for position in tracked_positions if position.is_lending]
 
         return DataCoverageMetrics(
-            lp_metrics=lp_metrics,
-            perp_metrics=perp_metrics,
-            lending_metrics=lending_metrics,
-            slippage_metrics=slippage_metrics,
+            lp_metrics=self._lp_data_coverage_metrics(lp_positions),
+            perp_metrics=self._perp_data_coverage_metrics(perp_positions),
+            lending_metrics=self._lending_data_coverage_metrics(lending_positions),
+            slippage_metrics=self._slippage_data_coverage_metrics(lp_positions),
         )
 
     def _calculate_returns(self, values: list[Decimal]) -> list[Decimal]:
@@ -2289,6 +2474,69 @@ class SimulatedPortfolio:
             x = x_new
         return x
 
+    def _token_holdings_value(self, market_state: MarketState) -> Decimal:
+        value = Decimal("0")
+        for token, amount in self.tokens.items():
+            try:
+                value += amount * market_state.get_price(token)
+            except KeyError:
+                if self.strict_reproducibility:
+                    raise
+                pass
+        return value
+
+    def _adapter_position_value(
+        self,
+        position: SimulatedPosition,
+        market_state: MarketState,
+        timestamp: datetime,
+        adapter: "StrategyBacktestAdapter",
+    ) -> Decimal:
+        value = adapter.value_position(position, market_state, timestamp)
+        # Adapter contract (LendingBacktestAdapter.value_position): BORROW
+        # valuations return the debt magnitude; portfolio equity subtracts it.
+        if position.position_type == PositionType.BORROW:
+            return -value
+        return value
+
+    def _mark_position_value(
+        self,
+        position: SimulatedPosition,
+        market_state: MarketState,
+        timestamp: datetime,
+        adapter: "StrategyBacktestAdapter | None",
+    ) -> Decimal:
+        if position.is_spot:
+            return self._mark_spot_position(position, market_state)
+        if adapter is not None:
+            try:
+                return self._adapter_position_value(position, market_state, timestamp, adapter)
+            except Exception:
+                return self._value_position_fallback(position, market_state, timestamp)
+        return self._value_position_fallback(position, market_state, timestamp)
+
+    def _numeraire_price_usd(self, market_state: MarketState) -> Decimal | None:
+        if self._numeraire_symbol is None:
+            return None
+        try:
+            return market_state.get_price(self._numeraire_symbol)
+        except KeyError:
+            return None
+
+    def _record_equity_point(
+        self,
+        timestamp: datetime,
+        value_usd: Decimal,
+        numeraire_price_usd: Decimal | None,
+    ) -> None:
+        self.equity_curve.append(
+            EquityPoint(
+                timestamp=timestamp,
+                value_usd=value_usd,
+                numeraire_price_usd=numeraire_price_usd,
+            )
+        )
+
     def mark_to_market(
         self,
         market_state: MarketState,
@@ -2338,45 +2586,9 @@ class SimulatedPortfolio:
             value = portfolio.mark_to_market(market_state, timestamp, adapter=lp_adapter)
             print(f"Portfolio value: ${value}")
         """
-        total_value = self.cash_usd
-
-        # Value of direct token holdings (not in positions)
-        for token, amount in self.tokens.items():
-            try:
-                price = market_state.get_price(token)
-                total_value += amount * price
-            except KeyError:
-                # If price not available, skip this token
-                pass
-
-        # Value positions using adapter if available, otherwise use internal methods
+        total_value = self.cash_usd + self._token_holdings_value(market_state)
         for position in self.positions:
-            if position.is_spot:
-                # Spot positions always use internal valuation
-                total_value += self._mark_spot_position(position, market_state)
-            elif adapter is not None:
-                # Use adapter for non-spot position valuation
-                # Pass timestamp for deterministic, reproducible valuation
-                try:
-                    value = adapter.value_position(position, market_state, timestamp)
-                    # Adapter contract (LendingBacktestAdapter.value_position):
-                    # BORROW valuations return the debt MAGNITUDE -- every
-                    # adapter-side consumer (debt totals, health factor,
-                    # liquidation) wants it positive -- and the portfolio
-                    # owns the subtraction: debt is negative equity
-                    # (VIB-5098; mirrors _mark_lending_position's sign).
-                    if position.position_type == PositionType.BORROW:
-                        value = -value
-                    total_value += value
-                except Exception:
-                    # Fall back to internal valuation on error
-                    total_value += self._value_position_fallback(position, market_state, timestamp)
-            elif position.is_lp:
-                total_value += self._mark_lp_position(position, market_state, timestamp)
-            elif position.is_perp:
-                total_value += self._mark_perp_position(position, market_state, timestamp)
-            elif position.is_lending:
-                total_value += self._mark_lending_position(position, market_state, timestamp)
+            total_value += self._mark_position_value(position, market_state, timestamp, adapter)
 
         # Update health factors for lending positions after all values are calculated
         self._update_health_factors(market_state)
@@ -2389,20 +2601,7 @@ class SimulatedPortfolio:
         # token's USD price at this timestamp so the reporting layer can divide
         # value_usd by it; a missing price stays None and fails loud at metrics
         # time rather than aborting an otherwise-valid USD run mid-loop.
-        numeraire_price_usd: Decimal | None = None
-        if self._numeraire_symbol is not None:
-            try:
-                numeraire_price_usd = market_state.get_price(self._numeraire_symbol)
-            except KeyError:
-                numeraire_price_usd = None
-
-        self.equity_curve.append(
-            EquityPoint(
-                timestamp=timestamp,
-                value_usd=total_value,
-                numeraire_price_usd=numeraire_price_usd,
-            )
-        )
+        self._record_equity_point(timestamp, total_value, self._numeraire_price_usd(market_state))
 
         return total_value
 
@@ -2547,6 +2746,79 @@ class SimulatedPortfolio:
 
         return total_value
 
+    @staticmethod
+    def _lp_fee_days_elapsed(position: SimulatedPosition, timestamp: datetime) -> Decimal:
+        start = position.last_updated or position.entry_time
+        time_elapsed = timestamp - start
+        return Decimal(str(time_elapsed.total_seconds())) / Decimal("86400")
+
+    @staticmethod
+    def _lp_liquidity_share(position_value_usd: Decimal) -> Decimal:
+        # The numerator must be the position's USD value -- position.liquidity
+        # holds V3 L-units (VIB-5096), not a USD figure. There is deliberately
+        # NO floor here: clamping tiny real shares to 10% minted LP fee value.
+        base_liquidity = Decimal("1000000")
+        return min(Decimal("1"), position_value_usd / base_liquidity)
+
+    @staticmethod
+    def _lp_fee_tier_model(fee_tier: Decimal) -> _LpFeeTierModel:
+        fee_tier_pct = fee_tier * Decimal("100")
+        if fee_tier_pct <= Decimal("0.01"):
+            return _LpFeeTierModel(Decimal("50"), Decimal("0.10"))
+        if fee_tier_pct <= Decimal("0.05"):
+            return _LpFeeTierModel(Decimal("20"), Decimal("0.20"))
+        if fee_tier_pct <= Decimal("0.30"):
+            return _LpFeeTierModel(Decimal("10"), Decimal("0.25"))
+        return _LpFeeTierModel(Decimal("3"), Decimal("0.10"))
+
+    def _lp_fee_estimate(
+        self,
+        position_value_usd: Decimal,
+        fee_tier: Decimal,
+        days_elapsed: Decimal,
+    ) -> Decimal:
+        model = self._lp_fee_tier_model(fee_tier)
+        estimated_daily_volume = position_value_usd * model.volume_multiplier
+        volume_based_fees = estimated_daily_volume * fee_tier * self._lp_liquidity_share(position_value_usd)
+        apr_based_fees = position_value_usd * (model.base_apr / Decimal("365"))
+        return ((volume_based_fees + apr_based_fees) * days_elapsed) / Decimal("2")
+
+    @staticmethod
+    def _lp_fee_tokens(position: SimulatedPosition) -> tuple[str, str]:
+        token0 = position.tokens[0] if len(position.tokens) > 0 else ""
+        token1 = position.tokens[1] if len(position.tokens) > 1 else ""
+        return token0, token1
+
+    @staticmethod
+    def _lp_fee_attribution_ratios(
+        position: SimulatedPosition,
+        position_value_usd: Decimal,
+        token0: str,
+        token1: str,
+    ) -> tuple[Decimal, Decimal]:
+        if position_value_usd <= 0 or position.entry_price <= 0:
+            return Decimal("0.5"), Decimal("0.5")
+
+        token0_value = position.amounts.get(token0, Decimal("0")) * position.entry_price
+        token1_value = position.amounts.get(token1, Decimal("0"))
+        total_value = token0_value + token1_value
+        if total_value <= 0:
+            return Decimal("0.5"), Decimal("0.5")
+        return token0_value / total_value, token1_value / total_value
+
+    def _apply_lp_fee_attribution(
+        self,
+        position: SimulatedPosition,
+        fees_usd: Decimal,
+        position_value_usd: Decimal,
+    ) -> None:
+        position.accumulated_fees_usd += fees_usd
+        token0, token1 = self._lp_fee_tokens(position)
+        token0_ratio, token1_ratio = self._lp_fee_attribution_ratios(position, position_value_usd, token0, token1)
+        if position.entry_price > 0:
+            position.fees_token0 += (fees_usd * token0_ratio) / position.entry_price
+        position.fees_token1 += fees_usd * token1_ratio
+
     def _simulate_lp_fee_accrual(
         self,
         position: SimulatedPosition,
@@ -2589,111 +2861,12 @@ class SimulatedPortfolio:
         if position_value_usd <= 0:
             return Decimal("0")
 
-        # Calculate time elapsed since last update
-        if position.last_updated:
-            time_elapsed = timestamp - position.last_updated
-        else:
-            time_elapsed = timestamp - position.entry_time
-
-        # Convert to days
-        days_elapsed = Decimal(str(time_elapsed.total_seconds())) / Decimal("86400")
-
+        days_elapsed = self._lp_fee_days_elapsed(position, timestamp)
         if days_elapsed <= 0:
             return Decimal("0")
 
-        # Calculate liquidity share factor
-        # Higher-value positions capture more fees proportionally
-        # We use a simple model: liquidity_share = min(1, value / base_liquidity)
-        # where base_liquidity is a reference pool TVL in USD (e.g., $1M).
-        # The numerator must be the position's USD value — position.liquidity
-        # holds V3 L-units (VIB-5096), not a USD figure.
-        #
-        # There is deliberately NO floor on the share. The removed
-        # ``max(Decimal("0.1"), liquidity_share)`` was the SAME value-minting
-        # defect fixed in the adapter path (epic VIB-5079; blocks VIB-5130):
-        # it credited any position below 10% of the $1M reference TVL — i.e.
-        # essentially every realistic position — with at least 10% of pool fee
-        # revenue (a ~$5k position marked through this generic/fallback lane saw
-        # its true ~0.5% share clamped to 10%, a ~20x overstatement). With
-        # base_liquidity fixed at $1M and position_value_usd > 0 guaranteed
-        # above, the share is always well-defined in (0, 1] — no fallback
-        # needed. Guarded by the lp:fee_share_scaling Trust Matrix cell
-        # (generic-lane arm).
-        base_liquidity = Decimal("1000000")
-        liquidity_share = min(Decimal("1"), position_value_usd / base_liquidity)
-
-        # Estimate daily trading volume as a multiple of position value
-        # Volume multiplier varies by fee tier (lower tiers = higher volume pools)
-        fee_tier_pct = position.fee_tier * Decimal("100")  # Convert to percentage
-
-        if fee_tier_pct <= Decimal("0.01"):
-            volume_multiplier = Decimal("50")  # Stablecoin pools: 50x daily volume
-            base_apr = Decimal("0.10")
-        elif fee_tier_pct <= Decimal("0.05"):
-            volume_multiplier = Decimal("20")  # Blue chip pairs: 20x daily volume
-            base_apr = Decimal("0.20")
-        elif fee_tier_pct <= Decimal("0.30"):
-            volume_multiplier = Decimal("10")  # Volatile pairs: 10x daily volume
-            base_apr = Decimal("0.25")
-        else:
-            volume_multiplier = Decimal("3")  # Exotic pairs: 3x daily volume
-            base_apr = Decimal("0.10")
-
-        # Calculate estimated daily volume
-        estimated_daily_volume = position_value_usd * volume_multiplier
-
-        # Calculate fees from volume
-        # fees = volume * fee_tier * liquidity_share
-        # But we also apply APR-based calculation for comparison
-        volume_based_fees = estimated_daily_volume * position.fee_tier * liquidity_share * days_elapsed
-
-        # APR-based calculation (fallback/comparison)
-        daily_fee_rate = base_apr / Decimal("365")
-        apr_based_fees = position_value_usd * daily_fee_rate * days_elapsed
-
-        # Use the average of both approaches for a balanced estimate
-        fees_usd = (volume_based_fees + apr_based_fees) / Decimal("2")
-
-        # Update detailed fee tracking fields on the position
-        # Fees are split 50/50 between token0 and token1 (simplified model)
-        # In reality, the split depends on which direction trades occur
-        position.accumulated_fees_usd += fees_usd
-
-        # Get token prices for fee attribution (use position amounts as proxy)
-        token0 = position.tokens[0] if len(position.tokens) > 0 else ""
-        token1 = position.tokens[1] if len(position.tokens) > 1 else ""
-
-        # Calculate fee attribution based on position composition
-        # If position has both tokens, split fees proportionally
-        total_amount0 = position.amounts.get(token0, Decimal("0"))
-        total_amount1 = position.amounts.get(token1, Decimal("0"))
-
-        if position_value_usd > 0 and position.entry_price > 0:
-            # Estimate token values
-            token0_value = total_amount0 * position.entry_price
-            token1_value = total_amount1  # Assume token1 is the quote currency
-
-            total_value = token0_value + token1_value
-            if total_value > 0:
-                # Split fees proportionally based on token composition
-                token0_ratio = token0_value / total_value
-                token1_ratio = token1_value / total_value
-            else:
-                # Default to 50/50 split
-                token0_ratio = Decimal("0.5")
-                token1_ratio = Decimal("0.5")
-        else:
-            # Default to 50/50 split
-            token0_ratio = Decimal("0.5")
-            token1_ratio = Decimal("0.5")
-
-        # Convert USD fees to token amounts
-        # For token0: fees_token0 = (fees_usd * token0_ratio) / entry_price
-        # For token1: fees_token1 = fees_usd * token1_ratio (assuming quote currency)
-        if position.entry_price > 0:
-            position.fees_token0 += (fees_usd * token0_ratio) / position.entry_price
-        position.fees_token1 += fees_usd * token1_ratio
-
+        fees_usd = self._lp_fee_estimate(position_value_usd, position.fee_tier, days_elapsed)
+        self._apply_lp_fee_attribution(position, fees_usd, position_value_usd)
         return fees_usd
 
     def _mark_perp_position(
@@ -3047,6 +3220,106 @@ class SimulatedPortfolio:
             "numeraire_symbol": self._numeraire_symbol,
         }
 
+    @staticmethod
+    def _equity_point_from_dict(data: dict[str, Any]) -> EquityPoint:
+        return EquityPoint(
+            timestamp=datetime.fromisoformat(data["timestamp"]),
+            value_usd=Decimal(data["value_usd"]),
+            eth_price_usd=None if data.get("eth_price_usd") is None else Decimal(str(data["eth_price_usd"])),
+            spot_value_usd=None if data.get("spot_value_usd") is None else Decimal(str(data["spot_value_usd"])),
+            position_value_usd=(
+                None if data.get("position_value_usd") is None else Decimal(str(data["position_value_usd"]))
+            ),
+            valuation_source=data.get("valuation_source", "simple"),
+            # Preserve the captured numeraire price (VIB-5127); absent /
+            # null round-trips to None (a USD point).
+            numeraire_price_usd=(
+                None if data.get("numeraire_price_usd") is None else Decimal(str(data["numeraire_price_usd"]))
+            ),
+        )
+
+    @staticmethod
+    def _trade_record_from_dict(data: dict[str, Any]) -> TradeRecord:
+        return TradeRecord(
+            timestamp=datetime.fromisoformat(data["timestamp"]),
+            intent_type=IntentType(data["intent_type"]),
+            executed_price=Decimal(data["executed_price"]),
+            fee_usd=Decimal(data["fee_usd"]),
+            slippage_usd=Decimal(data["slippage_usd"]),
+            gas_cost_usd=Decimal(data["gas_cost_usd"]),
+            # pnl_usd is nullable (None = realized nothing yet, an opening /
+            # inventory-building trade); a bare Decimal(None) would crash on
+            # round-trip (VIB-5083, CodeRabbit).
+            pnl_usd=None if data.get("pnl_usd") is None else Decimal(str(data["pnl_usd"])),
+            success=data["success"],
+            amount_usd=Decimal(data.get("amount_usd", "0")),
+            protocol=data.get("protocol", ""),
+            tokens=data.get("tokens", []),
+            tx_hash=data.get("tx_hash"),
+            error=data.get("error"),
+            metadata=data.get("metadata", {}),
+            actual_amount_in=None if data.get("actual_amount_in") is None else Decimal(str(data["actual_amount_in"])),
+            actual_amount_out=None
+            if data.get("actual_amount_out") is None
+            else Decimal(str(data["actual_amount_out"])),
+            expected_amount_in=(
+                None if data.get("expected_amount_in") is None else Decimal(str(data["expected_amount_in"]))
+            ),
+            expected_amount_out=(
+                None if data.get("expected_amount_out") is None else Decimal(str(data["expected_amount_out"]))
+            ),
+            il_loss_usd=None if data.get("il_loss_usd") is None else Decimal(str(data["il_loss_usd"])),
+            fees_earned_usd=None if data.get("fees_earned_usd") is None else Decimal(str(data["fees_earned_usd"])),
+            net_lp_pnl_usd=None if data.get("net_lp_pnl_usd") is None else Decimal(str(data["net_lp_pnl_usd"])),
+            gas_price_gwei=None if data.get("gas_price_gwei") is None else Decimal(str(data["gas_price_gwei"])),
+            estimated_mev_cost_usd=(
+                None if data.get("estimated_mev_cost_usd") is None else Decimal(str(data["estimated_mev_cost_usd"]))
+            ),
+            delayed_at_end=bool(data.get("delayed_at_end", False)),
+            position_id=data.get("position_id"),
+        )
+
+    @classmethod
+    def _portfolio_base_from_dict(cls, data: dict[str, Any]) -> "SimulatedPortfolio":
+        return cls(
+            initial_capital_usd=Decimal(data.get("initial_capital_usd", "10000")),
+            cash_usd=Decimal(data.get("cash_usd", "0")),
+            tokens={k: Decimal(v) for k, v in data.get("tokens", {}).items()},
+            positions=[SimulatedPosition.from_dict(p) for p in data.get("positions", [])],
+            equity_curve=[cls._equity_point_from_dict(e) for e in data.get("equity_curve", [])],
+            trades=[cls._trade_record_from_dict(t) for t in data.get("trades", [])],
+            _closed_positions=[SimulatedPosition.from_dict(p) for p in data.get("closed_positions", [])],
+            initial_margin_ratio=Decimal(data.get("initial_margin_ratio", "0.1")),
+            maintenance_margin_ratio=Decimal(data.get("maintenance_margin_ratio", "0.05")),
+            health_factor_warning_threshold=Decimal(data.get("health_factor_warning_threshold", "1.2")),
+            liquidation_penalty=Decimal(data.get("liquidation_penalty", "0.05")),
+        )
+
+    @staticmethod
+    def _restored_realized_pnl(portfolio: "SimulatedPortfolio", data: dict[str, Any]) -> Decimal:
+        if "realized_pnl" in data:
+            return Decimal(str(data["realized_pnl"]))
+        return sum((t.pnl_usd for t in portfolio.trades if t.success and t.pnl_usd is not None), Decimal("0"))
+
+    @classmethod
+    def _restore_portfolio_tracking(cls, portfolio: "SimulatedPortfolio", data: dict[str, Any]) -> None:
+        portfolio._max_margin_utilization = Decimal(data.get("max_margin_utilization", "0"))
+        portfolio._min_health_factor = Decimal(data.get("min_health_factor", "999"))
+        portfolio._health_factor_warnings = data.get("health_factor_warnings", 0)
+        portfolio._lending_liquidations = [
+            LendingLiquidationEvent.from_dict(ll) for ll in data.get("lending_liquidations", [])
+        ]
+        portfolio._perp_liquidations = [LiquidationEvent.from_dict(pl) for pl in data.get("perp_liquidations", [])]
+        # Restore per-token average cost basis so a resumed portfolio still
+        # realizes PnL on later disposing sells (VIB-5083, CodeRabbit).
+        portfolio._cost_basis = {k: Decimal(str(v)) for k, v in data.get("cost_basis", {}).items()}
+        # Restore the numeraire reporting context (VIB-5127); absent -> None (USD).
+        portfolio._numeraire_symbol = data.get("numeraire_symbol")
+        # Older artifacts predate realized_pnl; fall back to summing successful
+        # realized trades so resumed portfolios stay consistent.
+        portfolio._realized_pnl = cls._restored_realized_pnl(portfolio, data)
+        portfolio._unrealized_pnl = Decimal(str(data.get("unrealized_pnl", "0")))
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SimulatedPortfolio":
         """Deserialize from dictionary.
@@ -3057,77 +3330,8 @@ class SimulatedPortfolio:
         Returns:
             SimulatedPortfolio instance
         """
-        portfolio = cls(
-            initial_capital_usd=Decimal(data.get("initial_capital_usd", "10000")),
-            cash_usd=Decimal(data.get("cash_usd", "0")),
-            tokens={k: Decimal(v) for k, v in data.get("tokens", {}).items()},
-            positions=[SimulatedPosition.from_dict(p) for p in data.get("positions", [])],
-            equity_curve=[
-                EquityPoint(
-                    timestamp=datetime.fromisoformat(e["timestamp"]),
-                    value_usd=Decimal(e["value_usd"]),
-                    # Preserve the captured numeraire price (VIB-5127); absent /
-                    # null round-trips to None (a USD point).
-                    numeraire_price_usd=(
-                        None if e.get("numeraire_price_usd") is None else Decimal(str(e["numeraire_price_usd"]))
-                    ),
-                )
-                for e in data.get("equity_curve", [])
-            ],
-            trades=[
-                TradeRecord(
-                    timestamp=datetime.fromisoformat(t["timestamp"]),
-                    intent_type=IntentType(t["intent_type"]),
-                    executed_price=Decimal(t["executed_price"]),
-                    fee_usd=Decimal(t["fee_usd"]),
-                    slippage_usd=Decimal(t["slippage_usd"]),
-                    gas_cost_usd=Decimal(t["gas_cost_usd"]),
-                    # pnl_usd is now nullable (None = realized nothing yet, an
-                    # opening / inventory-building trade); the serializer emits
-                    # ``null`` for it, so a bare Decimal(t["pnl_usd"]) would
-                    # crash on round-trip (VIB-5083, CodeRabbit). net_pnl_usd is
-                    # a derived @property, not a constructor field, so it needs
-                    # no rehydration here.
-                    pnl_usd=None if t.get("pnl_usd") is None else Decimal(str(t["pnl_usd"])),
-                    success=t["success"],
-                    amount_usd=Decimal(t.get("amount_usd", "0")),
-                    protocol=t.get("protocol", ""),
-                    tokens=t.get("tokens", []),
-                )
-                for t in data.get("trades", [])
-            ],
-            _closed_positions=[SimulatedPosition.from_dict(p) for p in data.get("closed_positions", [])],
-            initial_margin_ratio=Decimal(data.get("initial_margin_ratio", "0.1")),
-            maintenance_margin_ratio=Decimal(data.get("maintenance_margin_ratio", "0.05")),
-            health_factor_warning_threshold=Decimal(data.get("health_factor_warning_threshold", "1.2")),
-            liquidation_penalty=Decimal(data.get("liquidation_penalty", "0.05")),
-        )
-        # Set tracking fields from data
-        portfolio._max_margin_utilization = Decimal(data.get("max_margin_utilization", "0"))
-        portfolio._min_health_factor = Decimal(data.get("min_health_factor", "999"))
-        portfolio._health_factor_warnings = data.get("health_factor_warnings", 0)
-        # Deserialize lending liquidations
-        portfolio._lending_liquidations = [
-            LendingLiquidationEvent.from_dict(ll) for ll in data.get("lending_liquidations", [])
-        ]
-        # Deserialize perp liquidations
-        portfolio._perp_liquidations = [LiquidationEvent.from_dict(pl) for pl in data.get("perp_liquidations", [])]
-        # Restore per-token average cost basis so a resumed portfolio still
-        # realizes PnL on later disposing sells (VIB-5083, CodeRabbit).
-        portfolio._cost_basis = {k: Decimal(str(v)) for k, v in data.get("cost_basis", {}).items()}
-        # Restore the numeraire reporting context (VIB-5127); absent -> None (USD).
-        portfolio._numeraire_symbol = data.get("numeraire_symbol")
-        # Restore realized/unrealized PnL totals. Older artifacts predate the
-        # field: fall back to summing successful trades' realized pnl so a
-        # resumed portfolio's realized_pnl stays consistent (VIB-5083, CodeRabbit).
-        if "realized_pnl" in data:
-            portfolio._realized_pnl = Decimal(str(data["realized_pnl"]))
-        else:
-            portfolio._realized_pnl = sum(
-                (t.pnl_usd for t in portfolio.trades if t.success and t.pnl_usd is not None),
-                Decimal("0"),
-            )
-        portfolio._unrealized_pnl = Decimal(str(data.get("unrealized_pnl", "0")))
+        portfolio = cls._portfolio_base_from_dict(data)
+        cls._restore_portfolio_tracking(portfolio, data)
         return portfolio
 
 

@@ -47,6 +47,7 @@ from almanak.framework.backtesting.adapters.base import (
     StrategyBacktestConfig,
     register_adapter,
 )
+from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
 
 if TYPE_CHECKING:
     from almanak.framework.backtesting.pnl.data_provider import MarketState
@@ -55,7 +56,7 @@ if TYPE_CHECKING:
         SimulatedPortfolio,
         SimulatedPosition,
     )
-    from almanak.framework.intents.vocabulary import Intent
+    from almanak.framework.intents.vocabulary import Intent, SwapIntent
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +197,26 @@ class ArbitrageExecutionResult:
             "is_profitable": self.is_profitable,
             "execution_model": self.execution_model.value,
         }
+
+
+@dataclass(frozen=True)
+class _HopSimulation:
+    step: ExecutionStep
+    amount_out: Decimal
+    slippage_pct: Decimal
+    fee_pct: Decimal
+    mev_cost_usd: Decimal
+
+
+@dataclass(frozen=True)
+class _CumulativeSimulation:
+    steps: list[ExecutionStep]
+    final_amount: Decimal
+    total_fees_pct: Decimal
+    total_mev_cost_usd: Decimal
+    total_execution_delay_seconds: float
+    cumulative_retention: Decimal
+    cumulative_slippage: Decimal
 
 
 @dataclass
@@ -472,143 +493,167 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
             slippage applied, or None for non-swap intents to use default
             execution logic.
         """
-        from almanak.framework.backtesting.models import IntentType
-        from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
         from almanak.framework.intents.vocabulary import SwapIntent
 
         # Only handle SWAP intents - other intents use default execution
         if not isinstance(intent, SwapIntent):
             return None
 
-        # Extract swap parameters
         token_in = intent.from_token
         token_out = intent.to_token
-
-        # Get trade amount in USD
-        if intent.amount_usd is not None:
-            amount_usd = Decimal(str(intent.amount_usd))
-        else:
-            # amount is in tokens - need to convert to USD
-            token_amount = (
-                Decimal(str(intent.amount)) if intent.amount != "all" else portfolio.get_token_balance(token_in)
-            )
-            try:
-                token_price = market_state.get_price(token_in)
-                amount_usd = token_amount * (token_price if token_price else Decimal("1"))
-            except KeyError:
-                amount_usd = token_amount  # Assume stablecoin if price not found
-
-        # Get token prices for execution
-        try:
-            price_in = market_state.get_price(token_in)
-        except KeyError:
-            price_in = Decimal("1")
-
-        try:
-            price_out = market_state.get_price(token_out)
-        except KeyError:
-            price_out = Decimal("1")
-
-        if not price_in or price_in <= 0:
-            price_in = Decimal("1")
-        if not price_out or price_out <= 0:
-            price_out = Decimal("1")
-
-        # Calculate input amount in tokens
+        amount_usd = self._swap_amount_usd(intent, portfolio, market_state)
+        price_in = self._swap_price(token_in, market_state, intent.protocol)
+        price_out = self._swap_price(token_out, market_state, intent.protocol)
         amount_in_tokens = amount_usd / price_in
-
-        # Check if this is a multi-hop swap (via route metadata)
-        # Multi-hop routes are typically indicated in the protocol response or intent metadata
-        route_hops: list[tuple[str, str, Decimal]] = []
-
-        # Check for route info in intent - could be added by strategy for explicit arbitrage paths
-        intent_metadata = getattr(intent, "metadata", {}) or {}
-        if "route" in intent_metadata:
-            route = intent_metadata["route"]
-            for hop in route:
-                hop_slippage = Decimal(str(hop.get("slippage", self._config.base_slippage_per_hop_pct)))
-                route_hops.append((hop["token_in"], hop["token_out"], hop_slippage))
-        else:
-            # Single hop swap - create a 1-hop route
-            route_hops = [(token_in, token_out, self._config.base_slippage_per_hop_pct)]
-
-        # Calculate cumulative execution result with MEV
+        route_hops = self._swap_route_hops(intent, token_in, token_out)
+        if self._route_exceeds_max_hops(route_hops):
+            return self._route_exceeded_fill(
+                intent=intent,
+                market_state=market_state,
+                token_in=token_in,
+                token_out=token_out,
+                price_out=price_out,
+                amount_usd=amount_usd,
+                route_hops=route_hops,
+                max_hops=self._config.max_hops,
+            )
         execution_result = self.calculate_cumulative_slippage(
             hops=route_hops,
             initial_amount=amount_in_tokens,
             initial_amount_usd=amount_usd,
             market_state=market_state,
         )
-
-        # Calculate final output amounts
-        total_slippage_pct = execution_result.total_slippage_pct
-        total_fees_pct = execution_result.total_fees_pct
-        total_mev_cost_usd = execution_result.total_mev_cost_usd
-
-        # Calculate expected and actual output
-        # Use execution_result.final_amount which properly compounds slippage/fees per hop
-        expected_amount_out = amount_in_tokens * (price_in / price_out)
-        if execution_result.initial_amount > 0:
-            effective_fill_ratio = execution_result.final_amount / execution_result.initial_amount
-        else:
-            effective_fill_ratio = Decimal("0")
-        actual_amount_out = expected_amount_out * effective_fill_ratio
-
-        # Calculate costs in USD
-        fee_usd = amount_usd * total_fees_pct
-        slippage_usd = amount_usd * total_slippage_pct
+        expected_amount_out, actual_amount_out = self._swap_output_amounts(
+            amount_in_tokens,
+            price_in,
+            price_out,
+            execution_result,
+        )
 
         # Apply max_slippage check from intent
         max_slippage = Decimal(str(intent.max_slippage))
-        if total_slippage_pct > max_slippage:
+        if execution_result.total_slippage_pct > max_slippage:
             logger.warning(
                 "Arbitrage swap slippage %.4f%% exceeds max_slippage %.4f%%",
-                float(total_slippage_pct * 100),
+                float(execution_result.total_slippage_pct * 100),
                 float(max_slippage * 100),
             )
-            # Return failed fill if slippage too high
-            return SimulatedFill(
-                timestamp=market_state.timestamp,
-                intent_type=IntentType.SWAP,
-                protocol=intent.protocol or "arbitrage",
-                tokens=[token_in, token_out],
-                executed_price=price_out,
-                amount_usd=amount_usd,
-                fee_usd=Decimal("0"),
-                slippage_usd=Decimal("0"),
-                gas_cost_usd=Decimal("0"),
-                tokens_in={},
-                tokens_out={},
-                success=False,
-                metadata={
-                    "failure_reason": "slippage_exceeded",
-                    "actual_slippage_pct": str(total_slippage_pct),
-                    "max_slippage_pct": str(max_slippage),
-                    "num_hops": execution_result.num_hops,
-                    "execution_model": execution_result.execution_model.value,
-                },
-            )
-
-        # Log multi-step execution details
-        if len(route_hops) > 1:
-            logger.info(
-                "Multi-hop arbitrage execution: %d hops, total_slippage=%.4f%%, fees=%.4f%%, MEV=$%.2f, delay=%.1fs",
-                len(route_hops),
-                float(total_slippage_pct * 100),
-                float(total_fees_pct * 100),
-                float(total_mev_cost_usd),
-                execution_result.total_execution_delay_seconds,
-            )
-        else:
-            logger.debug(
-                "Single-hop arbitrage: %s->%s, slippage=%.4f%%, MEV=$%.2f",
+            return self._slippage_exceeded_fill(
+                intent,
+                market_state,
                 token_in,
                 token_out,
-                float(total_slippage_pct * 100),
-                float(total_mev_cost_usd),
+                price_out,
+                amount_usd,
+                max_slippage,
+                execution_result,
             )
 
-        # Create successful fill with execution details
+        self._log_arbitrage_execution(route_hops, execution_result, token_in, token_out)
+        return self._successful_swap_fill(
+            intent=intent,
+            market_state=market_state,
+            token_in=token_in,
+            token_out=token_out,
+            price_out=price_out,
+            amount_usd=amount_usd,
+            amount_in_tokens=amount_in_tokens,
+            actual_amount_out=actual_amount_out,
+            expected_amount_out=expected_amount_out,
+            execution_result=execution_result,
+        )
+
+    def _swap_amount_usd(
+        self,
+        intent: "SwapIntent",
+        portfolio: "SimulatedPortfolio",
+        market_state: "MarketState",
+    ) -> Decimal:
+        if getattr(intent, "amount_usd", None) is not None:
+            return Decimal(str(intent.amount_usd))
+        token_amount = self._swap_token_amount(intent, portfolio)
+        token_price = self._swap_price(intent.from_token, market_state, intent.protocol)
+        return token_amount * token_price
+
+    @staticmethod
+    def _swap_token_amount(intent: "SwapIntent", portfolio: "SimulatedPortfolio") -> Decimal:
+        if intent.amount == "all":
+            return portfolio.get_token_balance(intent.from_token)
+        if intent.amount is None:
+            raise ValueError("SwapIntent requires amount when amount_usd is not set")
+        return Decimal(str(intent.amount))
+
+    def _swap_price(
+        self,
+        token: str,
+        market_state: "MarketState",
+        protocol: str | None,
+    ) -> Decimal:
+        try:
+            price = market_state.get_price(token)
+        except KeyError:
+            price = None
+        if price is not None and price > Decimal("0"):
+            return price
+        if self._config.strict_reproducibility:
+            raise HistoricalDataUnavailableError(
+                data_type="price",
+                identifier=token,
+                timestamp=getattr(market_state, "timestamp", datetime.now()),
+                message=f"Price unavailable for arbitrage token {token}",
+                protocol=protocol or "arbitrage",
+            )
+        return Decimal("1")
+
+    def _swap_route_hops(
+        self,
+        intent: "SwapIntent",
+        token_in: str,
+        token_out: str,
+    ) -> list[tuple[str, str, Decimal]]:
+        intent_metadata = getattr(intent, "metadata", {}) or {}
+        if "route" not in intent_metadata:
+            return [(token_in, token_out, self._config.base_slippage_per_hop_pct)]
+        return [
+            (
+                hop["token_in"],
+                hop["token_out"],
+                Decimal(str(hop.get("slippage", self._config.base_slippage_per_hop_pct))),
+            )
+            for hop in intent_metadata["route"]
+        ]
+
+    @staticmethod
+    def _swap_output_amounts(
+        amount_in_tokens: Decimal,
+        price_in: Decimal,
+        price_out: Decimal,
+        execution_result: ArbitrageExecutionResult,
+    ) -> tuple[Decimal, Decimal]:
+        # Use execution_result.final_amount, which properly compounds
+        # slippage/fees per hop.
+        expected_amount_out = amount_in_tokens * (price_in / price_out)
+        effective_fill_ratio = (
+            execution_result.final_amount / execution_result.initial_amount
+            if execution_result.initial_amount > 0
+            else Decimal("0")
+        )
+        return expected_amount_out, expected_amount_out * effective_fill_ratio
+
+    @staticmethod
+    def _slippage_exceeded_fill(
+        intent: "SwapIntent",
+        market_state: "MarketState",
+        token_in: str,
+        token_out: str,
+        price_out: Decimal,
+        amount_usd: Decimal,
+        max_slippage: Decimal,
+        execution_result: ArbitrageExecutionResult,
+    ) -> "SimulatedFill":
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
+
         return SimulatedFill(
             timestamp=market_state.timestamp,
             intent_type=IntentType.SWAP,
@@ -616,13 +661,113 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
             tokens=[token_in, token_out],
             executed_price=price_out,
             amount_usd=amount_usd,
-            fee_usd=fee_usd,
-            slippage_usd=slippage_usd,
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            tokens_in={},
+            tokens_out={},
+            success=False,
+            metadata={
+                "failure_reason": "slippage_exceeded",
+                "actual_slippage_pct": str(execution_result.total_slippage_pct),
+                "max_slippage_pct": str(max_slippage),
+                "num_hops": execution_result.num_hops,
+                "execution_model": execution_result.execution_model.value,
+            },
+        )
+
+    @staticmethod
+    def _route_exceeded_fill(
+        *,
+        intent: "SwapIntent",
+        market_state: "MarketState",
+        token_in: str,
+        token_out: str,
+        price_out: Decimal,
+        amount_usd: Decimal,
+        route_hops: list[tuple[str, str, Decimal]],
+        max_hops: int,
+    ) -> "SimulatedFill":
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
+
+        return SimulatedFill(
+            timestamp=market_state.timestamp,
+            intent_type=IntentType.SWAP,
+            protocol=intent.protocol or "arbitrage",
+            tokens=[token_in, token_out],
+            executed_price=price_out,
+            amount_usd=amount_usd,
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            tokens_in={},
+            tokens_out={},
+            success=False,
+            metadata={
+                "failure_reason": "max_hops_exceeded",
+                "num_hops": len(route_hops),
+                "max_hops": max_hops,
+            },
+        )
+
+    @staticmethod
+    def _log_arbitrage_execution(
+        route_hops: list[tuple[str, str, Decimal]],
+        execution_result: ArbitrageExecutionResult,
+        token_in: str,
+        token_out: str,
+    ) -> None:
+        if len(route_hops) > 1:
+            logger.info(
+                "Multi-hop arbitrage execution: %d hops, total_slippage=%.4f%%, fees=%.4f%%, MEV=$%.2f, delay=%.1fs",
+                len(route_hops),
+                float(execution_result.total_slippage_pct * 100),
+                float(execution_result.total_fees_pct * 100),
+                float(execution_result.total_mev_cost_usd),
+                execution_result.total_execution_delay_seconds,
+            )
+        else:
+            logger.debug(
+                "Single-hop arbitrage: %s->%s, slippage=%.4f%%, MEV=$%.2f",
+                token_in,
+                token_out,
+                float(execution_result.total_slippage_pct * 100),
+                float(execution_result.total_mev_cost_usd),
+            )
+
+    def _successful_swap_fill(
+        self,
+        intent: "SwapIntent",
+        market_state: "MarketState",
+        token_in: str,
+        token_out: str,
+        price_out: Decimal,
+        amount_usd: Decimal,
+        amount_in_tokens: Decimal,
+        actual_amount_out: Decimal,
+        expected_amount_out: Decimal,
+        execution_result: ArbitrageExecutionResult,
+    ) -> "SimulatedFill":
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
+
+        return SimulatedFill(
+            timestamp=market_state.timestamp,
+            intent_type=IntentType.SWAP,
+            protocol=intent.protocol or "arbitrage",
+            tokens=[token_in, token_out],
+            executed_price=price_out,
+            amount_usd=amount_usd,
+            fee_usd=amount_usd * execution_result.total_fees_pct,
+            slippage_usd=amount_usd * execution_result.total_slippage_pct,
             gas_cost_usd=Decimal("0"),  # Engine stamps chain-aware gas (PnLBacktester._execute_intent)
             tokens_in={token_out: actual_amount_out},  # Tokens received from the pool
             tokens_out={token_in: amount_in_tokens},  # Tokens sent to the pool
             success=True,
-            estimated_mev_cost_usd=total_mev_cost_usd if self._config.mev_simulation_enabled else None,
+            estimated_mev_cost_usd=(
+                execution_result.total_mev_cost_usd if self._config.mev_simulation_enabled else None
+            ),
             metadata={
                 "num_hops": execution_result.num_hops,
                 "execution_model": execution_result.execution_model.value,
@@ -630,8 +775,8 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
                 "execution_steps": [step.to_dict() for step in execution_result.steps],
                 "expected_amount_out": str(expected_amount_out),
                 "actual_amount_out": str(actual_amount_out),
-                "total_slippage_pct": str(total_slippage_pct),
-                "total_fees_pct": str(total_fees_pct),
+                "total_slippage_pct": str(execution_result.total_slippage_pct),
+                "total_fees_pct": str(execution_result.total_fees_pct),
                 "mev_enabled": self._config.mev_simulation_enabled,
             },
         )
@@ -784,76 +929,126 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
             )
         """
         if not hops or initial_amount <= 0:
-            return ArbitrageExecutionResult(
-                steps=[],
-                total_slippage_pct=Decimal("0"),
-                total_fees_pct=Decimal("0"),
-                total_mev_cost_usd=Decimal("0"),
-                total_execution_delay_seconds=0.0,
-                initial_amount=initial_amount,
-                final_amount=initial_amount,
-                profit_loss_pct=Decimal("0"),
-                execution_model=CumulativeSlippageModel(self._config.cumulative_slippage_model),
-            )
+            return self._empty_execution_result(initial_amount)
 
-        # Enforce max hops
-        if len(hops) > self._config.max_hops:
-            logger.warning(
-                "Arbitrage has %d hops, exceeding max_hops=%d. Truncating.",
-                len(hops),
-                self._config.max_hops,
-            )
-            hops = hops[: self._config.max_hops]
+        bounded_hops = self._bounded_hops(hops)
+        if bounded_hops is None:
+            return self._empty_execution_result(initial_amount)
+        simulation = self._simulate_cumulative_hops(
+            bounded_hops,
+            initial_amount,
+            initial_amount_usd,
+        )
+        result = self._build_cumulative_execution_result(simulation, initial_amount)
+        self._execution_history.append(result)
+        self._log_cumulative_execution_result(result)
+        return result
 
+    def _empty_execution_result(self, initial_amount: Decimal) -> ArbitrageExecutionResult:
+        return ArbitrageExecutionResult(
+            steps=[],
+            total_slippage_pct=Decimal("0"),
+            total_fees_pct=Decimal("0"),
+            total_mev_cost_usd=Decimal("0"),
+            total_execution_delay_seconds=0.0,
+            initial_amount=initial_amount,
+            final_amount=initial_amount,
+            profit_loss_pct=Decimal("0"),
+            execution_model=CumulativeSlippageModel(self._config.cumulative_slippage_model),
+        )
+
+    def _route_exceeds_max_hops(self, hops: list[tuple[str, str, Decimal]]) -> bool:
+        return len(hops) > self._config.max_hops
+
+    def _bounded_hops(self, hops: list[tuple[str, str, Decimal]]) -> list[tuple[str, str, Decimal]] | None:
+        if not self._route_exceeds_max_hops(hops):
+            return hops
+        logger.warning(
+            "Arbitrage has %d hops, exceeding max_hops=%d. Rejecting route.",
+            len(hops),
+            self._config.max_hops,
+        )
+        return None
+
+    def _simulate_cumulative_hops(
+        self,
+        hops: list[tuple[str, str, Decimal]],
+        initial_amount: Decimal,
+        initial_amount_usd: Decimal | None,
+    ) -> _CumulativeSimulation:
         steps: list[ExecutionStep] = []
         current_amount = initial_amount
         total_fees_pct = Decimal("0")
         total_mev_cost_usd = Decimal("0")
         total_execution_delay = 0.0
-
-        # Track cumulative slippage based on model
-        if self._config.cumulative_slippage_model == "multiplicative":
-            cumulative_retention = Decimal("1")
-        else:
-            cumulative_slippage = Decimal("0")
+        cumulative_retention = Decimal("1")
+        cumulative_slippage = Decimal("0")
+        cumulative_fee_retention = Decimal("1")
 
         for step_num, (token_in, token_out, slippage_pct) in enumerate(hops, 1):
-            # Apply base slippage if none provided
-            if slippage_pct <= 0:
-                slippage_pct = self._config.base_slippage_per_hop_pct
+            hop = self._simulate_hop(
+                step_num=step_num,
+                token_in=token_in,
+                token_out=token_out,
+                slippage_pct=slippage_pct,
+                current_amount=current_amount,
+                initial_amount=initial_amount,
+                initial_amount_usd=initial_amount_usd,
+            )
+            total_fees_pct += hop.fee_pct
+            total_mev_cost_usd += hop.mev_cost_usd
+            total_execution_delay += self._config.execution_delay_seconds
+            cumulative_retention, cumulative_slippage = self._update_cumulative_slippage(
+                cumulative_retention,
+                cumulative_slippage,
+                hop.slippage_pct,
+            )
+            if self._config.cumulative_slippage_model == "additive":
+                cumulative_fee_retention *= Decimal("1") - hop.fee_pct
+                current_amount = self._additive_model_amount(
+                    initial_amount,
+                    cumulative_slippage,
+                    cumulative_fee_retention,
+                )
+                hop.step.amount_out = current_amount
+            else:
+                current_amount = hop.amount_out
+            steps.append(hop.step)
 
-            # Get fee for this hop
-            fee_pct = self._config.base_fee_per_hop_pct
+        return _CumulativeSimulation(
+            steps=steps,
+            final_amount=current_amount,
+            total_fees_pct=total_fees_pct,
+            total_mev_cost_usd=total_mev_cost_usd,
+            total_execution_delay_seconds=total_execution_delay,
+            cumulative_retention=cumulative_retention,
+            cumulative_slippage=cumulative_slippage,
+        )
 
-            # Simulate MEV cost if enabled
-            mev_cost_usd = Decimal("0")
-            if self._config.mev_simulation_enabled and initial_amount_usd:
-                mev_simulator = self._get_mev_simulator()
-                if mev_simulator:
-                    # Estimate USD value of current step
-                    step_pct = current_amount / initial_amount
-                    step_usd = initial_amount_usd * step_pct
-
-                    from almanak.framework.backtesting.models import IntentType
-
-                    mev_result = mev_simulator.simulate_mev_cost(
-                        trade_amount_usd=step_usd,
-                        token_in=token_in,
-                        token_out=token_out,
-                        intent_type=IntentType.SWAP,
-                    )
-                    mev_cost_usd = mev_result.mev_cost_usd
-
-                    # Add MEV-induced slippage to step slippage
-                    if mev_result.additional_slippage_pct > 0:
-                        slippage_pct = slippage_pct + mev_result.additional_slippage_pct
-
-            # Calculate output amount after slippage and fees
-            amount_after_slippage = current_amount * (Decimal("1") - slippage_pct)
-            amount_after_fees = amount_after_slippage * (Decimal("1") - fee_pct)
-
-            # Create execution step
-            step = ExecutionStep(
+    def _simulate_hop(
+        self,
+        step_num: int,
+        token_in: str,
+        token_out: str,
+        slippage_pct: Decimal,
+        current_amount: Decimal,
+        initial_amount: Decimal,
+        initial_amount_usd: Decimal | None,
+    ) -> _HopSimulation:
+        slippage_pct = self._effective_hop_slippage(slippage_pct)
+        mev_cost_usd, mev_slippage_pct = self._hop_mev_impact(
+            token_in,
+            token_out,
+            current_amount,
+            initial_amount,
+            initial_amount_usd,
+        )
+        slippage_pct += mev_slippage_pct
+        fee_pct = self._config.base_fee_per_hop_pct
+        amount_after_slippage = current_amount * (Decimal("1") - slippage_pct)
+        amount_after_fees = amount_after_slippage * (Decimal("1") - fee_pct)
+        return _HopSimulation(
+            step=ExecutionStep(
                 step_number=step_num,
                 token_in=token_in,
                 token_out=token_out,
@@ -863,58 +1058,99 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
                 fee_pct=fee_pct,
                 mev_cost_usd=mev_cost_usd,
                 execution_delay_seconds=self._config.execution_delay_seconds,
-            )
-            steps.append(step)
+            ),
+            amount_out=amount_after_fees,
+            slippage_pct=slippage_pct,
+            fee_pct=fee_pct,
+            mev_cost_usd=mev_cost_usd,
+        )
 
-            # Update tracking
-            current_amount = amount_after_fees
-            total_fees_pct += fee_pct
-            total_mev_cost_usd += mev_cost_usd
-            total_execution_delay += self._config.execution_delay_seconds
+    def _effective_hop_slippage(self, slippage_pct: Decimal | None) -> Decimal:
+        if slippage_pct is None or slippage_pct < 0:
+            return self._config.base_slippage_per_hop_pct
+        return slippage_pct
 
-            if self._config.cumulative_slippage_model == "multiplicative":
-                cumulative_retention *= Decimal("1") - slippage_pct
-            else:
-                cumulative_slippage += slippage_pct
+    @staticmethod
+    def _additive_model_amount(
+        initial_amount: Decimal,
+        cumulative_slippage: Decimal,
+        cumulative_fee_retention: Decimal,
+    ) -> Decimal:
+        retention = max(Decimal("0"), Decimal("1") - cumulative_slippage)
+        return initial_amount * retention * cumulative_fee_retention
 
-        # Calculate total slippage
+    def _hop_mev_impact(
+        self,
+        token_in: str,
+        token_out: str,
+        current_amount: Decimal,
+        initial_amount: Decimal,
+        initial_amount_usd: Decimal | None,
+    ) -> tuple[Decimal, Decimal]:
+        if not self._config.mev_simulation_enabled or not initial_amount_usd:
+            return Decimal("0"), Decimal("0")
+        mev_simulator = self._get_mev_simulator()
+        if mev_simulator is None:
+            return Decimal("0"), Decimal("0")
+
+        from almanak.framework.backtesting.models import IntentType
+
+        step_usd = initial_amount_usd * (current_amount / initial_amount)
+        mev_result = mev_simulator.simulate_mev_cost(
+            trade_amount_usd=step_usd,
+            token_in=token_in,
+            token_out=token_out,
+            intent_type=IntentType.SWAP,
+        )
+        return mev_result.mev_cost_usd, max(mev_result.additional_slippage_pct, Decimal("0"))
+
+    def _update_cumulative_slippage(
+        self,
+        cumulative_retention: Decimal,
+        cumulative_slippage: Decimal,
+        slippage_pct: Decimal,
+    ) -> tuple[Decimal, Decimal]:
         if self._config.cumulative_slippage_model == "multiplicative":
-            total_slippage_pct = Decimal("1") - cumulative_retention
-        else:
-            total_slippage_pct = cumulative_slippage
+            return cumulative_retention * (Decimal("1") - slippage_pct), cumulative_slippage
+        return cumulative_retention, cumulative_slippage + slippage_pct
 
-        # Calculate profit/loss as percentage of initial
-        profit_loss_pct = (current_amount - initial_amount) / initial_amount
-
-        result = ArbitrageExecutionResult(
-            steps=steps,
+    def _build_cumulative_execution_result(
+        self,
+        simulation: _CumulativeSimulation,
+        initial_amount: Decimal,
+    ) -> ArbitrageExecutionResult:
+        total_slippage_pct = self._total_cumulative_slippage(simulation)
+        return ArbitrageExecutionResult(
+            steps=simulation.steps,
             total_slippage_pct=total_slippage_pct,
-            total_fees_pct=total_fees_pct,
-            total_mev_cost_usd=total_mev_cost_usd,
-            total_execution_delay_seconds=total_execution_delay,
+            total_fees_pct=simulation.total_fees_pct,
+            total_mev_cost_usd=simulation.total_mev_cost_usd,
+            total_execution_delay_seconds=simulation.total_execution_delay_seconds,
             initial_amount=initial_amount,
-            final_amount=current_amount,
-            profit_loss_pct=profit_loss_pct,
+            final_amount=simulation.final_amount,
+            profit_loss_pct=(simulation.final_amount - initial_amount) / initial_amount,
             execution_model=CumulativeSlippageModel(self._config.cumulative_slippage_model),
         )
 
-        # Store in history
-        self._execution_history.append(result)
+    def _total_cumulative_slippage(self, simulation: _CumulativeSimulation) -> Decimal:
+        if self._config.cumulative_slippage_model == "multiplicative":
+            return Decimal("1") - simulation.cumulative_retention
+        return simulation.cumulative_slippage
 
+    @staticmethod
+    def _log_cumulative_execution_result(result: ArbitrageExecutionResult) -> None:
         logger.debug(
             "Arbitrage execution: %d hops, slippage=%.4f%%, fees=%.4f%%, "
             "MEV=$%.2f, delay=%.1fs, initial=%s, final=%s, PnL=%.4f%%",
-            len(steps),
-            float(total_slippage_pct * 100),
-            float(total_fees_pct * 100),
-            float(total_mev_cost_usd),
-            total_execution_delay,
-            str(initial_amount),
-            str(current_amount),
-            float(profit_loss_pct * 100),
+            len(result.steps),
+            float(result.total_slippage_pct * 100),
+            float(result.total_fees_pct * 100),
+            float(result.total_mev_cost_usd),
+            result.total_execution_delay_seconds,
+            str(result.initial_amount),
+            str(result.final_amount),
+            float(result.profit_loss_pct * 100),
         )
-
-        return result
 
     def simulate_mev_impact(
         self,

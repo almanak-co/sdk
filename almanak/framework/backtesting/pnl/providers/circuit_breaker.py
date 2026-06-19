@@ -143,6 +143,10 @@ class CircuitBreakerConfig:
 
     def __post_init__(self) -> None:
         """Validate configuration values."""
+        self._validate_count_thresholds()
+        self._validate_failure_rate_threshold()
+
+    def _validate_count_thresholds(self) -> None:
         if self.failure_threshold < 1:
             raise ValueError("failure_threshold must be at least 1")
         if self.reset_timeout_seconds <= 0:
@@ -151,6 +155,10 @@ class CircuitBreakerConfig:
             raise ValueError("half_open_max_calls must be at least 1")
         if self.success_threshold_half_open < 1:
             raise ValueError("success_threshold_half_open must be at least 1")
+        if self.success_threshold_half_open > self.half_open_max_calls:
+            raise ValueError("success_threshold_half_open cannot exceed half_open_max_calls")
+
+    def _validate_failure_rate_threshold(self) -> None:
         if self.failure_rate_threshold is not None:
             if not 0 < self.failure_rate_threshold <= 1:
                 raise ValueError("failure_rate_threshold must be between 0 and 1")

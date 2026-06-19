@@ -6,13 +6,25 @@ for the slippage models.
 
 from decimal import Decimal
 
+import pytest
+
 from almanak.framework.backtesting.pnl.fee_models.liquidity import (
     DEFAULT_LIQUIDITY_USD,
+    FEE_SELECTOR,
     KNOWN_POOLS,
+    LIQUIDITY_SELECTOR,
+    SLOT0_SELECTOR,
     PoolLiquidityResult,
+    _estimate_liquidity_usd,
     _known_pools_from_reference,
+    _query_fee,
+    _query_fee_sync,
+    _query_liquidity,
+    _query_liquidity_sync,
     estimate_liquidity_for_trade,
     get_pool_address,
+    query_pool_liquidity,
+    query_pool_liquidity_sync,
 )
 
 # =============================================================================
@@ -106,6 +118,159 @@ class TestKnownPools:
             for pair, address in pools.items():
                 assert address.startswith("0x"), f"{chain}/{pair} address should start with 0x"
                 assert len(address) == 42, f"{chain}/{pair} address should be 42 chars"
+
+
+# =============================================================================
+# Pool Liquidity Query Tests
+# =============================================================================
+
+
+def _uint256(value: int) -> bytes:
+    return value.to_bytes(32, byteorder="big")
+
+
+def _slot0_bytes(sqrt_price_x96: int, tick: int) -> bytes:
+    tick_raw = tick if tick >= 0 else 2**24 + tick
+    return _uint256(sqrt_price_x96) + _uint256(tick_raw)
+
+
+class _AsyncEth:
+    def __init__(self, responses: dict[str, bytes], *, fail: bool = False) -> None:
+        self.responses = responses
+        self.fail = fail
+
+    async def call(self, request: dict[str, str]) -> bytes:
+        if self.fail:
+            raise RuntimeError("provider unavailable")
+        return self.responses[request["data"]]
+
+
+class _SyncEth:
+    def __init__(self, responses: dict[str, bytes], *, fail: bool = False) -> None:
+        self.responses = responses
+        self.fail = fail
+
+    def call(self, request: dict[str, str]) -> bytes:
+        if self.fail:
+            raise RuntimeError("provider unavailable")
+        return self.responses[request["data"]]
+
+
+class _FakeWeb3:
+    def __init__(self, eth: _AsyncEth | _SyncEth) -> None:
+        self.eth = eth
+
+    def to_checksum_address(self, address: str) -> str:
+        return address.lower()
+
+
+def _liquidity_responses(*, liquidity: int, sqrt_price_x96: int = 2**96, tick: int = -120, fee: int = 3000) -> dict[str, bytes]:
+    return {
+        LIQUIDITY_SELECTOR: _uint256(liquidity),
+        SLOT0_SELECTOR: _slot0_bytes(sqrt_price_x96, tick),
+        FEE_SELECTOR: _uint256(fee),
+    }
+
+
+class TestQueryPoolLiquidity:
+    @pytest.mark.asyncio
+    async def test_async_query_returns_measured_pool_fields(self) -> None:
+        result = await query_pool_liquidity(
+            pool_address="0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD",
+            web3=_FakeWeb3(_AsyncEth(_liquidity_responses(liquidity=10**18))),
+            current_price_usd=Decimal("2"),
+        )
+
+        assert result.pool_address == "0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD"
+        assert result.liquidity == 10**18
+        assert result.sqrt_price_x96 == 2**96
+        assert result.tick == -120
+        assert result.fee_tier == 3000
+        assert result.liquidity_usd == Decimal("2000")
+        assert result.is_estimated is False
+        assert result.source == "on-chain"
+
+    @pytest.mark.asyncio
+    async def test_async_query_preserves_measured_zero_liquidity(self) -> None:
+        result = await query_pool_liquidity(
+            pool_address="0x0000000000000000000000000000000000000000",
+            web3=_FakeWeb3(_AsyncEth(_liquidity_responses(liquidity=0))),
+            current_price_usd=Decimal("2"),
+        )
+
+        assert result.liquidity == 0
+        assert result.liquidity_usd == Decimal("0")
+        assert result.is_estimated is False
+        assert result.source == "on-chain"
+
+    @pytest.mark.asyncio
+    async def test_async_query_provider_failure_returns_default(self) -> None:
+        result = await query_pool_liquidity(
+            pool_address="0x0000000000000000000000000000000000000001",
+            web3=_FakeWeb3(_AsyncEth({}, fail=True)),
+            current_price_usd=Decimal("2"),
+        )
+
+        assert result.liquidity == 0
+        assert result.liquidity_usd == DEFAULT_LIQUIDITY_USD["default"]
+        assert result.is_estimated is True
+        assert result.source == "default"
+
+    @pytest.mark.asyncio
+    async def test_async_query_rejects_malformed_abi_words(self) -> None:
+        web3 = _FakeWeb3(
+            _AsyncEth(
+                {
+                    LIQUIDITY_SELECTOR: b"\x01",
+                    FEE_SELECTOR: b"\x0b\xb8",
+                }
+            )
+        )
+
+        assert await _query_liquidity(web3, "0xpool") is None
+        assert await _query_fee(web3, "0xpool") is None
+
+
+class TestQueryPoolLiquiditySync:
+    def test_sync_query_returns_measured_pool_fields(self) -> None:
+        result = query_pool_liquidity_sync(
+            pool_address="0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD",
+            web3=_FakeWeb3(_SyncEth(_liquidity_responses(liquidity=10**18, fee=500))),
+            current_price_usd=Decimal("2"),
+        )
+
+        assert result.liquidity == 10**18
+        assert result.sqrt_price_x96 == 2**96
+        assert result.tick == -120
+        assert result.fee_tier == 500
+        assert result.liquidity_usd == Decimal("2400.0")
+        assert result.is_estimated is False
+        assert result.source == "on-chain"
+
+    def test_sync_query_provider_failure_returns_default(self) -> None:
+        result = query_pool_liquidity_sync(
+            pool_address="0x0000000000000000000000000000000000000001",
+            web3=_FakeWeb3(_SyncEth({}, fail=True)),
+            current_price_usd=Decimal("2"),
+        )
+
+        assert result.liquidity == 0
+        assert result.liquidity_usd == DEFAULT_LIQUIDITY_USD["default"]
+        assert result.is_estimated is True
+        assert result.source == "default"
+
+    def test_sync_query_rejects_malformed_abi_words(self) -> None:
+        web3 = _FakeWeb3(
+            _SyncEth(
+                {
+                    LIQUIDITY_SELECTOR: b"\x01",
+                    FEE_SELECTOR: b"\x0b\xb8",
+                }
+            )
+        )
+
+        assert _query_liquidity_sync(web3, "0xpool") is None
+        assert _query_fee_sync(web3, "0xpool") is None
 
 
 # =============================================================================
@@ -296,6 +461,77 @@ class TestGetPoolAddress:
         """Should find known Optimism pool addresses."""
         address = get_pool_address("WETH", "USDC", "optimism")
         assert address is not None
+
+
+# =============================================================================
+# _estimate_liquidity_usd Tests
+# =============================================================================
+
+
+class TestEstimateLiquidityUsd:
+    """Tests for raw Uniswap V3 liquidity USD estimation."""
+
+    def test_zero_raw_liquidity_values_to_zero(self) -> None:
+        assert _estimate_liquidity_usd(
+            liquidity=0,
+            sqrt_price_x96=2**96,
+            current_price_usd=Decimal("2000"),
+            fee_tier=500,
+        ) == Decimal("0")
+
+    def test_sqrt_price_and_current_price_use_formula(self) -> None:
+        assert _estimate_liquidity_usd(
+            liquidity=10**18,
+            sqrt_price_x96=2**96,
+            current_price_usd=Decimal("2"),
+            fee_tier=3000,
+        ) == Decimal("2000")
+
+    @pytest.mark.parametrize(
+        ("fee_tier", "expected"),
+        [
+            (100, Decimal("3000")),
+            (500, Decimal("2400.0")),
+            (10000, Decimal("1000.0")),
+        ],
+    )
+    def test_fee_tier_multiplier(self, fee_tier: int, expected: Decimal) -> None:
+        assert _estimate_liquidity_usd(
+            liquidity=10**18,
+            sqrt_price_x96=2**96,
+            current_price_usd=Decimal("2"),
+            fee_tier=fee_tier,
+        ) == expected
+
+    def test_strict_mode_without_current_price_raises(self) -> None:
+        with pytest.raises(ValueError, match="No current_price_usd provided"):
+            _estimate_liquidity_usd(
+                liquidity=10**18,
+                sqrt_price_x96=2**96,
+                current_price_usd=None,
+                strict_mode=True,
+            )
+
+    def test_measured_zero_current_price_does_not_fallback_to_eth_reference(self) -> None:
+        assert _estimate_liquidity_usd(
+            liquidity=10**18,
+            sqrt_price_x96=2**96,
+            current_price_usd=Decimal("0"),
+            fee_tier=500,
+        ) == Decimal("0")
+
+    @pytest.mark.parametrize(
+        ("liquidity", "expected"),
+        [
+            (10**25, Decimal("50000000")),
+            (10**22, Decimal("10000000")),
+            (10**19, Decimal("1000000")),
+            (10**16, Decimal("100000")),
+            (10**14, Decimal("10000")),
+        ],
+    )
+    def test_no_sqrt_price_falls_back_by_liquidity_magnitude(self, liquidity: int, expected: Decimal) -> None:
+        assert _estimate_liquidity_usd(liquidity=liquidity) == expected
 
 
 # =============================================================================

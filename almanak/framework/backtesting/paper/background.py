@@ -41,7 +41,9 @@ Example:
     bg_trader.stop()
 """
 
+import asyncio
 import atexit
+import inspect
 import json
 import logging
 import multiprocessing
@@ -50,6 +52,7 @@ import signal
 import socket
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -1085,13 +1088,205 @@ class BackgroundPaperTrader:
 # =============================================================================
 
 
-# crap-allowlist: Phase 5c (#2097) swaps the inline SSL-cert search
-# for an ``apply_ssl_cert_file`` call. Cyclomatic complexity stays at
-# the pre-migration cc=13 (this function is the spawned-subprocess
-# entry point: PID acquisition, signal handling, state restore,
-# paper-trade loop). Coverage is 0% because unit tests don't spawn
-# the full subprocess — see TestBackgroundPaperTrader for the parent-
-# side coverage of start() / stop() / resume() that wires this in.
+_BACKTEST_WALLET = "0x" + "0" * 40
+
+
+def _instantiate_background_strategy(
+    strategy_cls: type[Any],
+    *,
+    strategy_config: dict[str, Any] | None,
+    config: PaperTraderConfig,
+) -> Any:
+    strat_cfg = strategy_config or {}
+    signature = inspect.signature(strategy_cls)
+    parameters = signature.parameters
+    accepts_kwargs = any(param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values())
+    if accepts_kwargs or all(name in parameters for name in ("config", "chain", "wallet_address", "risk_guard_config")):
+        return strategy_cls(
+            config=strat_cfg,
+            chain=config.chain,
+            wallet_address=config.wallet_address or _BACKTEST_WALLET,
+            risk_guard_config=None,
+        )
+    if parameters:
+        return strategy_cls(strat_cfg)
+    return strategy_cls()
+
+
+def _load_background_strategy(
+    *,
+    strategy_module: str,
+    strategy_class: str,
+    strategy_config: dict[str, Any] | None,
+    config: PaperTraderConfig,
+) -> Any:
+    import importlib
+
+    module = importlib.import_module(strategy_module)
+    cls = getattr(module, strategy_class)
+    return _instantiate_background_strategy(cls, strategy_config=strategy_config, config=config)
+
+
+def _load_resumed_background_state(state_file: Path, bg_logger: logging.Logger) -> PaperTraderState:
+    try:
+        state = PaperTraderState.load(state_file)
+        if not state.can_resume():
+            bg_logger.error(f"State cannot be resumed: status={state.status}")
+            sys.exit(1)
+
+        state.prepare_for_resume(os.getpid())
+        bg_logger.info(
+            f"Resuming session: tick_count={state.tick_count}, "
+            f"trades={len(state.trades)}, resume_count={state.resume_count}"
+        )
+        return state
+    except (ValueError, FileNotFoundError) as e:
+        bg_logger.error(f"Failed to load state for resume: {e}")
+        sys.exit(1)
+
+
+def _create_fresh_background_state(
+    *,
+    config: PaperTraderConfig,
+    config_dict: dict[str, Any],
+    trade_history: TradeHistoryWriter,
+    bg_logger: logging.Logger,
+) -> PaperTraderState:
+    session_start = datetime.now(UTC)
+    state = PaperTraderState(
+        deployment_id=config.deployment_id,
+        session_start=session_start,
+        last_save=session_start,
+        tick_count=0,
+        trades=[],
+        errors=[],
+        current_balances=config.get_initial_balances(),
+        initial_balances=config.get_initial_balances(),
+        equity_curve=[],
+        config=config_dict,
+        pid=os.getpid(),
+        status="running",
+    )
+    trade_history.truncate()
+    bg_logger.info("Starting fresh session")
+    return state
+
+
+def _prepare_background_state(
+    *,
+    config: PaperTraderConfig,
+    config_dict: dict[str, Any],
+    state_file: Path,
+    trade_history: TradeHistoryWriter,
+    resume: bool,
+    bg_logger: logging.Logger,
+) -> PaperTraderState:
+    if resume and state_file.exists():
+        return _load_resumed_background_state(state_file, bg_logger)
+
+    return _create_fresh_background_state(
+        config=config,
+        config_dict=config_dict,
+        trade_history=trade_history,
+        bg_logger=bg_logger,
+    )
+
+
+def _write_new_trade_records(
+    *,
+    trade_history: TradeHistoryWriter,
+    trades: list[PaperTrade],
+    last_trade_count: int,
+    bg_logger: logging.Logger,
+) -> int:
+    current_trade_count = len(trades)
+    if current_trade_count <= last_trade_count:
+        return last_trade_count
+
+    last_written = last_trade_count
+    for i in range(last_trade_count, current_trade_count):
+        try:
+            trade_history.write_trade(trades[i])
+            last_written = i + 1
+        except OSError as e:
+            bg_logger.error(f"Failed to write trade to history: {e}")
+            break
+    return last_written
+
+
+def _write_new_error_records(
+    *,
+    trade_history: TradeHistoryWriter,
+    errors: list[PaperTradeError],
+    last_error_count: int,
+    bg_logger: logging.Logger,
+) -> int:
+    current_error_count = len(errors)
+    if current_error_count <= last_error_count:
+        return last_error_count
+
+    last_written = last_error_count
+    for i in range(last_error_count, current_error_count):
+        try:
+            trade_history.write_error(errors[i])
+            last_written = i + 1
+        except OSError as e:
+            bg_logger.error(f"Failed to write error to history: {e}")
+            break
+    return last_written
+
+
+def _sync_background_state_from_trader(
+    state: PaperTraderState,
+    trader: Any,
+    portfolio_tracker: Any,
+) -> None:
+    state.tick_count = trader._tick_count
+    state.trades = trader._trades
+    state.errors = trader._errors
+    state.current_balances = dict(portfolio_tracker.current_balances)
+    state.equity_curve = [(p.timestamp, p.value_usd, getattr(p, "eth_price_usd", None)) for p in trader._equity_curve]
+    state.ticks_with_fork = getattr(trader, "_ticks_with_fork", 0)
+    state.ticks_with_indicators = getattr(trader, "_ticks_with_indicators", 0)
+    state.ticks_with_action = getattr(trader, "_ticks_with_action", 0)
+    state.last_successful_decision_at = getattr(trader, "_last_successful_decision_at", None)
+    state.last_trade_at = getattr(trader, "_last_trade_at", None)
+
+
+async def _sleep_until_next_tick(
+    seconds: float,
+    shutdown_requested: Callable[[], bool],
+) -> None:
+    sleep_remaining = seconds
+    while sleep_remaining > 0 and not shutdown_requested():
+        chunk = min(sleep_remaining, 2.0)
+        await asyncio.sleep(chunk)
+        sleep_remaining -= chunk
+
+
+def _final_background_status(
+    *,
+    current_status: str,
+    shutdown_requested: bool,
+    teardown_ok: bool,
+) -> str:
+    if current_status == "error":
+        return current_status
+    if not shutdown_requested:
+        return "completed"
+    if teardown_ok:
+        return "stopped_clean"
+    return "stopped"
+
+
+def _background_teardown_status(*, fork_is_persistent: bool, teardown_ok: bool) -> str:
+    if not fork_is_persistent:
+        return "skipped"
+    if teardown_ok:
+        return "ok"
+    return "failed"
+
+
 def _run_background_paper_trader(  # noqa: C901
     config_dict: dict[str, Any],
     strategy_module: str,
@@ -1122,8 +1317,6 @@ def _run_background_paper_trader(  # noqa: C901
         strategy_config: Strategy configuration dict (from config.json).
         raw_rpc_url: Unmasked RPC URL (to_dict masks it for display).
     """
-    import asyncio
-
     # Fix SSL cert resolution in spawned subprocess (macOS
     # multiprocessing issue). The parent process already called
     # ``apply_ssl_cert_file`` before ``Process.start()`` so the env
@@ -1187,31 +1380,13 @@ def _run_background_paper_trader(  # noqa: C901
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    # Import and instantiate strategy
-    _BACKTEST_WALLET = "0x" + "0" * 40
     try:
-        import importlib
-
-        module = importlib.import_module(strategy_module)
-        cls = getattr(module, strategy_class)
-        strat_cfg = strategy_config or {}
-
-        # Try IntentStrategy signature: (config, chain, wallet_address, risk_guard_config)
-        try:
-            strategy = cls(
-                config=strat_cfg,
-                chain=config.chain,
-                wallet_address=config.wallet_address or _BACKTEST_WALLET,
-                risk_guard_config=None,
-            )
-        except TypeError:
-            # Fall back to simple signature: (config,)
-            try:
-                strategy = cls(strat_cfg)
-            except TypeError:
-                # Fall back to no-arg constructor (mock strategies)
-                strategy = cls()
-
+        strategy = _load_background_strategy(
+            strategy_module=strategy_module,
+            strategy_class=strategy_class,
+            strategy_config=strategy_config,
+            config=config,
+        )
         bg_logger.info(f"Loaded strategy {strategy_class} from {strategy_module}")
     except (ImportError, AttributeError) as e:
         bg_logger.error(f"Failed to import strategy: {e}")
@@ -1221,45 +1396,14 @@ def _run_background_paper_trader(  # noqa: C901
     state_file = state_path / f"{config.deployment_id}.state.json"
     trade_history_file = TradeHistoryWriter.get_default_path(config.deployment_id, state_path)
     trade_history = TradeHistoryWriter(path=trade_history_file, deployment_id=config.deployment_id)
-
-    # Handle resume vs fresh start
-    if resume and state_file.exists():
-        # Load existing state
-        try:
-            state = PaperTraderState.load(state_file)
-            if not state.can_resume():
-                bg_logger.error(f"State cannot be resumed: status={state.status}")
-                sys.exit(1)
-
-            # Prepare state for resume
-            state.prepare_for_resume(os.getpid())
-            bg_logger.info(
-                f"Resuming session: tick_count={state.tick_count}, "
-                f"trades={len(state.trades)}, resume_count={state.resume_count}"
-            )
-        except (ValueError, FileNotFoundError) as e:
-            bg_logger.error(f"Failed to load state for resume: {e}")
-            sys.exit(1)
-    else:
-        # Create fresh state
-        session_start = datetime.now(UTC)
-        state = PaperTraderState(
-            deployment_id=config.deployment_id,
-            session_start=session_start,
-            last_save=session_start,
-            tick_count=0,
-            trades=[],
-            errors=[],
-            current_balances=config.get_initial_balances(),
-            initial_balances=config.get_initial_balances(),
-            equity_curve=[],
-            config=config_dict,
-            pid=os.getpid(),
-            status="running",
-        )
-        # Clear trade history for fresh start
-        trade_history.truncate()
-        bg_logger.info("Starting fresh session")
+    state = _prepare_background_state(
+        config=config,
+        config_dict=config_dict,
+        state_file=state_file,
+        trade_history=trade_history,
+        resume=resume,
+        bg_logger=bg_logger,
+    )
 
     # Save initial/resumed state
     state.save(state_file)
@@ -1363,40 +1507,20 @@ def _run_background_paper_trader(  # noqa: C901
                 except Exception as e:
                     bg_logger.error(f"Error during tick: {e}")
 
-                # Write new trades incrementally to JSONL
-                current_trade_count = len(trader._trades)
-                if current_trade_count > last_trade_count:
-                    for i in range(last_trade_count, current_trade_count):
-                        try:
-                            trade_history.write_trade(trader._trades[i])
-                        except OSError as e:
-                            bg_logger.error(f"Failed to write trade to history: {e}")
-                    last_trade_count = current_trade_count
+                last_trade_count = _write_new_trade_records(
+                    trade_history=trade_history,
+                    trades=trader._trades,
+                    last_trade_count=last_trade_count,
+                    bg_logger=bg_logger,
+                )
+                last_error_count = _write_new_error_records(
+                    trade_history=trade_history,
+                    errors=trader._errors,
+                    last_error_count=last_error_count,
+                    bg_logger=bg_logger,
+                )
 
-                # Write new errors incrementally to JSONL
-                current_error_count = len(trader._errors)
-                if current_error_count > last_error_count:
-                    for i in range(last_error_count, current_error_count):
-                        try:
-                            trade_history.write_error(trader._errors[i])
-                        except OSError as e:
-                            bg_logger.error(f"Failed to write error to history: {e}")
-                    last_error_count = current_error_count
-
-                # Update state
-                state.tick_count = trader._tick_count
-                state.trades = trader._trades
-                state.errors = trader._errors
-                state.current_balances = dict(portfolio_tracker.current_balances)
-                state.equity_curve = [
-                    (p.timestamp, p.value_usd, getattr(p, "eth_price_usd", None)) for p in trader._equity_curve
-                ]
-                # Health telemetry (VIB-1957)
-                state.ticks_with_fork = getattr(trader, "_ticks_with_fork", 0)
-                state.ticks_with_indicators = getattr(trader, "_ticks_with_indicators", 0)
-                state.ticks_with_action = getattr(trader, "_ticks_with_action", 0)
-                state.last_successful_decision_at = getattr(trader, "_last_successful_decision_at", None)
-                state.last_trade_at = getattr(trader, "_last_trade_at", None)
+                _sync_background_state_from_trader(state, trader, portfolio_tracker)
 
                 # Periodic save of full state
                 current_time = time.time()
@@ -1405,12 +1529,7 @@ def _run_background_paper_trader(  # noqa: C901
                     last_save_time = current_time
                     bg_logger.debug(f"Saved state: tick={state.tick_count}, trades={len(state.trades)}")
 
-                # Sleep until next tick (interruptible by shutdown signal)
-                sleep_remaining: float = config.tick_interval_seconds
-                while sleep_remaining > 0 and not shutdown_requested:
-                    chunk = min(sleep_remaining, 2.0)
-                    await asyncio.sleep(chunk)
-                    sleep_remaining -= chunk
+                await _sleep_until_next_tick(config.tick_interval_seconds, lambda: shutdown_requested)
 
         except asyncio.CancelledError:
             bg_logger.info("Trading loop cancelled")
@@ -1486,37 +1605,19 @@ def _run_background_paper_trader(  # noqa: C901
             trader._running = False
             await trader._cleanup()
 
-            # Update state with any teardown trades
-            state.tick_count = trader._tick_count
-            state.trades = trader._trades
-            state.errors = trader._errors
-            state.current_balances = dict(portfolio_tracker.current_balances)
-            state.equity_curve = [
-                (p.timestamp, p.value_usd, getattr(p, "eth_price_usd", None)) for p in trader._equity_curve
-            ]
-            # Health telemetry (VIB-1957)
-            state.ticks_with_fork = getattr(trader, "_ticks_with_fork", 0)
-            state.ticks_with_indicators = getattr(trader, "_ticks_with_indicators", 0)
-            state.ticks_with_action = getattr(trader, "_ticks_with_action", 0)
-            state.last_successful_decision_at = getattr(trader, "_last_successful_decision_at", None)
-            state.last_trade_at = getattr(trader, "_last_trade_at", None)
+            _sync_background_state_from_trader(state, trader, portfolio_tracker)
 
-            # Save final state (preserve error status from exception handler)
-            if state.status != "error":
-                if not shutdown_requested:
-                    state.status = "completed"
-                elif teardown_ok:
-                    state.status = "stopped_clean"
-                else:
-                    state.status = "stopped"
+            state.status = _final_background_status(
+                current_status=state.status,
+                shutdown_requested=shutdown_requested,
+                teardown_ok=teardown_ok,
+            )
             state.save(state_file)
 
-            if not fork_is_persistent:
-                teardown_status = "skipped"
-            elif teardown_ok:
-                teardown_status = "ok"
-            else:
-                teardown_status = "failed"
+            teardown_status = _background_teardown_status(
+                fork_is_persistent=fork_is_persistent,
+                teardown_ok=teardown_ok,
+            )
 
             bg_logger.info(
                 f"Trading session ended: {state.tick_count} ticks, "

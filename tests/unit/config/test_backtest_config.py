@@ -19,9 +19,12 @@ backtesting cluster — paper-trading and the PnL providers under
 from __future__ import annotations
 
 import os
+import sys
+import types
 
 import pytest
 
+import almanak.config.backtest as backtest_config
 from almanak.config.backtest import (
     DEFAULT_ARCHIVE_RPC_CHAINS,
     DEFAULT_GAS_API_KEY_ENV_VARS,
@@ -256,6 +259,40 @@ class TestSslCertFile:
         assert os.path.exists(cfg.ssl_cert_file)
         # Either certifi's path or a legacy OS path; both are accepted.
         assert cfg.ssl_cert_file in (certifi.where(), "/private/etc/ssl/cert.pem", "/etc/ssl/cert.pem")
+
+    def test_falls_back_to_os_path_when_certifi_missing(self, monkeypatch, tmp_path):
+        fallback = tmp_path / "fallback.pem"
+        fallback.write_text("fallback")
+        monkeypatch.setitem(sys.modules, "certifi", None)
+        monkeypatch.setattr(
+            backtest_config,
+            "_SSL_CERT_FALLBACK_PATHS",
+            (str(tmp_path / "missing.pem"), str(fallback)),
+        )
+
+        cfg = backtest_config_from_env()
+
+        assert cfg.ssl_cert_file == str(fallback)
+
+    def test_falls_back_to_os_path_when_certifi_path_missing(self, monkeypatch, tmp_path):
+        fallback = tmp_path / "fallback.pem"
+        fallback.write_text("fallback")
+        fake_certifi = types.ModuleType("certifi")
+        fake_certifi.where = lambda: str(tmp_path / "missing-certifi.pem")  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "certifi", fake_certifi)
+        monkeypatch.setattr(backtest_config, "_SSL_CERT_FALLBACK_PATHS", (str(fallback),))
+
+        cfg = backtest_config_from_env()
+
+        assert cfg.ssl_cert_file == str(fallback)
+
+    def test_returns_none_when_no_ssl_candidate_exists(self, monkeypatch, tmp_path):
+        monkeypatch.setitem(sys.modules, "certifi", None)
+        monkeypatch.setattr(backtest_config, "_SSL_CERT_FALLBACK_PATHS", (str(tmp_path / "missing.pem"),))
+
+        cfg = backtest_config_from_env()
+
+        assert cfg.ssl_cert_file is None
 
 
 class TestApplySslCertFile:

@@ -69,6 +69,41 @@ PROVIDER_CONFIDENCE_MAP: dict[str, DataConfidence] = {
 DEFAULT_PROVIDER_CONFIDENCE = DataConfidence.LOW
 
 
+@dataclass(frozen=True)
+class _ConfiguredProvider:
+    """Provider created from a ProviderConfig entry."""
+
+    provider: Any
+    name: str
+    provider_type: str
+    chain: str
+
+
+def _single_provider_lists(provider: Any | None, name: str) -> tuple[list[Any], list[str]]:
+    """Return AggregatedDataProvider constructor lists for an optional provider."""
+    if provider is None:
+        return [], []
+    return [provider], [name]
+
+
+def _provider_timestamps(providers: list[Any], attribute: str) -> list[datetime]:
+    """Read timestamp attributes once and keep measured non-empty values."""
+    timestamps: list[datetime] = []
+    for provider in providers:
+        timestamp = getattr(provider, attribute, None)
+        if timestamp is not None:
+            timestamps.append(timestamp)
+    return timestamps
+
+
+def _masked_provider_config(config: "ProviderConfig") -> dict[str, Any]:
+    """Return a log-safe provider config dictionary."""
+    data = config.to_dict()
+    if data.get("rpc_url"):
+        data["rpc_url"] = "***"
+    return data
+
+
 @dataclass
 class ProviderConfig:
     """Configuration for a single data provider.
@@ -327,9 +362,6 @@ class AggregatedDataProvider:
             self._provider_names,
         )
 
-    # crap-allowlist: VIB-4851 CS-1 — single default-chain literal swap (DEFAULT_CHAIN) in
-    # pre-existing high-CRAP factory (cc=8, cov=4% on main); refactor + coverage backfill
-    # tracked in VIB-4139.
     @classmethod
     def create_from_config(
         cls,
@@ -370,71 +402,93 @@ class AggregatedDataProvider:
         if not configs:
             raise ValueError("At least one provider config is required")
 
-        providers: list[Any] = []
-        provider_names: list[str] = []
+        configured_providers = [cls._create_provider_from_config(config, chain) for config in configs]
+        providers = [configured.provider for configured in configured_providers]
+        provider_names = [configured.name for configured in configured_providers]
 
-        for config in configs:
-            provider_type = config.provider_type.lower()
-            provider_chain = config.chain or chain
-
-            if provider_type == "chainlink":
-                # Lazy import to avoid circular dependencies
-                from .chainlink import ChainlinkDataProvider
-
-                provider: Any = ChainlinkDataProvider(
-                    chain=provider_chain,
-                    rpc_url=config.rpc_url,
-                    cache_ttl_seconds=config.cache_ttl_seconds,
-                    priority=config.priority,
-                )
-                providers.append(provider)
-                provider_names.append("chainlink")
-
-            elif provider_type == "coingecko":
-                from .coingecko import CoinGeckoDataProvider
-
-                provider = CoinGeckoDataProvider(
-                    api_key=config.api_key,
-                    **config.extra,
-                )
-                providers.append(provider)
-                provider_names.append("coingecko")
-
-            elif provider_type == "twap" or provider_type == "dex_twap":
-                # Lazy import DEX TWAP provider
-                from almanak.framework.data.price.dex_twap import DEXTWAPDataProvider
-
-                provider = DEXTWAPDataProvider(
-                    chain=provider_chain,
-                    rpc_url=config.rpc_url,
-                    cache_ttl_seconds=config.cache_ttl_seconds,
-                    **config.extra,
-                )
-                providers.append(provider)
-                provider_names.append("twap")
-
-            else:
-                raise ValueError(
-                    f"Unknown provider type: {config.provider_type}. Supported types: chainlink, coingecko, twap"
-                )
-
+        for config, configured in zip(configs, configured_providers, strict=True):
             logger.debug(
                 "Created %s provider for chain %s (config: %s)",
-                provider_type,
-                provider_chain,
-                config.to_dict(),
+                configured.provider_type,
+                configured.chain,
+                _masked_provider_config(config),
             )
 
         return cls(providers=providers, provider_names=provider_names, chain=chain)
 
-    # crap-allowlist: Phase 5c (#2097) swaps a single env read inside this
-    # mode-dispatch factory for an ``almanak.config.backtest`` lookup. The
-    # outer cyclomatic-complexity stays at the legacy cc=10 (auto / chainlink
-    # / twap / coingecko / invalid branches); coverage is 4% because
-    # network-touching providers are mock-tested elsewhere. Refactoring the
-    # mode dispatch out is a separate ticket on the backtesting backlog
-    # (the create_with_data_config -> _create_<mode>_provider split is
-    # already half-done).
+    @classmethod
+    def _create_provider_from_config(
+        cls,
+        config: ProviderConfig,
+        default_chain: str,
+    ) -> _ConfiguredProvider:
+        """Create one provider from a ProviderConfig."""
+        provider_type = config.provider_type.lower()
+        provider_chain = config.chain or default_chain
+
+        if provider_type == "chainlink":
+            return _ConfiguredProvider(
+                provider=cls._create_configured_chainlink_provider(config, provider_chain),
+                name="chainlink",
+                provider_type=provider_type,
+                chain=provider_chain,
+            )
+        if provider_type == "coingecko":
+            return _ConfiguredProvider(
+                provider=cls._create_configured_coingecko_provider(config),
+                name="coingecko",
+                provider_type=provider_type,
+                chain=provider_chain,
+            )
+        if provider_type in {"twap", "dex_twap"}:
+            return _ConfiguredProvider(
+                provider=cls._create_configured_twap_provider(config, provider_chain),
+                name="twap",
+                provider_type=provider_type,
+                chain=provider_chain,
+            )
+
+        raise ValueError(f"Unknown provider type: {config.provider_type}. Supported types: chainlink, coingecko, twap")
+
+    @staticmethod
+    def _create_configured_chainlink_provider(config: ProviderConfig, chain: str) -> Any:
+        """Create a Chainlink provider from ProviderConfig."""
+        from .chainlink import ChainlinkDataProvider
+
+        return ChainlinkDataProvider(
+            chain=chain,
+            rpc_url=config.rpc_url,
+            cache_ttl_seconds=config.cache_ttl_seconds,
+            priority=config.priority,
+        )
+
+    @staticmethod
+    def _create_configured_coingecko_provider(config: ProviderConfig) -> Any:
+        """Create a CoinGecko provider from ProviderConfig."""
+        from .coingecko import CoinGeckoDataProvider
+
+        return CoinGeckoDataProvider(
+            api_key=config.api_key,
+            **config.extra,
+        )
+
+    @staticmethod
+    def _create_configured_twap_provider(config: ProviderConfig, chain: str) -> Any:
+        """Create the gateway-backed TWAP provider from ProviderConfig."""
+        from .twap import TWAPDataProvider
+
+        extra = dict(config.extra)
+        observation_window_seconds = extra.pop("observation_window_seconds", extra.pop("twap_window_seconds", None))
+        if extra:
+            logger.debug("Ignoring unsupported TWAP provider config keys: %s", sorted(extra))
+        return TWAPDataProvider(
+            chain=chain,
+            rpc_url=config.rpc_url,
+            observation_window_seconds=observation_window_seconds,
+            cache_ttl_seconds=config.cache_ttl_seconds,
+            priority=config.priority,
+        )
+
     @classmethod
     async def create_with_data_config(
         cls,
@@ -481,9 +535,6 @@ class AggregatedDataProvider:
             config = BacktestDataConfig(price_provider="chainlink")
             provider = await AggregatedDataProvider.create_with_data_config(config)
         """
-        providers: list[Any] = []
-        provider_names: list[str] = []
-
         mode = data_config.price_provider
 
         # Resolve RPC URL from typed backtest config if not provided.
@@ -492,9 +543,7 @@ class AggregatedDataProvider:
         # requested chain explicitly so non-default chains (e.g. ``bsc``,
         # not in ``DEFAULT_ARCHIVE_RPC_CHAINS``) still get their
         # ``ARCHIVE_RPC_URL_<CHAIN>`` env var read (PR #2152 review).
-        if rpc_url is None:
-            chain_key = chain.lower()
-            rpc_url = backtest_config_from_env(archive_rpc_chains=(chain_key,)).archive_rpc_urls.get(chain_key, "")
+        rpc_url = cls._resolve_archive_rpc_url(chain=chain, rpc_url=rpc_url)
 
         logger.info(
             "Creating AggregatedDataProvider with mode=%s, chain=%s",
@@ -502,31 +551,13 @@ class AggregatedDataProvider:
             chain,
         )
 
-        if mode == "auto":
-            # Fallback chain: Chainlink -> TWAP -> CoinGecko
-            providers, provider_names = await cls._create_fallback_chain(
-                chain=chain,
-                rpc_url=rpc_url,
-                data_config=data_config,
-                token_addresses=token_addresses,
-            )
-        elif mode == "chainlink":
-            provider = await cls._create_chainlink_provider(chain, rpc_url)
-            if provider:
-                providers.append(provider)
-                provider_names.append("chainlink")
-        elif mode == "twap":
-            provider = await cls._create_twap_provider(chain, rpc_url)
-            if provider:
-                providers.append(provider)
-                provider_names.append("twap")
-        elif mode == "coingecko":
-            provider = await cls._create_coingecko_provider(data_config, token_addresses=token_addresses)
-            if provider:
-                providers.append(provider)
-                provider_names.append("coingecko")
-        else:
-            raise ValueError(f"Invalid price_provider mode: {mode}. Supported modes: auto, chainlink, twap, coingecko")
+        providers, provider_names = await cls._create_providers_for_data_mode(
+            mode=mode,
+            chain=chain,
+            rpc_url=rpc_url,
+            data_config=data_config,
+            token_addresses=token_addresses,
+        )
 
         if not providers:
             raise ValueError(
@@ -535,6 +566,44 @@ class AggregatedDataProvider:
             )
 
         return cls(providers=providers, provider_names=provider_names, chain=chain)
+
+    @staticmethod
+    def _resolve_archive_rpc_url(chain: str, rpc_url: str | None) -> str:
+        """Resolve the configured archive RPC URL for a chain."""
+        if rpc_url is not None:
+            return rpc_url
+        chain_key = chain.lower()
+        return backtest_config_from_env(archive_rpc_chains=(chain_key,)).archive_rpc_urls.get(chain_key, "")
+
+    @classmethod
+    async def _create_providers_for_data_mode(
+        cls,
+        *,
+        mode: str,
+        chain: str,
+        rpc_url: str,
+        data_config: "BacktestDataConfig",
+        token_addresses: dict[str, tuple[str, str]] | None = None,
+    ) -> tuple[list[Any], list[str]]:
+        """Create providers for one BacktestDataConfig price-provider mode."""
+        if mode == "auto":
+            return await cls._create_fallback_chain(
+                chain=chain,
+                rpc_url=rpc_url,
+                data_config=data_config,
+                token_addresses=token_addresses,
+            )
+        if mode == "chainlink":
+            provider = await cls._create_chainlink_provider(chain, rpc_url)
+            return _single_provider_lists(provider, "chainlink")
+        if mode == "twap":
+            provider = await cls._create_twap_provider(chain, rpc_url)
+            return _single_provider_lists(provider, "twap")
+        if mode == "coingecko":
+            provider = await cls._create_coingecko_provider(data_config, token_addresses=token_addresses)
+            return _single_provider_lists(provider, "coingecko")
+
+        raise ValueError(f"Invalid price_provider mode: {mode}. Supported modes: auto, chainlink, twap, coingecko")
 
     @classmethod
     async def _create_fallback_chain(
@@ -1052,14 +1121,7 @@ class AggregatedDataProvider:
 
         Returns the earliest min_timestamp from all providers.
         """
-        min_ts: datetime | None = None
-        for provider in self._providers:
-            if hasattr(provider, "min_timestamp"):
-                provider_min = provider.min_timestamp
-                if provider_min is not None:
-                    if min_ts is None or provider_min < min_ts:
-                        min_ts = provider_min
-        return min_ts
+        return min(_provider_timestamps(self._providers, "min_timestamp"), default=None)
 
     @property
     def max_timestamp(self) -> datetime | None:
@@ -1067,14 +1129,7 @@ class AggregatedDataProvider:
 
         Returns the latest max_timestamp from all providers.
         """
-        max_ts: datetime | None = None
-        for provider in self._providers:
-            if hasattr(provider, "max_timestamp"):
-                provider_max = provider.max_timestamp
-                if provider_max is not None:
-                    if max_ts is None or provider_max > max_ts:
-                        max_ts = provider_max
-        return max_ts
+        return max(_provider_timestamps(self._providers, "max_timestamp"), default=None)
 
     async def __aenter__(self) -> "AggregatedDataProvider":
         """Async context manager entry."""

@@ -13,6 +13,7 @@ Tests cover:
 """
 
 import logging
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -22,14 +23,17 @@ from almanak.framework.backtesting.pnl.fee_models.slippage_guard import (
     DEFAULT_HIGH_IMPACT_THRESHOLD,
     DEFAULT_MAX_SLIPPAGE_PCT,
     DEFAULT_SAFE_LIQUIDITY_PCT,
+    HistoricalSlippageModel,
     SlippageCapExceededError,
     SlippageCheckResult,
     SlippageGuard,
     SlippageGuardConfig,
+    SlippageModelConfig,
     SlippageWarning,
     cap_slippage,
     check_trade_slippage,
 )
+from almanak.framework.backtesting.pnl.types import DataConfidence, DataSourceInfo, LiquidityResult
 
 # =============================================================================
 # SlippageGuardConfig Tests
@@ -555,6 +559,148 @@ class TestSlippageGuardExceptions:
         )
         assert result.warning is not None
         assert result.warning.level == "high"
+
+
+# =============================================================================
+# Warning Priority Tests
+# =============================================================================
+
+
+class TestSlippageGuardWarningPriority:
+    def test_capped_low_impact_trade_emits_high_warning(self) -> None:
+        config = SlippageGuardConfig(
+            max_slippage_pct=Decimal("0.005"),
+            high_impact_threshold=Decimal("0.01"),
+            critical_impact_threshold=Decimal("0.05"),
+            log_warnings=False,
+        )
+        result = SlippageGuard(config).check_trade(
+            trade_amount_usd=Decimal("1000"),
+            estimated_slippage=Decimal("0.006"),
+            pool_liquidity_usd=Decimal("1000000"),
+        )
+
+        assert result.warning is not None
+        assert result.warning.level == "high"
+        assert result.warning.was_capped is True
+        assert result.warning.details["reasons"] == ["slippage capped from 0.60% to 0.50%"]
+
+    def test_critical_slippage_takes_priority_over_high_liquidity_ratio(self) -> None:
+        result = SlippageGuard(SlippageGuardConfig(log_warnings=False)).check_trade(
+            trade_amount_usd=Decimal("60000"),
+            estimated_slippage=Decimal("0.06"),
+            pool_liquidity_usd=Decimal("1000000"),
+            token_in="WETH",
+            token_out="USDC",
+            protocol="uniswap_v3",
+            tick=123,
+        )
+
+        assert result.warning is not None
+        assert result.warning.level == "critical"
+        assert result.warning.details["token_in"] == "WETH"
+        assert result.warning.details["token_out"] == "USDC"
+        assert result.warning.details["protocol"] == "uniswap_v3"
+        assert result.warning.details["tick"] == 123
+        assert any("critical threshold" in reason for reason in result.warning.details["reasons"])
+        assert any("safe limit" in reason for reason in result.warning.details["reasons"])
+        assert not any("high impact threshold" in reason for reason in result.warning.details["reasons"])
+
+
+# =============================================================================
+# Historical Slippage Model Tests
+# =============================================================================
+
+
+def _liquidity_result(
+    depth: Decimal,
+    *,
+    source: str = "uniswap_v3_subgraph",
+    confidence: DataConfidence = DataConfidence.HIGH,
+) -> LiquidityResult:
+    return LiquidityResult(
+        depth=depth,
+        source_info=DataSourceInfo(
+            source=source,
+            confidence=confidence,
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        ),
+    )
+
+
+class TestHistoricalSlippageModel:
+    def test_v3_historical_liquidity_uses_source_confidence(self) -> None:
+        model = HistoricalSlippageModel(
+            SlippageModelConfig(
+                v3_concentration_factor=Decimal("2"),
+                v3_fee_bps=3000,
+                max_slippage_pct=Decimal("0.10"),
+            )
+        )
+
+        result = model.calculate_slippage(
+            trade_amount_usd=Decimal("50000"),
+            historical_liquidity=_liquidity_result(Decimal("5000000")),
+            pool_type="uniswap_v3",
+        )
+
+        assert result.confidence == DataConfidence.HIGH
+        assert result.data_source == "uniswap_v3_subgraph"
+        assert result.pool_type == "v3"
+        assert result.was_fallback is False
+        assert result.source_info is not None
+        assert result.slippage > Decimal("0")
+        assert result.slippage_bps == int(result.slippage * Decimal("10000"))
+
+    def test_twap_source_is_labeled_as_twap_depth(self) -> None:
+        result = HistoricalSlippageModel(SlippageModelConfig(use_twap_depth=True)).calculate_slippage(
+            trade_amount_usd=Decimal("10000"),
+            historical_liquidity=_liquidity_result(
+                Decimal("2000000"),
+                source="balancer_twap_depth",
+                confidence=DataConfidence.MEDIUM,
+            ),
+            pool_type="concentrated",
+        )
+
+        assert result.confidence == DataConfidence.MEDIUM
+        assert result.data_source == "twap_liquidity"
+        assert result.pool_type == "v3"
+        assert result.was_fallback is False
+
+    def test_missing_historical_liquidity_uses_fallback_constant_product(self) -> None:
+        model = HistoricalSlippageModel(SlippageModelConfig(fallback_liquidity_usd=Decimal("1000000")))
+
+        result = model.calculate_slippage(
+            trade_amount_usd=Decimal("25000"),
+            historical_liquidity=None,
+            pool_type="v2",
+            fee_bps=20,
+        )
+
+        assert result.confidence == DataConfidence.LOW
+        assert result.data_source == "constant_product_fallback"
+        assert result.pool_type == "v2"
+        assert result.was_fallback is True
+        assert result.liquidity_usd == Decimal("1000000")
+        assert result.slippage > Decimal("0")
+
+    def test_zero_fallback_liquidity_returns_low_confidence_zero_slippage(self) -> None:
+        model = HistoricalSlippageModel(SlippageModelConfig(fallback_liquidity_usd=None))
+
+        result = model.calculate_slippage(
+            trade_amount_usd=Decimal("-25000"),
+            historical_liquidity=None,
+            pool_type="v3",
+        )
+
+        assert result.confidence == DataConfidence.LOW
+        assert result.data_source == "constant_product_fallback"
+        assert result.pool_type == "v3"
+        assert result.was_fallback is True
+        assert result.liquidity_usd == Decimal("0")
+        assert result.slippage == Decimal("0")
+        assert result.slippage_bps == 0
 
 
 # =============================================================================

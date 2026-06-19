@@ -5,13 +5,15 @@ subgraph responses. Covers V3-style pools, V2-style pools, Liquidity Book,
 Balancer, and Curve protocols.
 """
 
-import pytest
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from almanak.core.enums import Chain, Protocol
+import pytest
+
 from almanak.connectors._strategy_base.dex_volume_registry import DexVolumeRegistry
+from almanak.core.enums import Chain, Protocol
+from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 from almanak.framework.backtesting.pnl.providers.liquidity_depth import (
     DATA_SOURCE_FALLBACK,
     DEFAULT_TWAP_WINDOW_HOURS,
@@ -22,7 +24,6 @@ from almanak.framework.backtesting.pnl.providers.subgraph_client import (
     SubgraphClientConfig,
 )
 from almanak.framework.backtesting.pnl.types import DataConfidence
-
 
 # =============================================================================
 # Fixtures
@@ -618,6 +619,86 @@ class TestFallbackBehavior:
 
         assert result.depth == Decimal("1000000")
         assert result.source_info.confidence == DataConfidence.LOW
+
+
+# =============================================================================
+# Test Route Dispatch
+# =============================================================================
+
+
+class TestLiquidityDepthRouting:
+    """Test top-level route dispatch and fallback boundaries."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("protocol", "chain", "method_name"),
+        [
+            ("uniswap_v3", Chain.ARBITRUM, "_query_v3_liquidity"),
+            ("aerodrome", Chain.BASE, "_query_v2_liquidity"),
+            ("traderjoe_v2", Chain.AVALANCHE, "_query_liquidity_book"),
+            ("balancer", Chain.ETHEREUM, "_query_balancer_liquidity"),
+            ("curve", Chain.ETHEREUM, "_query_curve_liquidity"),
+        ],
+    )
+    async def test_protocol_family_dispatches_to_expected_query_method(
+        self,
+        provider,
+        protocol,
+        chain,
+        method_name,
+    ):
+        sentinel = object()
+        query_method = AsyncMock(return_value=sentinel)
+        setattr(provider, method_name, query_method)
+
+        result = await provider.get_liquidity_depth(
+            pool_address="0xpool",
+            chain=chain,
+            timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+            protocol=protocol,
+        )
+
+        assert result is sentinel
+        query_method.assert_awaited_once_with(
+            "0xpool",
+            chain,
+            datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+            protocol,
+        )
+
+    @pytest.mark.asyncio
+    async def test_unknown_protocol_returns_fallback_without_querying(self, provider):
+        provider._query_v3_liquidity = AsyncMock()  # type: ignore[method-assign]
+
+        result = await provider.get_liquidity_depth(
+            pool_address="0xpool",
+            chain=Chain.ARBITRUM,
+            timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+            protocol="not_a_dex",
+        )
+
+        assert result.depth == Decimal("0")
+        assert result.source_info.source == DATA_SOURCE_FALLBACK
+        provider._query_v3_liquidity.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pagination_overflow_stays_loud(self, provider):
+        provider._query_v3_liquidity = AsyncMock(  # type: ignore[method-assign]
+            side_effect=DataSourceUnavailableError(
+                data_type="liquidity",
+                identifier="0xpool",
+                remediation="narrow the query window",
+                message="window too large",
+            )
+        )
+
+        with pytest.raises(DataSourceUnavailableError, match="window too large"):
+            await provider.get_liquidity_depth(
+                pool_address="0xpool",
+                chain=Chain.ARBITRUM,
+                timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
+                protocol="uniswap_v3",
+            )
 
 
 # =============================================================================

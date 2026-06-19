@@ -434,52 +434,12 @@ class SlippageGuard:
         Returns:
             SlippageWarning if thresholds exceeded, None otherwise
         """
-        warning_level: str | None = None
-        warning_reasons: list[str] = []
-
-        # Check critical slippage threshold
-        if estimated_slippage >= self.config.critical_impact_threshold:
-            warning_level = "critical"
-            warning_reasons.append(
-                f"slippage {estimated_slippage * 100:.2f}% exceeds critical threshold "
-                f"{self.config.critical_impact_threshold * 100:.1f}%"
-            )
-
-        # Check liquidity ratio
-        if liquidity_ratio is not None:
-            if liquidity_ratio >= self.config.safe_liquidity_pct * 2:
-                # Very large trade (>2x safe threshold) is critical
-                warning_level = "critical"
-                warning_reasons.append(
-                    f"trade size {liquidity_ratio * 100:.1f}% of pool liquidity "
-                    f"exceeds 2x safe limit ({self.config.safe_liquidity_pct * 200:.0f}%)"
-                )
-            elif liquidity_ratio >= self.config.safe_liquidity_pct:
-                # Large trade (>safe threshold) is high warning
-                if warning_level != "critical":
-                    warning_level = "high"
-                warning_reasons.append(
-                    f"trade size {liquidity_ratio * 100:.1f}% of pool liquidity "
-                    f"exceeds safe limit ({self.config.safe_liquidity_pct * 100:.0f}%)"
-                )
-
-        # Check high impact threshold
-        if estimated_slippage >= self.config.high_impact_threshold:
-            if warning_level != "critical":
-                warning_level = "high"
-            if not any("slippage" in r for r in warning_reasons):
-                warning_reasons.append(
-                    f"slippage {estimated_slippage * 100:.2f}% exceeds high impact threshold "
-                    f"{self.config.high_impact_threshold * 100:.1f}%"
-                )
-
-        # If slippage was capped, add that to reasons
-        if was_capped:
-            warning_reasons.append(
-                f"slippage capped from {estimated_slippage * 100:.2f}% to {capped_slippage * 100:.2f}%"
-            )
-            if warning_level is None:
-                warning_level = "high"
+        warning_level, warning_reasons = self._warning_rule_results(
+            liquidity_ratio=liquidity_ratio,
+            estimated_slippage=estimated_slippage,
+            capped_slippage=capped_slippage,
+            was_capped=was_capped,
+        )
 
         # No warning needed
         if warning_level is None:
@@ -493,14 +453,6 @@ class SlippageGuard:
             **kwargs,
         )
 
-        # Build details dict
-        details: dict[str, Any] = {
-            "reasons": warning_reasons,
-        }
-        for key in ("token_in", "token_out", "protocol", "pool_address", "tick"):
-            if key in kwargs:
-                details[key] = kwargs[key]
-
         return SlippageWarning(
             level=warning_level,
             message=message,
@@ -510,8 +462,133 @@ class SlippageGuard:
             estimated_slippage=estimated_slippage,
             capped_slippage=capped_slippage,
             was_capped=was_capped,
-            details=details,
+            details=self._warning_details(warning_reasons, kwargs),
         )
+
+    def _warning_rule_results(
+        self,
+        liquidity_ratio: Decimal | None,
+        estimated_slippage: Decimal,
+        capped_slippage: Decimal,
+        was_capped: bool,
+    ) -> tuple[str | None, list[str]]:
+        warning_level: str | None = None
+        warning_reasons: list[str] = []
+        warning_level = self._apply_warning_rule(
+            current_level=warning_level,
+            warning_reasons=warning_reasons,
+            rule_result=self._critical_slippage_warning(estimated_slippage),
+        )
+        warning_level = self._apply_warning_rule(
+            current_level=warning_level,
+            warning_reasons=warning_reasons,
+            rule_result=self._liquidity_ratio_warning(liquidity_ratio),
+        )
+        warning_level = self._apply_warning_rule(
+            current_level=warning_level,
+            warning_reasons=warning_reasons,
+            rule_result=self._high_impact_warning(estimated_slippage, warning_reasons),
+        )
+        warning_level = self._apply_warning_rule(
+            current_level=warning_level,
+            warning_reasons=warning_reasons,
+            rule_result=self._capped_slippage_warning(
+                estimated_slippage=estimated_slippage,
+                capped_slippage=capped_slippage,
+                was_capped=was_capped,
+            ),
+        )
+        return warning_level, warning_reasons
+
+    def _apply_warning_rule(
+        self,
+        *,
+        current_level: str | None,
+        warning_reasons: list[str],
+        rule_result: tuple[str | None, list[str]],
+    ) -> str | None:
+        candidate_level, candidate_reasons = rule_result
+        warning_reasons.extend(candidate_reasons)
+        return self._merge_warning_level(current_level, candidate_level)
+
+    def _critical_slippage_warning(self, estimated_slippage: Decimal) -> tuple[str | None, list[str]]:
+        if estimated_slippage < self.config.critical_impact_threshold:
+            return None, []
+        return (
+            "critical",
+            [
+                f"slippage {estimated_slippage * 100:.2f}% exceeds critical threshold "
+                f"{self.config.critical_impact_threshold * 100:.1f}%"
+            ],
+        )
+
+    def _liquidity_ratio_warning(self, liquidity_ratio: Decimal | None) -> tuple[str | None, list[str]]:
+        if liquidity_ratio is None:
+            return None, []
+        if liquidity_ratio >= self.config.safe_liquidity_pct * 2:
+            return (
+                "critical",
+                [
+                    f"trade size {liquidity_ratio * 100:.1f}% of pool liquidity "
+                    f"exceeds 2x safe limit ({self.config.safe_liquidity_pct * 200:.0f}%)"
+                ],
+            )
+        if liquidity_ratio >= self.config.safe_liquidity_pct:
+            return (
+                "high",
+                [
+                    f"trade size {liquidity_ratio * 100:.1f}% of pool liquidity "
+                    f"exceeds safe limit ({self.config.safe_liquidity_pct * 100:.0f}%)"
+                ],
+            )
+        return None, []
+
+    def _high_impact_warning(
+        self,
+        estimated_slippage: Decimal,
+        warning_reasons: list[str],
+    ) -> tuple[str | None, list[str]]:
+        if estimated_slippage < self.config.high_impact_threshold:
+            return None, []
+        if any("slippage" in reason for reason in warning_reasons):
+            return "high", []
+        return (
+            "high",
+            [
+                f"slippage {estimated_slippage * 100:.2f}% exceeds high impact threshold "
+                f"{self.config.high_impact_threshold * 100:.1f}%"
+            ],
+        )
+
+    @staticmethod
+    def _capped_slippage_warning(
+        *,
+        estimated_slippage: Decimal,
+        capped_slippage: Decimal,
+        was_capped: bool,
+    ) -> tuple[str | None, list[str]]:
+        if not was_capped:
+            return None, []
+        return (
+            "high",
+            [f"slippage capped from {estimated_slippage * 100:.2f}% to {capped_slippage * 100:.2f}%"],
+        )
+
+    @staticmethod
+    def _merge_warning_level(current_level: str | None, candidate_level: str | None) -> str | None:
+        if candidate_level == "critical":
+            return "critical"
+        if candidate_level == "high" and current_level != "critical":
+            return "high"
+        return current_level
+
+    @staticmethod
+    def _warning_details(warning_reasons: list[str], context: dict[str, Any]) -> dict[str, Any]:
+        details: dict[str, Any] = {"reasons": warning_reasons}
+        for key in ("token_in", "token_out", "protocol", "pool_address", "tick"):
+            if key in context:
+                details[key] = context[key]
+        return details
 
     def _build_warning_message(
         self,

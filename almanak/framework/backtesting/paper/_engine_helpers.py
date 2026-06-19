@@ -268,23 +268,11 @@ async def run_main_loop(
     max_ticks: int | None,
     run_started_at: datetime,
 ) -> None:
-    """Execute the per-bar iteration loop.
+    """Execute the per-bar loop until duration, tick limit, or stop signal.
 
-    Per-bar order (preserved byte-for-byte for equity-curve determinism):
-
-    1. check time-limit (``end_time = run_started_at + effective_duration``)
-    2. check tick-limit
-    3. advance persistent fork (only if fork_lifecycle == PERSISTENT and
-       tick_count > 0)
-    4. execute_tick(strategy) + tick_count += 1
-    5. run position reconciler (only if reconciler enabled AND persistent)
-    6. asyncio.sleep(tick_interval_seconds)
-    7. refresh fork (if _should_refresh_fork() is True)
-
-    ``effective_duration == float('inf')`` means "run indefinitely" (the
-    contract ``PaperTrader.start()`` relies on): in that case ``end_time`` is
-    ``None`` and the time-limit gate is skipped. Using ``timedelta`` with
-    ``inf`` raises ``OverflowError`` (see issue #1839).
+    The order is load-bearing for equity determinism: limit checks, persistent
+    fork advance, tick execution, optional reconciliation, sleep, then optional
+    fork refresh. ``float('inf')`` disables the duration gate for ``start()``.
     """
     from datetime import timedelta
 

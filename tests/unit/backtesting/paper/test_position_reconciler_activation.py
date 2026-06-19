@@ -32,6 +32,7 @@ from almanak.framework.backtesting.paper.engine import PaperTrader, _safe_diverg
 from almanak.framework.backtesting.paper.models import (
     DivergenceRecord,
     PaperTradingSummary,
+    PnLBreakdown,
     ReconciliationSummary,
 )
 from almanak.framework.backtesting.paper.position_queries import (
@@ -704,6 +705,61 @@ class TestReconciliationSummarySurface:
         assert "POSITION RECONCILIATION" not in summary.summary()
         assert summary.to_dict()["reconciliation"] is None
         assert PaperTradingSummary.from_dict(summary.to_dict()).reconciliation is None
+
+    def test_summary_includes_all_optional_sections(self) -> None:
+        reconciliation = ReconciliationSummary(
+            checks_run=2,
+            total_divergences=1,
+            max_divergence_pct=None,
+            records=[
+                DivergenceRecord(
+                    key="lp-1",
+                    kind="position",
+                    divergence_type="range_mismatch",
+                    count=1,
+                    max_divergence_pct=None,
+                    last_seen=None,
+                )
+            ],
+        )
+        summary = PaperTradingSummary(
+            deployment_id="vib2634_strategy",
+            start_time=datetime(2026, 6, 13, 10, 0, tzinfo=UTC),
+            duration=timedelta(minutes=30),
+            total_trades=2,
+            successful_trades=1,
+            failed_trades=1,
+            chain="arbitrum",
+            initial_balances={"USDC": Decimal("1000")},
+            final_balances={"USDC": Decimal("990")},
+            total_gas_used=21_000,
+            total_gas_cost_usd=Decimal("1.23"),
+            pnl_usd=Decimal("-10"),
+            pnl_breakdown=PnLBreakdown(
+                interest_earned=Decimal("2.5"),
+                interest_paid=Decimal("1.0"),
+                trading_pnl=Decimal("-8.0"),
+                gas_costs=Decimal("1.23"),
+                fees_included=False,
+            ),
+            error_summary={"revert": 1},
+            reconciliation=reconciliation,
+        )
+
+        text = summary.summary()
+
+        assert "PERFORMANCE" in text
+        assert "Estimated PnL:      $-10.00" in text
+        assert "PnL BREAKDOWN (ex-LP-fees)" in text
+        assert "  Interest Earned:  $2.5000" in text
+        assert "INITIAL BALANCES" in text
+        assert "  USDC: 1,000.000000" in text
+        assert "FINAL BALANCES" in text
+        assert "  USDC: 990.000000" in text
+        assert "ERROR SUMMARY" in text
+        assert "  revert: 1" in text
+        assert "Divergences:        1" in text
+        assert "  [position] lp-1 range_mismatch: count=1, max=n/a, last_seen=n/a" in text
 
 
 # ---------------------------------------------------------------------------

@@ -466,6 +466,20 @@ class TestFundingAccumulationOverTime:
 
         assert position.accumulated_funding == Decimal("0")
 
+    def test_strict_update_missing_token_price_raises(self) -> None:
+        """Strict updates must not reuse entry price when market price is missing."""
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        config = PerpBacktestConfig(strategy_type="perp", strict_reproducibility=True)
+        adapter = PerpBacktestAdapter(config)
+
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        position = create_perp_long_position(entry_time=entry_time)
+        market = MockMarketState(prices={})
+
+        with pytest.raises(HistoricalDataUnavailableError, match="ETH"):
+            adapter.update_position(position, market, elapsed_seconds=3600, timestamp=entry_time + timedelta(hours=1))
+
 
 # =============================================================================
 # Liquidation Tests
@@ -930,6 +944,20 @@ class TestPositionValuation:
         expected_value = Decimal("10000") + Decimal("120")
         assert value == pytest.approx(expected_value, rel=Decimal("0.01"))
 
+    def test_strict_value_missing_token_price_raises(self) -> None:
+        """Strict valuation must not reuse entry price when market price is missing."""
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        config = PerpBacktestConfig(strategy_type="perp", strict_reproducibility=True)
+        adapter = PerpBacktestAdapter(config)
+
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        position = create_perp_long_position(entry_time=entry_time)
+        market = MockMarketState(prices={})
+
+        with pytest.raises(HistoricalDataUnavailableError, match="ETH"):
+            adapter.value_position(position, market)
+
 
 # =============================================================================
 # Should Rebalance Tests
@@ -1212,7 +1240,7 @@ class TestHistoricalFundingRateIntegration:
 
     def test_historical_rate_fallback_on_error(self) -> None:
         """Test that historical rate falls back to default on provider error."""
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import patch
 
         from almanak.framework.backtesting.config import BacktestDataConfig
 
@@ -1349,6 +1377,53 @@ class TestHistoricalFundingRateIntegration:
             assert position.funding_confidence == "high"
             assert position.funding_data_source is not None
             assert "historical" in position.funding_data_source
+
+    def test_historical_rate_uses_latest_timestamp_not_provider_order(self) -> None:
+        """Provider results may be unsorted; choose the newest timestamp explicitly."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from almanak.framework.backtesting.config import BacktestDataConfig
+        from almanak.framework.backtesting.pnl.types import DataConfidence, DataSourceInfo, FundingResult
+
+        data_config = BacktestDataConfig(use_historical_funding=True)
+        config = PerpBacktestConfig(
+            strategy_type="perp",
+            funding_rate_source="historical",
+            protocol="gmx",
+        )
+        adapter = PerpBacktestAdapter(config, data_config=data_config)
+
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        position = create_perp_long_position(entry_time=entry_time, protocol="gmx")
+
+        newest = FundingResult(
+            rate=Decimal("0.0007"),
+            source_info=DataSourceInfo(
+                source="gmx_api_newest",
+                confidence=DataConfidence.HIGH,
+                timestamp=entry_time,
+            ),
+        )
+        older = FundingResult(
+            rate=Decimal("0.0001"),
+            source_info=DataSourceInfo(
+                source="gmx_api_older",
+                confidence=DataConfidence.MEDIUM,
+                timestamp=entry_time - timedelta(minutes=30),
+            ),
+        )
+        mock_provider = MagicMock()
+        mock_provider.get_funding_rates = AsyncMock(return_value=[newest, older])
+
+        with patch.object(adapter, "_ensure_gmx_provider", return_value=mock_provider):
+            rate, confidence, source = adapter._get_historical_funding_rate_v2(
+                position=position,
+                timestamp=entry_time,
+            )
+
+        assert rate == Decimal("0.0007")
+        assert confidence == "high"
+        assert source == "historical:gmx_api_newest"
 
     def test_chain_config_in_serialization(self) -> None:
         """Test that chain field is properly serialized/deserialized."""
@@ -1558,12 +1633,17 @@ class TestExecuteIntentUsesRealPortfolioCash:
         )
 
     @staticmethod
-    def _open_intent(collateral_amount, size_usd: str = "5000", leverage: str = "5"):
+    def _open_intent(
+        collateral_amount,
+        size_usd: str = "5000",
+        leverage: str = "5",
+        collateral_token: str = "USDC",
+    ):
         from almanak.framework.intents.vocabulary import PerpOpenIntent
 
         return PerpOpenIntent(
             market="ETH/USD",
-            collateral_token="USDC",
+            collateral_token=collateral_token,
             collateral_amount=collateral_amount,
             size_usd=Decimal(size_usd),
             leverage=Decimal(leverage),
@@ -1598,6 +1678,32 @@ class TestExecuteIntentUsesRealPortfolioCash:
         assert fill is not None
         assert fill.success is False
         assert fill.metadata["validation_type"] == "margin"
+        assert fill.tokens_out == {}
+        assert fill.metadata["attempted_collateral_amount"] == "1000"
+        assert fill.metadata["attempted_collateral_token"] == "USDC"
+
+    def test_strict_open_missing_collateral_price_raises(self) -> None:
+        """Strict perp open must not assume $1 for a missing collateral price."""
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+        from almanak.framework.backtesting.pnl.data_provider import MarketState
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedPortfolio
+
+        adapter = PerpBacktestAdapter(
+            PerpBacktestConfig(strategy_type="perp", strict_reproducibility=True)
+        )
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
+        market = MarketState(
+            timestamp=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            prices={"ETH": Decimal("3000"), "USDC": Decimal("1")},
+            chain="arbitrum",
+        )
+
+        with pytest.raises(HistoricalDataUnavailableError, match="WETH"):
+            adapter.execute_intent(
+                self._open_intent(Decimal("1"), size_usd="5000", collateral_token="WETH"),
+                portfolio,
+                market,
+            )
 
     def test_open_all_collateral_uses_portfolio_cash_usd(self) -> None:
         """collateral_amount='all' must resolve to the portfolio's cash_usd."""

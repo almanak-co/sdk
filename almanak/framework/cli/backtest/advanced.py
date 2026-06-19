@@ -486,7 +486,7 @@ def _build_walk_forward_context(
         start=start,
         end=end,
         chain=chain,
-        token_list=[t.strip().upper() for t in tokens.split(",")],
+        token_list=_parse_cli_tokens(tokens),
         interval=interval,
         initial_capital=initial_capital,
         output_label=output,
@@ -672,6 +672,26 @@ def _write_walk_forward_output(output_path: Path | None, result: Any) -> None:
         with open(output_path, "w") as f:
             json.dump(result_dict, f, indent=2, default=str)
         click.echo(f"Walk-forward results written to: {output_path}")
+    except Exception as e:
+        click.echo(f"Warning: Could not save results: {e}", err=True)
+
+
+def _parse_cli_tokens(tokens: str) -> list[str]:
+    token_list = [token.strip().upper() for token in tokens.split(",")]
+    if not token_list or any(not token for token in token_list):
+        raise click.BadParameter("Expected comma-separated non-empty token symbols.", param_hint="--tokens")
+    return token_list
+
+
+def _write_json_output(output: str | Path | None, result: Any, label: str) -> None:
+    if output is None:
+        return
+    output_path = Path(output)
+    try:
+        result_dict = result.to_dict()
+        with open(output_path, "w") as f:
+            json.dump(result_dict, f, indent=2, default=str)
+        click.echo(f"{label} results written to: {output_path}")
     except Exception as e:
         click.echo(f"Warning: Could not save results: {e}", err=True)
 
@@ -886,6 +906,228 @@ def walk_forward_backtest(
 # =============================================================================
 
 
+@dataclass
+class _MonteCarloRunContext:
+    strategy: str
+    start: datetime
+    end: datetime
+    n_paths: int
+    method: str
+    path_method: Any
+    interval: int
+    initial_capital: float
+    chain: str
+    token_list: list[str]
+    base_token: str
+    parallel_workers: int
+    seed: int | None
+    output: str | None
+    verbose: bool
+
+    @property
+    def duration_days(self) -> int:
+        return (self.end - self.start).days
+
+
+def _build_monte_carlo_context(
+    *,
+    strategy: str,
+    start: datetime,
+    end: datetime,
+    n_paths: int,
+    method: str,
+    interval: int,
+    initial_capital: float,
+    chain: str,
+    tokens: str,
+    base_token: str,
+    parallel_workers: int,
+    seed: int | None,
+    output: str | None,
+    verbose: bool,
+) -> _MonteCarloRunContext:
+    from ...backtesting.pnl import PathGenerationMethod
+
+    _validate_walk_forward_strategy(strategy)
+    return _MonteCarloRunContext(
+        strategy=strategy,
+        start=start,
+        end=end,
+        n_paths=n_paths,
+        method=method,
+        path_method=PathGenerationMethod.BOOTSTRAP if method == "bootstrap" else PathGenerationMethod.GBM,
+        interval=interval,
+        initial_capital=initial_capital,
+        chain=chain,
+        token_list=_parse_cli_tokens(tokens),
+        base_token=base_token.strip().upper(),
+        parallel_workers=parallel_workers,
+        seed=seed,
+        output=output,
+        verbose=verbose,
+    )
+
+
+def _print_monte_carlo_configuration(ctx: _MonteCarloRunContext) -> None:
+    click.echo("=" * 70)
+    click.echo("MONTE CARLO SIMULATION CONFIGURATION")
+    click.echo("=" * 70)
+    click.echo(f"Strategy: {ctx.strategy}")
+    click.echo(f"Chain: {ctx.chain}")
+    click.echo(f"Historical Period: {ctx.start.date()} -> {ctx.end.date()} ({ctx.duration_days} days)")
+    click.echo(f"Interval: {ctx.interval}s ({ctx.interval / 3600:.1f} hours)")
+    click.echo(f"Initial Capital: ${ctx.initial_capital:,.2f}")
+    click.echo(f"Tokens: {', '.join(ctx.token_list)}")
+    click.echo(f"Base Token (simulated): {ctx.base_token}")
+    click.echo()
+    click.echo("Simulation Parameters:")
+    click.echo(f"  Number of Paths: {ctx.n_paths}")
+    click.echo(f"  Generation Method: {ctx.method.upper()}")
+    click.echo(f"  Parallel Workers: {ctx.parallel_workers}")
+    click.echo(f"  Random Seed: {ctx.seed}" if ctx.seed is not None else "  Random Seed: None (random)")
+    if ctx.output:
+        click.echo(f"Output: {ctx.output}")
+    click.echo("=" * 70)
+
+
+def _handle_monte_carlo_dry_run() -> None:
+    click.echo()
+    click.echo("Dry run - Monte Carlo simulation not executed.")
+
+
+def _resolve_demo_strategy_class(strategy: str, deployment_id: str) -> Any:
+    try:
+        return get_strategy(strategy)
+    except ValueError:
+        click.echo()
+        click.echo("Warning: No strategies registered in factory.", err=True)
+        click.echo("Running with mock strategy for demonstration.", err=True)
+        click.echo()
+
+        from ...backtesting import make_mock_strategy_class
+
+        return make_mock_strategy_class(deployment_id)
+
+
+def _build_monte_carlo_pnl_config(ctx: _MonteCarloRunContext) -> PnLBacktestConfig:
+    return PnLBacktestConfig(
+        start_time=ctx.start,
+        end_time=ctx.end,
+        interval_seconds=ctx.interval,
+        initial_capital_usd=Decimal(str(ctx.initial_capital)),
+        chain=ctx.chain,
+        tokens=ctx.token_list,
+        # gas_price_gwei omitted: chain-aware default (VIB-5088)
+        include_gas_costs=True,
+    )
+
+
+async def _fetch_ohlcv_closes(
+    data_provider: CoinGeckoDataProvider,
+    ctx: _MonteCarloRunContext,
+) -> list[Decimal]:
+    ohlcv_data = await data_provider.get_ohlcv(
+        ctx.base_token,
+        ctx.start,
+        ctx.end,
+        ctx.interval,
+    )
+    await data_provider.close()
+    return [ohlcv.close for ohlcv in ohlcv_data]
+
+
+def _synthetic_monte_carlo_prices(ctx: _MonteCarloRunContext) -> list[Decimal]:
+    import random
+
+    if ctx.seed is not None:
+        random.seed(ctx.seed)
+    n_steps = max(10, ctx.duration_days * (86400 // ctx.interval))
+    price = Decimal("3000")
+    historical_prices = [price]
+    for _ in range(n_steps - 1):
+        change = Decimal(str(random.gauss(0, 0.02)))
+        price = price * (1 + change)
+        historical_prices.append(price)
+    return historical_prices
+
+
+def _load_monte_carlo_historical_prices(
+    data_provider: CoinGeckoDataProvider,
+    ctx: _MonteCarloRunContext,
+) -> list[Decimal]:
+    click.echo()
+    click.echo(f"Fetching historical prices for {ctx.base_token}...")
+    try:
+        return asyncio.run(_fetch_ohlcv_closes(data_provider, ctx))
+    except Exception as e:
+        click.echo(f"Warning: Could not fetch historical prices: {e}", err=True)
+        click.echo("Using synthetic historical data for demonstration...", err=True)
+        return _synthetic_monte_carlo_prices(ctx)
+
+
+def _generate_monte_carlo_paths(ctx: _MonteCarloRunContext, historical_prices: list[Decimal]) -> Any:
+    from ...backtesting.pnl import MonteCarloPathGenerator, PricePathConfig
+
+    click.echo(f"Generating {ctx.n_paths} price paths using {ctx.method.upper()} method...")
+    path_config = PricePathConfig(method=ctx.path_method, n_paths=ctx.n_paths, seed=ctx.seed)
+    generator = MonteCarloPathGenerator(config=path_config)
+    paths = generator.generate_price_paths(historical_prices=historical_prices)
+    click.echo(f"Generated {paths.n_paths} paths with {paths.n_steps} steps each")
+    click.echo(f"Estimated drift: {float(paths.drift) * 100:.2f}% annualized")
+    click.echo(f"Estimated volatility: {float(paths.volatility) * 100:.2f}% annualized")
+    click.echo()
+    return paths
+
+
+def _build_monte_carlo_config(ctx: _MonteCarloRunContext) -> Any:
+    from ...backtesting.pnl import MonteCarloConfig
+
+    mc_config = MonteCarloConfig(
+        n_paths=ctx.n_paths,
+        parallel_workers=ctx.parallel_workers,
+        base_token=ctx.base_token,
+        quote_token="USDC",
+        seed=ctx.seed,
+        collect_individual_results=False,
+    )
+
+    def progress_callback(completed: int, total: int) -> None:
+        if ctx.verbose:
+            pct = (completed / total) * 100
+            click.echo(f"  Progress: {completed}/{total} paths ({pct:.1f}%)", nl=False)
+            click.echo("\r", nl=False)
+
+    if ctx.verbose:
+        mc_config.progress_callback = progress_callback
+    return mc_config
+
+
+def _run_monte_carlo_simulation(
+    *,
+    strategy_instance: Any,
+    paths: Any,
+    pnl_config: PnLBacktestConfig,
+    mc_config: Any,
+    ctx: _MonteCarloRunContext,
+) -> Any:
+    from ...backtesting.pnl import run_monte_carlo
+
+    click.echo(f"Running Monte Carlo simulation ({ctx.n_paths} paths, {ctx.parallel_workers} workers)...")
+    click.echo()
+    try:
+        return asyncio.run(
+            run_monte_carlo(
+                strategy=strategy_instance,
+                paths=paths,
+                backtest_config=pnl_config,
+                mc_config=mc_config,
+            )
+        )
+    except Exception as e:
+        click.echo(f"Error during Monte Carlo simulation: {e}", err=True)
+        sys.exit(1)
+
+
 # crap-allowlist: VIB-4062 — pre-existing CC=17 in monte-carlo CLI; same import-only touch
 @backtest.command("monte-carlo")
 @click.option("--strategy", "-s", required=True, help="Name of the strategy to simulate")
@@ -978,229 +1220,330 @@ def monte_carlo_backtest(  # noqa: C901
         almanak backtest monte-carlo -s test_strategy \\
             --start 2024-01-01 --end 2024-06-01 --dry-run
     """
-    from ...backtesting.pnl import (
-        MonteCarloConfig,
-        MonteCarloPathGenerator,
-        PathGenerationMethod,
-        PricePathConfig,
-        run_monte_carlo,
+    ctx = _build_monte_carlo_context(
+        strategy=strategy,
+        start=start,
+        end=end,
+        n_paths=n_paths,
+        method=method,
+        interval=interval,
+        initial_capital=initial_capital,
+        chain=chain,
+        tokens=tokens,
+        base_token=base_token,
+        parallel_workers=parallel_workers,
+        seed=seed,
+        output=output,
+        verbose=verbose,
     )
+    _print_monte_carlo_configuration(ctx)
 
-    # Validate strategy exists
-    available_strategies = list_strategies_fn()
-    if strategy not in available_strategies and available_strategies:
-        click.echo(f"Error: Unknown strategy '{strategy}'", err=True)
-        click.echo(f"Available strategies: {', '.join(sorted(available_strategies))}", err=True)
-        raise click.Abort()
-
-    # Parse tokens list
-    token_list = [t.strip().upper() for t in tokens.split(",")]
-    base_token_upper = base_token.strip().upper()
-
-    # Calculate duration
-    duration_days = (end - start).days
-
-    # Determine method enum
-    path_method = PathGenerationMethod.BOOTSTRAP if method == "bootstrap" else PathGenerationMethod.GBM
-
-    # Display configuration
-    click.echo("=" * 70)
-    click.echo("MONTE CARLO SIMULATION CONFIGURATION")
-    click.echo("=" * 70)
-    click.echo(f"Strategy: {strategy}")
-    click.echo(f"Chain: {chain}")
-    click.echo(f"Historical Period: {start.date()} -> {end.date()} ({duration_days} days)")
-    click.echo(f"Interval: {interval}s ({interval / 3600:.1f} hours)")
-    click.echo(f"Initial Capital: ${initial_capital:,.2f}")
-    click.echo(f"Tokens: {', '.join(token_list)}")
-    click.echo(f"Base Token (simulated): {base_token_upper}")
-    click.echo()
-    click.echo("Simulation Parameters:")
-    click.echo(f"  Number of Paths: {n_paths}")
-    click.echo(f"  Generation Method: {method.upper()}")
-    click.echo(f"  Parallel Workers: {parallel_workers}")
-    if seed is not None:
-        click.echo(f"  Random Seed: {seed}")
-    else:
-        click.echo("  Random Seed: None (random)")
-
-    if output:
-        click.echo(f"Output: {output}")
-
-    click.echo("=" * 70)
-
-    # Handle dry run
     if dry_run:
-        click.echo()
-        click.echo("Dry run - Monte Carlo simulation not executed.")
+        _handle_monte_carlo_dry_run()
         return
 
-    # Load strategy
-    try:
-        strategy_class = get_strategy(strategy)
-    except ValueError:
-        click.echo()
-        click.echo("Warning: No strategies registered in factory.", err=True)
-        click.echo("Running with mock strategy for demonstration.", err=True)
-        click.echo()
-
-        from ...market import MarketSnapshot
-
-        class MockMonteCarloStrategy:
-            """Mock strategy for Monte Carlo demonstration."""
-
-            deployment_id: str = "mock-monte-carlo"
-
-            def __init__(self, config: dict[str, Any]) -> None:
-                self.config = config
-
-            def decide(self, market: MarketSnapshot) -> dict[str, Any] | None:
-                return None
-
-        strategy_class = MockMonteCarloStrategy
-
-    # Load base strategy config
-    base_config = load_strategy_config(strategy, chain)
-
-    # Create strategy instance
-    strategy_instance = _create_backtest_strategy(strategy_class, base_config, chain)
-
-    # Create PnL backtest config
-    pnl_config = PnLBacktestConfig(
-        start_time=start,
-        end_time=end,
-        interval_seconds=interval,
-        initial_capital_usd=Decimal(str(initial_capital)),
-        chain=chain,
-        tokens=token_list,
-        # gas_price_gwei omitted: chain-aware default (VIB-5088)
-        include_gas_costs=True,
-    )
-
-    # Create data provider to fetch historical prices for path generation.
-    # Pass the SYMBOL -> (chain, address) map so non-native ERC20s resolve their
-    # coin id via the contract endpoint (Refinement R1).
+    strategy_class = _resolve_demo_strategy_class(ctx.strategy, "mock-monte-carlo")
+    base_config = load_strategy_config(ctx.strategy, ctx.chain)
+    strategy_instance = _create_backtest_strategy(strategy_class, base_config, ctx.chain)
+    pnl_config = _build_monte_carlo_pnl_config(ctx)
     token_addresses = build_token_address_map(
         strategy_config=base_config,
-        tracked_tokens=token_list,
-        chain=chain,
+        tracked_tokens=ctx.token_list,
+        chain=ctx.chain,
     )
     data_provider = CoinGeckoDataProvider(token_addresses=token_addresses)
-
-    click.echo()
-    click.echo(f"Fetching historical prices for {base_token_upper}...")
-
-    # Fetch historical prices using get_ohlcv and extract close prices
-    async def fetch_historical_prices() -> list[Decimal]:
-        """Fetch historical prices from CoinGecko."""
-        ohlcv_data = await data_provider.get_ohlcv(
-            base_token_upper,
-            start,
-            end,
-            interval,
-        )
-        await data_provider.close()
-        return [ohlcv.close for ohlcv in ohlcv_data]
-
-    try:
-        historical_prices = asyncio.run(fetch_historical_prices())
-    except Exception as e:
-        # If CoinGecko fails, generate synthetic historical data
-        click.echo(f"Warning: Could not fetch historical prices: {e}", err=True)
-        click.echo("Using synthetic historical data for demonstration...", err=True)
-
-        import random
-
-        if seed is not None:
-            random.seed(seed)
-        n_steps = max(10, duration_days * (86400 // interval))
-        price = Decimal("3000")
-        historical_prices = [price]
-        for _ in range(n_steps - 1):
-            change = Decimal(str(random.gauss(0, 0.02)))
-            price = price * (1 + change)
-            historical_prices.append(price)
-
+    historical_prices = _load_monte_carlo_historical_prices(data_provider, ctx)
     click.echo(f"Historical prices: {len(historical_prices)} data points")
     click.echo()
-
-    # Generate price paths
-    click.echo(f"Generating {n_paths} price paths using {method.upper()} method...")
-
-    path_config = PricePathConfig(
-        method=path_method,
-        n_paths=n_paths,
-        seed=seed,
+    paths = _generate_monte_carlo_paths(ctx, historical_prices)
+    mc_config = _build_monte_carlo_config(ctx)
+    result = _run_monte_carlo_simulation(
+        strategy_instance=strategy_instance,
+        paths=paths,
+        pnl_config=pnl_config,
+        mc_config=mc_config,
+        ctx=ctx,
     )
 
-    generator = MonteCarloPathGenerator(config=path_config)
-    paths = generator.generate_price_paths(
-        historical_prices=historical_prices,
-    )
-
-    click.echo(f"Generated {paths.n_paths} paths with {paths.n_steps} steps each")
-    click.echo(f"Estimated drift: {float(paths.drift) * 100:.2f}% annualized")
-    click.echo(f"Estimated volatility: {float(paths.volatility) * 100:.2f}% annualized")
-    click.echo()
-
-    # Create Monte Carlo config
-    mc_config = MonteCarloConfig(
-        n_paths=n_paths,
-        parallel_workers=parallel_workers,
-        base_token=base_token_upper,
-        quote_token="USDC",
-        seed=seed,
-        collect_individual_results=False,
-    )
-
-    # Progress callback for verbose mode
-    def progress_callback(completed: int, total: int) -> None:
-        if verbose:
-            pct = (completed / total) * 100
-            click.echo(f"  Progress: {completed}/{total} paths ({pct:.1f}%)", nl=False)
-            click.echo("\r", nl=False)
-
-    if verbose:
-        mc_config.progress_callback = progress_callback
-
-    # Run Monte Carlo simulation
-    click.echo(f"Running Monte Carlo simulation ({n_paths} paths, {parallel_workers} workers)...")
-    click.echo()
-
-    try:
-        result = asyncio.run(
-            run_monte_carlo(
-                strategy=strategy_instance,
-                paths=paths,
-                backtest_config=pnl_config,
-                mc_config=mc_config,
-            )
-        )
-    except Exception as e:
-        click.echo(f"Error during Monte Carlo simulation: {e}", err=True)
-        sys.exit(1)
-
-    if verbose:
+    if ctx.verbose:
         click.echo()
 
-    # Display results
     print_monte_carlo_results(result)
-
-    # Write output if requested
-    if output:
-        output_path = Path(output)
-        try:
-            result_dict = result.to_dict()
-            with open(output_path, "w") as f:
-                json.dump(result_dict, f, indent=2, default=str)
-            click.echo(f"Monte Carlo results written to: {output_path}")
-        except Exception as e:
-            click.echo(f"Warning: Could not save results: {e}", err=True)
+    _write_json_output(ctx.output, result, "Monte Carlo")
 
 
 # =============================================================================
 # Scenario Command
 # =============================================================================
+
+
+@dataclass
+class _ScenarioRunContext:
+    strategy: str
+    crisis_scenario: CrisisScenario
+    interval: int
+    initial_capital: float
+    chain: str
+    token_list: list[str]
+    gas_price: float
+    mev: bool
+    compare_normal: bool
+    normal_start: datetime | None
+    normal_end: datetime | None
+    output: str | None
+    verbose: bool
+
+
+def _print_available_crisis_scenarios() -> None:
+    click.echo()
+    click.echo("=" * 70)
+    click.echo("AVAILABLE CRISIS SCENARIOS")
+    click.echo("=" * 70)
+    click.echo()
+    for scenario_name, scenario_obj in PREDEFINED_SCENARIOS.items():
+        click.echo(f"  {scenario_name}")
+        click.echo(
+            f"    Period: {scenario_obj.start_date.strftime('%Y-%m-%d')} to "
+            f"{scenario_obj.end_date.strftime('%Y-%m-%d')} "
+            f"({scenario_obj.duration_days} days)"
+        )
+        click.echo(f"    Description: {scenario_obj.description[:80]}...")
+        click.echo()
+    click.echo("Use --scenario <name> to run a backtest with a specific scenario.")
+    click.echo("Use --scenario custom with --start/--end for custom date range.")
+    click.echo("=" * 70)
+
+
+def _require_scenario_cli_inputs(strategy: str | None, scenario: str | None) -> tuple[str, str]:
+    if strategy is None:
+        click.echo("Error: --strategy is required. Use -s <strategy_name>.", err=True)
+        raise click.Abort()
+    if scenario is None:
+        click.echo("Error: --scenario is required. Use --list-scenarios to see options.", err=True)
+        raise click.Abort()
+    return strategy, scenario
+
+
+def _resolve_custom_crisis_scenario(
+    *,
+    start: datetime | None,
+    end: datetime | None,
+    name: str | None,
+    description: str | None,
+) -> CrisisScenario:
+    if start is None or end is None:
+        click.echo("Error: --start and --end are required for custom scenarios.", err=True)
+        raise click.Abort()
+    if end <= start:
+        click.echo("Error: --end must be after --start for custom scenarios.", err=True)
+        raise click.Abort()
+    return CrisisScenario(
+        name=name or "custom_scenario",
+        start_date=start,
+        end_date=end,
+        description=description or f"Custom crisis scenario from {start.date()} to {end.date()}",
+    )
+
+
+def _resolve_crisis_scenario(
+    *,
+    scenario: str,
+    start: datetime | None,
+    end: datetime | None,
+    name: str | None,
+    description: str | None,
+) -> CrisisScenario:
+    if scenario.lower() == "custom":
+        return _resolve_custom_crisis_scenario(start=start, end=end, name=name, description=description)
+
+    crisis_scenario = get_scenario_by_name(scenario)
+    if crisis_scenario is not None:
+        return crisis_scenario
+
+    click.echo(f"Error: Unknown scenario '{scenario}'", err=True)
+    click.echo("Available scenarios:", err=True)
+    for name_key in PREDEFINED_SCENARIOS.keys():
+        click.echo(f"  - {name_key}", err=True)
+    click.echo("Use --scenario custom with --start/--end for custom dates.", err=True)
+    raise click.Abort()
+
+
+def _normal_period_for_scenario(
+    crisis_scenario: CrisisScenario,
+    normal_start: datetime | None,
+    compare_normal: bool,
+) -> tuple[datetime | None, datetime | None]:
+    if not compare_normal:
+        return None, None
+    from datetime import timedelta
+
+    resolved_start = normal_start or crisis_scenario.start_date - timedelta(days=30 + crisis_scenario.duration_days)
+    return resolved_start, resolved_start + timedelta(days=crisis_scenario.duration_days)
+
+
+def _build_scenario_context(
+    *,
+    strategy: str | None,
+    scenario: str | None,
+    start: datetime | None,
+    end: datetime | None,
+    name: str | None,
+    description: str | None,
+    interval: int,
+    initial_capital: float,
+    chain: str,
+    tokens: str,
+    gas_price: float,
+    mev: bool,
+    compare_normal: bool,
+    normal_start: datetime | None,
+    output: str | None,
+    verbose: bool,
+) -> _ScenarioRunContext:
+    strategy_name, scenario_name = _require_scenario_cli_inputs(strategy, scenario)
+    crisis_scenario = _resolve_crisis_scenario(
+        scenario=scenario_name,
+        start=start,
+        end=end,
+        name=name,
+        description=description,
+    )
+    _validate_walk_forward_strategy(strategy_name)
+    resolved_normal_start, normal_end = _normal_period_for_scenario(crisis_scenario, normal_start, compare_normal)
+    return _ScenarioRunContext(
+        strategy=strategy_name,
+        crisis_scenario=crisis_scenario,
+        interval=interval,
+        initial_capital=initial_capital,
+        chain=chain,
+        token_list=_parse_cli_tokens(tokens),
+        gas_price=gas_price,
+        mev=mev,
+        compare_normal=compare_normal,
+        normal_start=resolved_normal_start,
+        normal_end=normal_end,
+        output=output,
+        verbose=verbose,
+    )
+
+
+def _print_scenario_configuration(ctx: _ScenarioRunContext) -> None:
+    scenario = ctx.crisis_scenario
+    click.echo()
+    click.echo("=" * 70)
+    click.echo("CRISIS SCENARIO BACKTEST CONFIGURATION")
+    click.echo("=" * 70)
+    click.echo(f"Strategy: {ctx.strategy}")
+    click.echo(f"Chain: {ctx.chain}")
+    click.echo()
+    click.echo("Scenario:")
+    click.echo(f"  Name: {scenario.name}")
+    click.echo(
+        f"  Period: {scenario.start_date.strftime('%Y-%m-%d')} to "
+        f"{scenario.end_date.strftime('%Y-%m-%d')} "
+        f"({scenario.duration_days} days)"
+    )
+    click.echo(f"  Description: {scenario.description[:80]}...")
+    click.echo()
+    click.echo("Configuration:")
+    click.echo(f"  Interval: {ctx.interval}s ({ctx.interval / 3600:.1f} hours)")
+    click.echo(f"  Initial Capital: ${ctx.initial_capital:,.2f}")
+    click.echo(f"  Tokens: {', '.join(ctx.token_list)}")
+    click.echo(f"  Gas Price: {ctx.gas_price:.0f} gwei")
+    click.echo(f"  MEV Simulation: {'Enabled' if ctx.mev else 'Disabled'}")
+    click.echo(f"  Compare to Normal: {'Yes' if ctx.compare_normal else 'No'}")
+    if ctx.normal_start and ctx.normal_end:
+        click.echo(f"  Normal Period: {ctx.normal_start.strftime('%Y-%m-%d')} to {ctx.normal_end.strftime('%Y-%m-%d')}")
+    if ctx.output:
+        click.echo(f"Output: {ctx.output}")
+    click.echo("=" * 70)
+
+
+def _handle_scenario_dry_run() -> None:
+    click.echo()
+    click.echo("Dry run - crisis backtest not executed.")
+
+
+def _build_crisis_backtester(base_config: dict[str, Any], ctx: _ScenarioRunContext) -> PnLBacktester:
+    token_addresses = build_token_address_map(
+        strategy_config=base_config,
+        tracked_tokens=ctx.token_list,
+        chain=ctx.chain,
+    )
+    data_provider = CoinGeckoDataProvider(token_addresses=token_addresses)
+    return PnLBacktester(data_provider=data_provider, fee_models={}, slippage_models={})
+
+
+def _build_crisis_config(ctx: _ScenarioRunContext) -> CrisisBacktestConfig:
+    return CrisisBacktestConfig(
+        scenario=ctx.crisis_scenario,
+        initial_capital_usd=Decimal(str(ctx.initial_capital)),
+        interval_seconds=ctx.interval,
+        chain=ctx.chain,
+        tokens=ctx.token_list,
+        gas_price_gwei=Decimal(str(ctx.gas_price)),
+        mev_simulation_enabled=ctx.mev,
+    )
+
+
+def _run_crisis_scenario(
+    *,
+    strategy_instance: Any,
+    backtester: PnLBacktester,
+    crisis_config: CrisisBacktestConfig,
+    ctx: _ScenarioRunContext,
+) -> CrisisBacktestResult:
+    click.echo()
+    click.echo(f"Running crisis backtest for scenario '{ctx.crisis_scenario.name}'...")
+    if ctx.verbose:
+        click.echo(f"  Period: {ctx.crisis_scenario.duration_days} days")
+        click.echo(f"  Estimated ticks: {ctx.crisis_scenario.duration_days * 86400 // ctx.interval}")
+
+    try:
+        return asyncio.run(
+            run_crisis_backtest(
+                strategy=strategy_instance,
+                scenario=ctx.crisis_scenario,
+                backtester=backtester,
+                config=crisis_config,
+            )
+        )
+    except Exception as e:
+        click.echo(f"Error during crisis backtest: {e}", err=True)
+        sys.exit(1)
+
+
+def _maybe_add_normal_period_comparison(
+    *,
+    result: CrisisBacktestResult,
+    strategy_instance: Any,
+    backtester: PnLBacktester,
+    ctx: _ScenarioRunContext,
+) -> None:
+    if not ctx.compare_normal or ctx.normal_start is None or ctx.normal_end is None:
+        return
+
+    click.echo()
+    click.echo("Running normal period backtest for comparison...")
+    normal_pnl_config = PnLBacktestConfig(
+        start_time=ctx.normal_start,
+        end_time=ctx.normal_end,
+        interval_seconds=ctx.interval,
+        initial_capital_usd=Decimal(str(ctx.initial_capital)),
+        chain=ctx.chain,
+        tokens=ctx.token_list,
+        gas_price_gwei=Decimal(str(ctx.gas_price)),
+        mev_simulation_enabled=ctx.mev,
+    )
+
+    try:
+        normal_result = asyncio.run(backtester.backtest(strategy_instance, normal_pnl_config))
+        comparison = compare_crisis_to_normal(result.result, normal_result)
+        result.crisis_metrics["normal_period_comparison"] = comparison
+        result.result.crisis_results = build_crisis_metrics(result.result, ctx.crisis_scenario, normal_result)
+    except Exception as e:
+        click.echo(f"Warning: Normal period backtest failed: {e}", err=True)
+        click.echo("Continuing with crisis results only...")
 
 
 # crap-allowlist: VIB-4062 — pre-existing CC=31 in scenario CLI; same import-only touch
@@ -1325,231 +1668,50 @@ def scenario_backtest(  # noqa: C901
         # Dry run to verify configuration
         almanak backtest scenario -s test --scenario ftx_collapse --dry-run
     """
-    from datetime import timedelta
-
-    # Handle --list-scenarios
     if list_scenarios:
-        click.echo()
-        click.echo("=" * 70)
-        click.echo("AVAILABLE CRISIS SCENARIOS")
-        click.echo("=" * 70)
-        click.echo()
-        for scenario_name, scenario_obj in PREDEFINED_SCENARIOS.items():
-            click.echo(f"  {scenario_name}")
-            click.echo(
-                f"    Period: {scenario_obj.start_date.strftime('%Y-%m-%d')} to "
-                f"{scenario_obj.end_date.strftime('%Y-%m-%d')} "
-                f"({scenario_obj.duration_days} days)"
-            )
-            click.echo(f"    Description: {scenario_obj.description[:80]}...")
-            click.echo()
-        click.echo("Use --scenario <name> to run a backtest with a specific scenario.")
-        click.echo("Use --scenario custom with --start/--end for custom date range.")
-        click.echo("=" * 70)
+        _print_available_crisis_scenarios()
         return
 
-    # Validate required parameters when not listing scenarios
-    if strategy is None:
-        click.echo("Error: --strategy is required. Use -s <strategy_name>.", err=True)
-        raise click.Abort()
-
-    if scenario is None:
-        click.echo("Error: --scenario is required. Use --list-scenarios to see options.", err=True)
-        raise click.Abort()
-
-    # Resolve scenario
-    crisis_scenario: CrisisScenario | None = None
-
-    if scenario.lower() == "custom":
-        if start is None or end is None:
-            click.echo("Error: --start and --end are required for custom scenarios.", err=True)
-            raise click.Abort()
-        crisis_scenario = CrisisScenario(
-            name=name or "custom_scenario",
-            start_date=start,
-            end_date=end,
-            description=description or f"Custom crisis scenario from {start.date()} to {end.date()}",
-        )
-    else:
-        crisis_scenario = get_scenario_by_name(scenario)
-        if crisis_scenario is None:
-            click.echo(f"Error: Unknown scenario '{scenario}'", err=True)
-            click.echo("Available scenarios:", err=True)
-            for name_key in PREDEFINED_SCENARIOS.keys():
-                click.echo(f"  - {name_key}", err=True)
-            click.echo("Use --scenario custom with --start/--end for custom dates.", err=True)
-            raise click.Abort()
-
-    # Validate strategy exists
-    available_strategies = list_strategies_fn()
-    if strategy not in available_strategies and available_strategies:
-        click.echo(f"Error: Unknown strategy '{strategy}'", err=True)
-        click.echo(f"Available strategies: {', '.join(sorted(available_strategies))}", err=True)
-        raise click.Abort()
-
-    # Parse tokens list
-    token_list = [t.strip().upper() for t in tokens.split(",")]
-
-    # Display configuration
-    click.echo()
-    click.echo("=" * 70)
-    click.echo("CRISIS SCENARIO BACKTEST CONFIGURATION")
-    click.echo("=" * 70)
-    click.echo(f"Strategy: {strategy}")
-    click.echo(f"Chain: {chain}")
-    click.echo()
-    click.echo("Scenario:")
-    click.echo(f"  Name: {crisis_scenario.name}")
-    click.echo(
-        f"  Period: {crisis_scenario.start_date.strftime('%Y-%m-%d')} to "
-        f"{crisis_scenario.end_date.strftime('%Y-%m-%d')} "
-        f"({crisis_scenario.duration_days} days)"
+    ctx = _build_scenario_context(
+        strategy=strategy,
+        scenario=scenario,
+        start=start,
+        end=end,
+        name=name,
+        description=description,
+        interval=interval,
+        initial_capital=initial_capital,
+        chain=chain,
+        tokens=tokens,
+        gas_price=gas_price,
+        mev=mev,
+        compare_normal=compare_normal,
+        normal_start=normal_start,
+        output=output,
+        verbose=verbose,
     )
-    click.echo(f"  Description: {crisis_scenario.description[:80]}...")
-    click.echo()
-    click.echo("Configuration:")
-    click.echo(f"  Interval: {interval}s ({interval / 3600:.1f} hours)")
-    click.echo(f"  Initial Capital: ${initial_capital:,.2f}")
-    click.echo(f"  Tokens: {', '.join(token_list)}")
-    click.echo(f"  Gas Price: {gas_price:.0f} gwei")
-    click.echo(f"  MEV Simulation: {'Enabled' if mev else 'Disabled'}")
-    click.echo(f"  Compare to Normal: {'Yes' if compare_normal else 'No'}")
+    _print_scenario_configuration(ctx)
 
-    if compare_normal:
-        if normal_start is None:
-            normal_start = crisis_scenario.start_date - timedelta(days=30 + crisis_scenario.duration_days)
-        normal_end = normal_start + timedelta(days=crisis_scenario.duration_days)
-        click.echo(f"  Normal Period: {normal_start.strftime('%Y-%m-%d')} to {normal_end.strftime('%Y-%m-%d')}")
-
-    if output:
-        click.echo(f"Output: {output}")
-
-    click.echo("=" * 70)
-
-    # Handle dry run
     if dry_run:
-        click.echo()
-        click.echo("Dry run - crisis backtest not executed.")
+        _handle_scenario_dry_run()
         return
 
-    # Load strategy
-    try:
-        strategy_class = get_strategy(strategy)
-    except ValueError:
-        click.echo()
-        click.echo("Warning: No strategies registered in factory.", err=True)
-        click.echo("Running with mock strategy for demonstration.", err=True)
-        click.echo()
-
-        from ...market import MarketSnapshot
-
-        class MockCrisisStrategy:
-            """Mock strategy for crisis scenario demonstration."""
-
-            deployment_id: str = "mock-crisis"
-
-            def __init__(self, config: dict[str, Any]) -> None:
-                self.config = config
-
-            def decide(self, market: MarketSnapshot) -> dict[str, Any] | None:
-                return None
-
-        strategy_class = MockCrisisStrategy
-
-    # Load base strategy config
-    base_config = load_strategy_config(strategy, chain)
-
-    # Create strategy instance
-    strategy_instance = _create_backtest_strategy(strategy_class, base_config, chain)
-
-    # Create PnL backtester. Pass the SYMBOL -> (chain, address) map so
-    # non-native ERC20s resolve their coin id via the contract endpoint
-    # (Refinement R1); natives resolve via the chain registry.
-    token_addresses = build_token_address_map(
-        strategy_config=base_config,
-        tracked_tokens=token_list,
-        chain=chain,
+    strategy_class = _resolve_demo_strategy_class(ctx.strategy, "mock-crisis")
+    base_config = load_strategy_config(ctx.strategy, ctx.chain)
+    strategy_instance = _create_backtest_strategy(strategy_class, base_config, ctx.chain)
+    backtester = _build_crisis_backtester(base_config, ctx)
+    crisis_config = _build_crisis_config(ctx)
+    result = _run_crisis_scenario(
+        strategy_instance=strategy_instance,
+        backtester=backtester,
+        crisis_config=crisis_config,
+        ctx=ctx,
     )
-    data_provider = CoinGeckoDataProvider(token_addresses=token_addresses)
-    backtester = PnLBacktester(
-        data_provider=data_provider,
-        fee_models={},
-        slippage_models={},
+    _maybe_add_normal_period_comparison(
+        result=result,
+        strategy_instance=strategy_instance,
+        backtester=backtester,
+        ctx=ctx,
     )
-
-    # Create crisis backtest config
-    crisis_config = CrisisBacktestConfig(
-        scenario=crisis_scenario,
-        initial_capital_usd=Decimal(str(initial_capital)),
-        interval_seconds=interval,
-        chain=chain,
-        tokens=token_list,
-        gas_price_gwei=Decimal(str(gas_price)),
-        mev_simulation_enabled=mev,
-    )
-
-    click.echo()
-    click.echo(f"Running crisis backtest for scenario '{crisis_scenario.name}'...")
-
-    if verbose:
-        click.echo(f"  Period: {crisis_scenario.duration_days} days")
-        click.echo(f"  Estimated ticks: {crisis_scenario.duration_days * 86400 // interval}")
-
-    # Run crisis backtest
-    try:
-        result = asyncio.run(
-            run_crisis_backtest(
-                strategy=strategy_instance,
-                scenario=crisis_scenario,
-                backtester=backtester,
-                config=crisis_config,
-            )
-        )
-    except Exception as e:
-        click.echo(f"Error during crisis backtest: {e}", err=True)
-        sys.exit(1)
-
-    # Run normal period comparison if requested
-    if compare_normal:
-        click.echo()
-        click.echo("Running normal period backtest for comparison...")
-
-        normal_end_dt = normal_start + timedelta(days=crisis_scenario.duration_days) if normal_start else None
-        if normal_start and normal_end_dt:
-            normal_pnl_config = PnLBacktestConfig(
-                start_time=normal_start,
-                end_time=normal_end_dt,
-                interval_seconds=interval,
-                initial_capital_usd=Decimal(str(initial_capital)),
-                chain=chain,
-                tokens=token_list,
-                gas_price_gwei=Decimal(str(gas_price)),
-                mev_simulation_enabled=mev,
-            )
-
-            try:
-                normal_result = asyncio.run(backtester.backtest(strategy_instance, normal_pnl_config))
-
-                comparison = compare_crisis_to_normal(result.result, normal_result)
-                result.crisis_metrics["normal_period_comparison"] = comparison
-
-                crisis_metrics_obj = build_crisis_metrics(result.result, crisis_scenario, normal_result)
-                result.result.crisis_results = crisis_metrics_obj
-
-            except Exception as e:
-                click.echo(f"Warning: Normal period backtest failed: {e}", err=True)
-                click.echo("Continuing with crisis results only...")
-
-    # Display results
     print_crisis_backtest_results(result)
-
-    # Write output if requested
-    if output:
-        output_path = Path(output)
-        try:
-            result_dict = result.to_dict()
-            with open(output_path, "w") as f:
-                json.dump(result_dict, f, indent=2, default=str)
-            click.echo(f"Crisis backtest results written to: {output_path}")
-        except Exception as e:
-            click.echo(f"Warning: Could not save results: {e}", err=True)
+    _write_json_output(ctx.output, result, "Crisis backtest")

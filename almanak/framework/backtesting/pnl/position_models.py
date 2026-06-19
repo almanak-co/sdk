@@ -459,7 +459,9 @@ class SimulatedPosition:
 
         # Calculate liquidation price
         liq_calc = LiquidationCalculator()
-        margin = maintenance_margin or liq_calc.get_maintenance_margin_for_protocol(protocol)
+        margin = (
+            liq_calc.get_maintenance_margin_for_protocol(protocol) if maintenance_margin is None else maintenance_margin
+        )
         liquidation_price = liq_calc.calculate_liquidation_price(
             entry_price=entry_price,
             leverage=leverage,
@@ -517,7 +519,9 @@ class SimulatedPosition:
 
         # Calculate liquidation price
         liq_calc = LiquidationCalculator()
-        margin = maintenance_margin or liq_calc.get_maintenance_margin_for_protocol(protocol)
+        margin = (
+            liq_calc.get_maintenance_margin_for_protocol(protocol) if maintenance_margin is None else maintenance_margin
+        )
         liquidation_price = liq_calc.calculate_liquidation_price(
             entry_price=entry_price,
             leverage=leverage,

@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import tempfile
 from datetime import datetime
-from pathlib import Path
 
 import pytest
 
@@ -26,7 +25,6 @@ from almanak.framework.backtesting.pnl.periods import (
     list_presets,
     resolve_periods,
 )
-
 
 # =============================================================================
 # BacktestPeriod Tests

@@ -48,7 +48,7 @@ Examples:
 """
 
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -73,6 +73,154 @@ class ForkLifecycle(StrEnum):
 
     ROLLING_RESET = "rolling_reset"
     PERSISTENT = "persistent"
+
+
+_RPC_URL_PREFIXES = ("http://", "https://", "ws://", "wss://")
+_VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+_VALID_PRICE_SOURCES = {"coingecko", "chainlink", "twap", "auto"}
+
+
+def _normalize_chain(chain: str) -> str:
+    chain_lower = chain.lower()
+    if chain_lower not in CHAIN_IDS:
+        valid_chains = ", ".join(sorted(CHAIN_IDS.keys()))
+        raise ValueError(f"Unsupported chain '{chain}'. Valid chains: {valid_chains}")
+    return chain_lower
+
+
+def _validate_rpc_url(rpc_url: str) -> None:
+    if not rpc_url:
+        raise ValueError("rpc_url cannot be empty")
+    if not rpc_url.startswith(_RPC_URL_PREFIXES):
+        raise ValueError(f"rpc_url must be a valid URL, got: {rpc_url[:50]}...")
+
+
+def _validate_deployment_id(deployment_id: str) -> None:
+    if not deployment_id:
+        raise ValueError("deployment_id cannot be empty")
+
+
+def _decimal_for_validation(name: str, value: Any) -> Decimal:
+    if not isinstance(value, Decimal | int | float):
+        raise ValueError(f"{name} must be a Decimal-compatible number")
+    try:
+        decimal_value = value if type(value) is Decimal else Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{name} must be a Decimal-compatible number") from exc
+    if not decimal_value.is_finite():
+        raise ValueError(f"{name} must be finite")
+    return decimal_value
+
+
+def _validate_non_negative_decimal(name: str, value: Any, negative_message: str) -> None:
+    if _decimal_for_validation(name, value) < Decimal("0"):
+        raise ValueError(negative_message)
+
+
+def _validate_fraction(name: str, value: Any) -> None:
+    decimal_value = _decimal_for_validation(name, value)
+    if not (Decimal("0") <= decimal_value <= Decimal("1")):
+        raise ValueError(f"{name} must be between 0 and 1, got {value}")
+
+
+def _validate_initial_balances(
+    initial_eth: Any,
+    initial_tokens: dict[str, Any],
+    bootstrap: dict[str, Any],
+) -> None:
+    if not isinstance(initial_tokens, dict):
+        raise ValueError(f"initial_tokens must be a dict, got {type(initial_tokens).__name__}")
+    if not isinstance(bootstrap, dict):
+        raise ValueError(f"bootstrap must be a dict, got {type(bootstrap).__name__}")
+
+    _validate_non_negative_decimal("initial_eth", initial_eth, "initial_eth cannot be negative")
+
+    for token, amount in initial_tokens.items():
+        _validate_non_negative_decimal(
+            f"initial_tokens[{token}]",
+            amount,
+            f"initial_tokens[{token}] cannot be negative",
+        )
+
+    for chain_key, tokens in bootstrap.items():
+        if not isinstance(tokens, dict):
+            raise ValueError(f"bootstrap[{chain_key}] must be a dict, got {type(tokens).__name__}")
+        for token, amount in tokens.items():
+            _validate_non_negative_decimal(
+                f"bootstrap[{chain_key}][{token}]",
+                amount,
+                f"bootstrap[{chain_key}][{token}] cannot be negative",
+            )
+
+
+def _coerce_fork_lifecycle(fork_lifecycle: ForkLifecycle | str) -> ForkLifecycle:
+    if isinstance(fork_lifecycle, str):
+        return ForkLifecycle(fork_lifecycle)
+    return fork_lifecycle
+
+
+def _validate_tick_interval(tick_interval_seconds: int) -> None:
+    if tick_interval_seconds <= 0:
+        raise ValueError("tick_interval_seconds must be positive")
+
+
+def _validate_max_ticks(max_ticks: int | None) -> None:
+    if max_ticks is not None and max_ticks <= 0:
+        raise ValueError("max_ticks must be positive if specified")
+
+
+def _validate_anvil_port(anvil_port: int) -> None:
+    if anvil_port <= 0 or anvil_port > 65535:
+        raise ValueError(f"Invalid anvil_port: {anvil_port}")
+
+
+def _validate_startup_timeout(startup_timeout_seconds: float) -> None:
+    if startup_timeout_seconds <= 0:
+        raise ValueError("startup_timeout_seconds must be positive")
+
+
+def _validate_wallet_address(wallet_address: str | None) -> None:
+    if wallet_address is None:
+        return
+    if not wallet_address.startswith("0x"):
+        raise ValueError("wallet_address must start with '0x'")
+    if len(wallet_address) != 42:
+        raise ValueError("wallet_address must be 42 characters")
+
+
+def _normalize_log_level(log_level: str) -> str:
+    normalized = log_level.upper()
+    if normalized not in _VALID_LOG_LEVELS:
+        raise ValueError(f"Invalid log_level '{log_level}'. Valid levels: {', '.join(sorted(_VALID_LOG_LEVELS))}")
+    return normalized
+
+
+def _validate_price_source(price_source: str) -> None:
+    if price_source not in _VALID_PRICE_SOURCES:
+        raise ValueError(
+            f"Invalid price_source '{price_source}'. Valid sources: {', '.join(sorted(_VALID_PRICE_SOURCES))}"
+        )
+
+
+def _apply_allow_hardcoded_fallback(strict_price_mode: bool, allow_hardcoded_fallback: bool | None) -> bool:
+    if allow_hardcoded_fallback is None:
+        return strict_price_mode
+
+    import warnings
+
+    warnings.warn(
+        "allow_hardcoded_fallback is deprecated and is ignored; it no longer "
+        "affects pricing behavior. Set strict_price_mode directly instead "
+        "(strict_price_mode=False permits hardcoded fallbacks; the default "
+        "strict_price_mode=True fails when no real price is available).",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    # The deprecated flag is inert: strict_price_mode is authoritative. We do
+    # not let allow_hardcoded_fallback flip the mode, because a dataclass cannot
+    # distinguish an explicit strict_price_mode=True from its default True, so
+    # honoring the legacy flag would silently override an explicit strict choice.
+    return strict_price_mode
 
 
 @dataclass
@@ -248,133 +396,74 @@ class PaperTraderConfig:
     backtests to complete but may produce inaccurate results. Only use this
     for development/testing where price accuracy is not critical.
 
-    Note: This is the inverse of the deprecated allow_hardcoded_fallback field.
-    If both are set, strict_price_mode takes precedence.
+    Note: This is the inverse of the deprecated allow_hardcoded_fallback field,
+    which is now ignored. strict_price_mode is authoritative; set it directly.
 
     Environment variable: Set ALMANAK_ALLOW_HARDCODED_PRICES=1 to override
     strict_price_mode=False for testing scenarios.
     """
 
     allow_hardcoded_fallback: bool | None = None
-    """DEPRECATED: Use strict_price_mode instead.
+    """DEPRECATED and IGNORED: use strict_price_mode instead.
 
-    This field is kept for backward compatibility. If set, it will be converted
-    to the equivalent strict_price_mode value (allow_hardcoded_fallback=False
-    is equivalent to strict_price_mode=True).
+    Retained only for backward-compatible construction; it no longer changes
+    pricing behavior. strict_price_mode is authoritative (strict_price_mode=False
+    permits hardcoded fallbacks; the default True fails when no real price is
+    available). Passing any non-None value emits a DeprecationWarning.
 
     Will be removed in a future version.
     """
 
     # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
-    def __post_init__(self) -> None:  # noqa: C901
+    def __post_init__(self) -> None:
         """Validate configuration after initialization."""
         # Chain validation
-        chain_lower = self.chain.lower()
-        if chain_lower not in CHAIN_IDS:
-            valid_chains = ", ".join(sorted(CHAIN_IDS.keys()))
-            raise ValueError(f"Unsupported chain '{self.chain}'. Valid chains: {valid_chains}")
-        self.chain = chain_lower
+        self.chain = _normalize_chain(self.chain)
 
         # RPC URL validation
-        if not self.rpc_url:
-            raise ValueError("rpc_url cannot be empty")
-        if not self.rpc_url.startswith(("http://", "https://", "ws://", "wss://")):
-            raise ValueError(f"rpc_url must be a valid URL, got: {self.rpc_url[:50]}...")
+        _validate_rpc_url(self.rpc_url)
 
         # Deployment ID validation
-        if not self.deployment_id:
-            raise ValueError("deployment_id cannot be empty")
+        _validate_deployment_id(self.deployment_id)
 
-        # Initial ETH validation
-        if self.initial_eth < Decimal("0"):
-            raise ValueError("initial_eth cannot be negative")
-
-        # Initial tokens validation
-        for token, amount in self.initial_tokens.items():
-            if amount < Decimal("0"):
-                raise ValueError(f"initial_tokens[{token}] cannot be negative")
-
-        # Bootstrap validation (VIB-2375)
-        for chain_key, tokens in self.bootstrap.items():
-            if not isinstance(tokens, dict):
-                raise ValueError(f"bootstrap[{chain_key}] must be a dict, got {type(tokens).__name__}")
-            for token, amount in tokens.items():
-                if amount < Decimal("0"):
-                    raise ValueError(f"bootstrap[{chain_key}][{token}] cannot be negative")
+        _validate_initial_balances(self.initial_eth, self.initial_tokens, self.bootstrap)
 
         # Tick interval validation
-        if self.tick_interval_seconds <= 0:
-            raise ValueError("tick_interval_seconds must be positive")
+        _validate_tick_interval(self.tick_interval_seconds)
 
         # Max ticks validation
-        if self.max_ticks is not None and self.max_ticks <= 0:
-            raise ValueError("max_ticks must be positive if specified")
+        _validate_max_ticks(self.max_ticks)
 
         # Anvil port validation
-        if self.anvil_port <= 0 or self.anvil_port > 65535:
-            raise ValueError(f"Invalid anvil_port: {self.anvil_port}")
+        _validate_anvil_port(self.anvil_port)
 
         # Fork lifecycle validation (VIB-2631)
-        if isinstance(self.fork_lifecycle, str):
-            self.fork_lifecycle = ForkLifecycle(self.fork_lifecycle)
+        self.fork_lifecycle = _coerce_fork_lifecycle(self.fork_lifecycle)
         # Sync reset_fork_every_tick with fork_lifecycle for backward compat
         if self.fork_lifecycle == ForkLifecycle.PERSISTENT:
             self.reset_fork_every_tick = False
 
         # Oracle divergence threshold validation
-        if not (Decimal("0") <= self.oracle_divergence_threshold <= Decimal("1")):
-            raise ValueError(
-                f"oracle_divergence_threshold must be between 0 and 1, got {self.oracle_divergence_threshold}"
-            )
+        _validate_fraction("oracle_divergence_threshold", self.oracle_divergence_threshold)
 
         # Position reconciler tolerance validation (VIB-2634)
-        if not (Decimal("0") <= self.position_reconciler_tolerance_pct <= Decimal("1")):
-            raise ValueError(
-                f"position_reconciler_tolerance_pct must be between 0 and 1, "
-                f"got {self.position_reconciler_tolerance_pct}"
-            )
+        _validate_fraction("position_reconciler_tolerance_pct", self.position_reconciler_tolerance_pct)
 
         # Startup timeout validation
-        if self.startup_timeout_seconds <= 0:
-            raise ValueError("startup_timeout_seconds must be positive")
+        _validate_startup_timeout(self.startup_timeout_seconds)
 
-        # Wallet address validation (if provided)
-        if self.wallet_address is not None:
-            if not self.wallet_address.startswith("0x"):
-                raise ValueError("wallet_address must start with '0x'")
-            if len(self.wallet_address) != 42:
-                raise ValueError("wallet_address must be 42 characters")
+        _validate_wallet_address(self.wallet_address)
 
         # Log level validation
-        valid_log_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-        if self.log_level.upper() not in valid_log_levels:
-            raise ValueError(
-                f"Invalid log_level '{self.log_level}'. Valid levels: {', '.join(sorted(valid_log_levels))}"
-            )
-        self.log_level = self.log_level.upper()
+        self.log_level = _normalize_log_level(self.log_level)
 
         # Price source validation
-        valid_price_sources = {"coingecko", "chainlink", "twap", "auto"}
-        if self.price_source not in valid_price_sources:
-            raise ValueError(
-                f"Invalid price_source '{self.price_source}'. Valid sources: {', '.join(sorted(valid_price_sources))}"
-            )
+        _validate_price_source(self.price_source)
 
-        # Handle backward compatibility for allow_hardcoded_fallback -> strict_price_mode
-        # allow_hardcoded_fallback=False is equivalent to strict_price_mode=True
-        if self.allow_hardcoded_fallback is not None:
-            import warnings
-
-            warnings.warn(
-                "allow_hardcoded_fallback is deprecated. Use strict_price_mode instead. "
-                "allow_hardcoded_fallback=False is equivalent to strict_price_mode=True.",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-            # If user explicitly set allow_hardcoded_fallback=True, they want relaxed mode
-            # Override strict_price_mode to False (relaxed mode)
-            if self.allow_hardcoded_fallback:
-                self.strict_price_mode = False
+        self.strict_price_mode = _apply_allow_hardcoded_fallback(
+            self.strict_price_mode,
+            self.allow_hardcoded_fallback,
+        )
 
     @property
     def chain_id(self) -> int:

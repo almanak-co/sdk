@@ -178,27 +178,29 @@ class LendingBacktestConfig(StrategyBacktestConfig):
         Raises:
             ValueError: If strategy_type is not "lending" or invalid parameters.
         """
-        # Call parent validation
         super().__post_init__()
+        self._validate_strategy_type()
+        self._validate_interest_settings()
+        self._validate_threshold_values()
+        self._validate_liquidation_parameters()
 
-        # Validate strategy_type for lending
+    def _validate_strategy_type(self) -> None:
         if self.strategy_type.lower() != "lending":
             msg = f"LendingBacktestConfig requires strategy_type='lending', got '{self.strategy_type}'"
             raise ValueError(msg)
 
-        # Validate interest_accrual_method
+    def _validate_interest_settings(self) -> None:
         valid_methods = {"compound", "simple"}
         if self.interest_accrual_method not in valid_methods:
             msg = f"interest_accrual_method must be one of {valid_methods}, got '{self.interest_accrual_method}'"
             raise ValueError(msg)
 
-        # Validate interest_rate_source
         valid_sources = {"fixed", "historical", "protocol"}
         if self.interest_rate_source not in valid_sources:
             msg = f"interest_rate_source must be one of {valid_sources}, got '{self.interest_rate_source}'"
             raise ValueError(msg)
 
-        # Validate threshold values
+    def _validate_threshold_values(self) -> None:
         if self.liquidation_threshold <= Decimal("0") or self.liquidation_threshold > Decimal("1"):
             msg = f"liquidation_threshold must be in (0, 1], got {self.liquidation_threshold}"
             raise ValueError(msg)
@@ -212,7 +214,7 @@ class LendingBacktestConfig(StrategyBacktestConfig):
             msg = f"health_factor_critical_threshold ({self.health_factor_critical_threshold}) must be < health_factor_warning_threshold ({self.health_factor_warning_threshold})"
             raise ValueError(msg)
 
-        # Validate penalty and close factor
+    def _validate_liquidation_parameters(self) -> None:
         if self.liquidation_penalty < Decimal("0") or self.liquidation_penalty > Decimal("1"):
             msg = f"liquidation_penalty must be in [0, 1], got {self.liquidation_penalty}"
             raise ValueError(msg)
@@ -275,6 +277,23 @@ class LendingBacktestConfig(StrategyBacktestConfig):
             interest_rate_source=data.get("interest_rate_source", "fixed"),
             protocol=data.get("protocol", "aave_v3"),
         )
+
+
+@dataclass(frozen=True)
+class _LendingAPYResolution:
+    apy: Decimal
+    confidence: str
+    data_source: str
+
+
+@dataclass(frozen=True)
+class _LendingLiquidationPlan:
+    collateral_key: str
+    total_collateral: Decimal
+    collateral_seized: Decimal
+    debt_repaid: Decimal
+    remaining_amount: Decimal
+    remaining_interest: Decimal
 
 
 @register_adapter(
@@ -1194,7 +1213,7 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
                 total += value
         return total
 
-    def update_position(  # noqa: C901
+    def update_position(
         self,
         position: "SimulatedPosition",
         market_state: "MarketState",
@@ -1227,159 +1246,205 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
             separately. This method does not trigger liquidation, only emits
             proximity warnings.
         """
-        # Only process lending positions
-        if position.position_type not in (PositionType.SUPPLY, PositionType.BORROW):
+        if not self._should_update_lending_position(position, elapsed_seconds):
             return
 
-        # Skip if already liquidated
-        if position.is_liquidated:
-            return
-
-        if elapsed_seconds <= 0:
-            return
-
-        # Convert elapsed seconds to days for interest calculation
         elapsed_days = Decimal(str(elapsed_seconds)) / Decimal("86400")
-
-        # Get APY for this position
         protocol = position.protocol or self._config.protocol
         primary_token = position.primary_token
+        apy_timestamp = self._resolve_lending_timestamp(position, market_state, timestamp, "APY lookup")
+        apy_resolution = self._resolve_lending_apy(position, protocol, primary_token, apy_timestamp)
+        position.apy_confidence = apy_resolution.confidence
+        position.apy_data_source = apy_resolution.data_source
 
-        # Determine effective timestamp for APY lookup
+        token_price = self._lending_token_price(
+            position,
+            market_state,
+            primary_token,
+            apy_timestamp,
+            "lending position update",
+        )
+        principal_usd = position.total_amount * token_price
+        interest_result = self._interest_calculator.calculate_interest(
+            principal=principal_usd,
+            apy=apy_resolution.apy,
+            time_delta=elapsed_days,
+            compound=self._config.interest_accrual_method == "compound",
+        )
+
+        position.interest_accrued += interest_result.interest
+
+        if position.position_type == PositionType.BORROW and self._config.health_factor_tracking_enabled:
+            self._update_borrow_health_factor(position, principal_usd, protocol)
+
+        position.last_updated = self._resolve_lending_timestamp(position, market_state, timestamp, "")
+        self._log_lending_update(position, principal_usd, interest_result.interest, apy_resolution)
+
+    @staticmethod
+    def _should_update_lending_position(position: "SimulatedPosition", elapsed_seconds: float) -> bool:
+        if position.position_type not in (PositionType.SUPPLY, PositionType.BORROW):
+            return False
+        if position.is_liquidated:
+            return False
+        return elapsed_seconds > 0
+
+    def _resolve_lending_timestamp(
+        self,
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+        timestamp: datetime | None,
+        purpose: str,
+    ) -> datetime:
         if timestamp is not None:
-            apy_timestamp = timestamp
-        elif hasattr(market_state, "timestamp") and market_state.timestamp is not None:
-            apy_timestamp = market_state.timestamp
-        else:
-            if self._config.strict_reproducibility:
-                msg = (
-                    f"No simulation timestamp available for lending position {position.position_id} "
-                    "APY lookup. In strict reproducibility mode, timestamp must be provided. "
-                    "Either pass timestamp parameter or ensure market_state.timestamp is set."
-                )
-                raise ValueError(msg)
-            logger.warning(
-                "No simulation timestamp available for lending position %s APY lookup, "
-                "falling back to datetime.now(). This breaks backtest reproducibility.",
-                position.position_id,
+            return timestamp
+        if hasattr(market_state, "timestamp") and market_state.timestamp is not None:
+            return market_state.timestamp
+        if self._config.strict_reproducibility:
+            purpose_suffix = f" {purpose}" if purpose else ""
+            msg = (
+                f"No simulation timestamp available for lending position {position.position_id}{purpose_suffix}. "
+                "In strict reproducibility mode, timestamp must be provided. "
+                "Either pass timestamp parameter or ensure market_state.timestamp is set."
             )
-            apy_timestamp = datetime.now()
+            raise ValueError(msg)
+        warning_suffix = f" {purpose}" if purpose else ""
+        logger.warning(
+            "No simulation timestamp available for lending position %s%s, "
+            "falling back to datetime.now(). This breaks backtest reproducibility.",
+            position.position_id,
+            warning_suffix,
+        )
+        return datetime.now(UTC)
 
-        # Get APY based on position type and rate source
-        apy_confidence = DataConfidence.LOW.value  # Default
-        apy_data_source = "fallback:default_rate"  # Default
-
+    def _resolve_lending_apy(
+        self,
+        position: "SimulatedPosition",
+        protocol: str,
+        primary_token: str,
+        apy_timestamp: datetime,
+    ) -> _LendingAPYResolution:
         if position.apy_at_entry:
-            # Use position's entry APY if available
-            apy = position.apy_at_entry
-            apy_data_source = "position_entry"
-            apy_confidence = DataConfidence.MEDIUM.value
-        elif self._use_historical_apy():
-            # Use historical APY from BacktestDataConfig providers
-            supply_apy, borrow_apy, confidence, source = self._get_historical_apy(
+            return _LendingAPYResolution(
+                apy=position.apy_at_entry,
+                confidence=DataConfidence.MEDIUM.value,
+                data_source="position_entry",
+            )
+        if self._use_historical_apy():
+            return self._historical_lending_apy(position, protocol, primary_token, apy_timestamp)
+        if self._config.interest_rate_source == "historical":
+            return self._legacy_historical_lending_apy(position, protocol, primary_token, apy_timestamp)
+        return self._fixed_lending_apy(position, protocol)
+
+    def _historical_lending_apy(
+        self,
+        position: "SimulatedPosition",
+        protocol: str,
+        primary_token: str,
+        apy_timestamp: datetime,
+    ) -> _LendingAPYResolution:
+        supply_apy, borrow_apy, confidence, source = self._get_historical_apy(
+            protocol=protocol,
+            market=primary_token,
+            timestamp=apy_timestamp,
+        )
+        return _LendingAPYResolution(
+            apy=self._apy_for_position_type(position, supply_apy, borrow_apy),
+            confidence=confidence,
+            data_source=source,
+        )
+
+    def _legacy_historical_lending_apy(
+        self,
+        position: "SimulatedPosition",
+        protocol: str,
+        primary_token: str,
+        apy_timestamp: datetime,
+    ) -> _LendingAPYResolution:
+        if position.position_type == PositionType.SUPPLY:
+            apy = self._interest_calculator.get_historical_supply_apy_sync(
                 protocol=protocol,
                 market=primary_token,
                 timestamp=apy_timestamp,
             )
-            if position.position_type == PositionType.SUPPLY:
-                apy = supply_apy
-            else:
-                apy = borrow_apy
-            apy_confidence = confidence
-            apy_data_source = source
-        elif self._config.interest_rate_source == "historical":
-            # Use legacy historical APY from InterestCalculator
-            if position.position_type == PositionType.SUPPLY:
-                apy = self._interest_calculator.get_historical_supply_apy_sync(
-                    protocol=protocol,
-                    market=primary_token,
-                    timestamp=apy_timestamp,
-                )
-            else:
-                apy = self._interest_calculator.get_historical_borrow_apy_sync(
-                    protocol=protocol,
-                    market=primary_token,
-                    timestamp=apy_timestamp,
-                )
-            apy_data_source = "legacy_historical"
-            apy_confidence = DataConfidence.MEDIUM.value
         else:
-            # Use fixed/protocol default APY
-            if position.position_type == PositionType.SUPPLY:
-                apy = self._interest_calculator.get_supply_apy_for_protocol(protocol)
-            else:
-                apy = self._interest_calculator.get_borrow_apy_for_protocol(protocol)
-            apy_data_source = f"fixed:{self._config.interest_rate_source}"
-            apy_confidence = DataConfidence.LOW.value
+            apy = self._interest_calculator.get_historical_borrow_apy_sync(
+                protocol=protocol,
+                market=primary_token,
+                timestamp=apy_timestamp,
+            )
+        return _LendingAPYResolution(
+            apy=apy,
+            confidence=DataConfidence.MEDIUM.value,
+            data_source="legacy_historical",
+        )
 
-        # Update position confidence tracking
-        position.apy_confidence = apy_confidence
-        position.apy_data_source = apy_data_source
+    def _fixed_lending_apy(self, position: "SimulatedPosition", protocol: str) -> _LendingAPYResolution:
+        if position.position_type == PositionType.SUPPLY:
+            apy = self._interest_calculator.get_supply_apy_for_protocol(protocol)
+        else:
+            apy = self._interest_calculator.get_borrow_apy_for_protocol(protocol)
+        return _LendingAPYResolution(
+            apy=apy,
+            confidence=DataConfidence.LOW.value,
+            data_source=f"fixed:{self._config.interest_rate_source}",
+        )
 
-        # Calculate principal (current value without interest)
-        principal_amount = position.total_amount
+    @staticmethod
+    def _apy_for_position_type(
+        position: "SimulatedPosition",
+        supply_apy: Decimal,
+        borrow_apy: Decimal,
+    ) -> Decimal:
+        if position.position_type == PositionType.SUPPLY:
+            return supply_apy
+        return borrow_apy
 
+    def _lending_token_price(
+        self,
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+        primary_token: str,
+        timestamp: datetime,
+        context: str,
+    ) -> Decimal:
         try:
             token_price = market_state.get_price(primary_token)
         except KeyError:
-            token_price = position.entry_price
+            token_price = None
 
-        if token_price is None or token_price <= 0:
-            token_price = position.entry_price
+        if token_price is not None and token_price > 0:
+            return token_price
 
-        principal_usd = principal_amount * token_price
-
-        # Calculate interest
-        use_compound = self._config.interest_accrual_method == "compound"
-        interest_result = self._interest_calculator.calculate_interest(
-            principal=principal_usd,
-            apy=apy,
-            time_delta=elapsed_days,
-            compound=use_compound,
-        )
-
-        # Update position interest
-        position.interest_accrued += interest_result.interest
-
-        # For borrow positions, update health factor
-        if position.position_type == PositionType.BORROW and self._config.health_factor_tracking_enabled:
-            self._update_borrow_health_factor(position, principal_usd, protocol)
-
-        # Update timestamp using simulation time for reproducibility
-        # Prefer explicit timestamp > market_state.timestamp > datetime.now() (with warning)
-        if timestamp is not None:
-            update_time = timestamp
-        elif hasattr(market_state, "timestamp") and market_state.timestamp is not None:
-            update_time = market_state.timestamp
-        else:
-            if self._config.strict_reproducibility:
-                msg = (
-                    f"No simulation timestamp available for lending position {position.position_id}. "
-                    "In strict reproducibility mode, timestamp must be provided. "
-                    "Either pass timestamp parameter or ensure market_state.timestamp is set."
-                )
-                raise ValueError(msg)
-            logger.warning(
-                "No simulation timestamp available for lending position %s, "
-                "falling back to datetime.now(). This breaks backtest reproducibility.",
-                position.position_id,
+        if self._config.strict_reproducibility:
+            raise HistoricalDataUnavailableError(
+                data_type="price",
+                identifier=primary_token,
+                timestamp=timestamp,
+                message=f"Price unavailable for {primary_token} in {context}",
+                protocol=position.protocol,
             )
-            update_time = datetime.now()
-        position.last_updated = update_time
 
-        # Log interest accrual at INFO level for visibility
-        if interest_result.interest > Decimal("0.01"):  # Only log meaningful interest
+        return position.entry_price
+
+    @staticmethod
+    def _log_lending_update(
+        position: "SimulatedPosition",
+        principal_usd: Decimal,
+        interest: Decimal,
+        apy_resolution: _LendingAPYResolution,
+    ) -> None:
+        if interest > Decimal("0.01"):
             logger.info(
                 "Interest accrued: position=%s, type=%s, principal=$%.2f, "
                 "interest=$%.4f, total_accrued=$%.4f, APY=%.2f%% (source: %s, confidence: %s)",
                 position.position_id,
                 position.position_type.value,
                 float(principal_usd),
-                float(interest_result.interest),
+                float(interest),
                 float(position.interest_accrued),
-                float(apy * 100),
-                apy_data_source,
-                apy_confidence,
+                float(apy_resolution.apy * 100),
+                apy_resolution.data_source,
+                apy_resolution.confidence,
             )
         else:
             logger.debug(
@@ -1388,11 +1453,11 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
                 position.position_id,
                 position.position_type.value,
                 float(principal_usd),
-                float(interest_result.interest),
+                float(interest),
                 float(position.interest_accrued),
                 f"{float(position.health_factor):.4f}" if position.health_factor else "N/A",
-                apy_data_source,
-                apy_confidence,
+                apy_resolution.data_source,
+                apy_resolution.confidence,
             )
 
     def _update_borrow_health_factor(
@@ -1557,19 +1622,18 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
         """
         # Note: timestamp parameter accepted for interface consistency
         # Lending valuation is based on current market prices, not time-dependent
-        _ = timestamp
+        price_timestamp = self._lending_price_timestamp(position, market_state, timestamp)
         # Get primary token and amount
         primary_token = position.primary_token
         amount = position.total_amount
 
-        # Get current price
-        try:
-            current_price = market_state.get_price(primary_token)
-        except KeyError:
-            current_price = position.entry_price
-
-        if current_price is None or current_price <= 0:
-            current_price = position.entry_price
+        current_price = self._lending_token_price(
+            position,
+            market_state,
+            primary_token,
+            price_timestamp,
+            "lending position valuation",
+        )
 
         # Calculate principal value
         principal_value = amount * current_price
@@ -1590,6 +1654,20 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
         )
 
         return total_value
+
+    @staticmethod
+    def _lending_price_timestamp(
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+        timestamp: datetime | None,
+    ) -> datetime:
+        if timestamp is not None:
+            return timestamp
+        if hasattr(market_state, "timestamp") and market_state.timestamp is not None:
+            return market_state.timestamp
+        if position.last_updated is not None:
+            return position.last_updated
+        return position.entry_time
 
     def should_rebalance(
         self,
@@ -1673,98 +1751,123 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
             This method only processes BORROW positions.
             SUPPLY positions cannot be liquidated.
         """
-        # Only process borrow positions
+        health_factor = self._liquidatable_health_factor(position)
+        if health_factor is None:
+            return None
+
+        plan = self._lending_liquidation_plan(position, market_state)
+        if plan is None:
+            return None
+
+        self._apply_lending_liquidation_plan(position, plan, timestamp, health_factor)
+        event = self._lending_liquidation_event(position, timestamp, health_factor, plan)
+        self._log_lending_liquidation(position, health_factor, plan)
+        return event
+
+    def _liquidatable_health_factor(self, position: "SimulatedPosition") -> Decimal | None:
         if position.position_type != PositionType.BORROW:
             return None
-
-        # Skip if already liquidated
         if position.is_liquidated:
             return None
-
-        # Skip if liquidation model is disabled
         if not self._config.liquidation_model_enabled:
             return None
 
-        # Get health factor
         health_factor = position.health_factor
         if health_factor is None or health_factor >= Decimal("1.0"):
             return None
+        return health_factor
 
-        # Position is undercollateralized - simulate liquidation
-
-        # Get current debt value
+    def _lending_liquidation_plan(
+        self,
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+    ) -> _LendingLiquidationPlan | None:
         debt_value = self.value_position(position, market_state)
+        if debt_value <= Decimal("0"):
+            return None
 
-        # Calculate debt to repay (close factor)
-        debt_to_repay = debt_value * self._config.liquidation_close_factor
-
-        # Calculate collateral to seize (debt + penalty)
-        collateral_to_seize = debt_to_repay * (Decimal("1") + self._config.liquidation_penalty)
-
-        # Get tracked collateral for this position
         collateral_key = f"collateral_{position.position_id}"
         total_collateral = self._position_collateral.get(collateral_key, Decimal("0"))
-
-        # Cap collateral seized at available collateral
+        debt_to_repay = debt_value * self._config.liquidation_close_factor
+        collateral_to_seize = debt_to_repay * (Decimal("1") + self._config.liquidation_penalty)
         if collateral_to_seize > total_collateral:
             collateral_to_seize = total_collateral
+            debt_to_repay = collateral_to_seize / (Decimal("1") + self._config.liquidation_penalty)
 
-        # Update position debt
+        remaining_ratio = self._remaining_debt_ratio(debt_value, debt_to_repay)
         primary_token = position.primary_token
-        try:
-            token_price = market_state.get_price(primary_token)
-        except KeyError:
-            token_price = position.entry_price
-        if token_price is None or token_price <= 0:
-            token_price = position.entry_price
-
-        # Reduce debt by repaid amount (in token terms)
-        debt_reduction_tokens = debt_to_repay / token_price if token_price > 0 else Decimal("0")
         current_amount = position.amounts.get(primary_token, Decimal("0"))
-        new_amount = max(Decimal("0"), current_amount - debt_reduction_tokens)
+        remaining_amount = current_amount * remaining_ratio
+        remaining_interest = position.interest_accrued * remaining_ratio
 
-        # Proportionally reduce accrued interest when debt is reduced
-        if current_amount > 0 and hasattr(position, "interest_accrued"):
-            reduction_ratio = new_amount / current_amount
-            position.interest_accrued = position.interest_accrued * reduction_ratio
+        return _LendingLiquidationPlan(
+            collateral_key=collateral_key,
+            total_collateral=total_collateral,
+            collateral_seized=collateral_to_seize,
+            debt_repaid=debt_to_repay,
+            remaining_amount=remaining_amount,
+            remaining_interest=remaining_interest,
+        )
 
-        position.amounts[primary_token] = new_amount
+    @staticmethod
+    def _remaining_debt_ratio(debt_value: Decimal, debt_repaid: Decimal) -> Decimal:
+        if debt_value <= Decimal("0"):
+            return Decimal("0")
+        remaining_debt = max(Decimal("0"), debt_value - debt_repaid)
+        return remaining_debt / debt_value
 
-        # Update collateral tracking
-        self._position_collateral[collateral_key] = total_collateral - collateral_to_seize
+    def _apply_lending_liquidation_plan(
+        self,
+        position: "SimulatedPosition",
+        plan: _LendingLiquidationPlan,
+        timestamp: datetime,
+        health_factor: Decimal,
+    ) -> None:
+        primary_token = position.primary_token
+        position.amounts[primary_token] = plan.remaining_amount
+        position.interest_accrued = plan.remaining_interest
+        self._position_collateral[plan.collateral_key] = plan.total_collateral - plan.collateral_seized
 
-        # Check if position is fully liquidated
-        if new_amount <= Decimal("0"):
+        if plan.remaining_amount <= Decimal("0") and plan.remaining_interest <= Decimal("0"):
             position.is_liquidated = True
 
-        # Update position metadata
         position.last_updated = timestamp
         position.metadata["liquidation_timestamp"] = timestamp.isoformat()
         position.metadata["liquidation_health_factor"] = str(health_factor)
-        position.metadata["debt_repaid"] = str(debt_to_repay)
-        position.metadata["collateral_seized"] = str(collateral_to_seize)
+        position.metadata["debt_repaid"] = str(plan.debt_repaid)
+        position.metadata["collateral_seized"] = str(plan.collateral_seized)
 
-        # Create liquidation event
-        event = LendingLiquidationEvent(
+    def _lending_liquidation_event(
+        self,
+        position: "SimulatedPosition",
+        timestamp: datetime,
+        health_factor: Decimal,
+        plan: _LendingLiquidationPlan,
+    ) -> LendingLiquidationEvent:
+        return LendingLiquidationEvent(
             timestamp=timestamp,
             position_id=position.position_id,
             health_factor=health_factor,
-            collateral_seized=collateral_to_seize,
-            debt_repaid=debt_to_repay,
+            collateral_seized=plan.collateral_seized,
+            debt_repaid=plan.debt_repaid,
             penalty=self._config.liquidation_penalty,
         )
 
+    def _log_lending_liquidation(
+        self,
+        position: "SimulatedPosition",
+        health_factor: Decimal,
+        plan: _LendingLiquidationPlan,
+    ) -> None:
         logger.warning(
             "LIQUIDATION: Position %s liquidated at HF=%.4f. "
             "Debt repaid: $%.2f, Collateral seized: $%.2f (penalty=%.1f%%)",
             position.position_id,
             float(health_factor),
-            float(debt_to_repay),
-            float(collateral_to_seize),
+            float(plan.debt_repaid),
+            float(plan.collateral_seized),
             float(self._config.liquidation_penalty * 100),
         )
-
-        return event
 
     def set_position_collateral(
         self,

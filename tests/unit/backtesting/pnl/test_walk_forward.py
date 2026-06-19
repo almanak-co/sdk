@@ -27,6 +27,13 @@ from almanak.framework.backtesting.pnl.walk_forward import (
 )
 
 
+def _window_result_with_params(params: dict[str, object]) -> MagicMock:
+    wr = MagicMock()
+    wr.optimization_result = MagicMock()
+    wr.optimization_result.best_params = params
+    return wr
+
+
 class TestWalkForwardWindow:
     """Tests for WalkForwardWindow dataclass."""
 
@@ -400,6 +407,23 @@ class TestSplitWalkForward:
         assert len(windows) >= 2
         assert all(w.train_duration == timedelta(days=90) for w in windows)
         assert all(w.test_duration == timedelta(days=30) for w in windows)
+
+    def test_config_takes_precedence_over_individual_sizes(self) -> None:
+        """Explicit config owns sizing when individual params disagree."""
+        config = WalkForwardConfig.from_days(30, 10, min_windows=1)
+
+        windows = split_walk_forward(
+            start_date=datetime(2023, 1, 1),
+            end_date=datetime(2023, 4, 1),
+            config=config,
+            train_size=timedelta(days=90),
+            test_size=timedelta(days=30),
+            min_windows=3,
+        )
+
+        assert windows
+        assert all(window.train_duration == timedelta(days=30) for window in windows)
+        assert all(window.test_duration == timedelta(days=10) for window in windows)
 
     def test_overlapping_windows(self) -> None:
         """Test overlapping windows with small step."""
@@ -1399,6 +1423,60 @@ class TestCalculateParameterStability:
 
         # Different categorical values -> unstable
         assert stability["strategy_type"].is_stable is False
+
+    def test_zero_mean_numeric_parameter_uses_std_as_cv(self) -> None:
+        """Near-zero means use standard deviation as the instability signal."""
+        results = [
+            _window_result_with_params({"position_delta": Decimal("-1")}),
+            _window_result_with_params({"position_delta": Decimal("1")}),
+        ]
+
+        stability = calculate_parameter_stability(results)
+
+        position_delta = stability["position_delta"]
+        assert position_delta.mean == 0.0
+        assert position_delta.std == 1.0
+        assert position_delta.cv == 1.0
+        assert position_delta.is_stable is False
+
+    def test_parameter_seen_once_is_stable_single_sample(self) -> None:
+        """Parameters optimized in only one window are reported as single samples."""
+        results = [
+            _window_result_with_params({"rare_param": Decimal("7")}),
+            _window_result_with_params({}),
+            _window_result_with_params({}),
+        ]
+
+        stability = calculate_parameter_stability(results)
+
+        rare_param = stability["rare_param"]
+        assert rare_param.values == [Decimal("7")]
+        assert rare_param.cv == 0.0
+        assert rare_param.is_stable is True
+
+    def test_mixed_numeric_and_categorical_values_are_unstable(self) -> None:
+        """Type drift across windows is categorical instability, not numeric stability."""
+        results = [
+            _window_result_with_params({"risk_mode": Decimal("1")}),
+            _window_result_with_params({"risk_mode": "auto"}),
+        ]
+
+        stability = calculate_parameter_stability(results)
+
+        risk_mode = stability["risk_mode"]
+        assert risk_mode.mean == 0.0
+        assert risk_mode.cv == float("inf")
+        assert risk_mode.is_stable is False
+
+    def test_invalid_numeric_value_is_skipped_with_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Unexpected numeric conversion failures do not poison the whole report."""
+        results = [_window_result_with_params({"bad_param": Decimal("sNaN")})]
+
+        with caplog.at_level("WARNING"):
+            stability = calculate_parameter_stability(results)
+
+        assert stability == {}
+        assert "Could not analyze stability for parameter: bad_param" in caplog.text
 
 
 class TestWalkForwardResultInstability:

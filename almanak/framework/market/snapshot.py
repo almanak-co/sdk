@@ -4953,6 +4953,22 @@ class MarketSnapshot:
         """Seed a ``TokenBalance`` for a token."""
         self.set_balance(token, balance)
 
+    def seed_balance_usd_unmeasured(self, token: str, balance: TokenBalance) -> None:
+        """Seed a token amount whose USD value was not measured.
+
+        Public seeding counterpart to provider results that supply a measured
+        token amount but no trustworthy USD mark. ``balance_usd`` remains the
+        ``Decimal("0")`` unmeasured sentinel until a caller supplies a price or
+        warms the price cache.
+        """
+        if not isinstance(balance, TokenBalance):
+            raise TypeError(f"seed_balance_usd_unmeasured requires TokenBalance, got {type(balance).__name__}")
+        cache_key = f"{token}@{self._chain}"
+        self._balances.pop(token, None)
+        self._balance_cache[cache_key] = balance
+        self._balance_usd_unmeasured.add(cache_key)
+        self._balance_usd_unmeasured.discard(token)
+
     def seed_rsi(
         self,
         token: str,

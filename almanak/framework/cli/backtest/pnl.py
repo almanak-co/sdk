@@ -95,6 +95,19 @@ class WarmCacheOutcome:
         return self.successful_warms / self.total_tokens
 
 
+@dataclass
+class _PnlRuntime:
+    strategy_config: dict[str, Any]
+    strategy_instance: Any
+    token_addresses: dict[str, tuple[str, str]]
+    backtester: PnLBacktester
+    cache: DataCache | None
+
+    @property
+    def cache_stats(self) -> CacheStats | None:
+        return self.cache.stats if self.cache is not None else None
+
+
 # =============================================================================
 # Phase helpers (Phase 5B.1 extractions)
 # =============================================================================
@@ -160,6 +173,13 @@ def _load_config_from_result(
     except ConfigLoadError as e:
         click.echo(f"Error loading config: {e}", err=True)
         raise click.Abort() from e
+
+
+def _load_optional_result_config(from_result: str | None) -> tuple[PnLBacktestConfig | None, bool]:
+    if not from_result:
+        return None, False
+    pnl_config, _result_metadata, loaded_from_result = _load_config_from_result(from_result)
+    return pnl_config, loaded_from_result
 
 
 def _validate_and_build_context(
@@ -332,6 +352,154 @@ def _build_volume_data_config(
     return BacktestDataConfig(**kwargs)
 
 
+def _warn_if_strict_warm_is_inert(strict_warm: bool, warm_cache: bool) -> None:
+    if strict_warm and not warm_cache:
+        click.echo(
+            "Warning: --strict-warm has no effect without --warm-cache.",
+            err=True,
+        )
+
+
+def _apply_missing_price_policy(ctx: PnLBacktestContext, allow_missing_prices: bool) -> None:
+    if not allow_missing_prices:
+        return
+    ctx.pnl_config.fail_on_preflight_error = False
+    click.echo(
+        "Warning: --allow-missing-prices continues even when a tracked asset has no "
+        "price history; results for that asset are degraded.",
+        err=True,
+    )
+
+
+def _handle_pnl_dry_run(dry_run: bool) -> bool:
+    if not dry_run:
+        return False
+    click.echo()
+    click.echo("Dry run - backtest not executed.")
+    return True
+
+
+def _load_strategy_runtime_config(ctx: PnLBacktestContext, config_file: str | None) -> dict[str, Any]:
+    if config_file:
+        with open(config_file) as f:
+            strategy_config = json.load(f)
+        click.echo(f"Loaded config from: {config_file}")
+        return strategy_config
+    return load_strategy_config(ctx.strategy, ctx.pnl_config.chain)
+
+
+def _create_pnl_strategy_instance(ctx: PnLBacktestContext, strategy_config: dict[str, Any]) -> Any:
+    strategy_class = get_strategy(ctx.strategy)
+    strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, ctx.pnl_config.chain)
+    fallback_id = (
+        strategy_config.get("deployment_id")
+        or strategy_config.get("name")
+        or ctx.strategy
+        or strategy_instance.__class__.__name__
+    )
+    ensure_deployment_id(strategy_instance, fallback=fallback_id)
+    return strategy_instance
+
+
+def _build_pnl_token_addresses(
+    ctx: PnLBacktestContext,
+    strategy_config: dict[str, Any],
+) -> dict[str, tuple[str, str]]:
+    return build_token_address_map(
+        strategy_config=strategy_config,
+        tracked_tokens=ctx.token_list,
+        chain=ctx.pnl_config.chain,
+    )
+
+
+def _new_pnl_data_provider(token_addresses: dict[str, tuple[str, str]]) -> CoinGeckoDataProvider:
+    from ...backtesting.pnl.providers.coingecko import RetryConfig
+
+    return CoinGeckoDataProvider(
+        retry_config=RetryConfig.for_backtest(),
+        persistent_cache=True,
+        historical_cache_ttl=0,
+        token_addresses=token_addresses,
+    )
+
+
+def _prepare_pnl_runtime(
+    *,
+    ctx: PnLBacktestContext,
+    config_file: str | None,
+    warm_cache: bool,
+    strict_warm: bool,
+    start: datetime | None,
+    end: datetime | None,
+    interval: int,
+    volume_data_config: BacktestDataConfig | None,
+) -> _PnlRuntime:
+    strategy_config = _load_strategy_runtime_config(ctx, config_file)
+    strategy_instance = _create_pnl_strategy_instance(ctx, strategy_config)
+    token_addresses = _build_pnl_token_addresses(ctx, strategy_config)
+
+    click.echo()
+    click.echo("Initializing CoinGecko data provider...")
+
+    cache: DataCache | None = None
+    if warm_cache:
+        cache = _warm_cache(ctx, start, end, interval, strict=strict_warm, token_addresses=token_addresses)
+
+    backtester = PnLBacktester(
+        data_provider=_new_pnl_data_provider(token_addresses),
+        fee_models={},
+        slippage_models={},
+        data_config=volume_data_config,
+    )
+    return _PnlRuntime(
+        strategy_config=strategy_config,
+        strategy_instance=strategy_instance,
+        token_addresses=token_addresses,
+        backtester=backtester,
+        cache=cache,
+    )
+
+
+def _print_pnl_result_summary(result: BacktestResult) -> None:
+    click.echo()
+    click.echo("=" * 60)
+    click.echo("BACKTEST RESULTS")
+    click.echo("=" * 60)
+    click.echo(result.summary())
+    _emit_missing_volume_hint_for_result(result)
+
+
+def _write_pnl_outputs(
+    *,
+    result: BacktestResult,
+    ctx: PnLBacktestContext,
+    benchmark: str,
+    cache_stats: CacheStats | None,
+    chart: bool,
+    chart_format: str,
+    report: bool,
+) -> None:
+    _write_json_output(result, ctx.output_path, benchmark, cache_stats)
+    if chart:
+        _generate_chart(result, ctx.strategy, ctx.output_path, chart_format)
+    if report:
+        _generate_html_report(result, ctx.strategy, ctx.output_path)
+
+
+def _exit_if_pnl_failed(result: BacktestResult) -> None:
+    if result.success:
+        return
+    click.echo()
+    click.echo(f"Error: backtest failed: {result.error}", err=True)
+    sys.exit(1)
+
+
+def _print_pnl_followup_tip() -> None:
+    click.echo()
+    click.echo("Tip: Try 'almanak backtest sweep' to test multiple parameter combinations,")
+    click.echo("     or 'almanak backtest optimize' for Bayesian hyperparameter tuning.")
+
+
 # =============================================================================
 # Phase 5B.2 extractions: execution + output helpers
 # =============================================================================
@@ -403,10 +571,6 @@ async def _warm_cache_async(
     )
 
 
-# crap-allowlist: pre-existing CLI command body (cc=11 on main, unchanged by this PR); the
-# only addition is the token_addresses param + provider kwarg for dynamic coin-id resolution.
-# Score is coverage-driven (CLI bodies have no unit harness). Coverage backfill / decomposition
-# tracked as a follow-up (file under AGI - Strategist / VibeCoders).
 def _warm_cache(
     ctx: PnLBacktestContext,
     start: datetime | None,
@@ -1163,10 +1327,7 @@ def pnl_backtest(
         return
 
     # Phase 2: --from-result load (may abort)
-    pnl_config: PnLBacktestConfig | None = None
-    loaded_from_result = False
-    if from_result:
-        pnl_config, _result_metadata, loaded_from_result = _load_config_from_result(from_result)
+    pnl_config, loaded_from_result = _load_optional_result_config(from_result)
 
     # Phases 3+4: validate + build context
     ctx = _validate_and_build_context(
@@ -1200,126 +1361,48 @@ def pnl_backtest(
         allow_volume_fallback=allow_volume_fallback,
     )
 
-    # `--strict-warm` without `--warm-cache` is inert — surface it on every
-    # invocation path (including `--dry-run`) so the contract is uniform.
-    # Must run BEFORE the dry-run early return; otherwise dry-run invocations
-    # silently swallow the warning even though the flag is equally inert.
-    if strict_warm and not warm_cache:
-        click.echo(
-            "Warning: --strict-warm has no effect without --warm-cache.",
-            err=True,
-        )
-
-    # --allow-missing-prices opts out of the priceability guard: a tracked
-    # non-cash token with no price history becomes a degraded run instead of a
-    # hard preflight abort. Mirrors --allow-volume-fallback; echoed before the
-    # dry-run return so the contract is uniform across invocation paths.
-    if allow_missing_prices:
-        ctx.pnl_config.fail_on_preflight_error = False
-        click.echo(
-            "Warning: --allow-missing-prices continues even when a tracked asset has no "
-            "price history; results for that asset are degraded.",
-            err=True,
-        )
+    _warn_if_strict_warm_is_inert(strict_warm, warm_cache)
+    _apply_missing_price_policy(ctx, allow_missing_prices)
 
     # Phase 6: --dry-run early exit
-    if dry_run:
-        click.echo()
-        click.echo("Dry run - backtest not executed.")
+    if _handle_pnl_dry_run(dry_run):
         return
 
-    # Phase 7: load strategy configuration and build instance
-    if config_file:
-        with open(config_file) as f:
-            strategy_config = json.load(f)
-        click.echo(f"Loaded config from: {config_file}")
-    else:
-        strategy_config = load_strategy_config(ctx.strategy, ctx.pnl_config.chain)
-
-    # Resolve strategy class. The earlier validation guarantees the strategy is
-    # registered, so get_strategy() must not raise here.
-    strategy_class = get_strategy(ctx.strategy)
-    strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, ctx.pnl_config.chain)
-
-    fallback_id = (
-        strategy_config.get("deployment_id")
-        or strategy_config.get("name")
-        or ctx.strategy
-        or strategy_instance.__class__.__name__
-    )
-    ensure_deployment_id(strategy_instance, fallback=fallback_id)
-
-    # Build the SYMBOL -> (chain, address) map that lets the CoinGecko provider
-    # resolve each non-native ERC20's coin id dynamically via the contract
-    # endpoint (Refinement R1). Natives resolve via the chain registry and need
-    # no entry; a tracked symbol with no native/registry address is left out and
-    # surfaces as an honest preflight miss.
-    token_addresses = build_token_address_map(
-        strategy_config=strategy_config,
-        tracked_tokens=ctx.token_list,
-        chain=ctx.pnl_config.chain,
-    )
-
-    # Phase 8: initialize data provider for the backtest run
-    click.echo()
-    click.echo("Initializing CoinGecko data provider...")
-    from ...backtesting.pnl.providers.coingecko import RetryConfig
-
-    # Phase 9: warm cache (uses its own provider internally; closes it when done).
-    # The `--strict-warm without --warm-cache` no-op warning is emitted earlier,
-    # before the dry-run early return, so it fires on every invocation path.
-    cache: DataCache | None = None
-    if warm_cache:
-        cache = _warm_cache(ctx, start, end, interval, strict=strict_warm, token_addresses=token_addresses)
-
-    # Fresh data provider for the backtest run. Matches the original two-step
-    # sequence: warming uses a throwaway provider (closed in its own finally),
-    # then we create this one for the actual backtest.
-    data_provider = CoinGeckoDataProvider(
-        retry_config=RetryConfig.for_backtest(),
-        persistent_cache=True,
-        historical_cache_ttl=0,
-        token_addresses=token_addresses,
-    )
-
-    # Phase 10: run the backtest
-    backtester = PnLBacktester(
-        data_provider=data_provider,
-        fee_models={},
-        slippage_models={},
-        data_config=volume_data_config,
+    runtime = _prepare_pnl_runtime(
+        ctx=ctx,
+        config_file=config_file,
+        warm_cache=warm_cache,
+        strict_warm=strict_warm,
+        start=start,
+        end=end,
+        interval=interval,
+        volume_data_config=volume_data_config,
     )
 
     click.echo()
     click.echo("Starting PnL backtest...")
     click.echo()
 
-    result = _run_backtest(backtester, strategy_instance, ctx.pnl_config)
-
-    cache_stats: CacheStats | None = cache.stats if cache is not None else None
+    result = _run_backtest(runtime.backtester, runtime.strategy_instance, ctx.pnl_config)
 
     # Phase 11: display results summary
-    click.echo()
-    click.echo("=" * 60)
-    click.echo("BACKTEST RESULTS")
-    click.echo("=" * 60)
-    click.echo(result.summary())
-
-    # Missing-volume fail-loud captured into the result by the engine's error
-    # handler (rather than raised) still gets the CLI-flag hint.
-    _emit_missing_volume_hint_for_result(result)
+    _print_pnl_result_summary(result)
 
     # Phases 12-14: print benchmark, cache, verbose-trade sections
     _print_benchmark_comparison(ctx, result, benchmark, start, end, interval)
-    _print_cache_stats(cache_stats)
+    _print_cache_stats(runtime.cache_stats)
     _print_verbose_trades(result, verbose)
 
     # Phases 15-17: write JSON + optional chart + optional HTML report
-    _write_json_output(result, ctx.output_path, benchmark, cache_stats)
-    if chart:
-        _generate_chart(result, ctx.strategy, ctx.output_path, chart_format)
-    if report:
-        _generate_html_report(result, ctx.strategy, ctx.output_path)
+    _write_pnl_outputs(
+        result=result,
+        ctx=ctx,
+        benchmark=benchmark,
+        cache_stats=runtime.cache_stats,
+        chart=chart,
+        chart_format=chart_format,
+        report=report,
+    )
 
     # Phase 18: exit-code contract. The engine converts fatal simulation
     # errors into a partial result with `error` set instead of raising
@@ -1329,12 +1412,7 @@ def pnl_backtest(
     # still produced first — the JSON carries the diagnostic detail, the
     # exit code carries the verdict. Recoverable errors in `result.errors`
     # with no fatal `result.error` keep exit 0: the simulation completed.
-    if not result.success:
-        click.echo()
-        click.echo(f"Error: backtest failed: {result.error}", err=True)
-        sys.exit(1)
+    _exit_if_pnl_failed(result)
 
     # Phase 19: post-backtest tip
-    click.echo()
-    click.echo("Tip: Try 'almanak backtest sweep' to test multiple parameter combinations,")
-    click.echo("     or 'almanak backtest optimize' for Bayesian hyperparameter tuning.")
+    _print_pnl_followup_tip()

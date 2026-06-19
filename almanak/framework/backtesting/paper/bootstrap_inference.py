@@ -206,9 +206,68 @@ def _flatten_intents(result: Any) -> list[Any]:
             flat.extend(_flatten_intents(item))
         return flat
     elif isinstance(result, IntentSequence):
-        return list(result.intents)
+        return _flatten_intents(list(result.intents))
     else:
         return [result]
+
+
+def _single_token_attrs(intent_type: Any) -> tuple[str, ...]:
+    from almanak.framework.intents.vocabulary import IntentType
+
+    return {
+        IntentType.SWAP: ("from_token",),
+        IntentType.SUPPLY: ("token",),
+        IntentType.REPAY: ("token",),
+        IntentType.PERP_OPEN: ("collateral_token",),
+        IntentType.VAULT_DEPOSIT: ("deposit_token", "token"),
+        IntentType.BRIDGE: ("from_token", "token"),
+    }.get(intent_type, ())
+
+
+def _first_attr(intent: Any, attrs: tuple[str, ...]) -> Any:
+    for attr in attrs:
+        value = getattr(intent, attr, None)
+        if value:
+            return value
+    return None
+
+
+def _single_token_requirement(intent: Any, attrs: tuple[str, ...]) -> dict[str, Decimal]:
+    token = _first_attr(intent, attrs)
+    if not token:
+        return {}
+    return {token: _resolve_amount(intent, token)}
+
+
+def _symbolic_pool_pair(pool: Any) -> tuple[str, str] | None:
+    if not isinstance(pool, str):
+        return None
+    candidate = pool.strip()
+    if not candidate or candidate.lower().startswith("0x") or "/" not in candidate:
+        return None
+    segments = [segment.strip() for segment in candidate.split("/")]
+    if len(segments) < 2 or not segments[0] or not segments[1]:
+        return None
+    return segments[0].upper(), segments[1].upper()
+
+
+def _positive_decimal(value: Any) -> Decimal | None:
+    if type(value) is Decimal and value > 0:
+        return value
+    return None
+
+
+def _lp_open_requirements(intent: Any) -> dict[str, Decimal]:
+    pool_pair = _symbolic_pool_pair(getattr(intent, "pool", None))
+    if pool_pair is None:
+        return {}
+
+    tokens: dict[str, Decimal] = {}
+    for token, amount_attr in zip(pool_pair, ("amount0", "amount1"), strict=True):
+        amount = _positive_decimal(getattr(intent, amount_attr, None))
+        if amount is not None:
+            tokens[token] = amount
+    return tokens
 
 
 def _extract_tokens_from_intent(intent: Any) -> dict[str, Decimal]:
@@ -217,7 +276,7 @@ def _extract_tokens_from_intent(intent: Any) -> dict[str, Decimal]:
     Returns:
         Dict of token -> amount needed for this intent.
     """
-    from almanak.framework.intents.vocabulary import HoldIntent, IntentType, SwapIntent
+    from almanak.framework.intents.vocabulary import HoldIntent, IntentType
 
     intent_type = getattr(intent, "intent_type", None)
     if intent_type is None:
@@ -226,41 +285,12 @@ def _extract_tokens_from_intent(intent: Any) -> dict[str, Decimal]:
     if isinstance(intent, HoldIntent) or intent_type == IntentType.HOLD:
         return {}
 
-    if isinstance(intent, SwapIntent) or intent_type == IntentType.SWAP:
-        token = getattr(intent, "from_token", None)
-        if token:
-            amount = _resolve_amount(intent, token)
-            return {token: amount}
+    if intent_type == IntentType.LP_OPEN:
+        return _lp_open_requirements(intent)
 
-    if intent_type == IntentType.SUPPLY:
-        token = getattr(intent, "token", None)
-        if token:
-            amount = _resolve_amount(intent, token)
-            return {token: amount}
-
-    if intent_type == IntentType.REPAY:
-        token = getattr(intent, "token", None)
-        if token:
-            amount = _resolve_amount(intent, token)
-            return {token: amount}
-
-    if intent_type == IntentType.PERP_OPEN:
-        token = getattr(intent, "collateral_token", None)
-        if token:
-            amount = _resolve_amount(intent, token)
-            return {token: amount}
-
-    if intent_type == IntentType.VAULT_DEPOSIT:
-        token = getattr(intent, "deposit_token", None) or getattr(intent, "token", None)
-        if token:
-            amount = _resolve_amount(intent, token)
-            return {token: amount}
-
-    if intent_type == IntentType.BRIDGE:
-        token = getattr(intent, "from_token", getattr(intent, "token", None))
-        if token:
-            amount = _resolve_amount(intent, token)
-            return {token: amount}
+    attrs = _single_token_attrs(intent_type)
+    if attrs:
+        return _single_token_requirement(intent, attrs)
 
     return {}
 

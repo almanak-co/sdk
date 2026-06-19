@@ -1,4 +1,4 @@
-"""Unit tests for ``PaperTrader.run_loop`` and ``PaperTrader._execute_intent``.
+"""Unit tests for paper-trader run-loop, tick, and intent execution paths.
 
 These tests pin the orchestration shape of the two top-level paper-trader
 entry points without spinning up a real Anvil fork or RPC orchestrator.
@@ -12,6 +12,7 @@ Coverage targets:
   ``_running``/``max_ticks`` exit, exception handling via
   ``handle_run_loop_exception``, ``finally`` teardown (cleanup + cached
   valuation + summary assembly), session-event emission.
+* ``_execute_tick``: fork-recovery failure emits a balanced start/end event pair.
 * ``_execute_intent``: missing-orchestrator early return, compile-failure
   branch (errors list + return None), success branch (delegates to
   ``_build_successful_trade``), non-success-result branch
@@ -31,7 +32,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from almanak.framework.backtesting.models import IntentType
-from almanak.framework.backtesting.paper.config import ForkLifecycle, PaperTraderConfig
+from almanak.framework.backtesting.paper.config import PaperTraderConfig
 from almanak.framework.backtesting.paper.engine import (
     PaperTradeEventType,
     PaperTrader,
@@ -274,6 +275,62 @@ class TestRunLoopErrorPath:
         assert summary.error_summary[PaperTradeErrorType.INTERNAL_ERROR.value] == 1
         # Cleanup still ran (finally).
         assert "cleanup" in spy["order"]
+
+
+class TestExecuteTickLifecycle:
+    @pytest.mark.asyncio
+    async def test_fork_recovery_failure_still_emits_tick_end(self) -> None:
+        events: list[tuple[str, dict[str, Any]]] = []
+
+        def _cb(kind: str, data: dict[str, Any]) -> None:
+            events.append((kind, data))
+
+        trader = _make_trader()
+        trader.event_callback = _cb  # type: ignore[assignment]
+
+        async def _reset_to_latest() -> bool:
+            return False
+
+        trader.fork_manager.reset_to_latest = _reset_to_latest  # type: ignore[attr-defined]
+
+        trade = await trader._execute_tick(_MockStrategy())
+
+        assert trade is None
+        assert [event[0] for event in events] == [
+            PaperTradeEventType.TICK_STARTED,
+            PaperTradeEventType.TICK_ENDED,
+        ]
+        assert events[-1][1]["tick_number"] == trader._tick_count
+        assert "duration_seconds" in events[-1][1]
+
+    @pytest.mark.asyncio
+    async def test_fatal_tick_error_emits_error_before_reraising(self) -> None:
+        events: list[tuple[str, dict[str, Any]]] = []
+
+        trader = _make_trader()
+
+        def _record_event(kind: str, data: dict[str, Any]) -> None:
+            events.append((kind, data))
+
+        trader.event_callback = _record_event  # type: ignore[assignment]
+        trader._error_handler = MagicMock(handle_error=MagicMock(return_value=SimpleNamespace(should_stop=True)))
+
+        async def _raise_fatal() -> bool:
+            raise RuntimeError("fatal tick")
+
+        trader._ensure_tick_fork_ready = _raise_fatal  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="fatal tick"):
+            await trader._execute_tick(_MockStrategy())
+
+        assert [event[0] for event in events] == [
+            PaperTradeEventType.TICK_STARTED,
+            PaperTradeEventType.ERROR,
+            PaperTradeEventType.TICK_ENDED,
+        ]
+        assert events[1][1] == {"error": "fatal tick", "tick_number": trader._tick_count}
+        assert trader._running is False
+        assert len(trader._errors) == 1
 
 
 # ---------------------------------------------------------------------------

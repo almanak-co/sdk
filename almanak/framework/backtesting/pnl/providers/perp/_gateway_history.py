@@ -12,9 +12,13 @@ zero — the accounting contract's Empty ≠ Zero rule applies to market data to
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from functools import partial
 from typing import Any
 
 from almanak.framework.data.interfaces import DataSourceUnavailable
@@ -26,6 +30,7 @@ __all__ = [
     "MAX_WINDOW_SECONDS",
     "fetch_funding_points",
     "get_connected_gateway_client",
+    "run_sync_gateway_call",
 ]
 
 # Upstream funding-history endpoints cap one response at ~500 hourly entries
@@ -33,6 +38,7 @@ __all__ = [
 # issues one upstream call per RPC, so windows wider than this are chunked
 # client-side to preserve full-range coverage.
 MAX_WINDOW_SECONDS = 500 * 3600
+_GATEWAY_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="backtest-gateway")
 
 
 @dataclass(frozen=True)
@@ -41,6 +47,18 @@ class FundingHistoryPoint:
 
     timestamp: int
     rate_hourly: Decimal
+
+
+async def run_sync_gateway_call(
+    func: Callable[..., Any],
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Run a blocking gateway client call without poisoning the default executor."""
+    loop = asyncio.get_running_loop()
+    call = partial(func, *args, **kwargs)
+    return await loop.run_in_executor(_GATEWAY_EXECUTOR, call)
 
 
 def get_connected_gateway_client() -> tuple[Any, Any]:

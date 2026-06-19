@@ -29,7 +29,6 @@ Example:
             print(f"{rate.source_info.timestamp}: {rate.rate}")
 """
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -43,7 +42,7 @@ from almanak.framework.data.interfaces import DataSourceUnavailable
 from ...types import DataConfidence, DataSourceInfo, FundingResult
 from ..base import HistoricalFundingProvider
 from ..rate_limiter import TokenBucketRateLimiter
-from ._gateway_history import FundingHistoryPoint, fetch_funding_points
+from ._gateway_history import FundingHistoryPoint, fetch_funding_points, run_sync_gateway_call
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +232,7 @@ class GMXFundingProvider(HistoricalFundingProvider):
 
         await self._rate_limiter.acquire()
         try:
-            return await asyncio.to_thread(
+            return await run_sync_gateway_call(
                 fetch_funding_points,
                 venue=venue,
                 market=market.upper(),

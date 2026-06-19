@@ -300,6 +300,27 @@ class TestMaintenanceMarginVariations:
         )
         assert liq_price == Decimal("1600")
 
+    def test_position_liquidation_respects_zero_maintenance_margin_override(self):
+        """A measured zero override must not fall back to protocol margin."""
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        calculator = LiquidationCalculator()
+
+        position = SimulatedPosition.perp_long(
+            token="ETH",
+            collateral_usd=Decimal("10000"),
+            leverage=Decimal("5"),
+            entry_price=Decimal("2000"),
+            entry_time=entry_time,
+            protocol="gmx",
+        )
+
+        liq_price = calculator.calculate_liquidation_price_for_position(
+            position,
+            maintenance_margin=Decimal("0"),
+        )
+
+        assert liq_price == Decimal("1600")
+
     def test_high_maintenance_margin(self):
         """Test liquidation price with high (10%) maintenance margin.
 
@@ -496,6 +517,81 @@ class TestLiquidationWarningThreshold:
         )
         assert warning_custom is None
 
+    def test_explicit_zero_warning_threshold_disables_near_liquidation_warning(self):
+        """Measured zero threshold must not fall back to the calculator default."""
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        calculator = LiquidationCalculator()
+
+        position = SimulatedPosition.perp_long(
+            token="ETH",
+            collateral_usd=Decimal("10000"),
+            leverage=Decimal("5"),
+            entry_price=Decimal("2000"),
+            entry_time=entry_time,
+            protocol="gmx",
+        )
+
+        liq_price = position.liquidation_price
+        assert liq_price is not None
+        test_price = liq_price * Decimal("1.02")
+
+        warning = calculator.check_liquidation_proximity(
+            position=position,
+            current_price=test_price,
+            warning_threshold=Decimal("0"),
+            emit_warning=False,
+        )
+
+        assert warning is None
+
+    def test_explicit_zero_critical_threshold_is_not_defaulted(self):
+        """Measured zero critical threshold should keep near-liquidation warnings non-critical."""
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        calculator = LiquidationCalculator()
+
+        position = SimulatedPosition.perp_long(
+            token="ETH",
+            collateral_usd=Decimal("10000"),
+            leverage=Decimal("5"),
+            entry_price=Decimal("2000"),
+            entry_time=entry_time,
+            protocol="gmx",
+        )
+
+        liq_price = position.liquidation_price
+        assert liq_price is not None
+        test_price = liq_price * Decimal("1.02")
+
+        warning = calculator.check_liquidation_proximity(
+            position=position,
+            current_price=test_price,
+            critical_threshold=Decimal("0"),
+            emit_warning=False,
+        )
+
+        assert warning is not None
+        assert warning.is_critical is False
+
+    def test_non_perp_position_with_stale_liquidation_price_is_ignored(self):
+        """Only perp positions should emit liquidation proximity warnings."""
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        calculator = LiquidationCalculator()
+        position = SimulatedPosition.spot(
+            token="ETH",
+            amount=Decimal("1"),
+            entry_price=Decimal("2000"),
+            entry_time=entry_time,
+        )
+        position.liquidation_price = Decimal("1800")
+
+        warning = calculator.check_liquidation_proximity(
+            position=position,
+            current_price=Decimal("2000"),
+            emit_warning=False,
+        )
+
+        assert warning is None
+
 
 class TestLiquidationWarningMessage:
     """Tests for LiquidationWarning message generation."""
@@ -643,6 +739,20 @@ class TestEstimateSafeLeverage:
         # Liquidation should be below stop loss
         assert liq_price < Decimal("1800")
 
+    def test_safe_leverage_respects_zero_maintenance_margin_override(self):
+        """Explicit zero maintenance margin must not use the default margin."""
+        calculator = LiquidationCalculator()
+
+        max_leverage = calculator.estimate_safe_leverage(
+            entry_price=Decimal("2000"),
+            stop_loss_price=Decimal("1800"),
+            maintenance_margin=Decimal("0"),
+            safety_buffer=Decimal("0"),
+            is_long=True,
+        )
+
+        assert max_leverage == Decimal("10")
+
     def test_safe_leverage_for_5_percent_stop_loss_short(self):
         """Test safe leverage estimation for a 5% stop loss on short position."""
         calculator = LiquidationCalculator()
@@ -763,6 +873,22 @@ class TestLiquidationPriceIntegration:
 
         assert position.liquidation_price is not None
         assert position.liquidation_price < position.entry_price
+
+    def test_position_factory_respects_zero_maintenance_margin_override(self):
+        """Perp factories should preserve an explicit zero maintenance margin."""
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+
+        position = SimulatedPosition.perp_long(
+            token="ETH",
+            collateral_usd=Decimal("10000"),
+            leverage=Decimal("5"),
+            entry_price=Decimal("2000"),
+            entry_time=entry_time,
+            protocol="gmx",
+            maintenance_margin=Decimal("0"),
+        )
+
+        assert position.liquidation_price == Decimal("1600")
 
     def test_short_liquidation_above_entry(self):
         """Test that short position liquidation price is above entry price at reasonable leverage."""

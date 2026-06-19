@@ -40,11 +40,76 @@ class _TradeStatistics:
     avg_loss: Decimal
 
 
+@dataclass(frozen=True)
+class _ExecutionCostMetrics:
+    fees: Decimal
+    slippage: Decimal
+    gas: Decimal
+    mev: Decimal
+
+
+@dataclass(frozen=True)
+class _GasPriceMetrics:
+    average: Decimal
+    maximum: Decimal
+
+
+@dataclass(frozen=True)
+class _EquityMetrics:
+    total_pnl: Decimal
+    total_return: Decimal
+    annualized_return: Decimal
+    returns: list[Decimal]
+    equity_values: list[Decimal]
+
+
+@dataclass(frozen=True)
+class _RiskMetrics:
+    volatility: Decimal
+    sharpe: Decimal
+    sortino: Decimal
+    max_drawdown: Decimal
+    calmar: Decimal
+
+
 def _mean(values: list[Decimal]) -> Decimal:
     """Mean of ``values``, or ``Decimal("0")`` for an empty list."""
     if not values:
         return Decimal("0")
     return sum(values, Decimal("0")) / Decimal(str(len(values)))
+
+
+def _realized_net_pnls(trades: list[TradeRecord]) -> list[Decimal]:
+    return [t.realized_net_pnl() for t in trades if t.has_realized_pnl]
+
+
+def _split_wins_and_losses(realized_pnls: list[Decimal]) -> tuple[list[Decimal], list[Decimal]]:
+    winning_pnls = [p for p in realized_pnls if p > Decimal("0")]
+    losing_pnls = [p for p in realized_pnls if p <= Decimal("0")]
+    return winning_pnls, losing_pnls
+
+
+def _win_rate(winning_count: int, realized_count: int) -> Decimal:
+    if realized_count == 0:
+        return Decimal("0")
+    return Decimal(str(winning_count)) / Decimal(str(realized_count))
+
+
+def _profit_factor(winning_pnls: list[Decimal], losing_pnls: list[Decimal]) -> Decimal:
+    gross_profit = sum(winning_pnls, Decimal("0"))
+    gross_loss = abs(sum(losing_pnls, Decimal("0")))
+    # profit_factor is gross_profit / gross_loss. When gross_loss == 0 the
+    # ratio is mathematically undefined (an all-profit run divides by zero).
+    # We report 0 here as a documented limitation: BacktestMetrics.profit_factor
+    # is a non-Optional Decimal consumed by the JSON serializer (_decimal_str),
+    # the text report (``{...:.2f}``), and from_dict, so widening it to
+    # Optional/Infinity would ripple through all three. A 0 profit_factor on a
+    # run with gross_profit > 0 and zero losses should be read as "undefined
+    # (no losses)", not "no profit" -- the win_rate (1.0) and gross_profit
+    # disambiguate it. (VIB-5083, CodeRabbit.)
+    if gross_loss == Decimal("0"):
+        return Decimal("0")
+    return gross_profit / gross_loss
 
 
 def _compute_trade_statistics(trades: list[TradeRecord]) -> _TradeStatistics:
@@ -59,32 +124,12 @@ def _compute_trade_statistics(trades: list[TradeRecord]) -> _TradeStatistics:
     the win/loss denominator.
     """
     failed_count = sum(1 for t in trades if not t.success)
-    # realized_net_pnl() is gated by has_realized_pnl, so this list is all
-    # non-None Decimals.
-    realized_pnls = [t.realized_net_pnl() for t in trades if t.has_realized_pnl]
-    winning_pnls = [p for p in realized_pnls if p > Decimal("0")]
-    losing_pnls = [p for p in realized_pnls if p <= Decimal("0")]
-
-    win_rate = Decimal("0")
-    if realized_pnls:
-        win_rate = Decimal(str(len(winning_pnls))) / Decimal(str(len(realized_pnls)))
-
-    gross_profit = sum(winning_pnls, Decimal("0"))
-    gross_loss = abs(sum(losing_pnls, Decimal("0")))
-    # profit_factor is gross_profit / gross_loss. When gross_loss == 0 the
-    # ratio is mathematically undefined (an all-profit run divides by zero).
-    # We report 0 here as a documented limitation: BacktestMetrics.profit_factor
-    # is a non-Optional Decimal consumed by the JSON serializer (_decimal_str),
-    # the text report (``{...:.2f}``), and from_dict, so widening it to
-    # Optional/Infinity would ripple through all three. A 0 profit_factor on a
-    # run with gross_profit > 0 and zero losses should be read as "undefined
-    # (no losses)", not "no profit" -- the win_rate (1.0) and gross_profit
-    # disambiguate it. (VIB-5083, CodeRabbit.)
-    profit_factor = gross_profit / gross_loss if gross_loss > Decimal("0") else Decimal("0")
+    realized_pnls = _realized_net_pnls(trades)
+    winning_pnls, losing_pnls = _split_wins_and_losses(realized_pnls)
 
     return _TradeStatistics(
-        win_rate=win_rate,
-        profit_factor=profit_factor,
+        win_rate=_win_rate(len(winning_pnls), len(realized_pnls)),
+        profit_factor=_profit_factor(winning_pnls, losing_pnls),
         winning_trades=len(winning_pnls),
         losing_trades=len(losing_pnls),
         trades_with_realized_pnl=len(realized_pnls),
@@ -100,6 +145,61 @@ def _compute_trade_statistics(trades: list[TradeRecord]) -> _TradeStatistics:
         avg_win=_mean(winning_pnls),
         avg_loss=_mean(losing_pnls),
     )
+
+
+def _compute_equity_metrics(portfolio: SimulatedPortfolio) -> _EquityMetrics:
+    equity_values = [p.value_usd for p in portfolio.equity_curve]
+    timestamps = [p.timestamp for p in portfolio.equity_curve]
+    initial_value = equity_values[0]
+    final_value = equity_values[-1]
+    total_pnl = final_value - initial_value
+    total_return = (final_value - initial_value) / initial_value if initial_value > Decimal("0") else Decimal("0")
+    return _EquityMetrics(
+        total_pnl=total_pnl,
+        total_return=total_return,
+        annualized_return=compute_cagr(total_return, timestamps),
+        returns=calculate_returns(equity_values),
+        equity_values=equity_values,
+    )
+
+
+def _compute_execution_cost_metrics(trades: list[TradeRecord]) -> _ExecutionCostMetrics:
+    return _ExecutionCostMetrics(
+        fees=sum((t.fee_usd for t in trades), Decimal("0")),
+        slippage=sum((t.slippage_usd for t in trades), Decimal("0")),
+        gas=sum((t.gas_cost_usd for t in trades), Decimal("0")),
+        mev=sum(
+            (t.estimated_mev_cost_usd for t in trades if t.estimated_mev_cost_usd is not None),
+            Decimal("0"),
+        ),
+    )
+
+
+def _compute_gas_price_metrics(trades: list[TradeRecord]) -> _GasPriceMetrics:
+    gas_prices = [t.gas_price_gwei for t in trades if t.gas_price_gwei is not None]
+    if not gas_prices:
+        return _GasPriceMetrics(average=Decimal("0"), maximum=Decimal("0"))
+    average = sum(gas_prices, Decimal("0")) / Decimal(str(len(gas_prices)))
+    return _GasPriceMetrics(average=average, maximum=max(gas_prices))
+
+
+def _compute_risk_metrics(equity: _EquityMetrics, config: PnLBacktestConfig) -> _RiskMetrics:
+    trading_days = Decimal(str(config.trading_days_per_year))
+    volatility = calculate_volatility(equity.returns, trading_days)
+    sharpe = calculate_sharpe_ratio(
+        returns=equity.returns,
+        volatility=volatility,
+        risk_free_rate=config.risk_free_rate,
+        trading_days=trading_days,
+    )
+    sortino = calculate_sortino_ratio(
+        returns=equity.returns,
+        risk_free_rate=config.risk_free_rate,
+        trading_days=trading_days,
+    )
+    max_drawdown = calculate_max_drawdown(equity.equity_values)
+    calmar = equity.annualized_return / max_drawdown if max_drawdown > Decimal("0") else Decimal("0")
+    return _RiskMetrics(volatility, sharpe, sortino, max_drawdown, calmar)
 
 
 def decimal_sqrt(n: Decimal) -> Decimal:
@@ -400,81 +500,10 @@ def calculate_metrics(
     if not portfolio.equity_curve:
         return BacktestMetrics()
 
-    # Extract values for calculations
-    equity_values = [p.value_usd for p in portfolio.equity_curve]
-    timestamps = [p.timestamp for p in portfolio.equity_curve]
-
-    # Initial and final values
-    initial_value = equity_values[0] if equity_values else config.initial_capital_usd
-    final_value = equity_values[-1] if equity_values else config.initial_capital_usd
-
-    # Total PnL (before costs - costs are tracked separately)
-    total_pnl = final_value - initial_value
-
-    # Execution costs from trades
-    total_fees = sum((t.fee_usd for t in trades), Decimal("0"))
-    total_slippage = sum((t.slippage_usd for t in trades), Decimal("0"))
-    total_gas = sum((t.gas_cost_usd for t in trades), Decimal("0"))
-
-    # MEV costs from trades (only non-None values)
-    total_mev = sum(
-        (t.estimated_mev_cost_usd for t in trades if t.estimated_mev_cost_usd is not None),
-        Decimal("0"),
-    )
-
-    # Gas price statistics from trades
-    gas_prices = [t.gas_price_gwei for t in trades if t.gas_price_gwei is not None]
-    avg_gas_price = Decimal("0")
-    max_gas_price = Decimal("0")
-    if gas_prices:
-        avg_gas_price = sum(gas_prices, Decimal("0")) / Decimal(str(len(gas_prices)))
-        max_gas_price = max(gas_prices)
-
-    # Net PnL (same as total since costs are already reflected in equity)
-    # The equity curve already accounts for costs deducted during execution
-    net_pnl = total_pnl
-
-    # Total return percentage
-    total_return = Decimal("0")
-    if initial_value > Decimal("0"):
-        total_return = (final_value - initial_value) / initial_value
-
-    # Calculate annualized return (CAGR) -- shared helper, see compute_cagr.
-    annualized_return_value = compute_cagr(total_return, timestamps)
-
-    # Calculate returns series for risk metrics
-    returns = calculate_returns(equity_values)
-
-    # Trading days per year from config (crypto = 365, stocks = 252)
-    trading_days = Decimal(str(config.trading_days_per_year))
-
-    # Volatility (annualized standard deviation of returns)
-    volatility = calculate_volatility(returns, trading_days)
-
-    # Sharpe ratio with risk-free rate from config
-    sharpe = calculate_sharpe_ratio(
-        returns=returns,
-        volatility=volatility,
-        risk_free_rate=config.risk_free_rate,
-        trading_days=trading_days,
-    )
-
-    # Sortino ratio (downside risk-adjusted return)
-    sortino = calculate_sortino_ratio(
-        returns=returns,
-        risk_free_rate=config.risk_free_rate,
-        trading_days=trading_days,
-    )
-
-    # Maximum drawdown
-    max_drawdown = calculate_max_drawdown(equity_values)
-
-    # Calmar ratio (annualized return / max drawdown)
-    calmar = Decimal("0")
-    if max_drawdown > Decimal("0"):
-        calmar = annualized_return_value / max_drawdown
-
-    # Trade statistics (VIB-5083) -- see _compute_trade_statistics.
+    equity = _compute_equity_metrics(portfolio)
+    costs = _compute_execution_cost_metrics(trades)
+    gas_prices = _compute_gas_price_metrics(trades)
+    risk = _compute_risk_metrics(equity, config)
     stats = _compute_trade_statistics(trades)
 
     # Position-derived metrics (LP fee accrual, perp funding, lending interest,
@@ -493,20 +522,22 @@ def calculate_metrics(
     # are kept as ratios to preserve the calmar/sharpe/sortino chain that divides by
     # `max_drawdown_pct` (still a ratio in this module).
     return BacktestMetrics(
-        total_pnl_usd=total_pnl,
-        net_pnl_usd=net_pnl,
-        sharpe_ratio=sharpe,
-        max_drawdown_pct=max_drawdown,
+        total_pnl_usd=equity.total_pnl,
+        # The equity curve already accounts for costs deducted during execution,
+        # so net PnL equals total PnL and cost fields are informational only.
+        net_pnl_usd=equity.total_pnl,
+        sharpe_ratio=risk.sharpe,
+        max_drawdown_pct=risk.max_drawdown,
         win_rate=stats.win_rate,
         # Successful trades only -- failed fills are reported as failed_trades
         # and excluded from the performance denominator (VIB-5083, CodeRabbit).
         total_trades=len(trades) - stats.failed_trades,
         profit_factor=stats.profit_factor,
-        total_return_pct=total_return * Decimal("100"),
-        annualized_return_pct=annualized_return_value * Decimal("100"),
-        total_fees_usd=total_fees,
-        total_slippage_usd=total_slippage,
-        total_gas_usd=total_gas,
+        total_return_pct=equity.total_return * Decimal("100"),
+        annualized_return_pct=equity.annualized_return * Decimal("100"),
+        total_fees_usd=costs.fees,
+        total_slippage_usd=costs.slippage,
+        total_gas_usd=costs.gas,
         winning_trades=stats.winning_trades,
         losing_trades=stats.losing_trades,
         trades_with_realized_pnl=stats.trades_with_realized_pnl,
@@ -516,13 +547,13 @@ def calculate_metrics(
         largest_loss_usd=stats.largest_loss,
         avg_win_usd=stats.avg_win,
         avg_loss_usd=stats.avg_loss,
-        volatility=volatility,
-        sortino_ratio=sortino,
-        calmar_ratio=calmar,
-        avg_gas_price_gwei=avg_gas_price,
-        max_gas_price_gwei=max_gas_price,
-        total_gas_cost_usd=total_gas,
-        total_mev_cost_usd=total_mev,
+        volatility=risk.volatility,
+        sortino_ratio=risk.sortino,
+        calmar_ratio=risk.calmar,
+        avg_gas_price_gwei=gas_prices.average,
+        max_gas_price_gwei=gas_prices.maximum,
+        total_gas_cost_usd=costs.gas,
+        total_mev_cost_usd=costs.mev,
         # Position-derived block -- see aggregate_position_metrics above.
         total_fees_earned_usd=pos.total_fees_earned_usd,
         fees_by_pool=pos.fees_by_pool,

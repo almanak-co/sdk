@@ -10,6 +10,7 @@ positions to verify:
 User Story: US-021d - Integration test for portfolio aggregation
 """
 
+import logging
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -20,6 +21,7 @@ from almanak.framework.backtesting.pnl.portfolio import (
     SimulatedPosition,
 )
 from almanak.framework.backtesting.pnl.portfolio_aggregator import (
+    CascadeRiskWarning,
     PortfolioAggregator,
     PortfolioSnapshot,
     UnifiedRiskScore,
@@ -149,6 +151,23 @@ class TestMultiProtocolAggregation:
         usdc_positions = multi_protocol_portfolio.get_positions(token="USDC")
         # LP (ETH/USDC), supply (USDC) = 2
         assert len(usdc_positions) == 2
+
+    def test_combined_filtering_ands_filters(self, multi_protocol_portfolio: PortfolioAggregator):
+        """Test combined filters must all match a position."""
+        matching_positions = multi_protocol_portfolio.get_positions(
+            protocol="aave_v3",
+            position_type=PositionType.BORROW,
+            token="ETH",
+        )
+        assert len(matching_positions) == 1
+        assert matching_positions[0].position_type == PositionType.BORROW
+
+        non_matching_positions = multi_protocol_portfolio.get_positions(
+            protocol="aave_v3",
+            position_type=PositionType.SUPPLY,
+            token="ETH",
+        )
+        assert non_matching_positions == []
 
     def test_protocols_list(self, multi_protocol_portfolio: PortfolioAggregator):
         """Test that all protocols are listed."""
@@ -286,6 +305,24 @@ class TestNetExposureCalculation:
         # 5 ETH spot - 5 ETH short = 0
         assert eth_exposure == Decimal("0")
 
+    def test_perp_exposure_falls_back_to_amount_when_price_is_zero(self):
+        """Test zero supplied prices do not divide perp notional."""
+        entry_time = datetime(2024, 1, 1, tzinfo=UTC)
+        aggregator = PortfolioAggregator()
+        perp_long = SimulatedPosition.perp_long(
+            token="ETH",
+            collateral_usd=Decimal("4000"),
+            leverage=Decimal("5"),
+            entry_price=Decimal("2000"),
+            entry_time=entry_time,
+            protocol="gmx",
+        )
+        aggregator.add_position(perp_long)
+
+        exposure = aggregator.calculate_net_exposure("ETH", {"ETH": Decimal("0")})
+
+        assert exposure == perp_long.get_amount("ETH")
+
 
 class TestUnifiedRiskScore:
     """Tests for unified risk score calculation."""
@@ -385,6 +422,26 @@ class TestUnifiedRiskScore:
         assert "liquidation_proximity_risk" in risk.risk_factors
         assert "concentration_risk" in risk.risk_factors
 
+    def test_lending_liquidation_risk_includes_accrued_interest(self):
+        """At-risk borrow debt should include accrued interest in risk USD."""
+        entry_time = datetime(2024, 1, 1, tzinfo=UTC)
+        aggregator = PortfolioAggregator()
+        borrow = SimulatedPosition.borrow(
+            token="USDC",
+            amount=Decimal("10000"),
+            apy=Decimal("0.05"),
+            entry_price=Decimal("1"),
+            entry_time=entry_time,
+            health_factor=Decimal("1.1"),
+            protocol="aave_v3",
+        )
+        borrow.interest_accrued = Decimal("500")
+        aggregator.add_position(borrow)
+
+        risk = aggregator.calculate_unified_risk_score({"USDC": Decimal("1")})
+
+        assert risk.liquidation_risk_usd == Decimal("10500")
+
     def test_risk_score_serialization(self, risky_portfolio: PortfolioAggregator):
         """Test risk score roundtrip serialization."""
         prices = {"BTC": Decimal("40000"), "USDC": Decimal("1")}
@@ -473,6 +530,163 @@ class TestCollateralAndLeverage:
 
         # Hyperliquid: $9000 / $3000 = 3x
         assert leverage["hyperliquid"] == Decimal("3")
+
+    def test_total_leverage_mixed_positions(self, leveraged_portfolio: PortfolioAggregator):
+        """Total leverage includes perps plus supplied collateral value."""
+        leverage = leveraged_portfolio.calculate_total_leverage({"USDC": Decimal("1")})
+
+        assert leverage == Decimal("44000") / Decimal("18000")
+
+    def test_total_leverage_empty_and_spot_only(self):
+        """Empty portfolios have no leverage; spot-only portfolios are 1x."""
+        empty = PortfolioAggregator()
+        assert empty.calculate_total_leverage() == Decimal("0")
+
+        entry_time = datetime(2024, 1, 1, tzinfo=UTC)
+        spot_only = PortfolioAggregator.from_positions(
+            [
+                SimulatedPosition.spot(
+                    token="ETH",
+                    amount=Decimal("2"),
+                    entry_price=Decimal("2000"),
+                    entry_time=entry_time,
+                )
+            ]
+        )
+
+        assert spot_only.calculate_total_leverage({"ETH": Decimal("2000")}) == Decimal("1")
+
+    def test_total_leverage_debt_without_equity_saturates(self):
+        """Exposure with non-positive equity is reported as max leverage."""
+        entry_time = datetime(2024, 1, 1, tzinfo=UTC)
+        borrow_only = PortfolioAggregator.from_positions(
+            [
+                SimulatedPosition.borrow(
+                    token="USDC",
+                    amount=Decimal("1000"),
+                    apy=Decimal("0.04"),
+                    entry_price=Decimal("1"),
+                    entry_time=entry_time,
+                    protocol="aave_v3",
+                )
+            ]
+        )
+
+        assert borrow_only.calculate_total_leverage({"USDC": Decimal("1")}) == Decimal("999")
+
+    def test_total_leverage_zero_debt_without_equity_is_zero(self):
+        """Zero debt with non-positive equity remains measured zero leverage."""
+        entry_time = datetime(2024, 1, 1, tzinfo=UTC)
+        zero_borrow = PortfolioAggregator.from_positions(
+            [
+                SimulatedPosition.borrow(
+                    token="USDC",
+                    amount=Decimal("0"),
+                    apy=Decimal("0.04"),
+                    entry_price=Decimal("1"),
+                    entry_time=entry_time,
+                    protocol="aave_v3",
+                )
+            ]
+        )
+
+        assert zero_borrow.calculate_total_leverage({"USDC": Decimal("1")}) == Decimal("0")
+
+    def test_total_leverage_counts_lp_value(self):
+        """LP positions contribute their marked value to both exposure and equity."""
+        entry_time = datetime(2024, 1, 1, tzinfo=UTC)
+        lp_only = PortfolioAggregator.from_positions(
+            [
+                SimulatedPosition.lp(
+                    token0="ETH",
+                    token1="USDC",
+                    amount0=Decimal("1"),
+                    amount1=Decimal("2000"),
+                    liquidity=Decimal("100"),
+                    tick_lower=-887220,
+                    tick_upper=887220,
+                    fee_tier=Decimal("0.003"),
+                    entry_price=Decimal("2000"),
+                    entry_time=entry_time,
+                    protocol="uniswap_v3",
+                )
+            ]
+        )
+
+        assert lp_only.calculate_total_leverage({"ETH": Decimal("2000"), "USDC": Decimal("1")}) == Decimal("1")
+
+
+class TestCascadeRiskWarnings:
+    """Tests for cascade severity thresholds and logging."""
+
+    @pytest.mark.parametrize(
+        ("chain_length", "cascade_loss", "pool_collateral", "expected"),
+        [
+            (1, Decimal("10"), Decimal("1000"), "low"),
+            (2, Decimal("10"), Decimal("1000"), "medium"),
+            (1, Decimal("150"), Decimal("1000"), "medium"),
+            (3, Decimal("10"), Decimal("1000"), "high"),
+            (1, Decimal("300"), Decimal("1000"), "high"),
+            (4, Decimal("10"), Decimal("1000"), "critical"),
+            (1, Decimal("500"), Decimal("1000"), "critical"),
+            (1, Decimal("1"), Decimal("0"), "low"),
+        ],
+    )
+    def test_cascade_severity_thresholds(
+        self,
+        chain_length: int,
+        cascade_loss: Decimal,
+        pool_collateral: Decimal,
+        expected: str,
+    ):
+        aggregator = PortfolioAggregator()
+
+        assert aggregator._get_cascade_severity(chain_length, cascade_loss, pool_collateral) == expected
+
+    @pytest.mark.parametrize(
+        ("risk_score", "expected_level", "expected_text"),
+        [
+            (Decimal("0.3"), logging.WARNING, "ELEVATED"),
+            (Decimal("0.6"), logging.ERROR, "HIGH"),
+            (Decimal("0.8"), logging.CRITICAL, "CRITICAL"),
+        ],
+    )
+    def test_emit_cascade_risk_warnings_logs_threshold_levels(
+        self,
+        risk_score: Decimal,
+        expected_level: int,
+        expected_text: str,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        warning = CascadeRiskWarning(
+            severity="high",
+            message="cascade warning",
+            affected_positions=["pos-2"],
+            trigger_position_id="pos-1",
+            estimated_cascade_loss_usd=Decimal("100"),
+            collateral_at_risk_usd=Decimal("1000"),
+        )
+        aggregator = PortfolioAggregator()
+
+        with caplog.at_level(logging.WARNING):
+            aggregator._emit_cascade_risk_warnings(risk_score, [warning])
+
+        assert any(
+            record.levelno == expected_level and expected_text in record.getMessage()
+            for record in caplog.records
+        )
+        assert any(
+            record.levelno == logging.ERROR and "cascade warning" in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_emit_cascade_risk_warnings_below_threshold_is_silent(self, caplog: pytest.LogCaptureFixture):
+        aggregator = PortfolioAggregator()
+
+        with caplog.at_level(logging.WARNING):
+            aggregator._emit_cascade_risk_warnings(Decimal("0.299"), [])
+
+        assert caplog.records == []
 
 
 class TestPortfolioSnapshot:

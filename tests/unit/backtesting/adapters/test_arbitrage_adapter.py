@@ -21,6 +21,7 @@ from almanak.framework.backtesting.adapters.arbitrage_adapter import (
     CumulativeSlippageModel,
     ExecutionStep,
 )
+from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
 from almanak.framework.backtesting.pnl.portfolio import (
     PositionType,
     SimulatedPortfolio,
@@ -433,6 +434,7 @@ class TestCumulativeSlippageModels:
 
         # Additive: 0.01 + 0.01 + 0.01 = 0.03 (3%)
         assert result.total_slippage_pct == Decimal("0.03")
+        assert result.final_amount == Decimal("9700.00")
 
     def test_multiplicative_less_than_additive(self) -> None:
         """Test that multiplicative slippage is always less than additive for multiple hops."""
@@ -785,9 +787,9 @@ class TestMaxHopsAndEdgeCases:
             initial_amount=Decimal("10000"),
         )
 
-        # Should only process 3 hops
-        assert result.num_hops == 3
-        assert len(result.steps) == 3
+        assert result.num_hops == 0
+        assert result.final_amount == Decimal("10000")
+        assert result.total_slippage_pct == Decimal("0")
 
     def test_empty_hops_list(self) -> None:
         """Test handling of empty hops list."""
@@ -803,7 +805,7 @@ class TestMaxHopsAndEdgeCases:
         assert result.final_amount == Decimal("10000")
 
     def test_zero_slippage_hop(self) -> None:
-        """Test handling of zero slippage (uses base_slippage_per_hop_pct)."""
+        """Test explicit measured-zero slippage is preserved."""
         config = ArbitrageBacktestConfig(
             strategy_type="arbitrage",
             base_slippage_per_hop_pct=Decimal("0.002"),
@@ -817,8 +819,7 @@ class TestMaxHopsAndEdgeCases:
             initial_amount=Decimal("10000"),
         )
 
-        # Should use base slippage of 0.2%
-        assert result.steps[0].slippage_pct == Decimal("0.002")
+        assert result.steps[0].slippage_pct == Decimal("0")
 
     def test_execution_history_tracked(self) -> None:
         """Test that execution history is tracked across multiple calls."""
@@ -1222,6 +1223,26 @@ class TestExecuteIntentBranches:
         assert fill.tokens_out == {"FOO": Decimal("7")}
         assert fill.tokens_in == {"BAR": Decimal("7")}
 
+    def test_strict_mode_missing_input_price_raises(self) -> None:
+        """Strict arbitrage execution must not assume a missing input token is worth $1."""
+        adapter = self._adapter(strict_reproducibility=True)
+        market_state = MockMarketState(prices={"BAR": Decimal("1")})
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        intent = SwapIntent(from_token="FOO", to_token="BAR", amount=Decimal("7"))
+
+        with pytest.raises(HistoricalDataUnavailableError, match="FOO"):
+            adapter.execute_intent(intent, portfolio, market_state)
+
+    def test_strict_mode_zero_output_price_raises(self) -> None:
+        """Strict arbitrage execution must not turn a measured zero output price into $1."""
+        adapter = self._adapter(strict_reproducibility=True)
+        market_state = MockMarketState(prices={"FOO": Decimal("1"), "BAR": Decimal("0")})
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        intent = SwapIntent(from_token="FOO", to_token="BAR", amount_usd=Decimal("7"))
+
+        with pytest.raises(HistoricalDataUnavailableError, match="BAR"):
+            adapter.execute_intent(intent, portfolio, market_state)
+
     def test_slippage_exceeded_returns_failed_fill_with_empty_flows(self) -> None:
         """A fill rejected for slippage must not report any token movement."""
         adapter = self._adapter(base_slippage_per_hop_pct=Decimal("0.05"))
@@ -1267,3 +1288,30 @@ class TestExecuteIntentBranches:
         assert fill.metadata["num_hops"] == 2
         assert fill.tokens_out == {"FOO": Decimal("100")}
         assert fill.tokens_in == {"BAR": Decimal("100")}
+
+    def test_route_exceeding_max_hops_returns_failed_fill_with_empty_flows(self) -> None:
+        """Overlong routes are rejected instead of truncated to a different output token."""
+        adapter = self._adapter(max_hops=2)
+        market_state = MockMarketState(prices={"FOO": Decimal("1"), "MID": Decimal("1"), "BAR": Decimal("1")})
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        intent = RoutedSwapIntent(
+            from_token="FOO",
+            to_token="BAR",
+            amount=Decimal("100"),
+            metadata={
+                "route": [
+                    {"token_in": "FOO", "token_out": "A", "slippage": "0"},
+                    {"token_in": "A", "token_out": "B", "slippage": "0"},
+                    {"token_in": "B", "token_out": "BAR", "slippage": "0"},
+                ]
+            },
+        )
+
+        fill = adapter.execute_intent(intent, portfolio, market_state)
+
+        assert fill is not None
+        assert fill.success is False
+        assert fill.tokens_in == {}
+        assert fill.tokens_out == {}
+        assert fill.metadata["failure_reason"] == "max_hops_exceeded"
+        assert fill.metadata["max_hops"] == 2

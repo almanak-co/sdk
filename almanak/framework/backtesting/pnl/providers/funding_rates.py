@@ -35,7 +35,6 @@ Example:
     print(f"Funding rate: {rate.rate} ({rate.annualized_rate_pct}% APR)")
 """
 
-import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -47,7 +46,7 @@ from almanak.connectors._strategy_base.funding_history_registry import FundingHi
 from almanak.core.chains import DEFAULT_CHAIN
 from almanak.framework.data.interfaces import DataSourceUnavailable
 
-from .perp._gateway_history import fetch_funding_points
+from .perp._gateway_history import fetch_funding_points, run_sync_gateway_call
 
 logger = logging.getLogger(__name__)
 
@@ -463,7 +462,7 @@ class FundingRateProvider:
 
         try:
             # The RPC stub is synchronous; keep the event loop responsive.
-            data = await asyncio.to_thread(
+            data = await run_sync_gateway_call(
                 self._fetch_point_via_gateway,
                 protocol_lower,
                 market,

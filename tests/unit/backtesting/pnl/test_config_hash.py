@@ -208,6 +208,120 @@ def test_different_chain_produces_different_hash(base_config: PnLBacktestConfig)
 
 
 # =============================================================================
+# Config Validation Boundary Tests
+# =============================================================================
+
+
+class TestPnLBacktestConfigValidation:
+    """Direct coverage for PnLBacktestConfig.__post_init__ validation."""
+
+    @staticmethod
+    def _config(**overrides: object) -> PnLBacktestConfig:
+        params = {
+            "start_time": datetime(2024, 1, 1, tzinfo=UTC),
+            "end_time": datetime(2024, 1, 2, tzinfo=UTC),
+            "interval_seconds": 3600,
+            "initial_capital_usd": Decimal("10000"),
+            "gas_price_gwei": Decimal("30"),
+            "chain": "arbitrum",
+            "tokens": ["WETH", "USDC"],
+        }
+        params.update(overrides)
+        return PnLBacktestConfig(**params)
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            ({"end_time": datetime(2024, 1, 1, tzinfo=UTC)}, "end_time must be after start_time"),
+            ({"interval_seconds": 0}, "interval_seconds must be positive"),
+            ({"initial_capital_usd": Decimal("0")}, "initial_capital_usd must be positive"),
+            ({"inclusion_delay_blocks": -1}, "inclusion_delay_blocks cannot be negative"),
+            ({"tokens": []}, "tokens list cannot be empty"),
+            ({"gas_price_gwei": Decimal("-0.1")}, "gas_price_gwei cannot be negative"),
+        ],
+    )
+    def test_basic_invalid_values_raise(self, overrides: dict[str, object], message: str) -> None:
+        with pytest.raises(ValueError, match=message):
+            self._config(**overrides)
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            ({"initial_margin_ratio": Decimal("0")}, "initial_margin_ratio"),
+            ({"initial_margin_ratio": Decimal("1.01")}, "initial_margin_ratio"),
+            ({"maintenance_margin_ratio": Decimal("0")}, "maintenance_margin_ratio"),
+            ({"maintenance_margin_ratio": Decimal("1.01")}, "maintenance_margin_ratio"),
+            (
+                {"initial_margin_ratio": Decimal("0.1"), "maintenance_margin_ratio": Decimal("0.2")},
+                "maintenance_margin_ratio must be <= initial_margin_ratio",
+            ),
+        ],
+    )
+    def test_margin_invalid_values_raise(self, overrides: dict[str, object], message: str) -> None:
+        with pytest.raises(ValueError, match=message):
+            self._config(**overrides)
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"initial_margin_ratio": Decimal("1"), "maintenance_margin_ratio": Decimal("1")},
+            {"initial_margin_ratio": Decimal("0.5"), "maintenance_margin_ratio": Decimal("0.5")},
+        ],
+    )
+    def test_margin_boundary_values_are_allowed(self, overrides: dict[str, object]) -> None:
+        config = self._config(**overrides)
+
+        assert config.initial_margin_ratio == overrides["initial_margin_ratio"]
+        assert config.maintenance_margin_ratio == overrides["maintenance_margin_ratio"]
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            (
+                {"reconciliation_alert_threshold_pct": Decimal("-0.01")},
+                "reconciliation_alert_threshold_pct cannot be negative",
+            ),
+            ({"staleness_threshold_seconds": -1}, "staleness_threshold_seconds cannot be negative"),
+            ({"min_data_coverage": Decimal("-0.01")}, "min_data_coverage must be between 0 and 1"),
+            ({"min_data_coverage": Decimal("1.01")}, "min_data_coverage must be between 0 and 1"),
+        ],
+    )
+    def test_data_quality_invalid_values_raise(self, overrides: dict[str, object], message: str) -> None:
+        with pytest.raises(ValueError, match=message):
+            self._config(**overrides)
+
+    @pytest.mark.parametrize("min_data_coverage", [Decimal("0"), Decimal("1")])
+    def test_data_coverage_boundaries_are_allowed(self, min_data_coverage: Decimal) -> None:
+        config = self._config(min_data_coverage=min_data_coverage)
+
+        assert config.min_data_coverage == min_data_coverage
+
+    def test_institutional_mode_enforces_strict_defaults_and_minimum_coverage(self) -> None:
+        config = self._config(
+            institutional_mode=True,
+            strict_reproducibility=False,
+            allow_degraded_data=True,
+            allow_hardcoded_fallback=True,
+            require_symbol_mapping=False,
+            min_data_coverage=Decimal("0.5"),
+        )
+
+        assert config.strict_reproducibility is True
+        assert config.allow_degraded_data is False
+        assert config.allow_hardcoded_fallback is False
+        assert config.require_symbol_mapping is True
+        assert config.min_data_coverage == Decimal("0.98")
+
+    def test_institutional_mode_preserves_higher_minimum_coverage(self) -> None:
+        config = self._config(
+            institutional_mode=True,
+            min_data_coverage=Decimal("0.99"),
+        )
+
+        assert config.min_data_coverage == Decimal("0.99")
+
+
+# =============================================================================
 # Serialization Round-Trip Tests
 # =============================================================================
 

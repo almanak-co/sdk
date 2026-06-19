@@ -7,6 +7,9 @@ This module tests the reconciliation functionality including:
 - Alert emission for significant discrepancies
 """
 
+import os
+import subprocess
+import sys
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -226,6 +229,43 @@ class TestPositionDriftDetection:
         # Should not detect discrepancy (within tolerance)
         amount_events = [e for e in events if e.field_name.startswith("amount_")]
         assert len(amount_events) == 0
+
+    def test_amount_mismatch_event_order_is_hash_seed_stable(self):
+        """LP amount events should follow position token order, not set iteration."""
+        script = """
+from datetime import UTC, datetime
+from decimal import Decimal
+
+from almanak.framework.backtesting.paper.position_reconciler import compare_positions
+from almanak.framework.backtesting.pnl.portfolio import SimulatedPosition
+
+now = datetime.now(UTC)
+tracked = SimulatedPosition.lp(
+    "ETH", "USDC", Decimal("1"), Decimal("2000"), Decimal("100"),
+    -1, 1, Decimal("0.003"), Decimal("2000"), now,
+)
+actual = SimulatedPosition.lp(
+    "ETH", "USDC", Decimal("0.8"), Decimal("1700"), Decimal("90"),
+    -1, 1, Decimal("0.003"), Decimal("2000"), now,
+)
+tracked.position_id = actual.position_id = "lp"
+events = compare_positions([tracked], [actual], tolerance_pct=Decimal("0.01"))
+print([event.field_name for event in events])
+"""
+        expected = "['amount_ETH', 'amount_USDC', 'liquidity']"
+
+        for seed in ("1", "2", "3", "4", "5"):
+            env = os.environ.copy()
+            env["PYTHONHASHSEED"] = seed
+            result = subprocess.run(
+                [sys.executable, "-c", script],
+                check=True,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            assert result.stdout.strip() == expected
 
 
 class TestAutoCorrectPositions:

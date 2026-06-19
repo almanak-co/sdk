@@ -115,6 +115,17 @@ class DataQualityIssue:
         }
 
 
+@dataclass(frozen=True)
+class _OutlierPoint:
+    timestamp: datetime
+    price: Decimal
+    price_float: float | None
+
+    @property
+    def is_valid(self) -> bool:
+        return self.price_float is not None
+
+
 @dataclass
 class DataQualityResult:
     """Aggregated result of data quality validation.
@@ -183,18 +194,7 @@ class DataQualityResult:
         if not self.has_issues:
             return f"Data quality OK: {self.total_data_points} data points, {self.coverage_percent:.1f}% coverage"
 
-        error_count = len([i for i in self.issues if i.severity == DataQualitySeverity.ERROR])
-        warning_count = len([i for i in self.issues if i.severity == DataQualitySeverity.WARNING])
-        info_count = len([i for i in self.issues if i.severity == DataQualitySeverity.INFO])
-
-        parts = []
-        if error_count:
-            parts.append(f"{error_count} error(s)")
-        if warning_count:
-            parts.append(f"{warning_count} warning(s)")
-        if info_count:
-            parts.append(f"{info_count} info")
-
+        parts = _severity_summary_parts(_count_issues_by_severity(self.issues))
         token_str = f" for {self.token}" if self.token else ""
         return (
             f"Data quality issues{token_str}: {', '.join(parts)}. "
@@ -217,6 +217,21 @@ class DataQualityResult:
             "has_warnings": self.has_warnings,
             "has_errors": self.has_errors,
         }
+
+
+def _count_issues_by_severity(issues: list[DataQualityIssue]) -> dict[DataQualitySeverity, int]:
+    return {severity: sum(1 for issue in issues if issue.severity == severity) for severity in DataQualitySeverity}
+
+
+def _severity_summary_parts(counts: dict[DataQualitySeverity, int]) -> list[str]:
+    parts: list[str] = []
+    if counts[DataQualitySeverity.ERROR]:
+        parts.append(f"{counts[DataQualitySeverity.ERROR]} error(s)")
+    if counts[DataQualitySeverity.WARNING]:
+        parts.append(f"{counts[DataQualitySeverity.WARNING]} warning(s)")
+    if counts[DataQualitySeverity.INFO]:
+        parts.append(f"{counts[DataQualitySeverity.INFO]} info")
+    return parts
 
 
 def validate_price_data(  # noqa: C901
@@ -261,8 +276,10 @@ def validate_price_data(  # noqa: C901
         if result.gaps_found > 0:
             print(f"Found {result.gaps_found} gaps in data")
     """
+    if expected_interval_seconds <= 0:
+        raise ValueError("expected_interval_seconds must be positive")
+
     result = DataQualityResult(token=token)
-    issues: list[DataQualityIssue] = []
 
     if not price_data:
         result.total_data_points = 0
@@ -271,130 +288,182 @@ def validate_price_data(  # noqa: C901
         return result
 
     result.total_data_points = len(price_data)
-
-    # Sort by timestamp if not already sorted
     sorted_data = sorted(price_data, key=lambda x: x[0])
+    issues = _detect_invalid_order(price_data, token, log_warnings)
 
-    # Calculate expected data points based on time range
-    if len(sorted_data) >= 2:
-        time_range = (sorted_data[-1][0] - sorted_data[0][0]).total_seconds()
-        result.expected_data_points = int(time_range / expected_interval_seconds) + 1
-    else:
-        result.expected_data_points = result.total_data_points
+    duplicate_issues, duplicates_found, unique_timestamps = _detect_duplicate_timestamps(
+        sorted_data, token, log_warnings
+    )
+    gap_issues = _detect_gaps(sorted_data, expected_interval_seconds, gap_tolerance_factor, token, log_warnings)
 
-    # Check for duplicates using a set
-    seen_timestamps: set[datetime] = set()
-    duplicates_found = 0
-
-    for timestamp, _ in sorted_data:
-        if timestamp in seen_timestamps:
-            duplicates_found += 1
-            issues.append(
-                DataQualityIssue(
-                    issue_type=DataQualityIssueType.DUPLICATE,
-                    severity=DataQualitySeverity.WARNING,
-                    timestamp=timestamp,
-                    description="Duplicate timestamp found",
-                    details={"occurrence": duplicates_found + 1},
-                )
-            )
-            if log_warnings:
-                token_str = f" for {token}" if token else ""
-                logger.warning(f"Duplicate timestamp{token_str}: {timestamp.isoformat()}")
-        seen_timestamps.add(timestamp)
-
+    issues.extend(duplicate_issues)
+    issues.extend(gap_issues)
+    result.expected_data_points = _expected_data_points(sorted_data, expected_interval_seconds)
     result.duplicates_found = duplicates_found
-
-    # Check for gaps between consecutive data points
-    expected_interval = timedelta(seconds=expected_interval_seconds)
-    max_allowed_gap = expected_interval * gap_tolerance_factor
-    gaps_found = 0
-
-    # Check ordering and gaps
-    prev_timestamp: datetime | None = None
-    for timestamp, _ in sorted_data:
-        if prev_timestamp is not None:
-            gap = timestamp - prev_timestamp
-
-            # Check for invalid ordering (should not happen if sorted)
-            if gap < timedelta(0):
-                issues.append(
-                    DataQualityIssue(
-                        issue_type=DataQualityIssueType.INVALID_ORDER,
-                        severity=DataQualitySeverity.ERROR,
-                        timestamp=timestamp,
-                        description="Timestamp is before previous timestamp",
-                        details={
-                            "previous_timestamp": prev_timestamp.isoformat(),
-                            "gap_seconds": gap.total_seconds(),
-                        },
-                    )
-                )
-                if log_warnings:
-                    token_str = f" for {token}" if token else ""
-                    logger.error(
-                        f"Invalid timestamp order{token_str}: "
-                        f"{timestamp.isoformat()} is before {prev_timestamp.isoformat()}"
-                    )
-
-            # Check for gaps larger than expected
-            elif gap > max_allowed_gap:
-                gaps_found += 1
-                gap_seconds = gap.total_seconds()
-                expected_seconds = expected_interval_seconds
-                missing_points = int(gap_seconds / expected_seconds) - 1
-
-                # Determine severity based on gap size
-                if gap_seconds > expected_seconds * 4:
-                    severity = DataQualitySeverity.ERROR
-                elif gap_seconds > expected_seconds * 2:
-                    severity = DataQualitySeverity.WARNING
-                else:
-                    severity = DataQualitySeverity.INFO
-
-                issues.append(
-                    DataQualityIssue(
-                        issue_type=DataQualityIssueType.GAP,
-                        severity=severity,
-                        timestamp=prev_timestamp,
-                        description=(
-                            f"Gap of {gap_seconds:.0f}s detected "
-                            f"(expected {expected_seconds}s, "
-                            f"~{missing_points} missing point(s))"
-                        ),
-                        details={
-                            "gap_start": prev_timestamp.isoformat(),
-                            "gap_end": timestamp.isoformat(),
-                            "gap_seconds": gap_seconds,
-                            "expected_interval_seconds": expected_seconds,
-                            "missing_points_estimate": missing_points,
-                        },
-                    )
-                )
-                if log_warnings:
-                    token_str = f" for {token}" if token else ""
-                    logger.warning(
-                        f"Data gap{token_str}: {gap_seconds:.0f}s gap "
-                        f"from {prev_timestamp.isoformat()} to {timestamp.isoformat()} "
-                        f"(~{missing_points} missing point(s))"
-                    )
-
-        prev_timestamp = timestamp
-
-    result.gaps_found = gaps_found
+    result.gaps_found = len(gap_issues)
     result.issues = issues
-
-    # Calculate coverage percentage
-    if result.expected_data_points > 0:
-        result.coverage_percent = (result.total_data_points / result.expected_data_points) * 100
-    else:
-        result.coverage_percent = 100.0 if result.total_data_points > 0 else 0.0
+    result.coverage_percent = _coverage_percent(len(unique_timestamps), result.expected_data_points)
 
     # Log summary if issues were found
     if log_warnings and result.has_issues:
         logger.info(result.summary())
 
     return result
+
+
+def _detect_invalid_order(
+    price_data: list[tuple[datetime, Decimal]],
+    token: str | None,
+    log_warnings: bool,
+) -> list[DataQualityIssue]:
+    issues: list[DataQualityIssue] = []
+    prev_timestamp: datetime | None = None
+    for timestamp, _ in price_data:
+        if prev_timestamp is not None and timestamp < prev_timestamp:
+            issue = _invalid_order_issue(prev_timestamp, timestamp)
+            issues.append(issue)
+            if log_warnings:
+                _log_invalid_order(token, prev_timestamp, timestamp)
+        prev_timestamp = timestamp
+    return issues
+
+
+def _invalid_order_issue(prev_timestamp: datetime, timestamp: datetime) -> DataQualityIssue:
+    gap = timestamp - prev_timestamp
+    return DataQualityIssue(
+        issue_type=DataQualityIssueType.INVALID_ORDER,
+        severity=DataQualitySeverity.ERROR,
+        timestamp=timestamp,
+        description="Timestamp is before previous timestamp",
+        details={
+            "previous_timestamp": prev_timestamp.isoformat(),
+            "gap_seconds": gap.total_seconds(),
+        },
+    )
+
+
+def _log_invalid_order(token: str | None, prev_timestamp: datetime, timestamp: datetime) -> None:
+    token_str = f" for {token}" if token else ""
+    logger.error(f"Invalid timestamp order{token_str}: {timestamp.isoformat()} is before {prev_timestamp.isoformat()}")
+
+
+def _detect_duplicate_timestamps(
+    sorted_data: list[tuple[datetime, Decimal]],
+    token: str | None,
+    log_warnings: bool,
+) -> tuple[list[DataQualityIssue], int, set[datetime]]:
+    issues: list[DataQualityIssue] = []
+    seen_timestamps: set[datetime] = set()
+    occurrence_counts: dict[datetime, int] = {}
+
+    for timestamp, _ in sorted_data:
+        occurrence_counts[timestamp] = occurrence_counts.get(timestamp, 0) + 1
+        if timestamp in seen_timestamps:
+            issues.append(_duplicate_timestamp_issue(timestamp, occurrence_counts[timestamp]))
+            if log_warnings:
+                _log_duplicate_timestamp(token, timestamp)
+        seen_timestamps.add(timestamp)
+
+    return issues, len(issues), seen_timestamps
+
+
+def _duplicate_timestamp_issue(timestamp: datetime, occurrence: int) -> DataQualityIssue:
+    return DataQualityIssue(
+        issue_type=DataQualityIssueType.DUPLICATE,
+        severity=DataQualitySeverity.WARNING,
+        timestamp=timestamp,
+        description="Duplicate timestamp found",
+        details={"occurrence": occurrence},
+    )
+
+
+def _log_duplicate_timestamp(token: str | None, timestamp: datetime) -> None:
+    token_str = f" for {token}" if token else ""
+    logger.warning(f"Duplicate timestamp{token_str}: {timestamp.isoformat()}")
+
+
+def _detect_gaps(
+    sorted_data: list[tuple[datetime, Decimal]],
+    expected_interval_seconds: int,
+    gap_tolerance_factor: float,
+    token: str | None,
+    log_warnings: bool,
+) -> list[DataQualityIssue]:
+    expected_interval = timedelta(seconds=expected_interval_seconds)
+    max_allowed_gap = expected_interval * gap_tolerance_factor
+    issues: list[DataQualityIssue] = []
+
+    prev_timestamp: datetime | None = None
+    for timestamp, _ in sorted_data:
+        if prev_timestamp is not None:
+            issue = _gap_issue(prev_timestamp, timestamp, expected_interval_seconds, max_allowed_gap)
+            if issue is not None:
+                issues.append(issue)
+                if log_warnings:
+                    _log_gap(token, issue)
+        prev_timestamp = timestamp
+    return issues
+
+
+def _gap_issue(
+    prev_timestamp: datetime,
+    timestamp: datetime,
+    expected_interval_seconds: int,
+    max_allowed_gap: timedelta,
+) -> DataQualityIssue | None:
+    gap = timestamp - prev_timestamp
+    if gap <= max_allowed_gap:
+        return None
+
+    gap_seconds = gap.total_seconds()
+    missing_points = int(gap_seconds / expected_interval_seconds) - 1
+    return DataQualityIssue(
+        issue_type=DataQualityIssueType.GAP,
+        severity=_gap_severity(gap_seconds, expected_interval_seconds),
+        timestamp=prev_timestamp,
+        description=(
+            f"Gap of {gap_seconds:.0f}s detected "
+            f"(expected {expected_interval_seconds}s, "
+            f"~{missing_points} missing point(s))"
+        ),
+        details={
+            "gap_start": prev_timestamp.isoformat(),
+            "gap_end": timestamp.isoformat(),
+            "gap_seconds": gap_seconds,
+            "expected_interval_seconds": expected_interval_seconds,
+            "missing_points_estimate": missing_points,
+        },
+    )
+
+
+def _gap_severity(gap_seconds: float, expected_seconds: int) -> DataQualitySeverity:
+    if gap_seconds > expected_seconds * 4:
+        return DataQualitySeverity.ERROR
+    if gap_seconds > expected_seconds * 2:
+        return DataQualitySeverity.WARNING
+    return DataQualitySeverity.INFO
+
+
+def _log_gap(token: str | None, issue: DataQualityIssue) -> None:
+    token_str = f" for {token}" if token else ""
+    logger.warning(
+        f"Data gap{token_str}: {issue.details['gap_seconds']:.0f}s gap "
+        f"from {issue.details['gap_start']} to {issue.details['gap_end']} "
+        f"(~{issue.details['missing_points_estimate']} missing point(s))"
+    )
+
+
+def _expected_data_points(sorted_data: list[tuple[datetime, Decimal]], expected_interval_seconds: int) -> int:
+    if len(sorted_data) < 2:
+        return len(sorted_data)
+    time_range = (sorted_data[-1][0] - sorted_data[0][0]).total_seconds()
+    return int(time_range / expected_interval_seconds) + 1
+
+
+def _coverage_percent(unique_data_points: int, expected_data_points: int) -> float:
+    if expected_data_points <= 0:
+        return 100.0 if unique_data_points > 0 else 0.0
+    return min((unique_data_points / expected_data_points) * 100, 100.0)
 
 
 def detect_outliers(  # noqa: C901
@@ -441,120 +510,222 @@ def detect_outliers(  # noqa: C901
     """
     issues: list[DataQualityIssue] = []
 
+    if rolling_window_size <= 0:
+        raise ValueError("rolling_window_size must be positive")
+
     if not price_data or len(price_data) < 2:
         return issues
 
     # Sort by timestamp if not already sorted
     sorted_data = sorted(price_data, key=lambda x: x[0])
-    prices = [float(price) for _, price in sorted_data]
-    timestamps = [ts for ts, _ in sorted_data]
-
-    # 1. Detect rapid price changes (>threshold% change between consecutive points)
-    for i in range(1, len(prices)):
-        prev_price = prices[i - 1]
-        curr_price = prices[i]
-
-        # Skip if previous price is zero (can't calculate percentage change)
-        if prev_price == 0:
-            continue
-
-        pct_change = abs((curr_price - prev_price) / prev_price) * 100
-
-        if pct_change > rapid_change_threshold_pct:
-            # Determine severity based on magnitude
-            if pct_change > 100:
-                severity = DataQualitySeverity.ERROR
-            elif pct_change > rapid_change_threshold_pct:
-                severity = DataQualitySeverity.WARNING
-            else:
-                severity = DataQualitySeverity.INFO
-
-            issue = DataQualityIssue(
-                issue_type=DataQualityIssueType.OUTLIER,
-                severity=severity,
-                timestamp=timestamps[i],
-                description=(f"Rapid price change: {pct_change:.1f}% change from {prev_price:.2f} to {curr_price:.2f}"),
-                details={
-                    "outlier_type": "rapid_change",
-                    "previous_price": prev_price,
-                    "current_price": curr_price,
-                    "percent_change": pct_change,
-                    "threshold_pct": rapid_change_threshold_pct,
-                    "previous_timestamp": timestamps[i - 1].isoformat(),
-                },
-            )
-            issues.append(issue)
-
-            if log_warnings:
-                token_str = f" for {token}" if token else ""
-                logger.warning(
-                    f"Outlier detected{token_str}: {pct_change:.1f}% price change "
-                    f"at {timestamps[i].isoformat()} "
-                    f"(from {prev_price:.2f} to {curr_price:.2f})"
-                )
-
-    # 2. Detect statistical outliers (>N standard deviations from rolling mean)
-    if len(prices) >= rolling_window_size:
-        # Calculate rolling mean and standard deviation
-        for i in range(rolling_window_size, len(prices)):
-            window = prices[i - rolling_window_size : i]
-            mean = sum(window) / len(window)
-            variance = sum((x - mean) ** 2 for x in window) / len(window)
-            std_dev = variance**0.5
-
-            # Skip if standard deviation is too small (all same values)
-            if std_dev < 1e-10:
-                continue
-
-            curr_price = prices[i]
-            z_score = abs(curr_price - mean) / std_dev
-
-            if z_score > std_dev_threshold:
-                # Determine severity based on z-score
-                if z_score > 5:
-                    severity = DataQualitySeverity.ERROR
-                elif z_score > std_dev_threshold:
-                    severity = DataQualitySeverity.WARNING
-                else:
-                    severity = DataQualitySeverity.INFO
-
-                # Check if this timestamp already has a rapid change issue
-                # to avoid duplicate reporting
-                timestamp_already_flagged = any(
-                    iss.timestamp == timestamps[i] and iss.details.get("outlier_type") == "rapid_change"
-                    for iss in issues
-                )
-
-                if not timestamp_already_flagged:
-                    issue = DataQualityIssue(
-                        issue_type=DataQualityIssueType.OUTLIER,
-                        severity=severity,
-                        timestamp=timestamps[i],
-                        description=(
-                            f"Statistical outlier: price {curr_price:.2f} is "
-                            f"{z_score:.1f} std devs from rolling mean {mean:.2f}"
-                        ),
-                        details={
-                            "outlier_type": "statistical",
-                            "price": curr_price,
-                            "rolling_mean": mean,
-                            "rolling_std_dev": std_dev,
-                            "z_score": z_score,
-                            "threshold_std_dev": std_dev_threshold,
-                            "window_size": rolling_window_size,
-                        },
-                    )
-                    issues.append(issue)
-
-                    if log_warnings:
-                        token_str = f" for {token}" if token else ""
-                        logger.warning(
-                            f"Statistical outlier{token_str}: price {curr_price:.2f} "
-                            f"at {timestamps[i].isoformat()} is {z_score:.1f} "
-                            f"std devs from rolling mean {mean:.2f}"
-                        )
+    points, issues = _build_outlier_points(sorted_data, token, log_warnings)
+    issues.extend(
+        _detect_rapid_change_outliers(
+            points,
+            rapid_change_threshold_pct=rapid_change_threshold_pct,
+            token=token,
+            log_warnings=log_warnings,
+        )
+    )
+    issues.extend(
+        _detect_statistical_outliers(
+            points,
+            std_dev_threshold=std_dev_threshold,
+            rolling_window_size=rolling_window_size,
+            token=token,
+            log_warnings=log_warnings,
+            existing_issues=issues,
+        )
+    )
 
     return issues
+
+
+def _build_outlier_points(
+    sorted_data: list[tuple[datetime, Decimal]],
+    token: str | None,
+    log_warnings: bool,
+) -> tuple[list[_OutlierPoint], list[DataQualityIssue]]:
+    points: list[_OutlierPoint] = []
+    issues: list[DataQualityIssue] = []
+
+    for timestamp, price in sorted_data:
+        if _is_valid_price(price):
+            points.append(_OutlierPoint(timestamp=timestamp, price=price, price_float=float(price)))
+            continue
+        points.append(_OutlierPoint(timestamp=timestamp, price=price, price_float=None))
+        issue = _invalid_price_issue(timestamp, price)
+        issues.append(issue)
+        if log_warnings:
+            _log_invalid_price(token, issue)
+
+    return points, issues
+
+
+def _is_valid_price(price: Decimal) -> bool:
+    return price.is_finite() and price > Decimal("0")
+
+
+def _invalid_price_issue(timestamp: datetime, price: Decimal) -> DataQualityIssue:
+    return DataQualityIssue(
+        issue_type=DataQualityIssueType.OUTLIER,
+        severity=DataQualitySeverity.ERROR,
+        timestamp=timestamp,
+        description=f"Invalid price value: {price}",
+        details={
+            "outlier_type": "invalid_price",
+            "price": str(price),
+        },
+    )
+
+
+def _log_invalid_price(token: str | None, issue: DataQualityIssue) -> None:
+    token_str = f" for {token}" if token else ""
+    logger.warning(f"Invalid price{token_str}: {issue.details['price']} at {issue.timestamp.isoformat()}")
+
+
+def _detect_rapid_change_outliers(
+    points: list[_OutlierPoint],
+    rapid_change_threshold_pct: float,
+    token: str | None,
+    log_warnings: bool,
+) -> list[DataQualityIssue]:
+    issues: list[DataQualityIssue] = []
+    for i in range(1, len(points)):
+        previous = points[i - 1]
+        current = points[i]
+        if previous.price_float is None or current.price_float is None:
+            continue
+
+        pct_change = abs((current.price_float - previous.price_float) / previous.price_float) * 100
+        if pct_change > rapid_change_threshold_pct:
+            issue = _rapid_change_issue(previous, current, pct_change, rapid_change_threshold_pct)
+            issues.append(issue)
+            if log_warnings:
+                _log_rapid_change(token, issue)
+    return issues
+
+
+def _rapid_change_issue(
+    previous: _OutlierPoint,
+    current: _OutlierPoint,
+    pct_change: float,
+    rapid_change_threshold_pct: float,
+) -> DataQualityIssue:
+    assert previous.price_float is not None
+    assert current.price_float is not None
+    return DataQualityIssue(
+        issue_type=DataQualityIssueType.OUTLIER,
+        severity=DataQualitySeverity.ERROR if pct_change > 100 else DataQualitySeverity.WARNING,
+        timestamp=current.timestamp,
+        description=(
+            f"Rapid price change: {pct_change:.1f}% change from {previous.price_float:.2f} to {current.price_float:.2f}"
+        ),
+        details={
+            "outlier_type": "rapid_change",
+            "previous_price": previous.price_float,
+            "current_price": current.price_float,
+            "percent_change": pct_change,
+            "threshold_pct": rapid_change_threshold_pct,
+            "previous_timestamp": previous.timestamp.isoformat(),
+        },
+    )
+
+
+def _log_rapid_change(token: str | None, issue: DataQualityIssue) -> None:
+    token_str = f" for {token}" if token else ""
+    logger.warning(
+        f"Outlier detected{token_str}: {issue.details['percent_change']:.1f}% price change "
+        f"at {issue.timestamp.isoformat()} "
+        f"(from {issue.details['previous_price']:.2f} to {issue.details['current_price']:.2f})"
+    )
+
+
+def _detect_statistical_outliers(
+    points: list[_OutlierPoint],
+    std_dev_threshold: float,
+    rolling_window_size: int,
+    token: str | None,
+    log_warnings: bool,
+    existing_issues: list[DataQualityIssue],
+) -> list[DataQualityIssue]:
+    if len(points) < rolling_window_size:
+        return []
+
+    issues: list[DataQualityIssue] = []
+    for i in range(rolling_window_size, len(points)):
+        current = points[i]
+        window = points[i - rolling_window_size : i]
+        stats = _window_stats(window)
+        if current.price_float is None or stats is None:
+            continue
+
+        mean, std_dev = stats
+        z_score = abs(current.price_float - mean) / std_dev
+        if z_score <= std_dev_threshold or _has_rapid_change_issue(current.timestamp, existing_issues):
+            continue
+
+        issue = _statistical_outlier_issue(current, mean, std_dev, z_score, std_dev_threshold, rolling_window_size)
+        issues.append(issue)
+        if log_warnings:
+            _log_statistical_outlier(token, issue)
+    return issues
+
+
+def _window_stats(window: list[_OutlierPoint]) -> tuple[float, float] | None:
+    prices = [point.price_float for point in window]
+    if any(price is None for price in prices):
+        return None
+
+    typed_prices = [price for price in prices if price is not None]
+    mean = sum(typed_prices) / len(typed_prices)
+    variance = sum((price - mean) ** 2 for price in typed_prices) / len(typed_prices)
+    std_dev = variance**0.5
+    if std_dev < 1e-10:
+        return None
+    return mean, std_dev
+
+
+def _has_rapid_change_issue(timestamp: datetime, issues: list[DataQualityIssue]) -> bool:
+    return any(issue.timestamp == timestamp and issue.details.get("outlier_type") == "rapid_change" for issue in issues)
+
+
+def _statistical_outlier_issue(
+    current: _OutlierPoint,
+    mean: float,
+    std_dev: float,
+    z_score: float,
+    std_dev_threshold: float,
+    rolling_window_size: int,
+) -> DataQualityIssue:
+    assert current.price_float is not None
+    return DataQualityIssue(
+        issue_type=DataQualityIssueType.OUTLIER,
+        severity=DataQualitySeverity.ERROR if z_score > 5 else DataQualitySeverity.WARNING,
+        timestamp=current.timestamp,
+        description=(
+            f"Statistical outlier: price {current.price_float:.2f} is "
+            f"{z_score:.1f} std devs from rolling mean {mean:.2f}"
+        ),
+        details={
+            "outlier_type": "statistical",
+            "price": current.price_float,
+            "rolling_mean": mean,
+            "rolling_std_dev": std_dev,
+            "z_score": z_score,
+            "threshold_std_dev": std_dev_threshold,
+            "window_size": rolling_window_size,
+        },
+    )
+
+
+def _log_statistical_outlier(token: str | None, issue: DataQualityIssue) -> None:
+    token_str = f" for {token}" if token else ""
+    logger.warning(
+        f"Statistical outlier{token_str}: price {issue.details['price']:.2f} "
+        f"at {issue.timestamp.isoformat()} is {issue.details['z_score']:.1f} "
+        f"std devs from rolling mean {issue.details['rolling_mean']:.2f}"
+    )
 
 
 def validate_price_data_with_outliers(

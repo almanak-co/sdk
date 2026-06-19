@@ -25,6 +25,8 @@ from almanak.framework.backtesting.pnl.portfolio import (
     SimulatedPortfolio,
     SimulatedPosition,
 )
+from almanak.framework.intents.lending_intents import BorrowIntent
+from almanak.framework.intents.vocabulary import Intent
 
 # =============================================================================
 # Mock Classes
@@ -36,6 +38,7 @@ class MockMarketState:
     """Mock market state for testing."""
 
     prices: dict[str, Decimal] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=lambda: datetime(2024, 1, 1, tzinfo=UTC))
 
     def get_price(self, token: str) -> Decimal:
         """Get price for a token.
@@ -184,6 +187,33 @@ class TestLendingBacktestConfig:
                 health_factor_critical_threshold=Decimal("1.3"),
             )
 
+    def test_invalid_liquidation_penalty(self) -> None:
+        """Test validation rejects liquidation penalties outside [0, 1]."""
+        with pytest.raises(ValueError, match="liquidation_penalty must be in"):
+            LendingBacktestConfig(strategy_type="lending", liquidation_penalty=Decimal("-0.01"))
+
+        with pytest.raises(ValueError, match="liquidation_penalty must be in"):
+            LendingBacktestConfig(strategy_type="lending", liquidation_penalty=Decimal("1.01"))
+
+    def test_invalid_liquidation_close_factor(self) -> None:
+        """Test validation rejects close factors outside (0, 1]."""
+        with pytest.raises(ValueError, match="liquidation_close_factor must be in"):
+            LendingBacktestConfig(strategy_type="lending", liquidation_close_factor=Decimal("0"))
+
+        with pytest.raises(ValueError, match="liquidation_close_factor must be in"):
+            LendingBacktestConfig(strategy_type="lending", liquidation_close_factor=Decimal("1.01"))
+
+    def test_liquidation_boundary_values_are_allowed(self) -> None:
+        """Test inclusive/exclusive liquidation validation boundaries."""
+        config = LendingBacktestConfig(
+            strategy_type="lending",
+            liquidation_penalty=Decimal("0"),
+            liquidation_close_factor=Decimal("1"),
+        )
+
+        assert config.liquidation_penalty == Decimal("0")
+        assert config.liquidation_close_factor == Decimal("1")
+
     def test_to_dict(self) -> None:
         """Test serialization to dictionary."""
         config = LendingBacktestConfig(
@@ -229,6 +259,42 @@ class TestLendingBacktestConfig:
         assert restored.interest_accrual_method == original.interest_accrual_method
         assert restored.liquidation_penalty == original.liquidation_penalty
         assert restored.protocol == original.protocol
+
+
+class TestBorrowExecutionValidation:
+    def test_execute_borrow_rejects_low_health_factor_with_missing_price_fallback(self) -> None:
+        adapter = LendingBacktestAdapter(LendingBacktestConfig(strategy_type="lending", protocol="aave_v3"))
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        portfolio.positions = [
+            create_supply_position(token="WETH", amount=Decimal("10"), entry_price=Decimal("2000"))
+        ]
+        intent = BorrowIntent(
+            protocol="aave_v3",
+            collateral_token="WETH",
+            collateral_amount=Decimal("0"),
+            borrow_token="DAI",
+            borrow_amount=Decimal("20000"),
+        )
+        market = MockMarketState(prices={"WETH": Decimal("2000")})
+
+        fill = adapter._execute_borrow(intent, portfolio, market)
+
+        assert fill is not None
+        assert fill.success is False
+        assert fill.executed_price == Decimal("1")
+        assert fill.amount_usd == Decimal("20000")
+        assert fill.tokens_out == {"DAI": Decimal("20000")}
+        assert fill.metadata["failure_reason"] == "Health factor would be below 1.0"
+        assert fill.metadata["validation_type"] == "health_factor"
+        assert fill.metadata["collateral_usd"] == "20000"
+        assert fill.metadata["total_debt_usd"] == "20000"
+
+    def test_execute_borrow_non_borrow_intent_uses_default_execution(self) -> None:
+        adapter = LendingBacktestAdapter(LendingBacktestConfig(strategy_type="lending", protocol="aave_v3"))
+        portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("0"))
+        market = MockMarketState(prices={"WETH": Decimal("2000")})
+
+        assert adapter._execute_borrow(Intent.hold(), portfolio, market) is None
 
 
 # =============================================================================
@@ -444,6 +510,28 @@ class TestInterestAccrualAccuracy:
 
         assert position.interest_accrued == Decimal("0")
 
+    def test_strict_update_missing_token_price_raises(self) -> None:
+        """Strict updates must not reuse entry price when market price is missing."""
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        config = LendingBacktestConfig(
+            strategy_type="lending",
+            strict_reproducibility=True,
+        )
+        adapter = LendingBacktestAdapter(config)
+
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        position = create_supply_position(token="WETH", entry_price=Decimal("2000"), entry_time=entry_time)
+        market = MockMarketState(prices={})
+
+        with pytest.raises(HistoricalDataUnavailableError, match="WETH"):
+            adapter.update_position(
+                position,
+                market,
+                elapsed_seconds=3600,
+                timestamp=entry_time + timedelta(hours=1),
+            )
+
 
 # =============================================================================
 # Health Factor and Liquidation Tests
@@ -643,6 +731,76 @@ class TestLiquidationSimulation:
         assert event.debt_repaid == pytest.approx(Decimal("5000"), rel=Decimal("0.01"))
         assert event.penalty == Decimal("0.10")
 
+    def test_collateral_cap_recalculates_debt_repaid(self) -> None:
+        """Capped collateral must cap the debt reduction as well."""
+        config = LendingBacktestConfig(
+            strategy_type="lending",
+            liquidation_model_enabled=True,
+            liquidation_penalty=Decimal("0.10"),
+            liquidation_close_factor=Decimal("0.5"),
+        )
+        adapter = LendingBacktestAdapter(config)
+
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        borrow_position = create_borrow_position(
+            token="USDC",
+            amount=Decimal("10000"),
+            entry_price=Decimal("1"),
+            entry_time=entry_time,
+            health_factor=Decimal("0.5"),
+        )
+        adapter.set_position_collateral(borrow_position.position_id, Decimal("1000"))
+
+        event = adapter.check_and_simulate_liquidation(
+            borrow_position,
+            MockMarketState(prices={"USDC": Decimal("1")}),
+            entry_time + timedelta(hours=1),
+        )
+
+        assert event is not None
+        assert event.collateral_seized == Decimal("1000")
+        assert event.debt_repaid == pytest.approx(Decimal("1000") / Decimal("1.10"), rel=Decimal("0.01"))
+        assert borrow_position.total_amount == pytest.approx(
+            Decimal("10000") - event.debt_repaid,
+            rel=Decimal("0.01"),
+        )
+
+    def test_liquidation_with_interest_debt_reduction_ties_to_event(self) -> None:
+        """Principal plus interest should fall by exactly event.debt_repaid."""
+        config = LendingBacktestConfig(
+            strategy_type="lending",
+            liquidation_model_enabled=True,
+            liquidation_penalty=Decimal("0.05"),
+            liquidation_close_factor=Decimal("0.5"),
+        )
+        adapter = LendingBacktestAdapter(config)
+
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        borrow_position = create_borrow_position(
+            token="USDC",
+            amount=Decimal("10000"),
+            entry_price=Decimal("1"),
+            entry_time=entry_time,
+            health_factor=Decimal("0.8"),
+        )
+        borrow_position.interest_accrued = Decimal("500")
+        adapter.set_position_collateral(borrow_position.position_id, Decimal("20000"))
+        market = MockMarketState(prices={"USDC": Decimal("1")})
+
+        debt_before = borrow_position.total_amount + borrow_position.interest_accrued
+        event = adapter.check_and_simulate_liquidation(
+            borrow_position,
+            market,
+            entry_time + timedelta(hours=1),
+        )
+        debt_after = borrow_position.total_amount + borrow_position.interest_accrued
+
+        assert event is not None
+        assert borrow_position.total_amount == Decimal("5000.0")
+        assert borrow_position.interest_accrued == Decimal("250.0")
+        assert debt_before - debt_after == pytest.approx(event.debt_repaid, rel=Decimal("0.01"))
+        assert debt_after == pytest.approx(debt_before - event.debt_repaid, rel=Decimal("0.01"))
+
     def test_no_liquidation_when_hf_above_one(self) -> None:
         """Test that no liquidation occurs when health factor >= 1.0."""
         config = LendingBacktestConfig(
@@ -785,6 +943,20 @@ class TestPositionValuation:
 
         # Value = 10 ETH * $2500 = $25,000
         assert value == Decimal("25000")
+
+    def test_strict_value_missing_token_price_raises(self) -> None:
+        """Strict valuation must not reuse entry price when market price is missing."""
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        config = LendingBacktestConfig(strategy_type="lending", strict_reproducibility=True)
+        adapter = LendingBacktestAdapter(config)
+
+        entry_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+        position = create_supply_position(token="WETH", entry_price=Decimal("2000"), entry_time=entry_time)
+        market = MockMarketState(prices={})
+
+        with pytest.raises(HistoricalDataUnavailableError, match="WETH"):
+            adapter.value_position(position, market)
 
 
 # =============================================================================
@@ -1130,6 +1302,134 @@ class TestHistoricalAPYIntegration:
         provider = adapter._get_provider_for_protocol("unknown_protocol")
         assert provider is None
 
+    @pytest.mark.asyncio
+    async def test_historical_apy_async_returns_cached_value(self) -> None:
+        """Cached APY data bypasses provider lookup."""
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        timestamp = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+        adapter = LendingBacktestAdapter(data_config=BacktestDataConfig(use_historical_apy=True))
+        cache_key = ("aave_v3", "USDC", adapter._normalize_timestamp_to_day(timestamp))
+        adapter._apy_cache[cache_key] = (
+            Decimal("0.011"),
+            Decimal("0.022"),
+            "high",
+            "cached",
+        )
+
+        result = await adapter._get_historical_apy_async("aave_v3", "USDC", timestamp)
+
+        assert result == adapter._apy_cache[cache_key]
+
+    @pytest.mark.asyncio
+    async def test_historical_apy_async_unknown_protocol_uses_fallback(self) -> None:
+        """Unknown protocols degrade to configured fallback rates in non-strict mode."""
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        data_config = BacktestDataConfig(
+            use_historical_apy=True,
+            supply_apy_fallback=Decimal("0.012"),
+            borrow_apy_fallback=Decimal("0.034"),
+        )
+        adapter = LendingBacktestAdapter(data_config=data_config)
+        timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+
+        result = await adapter._get_historical_apy_async("unknown_protocol", "USDC", timestamp)
+
+        assert result == (Decimal("0.012"), Decimal("0.034"), "low", "fallback:default_rate")
+        assert adapter._apy_cache[("unknown_protocol", "USDC", adapter._normalize_timestamp_to_day(timestamp))] == result
+
+    @pytest.mark.asyncio
+    async def test_historical_apy_async_unknown_protocol_strict_raises(self) -> None:
+        """Unknown protocols fail loud when strict historical mode is enabled."""
+        from almanak.framework.backtesting.config import BacktestDataConfig
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        data_config = BacktestDataConfig(use_historical_apy=True, strict_historical_mode=True)
+        adapter = LendingBacktestAdapter(data_config=data_config)
+
+        with pytest.raises(HistoricalDataUnavailableError, match="No APY provider"):
+            await adapter._get_historical_apy_async("unknown_protocol", "USDC", datetime(2024, 1, 1, tzinfo=UTC))
+
+    @pytest.mark.asyncio
+    async def test_historical_apy_async_empty_provider_result_uses_fallback(self) -> None:
+        """Empty provider responses use configured fallback rates in non-strict mode."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        mock_provider = MagicMock()
+        mock_provider.get_apy = AsyncMock(return_value=[])
+        data_config = BacktestDataConfig(
+            use_historical_apy=True,
+            supply_apy_fallback=Decimal("0.021"),
+            borrow_apy_fallback=Decimal("0.043"),
+        )
+        adapter = LendingBacktestAdapter(data_config=data_config, aave_v3_provider=mock_provider)
+
+        result = await adapter._get_historical_apy_async("aave_v3", "USDC", datetime(2024, 1, 1, tzinfo=UTC))
+
+        assert result == (Decimal("0.021"), Decimal("0.043"), "low", "fallback:no_data")
+
+    @pytest.mark.asyncio
+    async def test_historical_apy_async_empty_provider_result_strict_raises(self) -> None:
+        """Empty provider responses fail loud in strict historical mode."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from almanak.framework.backtesting.config import BacktestDataConfig
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        mock_provider = MagicMock()
+        mock_provider.get_apy = AsyncMock(return_value=[])
+        data_config = BacktestDataConfig(use_historical_apy=True, strict_historical_mode=True)
+        adapter = LendingBacktestAdapter(data_config=data_config, aave_v3_provider=mock_provider)
+
+        with pytest.raises(HistoricalDataUnavailableError, match="No historical APY data"):
+            await adapter._get_historical_apy_async("aave_v3", "USDC", datetime(2024, 1, 1, tzinfo=UTC))
+
+    @pytest.mark.asyncio
+    async def test_historical_apy_async_re_raises_historical_data_error(self) -> None:
+        """Provider-raised HistoricalDataUnavailableError is not downgraded."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from almanak.framework.backtesting.config import BacktestDataConfig
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+        error = HistoricalDataUnavailableError(
+            data_type="apy",
+            identifier="USDC",
+            timestamp=timestamp,
+            message="provider has no APY",
+        )
+        mock_provider = MagicMock()
+        mock_provider.get_apy = AsyncMock(side_effect=error)
+        adapter = LendingBacktestAdapter(
+            data_config=BacktestDataConfig(use_historical_apy=True),
+            aave_v3_provider=mock_provider,
+        )
+
+        with pytest.raises(HistoricalDataUnavailableError) as exc_info:
+            await adapter._get_historical_apy_async("aave_v3", "USDC", timestamp)
+
+        assert exc_info.value is error
+
+    @pytest.mark.asyncio
+    async def test_historical_apy_async_provider_error_strict_raises(self) -> None:
+        """Generic provider failures become historical-data errors in strict mode."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from almanak.framework.backtesting.config import BacktestDataConfig
+        from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
+
+        mock_provider = MagicMock()
+        mock_provider.get_apy = AsyncMock(side_effect=RuntimeError("subgraph down"))
+        data_config = BacktestDataConfig(use_historical_apy=True, strict_historical_mode=True)
+        adapter = LendingBacktestAdapter(data_config=data_config, aave_v3_provider=mock_provider)
+
+        with pytest.raises(HistoricalDataUnavailableError, match="Failed to fetch historical APY"):
+            await adapter._get_historical_apy_async("aave_v3", "USDC", datetime(2024, 1, 1, tzinfo=UTC))
+
     def test_position_apy_confidence_tracking(self) -> None:
         """Test that position.apy_confidence is set during update."""
         from almanak.framework.backtesting.config import BacktestDataConfig
@@ -1181,7 +1481,7 @@ class TestHistoricalAPYIntegration:
 
     def test_historical_apy_with_mock_provider(self) -> None:
         """Test historical APY fetching with a mocked provider."""
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import AsyncMock, MagicMock
 
         from almanak.framework.backtesting.config import BacktestDataConfig
         from almanak.framework.backtesting.pnl.types import APYResult, DataConfidence, DataSourceInfo
@@ -1225,7 +1525,7 @@ class TestHistoricalAPYIntegration:
 
     def test_historical_apy_fallback_on_error(self) -> None:
         """Test that fallback is used when historical APY provider fails."""
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import AsyncMock, MagicMock
 
         from almanak.framework.backtesting.config import BacktestDataConfig
 

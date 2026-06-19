@@ -33,6 +33,7 @@ Example:
 """
 
 import logging
+from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -352,63 +353,93 @@ async def _get_defi_index_prices(
     Returns:
         List of BenchmarkPricePoint for the index
     """
-    # Fetch all component prices
-    component_prices: dict[str, list[BenchmarkPricePoint]] = {}
-
-    for token in DEFI_INDEX_WEIGHTS:
-        prices = await _get_single_token_prices(token, start, end, interval_seconds)
-        if prices:
-            component_prices[token] = prices
+    component_prices = await _fetch_defi_index_components(start, end, interval_seconds)
 
     if not component_prices:
         logger.warning("No component prices available for DeFi index")
         return []
 
-    # Normalize to a common index starting at 100
-    # Find the reference token with most data points
-    ref_token = max(component_prices.keys(), key=lambda t: len(component_prices[t]))
-    ref_prices = component_prices[ref_token]
+    ref_prices = _defi_index_reference_prices(component_prices)
+    return [
+        index_point
+        for ref_point in ref_prices
+        if (index_point := _defi_index_price_at(ref_point, component_prices)) is not None
+    ]
 
-    # Calculate weighted index at each timestamp
-    index_prices: list[BenchmarkPricePoint] = []
 
-    for i, ref_point in enumerate(ref_prices):
-        weighted_return = Decimal("0")
-        total_weight = Decimal("0")
+async def _fetch_defi_index_components(
+    start: datetime,
+    end: datetime,
+    interval_seconds: int,
+) -> dict[str, list[BenchmarkPricePoint]]:
+    """Fetch available DeFi index component price series."""
+    component_prices: dict[str, list[BenchmarkPricePoint]] = {}
+    for token in DEFI_INDEX_WEIGHTS:
+        prices = await _get_single_token_prices(token, start, end, interval_seconds)
+        if prices:
+            component_prices[token] = sorted(prices, key=lambda point: point.timestamp)
+    return component_prices
 
-        for token, weight in DEFI_INDEX_WEIGHTS.items():
-            if token not in component_prices:
-                continue
 
-            token_prices = component_prices[token]
-            if i >= len(token_prices):
-                continue
+def _defi_index_reference_prices(
+    component_prices: dict[str, list[BenchmarkPricePoint]],
+) -> list[BenchmarkPricePoint]:
+    """Return the densest component series to drive DeFi index timestamps."""
+    return max(component_prices.values(), key=len)
 
-            # Calculate normalized price (relative to first price)
-            first_price = token_prices[0].price
-            if first_price == 0:
-                continue
 
-            current_price = token_prices[i].price
-            normalized_return = current_price / first_price
+def _defi_index_price_at(
+    ref_point: BenchmarkPricePoint,
+    component_prices: dict[str, list[BenchmarkPricePoint]],
+) -> BenchmarkPricePoint | None:
+    """Calculate one DeFi index price at a reference timestamp."""
+    weighted_return = Decimal("0")
+    total_weight = Decimal("0")
 
-            weighted_return += weight * normalized_return
-            total_weight += weight
-
-        if total_weight == 0:
+    for token, weight in DEFI_INDEX_WEIGHTS.items():
+        token_prices = component_prices.get(token)
+        if not token_prices:
             continue
 
-        # Normalize by actual weights used
-        index_value = (weighted_return / total_weight) * Decimal("100")
+        normalized_return = _defi_component_return_at(token_prices, ref_point.timestamp)
+        if normalized_return is None:
+            continue
 
-        index_prices.append(
-            BenchmarkPricePoint(
-                timestamp=ref_point.timestamp,
-                price=index_value,
-            )
-        )
+        weighted_return += weight * normalized_return
+        total_weight += weight
 
-    return index_prices
+    if total_weight == 0:
+        return None
+
+    return BenchmarkPricePoint(
+        timestamp=ref_point.timestamp,
+        price=(weighted_return / total_weight) * Decimal("100"),
+    )
+
+
+def _defi_component_return_at(
+    token_prices: list[BenchmarkPricePoint],
+    timestamp: datetime,
+) -> Decimal | None:
+    """Return component performance using the latest price at or before timestamp."""
+    first_price = token_prices[0].price
+    if first_price == 0:
+        return None
+
+    current_price = _latest_benchmark_price_at_or_before(token_prices, timestamp)
+    if current_price is None:
+        return None
+
+    return current_price.price / first_price
+
+
+def _latest_benchmark_price_at_or_before(
+    prices: list[BenchmarkPricePoint],
+    timestamp: datetime,
+) -> BenchmarkPricePoint | None:
+    """Return the latest benchmark price that is not newer than timestamp."""
+    index = bisect_right(prices, timestamp, key=lambda point: point.timestamp) - 1
+    return prices[index] if index >= 0 else None
 
 
 def _parse_coingecko_prices(

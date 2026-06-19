@@ -749,6 +749,42 @@ class TestAccrueBeforeReduce:
 
         assert position.interest_accrued == accrued_at_fill
 
+    def test_non_lending_reduce_target_skips_interest_accrual(self) -> None:
+        """Accrue-before-reduce is scoped to lending positions only."""
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        spot = SimulatedPosition.spot(
+            token="USDC",
+            amount=SUPPLY_AMOUNT,
+            entry_price=Decimal("1"),
+            entry_time=TS,
+        )
+        portfolio.positions.append(spot)
+        fill = _reduce_fill(spot.position_id, {"USDC": Decimal("1000")}, timestamp=TS + timedelta(hours=1))
+
+        portfolio._accrue_interest_through_fill(fill, market(), adapter=None)
+
+        assert spot.last_updated is None
+        assert spot.amounts["USDC"] == SUPPLY_AMOUNT
+
+    def test_adapter_accrual_failure_is_swallowed_without_state_mutation(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A failed pre-reduce accrual does not half-commit the position."""
+
+        class FailingAdapter:
+            def update_position(self, *_args: object, **_kwargs: object) -> None:
+                raise RuntimeError("apy source unavailable")
+
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CASH)
+        position = supply_position()
+        portfolio.positions.append(position)
+        fill = _reduce_fill(position.position_id, {"USDC": Decimal("1000")}, timestamp=TS + timedelta(hours=1))
+
+        with caplog.at_level("WARNING"):
+            portfolio._accrue_interest_through_fill(fill, market(), adapter=FailingAdapter())
+
+        assert "Interest accrual before partial reduce" in caplog.text
+        assert position.interest_accrued == Decimal("0")
+        assert position.last_updated is None
+
 
 # =============================================================================
 # Real engine loop, both lanes (trust-matrix harness, network-free)

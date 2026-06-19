@@ -138,6 +138,37 @@ LST_TOKENS = frozenset(
     }
 )
 
+_TOKEN_CLASS_STABLE = "stable"
+_TOKEN_CLASS_LST = "lst"
+_TOKEN_CLASS_HIGH_VOLATILITY = "high_volatility"
+_TOKEN_CLASS_UNKNOWN = "unknown"
+
+
+def _normalize_token_symbol(token: str) -> str:
+    """Normalize token symbols before MEV classification."""
+    return token.strip().upper() if token else ""
+
+
+def _classify_token_for_mev(token: str) -> str:
+    """Classify a token symbol into the MEV vulnerability model."""
+    normalized = _normalize_token_symbol(token)
+    if normalized in STABLECOIN_TOKENS:
+        return _TOKEN_CLASS_STABLE
+    if normalized in LST_TOKENS:
+        return _TOKEN_CLASS_LST
+    if normalized in HIGH_VOLATILITY_TOKENS:
+        return _TOKEN_CLASS_HIGH_VOLATILITY
+    return _TOKEN_CLASS_UNKNOWN
+
+
+def _stable_pair_vulnerability(token_classes: set[str]) -> Decimal:
+    """Return vulnerability for a stablecoin paired with a non-stable token."""
+    if _TOKEN_CLASS_HIGH_VOLATILITY in token_classes:
+        return Decimal("0.7")
+    if _TOKEN_CLASS_LST in token_classes:
+        return Decimal("0.4")
+    return Decimal("0.5")
+
 
 # =============================================================================
 # Data Classes
@@ -353,8 +384,8 @@ class MEVSimulator:
             MEVSimulationResult with simulation outcome
         """
         # Normalize token symbols
-        token_in = token_in.upper() if token_in else ""
-        token_out = token_out.upper() if token_out else ""
+        token_in = _normalize_token_symbol(token_in)
+        token_out = _normalize_token_symbol(token_out)
 
         # Check if intent type is MEV-vulnerable
         if not self._is_mev_vulnerable_intent(intent_type):
@@ -478,37 +509,22 @@ class MEVSimulator:
         Returns:
             Vulnerability factor between 0 and 1
         """
-        # Both stablecoins = very low vulnerability
-        if token_in in STABLECOIN_TOKENS and token_out in STABLECOIN_TOKENS:
+        token_classes = {
+            _classify_token_for_mev(token_in),
+            _classify_token_for_mev(token_out),
+        }
+        if token_classes == {_TOKEN_CLASS_STABLE}:
             return Decimal("0.1")
-
-        # One stablecoin, one volatile = medium vulnerability
-        if token_in in STABLECOIN_TOKENS or token_out in STABLECOIN_TOKENS:
-            # Check if the non-stable is high volatility
-            non_stable = token_out if token_in in STABLECOIN_TOKENS else token_in
-            if non_stable in HIGH_VOLATILITY_TOKENS:
-                return Decimal("0.7")
-            if non_stable in LST_TOKENS:
-                return Decimal("0.4")
-            return Decimal("0.5")
-
-        # Both LST tokens = low-medium vulnerability
-        if token_in in LST_TOKENS and token_out in LST_TOKENS:
+        if _TOKEN_CLASS_STABLE in token_classes:
+            return _stable_pair_vulnerability(token_classes)
+        if token_classes == {_TOKEN_CLASS_LST}:
             return Decimal("0.3")
-
-        # LST to volatile or vice versa = medium vulnerability
-        if token_in in LST_TOKENS or token_out in LST_TOKENS:
+        if _TOKEN_CLASS_LST in token_classes:
             return Decimal("0.5")
-
-        # Both high volatility = highest vulnerability
-        if token_in in HIGH_VOLATILITY_TOKENS and token_out in HIGH_VOLATILITY_TOKENS:
+        if token_classes == {_TOKEN_CLASS_HIGH_VOLATILITY}:
             return Decimal("1.0")
-
-        # One high volatility = high vulnerability
-        if token_in in HIGH_VOLATILITY_TOKENS or token_out in HIGH_VOLATILITY_TOKENS:
+        if _TOKEN_CLASS_HIGH_VOLATILITY in token_classes:
             return Decimal("0.8")
-
-        # Unknown tokens = assume medium-high vulnerability
         return Decimal("0.6")
 
     def _calculate_size_vulnerability(self, trade_amount_usd: Decimal) -> Decimal:
@@ -720,7 +736,7 @@ def get_token_vulnerability(token_in: str, token_out: str) -> str:
         Vulnerability classification string: "low", "medium", "high", or "very_high"
     """
     simulator = MEVSimulator()
-    vulnerability = simulator._calculate_token_vulnerability(token_in.upper(), token_out.upper())
+    vulnerability = simulator._calculate_token_vulnerability(token_in, token_out)
 
     if vulnerability <= Decimal("0.25"):
         return "low"

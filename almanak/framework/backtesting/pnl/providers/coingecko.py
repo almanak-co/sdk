@@ -579,6 +579,8 @@ class OHLCVCache:
         # Find the closest OHLCV candle
         for i, candle in enumerate(ohlcv_list):
             if candle.timestamp >= timestamp:
+                if i == 0 and candle.timestamp > timestamp:
+                    return None
                 # Use the close price of the previous candle if available
                 if i > 0:
                     return ohlcv_list[i - 1].close
@@ -717,9 +719,9 @@ class CoinGeckoDataProvider:
         # explicit api_key kwarg was passed, mirroring the legacy
         # ``api_key or os.environ.get(...)`` precedence (kwarg wins; env
         # is the fallback).
-        self._api_key = api_key or (backtest_config_from_env().coingecko_api_key or "")
+        self._api_key = self._resolve_api_key(api_key)
         self._request_timeout = request_timeout
-        self._min_request_interval = min_request_interval
+        self._min_request_interval = self._effective_request_interval(self._api_key, min_request_interval)
         self._retry_config = retry_config or RetryConfig()
         self._data_config = data_config
 
@@ -727,41 +729,22 @@ class CoinGeckoDataProvider:
         # Non-native ERC20s resolve their coin id through the contract endpoint
         # keyed off this map; symbols absent from it (and not native) are
         # honest misses.
-        self._token_addresses: dict[str, tuple[str, str]] = {k.upper(): v for k, v in (token_addresses or {}).items()}
+        self._token_addresses = self._normalize_token_addresses(token_addresses)
 
         # Case-folded native symbol -> coin id projection, built once for O(1)
         # case-insensitive lookup. Registry-derived (native_coingecko_ids keys
         # are verbatim case, e.g. "wS"), never a hardcoded allowlist.
-        self._native_ids_by_upper: dict[str, str] = {
-            symbol.upper(): cg_id for symbol, cg_id in native_coingecko_ids().items()
-        }
+        self._native_ids_by_upper = self._normalize_native_ids()
 
         # In-memory coin-id resolution cache keyed by (chain_lower, address_lower).
         # Sits in front of the persistent SQLite resolution table.
         self._coin_id_cache: dict[tuple[str, str], str] = {}
 
         # Select API base URL based on whether we have an API key
-        self._api_base = self._PRO_API_BASE if self._api_key else self._FREE_API_BASE
+        self._api_base = self._api_base_for_key(self._api_key)
 
         # Determine rate limit: use config if provided, otherwise use tier-based defaults
-        if data_config is not None:
-            self._rate_limit = data_config.coingecko_rate_limit_per_minute
-            logger.info(
-                "Using rate limit from BacktestDataConfig: %d req/min",
-                self._rate_limit,
-            )
-        else:
-            # Fall back to tier-based defaults
-            self._rate_limit = self._PRO_RATE_LIMIT if self._api_key else self._FREE_RATE_LIMIT
-            logger.info(
-                "Using default %s tier rate limit: %d req/min",
-                "pro" if self._api_key else "free",
-                self._rate_limit,
-            )
-
-        # If pro tier, reduce default request interval
-        if self._api_key and min_request_interval == 1.5:
-            self._min_request_interval = 0.2  # 200ms for pro tier
+        self._rate_limit = self._coingecko_rate_limit(data_config)
 
         # Rate limit tracking (reactive - for handling 429 responses)
         self._rate_limit_state = RateLimitState()
@@ -769,7 +752,7 @@ class CoinGeckoDataProvider:
 
         # Proactive rate limiter (token bucket algorithm)
         # Configured based on config or tier-based defaults
-        burst_size = max(1, self._rate_limit // 5)  # 1/5 of rate limit for burst
+        burst_size = self._rate_limiter_burst_size(self._rate_limit)
         self._rate_limiter = TokenBucketRateLimiter(
             requests_per_minute=self._rate_limit,
             burst_size=burst_size,
@@ -797,6 +780,57 @@ class CoinGeckoDataProvider:
             request_timeout,
             self._retry_config.max_retries,
         )
+
+    @staticmethod
+    def _resolve_api_key(api_key: str) -> str:
+        """Return explicit CoinGecko API key or the configured env fallback."""
+        return api_key or (backtest_config_from_env().coingecko_api_key or "")
+
+    @staticmethod
+    def _effective_request_interval(api_key: str, min_request_interval: float) -> float:
+        """Return the request interval after the legacy pro-tier default adjustment."""
+        if api_key and min_request_interval == 1.5:
+            return 0.2
+        return min_request_interval
+
+    @staticmethod
+    def _normalize_token_addresses(
+        token_addresses: dict[str, tuple[str, str]] | None,
+    ) -> dict[str, tuple[str, str]]:
+        """Return a case-insensitive token-address map keyed by uppercase symbol."""
+        return {symbol.upper(): value for symbol, value in (token_addresses or {}).items()}
+
+    @staticmethod
+    def _normalize_native_ids() -> dict[str, str]:
+        """Return native CoinGecko ids keyed by uppercase symbol."""
+        return {symbol.upper(): cg_id for symbol, cg_id in native_coingecko_ids().items()}
+
+    def _api_base_for_key(self, api_key: str) -> str:
+        """Return the CoinGecko API base URL for the configured tier."""
+        return self._PRO_API_BASE if api_key else self._FREE_API_BASE
+
+    def _coingecko_rate_limit(self, data_config: BacktestDataConfig | None) -> int:
+        """Return the configured CoinGecko rate limit and log its source."""
+        if data_config is not None:
+            rate_limit = data_config.coingecko_rate_limit_per_minute
+            logger.info(
+                "Using rate limit from BacktestDataConfig: %d req/min",
+                rate_limit,
+            )
+            return rate_limit
+
+        rate_limit = self._PRO_RATE_LIMIT if self._api_key else self._FREE_RATE_LIMIT
+        logger.info(
+            "Using default %s tier rate limit: %d req/min",
+            "pro" if self._api_key else "free",
+            rate_limit,
+        )
+        return rate_limit
+
+    @staticmethod
+    def _rate_limiter_burst_size(rate_limit: int) -> int:
+        """Return the token-bucket burst size for a CoinGecko rate limit."""
+        return max(1, rate_limit // 5)
 
     def __repr__(self) -> str:
         """Return a safe representation without exposing the API key."""

@@ -282,6 +282,55 @@ class TestPaperPortfolioTrackerRecordTrade:
         assert "ETH" not in tracker_with_session.current_balances
         assert tracker_with_session.get_token_balance("ETH") == Decimal("0")
 
+    def test_record_trade_rejects_swap_with_empty_inflows(
+        self,
+        tracker_with_session: PaperPortfolioTracker,
+        base_timestamp: datetime,
+    ) -> None:
+        trade = PaperTrade(
+            timestamp=base_timestamp,
+            block_number=12345678,
+            intent={"type": "SWAP"},
+            tx_hash="0xempty",
+            gas_used=150000,
+            gas_cost_usd=Decimal("0.50"),
+            tokens_in={},
+            tokens_out={"USDC": Decimal("1000")},
+            intent_type="SWAP",
+        )
+
+        tracker_with_session.record_trade(trade)
+
+        assert tracker_with_session.trades == []
+        assert tracker_with_session.total_gas_used == 0
+        assert tracker_with_session.total_gas_cost_usd == Decimal("0")
+        assert tracker_with_session.get_token_balance("USDC") == Decimal("10000")
+
+    def test_record_trade_rejects_negative_token_flows(
+        self,
+        tracker_with_session: PaperPortfolioTracker,
+        base_timestamp: datetime,
+    ) -> None:
+        trade = PaperTrade(
+            timestamp=base_timestamp,
+            block_number=12345678,
+            intent={"type": "SWAP"},
+            tx_hash="0xnegative",
+            gas_used=150000,
+            gas_cost_usd=Decimal("0.50"),
+            tokens_in={"ETH": Decimal("1")},
+            tokens_out={"USDC": Decimal("-1000")},
+            intent_type="SWAP",
+        )
+
+        tracker_with_session.record_trade(trade)
+
+        assert tracker_with_session.trades == []
+        assert tracker_with_session.total_gas_used == 0
+        assert tracker_with_session.total_gas_cost_usd == Decimal("0")
+        assert tracker_with_session.get_token_balance("ETH") == Decimal("10")
+        assert tracker_with_session.get_token_balance("USDC") == Decimal("10000")
+
 
 # =============================================================================
 # Record Error Tests

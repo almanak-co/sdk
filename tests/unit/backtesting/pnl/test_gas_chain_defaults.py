@@ -304,6 +304,27 @@ class TestEngineGasSourceProvenance:
         # Explicitly set -- even when equal to the chain default -- is EXPLICIT.
         assert explicit_record.source is ParameterSource.EXPLICIT
 
+    def test_parameter_sources_record_gas_eth_override(self) -> None:
+        engine = _backtester()
+
+        tracker = engine._create_parameter_source_tracker(_config(gas_eth_price_override=Decimal("3200")))
+
+        record = next(r for r in tracker.records if r.parameter_name == "gas_eth_price_override")
+        assert record.source is ParameterSource.EXPLICIT
+        assert record.category == "gas"
+        assert record.value == "3200"
+
+    def test_parameter_sources_record_adapter_runtime_rates(self) -> None:
+        engine = _backtester()
+        engine._adapter = type("PerpLendingBacktestAdapter", (), {})()
+
+        tracker = engine._create_parameter_source_tracker(_config(strict_reproducibility=True))
+
+        funding = next(r for r in tracker.records if r.parameter_name == "funding_rate_source")
+        apy = next(r for r in tracker.records if r.parameter_name == "apy_source")
+        assert funding.source is ParameterSource.HISTORICAL
+        assert apy.source is ParameterSource.HISTORICAL
+
 
 # =============================================================================
 # Institutional mode: refuse to fabricate

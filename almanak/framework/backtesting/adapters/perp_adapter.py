@@ -45,7 +45,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -259,6 +259,23 @@ class PerpBacktestConfig(StrategyBacktestConfig):
             protocol=data.get("protocol", "gmx"),
             chain=data.get("chain", LEGACY_SERIALIZED_CHAIN),
         )
+
+
+@dataclass(frozen=True)
+class _FundingLookup:
+    primary_token: str
+    market: str
+    timestamp: datetime | None
+
+
+@dataclass(frozen=True)
+class _PerpOpenParams:
+    size_usd: Decimal
+    collateral_amount: Any
+    collateral_token: str
+    leverage: Decimal
+    is_long: bool
+    protocol: str
 
 
 @register_adapter(
@@ -661,48 +678,18 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             SimulatedFill with success=False if margin validation fails,
             or None to proceed with default execution.
         """
-        from almanak.framework.backtesting.models import IntentType
-        from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
         from almanak.framework.intents.vocabulary import PerpOpenIntent
 
         # Type narrowing for mypy
         if not isinstance(intent, PerpOpenIntent):
             return None
 
-        # Extract intent parameters
-        size_usd = Decimal(str(intent.size_usd))
-        collateral_amount = intent.collateral_amount
-        collateral_token = intent.collateral_token
-        leverage = Decimal(str(intent.leverage))
-        is_long = intent.is_long
-        protocol = intent.protocol
+        params = self._perp_open_params(intent)
+        collateral_usd = self._perp_collateral_usd(params, portfolio, market_state)
+        required_margin_ratio = self._perp_required_margin_ratio(params.leverage)
 
-        # Handle "all" collateral amount - use portfolio cash balance
-        if collateral_amount == "all":
-            collateral_usd = portfolio.cash_usd
-        else:
-            # Get collateral price to convert to USD
-            try:
-                collateral_price = market_state.get_price(collateral_token)
-            except KeyError:
-                collateral_price = Decimal("1")  # Assume stablecoin if not found
-
-            if collateral_price is None or collateral_price <= 0:
-                collateral_price = Decimal("1")
-
-            collateral_usd = Decimal(str(collateral_amount)) * collateral_price
-
-        # Calculate required collateral based on leverage
-        # If leverage is specified, required collateral = size / leverage
-        # Otherwise, use margin ratio from config
-        if leverage > Decimal("1"):
-            required_margin_ratio = Decimal("1") / leverage
-        else:
-            required_margin_ratio = self._config.initial_margin_ratio
-
-        # Validate margin requirements
         can_open, reason = self._margin_validator.can_open_position(
-            position_size=size_usd,
+            position_size=params.size_usd,
             collateral=collateral_usd,
             available_capital=portfolio.cash_usd,
             current_margin_used=self._get_current_margin_used(portfolio),
@@ -710,39 +697,121 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         )
 
         if not can_open:
-            logger.warning(
-                "Margin validation failed for PERP_OPEN: size=%s, collateral=%s, reason=%s",
-                size_usd,
+            return self._perp_margin_failure_fill(
+                params,
+                market_state,
                 collateral_usd,
+                required_margin_ratio,
                 reason,
             )
 
-            # Return a failed fill
-            return SimulatedFill(
-                timestamp=market_state.timestamp,
-                intent_type=IntentType.PERP_OPEN,
-                protocol=protocol,
-                tokens=[collateral_token],
-                executed_price=Decimal("0"),
-                amount_usd=size_usd,
-                fee_usd=Decimal("0"),
-                slippage_usd=Decimal("0"),
-                gas_cost_usd=Decimal("0"),
-                tokens_in={},
-                tokens_out={
-                    collateral_token: Decimal(str(collateral_amount)) if collateral_amount != "all" else collateral_usd
-                },
-                success=False,
-                metadata={
-                    "failure_reason": reason,
-                    "validation_type": "margin",
-                    "required_margin_ratio": str(required_margin_ratio),
-                    "collateral_usd": str(collateral_usd),
-                    "leverage": str(leverage),
-                },
-            )
+        self._log_perp_open_success(intent, market_state, params, collateral_usd, required_margin_ratio)
+        return None
 
-        # Margin validation passed - calculate liquidation price for logging
+    @staticmethod
+    def _perp_open_params(intent: Any) -> _PerpOpenParams:
+        return _PerpOpenParams(
+            size_usd=Decimal(str(intent.size_usd)),
+            collateral_amount=intent.collateral_amount,
+            collateral_token=intent.collateral_token,
+            leverage=Decimal(str(intent.leverage)),
+            is_long=intent.is_long,
+            protocol=intent.protocol,
+        )
+
+    def _perp_collateral_usd(
+        self,
+        params: _PerpOpenParams,
+        portfolio: "SimulatedPortfolio",
+        market_state: "MarketState",
+    ) -> Decimal:
+        if params.collateral_amount == "all":
+            return portfolio.cash_usd
+
+        collateral_price = self._perp_collateral_price(params, market_state)
+        return Decimal(str(params.collateral_amount)) * collateral_price
+
+    def _perp_collateral_price(
+        self,
+        params: _PerpOpenParams,
+        market_state: "MarketState",
+    ) -> Decimal:
+        try:
+            collateral_price = market_state.get_price(params.collateral_token)
+        except KeyError:
+            collateral_price = None
+
+        if collateral_price is not None and collateral_price > Decimal("0"):
+            return collateral_price
+        if self._config.strict_reproducibility:
+            raise HistoricalDataUnavailableError(
+                data_type="price",
+                identifier=params.collateral_token,
+                timestamp=getattr(market_state, "timestamp", datetime.now()),
+                message=f"Price unavailable for perp collateral token {params.collateral_token}",
+                chain=self._config.chain,
+                protocol=params.protocol,
+            )
+        return Decimal("1")
+
+    def _perp_required_margin_ratio(self, leverage: Decimal) -> Decimal:
+        if leverage > Decimal("1"):
+            return Decimal("1") / leverage
+        return self._config.initial_margin_ratio
+
+    def _perp_margin_failure_fill(
+        self,
+        params: _PerpOpenParams,
+        market_state: "MarketState",
+        collateral_usd: Decimal,
+        required_margin_ratio: Decimal,
+        reason: str,
+    ) -> "SimulatedFill":
+        from almanak.framework.backtesting.models import IntentType
+        from almanak.framework.backtesting.pnl.portfolio import SimulatedFill
+
+        logger.warning(
+            "Margin validation failed for PERP_OPEN: size=%s, collateral=%s, reason=%s",
+            params.size_usd,
+            collateral_usd,
+            reason,
+        )
+        return SimulatedFill(
+            timestamp=market_state.timestamp,
+            intent_type=IntentType.PERP_OPEN,
+            protocol=params.protocol,
+            tokens=[params.collateral_token],
+            executed_price=Decimal("0"),
+            amount_usd=params.size_usd,
+            fee_usd=Decimal("0"),
+            slippage_usd=Decimal("0"),
+            gas_cost_usd=Decimal("0"),
+            tokens_in={},
+            tokens_out=self._perp_failed_tokens_out(),
+            success=False,
+            metadata={
+                "failure_reason": reason,
+                "validation_type": "margin",
+                "required_margin_ratio": str(required_margin_ratio),
+                "collateral_usd": str(collateral_usd),
+                "attempted_collateral_amount": str(params.collateral_amount),
+                "attempted_collateral_token": params.collateral_token,
+                "leverage": str(params.leverage),
+            },
+        )
+
+    @staticmethod
+    def _perp_failed_tokens_out() -> dict[str, Decimal]:
+        return {}
+
+    def _log_perp_open_success(
+        self,
+        intent: Any,
+        market_state: "MarketState",
+        params: _PerpOpenParams,
+        collateral_usd: Decimal,
+        required_margin_ratio: Decimal,
+    ) -> None:
         try:
             market_token = intent.market.split("/")[0]  # e.g., "ETH/USD" -> "ETH"
             entry_price = market_state.get_price(market_token)
@@ -752,20 +821,23 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         if entry_price and entry_price > Decimal("0"):
             liq_price = self.get_liquidation_price(
                 entry_price=entry_price,
-                leverage=leverage if leverage > Decimal("1") else Decimal("1") / required_margin_ratio,
-                is_long=is_long,
+                leverage=self._perp_effective_leverage(params.leverage, required_margin_ratio),
+                is_long=params.is_long,
             )
             logger.info(
                 "PERP_OPEN margin validated: size=%s, collateral=%s, leverage=%.1fx, entry=%.2f, liq_price=%.2f",
-                size_usd,
+                params.size_usd,
                 collateral_usd,
-                float(leverage) if leverage > Decimal("1") else float(Decimal("1") / required_margin_ratio),
+                float(self._perp_effective_leverage(params.leverage, required_margin_ratio)),
                 float(entry_price),
                 float(liq_price),
             )
 
-        # Return None to let default execution proceed
-        return None
+    @staticmethod
+    def _perp_effective_leverage(leverage: Decimal, required_margin_ratio: Decimal) -> Decimal:
+        if leverage > Decimal("1"):
+            return leverage
+        return Decimal("1") / required_margin_ratio
 
     def _execute_perp_close(
         self,
@@ -851,87 +923,107 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             separately. This method does not trigger liquidation, only emits
             proximity warnings.
         """
-        # Only process perp positions
+        if not self._should_update_perp_position(position, elapsed_seconds):
+            return
+
+        primary_token = self._perp_primary_token(position)
+        funding_timestamp = self._resolve_perp_timestamp(position, market_state, timestamp, "funding")
+        current_price = self._perp_token_price(
+            position,
+            market_state,
+            primary_token,
+            funding_timestamp,
+            "perp position update",
+        )
+        self._apply_funding_if_due(position, elapsed_seconds, funding_timestamp)
+
+        self._liquidation_calculator.update_position_liquidation_price(position, self._config.maintenance_margin_ratio)
+        self._check_perp_liquidation_proximity(position, current_price)
+
+        position.last_updated = self._resolve_perp_timestamp(position, market_state, timestamp, "")
+        self._log_perp_position_update(position, current_price)
+
+    @staticmethod
+    def _should_update_perp_position(position: "SimulatedPosition", elapsed_seconds: float) -> bool:
         if position.position_type not in (PositionType.PERP_LONG, PositionType.PERP_SHORT):
-            return
-
-        # Skip if already liquidated
+            return False
         if position.is_liquidated:
-            return
+            return False
+        return elapsed_seconds > 0
 
-        if elapsed_seconds <= 0:
-            return
+    @staticmethod
+    def _perp_primary_token(position: "SimulatedPosition") -> str:
+        return position.tokens[0] if position.tokens else "ETH"
 
-        # Get primary token for price lookup
-        primary_token = position.tokens[0] if position.tokens else "ETH"
+    def _resolve_perp_timestamp(
+        self,
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+        timestamp: datetime | None,
+        purpose: str,
+    ) -> datetime:
+        if timestamp is not None:
+            return timestamp
+        if hasattr(market_state, "timestamp") and market_state.timestamp is not None:
+            return market_state.timestamp
+        if self._config.strict_reproducibility:
+            purpose_suffix = f" {purpose}" if purpose else ""
+            msg = (
+                f"No simulation timestamp available for perp position {position.position_id}{purpose_suffix}. "
+                "In strict reproducibility mode, timestamp must be provided. "
+                "Either pass timestamp parameter or ensure market_state.timestamp is set."
+            )
+            raise ValueError(msg)
+        warning_suffix = f" {purpose}" if purpose else ""
+        logger.warning(
+            "No simulation timestamp available for perp position %s%s, "
+            "falling back to datetime.now(). This breaks backtest reproducibility.",
+            position.position_id,
+            warning_suffix,
+        )
+        return datetime.now()
 
-        # Get current price
+    def _perp_token_price(
+        self,
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+        primary_token: str,
+        timestamp: datetime,
+        context: str,
+    ) -> Decimal:
         try:
             current_price = market_state.get_price(primary_token)
         except KeyError:
-            current_price = position.entry_price
+            current_price = None
 
-        if current_price is None or current_price <= 0:
-            current_price = position.entry_price
+        if current_price is not None and current_price > 0:
+            return current_price
 
-        # Apply funding payments based on frequency
-        # Pass timestamp for reproducible funding time tracking
-        # Prefer explicit timestamp > market_state.timestamp > datetime.now() (with warning)
-        if timestamp is not None:
-            funding_timestamp = timestamp
-        elif hasattr(market_state, "timestamp") and market_state.timestamp is not None:
-            funding_timestamp = market_state.timestamp
-        else:
-            if self._config.strict_reproducibility:
-                msg = (
-                    f"No simulation timestamp available for perp position {position.position_id} funding. "
-                    "In strict reproducibility mode, timestamp must be provided. "
-                    "Either pass timestamp parameter or ensure market_state.timestamp is set."
-                )
-                raise ValueError(msg)
-            logger.warning(
-                "No simulation timestamp available for perp position %s funding, "
-                "falling back to datetime.now(). This breaks backtest reproducibility.",
-                position.position_id,
-            )
-            funding_timestamp = datetime.now()
-        self._apply_funding_if_due(position, elapsed_seconds, funding_timestamp)
-
-        # Update liquidation price
-        self._liquidation_calculator.update_position_liquidation_price(position, self._config.maintenance_margin_ratio)
-
-        # Check liquidation proximity and emit warnings
-        if self._config.liquidation_model_enabled:
-            self._liquidation_calculator.check_liquidation_proximity(
-                position,
-                current_price,
-                warning_threshold=self._config.liquidation_warning_threshold,
-                critical_threshold=self._config.liquidation_critical_threshold,
-                emit_warning=True,
+        if self._config.strict_reproducibility:
+            raise HistoricalDataUnavailableError(
+                data_type="price",
+                identifier=primary_token,
+                timestamp=timestamp,
+                message=f"Price unavailable for {primary_token} in {context}",
+                chain=self._config.chain,
+                protocol=position.protocol,
             )
 
-        # Update timestamp using simulation time for reproducibility
-        # Prefer explicit timestamp > market_state.timestamp > datetime.now() (with warning)
-        if timestamp is not None:
-            update_time = timestamp
-        elif hasattr(market_state, "timestamp") and market_state.timestamp is not None:
-            update_time = market_state.timestamp
-        else:
-            if self._config.strict_reproducibility:
-                msg = (
-                    f"No simulation timestamp available for perp position {position.position_id}. "
-                    "In strict reproducibility mode, timestamp must be provided. "
-                    "Either pass timestamp parameter or ensure market_state.timestamp is set."
-                )
-                raise ValueError(msg)
-            logger.warning(
-                "No simulation timestamp available for perp position %s, "
-                "falling back to datetime.now(). This breaks backtest reproducibility.",
-                position.position_id,
-            )
-            update_time = datetime.now()
-        position.last_updated = update_time
+        return position.entry_price
 
+    def _check_perp_liquidation_proximity(self, position: "SimulatedPosition", current_price: Decimal) -> None:
+        if not self._config.liquidation_model_enabled:
+            return
+        self._liquidation_calculator.check_liquidation_proximity(
+            position,
+            current_price,
+            warning_threshold=self._config.liquidation_warning_threshold,
+            critical_threshold=self._config.liquidation_critical_threshold,
+            emit_warning=True,
+        )
+
+    @staticmethod
+    def _log_perp_position_update(position: "SimulatedPosition", current_price: Decimal) -> None:
         logger.debug(
             "Perp position update: position=%s, type=%s, price=%.2f, funding=%.4f, liq_price=%s",
             position.position_id,
@@ -1079,7 +1171,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             confidence,
         )
 
-    def _get_historical_funding_rate_v2(  # noqa: C901
+    def _get_historical_funding_rate_v2(
         self,
         position: "SimulatedPosition",
         timestamp: datetime | None = None,
@@ -1101,189 +1193,253 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
             HistoricalDataUnavailableError: If strict_historical_mode is True and
                 historical funding rate data cannot be fetched.
         """
-        primary_token = position.tokens[0] if position.tokens else "ETH"
-        market = f"{primary_token}-USD"
+        lookup = self._funding_lookup(position, timestamp)
+        if lookup.timestamp is None:
+            return self._funding_no_timestamp_result(position, lookup)
 
-        if timestamp is None:
-            if self._is_strict_historical_mode():
-                raise HistoricalDataUnavailableError(
-                    data_type="funding",
-                    identifier=market,
-                    timestamp=datetime.now(),
-                    message="No timestamp provided for historical funding rate lookup",
-                    chain=self._config.chain,
-                    protocol=position.protocol,
-                )
-            # Fallback to default rate
-            default_rate = self._get_funding_fallback_rate()
-            logger.warning(
-                "Using fallback funding rate for %s %s: %.6f (no timestamp provided)",
-                position.protocol,
-                primary_token,
-                float(default_rate),
-            )
-            return default_rate, "low", "fallback:no_timestamp"
-
-        # Get the appropriate provider for this protocol
         provider = self._get_provider_for_protocol(position.protocol)
         if provider is None:
-            if self._is_strict_historical_mode():
-                raise HistoricalDataUnavailableError(
-                    data_type="funding",
-                    identifier=market,
-                    timestamp=timestamp,
-                    message=f"No funding rate provider available for protocol '{position.protocol}'",
-                    chain=self._config.chain,
-                    protocol=position.protocol,
-                )
-            # Fallback to default rate
-            default_rate = self._get_funding_fallback_rate()
-            logger.warning(
-                "Using fallback funding rate for %s %s: %.6f (no provider for protocol)",
-                position.protocol,
-                primary_token,
-                float(default_rate),
-            )
-            return default_rate, "low", f"fallback:unsupported_protocol:{position.protocol}"
+            return self._funding_provider_unavailable_result(position, lookup)
 
-        # Check cache first
-        cache_key = (position.protocol.lower(), market, self._normalize_timestamp_to_hour(timestamp))
-        if cache_key in self._funding_cache:
-            cached = self._funding_cache[cache_key]
-            logger.debug(
-                "Using cached funding rate for %s %s at %s: %.6f",
-                position.protocol,
-                market,
-                timestamp.isoformat(),
-                float(cached[0]),
-            )
+        cache_key = self._funding_cache_key(position, lookup)
+        cached = self._cached_funding_rate(position, lookup, cache_key)
+        if cached is not None:
             return cached
 
         try:
-            # Run async query synchronously
-            # Check if we're in an async context
-            try:
-                asyncio.get_running_loop()
-                loop_is_running = True
-            except RuntimeError:
-                # No running loop
-                loop_is_running = False
-
-            if loop_is_running:
-                # Avoid blocking the running loop
-                if asyncio.current_task() is not None:
-                    if self._is_strict_historical_mode():
-                        raise HistoricalDataUnavailableError(
-                            data_type="funding",
-                            identifier=market,
-                            timestamp=timestamp,
-                            message="Cannot fetch historical funding rate in async context",
-                            chain=self._config.chain,
-                            protocol=position.protocol,
-                        )
-                    logger.debug("Historical funding fetch skipped in async context; using fallback.")
-                    default_rate = self._get_funding_fallback_rate()
-                    return default_rate, "low", "fallback:async_context"
-
-            # Fetch funding rates for a 1-hour window around the timestamp
-            from datetime import timedelta
-
-            start_time = timestamp - timedelta(hours=1)
-            end_time = timestamp
-
-            if loop_is_running:
-                # Use thread pool for async context
-                import concurrent.futures
-
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(
-                        asyncio.run,
-                        provider.get_funding_rates(
-                            market=market,
-                            start_date=start_time,
-                            end_date=end_time,
-                        ),
-                    )
-                    rates = future.result(timeout=30)
-            else:
-                # Safe to use asyncio.run
-                rates = asyncio.run(
-                    provider.get_funding_rates(
-                        market=market,
-                        start_date=start_time,
-                        end_date=end_time,
-                    )
-                )
-
+            rates = self._fetch_historical_funding_rates(provider, lookup, position)
+            if rates is None:
+                return self._funding_async_context_result()
             if not rates:
-                # No data returned
-                if self._is_strict_historical_mode():
-                    raise HistoricalDataUnavailableError(
-                        data_type="funding",
-                        identifier=market,
-                        timestamp=timestamp,
-                        message="No historical funding rate data returned from provider API",
-                        chain=self._config.chain,
-                        protocol=position.protocol,
-                    )
-                default_rate = self._get_funding_fallback_rate()
-                logger.warning(
-                    "No funding data returned for %s %s at %s, using fallback rate %.6f",
-                    position.protocol,
-                    market,
-                    timestamp.isoformat(),
-                    float(default_rate),
-                )
-                return default_rate, "low", "fallback:no_data"
-
-            # Use the most recent rate
-            latest_rate = rates[-1]
-            rate = latest_rate.rate
-            confidence_enum = latest_rate.source_info.confidence
-            source = latest_rate.source_info.source
-
-            # Map DataConfidence enum to string
-            confidence = confidence_enum.value if hasattr(confidence_enum, "value") else "medium"
-
-            # Cache the result
-            result = (rate, confidence, f"historical:{source}")
-            self._funding_cache[cache_key] = result
-
-            logger.info(
-                "Historical funding rate for %s %s at %s: %.6f (source=%s, confidence=%s)",
-                position.protocol,
-                market,
-                timestamp.isoformat(),
-                float(rate),
-                source,
-                confidence,
-            )
-            return result
-
+                return self._funding_no_data_result(position, lookup)
+            return self._cache_latest_funding_rate(position, lookup, cache_key, rates)
         except HistoricalDataUnavailableError:
-            # Re-raise if it's already our exception
             raise
         except Exception as e:
+            return self._funding_fetch_error_result(position, lookup, e)
+
+    def _funding_lookup(self, position: "SimulatedPosition", timestamp: datetime | None) -> _FundingLookup:
+        primary_token = self._perp_primary_token(position)
+        return _FundingLookup(
+            primary_token=primary_token,
+            market=f"{primary_token}-USD",
+            timestamp=timestamp,
+        )
+
+    def _funding_no_timestamp_result(
+        self,
+        position: "SimulatedPosition",
+        lookup: _FundingLookup,
+    ) -> tuple[Decimal, str, str]:
+        if self._is_strict_historical_mode():
+            raise HistoricalDataUnavailableError(
+                data_type="funding",
+                identifier=lookup.market,
+                timestamp=datetime.now(),
+                message="No timestamp provided for historical funding rate lookup",
+                chain=self._config.chain,
+                protocol=position.protocol,
+            )
+        default_rate = self._get_funding_fallback_rate()
+        logger.warning(
+            "Using fallback funding rate for %s %s: %.6f (no timestamp provided)",
+            position.protocol,
+            lookup.primary_token,
+            float(default_rate),
+        )
+        return default_rate, "low", "fallback:no_timestamp"
+
+    def _funding_provider_unavailable_result(
+        self,
+        position: "SimulatedPosition",
+        lookup: _FundingLookup,
+    ) -> tuple[Decimal, str, str]:
+        assert lookup.timestamp is not None
+        if self._is_strict_historical_mode():
+            raise HistoricalDataUnavailableError(
+                data_type="funding",
+                identifier=lookup.market,
+                timestamp=lookup.timestamp,
+                message=f"No funding rate provider available for protocol '{position.protocol}'",
+                chain=self._config.chain,
+                protocol=position.protocol,
+            )
+        default_rate = self._get_funding_fallback_rate()
+        logger.warning(
+            "Using fallback funding rate for %s %s: %.6f (no provider for protocol)",
+            position.protocol,
+            lookup.primary_token,
+            float(default_rate),
+        )
+        return default_rate, "low", f"fallback:unsupported_protocol:{position.protocol}"
+
+    def _funding_cache_key(self, position: "SimulatedPosition", lookup: _FundingLookup) -> tuple[str, str, datetime]:
+        assert lookup.timestamp is not None
+        return (position.protocol.lower(), lookup.market, self._normalize_timestamp_to_hour(lookup.timestamp))
+
+    def _cached_funding_rate(
+        self,
+        position: "SimulatedPosition",
+        lookup: _FundingLookup,
+        cache_key: tuple[str, str, datetime],
+    ) -> tuple[Decimal, str, str] | None:
+        cached = self._funding_cache.get(cache_key)
+        if cached is None:
+            return None
+        assert lookup.timestamp is not None
+        logger.debug(
+            "Using cached funding rate for %s %s at %s: %.6f",
+            position.protocol,
+            lookup.market,
+            lookup.timestamp.isoformat(),
+            float(cached[0]),
+        )
+        return cached
+
+    def _fetch_historical_funding_rates(
+        self,
+        provider: Any,
+        lookup: _FundingLookup,
+        position: "SimulatedPosition",
+    ) -> list[Any] | None:
+        assert lookup.timestamp is not None
+        loop_is_running = self._event_loop_is_running()
+        if loop_is_running and asyncio.current_task() is not None:
             if self._is_strict_historical_mode():
                 raise HistoricalDataUnavailableError(
                     data_type="funding",
-                    identifier=market,
-                    timestamp=timestamp,
-                    message=f"Failed to fetch historical funding rate: {e}",
+                    identifier=lookup.market,
+                    timestamp=lookup.timestamp,
+                    message="Cannot fetch historical funding rate in async context",
                     chain=self._config.chain,
                     protocol=position.protocol,
-                ) from e
-            # Fallback to default rate on any error
-            default_rate = self._get_funding_fallback_rate()
-            logger.warning(
-                "Failed to fetch historical funding rate for %s %s at %s, using fallback rate %.6f: %s",
-                position.protocol,
-                market,
-                timestamp.isoformat() if timestamp else "N/A",
-                float(default_rate),
-                str(e),
+                )
+            logger.debug("Historical funding fetch skipped in async context; using fallback.")
+            return None
+
+        start_time = lookup.timestamp - timedelta(hours=1)
+        if loop_is_running:
+            return self._run_funding_query_in_thread(provider, lookup.market, start_time, lookup.timestamp)
+        return asyncio.run(
+            provider.get_funding_rates(
+                market=lookup.market,
+                start_date=start_time,
+                end_date=lookup.timestamp,
             )
-            return default_rate, "low", "fallback:error"
+        )
+
+    @staticmethod
+    def _event_loop_is_running() -> bool:
+        try:
+            asyncio.get_running_loop()
+            return True
+        except RuntimeError:
+            return False
+
+    @staticmethod
+    def _run_funding_query_in_thread(
+        provider: Any,
+        market: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> list[Any]:
+        import concurrent.futures
+
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(
+                asyncio.run,
+                provider.get_funding_rates(
+                    market=market,
+                    start_date=start_time,
+                    end_date=end_time,
+                ),
+            )
+            return future.result(timeout=30)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _funding_async_context_result(self) -> tuple[Decimal, str, str]:
+        default_rate = self._get_funding_fallback_rate()
+        return default_rate, "low", "fallback:async_context"
+
+    def _funding_no_data_result(
+        self,
+        position: "SimulatedPosition",
+        lookup: _FundingLookup,
+    ) -> tuple[Decimal, str, str]:
+        assert lookup.timestamp is not None
+        if self._is_strict_historical_mode():
+            raise HistoricalDataUnavailableError(
+                data_type="funding",
+                identifier=lookup.market,
+                timestamp=lookup.timestamp,
+                message="No historical funding rate data returned from provider API",
+                chain=self._config.chain,
+                protocol=position.protocol,
+            )
+        default_rate = self._get_funding_fallback_rate()
+        logger.warning(
+            "No funding data returned for %s %s at %s, using fallback rate %.6f",
+            position.protocol,
+            lookup.market,
+            lookup.timestamp.isoformat(),
+            float(default_rate),
+        )
+        return default_rate, "low", "fallback:no_data"
+
+    def _cache_latest_funding_rate(
+        self,
+        position: "SimulatedPosition",
+        lookup: _FundingLookup,
+        cache_key: tuple[str, str, datetime],
+        rates: list[Any],
+    ) -> tuple[Decimal, str, str]:
+        assert lookup.timestamp is not None
+        latest_rate = max(rates, key=lambda rate: rate.source_info.timestamp)
+        confidence_enum = latest_rate.source_info.confidence
+        confidence = confidence_enum.value if hasattr(confidence_enum, "value") else "medium"
+        source = latest_rate.source_info.source
+        result = (latest_rate.rate, confidence, f"historical:{source}")
+        self._funding_cache[cache_key] = result
+
+        logger.info(
+            "Historical funding rate for %s %s at %s: %.6f (source=%s, confidence=%s)",
+            position.protocol,
+            lookup.market,
+            lookup.timestamp.isoformat(),
+            float(latest_rate.rate),
+            source,
+            confidence,
+        )
+        return result
+
+    def _funding_fetch_error_result(
+        self,
+        position: "SimulatedPosition",
+        lookup: _FundingLookup,
+        error: Exception,
+    ) -> tuple[Decimal, str, str]:
+        assert lookup.timestamp is not None
+        if self._is_strict_historical_mode():
+            raise HistoricalDataUnavailableError(
+                data_type="funding",
+                identifier=lookup.market,
+                timestamp=lookup.timestamp,
+                message=f"Failed to fetch historical funding rate: {error}",
+                chain=self._config.chain,
+                protocol=position.protocol,
+            ) from error
+        default_rate = self._get_funding_fallback_rate()
+        logger.warning(
+            "Failed to fetch historical funding rate for %s %s at %s, using fallback rate %.6f: %s",
+            position.protocol,
+            lookup.market,
+            lookup.timestamp.isoformat(),
+            float(default_rate),
+            str(error),
+        )
+        return default_rate, "low", "fallback:error"
 
     def _get_historical_funding_rate(
         self,
@@ -1407,18 +1563,15 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         """
         # Note: timestamp parameter accepted for interface consistency
         # Perp valuation is based on current market prices, not time-dependent
-        _ = timestamp
-        # Get primary token for price lookup
-        primary_token = position.tokens[0] if position.tokens else "ETH"
-
-        # Get current price
-        try:
-            current_price = market_state.get_price(primary_token)
-        except KeyError:
-            current_price = position.entry_price
-
-        if current_price is None or current_price <= 0:
-            current_price = position.entry_price
+        price_timestamp = self._perp_price_timestamp(position, market_state, timestamp)
+        primary_token = self._perp_primary_token(position)
+        current_price = self._perp_token_price(
+            position,
+            market_state,
+            primary_token,
+            price_timestamp,
+            "perp position valuation",
+        )
 
         # Get collateral (initial margin)
         collateral = position.collateral_usd
@@ -1442,6 +1595,20 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         )
 
         return total_value
+
+    @staticmethod
+    def _perp_price_timestamp(
+        position: "SimulatedPosition",
+        market_state: "MarketState",
+        timestamp: datetime | None,
+    ) -> datetime:
+        if timestamp is not None:
+            return timestamp
+        if hasattr(market_state, "timestamp") and market_state.timestamp is not None:
+            return market_state.timestamp
+        if position.last_updated is not None:
+            return position.last_updated
+        return position.entry_time
 
     def _calculate_unrealized_pnl(
         self,

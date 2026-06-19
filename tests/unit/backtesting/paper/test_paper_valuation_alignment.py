@@ -19,14 +19,11 @@ import pytest
 
 from almanak.framework.backtesting.models import EquityPoint
 from almanak.framework.backtesting.paper.models import PaperTradingSummary
-from almanak.framework.valuation.portfolio_valuer import StrategyLike
 from almanak.framework.valuation.rpc_adapter import (
     DirectRpcAdapter,
-    _AdapterConfig,
     _DirectRpcStub,
     _RpcResponse,
 )
-
 
 # =============================================================================
 # DirectRpcAdapter Tests
@@ -256,8 +253,8 @@ class TestPaperTraderValuerIntegration:
 
     def _make_trader(self):
         """Create a minimally mocked PaperTrader."""
-        from almanak.framework.backtesting.paper.engine import PaperTrader
         from almanak.framework.backtesting.paper.config import PaperTraderConfig
+        from almanak.framework.backtesting.paper.engine import PaperTrader
         from almanak.framework.backtesting.paper.portfolio_tracker import PaperPortfolioTracker
 
         config = PaperTraderConfig(
@@ -339,6 +336,44 @@ class TestPaperTraderValuerIntegration:
         assert total == Decimal("15000")
         assert spot == Decimal("10000")
         assert positions == Decimal("5000")
+
+    def test_value_portfolio_rich_adds_missing_native_eth(self):
+        trader = self._make_trader()
+        trader._init_portfolio_valuer()
+
+        trader._current_strategy = _FakeStrategy()
+        trader._last_market_snapshot = MagicMock()
+        trader._price_cache = {"ETH": Decimal("3000"), "USDC": Decimal("1")}
+
+        mock_snapshot = MagicMock()
+        mock_snapshot.total_value_usd = Decimal("10000")
+        mock_snapshot.available_cash_usd = Decimal("10000")
+        mock_snapshot.position_value_usd = Decimal("0")
+        mock_snapshot.value_confidence.value = "HIGH"
+
+        with patch.object(trader._portfolio_valuer, "value", return_value=mock_snapshot):
+            result = trader._value_portfolio_rich()
+
+        assert result == (Decimal("25000"), Decimal("25000"), Decimal("0"))
+
+    def test_value_portfolio_rich_keeps_included_native_eth(self):
+        trader = self._make_trader()
+        trader._init_portfolio_valuer()
+
+        trader._current_strategy = _FakeStrategy()
+        trader._last_market_snapshot = MagicMock()
+        trader._price_cache = {"ETH": Decimal("3000"), "USDC": Decimal("1")}
+
+        mock_snapshot = MagicMock()
+        mock_snapshot.total_value_usd = Decimal("25000")
+        mock_snapshot.available_cash_usd = Decimal("25000")
+        mock_snapshot.position_value_usd = Decimal("0")
+        mock_snapshot.value_confidence.value = "HIGH"
+
+        with patch.object(trader._portfolio_valuer, "value", return_value=mock_snapshot):
+            result = trader._value_portfolio_rich()
+
+        assert result == (Decimal("25000"), Decimal("25000"), Decimal("0"))
 
     def test_value_portfolio_rich_valuer_returns_unavailable(self):
         trader = self._make_trader()

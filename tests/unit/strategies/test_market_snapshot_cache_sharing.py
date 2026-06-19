@@ -453,6 +453,24 @@ class TestBalanceUsdFromPrice:
         assert tb.balance_usd == Decimal("0")  # measured zero, not 125
         assert oracle.call_count == 0
 
+    def test_seed_balance_usd_unmeasured_fills_from_price(self) -> None:
+        """Public paper-snapshot seed path preserves USD-unmeasured provenance."""
+        oracle = CountingOracle({})
+        snap = _make_snapshot(oracle)
+
+        snap.seed_balance_usd_unmeasured(
+            "ARB",
+            TokenBalance(symbol="ARB", balance=Decimal("42"), balance_usd=Decimal("0")),
+        )
+
+        first = snap.balance("ARB")
+        assert first.balance == Decimal("42")
+        assert first.balance_usd == Decimal("0")
+
+        second = snap.balance("ARB", price=Decimal("2"))
+        assert second.balance == Decimal("42")
+        assert second.balance_usd == Decimal("84")
+
     def test_cache_hit_recomputes_couldnt_price_zero_from_warm_cache(self) -> None:
         """Codex VIB-4843 re-audit (P2 #2 / test b): a non-zero holding cached
         with ``balance_usd == 0`` (couldn't-price sentinel) is recomputed from a

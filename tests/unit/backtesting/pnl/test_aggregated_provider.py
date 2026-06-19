@@ -10,6 +10,7 @@ This module tests the AggregatedDataProvider class, covering:
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -74,6 +75,35 @@ class MockProvider:
     def is_data_stale(self, token: str) -> bool:
         """Return whether data is stale."""
         return self._is_stale
+
+
+class TimestampProvider:
+    """Provider with counted timestamp property reads."""
+
+    def __init__(
+        self,
+        *,
+        min_timestamp: datetime | None = None,
+        max_timestamp: datetime | None = None,
+    ) -> None:
+        self._min_timestamp = min_timestamp
+        self._max_timestamp = max_timestamp
+        self.min_reads = 0
+        self.max_reads = 0
+
+    @property
+    def provider_name(self) -> str:
+        return "timestamp"
+
+    @property
+    def min_timestamp(self) -> datetime | None:
+        self.min_reads += 1
+        return self._min_timestamp
+
+    @property
+    def max_timestamp(self) -> datetime | None:
+        self.max_reads += 1
+        return self._max_timestamp
 
 
 class TestFallbackWhenPrimaryFails:
@@ -512,6 +542,89 @@ class TestProviderConfig:
         assert config.cache_ttl_seconds == 90
 
 
+class TestCreateFromConfig:
+    """Tests for configuration-based provider construction."""
+
+    def test_empty_config_list_raises(self) -> None:
+        with pytest.raises(ValueError, match="At least one provider config is required"):
+            AggregatedDataProvider.create_from_config([])
+
+    def test_unknown_provider_type_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown provider type"):
+            AggregatedDataProvider.create_from_config([ProviderConfig(provider_type="unknown")])
+
+    def test_create_from_config_preserves_order_and_provider_specific_kwargs(self, monkeypatch) -> None:
+        class StubChainlink:
+            def __init__(self, **kwargs: Any) -> None:
+                self.kwargs = kwargs
+
+        class StubCoinGecko:
+            def __init__(self, **kwargs: Any) -> None:
+                self.kwargs = kwargs
+
+        class StubTWAP:
+            def __init__(self, **kwargs: Any) -> None:
+                self.kwargs = kwargs
+
+        monkeypatch.setattr(
+            "almanak.framework.backtesting.pnl.providers.chainlink.ChainlinkDataProvider",
+            StubChainlink,
+        )
+        monkeypatch.setattr(
+            "almanak.framework.backtesting.pnl.providers.coingecko.CoinGeckoDataProvider",
+            StubCoinGecko,
+        )
+        monkeypatch.setattr(
+            "almanak.framework.backtesting.pnl.providers.twap.TWAPDataProvider",
+            StubTWAP,
+        )
+
+        aggregated = AggregatedDataProvider.create_from_config(
+            [
+                ProviderConfig(
+                    provider_type="chainlink",
+                    chain="base",
+                    rpc_url="https://base.example",
+                    cache_ttl_seconds=90,
+                    priority=7,
+                ),
+                ProviderConfig(
+                    provider_type="coingecko",
+                    api_key="cg-key",
+                    extra={"request_timeout_seconds": 3},
+                ),
+                ProviderConfig(
+                    provider_type="dex_twap",
+                    chain="ethereum",
+                    rpc_url="https://eth.example",
+                    cache_ttl_seconds=120,
+                    extra={"pool_hint": "weth-usdc", "twap_window_seconds": 900},
+                ),
+            ],
+            chain="arbitrum",
+        )
+
+        chainlink, coingecko, twap = aggregated.providers
+        assert aggregated.provider_names == ["chainlink", "coingecko", "twap"]
+        assert chainlink.kwargs == {
+            "chain": "base",
+            "rpc_url": "https://base.example",
+            "cache_ttl_seconds": 90,
+            "priority": 7,
+        }
+        assert coingecko.kwargs == {
+            "api_key": "cg-key",
+            "request_timeout_seconds": 3,
+        }
+        assert twap.kwargs == {
+            "chain": "ethereum",
+            "rpc_url": "https://eth.example",
+            "cache_ttl_seconds": 120,
+            "observation_window_seconds": 900,
+            "priority": None,
+        }
+
+
 class TestAggregatedProviderInitialization:
     """Tests for AggregatedDataProvider initialization."""
 
@@ -599,6 +712,34 @@ class TestAggregatedProviderProperties:
 
         # Original should be unchanged
         assert len(aggregated.providers) == 1
+
+    def test_min_timestamp_uses_earliest_value_and_reads_each_provider_once(self):
+        older = datetime(2024, 1, 1, tzinfo=UTC)
+        newer = datetime(2024, 1, 5, tzinfo=UTC)
+        provider1 = TimestampProvider(min_timestamp=newer)
+        provider2 = TimestampProvider(min_timestamp=None)
+        provider3 = TimestampProvider(min_timestamp=older)
+
+        aggregated = AggregatedDataProvider(providers=[provider1, provider2, provider3])
+
+        assert aggregated.min_timestamp == older
+        assert provider1.min_reads == 1
+        assert provider2.min_reads == 1
+        assert provider3.min_reads == 1
+
+    def test_max_timestamp_uses_latest_value_and_reads_each_provider_once(self):
+        older = datetime(2024, 1, 1, tzinfo=UTC)
+        newer = datetime(2024, 1, 5, tzinfo=UTC)
+        provider1 = TimestampProvider(max_timestamp=older)
+        provider2 = TimestampProvider(max_timestamp=None)
+        provider3 = TimestampProvider(max_timestamp=newer)
+
+        aggregated = AggregatedDataProvider(providers=[provider1, provider2, provider3])
+
+        assert aggregated.max_timestamp == newer
+        assert provider1.max_reads == 1
+        assert provider2.max_reads == 1
+        assert provider3.max_reads == 1
 
 
 class TestLoggingBehavior:
@@ -764,6 +905,71 @@ class TestCreateWithDataConfigThreadsTokenAddresses:
         assert cg._token_addresses == addr_map
 
 
+class TestCreateWithDataConfig:
+    """Tests for BacktestDataConfig-based provider factory dispatch."""
+
+    @pytest.mark.asyncio
+    async def test_auto_mode_preserves_fallback_order_and_threads_token_addresses(self, monkeypatch) -> None:
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        calls: list[tuple[str, Any]] = []
+        token_addresses = {"LINK": ("arbitrum", "0xlink")}
+        chainlink = MockProvider("chainlink")
+        twap = MockProvider("twap")
+        coingecko = MockProvider("coingecko")
+
+        async def create_chainlink(cls, chain: str, rpc_url: str) -> MockProvider:
+            calls.append(("chainlink", chain, rpc_url))
+            return chainlink
+
+        async def create_twap(cls, chain: str, rpc_url: str) -> MockProvider:
+            calls.append(("twap", chain, rpc_url))
+            return twap
+
+        async def create_coingecko(
+            cls,
+            data_config: BacktestDataConfig,
+            token_addresses: dict[str, tuple[str, str]] | None = None,
+        ) -> MockProvider:
+            calls.append(("coingecko", data_config.price_provider, token_addresses))
+            return coingecko
+
+        monkeypatch.setattr(AggregatedDataProvider, "_create_chainlink_provider", classmethod(create_chainlink))
+        monkeypatch.setattr(AggregatedDataProvider, "_create_twap_provider", classmethod(create_twap))
+        monkeypatch.setattr(AggregatedDataProvider, "_create_coingecko_provider", classmethod(create_coingecko))
+
+        aggregated = await AggregatedDataProvider.create_with_data_config(
+            BacktestDataConfig(price_provider="auto"),
+            chain="base",
+            rpc_url="https://base.example",
+            token_addresses=token_addresses,
+        )
+
+        assert aggregated.providers == [chainlink, twap, coingecko]
+        assert aggregated.provider_names == ["chainlink", "twap", "coingecko"]
+        assert calls == [
+            ("chainlink", "base", "https://base.example"),
+            ("twap", "base", "https://base.example"),
+            ("coingecko", "auto", token_addresses),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_single_provider_mode_errors_when_provider_unavailable(self, monkeypatch) -> None:
+        from almanak.framework.backtesting.config import BacktestDataConfig
+
+        async def create_chainlink(cls, chain: str, rpc_url: str) -> None:
+            return None
+
+        monkeypatch.setattr(AggregatedDataProvider, "_create_chainlink_provider", classmethod(create_chainlink))
+
+        with pytest.raises(ValueError, match="Failed to create any providers"):
+            await AggregatedDataProvider.create_with_data_config(
+                BacktestDataConfig(price_provider="chainlink"),
+                chain="arbitrum",
+                rpc_url="",
+            )
+
+
 __all__ = [
     "TestCreateWithDataConfigThreadsTokenAddresses",
     "TestIterateEmptyOrUnavailableFallback",
@@ -772,8 +978,10 @@ __all__ = [
     "TestDataSourceTracking",
     "TestFallbackStats",
     "TestProviderConfig",
+    "TestCreateFromConfig",
     "TestAggregatedProviderInitialization",
     "TestAggregatedProviderProperties",
     "TestLoggingBehavior",
     "TestAsyncContextManager",
+    "TestCreateWithDataConfig",
 ]

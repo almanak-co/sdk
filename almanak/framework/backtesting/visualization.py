@@ -195,6 +195,115 @@ class ChartResult:
     format: str = "png"
 
 
+_MISSING_MATPLOTLIB_ERROR = "matplotlib not installed. Run: pip install 'almanak[backtest]'"
+_MISSING_PLOTLY_ERROR = "plotly not installed. Run: pip install 'almanak[backtest]'"
+_ENTRY_TRADE_TYPES = {"SWAP", "LP_OPEN", "PERP_OPEN", "BORROW", "SUPPLY", "BRIDGE"}
+_EXIT_TRADE_TYPES = {"LP_CLOSE", "PERP_CLOSE", "REPAY", "WITHDRAW"}
+_SKIPPED_MARKER_TYPES = {"HOLD", "UNKNOWN"}
+_INTENT_COLORS = {
+    "SWAP": "#2196F3",
+    "LP_OPEN": "#4CAF50",
+    "LP_CLOSE": "#F44336",
+    "PERP_OPEN": "#9C27B0",
+    "PERP_CLOSE": "#E91E63",
+    "BORROW": "#FF9800",
+    "REPAY": "#FFEB3B",
+    "SUPPLY": "#00BCD4",
+    "WITHDRAW": "#795548",
+    "BRIDGE": "#607D8B",
+    "ENSURE_BALANCE": "#9E9E9E",
+}
+
+
+@dataclass(frozen=True)
+class _DurationScatterData:
+    durations: list[float]
+    pnl_values: list[float]
+    colors: list[str]
+
+
+def _chart_failure(chart_type: str, error: str, *, format: str = "png") -> ChartResult:
+    return ChartResult(chart_type=chart_type, file_path=None, success=False, error=error, format=format)
+
+
+def _load_matplotlib(chart_type: str) -> tuple[Any | None, ChartResult | None]:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        logger.error(_MISSING_MATPLOTLIB_ERROR)
+        return None, _chart_failure(chart_type, _MISSING_MATPLOTLIB_ERROR)
+    return plt, None
+
+
+def _load_plotly_graph_objects(warning_context: str) -> Any | None:
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        logger.warning("%s - cannot generate %s", _MISSING_PLOTLY_ERROR, warning_context)
+        return None
+    return go
+
+
+def _safe_deployment_id(deployment_id: str) -> str:
+    return deployment_id.replace("/", "_").replace("\\", "_")
+
+
+def _chart_output_path(
+    result: "BacktestResult",
+    output_path: Path | str | None,
+    *,
+    prefix: str,
+    suffix: str,
+) -> Path:
+    if output_path is None:
+        return Path(f"{prefix}_{_safe_deployment_id(result.deployment_id)}.{suffix}")
+    if isinstance(output_path, str):
+        return Path(output_path)
+    return output_path
+
+
+def _ensure_output_parent(output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _as_float(value: Decimal | float | int) -> float:
+    return float(value)
+
+
+def _trade_intent_name(trade: "TradeRecord") -> str:
+    intent_type = trade.intent_type
+    return intent_type.value if hasattr(intent_type, "value") else str(intent_type)
+
+
+def _result_trades(result: "BacktestResult") -> list["TradeRecord"]:
+    trades = getattr(result, "trades", None)
+    return trades if trades else []
+
+
+def _trade_pnl_values(trades: list["TradeRecord"]) -> list[float]:
+    pnl_values: list[float] = []
+    for trade in trades:
+        if hasattr(trade, "pnl_usd") and trade.pnl_usd is not None:
+            pnl_values.append(_as_float(trade.pnl_usd))
+    return pnl_values
+
+
+def _marker_is_entry(trade_type: str) -> bool:
+    return trade_type in _ENTRY_TRADE_TYPES and trade_type not in _EXIT_TRADE_TYPES
+
+
+def _closest_equity_value(
+    trade_time: datetime,
+    equity_lookup: dict[datetime, Decimal],
+    sorted_timestamps: list[datetime],
+) -> Decimal:
+    exact_value = equity_lookup.get(trade_time)
+    if exact_value is not None:
+        return exact_value
+    closest_time = min(sorted_timestamps, key=lambda timestamp: abs((timestamp - trade_time).total_seconds()))
+    return equity_lookup[closest_time]
+
+
 def _detect_drawdown_periods(
     timestamps: list[datetime],
     values: list[float],
@@ -289,47 +398,21 @@ def _extract_trade_markers(
     if not trades or not equity_curve:
         return []
 
-    # Build a timestamp -> value lookup from equity curve
     equity_lookup: dict[datetime, Decimal] = {point.timestamp: point.value_usd for point in equity_curve}
     sorted_timestamps = sorted(equity_lookup.keys())
-
     markers: list[TradeMarker] = []
 
-    # Entry intent types (opening positions)
-    entry_types = {"SWAP", "LP_OPEN", "PERP_OPEN", "BORROW", "SUPPLY", "BRIDGE"}
-    # Exit intent types (closing positions)
-    exit_types = {"LP_CLOSE", "PERP_CLOSE", "REPAY", "WITHDRAW"}
-
     for trade in trades:
-        # Determine if this is an entry or exit trade
-        trade_type_str = trade.intent_type.value if hasattr(trade.intent_type, "value") else str(trade.intent_type)
-        is_entry = trade_type_str in entry_types
-        is_exit = trade_type_str in exit_types
-
-        # For SWAP, check metadata or context if available to determine direction
-        # By default, we mark SWAPs as entry trades
-        if trade_type_str == "HOLD" or trade_type_str == "UNKNOWN":
-            # Skip HOLD and UNKNOWN intents - they don't represent actual trades
+        trade_type = _trade_intent_name(trade)
+        if trade_type in _SKIPPED_MARKER_TYPES:
             continue
-
-        # Find the closest equity curve value for this trade timestamp
-        trade_time = trade.timestamp
-        equity_value = equity_lookup.get(trade_time)
-
-        if equity_value is None:
-            # Find the closest timestamp
-            closest_time = min(
-                sorted_timestamps,
-                key=lambda t: abs((t - trade_time).total_seconds()),
-            )
-            equity_value = equity_lookup[closest_time]
 
         markers.append(
             TradeMarker(
-                timestamp=trade_time,
-                value_usd=equity_value,
-                is_entry=is_entry and not is_exit,
-                trade_type=trade_type_str,
+                timestamp=trade.timestamp,
+                value_usd=_closest_equity_value(trade.timestamp, equity_lookup, sorted_timestamps),
+                is_entry=_marker_is_entry(trade_type),
+                trade_type=trade_type,
                 pnl_usd=trade.pnl_usd if hasattr(trade, "pnl_usd") else None,
             )
         )
@@ -420,6 +503,288 @@ def calculate_distribution_stats(pnl_values: list[float]) -> DistributionStats |
     )
 
 
+def _equity_drawdowns(
+    show_drawdown: bool,
+    timestamps: list[datetime],
+    values: list[float],
+    min_drawdown_pct: float,
+) -> list[DrawdownPeriod]:
+    if not show_drawdown:
+        return []
+    return _detect_drawdown_periods(timestamps, values, min_drawdown_pct)
+
+
+def _add_static_drawdown_regions(
+    ax: Any,
+    cfg: ChartConfig,
+    timestamps: list[datetime],
+    drawdown_periods: list[DrawdownPeriod],
+) -> None:
+    for period in drawdown_periods:
+        ax.axvspan(period.start, period.end, color=cfg.drawdown_color, alpha=cfg.drawdown_alpha, label=None)
+    if drawdown_periods:
+        ax.axvspan(
+            timestamps[0],
+            timestamps[0],
+            color=cfg.drawdown_color,
+            alpha=cfg.drawdown_alpha,
+            label="Drawdown Period",
+        )
+
+
+def _add_static_benchmark_trace(
+    ax: Any,
+    cfg: ChartConfig,
+    benchmark_curve: list["EquityPoint"] | None,
+    benchmark_label: str,
+) -> None:
+    if not benchmark_curve:
+        return
+    benchmark_timestamps, benchmark_values = _extract_equity_chart_series(benchmark_curve)
+    ax.plot(
+        benchmark_timestamps,
+        benchmark_values,
+        linewidth=cfg.line_width,
+        color=cfg.benchmark_color,
+        linestyle=cfg.benchmark_line_style,
+        label=benchmark_label,
+    )
+
+
+def _add_static_strategy_equity_trace(
+    ax: Any,
+    cfg: ChartConfig,
+    timestamps: list[datetime],
+    values: list[float],
+) -> None:
+    ax.plot(timestamps, values, linewidth=cfg.line_width, color=cfg.line_color, label="Strategy")
+    ax.fill_between(timestamps, values, alpha=cfg.fill_alpha, color=cfg.line_color)
+
+
+def _static_marker_color(marker: TradeMarker, cfg: ChartConfig, color_by_pnl: bool) -> str:
+    if color_by_pnl and marker.pnl_usd is not None:
+        return cfg.profit_color if marker.pnl_usd >= 0 else cfg.loss_color
+    return cfg.entry_color if marker.is_entry else cfg.exit_color
+
+
+def _add_static_marker_group(
+    ax: Any,
+    cfg: ChartConfig,
+    markers: list[TradeMarker],
+    *,
+    marker: str,
+    label: str,
+    color_by_pnl: bool,
+) -> None:
+    if not markers:
+        return
+    ax.scatter(
+        [trade_marker.timestamp for trade_marker in markers],
+        [_as_float(trade_marker.value_usd) for trade_marker in markers],
+        c=[_static_marker_color(trade_marker, cfg, color_by_pnl) for trade_marker in markers],
+        marker=marker,
+        s=cfg.marker_size,
+        zorder=5,
+        label=label,
+        edgecolors="white",
+        linewidths=0.5,
+    )
+
+
+def _add_static_trade_markers(
+    ax: Any,
+    cfg: ChartConfig,
+    trade_markers: list[TradeMarker],
+    *,
+    color_by_pnl: bool,
+) -> None:
+    entry_markers = [marker for marker in trade_markers if marker.is_entry]
+    exit_markers = [marker for marker in trade_markers if not marker.is_entry]
+    _add_static_marker_group(
+        ax,
+        cfg,
+        entry_markers,
+        marker=cfg.entry_marker,
+        label="Entry",
+        color_by_pnl=color_by_pnl,
+    )
+    _add_static_marker_group(
+        ax,
+        cfg,
+        exit_markers,
+        marker=cfg.exit_marker,
+        label="Exit",
+        color_by_pnl=color_by_pnl,
+    )
+
+
+def _static_trade_markers(result: "BacktestResult", show_trades: bool) -> list[TradeMarker]:
+    trades = _result_trades(result)
+    if not show_trades or not trades:
+        return []
+    return _extract_trade_markers(trades, result.equity_curve)
+
+
+def _style_static_equity_axes(ax: Any, plt: Any, cfg: ChartConfig, chart_title: str) -> None:
+    ax.set_title(chart_title, fontsize=cfg.title_size, fontweight="bold")
+    ax.set_xlabel("Time", fontsize=cfg.font_size)
+    ax.set_ylabel("Portfolio Value (USD)", fontsize=cfg.font_size)
+    ax.tick_params(labelsize=cfg.font_size)
+    ax.grid(True, alpha=cfg.grid_alpha)
+    ax.legend(loc="upper left")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+
+
+def _save_static_chart(fig: Any, plt: Any, output_path: Path, cfg: ChartConfig) -> None:
+    fig.savefig(output_path, dpi=cfg.dpi, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _add_static_pnl_histogram_bars(ax: Any, cfg: ChartConfig, pnl_values: list[float], bins: int) -> None:
+    _, bin_edges, patches = ax.hist(pnl_values, bins=bins, edgecolor="white", linewidth=0.5)
+    for i, patch in enumerate(patches):
+        bin_mid = (bin_edges[i] + bin_edges[i + 1]) / 2
+        patch.set_facecolor(cfg.profit_color if bin_mid >= 0 else cfg.loss_color)
+
+
+def _format_distribution_stats(stats: DistributionStats) -> str:
+    return (
+        f"Mean: ${stats.mean:,.2f}\n"
+        f"Median: ${stats.median:,.2f}\n"
+        f"Std Dev: ${stats.std_dev:,.2f}\n"
+        f"Skewness: {stats.skewness:.3f}\n"
+        f"Kurtosis: {stats.kurtosis:.3f}\n"
+        f"5th %ile: ${stats.percentile_5:,.2f}\n"
+        f"95th %ile: ${stats.percentile_95:,.2f}"
+    )
+
+
+def _add_static_pnl_stats(
+    ax: Any, cfg: ChartConfig, pnl_values: list[float], show_stats: bool
+) -> DistributionStats | None:
+    if not show_stats:
+        return None
+    stats = calculate_distribution_stats(pnl_values)
+    if stats is None:
+        return None
+    ax.text(
+        0.02,
+        0.98,
+        _format_distribution_stats(stats),
+        transform=ax.transAxes,
+        fontsize=cfg.font_size - 1,
+        verticalalignment="top",
+        bbox={"boxstyle": "round", "facecolor": "wheat", "alpha": 0.8},
+        family="monospace",
+    )
+    ax.axvline(x=stats.mean, color="#1976D2", linestyle="-.", linewidth=1.2, label=f"Mean (${stats.mean:,.0f})")
+    ax.axvline(
+        x=stats.median,
+        color="#7B1FA2",
+        linestyle=":",
+        linewidth=1.2,
+        label=f"Median (${stats.median:,.0f})",
+    )
+    return stats
+
+
+def _style_static_pnl_axes(ax: Any, plt: Any, cfg: ChartConfig, chart_title: str) -> None:
+    ax.set_title(chart_title, fontsize=cfg.title_size, fontweight="bold")
+    ax.set_xlabel("PnL (USD)", fontsize=cfg.font_size)
+    ax.set_ylabel("Number of Trades", fontsize=cfg.font_size)
+    ax.tick_params(labelsize=cfg.font_size)
+    ax.grid(True, alpha=cfg.grid_alpha, axis="y")
+    ax.legend(loc="upper right")
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    plt.tight_layout()
+
+
+def _duration_from_metadata(metadata: dict[str, Any]) -> float | None:
+    if "duration_hours" in metadata:
+        return float(metadata["duration_hours"])
+    if "duration_minutes" in metadata:
+        return float(metadata["duration_minutes"]) / 60
+    if "hold_time_seconds" in metadata:
+        return float(metadata["hold_time_seconds"]) / 3600
+    return None
+
+
+def _trade_duration_hours(sorted_trades: list["TradeRecord"], index: int) -> float | None:
+    trade = sorted_trades[index]
+    metadata = getattr(trade, "metadata", None)
+    if metadata:
+        duration_hours = _duration_from_metadata(metadata)
+        if duration_hours is not None:
+            return duration_hours
+    if index == 0:
+        return None
+    previous_trade = sorted_trades[index - 1]
+    time_diff = (trade.timestamp - previous_trade.timestamp).total_seconds() / 3600
+    return max(0.1, time_diff)
+
+
+def _duration_scatter_data(trades: list["TradeRecord"], cfg: ChartConfig) -> _DurationScatterData:
+    durations: list[float] = []
+    pnl_values: list[float] = []
+    colors: list[str] = []
+    sorted_trades = sorted(trades, key=lambda trade: trade.timestamp)
+
+    for i, trade in enumerate(sorted_trades):
+        if not hasattr(trade, "pnl_usd") or trade.pnl_usd is None:
+            continue
+        duration_hours = _trade_duration_hours(sorted_trades, i)
+        if duration_hours is None:
+            continue
+        pnl = _as_float(trade.pnl_usd)
+        durations.append(duration_hours)
+        pnl_values.append(pnl)
+        colors.append(cfg.profit_color if pnl >= 0 else cfg.loss_color)
+
+    return _DurationScatterData(durations=durations, pnl_values=pnl_values, colors=colors)
+
+
+def _style_duration_axes(ax: Any, plt: Any, cfg: ChartConfig, chart_title: str) -> None:
+    ax.set_title(chart_title, fontsize=cfg.title_size, fontweight="bold")
+    ax.set_xlabel("Duration (hours)", fontsize=cfg.font_size)
+    ax.set_ylabel("PnL (USD)", fontsize=cfg.font_size)
+    ax.tick_params(labelsize=cfg.font_size)
+    ax.grid(True, alpha=cfg.grid_alpha)
+    ax.legend(loc="upper right")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    plt.tight_layout()
+
+
+def _intent_counts(trades: list["TradeRecord"]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for trade in trades:
+        if not hasattr(trade, "intent_type"):
+            continue
+        intent_name = _trade_intent_name(trade)
+        if intent_name == "HOLD":
+            continue
+        counts[intent_name] = counts.get(intent_name, 0) + 1
+    return counts
+
+
+def _intent_pie_data(intent_counts: dict[str, int]) -> tuple[list[str], list[int], list[str]]:
+    sorted_intents = sorted(intent_counts.items(), key=lambda item: item[1], reverse=True)
+    labels = [intent for intent, _ in sorted_intents]
+    sizes = [count for _, count in sorted_intents]
+    colors = [_INTENT_COLORS.get(label, "#757575") for label in labels]
+    return labels, sizes, colors
+
+
+def _style_intent_pie_text(texts: Any, autotexts: Any, cfg: ChartConfig) -> None:
+    for text in texts:
+        text.set_fontsize(cfg.font_size)
+    for autotext in autotexts:
+        autotext.set_fontsize(cfg.font_size - 1)
+        autotext.set_color("white")
+        autotext.set_fontweight("bold")
+
+
 # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
 def plot_equity_curve(  # noqa: C901
     result: "BacktestResult",
@@ -479,199 +844,31 @@ def plot_equity_curve(  # noqa: C901
             color_by_pnl=True,  # Green for profit, red for loss
         )
     """
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        logger.error("matplotlib not installed. Run: pip install 'almanak[backtest]'")
-        return ChartResult(
-            chart_type="equity_curve",
-            file_path=None,
-            success=False,
-            error="matplotlib not installed. Run: pip install 'almanak[backtest]'",
-        )
+    plt, failure = _load_matplotlib("equity_curve")
+    if failure is not None:
+        return failure
+    assert plt is not None
 
-    # Validate input
     if not result.equity_curve:
-        return ChartResult(
-            chart_type="equity_curve",
-            file_path=None,
-            success=False,
-            error="No equity curve data in backtest result",
-        )
+        return _chart_failure("equity_curve", "No equity curve data in backtest result")
 
-    # Use defaults
     cfg = config or ChartConfig()
-
-    # Determine output path
-    if output_path is None:
-        safe_id = result.deployment_id.replace("/", "_").replace("\\", "_")
-        output_path = Path(f"equity_curve_{safe_id}.png")
-    elif isinstance(output_path, str):
-        output_path = Path(output_path)
-
-    # Ensure parent directory exists
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = _chart_output_path(result, output_path, prefix="equity_curve", suffix="png")
+    _ensure_output_parent(output_path)
 
     try:
-        # Extract data from equity curve
-        timestamps: list[datetime] = []
-        values: list[float] = []
-
-        for point in result.equity_curve:
-            timestamps.append(point.timestamp)
-            # Convert Decimal to float for matplotlib
-            if isinstance(point.value_usd, Decimal):
-                values.append(float(point.value_usd))
-            else:
-                values.append(point.value_usd)
-
-        # Detect drawdown periods if requested
-        drawdown_periods: list[DrawdownPeriod] = []
-        if show_drawdown:
-            drawdown_periods = _detect_drawdown_periods(timestamps, values, min_drawdown_pct)
-
-        # Create figure
+        timestamps, values = _extract_equity_chart_series(result.equity_curve)
+        drawdown_periods = _equity_drawdowns(show_drawdown, timestamps, values, min_drawdown_pct)
         fig, ax = plt.subplots(figsize=(cfg.figure_width, cfg.figure_height))
 
-        # Plot drawdown periods first (so they appear behind the lines)
-        if show_drawdown and drawdown_periods:
-            for period in drawdown_periods:
-                ax.axvspan(
-                    period.start,  # type: ignore[arg-type]
-                    period.end,  # type: ignore[arg-type]
-                    color=cfg.drawdown_color,
-                    alpha=cfg.drawdown_alpha,
-                    label=None,  # Don't add each period to legend
-                )
-            # Add one dummy patch for the legend
-            ax.axvspan(
-                timestamps[0],  # type: ignore[arg-type]
-                timestamps[0],  # type: ignore[arg-type]
-                color=cfg.drawdown_color,
-                alpha=cfg.drawdown_alpha,
-                label="Drawdown Period",
-            )
-
-        # Plot benchmark curve if provided
-        if benchmark_curve:
-            benchmark_timestamps: list[datetime] = []
-            benchmark_values: list[float] = []
-            for point in benchmark_curve:
-                benchmark_timestamps.append(point.timestamp)
-                if isinstance(point.value_usd, Decimal):
-                    benchmark_values.append(float(point.value_usd))
-                else:
-                    benchmark_values.append(point.value_usd)
-
-            ax.plot(
-                benchmark_timestamps,  # type: ignore[arg-type]
-                benchmark_values,
-                linewidth=cfg.line_width,
-                color=cfg.benchmark_color,
-                linestyle=cfg.benchmark_line_style,
-                label=benchmark_label,
-            )
-
-        # Plot strategy equity curve (on top of benchmark)
-        ax.plot(
-            timestamps,  # type: ignore[arg-type]
-            values,
-            linewidth=cfg.line_width,
-            color=cfg.line_color,
-            label="Strategy",
-        )
-
-        # Fill under the strategy curve
-        ax.fill_between(timestamps, values, alpha=cfg.fill_alpha, color=cfg.line_color)  # type: ignore[arg-type]
-
-        # Extract and plot trade markers if requested
-        trade_markers: list[TradeMarker] = []
-        if show_trades and hasattr(result, "trades") and result.trades:
-            trade_markers = _extract_trade_markers(result.trades, result.equity_curve)
-
-            if trade_markers:
-                # Separate markers into groups for plotting
-                entry_times: list[datetime] = []
-                entry_values: list[float] = []
-                entry_colors: list[str] = []
-
-                exit_times: list[datetime] = []
-                exit_values: list[float] = []
-                exit_colors: list[str] = []
-
-                for marker in trade_markers:
-                    marker_value = float(marker.value_usd)
-
-                    if color_by_pnl:
-                        # Color by profit/loss
-                        if marker.pnl_usd is not None:
-                            color = cfg.profit_color if marker.pnl_usd >= 0 else cfg.loss_color
-                        else:
-                            color = cfg.entry_color if marker.is_entry else cfg.exit_color
-                    else:
-                        # Color by entry/exit
-                        color = cfg.entry_color if marker.is_entry else cfg.exit_color
-
-                    if marker.is_entry:
-                        entry_times.append(marker.timestamp)
-                        entry_values.append(marker_value)
-                        entry_colors.append(color)
-                    else:
-                        exit_times.append(marker.timestamp)
-                        exit_values.append(marker_value)
-                        exit_colors.append(color)
-
-                # Plot entry markers (triangles pointing up)
-                if entry_times:
-                    ax.scatter(
-                        entry_times,  # type: ignore[arg-type]
-                        entry_values,
-                        c=entry_colors,
-                        marker=cfg.entry_marker,
-                        s=cfg.marker_size,
-                        zorder=5,
-                        label="Entry",
-                        edgecolors="white",
-                        linewidths=0.5,
-                    )
-
-                # Plot exit markers (triangles pointing down)
-                if exit_times:
-                    ax.scatter(
-                        exit_times,  # type: ignore[arg-type]
-                        exit_values,
-                        c=exit_colors,
-                        marker=cfg.exit_marker,
-                        s=cfg.marker_size,
-                        zorder=5,
-                        label="Exit",
-                        edgecolors="white",
-                        linewidths=0.5,
-                    )
-
-        # Set title
+        _add_static_drawdown_regions(ax, cfg, timestamps, drawdown_periods)
+        _add_static_benchmark_trace(ax, cfg, benchmark_curve, benchmark_label)
+        _add_static_strategy_equity_trace(ax, cfg, timestamps, values)
+        trade_markers = _static_trade_markers(result, show_trades)
+        _add_static_trade_markers(ax, cfg, trade_markers, color_by_pnl=color_by_pnl)
         chart_title = title or f"Equity Curve - {result.deployment_id}"
-        ax.set_title(chart_title, fontsize=cfg.title_size, fontweight="bold")
-
-        # Set labels
-        ax.set_xlabel("Time", fontsize=cfg.font_size)
-        ax.set_ylabel("Portfolio Value (USD)", fontsize=cfg.font_size)
-
-        # Apply styling
-        ax.tick_params(labelsize=cfg.font_size)
-        ax.grid(True, alpha=cfg.grid_alpha)
-        ax.legend(loc="upper left")
-
-        # Format y-axis with dollar values
-        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"${x:,.0f}"))
-
-        # Rotate x-axis labels for readability
-        plt.xticks(rotation=45, ha="right")
-        plt.tight_layout()
-
-        # Save plot
-        fig.savefig(output_path, dpi=cfg.dpi, bbox_inches="tight")
-        plt.close(fig)
+        _style_static_equity_axes(ax, plt, cfg, chart_title)
+        _save_static_chart(fig, plt, output_path, cfg)
 
         logger.info("Created equity curve plot: %s", output_path)
         if benchmark_curve:
@@ -692,12 +889,7 @@ def plot_equity_curve(  # noqa: C901
 
     except Exception as e:
         logger.exception("Failed to create equity curve plot")
-        return ChartResult(
-            chart_type="equity_curve",
-            file_path=None,
-            success=False,
-            error=str(e),
-        )
+        return _chart_failure("equity_curve", str(e))
 
 
 def _interactive_equity_output_path(
@@ -1069,141 +1261,31 @@ def plot_pnl_histogram(
         if chart.success:
             print(f"Saved to: {chart.file_path}")
     """
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        logger.error("matplotlib not installed. Run: pip install 'almanak[backtest]'")
-        return ChartResult(
-            chart_type="pnl_histogram",
-            file_path=None,
-            success=False,
-            error="matplotlib not installed. Run: pip install 'almanak[backtest]'",
-        )
+    plt, failure = _load_matplotlib("pnl_histogram")
+    if failure is not None:
+        return failure
+    assert plt is not None
 
-    # Validate input
-    if not hasattr(result, "trades") or not result.trades:
-        return ChartResult(
-            chart_type="pnl_histogram",
-            file_path=None,
-            success=False,
-            error="No trades data in backtest result",
-        )
+    trades = _result_trades(result)
+    if not trades:
+        return _chart_failure("pnl_histogram", "No trades data in backtest result")
 
-    # Use defaults
     cfg = config or ChartConfig()
-
-    # Determine output path
-    if output_path is None:
-        safe_id = result.deployment_id.replace("/", "_").replace("\\", "_")
-        output_path = Path(f"pnl_histogram_{safe_id}.png")
-    elif isinstance(output_path, str):
-        output_path = Path(output_path)
-
-    # Ensure parent directory exists
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = _chart_output_path(result, output_path, prefix="pnl_histogram", suffix="png")
+    _ensure_output_parent(output_path)
 
     try:
-        # Extract PnL values from trades
-        pnl_values: list[float] = []
-        for trade in result.trades:
-            if hasattr(trade, "pnl_usd") and trade.pnl_usd is not None:
-                if isinstance(trade.pnl_usd, Decimal):
-                    pnl_values.append(float(trade.pnl_usd))
-                else:
-                    pnl_values.append(trade.pnl_usd)
-
+        pnl_values = _trade_pnl_values(trades)
         if not pnl_values:
-            return ChartResult(
-                chart_type="pnl_histogram",
-                file_path=None,
-                success=False,
-                error="No PnL data in trades",
-            )
+            return _chart_failure("pnl_histogram", "No PnL data in trades")
 
-        # Create figure
         fig, ax = plt.subplots(figsize=(cfg.figure_width, cfg.figure_height))
-
-        # Color bars by profit/loss
-        n, bin_edges, patches = ax.hist(pnl_values, bins=bins, edgecolor="white", linewidth=0.5)
-
-        # Color each bar based on whether it represents profit or loss
-        for i, patch in enumerate(patches):  # type: ignore[arg-type]
-            # Use the midpoint of the bin to determine color
-            bin_mid = (bin_edges[i] + bin_edges[i + 1]) / 2
-            if bin_mid >= 0:
-                patch.set_facecolor(cfg.profit_color)
-            else:
-                patch.set_facecolor(cfg.loss_color)
-
-        # Add vertical line at zero
+        _add_static_pnl_histogram_bars(ax, cfg, pnl_values, bins)
         ax.axvline(x=0, color="#757575", linestyle="--", linewidth=1.5, label="Break-even")
-
-        # Calculate and display distribution statistics if requested
-        stats = None
-        if show_stats:
-            stats = calculate_distribution_stats(pnl_values)
-            if stats:
-                # Create statistics text box
-                stats_text = (
-                    f"Mean: ${stats.mean:,.2f}\n"
-                    f"Median: ${stats.median:,.2f}\n"
-                    f"Std Dev: ${stats.std_dev:,.2f}\n"
-                    f"Skewness: {stats.skewness:.3f}\n"
-                    f"Kurtosis: {stats.kurtosis:.3f}\n"
-                    f"5th %ile: ${stats.percentile_5:,.2f}\n"
-                    f"95th %ile: ${stats.percentile_95:,.2f}"
-                )
-
-                # Add text box with stats
-                props = {"boxstyle": "round", "facecolor": "wheat", "alpha": 0.8}
-                ax.text(
-                    0.02,
-                    0.98,
-                    stats_text,
-                    transform=ax.transAxes,
-                    fontsize=cfg.font_size - 1,
-                    verticalalignment="top",
-                    bbox=props,
-                    family="monospace",
-                )
-
-                # Add vertical lines for mean and median
-                ax.axvline(
-                    x=stats.mean,
-                    color="#1976D2",
-                    linestyle="-.",
-                    linewidth=1.2,
-                    label=f"Mean (${stats.mean:,.0f})",
-                )
-                ax.axvline(
-                    x=stats.median,
-                    color="#7B1FA2",
-                    linestyle=":",
-                    linewidth=1.2,
-                    label=f"Median (${stats.median:,.0f})",
-                )
-
-        # Set title
+        stats = _add_static_pnl_stats(ax, cfg, pnl_values, show_stats)
         chart_title = title or f"Trade PnL Distribution - {result.deployment_id}"
-        ax.set_title(chart_title, fontsize=cfg.title_size, fontweight="bold")
-
-        # Set labels
-        ax.set_xlabel("PnL (USD)", fontsize=cfg.font_size)
-        ax.set_ylabel("Number of Trades", fontsize=cfg.font_size)
-
-        # Apply styling
-        ax.tick_params(labelsize=cfg.font_size)
-        ax.grid(True, alpha=cfg.grid_alpha, axis="y")
-        ax.legend(loc="upper right")
-
-        # Format x-axis with dollar values
-        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"${x:,.0f}"))
-
-        plt.tight_layout()
-
-        # Save plot
-        fig.savefig(output_path, dpi=cfg.dpi, bbox_inches="tight")
-        plt.close(fig)
+        _style_static_pnl_axes(ax, plt, cfg, chart_title)
+        _save_static_chart(fig, plt, output_path, cfg)
 
         logger.info("Created PnL histogram: %s", output_path)
         if show_stats and stats:
@@ -1218,12 +1300,170 @@ def plot_pnl_histogram(
 
     except Exception as e:
         logger.exception("Failed to create PnL histogram")
-        return ChartResult(
-            chart_type="pnl_histogram",
-            file_path=None,
-            success=False,
-            error=str(e),
+        return _chart_failure("pnl_histogram", str(e))
+
+
+def _pnl_histogram_bin_spec(pnl_values: list[float], bins: int) -> tuple[float, float, float]:
+    all_min = min(pnl_values)
+    all_max = max(pnl_values)
+    bin_size = (all_max - all_min) / bins if all_max != all_min else 1
+    return all_min, all_max, bin_size
+
+
+def _add_interactive_pnl_histogram_trace(
+    fig: Any,
+    go: Any,
+    values: list[float],
+    *,
+    name: str,
+    color: str,
+    bin_spec: tuple[float, float, float],
+) -> None:
+    if not values:
+        return
+    all_min, all_max, bin_size = bin_spec
+    fig.add_trace(
+        go.Histogram(
+            x=values,
+            name=name,
+            marker_color=color,
+            xbins={"start": all_min, "end": all_max, "size": bin_size},
+            hovertemplate="PnL: $%{x:,.2f}<br>Count: %{y}<extra></extra>",
         )
+    )
+
+
+def _add_interactive_pnl_histogram_traces(fig: Any, go: Any, pnl_values: list[float], bins: int) -> None:
+    bin_spec = _pnl_histogram_bin_spec(pnl_values, bins)
+    _add_interactive_pnl_histogram_trace(
+        fig,
+        go,
+        [value for value in pnl_values if value < 0],
+        name="Losses",
+        color="rgba(244, 67, 54, 0.7)",
+        bin_spec=bin_spec,
+    )
+    _add_interactive_pnl_histogram_trace(
+        fig,
+        go,
+        [value for value in pnl_values if value >= 0],
+        name="Profits",
+        color="rgba(76, 175, 80, 0.7)",
+        bin_spec=bin_spec,
+    )
+
+
+def _add_interactive_pnl_reference_lines(fig: Any, stats: DistributionStats | None) -> None:
+    fig.add_vline(
+        x=0,
+        line_dash="dash",
+        line_color="#757575",
+        line_width=2,
+        annotation_text="Break-even",
+        annotation_position="top",
+    )
+    if stats is None:
+        return
+    fig.add_vline(
+        x=stats.mean,
+        line_dash="dashdot",
+        line_color="#1976D2",
+        line_width=1.5,
+        annotation_text=f"Mean (${stats.mean:,.0f})",
+        annotation_position="bottom right",
+    )
+    fig.add_vline(
+        x=stats.median,
+        line_dash="dot",
+        line_color="#7B1FA2",
+        line_width=1.5,
+        annotation_text=f"Median (${stats.median:,.0f})",
+        annotation_position="bottom left",
+    )
+
+
+def _skewness_interpretation(skewness: float) -> str:
+    if skewness > 0.5:
+        return "Right-skewed (more large gains)"
+    if skewness < -0.5:
+        return "Left-skewed (more large losses)"
+    return "Approximately symmetric"
+
+
+def _kurtosis_interpretation(kurtosis: float) -> str:
+    if kurtosis > 1:
+        return "Fat tails (extreme values likely)"
+    if kurtosis < -1:
+        return "Thin tails (extreme values rare)"
+    return "Normal-like tails"
+
+
+def _interactive_pnl_stats_annotation(stats: DistributionStats | None, show_stats: bool) -> str:
+    if not show_stats or stats is None:
+        return ""
+    return (
+        f"<b>Distribution Statistics</b><br>"
+        f"Mean: ${stats.mean:,.2f}<br>"
+        f"Median: ${stats.median:,.2f}<br>"
+        f"Std Dev: ${stats.std_dev:,.2f}<br>"
+        f"<b>Skewness: {stats.skewness:.3f}</b> ({_skewness_interpretation(stats.skewness)})<br>"
+        f"<b>Kurtosis: {stats.kurtosis:.3f}</b> ({_kurtosis_interpretation(stats.kurtosis)})<br>"
+        f"Range: ${stats.min_return:,.2f} to ${stats.max_return:,.2f}<br>"
+        f"5th-95th %ile: ${stats.percentile_5:,.2f} to ${stats.percentile_95:,.2f}<br>"
+        f"Trade Count: {stats.count}"
+    )
+
+
+def _apply_interactive_pnl_layout(fig: Any, chart_title: str) -> None:
+    fig.update_layout(
+        title={"text": chart_title, "x": 0.5, "xanchor": "center", "font": {"size": 18, "color": "#333"}},
+        xaxis_title="PnL (USD)",
+        yaxis_title="Number of Trades",
+        xaxis_tickprefix="$",
+        xaxis_tickformat=",.0f",
+        barmode="overlay",
+        hovermode="x unified",
+        legend={"yanchor": "top", "y": 0.99, "xanchor": "right", "x": 0.99},
+        template="plotly_white",
+        margin={"l": 60, "r": 30, "t": 80, "b": 60},
+    )
+
+
+def _add_interactive_pnl_stats_annotation(fig: Any, stats_annotation: str) -> None:
+    if not stats_annotation:
+        return
+    fig.add_annotation(
+        text=stats_annotation,
+        xref="paper",
+        yref="paper",
+        x=0.02,
+        y=0.98,
+        showarrow=False,
+        font={"size": 11, "family": "monospace"},
+        align="left",
+        bgcolor="rgba(255, 255, 255, 0.9)",
+        bordercolor="#ccc",
+        borderwidth=1,
+        borderpad=8,
+    )
+
+
+def _build_interactive_pnl_histogram_figure(
+    go: Any,
+    result: "BacktestResult",
+    pnl_values: list[float],
+    *,
+    title: str | None,
+    bins: int,
+    show_stats: bool,
+) -> tuple[Any, DistributionStats | None]:
+    stats = calculate_distribution_stats(pnl_values)
+    fig = go.Figure()
+    _add_interactive_pnl_histogram_traces(fig, go, pnl_values, bins)
+    _add_interactive_pnl_reference_lines(fig, stats)
+    _apply_interactive_pnl_layout(fig, title or f"Trade PnL Distribution - {result.deployment_id}")
+    _add_interactive_pnl_stats_annotation(fig, _interactive_pnl_stats_annotation(stats, show_stats))
+    return fig, stats
 
 
 # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
@@ -1259,191 +1499,29 @@ def plot_pnl_histogram_interactive(  # noqa: C901
     try:
         import plotly.graph_objects as go
     except ImportError:
-        logger.error("plotly not installed. Run: pip install 'almanak[backtest]'")
-        return ChartResult(
-            chart_type="pnl_histogram",
-            file_path=None,
-            success=False,
-            error="plotly not installed. Run: pip install 'almanak[backtest]'",
-            format="html",
-        )
+        logger.error(_MISSING_PLOTLY_ERROR)
+        return _chart_failure("pnl_histogram", _MISSING_PLOTLY_ERROR, format="html")
 
-    # Validate input
-    if not hasattr(result, "trades") or not result.trades:
-        return ChartResult(
-            chart_type="pnl_histogram",
-            file_path=None,
-            success=False,
-            error="No trades data in backtest result",
-            format="html",
-        )
+    trades = _result_trades(result)
+    if not trades:
+        return _chart_failure("pnl_histogram", "No trades data in backtest result", format="html")
 
-    # Determine output path
-    if output_path is None:
-        safe_id = result.deployment_id.replace("/", "_").replace("\\", "_")
-        output_path = Path(f"pnl_histogram_{safe_id}.html")
-    elif isinstance(output_path, str):
-        output_path = Path(output_path)
-
-    # Ensure parent directory exists
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = _chart_output_path(result, output_path, prefix="pnl_histogram", suffix="html")
+    _ensure_output_parent(output_path)
 
     try:
-        # Extract PnL values from trades
-        pnl_values: list[float] = []
-        for trade in result.trades:
-            if hasattr(trade, "pnl_usd") and trade.pnl_usd is not None:
-                if isinstance(trade.pnl_usd, Decimal):
-                    pnl_values.append(float(trade.pnl_usd))
-                else:
-                    pnl_values.append(trade.pnl_usd)
-
+        pnl_values = _trade_pnl_values(trades)
         if not pnl_values:
-            return ChartResult(
-                chart_type="pnl_histogram",
-                file_path=None,
-                success=False,
-                error="No PnL data in trades",
-                format="html",
-            )
+            return _chart_failure("pnl_histogram", "No PnL data in trades", format="html")
 
-        # Calculate distribution statistics
-        stats = calculate_distribution_stats(pnl_values)
-
-        # Create figure
-        fig = go.Figure()
-
-        # Separate profits and losses for coloring
-        profits = [x for x in pnl_values if x >= 0]
-        losses = [x for x in pnl_values if x < 0]
-
-        # Calculate bin edges for consistent binning
-        all_min = min(pnl_values)
-        all_max = max(pnl_values)
-        bin_size = (all_max - all_min) / bins if all_max != all_min else 1
-
-        # Add histogram for losses (red)
-        if losses:
-            fig.add_trace(
-                go.Histogram(
-                    x=losses,
-                    name="Losses",
-                    marker_color="rgba(244, 67, 54, 0.7)",
-                    xbins={"start": all_min, "end": all_max, "size": bin_size},
-                    hovertemplate="PnL: $%{x:,.2f}<br>Count: %{y}<extra></extra>",
-                )
-            )
-
-        # Add histogram for profits (green)
-        if profits:
-            fig.add_trace(
-                go.Histogram(
-                    x=profits,
-                    name="Profits",
-                    marker_color="rgba(76, 175, 80, 0.7)",
-                    xbins={"start": all_min, "end": all_max, "size": bin_size},
-                    hovertemplate="PnL: $%{x:,.2f}<br>Count: %{y}<extra></extra>",
-                )
-            )
-
-        # Add vertical line at zero
-        fig.add_vline(
-            x=0,
-            line_dash="dash",
-            line_color="#757575",
-            line_width=2,
-            annotation_text="Break-even",
-            annotation_position="top",
+        fig, stats = _build_interactive_pnl_histogram_figure(
+            go,
+            result,
+            pnl_values,
+            title=title,
+            bins=bins,
+            show_stats=show_stats,
         )
-
-        # Add mean and median lines if stats available
-        if stats:
-            fig.add_vline(
-                x=stats.mean,
-                line_dash="dashdot",
-                line_color="#1976D2",
-                line_width=1.5,
-                annotation_text=f"Mean (${stats.mean:,.0f})",
-                annotation_position="bottom right",
-            )
-            fig.add_vline(
-                x=stats.median,
-                line_dash="dot",
-                line_color="#7B1FA2",
-                line_width=1.5,
-                annotation_text=f"Median (${stats.median:,.0f})",
-                annotation_position="bottom left",
-            )
-
-        # Create annotation text with stats
-        stats_annotation = ""
-        if show_stats and stats:
-            # Interpret skewness
-            if stats.skewness > 0.5:
-                skew_interp = "Right-skewed (more large gains)"
-            elif stats.skewness < -0.5:
-                skew_interp = "Left-skewed (more large losses)"
-            else:
-                skew_interp = "Approximately symmetric"
-
-            # Interpret kurtosis
-            if stats.kurtosis > 1:
-                kurt_interp = "Fat tails (extreme values likely)"
-            elif stats.kurtosis < -1:
-                kurt_interp = "Thin tails (extreme values rare)"
-            else:
-                kurt_interp = "Normal-like tails"
-
-            stats_annotation = (
-                f"<b>Distribution Statistics</b><br>"
-                f"Mean: ${stats.mean:,.2f}<br>"
-                f"Median: ${stats.median:,.2f}<br>"
-                f"Std Dev: ${stats.std_dev:,.2f}<br>"
-                f"<b>Skewness: {stats.skewness:.3f}</b> ({skew_interp})<br>"
-                f"<b>Kurtosis: {stats.kurtosis:.3f}</b> ({kurt_interp})<br>"
-                f"Range: ${stats.min_return:,.2f} to ${stats.max_return:,.2f}<br>"
-                f"5th-95th %ile: ${stats.percentile_5:,.2f} to ${stats.percentile_95:,.2f}<br>"
-                f"Trade Count: {stats.count}"
-            )
-
-        # Set layout
-        chart_title = title or f"Trade PnL Distribution - {result.deployment_id}"
-        fig.update_layout(
-            title={
-                "text": chart_title,
-                "x": 0.5,
-                "xanchor": "center",
-                "font": {"size": 18, "color": "#333"},
-            },
-            xaxis_title="PnL (USD)",
-            yaxis_title="Number of Trades",
-            xaxis_tickprefix="$",
-            xaxis_tickformat=",.0f",
-            barmode="overlay",
-            hovermode="x unified",
-            legend={"yanchor": "top", "y": 0.99, "xanchor": "right", "x": 0.99},
-            template="plotly_white",
-            margin={"l": 60, "r": 30, "t": 80, "b": 60},
-        )
-
-        # Add stats annotation box if requested
-        if show_stats and stats_annotation:
-            fig.add_annotation(
-                text=stats_annotation,
-                xref="paper",
-                yref="paper",
-                x=0.02,
-                y=0.98,
-                showarrow=False,
-                font={"size": 11, "family": "monospace"},
-                align="left",
-                bgcolor="rgba(255, 255, 255, 0.9)",
-                bordercolor="#ccc",
-                borderwidth=1,
-                borderpad=8,
-            )
-
-        # Save as HTML
         fig.write_html(str(output_path), include_plotlyjs=True, full_html=True)
 
         logger.info("Created interactive PnL histogram: %s", output_path)
@@ -1459,13 +1537,7 @@ def plot_pnl_histogram_interactive(  # noqa: C901
 
     except Exception as e:
         logger.exception("Failed to create interactive PnL histogram")
-        return ChartResult(
-            chart_type="pnl_histogram",
-            file_path=None,
-            success=False,
-            error=str(e),
-            format="html",
-        )
+        return _chart_failure("pnl_histogram", str(e), format="html")
 
 
 def plot_duration_scatter(
@@ -1495,125 +1567,38 @@ def plot_duration_scatter(
         if chart.success:
             print(f"Saved to: {chart.file_path}")
     """
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        logger.error("matplotlib not installed. Run: pip install 'almanak[backtest]'")
-        return ChartResult(
-            chart_type="duration_scatter",
-            file_path=None,
-            success=False,
-            error="matplotlib not installed. Run: pip install 'almanak[backtest]'",
-        )
+    plt, failure = _load_matplotlib("duration_scatter")
+    if failure is not None:
+        return failure
+    assert plt is not None
 
-    # Validate input
-    if not hasattr(result, "trades") or not result.trades:
-        return ChartResult(
-            chart_type="duration_scatter",
-            file_path=None,
-            success=False,
-            error="No trades data in backtest result",
-        )
+    trades = _result_trades(result)
+    if not trades:
+        return _chart_failure("duration_scatter", "No trades data in backtest result")
 
-    # Use defaults
     cfg = config or ChartConfig()
-
-    # Determine output path
-    if output_path is None:
-        safe_id = result.deployment_id.replace("/", "_").replace("\\", "_")
-        output_path = Path(f"duration_scatter_{safe_id}.png")
-    elif isinstance(output_path, str):
-        output_path = Path(output_path)
-
-    # Ensure parent directory exists
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = _chart_output_path(result, output_path, prefix="duration_scatter", suffix="png")
+    _ensure_output_parent(output_path)
 
     try:
-        # Extract duration and PnL from trades
-        # Duration is calculated as time between consecutive trades or estimated from metadata
-        durations: list[float] = []  # in hours
-        pnl_values: list[float] = []
-        colors: list[str] = []
+        scatter_data = _duration_scatter_data(trades, cfg)
+        if not scatter_data.durations:
+            return _chart_failure("duration_scatter", "No duration/PnL data available for scatter plot")
 
-        # Sort trades by timestamp
-        sorted_trades = sorted(result.trades, key=lambda t: t.timestamp)
-
-        for i, trade in enumerate(sorted_trades):
-            if not hasattr(trade, "pnl_usd") or trade.pnl_usd is None:
-                continue
-
-            pnl = float(trade.pnl_usd) if isinstance(trade.pnl_usd, Decimal) else trade.pnl_usd
-
-            # Calculate duration from metadata or estimate from trade timing
-            duration_hours = None
-
-            # Check for duration in metadata
-            if hasattr(trade, "metadata") and trade.metadata:
-                if "duration_hours" in trade.metadata:
-                    duration_hours = float(trade.metadata["duration_hours"])
-                elif "duration_minutes" in trade.metadata:
-                    duration_hours = float(trade.metadata["duration_minutes"]) / 60
-                elif "hold_time_seconds" in trade.metadata:
-                    duration_hours = float(trade.metadata["hold_time_seconds"]) / 3600
-
-            # If no duration in metadata, estimate from trade sequence
-            # For position-closing trades, use time since last related trade
-            if duration_hours is None and i > 0:
-                prev_trade = sorted_trades[i - 1]
-                time_diff = (trade.timestamp - prev_trade.timestamp).total_seconds() / 3600
-                duration_hours = max(0.1, time_diff)  # Minimum 0.1 hours (6 min)
-
-            if duration_hours is not None:
-                durations.append(duration_hours)
-                pnl_values.append(pnl)
-                colors.append(cfg.profit_color if pnl >= 0 else cfg.loss_color)
-
-        if not durations:
-            return ChartResult(
-                chart_type="duration_scatter",
-                file_path=None,
-                success=False,
-                error="No duration/PnL data available for scatter plot",
-            )
-
-        # Create figure
         fig, ax = plt.subplots(figsize=(cfg.figure_width, cfg.figure_height))
-
-        # Create scatter plot
         ax.scatter(
-            durations,
-            pnl_values,
-            c=colors,
+            scatter_data.durations,
+            scatter_data.pnl_values,
+            c=scatter_data.colors,
             s=cfg.marker_size,
             alpha=0.7,
             edgecolors="white",
             linewidths=0.5,
         )
-
-        # Add horizontal line at zero
         ax.axhline(y=0, color="#757575", linestyle="--", linewidth=1.5, label="Break-even")
-
-        # Set title
         chart_title = title or f"Trade Duration vs PnL - {result.deployment_id}"
-        ax.set_title(chart_title, fontsize=cfg.title_size, fontweight="bold")
-
-        # Set labels
-        ax.set_xlabel("Duration (hours)", fontsize=cfg.font_size)
-        ax.set_ylabel("PnL (USD)", fontsize=cfg.font_size)
-
-        # Apply styling
-        ax.tick_params(labelsize=cfg.font_size)
-        ax.grid(True, alpha=cfg.grid_alpha)
-        ax.legend(loc="upper right")
-
-        # Format y-axis with dollar values
-        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"${x:,.0f}"))
-
-        plt.tight_layout()
-
-        # Save plot
-        fig.savefig(output_path, dpi=cfg.dpi, bbox_inches="tight")
-        plt.close(fig)
+        _style_duration_axes(ax, plt, cfg, chart_title)
+        _save_static_chart(fig, plt, output_path, cfg)
 
         logger.info("Created duration scatter plot: %s", output_path)
 
@@ -1626,12 +1611,7 @@ def plot_duration_scatter(
 
     except Exception as e:
         logger.exception("Failed to create duration scatter plot")
-        return ChartResult(
-            chart_type="duration_scatter",
-            file_path=None,
-            success=False,
-            error=str(e),
-        )
+        return _chart_failure("duration_scatter", str(e))
 
 
 def plot_intent_pie(
@@ -1661,92 +1641,27 @@ def plot_intent_pie(
         if chart.success:
             print(f"Saved to: {chart.file_path}")
     """
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        logger.error("matplotlib not installed. Run: pip install 'almanak[backtest]'")
-        return ChartResult(
-            chart_type="intent_pie",
-            file_path=None,
-            success=False,
-            error="matplotlib not installed. Run: pip install 'almanak[backtest]'",
-        )
+    plt, failure = _load_matplotlib("intent_pie")
+    if failure is not None:
+        return failure
+    assert plt is not None
 
-    # Validate input
-    if not hasattr(result, "trades") or not result.trades:
-        return ChartResult(
-            chart_type="intent_pie",
-            file_path=None,
-            success=False,
-            error="No trades data in backtest result",
-        )
+    trades = _result_trades(result)
+    if not trades:
+        return _chart_failure("intent_pie", "No trades data in backtest result")
 
-    # Use defaults
     cfg = config or ChartConfig()
-
-    # Determine output path
-    if output_path is None:
-        safe_id = result.deployment_id.replace("/", "_").replace("\\", "_")
-        output_path = Path(f"intent_pie_{safe_id}.png")
-    elif isinstance(output_path, str):
-        output_path = Path(output_path)
-
-    # Ensure parent directory exists
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = _chart_output_path(result, output_path, prefix="intent_pie", suffix="png")
+    _ensure_output_parent(output_path)
 
     try:
-        # Count trades by intent type
-        intent_counts: dict[str, int] = {}
-        for trade in result.trades:
-            if hasattr(trade, "intent_type"):
-                intent_type = trade.intent_type
-                if hasattr(intent_type, "value"):
-                    intent_name = intent_type.value
-                else:
-                    intent_name = str(intent_type)
-
-                # Skip HOLD intents as they're not actual trades
-                if intent_name == "HOLD":
-                    continue
-
-                intent_counts[intent_name] = intent_counts.get(intent_name, 0) + 1
-
+        intent_counts = _intent_counts(trades)
         if not intent_counts:
-            return ChartResult(
-                chart_type="intent_pie",
-                file_path=None,
-                success=False,
-                error="No intent type data in trades",
-            )
+            return _chart_failure("intent_pie", "No intent type data in trades")
 
-        # Sort by count for consistent ordering
-        sorted_intents = sorted(intent_counts.items(), key=lambda x: x[1], reverse=True)
-        labels = [item[0] for item in sorted_intents]
-        sizes = [item[1] for item in sorted_intents]
-
-        # Define colors for different intent types
-        intent_colors = {
-            "SWAP": "#2196F3",  # Blue
-            "LP_OPEN": "#4CAF50",  # Green
-            "LP_CLOSE": "#F44336",  # Red
-            "PERP_OPEN": "#9C27B0",  # Purple
-            "PERP_CLOSE": "#E91E63",  # Pink
-            "BORROW": "#FF9800",  # Orange
-            "REPAY": "#FFEB3B",  # Yellow
-            "SUPPLY": "#00BCD4",  # Cyan
-            "WITHDRAW": "#795548",  # Brown
-            "BRIDGE": "#607D8B",  # Blue Grey
-            "ENSURE_BALANCE": "#9E9E9E",  # Grey
-        }
-
-        # Get colors for each label, using a default for unknown types
-        colors = [intent_colors.get(label, "#757575") for label in labels]
-
-        # Create figure
+        labels, sizes, colors = _intent_pie_data(intent_counts)
         fig, ax = plt.subplots(figsize=(cfg.figure_width, cfg.figure_height))
-
-        # Create pie chart
-        _, texts, autotexts = ax.pie(  # type: ignore[misc]
+        _, texts, autotexts = ax.pie(
             sizes,
             labels=labels,
             colors=colors,
@@ -1755,26 +1670,12 @@ def plot_intent_pie(
             pctdistance=0.75,
         )
 
-        # Style the text
-        for text in texts:
-            text.set_fontsize(cfg.font_size)
-        for autotext in autotexts:
-            autotext.set_fontsize(cfg.font_size - 1)
-            autotext.set_color("white")
-            autotext.set_fontweight("bold")
-
-        # Set title
+        _style_intent_pie_text(texts, autotexts, cfg)
         chart_title = title or f"Trades by Intent Type - {result.deployment_id}"
         ax.set_title(chart_title, fontsize=cfg.title_size, fontweight="bold")
-
-        # Equal aspect ratio ensures circular pie
         ax.axis("equal")
-
         plt.tight_layout()
-
-        # Save plot
-        fig.savefig(output_path, dpi=cfg.dpi, bbox_inches="tight")
-        plt.close(fig)
+        _save_static_chart(fig, plt, output_path, cfg)
 
         logger.info("Created intent pie chart: %s", output_path)
 
@@ -1787,12 +1688,7 @@ def plot_intent_pie(
 
     except Exception as e:
         logger.exception("Failed to create intent pie chart")
-        return ChartResult(
-            chart_type="intent_pie",
-            file_path=None,
-            success=False,
-            error=str(e),
-        )
+        return _chart_failure("intent_pie", str(e))
 
 
 def _load_equity_chart_plotly() -> Any | None:
@@ -2208,6 +2104,57 @@ def generate_pnl_distribution_html(
         return ""
 
 
+def _drawdown_chart_series(equity_curve: list["EquityPoint"]) -> tuple[list[datetime], list[float]]:
+    timestamps: list[datetime] = []
+    drawdowns: list[float] = []
+    peak_value = 0.0
+
+    for point in equity_curve:
+        value = _as_float(point.value_usd)
+        peak_value = max(peak_value, value)
+        drawdown_pct = ((peak_value - value) / peak_value * 100) if peak_value > 0 else 0.0
+        timestamps.append(point.timestamp)
+        drawdowns.append(-drawdown_pct)
+
+    return timestamps, drawdowns
+
+
+def _build_drawdown_chart_figure(
+    go: Any,
+    timestamps: list[datetime],
+    drawdowns: list[float],
+    *,
+    title: str | None,
+    height: int,
+) -> Any:
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=timestamps,
+            y=drawdowns,
+            name="Drawdown",
+            fill="tozeroy",
+            fillcolor="rgba(244, 67, 54, 0.3)",
+            line={"color": "#F44336", "width": 1},
+            hovertemplate="<b>%{x}</b><br>Drawdown: %{y:.2f}%<extra></extra>",
+        )
+    )
+    max_dd = min(drawdowns) if drawdowns else 0
+    fig.update_layout(
+        title={"text": title or "Drawdown", "x": 0.5, "xanchor": "center", "font": {"size": 16}},
+        xaxis_title="Time",
+        yaxis_title="Drawdown (%)",
+        yaxis_ticksuffix="%",
+        yaxis_range=[max_dd * 1.1 if max_dd < 0 else -1, 0.5],
+        hovermode="x unified",
+        template="plotly_white",
+        height=height,
+        margin={"l": 60, "r": 30, "t": 50, "b": 50},
+        showlegend=False,
+    )
+    return fig
+
+
 # crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~4%)
 def generate_drawdown_chart_html(
     result: "BacktestResult",
@@ -2231,10 +2178,8 @@ def generate_drawdown_chart_html(
         chart_html = generate_drawdown_chart_html(result)
         # Use in Jinja2 template: {{ chart_html | safe }}
     """
-    try:
-        import plotly.graph_objects as go
-    except ImportError:
-        logger.warning("plotly not installed (pip install 'almanak[backtest]') - cannot generate drawdown chart")
+    go = _load_plotly_graph_objects("drawdown chart")
+    if go is None:
         return ""
 
     if not result.equity_curve:
@@ -2242,49 +2187,8 @@ def generate_drawdown_chart_html(
         return ""
 
     try:
-        # Extract data and calculate drawdown
-        timestamps: list[datetime] = []
-        drawdowns: list[float] = []
-        peak_value = 0.0
-
-        for point in result.equity_curve:
-            value = float(point.value_usd) if isinstance(point.value_usd, Decimal) else point.value_usd
-            peak_value = max(peak_value, value)
-            drawdown_pct = ((peak_value - value) / peak_value * 100) if peak_value > 0 else 0.0
-            timestamps.append(point.timestamp)
-            drawdowns.append(-drawdown_pct)  # Negative for visual representation
-
-        # Create figure
-        fig = go.Figure()
-
-        fig.add_trace(
-            go.Scatter(
-                x=timestamps,
-                y=drawdowns,
-                name="Drawdown",
-                fill="tozeroy",
-                fillcolor="rgba(244, 67, 54, 0.3)",
-                line={"color": "#F44336", "width": 1},
-                hovertemplate="<b>%{x}</b><br>Drawdown: %{y:.2f}%<extra></extra>",
-            )
-        )
-
-        # Configure layout
-        chart_title = title or "Drawdown"
-        max_dd = min(drawdowns) if drawdowns else 0
-        fig.update_layout(
-            title={"text": chart_title, "x": 0.5, "xanchor": "center", "font": {"size": 16}},
-            xaxis_title="Time",
-            yaxis_title="Drawdown (%)",
-            yaxis_ticksuffix="%",
-            yaxis_range=[max_dd * 1.1 if max_dd < 0 else -1, 0.5],
-            hovermode="x unified",
-            template="plotly_white",
-            height=height,
-            margin={"l": 60, "r": 30, "t": 50, "b": 50},
-            showlegend=False,
-        )
-
+        timestamps, drawdowns = _drawdown_chart_series(result.equity_curve)
+        fig = _build_drawdown_chart_figure(go, timestamps, drawdowns, title=title, height=height)
         return fig.to_html(include_plotlyjs="cdn", full_html=False, div_id="drawdown-chart")
 
     except Exception as e:

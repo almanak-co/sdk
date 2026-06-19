@@ -19,6 +19,66 @@ import click
 from almanak.core.chains import DEFAULT_CHAIN
 
 
+def _strict_numeric_sweep_value(name: str, value: str) -> float:
+    try:
+        return float(value)
+    except (ValueError, TypeError) as e:
+        raise click.UsageError(f"--numeric-param '{name}': value {value!r} is not numeric ({e}).") from e
+
+
+def _try_float_sweep_value(value: str) -> float | None:
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _float_round_trips(value: str, coerced: float) -> bool:
+    return str(coerced) == value or f"{coerced:g}" == value
+
+
+def _emit_nonfinite_sweep_warning(name: str, value: str, coerced: float) -> None:
+    click.echo(
+        f"Warning: sweep param '{name}={value}' was coerced to {coerced}; "
+        "this is almost certainly not what you meant. "
+        "Pass --numeric-param to enforce numeric typing, or quote the "
+        "value as a categorical string (no sibling floats) to keep it as-is.",
+        err=True,
+    )
+
+
+def _emit_roundtrip_sweep_warning(name: str, value: str, coerced: float) -> None:
+    click.echo(
+        f"Warning: sweep param '{name}={value}' was coerced to float "
+        f"{coerced}; the string no longer round-trips. "
+        f"Use --numeric-param {name} to opt in explicitly, or keep it "
+        "categorical by ensuring no value in the list is numeric.",
+        err=True,
+    )
+
+
+def _maybe_warn_ambiguous_sweep_value(
+    name: str,
+    value: str,
+    coerced: float,
+    *,
+    warned_ambiguous: set[tuple[str, str]],
+    emit_warnings: bool,
+) -> None:
+    key = (name, value)
+    if key in warned_ambiguous:
+        return
+    if math.isnan(coerced) or math.isinf(coerced):
+        warned_ambiguous.add(key)
+        if emit_warnings:
+            _emit_nonfinite_sweep_warning(name, value, coerced)
+        return
+    if not _float_round_trips(value, coerced):
+        warned_ambiguous.add(key)
+        if emit_warnings:
+            _emit_roundtrip_sweep_warning(name, value, coerced)
+
+
 def _coerce_sweep_value(
     name: str,
     value: str,
@@ -67,43 +127,19 @@ def _coerce_sweep_value(
     dedicated deprecation cycle.
     """
     if name in numeric_param_names:
-        # Strict: must be numeric. Empty string and other garbage become
-        # explicit UsageErrors with the problematic value visible.
-        try:
-            return float(value)
-        except (ValueError, TypeError) as e:
-            raise click.UsageError(f"--numeric-param '{name}': value {value!r} is not numeric ({e}).") from e
+        return _strict_numeric_sweep_value(name, value)
 
-    try:
-        coerced = float(value)
-    except (ValueError, TypeError):
-        # Non-numeric: keep the raw string (original behaviour).
+    coerced = _try_float_sweep_value(value)
+    if coerced is None:
         return value
 
-    # Warn on semantically-changed coercion. We compare against the
-    # original string to catch "0001" → 1.0, "1e5" → 100000.0, etc.
-    key = (name, value)
-    if key not in warned_ambiguous:
-        if math.isnan(coerced) or math.isinf(coerced):
-            warned_ambiguous.add(key)
-            if emit_warnings:
-                click.echo(
-                    f"Warning: sweep param '{name}={value}' was coerced to {coerced}; "
-                    "this is almost certainly not what you meant. "
-                    "Pass --numeric-param to enforce numeric typing, or quote the "
-                    "value as a categorical string (no sibling floats) to keep it as-is.",
-                    err=True,
-                )
-        elif str(coerced) != value and f"{coerced:g}" != value:
-            warned_ambiguous.add(key)
-            if emit_warnings:
-                click.echo(
-                    f"Warning: sweep param '{name}={value}' was coerced to float "
-                    f"{coerced}; the string no longer round-trips. "
-                    f"Use --numeric-param {name} to opt in explicitly, or keep it "
-                    "categorical by ensuring no value in the list is numeric.",
-                    err=True,
-                )
+    _maybe_warn_ambiguous_sweep_value(
+        name,
+        value,
+        coerced,
+        warned_ambiguous=warned_ambiguous,
+        emit_warnings=emit_warnings,
+    )
     return coerced
 
 
@@ -213,6 +249,64 @@ from .run_helpers import (
 # =============================================================================
 
 
+def _coerce_sweep_params(
+    *,
+    base_config: dict[str, Any],
+    params: dict[str, str],
+    numeric_param_names: frozenset[str],
+    emit_ambiguity_warnings: bool,
+) -> tuple[dict[str, Any], set[tuple[str, str]]]:
+    warned: set[tuple[str, str]] = set()
+    strategy_config = base_config.copy()
+    for name, value in params.items():
+        strategy_config[name] = _coerce_sweep_value(
+            name,
+            value,
+            numeric_param_names=numeric_param_names,
+            warned_ambiguous=warned,
+            emit_warnings=emit_ambiguity_warnings,
+        )
+    return strategy_config, warned
+
+
+def _apply_sweep_param_attributes(
+    strategy_instance: Any,
+    *,
+    params: dict[str, str],
+    numeric_param_names: frozenset[str],
+    warned: set[tuple[str, str]],
+    emit_ambiguity_warnings: bool,
+) -> None:
+    config = getattr(strategy_instance, "config", None)
+    if isinstance(config, dict):
+        return
+    for name, value in params.items():
+        setattr(
+            strategy_instance,
+            name,
+            _coerce_sweep_value(
+                name,
+                value,
+                numeric_param_names=numeric_param_names,
+                warned_ambiguous=warned,
+                emit_warnings=emit_ambiguity_warnings,
+            ),
+        )
+
+
+def _sweep_result_from_metrics(params: dict[str, str], result: Any) -> SweepResult:
+    metrics = result.metrics
+    return SweepResult(
+        params=params,
+        result=result,
+        sharpe_ratio=metrics.sharpe_ratio if metrics.sharpe_ratio else Decimal("0"),
+        total_return_pct=metrics.total_return_pct if metrics.total_return_pct else Decimal("0"),
+        max_drawdown_pct=metrics.max_drawdown_pct if metrics.max_drawdown_pct else Decimal("0"),
+        win_rate=metrics.win_rate if metrics.win_rate else Decimal("0"),
+        total_trades=metrics.total_trades,
+    )
+
+
 async def run_sweep_backtest(
     strategy_class: Any,
     base_config: dict[str, Any],
@@ -246,73 +340,24 @@ async def run_sweep_backtest(
     Returns:
         SweepResult with backtest results and key metrics
     """
-    # Create strategy config with overridden parameters. See
-    # `_coerce_sweep_value` for the #1702 coercion semantics.
-    # #1756: when the CLI invokes this helper it sets
-    # `emit_ambiguity_warnings=False` because it has already emitted the
-    # warnings once in the parent pre-pass. Direct programmatic callers
-    # (tests, notebooks, library users) keep the #1702 default so the
-    # coercion surface stays visible.
-    warned: set[tuple[str, str]] = set()
-    strategy_config = base_config.copy()
-    for name, value in params.items():
-        strategy_config[name] = _coerce_sweep_value(
-            name,
-            value,
-            numeric_param_names=numeric_param_names,
-            warned_ambiguous=warned,
-            emit_warnings=emit_ambiguity_warnings,
-        )
-
-    # Create strategy instance
-    strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, pnl_config.chain)
-    # Set params as attributes for strategies that don't read config dict
-    if not hasattr(strategy_instance, "config") or not isinstance(getattr(strategy_instance, "config", None), dict):
-        for name, value in params.items():
-            setattr(
-                strategy_instance,
-                name,
-                _coerce_sweep_value(
-                    name,
-                    value,
-                    numeric_param_names=numeric_param_names,
-                    warned_ambiguous=warned,
-                    emit_warnings=emit_ambiguity_warnings,
-                ),
-            )
-
-    # Ensure strategy has a non-empty deployment_id (same pattern as PnL backtest)
-    existing_id = getattr(strategy_instance, "deployment_id", "")
-    if not existing_id:
-        param_str = "_".join(f"{k}{v}" for k, v in params.items())
-        fallback_id = f"sweep-{param_str}" if param_str else "sweep"
-        if hasattr(strategy_instance, "_deployment_id"):
-            strategy_instance._deployment_id = fallback_id
-        else:
-            strategy_instance.deployment_id = fallback_id
-
-    # Create backtester
-    backtester = PnLBacktester(
-        data_provider=data_provider,
-        fee_models={},
-        slippage_models={},
-    )
-
-    # Run backtest
-    result = await backtester.backtest(strategy_instance, pnl_config)
-
-    # Extract key metrics
-    metrics = result.metrics
-
-    return SweepResult(
+    strategy_config, warned = _coerce_sweep_params(
+        base_config=base_config,
         params=params,
-        result=result,
-        sharpe_ratio=metrics.sharpe_ratio if metrics.sharpe_ratio else Decimal("0"),
-        total_return_pct=metrics.total_return_pct if metrics.total_return_pct else Decimal("0"),
-        max_drawdown_pct=metrics.max_drawdown_pct if metrics.max_drawdown_pct else Decimal("0"),
-        win_rate=metrics.win_rate if metrics.win_rate else Decimal("0"),
-        total_trades=metrics.total_trades,
+        numeric_param_names=numeric_param_names,
+        emit_ambiguity_warnings=emit_ambiguity_warnings,
     )
+    strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, pnl_config.chain)
+    _apply_sweep_param_attributes(
+        strategy_instance,
+        params=params,
+        numeric_param_names=numeric_param_names,
+        warned=warned,
+        emit_ambiguity_warnings=emit_ambiguity_warnings,
+    )
+    _ensure_sweep_worker_deployment_id(strategy_instance, params)
+    backtester = PnLBacktester(data_provider=data_provider, fee_models={}, slippage_models={})
+    result = await backtester.backtest(strategy_instance, pnl_config)
+    return _sweep_result_from_metrics(params, result)
 
 
 async def run_parallel_sweeps(
@@ -734,6 +779,90 @@ class _SweepTask:
     emit_ambiguity_warnings: bool = False
 
 
+def _resolve_sweep_worker_strategy_class(task: _SweepTask) -> Any:
+    import importlib
+
+    module_name, class_name = task.strategy_class_name.rsplit(".", 1)
+    try:
+        module = importlib.import_module(module_name)
+        return getattr(module, class_name)
+    except (ImportError, AttributeError):
+        from ...strategies import get_strategy
+
+        try:
+            return get_strategy(class_name.lower().replace("strategy", ""))
+        except ValueError:
+            from ...backtesting import make_mock_strategy_class
+
+            return make_mock_strategy_class("mock-worker")
+
+
+def _coerce_sweep_params_for_worker(task: _SweepTask) -> tuple[dict[str, Any], set[tuple[str, str]]]:
+    return _coerce_sweep_params(
+        base_config=task.base_config,
+        params=task.params,
+        numeric_param_names=task.numeric_param_names,
+        emit_ambiguity_warnings=task.emit_ambiguity_warnings,
+    )
+
+
+def _resolve_sweep_worker_chain(task: _SweepTask, strategy_class: Any) -> str:
+    fallback_chain = task.default_chain or get_default_chain(strategy_class)
+    return task.base_config.get("chain") or task.pnl_config_dict.get("chain") or fallback_chain
+
+
+def _apply_sweep_worker_param_attributes(
+    strategy_instance: Any,
+    task: _SweepTask,
+    warned: set[tuple[str, str]],
+) -> None:
+    _apply_sweep_param_attributes(
+        strategy_instance,
+        params=task.params,
+        numeric_param_names=task.numeric_param_names,
+        warned=warned,
+        emit_ambiguity_warnings=task.emit_ambiguity_warnings,
+    )
+
+
+def _ensure_sweep_worker_deployment_id(strategy_instance: Any, params: dict[str, str]) -> None:
+    existing_id = getattr(strategy_instance, "deployment_id", "")
+    if existing_id:
+        return
+    param_str = "_".join(f"{key}{value}" for key, value in params.items())
+    fallback_id = f"sweep-{param_str}" if param_str else "sweep"
+    if hasattr(strategy_instance, "_deployment_id"):
+        strategy_instance._deployment_id = fallback_id
+    else:
+        strategy_instance.deployment_id = fallback_id
+
+
+def _pnl_config_from_sweep_task(task: _SweepTask) -> PnLBacktestConfig:
+    pnl_config_dict = task.pnl_config_dict.copy()
+    for key in ["duration_seconds", "duration_days", "estimated_ticks"]:
+        pnl_config_dict.pop(key, None)
+    return PnLBacktestConfig.from_dict(pnl_config_dict)
+
+
+def _build_sweep_worker_backtester(
+    *,
+    strategy_config: dict[str, Any],
+    pnl_config: PnLBacktestConfig,
+    worker_chain: str,
+) -> PnLBacktester:
+    token_addresses = build_token_address_map(
+        strategy_config=strategy_config,
+        tracked_tokens=list(pnl_config.tokens),
+        chain=worker_chain,
+    )
+    data_provider = CoinGeckoDataProvider(token_addresses=token_addresses)
+    return PnLBacktester(data_provider=data_provider, fee_models={}, slippage_models={})
+
+
+def _sweep_result_from_backtest(task: _SweepTask, result: Any) -> SweepResult:
+    return _sweep_result_from_metrics(task.params, result)
+
+
 # crap-allowlist: pre-existing sweep-worker body (cc=19 on main, unchanged by this PR); the only
 # addition is a build_token_address_map call + provider kwarg for dynamic coin-id resolution.
 # Score is coverage-driven (subprocess worker, no unit harness). Coverage backfill / decomposition
@@ -750,116 +879,20 @@ def _run_sweep_task_worker(task: _SweepTask) -> SweepResult:
     Returns:
         SweepResult with backtest results
     """
-    import importlib
-
-    # Import strategy class dynamically
-    module_name, class_name = task.strategy_class_name.rsplit(".", 1)
-    try:
-        module = importlib.import_module(module_name)
-        strategy_class = getattr(module, class_name)
-    except (ImportError, AttributeError):
-        # Fallback: try to get from strategies registry
-        from ...strategies import get_strategy
-
-        # Extract just the class name for registry lookup
-        try:
-            strategy_class = get_strategy(class_name.lower().replace("strategy", ""))
-        except ValueError:
-            # Issue #1701: shared mock (preserves id "mock-worker" exactly).
-            from ...backtesting import make_mock_strategy_class
-
-            strategy_class = make_mock_strategy_class("mock-worker")
-
-    # Create strategy config with overridden parameters. #1702: shared
-    # coercion helper replaces the raw `float()` calls so numeric-param
-    # contracts are honoured in workers too. #1756: ambiguity warnings are
-    # emitted once in the parent process before workers spawn, so workers
-    # default to `emit_warnings=False` to avoid duplicating the stderr
-    # output across N periods × M workers. The `task.emit_ambiguity_warnings`
-    # flag preserves the opt-in path for programmatic callers that want
-    # workers to warn (e.g. a test harness bypassing the parent preflight).
-    warned: set[tuple[str, str]] = set()
-    strategy_config = task.base_config.copy()
-    for name, value in task.params.items():
-        strategy_config[name] = _coerce_sweep_value(
-            name,
-            value,
-            numeric_param_names=task.numeric_param_names,
-            warned_ambiguous=warned,
-            emit_warnings=task.emit_ambiguity_warnings,
-        )
-
-    # Resolve chain. Config overrides win; the parent-provided
-    # `default_chain` is used as the final fallback so the worker never has
-    # to re-import `..run` (#1703). If for some reason `default_chain` is
-    # missing (e.g. an older _SweepTask pickle), fall back to the
-    # dependency-free `get_default_chain` re-derivation.
-    fallback_chain = task.default_chain or get_default_chain(strategy_class)
-    worker_chain = task.base_config.get("chain") or task.pnl_config_dict.get("chain") or fallback_chain
+    strategy_class = _resolve_sweep_worker_strategy_class(task)
+    strategy_config, warned = _coerce_sweep_params_for_worker(task)
+    worker_chain = _resolve_sweep_worker_chain(task, strategy_class)
     strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, worker_chain)
-    # Set params as attributes for strategies that don't read config dict.
-    # #1756: same `emit_warnings` contract as above — the `warned` set is
-    # shared with the first pass so even when `task.emit_ambiguity_warnings`
-    # is True, each (name, value) pair still warns exactly once per worker.
-    if not hasattr(strategy_instance, "config") or not isinstance(getattr(strategy_instance, "config", None), dict):
-        for name, value in task.params.items():
-            setattr(
-                strategy_instance,
-                name,
-                _coerce_sweep_value(
-                    name,
-                    value,
-                    numeric_param_names=task.numeric_param_names,
-                    warned_ambiguous=warned,
-                    emit_warnings=task.emit_ambiguity_warnings,
-                ),
-            )
-
-    existing_id = getattr(strategy_instance, "deployment_id", "")
-    if not existing_id:
-        param_str = "_".join(f"{k}{v}" for k, v in task.params.items())
-        fallback_id = f"sweep-{param_str}" if param_str else "sweep"
-        if hasattr(strategy_instance, "_deployment_id"):
-            strategy_instance._deployment_id = fallback_id
-        else:
-            strategy_instance.deployment_id = fallback_id
-
-    # Recreate PnL config (remove computed properties first)
-    pnl_config_dict = task.pnl_config_dict.copy()
-    for key in ["duration_seconds", "duration_days", "estimated_ticks"]:
-        pnl_config_dict.pop(key, None)
-    pnl_config = PnLBacktestConfig.from_dict(pnl_config_dict)
-
-    # Create data provider and backtester. Pass the SYMBOL -> (chain, address)
-    # map so non-native ERC20s resolve their coin id via the contract endpoint;
-    # natives resolve via the chain registry (Refinement R1).
-    token_addresses = build_token_address_map(
+    _apply_sweep_worker_param_attributes(strategy_instance, task, warned)
+    _ensure_sweep_worker_deployment_id(strategy_instance, task.params)
+    pnl_config = _pnl_config_from_sweep_task(task)
+    backtester = _build_sweep_worker_backtester(
         strategy_config=strategy_config,
-        tracked_tokens=list(pnl_config.tokens),
-        chain=worker_chain,
+        pnl_config=pnl_config,
+        worker_chain=worker_chain,
     )
-    data_provider = CoinGeckoDataProvider(token_addresses=token_addresses)
-    backtester = PnLBacktester(
-        data_provider=data_provider,
-        fee_models={},
-        slippage_models={},
-    )
-
-    # Run backtest
     result = asyncio.run(backtester.backtest(strategy_instance, pnl_config))
-
-    # Extract metrics
-    metrics = result.metrics
-
-    return SweepResult(
-        params=task.params,
-        result=result,
-        sharpe_ratio=metrics.sharpe_ratio if metrics.sharpe_ratio else Decimal("0"),
-        total_return_pct=metrics.total_return_pct if metrics.total_return_pct else Decimal("0"),
-        max_drawdown_pct=metrics.max_drawdown_pct if metrics.max_drawdown_pct else Decimal("0"),
-        win_rate=metrics.win_rate if metrics.win_rate else Decimal("0"),
-        total_trades=metrics.total_trades,
-    )
+    return _sweep_result_from_backtest(task, result)
 
 
 # =============================================================================
@@ -904,6 +937,66 @@ def load_optimization_config(config_path: Path) -> dict[str, Any]:
     return config
 
 
+def _param_type_from_spec(name: str, spec: dict[str, Any]) -> str:
+    raw_type = spec.get("type", "continuous")
+    if not isinstance(raw_type, str):
+        raise click.BadParameter(f"Parameter '{name}' type must be a string")
+    return raw_type.lower()
+
+
+def _required_range_bounds(name: str, spec: dict[str, Any], param_type: str) -> tuple[Any, Any]:
+    min_val = spec.get("min")
+    max_val = spec.get("max")
+    if min_val is None or max_val is None:
+        raise click.BadParameter(f"{param_type.title()} parameter '{name}' requires 'min' and 'max'")
+    return min_val, max_val
+
+
+def _parse_categorical_param_range(name: str, spec: dict[str, Any], categorical: Any) -> Any:
+    choices = spec.get("choices", [])
+    if not choices:
+        raise click.BadParameter(f"Categorical parameter '{name}' requires 'choices' list")
+    return categorical(choices)
+
+
+def _parse_discrete_param_range(name: str, spec: dict[str, Any], discrete: Any) -> Any:
+    min_val, max_val = _required_range_bounds(name, spec, "discrete")
+    try:
+        low = int(min_val)
+        high = int(max_val)
+    except (TypeError, ValueError) as e:
+        raise click.BadParameter(f"Discrete parameter '{name}' requires integer bounds") from e
+    return discrete(low, high, step=spec.get("step"))
+
+
+def _parse_continuous_param_range(name: str, spec: dict[str, Any], continuous: Any) -> Any:
+    min_val, max_val = _required_range_bounds(name, spec, "continuous")
+    if isinstance(min_val, str) or isinstance(max_val, str):
+        min_val = Decimal(str(min_val))
+        max_val = Decimal(str(max_val))
+    return continuous(min_val, max_val, step=spec.get("step"), log=spec.get("log", False))
+
+
+def _parse_dict_param_range(
+    name: str,
+    spec: dict[str, Any],
+    *,
+    categorical: Any,
+    continuous: Any,
+    discrete: Any,
+) -> Any:
+    param_type = _param_type_from_spec(name, spec)
+    if param_type == "categorical":
+        return _parse_categorical_param_range(name, spec, categorical)
+    if param_type == "discrete":
+        return _parse_discrete_param_range(name, spec, discrete)
+    if param_type == "continuous":
+        return _parse_continuous_param_range(name, spec, continuous)
+    raise click.BadParameter(
+        f"Unknown parameter type '{param_type}' for '{name}'. Use: continuous, discrete, or categorical"
+    )
+
+
 def parse_param_ranges_from_config(
     config: dict[str, Any],
 ) -> dict[str, Any]:
@@ -928,39 +1021,13 @@ def parse_param_ranges_from_config(
 
     for name, spec in config.get("param_ranges", {}).items():
         if isinstance(spec, dict):
-            param_type = spec.get("type", "continuous").lower()
-
-            if param_type == "categorical":
-                choices = spec.get("choices", [])
-                if not choices:
-                    raise click.BadParameter(f"Categorical parameter '{name}' requires 'choices' list")
-                param_ranges[name] = categorical(choices)
-
-            elif param_type == "discrete":
-                min_val = spec.get("min")
-                max_val = spec.get("max")
-                step = spec.get("step")
-                if min_val is None or max_val is None:
-                    raise click.BadParameter(f"Discrete parameter '{name}' requires 'min' and 'max'")
-                param_ranges[name] = discrete(int(min_val), int(max_val), step=step)
-
-            elif param_type == "continuous":
-                min_val = spec.get("min")
-                max_val = spec.get("max")
-                step = spec.get("step")
-                log = spec.get("log", False)
-                if min_val is None or max_val is None:
-                    raise click.BadParameter(f"Continuous parameter '{name}' requires 'min' and 'max'")
-                # Convert to Decimal for financial parameters
-                if isinstance(min_val, str) or isinstance(max_val, str):
-                    min_val = Decimal(str(min_val))
-                    max_val = Decimal(str(max_val))
-                param_ranges[name] = continuous(min_val, max_val, step=step, log=log)
-
-            else:
-                raise click.BadParameter(
-                    f"Unknown parameter type '{param_type}' for '{name}'. Use: continuous, discrete, or categorical"
-                )
+            param_ranges[name] = _parse_dict_param_range(
+                name,
+                spec,
+                categorical=categorical,
+                continuous=continuous,
+                discrete=discrete,
+            )
         elif isinstance(spec, list):
             # Legacy format: list means categorical
             param_ranges[name] = spec
@@ -1163,6 +1230,98 @@ def _compute_worker_count(parallel: bool, workers: int | None, total_runs: int) 
         effective = workers if workers is not None else max(1, (os.cpu_count() or 1) - 1)
         return min(effective, total_runs) if total_runs > 0 else effective
     return workers if workers is not None else 4
+
+
+def _normalize_numeric_param_names(numeric_params: tuple[str, ...]) -> frozenset[str]:
+    return frozenset(name.strip() for name in numeric_params if name.strip())
+
+
+def _validate_sweep_strategy(strategy: str) -> None:
+    available_strategies = list_strategies_fn()
+    if strategy in available_strategies or not available_strategies:
+        return
+
+    click.echo(f"Error: Unknown strategy '{strategy}'", err=True)
+    click.echo(f"Available strategies: {', '.join(sorted(available_strategies))}", err=True)
+    raise click.Abort()
+
+
+def _validate_numeric_param_names(
+    *,
+    numeric_param_names: frozenset[str],
+    sweep_params: list[SweepParameter],
+) -> None:
+    known_names = {p.name for p in sweep_params}
+    unknown_numeric = numeric_param_names - known_names
+    if not unknown_numeric:
+        return
+
+    raise click.UsageError(
+        f"--numeric-param refers to unknown sweep parameter(s): "
+        f"{', '.join(sorted(unknown_numeric))}. Known params: "
+        f"{', '.join(sorted(known_names)) or '(none)'}."
+    )
+
+
+def _build_sweep_run_context(
+    *,
+    strategy: str,
+    start: datetime | None,
+    end: datetime | None,
+    periods: str | None,
+    params: tuple[str, ...],
+    numeric_params: tuple[str, ...],
+    interval: int,
+    initial_capital: float,
+    chain: str,
+    tokens: str,
+    output: str | None,
+) -> _SweepRunContext:
+    sweep_params = _parse_sweep_params(params)
+    numeric_param_names = _normalize_numeric_param_names(numeric_params)
+    multi_period_mode, backtest_periods = _resolve_backtest_periods(periods, start, end)
+
+    _validate_sweep_strategy(strategy)
+
+    combinations = generate_combinations(sweep_params)
+    _validate_numeric_param_names(numeric_param_names=numeric_param_names, sweep_params=sweep_params)
+    if numeric_param_names:
+        _preflight_validate_numeric_params(combinations, numeric_param_names)
+    _preflight_emit_ambiguous_warnings(combinations, numeric_param_names)
+
+    return _SweepRunContext(
+        strategy=strategy,
+        chain=chain,
+        token_list=parse_token_list(tokens),
+        interval=interval,
+        initial_capital=initial_capital,
+        output_path=Path(output) if output else None,
+        multi_period_mode=multi_period_mode,
+        backtest_periods=backtest_periods,
+        sweep_params=sweep_params,
+        combinations=combinations,
+        periods_spec=periods,
+        numeric_param_names=numeric_param_names,
+    )
+
+
+def _build_sweep_data_provider(ctx: _SweepRunContext, base_config: dict[str, Any]) -> CoinGeckoDataProvider:
+    click.echo()
+    click.echo("Initializing CoinGecko data provider...")
+    token_addresses = build_token_address_map(
+        strategy_config=base_config,
+        tracked_tokens=ctx.token_list,
+        chain=ctx.chain,
+    )
+    return CoinGeckoDataProvider(token_addresses=token_addresses)
+
+
+def _print_sweep_start(ctx: _SweepRunContext, total_runs: int) -> None:
+    if ctx.multi_period_mode:
+        click.echo(f"Starting multi-period sweep ({total_runs} total runs)...")
+    else:
+        click.echo(f"Starting parameter sweep ({len(ctx.combinations)} combinations)...")
+    click.echo()
 
 
 def _handle_sweep_dry_run(ctx: _SweepRunContext) -> bool:
@@ -1413,10 +1572,6 @@ def _generate_sweep_report(
 # =============================================================================
 
 
-# crap-allowlist: pre-existing CLI command body (cc=13 on main, unchanged by this PR); the only
-# addition is a build_token_address_map call + provider kwarg for dynamic coin-id resolution.
-# Score is coverage-driven (CLI command body, no unit harness). Coverage backfill / decomposition
-# tracked as a follow-up (file under AGI - Strategist / VibeCoders).
 @backtest.command("sweep")
 @click.option(
     "--strategy",
@@ -1598,77 +1753,22 @@ def sweep_backtest(
             --periods "2024-monthly" \\
             --param "threshold:0.01,0.02,0.03"
     """
-    # Phase S1: parse --param flags
-    sweep_params = _parse_sweep_params(params)
-    # #1702: normalise `--numeric-param` names (strip + de-duplicate).
-    numeric_param_names = frozenset(n.strip() for n in numeric_params if n.strip())
-
-    # Phase S2: resolve --periods vs --start/--end
-    multi_period_mode, backtest_periods = _resolve_backtest_periods(periods, start, end)
-
-    # Phase S3: validate strategy is registered (sweep-flavoured: empty registry
-    # falls through to the MockSweepStrategy path below).
-    available_strategies = list_strategies_fn()
-    if strategy not in available_strategies and available_strategies:
-        click.echo(f"Error: Unknown strategy '{strategy}'", err=True)
-        click.echo(f"Available strategies: {', '.join(sorted(available_strategies))}", err=True)
-        raise click.Abort()
-
-    # Phase S4: build combinations + token list
-    combinations = generate_combinations(sweep_params)
-    token_list = parse_token_list(tokens)
-
-    # #1702: reject `--numeric-param` names that aren't in the sweep.
-    known_names = {p.name for p in sweep_params}
-    unknown_numeric = numeric_param_names - known_names
-    if unknown_numeric:
-        raise click.UsageError(
-            f"--numeric-param refers to unknown sweep parameter(s): "
-            f"{', '.join(sorted(unknown_numeric))}. Known params: "
-            f"{', '.join(sorted(known_names)) or '(none)'}."
-        )
-
-    # #1702: validate every numeric-param value up front, in the PARENT
-    # process, before we dispatch any work.
-    #
-    # Why parent-side: the worker path below (`_run_parallel_sweep`) runs
-    # `_coerce_sweep_value` inside subprocesses. Any `click.UsageError`
-    # raised there is pickled back to the parent and caught by the broad
-    # `except Exception` in the results loop, which degrades the error
-    # into a synthetic failed `SweepResult` — the command then exits 0
-    # and produces ranked output from a misconfigured sweep. By failing
-    # fast here we uphold the `--numeric-param` "run aborts" contract in
-    # both sequential and parallel modes.
-    if numeric_param_names:
-        _preflight_validate_numeric_params(combinations, numeric_param_names)
-
-    # #1756: emit the #1702 ambiguous-coercion warnings once per sweep run
-    # from the parent process, BEFORE any worker or period dispatch. This
-    # replaces the previous per-worker dedup which produced N×M duplicate
-    # warnings on a N-period × M-worker sweep (the `warned_ambiguous` set is
-    # process-local and cannot be shared across `ProcessPoolExecutor` workers
-    # without plumbing it through the pickle boundary). Workers still run
-    # `_coerce_sweep_value`, but with `emit_warnings=False` so the coerced
-    # value is identical while the stderr output stays a single, unique set.
-    _preflight_emit_ambiguous_warnings(combinations, numeric_param_names)
-
-    ctx = _SweepRunContext(
+    ctx = _build_sweep_run_context(
         strategy=strategy,
-        chain=chain,
-        token_list=token_list,
+        start=start,
+        end=end,
+        periods=periods,
+        params=params,
+        numeric_params=numeric_params,
         interval=interval,
         initial_capital=initial_capital,
-        output_path=Path(output) if output else None,
-        multi_period_mode=multi_period_mode,
-        backtest_periods=backtest_periods,
-        sweep_params=sweep_params,
-        combinations=combinations,
-        periods_spec=periods,
-        numeric_param_names=numeric_param_names,
+        chain=chain,
+        tokens=tokens,
+        output=output,
     )
 
     # Phase S5: compute worker count + print configuration banner
-    total_runs = len(combinations) * len(backtest_periods)
+    total_runs = len(ctx.combinations) * len(ctx.backtest_periods)
     effective_workers = _compute_worker_count(parallel, workers, total_runs)
     _print_sweep_configuration(ctx, parallel=parallel, effective_workers=effective_workers)
 
@@ -1682,21 +1782,8 @@ def sweep_backtest(
 
     # Phase S8: load base strategy config + data provider
     base_config = load_strategy_config(strategy, chain)
-
-    click.echo()
-    click.echo("Initializing CoinGecko data provider...")
-    token_addresses = build_token_address_map(
-        strategy_config=base_config,
-        tracked_tokens=token_list,
-        chain=chain,
-    )
-    data_provider = CoinGeckoDataProvider(token_addresses=token_addresses)
-
-    if multi_period_mode:
-        click.echo(f"Starting multi-period sweep ({total_runs} total runs)...")
-    else:
-        click.echo(f"Starting parameter sweep ({len(combinations)} combinations)...")
-    click.echo()
+    data_provider = _build_sweep_data_provider(ctx, base_config)
+    _print_sweep_start(ctx, total_runs)
 
     # Phase S9: run sweep across all periods
     all_results = _run_sweep_over_periods(

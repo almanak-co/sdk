@@ -5,10 +5,11 @@ functionality including retry behavior.
 """
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
+from almanak.framework.backtesting.exceptions import DataSourceUnavailableError, HistoricalDataUnavailableError
 from almanak.framework.backtesting.models import BacktestEngine, BacktestMetrics, BacktestResult
 from almanak.framework.backtesting.pnl.error_handling import (
     BacktestCircuitBreaker,
@@ -106,6 +107,61 @@ class TestErrorClassification:
 
         assert classification.error_type == ErrorType.STALE_DATA
         assert classification.is_non_critical is True
+
+    @pytest.mark.parametrize(
+        ("message", "expected_type", "expected_category"),
+        [
+            ("HTTP 503: service unavailable", ErrorType.TEMPORARY_UNAVAILABLE, ErrorCategory.RECOVERABLE),
+            ("Malformed response: invalid data", ErrorType.DATA_CORRUPTION, ErrorCategory.FATAL),
+            ("Insufficient funds: balance too low", ErrorType.INSUFFICIENT_FUNDS, ErrorCategory.FATAL),
+            ("Partial response: missing field amount", ErrorType.PARTIAL_DATA, ErrorCategory.NON_CRITICAL),
+        ],
+    )
+    def test_classify_message_patterns(
+        self,
+        message: str,
+        expected_type: ErrorType,
+        expected_category: ErrorCategory,
+    ) -> None:
+        """Known error message patterns should retain their categories."""
+        classification = classify_error(Exception(message))
+
+        assert classification.error_type == expected_type
+        assert classification.category == expected_category
+
+    def test_classify_data_source_unavailable_error_is_fatal(self) -> None:
+        """Fail-loud data-source errors must not be retried as generic outages."""
+        error = DataSourceUnavailableError(
+            data_type="volume",
+            identifier="pool:WETH-USDC",
+            remediation="provide historical volume or opt into the heuristic fallback",
+            message="Historical volume unavailable for pool",
+        )
+
+        classification = classify_error(error)
+
+        assert classification.error_type == ErrorType.UNKNOWN
+        assert classification.category == ErrorCategory.FATAL
+        assert classification.is_fatal is True
+        assert classification.is_recoverable is False
+
+    def test_classify_historical_data_unavailable_error_is_fatal(self) -> None:
+        """Strict historical-data misses are fail-loud accuracy errors."""
+        error = HistoricalDataUnavailableError(
+            data_type="funding",
+            identifier="ETH-PERP",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            message="Historical funding unavailable",
+            chain="ethereum",
+            protocol="gmx_v2",
+        )
+
+        classification = classify_error(error)
+
+        assert classification.error_type == ErrorType.UNKNOWN
+        assert classification.category == ErrorCategory.FATAL
+        assert classification.is_fatal is True
+        assert classification.is_recoverable is False
 
     def test_classify_unknown_error(self) -> None:
         """Unknown errors should be classified as fatal (safe default)."""

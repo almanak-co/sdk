@@ -252,6 +252,44 @@ class PortfolioSnapshot:
         )
 
 
+@dataclass(frozen=True)
+class _HealthRiskSummary:
+    min_health_factor: Decimal | None
+    risk: Decimal
+    positions_at_risk: int
+    liquidation_risk_usd: Decimal
+
+
+@dataclass(frozen=True)
+class _PerpRiskSummary:
+    max_leverage: Decimal
+    avg_leverage: Decimal
+    leverage_risk: Decimal
+    positions_at_risk: int
+    liquidation_risk_usd: Decimal
+
+
+@dataclass(frozen=True)
+class _CascadeProtocolAnalysis:
+    protocol: str
+    shared_positions: int
+    collateral_at_risk_usd: Decimal
+    cascade_chains: list[list[str]]
+    warnings: list[CascadeRiskWarning]
+    protocol_correlation: Decimal
+
+
+@dataclass(frozen=True)
+class _CascadePortfolioSummary:
+    warnings: list[CascadeRiskWarning]
+    cascade_chains: list[list[str]]
+    protocol_correlations: dict[str, Decimal]
+    positions_with_shared_collateral: int
+    total_collateral_at_risk_usd: Decimal
+    max_cascade_depth: int
+    estimated_cascade_loss_usd: Decimal
+
+
 @dataclass
 class PortfolioAggregator:
     """Unified position tracking across multiple protocols.
@@ -361,35 +399,32 @@ class PortfolioAggregator:
         Returns:
             List of positions matching all specified filters
         """
-        # Start with the most restrictive filter for efficiency
-        if protocol is not None and position_type is None and token is None:
-            return list(self._positions_by_protocol.get(protocol, []))
+        candidates = self._position_filter_candidates(protocol, position_type)
+        return [pos for pos in candidates if self._position_matches_filters(pos, protocol, position_type, token)]
 
-        if position_type is not None and protocol is None and token is None:
-            return list(self._positions_by_type.get(position_type, []))
-
-        # For combined filters, start with smallest candidate set
+    def _position_filter_candidates(
+        self,
+        protocol: str | None,
+        position_type: PositionType | None,
+    ) -> list[SimulatedPosition]:
         if protocol is not None:
-            candidates = self._positions_by_protocol.get(protocol, [])
-        elif position_type is not None:
-            candidates = self._positions_by_type.get(position_type, [])
-        else:
-            candidates = self.positions
+            return self._positions_by_protocol.get(protocol, [])
+        if position_type is not None:
+            return self._positions_by_type.get(position_type, [])
+        return self.positions
 
-        result = []
-        for pos in candidates:
-            # Check protocol filter
-            if protocol is not None and pos.protocol != protocol:
-                continue
-            # Check type filter
-            if position_type is not None and pos.position_type != position_type:
-                continue
-            # Check token filter
-            if token is not None and token not in pos.tokens:
-                continue
-            result.append(pos)
-
-        return result
+    @staticmethod
+    def _position_matches_filters(
+        position: SimulatedPosition,
+        protocol: str | None,
+        position_type: PositionType | None,
+        token: str | None,
+    ) -> bool:
+        if protocol is not None and position.protocol != protocol:
+            return False
+        if position_type is not None and position.position_type != position_type:
+            return False
+        return token is None or token in position.tokens
 
     def remove_position(self, position_id: str) -> SimulatedPosition | None:
         """Remove a position by its ID.
@@ -547,54 +582,13 @@ class PortfolioAggregator:
             Net exposure in asset units. Positive = net long, negative = net short.
             For perp positions without prices, returns exposure in USD terms.
         """
-        net_exposure = Decimal("0")
-
-        for position in self.positions:
-            if position.position_type == PositionType.SPOT:
-                # Spot: direct holding
-                net_exposure += position.get_amount(asset)
-
-            elif position.position_type == PositionType.SUPPLY:
-                # Supply: lending deposits count as long exposure
-                net_exposure += position.get_amount(asset)
-
-            elif position.position_type == PositionType.BORROW:
-                # Borrow: borrowed amounts count as short exposure
-                net_exposure -= position.get_amount(asset)
-
-            elif position.position_type == PositionType.PERP_LONG:
-                # Perp long: convert notional to asset units if price available
-                if asset in position.tokens:
-                    if position.notional_usd > Decimal("0"):
-                        if prices and asset in prices and prices[asset] > Decimal("0"):
-                            # Convert USD notional to asset units
-                            net_exposure += position.notional_usd / prices[asset]
-                        else:
-                            # Fall back to using amounts if available
-                            net_exposure += position.get_amount(asset)
-                    else:
-                        net_exposure += position.get_amount(asset)
-
-            elif position.position_type == PositionType.PERP_SHORT:
-                # Perp short: negative exposure
-                if asset in position.tokens:
-                    if position.notional_usd > Decimal("0"):
-                        if prices and asset in prices and prices[asset] > Decimal("0"):
-                            # Convert USD notional to asset units (negative for short)
-                            net_exposure -= position.notional_usd / prices[asset]
-                        else:
-                            # Fall back to using amounts if available
-                            net_exposure -= position.get_amount(asset)
-                    else:
-                        net_exposure -= position.get_amount(asset)
-
-            elif position.position_type == PositionType.LP:
-                # LP: Both tokens in the pair contribute to exposure
-                # LP positions are considered neutral to slightly long
-                # as they hold both tokens
-                net_exposure += position.get_amount(asset)
-
-        return net_exposure
+        return sum(
+            (
+                self._directional_asset_exposure(position, asset, prices, lp_multiplier=Decimal("1"))
+                for position in self.positions
+            ),
+            Decimal("0"),
+        )
 
     def calculate_net_exposure_usd(self, asset: str, prices: dict[str, Decimal]) -> Decimal:
         """Calculate net exposure in USD terms for a specific asset.
@@ -737,7 +731,7 @@ class PortfolioAggregator:
                 total += position.notional_usd
         return total
 
-    def calculate_unified_risk_score(  # noqa: C901
+    def calculate_unified_risk_score(
         self,
         prices: dict[str, Decimal] | None = None,
         health_factor_warning_threshold: Decimal = Decimal("1.5"),
@@ -768,137 +762,162 @@ class PortfolioAggregator:
         Returns:
             UnifiedRiskScore with overall score and individual risk components
         """
-        risk_factors: dict[str, Decimal] = {}
+        prices = prices or {}
+        health_summary = self._health_risk_summary(health_factor_warning_threshold)
+        perp_summary = self._perp_risk_summary(
+            prices,
+            leverage_warning_threshold,
+            liquidation_proximity_threshold,
+        )
+        liquidation_risk_usd = health_summary.liquidation_risk_usd + perp_summary.liquidation_risk_usd
+        liquidation_proximity_risk = self._liquidation_proximity_risk(liquidation_risk_usd)
+        concentration_risk = self._concentration_risk()
+
+        risk_factors = {
+            "health_factor_risk": health_summary.risk,
+            "leverage_risk": perp_summary.leverage_risk,
+            "liquidation_proximity_risk": liquidation_proximity_risk,
+            "concentration_risk": concentration_risk,
+        }
+
+        return UnifiedRiskScore(
+            score=self._weighted_unified_risk_score(risk_factors),
+            min_health_factor=health_summary.min_health_factor,
+            max_leverage=perp_summary.max_leverage,
+            avg_leverage=perp_summary.avg_leverage,
+            positions_at_risk=health_summary.positions_at_risk + perp_summary.positions_at_risk,
+            liquidation_risk_usd=liquidation_risk_usd,
+            risk_factors=risk_factors,
+        )
+
+    def _health_risk_summary(self, warning_threshold: Decimal) -> _HealthRiskSummary:
+        health_factors: list[Decimal] = []
         positions_at_risk = 0
         liquidation_risk_usd = Decimal("0")
 
-        # Track health factors for lending positions
-        min_health_factor: Decimal | None = None
-        health_factor_risk = Decimal("0")
-        lending_positions = self.get_positions(position_type=PositionType.BORROW)
+        for position in self.get_positions(position_type=PositionType.BORROW):
+            if position.health_factor is None:
+                continue
+            health_factors.append(position.health_factor)
+            if position.health_factor < warning_threshold:
+                positions_at_risk += 1
+                liquidation_risk_usd += self._borrow_debt_value_usd(position)
 
-        if lending_positions:
-            health_factors = []
-            for pos in lending_positions:
-                if pos.health_factor is not None:
-                    health_factors.append(pos.health_factor)
-                    if pos.health_factor < health_factor_warning_threshold:
-                        positions_at_risk += 1
-                        # Estimate liquidation risk based on debt size
-                        debt_usd = pos.total_amount * pos.entry_price
-                        liquidation_risk_usd += debt_usd
+        min_health_factor = min(health_factors) if health_factors else None
+        return _HealthRiskSummary(
+            min_health_factor=min_health_factor,
+            risk=self._health_factor_risk(min_health_factor),
+            positions_at_risk=positions_at_risk,
+            liquidation_risk_usd=liquidation_risk_usd,
+        )
 
-            if health_factors:
-                min_health_factor = min(health_factors)
-                # Health factor risk: 0 at HF=2+, 1 at HF<=1
-                if min_health_factor >= Decimal("2"):
-                    health_factor_risk = Decimal("0")
-                elif min_health_factor <= Decimal("1"):
-                    health_factor_risk = Decimal("1")
-                else:
-                    # Linear interpolation between 1 and 2
-                    health_factor_risk = Decimal("2") - min_health_factor
+    @staticmethod
+    def _health_factor_risk(min_health_factor: Decimal | None) -> Decimal:
+        if min_health_factor is None or min_health_factor >= Decimal("2"):
+            return Decimal("0")
+        if min_health_factor <= Decimal("1"):
+            return Decimal("1")
+        return Decimal("2") - min_health_factor
 
-        risk_factors["health_factor_risk"] = health_factor_risk
-
-        # Track leverage for perp positions
-        leverage_values: list[tuple[Decimal, Decimal]] = []  # (leverage, notional)
+    def _perp_risk_summary(
+        self,
+        prices: dict[str, Decimal],
+        leverage_warning_threshold: Decimal,
+        liquidation_proximity_threshold: Decimal,
+    ) -> _PerpRiskSummary:
+        leverage_values: list[tuple[Decimal, Decimal]] = []
+        positions_at_risk = 0
+        liquidation_risk_usd = Decimal("0")
         perp_positions = self.get_positions(position_type=PositionType.PERP_LONG) + self.get_positions(
             position_type=PositionType.PERP_SHORT
         )
 
-        for pos in perp_positions:
-            if pos.collateral_usd > Decimal("0"):
-                effective_leverage = pos.notional_usd / pos.collateral_usd
-                leverage_values.append((effective_leverage, pos.notional_usd))
+        for position in perp_positions:
+            if position.collateral_usd <= Decimal("0"):
+                continue
+            effective_leverage = position.notional_usd / position.collateral_usd
+            leverage_values.append((effective_leverage, position.notional_usd))
+            if effective_leverage > leverage_warning_threshold:
+                positions_at_risk += 1
+            if self._perp_near_liquidation(position, prices, liquidation_proximity_threshold):
+                liquidation_risk_usd += position.notional_usd
 
-                if effective_leverage > leverage_warning_threshold:
-                    positions_at_risk += 1
-
-                # Check liquidation proximity
-                if pos.liquidation_price is not None and prices:
-                    token = pos.primary_token
-                    if token in prices and prices[token] > Decimal("0"):
-                        current_price = prices[token]
-                        if pos.position_type == PositionType.PERP_LONG:
-                            # Long: at risk if price approaches liquidation from above
-                            distance = (current_price - pos.liquidation_price) / current_price
-                        else:
-                            # Short: at risk if price approaches liquidation from below
-                            distance = (pos.liquidation_price - current_price) / current_price
-
-                        if distance < liquidation_proximity_threshold:
-                            liquidation_risk_usd += pos.notional_usd
-
-        # Calculate max and weighted average leverage
-        max_leverage = Decimal("0")
-        avg_leverage = Decimal("0")
-        total_notional = Decimal("0")
-
-        for leverage, notional in leverage_values:
-            if leverage > max_leverage:
-                max_leverage = leverage
-            avg_leverage += leverage * notional
-            total_notional += notional
-
-        if total_notional > Decimal("0"):
-            avg_leverage = avg_leverage / total_notional
-        else:
-            avg_leverage = Decimal("0")
-
-        # Leverage risk: 0 at 1x, 0.5 at 5x, 1.0 at 10x+
-        if max_leverage <= Decimal("1"):
-            leverage_risk = Decimal("0")
-        elif max_leverage >= Decimal("10"):
-            leverage_risk = Decimal("1")
-        else:
-            leverage_risk = (max_leverage - Decimal("1")) / Decimal("9")
-
-        risk_factors["leverage_risk"] = leverage_risk
-
-        # Liquidation proximity risk (based on USD at risk)
-        total_value = self.get_total_collateral_usd() + self.get_total_notional_usd()
-        if total_value > Decimal("0"):
-            liquidation_proximity_risk = min(liquidation_risk_usd / total_value, Decimal("1"))
-        else:
-            liquidation_proximity_risk = Decimal("0")
-
-        risk_factors["liquidation_proximity_risk"] = liquidation_proximity_risk
-
-        # Concentration risk (collateral utilization)
-        collateral_util = self.calculate_collateral_utilization()
-        if collateral_util >= Decimal("999"):  # Over-leveraged
-            concentration_risk = Decimal("1")
-        elif collateral_util >= Decimal("1"):  # Fully utilized
-            concentration_risk = Decimal("0.8")
-        elif collateral_util >= Decimal("0.8"):  # High utilization
-            concentration_risk = Decimal("0.5") + (collateral_util - Decimal("0.8")) * Decimal("1.5")
-        else:
-            concentration_risk = collateral_util * Decimal("0.625")  # Scale 0-0.8 to 0-0.5
-
-        risk_factors["concentration_risk"] = concentration_risk
-
-        # Calculate weighted overall score
-        # Weights: health_factor=0.35, leverage=0.25, liquidation_proximity=0.25, concentration=0.15
-        overall_score = (
-            health_factor_risk * Decimal("0.35")
-            + leverage_risk * Decimal("0.25")
-            + liquidation_proximity_risk * Decimal("0.25")
-            + concentration_risk * Decimal("0.15")
-        )
-
-        # Ensure score is bounded 0-1
-        overall_score = max(Decimal("0"), min(Decimal("1"), overall_score))
-
-        return UnifiedRiskScore(
-            score=overall_score,
-            min_health_factor=min_health_factor,
+        max_leverage, avg_leverage = self._leverage_summary(leverage_values)
+        return _PerpRiskSummary(
             max_leverage=max_leverage,
             avg_leverage=avg_leverage,
+            leverage_risk=self._leverage_risk(max_leverage),
             positions_at_risk=positions_at_risk,
             liquidation_risk_usd=liquidation_risk_usd,
-            risk_factors=risk_factors,
         )
+
+    @staticmethod
+    def _leverage_summary(leverage_values: list[tuple[Decimal, Decimal]]) -> tuple[Decimal, Decimal]:
+        if not leverage_values:
+            return Decimal("0"), Decimal("0")
+        max_leverage = max(leverage for leverage, _notional in leverage_values)
+        weighted_leverage = sum((leverage * notional for leverage, notional in leverage_values), Decimal("0"))
+        total_notional = sum((notional for _leverage, notional in leverage_values), Decimal("0"))
+        avg_leverage = weighted_leverage / total_notional if total_notional > Decimal("0") else Decimal("0")
+        return max_leverage, avg_leverage
+
+    @staticmethod
+    def _leverage_risk(max_leverage: Decimal) -> Decimal:
+        if max_leverage <= Decimal("1"):
+            return Decimal("0")
+        if max_leverage >= Decimal("10"):
+            return Decimal("1")
+        return (max_leverage - Decimal("1")) / Decimal("9")
+
+    def _perp_near_liquidation(
+        self,
+        position: SimulatedPosition,
+        prices: dict[str, Decimal],
+        threshold: Decimal,
+    ) -> bool:
+        distance = self._perp_liquidation_distance(position, prices)
+        return distance is not None and distance < threshold
+
+    @staticmethod
+    def _perp_liquidation_distance(position: SimulatedPosition, prices: dict[str, Decimal]) -> Decimal | None:
+        if position.liquidation_price is None:
+            return None
+        current_price = prices.get(position.primary_token)
+        if current_price is None or current_price <= Decimal("0"):
+            return None
+        if position.position_type == PositionType.PERP_LONG:
+            return (current_price - position.liquidation_price) / current_price
+        return (position.liquidation_price - current_price) / current_price
+
+    def _liquidation_proximity_risk(self, liquidation_risk_usd: Decimal) -> Decimal:
+        total_value = self.get_total_collateral_usd() + self.get_total_notional_usd()
+        if total_value <= Decimal("0"):
+            return Decimal("0")
+        return min(liquidation_risk_usd / total_value, Decimal("1"))
+
+    def _concentration_risk(self) -> Decimal:
+        collateral_util = self.calculate_collateral_utilization()
+        if collateral_util >= Decimal("999"):
+            return Decimal("1")
+        if collateral_util >= Decimal("1"):
+            return Decimal("0.8")
+        if collateral_util >= Decimal("0.8"):
+            return Decimal("0.5") + (collateral_util - Decimal("0.8")) * Decimal("1.5")
+        return collateral_util * Decimal("0.625")
+
+    @staticmethod
+    def _weighted_unified_risk_score(risk_factors: dict[str, Decimal]) -> Decimal:
+        overall_score = (
+            risk_factors["health_factor_risk"] * Decimal("0.35")
+            + risk_factors["leverage_risk"] * Decimal("0.25")
+            + risk_factors["liquidation_proximity_risk"] * Decimal("0.25")
+            + risk_factors["concentration_risk"] * Decimal("0.15")
+        )
+        return max(Decimal("0"), min(Decimal("1"), overall_score))
+
+    @staticmethod
+    def _borrow_debt_value_usd(position: SimulatedPosition) -> Decimal:
+        return position.total_amount * position.entry_price + position.interest_accrued
 
     def create_snapshot(
         self,
@@ -1067,53 +1086,45 @@ class PortfolioAggregator:
         Returns:
             Net delta in asset units. Positive = net long, negative = net short.
         """
-        net_delta = Decimal("0")
+        return sum(
+            (
+                self._directional_asset_exposure(position, asset, prices, lp_multiplier=Decimal("0.5"))
+                for position in self.positions
+            ),
+            Decimal("0"),
+        )
 
-        for position in self.positions:
-            if position.position_type == PositionType.SPOT:
-                # Spot: full delta
-                net_delta += position.get_amount(asset)
+    def _directional_asset_exposure(
+        self,
+        position: SimulatedPosition,
+        asset: str,
+        prices: dict[str, Decimal] | None,
+        lp_multiplier: Decimal,
+    ) -> Decimal:
+        if position.position_type in (PositionType.SPOT, PositionType.SUPPLY):
+            return position.get_amount(asset)
+        if position.position_type == PositionType.BORROW:
+            return -position.get_amount(asset)
+        if position.position_type == PositionType.PERP_LONG:
+            return self._perp_asset_units(position, asset, prices)
+        if position.position_type == PositionType.PERP_SHORT:
+            return -self._perp_asset_units(position, asset, prices)
+        if position.position_type == PositionType.LP:
+            return position.get_amount(asset) * lp_multiplier
+        return Decimal("0")
 
-            elif position.position_type == PositionType.SUPPLY:
-                # Supply: full positive delta (benefit from appreciation)
-                net_delta += position.get_amount(asset)
-
-            elif position.position_type == PositionType.BORROW:
-                # Borrow: negative delta (debt grows with price in fiat terms)
-                net_delta -= position.get_amount(asset)
-
-            elif position.position_type == PositionType.PERP_LONG:
-                # Perp long: full positive delta
-                if asset in position.tokens:
-                    if position.notional_usd > Decimal("0"):
-                        if prices and asset in prices and prices[asset] > Decimal("0"):
-                            # Convert USD notional to asset units
-                            net_delta += position.notional_usd / prices[asset]
-                        else:
-                            net_delta += position.get_amount(asset)
-                    else:
-                        net_delta += position.get_amount(asset)
-
-            elif position.position_type == PositionType.PERP_SHORT:
-                # Perp short: full negative delta
-                if asset in position.tokens:
-                    if position.notional_usd > Decimal("0"):
-                        if prices and asset in prices and prices[asset] > Decimal("0"):
-                            # Convert USD notional to asset units (negative for short)
-                            net_delta -= position.notional_usd / prices[asset]
-                        else:
-                            net_delta -= position.get_amount(asset)
-                    else:
-                        net_delta -= position.get_amount(asset)
-
-            elif position.position_type == PositionType.LP:
-                # LP: reduced delta due to impermanent loss effect
-                # IL causes LP positions to have ~0.5x delta exposure
-                # as the position auto-rebalances against price movements
-                lp_delta_multiplier = Decimal("0.5")
-                net_delta += position.get_amount(asset) * lp_delta_multiplier
-
-        return net_delta
+    @staticmethod
+    def _perp_asset_units(
+        position: SimulatedPosition,
+        asset: str,
+        prices: dict[str, Decimal] | None,
+    ) -> Decimal:
+        if asset not in position.tokens:
+            return Decimal("0")
+        price = prices.get(asset) if prices else None
+        if position.notional_usd > Decimal("0") and price is not None and price > Decimal("0"):
+            return position.notional_usd / price
+        return position.get_amount(asset)
 
     def calculate_all_net_deltas(self, prices: dict[str, Decimal] | None = None) -> dict[str, Decimal]:
         """Calculate net delta for all assets in the portfolio.
@@ -1183,119 +1194,180 @@ class PortfolioAggregator:
             CascadeRiskResult with overall score, cascade chains, and warnings
         """
         prices = prices or {}
-        warnings: list[CascadeRiskWarning] = []
-        cascade_chains: list[list[str]] = []
-        protocol_correlations: dict[str, Decimal] = {}
-
-        # Group positions by protocol (shared collateral pool)
-        positions_by_protocol: dict[str, list[SimulatedPosition]] = {}
-        for position in self.positions:
-            if position.protocol not in positions_by_protocol:
-                positions_by_protocol[position.protocol] = []
-            positions_by_protocol[position.protocol].append(position)
-
-        # Calculate collateral at risk
-        total_collateral_at_risk = Decimal("0")
-        positions_with_shared_collateral = 0
-
-        # Analyze each protocol for cascade risk
-        for protocol, protocol_positions in positions_by_protocol.items():
-            # Count leveraged positions (can cause cascades)
-            leveraged_positions = [
-                p
-                for p in protocol_positions
-                if p.position_type
-                in (
-                    PositionType.PERP_LONG,
-                    PositionType.PERP_SHORT,
-                    PositionType.BORROW,
-                )
-            ]
-
-            if len(leveraged_positions) <= 1:
-                # No cascade risk with single position
-                continue
-
-            # Multiple leveraged positions on same protocol = shared risk
-            positions_with_shared_collateral += len(leveraged_positions)
-
-            # Calculate total collateral in this pool
-            pool_collateral = sum(
-                (p.collateral_usd for p in leveraged_positions if p.collateral_usd > Decimal("0")), Decimal("0")
-            )
-            total_collateral_at_risk += pool_collateral
-
-            # Find positions at risk of liquidation
-            positions_at_risk = self._identify_positions_at_risk(leveraged_positions, prices)
-
-            # Build cascade chains from at-risk positions
-            for trigger_pos in positions_at_risk:
-                chain = self._build_cascade_chain(trigger_pos, leveraged_positions, prices)
-                if len(chain) > 1:
-                    cascade_chains.append([p.position_id for p in chain])
-
-                    # Calculate cascade loss
-                    cascade_loss = self._estimate_cascade_loss(chain, prices)
-
-                    # Generate warning if chain is significant
-                    if cascade_loss > Decimal("0") and emit_warnings:
-                        severity = self._get_cascade_severity(len(chain), cascade_loss, pool_collateral)
-                        affected_ids = [p.position_id for p in chain if p != trigger_pos]
-
-                        warning = CascadeRiskWarning(
-                            severity=severity,
-                            message=self._format_cascade_warning(trigger_pos, chain, cascade_loss),
-                            affected_positions=affected_ids,
-                            trigger_position_id=trigger_pos.position_id,
-                            estimated_cascade_loss_usd=cascade_loss,
-                            collateral_at_risk_usd=pool_collateral,
-                        )
-                        warnings.append(warning)
-
-            # Calculate protocol correlation risk
-            protocol_risk = self._calculate_protocol_correlation_risk(leveraged_positions)
-            if protocol_risk > Decimal("0"):
-                protocol_correlations[protocol] = protocol_risk
-
-        # Calculate max cascade depth
-        max_cascade_depth = max((len(chain) for chain in cascade_chains), default=0)
-
-        # Estimate worst-case cascade loss
-        estimated_cascade_loss = Decimal("0")
-        if cascade_chains:
-            # Find the chain with highest potential loss
-            for chain_ids in cascade_chains:
-                chain_positions_maybe = [
-                    self._positions_by_id.get(pid) for pid in chain_ids if pid in self._positions_by_id
-                ]
-                chain_positions_filtered = [p for p in chain_positions_maybe if p is not None]
-                loss = self._estimate_cascade_loss(chain_positions_filtered, prices)
-                if loss > estimated_cascade_loss:
-                    estimated_cascade_loss = loss
-
-        # Calculate overall risk score
+        summary = self._cascade_portfolio_summary(
+            self._cascade_protocol_analyses(prices, emit_warnings),
+            prices,
+        )
         risk_score = self._calculate_cascade_risk_score(
-            positions_with_shared_collateral=positions_with_shared_collateral,
-            max_cascade_depth=max_cascade_depth,
-            total_collateral_at_risk=total_collateral_at_risk,
-            estimated_cascade_loss=estimated_cascade_loss,
-            protocol_correlations=protocol_correlations,
+            positions_with_shared_collateral=summary.positions_with_shared_collateral,
+            max_cascade_depth=summary.max_cascade_depth,
+            total_collateral_at_risk=summary.total_collateral_at_risk_usd,
+            estimated_cascade_loss=summary.estimated_cascade_loss_usd,
+            protocol_correlations=summary.protocol_correlations,
         )
 
-        # Emit warnings if threshold exceeded
         if emit_warnings and risk_score >= cascade_threshold:
-            self._emit_cascade_risk_warnings(risk_score, warnings)
+            self._emit_cascade_risk_warnings(risk_score, summary.warnings)
 
+        return self._cascade_risk_result(risk_score, summary)
+
+    def _cascade_protocol_analyses(
+        self,
+        prices: dict[str, Decimal],
+        emit_warnings: bool,
+    ) -> list[_CascadeProtocolAnalysis]:
+        return [
+            self._analyze_cascade_protocol(protocol, protocol_positions, prices, emit_warnings)
+            for protocol, protocol_positions in self._positions_grouped_by_protocol().items()
+        ]
+
+    def _cascade_portfolio_summary(
+        self,
+        analyses: list[_CascadeProtocolAnalysis],
+        prices: dict[str, Decimal],
+    ) -> _CascadePortfolioSummary:
+        cascade_chains = [chain for analysis in analyses for chain in analysis.cascade_chains]
+        return _CascadePortfolioSummary(
+            warnings=[warning for analysis in analyses for warning in analysis.warnings],
+            cascade_chains=cascade_chains,
+            protocol_correlations=self._cascade_protocol_correlations(analyses),
+            positions_with_shared_collateral=sum((analysis.shared_positions for analysis in analyses), 0),
+            total_collateral_at_risk_usd=sum(
+                (analysis.collateral_at_risk_usd for analysis in analyses),
+                Decimal("0"),
+            ),
+            max_cascade_depth=max((len(chain) for chain in cascade_chains), default=0),
+            estimated_cascade_loss_usd=self._max_cascade_loss(cascade_chains, prices),
+        )
+
+    @staticmethod
+    def _cascade_protocol_correlations(analyses: list[_CascadeProtocolAnalysis]) -> dict[str, Decimal]:
+        return {
+            analysis.protocol: analysis.protocol_correlation
+            for analysis in analyses
+            if analysis.protocol_correlation > Decimal("0")
+        }
+
+    @staticmethod
+    def _cascade_risk_result(
+        risk_score: Decimal,
+        summary: _CascadePortfolioSummary,
+    ) -> CascadeRiskResult:
         return CascadeRiskResult(
             risk_score=risk_score,
-            positions_with_shared_collateral=positions_with_shared_collateral,
-            cascade_chains=cascade_chains,
-            max_cascade_depth=max_cascade_depth,
-            total_collateral_at_risk_usd=total_collateral_at_risk,
-            estimated_cascade_loss_usd=estimated_cascade_loss,
-            warnings=warnings,
-            protocol_correlations=protocol_correlations,
+            positions_with_shared_collateral=summary.positions_with_shared_collateral,
+            cascade_chains=summary.cascade_chains,
+            max_cascade_depth=summary.max_cascade_depth,
+            total_collateral_at_risk_usd=summary.total_collateral_at_risk_usd,
+            estimated_cascade_loss_usd=summary.estimated_cascade_loss_usd,
+            warnings=summary.warnings,
+            protocol_correlations=summary.protocol_correlations,
         )
+
+    def _positions_grouped_by_protocol(self) -> dict[str, list[SimulatedPosition]]:
+        positions_by_protocol: dict[str, list[SimulatedPosition]] = {}
+        for position in self.positions:
+            positions_by_protocol.setdefault(position.protocol, []).append(position)
+        return positions_by_protocol
+
+    def _analyze_cascade_protocol(
+        self,
+        protocol: str,
+        protocol_positions: list[SimulatedPosition],
+        prices: dict[str, Decimal],
+        emit_warnings: bool,
+    ) -> _CascadeProtocolAnalysis:
+        leveraged_positions = self._leveraged_positions(protocol_positions)
+        if len(leveraged_positions) <= 1:
+            return _CascadeProtocolAnalysis(
+                protocol=protocol,
+                shared_positions=0,
+                collateral_at_risk_usd=Decimal("0"),
+                cascade_chains=[],
+                warnings=[],
+                protocol_correlation=Decimal("0"),
+            )
+
+        pool_collateral = self._cascade_pool_collateral(leveraged_positions)
+        cascade_chains, warnings = self._cascade_chains_and_warnings(
+            leveraged_positions,
+            prices,
+            pool_collateral,
+            emit_warnings,
+        )
+        return _CascadeProtocolAnalysis(
+            protocol=protocol,
+            shared_positions=len(leveraged_positions),
+            collateral_at_risk_usd=pool_collateral,
+            cascade_chains=cascade_chains,
+            warnings=warnings,
+            protocol_correlation=self._calculate_protocol_correlation_risk(leveraged_positions),
+        )
+
+    @staticmethod
+    def _leveraged_positions(positions: list[SimulatedPosition]) -> list[SimulatedPosition]:
+        return [
+            position
+            for position in positions
+            if position.position_type in (PositionType.PERP_LONG, PositionType.PERP_SHORT, PositionType.BORROW)
+        ]
+
+    @staticmethod
+    def _cascade_pool_collateral(positions: list[SimulatedPosition]) -> Decimal:
+        return sum(
+            (position.collateral_usd for position in positions if position.collateral_usd > Decimal("0")),
+            Decimal("0"),
+        )
+
+    def _cascade_chains_and_warnings(
+        self,
+        leveraged_positions: list[SimulatedPosition],
+        prices: dict[str, Decimal],
+        pool_collateral: Decimal,
+        emit_warnings: bool,
+    ) -> tuple[list[list[str]], list[CascadeRiskWarning]]:
+        cascade_chains: list[list[str]] = []
+        warnings: list[CascadeRiskWarning] = []
+        for trigger_position in self._identify_positions_at_risk(leveraged_positions, prices):
+            chain = self._build_cascade_chain(trigger_position, leveraged_positions, prices)
+            if len(chain) <= 1:
+                continue
+            cascade_chains.append([position.position_id for position in chain])
+            warning = self._cascade_warning(trigger_position, chain, prices, pool_collateral, emit_warnings)
+            if warning is not None:
+                warnings.append(warning)
+        return cascade_chains, warnings
+
+    def _cascade_warning(
+        self,
+        trigger_position: SimulatedPosition,
+        chain: list[SimulatedPosition],
+        prices: dict[str, Decimal],
+        pool_collateral: Decimal,
+        emit_warnings: bool,
+    ) -> CascadeRiskWarning | None:
+        cascade_loss = self._estimate_cascade_loss(chain, prices)
+        if cascade_loss <= Decimal("0") or not emit_warnings:
+            return None
+        return CascadeRiskWarning(
+            severity=self._get_cascade_severity(len(chain), cascade_loss, pool_collateral),
+            message=self._format_cascade_warning(trigger_position, chain, cascade_loss),
+            affected_positions=[position.position_id for position in chain if position != trigger_position],
+            trigger_position_id=trigger_position.position_id,
+            estimated_cascade_loss_usd=cascade_loss,
+            collateral_at_risk_usd=pool_collateral,
+        )
+
+    def _max_cascade_loss(self, cascade_chains: list[list[str]], prices: dict[str, Decimal]) -> Decimal:
+        return max(
+            (self._estimate_cascade_loss(self._positions_for_chain(chain_ids), prices) for chain_ids in cascade_chains),
+            default=Decimal("0"),
+        )
+
+    def _positions_for_chain(self, chain_ids: list[str]) -> list[SimulatedPosition]:
+        return [
+            position for position_id in chain_ids if (position := self._positions_by_id.get(position_id)) is not None
+        ]
 
     def _identify_positions_at_risk(
         self,
@@ -1315,31 +1387,18 @@ class PortfolioAggregator:
         Returns:
             List of positions at risk of liquidation
         """
-        at_risk: list[SimulatedPosition] = []
+        return [position for position in positions if self._position_has_liquidation_risk(position, prices)]
 
-        for position in positions:
-            if position.position_type in (PositionType.PERP_LONG, PositionType.PERP_SHORT):
-                # Check perp liquidation proximity
-                if position.liquidation_price is not None:
-                    token = position.primary_token
-                    if token in prices and prices[token] > Decimal("0"):
-                        current_price = prices[token]
-                        if position.position_type == PositionType.PERP_LONG:
-                            # Long at risk if price within 20% of liquidation
-                            distance = (current_price - position.liquidation_price) / current_price
-                        else:
-                            # Short at risk if price within 20% of liquidation
-                            distance = (position.liquidation_price - current_price) / current_price
-
-                        if distance < Decimal("0.2"):
-                            at_risk.append(position)
-
-            elif position.position_type == PositionType.BORROW:
-                # Check lending health factor
-                if position.health_factor is not None and position.health_factor < Decimal("1.3"):
-                    at_risk.append(position)
-
-        return at_risk
+    def _position_has_liquidation_risk(
+        self,
+        position: SimulatedPosition,
+        prices: dict[str, Decimal],
+    ) -> bool:
+        if position.position_type in (PositionType.PERP_LONG, PositionType.PERP_SHORT):
+            return self._perp_near_liquidation(position, prices, Decimal("0.2"))
+        if position.position_type == PositionType.BORROW:
+            return position.health_factor is not None and position.health_factor < Decimal("1.3")
+        return False
 
     def _build_cascade_chain(
         self,
@@ -1363,52 +1422,57 @@ class PortfolioAggregator:
         Returns:
             List of positions in the cascade chain, starting with trigger
         """
-        chain: list[SimulatedPosition] = [trigger_position]
-        remaining_positions = [p for p in pool_positions if p != trigger_position]
-
-        # Simulate the cascade
-        # Calculate collateral loss from trigger liquidation
+        chain = [trigger_position]
+        remaining_positions = [position for position in pool_positions if position != trigger_position]
         trigger_loss = trigger_position.collateral_usd
+        remaining_collateral = sum((p.collateral_usd for p in remaining_positions), Decimal("0"))
 
-        # Calculate total available collateral after trigger
-        remaining_collateral = sum(p.collateral_usd for p in remaining_positions)
-
-        # Check if loss impacts other positions
         for position in remaining_positions:
-            if position.collateral_usd <= Decimal("0"):
-                continue
-
-            # Calculate position's share of remaining collateral
-            share = position.collateral_usd / (remaining_collateral or Decimal("1"))
-
-            # Estimate impact of trigger loss on this position
-            impact = trigger_loss * share
-
-            # If impact reduces effective collateral below maintenance
-            effective_collateral = position.collateral_usd - impact
-            if position.notional_usd > Decimal("0"):
-                effective_leverage = position.notional_usd / max(effective_collateral, Decimal("0.01"))
-                # If leverage exceeds safe threshold, position cascades
-                max_leverage = Decimal("20")  # Protocol max leverage
-                if effective_leverage > max_leverage:
-                    chain.append(position)
-                    trigger_loss += position.collateral_usd
-
-            # For borrow positions, check health factor impact
-            elif position.position_type == PositionType.BORROW:
-                if position.health_factor is not None:
-                    # Reduced collateral reduces health factor
-                    reduction_factor = (
-                        effective_collateral / position.collateral_usd
-                        if position.collateral_usd > Decimal("0")
-                        else Decimal("0")
-                    )
-                    projected_hf = position.health_factor * reduction_factor
-                    if projected_hf < Decimal("1.0"):
-                        chain.append(position)
-                        trigger_loss += position.collateral_usd
+            if self._position_cascades(position, trigger_loss, remaining_collateral):
+                chain.append(position)
+                trigger_loss += position.collateral_usd
 
         return chain
+
+    def _position_cascades(
+        self,
+        position: SimulatedPosition,
+        trigger_loss: Decimal,
+        remaining_collateral: Decimal,
+    ) -> bool:
+        if position.collateral_usd <= Decimal("0"):
+            return False
+        effective_collateral = self._effective_collateral_after_loss(
+            position,
+            trigger_loss,
+            remaining_collateral,
+        )
+        if position.notional_usd > Decimal("0"):
+            return self._perp_cascades(position, effective_collateral)
+        if position.position_type == PositionType.BORROW:
+            return self._borrow_cascades(position, effective_collateral)
+        return False
+
+    @staticmethod
+    def _effective_collateral_after_loss(
+        position: SimulatedPosition,
+        trigger_loss: Decimal,
+        remaining_collateral: Decimal,
+    ) -> Decimal:
+        share = position.collateral_usd / (remaining_collateral or Decimal("1"))
+        return position.collateral_usd - trigger_loss * share
+
+    @staticmethod
+    def _perp_cascades(position: SimulatedPosition, effective_collateral: Decimal) -> bool:
+        effective_leverage = position.notional_usd / max(effective_collateral, Decimal("0.01"))
+        return effective_leverage > Decimal("20")
+
+    @staticmethod
+    def _borrow_cascades(position: SimulatedPosition, effective_collateral: Decimal) -> bool:
+        if position.health_factor is None:
+            return False
+        reduction_factor = effective_collateral / position.collateral_usd
+        return position.health_factor * reduction_factor < Decimal("1.0")
 
     def _estimate_cascade_loss(
         self,
@@ -1440,8 +1504,7 @@ class PortfolioAggregator:
 
             elif position.position_type == PositionType.BORROW:
                 # Lending liquidation: collateral seized to cover debt
-                # Estimate debt value
-                debt_value = position.total_amount * position.entry_price
+                debt_value = self._borrow_debt_value_usd(position)
                 # Close factor typically 50%
                 close_factor = Decimal("0.5")
                 seized = debt_value * close_factor * (Decimal("1") + liquidation_penalty)

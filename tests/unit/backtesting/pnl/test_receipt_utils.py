@@ -6,9 +6,111 @@ import pytest
 
 from almanak.framework.backtesting.pnl.receipt_utils import (
     DEFAULT_DISCREPANCY_THRESHOLD,
+    TRANSFER_EVENT_TOPIC,
     DiscrepancyResult,
     calculate_discrepancy,
+    extract_token_flows,
+    parse_transfer_events,
 )
+
+WALLET = "0x" + "11" * 20
+COUNTERPARTY = "0x" + "22" * 20
+TOKEN = "0x" + "aa" * 20
+
+
+def _address_topic(address: str) -> str:
+    return "0x" + ("0" * 24) + address[2:].lower()
+
+
+def _uint256_data(value: int) -> str:
+    return "0x" + f"{value:064x}"
+
+
+def _transfer_log(
+    *,
+    token: str = TOKEN,
+    from_addr: str = COUNTERPARTY,
+    to_addr: str = WALLET,
+    value: int = 1000,
+    data: str | None = None,
+    topic: str = TRANSFER_EVENT_TOPIC,
+    log_index: int | str = 0,
+    extra_topics: tuple[str, ...] = (),
+) -> dict:
+    return {
+        "address": token,
+        "topics": [topic, _address_topic(from_addr), _address_topic(to_addr), *extra_topics],
+        "data": _uint256_data(value) if data is None else data,
+        "logIndex": log_index,
+    }
+
+
+class TestTransferEventParsing:
+    """Tests for ERC-20 Transfer receipt parsing."""
+
+    def test_parse_transfer_events_accepts_hex_success_status(self):
+        """JSON-RPC hex status 0x1 should be treated as success."""
+        receipt = {"status": "0x1", "logs": [_transfer_log(value=123)]}
+
+        transfers = parse_transfer_events(receipt)
+
+        assert len(transfers) == 1
+        assert transfers[0].value == 123
+        assert transfers[0].token_address == TOKEN
+        assert transfers[0].from_addr == COUNTERPARTY
+        assert transfers[0].to_addr == WALLET
+
+    def test_extract_token_flows_accepts_hex_success_status(self):
+        """Receipt-backed token flow extraction must not drop JSON-RPC status receipts."""
+        receipt = {
+            "status": "0x1",
+            "logs": [
+                _transfer_log(from_addr=WALLET, to_addr=COUNTERPARTY, value=250),
+                _transfer_log(from_addr=COUNTERPARTY, to_addr=WALLET, value=100),
+            ],
+        }
+
+        flows = extract_token_flows(receipt, wallet_address=WALLET.upper())
+
+        assert flows.tokens_out == {TOKEN: 250}
+        assert flows.tokens_in == {TOKEN: 100}
+        assert flows.flows[TOKEN].net_amount == -150
+
+    def test_empty_transfer_data_is_not_measured_zero(self):
+        """Missing Transfer data is malformed/unmeasured, not a zero-value transfer."""
+        receipt = {"status": 1, "logs": [_transfer_log(data="0x")]}
+
+        assert parse_transfer_events(receipt) == []
+
+    def test_zero_value_transfer_requires_explicit_zero_word(self):
+        """A measured zero transfer has an explicit uint256 zero word in data."""
+        receipt = {"status": 1, "logs": [_transfer_log(value=0)]}
+
+        transfers = parse_transfer_events(receipt)
+
+        assert len(transfers) == 1
+        assert transfers[0].value == 0
+
+    def test_erc721_transfer_topic_shape_is_skipped(self):
+        """ERC-721 Transfer has the same signature but four topics and no ERC-20 value data."""
+        token_id_topic = "0x" + f"{42:064x}"
+        receipt = {"status": 1, "logs": [_transfer_log(data="0x", extra_topics=(token_id_topic,))]}
+
+        assert parse_transfer_events(receipt) == []
+
+    def test_topic_matching_is_case_insensitive(self):
+        """Event topics are hex data and should not depend on letter casing."""
+        receipt = {"status": 1, "logs": [_transfer_log(topic=TRANSFER_EVENT_TOPIC.upper())]}
+
+        assert len(parse_transfer_events(receipt)) == 1
+
+    def test_hex_log_index_is_normalized_to_int(self):
+        """JSON-RPC logIndex hex strings should be normalized for ordering consumers."""
+        receipt = {"status": 1, "logs": [_transfer_log(log_index="0x2")]}
+
+        transfers = parse_transfer_events(receipt)
+
+        assert transfers[0].log_index == 2
 
 
 class TestCalculateDiscrepancy:

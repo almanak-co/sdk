@@ -16,7 +16,7 @@ semantics:
   ``0E+17``, no negative "win").
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -30,7 +30,7 @@ from almanak.framework.backtesting.pnl.portfolio import (
     SimulatedPortfolio,
 )
 
-TS = datetime(2025, 11, 1, tzinfo=timezone.utc)
+TS = datetime(2025, 11, 1, tzinfo=UTC)
 
 
 def _market(weth: str) -> MarketState:
@@ -321,6 +321,43 @@ class TestAttributionHandlesUnrealizedPnL:
             pnl_by_intent_type=by_intent,
             pnl_by_asset=by_asset,
         )
+
+
+class TestAttributionResult:
+    def test_get_attribution_result_dispatches_protocol_intent_and_asset(self) -> None:
+        from almanak.framework.backtesting.pnl.calculators.attribution import AttributionCalculator
+
+        trades = [
+            _trade_record(pnl_usd=Decimal("120"), protocol="uniswap_v3", intent_type=IntentType.SWAP),
+            _trade_record(
+                pnl_usd=Decimal("-20"),
+                protocol="aave_v3",
+                intent_type=IntentType.BORROW,
+                tokens=["USDC"],
+            ),
+            _trade_record(pnl_usd=Decimal("999"), success=False, protocol="failed"),
+        ]
+        calculator = AttributionCalculator()
+
+        by_protocol = calculator.get_attribution_result(trades, "protocol")
+        by_intent = calculator.get_attribution_result(trades, "intent_type")
+        by_asset = calculator.get_attribution_result(trades, "asset")
+
+        assert by_protocol.attribution == {"uniswap_v3": Decimal("120"), "aave_v3": Decimal("-20")}
+        assert by_protocol.total_pnl == Decimal("100")
+        assert by_protocol.trade_count == 2
+        assert by_protocol.unattributed_pnl == Decimal("0")
+        assert by_intent.attribution == {"SWAP": Decimal("120"), "BORROW": Decimal("-20")}
+        assert by_asset.attribution == {
+            "WETH": Decimal("60"),
+            "USDC": Decimal("40"),
+        }
+
+    def test_get_attribution_result_rejects_unknown_type(self) -> None:
+        from almanak.framework.backtesting.pnl.calculators.attribution import AttributionCalculator
+
+        with pytest.raises(ValueError, match="Unknown attribution_type"):
+            AttributionCalculator().get_attribution_result([], "venue")
 
 
 class TestGeminiReviewRegressions:

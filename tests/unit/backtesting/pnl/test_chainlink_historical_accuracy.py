@@ -596,7 +596,7 @@ class TestDataSourceMetadata:
             ),
             patch.object(
                 provider,
-                "_query_latest_round_data_sync",
+                "_query_latest_round_data",
                 create_mock_query_latest_round_data(latest_round),
             ),
             patch.object(provider, "_get_decimals_cached", return_value=8),

@@ -427,7 +427,130 @@ async def _run_paper_trading_foreground(
     return summary
 
 
-# crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
+def _background_paper_trader(strategy: str) -> BackgroundPaperTrader:
+    return BackgroundPaperTrader(
+        config=PaperTraderConfig(
+            chain="arbitrum",
+            rpc_url="http://localhost:8545",
+            deployment_id=strategy,
+        ),
+    )
+
+
+def _handle_background_stop(
+    *,
+    strategy: str,
+    bg_trader: BackgroundPaperTrader,
+    force: bool,
+) -> bool:
+    bg_status = bg_trader.get_status()
+    if not bg_status.is_running:
+        return False
+
+    click.echo(f"Session: {strategy}")
+    click.echo(f"Status: running (PID: {bg_status.pid})")
+
+    if force:
+        _force_kill_background_process(bg_status.pid)
+    else:
+        _stop_background_process_gracefully(bg_trader)
+
+    update_paper_session_status(strategy, "stopped")
+    return True
+
+
+def _force_kill_background_process(pid: int | None) -> None:
+    if not pid:
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+        click.echo(f"Process {pid} killed forcefully.")
+    except (ProcessLookupError, PermissionError) as e:
+        click.echo(f"Error: {e}", err=True)
+
+
+def _stop_background_process_gracefully(bg_trader: BackgroundPaperTrader) -> None:
+    stopped = bg_trader.stop()
+    if stopped:
+        click.echo("Session stopped gracefully.")
+    else:
+        click.echo("Failed to stop session. Try --force.", err=True)
+
+
+def _render_legacy_stop_header(strategy: str, state: dict[str, Any]) -> tuple[Any, str]:
+    pid = state.get("pid")
+    status = state.get("status", "unknown")
+    click.echo(f"Session: {strategy}")
+    click.echo(f"Status: {status}")
+    click.echo(f"PID: {pid}")
+    return pid, status
+
+
+def _cleanup_non_running_session(strategy: str, status: str) -> None:
+    click.echo()
+    click.echo(f"Session is not running (status: {status})")
+    click.echo("Cleaning up session state...")
+    delete_paper_session_state(strategy)
+    click.echo("Done.")
+
+
+def _mark_missing_legacy_process_stopped(strategy: str) -> None:
+    click.echo()
+    click.echo("Process is no longer running.")
+    update_paper_session_status(strategy, "stopped")
+    click.echo("Session state updated.")
+
+
+def _send_legacy_stop_signal(strategy: str, pid: int, force: bool) -> None:
+    try:
+        if force:
+            os.kill(pid, signal.SIGKILL)
+            click.echo()
+            click.echo(f"Process {pid} killed forcefully.")
+        else:
+            os.kill(pid, signal.SIGTERM)
+            click.echo()
+            click.echo(f"Stop signal sent to process {pid}.")
+            click.echo("Waiting for graceful shutdown...")
+
+        update_paper_session_status(strategy, "stopped")
+        click.echo("Session stopped.")
+
+    except ProcessLookupError:
+        click.echo()
+        click.echo("Process no longer exists.")
+        update_paper_session_status(strategy, "stopped")
+
+    except PermissionError:
+        click.echo()
+        click.echo(f"Permission denied to stop process {pid}", err=True)
+        click.echo("Try running with appropriate permissions.", err=True)
+
+
+def _handle_legacy_stop(strategy: str, force: bool) -> None:
+    state = load_paper_session_state(strategy)
+    if not state:
+        click.echo(f"No paper trading session found for '{strategy}'", err=True)
+        return
+
+    pid, status = _render_legacy_stop_header(strategy, state)
+    if status != "running":
+        _cleanup_non_running_session(strategy, status)
+        return
+
+    if not pid:
+        click.echo()
+        click.echo("No PID recorded for this session.")
+        update_paper_session_status(strategy, "stopped")
+        return
+
+    if not is_process_running(pid):
+        _mark_missing_legacy_process_stopped(strategy)
+        return
+
+    _send_legacy_stop_signal(strategy, pid, force)
+
+
 @paper.command("stop")
 @click.option("--strategy", "-s", required=True, help="Name of the strategy to stop")
 @click.option("--force", is_flag=True, default=False, help="Force stop (kill process)")
@@ -449,94 +572,12 @@ def paper_stop(strategy: str, force: bool) -> None:
         almanak strat backtest paper stop -s momentum_v1 --force
     """
     # Try BackgroundPaperTrader first (engine state dir)
-    bg_trader = BackgroundPaperTrader(
-        config=PaperTraderConfig(
-            chain="arbitrum",
-            rpc_url="http://localhost:8545",
-            deployment_id=strategy,
-        ),
-    )
-
-    bg_status = bg_trader.get_status()
-
-    if bg_status.is_running:
-        click.echo(f"Session: {strategy}")
-        click.echo(f"Status: running (PID: {bg_status.pid})")
-
-        if force:
-            if bg_status.pid:
-                try:
-                    os.kill(bg_status.pid, signal.SIGKILL)
-                    click.echo(f"Process {bg_status.pid} killed forcefully.")
-                except (ProcessLookupError, PermissionError) as e:
-                    click.echo(f"Error: {e}", err=True)
-        else:
-            stopped = bg_trader.stop()
-            if stopped:
-                click.echo("Session stopped gracefully.")
-            else:
-                click.echo("Failed to stop session. Try --force.", err=True)
-
-        update_paper_session_status(strategy, "stopped")
+    bg_trader = _background_paper_trader(strategy)
+    if _handle_background_stop(strategy=strategy, bg_trader=bg_trader, force=force):
         return
 
     # Fallback: check CLI session state
-    state = load_paper_session_state(strategy)
-    if not state:
-        click.echo(f"No paper trading session found for '{strategy}'", err=True)
-        return
-
-    pid = state.get("pid")
-    status = state.get("status", "unknown")
-
-    click.echo(f"Session: {strategy}")
-    click.echo(f"Status: {status}")
-    click.echo(f"PID: {pid}")
-
-    if status != "running":
-        click.echo()
-        click.echo(f"Session is not running (status: {status})")
-        click.echo("Cleaning up session state...")
-        delete_paper_session_state(strategy)
-        click.echo("Done.")
-        return
-
-    if pid:
-        if not is_process_running(pid):
-            click.echo()
-            click.echo("Process is no longer running.")
-            update_paper_session_status(strategy, "stopped")
-            click.echo("Session state updated.")
-            return
-
-        try:
-            if force:
-                os.kill(pid, signal.SIGKILL)
-                click.echo()
-                click.echo(f"Process {pid} killed forcefully.")
-            else:
-                os.kill(pid, signal.SIGTERM)
-                click.echo()
-                click.echo(f"Stop signal sent to process {pid}.")
-                click.echo("Waiting for graceful shutdown...")
-
-            update_paper_session_status(strategy, "stopped")
-            click.echo("Session stopped.")
-
-        except ProcessLookupError:
-            click.echo()
-            click.echo("Process no longer exists.")
-            update_paper_session_status(strategy, "stopped")
-
-        except PermissionError:
-            click.echo()
-            click.echo(f"Permission denied to stop process {pid}", err=True)
-            click.echo("Try running with appropriate permissions.", err=True)
-
-    else:
-        click.echo()
-        click.echo("No PID recorded for this session.")
-        update_paper_session_status(strategy, "stopped")
+    _handle_legacy_stop(strategy, force)
 
 
 @paper.command("resume")
@@ -700,6 +741,71 @@ def get_paper_log_file(deployment_id: str) -> Path:
     return session_log
 
 
+def _print_missing_log_file(strategy: str, log_file: Path) -> None:
+    click.echo(f"No log file found for strategy '{strategy}'", err=True)
+    click.echo()
+    click.echo("Possible reasons:")
+    click.echo("  - No paper trading session has been run for this strategy")
+    click.echo("  - The session was run in foreground mode (no log file created)")
+    click.echo("  - The log file was deleted")
+    click.echo()
+    click.echo(f"Expected log file location: {log_file}")
+
+
+def _follow_log_file(log_file: Path) -> None:
+    click.echo("Following logs... (press Ctrl+C to stop)")
+    click.echo()
+
+    try:
+        import time as time_module
+
+        with open(log_file) as f:
+            f.seek(0, 2)
+
+            while True:
+                line = f.readline()
+                if line:
+                    click.echo(line, nl=False)
+                else:
+                    time_module.sleep(0.5)
+    except KeyboardInterrupt:
+        click.echo()
+        click.echo("Stopped following logs.")
+    except OSError as e:
+        click.echo(f"Error reading log file: {e}", err=True)
+
+
+def _select_log_lines(all_lines: list[str], lines: int, show_all: bool) -> list[str]:
+    if show_all:
+        return all_lines
+    return all_lines[-lines:]
+
+
+def _print_log_tail(log_file: Path, lines: int, show_all: bool) -> None:
+    try:
+        with open(log_file) as f:
+            all_lines = f.readlines()
+
+        lines_to_show = _select_log_lines(all_lines, lines, show_all)
+        if not lines_to_show:
+            click.echo("(Log file is empty)")
+            return
+
+        for line in lines_to_show:
+            click.echo(line, nl=False)
+
+        click.echo()
+        click.echo("=" * 60)
+        click.echo(f"Showing {len(lines_to_show)} of {len(all_lines)} total lines")
+
+        if len(all_lines) > len(lines_to_show):
+            click.echo(f"Use --all to see all {len(all_lines)} lines")
+            click.echo("Use --follow to watch logs in real-time")
+
+    except OSError as e:
+        click.echo(f"Error reading log file: {e}", err=True)
+
+
 @paper.command("logs")
 @click.option("--strategy", "-s", required=True, help="Name of the strategy to view logs for")
 @click.option("--lines", "-n", type=int, default=100, help="Number of lines to display (default: 100)")
@@ -729,68 +835,16 @@ def paper_logs(strategy: str, lines: int, follow: bool, show_all: bool) -> None:
     log_file = get_paper_log_file(strategy)
 
     if not log_file.exists():
-        click.echo(f"No log file found for strategy '{strategy}'", err=True)
-        click.echo()
-        click.echo("Possible reasons:")
-        click.echo("  - No paper trading session has been run for this strategy")
-        click.echo("  - The session was run in foreground mode (no log file created)")
-        click.echo("  - The log file was deleted")
-        click.echo()
-        click.echo(f"Expected log file location: {log_file}")
+        _print_missing_log_file(strategy, log_file)
         return
 
     click.echo(f"Log file: {log_file}")
     click.echo("=" * 60)
 
     if follow:
-        click.echo("Following logs... (press Ctrl+C to stop)")
-        click.echo()
-
-        try:
-            import time as time_module
-
-            with open(log_file) as f:
-                f.seek(0, 2)
-
-                while True:
-                    line = f.readline()
-                    if line:
-                        click.echo(line, nl=False)
-                    else:
-                        time_module.sleep(0.5)
-        except KeyboardInterrupt:
-            click.echo()
-            click.echo("Stopped following logs.")
-        except OSError as e:
-            click.echo(f"Error reading log file: {e}", err=True)
-
+        _follow_log_file(log_file)
     else:
-        try:
-            with open(log_file) as f:
-                all_lines = f.readlines()
-
-            if show_all:
-                lines_to_show = all_lines
-            else:
-                lines_to_show = all_lines[-lines:]
-
-            if not lines_to_show:
-                click.echo("(Log file is empty)")
-                return
-
-            for line in lines_to_show:
-                click.echo(line, nl=False)
-
-            click.echo()
-            click.echo("=" * 60)
-            click.echo(f"Showing {len(lines_to_show)} of {len(all_lines)} total lines")
-
-            if len(all_lines) > len(lines_to_show):
-                click.echo(f"Use --all to see all {len(all_lines)} lines")
-                click.echo("Use --follow to watch logs in real-time")
-
-        except OSError as e:
-            click.echo(f"Error reading log file: {e}", err=True)
+        _print_log_tail(log_file, lines, show_all)
 
 
 # =============================================================================
@@ -798,7 +852,75 @@ def paper_logs(strategy: str, lines: int, follow: bool, show_all: bool) -> None:
 # =============================================================================
 
 
-# crap-allowlist: #2703 mechanical extras-message string change in existing high-CRAP function (pre-existing cov ~2%)
+def _dashboard_command(port: int, host: str, no_browser: bool) -> list[str]:
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        "--server.port",
+        str(port),
+        "--server.address",
+        host,
+    ]
+    if no_browser:
+        cmd.extend(["--server.headless", "true"])
+    return cmd
+
+
+def _dashboard_app_path() -> Path:
+    from pathlib import Path as PathLib
+
+    try:
+        from almanak.framework.backtesting.dashboard import app as dashboard_app
+    except ImportError as e:
+        click.echo("Error: Could not find dashboard module.", err=True)
+        click.echo("Make sure Streamlit is installed: pip install 'almanak[dashboard]'", err=True)
+        raise click.Abort() from e
+    return PathLib(dashboard_app.__file__)
+
+
+def _print_dashboard_banner(host: str, port: int, url: str) -> None:
+    click.echo("=" * 60)
+    click.echo("BACKTEST DASHBOARD")
+    click.echo("=" * 60)
+    click.echo("Starting Streamlit dashboard...")
+    click.echo(f"Host: {host}")
+    click.echo(f"Port: {port}")
+    click.echo(f"URL: {url}")
+    click.echo()
+    click.echo("Press Ctrl+C to stop the server")
+    click.echo("=" * 60)
+
+
+def _open_dashboard_later(url: str) -> None:
+    import threading
+    import webbrowser
+
+    def open_browser() -> None:
+        import time
+
+        time.sleep(1.5)
+        webbrowser.open(url)
+
+    threading.Thread(target=open_browser, daemon=True).start()
+
+
+def _run_dashboard_process(cmd: list[str]) -> None:
+    import subprocess
+
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        click.echo(f"Error: Streamlit failed to start (exit code {e.returncode})", err=True)
+        raise click.Abort() from e
+    except FileNotFoundError as e:
+        click.echo("Error: Streamlit not found. Install it with: pip install 'almanak[dashboard]'", err=True)
+        raise click.Abort() from e
+    except KeyboardInterrupt:
+        click.echo("\nDashboard stopped.")
+
+
 @backtest.command("dashboard")
 @click.option("--port", "-p", type=int, default=8501, help="Port to run the Streamlit dashboard (default: 8501)")
 @click.option("--no-browser", is_flag=True, default=False, help="Don't automatically open the browser")
@@ -824,66 +946,12 @@ def dashboard_cmd(port: int, no_browser: bool, host: str) -> None:
         # Allow external connections
         almanak backtest dashboard --host 0.0.0.0
     """
-    import subprocess
-    import webbrowser
-    from pathlib import Path as PathLib
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "streamlit",
-        "run",
-        "--server.port",
-        str(port),
-        "--server.address",
-        host,
-    ]
-
-    if no_browser:
-        cmd.extend(["--server.headless", "true"])
-
-    try:
-        from almanak.framework.backtesting.dashboard import app as dashboard_app
-
-        dashboard_path = PathLib(dashboard_app.__file__)
-        cmd.append(str(dashboard_path))
-    except ImportError as e:
-        click.echo("Error: Could not find dashboard module.", err=True)
-        click.echo("Make sure Streamlit is installed: pip install 'almanak[dashboard]'", err=True)
-        raise click.Abort() from e
-
-    click.echo("=" * 60)
-    click.echo("BACKTEST DASHBOARD")
-    click.echo("=" * 60)
-    click.echo("Starting Streamlit dashboard...")
-    click.echo(f"Host: {host}")
-    click.echo(f"Port: {port}")
-
+    cmd = _dashboard_command(port, host, no_browser)
+    cmd.append(str(_dashboard_app_path()))
     url = f"http://{host}:{port}"
-    click.echo(f"URL: {url}")
-    click.echo()
-    click.echo("Press Ctrl+C to stop the server")
-    click.echo("=" * 60)
+    _print_dashboard_banner(host, port, url)
 
     if not no_browser:
+        _open_dashboard_later(url)
 
-        def open_browser() -> None:
-            import time
-
-            time.sleep(1.5)
-            webbrowser.open(url)
-
-        import threading
-
-        threading.Thread(target=open_browser, daemon=True).start()
-
-    try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as e:
-        click.echo(f"Error: Streamlit failed to start (exit code {e.returncode})", err=True)
-        raise click.Abort() from e
-    except FileNotFoundError as e:
-        click.echo("Error: Streamlit not found. Install it with: pip install 'almanak[dashboard]'", err=True)
-        raise click.Abort() from e
-    except KeyboardInterrupt:
-        click.echo("\nDashboard stopped.")
+    _run_dashboard_process(cmd)

@@ -162,6 +162,21 @@ class TestMonteCarloParameterParsing:
         assert result.exit_code != 0
         assert "invalid" in result.output.lower() or "choice" in result.output.lower()
 
+    def test_empty_token_entry_shows_error(self, cli_runner: CliRunner) -> None:
+        """Test that empty token entries are rejected before provider setup."""
+        with patch("almanak.framework.cli.backtest.advanced.list_strategies_fn", return_value=["test"]):
+            result = cli_runner.invoke(backtest, [
+                "monte-carlo",
+                "--strategy", "test",
+                "--start", "2024-01-01",
+                "--end", "2024-06-01",
+                "--tokens", "WETH,,USDC",
+                "--dry-run",
+            ])
+
+        assert result.exit_code != 0
+        assert "non-empty token symbols" in result.output
+
 
 # =============================================================================
 # Test Dry Run Mode

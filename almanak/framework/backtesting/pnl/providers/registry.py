@@ -26,12 +26,26 @@ Example:
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from almanak.core.chains._helpers import vendor_chain_map
 
 logger = logging.getLogger(__name__)
+
+
+def _supports_filter(
+    supported_values: list[str],
+    requested_value: str,
+    *,
+    normalize: Callable[[str], str],
+) -> bool:
+    """Return whether metadata supports a requested chain/token filter."""
+    if not supported_values:
+        return True
+    requested = normalize(requested_value)
+    return requested in {normalize(value) for value in supported_values}
 
 
 @dataclass
@@ -132,7 +146,7 @@ class ProviderRegistry:
             })
         """
         name_lower = name.lower()
-        extra_metadata = metadata or {}
+        extra_metadata = dict(metadata or {})
 
         if name_lower in cls._providers:
             logger.warning(
@@ -238,11 +252,10 @@ class ProviderRegistry:
         Returns:
             List of ProviderMetadata for providers supporting the chain
         """
-        chain_lower = chain.lower()
         matching = [
             meta
             for meta in cls._providers.values()
-            if not meta.supported_chains or chain_lower in [c.lower() for c in meta.supported_chains]
+            if _supports_filter(meta.supported_chains, chain, normalize=str.lower)
         ]
         return sorted(matching, key=lambda m: m.priority)
 
@@ -256,11 +269,10 @@ class ProviderRegistry:
         Returns:
             List of ProviderMetadata for providers supporting the token
         """
-        token_upper = token.upper()
         matching = [
             meta
             for meta in cls._providers.values()
-            if not meta.supported_tokens or token_upper in [t.upper() for t in meta.supported_tokens]
+            if _supports_filter(meta.supported_tokens, token, normalize=str.upper)
         ]
         return sorted(matching, key=lambda m: m.priority)
 
@@ -340,31 +352,31 @@ class ProviderRegistry:
             if meta:
                 provider = meta.provider_class(chain="arbitrum")
         """
-        candidates = list(cls._providers.values())
-
-        # Filter by chain if specified
-        if chain:
-            chain_lower = chain.lower()
-            candidates = [
-                m
-                for m in candidates
-                if not m.supported_chains or chain_lower in [c.lower() for c in m.supported_chains]
-            ]
-
-        # Filter by token if specified
-        if token:
-            token_upper = token.upper()
-            candidates = [
-                m
-                for m in candidates
-                if not m.supported_tokens or token_upper in [t.upper() for t in m.supported_tokens]
-            ]
+        candidates = cls._matching_providers(token=token, chain=chain)
 
         if not candidates:
             return None
 
         # Return highest priority (lowest number)
         return min(candidates, key=lambda m: m.priority)
+
+    @classmethod
+    def _matching_providers(
+        cls,
+        token: str | None = None,
+        chain: str | None = None,
+    ) -> list[ProviderMetadata]:
+        """Return registered providers matching optional token/chain filters."""
+        candidates = list(cls._providers.values())
+        if chain:
+            candidates = [
+                meta for meta in candidates if _supports_filter(meta.supported_chains, chain, normalize=str.lower)
+            ]
+        if token:
+            candidates = [
+                meta for meta in candidates if _supports_filter(meta.supported_tokens, token, normalize=str.upper)
+            ]
+        return candidates
 
     @classmethod
     def to_dict(cls) -> dict[str, dict[str, Any]]:

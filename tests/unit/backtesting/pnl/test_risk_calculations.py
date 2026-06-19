@@ -331,6 +331,23 @@ class TestNetDeltaCalculation:
         # Perp short: -$15000 notional / $2000 = -7.5 ETH delta
         assert delta == Decimal("-7.5")
 
+    def test_perp_delta_falls_back_to_amount_when_price_is_zero(self, entry_time: datetime):
+        """Test zero supplied prices do not divide perp notional."""
+        aggregator = PortfolioAggregator()
+        perp_long = SimulatedPosition.perp_long(
+            token="ETH",
+            collateral_usd=Decimal("4000"),
+            leverage=Decimal("5"),
+            entry_price=Decimal("2000"),
+            entry_time=entry_time,
+            protocol="gmx",
+        )
+        aggregator.add_position(perp_long)
+
+        delta = aggregator.calculate_net_delta("ETH", {"ETH": Decimal("0")})
+
+        assert delta == perp_long.get_amount("ETH")
+
     def test_lp_position_reduced_delta(self, entry_time: datetime):
         """Test that LP positions have reduced delta due to IL effect."""
         aggregator = PortfolioAggregator()
@@ -630,6 +647,24 @@ class TestCascadeRiskCalculation:
         # Borrow positions share collateral on same protocol
         assert result.positions_with_shared_collateral >= 2
         assert result.risk_score > Decimal("0")
+
+    def test_borrow_cascade_loss_includes_accrued_interest(self, entry_time: datetime):
+        """Borrow cascade-loss estimates should include accrued interest."""
+        aggregator = PortfolioAggregator()
+        borrow = SimulatedPosition.borrow(
+            token="USDC",
+            amount=Decimal("10000"),
+            apy=Decimal("0.05"),
+            entry_price=Decimal("1"),
+            entry_time=entry_time,
+            health_factor=Decimal("1.1"),
+            protocol="aave_v3",
+        )
+        borrow.interest_accrued = Decimal("500")
+
+        loss = aggregator._estimate_cascade_loss([borrow], {"USDC": Decimal("1")})
+
+        assert loss == Decimal("10500") * Decimal("0.5") * Decimal("1.05")
 
     def test_cascade_risk_different_protocols_no_shared_risk(self, entry_time: datetime):
         """Test that positions on different protocols don't share cascade risk."""

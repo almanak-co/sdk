@@ -13,8 +13,6 @@ covering:
 import asyncio
 import time
 from datetime import datetime
-from decimal import Decimal
-from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -403,7 +401,7 @@ class TestExponentialBackoffTiming:
 
         # Check that sleep was called with increasing delays
         # Exponential backoff: 1*2^0 + jitter, 1*2^1 + jitter, 1*2^2 + jitter
-        for i, call in enumerate(mock_sleep.call_args_list):
+        for call in mock_sleep.call_args_list:
             delay = call[0][0]
             delays.append(delay)
 
@@ -486,6 +484,43 @@ class TestExponentialBackoffTiming:
 
         # Should have triggered rate reduction
         assert limiter.requests_per_minute < 100
+
+    @pytest.mark.asyncio
+    async def test_custom_detector_false_does_not_reduce_rate(self):
+        """Custom rate-limit detector returning false keeps the configured rate."""
+        limiter = TokenBucketRateLimiter(requests_per_minute=100)
+
+        async def transient_failure():
+            raise ValueError("429 text that custom detector ignores")
+
+        with pytest.raises(ValueError):
+            await limiter.retry_with_backoff(
+                transient_failure,
+                max_retries=1,
+                base_delay_seconds=0.01,
+                is_rate_limit_error=lambda _exc: False,
+            )
+
+        assert limiter.requests_per_minute == 100
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"max_retries": -1}, "max_retries"),
+            ({"base_delay_seconds": -0.1}, "base_delay_seconds"),
+            ({"max_delay_seconds": 0}, "max_delay_seconds"),
+        ],
+    )
+    async def test_invalid_retry_settings_raise_value_error(self, kwargs: dict[str, float], message: str):
+        """Invalid retry parameters fail at the boundary instead of at sleep/runtime."""
+        limiter = TokenBucketRateLimiter(requests_per_minute=60)
+
+        async def success_func():
+            return "success"
+
+        with pytest.raises(ValueError, match=message):
+            await limiter.retry_with_backoff(success_func, **kwargs)
 
 
 class TestRequestQueue:
@@ -762,7 +797,7 @@ class TestEdgeCases:
         limiter = TokenBucketRateLimiter(requests_per_minute=60, burst_size=3)
 
         # Launch concurrent acquires
-        results = await asyncio.gather(
+        await asyncio.gather(
             limiter.acquire(),
             limiter.acquire(),
             limiter.acquire(),

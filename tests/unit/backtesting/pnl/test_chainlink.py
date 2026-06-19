@@ -10,9 +10,10 @@ This module tests the ChainlinkDataProvider class, covering:
 """
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -23,13 +24,17 @@ from almanak.framework.backtesting.pnl.providers.chainlink import (
     LATEST_ROUND_DATA_SELECTOR,
     MAX_MULTICALL_BATCH_SIZE,
     TOKEN_TO_PAIR,
+    BinarySearchResult,
     CachedPrice,
     ChainlinkDataProvider,
     ChainlinkPriceFeed,
     ChainlinkRoundData,
     ChainlinkStaleDataError,
+    PersistentCacheConfig,
     PriceCache,
 )
+from almanak.framework.backtesting.pnl.types import DataConfidence
+from almanak.framework.data.interfaces import DataSourceUnavailable
 
 
 class TestChainlinkProviderInitialization:
@@ -114,6 +119,34 @@ class TestBatchRoundQueries:
         assert sorted(calls) == round_ids
         assert [result.round_id if result else None for result in results] == round_ids
         assert max_in_flight == MAX_MULTICALL_BATCH_SIZE
+
+    def test_prefetch_round_ids_refuses_cross_phase_ranges(self):
+        start_round = (1 << 64) + 10
+        end_round = (2 << 64) + 5
+        start = BinarySearchResult(
+            round_id=start_round,
+            round_data=ChainlinkRoundData(
+                round_id=start_round,
+                answer=250000000000,
+                started_at=0,
+                updated_at=0,
+                answered_in_round=start_round,
+            ),
+            iterations=1,
+        )
+        end = BinarySearchResult(
+            round_id=end_round,
+            round_data=ChainlinkRoundData(
+                round_id=end_round,
+                answer=250100000000,
+                started_at=0,
+                updated_at=0,
+                answered_in_round=end_round,
+            ),
+            iterations=1,
+        )
+
+        assert ChainlinkDataProvider._prefetch_round_ids(start, end) == []
 
 
 class TestFeedConfiguration:
@@ -667,6 +700,490 @@ class TestCachingBehavior:
         assert provider._cache.ttl_seconds == 120
 
 
+class TestPersistentCache:
+    """Tests for persistent Chainlink round cache load/save behavior."""
+
+    @staticmethod
+    def _write_cache(tmp_path, payload: dict) -> None:
+        cache_path = tmp_path / "chainlink_rounds_ethereum.json"
+        cache_path.write_text(json.dumps(payload))
+
+    def test_load_persistent_cache_valid_file(self, tmp_path):
+        payload = {
+            "cached_at": datetime.now(UTC).isoformat(),
+            "chain": "ethereum",
+            "rounds": {
+                "0xfeed": [
+                    {"round_id": 1, "updated_at": 1718450000, "price": "2500.00"},
+                    {"round_id": 2, "updated_at": 1718453600, "price": "2510.00"},
+                ]
+            },
+            "decimals": {"0xfeed": 8},
+            "round_bounds": {"0xfeed": {"min": 1, "max": 2}},
+        }
+        self._write_cache(tmp_path, payload)
+
+        provider = ChainlinkDataProvider(
+            chain="ethereum",
+            persistent_cache_config=PersistentCacheConfig(enabled=True, cache_directory=str(tmp_path)),
+        )
+
+        assert provider._round_cache == {
+            "0xfeed": [
+                (1, 1718450000, Decimal("2500.00")),
+                (2, 1718453600, Decimal("2510.00")),
+            ]
+        }
+        assert provider._decimals_cache == {"0xfeed": 8}
+        assert provider._round_bounds_cache == {"0xfeed": (1, 2)}
+
+    def test_malformed_persistent_cache_does_not_partially_hydrate_state(self, tmp_path):
+        payload = {
+            "cached_at": datetime.now(UTC).isoformat(),
+            "chain": "ethereum",
+            "rounds": {
+                "0xgood": [{"round_id": 1, "updated_at": 1718450000, "price": "2500.00"}],
+                "0xbad": [{"round_id": 2, "updated_at": 1718453600}],
+            },
+            "decimals": {"0xgood": 8},
+            "round_bounds": {"0xgood": {"min": 1, "max": 1}},
+        }
+        self._write_cache(tmp_path, payload)
+
+        provider = ChainlinkDataProvider(
+            chain="ethereum",
+            persistent_cache_config=PersistentCacheConfig(enabled=True, cache_directory=str(tmp_path)),
+        )
+
+        assert provider._round_cache == {}
+        assert provider._decimals_cache == {}
+        assert provider._round_bounds_cache == {}
+
+    def test_expired_persistent_cache_is_ignored(self, tmp_path):
+        payload = {
+            "cached_at": datetime(2024, 1, 1, tzinfo=UTC).isoformat(),
+            "rounds": {"0xfeed": [{"round_id": 1, "updated_at": 1718450000, "price": "2500.00"}]},
+            "decimals": {"0xfeed": 8},
+            "round_bounds": {"0xfeed": {"min": 1, "max": 1}},
+        }
+        self._write_cache(tmp_path, payload)
+
+        provider = ChainlinkDataProvider(
+            chain="ethereum",
+            persistent_cache_config=PersistentCacheConfig(
+                enabled=True,
+                cache_directory=str(tmp_path),
+                max_age_days=1,
+            ),
+        )
+
+        assert provider._round_cache == {}
+        assert provider._decimals_cache == {}
+        assert provider._round_bounds_cache == {}
+
+    def test_save_persistent_cache_serializes_rounds_and_bounds(self, tmp_path):
+        provider = ChainlinkDataProvider(
+            chain="ethereum",
+            persistent_cache_config=PersistentCacheConfig(enabled=True, cache_directory=str(tmp_path)),
+        )
+        provider._round_cache = {"0xfeed": [(1, 1718450000, Decimal("2500.00"))]}
+        provider._decimals_cache = {"0xfeed": 8}
+        provider._round_bounds_cache = {"0xfeed": (1, 10)}
+
+        provider._save_persistent_cache()
+
+        cache_path = tmp_path / "chainlink_rounds_ethereum.json"
+        saved = json.loads(cache_path.read_text())
+        assert saved["chain"] == "ethereum"
+        assert saved["rounds"]["0xfeed"] == [
+            {"round_id": 1, "updated_at": 1718450000, "price": "2500.00"}
+        ]
+        assert saved["decimals"] == {"0xfeed": 8}
+        assert saved["round_bounds"] == {"0xfeed": {"min": 1, "max": 10}}
+
+
+class TestHistoricalPriceCacheLookup:
+    """Tests for Chainlink historical cache lookup helpers."""
+
+    @pytest.mark.asyncio
+    async def test_get_historical_price_uses_latest_cached_timestamp_before_target(self):
+        provider = ChainlinkDataProvider()
+        first_ts = int(datetime(2024, 6, 15, 12, 0, tzinfo=UTC).timestamp())
+        second_ts = int(datetime(2024, 6, 15, 13, 0, tzinfo=UTC).timestamp())
+        provider._historical_cache["ETH"] = {
+            first_ts: Decimal("2500"),
+            second_ts: Decimal("2550"),
+        }
+
+        price = await provider._get_historical_price("ETH", datetime(2024, 6, 15, 13, 30, tzinfo=UTC))
+
+        assert price == Decimal("2550")
+
+    @pytest.mark.asyncio
+    async def test_get_historical_price_falls_back_to_main_cache(self):
+        provider = ChainlinkDataProvider()
+        provider.set_historical_prices(
+            "ETH",
+            [(datetime(2024, 6, 15, 12, 0, tzinfo=UTC), Decimal("2500"))],
+        )
+
+        price = await provider._get_historical_price("ETH", datetime(2024, 6, 15, 12, 30, tzinfo=UTC))
+
+        assert price == Decimal("2500")
+
+    @pytest.mark.asyncio
+    async def test_get_historical_price_uses_persistent_round_cache(self):
+        provider = ChainlinkDataProvider()
+        feed = provider.get_feed_config("ETH")
+        assert feed is not None
+        provider._round_cache[feed.address] = [
+            (1, int(datetime(2024, 6, 15, 12, 0, tzinfo=UTC).timestamp()), Decimal("2500")),
+            (2, int(datetime(2024, 6, 15, 13, 0, tzinfo=UTC).timestamp()), Decimal("2550")),
+        ]
+
+        price = await provider._get_historical_price("ETH", datetime(2024, 6, 15, 13, 30, tzinfo=UTC))
+
+        assert price == Decimal("2550")
+
+
+class TestPrefetchRoundsForRange:
+    """Tests for Chainlink range prefetch cache behavior."""
+
+    @pytest.mark.asyncio
+    async def test_prefetch_rounds_deduplicates_existing_round_ids(self):
+        provider = ChainlinkDataProvider(chain="ethereum", rpc_url="https://example.com")
+        feed = provider.get_feed_config("ETH")
+        assert feed is not None
+        first_round = ChainlinkRoundData(
+            round_id=1,
+            answer=250000000000,
+            started_at=1718450000,
+            updated_at=1718450000,
+            answered_in_round=1,
+        )
+        second_round = ChainlinkRoundData(
+            round_id=2,
+            answer=255000000000,
+            started_at=1718453600,
+            updated_at=1718453600,
+            answered_in_round=2,
+        )
+
+        async def fake_binary_search(feed_address: str, target_ts: int) -> BinarySearchResult:
+            assert feed_address == feed.address
+            if target_ts == first_round.updated_at:
+                return BinarySearchResult(1, first_round, iterations=1, exact_match=True)
+            return BinarySearchResult(2, second_round, iterations=1, exact_match=True)
+
+        provider._get_decimals_cached = AsyncMock(return_value=8)  # type: ignore[method-assign]
+        provider._binary_search_round_for_timestamp = fake_binary_search  # type: ignore[method-assign]
+        provider._batch_query_rounds = AsyncMock(return_value=[first_round, second_round])  # type: ignore[method-assign]
+        provider._save_persistent_cache = MagicMock()  # type: ignore[method-assign]
+
+        start = datetime.fromtimestamp(first_round.updated_at, tz=UTC)
+        end = datetime.fromtimestamp(second_round.updated_at, tz=UTC)
+
+        first_count = await provider.prefetch_rounds_for_range("ETH", start, end)
+        second_count = await provider.prefetch_rounds_for_range("ETH", start, end)
+
+        assert first_count == 2
+        assert second_count == 2
+        assert provider._round_cache[feed.address] == [
+            (1, first_round.updated_at, Decimal("2500")),
+            (2, second_round.updated_at, Decimal("2550")),
+        ]
+        assert provider._historical_cache["ETH"] == {
+            first_round.updated_at: Decimal("2500"),
+            second_round.updated_at: Decimal("2550"),
+        }
+
+
+class TestBinarySearchRoundForTimestamp:
+    """Tests for Chainlink timestamp-to-round binary search."""
+
+    @staticmethod
+    def _round(round_id: int, updated_at: int, answer: int | None = None) -> ChainlinkRoundData:
+        return ChainlinkRoundData(
+            round_id=round_id,
+            answer=answer if answer is not None else round_id * 100000000,
+            started_at=updated_at,
+            updated_at=updated_at,
+            answered_in_round=round_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_binary_search_returns_exact_match(self):
+        provider = ChainlinkDataProvider(rpc_url="https://example.com")
+        rounds = {
+            1: self._round(1, 100),
+            2: self._round(2, 200),
+            3: self._round(3, 300),
+        }
+        provider._round_bounds_cache["0xfeed"] = (1, 3)
+        provider._query_round_data = AsyncMock(side_effect=lambda _feed, round_id: rounds.get(round_id))  # type: ignore[method-assign]
+
+        result = await provider._binary_search_round_for_timestamp("0xfeed", 200)
+
+        assert result is not None
+        assert result.round_id == 2
+        assert result.exact_match is True
+
+    @pytest.mark.asyncio
+    async def test_binary_search_returns_latest_when_target_after_latest(self):
+        provider = ChainlinkDataProvider(rpc_url="https://example.com")
+        latest = self._round(3, 300)
+        provider._round_bounds_cache["0xfeed"] = (1, 3)
+        provider._query_round_data = AsyncMock(return_value=latest)  # type: ignore[method-assign]
+
+        result = await provider._binary_search_round_for_timestamp("0xfeed", 400)
+
+        assert result is not None
+        assert result.round_id == 3
+        assert result.round_data is latest
+        assert result.exact_match is False
+
+    @pytest.mark.asyncio
+    async def test_binary_search_skips_round_gap_and_returns_best_before_target(self):
+        provider = ChainlinkDataProvider(rpc_url="https://example.com")
+        rounds = {
+            1: self._round(1, 100),
+            2: self._round(2, 200),
+            4: self._round(4, 400),
+            5: self._round(5, 500),
+        }
+        provider._round_bounds_cache["0xfeed"] = (1, 5)
+        provider._query_round_data = AsyncMock(side_effect=lambda _feed, round_id: rounds.get(round_id))  # type: ignore[method-assign]
+
+        result = await provider._binary_search_round_for_timestamp("0xfeed", 450)
+
+        assert result is not None
+        assert result.round_id == 4
+        assert result.round_data.updated_at == 400
+        assert result.exact_match is False
+
+    @pytest.mark.asyncio
+    async def test_binary_search_returns_none_before_earliest_round(self):
+        provider = ChainlinkDataProvider(rpc_url="https://example.com")
+        rounds = {
+            1: self._round(1, 100),
+            2: self._round(2, 200),
+            3: self._round(3, 300),
+        }
+        provider._round_bounds_cache["0xfeed"] = (1, 3)
+        provider._query_round_data = AsyncMock(side_effect=lambda _feed, round_id: rounds.get(round_id))  # type: ignore[method-assign]
+
+        result = await provider._binary_search_round_for_timestamp("0xfeed", 50)
+
+        assert result is None
+
+
+class TestGetPriceAtTimestamp:
+    """Tests for Chainlink timestamp price result construction."""
+
+    @staticmethod
+    def _round(round_id: int, updated_at: int, answer: int = 250000000000) -> ChainlinkRoundData:
+        return ChainlinkRoundData(
+            round_id=round_id,
+            answer=answer,
+            started_at=updated_at,
+            updated_at=updated_at,
+            answered_in_round=round_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_price_at_timestamp_unknown_token_returns_none(self):
+        provider = ChainlinkDataProvider(rpc_url="https://example.com")
+
+        result = await provider.get_price_at_timestamp("UNKNOWN", datetime(2024, 6, 15, tzinfo=UTC))
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_price_at_timestamp_without_round_returns_none(self):
+        provider = ChainlinkDataProvider(rpc_url="https://example.com")
+        provider._get_decimals_cached = AsyncMock(return_value=8)  # type: ignore[method-assign]
+        provider._binary_search_round_for_timestamp = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+        result = await provider.get_price_at_timestamp("ETH", datetime(2024, 6, 15, tzinfo=UTC))
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_price_at_timestamp_exact_match_is_high_confidence(self):
+        provider = ChainlinkDataProvider(rpc_url="https://example.com")
+        target = datetime(2024, 6, 15, 12, 0, tzinfo=UTC)
+        round_data = self._round(10, int(target.timestamp()))
+        provider._get_decimals_cached = AsyncMock(return_value=8)  # type: ignore[method-assign]
+        provider._binary_search_round_for_timestamp = AsyncMock(  # type: ignore[method-assign]
+            return_value=BinarySearchResult(
+                round_id=10,
+                round_data=round_data,
+                iterations=1,
+                exact_match=True,
+            )
+        )
+
+        result = await provider.get_price_at_timestamp("ETH", target)
+
+        assert result is not None
+        assert result.price == Decimal("2500")
+        assert result.round_id == 10
+        assert result.confidence == DataConfidence.HIGH
+        assert result.source_info.confidence == DataConfidence.HIGH
+        assert result.is_stale is False
+
+    @pytest.mark.asyncio
+    async def test_get_price_at_timestamp_nearby_round_is_medium_confidence(self):
+        provider = ChainlinkDataProvider(rpc_url="https://example.com")
+        target = datetime(2024, 6, 15, 12, 10, tzinfo=UTC)
+        round_data = self._round(10, int(datetime(2024, 6, 15, 12, 0, tzinfo=UTC).timestamp()))
+        provider._get_decimals_cached = AsyncMock(return_value=8)  # type: ignore[method-assign]
+        provider._binary_search_round_for_timestamp = AsyncMock(  # type: ignore[method-assign]
+            return_value=BinarySearchResult(
+                round_id=10,
+                round_data=round_data,
+                iterations=1,
+                exact_match=False,
+            )
+        )
+
+        result = await provider.get_price_at_timestamp("ETH", target)
+
+        assert result is not None
+        assert result.confidence == DataConfidence.MEDIUM
+        assert result.is_stale is False
+
+    @pytest.mark.asyncio
+    async def test_get_price_at_timestamp_old_round_is_low_confidence_and_stale(self):
+        provider = ChainlinkDataProvider(rpc_url="https://example.com")
+        target = datetime(2024, 6, 15, 14, 0, tzinfo=UTC)
+        round_data = self._round(10, int(datetime(2024, 6, 15, 12, 0, tzinfo=UTC).timestamp()))
+        provider._get_decimals_cached = AsyncMock(return_value=8)  # type: ignore[method-assign]
+        provider._binary_search_round_for_timestamp = AsyncMock(  # type: ignore[method-assign]
+            return_value=BinarySearchResult(
+                round_id=10,
+                round_data=round_data,
+                iterations=1,
+                exact_match=False,
+            )
+        )
+
+        result = await provider.get_price_at_timestamp("ETH", target)
+
+        assert result is not None
+        assert result.confidence == DataConfidence.LOW
+        assert result.is_stale is True
+
+
+class TestFetchHistoricalRounds:
+    """Tests for Chainlink historical round traversal."""
+
+    @staticmethod
+    def _round(round_id: int, updated_at: int, answer: int | None = None) -> ChainlinkRoundData:
+        return ChainlinkRoundData(
+            round_id=round_id,
+            answer=answer if answer is not None else round_id * 100000000,
+            started_at=updated_at,
+            updated_at=updated_at,
+            answered_in_round=round_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetch_historical_rounds_unknown_token_returns_empty(self):
+        provider = ChainlinkDataProvider(rpc_url="https://example.com")
+
+        prices = await provider._fetch_historical_rounds(
+            "UNKNOWN",
+            datetime(2024, 6, 15, 12, 0, tzinfo=UTC),
+            datetime(2024, 6, 15, 13, 0, tzinfo=UTC),
+        )
+
+        assert prices == []
+
+    @pytest.mark.asyncio
+    async def test_fetch_historical_rounds_without_latest_round_returns_empty(self):
+        provider = ChainlinkDataProvider(rpc_url="https://example.com")
+        provider._get_decimals_cached = AsyncMock(return_value=8)  # type: ignore[method-assign]
+        provider._query_latest_round_data = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        provider._query_round_data = AsyncMock()  # type: ignore[method-assign]
+
+        prices = await provider._fetch_historical_rounds(
+            "ETH",
+            datetime(2024, 6, 15, 12, 0, tzinfo=UTC),
+            datetime(2024, 6, 15, 13, 0, tzinfo=UTC),
+        )
+
+        assert prices == []
+        provider._query_round_data.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fetch_historical_rounds_collects_range_sorted_and_caches(self):
+        provider = ChainlinkDataProvider(rpc_url="https://example.com")
+        start = datetime(2024, 6, 15, 12, 0, tzinfo=UTC)
+        end = datetime(2024, 6, 15, 14, 0, tzinfo=UTC)
+        start_ts = int(start.timestamp())
+        rounds = {
+            5: self._round(5, int(end.timestamp()), 260000000000),
+            4: self._round(4, int(datetime(2024, 6, 15, 13, 0, tzinfo=UTC).timestamp()), 255000000000),
+            3: self._round(3, start_ts, 250000000000),
+            2: self._round(2, start_ts - 3600, 240000000000),
+        }
+        provider._get_decimals_cached = AsyncMock(return_value=8)  # type: ignore[method-assign]
+        provider._query_latest_round_data = AsyncMock(return_value=rounds[5])  # type: ignore[method-assign]
+        provider._query_round_data = AsyncMock(side_effect=lambda _feed, round_id: rounds.get(round_id))  # type: ignore[method-assign]
+
+        prices = await provider._fetch_historical_rounds("ETH", start, end)
+
+        assert prices == [
+            (start, Decimal("2500")),
+            (datetime(2024, 6, 15, 13, 0, tzinfo=UTC), Decimal("2550")),
+            (end, Decimal("2600")),
+        ]
+        assert provider._historical_cache["ETH"] == {
+            start_ts: Decimal("2500"),
+            int(datetime(2024, 6, 15, 13, 0, tzinfo=UTC).timestamp()): Decimal("2550"),
+            int(end.timestamp()): Decimal("2600"),
+        }
+
+    @pytest.mark.asyncio
+    async def test_fetch_historical_rounds_skips_round_gaps(self):
+        provider = ChainlinkDataProvider(rpc_url="https://example.com")
+        start = datetime(2024, 6, 15, 12, 0, tzinfo=UTC)
+        end = datetime(2024, 6, 15, 14, 0, tzinfo=UTC)
+        rounds = {
+            5: self._round(5, int(end.timestamp()), 260000000000),
+            3: self._round(3, int(start.timestamp()), 250000000000),
+            2: self._round(2, int(start.timestamp()) - 3600, 240000000000),
+        }
+        provider._get_decimals_cached = AsyncMock(return_value=8)  # type: ignore[method-assign]
+        provider._query_latest_round_data = AsyncMock(return_value=rounds[5])  # type: ignore[method-assign]
+        provider._query_round_data = AsyncMock(side_effect=lambda _feed, round_id: rounds.get(round_id))  # type: ignore[method-assign]
+
+        prices = await provider._fetch_historical_rounds("ETH", start, end)
+
+        assert prices == [
+            (start, Decimal("2500")),
+            (end, Decimal("2600")),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_fetch_historical_rounds_stops_after_many_gaps(self):
+        provider = ChainlinkDataProvider(rpc_url="https://example.com")
+        latest = self._round(150, int(datetime(2024, 6, 15, 14, 0, tzinfo=UTC).timestamp()))
+        provider._get_decimals_cached = AsyncMock(return_value=8)  # type: ignore[method-assign]
+        provider._query_latest_round_data = AsyncMock(return_value=latest)  # type: ignore[method-assign]
+        provider._query_round_data = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+        prices = await provider._fetch_historical_rounds(
+            "ETH",
+            datetime(2024, 6, 15, 12, 0, tzinfo=UTC),
+            datetime(2024, 6, 15, 14, 0, tzinfo=UTC),
+        )
+
+        assert prices == []
+        assert provider._query_round_data.await_count == 101
+
+
 class TestMockedPriceFetching:
     """Tests for price fetching with mocked Chainlink responses."""
 
@@ -717,6 +1234,30 @@ class TestMockedPriceFetching:
 
             # Return too short response (< 160 bytes)
             mock_web3_instance.eth.call.return_value = b"\x00" * 100
+
+            with patch("web3.Web3", mock_web3_class):
+                provider = ChainlinkDataProvider(rpc_url="https://eth-mainnet.example.com")
+                result = provider._query_latest_round_data_sync("0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419")
+
+            assert result is None
+
+    def test_query_latest_round_data_rejects_zero_answer(self):
+        """Test latest round data rejects non-positive oracle answers."""
+        with patch.dict("sys.modules", {"web3": MagicMock()}):
+            mock_web3_instance = MagicMock()
+            mock_web3_class = MagicMock(return_value=mock_web3_instance)
+            mock_web3_class.HTTPProvider = MagicMock()
+            mock_web3_instance.to_checksum_address.return_value = "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"
+
+            current_time = int(datetime.now(UTC).timestamp())
+            mock_result = (
+                int.to_bytes(1, 32, "big")
+                + int.to_bytes(0, 32, "big", signed=True)
+                + int.to_bytes(current_time, 32, "big")
+                + int.to_bytes(current_time, 32, "big")
+                + int.to_bytes(1, 32, "big")
+            )
+            mock_web3_instance.eth.call.return_value = mock_result
 
             with patch("web3.Web3", mock_web3_class):
                 provider = ChainlinkDataProvider(rpc_url="https://eth-mainnet.example.com")
@@ -799,6 +1340,130 @@ class TestMockedPriceFetching:
                 price = provider.get_latest_price_sync("ETH", use_cache=False)
 
             assert price == Decimal("2600")
+
+    def test_get_latest_price_sync_stale_without_raise_returns_none(self):
+        """Test sync get_latest_price returns None for stale data when configured."""
+        provider = ChainlinkDataProvider(rpc_url="https://eth-mainnet.example.com")
+        stale_updated_at = datetime(2024, 1, 1, tzinfo=UTC)
+        round_data = ChainlinkRoundData(
+            round_id=1,
+            answer=250000000000,
+            started_at=int(stale_updated_at.timestamp()),
+            updated_at=int(stale_updated_at.timestamp()),
+            answered_in_round=1,
+        )
+        provider._query_latest_round_data_sync = MagicMock(return_value=round_data)  # type: ignore[method-assign]
+
+        price = provider.get_latest_price_sync("ETH", raise_on_stale=False, use_cache=False)
+
+        assert price is None
+
+    @pytest.mark.asyncio
+    async def test_get_latest_price_unknown_token(self):
+        """Test async get_latest_price raises for unknown token."""
+        provider = ChainlinkDataProvider()
+
+        with pytest.raises(ValueError) as exc_info:
+            await provider.get_latest_price("UNKNOWN_XYZ")
+
+        assert "Unknown token" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_get_latest_price_no_feed(self):
+        """Test async get_latest_price raises when no feed is available."""
+        provider = ChainlinkDataProvider(chain="base")
+
+        with pytest.raises(ValueError) as exc_info:
+            await provider.get_latest_price("GMX")
+
+        assert "No Chainlink feed" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_get_latest_price_with_cache(self):
+        """Test async get_latest_price uses live cache when enabled."""
+        provider = ChainlinkDataProvider(rpc_url="https://eth-mainnet.example.com")
+        provider._cache.set_live_price("ETH", Decimal("2500"))
+        provider._query_latest_round_data = AsyncMock()  # type: ignore[method-assign]
+
+        price = await provider.get_latest_price("ETH", use_cache=True)
+
+        assert price == Decimal("2500")
+        provider._query_latest_round_data.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_get_latest_price_query_failure_returns_none(self):
+        """Test async get_latest_price returns None when latest round query fails."""
+        provider = ChainlinkDataProvider(rpc_url="https://eth-mainnet.example.com")
+        provider._query_latest_round_data = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+        price = await provider.get_latest_price("ETH", use_cache=False)
+
+        assert price is None
+
+    @pytest.mark.asyncio
+    async def test_get_latest_price_converts_and_caches_fresh_round(self):
+        """Test async get_latest_price converts decimals and stores live cache."""
+        provider = ChainlinkDataProvider(rpc_url="https://eth-mainnet.example.com")
+        current_time = int(datetime.now(UTC).timestamp())
+        round_data = ChainlinkRoundData(
+            round_id=1,
+            answer=2500000000,
+            started_at=current_time,
+            updated_at=current_time,
+            answered_in_round=1,
+        )
+        provider._query_latest_round_data = AsyncMock(return_value=round_data)  # type: ignore[method-assign]
+        provider._query_decimals = AsyncMock(return_value=6)  # type: ignore[method-assign]
+
+        price = await provider.get_latest_price("ETH", use_cache=False)
+
+        assert price == Decimal("2500")
+        cached = provider._cache.get_live_price("ETH")
+        assert cached is not None
+        assert cached.price == Decimal("2500")
+
+    @pytest.mark.asyncio
+    async def test_get_latest_price_stale_without_raise_returns_none(self):
+        """Test async get_latest_price returns None for stale data when configured."""
+        provider = ChainlinkDataProvider(rpc_url="https://eth-mainnet.example.com")
+        stale_updated_at = datetime(2024, 1, 1, tzinfo=UTC)
+        round_data = ChainlinkRoundData(
+            round_id=1,
+            answer=250000000000,
+            started_at=int(stale_updated_at.timestamp()),
+            updated_at=int(stale_updated_at.timestamp()),
+            answered_in_round=1,
+        )
+        provider._query_latest_round_data = AsyncMock(return_value=round_data)  # type: ignore[method-assign]
+        provider._query_decimals = AsyncMock(return_value=8)  # type: ignore[method-assign]
+
+        price = await provider.get_latest_price("ETH", raise_on_stale=False, use_cache=False)
+
+        assert price is None
+        provider._query_decimals.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_query_round_data_rejects_negative_answer(self):
+        """Test historical round data rejects negative oracle answers."""
+        provider = ChainlinkDataProvider(rpc_url="https://eth-mainnet.example.com")
+        current_time = int(datetime.now(UTC).timestamp())
+        mock_result = (
+            int.to_bytes(10, 32, "big")
+            + (-1).to_bytes(32, "big", signed=True)
+            + int.to_bytes(current_time, 32, "big")
+            + int.to_bytes(current_time, 32, "big")
+            + int.to_bytes(10, 32, "big")
+        )
+
+        with patch("web3.AsyncWeb3") as mock_web3_class, patch("web3.AsyncHTTPProvider"):
+            mock_web3 = MagicMock()
+            mock_web3.to_checksum_address.return_value = "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"
+            mock_web3.eth.call = AsyncMock(return_value=mock_result)
+            mock_web3_class.return_value = mock_web3
+
+            result = await provider._query_round_data("0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419", 10)
+
+        assert result is None
 
 
 class TestChainlinkRoundData:
@@ -918,6 +1583,139 @@ class TestHistoricalDataIteration:
             assert "fallback_price_hits" in market_state.metadata
             break  # Only need to verify first iteration
 
+    @pytest.mark.asyncio
+    async def test_iterate_fetches_archive_prices_for_uncached_tokens(self):
+        """Test archive mode preloads uncached token prices before iteration."""
+        from almanak.framework.backtesting.pnl.data_provider import HistoricalDataConfig
+
+        provider = ChainlinkDataProvider(rpc_url="https://eth-mainnet.example.com")
+        provider._verify_archive_access = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        start = datetime(2024, 6, 15, 12, 0, tzinfo=UTC)
+        end = datetime(2024, 6, 15, 13, 0, tzinfo=UTC)
+        provider._fetch_historical_rounds = AsyncMock(  # type: ignore[method-assign]
+            return_value=[
+                (start, Decimal("2500")),
+                (end, Decimal("2550")),
+            ]
+        )
+        config = HistoricalDataConfig(
+            start_time=start,
+            end_time=end,
+            interval_seconds=3600,
+            tokens=["ETH"],
+            include_ohlcv=False,
+        )
+
+        data_points = [(timestamp, state) async for timestamp, state in provider.iterate(config)]
+
+        assert [timestamp for timestamp, _state in data_points] == [start, end]
+        assert [state.get_price("ETH") for _timestamp, state in data_points] == [
+            Decimal("2500"),
+            Decimal("2550"),
+        ]
+        assert [state.metadata["data_source"] for _timestamp, state in data_points] == [
+            "chainlink_historical",
+            "chainlink_historical",
+        ]
+        assert data_points[-1][1].metadata["historical_price_hits"] == 2
+        provider._fetch_historical_rounds.assert_awaited_once_with("ETH", start, end)
+
+    @pytest.mark.asyncio
+    async def test_iterate_does_not_refetch_tokens_already_cached(self):
+        """Test archive mode leaves existing token cache intact."""
+        from almanak.framework.backtesting.pnl.data_provider import HistoricalDataConfig
+
+        provider = ChainlinkDataProvider(rpc_url="https://eth-mainnet.example.com")
+        provider.set_historical_prices(
+            "ETH",
+            [(datetime(2024, 6, 15, 12, 0, tzinfo=UTC), Decimal("2500"))],
+        )
+        provider._verify_archive_access = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        provider._fetch_historical_rounds = AsyncMock()  # type: ignore[method-assign]
+        config = HistoricalDataConfig(
+            start_time=datetime(2024, 6, 15, 12, 0, tzinfo=UTC),
+            end_time=datetime(2024, 6, 15, 13, 0, tzinfo=UTC),
+            interval_seconds=3600,
+            tokens=["ETH"],
+        )
+
+        data_points = [(timestamp, state) async for timestamp, state in provider.iterate(config)]
+
+        assert data_points[0][1].get_price("ETH") == Decimal("2500")
+        provider._fetch_historical_rounds.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_iterate_generates_pseudo_ohlcv_when_requested(self):
+        """Test iteration emits pseudo-OHLCV bars from cached spot prices."""
+        from almanak.framework.backtesting.pnl.data_provider import HistoricalDataConfig
+
+        provider = ChainlinkDataProvider()
+        timestamp = datetime(2024, 6, 15, 12, 0, tzinfo=UTC)
+        provider.set_historical_prices("ETH", [(timestamp, Decimal("2500"))])
+        config = HistoricalDataConfig(
+            start_time=timestamp,
+            end_time=timestamp + timedelta(hours=1),
+            interval_seconds=3600,
+            tokens=["ETH"],
+            include_ohlcv=True,
+        )
+
+        _timestamp, state = await anext(provider.iterate(config))
+
+        ohlcv = state.ohlcv["ETH"]
+        assert ohlcv.open == Decimal("2500")
+        assert ohlcv.high == Decimal("2500")
+        assert ohlcv.low == Decimal("2500")
+        assert ohlcv.close == Decimal("2500")
+        assert ohlcv.volume is None
+
+    @pytest.mark.asyncio
+    async def test_iterate_normalizes_naive_archive_window(self):
+        """Test archive preload receives UTC-aware timestamps for naive configs."""
+        from almanak.framework.backtesting.pnl.data_provider import HistoricalDataConfig
+
+        provider = ChainlinkDataProvider(rpc_url="https://eth-mainnet.example.com")
+        provider._verify_archive_access = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        provider._fetch_historical_rounds = AsyncMock(  # type: ignore[method-assign]
+            return_value=[
+                (datetime(2024, 6, 15, 12, 0, tzinfo=UTC), Decimal("2500")),
+                (datetime(2024, 6, 15, 13, 0, tzinfo=UTC), Decimal("2501")),
+            ]
+        )
+        config = HistoricalDataConfig(
+            start_time=datetime(2024, 6, 15, 12, 0),
+            end_time=datetime(2024, 6, 15, 13, 0),
+            interval_seconds=3600,
+            tokens=["ETH"],
+        )
+
+        data_points = [(timestamp, state) async for timestamp, state in provider.iterate(config)]
+
+        fetch_args = provider._fetch_historical_rounds.await_args.args
+        assert fetch_args[1] == datetime(2024, 6, 15, 12, 0, tzinfo=UTC)
+        assert fetch_args[2] == datetime(2024, 6, 15, 13, 0, tzinfo=UTC)
+        assert [timestamp for timestamp, _state in data_points] == [
+            datetime(2024, 6, 15, 12, 0, tzinfo=UTC),
+            datetime(2024, 6, 15, 13, 0, tzinfo=UTC),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_iterate_empty_cache_raises_data_source_unavailable(self):
+        """Test no-archive iteration raises instead of yielding empty market states."""
+        from almanak.framework.backtesting.pnl.data_provider import HistoricalDataConfig
+
+        provider = ChainlinkDataProvider()
+        config = HistoricalDataConfig(
+            start_time=datetime(2024, 6, 15, 12, 0, tzinfo=UTC),
+            end_time=datetime(2024, 6, 15, 13, 0, tzinfo=UTC),
+            interval_seconds=3600,
+            tokens=["ETH"],
+            include_ohlcv=False,
+        )
+
+        with pytest.raises(DataSourceUnavailable):
+            _ = [(timestamp, state) async for timestamp, state in provider.iterate(config)]
+
 
 class TestGetPrice:
     """Tests for get_price method."""
@@ -958,6 +1756,21 @@ class TestGetPrice:
         assert price == Decimal("2500")
 
     @pytest.mark.asyncio
+    async def test_get_price_live_request_prefers_latest_rpc_over_historical_cache(self):
+        """Current-price requests must not be served from stale historical cache."""
+        provider = ChainlinkDataProvider(rpc_url="https://eth-mainnet.example.com")
+        provider.set_historical_prices(
+            "ETH",
+            [(datetime.now(UTC) - timedelta(hours=1), Decimal("2400"))],
+        )
+        provider._latest_price_or_raise = AsyncMock(return_value=Decimal("2600"))  # type: ignore[method-assign]
+
+        price = await provider.get_price("ETH")
+
+        assert price == Decimal("2600")
+        provider._latest_price_or_raise.assert_awaited_once_with("ETH", True)
+
+    @pytest.mark.asyncio
     async def test_get_price_historical_not_available(self):
         """Test get_price raises when historical data not available."""
         provider = ChainlinkDataProvider()
@@ -966,6 +1779,27 @@ class TestGetPrice:
             await provider.get_price("ETH", datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC))
 
         assert "not available" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_get_price_returns_archive_price_when_cache_disabled(self):
+        """Historical archive fetch should return fetched prices even without cache."""
+        provider = ChainlinkDataProvider(
+            rpc_url="https://eth-mainnet.example.com",
+            cache_ttl_seconds=0,
+        )
+        target = datetime(2024, 6, 15, 12, 0, 0, tzinfo=UTC)
+        provider._verify_archive_access = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        provider._fetch_historical_rounds = AsyncMock(  # type: ignore[method-assign]
+            return_value=[
+                (target - timedelta(minutes=5), Decimal("2495")),
+                (target, Decimal("2500")),
+                (target + timedelta(minutes=5), Decimal("2505")),
+            ]
+        )
+
+        price = await provider.get_price("ETH", target)
+
+        assert price == Decimal("2500")
 
 
 class TestGetOhlcv:

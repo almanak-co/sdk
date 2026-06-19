@@ -42,6 +42,25 @@ class MissingPriceError(ValueError):
         )
 
 
+def _trade_intent_type(trade: PaperTrade) -> str:
+    intent_type = getattr(trade, "intent_type", "") or ""
+    if intent_type:
+        return intent_type.upper()
+    if isinstance(trade.intent, dict):
+        return str(trade.intent.get("type", "")).upper()
+    return ""
+
+
+def _has_negative_token_flows(trade: PaperTrade) -> bool:
+    return any(amount < 0 for token_flows in (trade.tokens_in, trade.tokens_out) for amount in token_flows.values())
+
+
+def _swap_has_zero_inflow(trade: PaperTrade, intent_type: str) -> bool:
+    if intent_type != "SWAP" or not trade.tokens_out:
+        return False
+    return not any(amount > 0 for amount in trade.tokens_in.values())
+
+
 @dataclass
 class PaperPortfolioTracker:
     """Tracks paper trading portfolio state.
@@ -143,21 +162,25 @@ class PaperPortfolioTracker:
             )
             tracker.record_trade(trade)
         """
-        # VIB-2551: Sanity guard — reject trades with zero-amount inflows for swaps
-        # This prevents the -$42k PnL corruption from Decimal("0") fallbacks
-        # Use trade.intent_type (always set by engine) with intent dict fallback
-        intent_type = getattr(trade, "intent_type", "") or ""
-        if not intent_type:
-            intent_type = trade.intent.get("type", "") if isinstance(trade.intent, dict) else ""
-        if intent_type.upper() == "SWAP" and trade.tokens_out:
-            has_nonzero_inflow = any(amount > 0 for amount in trade.tokens_in.values())
-            if not has_nonzero_inflow:
-                logger.error(
-                    f"[paper-trading] SANITY GUARD: Swap trade has zero/empty inflows "
-                    f"(tokens_in={trade.tokens_in}, tokens_out={trade.tokens_out}). "
-                    f"Rejecting trade to prevent balance corruption."
-                )
-                return
+        intent_type = _trade_intent_type(trade)
+        if _has_negative_token_flows(trade):
+            logger.error(
+                "[paper-trading] SANITY GUARD: Trade has negative token flows "
+                "(tokens_in=%s, tokens_out=%s). Rejecting trade to prevent balance corruption.",
+                trade.tokens_in,
+                trade.tokens_out,
+            )
+            return
+
+        # VIB-2551: reject swap zero-amount inflows before mutating balances.
+        if _swap_has_zero_inflow(trade, intent_type):
+            logger.error(
+                "[paper-trading] SANITY GUARD: Swap trade has zero/empty inflows "
+                "(tokens_in=%s, tokens_out=%s). Rejecting trade to prevent balance corruption.",
+                trade.tokens_in,
+                trade.tokens_out,
+            )
+            return
 
         # Add trade to list
         self.trades.append(trade)

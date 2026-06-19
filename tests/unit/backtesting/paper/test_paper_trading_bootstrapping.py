@@ -15,6 +15,7 @@ import pytest
 
 from almanak.framework.anvil.fork_manager import RollingForkManager
 from almanak.framework.backtesting.paper.config import PaperTraderConfig
+from almanak.framework.backtesting.paper.engine import PaperTrader
 
 # ---- PaperTraderConfig.get_initial_balances() ----
 
@@ -364,3 +365,41 @@ class TestBootstrapConfig:
         balances = config.get_initial_balances()
         assert "wstETH" in balances
         assert "swETH" in balances
+
+
+class TestBootstrapValidation:
+    """Post-funding validation boundaries for bootstrap requirements."""
+
+    @pytest.mark.asyncio()
+    async def test_zero_requested_amount_is_not_missing_under_strict_validation(self):
+        config = PaperTraderConfig(
+            chain="arbitrum",
+            rpc_url="https://arb.example.com",
+            deployment_id="test",
+            strict_bootstrap=True,
+        )
+        fork_manager = MagicMock()
+        fork_manager._get_token_balance = AsyncMock(return_value=0)
+        portfolio_tracker = MagicMock()
+
+        with (
+            patch("almanak.framework.backtesting.paper.engine.CoinGeckoPriceSource"),
+            patch("almanak.framework.backtesting.paper.engine.ChainlinkDataProvider"),
+            patch("almanak.framework.backtesting.paper.engine.DEXTWAPDataProvider"),
+        ):
+            trader = PaperTrader(
+                fork_manager=fork_manager,
+                portfolio_tracker=portfolio_tracker,
+                config=config,
+            )
+
+        resolver = MagicMock()
+        resolver.resolve.return_value = MagicMock(address="0xaf88d065e77c8cc2239327c5edb3a432268e5831")
+
+        with patch("almanak.framework.data.tokens.get_token_resolver", return_value=resolver):
+            await trader._validate_bootstrap(
+                "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+                {"USDC": Decimal("0")},
+            )
+
+        fork_manager._get_token_balance.assert_not_awaited()

@@ -9,7 +9,7 @@ a 4882% actual return was being reported as 48.82% — the raw ratio stored in t
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from almanak.framework.backtesting.models import LendingLiquidationEvent, LiquidationEvent
+from almanak.framework.backtesting.models import IntentType, LendingLiquidationEvent, LiquidationEvent, TradeRecord
 from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
 from almanak.framework.backtesting.pnl.metrics_calculator import calculate_metrics
 from almanak.framework.backtesting.pnl.portfolio import EquityPoint, SimulatedPortfolio
@@ -26,6 +26,31 @@ def _make_config(initial_capital: Decimal = Decimal("10000")) -> PnLBacktestConf
         start_time=datetime(2024, 1, 1),
         end_time=datetime(2024, 12, 31),
         initial_capital_usd=initial_capital,
+    )
+
+
+def _trade_record(
+    *,
+    timestamp: datetime,
+    pnl_usd: Decimal | None,
+    success: bool = True,
+    fee_usd: Decimal = Decimal("0"),
+    slippage_usd: Decimal = Decimal("0"),
+    gas_cost_usd: Decimal = Decimal("0"),
+    gas_price_gwei: Decimal | None = None,
+    estimated_mev_cost_usd: Decimal | None = None,
+) -> TradeRecord:
+    return TradeRecord(
+        timestamp=timestamp,
+        intent_type=IntentType.SWAP,
+        executed_price=Decimal("1"),
+        fee_usd=fee_usd,
+        slippage_usd=slippage_usd,
+        gas_cost_usd=gas_cost_usd,
+        pnl_usd=pnl_usd,
+        success=success,
+        gas_price_gwei=gas_price_gwei,
+        estimated_mev_cost_usd=estimated_mev_cost_usd,
     )
 
 
@@ -189,6 +214,62 @@ class TestNetPnlEqualsEquityCurvePnl:
         assert metrics.total_fees_usd == Decimal("30")
         assert metrics.total_slippage_usd == Decimal("10")
         assert metrics.total_gas_usd == Decimal("5")
+
+
+class TestTradeStatisticsBoundaries:
+    """Characterize trade-stat denominator and cost-column boundaries."""
+
+    def test_breakeven_trade_is_measured_realized_pnl(self) -> None:
+        t0 = datetime(2024, 1, 1)
+        portfolio = _make_portfolio(
+            [
+                (t0, Decimal("10000")),
+                (t0 + timedelta(days=1), Decimal("10000")),
+            ]
+        )
+        trades = [_trade_record(timestamp=t0, pnl_usd=Decimal("0"))]
+
+        metrics = calculate_metrics(portfolio, trades=trades, config=_make_config())
+
+        assert metrics.trades_with_realized_pnl == 1
+        assert metrics.winning_trades == 0
+        assert metrics.losing_trades == 1
+        assert metrics.win_rate == Decimal("0")
+        assert metrics.avg_trade_pnl_usd == Decimal("0")
+
+    def test_failed_trade_costs_are_reported_but_excluded_from_performance_denominator(self) -> None:
+        t0 = datetime(2024, 1, 1)
+        portfolio = _make_portfolio(
+            [
+                (t0, Decimal("10000")),
+                (t0 + timedelta(days=1), Decimal("10010")),
+            ]
+        )
+        trades = [
+            _trade_record(timestamp=t0, pnl_usd=Decimal("10"), gas_price_gwei=Decimal("20")),
+            _trade_record(
+                timestamp=t0 + timedelta(hours=1),
+                pnl_usd=Decimal("-999"),
+                success=False,
+                fee_usd=Decimal("2"),
+                slippage_usd=Decimal("3"),
+                gas_cost_usd=Decimal("4"),
+                gas_price_gwei=Decimal("40"),
+                estimated_mev_cost_usd=Decimal("5"),
+            ),
+        ]
+
+        metrics = calculate_metrics(portfolio, trades=trades, config=_make_config())
+
+        assert metrics.total_trades == 1
+        assert metrics.failed_trades == 1
+        assert metrics.trades_with_realized_pnl == 1
+        assert metrics.total_fees_usd == Decimal("2")
+        assert metrics.total_slippage_usd == Decimal("3")
+        assert metrics.total_gas_usd == Decimal("4")
+        assert metrics.total_mev_cost_usd == Decimal("5")
+        assert metrics.avg_gas_price_gwei == Decimal("30")
+        assert metrics.max_gas_price_gwei == Decimal("40")
 
 
 class TestPositionDerivedMetricsParity:

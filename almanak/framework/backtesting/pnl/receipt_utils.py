@@ -144,12 +144,128 @@ def _topic_to_address(topic: bytes | str) -> str:
     Returns:
         Checksummed address string
     """
-    if isinstance(topic, bytes):
-        return "0x" + topic[-20:].hex()
-    if isinstance(topic, str):
-        topic = topic.replace("0x", "")
-        return "0x" + topic[-40:]
+    topic_hex = _hex_without_prefix(topic)
+    if len(topic_hex) < 40:
+        return ""
+    return "0x" + topic_hex[-40:].lower()
+
+
+def _hex_without_prefix(value: bytes | str) -> str:
+    """Return lowercase hex without a leading 0x prefix."""
+    if isinstance(value, bytes):
+        return value.hex().lower()
+    if isinstance(value, str):
+        text = value.strip().lower()
+        return text[2:] if text.startswith("0x") else text
     return ""
+
+
+def _normalize_topic(topic: bytes | str) -> str:
+    """Return a normalized 0x-prefixed topic string."""
+    topic_hex = _hex_without_prefix(topic)
+    return f"0x{topic_hex}" if topic_hex else ""
+
+
+def _parse_int(value: Any) -> int | None:
+    """Parse decimal, hex-string, or bytes integers from JSON-RPC fields."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, bytes):
+        value_hex = value.hex()
+        return int(value_hex, 16) if value_hex else 0
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        return int(text, 16) if text.lower().startswith("0x") else int(text)
+    return None
+
+
+def _receipt_succeeded(receipt: dict[str, Any]) -> bool:
+    """Return whether a receipt status indicates success."""
+    if "status" not in receipt:
+        return True
+    try:
+        return _parse_int(receipt["status"]) == 1
+    except ValueError:
+        return False
+
+
+def _is_transfer_topic(topics: list[Any] | tuple[Any, ...]) -> bool:
+    """Return whether topics start with the ERC-20/721 Transfer signature."""
+    return bool(topics) and _normalize_topic(topics[0]) == TRANSFER_EVENT_TOPIC
+
+
+def _is_erc20_transfer_topics(topics: list[Any] | tuple[Any, ...]) -> bool:
+    """Return whether topic shape matches ERC-20 Transfer(address,address,uint256)."""
+    if not _is_transfer_topic(topics):
+        return False
+    if len(topics) < 3:
+        logger.warning("Transfer event has fewer than 3 topics, skipping")
+        return False
+    if len(topics) != 3:
+        logger.debug("Transfer event has non-ERC20 topic shape, skipping")
+        return False
+    return True
+
+
+def _parse_transfer_value(data: Any) -> int | None:
+    """Parse a Transfer data word; empty means unmeasured/malformed, not zero."""
+    data_hex = _hex_without_prefix(data)
+    if not data_hex:
+        return None
+    return int(data_hex, 16)
+
+
+def _normalize_token_address(token_address: Any) -> str:
+    """Normalize an emitting token contract address from a log."""
+    if isinstance(token_address, bytes):
+        return "0x" + token_address.hex().lower()
+    if isinstance(token_address, str):
+        text = token_address.strip().lower()
+        return text if text.startswith("0x") else f"0x{text}"
+    return ""
+
+
+def _parse_log_index(log_index: Any) -> int:
+    """Parse logIndex while preserving zero as the default for absent values."""
+    try:
+        parsed = _parse_int(log_index)
+    except ValueError:
+        return 0
+    return parsed if parsed is not None else 0
+
+
+def _parse_transfer_log(log: Any) -> TransferEvent | None:
+    """Parse a single ERC-20 Transfer log, returning None when it is not usable."""
+    if not isinstance(log, dict):
+        return None
+
+    topics = log.get("topics", [])
+    if not isinstance(topics, list | tuple) or not _is_erc20_transfer_topics(topics):
+        return None
+
+    from_addr = _topic_to_address(topics[1])
+    to_addr = _topic_to_address(topics[2])
+    token_address = _normalize_token_address(log.get("address", ""))
+    if not from_addr or not to_addr or not token_address:
+        logger.warning("Transfer event has invalid address fields, skipping")
+        return None
+
+    value = _parse_transfer_value(log.get("data", ""))
+    if value is None:
+        logger.warning("Transfer event has empty data, skipping")
+        return None
+
+    return TransferEvent(
+        token_address=token_address,
+        from_addr=from_addr,
+        to_addr=to_addr,
+        value=value,
+        log_index=_parse_log_index(log.get("logIndex", 0)),
+    )
 
 
 def parse_transfer_events(receipt: dict[str, Any] | None) -> list[TransferEvent]:
@@ -175,9 +291,7 @@ def parse_transfer_events(receipt: dict[str, Any] | None) -> list[TransferEvent]
     if receipt is None:
         return []
 
-    # Check transaction status - don't parse failed transactions
-    status = receipt.get("status", 1)
-    if status != 1:
+    if not _receipt_succeeded(receipt):
         logger.debug("Transaction failed (status != 1), no transfers to parse")
         return []
 
@@ -189,54 +303,9 @@ def parse_transfer_events(receipt: dict[str, Any] | None) -> list[TransferEvent]
 
     for log in logs:
         try:
-            topics = log.get("topics", [])
-            if not topics:
-                continue
-
-            # Get the event signature (first topic)
-            first_topic = topics[0]
-            if isinstance(first_topic, bytes):
-                first_topic = "0x" + first_topic.hex()
-
-            # Check if this is a Transfer event
-            if first_topic != TRANSFER_EVENT_TOPIC:
-                continue
-
-            # Need at least 3 topics for Transfer (signature + from + to)
-            if len(topics) < 3:
-                logger.warning("Transfer event has fewer than 3 topics, skipping")
-                continue
-
-            # Parse addresses from indexed topics
-            from_addr = _topic_to_address(topics[1])
-            to_addr = _topic_to_address(topics[2])
-
-            # Parse value from data
-            data = log.get("data", "")
-            if isinstance(data, bytes):
-                data = data.hex()
-            elif isinstance(data, str) and data.startswith("0x"):
-                data = data[2:]
-
-            value = int(data, 16) if data else 0
-
-            # Get token address (contract that emitted the event)
-            token_address = log.get("address", "")
-            if isinstance(token_address, bytes):
-                token_address = "0x" + token_address.hex()
-            token_address = token_address.lower()
-
-            log_index = log.get("logIndex", 0)
-
-            transfers.append(
-                TransferEvent(
-                    token_address=token_address,
-                    from_addr=from_addr.lower(),
-                    to_addr=to_addr.lower(),
-                    value=value,
-                    log_index=log_index,
-                )
-            )
+            transfer = _parse_transfer_log(log)
+            if transfer is not None:
+                transfers.append(transfer)
 
         except Exception as e:
             logger.warning(f"Failed to parse Transfer event: {e}")

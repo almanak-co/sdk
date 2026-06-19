@@ -11,14 +11,14 @@ covering:
 - Market ID resolution by symbol
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from almanak.core.enums import Chain
+from almanak.framework.backtesting.exceptions import DataSourceUnavailableError
 from almanak.framework.backtesting.pnl.providers.lending.spark_apy import (
     BORROWER_SIDE,
     DATA_SOURCE,
@@ -108,7 +108,7 @@ class TestSupportedChains:
 
     def test_subgraph_ids_are_valid_format(self):
         """Test subgraph IDs have valid format (base58-like)."""
-        for chain, subgraph_id in SPARK_SUBGRAPH_IDS.items():
+        for _chain, subgraph_id in SPARK_SUBGRAPH_IDS.items():
             # Subgraph IDs are base58-like strings
             assert len(subgraph_id) >= 40
             assert all(c.isalnum() for c in subgraph_id)
@@ -385,6 +385,79 @@ class TestAPYFetching:
         mock_client.query.side_effect = [
             {"markets": [{"id": "0xmarket123", "name": "DAI", "inputToken": {"symbol": "DAI"}}]},
             SubgraphQueryError("Query failed"),
+        ]
+
+        provider = SparkAPYProvider(client=mock_client)
+        results = await provider.get_apy(
+            protocol="spark",
+            market="DAI",
+            start_date=datetime(2024, 1, 1, tzinfo=UTC),
+            end_date=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+
+        assert len(results) == 2
+        assert all(r.source_info.confidence == DataConfidence.LOW for r in results)
+
+    @pytest.mark.asyncio
+    async def test_get_apy_direct_market_id_with_naive_dates(self, mock_client: MagicMock):
+        """Direct market IDs skip lookup and naive datetimes are read as UTC days."""
+        mock_client.query.return_value = {
+            "marketDailySnapshots": [
+                {
+                    "id": "snap1",
+                    "days": 19723,
+                    "timestamp": 1704067200,
+                    "rates": [
+                        {"rate": "3.5", "side": LENDER_SIDE},
+                        {"rate": "5.5", "side": BORROWER_SIDE},
+                    ],
+                }
+            ]
+        }
+
+        provider = SparkAPYProvider(client=mock_client)
+        results = await provider.get_apy(
+            protocol="spark",
+            market="0x1234567890abcdef1234567890abcdef12345678",
+            start_date=datetime(2024, 1, 1),  # noqa: DTZ001 - deliberate naive input
+            end_date=datetime(2024, 1, 2),  # noqa: DTZ001
+        )
+
+        assert len(results) == 1
+        assert results[0].supply_apy == Decimal("0.035")
+        assert mock_client.query.call_count == 1
+        variables = mock_client.query.call_args.args[2]
+        assert variables["marketId"] == "0x1234567890abcdef1234567890abcdef12345678"
+        assert variables["startDay"] == 19723
+        assert variables["endDay"] == 19724
+
+    @pytest.mark.asyncio
+    async def test_get_apy_pagination_overflow_stays_loud(self, mock_client: MagicMock):
+        """Pagination overflow is not silently replaced with fallback data."""
+        provider = SparkAPYProvider(client=mock_client)
+        provider._client.query_with_pagination = AsyncMock(
+            side_effect=DataSourceUnavailableError(
+                data_type="apy",
+                identifier="0xmarket123",
+                remediation="narrow the query window",
+                message="window too large",
+            )
+        )
+
+        with pytest.raises(DataSourceUnavailableError, match="window too large"):
+            await provider.get_apy(
+                protocol="spark",
+                market="0xmarket123",
+                start_date=datetime(2024, 1, 1, tzinfo=UTC),
+                end_date=datetime(2024, 1, 2, tzinfo=UTC),
+            )
+
+    @pytest.mark.asyncio
+    async def test_get_apy_unexpected_error_returns_fallback(self, mock_client: MagicMock):
+        """Unexpected subgraph errors degrade to fallback APYs."""
+        mock_client.query.side_effect = [
+            {"markets": [{"id": "0xmarket123", "name": "DAI", "inputToken": {"symbol": "DAI"}}]},
+            RuntimeError("boom"),
         ]
 
         provider = SparkAPYProvider(client=mock_client)

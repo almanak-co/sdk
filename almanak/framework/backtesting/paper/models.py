@@ -552,14 +552,8 @@ class PaperTradingSummary:
             return 0
         return self.total_gas_used // self.successful_trades
 
-    # crap-allowlist: VIB-4722 mechanical deployment_id rename in existing high-CRAP function.
-    def summary(self) -> str:
-        """Generate a human-readable summary.
-
-        Returns:
-            Multi-line string with formatted session summary
-        """
-        lines = [
+    def _summary_header_lines(self) -> list[str]:
+        return [
             "=" * 70,
             "PAPER TRADING SESSION SUMMARY",
             "=" * 70,
@@ -587,88 +581,92 @@ class PaperTradingSummary:
             f"Total Gas Cost:     ${self.total_gas_cost_usd:,.2f}",
         ]
 
+    def _summary_performance_lines(self) -> list[str]:
         if self.pnl_usd is not None:
-            lines.extend(
-                [
-                    "",
-                    "PERFORMANCE",
-                    "-" * 70,
-                    f"Estimated PnL:      ${self.pnl_usd:,.2f}",
-                ]
-            )
+            return [
+                "",
+                "PERFORMANCE",
+                "-" * 70,
+                f"Estimated PnL:      ${self.pnl_usd:,.2f}",
+            ]
+        return []
 
-        if self.pnl_breakdown is not None:
-            b = self.pnl_breakdown
-            fee_label = "" if b.fees_included else " (ex-LP-fees)"
-            lines.extend(
-                [
-                    "",
-                    f"PnL BREAKDOWN{fee_label}",
-                    "-" * 70,
-                    f"  Interest Earned:  ${b.interest_earned:,.4f}",
-                    f"  Interest Paid:    ${b.interest_paid:,.4f}",
-                    f"  Net Yield:        ${b.net_yield:,.4f}",
-                    f"  Trading PnL:      ${b.trading_pnl:,.4f}",
-                    f"  Gas Costs:        ${b.gas_costs:,.4f}",
-                    f"  Total PnL:        ${b.total_pnl:,.4f}",
-                ]
-            )
+    def _summary_pnl_breakdown_lines(self) -> list[str]:
+        if self.pnl_breakdown is None:
+            return []
 
-        if self.initial_balances:
-            lines.extend(
-                [
-                    "",
-                    "INITIAL BALANCES",
-                    "-" * 70,
-                ]
-            )
-            for token, amount in self.initial_balances.items():
-                lines.append(f"  {token}: {amount:,.6f}")
+        b = self.pnl_breakdown
+        fee_label = "" if b.fees_included else " (ex-LP-fees)"
+        return [
+            "",
+            f"PnL BREAKDOWN{fee_label}",
+            "-" * 70,
+            f"  Interest Earned:  ${b.interest_earned:,.4f}",
+            f"  Interest Paid:    ${b.interest_paid:,.4f}",
+            f"  Net Yield:        ${b.net_yield:,.4f}",
+            f"  Trading PnL:      ${b.trading_pnl:,.4f}",
+            f"  Gas Costs:        ${b.gas_costs:,.4f}",
+            f"  Total PnL:        ${b.total_pnl:,.4f}",
+        ]
 
-        if self.final_balances:
-            lines.extend(
-                [
-                    "",
-                    "FINAL BALANCES",
-                    "-" * 70,
-                ]
-            )
-            for token, amount in self.final_balances.items():
-                lines.append(f"  {token}: {amount:,.6f}")
+    def _summary_balance_lines(self, title: str, balances: dict[str, Decimal]) -> list[str]:
+        if not balances:
+            return []
+        lines = ["", title, "-" * 70]
+        lines.extend(f"  {token}: {amount:,.6f}" for token, amount in balances.items())
+        return lines
 
-        if self.error_summary:
-            lines.extend(
-                [
-                    "",
-                    "ERROR SUMMARY",
-                    "-" * 70,
-                ]
-            )
-            for error_type, count in self.error_summary.items():
-                lines.append(f"  {error_type}: {count}")
+    def _summary_error_lines(self) -> list[str]:
+        if not self.error_summary:
+            return []
+        lines = ["", "ERROR SUMMARY", "-" * 70]
+        lines.extend(f"  {error_type}: {count}" for error_type, count in self.error_summary.items())
+        return lines
 
-        if self.reconciliation is not None:
-            r = self.reconciliation
-            lines.extend(
-                [
-                    "",
-                    "POSITION RECONCILIATION (observe-only)",
-                    "-" * 70,
-                    f"Checks Run:         {r.checks_run}",
-                    f"Divergences:        {r.total_divergences}",
-                ]
-            )
-            if r.max_divergence_pct is not None:
-                lines.append(f"Max Divergence:     {r.max_divergence_pct * 100:.2f}%")
-            for rec in r.records:
-                pct = f"{rec.max_divergence_pct * 100:.2f}%" if rec.max_divergence_pct is not None else "n/a"
-                last_seen = rec.last_seen.strftime("%Y-%m-%d %H:%M:%S") if rec.last_seen else "n/a"
-                lines.append(
-                    f"  [{rec.kind}] {rec.key} {rec.divergence_type}: count={rec.count}, max={pct}, last_seen={last_seen}"
-                )
+    def _summary_reconciliation_record_line(self, record: DivergenceRecord) -> str:
+        pct = f"{record.max_divergence_pct * 100:.2f}%" if record.max_divergence_pct is not None else "n/a"
+        last_seen = record.last_seen.strftime("%Y-%m-%d %H:%M:%S") if record.last_seen else "n/a"
+        return (
+            f"  [{record.kind}] {record.key} {record.divergence_type}: "
+            f"count={record.count}, max={pct}, last_seen={last_seen}"
+        )
 
+    def _summary_reconciliation_lines(self) -> list[str]:
+        if self.reconciliation is None:
+            return []
+
+        r = self.reconciliation
+        lines = [
+            "",
+            "POSITION RECONCILIATION (observe-only)",
+            "-" * 70,
+            f"Checks Run:         {r.checks_run}",
+            f"Divergences:        {r.total_divergences}",
+        ]
+        if r.max_divergence_pct is not None:
+            lines.append(f"Max Divergence:     {r.max_divergence_pct * 100:.2f}%")
+        lines.extend(self._summary_reconciliation_record_line(record) for record in r.records)
+        return lines
+
+    def _summary_optional_lines(self) -> list[str]:
+        lines: list[str] = []
+        lines.extend(self._summary_performance_lines())
+        lines.extend(self._summary_pnl_breakdown_lines())
+        lines.extend(self._summary_balance_lines("INITIAL BALANCES", self.initial_balances))
+        lines.extend(self._summary_balance_lines("FINAL BALANCES", self.final_balances))
+        lines.extend(self._summary_error_lines())
+        lines.extend(self._summary_reconciliation_lines())
+        return lines
+
+    def summary(self) -> str:
+        """Generate a human-readable summary.
+
+        Returns:
+            Multi-line string with formatted session summary
+        """
+        lines = self._summary_header_lines()
+        lines.extend(self._summary_optional_lines())
         lines.append("=" * 70)
-
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, Any]:

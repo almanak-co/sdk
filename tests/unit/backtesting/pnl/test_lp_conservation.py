@@ -541,6 +541,106 @@ class TestGeminiReviewRegressions:
         assert position.liquidity > Decimal("0")
 
 
+class TestLPUnrealizedPnLEdgeCases:
+    """Direct coverage for generic LP unrealized-PnL fallback paths."""
+
+    def test_single_token_lp_position_returns_zero(self) -> None:
+        position = SimulatedPosition.lp(
+            token0="WETH",
+            token1="USDC",
+            amount0=Decimal("1"),
+            amount1=Decimal("2000"),
+            liquidity=Decimal("1"),
+            tick_lower=MIN_TICK,
+            tick_upper=MAX_TICK,
+            fee_tier=Decimal("0.003"),
+            entry_price=WETH_PRICE,
+            entry_time=START,
+        )
+        position.tokens = ["WETH"]
+
+        pnl = SimulatedPortfolio(initial_capital_usd=INITIAL_CAPITAL)._calculate_lp_unrealized_pnl(
+            position,
+            _market_state(0),
+        )
+
+        assert pnl == Decimal("0")
+
+    def test_missing_token0_price_raises_in_strict_mode(self) -> None:
+        position = SimulatedPosition.lp(
+            token0="WETH",
+            token1="USDC",
+            amount0=Decimal("1"),
+            amount1=Decimal("2000"),
+            liquidity=Decimal("1"),
+            tick_lower=MIN_TICK,
+            tick_upper=MAX_TICK,
+            fee_tier=Decimal("0.003"),
+            entry_price=WETH_PRICE,
+            entry_time=START,
+        )
+        portfolio = SimulatedPortfolio(initial_capital_usd=INITIAL_CAPITAL, strict_reproducibility=True)
+        market_state = MarketState(timestamp=START, prices={"USDC": Decimal("1")}, chain="arbitrum")
+
+        with pytest.raises(ValueError, match="Price unavailable for WETH"):
+            portfolio._calculate_lp_unrealized_pnl(position, market_state)
+
+    def test_missing_prices_fall_back_to_entry_and_stable_quote(self, caplog: pytest.LogCaptureFixture) -> None:
+        position = SimulatedPosition.lp(
+            token0="WETH",
+            token1="USDC",
+            amount0=Decimal("1"),
+            amount1=Decimal("2000"),
+            liquidity=Decimal("1"),
+            tick_lower=MIN_TICK,
+            tick_upper=MAX_TICK,
+            fee_tier=Decimal("0.003"),
+            entry_price=WETH_PRICE,
+            entry_time=START,
+        )
+        position.metadata["entry_amounts"] = {"WETH": "1", "USDC": "2000"}
+        market_state = MarketState(timestamp=START, prices={}, chain="arbitrum")
+
+        with caplog.at_level("WARNING"):
+            pnl = SimulatedPortfolio(initial_capital_usd=INITIAL_CAPITAL)._calculate_lp_unrealized_pnl(
+                position,
+                market_state,
+            )
+
+        assert "falling back to entry_price" in caplog.text
+        assert pnl == Decimal("0")
+
+    def test_missing_entry_amounts_derive_from_v3_liquidity_units(self) -> None:
+        calc = ImpermanentLossCalculator()
+        liquidity = calc.liquidity_for_target_value(DEPOSIT_USD, WETH_PRICE, MIN_TICK, MAX_TICK)
+        _, amount0, amount1 = calc.calculate_il_v3(
+            entry_price=WETH_PRICE,
+            current_price=WETH_PRICE,
+            tick_lower=MIN_TICK,
+            tick_upper=MAX_TICK,
+            liquidity=liquidity,
+        )
+        position = SimulatedPosition.lp(
+            token0="WETH",
+            token1="USDC",
+            amount0=amount0,
+            amount1=amount1,
+            liquidity=liquidity,
+            tick_lower=MIN_TICK,
+            tick_upper=MAX_TICK,
+            fee_tier=Decimal("0.003"),
+            entry_price=WETH_PRICE,
+            entry_time=START,
+        )
+
+        pnl = SimulatedPortfolio(initial_capital_usd=INITIAL_CAPITAL)._calculate_lp_unrealized_pnl(
+            position,
+            _market_state(0),
+        )
+
+        assert abs(pnl) <= DUST * DEPOSIT_USD
+
+
 class TestAdapterLaneBranchCoverage:
     """Branch pins for _execute_lp_open's guard paths (CRAP gate: cc=26 needs
     the error/fallback branches exercised, not just the happy path)."""
