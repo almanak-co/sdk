@@ -856,6 +856,33 @@ class CoinGeckoDataProvider:
             self._session = None
         self._historical_cache.close()
 
+    def register_token_addresses(self, token_addresses: dict[str, tuple[str, str]]) -> None:
+        """Augment the ``SYMBOL -> (chain, address)`` coin-id resolution map post-construction.
+
+        ``__init__``'s ``token_addresses`` covers the tokens known when the
+        provider is built (the CLI resolves the strategy's tracked / funded
+        symbols via ``build_token_address_map``). Tokens discovered later --
+        notably the declared numeraire, which the PnL engine auto-adds to the
+        data-fetch set even when the strategy never trades it (VIB-5127) -- are
+        registered here so their CoinGecko coin id resolves via the contract
+        endpoint instead of an honest miss. Keys are upper-cased to match
+        ``__init__``; a later registration wins on conflict (the caller's
+        address is authoritative). The native fast path is unaffected: a native
+        symbol still resolves registry-side before this map is consulted.
+        """
+        if not token_addresses:
+            return
+        # Lower-case EVM addresses (``0x...``) on store: the CoinGecko contract
+        # endpoint requires lowercase and a checksummed address fails the lookup
+        # (ALM-2664). Non-EVM (Solana base58) addresses are case-sensitive and
+        # left verbatim. Mirrors the cache key, which already lower-cases.
+        self._token_addresses.update(
+            {
+                symbol.upper(): (chain, address.lower() if address.startswith("0x") else address)
+                for symbol, (chain, address) in token_addresses.items()
+            }
+        )
+
     async def _resolve_token_id(self, token: str) -> str | None:
         """Resolve a token symbol to its CoinGecko coin id.
 

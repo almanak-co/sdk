@@ -970,7 +970,40 @@ class TestCreateWithDataConfig:
             )
 
 
+class TestRegisterTokenAddresses:
+    """``register_token_addresses`` forwards to wrapped legs that accept it."""
+
+    def test_forwards_to_supporting_providers_and_skips_others(self) -> None:
+        """Providers with the hook receive the map; those without are skipped silently."""
+
+        class RecordingProvider:
+            def __init__(self, name: str) -> None:
+                self._name = name
+                self.registered: list[dict[str, tuple[str, str]]] = []
+
+            @property
+            def provider_name(self) -> str:
+                return self._name
+
+            def register_token_addresses(self, token_addresses: dict[str, tuple[str, str]]) -> None:
+                self.registered.append(token_addresses)
+
+        coingecko_like = RecordingProvider("coingecko")
+        # MockProvider has no register_token_addresses -- must be skipped, not error.
+        chainlink_like = MockProvider(name="chainlink")
+        aggregated = AggregatedDataProvider(
+            providers=[chainlink_like, coingecko_like],
+            provider_names=["chainlink", "coingecko"],
+        )
+
+        mapping = {"CBBTC": ("base", "0xBdb9300b7CDE636d9cD4AFF00f6F009fFBBc8EE6")}
+        aggregated.register_token_addresses(mapping)
+
+        assert coingecko_like.registered == [mapping]
+
+
 __all__ = [
+    "TestRegisterTokenAddresses",
     "TestCreateWithDataConfigThreadsTokenAddresses",
     "TestIterateEmptyOrUnavailableFallback",
     "TestFallbackWhenPrimaryFails",

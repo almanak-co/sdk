@@ -53,6 +53,7 @@ from almanak.framework.backtesting.models import (
 )
 from almanak.framework.backtesting.numeraire import (
     compute_numeraire_metrics,
+    numeraire_token_address,
     resolve_numeraire_symbol,
 )
 from almanak.framework.backtesting.pnl.data_provider import (
@@ -243,6 +244,24 @@ def initialize_backtest(
         if numeraire_symbol is not None and numeraire_symbol not in {t.upper() for t in data_tokens}:
             data_tokens.append(numeraire_symbol)
             bt_logger.debug(f"Added numeraire token {numeraire_symbol} to the data-fetch token set")
+
+        # Register the numeraire's contract address with the data provider so its
+        # CoinGecko coin id resolves by address. The numeraire is identified by
+        # (chain_id, address) on the strategy's QuoteAsset, but the CLI's
+        # token-address map (build_token_address_map) only covers traded tokens
+        # -- a numeraire the strategy never trades (e.g. a cbBTC-quoted strategy
+        # holding only WETH/USDC) would otherwise be an unpriceable honest miss
+        # that fails loud at metrics time (VIB-5127). Duck-typed: providers
+        # without the hook (custom HistoricalDataProvider impls) are unaffected.
+        if numeraire_symbol is not None:
+            numeraire_address = numeraire_token_address(strategy, config.chain)
+            register_addresses = getattr(backtester.data_provider, "register_token_addresses", None)
+            if numeraire_address is not None and callable(register_addresses):
+                register_addresses({numeraire_symbol: numeraire_address})
+                bt_logger.debug(
+                    f"Registered numeraire {numeraire_symbol} address {numeraire_address[1]} "
+                    f"on {numeraire_address[0]} with the data provider for coin-id resolution"
+                )
 
         # Create historical data config
         data_config = HistoricalDataConfig(

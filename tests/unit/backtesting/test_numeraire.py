@@ -25,11 +25,16 @@ from almanak.framework.backtesting.models import (
 from almanak.framework.backtesting.numeraire import (
     compute_numeraire_metrics,
     compute_numeraire_metrics_paper,
+    numeraire_token_address,
     resolve_numeraire_symbol,
 )
 
 # WETH on Arbitrum (the default backtest chain in the trust matrix).
 WETH_ARBITRUM = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+# cbBTC on Base (chain_id 8453) -- a non-native ERC20 absent from the native
+# CoinGecko-id projection, so it is only priceable by contract address. This is
+# the exact numeraire from the reported unpriceable-numeraire bug.
+CBBTC_BASE = "0xBdb9300b7CDE636d9cD4AFF00f6F009fFBBc8EE6"
 _TS0 = datetime(2024, 1, 1, tzinfo=UTC)
 
 
@@ -68,6 +73,25 @@ def test_resolve_token_chain_mismatch_raises() -> None:
     strategy = _Strategy(QuoteAsset.token(42161, WETH_ARBITRUM))  # Arbitrum token
     with pytest.raises(ValueError, match="must live on the backtest chain"):
         resolve_numeraire_symbol(strategy, "base")
+
+
+# --- numeraire_token_address ---------------------------------------------------
+
+
+def test_numeraire_address_usd_strategy_returns_none() -> None:
+    assert numeraire_token_address(_Strategy(QuoteAsset.usd()), "base") is None
+
+
+def test_numeraire_address_no_quote_asset_attr_returns_none() -> None:
+    # A strategy exposing no quote_asset reads as USD -> no address to register.
+    assert numeraire_token_address(_Strategy(), "base") is None
+
+
+def test_numeraire_address_token_returns_chain_and_address() -> None:
+    # The address comes straight from the QuoteAsset (canonical (chain_id,
+    # address)); QuoteAsset lower-cases EVM addresses as its canonical key.
+    strategy = _Strategy(QuoteAsset.token(8453, CBBTC_BASE))
+    assert numeraire_token_address(strategy, "base") == ("base", CBBTC_BASE.lower())
 
 
 # --- compute_numeraire_metrics (PnL / daily convention) ------------------------

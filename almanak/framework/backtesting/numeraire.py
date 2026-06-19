@@ -108,6 +108,34 @@ def resolve_numeraire_symbol(strategy: object, chain: str) -> str | None:
     return symbol.upper() if is_token_known(chain_id, address) else symbol
 
 
+def numeraire_token_address(strategy: object, chain: str) -> tuple[str, str] | None:
+    """Return ``(chain, address)`` for a token numeraire, else ``None``.
+
+    The contract address is read straight from the strategy's declared
+    :class:`QuoteAsset` (the canonical ``(chain_id, address)`` token identity),
+    so the PnL engine can register it with the data provider and the numeraire
+    resolves its CoinGecko coin id by contract address -- exactly like any other
+    non-native ERC20 -- instead of an honest miss that fails loud at metrics
+    time (VIB-5127). ``None`` for the USD default (``fiat_usd``) and for a
+    strategy that declares no quote asset.
+
+    ``chain`` is the backtest chain name. :func:`resolve_numeraire_symbol` is
+    always called first and has already verified the quote-asset token lives on
+    it (raising otherwise), so pairing ``chain`` with the quote-asset address
+    yields the ``SYMBOL -> (chain, address)`` entry the provider's
+    contract-endpoint resolver expects.
+
+    Args:
+        strategy: The strategy under test. ``quote_asset`` is read defensively
+            via ``getattr`` (the backtest strategy contract does not require it).
+        chain: The backtest chain name (e.g. ``"base"``), as carried by config.
+    """
+    quote_asset = QuoteAsset.parse(getattr(strategy, "quote_asset", None))
+    if quote_asset.is_usd or quote_asset.address is None:
+        return None
+    return (chain, quote_asset.address)
+
+
 def _project_numeraire_equity(
     equity_curve: Sequence[EquityPoint],
     numeraire_symbol: str | None,
@@ -256,6 +284,7 @@ def compute_numeraire_metrics_paper(
 
 __all__ = [
     "resolve_numeraire_symbol",
+    "numeraire_token_address",
     "compute_numeraire_metrics",
     "compute_numeraire_metrics_paper",
 ]

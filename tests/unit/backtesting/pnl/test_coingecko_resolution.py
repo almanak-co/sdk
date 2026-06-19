@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -433,3 +433,92 @@ class TestPersistentResolutionCache:
         cache.clear()
         assert cache.get_coin_id("arbitrum", _WSTETH_ARB_ADDRESS) is None
         cache.close()
+
+
+# cbBTC on Base -- a non-native ERC20 absent from the native projection, so it
+# is an honest miss until its address is registered (the reported numeraire bug).
+_CBBTC_BASE_ADDRESS = "0xBdb9300b7CDE636d9cD4AFF00f6F009fFBBc8EE6"
+_CBBTC_BASE_BRIDGED_ID = "coinbase-wrapped-btc"
+
+
+class TestRegisterTokenAddresses:
+    """``register_token_addresses`` augments the resolution map post-construction.
+
+    This is the engine's hook for the declared numeraire, which is auto-added to
+    the data-fetch set after the provider is built and would otherwise be an
+    unpriceable honest miss.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unregistered_token_is_an_honest_miss(self) -> None:
+        """Baseline: a non-native ERC20 with no address entry resolves to None."""
+        provider = CoinGeckoDataProvider(retry_config=_fast_retry())
+        with patch.object(provider, "_make_request", new_callable=AsyncMock) as req:
+            assert await provider._resolve_token_id("CBBTC") is None
+        req.assert_not_called()  # honest miss, no network
+        await provider.close()
+
+    @pytest.mark.asyncio
+    async def test_register_enables_address_resolution(self) -> None:
+        """After registration the symbol resolves via the contract endpoint."""
+        provider = CoinGeckoDataProvider(retry_config=_fast_retry())
+        provider.register_token_addresses({"CBBTC": ("base", _CBBTC_BASE_ADDRESS)})
+        with patch.object(
+            provider,
+            "_make_request",
+            new_callable=AsyncMock,
+            return_value={"id": _CBBTC_BASE_BRIDGED_ID},
+        ) as req:
+            coin_id = await provider._resolve_token_id("CBBTC")
+
+        assert coin_id == _CBBTC_BASE_BRIDGED_ID
+        req.assert_awaited_once()
+        # The address is normalised to lowercase before hitting the CoinGecko
+        # contract endpoint (which rejects checksummed addresses -- ALM-2664).
+        endpoint = req.await_args.args[0]
+        assert _CBBTC_BASE_ADDRESS.lower() in endpoint
+        assert _CBBTC_BASE_ADDRESS not in endpoint  # the checksummed form must not leak
+
+    @pytest.mark.asyncio
+    async def test_register_merges_with_constructor_map(self) -> None:
+        """Registration augments, never replaces, the construction-time map."""
+        provider = CoinGeckoDataProvider(
+            retry_config=_fast_retry(),
+            token_addresses={"wstETH": ("arbitrum", _WSTETH_ARB_ADDRESS)},
+        )
+        provider.register_token_addresses({"CBBTC": ("base", _CBBTC_BASE_ADDRESS)})
+
+        def _fake_request(endpoint: str, _params: dict) -> dict:
+            if _WSTETH_ARB_ADDRESS in endpoint:
+                return {"id": _WSTETH_ARB_BRIDGED_ID}
+            return {"id": _CBBTC_BASE_BRIDGED_ID}
+
+        with patch.object(provider, "_make_request", new_callable=AsyncMock, side_effect=_fake_request):
+            assert await provider._resolve_token_id("WSTETH") == _WSTETH_ARB_BRIDGED_ID
+            assert await provider._resolve_token_id("CBBTC") == _CBBTC_BASE_BRIDGED_ID
+        await provider.close()
+
+    @pytest.mark.asyncio
+    async def test_register_is_case_insensitive(self) -> None:
+        """Keys are upper-cased on store, matching __init__ normalisation."""
+        provider = CoinGeckoDataProvider(retry_config=_fast_retry())
+        provider.register_token_addresses({"cbBTC": ("base", _CBBTC_BASE_ADDRESS)})
+        with patch.object(
+            provider, "_make_request", new_callable=AsyncMock, return_value={"id": _CBBTC_BASE_BRIDGED_ID}
+        ):
+            assert await provider._resolve_token_id("CBBTC") == _CBBTC_BASE_BRIDGED_ID
+        await provider.close()
+
+    @pytest.mark.asyncio
+    async def test_register_empty_is_noop(self) -> None:
+        """An empty registration leaves existing entries intact."""
+        provider = CoinGeckoDataProvider(
+            retry_config=_fast_retry(),
+            token_addresses={"wstETH": ("arbitrum", _WSTETH_ARB_ADDRESS)},
+        )
+        provider.register_token_addresses({})
+        with patch.object(
+            provider, "_make_request", new_callable=AsyncMock, return_value={"id": _WSTETH_ARB_BRIDGED_ID}
+        ):
+            assert await provider._resolve_token_id("WSTETH") == _WSTETH_ARB_BRIDGED_ID
+        await provider.close()

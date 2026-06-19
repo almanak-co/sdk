@@ -759,6 +759,20 @@ class AggregatedDataProvider:
             DEFAULT_PROVIDER_CONFIDENCE,
         )
 
+    def register_token_addresses(self, token_addresses: dict[str, tuple[str, str]]) -> None:
+        """Forward address registrations to every wrapped provider that accepts them.
+
+        Only the CoinGecko leg consumes ``token_addresses``; the on-chain legs
+        (Chainlink / TWAP) have no such map and are skipped. Lets the PnL engine
+        register the numeraire's contract address on the ``auto`` / ``coingecko``
+        fallback chains so a numeraire the strategy never trades is still priced
+        via CoinGecko's contract endpoint (VIB-5127).
+        """
+        for provider in self._providers:
+            register = getattr(provider, "register_token_addresses", None)
+            if callable(register):
+                register(token_addresses)
+
     @property
     def providers(self) -> list[Any]:
         """Get the list of providers in priority order."""
