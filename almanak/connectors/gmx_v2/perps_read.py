@@ -64,11 +64,23 @@ _MAX_POSITION_RANGE = 100
 # Reader.getAccountPositions(address dataStore, address account, uint256 start,
 # uint256 end) -> Position.Props[]. The selector is derived from the signature
 # (pure; no provider). Output ABI built from the known struct so a typo in the
-# 11-field Numbers tuple can't silently corrupt the decode.
+# Numbers tuple can't silently corrupt the decode.
 _GET_ACCOUNT_POSITIONS_SIG = "getAccountPositions(address,address,uint256,uint256)"
 _GET_ACCOUNT_POSITIONS_SELECTOR = function_signature_to_4byte_selector(_GET_ACCOUNT_POSITIONS_SIG)
-_POSITION_NUMBERS = "(" + ",".join(["uint256"] * 11) + ")"  # Position.Numbers (11 uints)
-# Position.Props = (Addresses(3 addrs), Numbers(11 uints), Flags(1 bool)).
+# Position.Numbers — the CURRENT GMX struct (VIB-5289). It is **10 fields**, and
+# index 3 is a SIGNED ``int256 pendingImpactAmount``:
+#   (sizeInUsd, sizeInTokens, collateralAmount, pendingImpactAmount[int256],
+#    borrowingFactor, fundingFeeAmountPerSize,
+#    longTokenClaimableFundingAmountPerSize, shortTokenClaimableFundingAmountPerSize,
+#    increasedAtTime, decreasedAtTime)
+# The legacy ``increasedAtBlock``/``decreasedAtBlock`` were removed and
+# ``pendingImpactAmount`` added. The prior ABI declared 11 ``uint256`` — decoding
+# the real 10-field return against it ran ``eth_abi`` out of bytes, the decode
+# threw, and ``_reduce_gmx_positions`` returned ``ok=False`` for EVERY live
+# position (a silent §7.10 money-path read failure). Verified against real chain
+# bytes (tests/reports/vib5252_perp_net_equity_realfork_proof.md).
+_POSITION_NUMBERS = "(uint256,uint256,uint256,int256,uint256,uint256,uint256,uint256,uint256,uint256)"
+# Position.Props = (Addresses(3 addrs), Numbers(10), Flags(1 bool)).
 _POSITION_PROPS = f"((address,address,address),{_POSITION_NUMBERS},(bool))"
 _GET_ACCOUNT_POSITIONS_OUTPUT = f"{_POSITION_PROPS}[]"
 
@@ -96,12 +108,12 @@ def _build_gmx_calls(query: PerpsPositionQuery) -> list[EthCall]:
 def _reduce_gmx_positions(query: PerpsPositionQuery, results: list[str | None]) -> PerpsReadResult:
     """Decode the ``getAccountPositions`` return into active positions.
 
-    Field mapping is byte-identical to ``GMXV2SDK._parse_raw_positions``
-    (sdk.py:500-531): ``addresses=(account, market, collateralToken)``,
-    ``numbers[0..10]`` the eleven Position.Numbers uints, ``flags[0]=isLong``.
-    Only ``numbers`` indices the valuer consumes are surfaced on
-    :class:`PerpsPositionOnChain`; the claimable-funding / block fields are
-    decoded-but-dropped exactly as the framework reader dropped them.
+    ``addresses=(account, market, collateralToken)``, ``numbers`` the ten
+    Position.Numbers fields (index 3 is the signed ``pendingImpactAmount``),
+    ``flags[0]=isLong``. Only the indices the valuer consumes are surfaced on
+    :class:`PerpsPositionOnChain`; ``pendingImpactAmount`` and the
+    claimable-funding fields are decoded-but-dropped (not part of the §7.4
+    net-equity formula, which uses size + collateral + mark price).
 
     Empty≠Zero: a ``None`` blob (the gateway ``eth_call`` failed) or a malformed
     decode yields ``ok=False`` (unmeasured); a successful decode of an empty
@@ -131,11 +143,12 @@ def _reduce_gmx_positions(query: PerpsPositionQuery, results: list[str | None]) 
             size_in_usd=numbers[0],  # 30 decimals
             size_in_tokens=numbers[1],  # index token decimals
             collateral_amount=numbers[2],  # collateral token decimals
+            # numbers[3] = pendingImpactAmount (int256) — decoded, not consumed.
             is_long=flags[0],
-            borrowing_factor=numbers[3],
-            funding_fee_amount_per_size=numbers[4],
-            increased_at_time=numbers[9],
-            decreased_at_time=numbers[10],
+            borrowing_factor=numbers[4],
+            funding_fee_amount_per_size=numbers[5],
+            increased_at_time=numbers[8],
+            decreased_at_time=numbers[9],
             key_prefix="gmx",
         )
         if pos.is_active:  # size_in_usd > 0 — matches the legacy reader's filter

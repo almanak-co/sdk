@@ -1464,19 +1464,26 @@ class PortfolioValuer:
         # Source 2: Framework discovery (on-chain scanning)
         discovered_positions: list[PositionInfo] = []
         discovery_had_errors = False
+        # Perp venues whose on-chain book discovery read successfully (VIB-5252):
+        # for these, discovery is the complete authoritative set and a strategy's
+        # notional perp stub is redundant. Empty when discovery did not run.
+        perp_protocols_ok: set[str] = set()
         discovery_config = self._build_discovery_config(strategy, strategy_positions)
         if discovery_config:
             discovered = self._discovery.discover(discovery_config)
             if discovered.errors:
                 discovery_had_errors = True
             discovered_positions = list(discovered.positions)
+            perp_protocols_ok = set(discovered.perp_protocols_ok)
 
         # Merge the two sources by canonical identity (VIB-4838): discovery is
         # authoritative for value + on-chain details, the strategy for
         # position_type + domain hints. Degenerate strategy stubs that merely
         # duplicate a discovered position are dropped here so they cannot reach
         # the repricer and trip ``no_path``.
-        merged_positions = self._merge_position_sources(strategy_positions, discovered_positions, strategy.chain)
+        merged_positions = self._merge_position_sources(
+            strategy_positions, discovered_positions, strategy.chain, perp_protocols_ok
+        )
 
         positions_incomplete = strategy_failed or discovery_had_errors
         if not merged_positions:
@@ -1609,6 +1616,15 @@ class PortfolioValuer:
                         lp_token_ids.append(token_id)
                     if p.protocol:
                         lp_protocol = p.protocol
+                # Seed discovery with any perp venue the strategy itself reports
+                # (VIB-5252). ``protocols`` is otherwise sourced only from
+                # ``STRATEGY_METADATA.supported_protocols``; a strategy that
+                # reports a perp position but omits the venue from its metadata
+                # would never have its perps scanned, so the notional stub would
+                # survive. Harvesting the venue here guarantees the discovery
+                # scan that lets the merge drop the stub for net-equity.
+                elif p.position_type == PT.PERP and p.protocol and p.protocol not in protocols:
+                    protocols.append(p.protocol)
 
             if not protocols and not tracked_tokens:
                 return None
@@ -1737,6 +1753,7 @@ class PortfolioValuer:
         strategy_positions: list["PositionInfo"],
         discovered_positions: list["PositionInfo"],
         chain: str,
+        perp_protocols_ok: set[str] | None = None,
     ) -> list["PositionInfo"]:
         """Dedup strategy + discovery positions by canonical identity (VIB-4838).
 
@@ -1749,8 +1766,40 @@ class PortfolioValuer:
         confidence-poisoning and the latent NAV double-count described in the
         VIB-4838 brief. See ``blueprints/27-accounting.md`` §7 (Layer 2
         snapshots) and the §3.4 S9 no-double-count invariant.
+
+        **Perps — discovery wins (VIB-5252).** A strategy reports a perp as a
+        ``details["market"]``-as-SYMBOL stub whose ``value_usd`` is gross
+        NOTIONAL (collateral × leverage) and which carries no wallet hint, so it
+        can never reprice to net-equity. Only the *discovered* perp carries the
+        on-chain market address + wallet that ``_value_matched_perp`` needs to
+        compute §7.4 net-equity (collateral + uPnL − fees). The two key
+        distinctly (symbol vs address), so the canonical-key collapse above
+        never merges them. ``perp_protocols_ok`` (the venues discovery read
+        successfully — a single account-level read returns the whole book)
+        lets us resolve this: when discovery authoritatively scanned a perp
+        venue, the strategy's notional stub is redundant and is dropped, and
+        discovery's complete book is added below. This *inverts* the historical
+        precedence (which kept the stub) while preserving its only real purpose,
+        anti-double-count — discovery and stub are still never both kept. When
+        discovery did NOT scan ok for the venue (read failed / venue undeclared)
+        the stub is preserved, and ``IntentStrategy.get_portfolio_snapshot``'s
+        degraded fallback excludes its notional rather than re-booking it.
         """
         from almanak.framework.teardown.models import PositionType as _PT
+
+        # Venues for which a strategy's notional perp stub is redundant and must
+        # be dropped (VIB-5252). A stub is redundant when discovery either (a)
+        # scanned the venue successfully — ``perp_protocols_ok``, which also
+        # covers the flat/empty book — or (b) already returned a perp for that
+        # venue. (b) makes the anti-double-count guarantee independent of the
+        # caller threading ``perp_protocols_ok``: discovery's account-level read
+        # returns the complete book, so a discovered perp for a venue means any
+        # same-venue stub is either that position (deduped) or an unfilled one
+        # (correctly dropped). In production (a) always implies (b)'s superset.
+        perp_drop_protocols = {_normalize_protocol_for_dedup(p) for p in (perp_protocols_ok or set())}
+        perp_drop_protocols |= {
+            _normalize_protocol_for_dedup(d.protocol) for d in discovered_positions if d.position_type == _PT.PERP
+        }
 
         # Index discovery by canonical key (discovery wins on collision).
         discovery_by_key: dict[tuple, PositionInfo] = {}
@@ -1758,8 +1807,6 @@ class PortfolioValuer:
             key = self._canonical_position_key(d, chain)
             if key is not None:
                 discovery_by_key[key] = d
-
-        strategy_protocol_types = {(sp.protocol, sp.position_type) for sp in strategy_positions}
 
         merged: list[PositionInfo] = []
         consumed_discovery: set[int] = set()
@@ -1787,6 +1834,20 @@ class PortfolioValuer:
                 )
                 consumed_discovery.add(id(disc))
                 continue
+            # Perp stub whose venue discovery authoritatively scanned (VIB-5252):
+            # discovery is the complete on-chain book (filled positions are added
+            # in step 2; an empty ok-scan means the perp is flat). The stub only
+            # carries notional and cannot reprice, so drop it — never let it
+            # masquerade as equity.
+            if sp.position_type == _PT.PERP and _normalize_protocol_for_dedup(sp.protocol) in perp_drop_protocols:
+                logger.debug(
+                    "VIB-5252: dropping notional perp stub (position_id=%s) — "
+                    "discovery authoritatively scanned protocol=%s on %s",
+                    sp.position_id,
+                    sp.protocol,
+                    chain,
+                )
+                continue
             # No canonical match. Drop only true phantom duplicates.
             if self._is_degenerate_stub(sp, discovered_positions, chain):
                 logger.debug(
@@ -1801,13 +1862,12 @@ class PortfolioValuer:
             merged.append(sp)
 
         # 2. Add discovery positions the strategy did not already collapse onto.
+        # Discovered perps are added unconditionally (VIB-5252): the historical
+        # skip that dropped a discovered perp whenever the strategy reported one
+        # is gone — discovery is the authoritative net-equity source, and the
+        # redundant strategy stub was already dropped in step 1.
         for d in discovered_positions:
             if id(d) in consumed_discovery:
-                continue
-            # Preserve the legacy perp precedence: if the strategy reported a
-            # perp for the same protocol, skip the discovered one (the two use
-            # different id formats and the strategy read its own on-chain size).
-            if d.position_type == _PT.PERP and (d.protocol, _PT.PERP) in strategy_protocol_types:
                 continue
             merged.append(d)
 
@@ -1913,10 +1973,22 @@ class PortfolioValuer:
             result = self._reprice_perps_on_chain_enriched(position, chain, market)
             if result is not None:
                 return result[0], result[1], True
-            # PERPs: trust the strategy fallback — strategies (e.g. GMX V2,
-            # Drift) report the position with a meaningful value_usd from
-            # their own on-chain reads inside ``get_open_positions``.
-            return position.value_usd, {}, True
+            # VIB-5252: the on-chain net-equity read did not match this perp.
+            # In the common path Site A (``_merge_position_sources``) drops the
+            # strategy's notional stub before it reaches here, so this is hit
+            # only when discovery could NOT scan the venue (read failed / venue
+            # undeclared) and the stub survived. A strategy perp's ``value_usd``
+            # is gross NOTIONAL (collateral × leverage), NOT net equity — booking
+            # it at ``repriced=True`` here would overstate NAV by leverage (the
+            # original double-count, and the inert trap PR #2937 fell into).
+            # Signal no_path instead: confidence drops to UNAVAILABLE (§7.5) so
+            # the runner substitutes ``IntentStrategy.get_portfolio_snapshot``,
+            # which excludes the perp notional rather than re-booking it (Site D).
+            # Unlike the lending branches above we return ``0`` (not the reported
+            # value): a lending stub's value is a real supply/debt amount, but a
+            # perp stub's is inflated notional — if any UNAVAILABLE-tolerant
+            # reader uses it, understating to 0 is safe; over-stating is not.
+            return Decimal("0"), {}, False
 
         if position.position_type == PositionType.VAULT:
             result = self._reprice_vault_on_chain_enriched(position, chain, market)

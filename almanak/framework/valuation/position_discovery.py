@@ -79,6 +79,15 @@ class DiscoveryResult:
     lending_assets_scanned: int = 0
     lp_ids_scanned: int = 0
     perps_scanned: bool = False
+    # Perp protocols whose on-chain book was read SUCCESSFULLY (``ok=True``),
+    # including a measured-empty book. Membership means "discovery is the
+    # complete authoritative position set for this (protocol, chain)" — a
+    # single account-level read returns the whole book (VIB-5252). The merge
+    # uses this to drop a strategy's redundant notional perp stub: an ``ok``
+    # scan that returned nothing proves the perp is flat/unfilled, NOT that the
+    # stub's notional should stand. A protocol whose read FAILED (``ok=False``)
+    # is absent here, so the stub is preserved (we cannot confirm).
+    perp_protocols_ok: set[str] = field(default_factory=set)
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -326,6 +335,13 @@ class PositionDiscoveryService:
                 logger.debug(error_msg)
                 result.errors.append(error_msg)
                 continue
+
+            # Read succeeded — discovery is now the complete authoritative book
+            # for this protocol on this chain (VIB-5252). Record it BEFORE the
+            # positions loop so an ``ok``-but-empty book (no active positions)
+            # still marks the protocol authoritative; otherwise the merge would
+            # keep the strategy's notional stub for a perp that is provably flat.
+            result.perp_protocols_ok.add(protocol)
 
             for pos in read_result.positions:
                 side = "long" if pos.is_long else "short"

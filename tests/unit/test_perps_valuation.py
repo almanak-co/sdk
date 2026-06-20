@@ -160,7 +160,8 @@ class TestPerpsPositionReader:
         # One active ETH long, encoded in the Reader's Position.Props[] ABI shape.
         props = (
             (account, to_checksum_address(_ETH_MARKET), to_checksum_address(_USDC)),
-            (10**31, 10**18, 10**6, 7, 9, 11, 13, 100, 200, 1_700_000_000, 1_700_000_001),
+            # Current 10-field Numbers: int256 pendingImpactAmount at index 3 (VIB-5289).
+            (10**31, 10**18, 10**6, -5, 7, 9, 11, 13, 1_700_000_000, 1_700_000_001),
             (True,),
         )
         blob = "0x" + abi_encode([gmx_perps._GET_ACCOUNT_POSITIONS_OUTPUT], [[props]]).hex()
@@ -748,9 +749,18 @@ class TestPositionDiscoveryPerps:
 
 
 class TestAuditFixes:
-    def test_perps_dedup_skips_discovered_when_strategy_reports(self):
-        """Fix P2: discovery perps skipped when the strategy already reports a PERP
-        for the same protocol (no double-count)."""
+    def test_perps_dedup_discovery_wins_when_strategy_reports(self):
+        """VIB-5252: when both the strategy and discovery report a perp for the
+        same venue, ONE position survives (no double-count) and it is the
+        DISCOVERED one.
+
+        Inverts the historical "strategy stub wins" precedence: the strategy
+        reports a perp as a SYMBOL stub at gross NOTIONAL that cannot reprice to
+        net-equity, whereas discovery carries the on-chain market address +
+        wallet that ``_value_matched_perp`` needs for §7.4 net-equity. Discovery
+        is the complete authoritative book, so the notional stub is dropped and
+        the discovered position is kept. The anti-double-count guarantee is
+        preserved — exactly one perp leg survives."""
         from unittest.mock import patch
 
         from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
@@ -762,16 +772,16 @@ class TestAuditFixes:
             position_id="gmx-ETH/USD-usdc-perp",  # Strategy's custom format
             chain="arbitrum",
             protocol="gmx_v2",
-            value_usd=Decimal("2500"),
-            details={"market": "0x70d95587", "is_long": True, "wallet_address": "0xW"},
+            value_usd=Decimal("2500"),  # gross notional — must NOT win
+            details={"market": "ETH/USD", "is_long": True},  # symbol stub, no wallet
         )
         discovered_pos = PositionInfo(
             position_type=PositionType.PERP,
             position_id="gmx-0x70d95587-0xusdc-long",  # Discovery format
             chain="arbitrum",
             protocol="gmx_v2",
-            value_usd=Decimal("0"),
-            details={},
+            value_usd=Decimal("0"),  # repriced downstream by _value_matched_perp
+            details={"market": "0x70d95587", "is_long": True, "wallet_address": "0xW"},
         )
 
         with patch.object(valuer, "_get_strategy_positions", return_value=([strategy_pos], False)):
@@ -779,6 +789,7 @@ class TestAuditFixes:
             mock_result = MagicMock()
             mock_result.positions = [discovered_pos]
             mock_result.errors = []
+            mock_result.perp_protocols_ok = {"gmx_v2"}
             mock_discovery.discover.return_value = mock_result
             valuer._discovery = mock_discovery
 
@@ -794,9 +805,13 @@ class TestAuditFixes:
 
                 positions, total, incomplete = valuer._get_positions(strategy, market, {})
 
-        # Only the strategy's position survives (no double-count).
+        # Exactly one perp leg survives (no double-count) and it is the discovered
+        # one — the strategy's notional stub was dropped (VIB-5252). The survivor
+        # carries discovery's on-chain market address + wallet (the net-equity
+        # repricing inputs), not the strategy's symbol stub.
         assert len(positions) == 1
         assert positions[0].details.get("market") == "0x70d95587"
+        assert positions[0].details.get("wallet_address") == "0xW"
 
     def test_perps_dedup_collapses_alias_across_sources(self):
         """Fix P1: a strategy-reported perp alias and a discovery-stamped canonical

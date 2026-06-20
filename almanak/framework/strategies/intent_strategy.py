@@ -1520,10 +1520,28 @@ class IntentStrategy(StrategyBase[ConfigT]):
             positions: list[PositionValue] = []
             position_value = Decimal("0")
             positions_unavailable = False
+            perp_notional_excluded = False
 
             try:
                 position_summary = self.get_open_positions()
+                from ..teardown.models import PositionType as _PT
+
+                non_perp_value = Decimal("0")
                 for p in position_summary.positions:
+                    # VIB-5252: a strategy-reported PERP leg's value_usd is gross
+                    # NOTIONAL (collateral × leverage), not net equity. Net equity
+                    # (collateral + uPnL − fees) is only knowable from the on-chain
+                    # discovery/repricing path (PortfolioValuer), which this degraded
+                    # fallback does NOT run — it is reached precisely when that path
+                    # went UNAVAILABLE. Booking the notional here would re-introduce
+                    # the NAV inflation the canonical valuer's UNAVAILABLE was
+                    # protecting against (the inert-fix trap, VIB-5252), so exclude
+                    # perp legs from the fallback total and degrade confidence
+                    # (§7.5: degrade, never fabricate). Under-stating by the perp's
+                    # collateral is safe; over-stating by its notional is not.
+                    if p.position_type == _PT.PERP:
+                        perp_notional_excluded = True
+                        continue
                     positions.append(
                         PositionValue(
                             position_type=p.position_type,
@@ -1535,7 +1553,11 @@ class IntentStrategy(StrategyBase[ConfigT]):
                             details=p.details,
                         )
                     )
-                position_value = position_summary.total_value_usd
+                    non_perp_value += p.value_usd or Decimal("0")
+                # Preserve the declared total byte-identically when no perp leg was
+                # dropped (the common path); fall back to the non-perp leg sum only
+                # when a perp leg was excluded, so non-perp strategies are unaffected.
+                position_value = non_perp_value if perp_notional_excluded else position_summary.total_value_usd
             except Exception as e:  # noqa: BLE001  # Intentional graceful degradation
                 logger.warning(f"Failed to get open positions: {e}")
                 positions_unavailable = True
@@ -1587,7 +1609,14 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 # tracked in VIB-5278, pre-existing and out of scope here.
                 total_value_usd=position_value,
                 available_cash_usd=wallet_value,
-                value_confidence=ValueConfidence.ESTIMATED if positions_unavailable else ValueConfidence.HIGH,
+                # Degrade to ESTIMATED when positions could not be read OR a perp
+                # leg's net equity was excluded from the total (VIB-5252) — the
+                # number is a best-effort partial, not a fully-measured HIGH total.
+                value_confidence=(
+                    ValueConfidence.ESTIMATED
+                    if (positions_unavailable or perp_notional_excluded)
+                    else ValueConfidence.HIGH
+                ),
                 positions=positions,
                 wallet_balances=wallet_balances,
                 chain=self._chain,

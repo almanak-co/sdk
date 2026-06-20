@@ -532,7 +532,24 @@ class TestPortfolioValuerDiscoveryIntegration:
         assert positions[0].details.get("valuation_status") == "no_path"
 
     def test_strategy_only_no_discovery(self):
-        """Strategy provides positions, discovery finds nothing new."""
+        """Strategy reports a perp, discovery confirms nothing for it.
+
+        VIB-5252: a perp strategy reports ``value_usd`` as GROSS NOTIONAL
+        (size = collateral x leverage), which is NOT the position's net equity
+        (collateral + uPnL - fees). The old behaviour passed that notional
+        straight through ("no repricing for perps yet") and overstated NAV.
+
+        Here discovery returns an empty result — gmx_v2 was NOT scanned ok
+        (``perp_protocols_ok`` is empty) and no on-chain perp was found — so the
+        stub survives the merge (the negative-control case: we cannot *confirm*
+        the position is flat, so we don't silently drop it). It then reaches the
+        enriched perp repricer, which has no address/wallet to read net equity
+        from and so refuses to book notional: ``value_usd=0`` /
+        ``valuation_status='no_path'`` / ``unavailable=True``. The
+        strategy-level fallback (``IntentStrategy.get_portfolio_snapshot``,
+        Site D) presents this safely by excluding perp notional and degrading
+        confidence — it is never re-booked at the notional value.
+        """
         valuer = self._make_valuer()
 
         strategy_pos = PositionInfo(
@@ -540,7 +557,7 @@ class TestPortfolioValuerDiscoveryIntegration:
             position_id="gmx-perp-1",
             chain="arbitrum",
             protocol="gmx_v2",
-            value_usd=Decimal("5000"),
+            value_usd=Decimal("5000"),  # gross notional stub (the buggy value)
             details={"direction": "LONG"},
         )
         strategy = self._make_strategy(
@@ -554,8 +571,10 @@ class TestPortfolioValuerDiscoveryIntegration:
 
         assert len(positions) == 1
         assert positions[0].position_type == PositionType.PERP
-        # Perps pass through strategy value (no repricing for perps yet)
-        assert positions[0].value_usd == Decimal("5000")
+        # Net-equity contract: an unrepriceable perp is NEVER booked at notional.
+        assert positions[0].value_usd == Decimal("0")
+        assert positions[0].details.get("valuation_status") == "no_path"
+        assert unavailable is True
 
     def test_deduplication_discovery_enriches_strategy(self):
         """When both sources report the same position, discovery enriches details."""

@@ -250,13 +250,18 @@ class TestRealProtocolPositionsStillAdded:
             (PositionType.SUPPLY, Decimal("5000")),
             (PositionType.VAULT, Decimal("7500")),
             (PositionType.STAKE, Decimal("2500")),
-            (PositionType.PERP, Decimal("1500")),
+            # PERP is intentionally absent: VIB-5252 — a bare perp stub carries
+            # gross NOTIONAL, not net equity, so an unrepriceable perp degrades to
+            # no_path/UNAVAILABLE (0 contribution) rather than booking value_usd.
+            # Perp net-equity addition is covered by the dedicated VIB-5252 tests
+            # (test_perp_net_equity_vib5252.py), which drive the on-chain reprice.
             (PositionType.PREDICTION, Decimal("400")),
             (PositionType.CEX, Decimal("800")),
         ],
     )
     def test_non_token_position_added_to_wallet_total(self, position_type, value_usd):
-        """Every non-TOKEN position type is summed into wallet_total."""
+        """Every non-TOKEN position type (except PERP — see VIB-5252 note) is
+        summed into wallet_total."""
         position = PositionInfo(
             position_type=position_type,
             position_id=f"pos-{position_type.value.lower()}",

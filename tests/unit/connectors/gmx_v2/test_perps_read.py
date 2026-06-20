@@ -32,7 +32,6 @@ from almanak.connectors._strategy_base.perps_read_base import (
 from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
 from almanak.connectors.gmx_v2 import perps_read as gmx_perps
 from almanak.connectors.gmx_v2.perps_read import _GMX_USD_DECIMALS, value_perps_position
-from almanak.connectors.gmx_v2.sdk import GMXV2SDK
 
 # Real GMX arbitrum market addresses (checksummed) the metadata tables key on.
 _ETH_MARKET = "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336"  # ETH/USD, 18 dec
@@ -42,13 +41,17 @@ _ACCOUNT = to_checksum_address("0x" + "11" * 20)
 _USDC = to_checksum_address("0x" + "cc" * 20)
 
 
-def _props(market, *, size_usd, size_tok, col_amt, is_long, bf=7, ffaps=9):
-    """A synthetic Position.Props tuple in the Reader's (addresses, numbers, flags) shape."""
+def _props(market, *, size_usd, size_tok, col_amt, is_long, bf=7, ffaps=9, pia=-5):
+    """A synthetic Position.Props tuple in the Reader's (addresses, numbers, flags) shape.
+
+    Numbers follows the CURRENT 10-field GMX struct (VIB-5289): index 3 is the
+    signed ``int256 pendingImpactAmount``; the legacy block fields are gone.
+    """
     addresses = (_ACCOUNT, to_checksum_address(market), _USDC)
-    # numbers[0..10]: size_usd, size_tok, col_amt, borrowingFactor, fundingFeeAmountPerSize,
-    # longTokClaimable, shortTokClaimable, increasedAtBlock, decreasedAtBlock,
+    # numbers[0..9]: size_usd, size_tok, col_amt, pendingImpactAmount[int256],
+    # borrowingFactor, fundingFeeAmountPerSize, longTokClaimable, shortTokClaimable,
     # increasedAtTime, decreasedAtTime
-    numbers = (size_usd, size_tok, col_amt, bf, ffaps, 11, 13, 100, 200, 1_700_000_000, 1_700_000_001)
+    numbers = (size_usd, size_tok, col_amt, pia, bf, ffaps, 11, 13, 1_700_000_000, 1_700_000_001)
     flags = (is_long,)
     return (addresses, numbers, flags)
 
@@ -62,9 +65,22 @@ def _encode(props_list):
 # --------------------------------------------------------------------------- #
 
 
-def test_reduce_matches_legacy_parse_raw_positions_active_subset():
+def test_reduce_decodes_current_10_field_numbers_struct():
+    """VIB-5289: decode the CURRENT 10-field ``Position.Numbers`` (``int256``
+    ``pendingImpactAmount`` at index 3). The prior 11-``uint256`` ABI ran
+    ``eth_abi`` out of bytes on the real return → ``ok=False`` for EVERY live
+    position. Field-shift vs the stale layout: ``borrowing_factor`` 3→4,
+    ``funding_fee_amount_per_size`` 4→5, ``increased_at_time`` 9→8,
+    ``decreased_at_time`` 10→9; the valuation-critical size/collateral/is_long
+    stay at 0/1/2.
+
+    Validated against ground truth directly, NOT against ``GMXV2SDK``
+    ``_parse_raw_positions`` — that SDK/adapter oracle is ITSELF on the stale
+    11-field layout (execution path; tracked in VIB-5289 for a separately-
+    validated fix), so asserting parity with it would assert the bug.
+    """
     props_list = [
-        _props(_ETH_MARKET, size_usd=10**31, size_tok=10**18, col_amt=10**6, is_long=True),
+        _props(_ETH_MARKET, size_usd=10**31, size_tok=10**18, col_amt=10**6, is_long=True, bf=71, ffaps=91),
         _props(_BTC_MARKET, size_usd=0, size_tok=0, col_amt=5 * 10**6, is_long=False),  # inactive
         _props(_DOGE_MARKET, size_usd=2 * 10**31, size_tok=3 * 10**9, col_amt=10**18, is_long=False),
     ]
@@ -72,21 +88,36 @@ def test_reduce_matches_legacy_parse_raw_positions_active_subset():
         PerpsPositionQuery(chain="arbitrum", wallet_address=_ACCOUNT), [_encode(props_list)]
     )
     assert result.ok is True
-    # Oracle: parse ALL then keep active (size_in_usd > 0) — the legacy reader's filter.
-    legacy = [d for d in GMXV2SDK._parse_raw_positions(props_list) if d["size_in_usd"] > 0]
-    assert len(result.positions) == len(legacy) == 2
-    for pos, leg in zip(result.positions, legacy, strict=True):
-        assert pos.account == leg["account"]
-        assert pos.market == leg["market"]
-        assert pos.collateral_token == leg["collateral_token"]
-        assert pos.size_in_usd == leg["size_in_usd"]
-        assert pos.size_in_tokens == leg["size_in_tokens"]
-        assert pos.collateral_amount == leg["collateral_amount"]
-        assert pos.is_long == leg["is_long"]
-        assert pos.borrowing_factor == leg["borrowing_factor"]
-        assert pos.funding_fee_amount_per_size == leg["funding_fee_amount_per_size"]
-        assert pos.increased_at_time == leg["increased_at_time"]
-        assert pos.decreased_at_time == leg["decreased_at_time"]
+    # Inactive (size_in_usd == 0) is filtered; ETH + DOGE remain.
+    assert len(result.positions) == 2
+    eth, doge = result.positions
+    # Valuation-critical fields (indices 0/1/2 + flags) decode correctly.
+    assert eth.account == _ACCOUNT
+    assert eth.market == to_checksum_address(_ETH_MARKET)
+    assert eth.collateral_token == _USDC
+    assert (eth.size_in_usd, eth.size_in_tokens, eth.collateral_amount) == (10**31, 10**18, 10**6)
+    assert eth.is_long is True
+    # Shifted fields land on their NEW indices (4/5/8/9), not the old (3/4/9/10)
+    # which under the 11-field layout would have read pendingImpactAmount as
+    # borrowing_factor.
+    assert eth.borrowing_factor == 71
+    assert eth.funding_fee_amount_per_size == 91
+    assert eth.increased_at_time == 1_700_000_000
+    assert eth.decreased_at_time == 1_700_000_001
+    assert doge.is_long is False and doge.size_in_usd == 2 * 10**31
+
+
+def test_numbers_abi_pins_current_10_field_struct():
+    """VIB-5289 regression pin: the ``Position.Numbers`` ABI must be the current
+    10-field struct with the signed ``int256 pendingImpactAmount`` at index 3 —
+    NOT the stale 11-``uint256`` layout that decoded ZERO live GMX positions
+    (every read failed → ``ok=False``). A precise structural assertion so a
+    revert (or a copy-paste back to ``["uint256"] * 11``) trips here."""
+    fields = gmx_perps._POSITION_NUMBERS.strip("()").split(",")
+    assert len(fields) == 10, "GMX Position.Numbers is 10 fields, not 11"
+    assert fields[3] == "int256", "index 3 is the signed pendingImpactAmount"
+    assert fields.count("int256") == 1
+    assert fields.count("uint256") == 9
 
 
 def test_reduce_failed_read_is_unmeasured_empty_book_is_measured():

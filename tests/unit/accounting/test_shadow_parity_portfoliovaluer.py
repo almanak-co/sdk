@@ -99,10 +99,19 @@ def _looping_fixture_positions() -> list[PositionValue]:
 
 
 def _perp_fixture_positions() -> list[PositionValue]:
-    """perp/config.json: collateral_amount=$5.0, leverage=2.0 (notional $10). The
-    valuer carries ONE positive PERP leg = collateral + uPnL (≈$5.0 at open); the
-    leverage/notional is off the balance sheet — value_usd is NOT the notional. No
-    debt leg. True net equity = $5.00."""
+    """perp/config.json: collateral_amount=$5.0, leverage=2.0 (notional $10). True
+    net equity = $5.00 (collateral + uPnL − fees, §7.4); this fixture pins that
+    POST-fix target shape — ONE positive PERP leg at net equity, notional off the
+    balance sheet.
+
+    Note (VIB-5254/VIB-5252): production did NOT emit this shape before VIB-5252.
+    The strategy reported ``value_usd = collateral × leverage`` (notional, $10),
+    and the merge discarded the only repriceable leg, so the original
+    "zero-discrepancy control" was VOID — it passed only because this hand-built
+    fixture already carried net equity. VIB-5252 makes the on-chain discovery
+    path emit net equity in production, so this fixture is now a faithful target,
+    not a fiction. Do NOT raise value_usd to the notional to "match" the old
+    production bug."""
     return [
         PositionValue(
             position_type=PositionType.PERP,
