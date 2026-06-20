@@ -1,0 +1,7 @@
+# Pendle E2E / round-trip run artifacts (strategy SQLite dumps) are evidence for
+# the real-fork reports under tests/reports/, not committed fixtures. The
+# committed Accountant-Test ratchet fixture lives at tests/fixtures/accounting/pendle_pt/.
+# Transient SQLite WAL sidecars (*.db-shm / *.db-wal) must never be tracked.
+*.db
+*.db-shm
+*.db-wal

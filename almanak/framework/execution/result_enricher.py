@@ -351,6 +351,11 @@ class ResultEnricher:
         "lido": {
             "STAKE": ["primitive_money_legs"],
         },
+        # NOTE: prefer the connector-owned ``EXTRA_EXTRACTIONS_BY_INTENT`` parser
+        # attribute (merged generically by ``_with_parser_extra_extractions``) for
+        # NEW connector-specific extractions — it keeps the protocol name out of
+        # this framework file (guarded by ``test_connector_descriptor``). This
+        # per-protocol overlay table is the older, not-yet-migrated mechanism.
     }
 
     # VIB-4434 W2 — Per-protocol REMOVE table; companion to
@@ -471,6 +476,36 @@ class ResultEnricher:
         removed = ResultEnricher.EXTRACTION_SPECS_REMOVE_BY_PROTOCOL.get(protocol, {}).get(intent_type)
         if removed:
             merged = [field for field in merged if field not in removed]
+        return merged
+
+    @staticmethod
+    def _with_parser_extra_extractions(spec: list[str], parser: Any, intent_type: str) -> list[str]:
+        """Append a parser's CONNECTOR-DECLARED per-intent extraction fields.
+
+        A receipt parser may publish ``EXTRA_EXTRACTIONS_BY_INTENT`` —
+        ``{intent_type: (field, ...)}`` — naming extra fields it can extract beyond
+        the generic :data:`EXTRACTION_SPECS` base (e.g. the US-009
+        ``primitive_money_legs`` seam for a PT redeem WITHDRAW). The framework reads
+        it generically so connector-specific field choices live in the connector,
+        not this enricher (the alternative — a per-protocol overlay — names the
+        protocol here; ``test_connector_descriptor`` forbids that for migrated
+        connectors). Additive with order-preserving dedup, mirroring
+        :meth:`_merge_spec_with_overlay`; each field is still gated by the parser's
+        ``SUPPORTED_EXTRACTIONS`` at extraction time, so a stray declaration cannot
+        force an unsupported extract.
+        """
+        extra = getattr(parser, "EXTRA_EXTRACTIONS_BY_INTENT", None)
+        if not isinstance(extra, dict):
+            return spec
+        fields = extra.get(intent_type)
+        if not fields:
+            return spec
+        merged = list(spec)
+        seen = set(spec)
+        for field in fields:
+            if field not in seen:
+                merged.append(field)
+                seen.add(field)
         return merged
 
     def __init__(
@@ -679,6 +714,11 @@ class ResultEnricher:
                     return result
             else:
                 logger.debug(f"Enrichment: found {len(receipts)} receipt(s) to process")
+
+                # Merge the resolved parser's connector-DECLARED per-intent extra
+                # extractions (e.g. the US-009 ``primitive_money_legs`` seam) — kept
+                # connector-side, not as a protocol-named overlay in this framework.
+                spec = self._with_parser_extra_extractions(spec, parser, intent_type)
 
                 # On-chain extraction skips fields already populated off-chain so
                 # the CLOB-authoritative values are not overwritten by speculative

@@ -43,10 +43,22 @@ def test_pendle_lp_close_position_key_bare_address():
 
 
 def test_pendle_pt_swap_position_key():
-    intent = SimpleNamespace(protocol="pendle_v2", pool="0xMarketAddr")
+    # PT buy: a Pendle SWAP whose to_token is a PT- symbol keys on the normalized
+    # PT SYMBOL (VIB-4988 — NOT the market address; a SwapIntent carries no market
+    # and the resolved market is never persisted on the ledger row).
+    intent = SimpleNamespace(protocol="pendle_v2", from_token="WSTETH", to_token="PT-wstETH-25JUN2026", pool="")
+    position_key, _market_id = _call(intent, "SWAP")
+    assert position_key == "pendle_pt:arbitrum:0xwallet:pt-wsteth-25jun2026"
+
+
+def test_pendle_non_pt_swap_falls_through_to_generic():
+    # A Pendle SWAP with NO PT leg (a YT/SY swap) is not a PT position action —
+    # the connector declines it (returns None), so the runner's generic SWAP
+    # branch produces the swap: key (VIB-4988).
+    intent = SimpleNamespace(protocol="pendle_v2", from_token="WSTETH", to_token="YT-wstETH-25JUN2026", pool="0xMarketAddr")
     position_key, market_id = _call(intent, "SWAP")
-    assert position_key == "pendle_pt:arbitrum:0xwallet:0xmarketaddr"
-    assert market_id == "0xmarketaddr"
+    assert position_key == "swap:arbitrum:0xwallet"
+    assert market_id == ""
 
 
 def test_pendle_lp_no_market_returns_empty():

@@ -406,13 +406,12 @@ class FIFOBasisStore:
         pt_token = ctx.payload.get("pt_token", "")
         if not pt_token:
             return 0
-        # PT_BUY stores raw 18-decimal integers from the swap receipt.
+        # PT_BUY stores HUMAN amounts (the uniform PT payload convention) — read
+        # directly, no /1e18 (the builder converts raw→human before persisting).
         pt_human = _parse_decimal(ctx.payload.get("pt_amount"))
         sy_human = _parse_decimal(ctx.payload.get("sy_amount"))
         if pt_human is None or sy_human is None:
             return 0
-        pt_human = pt_human / _DECIMALS_18
-        sy_human = sy_human / _DECIMALS_18
         if pt_human <= 0:
             return 0
         self.record_pt_buy(
@@ -427,22 +426,19 @@ class FIFOBasisStore:
         return 1
 
     def _replay_pt_sell(self, ctx: _ReplayContext, v1_skipped: dict[str, int], log: Any) -> int:
-        # PT_SELL follows the same raw-integer convention as PT_BUY.
+        # PT_SELL stores HUMAN amounts (the uniform PT payload convention, same as
+        # PT_BUY / PT_REDEEM) — read directly, no /1e18.
         pt_token = ctx.payload.get("pt_token", "")
         if not pt_token:
             return 0
-        pt_raw = _parse_decimal(ctx.payload.get("pt_amount"))
-        if pt_raw is None:
+        pt_human = _parse_decimal(ctx.payload.get("pt_amount"))
+        if pt_human is None or pt_human <= 0:
             return 0
-        pt_human = pt_raw / _DECIMALS_18
-        if pt_human <= 0:
-            return 0
-        sy_raw = _parse_decimal(ctx.payload.get("sy_amount"))
+        sy_human = _parse_decimal(ctx.payload.get("sy_amount"))
         # sy_amount is required for PT_SELL: it's the actual market proceeds.
         # Defaulting to pt_amount (1:1 assumption) would invent cost-basis data.
-        if sy_raw is None or sy_raw <= 0:
+        if sy_human is None or sy_human <= 0:
             return 0
-        sy_human = sy_raw / _DECIMALS_18
         self.match_pt_redeem(
             deployment_id=ctx.deployment_id,
             position_key=ctx.position_key,
@@ -456,10 +452,10 @@ class FIFOBasisStore:
         pt_token = ctx.payload.get("pt_token", "")
         if not pt_token:
             return 0
-        # PT_REDEEM events are written by build_pendle_pt_redeem_accounting_event()
-        # which converts to human-decimal before storing (unlike PT_BUY / PT_SELL).
-        # When py_redeemed was missing from the receipt, pt_amount is None and the
-        # builder fell back to sy_amount — mirror that fallback here.
+        # PT_REDEEM stores HUMAN amounts (the uniform PT payload convention, same
+        # as PT_BUY / PT_SELL) — read directly, no /1e18. When py_redeemed was
+        # missing from the receipt, pt_amount is None and the builder fell back to
+        # sy_amount — mirror that fallback here.
         pt_raw = _parse_decimal(ctx.payload.get("pt_amount"))
         sy_raw = _parse_decimal(ctx.payload.get("sy_amount"))
         if pt_raw is not None:

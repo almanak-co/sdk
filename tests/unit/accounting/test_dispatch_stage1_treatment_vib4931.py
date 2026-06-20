@@ -61,7 +61,7 @@ def test_stage1_claimed_event_runs_treatment_before_classify(monkeypatch):
     monkeypatch.setattr(
         AccountingTreatmentRegistry,
         "categorize",
-        lambda _it, _p, _t: AccountingCategoryDecision(category=AccountingCategory.LP, treatment_key="k"),
+        lambda _it, _p, _t, _tin="": AccountingCategoryDecision(category=AccountingCategory.LP, treatment_key="k"),
     )
     monkeypatch.setattr(AccountingTreatmentRegistry, "treatment_for", lambda _k: treatment)
     monkeypatch.setattr("almanak.framework.accounting.processor.classify", classify_spy)
@@ -82,7 +82,7 @@ def test_stage1_declines_falls_through_to_generic(monkeypatch):
     sentinel = object()
     handler = MagicMock(return_value=sentinel)
 
-    monkeypatch.setattr(AccountingTreatmentRegistry, "categorize", lambda _it, _p, _t: None)
+    monkeypatch.setattr(AccountingTreatmentRegistry, "categorize", lambda _it, _p, _t, _tin="": None)
     monkeypatch.setattr("almanak.framework.accounting.processor.classify", lambda *_a: AccountingCategory.LP)
     monkeypatch.setattr("almanak.framework.accounting.processor.HANDLERS", {AccountingCategory.LP: handler})
 
@@ -102,7 +102,7 @@ def test_stage1_missing_treatment_falls_through_to_generic(monkeypatch, caplog):
     monkeypatch.setattr(
         AccountingTreatmentRegistry,
         "categorize",
-        lambda _it, _p, _t: AccountingCategoryDecision(category=AccountingCategory.LP, treatment_key="orphan"),
+        lambda _it, _p, _t, _tin="": AccountingCategoryDecision(category=AccountingCategory.LP, treatment_key="orphan"),
     )
     monkeypatch.setattr(AccountingTreatmentRegistry, "treatment_for", lambda _k: None)
     monkeypatch.setattr("almanak.framework.accounting.processor.classify", lambda *_a: AccountingCategory.LP)

@@ -16,14 +16,18 @@ Event Signatures (PendleMarketV3, verified on-chain 2026-04-26 via VIB-3419):
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from almanak.connectors._strategy_base.base import EventRegistry, HexDecoder
 from almanak.framework.execution.extracted_data import LPCloseData, LPOpenData, SwapAmounts
+
+if TYPE_CHECKING:
+    from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +97,93 @@ EVENT_NAME_TO_TYPE: dict[str, PendleEventType] = {
     "Transfer": PendleEventType.TRANSFER,
     "Approval": PendleEventType.APPROVAL,
 }
+
+
+# =============================================================================
+# PT / base-token symbol resolution (G-PT0)
+# =============================================================================
+#
+# The Pendle Market ``Swap`` event carries no token symbol — it reflects an
+# internal SY <-> PT trade. The legacy parser therefore stamped the swap legs
+# with the generic placeholders ``"SY"`` / ``"PT"``. Those placeholders flow
+# through ResultEnricher into ``transaction_ledger.token_in`` / ``token_out``
+# and win over the intent's ``to_token`` (ledger precedence prefers the parser
+# label). The accounting categorizer claims a PT trade only when a leg
+# ``.startswith("PT-")`` AND ``_parse_pt_maturity`` can read the expiry out of
+# the symbol — neither of which a bare ``"PT"`` (or even the intent's
+# maturity-less ``"PT-wstETH"`` alias) satisfies. The whole Pendle PT
+# accounting vertical was inert as a result.
+#
+# The compiler already hands the parser the PT token *address* (``token_out``
+# for a buy, ``token_in`` for a sell). That address reverse-maps — via the
+# connector's own ``PT_TOKEN_INFO`` catalogue — to the canonical
+# maturity-bearing symbol (e.g. ``PT-wstETH-25JUN2026``), which is the ONLY
+# source that carries the expiry. We resolve it here so the ledger carries the
+# real on-chain symbol for every downstream consumer, not just accounting.
+
+
+def _resolve_pt_symbol(chain: str, pt_address: str | None) -> str | None:
+    """Return the canonical maturity-bearing PT symbol for ``pt_address``.
+
+    Reverse-looks the PT token address up in :data:`PT_TOKEN_INFO` and returns
+    the alias that embeds the maturity date (``PT-<asset>-<DDMONYYYY>``) so that
+    :func:`accounting_spec._parse_pt_maturity` can read the expiry. When several
+    aliases share the address (the catalogue stores upper-case + mixed-case +
+    maturity-less spellings of the same token), the longest alias that matches
+    ``[-_]\\d{1,2}[A-Z]{3}\\d{4}`` wins — that is the maturity-bearing one.
+
+    Returns ``None`` (never a fabricated symbol) when the chain/address is
+    unknown or no catalogue alias carries a maturity — the caller then degrades
+    to the generic label rather than guessing wrong (Empty != Zero).
+    """
+    if not pt_address:
+        return None
+    from almanak.connectors.pendle.sdk import PT_TOKEN_INFO
+
+    target = pt_address.lower()
+    chain_info = PT_TOKEN_INFO.get(chain.lower(), {})
+    maturity_re = re.compile(r"[-_]\d{1,2}[A-Z]{3}\d{4}(?:$|[-_])")
+    best: str | None = None
+    for symbol, (addr, _decimals) in chain_info.items():
+        if addr.lower() != target:
+            continue
+        if not maturity_re.search(symbol.upper()):
+            continue
+        # The catalogue stores several maturity-bearing aliases at one address
+        # (a fully-upper-case spelling kept only "for compiler lookup" plus the
+        # canonical mixed-case form). Prefer the longest, and among equal-length
+        # ties prefer the mixed-case spelling — that is the human-readable
+        # canonical symbol the strategy config carries
+        # (``market_name="PT-wstETH-25JUN2026"``). The downstream maturity parse
+        # is case-insensitive, so this only affects ledger readability.
+        if best is None or _pt_symbol_rank(symbol) > _pt_symbol_rank(best):
+            best = symbol
+    return best
+
+
+def _pt_symbol_rank(symbol: str) -> tuple[int, int]:
+    """Rank a PT alias: longer wins; among ties, a non-all-caps spelling wins."""
+    return (len(symbol), 0 if symbol.isupper() else 1)
+
+
+def _resolve_base_symbol(chain: str, base_address: str | None) -> str | None:
+    """Return the underlying/base token symbol for ``base_address``.
+
+    Reverse-looks the address up in :data:`PENDLE_TOKENS` (the connector's
+    canonical underlying-token catalogue). This is the non-PT leg of a PT swap
+    (e.g. ``WSTETH``), which the accounting builders key ``price_inputs_json``
+    by. Returns ``None`` when unknown — the caller degrades to ``"SY"`` rather
+    than inventing a symbol.
+    """
+    if not base_address:
+        return None
+    from almanak.connectors.pendle.addresses import PENDLE_TOKENS
+
+    target = base_address.lower()
+    for symbol, addr in PENDLE_TOKENS.get(chain.lower(), {}).items():
+        if addr.lower() == target:
+            return symbol
+    return None
 
 
 # =============================================================================
@@ -388,8 +479,25 @@ class PendleReceiptParser:
             "lp_close_data",
             "position_id",
             "redemption_amounts",
+            # G-PT (VIB-4988 part 2): a PT redeem (WITHDRAW) declares its money
+            # legs (INPUT=PT, OUTPUT=underlying) as a typed PrimitiveMoneyLegs so
+            # the ledger dispatcher carries the maturity-bearing PT symbol on
+            # token_in instead of the lending-path guess (underlying-in/empty-out).
+            "primitive_money_legs",
         }
     )
+
+    # Connector-DECLARED per-intent extra extractions (VIB-4988): the framework
+    # enricher merges these onto the generic EXTRACTION_SPECS base via
+    # ``ResultEnricher._with_parser_extra_extractions`` — keeping the Pendle-specific
+    # field choice in the connector, not as a protocol-named overlay in the
+    # framework (test_connector_descriptor forbids that for migrated connectors).
+    # A PT redeem is a WITHDRAW; ``extract_primitive_money_legs`` surfaces the
+    # maturity-bearing PT symbol the lending-path guesser would otherwise drop. A
+    # non-PT Pendle withdraw yields None from the extractor → legacy path, unchanged.
+    EXTRA_EXTRACTIONS_BY_INTENT: dict[str, tuple[str, ...]] = {
+        "WITHDRAW": ("primitive_money_legs",),
+    }
 
     def __init__(
         self,
@@ -428,7 +536,14 @@ class PendleReceiptParser:
         user-facing amounts from Transfer events. The Market Swap event reports
         an internal PT flash-mint for YT trades, so the generic framework cannot
         derive these parser-specific hints.
+
+        G-PT (VIB-4988 part 2): a PT redeem (``primitive_money_legs`` on a
+        WITHDRAW) needs the compiler-resolved PT token address and the underlying
+        out-token identity/decimals to declare its money legs — a redeem emits no
+        Market Swap event, so the swap-path PT-symbol resolution never fires.
         """
+        if field == "primitive_money_legs":
+            return self._build_redeem_legs_kwargs(bundle_metadata)
         if field != "swap_amounts":
             return {}
 
@@ -467,6 +582,41 @@ class PendleReceiptParser:
                         decimals,
                     )
 
+        return kwargs
+
+    @staticmethod
+    def _build_redeem_legs_kwargs(bundle_metadata: dict[str, Any]) -> dict[str, Any]:
+        """Thread the redeem compiler context into ``extract_primitive_money_legs``.
+
+        The compiler's redeem ``ActionBundle.metadata`` carries the resolved PT
+        token address (``pt_address``) and the underlying out-token descriptor
+        (``out_token`` = ``{symbol, address, decimals}``). The receipt parser
+        reverse-maps the PT address to the canonical maturity-bearing PT symbol
+        and uses the out-token symbol/decimals for the OUTPUT leg. Each value is
+        only threaded when present so a missing key degrades the parser rather
+        than crashing the extraction (Empty != Zero).
+        """
+        kwargs: dict[str, Any] = {}
+        pt_address = bundle_metadata.get("pt_address")
+        if pt_address:
+            kwargs["pt_address"] = pt_address
+        out_token = bundle_metadata.get("out_token") or {}
+        if isinstance(out_token, dict):
+            out_symbol = out_token.get("symbol")
+            if out_symbol:
+                kwargs["out_token_symbol"] = out_symbol
+            out_address = out_token.get("address")
+            if out_address:
+                kwargs["out_token_address"] = out_address
+            out_decimals = out_token.get("decimals")
+            if out_decimals is not None:
+                try:
+                    kwargs["out_token_decimals"] = int(out_decimals)
+                except (TypeError, ValueError):
+                    logger.debug(
+                        "Could not coerce out_token.decimals=%r to int; redeem OUTPUT leg uses 18-decimal default",
+                        out_decimals,
+                    )
         return kwargs
 
     def parse_receipt(  # noqa: C901
@@ -1087,22 +1237,29 @@ class PendleReceiptParser:
         else:
             is_buying_pt = swap_event.is_buy_pt
 
+        # G-PT0: stamp the FULL maturity-bearing PT symbol (resolved from the
+        # compiler-supplied PT token address) instead of the generic ``"PT"``
+        # placeholder, and the real underlying symbol instead of ``"SY"`` where
+        # resolvable. This carries truth to ``transaction_ledger.token_in`` /
+        # ``token_out`` so the accounting categorizer claims the trade and
+        # ``_parse_pt_maturity`` can read the expiry. Degrade to the generic
+        # label (never a fabricated symbol) when the address is unknown.
         if is_buying_pt:
-            # SY -> PT swap
+            # base/SY -> PT swap: PT is the OUTPUT leg.
             amount_in = swap_event.sy_amount
             amount_out = swap_event.pt_amount
             swap_type = "buy_pt"
-            token_in = "SY"
-            token_out = "PT"
+            token_in = _resolve_base_symbol(self.chain, token_in_address) or "SY"
+            token_out = _resolve_pt_symbol(self.chain, token_out_address) or "PT"
             in_decimals = self.token_in_decimals
             out_decimals = self.token_out_decimals
         else:
-            # PT -> SY swap
+            # PT -> base/SY swap: PT is the INPUT leg.
             amount_in = swap_event.pt_amount
             amount_out = swap_event.sy_amount
             swap_type = "sell_pt"
-            token_in = "PT"
-            token_out = "SY"
+            token_in = _resolve_pt_symbol(self.chain, token_in_address) or "PT"
+            token_out = _resolve_base_symbol(self.chain, token_out_address) or "SY"
             in_decimals = self.token_out_decimals
             out_decimals = self.token_in_decimals
 
@@ -1432,6 +1589,163 @@ class PendleReceiptParser:
         except Exception as e:
             logger.warning(f"Failed to extract lp_close_data: {e}")
             return None
+
+    @staticmethod
+    def _pt_transfer_amount(
+        transfer_events: "list[TransferEventData]",
+        pt_address: str | None,
+    ) -> int | None:
+        """Return the PT TOKEN COUNT (raw 18-dec int) the redeem burned, from the
+        PT-token ERC20 ``Transfer`` log — or ``None`` when not resolvable.
+
+        AT/AFTER maturity ``redeemPyToToken`` emits no ``RedeemPY`` (only the SY
+        ``Redeem``), so the PT count must be read off the PT token's own
+        ``Transfer`` log: the wallet sends its PT to the router and the router
+        burns it (Transfer ``to`` == 0x0). Matching on ``token_address ==
+        pt_address`` isolates the PT leg from the SY / underlying transfers in the
+        same receipt; this value IS the PT count in the SAME 18-dec basis the
+        PT_BUY's PT ``amount_out`` uses, so PT-quantity conserves (PEN6).
+
+        Picks the largest matching transfer value — a redeem of the full balance
+        emits one PT transfer; the ``max`` guards against incidental dust/zero
+        transfers without assuming log ordering. Returns ``None`` when no PT
+        transfer is present (Empty != Zero — the caller degrades rather than
+        fabricating the count from the SY-asset amount).
+        """
+        if not pt_address:
+            return None
+        target = pt_address.lower()
+        values = [t.value for t in transfer_events if (t.token_address or "").lower() == target and t.value > 0]
+        return max(values) if values else None
+
+    def extract_primitive_money_legs(
+        self,
+        receipt: dict[str, Any],
+        *,
+        pt_address: str | None = None,
+        out_token_symbol: str | None = None,
+        out_token_address: str | None = None,
+        out_token_decimals: int | None = None,
+    ) -> "PrimitiveMoneyLegs | None":
+        """Declare the PT-redeem money legs for the transaction ledger (G-PT / VIB-4988).
+
+        A Pendle PT redeem is a WITHDRAW intent whose compiler names
+        ``intent.token`` = the *underlying* out token and ``intent.market_id`` =
+        the YT address; the PT token is on *neither*. So the legacy ledger
+        guesser (lending path) lands ``token_in`` = underlying / ``token_out`` =
+        ``""`` and the canonical PT symbol — the only cross-boundary join key the
+        accounting FIFO matcher and the position-events lifecycle use — never
+        reaches the row. The PT redeem also emits ``RedeemPY`` / ``RedeemSY``,
+        never a Market ``Swap``, so the swap-path PT-symbol resolution
+        (:func:`_resolve_pt_symbol` inside :meth:`_build_swap_result`) never fires.
+
+        This declares the redeem's two money legs as a typed
+        :class:`PrimitiveMoneyLegs` — the contract the US-009 ledger dispatcher
+        prefers over its legacy guess (blueprint 27 §6.6) — so the row carries:
+
+        * INPUT  — the canonical maturity-bearing PT symbol (reverse-mapped from
+          the compiler-supplied ``pt_address`` via :func:`_resolve_pt_symbol`),
+          amount = the PT TOKEN COUNT (18-dec), basis-identical to the PT_BUY's PT
+          ``amount_out`` so PT-quantity conserves (PEN6). Sourced from
+          ``RedeemPY.net_py_redeemed`` (the netPYRedeemed PT count, PRE-maturity)
+          or, at/after maturity where no RedeemPY fires, the PT-token ``Transfer``
+          value (:meth:`_pt_transfer_amount`). The SY ``Redeem.amountSyToRedeem``
+          is SY-ASSET denominated (≈ PT × SY-rate), NOT the PT count, and is never
+          used for this leg — that mismatch was the PEN6 basis break this closes.
+        * OUTPUT — the underlying token received (``out_token_symbol``), amount =
+          ``amount_token_out`` from the SY ``Redeem`` event when present.
+
+        Empty != Zero (blueprint 27 §10.10): when ``_resolve_pt_symbol`` returns
+        ``None`` (unknown catalogue address), or no PT count is resolvable (no
+        RedeemPY and no PT Transfer), this returns ``None`` so the dispatcher falls
+        back to its legacy path and the accounting builder's R6 degrade fires
+        (ESTIMATED + unavailable_reason) — a PT symbol / count is never fabricated,
+        and the SY-asset amount is never recorded as the PT count. The OUTPUT
+        amount is UNMEASURED (never a measured zero, never an SY proxy) when no
+        ``Redeem`` event carries a measured ``amount_token_out``.
+
+        Returns ``None`` for a non-PT Pendle withdraw (no resolvable PT symbol /
+        count), so a YT redeem / non-PT path is unchanged.
+
+        Args:
+            receipt: Transaction receipt dict with a ``logs`` field.
+            pt_address: Compiler-resolved PT token address (from redeem metadata).
+            out_token_symbol: Underlying out-token symbol (from redeem metadata).
+            out_token_address: Underlying out-token address (unused today; kept
+                for symmetry with the swap-path resolution).
+            out_token_decimals: Underlying out-token decimals (defaults to 18).
+
+        Returns:
+            A :class:`PrimitiveMoneyLegs` declaring the INPUT/OUTPUT legs, or
+            ``None`` when the receipt is not a resolvable PT redeem.
+        """
+        from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLeg, PrimitiveMoneyLegs
+        from almanak.framework.accounting.measured import MeasuredMoney
+
+        pt_symbol = _resolve_pt_symbol(self.chain, pt_address)
+        if pt_symbol is None:
+            # Unknown catalogue address (or no pt_address threaded): never
+            # fabricate a PT symbol. Fall back to the legacy dispatcher path so
+            # the accounting R6 degrade fires rather than a wrong key.
+            logger.debug(
+                "Pendle redeem: could not resolve PT symbol from pt_address=%r on chain=%s; "
+                "falling back to legacy ledger extraction (Empty != Zero).",
+                pt_address,
+                self.chain,
+            )
+            return None
+
+        try:
+            result = self.parse_receipt(receipt)
+        except Exception as e:
+            logger.warning(f"Failed to extract primitive money legs (redeem): {e}")
+            return None
+
+        # PT redeemed (INPUT leg) — MUST be the PT TOKEN COUNT, basis-identical to
+        # the PT_BUY's PT ``amount_out`` so PT-quantity conserves (PEN6). PT/YT are
+        # always 18 decimals on Pendle. Source priority (PEN6 / VIB-4988):
+        #   1. ``RedeemPY.net_py_redeemed`` — the netPYRedeemed field IS the PT
+        #      token count, emitted by the YT on the PRE-maturity redeem path.
+        #   2. The PT-token ERC20 ``Transfer`` value (token_address == pt_address)
+        #      — the user→router/burn transfer is the PT token count, the robust
+        #      source AT/AFTER maturity where ``redeemPyToToken`` emits only the SY
+        #      ``Redeem`` (no RedeemPY). The SY ``Redeem.amountSyToRedeem`` is
+        #      SY-ASSET denominated (≈ PT × SY-exchange-rate), NOT the PT count, so
+        #      it must NEVER seed the PT leg (the basis bug this fix closes).
+        #   3. Otherwise UNMEASURED-degrade → return None (Empty != Zero): never
+        #      record the asset-denominated amount as the PT count.
+        py_raw: int | None = None
+        if result.redeem_events:
+            py_raw = result.redeem_events[0].net_py_redeemed
+        else:
+            py_raw = self._pt_transfer_amount(result.transfer_events, pt_address)
+        if py_raw is None:
+            # Neither a RedeemPY token count nor a resolvable PT Transfer — do not
+            # fabricate the PT count from the SY-asset amount. Fall back to the
+            # legacy dispatcher path (R6 degrade) rather than book a wrong basis.
+            logger.debug(
+                "Pendle redeem: no PT token count available (no RedeemPY event and no PT Transfer "
+                "for pt_address=%r); falling back to legacy ledger extraction (Empty != Zero).",
+                pt_address,
+            )
+            return None
+        pt_amount = MeasuredMoney.measured(Decimal(str(py_raw)) / Decimal(10**18))
+
+        # Underlying received (OUTPUT leg). The SY ``Redeem`` event carries the
+        # measured ``amount_token_out`` (the underlying the wallet actually got);
+        # absent it the amount is UNMEASURED — never an SY proxy, never zero.
+        out_decimals = out_token_decimals if out_token_decimals is not None else 18
+        out_token = out_token_symbol or ""
+        if result.redeem_sy_events and result.redeem_sy_events[0].amount_token_out:
+            out_raw = result.redeem_sy_events[0].amount_token_out
+            out_amount = MeasuredMoney.measured(Decimal(str(out_raw)) / Decimal(10**out_decimals))
+        else:
+            out_amount = MeasuredMoney.unmeasured()
+
+        return PrimitiveMoneyLegs.of(
+            PrimitiveMoneyLeg.input(pt_symbol, pt_amount),
+            PrimitiveMoneyLeg.output(out_token, out_amount),
+        )
 
     def extract_redemption_amounts(self, receipt: dict[str, Any]) -> dict[str, int] | None:
         """

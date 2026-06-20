@@ -60,6 +60,14 @@ PENDLE_MARKETS = {
     "PT-wstETH-25JUN2026": "0xf78452e0f5c0b95fc5dc8353b8cd1e06e53fa25b",
 }
 
+# YT (Yield Token) address per PT market — needed for the redeem-at-maturity
+# exit (``exit_via="redeem"``). The Pendle redeem compiler takes the YT address
+# as the WITHDRAW ``market_id`` and resolves the PT from it. Verified via
+# readTokens() on the market (see connectors/pendle/sdk.py:YT_TOKEN_INFO).
+PENDLE_YT_ADDRESSES = {
+    "PT-wstETH-25JUN2026": "0x25bda1edd6af17c61399aa0eb84b93daa3069764",
+}
+
 
 @almanak_strategy(
     name="demo_pendle_basics",
@@ -69,7 +77,11 @@ PENDLE_MARKETS = {
     tags=["demo", "tutorial", "pendle", "yield", "pt", "fixed-yield"],
     supported_chains=["arbitrum"],
     supported_protocols=["pendle"],
-    intent_types=["SWAP", "HOLD"],
+    # WITHDRAW is emitted only when ``exit_via="redeem"`` (the redeem-at-maturity
+    # exit); the default exit is SWAP. Declared statically because the decorator
+    # metadata is the universe of intents the strategy CAN emit, not the runtime
+    # config-selected subset.
+    intent_types=["SWAP", "WITHDRAW", "HOLD"],
     default_chain="arbitrum",
     quote_asset="USD",
 )
@@ -126,9 +138,29 @@ class PendleBasicsStrategy(IntentStrategy):
         self.pt_token = self.get_config("pt_token", "PT-wstETH")
         self.pt_token_symbol = self.get_config("pt_token_symbol", self.pt_token)
 
+        # Exit mode: "sell" (default — SWAP PT back to base on the secondary
+        # market) or "redeem" (WITHDRAW intent — redeem PT+YT to the underlying
+        # via Pendle's redeemPyToToken, the at/after-maturity exit). The redeem
+        # path drives the buy → (warp past maturity) → redeem round-trip a
+        # real-fork run needs to exercise the PT_REDEEM accounting lane.
+        self.exit_via = str(self.get_config("exit_via", "sell")).lower()
+        # YT address for the redeem exit — the Pendle redeem compiler takes it as
+        # the WITHDRAW market_id and resolves the PT from it. Config override
+        # falls back to the per-market default.
+        self.yt_address = self.get_config(
+            "yt_address", PENDLE_YT_ADDRESSES.get(self.market_name, "")
+        )
+
         # Track state
         self._has_entered_position = False
+        self._has_exited_position = False
         self._consecutive_holds = 0
+        # Hold the PT for a few iterations, then sell it back to the base token
+        # so the demo exercises the full round-trip (buy → hold → sell) and the
+        # accounting realizes the fixed yield. 0 → sell on the next iteration.
+        self._hold_iterations_before_exit = int(
+            self.get_config("hold_iterations_before_exit", 2)
+        )
 
         trade_size_display = (
             f"{self.trade_size_token} {self.base_token_symbol}"
@@ -190,6 +222,71 @@ class PendleBasicsStrategy(IntentStrategy):
         except ValueError as e:
             logger.warning(f"Could not get balance: {e}")
             return Intent.hold(reason="Balance data unavailable")
+
+        # =================================================================
+        # STEP 2b: Exit an open PT position
+        # =================================================================
+        # If we already hold PT, hold for a few iterations and then sell it back
+        # to the base token. This demonstrates the full round-trip (the SELL
+        # leg realizes the fixed yield in the accounting) and runs in the normal
+        # iteration lane — checked BEFORE the buy-oriented balance gate below so
+        # a low base-token balance can't strand us in the position.
+        if self._has_entered_position and not self._has_exited_position:
+            if self._consecutive_holds < self._hold_iterations_before_exit:
+                self._consecutive_holds += 1
+                return Intent.hold(
+                    reason=f"Holding {self.pt_token} "
+                    f"({self._consecutive_holds}/{self._hold_iterations_before_exit} before exit)"
+                )
+            try:
+                pt_amount = market.balance(self.pt_token).balance
+            except ValueError as e:
+                logger.warning(f"Could not read {self.pt_token} balance for exit: {e}")
+                return Intent.hold(reason="PT balance unavailable for exit")
+            if pt_amount <= 0:
+                self._has_exited_position = True
+                return Intent.hold(reason="No PT balance to exit")
+            self._has_exited_position = True
+            self._consecutive_holds = 0
+            if self.exit_via == "redeem":
+                # Redeem-at-maturity exit: WITHDRAW redeems PT+YT to the
+                # underlying via Pendle's redeemPyToToken (the post-maturity exit
+                # — drive it after warping past the PT's expiry). The compiler
+                # takes the YT address as market_id and resolves the PT from it;
+                # ``token`` is the underlying out token.
+                if not self.yt_address:
+                    logger.warning(
+                        "exit_via='redeem' but no yt_address configured for %s; "
+                        "falling back to SWAP exit",
+                        self.market_name,
+                    )
+                else:
+                    logger.info(
+                        f"Exiting Pendle position via REDEEM: redeeming {pt_amount} "
+                        f"{self.pt_token} to {self.base_token} (YT={self.yt_address})"
+                    )
+                    return Intent.withdraw(
+                        protocol="pendle",
+                        token=self.base_token,
+                        amount=pt_amount,
+                        market_id=self.yt_address,
+                        chain=self.chain,
+                    )
+            logger.info(
+                f"Exiting Pendle position: swapping {pt_amount} {self.pt_token} "
+                f"back to {self.base_token}"
+            )
+            return Intent.swap(
+                from_token=self.pt_token,
+                to_token=self.base_token,
+                amount=pt_amount,
+                max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),
+                protocol="pendle",
+            )
+
+        if self._has_exited_position:
+            self._consecutive_holds += 1
+            return Intent.hold(reason="Round-trip complete (bought and sold PT)")
 
         # =================================================================
         # STEP 3: Decision Logic
@@ -290,7 +387,7 @@ class PendleBasicsStrategy(IntentStrategy):
 
         positions: list[PositionInfo] = []
 
-        if self._has_entered_position:
+        if self._has_entered_position and not self._has_exited_position:
             positions.append(
                 PositionInfo(
                     position_type=PositionType.TOKEN,

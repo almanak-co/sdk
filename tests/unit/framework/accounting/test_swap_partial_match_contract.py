@@ -127,8 +127,14 @@ def test_swap_matching_policy_version_bumped_to_v4() -> None:
 
 
 def test_swap_primitive_version_bumped_to_v2() -> None:
-    """F1 primitive contract gained the partial-match field bundle → v2."""
-    assert PRIMITIVE_VERSIONS[Primitive.SWAP] == 2
+    """SWAP primitive contract version.
+
+    VIB-4905 (F1) took it to v2 (partial-match field bundle); VIB-4988 took it
+    to v3 (Pendle PT now emits PT_SELL / PT_REDEEM realized-yield events under
+    the SWAP primitive), then to v4 (PT_BUY/PT_SELL payloads moved raw-18 →
+    human units, uniform with PT_REDEEM). The assertion tracks the current value.
+    """
+    assert PRIMITIVE_VERSIONS[Primitive.SWAP] == 4
 
 
 # ---------------------------------------------------------------------------

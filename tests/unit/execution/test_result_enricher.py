@@ -1339,6 +1339,38 @@ class TestExtractionSpecPerProtocolOverlay:
         # A non-migrated protocol's LP_CLOSE spec is untouched.
         assert "primitive_money_legs" not in ResultEnricher._merge_spec_with_overlay("LP_CLOSE", "uniswap_v3")
 
+    def test_with_parser_extra_extractions_merges_connector_declared_fields(self) -> None:
+        """A parser's connector-DECLARED ``EXTRA_EXTRACTIONS_BY_INTENT`` is merged
+        onto the base spec generically (no protocol name in the framework) —
+        additive, order-preserving, idempotent, and a no-op for parsers without it.
+        """
+        base = ["withdraw_amount", "redemption_amounts"]
+
+        class _StubParser:
+            EXTRA_EXTRACTIONS_BY_INTENT = {"WITHDRAW": ("primitive_money_legs",)}
+
+        merged = ResultEnricher._with_parser_extra_extractions(base, _StubParser(), "WITHDRAW")
+        assert merged[: len(base)] == base, "base fields preserved first"
+        assert merged[-1] == "primitive_money_legs", "declared field appended at tail"
+        # A different intent type is untouched.
+        assert ResultEnricher._with_parser_extra_extractions(base, _StubParser(), "SWAP") == base
+        # Re-merging does not duplicate (order-preserving dedup).
+        again = ResultEnricher._with_parser_extra_extractions(merged, _StubParser(), "WITHDRAW")
+        assert again.count("primitive_money_legs") == 1
+        # A parser without the attribute is a no-op (never raises).
+        assert ResultEnricher._with_parser_extra_extractions(base, object(), "WITHDRAW") == base
+
+    def test_pendle_withdraw_money_legs_is_connector_owned_not_framework_overlay(self) -> None:
+        """The Pendle PT-redeem ``primitive_money_legs`` extraction is declared on
+        the connector parser, NOT as a protocol-named framework overlay (VIB-4988;
+        guarded by ``test_connector_descriptor``)."""
+        from almanak.connectors.pendle.receipt_parser import PendleReceiptParser
+
+        assert "primitive_money_legs" in PendleReceiptParser.EXTRA_EXTRACTIONS_BY_INTENT["WITHDRAW"]
+        assert "primitive_money_legs" in PendleReceiptParser.SUPPORTED_EXTRACTIONS
+        # Not present as a framework per-protocol overlay.
+        assert "pendle" not in ResultEnricher.EXTRACTION_SPECS_BY_PROTOCOL
+
     # ----- 8. Forward-compat guard: a parser that declares
     #         SUPPORTED_EXTRACTIONS with Uniswap-V3-style fields under
     #         protocol="sushiswap_v3" must not emit any bin_ids / fees0 /

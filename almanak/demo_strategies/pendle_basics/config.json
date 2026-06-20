@@ -16,8 +16,9 @@
     "base_token": "WSTETH",
     "base_token_symbol": "WSTETH",
     "base_token_decimals": 18,
-    "pt_token": "PT-wstETH",
-    "pt_token_symbol": "PT-wstETH",
+    "pt_token": "PT-wstETH-25JUN2026",
+    "pt_token_symbol": "PT-wstETH-25JUN2026",
+    "hold_iterations_before_exit": 2,
     "anvil_funding": {
         "ETH": 10,
         "WSTETH": 1

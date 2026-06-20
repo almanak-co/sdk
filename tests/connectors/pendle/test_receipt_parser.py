@@ -11,10 +11,8 @@ import pytest
 
 from almanak.connectors.pendle import (
     EVENT_TOPICS,
-    PendleEventType,
     PendleReceiptParser,
 )
-
 
 # =============================================================================
 # Fixtures
@@ -798,8 +796,8 @@ class TestYTSwapReconstruction:
         log = create_swap_log(
             self.WALLET,
             self.WALLET,
-            10**18,        # +1 PT
-            -(10**18),     # -1 SY
+            10**18,  # +1 PT
+            -(10**18),  # -1 SY
             self.MARKET,
         )
         receipt = create_mock_receipt(logs=[log])
@@ -851,6 +849,432 @@ class TestYTSwapReconstruction:
         # Without the fix, default decimals=18 would report 1.5e-12 fUSDT0.
         assert amounts.amount_in_decimal == Decimal("1.5")
         assert amounts.amount_out_decimal == Decimal("12")
+
+
+class TestPTSwapSymbolResolution:
+    """G-PT0: PT swaps must stamp the FULL maturity-bearing PT symbol.
+
+    The Pendle Market ``Swap`` event carries no symbol, so the legacy parser
+    used generic ``"PT"`` / ``"SY"`` placeholders. Those flow to
+    ``transaction_ledger.token_in`` / ``token_out`` and the accounting
+    categorizer never claimed the trade (it needs ``token_out.startswith("PT-")``
+    plus a parseable maturity). The parser now resolves the canonical
+    maturity-bearing symbol from the compiler-supplied PT token address.
+    """
+
+    # Arbitrum PT-wstETH-25JUN2026 (PT token addr) + WSTETH underlying.
+    PT_WSTETH = "0x71fBF40651E9D4278a74586AfC99F307f369Ce9A"
+    WSTETH = "0x5979D7b546E38E414F7E9822514be443A4800529"
+    MARKET = "0xf78452e0f5C0B95fc5dC8353B8CD1e06E53fa25B"
+    WALLET = "0x1234567890123456789012345678901234567890"
+
+    def _parser(self):
+        return PendleReceiptParser(chain="arbitrum", token_in_decimals=18, token_out_decimals=18)
+
+    def _buy_receipt(self):
+        # buy_pt: Swap event is positive pt_to_account, negative sy_to_account.
+        log = create_swap_log(self.WALLET, self.WALLET, 10**18, -(10**18), self.MARKET)
+        return create_mock_receipt(logs=[log])
+
+    def _sell_receipt(self):
+        # sell_pt: Swap event is negative pt_to_account, positive sy_to_account.
+        log = create_swap_log(self.WALLET, self.WALLET, -(10**18), 10**18, self.MARKET)
+        return create_mock_receipt(logs=[log])
+
+    def test_buy_pt_token_out_carries_full_symbol(self):
+        """A PT buy must report token_out = the maturity-bearing PT symbol."""
+        amounts = self._parser().extract_swap_amounts(
+            self._buy_receipt(),
+            intent_swap_type="token_to_pt",
+            token_in_address=self.WSTETH,
+            token_out_address=self.PT_WSTETH,
+            wallet_address=self.WALLET,
+        )
+        assert amounts is not None
+        assert amounts.token_out == "PT-wstETH-25JUN2026"
+        assert amounts.token_out.startswith("PT-")
+        assert amounts.token_in == "WSTETH"
+        # Amounts (raw-18) are untouched by the symbol fix.
+        assert amounts.amount_in == 10**18
+        assert amounts.amount_out == 10**18
+
+    def test_sell_pt_token_in_carries_full_symbol(self):
+        """A PT sell must report token_in = the maturity-bearing PT symbol."""
+        amounts = self._parser().extract_swap_amounts(
+            self._sell_receipt(),
+            intent_swap_type="pt_to_token",
+            token_in_address=self.PT_WSTETH,
+            token_out_address=self.WSTETH,
+            wallet_address=self.WALLET,
+        )
+        assert amounts is not None
+        assert amounts.token_in == "PT-wstETH-25JUN2026"
+        assert amounts.token_in.startswith("PT-")
+        assert amounts.token_out == "WSTETH"
+
+    def test_full_symbol_parses_maturity(self):
+        """The resolved symbol must feed _parse_pt_maturity (the whole point)."""
+        from almanak.connectors.pendle.accounting_spec import _parse_pt_maturity
+
+        amounts = self._parser().extract_swap_amounts(
+            self._buy_receipt(),
+            intent_swap_type="token_to_pt",
+            token_in_address=self.WSTETH,
+            token_out_address=self.PT_WSTETH,
+            wallet_address=self.WALLET,
+        )
+        maturity = _parse_pt_maturity(amounts.token_out)
+        assert maturity is not None
+        assert (maturity.year, maturity.month, maturity.day) == (2026, 6, 25)
+
+    def test_unknown_pt_address_degrades_to_generic_label(self):
+        """Empty != Zero: an unknown PT address degrades to "PT", never guessed."""
+        amounts = self._parser().extract_swap_amounts(
+            self._buy_receipt(),
+            intent_swap_type="token_to_pt",
+            token_in_address=self.WSTETH,
+            token_out_address="0x" + "de" * 20,  # not in PT_TOKEN_INFO
+            wallet_address=self.WALLET,
+        )
+        assert amounts is not None
+        assert amounts.token_out == "PT"
+
+    def test_missing_pt_address_degrades_to_generic_label(self):
+        """No compiler address supplied -> generic labels (legacy behaviour)."""
+        amounts = self._parser().extract_swap_amounts(self._buy_receipt())
+        assert amounts is not None
+        assert amounts.token_out == "PT"
+        assert amounts.token_in == "SY"
+
+
+class TestPendleRedeemMoneyLegs:
+    """G-PT (VIB-4988 part 2): a PT redeem (WITHDRAW) declares its money legs as a
+    typed ``PrimitiveMoneyLegs`` (INPUT=canonical PT symbol resolved from the
+    compiler-supplied ``pt_address``, OUTPUT=underlying) so the ledger row carries
+    the maturity-bearing PT symbol on ``token_in`` instead of the lending guess.
+
+    A redeem emits ``RedeemPY`` / ``RedeemSY``, never a Market ``Swap``, so the
+    swap-path PT-symbol resolution never fires — these tests pin the redeem path.
+    """
+
+    # Arbitrum PT-wstETH-25JUN2026 (PT token addr) + WSTETH underlying + SY/YT.
+    PT_WSTETH = "0x71fBF40651E9D4278a74586AfC99F307f369Ce9A"
+    WSTETH = "0x5979D7b546E38E414F7E9822514be443A4800529"
+    SY_ADDR = "0x" + "5a" * 20
+    YT_ADDR = "0x25bda1edd6af17c61399aa0eb84b93daa3069764"
+    WALLET = "0x1234567890123456789012345678901234567890"
+
+    def _parser(self):
+        return PendleReceiptParser(chain="arbitrum", token_in_decimals=18, token_out_decimals=18)
+
+    @staticmethod
+    def _topic_addr(addr: str) -> str:
+        return "0x" + addr.lower().replace("0x", "").zfill(64)
+
+    def _redeem_sy_log(self, amount_sy: int, amount_token_out: int) -> dict:
+        # Redeem(caller, receiver, tokenOut indexed; amountSyToRedeem, amountTokenOut)
+        data = "0x" + hex(amount_sy)[2:].zfill(64) + hex(amount_token_out)[2:].zfill(64)
+        return {
+            "topics": [
+                EVENT_TOPICS["RedeemSY"],
+                self._topic_addr(self.WALLET),
+                self._topic_addr(self.WALLET),
+                self._topic_addr(self.WSTETH),
+            ],
+            "data": data,
+            "logIndex": 0,
+            "address": self.SY_ADDR,
+        }
+
+    def _redeem_py_log(self, net_py: int, net_sy: int) -> dict:
+        # RedeemPY(caller, receiver indexed; netPYRedeemed, netSYRedeemed); emitter=YT
+        data = "0x" + hex(net_py)[2:].zfill(64) + hex(net_sy)[2:].zfill(64)
+        return {
+            "topics": [
+                EVENT_TOPICS["RedeemPY"],
+                self._topic_addr(self.WALLET),
+                self._topic_addr(self.WALLET),
+            ],
+            "data": data,
+            "logIndex": 0,
+            "address": self.YT_ADDR,
+        }
+
+    def _pt_transfer_log(self, from_addr: str, to_addr: str, value: int, token_address: str | None = None) -> dict:
+        # ERC20 Transfer(from indexed, to indexed; value) on the PT token.
+        return {
+            "topics": [
+                EVENT_TOPICS["Transfer"],
+                self._topic_addr(from_addr),
+                self._topic_addr(to_addr),
+            ],
+            "data": "0x" + hex(value)[2:].zfill(64),
+            "logIndex": 0,
+            "address": token_address or self.PT_WSTETH,
+        }
+
+    # Captured real-fork basis (pendle_redeem_roundtrip_20260620.db): the PT_BUY
+    # bought 0.012378419794380337 PT; the redeem burned the FULL PT balance, but
+    # the SY ``Redeem`` reported 0.010002774988900641 SY-asset (PT × SY-rate).
+    # PEN6 requires the INPUT leg = the PT COUNT (0.012378), NOT the SY amount.
+    PT_COUNT_RAW = 12378419794380337  # 0.012378419794380337 PT (18 dec)
+    SY_OUT_RAW = 10002774988900641  # 0.010002774988900641 wstETH out (18 dec)
+    BURN = "0x0000000000000000000000000000000000000000"
+
+    def test_post_maturity_redeem_pt_count_from_transfer_not_sy(self):
+        """PEN6 basis: at/after maturity (RedeemSY only, NO RedeemPY) the PT INPUT
+        leg MUST be the PT TOKEN COUNT from the PT ``Transfer`` — NOT the
+        SY-asset ``amount_sy_to_redeem`` (the basis bug). OUTPUT = the measured
+        underlying ``amount_token_out``.
+
+        Uses the captured real-fork values so the SY≠PT-count mismatch is exercised
+        (0.012378 PT burned vs 0.010002 wstETH out)."""
+        receipt = create_mock_receipt(
+            logs=[
+                # PT burned: wallet -> 0x0 (full balance), token == pt_address.
+                self._pt_transfer_log(self.WALLET, self.BURN, self.PT_COUNT_RAW),
+                self._redeem_sy_log(self.SY_OUT_RAW, self.SY_OUT_RAW),
+            ]
+        )
+        legs = self._parser().extract_primitive_money_legs(
+            receipt,
+            pt_address=self.PT_WSTETH,
+            out_token_symbol="WSTETH",
+            out_token_address=self.WSTETH,
+            out_token_decimals=18,
+        )
+        assert legs is not None
+        inputs = legs.input_legs
+        outputs = legs.output_legs
+        assert len(inputs) == 1
+        assert len(outputs) == 1
+        assert inputs[0].token == "PT-wstETH-25JUN2026"
+        assert inputs[0].amount.is_measured
+        # PT count, basis-identical to the PT_BUY's amount_out — NOT the SY amount.
+        assert inputs[0].amount.value == Decimal("0.012378419794380337")
+        assert inputs[0].amount.value != Decimal("0.010002774988900641")
+        # OUTPUT = underlying received (the SY Redeem's amount_token_out).
+        assert outputs[0].token == "WSTETH"
+        assert outputs[0].amount.is_measured
+        assert outputs[0].amount.value == Decimal("0.010002774988900641")
+
+    def test_pre_maturity_redeem_uses_redeempy_pt_count(self):
+        """Pre-maturity redeem: PT count from ``RedeemPY.net_py_redeemed`` (the PT
+        count) — preferred over any PT Transfer; underlying from RedeemSY's
+        ``amount_token_out``. RedeemPY's PT count is distinct from the SY amounts."""
+        receipt = create_mock_receipt(
+            logs=[
+                self._redeem_py_log(self.PT_COUNT_RAW, self.SY_OUT_RAW),
+                self._redeem_sy_log(self.SY_OUT_RAW, 21 * 10**17),
+            ]
+        )
+        legs = self._parser().extract_primitive_money_legs(
+            receipt,
+            pt_address=self.PT_WSTETH,
+            out_token_symbol="WSTETH",
+            out_token_decimals=18,
+        )
+        assert legs is not None
+        assert legs.input_legs[0].token == "PT-wstETH-25JUN2026"
+        assert legs.input_legs[0].amount.value == Decimal("0.012378419794380337")
+        assert legs.output_legs[0].token == "WSTETH"
+        assert legs.output_legs[0].amount.value == Decimal("2.1")
+
+    def test_pt_transfer_filtered_by_token_address(self):
+        """A Transfer of a DIFFERENT token (e.g. the underlying out) must NOT be
+        mistaken for the PT count — only ``token_address == pt_address`` counts."""
+        receipt = create_mock_receipt(
+            logs=[
+                # Underlying transfer (router -> wallet) on a NON-PT token: must be ignored.
+                self._pt_transfer_log(self.SY_ADDR, self.WALLET, self.SY_OUT_RAW, token_address=self.WSTETH),
+                # The real PT burn.
+                self._pt_transfer_log(self.WALLET, self.BURN, self.PT_COUNT_RAW),
+                self._redeem_sy_log(self.SY_OUT_RAW, self.SY_OUT_RAW),
+            ]
+        )
+        legs = self._parser().extract_primitive_money_legs(
+            receipt, pt_address=self.PT_WSTETH, out_token_symbol="WSTETH"
+        )
+        assert legs is not None
+        assert legs.input_legs[0].amount.value == Decimal("0.012378419794380337")
+
+    def test_post_maturity_no_pt_transfer_degrades_not_sy(self):
+        """At/after maturity with NO RedeemPY and NO PT Transfer, the PT count is
+        unresolvable — return None (degrade) rather than booking the SY-asset
+        amount as the PT count (Empty != Zero, the PEN6 guard)."""
+        receipt = create_mock_receipt(logs=[self._redeem_sy_log(self.SY_OUT_RAW, self.SY_OUT_RAW)])
+        legs = self._parser().extract_primitive_money_legs(
+            receipt, pt_address=self.PT_WSTETH, out_token_symbol="WSTETH"
+        )
+        assert legs is None
+
+    def test_unknown_pt_address_returns_none_no_fabrication(self):
+        """An unknown catalogue PT address resolves no symbol -> return None so the
+        dispatcher falls back (Empty != Zero: never fabricate a PT symbol)."""
+        receipt = create_mock_receipt(
+            logs=[
+                self._pt_transfer_log(self.WALLET, self.BURN, self.PT_COUNT_RAW, token_address="0x" + "de" * 20),
+                self._redeem_sy_log(self.SY_OUT_RAW, self.SY_OUT_RAW),
+            ]
+        )
+        legs = self._parser().extract_primitive_money_legs(
+            receipt,
+            pt_address="0x" + "de" * 20,  # not in PT_TOKEN_INFO
+            out_token_symbol="WSTETH",
+        )
+        assert legs is None
+
+    def test_no_pt_address_returns_none(self):
+        """No compiler ``pt_address`` threaded -> no PT symbol -> None (legacy path)."""
+        receipt = create_mock_receipt(
+            logs=[
+                self._pt_transfer_log(self.WALLET, self.BURN, self.PT_COUNT_RAW),
+                self._redeem_sy_log(self.SY_OUT_RAW, self.SY_OUT_RAW),
+            ]
+        )
+        assert self._parser().extract_primitive_money_legs(receipt, out_token_symbol="WSTETH") is None
+
+    def test_missing_token_out_yields_unmeasured_output(self):
+        """No measured ``amount_token_out`` (degenerate receipt) -> OUTPUT amount is
+        UNMEASURED, never a measured zero or an SY proxy (Empty != Zero). The PT
+        count is still measured from the PT Transfer."""
+        receipt = create_mock_receipt(
+            logs=[
+                self._pt_transfer_log(self.WALLET, self.BURN, self.PT_COUNT_RAW),
+                self._redeem_sy_log(self.SY_OUT_RAW, 0),
+            ]
+        )
+        legs = self._parser().extract_primitive_money_legs(
+            receipt, pt_address=self.PT_WSTETH, out_token_symbol="WSTETH"
+        )
+        assert legs is not None
+        assert legs.input_legs[0].amount.is_measured  # PT count still known
+        assert legs.input_legs[0].amount.value == Decimal("0.012378419794380337")
+        assert not legs.output_legs[0].amount.is_measured  # underlying unmeasured
+
+    def test_no_redeem_event_no_pt_transfer_returns_none(self):
+        """A receipt with no redeem event and no PT transfer is not a redeem -> None."""
+        receipt = create_mock_receipt(logs=[])
+        assert (
+            self._parser().extract_primitive_money_legs(receipt, pt_address=self.PT_WSTETH, out_token_symbol="WSTETH")
+            is None
+        )
+
+    def test_build_extract_kwargs_threads_redeem_context(self):
+        """``build_extract_kwargs(field="primitive_money_legs")`` threads the
+        compiler's redeem metadata (pt_address + out_token descriptor) into the
+        extractor kwargs."""
+        bundle_metadata = {
+            "protocol": "pendle",
+            "yt_address": self.YT_ADDR,
+            "pt_address": self.PT_WSTETH,
+            "out_token": {"symbol": "WSTETH", "address": self.WSTETH, "decimals": 18},
+            "py_amount": str(10**18),
+        }
+        kwargs = self._parser().build_extract_kwargs(
+            field="primitive_money_legs", bundle_metadata=bundle_metadata
+        )
+        assert kwargs["pt_address"] == self.PT_WSTETH
+        assert kwargs["out_token_symbol"] == "WSTETH"
+        assert kwargs["out_token_address"] == self.WSTETH
+        assert kwargs["out_token_decimals"] == 18
+
+    def test_build_extract_kwargs_redeem_missing_keys_degrade(self):
+        """Missing redeem-metadata keys degrade (omitted from kwargs) rather than
+        crashing — the extractor then returns None (Empty != Zero)."""
+        # No pt_address / out_token at all → empty kwargs.
+        assert self._parser().build_extract_kwargs(field="primitive_money_legs", bundle_metadata={}) == {}
+        # Non-int decimals → out_token_decimals omitted, others still threaded.
+        kwargs = self._parser().build_extract_kwargs(
+            field="primitive_money_legs",
+            bundle_metadata={"pt_address": self.PT_WSTETH, "out_token": {"symbol": "WSTETH", "decimals": "oops"}},
+        )
+        assert kwargs["pt_address"] == self.PT_WSTETH
+        assert kwargs["out_token_symbol"] == "WSTETH"
+        assert "out_token_decimals" not in kwargs
+
+    def test_build_extract_kwargs_swap_field_unaffected(self):
+        """The redeem branch must not change the swap_amounts kwargs contract."""
+        kwargs = self._parser().build_extract_kwargs(
+            field="swap_amounts",
+            bundle_metadata={"swap_type": "token_to_pt", "to_token_address": self.PT_WSTETH},
+        )
+        assert kwargs.get("intent_swap_type") == "token_to_pt"
+        assert "pt_address" not in kwargs  # swap path never threads pt_address
+
+
+class TestPTSymbolResolverHelpers:
+    """Direct mocked-catalogue coverage of the symbol-resolution helpers (CodeRabbit).
+
+    ``TestPTSwapSymbolResolution`` exercises these through ``extract_swap_amounts``
+    against the live catalogue; this class pins the helper branches the live tables
+    can't easily reach — the ``_pt_symbol_rank`` tiebreak and the missing-maturity
+    degrade — independently, with mocked ``PT_TOKEN_INFO`` / ``PENDLE_TOKENS``.
+    """
+
+    _ADDR = "0x" + "ab" * 20
+
+    def test_pt_symbol_rank_orders_longest_then_mixed_case(self):
+        from almanak.connectors.pendle.receipt_parser import _pt_symbol_rank
+
+        # Longer alias wins.
+        assert _pt_symbol_rank("PT-wstETH-25JUN2026") > _pt_symbol_rank("PT-25JUN2026")
+        # Equal length: the mixed-case (canonical, human-readable) spelling wins.
+        assert len("PT-wstETH-25JUN2026") == len("PT-WSTETH-25JUN2026")
+        assert _pt_symbol_rank("PT-wstETH-25JUN2026") > _pt_symbol_rank("PT-WSTETH-25JUN2026")
+
+    def test_resolve_pt_symbol_prefers_maturity_bearing_mixed_case(self, monkeypatch):
+        from almanak.connectors.pendle import sdk
+
+        monkeypatch.setattr(
+            sdk,
+            "PT_TOKEN_INFO",
+            {
+                "arbitrum": {
+                    "PT": (self._ADDR, 18),  # maturity-less — must be ignored
+                    "PT-WSTETH-25JUN2026": (self._ADDR, 18),  # all-caps maturity-bearing
+                    "PT-wstETH-25JUN2026": (self._ADDR, 18),  # canonical mixed-case
+                }
+            },
+        )
+        from almanak.connectors.pendle.receipt_parser import _resolve_pt_symbol
+
+        # Case-insensitive address match; ranking picks the canonical mixed-case alias.
+        assert _resolve_pt_symbol("arbitrum", self._ADDR.upper()) == "PT-wstETH-25JUN2026"
+
+    def test_resolve_pt_symbol_no_maturity_alias_degrades_none(self, monkeypatch):
+        """An address present in the catalogue but with no maturity-bearing alias
+        degrades to None — never a fabricated maturity-less symbol (Empty != Zero)."""
+        from almanak.connectors.pendle import sdk
+
+        monkeypatch.setattr(
+            sdk,
+            "PT_TOKEN_INFO",
+            {"arbitrum": {"PT": (self._ADDR, 18), "PT-SOMETHING": (self._ADDR, 18)}},
+        )
+        from almanak.connectors.pendle.receipt_parser import _resolve_pt_symbol
+
+        assert _resolve_pt_symbol("arbitrum", self._ADDR) is None
+
+    def test_resolve_pt_symbol_empty_or_unknown_is_none(self):
+        from almanak.connectors.pendle.receipt_parser import _resolve_pt_symbol
+
+        assert _resolve_pt_symbol("arbitrum", None) is None
+        assert _resolve_pt_symbol("arbitrum", "") is None
+        assert _resolve_pt_symbol("nosuchchain", self._ADDR) is None
+
+    def test_resolve_base_symbol_lookup_and_degrade(self, monkeypatch):
+        from almanak.connectors.pendle import addresses
+
+        monkeypatch.setattr(addresses, "PENDLE_TOKENS", {"arbitrum": {"WSTETH": self._ADDR}})
+        from almanak.connectors.pendle.receipt_parser import _resolve_base_symbol
+
+        # Case-insensitive match.
+        assert _resolve_base_symbol("arbitrum", self._ADDR.upper()) == "WSTETH"
+        # Unknown address / empty / unknown chain → None (degrade to "SY" upstream).
+        assert _resolve_base_symbol("arbitrum", "0x" + "cd" * 20) is None
+        assert _resolve_base_symbol("arbitrum", None) is None
+        assert _resolve_base_symbol("nosuchchain", self._ADDR) is None
 
 
 if __name__ == "__main__":

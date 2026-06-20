@@ -2030,27 +2030,49 @@ def deserialize_extracted_data(json_str: str) -> dict[str, Any]:
         if not isinstance(val, dict) or "_type" not in val:
             result[key] = val
             continue
-
         type_name = val.pop("_type")
-        if type_name == "Decimal":
-            result[key] = Decimal(val["value"])
-        elif type_name == "datetime":
-            result[key] = datetime.fromisoformat(val["value"])
-        elif type_name == "Enum":
-            result[key] = val  # Return as dict; caller knows the enum type
-        elif type_name in type_map:
-            try:
-                cls = type_map[type_name]
-                # Convert string values back to appropriate types
-                result[key] = _reconstruct_dataclass(cls, val)
-            except (TypeError, ValueError):
-                val["_type"] = type_name
-                result[key] = val
-        else:
-            val["_type"] = type_name
-            result[key] = val
+        result[key] = _reconstruct_tagged_value(type_name, val, type_map)
 
     return result
+
+
+def _reconstruct_tagged_value(type_name: str, val: dict[str, Any], type_map: dict[str, type]) -> Any:
+    """Reconstruct one ``_type``-tagged extracted-data value (inverse of the
+    ``serialize_extracted_data`` tagging).
+
+    ``val`` has already had its ``_type`` key popped. Unknown or unreconstructable
+    tags re-stamp ``_type`` and return the raw dict, so the blob round-trips
+    losslessly as a plain dict rather than raising.
+    """
+    if type_name == "Decimal":
+        return Decimal(val["value"])
+    if type_name == "datetime":
+        return datetime.fromisoformat(val["value"])
+    if type_name == "Enum":
+        return val  # Return as dict; caller knows the enum type
+    if type_name == "PrimitiveMoneyLegs":
+        # The connector-DECLARED money legs (US-009): serialize_extracted_data
+        # writes them via to_dict()+_type, but PrimitiveMoneyLegs is not a flat
+        # dataclass (nested legs + MeasuredMoney) so it needs its own typed
+        # round-trip rather than _reconstruct_dataclass. Without this branch the
+        # legs come back as a raw dict and typed readers (e.g. the Pendle redeem
+        # accounting handler, which reads the persisted blob) silently miss them.
+        try:
+            from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
+
+            return PrimitiveMoneyLegs.from_dict(val)
+        except (TypeError, ValueError, KeyError):
+            val["_type"] = type_name
+            return val
+    if type_name in type_map:
+        try:
+            # Convert string values back to appropriate types.
+            return _reconstruct_dataclass(type_map[type_name], val)
+        except (TypeError, ValueError):
+            val["_type"] = type_name
+            return val
+    val["_type"] = type_name
+    return val
 
 
 def _reconstruct_dataclass(cls: type, data: dict[str, Any]) -> Any:

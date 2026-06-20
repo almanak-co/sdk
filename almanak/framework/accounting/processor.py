@@ -289,6 +289,7 @@ class AccountingProcessor:
         intent_type = ledger_row.get("intent_type") or ""
         protocol = ledger_row.get("protocol") or ""
         token_out = ledger_row.get("token_out") or ""
+        token_in = ledger_row.get("token_in") or ""
 
         ctx = HandlerContext(
             outbox_row=outbox_row,
@@ -307,7 +308,7 @@ class AccountingProcessor:
         # connector wiring bug), we log loudly and FALL THROUGH to the generic stage-2
         # path so the event is still accounted (generically) rather than silently
         # dropped (CodeRabbit review on #2598).
-        decision = AccountingTreatmentRegistry.categorize(intent_type, protocol, token_out)
+        decision = AccountingTreatmentRegistry.categorize(intent_type, protocol, token_out, token_in)
         if decision is not None:
             treatment = AccountingTreatmentRegistry.treatment_for(decision.treatment_key)
             if treatment is not None:

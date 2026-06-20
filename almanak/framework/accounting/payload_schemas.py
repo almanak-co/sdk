@@ -193,7 +193,20 @@ PRIMITIVE_VERSIONS: dict[Primitive, int] = {
     # ``unmatched_proceeds_usd``).  Bump documents the new emitter contract
     # at the primitive level (separate from the matching-policy bump above
     # — see module docstring for the policy/contract split).
-    Primitive.SWAP: 2,
+    # VIB-4988 (v2→v3): Pendle PT now emits PT_SELL and PT_REDEEM (previously
+    # only PT_BUY), adding realized fixed-yield attribution to the SWAP
+    # primitive's emitted-event set + a realized-yield CLOSE invariant. PT_*
+    # taxonomy-map to Primitive.SWAP, so this is the right slot. (The FIFO
+    # matching algo is invoked, not changed — matching_policy_version is NOT
+    # bumped.)
+    # VIB-4988 (v3→v4): PT_BUY / PT_SELL payloads now store ``pt_amount`` /
+    # ``sy_amount`` in HUMAN units (was raw-18), uniform with PT_REDEEM, so PEN6
+    # quantity-conservation holds across a buy→redeem round-trip. A semantic
+    # change to the persisted payload unit → primitive_version bump (the FIFO
+    # algo is unchanged, so matching_policy_version is NOT bumped). Pre-v4 rows
+    # carry raw-18 payloads; the stamp lets a reader disambiguate. (Branch is
+    # unmerged/pre-production, so no backfill obligation — Blueprint 27 §10.6.)
+    Primitive.SWAP: 4,
     Primitive.VAULT: PRIMITIVE_VERSION_DEFAULT,
     Primitive.STAKING: PRIMITIVE_VERSION_DEFAULT,
     Primitive.BRIDGE: PRIMITIVE_VERSION_DEFAULT,

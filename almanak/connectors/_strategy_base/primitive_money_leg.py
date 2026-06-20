@@ -170,6 +170,25 @@ class PrimitiveMoneyLeg:
         """
         return {"role": self.role.value, "token": self.token, "amount": self.amount.to_payload()}
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PrimitiveMoneyLeg:
+        """Reconstruct a leg from its :meth:`to_dict` form (the inverse round-trip).
+
+        Used by ``deserialize_extracted_data`` (``observability/ledger.py``) to
+        rebuild the typed money-legs fact from the persisted
+        ``transaction_ledger.extracted_data`` blob, so every reader of the
+        deserialized extracted-data — notably the accounting handlers, which read
+        the persisted JSON via ``_pt_context`` rather than the in-memory result —
+        sees a typed ``PrimitiveMoneyLegs`` and not a raw dict. The amount
+        round-trips via :meth:`MeasuredMoney.from_payload`, preserving the three
+        Empty≠Zero states (measured / unmeasured / absent).
+        """
+        return cls(
+            MoneyLegRole(data["role"]),
+            data.get("token") or "",
+            MeasuredMoney.from_payload(data.get("amount")),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class PrimitiveMoneyLegs:
@@ -315,6 +334,22 @@ class PrimitiveMoneyLegs:
         other typed extracted-data objects honour — rather than a ``repr`` string.
         """
         return {"legs": [leg.to_dict() for leg in self.legs]}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PrimitiveMoneyLegs:
+        """Reconstruct from the :meth:`to_dict` form (inverse round-trip).
+
+        See :meth:`PrimitiveMoneyLeg.from_dict` — this rebuilds the typed legs
+        set from the persisted ledger ``extracted_data`` blob so deserialized
+        readers receive a typed ``PrimitiveMoneyLegs``. A missing / non-list
+        ``legs`` yields an empty set rather than raising (a tolerant read of a
+        malformed blob; the caller treats an empty legs set as "no declared legs"
+        and falls back to legacy extraction).
+        """
+        raw_legs = data.get("legs")
+        if not isinstance(raw_legs, list):
+            return cls(())
+        return cls(tuple(PrimitiveMoneyLeg.from_dict(leg) for leg in raw_legs))
 
 
 __all__ = [

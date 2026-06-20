@@ -4340,19 +4340,17 @@ class StrategyRunner:
             protocol = (getattr(intent, "protocol", "") or "").lower()
             t = intent_type_str.upper()
 
-            # Lending (SUPPLY / BORROW / REPAY / DELEVERAGE / WITHDRAW)
-            if t in {"SUPPLY", "BORROW", "REPAY", "DELEVERAGE", "WITHDRAW"}:
-                from ..accounting.lending_accounting import _derive_position_key, _intent_asset, _intent_market_id
-
-                market_id = _intent_market_id(intent) or ""
-                asset = _intent_asset(intent)
-                position_key = _derive_position_key(protocol, chain, wallet_address, market_id or None, asset)
-                return position_key, market_id
-
             # Connectors with custom accounting publish their outbox position-key
-            # derivation via the strategy-side registry (VIB-4931), so the runner
-            # routes them without naming the protocol. Returns (position_key,
-            # market_id) when a connector contributes a custom key, else None.
+            # derivation via the strategy-side registry (VIB-4931). This probe
+            # runs FIRST — mirroring the dispatcher's registry stage-1 (Blueprint
+            # 27 §10.5) — so a connector-owned event keys by its connector
+            # treatment, not the generic branches below. In particular a Pendle PT
+            # redeem arrives as WITHDRAW; without registry-first it would take the
+            # lending branch and get a lending key, breaking the PT FIFO match
+            # (VIB-4988). `position_key_for` returns None for every protocol whose
+            # connector does not publish a position_key (only Pendle does today),
+            # so every genuine lending WITHDRAW falls through to the lending branch
+            # with a byte-identical key.
             from almanak.connectors._strategy_accounting_treatment_registry import (
                 AccountingTreatmentRegistry,
             )
@@ -4362,6 +4360,15 @@ class StrategyRunner:
             )
             if registry_key is not None:
                 return registry_key
+
+            # Lending (SUPPLY / BORROW / REPAY / DELEVERAGE / WITHDRAW)
+            if t in {"SUPPLY", "BORROW", "REPAY", "DELEVERAGE", "WITHDRAW"}:
+                from ..accounting.lending_accounting import _derive_position_key, _intent_asset, _intent_market_id
+
+                market_id = _intent_market_id(intent) or ""
+                asset = _intent_asset(intent)
+                position_key = _derive_position_key(protocol, chain, wallet_address, market_id or None, asset)
+                return position_key, market_id
 
             # Generic SWAP — position key groups by chain+wallet for FIFO lot tracking.
             if t == "SWAP":

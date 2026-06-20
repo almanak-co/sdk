@@ -33,6 +33,11 @@ _TAXONOMY_LIFECYCLE_BY_PRIMITIVE = {
     Primitive.LP: _LP_LIFECYCLE,
     Primitive.LENDING: _LENDING_LIFECYCLE,
     Primitive.PERP: _PERP_LIFECYCLE,
+    # Pendle PT rides the SWAP primitive (taxonomy: PENDLE_PT → Primitive.SWAP).
+    # SWAP is atomic — no multi-step lifecycle constant — so the canonical
+    # lifecycle is empty; the PT buy→sell round-trip is enforced by the PEN cell
+    # pack, not the intent_type lifecycle guard (both legs are SWAP in the ledger).
+    Primitive.SWAP: (),
 }
 
 

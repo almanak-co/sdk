@@ -39,6 +39,7 @@ functions. It does not import ``almanak.framework`` at runtime — a decision's
 from __future__ import annotations
 
 import importlib
+import inspect
 import logging
 from collections.abc import Iterator
 from typing import ClassVar
@@ -46,10 +47,40 @@ from typing import ClassVar
 from almanak.connectors._strategy_base.accounting_treatment_base import (
     AccountingCategoryDecision,
     AccountingTreatmentSpec,
+    CategorizeFn,
     TreatmentFn,
 )
 
 logger = logging.getLogger(__name__)
+
+# Arity cache for connector-published ``categorize`` functions. ``token_in`` is an
+# additive 4th argument (the CategorizeFn contract): a connector that only needs
+# ``token_out`` may publish a 3-arg ``categorize``, so the registry must NOT pass
+# ``token_in`` positionally to a function that cannot accept it — that would raise
+# ``TypeError``, isolate the connector, and silently route its events to the
+# generic path (a money-path loss). Keyed by the function object (connector specs
+# are module-level singletons, so each ``categorize`` is inspected at most once;
+# holding the reference also rules out ``id()`` reuse).
+_CATEGORIZE_ACCEPTS_TOKEN_IN: dict[CategorizeFn, bool] = {}
+
+
+def _categorize_accepts_token_in(fn: CategorizeFn) -> bool:
+    """True iff ``fn`` can be called with the additive 4th ``token_in`` argument.
+
+    A function with ``token_in`` (positional or keyword) or ``*args`` accepts it;
+    a strict 3-arg ``(intent_type, protocol, token_out)`` function does not and is
+    called 3-arg, honouring the CategorizeFn backward-compatibility contract.
+    """
+    cached = _CATEGORIZE_ACCEPTS_TOKEN_IN.get(fn)
+    if cached is None:
+        try:
+            inspect.signature(fn).bind("", "", "", "")
+            cached = True
+        except TypeError:
+            cached = False
+        _CATEGORIZE_ACCEPTS_TOKEN_IN[fn] = cached
+    return cached
+
 
 # ``AccountingCategoryDecision`` / ``AccountingTreatmentSpec`` are re-exported so
 # callers can name the seam types without reaching into the base module.
@@ -159,19 +190,32 @@ class AccountingTreatmentRegistry:
             yield connector, spec
 
     @classmethod
-    def categorize(cls, intent_type: str, protocol: str, token_out: str) -> AccountingCategoryDecision | None:
+    def categorize(
+        cls,
+        intent_type: str,
+        protocol: str,
+        token_out: str,
+        token_in: str = "",
+    ) -> AccountingCategoryDecision | None:
         """Resolve the connector decision for one event, or ``None`` if unclaimed.
 
         Iterates the published specs in registration order; the first connector
-        whose ``categorize`` claims ``(intent_type, protocol, token_out)`` wins. A
-        connector whose ``categorize`` raises is isolated (logged + skipped) so a
-        buggy sibling cannot break dispatch for healthy connectors. Returns
-        ``None`` when no connector claims the event — the framework dispatcher then
-        routes it through the generic category path.
+        whose ``categorize`` claims ``(intent_type, protocol, token_out, token_in)``
+        wins. ``token_in`` is additive (default ``""``) — it lets a connector
+        precisely claim a directional swap leg (e.g. Pendle's PT *sell*, where the
+        PT- token is on the ``token_in`` side) rather than over-claiming every swap
+        in the protocol (VIB-4988). A connector whose ``categorize`` raises is
+        isolated (logged + skipped) so a buggy sibling cannot break dispatch for
+        healthy connectors. Returns ``None`` when no connector claims the event —
+        the framework dispatcher then routes it through the generic category path.
         """
         for connector, spec in cls._iter_specs():
             try:
-                decision = spec.categorize(intent_type, protocol, token_out)
+                if _categorize_accepts_token_in(spec.categorize):
+                    decision = spec.categorize(intent_type, protocol, token_out, token_in)
+                else:
+                    # 3-arg connector (CategorizeFn contract): token_in is additive.
+                    decision = spec.categorize(intent_type, protocol, token_out)
             except Exception:  # noqa: BLE001 — isolate one broken connector
                 logger.warning(
                     "Connector %r categorize() raised for intent_type=%r protocol=%r; "

@@ -74,7 +74,7 @@ CLOSE_EVENT_TYPES: tuple[str, ...] = tuple(
 # ``Primitive`` via ``SCORECARD_PROFILES`` (assembled below). ``Primitive`` is
 # kept as a back-compat alias: it is exported in ``__all__`` and referenced by
 # annotations throughout this module.
-ProfileName = Literal["lp", "looping", "perp"]
+ProfileName = Literal["lp", "looping", "perp", "pendle_pt"]
 Primitive = ProfileName
 CellStatus = Literal["PASS", "FAIL", "XFAIL", "SKIP"]
 
@@ -2814,6 +2814,166 @@ def _cells_perp(
     return out
 
 
+def _cells_pendle_pt(
+    acct_events: list[dict[str, Any]],
+    pos_events: list[dict[str, Any]],
+    acct_payloads: dict[Any, dict[str, Any]],
+    payload_errors: dict[Any, str],
+) -> list[CellResult]:
+    """PEN1–PEN6 — the Pendle Principal Token (PT) scorecard.
+
+    A PT is economically a fixed-yield position (buy at a discount to par,
+    redeem/sell to realise yield), even though its events ride the SWAP
+    primitive in the taxonomy (``taxonomy.py`` ``PENDLE_PT → Primitive.SWAP``).
+    These cells score the PT-specific economics off the ``PendleAccountingEvent``
+    payload (``pt_amount``/``sy_amount``/``pt_price``/``implied_apr_bps``/
+    ``realized_yield_usd``) and the ``PENDLE_PT`` position_events lifecycle.
+    """
+    out: list[CellResult] = []
+    pt_buys = [r for r in acct_events if r.get("event_type") == "PT_BUY"]
+    pt_disposals = [r for r in acct_events if r.get("event_type") in ("PT_SELL", "PT_REDEEM")]
+
+    # PEN1 — acquisition cost basis: a PT buy books principal (pt_amount) AND its
+    # SY cost (sy_amount), the two inputs every downstream PnL number needs.
+    blocked = _payload_block_cell(
+        "PEN1", "PT acquisition cost basis (principal + SY cost booked)", pt_buys, payload_errors
+    )
+    if blocked is not None:
+        out.append(blocked)
+    else:
+        ok = False
+        for r in pt_buys:
+            p = acct_payloads.get(r.get("id"), {})
+            if p.get("pt_amount") is not None and p.get("sy_amount") is not None:
+                ok = True
+                break
+        out.append(
+            CellResult(
+                "PEN1",
+                "PT acquisition cost basis (principal + SY cost booked)",
+                "PASS" if ok else "XFAIL",
+                "PT_BUY books pt_amount + sy_amount" if ok else "no PT_BUY carrying pt_amount + sy_amount",
+            )
+        )
+
+    # PEN2 — entry economics: discount-to-par (pt_price) and implied fixed APY
+    # (implied_apr_bps) are persisted at entry so the thesis is auditable.
+    blocked = _payload_block_cell("PEN2", "Discount-to-par + implied fixed APY at entry", pt_buys, payload_errors)
+    if blocked is not None:
+        out.append(blocked)
+    else:
+        ok = False
+        for r in pt_buys:
+            p = acct_payloads.get(r.get("id"), {})
+            if p.get("pt_price") is not None and p.get("implied_apr_bps") is not None:
+                ok = True
+                break
+        out.append(
+            CellResult(
+                "PEN2",
+                "Discount-to-par + implied fixed APY at entry",
+                "PASS" if ok else "XFAIL",
+                "PT_BUY carries pt_price + implied_apr_bps" if ok else "pt_price / implied_apr_bps not populated",
+            )
+        )
+
+    # PEN3 — open-PT mark-to-market (unrealised discount accretion). Requires the
+    # portfolio valuer to price an open PT (G-PT2) which needs a gateway PT price
+    # path (VIB-5276); until then an open PT carries no cost_basis_usd /
+    # unrealized_pnl_usd. XFAIL, not FAIL — the capability is absent, not wrong.
+    out.append(
+        CellResult(
+            "PEN3",
+            "Open-PT mark-to-market (unrealised discount accretion)",
+            "XFAIL",
+            "open-PT valuer unwired (G-PT2 / VIB-5276 gateway PT price)",
+        )
+    )
+
+    # PEN4 — realised fixed yield: a PT sell/redeem books realized_yield_usd
+    # (sy_received − matched-lot cost) against the FIFO buy lot. This is the
+    # strategy's entire payoff.
+    blocked = _payload_block_cell(
+        "PEN4", "Realised fixed yield on sell/redeem (FIFO-matched)", pt_disposals, payload_errors
+    )
+    if blocked is not None:
+        out.append(blocked)
+    else:
+        ok = False
+        for r in pt_disposals:
+            p = acct_payloads.get(r.get("id"), {})
+            if p.get("realized_yield_usd") is not None:
+                ok = True
+                break
+        out.append(
+            CellResult(
+                "PEN4",
+                "Realised fixed yield on sell/redeem (FIFO-matched)",
+                "PASS" if ok else "XFAIL",
+                "PT_SELL/PT_REDEEM books realized_yield_usd" if ok else "realized_yield_usd null/missing",
+            )
+        )
+
+    # PEN5 — lifecycle continuity: a PT buy seeds a PENDLE_PT OPEN and a
+    # sell/redeem a CLOSE on the SAME position_id, so the dashboard renders one
+    # position. (position_events ↔ accounting_events join key is byte-identical,
+    # asserted in the connector/observability unit suites.)
+    pt_pos = [r for r in pos_events if r.get("position_type") == "PENDLE_PT"]
+    opens = [r for r in pt_pos if r.get("event_type") == "OPEN"]
+    closes = [r for r in pt_pos if r.get("event_type") == "CLOSE"]
+    has_open = bool(opens)
+    has_close = bool(closes)
+    same_id = bool(
+        has_open and has_close and {r.get("position_id") for r in opens} & {r.get("position_id") for r in closes}
+    )
+    out.append(
+        CellResult(
+            "PEN5",
+            "Position lifecycle continuity (PENDLE_PT OPEN→CLOSE, one position)",
+            "PASS" if same_id else "XFAIL",
+            f"OPEN={has_open} CLOSE={has_close} shared_position_id={same_id}",
+        )
+    )
+
+    # PEN6 — PT-quantity conservation: the principal acquired must equal the
+    # principal disposed (sold + redeemed) within tolerance — the conservation
+    # invariant the lane-symmetry contract rests on. Full money-leg (USD) lane
+    # symmetry is the PrimitiveMoneyLegs work (G-PT4); this is the unit-level
+    # conservation it presupposes, checkable from the existing payloads.
+    def _sum_pt(rows: list[dict[str, Any]]) -> tuple[Decimal, bool]:
+        total = Decimal(0)
+        seen = False
+        for r in rows:
+            v = acct_payloads.get(r.get("id"), {}).get("pt_amount")
+            if v is None:
+                continue
+            try:
+                total += Decimal(str(v))
+                seen = True
+            except (ArithmeticError, ValueError):
+                continue
+        return total, seen
+
+    bought, have_buy = _sum_pt(pt_buys)
+    disposed, have_disp = _sum_pt(pt_disposals)
+    if have_buy and have_disp and bought > 0:
+        rel = abs(bought - disposed) / bought
+        pen6_pass = rel <= Decimal("0.01")
+        pen6_detail = f"PT bought={bought} disposed={disposed} rel_diff={rel:.6f}"
+    else:
+        pen6_pass = False
+        pen6_detail = f"incomplete round-trip (have_buy={have_buy} have_disposal={have_disp})"
+    out.append(
+        CellResult(
+            "PEN6",
+            "PT-quantity conservation (principal acquired == disposed)",
+            "PASS" if pen6_pass else "XFAIL",
+            pen6_detail,
+        )
+    )
+    return out
+
+
 # ─── Scorecard profile registry (G-A foundation) ─────────────────────────
 #
 # One declarative table replaces the former per-primitive if/elif ladders (the
@@ -2866,6 +3026,25 @@ SCORECARD_PROFILES: dict[str, ScorecardProfile] = {
         eps_pct=Decimal("0.0005"),
         eps_scaling=lambda b: (b.max_perp_notional, "max_perp_notional"),
         cells=lambda ctx: _cells_perp(
+            ctx.acct_events,
+            ctx.pos_events,
+            ctx.acct_payloads,
+            ctx.payload_errors,
+        ),
+    ),
+    # Pendle PT rides the SWAP primitive in the taxonomy (taxonomy.py
+    # ``PENDLE_PT → Primitive.SWAP``): a PT buy/sell IS a swap, and both legs land
+    # as ``SWAP`` intent_type in the ledger — so the canonical lifecycle is SWAP's
+    # (atomic, empty). The buy→sell round-trip is asserted by the PEN cell pack
+    # (PEN1/PEN4/PEN5), not the coarse intent_type lifecycle guard, which cannot
+    # tell a PT buy from a PT sell (both are ``SWAP``).
+    "pendle_pt": ScorecardProfile(
+        name="pendle_pt",
+        canonical_primitive=_TaxonomyPrimitive.SWAP,
+        required_lifecycle=(),
+        eps_pct=Decimal("0.0025"),
+        eps_scaling=lambda b: (b.notional_traded, "notional_traded"),
+        cells=lambda ctx: _cells_pendle_pt(
             ctx.acct_events,
             ctx.pos_events,
             ctx.acct_payloads,

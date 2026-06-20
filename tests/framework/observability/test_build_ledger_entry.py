@@ -1192,6 +1192,47 @@ class TestExtractedDataSerialization:
         entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
         assert entry.extracted_data_json == ""
 
+    def test_primitive_money_legs_round_trip_as_typed_object(self):
+        """The connector-DECLARED ``PrimitiveMoneyLegs`` survives serialize →
+        deserialize as a TYPED object (not a raw dict), preserving Empty≠Zero.
+
+        Without the ``PrimitiveMoneyLegs`` reconstruction branch in
+        ``deserialize_extracted_data`` the legs come back as a plain dict, so the
+        Pendle redeem accounting handler (which reads the PERSISTED blob via
+        ``_pt_context``) silently misses the PT-count INPUT leg and mis-sources
+        the basis from the SY-asset amount (VIB-4988 PEN6).
+        """
+        from decimal import Decimal as _D
+
+        from almanak.connectors._strategy_base.primitive_money_leg import (
+            MoneyLegRole,
+            PrimitiveMoneyLeg,
+            PrimitiveMoneyLegs,
+        )
+        from almanak.framework.accounting.measured import MeasuredMoney
+
+        legs = PrimitiveMoneyLegs.of(
+            PrimitiveMoneyLeg.input("PT-wstETH-25JUN2026", MeasuredMoney.measured(_D("0.012378"))),
+            PrimitiveMoneyLeg.output("WSTETH", MeasuredMoney.unmeasured()),
+        )
+        result = SimpleNamespace(
+            swap_amounts=None,
+            transaction_results=[],
+            total_gas_used=0,
+            gas_cost_usd=None,
+            extracted_data={"primitive_money_legs": legs},
+        )
+        intent = _make_intent("WITHDRAW")
+        entry = build_ledger_entry(deployment_id="s", cycle_id="c", intent=intent, result=result)
+        restored = deserialize_extracted_data(entry.extracted_data_json)["primitive_money_legs"]
+        assert isinstance(restored, PrimitiveMoneyLegs)
+        assert restored == legs
+        pt_leg = restored.by_role(MoneyLegRole.INPUT)[0]
+        assert pt_leg.token == "PT-wstETH-25JUN2026"
+        assert pt_leg.amount.value == _D("0.012378")
+        # The unmeasured OUTPUT leg stays unmeasured (never a fabricated zero).
+        assert restored.by_role(MoneyLegRole.OUTPUT)[0].amount.is_unmeasured
+
     def test_missing_extracted_data_attr_yields_empty_string(self):
         """hasattr gating: no extracted_data attr on result → '' preserved."""
         result = SimpleNamespace(

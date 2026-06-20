@@ -235,3 +235,30 @@ def test_legs_to_dict_lists_each_leg() -> None:
             {"role": "output", "token": "wstETH", "amount": "0.85"},
         ]
     }
+
+
+def test_leg_from_dict_round_trips_empty_neq_zero_states() -> None:
+    """``from_dict`` is the exact inverse of ``to_dict`` for all three states."""
+    for original in (
+        PrimitiveMoneyLeg.input("ETH", MeasuredMoney.measured(Decimal("0"))),
+        PrimitiveMoneyLeg.input("PT-wstETH-25JUN2026", MeasuredMoney.measured(Decimal("0.012378"))),
+        PrimitiveMoneyLeg.output("WSTETH", MeasuredMoney.unmeasured()),
+        PrimitiveMoneyLeg.output("WSTETH", MeasuredMoney.absent()),
+    ):
+        restored = PrimitiveMoneyLeg.from_dict(original.to_dict())
+        assert restored == original
+
+
+def test_legs_from_dict_round_trips() -> None:
+    """A full legs set survives ``to_dict`` → ``from_dict`` byte-identically."""
+    legs = PrimitiveMoneyLegs.of(
+        PrimitiveMoneyLeg.input("PT-wstETH-25JUN2026", MeasuredMoney.measured(Decimal("0.012378"))),
+        PrimitiveMoneyLeg.output("WSTETH", MeasuredMoney.measured(Decimal("0.010003"))),
+    )
+    assert PrimitiveMoneyLegs.from_dict(legs.to_dict()) == legs
+
+
+def test_legs_from_dict_tolerates_malformed_blob() -> None:
+    """A missing / non-list ``legs`` yields an empty set, not a crash."""
+    assert PrimitiveMoneyLegs.from_dict({}) == PrimitiveMoneyLegs(())
+    assert PrimitiveMoneyLegs.from_dict({"legs": None}) == PrimitiveMoneyLegs(())

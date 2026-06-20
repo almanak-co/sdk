@@ -66,10 +66,13 @@ __all__ = [
 # framework ``HandlerContext`` / accounting-event types.
 TreatmentFn = Callable[..., Any]
 
-# Categorizer: maps one ``(intent_type, protocol, token_out)`` to a
+# Categorizer: maps one ``(intent_type, protocol, token_out, token_in)`` to a
 # generic-category decision, or ``None`` to decline ("this connector does not
-# claim this event").
-CategorizeFn = Callable[[str, str, str], "AccountingCategoryDecision | None"]
+# claim this event"). ``token_in`` is additive (default ``""``) so a connector
+# that only needs ``token_out`` keeps a 3-arg signature; Pendle needs ``token_in``
+# to precisely claim a PT *sell* (PT-prefixed ``token_in``) vs a generic SY/YT
+# swap (VIB-4988).
+CategorizeFn = Callable[..., "AccountingCategoryDecision | None"]
 
 # Outbox position-key deriver: returns the connector's ``(position_key, market_id)``
 # for an event it owns, or ``None`` when it does not own ``(protocol, intent_type)``.
@@ -109,10 +112,11 @@ class AccountingTreatmentSpec:
     egress and makes no live chain calls.
 
     Attributes:
-        categorize: ``(intent_type, protocol, token_out) -> AccountingCategoryDecision
-            | None``. Returns ``None`` for events this connector does not claim
-            (the registry then falls through to the next connector / the generic
-            path).
+        categorize: ``(intent_type, protocol, token_out, token_in="") ->
+            AccountingCategoryDecision | None``. Returns ``None`` for events this
+            connector does not claim (the registry then falls through to the next
+            connector / the generic path). ``token_in`` is additive (default
+            ``""``); a connector that does not need it keeps a 3-arg signature.
         treatments: ``treatment_key -> treatment fn``. Each fn takes the same
             ``HandlerContext`` the generic category handlers receive and returns a
             typed accounting event (or ``None``). The connector-owned logic the

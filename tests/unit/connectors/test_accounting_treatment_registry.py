@@ -43,7 +43,7 @@ def _decision(treatment_key: str) -> AccountingCategoryDecision:
 
 def _spec(*, claims, treatments=None, categorize=None, position_key=None) -> AccountingTreatmentSpec:
     return AccountingTreatmentSpec(
-        categorize=categorize or (lambda _it, _proto, _tok: None),
+        categorize=categorize or (lambda _it, _proto, _tok, _tin="": None),
         treatments=treatments or {},
         claims_event_types=frozenset(claims),
         position_key=position_key,
@@ -123,15 +123,42 @@ def test_position_key_for_routes_pendle():
 
 
 def test_categorize_first_claiming_connector_wins(monkeypatch):
-    a = _spec(claims={"SWAP"}, categorize=lambda _it, p, _t: _decision("a") if p == "alpha" else None)
-    b = _spec(claims={"SWAP"}, categorize=lambda _it, p, _t: _decision("b") if p == "alpha" else None)
+    a = _spec(claims={"SWAP"}, categorize=lambda _it, p, _t, _tin="": _decision("a") if p == "alpha" else None)
+    b = _spec(claims={"SWAP"}, categorize=lambda _it, p, _t, _tin="": _decision("b") if p == "alpha" else None)
     _install(monkeypatch, {"a_conn": a, "b_conn": b})  # insertion order: a_conn first
     decision = AccountingTreatmentRegistry.categorize("SWAP", "alpha", "")
     assert decision is not None and decision.treatment_key == "a"
 
 
+def test_categorize_calls_strict_3arg_connector(monkeypatch):
+    """A connector publishing a strict 3-arg ``categorize`` (no ``token_in``) is
+    still called and can claim — the CategorizeFn additive-arg contract. Passing
+    ``token_in`` positionally to such a function would TypeError → isolate it →
+    silently drop its events to the generic path (a money-path loss)."""
+    # Exactly 3 params, no *args, no token_in — the legacy signature.
+    legacy = _spec(claims={"SWAP"}, categorize=lambda _it, p, _t: _decision("legacy") if p == "alpha" else None)
+    _install(monkeypatch, {"legacy_conn": legacy})
+    decision = AccountingTreatmentRegistry.categorize("SWAP", "alpha", "TOK", "PT-x")
+    assert decision is not None and decision.treatment_key == "legacy"
+
+
+def test_categorize_passes_token_in_to_4arg_connector(monkeypatch):
+    """A 4-arg connector receives ``token_in`` so it can claim a directional leg
+    (e.g. a PT- ``token_in`` sell) without over-claiming every swap."""
+    directional = _spec(
+        claims={"SWAP"},
+        categorize=lambda _it, _p, _t, tin="": _decision("pt_sell") if tin.startswith("PT-") else None,
+    )
+    _install(monkeypatch, {"dir_conn": directional})
+    assert AccountingTreatmentRegistry.categorize("SWAP", "pendle", "WSTETH", "PT-x") is not None
+    assert AccountingTreatmentRegistry.categorize("SWAP", "pendle", "PT-x", "WSTETH") is None
+
+
 def test_broken_connector_is_skipped_not_fatal(monkeypatch):
-    good = _spec(claims={"LP_OPEN"}, categorize=lambda _it, p, _t: _decision("good") if p == "good_proto" else None)
+    good = _spec(
+        claims={"LP_OPEN"},
+        categorize=lambda _it, p, _t, _tin="": _decision("good") if p == "good_proto" else None,
+    )
     _install(monkeypatch, {"broken": None, "good": good})  # broken's attr is the wrong type
     decision = AccountingTreatmentRegistry.categorize("LP_OPEN", "good_proto", "")
     assert decision is not None and decision.treatment_key == "good"
@@ -142,7 +169,7 @@ def test_categorize_isolates_a_raising_connector(monkeypatch):
         raise RuntimeError("boom")
 
     raising = _spec(claims={"LP_OPEN"}, categorize=_boom)
-    good = _spec(claims={"LP_OPEN"}, categorize=lambda _it, _p, _t: _decision("good"))
+    good = _spec(claims={"LP_OPEN"}, categorize=lambda _it, _p, _t, _tin="": _decision("good"))
     _install(monkeypatch, {"a_raising": raising, "z_good": good})  # raising iterated first
     decision = AccountingTreatmentRegistry.categorize("LP_OPEN", "anything", "")
     assert decision is not None and decision.treatment_key == "good"

@@ -90,9 +90,11 @@ def _pt_row(
         "position_key": position_key,
         "market_id": "pendle-market",
         "pt_token": pt_token,
-        # stored as raw integers (18-decimal scale)
-        "pt_amount": str(int(pt_amount_human * _DECIMALS_18)),
-        "sy_amount": str(int(sy_amount_human * _DECIMALS_18)),
+        # Stored as HUMAN decimals — the uniform PT payload convention
+        # (VIB-4988 v4: PT_BUY/PT_SELL/PT_REDEEM all human; replay reads human
+        # directly, no /1e18).
+        "pt_amount": str(pt_amount_human),
+        "sy_amount": str(sy_amount_human),
         "confidence": "HIGH",
         "unavailable_reason": "",
         "schema_version": 1,

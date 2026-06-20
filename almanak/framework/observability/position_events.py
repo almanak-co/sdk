@@ -115,6 +115,10 @@ class PositionType(StrEnum):
     # joining on intent_type.
     LENDING_COLLATERAL = "LENDING_COLLATERAL"
     LENDING_DEBT = "LENDING_DEBT"
+    # Pendle PT (VIB-52xx) — kept in sync with ``primitives.PositionKind`` so
+    # the taxonomy can declare ``position_type=PENDLE_PT`` on the PT rows. A PT
+    # buy seeds OPEN, a sell/redeem seeds CLOSE on the same ``position_id``.
+    PENDLE_PT = "PENDLE_PT"
 
 
 # Intent types that map to position events.
@@ -308,6 +312,193 @@ class IntentEventContext:
     recent_open_events: dict | None = None
 
 
+def _redeem_pt_symbol_from_legs(extracted: Any) -> str:
+    """Return the canonical PT symbol from a redeem's DECLARED INPUT money leg.
+
+    A PT redeem (WITHDRAW) carries the canonical maturity-bearing PT symbol on
+    neither ``intent.from_token`` nor ``intent.to_token`` — the compiler names
+    the underlying out token and the YT address, not the PT. The Pendle parser's
+    ``extract_primitive_money_legs`` (G-PT / VIB-4988 part 2) instead declares the
+    redeem's INPUT leg as the PT symbol, surfaced on
+    ``extracted_data["primitive_money_legs"]``. This reads that INPUT leg's token
+    so the CLOSE position_id is keyed on the SAME maturity-bearing PT symbol the
+    accounting ``_pt_context`` reads off the ledger ``token_in`` column — keeping
+    OPEN(buy) and CLOSE(redeem) on one byte-identical key.
+
+    Returns ``""`` (never a fabricated symbol; Empty != Zero) when no declared
+    legs are present, the value is not a ``PrimitiveMoneyLegs``, or no INPUT leg
+    carries a ``PT-`` token — the caller then treats the withdraw as non-PT.
+    """
+    if not isinstance(extracted, dict):
+        return ""
+    legs = extracted.get("primitive_money_legs")
+    if legs is None:
+        return ""
+    # Deferred import: connector value types must never load at module import
+    # (framework → connector boundary; mirrors the ledger dispatcher's resolver).
+    from almanak.connectors._strategy_base.primitive_money_leg import PrimitiveMoneyLegs
+
+    if not isinstance(legs, PrimitiveMoneyLegs):
+        return ""
+    for leg in legs.input_legs:
+        token = (leg.token or "").strip()
+        if token.upper().startswith("PT-"):
+            return token
+    return ""
+
+
+def _pendle_pt_event(
+    intent: Any,
+    intent_type: str,
+    chain: str,
+    wallet: str,
+    *,
+    redeem_pt_symbol: str = "",
+) -> tuple[PositionEventType, str] | None:
+    """Resolve a Pendle PT lifecycle action to ``(event_type, position_id)``.
+
+    Pendle PT trades do not flow through the static ``INTENT_TO_EVENT_TYPE``
+    map: a PT buy/sell arrives as ``SWAP`` (absent from the map → no event) and
+    a redeem arrives as ``WITHDRAW`` (present, but would mis-resolve to a
+    *lending* leg via ``_resolve_position_type``). This helper intercepts the
+    Pendle-PT shape so it seeds a ``PENDLE_PT`` OPEN→CLOSE lifecycle on a
+    market-derived ``position_id`` that is byte-identical to the accounting
+    treatment's ``pendle_pt:<chain>:<wallet>:<market>`` key
+    (``connectors/pendle/accounting_spec.py:_position_key``) — so OPEN (buy) and
+    CLOSE (sell/redeem) collapse onto one renderable position.
+
+    A redeem's PT symbol comes from the connector-DECLARED INPUT money leg
+    (``redeem_pt_symbol``, G-PT / VIB-4988 part 2), NOT from
+    ``intent.from_token`` / ``to_token`` — the redeem intent carries the
+    underlying out token and the YT address on those, never the PT. When no PT
+    symbol is resolvable for a WITHDRAW (a non-PT Pendle withdraw, e.g. a YT
+    redeem), this returns ``None`` so the generic path runs.
+
+    Returns ``None`` for every non-Pendle-PT intent — including non-PT Pendle
+    swaps (YT / SY ↔ underlying) — so the generic path is unchanged.
+    """
+    protocol = (getattr(intent, "protocol", "") or "").lower()
+    # tech-debt VIB-5292: this framework-side protocol-name gate is the position-
+    # events analogue of the accounting AccountingTreatmentRegistry de-coupling —
+    # tracked for migration to a connector-owned position-event classifier
+    # (blueprint 22). Baselined in the chain/protocol coupling ratchet meanwhile.
+    if "pendle" not in protocol:
+        return None
+    from_token = (getattr(intent, "from_token", "") or "").strip()
+    to_token = (getattr(intent, "to_token", "") or "").strip()
+    from_u = from_token.upper()
+    to_u = to_token.upper()
+    if intent_type == "SWAP":
+        if to_u.startswith("PT-"):
+            event_type = PositionEventType.OPEN  # buy PT
+            pt_symbol = to_token
+        elif from_u.startswith("PT-"):
+            event_type = PositionEventType.CLOSE  # sell PT
+            pt_symbol = from_token
+        else:
+            return None  # YT / SY swap — not a PT position action
+    elif intent_type == "WITHDRAW":
+        # A PT redeem's symbol lives on the DECLARED INPUT leg (the redeem intent
+        # itself carries the underlying out token / YT address, never the PT). No
+        # resolvable PT symbol → a non-PT Pendle withdraw (YT redeem) → generic
+        # path. This guards the prior bug where a non-PT withdraw produced a bogus
+        # ``pendle_pt:...:<underlying>`` id, and the bug where a real redeem (no
+        # from/to PT token) produced an empty position_id and seeded no CLOSE.
+        pt_symbol = redeem_pt_symbol.strip()
+        if not pt_symbol.upper().startswith("PT-"):
+            return None
+        event_type = PositionEventType.CLOSE  # redeem at/after maturity
+    else:
+        return None
+    # Identity is the normalized maturity-bearing PT symbol (e.g.
+    # "pt-wsteth-25jun2026") — the ONLY identifier present in BOTH the intent
+    # (here) and the persisted ledger row (the accounting treatment's
+    # ``_pt_context`` reads ``token_in``/``token_out``). A Pendle ``SwapIntent``
+    # carries no pool/market, and the resolved market address is never persisted
+    # on the ledger row, so a market-derived key is empty in practice. Keying on
+    # the PT symbol makes this ``position_id`` byte-identical to the
+    # ``accounting_events`` ``position_key``
+    # (connectors/pendle/accounting_spec.py:_pt_context) — the surface the
+    # dashboard joins on — and the maturity-bearing symbol uniquely identifies
+    # the PT (one symbol ⇔ one market ⇔ one maturity). Upstream (the G-PT0
+    # receipt parser + the demo config) guarantees the canonical symbol is used
+    # on every leg so OPEN (buy) and CLOSE (sell/redeem) collapse onto one key.
+    pt_key = pt_symbol.strip().lower()
+    position_id = f"pendle_pt:{chain.lower()}:{wallet.lower()}:{pt_key}" if pt_key else ""
+    return event_type, position_id
+
+
+def _resolve_event_and_position_type(
+    ctx: IntentEventContext, intent_type: str
+) -> tuple[PositionEventType, PositionType, str] | None:
+    """Resolve ``(event_type, position_type, pendle_position_id_override)`` for an intent.
+
+    The Pendle-PT interception runs before the generic gate because a Pendle
+    SWAP/WITHDRAW would otherwise either drop (SWAP absent from the map) or
+    mis-resolve to a lending leg (WITHDRAW). A redeem's PT symbol comes from the
+    connector-declared INPUT money leg (G-PT / VIB-4988 part 2). When the intent
+    is not a Pendle PT action it falls to the generic ``INTENT_TO_EVENT_TYPE``
+    map; an intent type absent from that map yields ``None`` (not a
+    position-producing lifecycle intent).
+    """
+    intent = ctx.intent
+    pendle_pt = _pendle_pt_event(
+        intent,
+        intent_type,
+        ctx.chain,
+        ctx.wallet_address,
+        redeem_pt_symbol=_redeem_pt_symbol_from_legs(ctx.extracted),
+    )
+    if pendle_pt is not None:
+        pt_event_type, pendle_position_id_override = pendle_pt
+        return pt_event_type, PositionType.PENDLE_PT, pendle_position_id_override
+
+    event_type = INTENT_TO_EVENT_TYPE.get(intent_type)
+    if event_type is None:
+        return None
+    # VIB-4162: strict resolution — raises UnknownIntentTypeError if the intent
+    # passed the INTENT_TO_EVENT_TYPE gate but the taxonomy has no record. The
+    # pre-T2 silent-LP fallback at this site is the canonical class-of-bug T2
+    # fixes (see module commit history).
+    return event_type, _resolve_position_type(intent_type), ""
+
+
+def _tx_and_gas_details(ctx: IntentEventContext, result: Any) -> tuple[str, str]:
+    """Resolve ``(tx_hash, gas_usd)`` from the result envelope (first tx only).
+
+    Gas USD precedence mirrors the ledger writer's
+    ``observability.ledger._extract_tx_and_gas``:
+      1. honour a pre-computed ``result.gas_cost_usd`` if set (legacy enrichers
+         like the prediction-handler path);
+      2. otherwise compute from ``result.total_gas_cost_wei × native_usd`` via
+         ``accounting.gas_pricing.compute_gas_usd`` — closes the gap where
+         ``position_events.gas_usd`` was empty even when the ledger had real
+         numbers, because the orchestrator only populates ``total_gas_cost_wei``,
+         not ``gas_cost_usd``.
+    """
+    tx_hash = ""
+    gas_usd = ""
+    if not result:
+        return tx_hash, gas_usd
+    if hasattr(result, "transaction_results") and result.transaction_results:
+        tx_hash = result.transaction_results[0].tx_hash or ""
+    gas_cost_legacy = getattr(result, "gas_cost_usd", None)
+    if gas_cost_legacy is not None:
+        gas_usd = str(gas_cost_legacy)
+    else:
+        from almanak.framework.accounting.gas_pricing import compute_gas_usd
+
+        gas_cost_wei = getattr(result, "total_gas_cost_wei", None)
+        computed = compute_gas_usd(
+            gas_cost_wei=gas_cost_wei,
+            chain=ctx.chain,
+            price_oracle=ctx.price_oracle,
+        )
+        if computed is not None:
+            gas_usd = str(computed)
+    return tx_hash, gas_usd
+
+
 def _seed_event(ctx: IntentEventContext) -> PositionEvent | None:
     """Phase α + β — intent-type dispatch and seed the PositionEvent.
 
@@ -321,54 +512,24 @@ def _seed_event(ctx: IntentEventContext) -> PositionEvent | None:
         it = intent.intent_type
         intent_type = it.value if hasattr(it, "value") else str(it)
 
-    event_type = INTENT_TO_EVENT_TYPE.get(intent_type)
-    if event_type is None:
+    resolved = _resolve_event_and_position_type(ctx, intent_type)
+    if resolved is None:
         return None
-
-    # VIB-4162: strict resolution — raises UnknownIntentTypeError if the
-    # intent passed the INTENT_TO_EVENT_TYPE gate but the taxonomy has
-    # no record. The pre-T2 silent-LP fallback at this site is the
-    # canonical class-of-bug T2 fixes (see module commit history).
-    position_type = _resolve_position_type(intent_type)
+    event_type, position_type, pendle_position_id_override = resolved
     protocol = getattr(intent, "protocol", "") or ""
 
-    # Position id: result.position_id takes precedence over intent.position_id.
-    position_id = ""
+    # Position id: a Pendle-PT market-derived key (continuity across buy→redeem)
+    # takes precedence; otherwise result.position_id over intent.position_id.
+    position_id = pendle_position_id_override
     result = ctx.result
-    if result and hasattr(result, "position_id") and result.position_id:
+    if position_id:
+        pass
+    elif result and hasattr(result, "position_id") and result.position_id:
         position_id = str(result.position_id)
     elif hasattr(intent, "position_id") and intent.position_id:
         position_id = str(intent.position_id)
 
-    # Tx details from the result envelope (first transaction only).
-    # Gas USD precedence mirrors the ledger writer's
-    # ``observability.ledger._extract_tx_and_gas``:
-    #   1. honour a pre-computed ``result.gas_cost_usd`` if set (legacy
-    #      enrichers like the prediction-handler path);
-    #   2. otherwise compute from ``result.total_gas_cost_wei × native_usd``
-    #      via ``accounting.gas_pricing.compute_gas_usd`` — closes the gap
-    #      where ``position_events.gas_usd`` was empty even when the ledger
-    #      had real numbers, because the orchestrator only populates
-    #      ``total_gas_cost_wei``, not ``gas_cost_usd``.
-    tx_hash = ""
-    gas_usd = ""
-    if result:
-        if hasattr(result, "transaction_results") and result.transaction_results:
-            tx_hash = result.transaction_results[0].tx_hash or ""
-        gas_cost_legacy = getattr(result, "gas_cost_usd", None)
-        if gas_cost_legacy is not None:
-            gas_usd = str(gas_cost_legacy)
-        else:
-            from almanak.framework.accounting.gas_pricing import compute_gas_usd
-
-            gas_cost_wei = getattr(result, "total_gas_cost_wei", None)
-            computed = compute_gas_usd(
-                gas_cost_wei=gas_cost_wei,
-                chain=ctx.chain,
-                price_oracle=ctx.price_oracle,
-            )
-            if computed is not None:
-                gas_usd = str(computed)
+    tx_hash, gas_usd = _tx_and_gas_details(ctx, result)
 
     return PositionEvent(
         deployment_id=ctx.deployment_id,

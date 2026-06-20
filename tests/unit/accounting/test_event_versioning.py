@@ -294,7 +294,11 @@ def test_primitive_versions_explicit_per_primitive_pinning() -> None:
         Primitive.PERP: 1,
         Primitive.UTILITY: 1,
         # VIB-4905 (F1): bumped 1→2 — SwapEventPayload partial-match contract.
-        Primitive.SWAP: 2,
+        # VIB-4988: bumped 2→3 — Pendle PT now emits PT_SELL / PT_REDEEM
+        # (realized fixed-yield attribution) under the SWAP primitive.
+        # VIB-4988: bumped 3→4 — PT_BUY/PT_SELL payloads moved raw-18 → human
+        # units (uniform with PT_REDEEM) so PEN6 conservation holds on a redeem.
+        Primitive.SWAP: 4,
         Primitive.VAULT: 1,
         Primitive.STAKING: 1,
         Primitive.BRIDGE: 1,

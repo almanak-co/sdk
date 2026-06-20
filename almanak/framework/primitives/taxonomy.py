@@ -334,21 +334,21 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             "PT_BUY",
             Primitive.SWAP,
             AccountingCategory.SWAP,
-            position_type=None,
+            position_type=PositionKind.PENDLE_PT,
             event_kind=EventKind.OPEN,
         ),
         _record(
             "PT_SELL",
             Primitive.SWAP,
             AccountingCategory.SWAP,
-            position_type=None,
+            position_type=PositionKind.PENDLE_PT,
             event_kind=EventKind.CLOSE,
         ),
         _record(
             "PT_REDEEM",
             Primitive.SWAP,
             AccountingCategory.SWAP,
-            position_type=None,
+            position_type=PositionKind.PENDLE_PT,
             event_kind=EventKind.CLOSE,
         ),
         _record(
@@ -701,6 +701,10 @@ _GENERIC_LABEL_PRIMITIVES: dict[str, Primitive] = {
     "STAKING": Primitive.STAKING,
     "STAKED": Primitive.STAKING,
     "PREDICTION": Primitive.PREDICTION,
+    # Pendle PT — the position lives on the SWAP primitive (a PT buy/sell IS a
+    # swap; a redeem IS a withdraw treated as a swap-class disposal). The
+    # PENDLE_PT PositionKind is the position-axis label, SWAP the primitive.
+    "PENDLE_PT": Primitive.SWAP,
     # CEX holdings + plain token balances are bookkeeping legs the teardown
     # system unwinds via swap / withdraw — no protocol state machine. Mapping
     # to UTILITY documents the "no primitive of its own" invariant while

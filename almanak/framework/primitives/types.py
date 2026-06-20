@@ -102,6 +102,11 @@ class PositionKind(StrEnum):
     LENDING_DEBT = "LENDING_DEBT"
     VAULT = "VAULT"
     STAKING = "STAKING"
+    # Pendle principal token (VIB-52xx). Orthogonal to ``Primitive.SWAP``: a PT
+    # buy/sell IS a swap and a redeem IS a withdraw, but the holding is a tracked
+    # position with an OPEN→CLOSE lifecycle the dashboard renders as one
+    # position. Lives on the position axis, not the primitive axis.
+    PENDLE_PT = "PENDLE_PT"
 
 
 class LifecyclePhase(StrEnum):

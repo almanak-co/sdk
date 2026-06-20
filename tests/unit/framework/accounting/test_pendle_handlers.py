@@ -44,7 +44,9 @@ def _ledger(
     protocol: str = "pendle",
     extracted_data_json: str = "",
     token_out: str = "",
+    token_in: str = "USDC",
     tx_hash: str = "0xdeadbeef",
+    price_inputs_json: str = "",
 ) -> dict:
     return {
         "id": str(uuid.uuid4()),
@@ -55,12 +57,12 @@ def _ledger(
         "intent_type": intent_type,
         "protocol": protocol,
         "chain": "arbitrum",
-        "token_in": "USDC",
+        "token_in": token_in,
         "token_out": token_out,
         "tx_hash": tx_hash,
         "gas_usd": "0.01",
         "extracted_data_json": extracted_data_json,
-        "price_inputs_json": "",
+        "price_inputs_json": price_inputs_json,
         "pre_state_json": "",
         "post_state_json": "",
     }
@@ -92,9 +94,7 @@ def test_handle_pendle_lp_close_returns_event() -> None:
     """LP_CLOSE with lp_close_data returns a PENDLE_LP_CLOSE event."""
     sy_raw = int(0.8 * 10**18)
     pt_raw = int(1.2 * 10**18)
-    extracted = json.dumps(
-        {"lp_close_data": {"amount0_collected": sy_raw, "amount1_collected": pt_raw}}
-    )
+    extracted = json.dumps({"lp_close_data": {"amount0_collected": sy_raw, "amount1_collected": pt_raw}})
 
     event = handle_pendle_lp(_outbox("LP_CLOSE"), _ledger("LP_CLOSE", extracted_data_json=extracted))
 
@@ -142,7 +142,7 @@ def test_handle_pendle_lp_uses_market_id_from_outbox() -> None:
 
 def test_handle_pendle_pt_basic_with_maturity() -> None:
     """Valid Pendle PT swap produces PT_BUY event with HIGH confidence and APR."""
-    sy_in = int(0.9 * 10**18)   # 0.9 SY (price of the PT)
+    sy_in = int(0.9 * 10**18)  # 0.9 SY (price of the PT)
     pt_out = int(1.0 * 10**18)  # 1.0 PT received
     extracted = json.dumps({"swap_amounts": {"amount_in": sy_in, "amount_out": pt_out}})
 
@@ -337,3 +337,304 @@ def test_handle_pendle_pt_propagates_source_ledger_entry_id() -> None:
     lots = basis._lots.get(key, [])
     assert len(lots) == 1
     assert lots[0]["source_ledger_entry_id"] == expected_ledger_entry_id
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# R1 — PT_BUY records the FIFO lot in HUMAN units (VIB-4988)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_pt_buy_records_lot_in_human_units() -> None:
+    """R1: the PT_BUY event PAYLOAD and the in-memory PT lot are both HUMAN units
+    (uniform PT convention, VIB-4988 v3→v4) so they match _replay_pt_buy."""
+    sy_in = int(0.9 * 10**18)
+    pt_out = int(1.0 * 10**18)
+    extracted = json.dumps({"swap_amounts": {"amount_in": sy_in, "amount_out": pt_out}})
+    future = datetime.now(UTC) + timedelta(days=730)
+    pt_symbol = f"PT-wstETH-{future.day:02d}{future.strftime('%b').upper()}{future.year}"
+
+    basis = FIFOBasisStore()
+    ob = _outbox("SWAP", position_key="pendle_pt:arbitrum:0xwallet:0xmarket", market_id="0xmarket")
+    led = _ledger("SWAP", protocol="pendle", token_out=pt_symbol, extracted_data_json=extracted)
+
+    event = handle_pendle_pt(ob, led, basis_store=basis)
+
+    assert event is not None
+    # Event payload is HUMAN units (raw / 1e18).
+    assert event.pt_amount == Decimal("1")  # 1.0 PT human
+    assert event.sy_amount == Decimal("0.9")  # 0.9 SY human
+    # Lot is HUMAN (raw / 1e18) — same convention as the payload.
+    key = f"{event.identity.deployment_id}:{event.position_key}:{(event.pt_token or 'PT').lower()}"
+    lot = basis._lots[key][0]
+    assert lot["remaining_pt"] == Decimal("1")  # 1.0 PT human
+    assert lot["cost_per_pt"] == Decimal("0.9")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PT_SELL (token_in is PT-)  (VIB-4988)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _future_pt(days: int = 730, base: str = "wstETH") -> str:
+    future = datetime.now(UTC) + timedelta(days=days)
+    return f"PT-{base}-{future.day:02d}{future.strftime('%b').upper()}{future.year}"
+
+
+def _buy_lot(basis: FIFOBasisStore, pt_symbol: str, sy: float = 0.9, pt: float = 1.0) -> None:
+    """Seed a PT buy lot (HUMAN) via the real buy path."""
+    extracted = json.dumps({"swap_amounts": {"amount_in": int(sy * 10**18), "amount_out": int(pt * 10**18)}})
+    ob = _outbox("SWAP", position_key="pendle_pt:arbitrum:0xwallet:0xmarket", market_id="0xmarket")
+    led = _ledger("SWAP", protocol="pendle", token_out=pt_symbol, extracted_data_json=extracted)
+    handle_pendle_pt(ob, led, basis_store=basis)
+
+
+def test_pt_sell_realized_yield_usd_high_confidence() -> None:
+    """Buy 1.0 PT @ 0.9 SY, sell 1.0 PT for 0.95 base @ $1 → realized yield = 0.05 USD, HIGH."""
+    pt_symbol = _future_pt()
+    basis = FIFOBasisStore()
+    _buy_lot(basis, pt_symbol)
+
+    sell_ext = json.dumps({"swap_amounts": {"amount_in": int(1.0 * 10**18), "amount_out": int(0.95 * 10**18)}})
+    ob = _outbox("SWAP", position_key="pendle_pt:arbitrum:0xwallet:0xmarket", market_id="0xmarket")
+    led = _ledger(
+        "SWAP",
+        protocol="pendle",
+        token_in=pt_symbol,
+        token_out="USDC",
+        extracted_data_json=sell_ext,
+        price_inputs_json=json.dumps({"USDC": "1.0"}),
+    )
+
+    event = handle_pendle_pt(ob, led, basis_store=basis)
+
+    assert event is not None
+    assert event.event_type == PendleEventType.PT_SELL
+    # human amounts on the event (uniform PT convention)
+    assert event.pt_amount == Decimal("1")
+    assert event.sy_amount == Decimal("0.95")
+    assert event.realized_yield_usd == Decimal("0.05")
+    assert event.confidence == AccountingConfidence.HIGH
+    assert event.basis_lot_id is not None
+    assert event.implied_apr_bps is None
+
+
+def test_pt_sell_break_even_is_measured_zero() -> None:
+    """Sell exactly at cost → realized yield == Decimal('0') (measured break-even), HIGH."""
+    pt_symbol = _future_pt()
+    basis = FIFOBasisStore()
+    _buy_lot(basis, pt_symbol, sy=0.9, pt=1.0)
+
+    sell_ext = json.dumps({"swap_amounts": {"amount_in": int(1.0 * 10**18), "amount_out": int(0.9 * 10**18)}})
+    ob = _outbox("SWAP", position_key="pendle_pt:arbitrum:0xwallet:0xmarket", market_id="0xmarket")
+    led = _ledger(
+        "SWAP",
+        protocol="pendle",
+        token_in=pt_symbol,
+        token_out="USDC",
+        extracted_data_json=sell_ext,
+        price_inputs_json=json.dumps({"USDC": "1.0"}),
+    )
+
+    event = handle_pendle_pt(ob, led, basis_store=basis)
+
+    assert event is not None
+    assert event.realized_yield_usd == Decimal("0")  # measured zero, NOT None
+    assert event.confidence == AccountingConfidence.HIGH
+
+
+def test_pt_sell_unmatched_returns_none_estimated() -> None:
+    """Sell with no prior buy lot → realized_yield None + ESTIMATED (Empty≠Zero)."""
+    pt_symbol = _future_pt()
+    basis = FIFOBasisStore()  # no buy lot
+
+    sell_ext = json.dumps({"swap_amounts": {"amount_in": int(1.0 * 10**18), "amount_out": int(0.95 * 10**18)}})
+    ob = _outbox("SWAP", position_key="pendle_pt:arbitrum:0xwallet:0xmarket", market_id="0xmarket")
+    led = _ledger(
+        "SWAP",
+        protocol="pendle",
+        token_in=pt_symbol,
+        token_out="USDC",
+        extracted_data_json=sell_ext,
+        price_inputs_json=json.dumps({"USDC": "1.0"}),
+    )
+
+    event = handle_pendle_pt(ob, led, basis_store=basis)
+
+    assert event is not None
+    assert event.event_type == PendleEventType.PT_SELL
+    assert event.realized_yield_usd is None
+    assert event.confidence == AccountingConfidence.ESTIMATED
+    assert event.basis_lot_id is None
+
+
+def test_pt_sell_missing_sy_price_is_sy_denominated_estimated() -> None:
+    """sy_price missing → SY-denominated yield stored + ESTIMATED + explicit reason."""
+    pt_symbol = _future_pt()
+    basis = FIFOBasisStore()
+    _buy_lot(basis, pt_symbol)
+
+    sell_ext = json.dumps({"swap_amounts": {"amount_in": int(1.0 * 10**18), "amount_out": int(0.95 * 10**18)}})
+    ob = _outbox("SWAP", position_key="pendle_pt:arbitrum:0xwallet:0xmarket", market_id="0xmarket")
+    led = _ledger(
+        "SWAP",
+        protocol="pendle",
+        token_in=pt_symbol,
+        token_out="USDC",
+        extracted_data_json=sell_ext,
+        price_inputs_json="",  # no price
+    )
+
+    event = handle_pendle_pt(ob, led, basis_store=basis)
+
+    assert event is not None
+    # SY-denominated value (0.95 - 0.9 = 0.05 SY), NOT silently treated as USD.
+    assert event.realized_yield_usd == Decimal("0.05")
+    assert event.confidence == AccountingConfidence.ESTIMATED
+    assert "SY-denominated" in event.unavailable_reason
+
+
+def test_pt_sell_stores_human_amounts() -> None:
+    """PT_SELL event payload stores HUMAN amounts (matches _replay_pt_sell)."""
+    pt_symbol = _future_pt()
+    basis = FIFOBasisStore()
+    _buy_lot(basis, pt_symbol)
+
+    pt_raw = int(1.0 * 10**18)
+    sy_raw = int(0.95 * 10**18)
+    sell_ext = json.dumps({"swap_amounts": {"amount_in": pt_raw, "amount_out": sy_raw}})
+    ob = _outbox("SWAP", position_key="pendle_pt:arbitrum:0xwallet:0xmarket", market_id="0xmarket")
+    led = _ledger(
+        "SWAP",
+        protocol="pendle",
+        token_in=pt_symbol,
+        token_out="USDC",
+        extracted_data_json=sell_ext,
+        price_inputs_json=json.dumps({"USDC": "1.0"}),
+    )
+
+    event = handle_pendle_pt(ob, led, basis_store=basis)
+
+    assert event is not None
+    assert event.pt_amount == Decimal("1")  # human (pt_raw / 1e18)
+    assert event.sy_amount == Decimal("0.95")  # human (sy_raw / 1e18)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PT_REDEEM (WITHDRAW)  (VIB-4988)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_pt_redeem_at_maturity_human_amounts_and_yield() -> None:
+    """WITHDRAW redeem: amounts stored HUMAN (raw/1e18); realized yield in USD."""
+    pt_symbol = _future_pt()
+    basis = FIFOBasisStore()
+    _buy_lot(basis, pt_symbol, sy=0.9, pt=1.0)
+
+    py_raw = int(1.0 * 10**18)
+    sy_raw = int(1.0 * 10**18)
+    red_ext = json.dumps({"redemption_amounts": {"py_redeemed": py_raw, "sy_received": sy_raw}})
+    ob = _outbox("WITHDRAW", position_key="pendle_pt:arbitrum:0xwallet:0xmarket", market_id="0xmarket")
+    led = _ledger(
+        "WITHDRAW",
+        protocol="pendle",
+        token_in=pt_symbol,
+        token_out="USDC",
+        extracted_data_json=red_ext,
+        price_inputs_json=json.dumps({"USDC": "1.0"}),
+    )
+
+    event = handle_pendle_pt(ob, led, basis_store=basis)
+
+    assert event is not None
+    assert event.event_type == PendleEventType.PT_REDEEM
+    # HUMAN amounts (== raw / 1e18), NOT raw-18.
+    assert event.pt_amount == Decimal(py_raw) / _SCALE_18
+    assert event.sy_amount == Decimal(sy_raw) / _SCALE_18
+    # Yield = (1.0 received - 0.9 cost) * $1 = 0.10 USD.
+    assert event.realized_yield_usd == Decimal("0.1")
+    assert event.basis_lot_id is not None
+
+
+def test_pt_redeem_sources_pt_count_from_declared_legs_pen6() -> None:
+    """PEN6: pt_amount comes from the DECLARED INPUT money leg (PT count), NOT
+    ``redemption_amounts['py_redeemed']`` (post-maturity the SY-ASSET amount).
+
+    The legs INPUT (PT count) is basis-identical to the PT_BUY's PT ``amount_out``
+    so PT quantity conserves through the FIFO match; ``redemption_amounts`` here
+    carries the SMALLER SY-asset amount the legacy path would have mis-booked
+    (the exact basis break VIB-4988 closes). The legs round-trip through
+    ``serialize_extracted_data`` → handler deserialize, mirroring production.
+    """
+    from almanak.connectors._strategy_base.primitive_money_leg import (
+        PrimitiveMoneyLeg,
+        PrimitiveMoneyLegs,
+    )
+    from almanak.framework.accounting.measured import MeasuredMoney
+    from almanak.framework.observability.ledger import serialize_extracted_data
+
+    pt_symbol = _future_pt()
+    basis = FIFOBasisStore()
+    _buy_lot(basis, pt_symbol, sy=0.9, pt=0.012378)
+
+    pt_count = Decimal("0.012378")
+    underlying_out = Decimal("0.010003")  # SY-asset amount — smaller than PT count
+    legs = PrimitiveMoneyLegs.of(
+        PrimitiveMoneyLeg.input(pt_symbol, MeasuredMoney.measured(pt_count)),
+        PrimitiveMoneyLeg.output("WSTETH", MeasuredMoney.measured(underlying_out)),
+    )
+    extracted = serialize_extracted_data(
+        {
+            "primitive_money_legs": legs,
+            # Legacy redemption_amounts carries the WRONG (SY-asset) PT amount;
+            # the declared legs INPUT must win.
+            "redemption_amounts": {
+                "py_redeemed": int(underlying_out * 10**18),
+                "sy_received": int(underlying_out * 10**18),
+            },
+        }
+    )
+    ob = _outbox("WITHDRAW", position_key="pendle_pt:arbitrum:0xwallet:0xmarket", market_id="0xmarket")
+    led = _ledger(
+        "WITHDRAW",
+        protocol="pendle",
+        token_in=pt_symbol,
+        token_out="WSTETH",
+        extracted_data_json=extracted,
+        price_inputs_json=json.dumps({"WSTETH": "4000.0"}),
+    )
+
+    event = handle_pendle_pt(ob, led, basis_store=basis)
+
+    assert event is not None
+    assert event.event_type == PendleEventType.PT_REDEEM
+    # PEN6: PT count from the INPUT leg, NOT the SY-asset amount.
+    assert event.pt_amount == pt_count
+    # Underlying received from the OUTPUT leg.
+    assert event.sy_amount == underlying_out
+    # Full-quantity FIFO match (PT count == lot size) → a matched lot.
+    assert event.basis_lot_id is not None
+
+
+def test_pt_redeem_token_in_not_pt_degrades_confidence() -> None:
+    """R6: WITHDRAW whose token_in is not a PT- symbol → ESTIMATED + degrade reason."""
+    pt_symbol = _future_pt()
+    basis = FIFOBasisStore()
+    _buy_lot(basis, pt_symbol)
+
+    red_ext = json.dumps({"redemption_amounts": {"py_redeemed": int(1e18), "sy_received": int(1e18)}})
+    ob = _outbox("WITHDRAW", position_key="pendle_pt:arbitrum:0xwallet:0xmarket", market_id="0xmarket")
+    led = _ledger(
+        "WITHDRAW",
+        protocol="pendle",
+        token_in="USDC",  # NOT a PT- symbol
+        token_out="USDC",
+        extracted_data_json=red_ext,
+        price_inputs_json=json.dumps({"USDC": "1.0"}),
+    )
+
+    event = handle_pendle_pt(ob, led, basis_store=basis)
+
+    assert event is not None
+    assert event.event_type == PendleEventType.PT_REDEEM
+    assert event.confidence == AccountingConfidence.ESTIMATED
+    assert "not a PT- symbol" in event.unavailable_reason

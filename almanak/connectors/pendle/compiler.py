@@ -1088,6 +1088,16 @@ def compile_pendle_redeem(compiler, intent: WithdrawIntent) -> CompilationResult
                 "py_amount": str(py_amount),
                 "min_token_out": str(min_token_out),
                 "chain": compiler.chain,
+                # G-PT (VIB-4988 part 2): carry the resolved PT token address so
+                # the receipt parser can stamp the canonical maturity-bearing PT
+                # symbol on the WITHDRAW money legs (token_in). A redeem emits
+                # RedeemPY / RedeemSY, never a Market Swap event, so the swap-path
+                # PT-symbol resolution never fires for a redeem; the address is
+                # the only on-chain-truth PT identity the parser can reverse-map
+                # to the maturity-bearing symbol. ``None`` when the YT is not in
+                # the catalogue and the on-chain YT.PT() fallback failed — the
+                # parser then degrades (no fabricated symbol; Empty != Zero).
+                "pt_address": pt_address,
             },
         )
 
