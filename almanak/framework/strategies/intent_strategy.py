@@ -1482,10 +1482,16 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 # Custom CEX balance fetch
                 cex_balance = self._fetch_cex_balance()
 
+                # VIB-3614: total_value_usd is positions-only; idle CEX cash is
+                # uninvested buying power → available_cash_usd. NAV is reconstructed
+                # downstream as total_value_usd + available_cash_usd, so putting
+                # cex_balance in BOTH would double-count it (cf. VIB-5271). Model a
+                # CEX holding as a PositionType.CEX position if it should count as
+                # deployed value instead of cash.
                 return PortfolioSnapshot(
                     timestamp=datetime.now(UTC),
                     deployment_id=self.deployment_id,
-                    total_value_usd=cex_balance,
+                    total_value_usd=Decimal("0"),
                     available_cash_usd=cex_balance,
                     value_confidence=ValueConfidence.ESTIMATED,
                     chain=self.chain,
@@ -1570,7 +1576,16 @@ class IntentStrategy(StrategyBase[ConfigT]):
             return PortfolioSnapshot(
                 timestamp=datetime.now(UTC),
                 deployment_id=self.deployment_id,
-                total_value_usd=position_value + wallet_value,
+                # VIB-3614: total_value_usd is strategy-scoped (open-position value only);
+                # wallet cash lives in available_cash_usd. Consumers reconstruct NAV as
+                # total_value_usd + available_cash_usd, so adding wallet_value here would
+                # double-count the wallet (VIB-5271). This aligns with the positions-only
+                # storage contract the canonical PortfolioValuer emits
+                # (portfolio_valuer.py: total_value_usd=position_value_positive). Note the
+                # canonical path additionally drops negative (debt) legs while this degraded
+                # fallback reports the raw position-summary total — residual divergence
+                # tracked in VIB-5278, pre-existing and out of scope here.
+                total_value_usd=position_value,
                 available_cash_usd=wallet_value,
                 value_confidence=ValueConfidence.ESTIMATED if positions_unavailable else ValueConfidence.HIGH,
                 positions=positions,

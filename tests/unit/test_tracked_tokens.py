@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from almanak import IntentStrategy
+from almanak.framework.portfolio.models import ValueConfidence
 
 
 # ---------------------------------------------------------------------------
@@ -560,3 +561,102 @@ class TestVib3937NativeTokenInWalletSnapshot:
         assert len(eth_rows) == 1, (
             f"VIB-3937: ETH already in tracked tokens must not be duplicated; got {eth_rows}"
         )
+
+
+class TestVib5271FallbackTotalIsPositionsOnly:
+    """VIB-5271: the strategy fallback snapshot's ``total_value_usd`` must be
+    strategy-scoped (open-position value ONLY), per VIB-3614 and matching the
+    canonical ``PortfolioValuer``. Wallet cash lives in ``available_cash_usd``.
+
+    The pre-fix bug set ``total_value_usd = position_value + wallet_value`` while
+    ``available_cash_usd = wallet_value``, so the NAV consumer formula
+    ``total_value_usd + available_cash_usd`` (quant_aggregations.py NAV/drawdown
+    fold, portfolio/models.py) double-counted the wallet. No prior test pinned
+    the fallback arithmetic — which is why that regression slipped (it only
+    surfaced via the VIB-5252 perp self-review). This class is that pin.
+    """
+
+    @staticmethod
+    def _strategy_reporting_position(value_usd: Decimal) -> _ConcreteStrategy:
+        """An arbitrum strategy whose get_open_positions reports ONE real
+        protocol position worth ``value_usd`` (so position_value is non-zero
+        and the wallet double-count is observable)."""
+        from datetime import UTC, datetime
+
+        from almanak.framework.teardown.models import (
+            PositionInfo,
+            PositionType,
+            TeardownPositionSummary,
+        )
+
+        config = PoolConfig(pool="WETH/USDC/500", chain="arbitrum")
+        strategy = _make_strategy(config)
+
+        def _get_open_positions() -> TeardownPositionSummary:
+            return TeardownPositionSummary(
+                deployment_id="test",
+                timestamp=datetime.now(UTC),
+                positions=[
+                    PositionInfo(
+                        position_type=PositionType.LP,
+                        position_id="lp-WETH/USDC-arbitrum",
+                        chain="arbitrum",
+                        protocol="uniswap_v3",
+                        value_usd=value_usd,
+                    )
+                ],
+                total_value_usd=value_usd,
+            )
+
+        strategy.get_open_positions = _get_open_positions  # type: ignore[method-assign]
+        return strategy
+
+    def test_fallback_total_value_is_positions_only_no_wallet_double_count(self) -> None:
+        position_value = Decimal("2000")
+        strategy = self._strategy_reporting_position(position_value)
+        market = _StubMarket(
+            balances={
+                "WETH": Decimal("0.5"),
+                "USDC": Decimal("100"),
+                "ETH": Decimal("0.987654321"),  # native gas-token
+            },
+            prices={
+                "WETH": Decimal("2300"),
+                "USDC": Decimal("1"),
+                "ETH": Decimal("2300"),
+            },
+        )
+        expected_cash = (
+            Decimal("0.5") * Decimal("2300")  # WETH
+            + Decimal("100") * Decimal("1")  # USDC
+            + Decimal("0.987654321") * Decimal("2300")  # native ETH
+        )
+
+        snap = strategy.get_portfolio_snapshot(market=market)
+
+        # total_value_usd is positions-only (VIB-3614) — wallet NOT folded in.
+        assert snap.total_value_usd == position_value
+        # Wallet cash carried separately, unchanged.
+        assert snap.available_cash_usd == expected_cash
+        # NAV reconstruction counts the wallet EXACTLY ONCE.
+        nav = snap.total_value_usd + snap.available_cash_usd
+        assert nav == position_value + expected_cash
+        # And specifically NOT the pre-fix double-count.
+        assert nav != position_value + 2 * expected_cash
+        # Positions were available → HIGH confidence.
+        assert snap.value_confidence == ValueConfidence.HIGH
+
+    def test_fallback_total_matches_open_position_value(self) -> None:
+        """The fallback's total_value_usd must equal the reported open-position
+        value (the same quantity the canonical PortfolioValuer emits), with zero
+        wallet contribution."""
+        position_value = Decimal("7531.42")
+        strategy = self._strategy_reporting_position(position_value)
+        market = _StubMarket(
+            balances={"WETH": Decimal("1"), "USDC": Decimal("0"), "ETH": Decimal("0.1")},
+            prices={"WETH": Decimal("2300"), "USDC": Decimal("1"), "ETH": Decimal("2300")},
+        )
+
+        snap = strategy.get_portfolio_snapshot(market=market)
+
+        assert snap.total_value_usd == position_value
