@@ -41,6 +41,11 @@ from almanak.framework.accounting.payload_schemas import (
     is_v1_event_type,
     validate_payload,
 )
+from almanak.framework.accounting.scorecard_profiles import (
+    G6Bases,
+    ScorecardCtx,
+    ScorecardProfile,
+)
 from almanak.framework.primitives.taxonomy import (
     TAXONOMY,
     UnknownIntentTypeError,
@@ -62,19 +67,23 @@ CLOSE_EVENT_TYPES: tuple[str, ...] = tuple(
     sorted(intent for intent, rec in TAXONOMY.items() if rec.event_kind == EventKind.CLOSE)
 )
 
-Primitive = Literal["lp", "looping", "perp"]
+# The scorecard-profile string contract: the stable keys used by the ratchet,
+# matrix YAML, CLI, fixture directories, and the accounting unit tests. This is
+# NOT the canonical ``Primitive`` enum — ``"looping"`` is a leverage-loop
+# *lending* scorecard with no enum twin. Each profile carries its canonical
+# ``Primitive`` via ``SCORECARD_PROFILES`` (assembled below). ``Primitive`` is
+# kept as a back-compat alias: it is exported in ``__all__`` and referenced by
+# annotations throughout this module.
+ProfileName = Literal["lp", "looping", "perp"]
+Primitive = ProfileName
 CellStatus = Literal["PASS", "FAIL", "XFAIL", "SKIP"]
 
 
-# VIB-4162 (T2): canonical lifecycle expectations per primitive. The
-# Accountant Test's lifecycle harness asserts the exercised intent_type
-# set in transaction_ledger (success=1 rows) is a SUPERSET of these.
-# Looping uses the lending lifecycle; lp/perp use their named lifecycles.
-_LIFECYCLE_BY_PRIMITIVE: dict[Primitive, tuple[str, ...]] = {
-    "lp": ("LP_OPEN", "LP_CLOSE"),
-    "looping": ("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
-    "perp": ("PERP_OPEN", "PERP_CLOSE"),
-}
+# VIB-4162 (T2): canonical lifecycle expectations per primitive now live on each
+# ``ScorecardProfile.required_lifecycle`` (see ``SCORECARD_PROFILES`` below). The
+# lifecycle harness reads them through the registry; a unit test asserts each
+# tuple equals the taxonomy lifecycle constant for the profile's canonical
+# primitive, so the explicit tuple cannot silently drift from the taxonomy.
 
 
 class FixtureLifecycleError(AssertionError):
@@ -109,8 +118,13 @@ def _assert_fixture_lifecycle(
     Raises :class:`FixtureLifecycleError` with a structured diagnostic that
     names the missing step(s) AND the steps that were observed.
     """
-    expected = set(_LIFECYCLE_BY_PRIMITIVE.get(primitive, ()))
+    profile = _profile_for(primitive)
+    expected = set(profile.required_lifecycle)
     if not expected:
+        # An atomic primitive (e.g. pendle_pt: SWAP has no multi-step
+        # lifecycle constant) declares an empty required_lifecycle — its
+        # round-trip is enforced by its cell pack, not this guard. Unknown
+        # profiles never reach here: _profile_for raises above.
         return
     if deployment_id is None:
         cur = conn.execute("SELECT DISTINCT intent_type FROM transaction_ledger WHERE success=1")
@@ -1178,18 +1192,19 @@ def _cell_g6_reconciliation(  # noqa: C901
     #   - Perp:    0.05% × max_notional_exposure
     floor = Decimal("0.10")
     eps_floor_label = "$0.10"
-    if primitive == "lp":
-        eps_pct = Decimal("0.0025")
-        scaling_base = notional_traded
-        scaling_label = "notional_traded"
-    elif primitive == "looping":
-        eps_pct = Decimal("0.0010")
-        scaling_base = max(notional_traded, max_debt)
-        scaling_label = "max(notional_traded, max_debt_outstanding)"
-    else:  # perp
-        eps_pct = Decimal("0.0005")
-        scaling_base = max_perp_notional
-        scaling_label = "max_perp_notional"
+    # Per-primitive tolerance lives on the ``ScorecardProfile`` (G-A): a flat
+    # ``eps_pct`` plus a selector over the three notional bases computed above.
+    # ``eps_pct`` / ``scaling_base`` / ``scaling_label`` / ``eps`` are identical
+    # to the former if/elif/else ladder for lp/looping/perp.
+    _profile = _profile_for(primitive)
+    eps_pct = _profile.eps_pct
+    scaling_base, scaling_label = _profile.eps_scaling(
+        G6Bases(
+            notional_traded=notional_traded,
+            max_debt=max_debt,
+            max_perp_notional=max_perp_notional,
+        )
+    )
     eps = max(floor, eps_pct * scaling_base)
     capital = max(abs(initial), abs(final))
     gap = abs(wallet_pnl - component_pnl)
@@ -2799,6 +2814,84 @@ def _cells_perp(
     return out
 
 
+# ─── Scorecard profile registry (G-A foundation) ─────────────────────────
+#
+# One declarative table replaces the former per-primitive if/elif ladders (the
+# lifecycle map, the G6 ε selector, and the cell-pack dispatch). Each profile
+# carries its canonical taxonomy ``Primitive`` (Blueprint 27 §2.4) and an adapter
+# that calls the existing cell pack with its current signature — so adding a
+# primitive is one entry, not three new branches. Assembled here (not in
+# ``scorecard_profiles.py``) because the cell-pack callables live in this module;
+# the dataclass tier is neutral so there is no import cycle (§2.1 layering).
+#
+# ``_TaxonomyPrimitive`` is the canonical enum (imported as such because the
+# module-local ``Primitive`` name is the ``ProfileName`` string alias).
+SCORECARD_PROFILES: dict[str, ScorecardProfile] = {
+    "lp": ScorecardProfile(
+        name="lp",
+        canonical_primitive=_TaxonomyPrimitive.LP,
+        required_lifecycle=("LP_OPEN", "LP_CLOSE"),
+        eps_pct=Decimal("0.0025"),
+        eps_scaling=lambda b: (b.notional_traded, "notional_traded"),
+        cells=lambda ctx: _cells_lp(
+            ctx.pos_events,
+            ctx.acct_events,
+            ctx.snapshots,
+            ctx.acct_payloads,
+            ctx.payload_errors,
+            ctx.position_state_rows,
+        ),
+    ),
+    "looping": ScorecardProfile(
+        name="looping",
+        canonical_primitive=_TaxonomyPrimitive.LENDING,
+        required_lifecycle=("SUPPLY", "BORROW", "REPAY", "WITHDRAW"),
+        eps_pct=Decimal("0.0010"),
+        eps_scaling=lambda b: (
+            max(b.notional_traded, b.max_debt),
+            "max(notional_traded, max_debt_outstanding)",
+        ),
+        cells=lambda ctx: _cells_lending(
+            ctx.acct_events,
+            ctx.snapshots,
+            ctx.acct_payloads,
+            ctx.payload_errors,
+            ctx.position_state_rows,
+        ),
+    ),
+    "perp": ScorecardProfile(
+        name="perp",
+        canonical_primitive=_TaxonomyPrimitive.PERP,
+        required_lifecycle=("PERP_OPEN", "PERP_CLOSE"),
+        eps_pct=Decimal("0.0005"),
+        eps_scaling=lambda b: (b.max_perp_notional, "max_perp_notional"),
+        cells=lambda ctx: _cells_perp(
+            ctx.acct_events,
+            ctx.pos_events,
+            ctx.acct_payloads,
+            ctx.payload_errors,
+        ),
+    ),
+}
+
+
+def _profile_for(name: str) -> ScorecardProfile:
+    """Resolve a scorecard profile by its string key, failing loud on an unknown
+    profile.
+
+    The former G6 ``else`` branch silently scored an unknown primitive with
+    perp's ε — a latent mis-scoring. Every caller is constrained to the
+    registered keys (the ratchet tuple, regression-assert ``choices``, the matrix
+    runner, the CLI, and ``accountant_query``'s documented contract), so raising
+    here changes no real output and turns a typo into a clear error instead of a
+    wrong number.
+    """
+    try:
+        return SCORECARD_PROFILES[name]
+    except KeyError:
+        raise ValueError(f"unknown scorecard profile {name!r}; known: {sorted(SCORECARD_PROFILES)}") from None
+
+
 # ─── Top-level runner ────────────────────────────────────────────────────
 
 
@@ -2869,29 +2962,23 @@ def evaluate_cells(
     cells.append(_cell_g14_sdk_eq_onchain(snapshots, position_state_rows))
     cells.append(_cell_g15_multi_period_self_consistency(snapshots, position_state_rows))
 
-    if primitive == "lp":
+    # Primitive-specific cell pack (G-A): one registry lookup replaces the
+    # former if/elif ladder. An unrecognised profile extends nothing — exactly
+    # the old fall-through (there was no ``else`` branch).
+    _profile = SCORECARD_PROFILES.get(primitive)
+    if _profile is not None:
         cells.extend(
-            _cells_lp(
-                pos_events,
-                acct_events,
-                snapshots,
-                acct_payloads,
-                payload_errors,
-                position_state_rows,
+            _profile.cells(
+                ScorecardCtx(
+                    pos_events=pos_events,
+                    acct_events=acct_events,
+                    snapshots=snapshots,
+                    acct_payloads=acct_payloads,
+                    payload_errors=payload_errors,
+                    position_state_rows=position_state_rows,
+                )
             )
         )
-    elif primitive == "looping":
-        cells.extend(
-            _cells_lending(
-                acct_events,
-                snapshots,
-                acct_payloads,
-                payload_errors,
-                position_state_rows,
-            )
-        )
-    elif primitive == "perp":
-        cells.extend(_cells_perp(acct_events, pos_events, acct_payloads, payload_errors))
 
     # VIB-4201 (T15): cell #22 — registry coherence. Appended after the
     # 15 generic + 6 primitive-specific cells. NOT in the ≥16/21 gating
