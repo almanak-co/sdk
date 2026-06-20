@@ -589,22 +589,59 @@ def _earliest_signal_ts(buy_signals: pd.DataFrame, sell_signals: pd.DataFrame) -
     """
     times: list[pd.Timestamp] = []
     for frame in (buy_signals, sell_signals):
-        if isinstance(frame, pd.DataFrame) and "time" in frame.columns and not frame.empty:
-            col = frame["time"].dropna()
-            if col.empty:
-                continue
-            val = col.min()
-            if pd.isna(val):
-                continue
-            # Normalize each frame's minimum to UTC *before* the cross-frame
-            # comparison so a mix of tz-naive and tz-aware frames (custom
-            # dashboards / future callers) can't raise on ``min(times)``.
-            ts = pd.Timestamp(val)
-            ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
-            times.append(ts)
+        if not (isinstance(frame, pd.DataFrame) and "time" in frame.columns and not frame.empty):
+            continue
+        # Coerce to UTC-aware datetimes BEFORE reducing. ``errors="coerce"``
+        # turns an unparseable ``time`` value (e.g. a junk string from a custom
+        # dashboard / future caller) into ``NaT`` so it is dropped instead of
+        # raising and taking down the whole render; ``utc=True`` unifies tz-naive
+        # and tz-aware frames so the cross-frame ``min`` below cannot raise. For
+        # the production input (already-UTC datetimes from
+        # ``_trade_rows_to_signals``) this is an idempotent no-op.
+        col = pd.to_datetime(frame["time"], utc=True, errors="coerce").dropna()
+        if col.empty:
+            continue
+        times.append(col.min())
     if not times:
         return None
     return min(times).to_pydatetime()
+
+
+def _anchored_start_time(
+    strategy_start_time: str | datetime | pd.Timestamp | None,
+    buy_signals: pd.DataFrame | None,
+    sell_signals: pd.DataFrame | None,
+) -> pd.Timestamp | None:
+    """x-position for the dashboard "Start" line, clamped so it can NEVER fall
+    after the first executed trade.
+
+    A "Start" line drawn to the right of a genuine buy/sell marker is impossible
+    — the strategy cannot trade before it deployed — but
+    :func:`_strategy_start_time` can report a too-late start two ways:
+
+    * ``get_timeline(limit=200)`` truncates, so on a long run the original
+      ``STRATEGY_STARTED`` event ages out of the window and the fallback picks the
+      oldest of the *recent* events (well after the true start); and
+    * a dashboard relaunch re-emits a fresh ``STRATEGY_STARTED``, so a re-rendered
+      report anchors "Start" to the relaunch time, not the original deployment.
+
+    Either way the line would land after real trades. Clamp it to the earliest
+    plotted buy/sell marker (the markers use the authoritative ledger trade time),
+    so the line sits at-or-before the first action. Returns ``None`` (no line)
+    only when neither a start time nor any marker is available.
+    """
+    start_time = pd.to_datetime(strategy_start_time, utc=True, errors="coerce")
+    earliest = _earliest_signal_ts(
+        buy_signals if isinstance(buy_signals, pd.DataFrame) else pd.DataFrame(),
+        sell_signals if isinstance(sell_signals, pd.DataFrame) else pd.DataFrame(),
+    )
+    if earliest is not None:
+        earliest_ts = pd.to_datetime(earliest, utc=True, errors="coerce")
+        if not pd.isna(earliest_ts) and (pd.isna(start_time) or earliest_ts < start_time):
+            start_time = earliest_ts
+    if pd.isna(start_time):
+        return None
+    return start_time
 
 
 def _trade_row_marker_price(
@@ -1475,32 +1512,40 @@ def _render_charts_section(  # noqa: C901
                     col=1,
                 )
 
-        if strategy_start_time is not None:
-            start_time = pd.to_datetime(strategy_start_time, utc=True, errors="coerce")
-            if not pd.isna(start_time):
-                fig.add_trace(
-                    go.Scatter(
-                        x=[start_time, start_time],
-                        y=[price_df["price"].min(), price_df["price"].max()],
-                        mode="lines",
-                        name="Start",
-                        line={"color": colors.neutral, "width": 1, "dash": "dot"},
-                    ),
-                    row=1,
-                    col=1,
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=[start_time, start_time],
-                        y=[0, 100],
-                        mode="lines",
-                        name="Start",
-                        line={"color": colors.neutral, "width": 1, "dash": "dot"},
-                        showlegend=False,
-                    ),
-                    row=2,
-                    col=1,
-                )
+        # Resolve the Start line through _anchored_start_time UNCONDITIONALLY: it
+        # clamps a too-late reported start back onto the first trade (get_timeline
+        # truncation / relaunch re-emission would otherwise draw "Start" to the
+        # RIGHT of real markers) AND still anchors the line at the first trade when
+        # the reported start is missing entirely (None), rather than dropping it.
+        # It returns None only when there is neither a start nor a trade — the sole
+        # case that legitimately draws no line. Gating this on
+        # ``strategy_start_time is not None`` would silently drop the line whenever
+        # the timeline read came back empty but trades exist (VIB-5287).
+        start_time = _anchored_start_time(strategy_start_time, buy_df, sell_df)
+        if start_time is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=[start_time, start_time],
+                    y=[price_df["price"].min(), price_df["price"].max()],
+                    mode="lines",
+                    name="Start",
+                    line={"color": colors.neutral, "width": 1, "dash": "dot"},
+                ),
+                row=1,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=[start_time, start_time],
+                    y=[0, 100],
+                    mode="lines",
+                    name="Start",
+                    line={"color": colors.neutral, "width": 1, "dash": "dot"},
+                    showlegend=False,
+                ),
+                row=2,
+                col=1,
+            )
 
         # Add RSI indicator
         if isinstance(indicator_data, list):
