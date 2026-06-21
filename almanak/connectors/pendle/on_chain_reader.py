@@ -122,6 +122,7 @@ class PendleOnChainReader:
         chain: str = "ethereum",
         cache_ttl_seconds: float = 30.0,
         gateway_client: "GatewayClient | None" = None,
+        request_timeout_seconds: float = 30.0,
     ):
         """Initialize the on-chain reader.
 
@@ -130,6 +131,10 @@ class PendleOnChainReader:
             chain: Target chain (ethereum, arbitrum).
             cache_ttl_seconds: Cache TTL for on-chain reads.
             gateway_client: Gateway client (for gateway mode). Preferred over rpc_url.
+            request_timeout_seconds: Bound on each blocking web3 RPC request in
+                direct mode. Without it, ``web3`` defaults to no timeout, so a
+                hung RPC wedges the caller (and, when the reader is driven from
+                the gateway, a worker thread) indefinitely.
 
         Raises:
             ValueError: If chain is unsupported or neither rpc_url nor gateway_client provided.
@@ -157,7 +162,9 @@ class PendleOnChainReader:
             # Direct/web3 mode (legacy)
             from web3 import Web3
 
-            self.web3 = Web3(Web3.HTTPProvider(rpc_url))  # vib-2986-exempt: gateway-internal fallback
+            self.web3 = Web3(
+                Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": request_timeout_seconds})
+            )  # vib-2986-exempt: gateway-internal fallback
             self.router_static = self.web3.eth.contract(
                 address=self.web3.to_checksum_address(self.router_static_address),
                 abi=ROUTER_STATIC_ABI,

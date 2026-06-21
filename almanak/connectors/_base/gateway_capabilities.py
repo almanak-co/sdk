@@ -47,6 +47,7 @@ Strategy-side code MUST NOT import this module.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -790,3 +791,87 @@ class GatewayDexVolumeCapability(Protocol):
         end_ts: int,
         interval_secs: int,
     ) -> Any: ...
+
+
+@dataclass(frozen=True)
+class PrincipalTokenMarketRef:
+    """Resolved on-chain identity of a principal-token (PT/YT/LP) symbol.
+
+    Returned by :class:`GatewayPrincipalTokenPriceCapability` so the gateway
+    can compose a PT/YT-USD price (VIB-5310) WITHOUT the gateway holding any
+    protocol-specific symbol→market knowledge. The connector owns the static
+    metadata; this struct is the protocol-agnostic hand-off.
+
+    Attributes:
+        protocol: Owning connector's protocol name (e.g. ``"pendle"``). The
+            gateway uses it to build the protocol's on-chain market reader via
+            ``PRINCIPAL_TOKEN_MARKET_READ_REGISTRY``.
+        market_address: The PT/YT market contract address (RouterStatic key for
+            ``getPtToAssetRate`` / ``expiry``).
+        underlying_token: The token whose USD price denominates the composition
+            (``pt_usd = underlying_price × pt_to_asset_rate``). Address or
+            symbol — priced through the existing ``MarketService`` aggregator.
+            MUST be non-empty: a ref with no priceable underlying is unmeasured,
+            so the connector returns ``None`` from ``resolve_*`` instead.
+        family: ``"PT"``, ``"YT"`` or ``"LP"``. The gateway returns
+            ``UNMEASURED`` for ``"YT"`` in M1 (held-YT valuation is VIB-5322/M3).
+        maturity_ts: Unix seconds of contract maturity, or 0 when not statically
+            known (the gateway reads days-to-maturity on-chain regardless).
+    """
+
+    protocol: str
+    market_address: str
+    underlying_token: str
+    family: str
+    maturity_ts: int = 0
+
+
+@runtime_checkable
+class GatewayPrincipalTokenPriceCapability(Protocol):
+    """Connector resolves a PT/YT symbol to its market + underlying for pricing.
+
+    The single source of the gateway's PT/YT-USD price authority (VIB-5310,
+    epic VIB-5299, M1). The gateway is the *price* authority — it sources both
+    composition legs (``pt_to_asset_rate`` via the connector's on-chain market
+    reader, underlying/USD via the existing price aggregator), composes, and
+    stamps confidence — but it holds NO protocol-specific symbol→market table.
+    That knowledge stays connector-owned behind this capability, so a second
+    principal-token protocol plugs in by implementing it (capability dispatch,
+    never a protocol-name literal in ``market_service``).
+
+    Contract:
+
+    * ``principal_token_price_chains() -> frozenset[str]`` — chains on which
+      ``resolve_principal_token_ref`` can return a ref. Empty is legal.
+    * ``resolve_principal_token_ref(*, symbol, chain, maturity_ts=0)
+      -> PrincipalTokenMarketRef | None`` — resolve a canonical PT/YT symbol
+      (case-insensitive; the *symbol* is the identity + join key, design-spine
+      §3) to its market + underlying. Return ``None`` when the symbol is
+      unknown OR has no priceable underlying — the gateway maps ``None`` to
+      ``UNMEASURED`` (Empty≠Zero: expected-no-data, never a fabricated price).
+      MUST NOT perform network egress: resolution is from connector-owned
+      static metadata only.
+    """
+
+    def principal_token_price_chains(self) -> frozenset[str]: ...
+
+    def resolve_principal_token_ref(
+        self,
+        *,
+        symbol: str,
+        chain: str,
+        maturity_ts: int = 0,
+    ) -> PrincipalTokenMarketRef | None: ...
+
+    def build_principal_token_market_reader(self, *, chain: str, rpc_url: str) -> Any | None:
+        """Build the connector's on-chain market reader (``get_pt_to_asset_rate``,
+        ``get_days_to_maturity``) for ``chain``, or ``None`` if unsupported.
+
+        Returned here — on the same capability as resolution — so the gateway
+        never reaches into a strategy-side connector registry to construct it
+        (gateway/connector isolation, VIB-4121). The reader reads on-chain via
+        the connector's existing gateway-internal eth_call path; the gateway
+        passes a resolved ``rpc_url`` so the read happens inside the egress
+        layer with no new egress surface.
+        """
+        ...

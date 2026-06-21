@@ -9,6 +9,7 @@ import asyncio
 import logging
 import re
 import time
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Any
 
@@ -128,6 +129,76 @@ def _block_pin_unsupported_reason(chain: str, block_tag: int | None) -> str | No
     if block_tag is not None and is_solana_chain(chain):
         return f"block-pinned balance reads (block_tag={block_tag}) are not supported on non-EVM chain '{chain}'"
     return None
+
+
+# VIB-5310 — PT/YT-USD confidence numerics. The coarse ``confidence_band`` is
+# AUTHORITATIVE (consumers MUST NOT re-threshold the raw ``confidence`` double);
+# the double is informational and kept CONSISTENT with the band: HIGH carries the
+# measured underlying-price confidence (≤ 1.0), ESTIMATED degrades it (the
+# underlying was measured but STALE), UNAVAILABLE is 0.0. Per the ratified AC,
+# ESTIMATED is reserved for measured-but-degraded inputs — a MISSING required
+# read (e.g. pt_to_asset_rate) is UNMEASURED, never AVAILABLE/ESTIMATED with a
+# fabricated at-par rate. The ``stale`` bool still rides separately so a consumer
+# sees the raw freshness signal alongside the band.
+_PT_ESTIMATED_CONF_CAP = 0.5
+
+
+class _UnpriceableUnderlying(Exception):
+    """The SY underlying could not be priced by any source (EXPECTED → UNMEASURED).
+
+    Distinguished from an unexpected read error (→ ERRORED): an unpriceable
+    underlying is a measured "no price" (Empty≠Zero), not an infrastructure
+    failure. Carries no numeric price.
+    """
+
+
+def _build_pt_price_response(
+    *,
+    symbol: str,
+    chain: str,
+    quote: str,
+    availability: "gateway_pb2.PtPriceAvailability.ValueType",
+    confidence_band: "gateway_pb2.PtPriceConfidenceBand.ValueType",
+    price: str = "",
+    underlying_price: str = "",
+    pt_to_asset_rate: str = "",
+    source: str = "",
+    confidence: float = 0.0,
+    timestamp: int = 0,
+    stale: bool = False,
+    maturity_ts: int = 0,
+    days_to_maturity: int = 0,
+) -> "gateway_pb2.PtPriceResponse":
+    """Construct a ``PtPriceResponse``, enforcing the never-empty-AVAILABLE guard.
+
+    Structural Empty≠Zero invariant (VIB-5309/5310): a response may carry
+    ``availability=AVAILABLE`` ONLY with a non-empty ``price``. Any attempt to
+    emit AVAILABLE without a price is a provider bug, not a runtime condition —
+    so this raises ``ValueError`` rather than silently shipping a wire message a
+    consumer would trust. Every GetPtPrice return path goes through here, making
+    the corrupt state unrepresentable.
+    """
+    if availability == gateway_pb2.PT_PRICE_AVAILABILITY_AVAILABLE and not price:
+        raise ValueError(
+            "PT price provider invariant violated: availability=AVAILABLE requires a "
+            "non-empty price (Empty≠Zero, VIB-5309). Emit UNMEASURED/ERRORED instead."
+        )
+    return gateway_pb2.PtPriceResponse(
+        symbol=symbol,
+        chain=chain,
+        quote=quote,
+        price=price,
+        availability=availability,
+        confidence=confidence,
+        confidence_band=confidence_band,
+        underlying_price=underlying_price,
+        pt_to_asset_rate=pt_to_asset_rate,
+        source=source,
+        timestamp=timestamp,
+        stale=stale,
+        maturity_ts=maturity_ts,
+        days_to_maturity=days_to_maturity,
+    )
 
 
 class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
@@ -731,6 +802,323 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 logger.error(f"GetPrice failed for {token}/{quote}: {e}")
             set_error_from_upstream(context, e, upstream="price_aggregator")
             return gateway_pb2.PriceResponse()
+
+    async def GetPtPrice(
+        self,
+        request: gateway_pb2.PtPriceRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.PtPriceResponse:
+        """Compose a Pendle PT/YT-USD price (VIB-5310, epic VIB-5299, M1).
+
+        The gateway is the PRICE AUTHORITY: ``pt_usd = underlying/USD ×
+        pt_to_asset_rate`` is composed HERE from two gateway-sourced legs —
+        ``pt_to_asset_rate`` via the connector's on-chain market reader (a
+        gateway-internal eth_call, no new egress) and underlying/USD via the
+        existing price aggregator. There is no direct Pendle price feed.
+
+        Honest availability per the ratified AC (Empty≠Zero — never ``"0"`` for
+        unmeasured, never an at-par fabrication):
+
+        * both legs measured AND fresh → ``AVAILABLE`` + band ``HIGH``.
+        * both legs measured but underlying STALE → ``AVAILABLE`` + band
+          ``ESTIMATED`` + ``stale=True`` (HIGH requires freshness; ESTIMATED is
+          measured-but-degraded only).
+        * ``pt_to_asset_rate`` missing → ``UNMEASURED`` (NO price). The at-par
+          (rate=1.0) default is FORBIDDEN — it overvalues the PT to par.
+        * underlying unpriceable → ``UNMEASURED`` (NO price). Never fabricate.
+        * underlying-price read raised unexpectedly → ``ERRORED`` (NO price).
+        * YT in M1 → ``UNMEASURED`` (held-YT valuation is VIB-5322/M3), never a
+          guess.
+
+        ``confidence_band`` is AUTHORITATIVE; the ``confidence`` double is kept
+        consistent with it (see ``_PT_ESTIMATED_CONF_CAP``). The ``stale`` flag
+        rides separately so consumers see the raw freshness signal too.
+        """
+        await self._ensure_initialized()
+
+        symbol = (request.symbol or "").strip()
+        quote = request.quote or "USD"
+
+        try:
+            chain = validate_chain(request.chain)
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return gateway_pb2.PtPriceResponse()
+
+        if not symbol:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("symbol is required for GetPtPrice")
+            return gateway_pb2.PtPriceResponse()
+
+        # M1 is USD-only. Reject any other quote LOUDLY rather than compose a USD
+        # number and silently echo the caller's label onto it (a EUR-labelled USD
+        # price at AVAILABLE+HIGH is wrong-label money). Empty == default USD.
+        if request.quote and request.quote.upper() != "USD":
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"GetPtPrice supports quote=USD only in M1 (got {request.quote!r})")
+            return gateway_pb2.PtPriceResponse()
+
+        unmeasured_band = gateway_pb2.PT_PRICE_CONFIDENCE_BAND_UNAVAILABLE
+
+        # 1. Resolve symbol → market + underlying (connector-owned, no egress).
+        ref = self._resolve_principal_token_ref(symbol, chain, request.maturity_ts)
+        if ref is None:
+            return _build_pt_price_response(
+                symbol=symbol,
+                chain=chain,
+                quote=quote,
+                availability=gateway_pb2.PT_PRICE_AVAILABILITY_UNMEASURED,
+                confidence_band=unmeasured_band,
+                source="unmeasured:symbol-not-resolved-or-no-underlying",
+                maturity_ts=request.maturity_ts,
+            )
+
+        # 2. YT held-valuation is deferred to VIB-5322 / M3 — never a guess.
+        if ref.family == "YT":
+            return _build_pt_price_response(
+                symbol=symbol,
+                chain=chain,
+                quote=quote,
+                availability=gateway_pb2.PT_PRICE_AVAILABILITY_UNMEASURED,
+                confidence_band=unmeasured_band,
+                source="unmeasured:yt-valuation-deferred-VIB-5322",
+                maturity_ts=ref.maturity_ts,
+            )
+
+        # 3. Price the underlying (existing aggregator). Unpriceable → UNMEASURED
+        #    (expected); unexpected error → ERRORED. Both carry NO price.
+        try:
+            underlying_result = await self._price_underlying_usd(ref.underlying_token, chain)
+        except _UnpriceableUnderlying as e:
+            logger.warning("GetPtPrice: underlying %s unpriceable for %s: %s", ref.underlying_token, symbol, e)
+            return _build_pt_price_response(
+                symbol=symbol,
+                chain=chain,
+                quote=quote,
+                availability=gateway_pb2.PT_PRICE_AVAILABILITY_UNMEASURED,
+                confidence_band=unmeasured_band,
+                source=f"unmeasured:underlying-unpriceable:{ref.underlying_token}",
+                maturity_ts=ref.maturity_ts,
+            )
+        except Exception as e:
+            logger.error("GetPtPrice: underlying price read errored for %s: %s", symbol, e)
+            return _build_pt_price_response(
+                symbol=symbol,
+                chain=chain,
+                quote=quote,
+                availability=gateway_pb2.PT_PRICE_AVAILABILITY_ERRORED,
+                confidence_band=unmeasured_band,
+                source="errored:underlying-price-read",
+                maturity_ts=ref.maturity_ts,
+            )
+
+        underlying_price = underlying_result.price
+
+        # 4. Read pt_to_asset_rate + days-to-maturity (gateway-internal eth_call).
+        #    The direct-mode reader does a BLOCKING web3 .call(); run it OFF the
+        #    asyncio event loop via to_thread so a slow RPC can't stall every
+        #    concurrent gRPC handler on the gateway (perimeter liveness). The
+        #    reader itself carries a bounded web3 request timeout so the worker
+        #    thread can't hang forever either.
+        rate, days_to_maturity, rate_reason = await asyncio.to_thread(self._read_pt_market, ref, chain)
+
+        # 5. Missing PT rate → UNMEASURED. Per the ratified AC, a missing
+        #    required read is NEVER fabricated: defaulting pt_to_asset_rate to
+        #    1.0 (at-par) would overvalue the PT to its maximum redemption value
+        #    (PT trades at ≤ par before maturity), so there is no AVAILABLE path
+        #    here. ``underlying_price`` is echoed for transparency (it WAS
+        #    measured); ``price`` stays empty (Empty≠Zero).
+        if rate is None:
+            return _build_pt_price_response(
+                symbol=symbol,
+                chain=chain,
+                quote=quote,
+                availability=gateway_pb2.PT_PRICE_AVAILABILITY_UNMEASURED,
+                confidence_band=unmeasured_band,
+                underlying_price=str(underlying_price),
+                source=f"unmeasured:pt-rate-unavailable({rate_reason})",
+                timestamp=int(underlying_result.timestamp.timestamp()),
+                maturity_ts=ref.maturity_ts,
+                days_to_maturity=days_to_maturity or 0,
+            )
+
+        # 6. Both legs measured → compose. Band: HIGH only when ALL inputs are
+        #    measured AND fresh; a measured-but-STALE underlying drops the band
+        #    to ESTIMATED (with the stale flag set) — ESTIMATED is reserved for
+        #    measured-but-degraded, NEVER for a fabricated/missing input.
+        return self._compose_available_pt_response(
+            symbol=symbol,
+            chain=chain,
+            quote=quote,
+            ref=ref,
+            underlying_result=underlying_result,
+            rate=rate,
+            days_to_maturity=days_to_maturity,
+        )
+
+    def _compose_available_pt_response(
+        self,
+        *,
+        symbol: str,
+        chain: str,
+        quote: str,
+        ref: Any,
+        underlying_result: Any,
+        rate: Decimal,
+        days_to_maturity: int | None,
+    ) -> "gateway_pb2.PtPriceResponse":
+        """Stamp an AVAILABLE PT/USD response from two measured legs.
+
+        ``HIGH`` only when the underlying is fresh; a stale underlying →
+        ``ESTIMATED`` + ``stale=True`` (the band carries freshness, the separate
+        ``stale`` flag carries the raw signal). ``confidence_band`` is
+        authoritative; the ``confidence`` double is kept consistent.
+        """
+        underlying_price = underlying_result.price
+        pt_usd = underlying_price * rate
+        fresh = not underlying_result.stale
+        if fresh:
+            band = gateway_pb2.PT_PRICE_CONFIDENCE_BAND_HIGH
+            confidence = underlying_result.confidence
+        else:
+            band = gateway_pb2.PT_PRICE_CONFIDENCE_BAND_ESTIMATED
+            confidence = min(underlying_result.confidence, _PT_ESTIMATED_CONF_CAP)
+
+        return _build_pt_price_response(
+            symbol=symbol,
+            chain=chain,
+            quote=quote,
+            availability=gateway_pb2.PT_PRICE_AVAILABILITY_AVAILABLE,
+            confidence_band=band,
+            price=str(pt_usd),
+            underlying_price=str(underlying_price),
+            pt_to_asset_rate=str(rate),
+            source=f"composition:getPtToAssetRate×{underlying_result.source}",
+            confidence=confidence,
+            timestamp=int(underlying_result.timestamp.timestamp()),
+            stale=underlying_result.stale,
+            maturity_ts=ref.maturity_ts,
+            days_to_maturity=days_to_maturity or 0,
+        )
+
+    def _resolve_principal_token_ref(self, symbol: str, chain: str, maturity_ts: int):
+        """Dispatch symbol→market+underlying to connector capability providers.
+
+        Capability dispatch (never a protocol-name literal): any connector
+        implementing ``GatewayPrincipalTokenPriceCapability`` for ``chain`` may
+        resolve the symbol. Returns the first non-None
+        ``PrincipalTokenMarketRef`` or ``None`` when unresolved (→ UNMEASURED).
+        A misbehaving provider is logged and skipped, never crashing the call.
+        """
+        from almanak.connectors._base.gateway_capabilities import (
+            GatewayPrincipalTokenPriceCapability,
+        )
+        from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+
+        for provider in GATEWAY_REGISTRY.capability_providers(GatewayPrincipalTokenPriceCapability):  # type: ignore[type-abstract]
+            try:
+                if chain not in provider.principal_token_price_chains():
+                    continue
+                ref = provider.resolve_principal_token_ref(symbol=symbol, chain=chain, maturity_ts=maturity_ts)
+            except Exception as e:
+                logger.warning(
+                    "GetPtPrice: principal-token resolver %s failed for %s: %s", type(provider).__name__, symbol, e
+                )
+                continue
+            if ref is not None:
+                return ref
+        return None
+
+    async def _price_underlying_usd(self, token: str, chain: str):
+        """Price the SY underlying in USD via the existing aggregator.
+
+        Raises :class:`_UnpriceableUnderlying` for an EXPECTED "no source has a
+        price" (→ UNMEASURED); propagates any other exception (→ ERRORED).
+        """
+        from almanak.framework.data.interfaces import (
+            AllDataSourcesFailed,
+            DataSourceUnavailable,
+        )
+
+        try:
+            resolved_token = await self._resolve_token_for_pricing(token, chain)
+        except Exception:
+            # Address metadata resolution is best-effort; fall back to symbol path.
+            resolved_token = None
+
+        try:
+            return await self._price_aggregator.get_aggregated_price(token, "USD", resolved_token=resolved_token)
+        except (AllDataSourcesFailed, DataSourceUnavailable) as e:
+            raise _UnpriceableUnderlying(str(e)) from e
+
+    def _read_pt_market(self, ref, chain: str) -> tuple[Decimal | None, int | None, str]:
+        """Read ``pt_to_asset_rate`` + days-to-maturity via the connector reader.
+
+        Returns ``(rate_or_None, days_or_None, reason)``. ``rate`` is ``None``
+        when the reader cannot be built or the read fails / is non-positive; the
+        CALLER maps a ``None`` rate to ``UNMEASURED`` (no price) — deliberately
+        NOT ``valuation.py``'s at-par (1.0) fallback, which overvalues the PT and
+        is forbidden by the ratified AC. Reads run through the connector's
+        on-chain market reader in direct mode, a gateway-internal eth_call path
+        that reuses the EXISTING ``# vib-2986-exempt`` marker (no new egress, no
+        new marker).
+        """
+        reader = self._build_pt_reader(ref.protocol, chain)
+        if reader is None:
+            return None, None, "rate-reader-unavailable"
+
+        rate: Decimal | None = None
+        reason = ""
+        try:
+            raw = reader.get_pt_to_asset_rate(ref.market_address)
+            if raw is not None and raw > 0:
+                rate = raw
+            else:
+                reason = "pt_to_asset_rate-non-positive"
+        except Exception as e:
+            logger.debug("GetPtPrice: pt_to_asset_rate read failed for %s: %s", ref.market_address, e)
+            reason = "pt_to_asset_rate-read-failed"
+
+        days: int | None = None
+        try:
+            days = reader.get_days_to_maturity(ref.market_address)
+        except Exception as e:
+            logger.debug("GetPtPrice: days_to_maturity read failed for %s: %s", ref.market_address, e)
+
+        return rate, days, reason
+
+    def _build_pt_reader(self, protocol: str, chain: str):
+        """Build the connector's on-chain principal-token market reader, or None.
+
+        Routes through the SAME ``GatewayPrincipalTokenPriceCapability`` provider
+        that resolved the symbol (gateway/connector isolation, VIB-4121 — the
+        gateway never reaches into a strategy-side connector registry). The
+        provider builds its reader in direct (rpc_url) mode, reusing the on-chain
+        reader's established ``# vib-2986-exempt`` web3 path (no new egress).
+        Returns ``None`` (→ caller emits ``UNMEASURED``, never at-par) when no
+        provider/reader/chain supports the read.
+        """
+        from almanak.connectors._base.gateway_capabilities import (
+            GatewayPrincipalTokenPriceCapability,
+        )
+        from almanak.connectors._base.types import ProtocolName
+        from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
+        from almanak.gateway.utils import get_rpc_url
+
+        # Protocol-keyed lookup (no ``.protocol`` access on the capability
+        # Protocol): the connector that owns ``protocol`` is also the capability
+        # provider. ``isinstance`` narrows it to the capability so the reader
+        # build is typed without touching the connector base ClassVar.
+        connector = GATEWAY_REGISTRY.get(ProtocolName(protocol))
+        if not isinstance(connector, GatewayPrincipalTokenPriceCapability):
+            return None
+        try:
+            rpc_url = get_rpc_url(chain, network=self.settings.network)
+            return connector.build_principal_token_market_reader(chain=chain, rpc_url=rpc_url)
+        except Exception as e:
+            logger.debug("GetPtPrice: could not build %s reader for %s: %s", protocol, chain, e)
+            return None
 
     async def GetBalance(
         self,
