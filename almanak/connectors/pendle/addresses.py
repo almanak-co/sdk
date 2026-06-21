@@ -31,7 +31,12 @@ PENDLE: dict[str, dict[str, str]] = {
     "arbitrum": {
         # Core contracts
         "router": "0x888888888889758F76e7103c6CbF23ABbF58F946",
-        "router_static": "0x263833d47eA3fA4a30f269323aba6a107f9eB14C",
+        # NOTE: Pendle has decommissioned RouterStatic on Arbitrum — the historical
+        # address (0xADB09F65…) has no code, and the Ethereum RouterStatic address is
+        # a *different*, unrelated contract on Arbitrum (its getPtToAssetRate reverts).
+        # The PT rate is therefore read from ``pt_oracle`` (VIB-5333), not RouterStatic,
+        # so no ``router_static`` entry is defined here. Do NOT re-add one without an
+        # on-chain-verified Arbitrum RouterStatic deployment.
         "market_factory": "0x2FCb47B58350cD377f94d3821e7373Df60bD9Ced",
         "yt_factory": "0x28d4cE244fCE6f26C6A4A0447fFe8A4ccf9F1CcC",
         "pt_oracle": "0x1Fd95db7B7C0067De8D45C0cb35D59796adfD187",

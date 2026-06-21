@@ -81,9 +81,7 @@ class TestStandardERC20Events:
         mod = importlib.import_module(module_path)
         topics = mod.EVENT_TOPICS
         if "Transfer" in topics:
-            assert topics["Transfer"] == _topic(STANDARD_EVENTS["Transfer"]), (
-                f"{module_path}: Transfer topic mismatch"
-            )
+            assert topics["Transfer"] == _topic(STANDARD_EVENTS["Transfer"]), f"{module_path}: Transfer topic mismatch"
 
     @pytest.mark.parametrize(
         "module_path",
@@ -106,9 +104,7 @@ class TestStandardERC20Events:
         mod = importlib.import_module(module_path)
         topics = mod.EVENT_TOPICS
         if "Approval" in topics:
-            assert topics["Approval"] == _topic(STANDARD_EVENTS["Approval"]), (
-                f"{module_path}: Approval topic mismatch"
-            )
+            assert topics["Approval"] == _topic(STANDARD_EVENTS["Approval"]), f"{module_path}: Approval topic mismatch"
 
     def test_enso_transfer_signature(self):
         from almanak.connectors.enso.receipt_parser import TRANSFER_EVENT_SIGNATURE
@@ -175,12 +171,19 @@ class TestWETHEvents:
 
 
 class TestPendleSelectors:
-    """Validate Pendle RouterStatic function selectors."""
+    """Validate Pendle on-chain reader function selectors."""
 
     def test_get_pt_to_asset_rate(self):
+        # PT rate now reads the PendlePYLpOracle 2-arg TWAP call (VIB-5333),
+        # NOT the legacy 1-arg RouterStatic spot read.
         from almanak.connectors.pendle.on_chain_reader import GET_PT_TO_ASSET_RATE_SELECTOR
 
-        assert GET_PT_TO_ASSET_RATE_SELECTOR == _selector("getPtToAssetRate(address)")
+        assert GET_PT_TO_ASSET_RATE_SELECTOR == _selector("getPtToAssetRate(address,uint32)")
+
+    def test_get_oracle_state(self):
+        from almanak.connectors.pendle.on_chain_reader import GET_ORACLE_STATE_SELECTOR
+
+        assert GET_ORACLE_STATE_SELECTOR == _selector("getOracleState(address,uint32)")
 
     def test_get_implied_apy(self):
         from almanak.connectors.pendle.on_chain_reader import GET_IMPLIED_APY_SELECTOR
@@ -188,9 +191,11 @@ class TestPendleSelectors:
         assert GET_IMPLIED_APY_SELECTOR == _selector("getImpliedApy(address)")
 
     def test_read_tokens(self):
+        # readTokens is read from the market contract directly (no-arg), not
+        # RouterStatic's readTokens(address).
         from almanak.connectors.pendle.on_chain_reader import READ_TOKENS_SELECTOR
 
-        assert READ_TOKENS_SELECTOR == _selector("readTokens(address)")
+        assert READ_TOKENS_SELECTOR == _selector("readTokens()")
 
     def test_expiry(self):
         from almanak.connectors.pendle.on_chain_reader import EXPIRY_SELECTOR
@@ -483,9 +488,7 @@ class TestPolymarketEvents:
         """PayoutRedemption from CTF contract (signature from comment in receipt_parser.py)."""
         from almanak.connectors.polymarket.receipt_parser import PAYOUT_REDEMPTION_TOPIC
 
-        assert PAYOUT_REDEMPTION_TOPIC == _topic(
-            "PayoutRedemption(address,address,bytes32,bytes32,uint256[],uint256)"
-        )
+        assert PAYOUT_REDEMPTION_TOPIC == _topic("PayoutRedemption(address,address,bytes32,bytes32,uint256[],uint256)")
 
 
 # =============================================================================

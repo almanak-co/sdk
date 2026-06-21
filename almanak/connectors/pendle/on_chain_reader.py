@@ -1,8 +1,24 @@
-"""On-chain reader for Pendle RouterStatic contract.
+"""On-chain reader for Pendle market pricing.
 
 Provides fallback pricing when the Pendle REST API is unavailable.
-Reads PT-to-asset rate, implied APY, and market expiry directly from
-the RouterStatic contract via RPC calls.
+
+**PT-to-asset rate** (the canonical money-path read consumed by the gateway's
+``GetPtPrice`` valuation) is read from the per-chain **PendlePYLpOracle** via the
+2-arg ``getPtToAssetRate(market, duration)`` TWAP call. This is a deliberate move
+off the legacy ``RouterStatic.getPtToAssetRate(market)`` spot read (VIB-5333):
+
+- Pendle has **decommissioned** ``RouterStatic`` on Arbitrum — the historical
+  address has no code, so every Arbitrum PT rate read failed and the PT was valued
+  at $0. The PT oracle answers on both Ethereum and Arbitrum.
+- The TWAP read is manipulation-resistant (a strict improvement over a single-block
+  spot read for accounting valuation).
+
+``getImpliedApy`` remains a ``RouterStatic``-only function and is retained on the
+RouterStatic path purely for informational health display; it is NOT on the money
+path and degrades gracefully on chains without a registered RouterStatic.
+
+``readTokens`` / ``expiry`` are read from the **market** contract directly (no
+RouterStatic dependency), so they are chain-portable.
 
 Supports two modes:
 - **Gateway mode** (preferred): Routes reads through the gateway's RpcService
@@ -18,32 +34,75 @@ import time
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from .addresses import PENDLE as _PENDLE
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
 
-# RouterStatic addresses per chain
-ROUTER_STATIC_ADDRESSES: dict[str, str] = {
-    "ethereum": "0x263833d47eA3fA4a30f269323aba6a107f9eB14C",
-    "arbitrum": "0xADB09F65Bd90D19e3148Db7b340e4B65D6063a90",
+# Chains for which the connector supports on-chain market reads. Scoped to the
+# chains that have a registered PT oracle (the rate money path); broaden only with
+# a verified pt_oracle entry in ``addresses.PENDLE`` plus tests.
+_SUPPORTED_CHAINS: tuple[str, ...] = ("ethereum", "arbitrum")
+
+# PendlePYLpOracle addresses per chain — canonical, manipulation-resistant TWAP
+# rate source. Single source of truth: ``addresses.PENDLE[chain]["pt_oracle"]``.
+PT_ORACLE_ADDRESSES: dict[str, str] = {
+    chain: _PENDLE[chain]["pt_oracle"] for chain in _SUPPORTED_CHAINS if "pt_oracle" in _PENDLE[chain]
 }
 
-# Function selectors (keccak256 of canonical signatures, first 4 bytes)
-GET_PT_TO_ASSET_RATE_SELECTOR = "0xf2344deb"  # getPtToAssetRate(address)
-GET_IMPLIED_APY_SELECTOR = "0xfc0e022c"  # getImpliedApy(address)
-READ_TOKENS_SELECTOR = "0x61d725ab"  # readTokens(address)
-EXPIRY_SELECTOR = "0xe184c9be"  # expiry()
+# RouterStatic addresses per chain — retained ONLY for ``getImpliedApy`` (an
+# informational health read, NOT the money path). Pendle has decommissioned
+# RouterStatic on Arbitrum, so it is absent there and ``get_implied_apy`` degrades
+# gracefully. Single source of truth: ``addresses.PENDLE[chain]["router_static"]``.
+ROUTER_STATIC_ADDRESSES: dict[str, str] = {
+    chain: _PENDLE[chain]["router_static"] for chain in _SUPPORTED_CHAINS if "router_static" in _PENDLE[chain]
+}
 
-# Minimal ABI for RouterStatic read methods (only used in direct/web3 mode)
-ROUTER_STATIC_ABI = [
+# 15-minute TWAP window for the PT oracle. MUST be > 0 — a duration of 0 reverts
+# on-chain with a division-by-zero inside the oracle.
+PT_ORACLE_TWAP_DURATION_SECONDS = 900
+
+# Function selectors (keccak256 of canonical signatures, first 4 bytes)
+GET_PT_TO_ASSET_RATE_SELECTOR = "0xabca0eab"  # getPtToAssetRate(address,uint32) on PendlePYLpOracle
+GET_ORACLE_STATE_SELECTOR = "0x873e9600"  # getOracleState(address,uint32) on PendlePYLpOracle
+GET_IMPLIED_APY_SELECTOR = "0xfc0e022c"  # getImpliedApy(address) on RouterStatic (informational only)
+READ_TOKENS_SELECTOR = "0x2c8ce6bc"  # readTokens() on the market contract (no-arg)
+EXPIRY_SELECTOR = "0xe184c9be"  # expiry() on the market contract
+
+# Minimal ABI for the PendlePYLpOracle read methods (only used in direct/web3 mode)
+PT_ORACLE_ABI = [
     {
-        "inputs": [{"internalType": "address", "name": "market", "type": "address"}],
+        "inputs": [
+            {"internalType": "address", "name": "market", "type": "address"},
+            {"internalType": "uint32", "name": "duration", "type": "uint32"},
+        ],
         "name": "getPtToAssetRate",
         "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
         "stateMutability": "view",
         "type": "function",
     },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "market", "type": "address"},
+            {"internalType": "uint32", "name": "duration", "type": "uint32"},
+        ],
+        "name": "getOracleState",
+        "outputs": [
+            {"internalType": "bool", "name": "increaseCardinalityRequired", "type": "bool"},
+            {"internalType": "uint16", "name": "cardinalityRequired", "type": "uint16"},
+            {"internalType": "bool", "name": "oldestObservationSatisfied", "type": "bool"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+# Minimal ABI for RouterStatic read methods (only used in direct/web3 mode).
+# Only ``getImpliedApy`` remains — the rate read moved to the PT oracle and
+# ``readTokens`` moved to the market contract.
+ROUTER_STATIC_ABI = [
     {
         "inputs": [{"internalType": "address", "name": "market", "type": "address"}],
         "name": "getImpliedApy",
@@ -51,21 +110,10 @@ ROUTER_STATIC_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
-    {
-        "inputs": [{"internalType": "address", "name": "market", "type": "address"}],
-        "name": "readTokens",
-        "outputs": [
-            {"internalType": "address", "name": "sy", "type": "address"},
-            {"internalType": "address", "name": "pt", "type": "address"},
-            {"internalType": "address", "name": "yt", "type": "address"},
-        ],
-        "stateMutability": "view",
-        "type": "function",
-    },
 ]
 
-# Market expiry ABI (on the market contract itself, only used in direct mode)
-MARKET_EXPIRY_ABI = [
+# ABI for the market contract reads (expiry + readTokens). Only used in direct mode.
+MARKET_ABI = [
     {
         "inputs": [],
         "name": "expiry",
@@ -73,7 +121,21 @@ MARKET_EXPIRY_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    {
+        "inputs": [],
+        "name": "readTokens",
+        "outputs": [
+            {"internalType": "address", "name": "_SY", "type": "address"},
+            {"internalType": "address", "name": "_PT", "type": "address"},
+            {"internalType": "address", "name": "_YT", "type": "address"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
 ]
+
+# Backwards-compatible alias (the expiry-only ABI used to live under this name).
+MARKET_EXPIRY_ABI = MARKET_ABI
 
 SCALE_1E18 = Decimal("1000000000000000000")
 
@@ -81,6 +143,11 @@ SCALE_1E18 = Decimal("1000000000000000000")
 def _encode_address(addr: str) -> str:
     """ABI-encode an address as a 32-byte hex string (no 0x prefix)."""
     return addr.lower().removeprefix("0x").zfill(64)
+
+
+def _encode_address_uint32(addr: str, value: int) -> str:
+    """ABI-encode an (address, uint32) tuple as two 32-byte hex words (no 0x prefix)."""
+    return _encode_address(addr) + format(value, "064x")
 
 
 def _decode_uint256(hex_str: str) -> int:
@@ -96,6 +163,17 @@ def _decode_address(hex_str: str) -> str:
     return "0x" + raw[-40:]
 
 
+def _decode_oracle_state(hex_str: str) -> tuple[bool, int, bool]:
+    """Decode ``getOracleState`` output into (increaseCardinalityRequired, cardinality, oldestObservationSatisfied)."""
+    raw = hex_str.removeprefix("0x")
+    if len(raw) < 192:
+        raise PendleOnChainError(f"getOracleState returned unexpected data length: {len(raw)}")
+    increase_cardinality_required = int(raw[0:64], 16) != 0
+    cardinality = int(raw[64:128], 16)
+    oldest_observation_satisfied = int(raw[128:192], 16) != 0
+    return increase_cardinality_required, cardinality, oldest_observation_satisfied
+
+
 class PendleOnChainError(Exception):
     """Raised when an on-chain read fails."""
 
@@ -103,9 +181,10 @@ class PendleOnChainError(Exception):
 class PendleOnChainReader:
     """Reads Pendle market data directly from on-chain contracts.
 
-    Used as a fallback when the Pendle REST API is unavailable.
-    All reads are via the RouterStatic contract which provides
-    view-only aggregation functions.
+    Used as a fallback when the Pendle REST API is unavailable. The PT-to-asset
+    rate is read from the per-chain PendlePYLpOracle (TWAP); ``readTokens`` /
+    ``expiry`` are read from the market contract; ``getImpliedApy`` (informational
+    only) is read from the RouterStatic when one is registered for the chain.
 
     Supports two initialization modes:
 
@@ -139,14 +218,17 @@ class PendleOnChainReader:
         Raises:
             ValueError: If chain is unsupported or neither rpc_url nor gateway_client provided.
         """
-        if chain not in ROUTER_STATIC_ADDRESSES:
+        if chain not in PT_ORACLE_ADDRESSES:
             raise ValueError(
-                f"Unsupported chain for Pendle on-chain reads: {chain}. Supported: {list(ROUTER_STATIC_ADDRESSES.keys())}"
+                f"Unsupported chain for Pendle on-chain reads: {chain}. Supported: {list(PT_ORACLE_ADDRESSES.keys())}"
             )
 
         self.chain = chain
         self.cache_ttl = cache_ttl_seconds
-        self.router_static_address = ROUTER_STATIC_ADDRESSES[chain]
+        self.pt_oracle_address = PT_ORACLE_ADDRESSES[chain]
+        # RouterStatic is optional (informational getImpliedApy only) and absent on
+        # chains where Pendle decommissioned it (e.g. Arbitrum).
+        self.router_static_address = ROUTER_STATIC_ADDRESSES.get(chain)
         self._gateway_client = gateway_client
 
         # Simple TTL cache
@@ -156,6 +238,7 @@ class PendleOnChainReader:
         if gateway_client is not None:
             # Gateway mode: no web3 dependency needed
             self.web3 = None
+            self.pt_oracle = None
             self.router_static = None
             logger.info("PendleOnChainReader initialized (gateway mode): chain=%s", chain)
         elif rpc_url is not None:
@@ -165,9 +248,17 @@ class PendleOnChainReader:
             self.web3 = Web3(
                 Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": request_timeout_seconds})
             )  # vib-2986-exempt: gateway-internal fallback
-            self.router_static = self.web3.eth.contract(
-                address=self.web3.to_checksum_address(self.router_static_address),
-                abi=ROUTER_STATIC_ABI,
+            self.pt_oracle = self.web3.eth.contract(
+                address=self.web3.to_checksum_address(self.pt_oracle_address),
+                abi=PT_ORACLE_ABI,
+            )
+            self.router_static = (
+                self.web3.eth.contract(
+                    address=self.web3.to_checksum_address(self.router_static_address),
+                    abi=ROUTER_STATIC_ABI,
+                )
+                if self.router_static_address is not None
+                else None
             )
             logger.info("PendleOnChainReader initialized (direct mode): chain=%s", chain)
         else:
@@ -213,12 +304,71 @@ class PendleOnChainReader:
             raise PendleOnChainError(f"Empty result from gateway RPC ({request_id})")
         return result
 
+    def _read_oracle_state(self, market_address: str) -> tuple[bool, int, bool]:
+        """Read ``getOracleState(market, duration)`` from the PT oracle.
+
+        Returns ``(increaseCardinalityRequired, cardinality, oldestObservationSatisfied)``.
+        """
+        if self._gateway_client is not None:
+            calldata = GET_ORACLE_STATE_SELECTOR + _encode_address_uint32(
+                market_address, PT_ORACLE_TWAP_DURATION_SECONDS
+            )
+            result = self._gateway_eth_call(self.pt_oracle_address, calldata, "pendle_oracle_state")
+            return _decode_oracle_state(result)
+        assert self.web3 is not None and self.pt_oracle is not None
+        increase_required, cardinality, oldest_ok = self.pt_oracle.functions.getOracleState(
+            self.web3.to_checksum_address(market_address),
+            PT_ORACLE_TWAP_DURATION_SECONDS,
+        ).call()
+        return bool(increase_required), int(cardinality), bool(oldest_ok)
+
+    def _assert_oracle_ready(self, market_address: str) -> None:
+        """Gate the rate read on TWAP readiness — Empty≠Zero.
+
+        A PT oracle that cannot yet produce a ``duration``-second TWAP must yield
+        NO number, never a fabricated at-par (1.0) rate that would overvalue the PT
+        to its maximum redemption value (PT trades at ≤ par before maturity).
+
+        Gate semantics (intentionally NOT a blanket both-flags gate):
+
+        - ``oldestObservationSatisfied == False`` → the observation window cannot be
+          spanned; the rate read itself would revert. Treated as UNMEASURED (raise).
+        - ``increaseCardinalityRequired == True`` → forward-looking buffer-size advice
+          ONLY. The current read is still valid — verified on the live Ethereum
+          production market (Aug-2026 sUSDe), which reports this flag ``True`` yet
+          returns a correct rate matching the legacy RouterStatic spot read. It is
+          logged as a warning but NOT treated as UNMEASURED; gating on it would zero
+          out an otherwise-valid PT valuation (a regression worse than the bug).
+
+        Raises:
+            PendleOnChainError: When the oracle is not ready (→ caller emits UNMEASURED).
+        """
+        increase_required, cardinality, oldest_ok = self._read_oracle_state(market_address)
+        if not oldest_ok:
+            raise PendleOnChainError(
+                f"PT oracle not ready for {market_address}: oldestObservationSatisfied=False "
+                f"(duration={PT_ORACLE_TWAP_DURATION_SECONDS}s) — UNMEASURED, not fabricated"
+            )
+        if increase_required:
+            logger.warning(
+                "PT oracle for %s reports increaseCardinalityRequired=True (cardinality=%s); "
+                "current TWAP read is still valid, but the observation buffer should be grown",
+                market_address,
+                cardinality,
+            )
+
     def get_pt_to_asset_rate(self, market_address: str) -> Decimal:
-        """Get the PT-to-underlying-asset exchange rate.
+        """Get the PT-to-underlying-asset exchange rate via the PT oracle TWAP.
 
         This is the key pricing function: it returns how much underlying
         asset 1 PT is worth. Before maturity, this is typically < 1.0
         (PT trades at a discount). At maturity, it converges to 1.0.
+
+        Read from the per-chain PendlePYLpOracle using the 2-arg
+        ``getPtToAssetRate(market, duration)`` TWAP call (``duration`` fixed at
+        ``PT_ORACLE_TWAP_DURATION_SECONDS``). The read is gated on oracle readiness
+        (:meth:`_assert_oracle_ready`) so a not-ready oracle surfaces as UNMEASURED
+        rather than a fabricated rate.
 
         Args:
             market_address: Market contract address
@@ -227,22 +377,28 @@ class PendleOnChainReader:
             Exchange rate as Decimal (in 1e18 scale, normalized to human-readable)
 
         Raises:
-            PendleOnChainError: If the RPC call fails
+            PendleOnChainError: If the oracle is not ready or the RPC call fails
         """
         cache_key = f"pt_rate:{market_address.lower()}"
         cached = self._get_cached(cache_key)
         if cached is not None:
             return cached
 
+        # Readiness gate first — never cache or fabricate when UNMEASURED.
+        self._assert_oracle_ready(market_address)
+
         try:
             if self._gateway_client is not None:
-                calldata = GET_PT_TO_ASSET_RATE_SELECTOR + _encode_address(market_address)
-                result = self._gateway_eth_call(self.router_static_address, calldata, "pendle_pt_rate")
+                calldata = GET_PT_TO_ASSET_RATE_SELECTOR + _encode_address_uint32(
+                    market_address, PT_ORACLE_TWAP_DURATION_SECONDS
+                )
+                result = self._gateway_eth_call(self.pt_oracle_address, calldata, "pendle_pt_rate")
                 raw_rate = _decode_uint256(result)
             else:
-                assert self.web3 is not None and self.router_static is not None
-                raw_rate = self.router_static.functions.getPtToAssetRate(
-                    self.web3.to_checksum_address(market_address)
+                assert self.web3 is not None and self.pt_oracle is not None
+                raw_rate = self.pt_oracle.functions.getPtToAssetRate(
+                    self.web3.to_checksum_address(market_address),
+                    PT_ORACLE_TWAP_DURATION_SECONDS,
                 ).call()
             rate = Decimal(str(raw_rate)) / SCALE_1E18
             self._set_cached(cache_key, rate)
@@ -269,6 +425,11 @@ class PendleOnChainReader:
         cached = self._get_cached(cache_key)
         if cached is not None:
             return cached
+
+        if self.router_static_address is None:
+            # Informational read only; no RouterStatic on this chain (e.g. Arbitrum,
+            # where Pendle decommissioned it). Surface cleanly so callers degrade.
+            raise PendleOnChainError(f"getImpliedApy unavailable on {self.chain}: no RouterStatic registered")
 
         try:
             if self._gateway_client is not None:
@@ -311,7 +472,9 @@ class PendleOnChainReader:
                 result = self._gateway_eth_call(market_address, EXPIRY_SELECTOR, "pendle_expiry")
                 expiry = _decode_uint256(result)
             else:
-                assert self.web3 is not None and self.router_static is not None
+                # expiry() reads the MARKET contract, not RouterStatic — do not gate
+                # on router_static (absent on Arbitrum). Matches get_days_to_maturity.
+                assert self.web3 is not None
                 market_contract = self.web3.eth.contract(
                     address=self.web3.to_checksum_address(market_address),
                     abi=MARKET_EXPIRY_ABI,
@@ -363,6 +526,9 @@ class PendleOnChainReader:
     def get_market_tokens(self, market_address: str) -> dict[str, str]:
         """Get SY, PT, and YT addresses for a market.
 
+        Read from the **market** contract's no-arg ``readTokens()`` (chain-portable;
+        no RouterStatic dependency).
+
         Args:
             market_address: Market contract address
 
@@ -379,8 +545,7 @@ class PendleOnChainReader:
 
         try:
             if self._gateway_client is not None:
-                calldata = READ_TOKENS_SELECTOR + _encode_address(market_address)
-                raw = self._gateway_eth_call(self.router_static_address, calldata, "pendle_read_tokens")
+                raw = self._gateway_eth_call(market_address, READ_TOKENS_SELECTOR, "pendle_read_tokens")
                 hex_data = raw.removeprefix("0x")
                 if len(hex_data) < 192:
                     raise PendleOnChainError(f"readTokens returned unexpected data length: {len(hex_data)}")
@@ -390,10 +555,12 @@ class PendleOnChainReader:
                     "yt": _decode_address(hex_data[128:192]),
                 }
             else:
-                assert self.web3 is not None and self.router_static is not None
-                sy, pt, yt = self.router_static.functions.readTokens(
-                    self.web3.to_checksum_address(market_address)
-                ).call()
+                assert self.web3 is not None
+                market_contract = self.web3.eth.contract(
+                    address=self.web3.to_checksum_address(market_address),
+                    abi=MARKET_ABI,
+                )
+                sy, pt, yt = market_contract.functions.readTokens().call()
                 result = {
                     "sy": sy.lower(),
                     "pt": pt.lower(),

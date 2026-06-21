@@ -131,7 +131,7 @@ class PendleGatewayConnector(
     def build_principal_token_market_reader(self, *, chain: str, rpc_url: str):
         """Build a Pendle on-chain market reader in direct (rpc_url) mode.
 
-        Returns ``None`` for a chain without a RouterStatic mapping. With no reader
+        Returns ``None`` for a chain without a PT-oracle mapping. With no reader
         the gateway cannot read ``pt_to_asset_rate``, so the price is UNMEASURED
         (no price) — it is NEVER fabricated to an at-par (1.0) ESTIMATED rate, which
         would overvalue the PT to its maximum redemption value (PT trades at ≤ par
@@ -141,9 +141,9 @@ class PendleGatewayConnector(
         path — no new egress, no new exempt marker. A bounded request timeout is
         passed so a hung RPC can't wedge the gateway's worker thread indefinitely.
         """
-        from ..on_chain_reader import ROUTER_STATIC_ADDRESSES, PendleOnChainReader
+        from ..on_chain_reader import PT_ORACLE_ADDRESSES, PendleOnChainReader
 
-        if chain not in ROUTER_STATIC_ADDRESSES:
+        if chain not in PT_ORACLE_ADDRESSES:
             return None
         return PendleOnChainReader(
             chain=chain,
