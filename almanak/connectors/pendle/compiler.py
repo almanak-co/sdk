@@ -253,25 +253,43 @@ def _resolve_pendle_market(intent: SwapIntent, compiler, side: str) -> str | Com
 
 
 def _compute_pendle_min_out(
-    swap_type: str, amount_in: int, slippage_bps: int, post_preswap: bool = False
+    swap_type: str,
+    amount_in: int,
+    slippage_bps: int,
+    post_preswap: bool = False,
+    yt_to_asset_rate: Decimal | None = None,
 ) -> tuple[int, str]:
     """Compute (min_amount_out, estimation_method) for the Pendle step.
 
-    The Pendle SDK methods apply slippage_bps internally on top of min_amount_out;
-    do NOT pre-apply slippage here (VIB-576).
+    ``min_amount_out`` is denominated in the OUTPUT token. The Pendle SDK methods apply
+    slippage_bps internally on top of min_amount_out; do NOT pre-apply slippage here (VIB-576).
 
     BUY (token_to_pt/yt): PT/YT is cheaper than the underlying so a 1:1 estimate is a safe minimum.
-    SELL (pt_to_token): PT trades at a discount; use a 50% floor (VIB-1366).
-    SELL (yt_to_token): YT decays toward zero near expiry. Scale the floor by slippage so
-        TeardownManager escalation can actually widen tolerance (VIB-2174):
-        - <500bps: 1% floor
-        - >=500bps: 1 wei floor (SDK's slippage_bps is the only protection).
+    SELL (pt_to_token): PT redeems ~1:1 for the underlying near maturity, so the raw PT count is a
+        usable proxy for expected output; take a 50% floor of it (VIB-1366).
+    SELL (yt_to_token): the OUTPUT is the underlying asset, but 1 YT is worth only a small
+        fraction of 1 underlying (and decays toward 0 near expiry). The floor must therefore be
+        derived from the EXPECTED underlying output = ``amount_in × yt_to_asset_rate`` — NOT from
+        the raw YT count, which over-floors by ~1/rate× and reverts every near-expiry YT sell
+        (VIB-5329). Take 50% of expected output to mirror the PT-sell anti-MEV floor; the SDK
+        applies slippage_bps on top, which keeps TeardownManager escalation working (VIB-2174):
+        - >=500bps: 1 wei floor (max-tolerance escalation; SDK slippage is the only protection).
+        - <500bps with a known rate: 50%-of-expected-output floor.
+        - <500bps with the rate unavailable: 1 wei floor (degraded, logged) rather than the
+          unit-wrong raw-count floor that reverts.
     """
     suffix = ", post-pre-swap" if post_preswap else ""
     if swap_type == "yt_to_token":
         if slippage_bps >= 500:
             return 1, f"minimal floor (high slippage {slippage_bps}bps, YT near-expiry{suffix})"
-        return amount_in // 100, f"1% floor (YT near-expiry safe, slippage {slippage_bps}bps{suffix})"
+        if yt_to_asset_rate is not None and yt_to_asset_rate > 0:
+            expected_out = int(Decimal(str(amount_in)) * yt_to_asset_rate)
+            floor = max(1, expected_out // 2)
+            return (
+                floor,
+                f"50% of expected output (YT/asset rate {yt_to_asset_rate:.6f}, slippage {slippage_bps}bps{suffix})",
+            )
+        return 1, f"minimal floor (YT/asset rate unavailable, slippage {slippage_bps}bps{suffix})"
     if swap_type == "pt_to_token":
         return amount_in // 2, f"50% floor (PT discount safe{suffix})"
     return amount_in, f"1:1 estimate (BUY direction{suffix})"
@@ -658,7 +676,15 @@ def compile_pendle_swap(compiler, intent: SwapIntent) -> CompilationResult:
         market = market_or_err
 
         slippage_bps = int(intent.max_slippage * Decimal("10000"))
-        min_amount_out, estimation_method = _compute_pendle_min_out(swap_type, amount_in, slippage_bps)
+        # For YT sells the floor must be denominated in OUTPUT (underlying) units, so read the
+        # YT/asset exchange rate (= 1 - ptToAsset, gateway-routed) and feed it to the floor calc.
+        # VIB-5329: without this the floor used the raw YT count and reverted every near-expiry sell.
+        yt_to_asset_rate: Decimal | None = None
+        if swap_type == "yt_to_token" and slippage_bps < 500:
+            yt_to_asset_rate = adapter.get_yt_to_asset_rate(market)
+        min_amount_out, estimation_method = _compute_pendle_min_out(
+            swap_type, amount_in, slippage_bps, yt_to_asset_rate=yt_to_asset_rate
+        )
         logger.info(
             f"Pendle slippage params: swap_type={swap_type}, amount_in={amount_in}, "
             f"min_amount_out={min_amount_out}, slippage_bps={slippage_bps}, estimation={estimation_method}"

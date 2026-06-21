@@ -22,7 +22,6 @@ from almanak.framework.intents.compiler import (
 )
 from almanak.framework.intents.vocabulary import SwapIntent
 
-
 # ============================================================================
 # Fixtures
 # ============================================================================
@@ -420,13 +419,12 @@ class TestSellDirectionMinAmountDiscount:
             f"(got {params['min_amount_out']}, expected {params['amount_in']})"
         )
 
-    def test_yt_sell_min_amount_out_uses_deeper_discount(self, compiler_ethereum):
-        """YT-sUSDe -> sUSDe should use min_amount_out = amount_in // 100 (1% floor).
+    def _capture_yt_sell_params(self, compiler, yt_to_asset_rate):
+        """Compile a YT-sUSDe -> sUSDe sell with the adapter's YT/asset rate mocked.
 
-        YT represents only yield, which can approach zero near maturity.
-        A 50% floor (used for PT) would still cause reverts for YT sells.
+        Returns the captured PendleSwapParams kwargs for the single Pendle step.
         """
-        from almanak.connectors.pendle.adapter import PendleSwapParams
+        from almanak.connectors.pendle.adapter import PendleAdapter, PendleSwapParams
 
         captured_params = []
         original_init = PendleSwapParams.__init__
@@ -443,17 +441,49 @@ class TestSellDirectionMinAmountDiscount:
             protocol="pendle",
         )
 
-        with patch.object(PendleSwapParams, "__init__", capturing_init):
-            result = compiler_ethereum.compile(intent)
+        with (
+            patch.object(PendleSwapParams, "__init__", capturing_init),
+            patch.object(PendleAdapter, "get_yt_to_asset_rate", return_value=yt_to_asset_rate),
+        ):
+            result = compiler.compile(intent)
 
         assert result.status == CompilationStatus.SUCCESS, f"Compilation failed: {result.error}"
         assert len(captured_params) == 1, f"Expected 1 PendleSwapParams, got {len(captured_params)}"
+        return captured_params[0]
 
-        params = captured_params[0]
+    def test_yt_sell_min_amount_out_uses_expected_output_floor(self, compiler_ethereum):
+        """VIB-5329: YT sell floor is 50% of EXPECTED underlying output, not raw YT count.
+
+        ``min_amount_out`` is denominated in the output (underlying) token. 1 YT is worth
+        only a small fraction of 1 underlying near expiry, so the floor must scale by the
+        YT/asset rate. The old ``amount_in // 100`` (raw YT count) over-floored ~1/rate× and
+        reverted every near-expiry YT sell.
+        """
+        rate = Decimal("0.005")
+        params = self._capture_yt_sell_params(compiler_ethereum, yt_to_asset_rate=rate)
+
         assert params["swap_type"] == "yt_to_token"
-        assert params["min_amount_out"] == params["amount_in"] // 100, (
-            f"YT sell min_amount_out should be amount_in // 100 "
-            f"(got {params['min_amount_out']}, expected {params['amount_in'] // 100})"
+        expected_out = int(Decimal(str(params["amount_in"])) * rate)
+        expected_floor = max(1, expected_out // 2)
+        assert params["min_amount_out"] == expected_floor, (
+            f"YT sell min_amount_out should be 50% of expected output "
+            f"(got {params['min_amount_out']}, expected {expected_floor})"
+        )
+        # And it must NOT be the unit-wrong raw-count floor.
+        assert params["min_amount_out"] != params["amount_in"] // 100
+
+    def test_yt_sell_min_amount_out_falls_back_when_rate_unavailable(self, compiler_ethereum):
+        """VIB-5329: when the YT/asset rate can't be read, fall back to a 1-wei floor.
+
+        This is strictly safer than the old raw-count floor (which always reverted); the
+        Pendle SDK's slippage_bps remains the protection in this degraded mode.
+        """
+        params = self._capture_yt_sell_params(compiler_ethereum, yt_to_asset_rate=None)
+
+        assert params["swap_type"] == "yt_to_token"
+        assert params["min_amount_out"] == 1, (
+            f"YT sell min_amount_out should be 1-wei fallback when rate unavailable "
+            f"(got {params['min_amount_out']})"
         )
 
 

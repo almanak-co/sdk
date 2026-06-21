@@ -17,6 +17,7 @@ standard adapter interface.
 
 import logging
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from almanak.core.enums import ActionType
@@ -444,6 +445,40 @@ class PendleAdapter:
         action_key = action.value.lower()
         return PENDLE_GAS_ESTIMATES.get(action_key, 500_000)
 
+    def _get_on_chain_reader(self) -> "PendleOnChainReader":
+        """Lazily build (and memoize) the on-chain reader, preferring the gateway path."""
+        if self._on_chain_reader is None:
+            from .on_chain_reader import PendleOnChainReader
+
+            if self._gateway_client is not None:
+                self._on_chain_reader = PendleOnChainReader(gateway_client=self._gateway_client, chain=self.chain)
+            else:
+                self._on_chain_reader = PendleOnChainReader(rpc_url=self._rpc_url, chain=self.chain)
+        return self._on_chain_reader
+
+    def get_yt_to_asset_rate(self, market: str) -> Decimal | None:
+        """Return how much underlying asset 1 YT is worth (asset per YT), or None on failure.
+
+        Derived from the Pendle PT/YT invariant: 1 PT + 1 YT settles to ~1 unit of the
+        SY underlying asset, so ``ytToAsset ≈ 1 - ptToAsset``. ``getPtToAssetRate`` is read
+        through the existing gateway-routed on-chain reader (no new egress). Near expiry the
+        PT rate converges toward 1.0, so this value decays toward 0 — matching YT's decay.
+
+        The result is clamped to ``>= 0`` (post-maturity the PT rate can meet/exceed 1.0,
+        at which point YT is worth ~nothing). Returns ``None`` if the rate cannot be read,
+        letting callers fall back to a conservative minimal floor rather than guessing.
+
+        Used by the compiler to denominate the YT-sell ``min_amount_out`` floor in OUTPUT
+        (underlying) units instead of raw YT count (VIB-5329).
+        """
+        try:
+            pt_rate = self._get_on_chain_reader().get_pt_to_asset_rate(market)
+        except Exception as e:  # noqa: BLE001 — never let a pricing read block compilation
+            logger.warning("Could not read PT-to-asset rate for YT/asset derivation on %s: %s", market[:10], e)
+            return None
+        yt_rate = Decimal("1") - pt_rate
+        return yt_rate if yt_rate > 0 else Decimal("0")
+
     def estimate_output(
         self,
         market: str,
@@ -489,20 +524,14 @@ class PendleAdapter:
 
         # Tier 2: Try on-chain RouterStatic
         try:
-            if self._on_chain_reader is None:
-                from .on_chain_reader import PendleOnChainReader
-
-                if self._gateway_client is not None:
-                    self._on_chain_reader = PendleOnChainReader(gateway_client=self._gateway_client, chain=self.chain)
-                else:
-                    self._on_chain_reader = PendleOnChainReader(rpc_url=self._rpc_url, chain=self.chain)
+            reader = self._get_on_chain_reader()
 
             if swap_type == "token_to_pt":
-                estimated = self._on_chain_reader.estimate_pt_output(market, amount_in)
+                estimated = reader.estimate_pt_output(market, amount_in)
             elif swap_type == "pt_to_token":
                 from decimal import Decimal
 
-                rate = self._on_chain_reader.get_pt_to_asset_rate(market)
+                rate = reader.get_pt_to_asset_rate(market)
                 estimated = int(Decimal(str(amount_in)) * rate)
             else:
                 # YT pricing is more complex than PT -- skip on-chain fallback
