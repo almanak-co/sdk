@@ -23,7 +23,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    pass
+    from almanak.framework.portfolio.models import ValueConfidence
 
 
 # =============================================================================
@@ -122,6 +122,57 @@ class PriceData:
     low_24h: Decimal = Decimal("0")
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     source: str = ""
+
+
+@dataclass
+class PtPriceData:
+    """Typed, strategy-safe result of ``MarketSnapshot.pt_price`` (VIB-5311).
+
+    A pure pass-through of the gateway PT/YT-USD price contract
+    (``PtPriceResponse``, VIB-5309/5310) — the gateway is the single price
+    authority that composes ``price = pt_to_asset_rate × underlying/USD`` and
+    originates confidence + staleness. This object carries that one number to
+    every consumer (valuation, dashboard, Accountant Test) so two tiles can
+    never disagree (design spine §0/§1).
+
+    Empty ≠ Zero (spine §3): an unmeasured price is ``price=None`` +
+    ``confidence=UNAVAILABLE`` — NEVER ``Decimal("0")``. The composition legs
+    (``underlying_price``, ``pt_to_asset_rate``) are ``None`` when the gateway
+    did not emit them, never ``Decimal("0")``.
+
+    ``confidence`` combines the gateway's coarse band with its ``stale`` flag
+    into the framework ``ValueConfidence`` vocabulary (the band alone lacks
+    STALE — see ``PtPriceConfidenceBand``). Confidence only ever degrades
+    downstream; a consumer must not upgrade it (spine §3.4).
+    """
+
+    # Resolved identity echoed back by the gateway (the symbol is the cross-
+    # boundary join + FIFO-match key — spine §3.1).
+    symbol: str
+    chain: str
+    # Composed PT/YT price in ``quote`` (USD). ``None`` when unmeasured.
+    price: Decimal | None
+    confidence: ValueConfidence
+    # Composition transparency — ``None`` when the leg was not measured.
+    underlying_price: Decimal | None = None
+    pt_to_asset_rate: Decimal | None = None
+    # ``None`` when not reported (e.g. unmeasured / old gateway), never 0-as-unknown.
+    days_to_maturity: int | None = None
+    maturity_ts: int | None = None
+    source: str = ""
+    stale: bool = False
+    # Raw confidence double in [0.0, 1.0]. Populated from the gateway's
+    # ``confidence`` field on an AVAILABLE response (the provider always reports
+    # it there); ``None`` for an unmeasured/errored result, where no number exists.
+    raw_confidence: float | None = None
+    timestamp: datetime | None = None
+
+    @property
+    def is_available(self) -> bool:
+        """True when a usable price was measured (price present + not UNAVAILABLE)."""
+        from almanak.framework.portfolio.models import ValueConfidence as _VC
+
+        return self.price is not None and self.confidence != _VC.UNAVAILABLE
 
 
 # =============================================================================

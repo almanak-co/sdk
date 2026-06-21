@@ -21,7 +21,7 @@ import inspect
 import logging
 import re
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from .models import (
@@ -37,6 +37,7 @@ from .models import (
     OBVData,
     PriceData,
     PriceOracle,
+    PtPriceData,
     RSIData,
     RSIProvider,
     StochasticData,
@@ -76,6 +77,12 @@ logger = logging.getLogger(__name__)
 # Default OHLCV timeframe used by indicator methods when neither an explicit
 # timeframe argument nor a strategy-level default_timeframe is provided.
 DEFAULT_TIMEFRAME = "4h"
+
+# Fallback gRPC deadline (seconds) for gateway price reads (e.g. ``pt_price``)
+# when the connected client exposes no configured timeout. Matches the
+# GatewayClientConfig / GatewayPriceOracle default so a hung gateway cannot
+# stall the decide cycle indefinitely.
+_GATEWAY_RPC_TIMEOUT_SECONDS = 30.0
 
 
 # Strips "Data source '<name>' unavailable: " boilerplate from str(DataSourceUnavailable)
@@ -273,6 +280,29 @@ _PROVIDER_NAME_HINTS: tuple[tuple[str, str], ...] = (
     ("marketservice", "aggregator"),
     ("gateway", "aggregator"),
 )
+
+
+def _pt_price_confidence(*, stale: bool, confidence_band: int) -> Any:
+    """Combine the gateway's coarse band + ``stale`` flag into ``ValueConfidence``.
+
+    Do NOT collapse: ``PtPriceConfidenceBand`` has no STALE member, so a stale
+    price must map to STALE regardless of band, else staleness is silently
+    dropped and a degraded price renders as HIGH. Band UNSPECIFIED/UNAVAILABLE
+    on an otherwise-AVAILABLE response fails closed to UNAVAILABLE (spine §2/§3).
+
+    Returns ``ValueConfidence`` (typed ``Any`` to keep this module's import
+    surface lean — the portfolio enum is imported lazily).
+    """
+    from almanak.framework.portfolio.models import ValueConfidence
+    from almanak.gateway.proto import gateway_pb2
+
+    if stale:
+        return ValueConfidence.STALE
+    if confidence_band == gateway_pb2.PT_PRICE_CONFIDENCE_BAND_HIGH:
+        return ValueConfidence.HIGH
+    if confidence_band == gateway_pb2.PT_PRICE_CONFIDENCE_BAND_ESTIMATED:
+        return ValueConfidence.ESTIMATED
+    return ValueConfidence.UNAVAILABLE
 
 
 def _infer_oracle_source(price_oracle: PriceOracle) -> str:
@@ -792,6 +822,195 @@ class MarketSnapshot:
         # Get basic price and create PriceData
         current_price = self.price(token, quote, chain=requested_chain)
         return self._price_cache.get(cache_key, PriceData(price=current_price))
+
+    def pt_price(
+        self,
+        symbol: str,
+        chain: str | None = None,
+        maturity: int | None = None,
+        *,
+        quote: str = "USD",
+    ) -> PtPriceData:
+        """Get the USD price of a Pendle PT/YT by symbol (VIB-5311).
+
+        Strategy-safe, typed pass-through of the gateway PT/YT-USD price
+        authority (``GetPtPrice``, VIB-5309/5310). The gateway composes
+        ``price = pt_to_asset_rate × underlying/USD``, sources both legs, and
+        originates the confidence band + staleness; this method performs NO
+        on-chain reads and NO composition — it only maps the wire contract to
+        the framework ``ValueConfidence`` vocabulary (design spine §1/§2).
+
+        Empty ≠ Zero: an expected-unpriceable PT (no composition leg) returns
+        ``price=None`` + ``confidence=UNAVAILABLE`` — NEVER ``Decimal("0")`` —
+        and never raises. A genuinely unmeasured price is distinguished at the
+        wire level by ``availability`` (UNMEASURED / ERRORED / UNSPECIFIED),
+        not by an empty string.
+
+        Args:
+            symbol: Canonical PT/YT symbol — the identity + join + FIFO-match
+                key (spine §3.1). Case-insensitive at the gateway.
+            chain: Chain name. ``None`` resolves per the snapshot's configured
+                chains (single-chain returns the only chain; multi-chain raises
+                ``AmbiguousChainError``).
+            maturity: Optional maturity hint as a Unix timestamp in SECONDS.
+                Config is maturity-less; ``None`` (the default) lets the gateway
+                resolve the active maturity for ``symbol`` (spine §3.2).
+            quote: Quote currency (default ``"USD"``), keyword-only.
+
+        Returns:
+            PtPriceData. ``price`` is ``None`` (with ``confidence=UNAVAILABLE``)
+            when the gateway reports the PT as unmeasured / errored, or on an
+            old gateway that does not set ``availability``.
+
+        Raises:
+            AmbiguousChainError / ChainNotConfiguredError: per :meth:`price`.
+            PriceUnavailableError: when no connected ``GatewayClient`` is wired
+                onto this snapshot — a transport / wiring error, distinct from
+                the expected-unpriceable case (which returns UNAVAILABLE). This
+                surfaces a misconfiguration loudly instead of silently masking
+                it as an unmeasured price.
+        """
+        from almanak.framework.portfolio.models import ValueConfidence
+
+        from .errors import PriceUnavailableError
+
+        requested_chain = self._resolve_chain(chain)
+
+        # ``is None`` first so mypy narrows ``client`` to non-None below (an
+        # intermediate ``gateway_connected`` bool would not narrow the attr access).
+        client = self._gateway_client
+        if client is None or not getattr(client, "is_connected", False):
+            raise PriceUnavailableError(
+                token=symbol,
+                reason=(
+                    f"pt_price({symbol!r}) on {requested_chain} requires a connected "
+                    "GatewayClient; none was wired onto this MarketSnapshot. The gateway "
+                    "is the PT/USD price authority — wire the gateway client (this is a "
+                    "transport error, not an unpriceable PT)."
+                ),
+            )
+
+        from almanak.gateway.proto import gateway_pb2
+
+        def _unavailable() -> PtPriceData:
+            """Empty ≠ Zero: unmeasured PT → no number, fail-closed confidence."""
+            return PtPriceData(
+                symbol=symbol,
+                chain=requested_chain,
+                price=None,
+                confidence=ValueConfidence.UNAVAILABLE,
+            )
+
+        request = gateway_pb2.PtPriceRequest(
+            symbol=symbol,
+            chain=requested_chain,
+            quote=quote,
+            maturity_ts=int(maturity) if maturity else 0,
+        )
+        # Always carry an explicit gRPC deadline: the client interceptors only
+        # PROPAGATE a per-call timeout, they do not impose a global one — so an
+        # unbounded call to a hung gateway would hang the decide cycle. Mirror
+        # the GatewayPriceOracle/GetPrice contract by using the client's
+        # configured timeout, falling back to a sane default.
+        config_timeout = getattr(getattr(client, "config", None), "timeout", None)
+        rpc_timeout = config_timeout if isinstance(config_timeout, int | float) else _GATEWAY_RPC_TIMEOUT_SECONDS
+        try:
+            response = client.market.GetPtPrice(request, timeout=rpc_timeout)
+        except Exception as e:  # noqa: BLE001
+            # Fail-closed on any RPC/transport error: a money-path read must
+            # surface "unmeasured" (NAV shows no number), never a fabricated
+            # price and never a hard crash of the decide cycle.
+            self._record_critical_data_failure("pt_price", f"{symbol}@{requested_chain}", e)
+            logger.warning(f"pt_price gateway request failed for {symbol}@{requested_chain}: {e}")
+            return _unavailable()
+
+        availability = response.availability
+        if availability != gateway_pb2.PT_PRICE_AVAILABILITY_AVAILABLE:
+            # UNMEASURED / ERRORED / UNSPECIFIED (old gateway) → no number.
+            return _unavailable()
+
+        # AVAILABLE → ``price`` SHOULD be a non-empty, finite decimal string
+        # (the provider's structural guard, spine §2 VIB-5311). But a
+        # version-skewed or buggy gateway could still emit AVAILABLE with an
+        # empty / non-numeric / non-finite ``price``. Crashing on it would
+        # contradict this method's own fail-closed contract, and a non-finite
+        # ``Decimal`` ("NaN" / "Infinity" parse WITHOUT raising) would silently
+        # poison NAV downstream. Treat any of those as unmeasured (Empty ≠ Zero)
+        # and log it: an AVAILABLE response with a bad price is a gateway
+        # contract violation.
+        try:
+            price = Decimal(response.price)
+            price_ok = price.is_finite()
+        except InvalidOperation:
+            price_ok = False
+        if not price_ok:
+            self._record_critical_data_failure(
+                "pt_price",
+                f"{symbol}@{requested_chain}",
+                f"AVAILABLE response with malformed/non-finite price {response.price!r}",
+            )
+            logger.warning(
+                "pt_price gateway returned AVAILABLE with a malformed/empty/non-finite price "
+                f"{response.price!r} for {symbol}@{requested_chain}; failing closed to UNAVAILABLE"
+            )
+            return _unavailable()
+
+        def _opt_decimal(raw: str) -> Decimal | None:
+            """Parse an optional transparency leg; None when absent, malformed, OR non-finite.
+
+            The legs (``underlying_price`` / ``pt_to_asset_rate``) are display-
+            only — a bad leg must not crash nor poison the measured price, so it
+            degrades to None (Empty ≠ Zero) rather than raising or passing a
+            NaN/Inf through.
+            """
+            if not raw:
+                return None
+            try:
+                parsed = Decimal(raw)
+            except InvalidOperation:
+                parsed = None
+            if parsed is None or not parsed.is_finite():
+                logger.warning(
+                    f"pt_price gateway returned a malformed/non-finite composition leg {raw!r} "
+                    f"for {symbol}@{requested_chain}; dropping it (price unaffected)"
+                )
+                return None
+            return parsed
+
+        # Combine band + ``stale`` into the final ValueConfidence (see helper —
+        # the band alone has no STALE member, so do NOT map band→enum directly).
+        confidence = _pt_price_confidence(stale=response.stale, confidence_band=response.confidence_band)
+
+        # Guard the timestamp conversion: a malformed / out-of-range epoch
+        # (negative, or beyond the platform's datetime range) makes
+        # ``fromtimestamp`` raise (OverflowError / OSError / ValueError) — a bad
+        # timestamp must degrade ``timestamp`` to None, never crash a read whose
+        # price is otherwise valid.
+        composed_at: datetime | None = None
+        if response.timestamp:
+            try:
+                composed_at = datetime.fromtimestamp(response.timestamp, tz=UTC)
+            except (OverflowError, OSError, ValueError):
+                logger.warning(
+                    f"pt_price gateway returned an out-of-range timestamp {response.timestamp!r} "
+                    f"for {symbol}@{requested_chain}; dropping it (price unaffected)"
+                )
+
+        self._critical_data_failures.pop(("pt_price", f"{symbol}@{requested_chain}"), None)
+        return PtPriceData(
+            symbol=response.symbol or symbol,
+            chain=response.chain or requested_chain,
+            price=price,
+            confidence=confidence,
+            underlying_price=_opt_decimal(response.underlying_price),
+            pt_to_asset_rate=_opt_decimal(response.pt_to_asset_rate),
+            days_to_maturity=response.days_to_maturity if response.maturity_ts else None,
+            maturity_ts=response.maturity_ts or None,
+            source=response.source,
+            stale=response.stale,
+            raw_confidence=response.confidence,
+            timestamp=composed_at,
+        )
 
     def rsi(self, token: str, period: int = 14, timeframe: str | None = None) -> RSIData:
         """Get RSI (Relative Strength Index) for a token.
