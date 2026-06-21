@@ -19,6 +19,69 @@ else:
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
+class _PtPriceAvailability:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _PtPriceAvailabilityEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_PtPriceAvailability.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    PT_PRICE_AVAILABILITY_UNSPECIFIED: _PtPriceAvailability.ValueType  # 0
+    """old gateway / unknown → UNMEASURED (fail closed)"""
+    PT_PRICE_AVAILABILITY_AVAILABLE: _PtPriceAvailability.ValueType  # 1
+    """composed OK → price is MEASURED"""
+    PT_PRICE_AVAILABILITY_UNMEASURED: _PtPriceAvailability.ValueType  # 2
+    """expected: PT not priceable + no composition leg → NO price"""
+    PT_PRICE_AVAILABILITY_ERRORED: _PtPriceAvailability.ValueType  # 3
+    """a read raised → NO price"""
+
+class PtPriceAvailability(_PtPriceAvailability, metaclass=_PtPriceAvailabilityEnumTypeWrapper):
+    """VIB-5309 — Pendle PT/YT USD price contract (epic VIB-5299, M1).
+
+    Wire-level Empty ≠ Zero, mirroring the ``AccountingBackendStatus`` precedent
+    (see that enum's note): the zero value is ``*_UNSPECIFIED`` so an OLD gateway
+    that never sets this field — or any response built without it — decodes as
+    UNSPECIFIED, which the client MUST treat as UNMEASURED (no number; fail
+    closed). ONLY an explicit ``*_AVAILABLE`` carries a trustable ``price``.
+    """
+
+PT_PRICE_AVAILABILITY_UNSPECIFIED: PtPriceAvailability.ValueType  # 0
+"""old gateway / unknown → UNMEASURED (fail closed)"""
+PT_PRICE_AVAILABILITY_AVAILABLE: PtPriceAvailability.ValueType  # 1
+"""composed OK → price is MEASURED"""
+PT_PRICE_AVAILABILITY_UNMEASURED: PtPriceAvailability.ValueType  # 2
+"""expected: PT not priceable + no composition leg → NO price"""
+PT_PRICE_AVAILABILITY_ERRORED: PtPriceAvailability.ValueType  # 3
+"""a read raised → NO price"""
+Global___PtPriceAvailability: _TypeAlias = PtPriceAvailability  # noqa: Y015
+
+class _PtPriceConfidenceBand:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _PtPriceConfidenceBandEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_PtPriceConfidenceBand.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    PT_PRICE_CONFIDENCE_BAND_UNSPECIFIED: _PtPriceConfidenceBand.ValueType  # 0
+    """old gateway / unknown → UNAVAILABLE"""
+    PT_PRICE_CONFIDENCE_BAND_HIGH: _PtPriceConfidenceBand.ValueType  # 1
+    PT_PRICE_CONFIDENCE_BAND_ESTIMATED: _PtPriceConfidenceBand.ValueType  # 2
+    PT_PRICE_CONFIDENCE_BAND_UNAVAILABLE: _PtPriceConfidenceBand.ValueType  # 3
+
+class PtPriceConfidenceBand(_PtPriceConfidenceBand, metaclass=_PtPriceConfidenceBandEnumTypeWrapper):
+    """Coarse confidence band mapping 1:1 to the framework ``ValueConfidence`` enum
+    (``almanak/framework/portfolio/models.py``) so clients do NOT re-threshold
+    the raw ``confidence`` double. HIGH = all inputs measured; ESTIMATED = a
+    fallback was used (e.g. ``pt_to_asset_rate`` defaulted to 1.0 at-par);
+    UNAVAILABLE = cannot be valued (pairs with UNMEASURED/ERRORED availability).
+    Confidence only ever DEGRADES downstream — a consumer cannot upgrade it.
+    """
+
+PT_PRICE_CONFIDENCE_BAND_UNSPECIFIED: PtPriceConfidenceBand.ValueType  # 0
+"""old gateway / unknown → UNAVAILABLE"""
+PT_PRICE_CONFIDENCE_BAND_HIGH: PtPriceConfidenceBand.ValueType  # 1
+PT_PRICE_CONFIDENCE_BAND_ESTIMATED: PtPriceConfidenceBand.ValueType  # 2
+PT_PRICE_CONFIDENCE_BAND_UNAVAILABLE: PtPriceConfidenceBand.ValueType  # 3
+Global___PtPriceConfidenceBand: _TypeAlias = PtPriceConfidenceBand  # noqa: Y015
+
 class _AccountingBackendStatus:
     ValueType = _typing.NewType("ValueType", _builtins.int)
     V: _TypeAlias = ValueType  # noqa: Y015
@@ -554,6 +617,106 @@ class PriceResponse(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PriceResponse: _TypeAlias = PriceResponse  # noqa: Y015
+
+@_typing.final
+class PtPriceRequest(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SYMBOL_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    QUOTE_FIELD_NUMBER: _builtins.int
+    MATURITY_TS_FIELD_NUMBER: _builtins.int
+    symbol: _builtins.str
+    """Canonical PT/YT symbol — the identity + join + FIFO-match key (see spine
+    §3). Case-insensitive at the consumer; the gateway resolves the market.
+    """
+    chain: _builtins.str
+    quote: _builtins.str
+    """Default: USD"""
+    maturity_ts: _builtins.int
+    """Optional maturity hint. Config is maturity-less; the parser / price
+    contract are maturity-bearing. 0 = let the gateway resolve the active
+    maturity for ``symbol``.
+    """
+    def __init__(
+        self,
+        *,
+        symbol: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        quote: _builtins.str = ...,
+        maturity_ts: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["chain", b"chain", "maturity_ts", b"maturity_ts", "quote", b"quote", "symbol", b"symbol"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PtPriceRequest: _TypeAlias = PtPriceRequest  # noqa: Y015
+
+@_typing.final
+class PtPriceResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SYMBOL_FIELD_NUMBER: _builtins.int
+    CHAIN_FIELD_NUMBER: _builtins.int
+    QUOTE_FIELD_NUMBER: _builtins.int
+    PRICE_FIELD_NUMBER: _builtins.int
+    AVAILABILITY_FIELD_NUMBER: _builtins.int
+    CONFIDENCE_FIELD_NUMBER: _builtins.int
+    CONFIDENCE_BAND_FIELD_NUMBER: _builtins.int
+    UNDERLYING_PRICE_FIELD_NUMBER: _builtins.int
+    PT_TO_ASSET_RATE_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
+    TIMESTAMP_FIELD_NUMBER: _builtins.int
+    STALE_FIELD_NUMBER: _builtins.int
+    MATURITY_TS_FIELD_NUMBER: _builtins.int
+    DAYS_TO_MATURITY_FIELD_NUMBER: _builtins.int
+    symbol: _builtins.str
+    """Echoes the resolved identity so a consumer can confirm the join key."""
+    chain: _builtins.str
+    quote: _builtins.str
+    """e.g. USD"""
+    price: _builtins.str
+    """Composed PT/YT price as a decimal string. ABSENT (empty string) when
+    unmeasured — NEVER ``"0"`` for an unmeasured price (Empty ≠ Zero). Gate
+    on ``availability``, not on string emptiness.
+    """
+    availability: Global___PtPriceAvailability.ValueType
+    confidence: _builtins.float
+    """Raw confidence in [0.0, 1.0]; ``confidence_band`` is the coarse mapping."""
+    confidence_band: Global___PtPriceConfidenceBand.ValueType
+    underlying_price: _builtins.str
+    """Composition transparency so consumers can show the breakdown and the
+    Accountant Test can re-derive ``price = pt_to_asset_rate × underlying``.
+    Both optional decimal strings; absent when the leg was not measured.
+    """
+    pt_to_asset_rate: _builtins.str
+    source: _builtins.str
+    """e.g. ``composition:getPtToAssetRate×<oracle>``."""
+    timestamp: _builtins.int
+    stale: _builtins.bool
+    maturity_ts: _builtins.int
+    days_to_maturity: _builtins.int
+    def __init__(
+        self,
+        *,
+        symbol: _builtins.str = ...,
+        chain: _builtins.str = ...,
+        quote: _builtins.str = ...,
+        price: _builtins.str = ...,
+        availability: Global___PtPriceAvailability.ValueType = ...,
+        confidence: _builtins.float = ...,
+        confidence_band: Global___PtPriceConfidenceBand.ValueType = ...,
+        underlying_price: _builtins.str = ...,
+        pt_to_asset_rate: _builtins.str = ...,
+        source: _builtins.str = ...,
+        timestamp: _builtins.int = ...,
+        stale: _builtins.bool = ...,
+        maturity_ts: _builtins.int = ...,
+        days_to_maturity: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["availability", b"availability", "chain", b"chain", "confidence", b"confidence", "confidence_band", b"confidence_band", "days_to_maturity", b"days_to_maturity", "maturity_ts", b"maturity_ts", "price", b"price", "pt_to_asset_rate", b"pt_to_asset_rate", "quote", b"quote", "source", b"source", "stale", b"stale", "symbol", b"symbol", "timestamp", b"timestamp", "underlying_price", b"underlying_price"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___PtPriceResponse: _TypeAlias = PtPriceResponse  # noqa: Y015
 
 @_typing.final
 class BalanceRequest(_message.Message):

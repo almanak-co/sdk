@@ -222,6 +222,11 @@ class MarketServiceStub(object):
                 request_serializer=gateway__pb2.PriceRequest.SerializeToString,
                 response_deserializer=gateway__pb2.PriceResponse.FromString,
                 _registered_method=True)
+        self.GetPtPrice = channel.unary_unary(
+                '/almanak.gateway.proto.MarketService/GetPtPrice',
+                request_serializer=gateway__pb2.PtPriceRequest.SerializeToString,
+                response_deserializer=gateway__pb2.PtPriceResponse.FromString,
+                _registered_method=True)
         self.GetBalance = channel.unary_unary(
                 '/almanak.gateway.proto.MarketService/GetBalance',
                 request_serializer=gateway__pb2.BalanceRequest.SerializeToString,
@@ -253,6 +258,27 @@ class MarketServiceServicer(object):
 
     def GetPrice(self, request, context):
         """Get token price from aggregated sources.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetPtPrice(self, request, context):
+        """VIB-5309 (epic VIB-5299, M1) — Pendle PT/YT USD price.
+
+        Returns a composed PT/USD (or YT/USD) value. The gateway is the price
+        AUTHORITY: PT/USD = ``pt_to_asset_rate × underlying/USD`` is composed
+        gateway-side (VIB-5310 provider), NOT fetched from a direct Pendle feed.
+        The PT/YT *symbol* is the canonical identity + join key (a SwapIntent has
+        no pool; the resolved market is persisted nowhere on the ledger row).
+
+        Empty ≠ Zero is enforced at the wire: ``price`` is ABSENT (empty string)
+        when unmeasured and ``availability`` distinguishes "expected no price"
+        (UNMEASURED) from "read errored" (ERRORED) from "old stub" (UNSPECIFIED),
+        which a bare empty string cannot. NEVER ``"0"`` for an unmeasured price.
+
+        Contract only in VIB-5309; the servicer leaves this UNIMPLEMENTED until
+        the VIB-5310 provider lands.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -298,6 +324,11 @@ def add_MarketServiceServicer_to_server(servicer, server):
                     servicer.GetPrice,
                     request_deserializer=gateway__pb2.PriceRequest.FromString,
                     response_serializer=gateway__pb2.PriceResponse.SerializeToString,
+            ),
+            'GetPtPrice': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPtPrice,
+                    request_deserializer=gateway__pb2.PtPriceRequest.FromString,
+                    response_serializer=gateway__pb2.PtPriceResponse.SerializeToString,
             ),
             'GetBalance': grpc.unary_unary_rpc_method_handler(
                     servicer.GetBalance,
@@ -351,6 +382,33 @@ class MarketService(object):
             '/almanak.gateway.proto.MarketService/GetPrice',
             gateway__pb2.PriceRequest.SerializeToString,
             gateway__pb2.PriceResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetPtPrice(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.MarketService/GetPtPrice',
+            gateway__pb2.PtPriceRequest.SerializeToString,
+            gateway__pb2.PtPriceResponse.FromString,
             options,
             channel_credentials,
             insecure,

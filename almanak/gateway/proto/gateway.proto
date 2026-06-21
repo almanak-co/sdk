@@ -61,6 +61,23 @@ service MarketService {
   // Get token price from aggregated sources.
   rpc GetPrice(PriceRequest) returns (PriceResponse);
 
+  // VIB-5309 (epic VIB-5299, M1) — Pendle PT/YT USD price.
+  //
+  // Returns a composed PT/USD (or YT/USD) value. The gateway is the price
+  // AUTHORITY: PT/USD = ``pt_to_asset_rate × underlying/USD`` is composed
+  // gateway-side (VIB-5310 provider), NOT fetched from a direct Pendle feed.
+  // The PT/YT *symbol* is the canonical identity + join key (a SwapIntent has
+  // no pool; the resolved market is persisted nowhere on the ledger row).
+  //
+  // Empty ≠ Zero is enforced at the wire: ``price`` is ABSENT (empty string)
+  // when unmeasured and ``availability`` distinguishes "expected no price"
+  // (UNMEASURED) from "read errored" (ERRORED) from "old stub" (UNSPECIFIED),
+  // which a bare empty string cannot. NEVER ``"0"`` for an unmeasured price.
+  //
+  // Contract only in VIB-5309; the servicer leaves this UNIMPLEMENTED until
+  // the VIB-5310 provider lands.
+  rpc GetPtPrice(PtPriceRequest) returns (PtPriceResponse);
+
   // Get token balance for strategy wallet.
   rpc GetBalance(BalanceRequest) returns (BalanceResponse);
 
@@ -98,6 +115,81 @@ message PriceResponse {
   repeated string sources_ok = 6;
   map<string, string> sources_failed = 7;
   repeated string outliers = 8;
+}
+
+// VIB-5309 — Pendle PT/YT USD price contract (epic VIB-5299, M1).
+//
+// Wire-level Empty ≠ Zero, mirroring the ``AccountingBackendStatus`` precedent
+// (see that enum's note): the zero value is ``*_UNSPECIFIED`` so an OLD gateway
+// that never sets this field — or any response built without it — decodes as
+// UNSPECIFIED, which the client MUST treat as UNMEASURED (no number; fail
+// closed). ONLY an explicit ``*_AVAILABLE`` carries a trustable ``price``.
+enum PtPriceAvailability {
+  PT_PRICE_AVAILABILITY_UNSPECIFIED = 0;  // old gateway / unknown → UNMEASURED (fail closed)
+  PT_PRICE_AVAILABILITY_AVAILABLE = 1;    // composed OK → price is MEASURED
+  PT_PRICE_AVAILABILITY_UNMEASURED = 2;   // expected: PT not priceable + no composition leg → NO price
+  PT_PRICE_AVAILABILITY_ERRORED = 3;      // a read raised → NO price
+}
+
+// Coarse confidence band so clients do NOT re-threshold the raw ``confidence``
+// double. This maps to the three *origination* bands of the framework
+// ``ValueConfidence`` enum (``almanak/framework/portfolio/models.py``):
+// HIGH = all inputs measured; ESTIMATED = a fallback was used (e.g.
+// ``pt_to_asset_rate`` defaulted to 1.0 at-par); UNAVAILABLE = cannot be valued
+// (pairs with UNMEASURED/ERRORED availability).
+//
+// NOT 1:1 with ``ValueConfidence``: that enum has a fourth member, STALE, which
+// is NOT a band here. Staleness is carried separately by the ``stale`` bool
+// (PtPriceResponse field 12). Consumers (VIB-5311) MUST combine band + ``stale``
+// to produce the final ``ValueConfidence`` — never map band→enum directly, or a
+// stale price silently renders as HIGH and drops the staleness signal.
+//
+// Confidence only ever DEGRADES downstream — a consumer cannot upgrade it.
+enum PtPriceConfidenceBand {
+  PT_PRICE_CONFIDENCE_BAND_UNSPECIFIED = 0;  // old gateway / unknown → UNAVAILABLE
+  PT_PRICE_CONFIDENCE_BAND_HIGH = 1;
+  PT_PRICE_CONFIDENCE_BAND_ESTIMATED = 2;
+  PT_PRICE_CONFIDENCE_BAND_UNAVAILABLE = 3;
+}
+
+message PtPriceRequest {
+  // Canonical PT/YT symbol — the identity + join + FIFO-match key (see spine
+  // §3). Case-insensitive at the consumer; the gateway resolves the market.
+  string symbol = 1;
+  string chain = 2;
+  string quote = 3;  // Default: USD
+  // Optional maturity hint, as a Unix timestamp in SECONDS. Config is
+  // maturity-less; the parser / price contract are maturity-bearing.
+  // 0 = let the gateway resolve the active maturity for ``symbol``.
+  int64 maturity_ts = 4;
+}
+
+message PtPriceResponse {
+  // Echoes the resolved identity so a consumer can confirm the join key.
+  string symbol = 1;
+  string chain = 2;
+  string quote = 3;  // e.g. USD
+  // Composed PT/YT price as a decimal string. ABSENT (empty string) when
+  // unmeasured — NEVER ``"0"`` for an unmeasured price (Empty ≠ Zero). Gate
+  // on ``availability``, not on string emptiness.
+  string price = 4;
+  PtPriceAvailability availability = 5;
+  // Raw confidence in [0.0, 1.0]; ``confidence_band`` is the coarse mapping.
+  double confidence = 6;
+  PtPriceConfidenceBand confidence_band = 7;
+  // Composition transparency so consumers can show the breakdown and the
+  // Accountant Test can re-derive ``price = pt_to_asset_rate × underlying``.
+  // Both optional decimal strings; absent when the leg was not measured.
+  string underlying_price = 8;
+  string pt_to_asset_rate = 9;
+  // e.g. ``composition:getPtToAssetRate×<oracle>``.
+  string source = 10;
+  // Unix timestamp in SECONDS when the price was composed.
+  int64 timestamp = 11;
+  bool stale = 12;
+  // Unix timestamp in SECONDS of contract maturity.
+  int64 maturity_ts = 13;
+  int32 days_to_maturity = 14;
 }
 
 message BalanceRequest {

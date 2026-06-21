@@ -7,7 +7,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | Service | Methods | Description |
 |---------|---------|-------------|
 | Health | 3 | Standard gRPC health checks and chain registration |
-| MarketService | 5 | Price data, balances, batch balances, technical indicators, and Uniswap V4 pool key lookup |
+| MarketService | 6 | Price data, Pendle PT/YT-USD price, balances, batch balances, technical indicators, and Uniswap V4 pool key lookup |
 | StateService | 29 | Strategy state persistence, portfolio snapshots/metrics, transaction ledger, accounting events, position events, accounting outbox, atomic ledger+registry writes, and cutover migration state |
 | ExecutionService | 3 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
@@ -107,6 +107,77 @@ from almanak.framework.data.price import GatewayPriceOracle
 oracle = GatewayPriceOracle(gateway_client)
 price = await oracle.get_price("ETH", "USD")
 ```
+
+### GetPtPrice
+
+Get the composed USD price of a Pendle PT (Principal Token) or YT (Yield Token).
+
+The gateway is the price **authority**: `PT/USD` is composed gateway-side as
+`pt_to_asset_rate × underlying/USD` (it is not fetched from a direct Pendle feed).
+The PT/YT **symbol** is the canonical identity and cross-boundary join key.
+
+```protobuf
+rpc GetPtPrice(PtPriceRequest) returns (PtPriceResponse)
+```
+
+**Request:**
+```protobuf
+message PtPriceRequest {
+  string symbol = 1;       // Canonical PT/YT symbol — the identity + join key
+  string chain = 2;
+  string quote = 3;        // Quote currency (default: "USD")
+  int64 maturity_ts = 4;   // Optional maturity hint; 0 = gateway resolves it
+}
+```
+
+**Response:**
+```protobuf
+message PtPriceResponse {
+  string symbol = 1;
+  string chain = 2;
+  string quote = 3;
+  string price = 4;                          // Decimal as string; ABSENT (empty) when unmeasured — never "0"
+  PtPriceAvailability availability = 5;       // Wire-level Empty != Zero (see below)
+  double confidence = 6;                     // 0.0-1.0
+  PtPriceConfidenceBand confidence_band = 7;  // Coarse band — combine with `stale` (field 12) for ValueConfidence
+  string underlying_price = 8;               // Composition transparency (optional)
+  string pt_to_asset_rate = 9;               // Composition transparency (optional)
+  string source = 10;                        // e.g. "composition:getPtToAssetRate×<oracle>"
+  int64 timestamp = 11;
+  bool stale = 12;
+  int64 maturity_ts = 13;
+  int32 days_to_maturity = 14;
+}
+```
+
+**Availability (Empty ≠ Zero):** `price` is a measured number **only** when
+`availability == AVAILABLE`. Any other state carries an empty `price` string — never
+the literal `"0"` (which would be a *measured* zero). Consumers gate on `availability`,
+not on string emptiness, and must treat the zero-value enum as unmeasured (fail closed):
+
+```protobuf
+enum PtPriceAvailability {
+  PT_PRICE_AVAILABILITY_UNSPECIFIED = 0;  // old gateway / unknown -> UNMEASURED (fail closed)
+  PT_PRICE_AVAILABILITY_AVAILABLE = 1;    // composed OK -> price is MEASURED
+  PT_PRICE_AVAILABILITY_UNMEASURED = 2;   // expected: PT not priceable + no composition leg -> NO price
+  PT_PRICE_AVAILABILITY_ERRORED = 3;      // a read raised -> NO price
+}
+
+enum PtPriceConfidenceBand {
+  PT_PRICE_CONFIDENCE_BAND_UNSPECIFIED = 0;  // old gateway / unknown -> UNAVAILABLE
+  PT_PRICE_CONFIDENCE_BAND_HIGH = 1;          // all inputs measured
+  PT_PRICE_CONFIDENCE_BAND_ESTIMATED = 2;     // a fallback was used (e.g. rate defaulted at-par)
+  PT_PRICE_CONFIDENCE_BAND_UNAVAILABLE = 3;   // cannot be valued
+}
+```
+
+**Confidence band ≠ ValueConfidence (not 1:1):** `PtPriceConfidenceBand` carries only
+the three *origination* bands (HIGH / ESTIMATED / UNAVAILABLE). The framework
+`ValueConfidence` enum has a fourth member, **STALE**, which is **not** a band here —
+staleness is carried separately by the `stale` bool (field 12). Consumers MUST combine
+`confidence_band` **and** `stale` to derive the final `ValueConfidence`; mapping
+band→enum directly would silently render a stale price as HIGH and drop the staleness
+signal.
 
 ### GetBalance
 
