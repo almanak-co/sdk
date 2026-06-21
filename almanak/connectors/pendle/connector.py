@@ -69,12 +69,26 @@ CONNECTOR = Connector(
     ),
     strategy_intents=("SWAP", "LP_OPEN", "LP_CLOSE", "WITHDRAW"),
     strategy_chains=("arbitrum", "ethereum"),
-    # Matrix output renders Pendle as yield across deployed markets.
+    # Matrix output renders Pendle as "yield" — an explicit entry is required
+    # because intent-derived categories would map WITHDRAW→lending and SWAP/LP
+    # to swap/lp, never "yield".
+    #
+    # Chains: Pendle's compiler genuinely supports {arbitrum, ethereum, plasma}
+    # (see `_check_pendle_chain_supported`, compiler.py:471, and the SWAP inline
+    # check). We advertise only {arbitrum, ethereum} — the chains with intent-test
+    # coverage (tests/intents/{arbitrum,ethereum}). The previously-advertised
+    # sonic/base/mantle/bsc do NOT compile (no PT/YT market data) and were the
+    # actual over-advertise bug (VIB-5300). plasma compiles but is intentionally
+    # NOT advertised yet, pending intent-test coverage — tracked in VIB-5328.
+    # The drift guard (tests/connectors/pendle/test_chain_truth_matrix_alignment.py)
+    # enforces advertised ⊆ real-compile-truth; it deliberately does NOT key on
+    # the advisory `PendleCompiler.chains` ClassVar. Compiler chain extension is
+    # VIB-5324.
     strategy_matrix_entries=(
         StrategyMatrixEntry(
             matrix_name="pendle",
             category="yield",
-            chains=frozenset(("arbitrum", "ethereum", "plasma", "sonic", "base", "mantle", "bsc")),
+            chains=frozenset(("arbitrum", "ethereum")),
         ),
     ),
 )

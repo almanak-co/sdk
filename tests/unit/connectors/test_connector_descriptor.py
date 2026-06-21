@@ -289,7 +289,10 @@ EXPECTED_STRATEGY_MATRIX_ENTRIES = {
         StrategyMatrixEntry(
             matrix_name="pendle",
             category="yield",
-            chains=frozenset(("arbitrum", "ethereum", "plasma", "sonic", "base", "mantle", "bsc")),
+            # VIB-5300 trimmed this to the chains Pendle can actually compile on
+            # ({arbitrum, ethereum}); the prior 7-chain set over-advertised chains
+            # that failed at compile time.
+            chains=frozenset(("arbitrum", "ethereum")),
         ),
     ),
     "fluid": (
