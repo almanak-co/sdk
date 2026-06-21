@@ -242,12 +242,45 @@ class PendleOnChainReader:
             self.router_static = None
             logger.info("PendleOnChainReader initialized (gateway mode): chain=%s", chain)
         elif rpc_url is not None:
-            # Direct/web3 mode (legacy)
+            # Direct/web3 mode (HTTPProvider). Two distinct callers reach this branch
+            # (both verifiable against source — references are file:symbol, grep them):
+            #
+            #   1. The GATEWAY ITSELF, gateway-side. ``GetPtPrice``
+            #      (almanak/gateway/services/market_service.py: ``MarketService.GetPtPrice``)
+            #      → ``_read_pt_market`` → ``_build_pt_reader`` →
+            #      ``connector.build_principal_token_market_reader(chain, rpc_url)`` (same
+            #      file) → ``PendleGatewayConnector.build_principal_token_market_reader``
+            #      (almanak/connectors/pendle/gateway/provider.py), which returns THIS
+            #      reader in direct (rpc_url) mode. The gateway holds RPC credentials
+            #      (``gateway.utils.get_rpc_url``) and IS the egress layer, so this direct
+            #      read is legitimate gateway-internal egress, NOT a strategy-container
+            #      bypass. (NB: there is no ``almanak/gateway/`` reference to this reader
+            #      because the binding lives in the connector's gateway subpackage
+            #      ``pendle/gateway/provider.py`` — a scan limited to ``almanak/gateway/``
+            #      misses it.) This consumer is what makes the direct branch genuinely
+            #      load-bearing — deleting it breaks gateway PT pricing, not just local dev.
+            #
+            #   2. Strategy-container readers, ONLY when ``gateway_client is None``:
+            #      ``adapter._get_on_chain_reader`` (this package) and PT health via
+            #      ``framework/data/position_health`` →
+            #      ``principal_token_registry.build_reader`` →
+            #      ``on_chain_reader_provider.PendlePrincipalTokenMarketReadConnector``.
+            #
+            # Consumer (2) is UNREACHABLE from a hosted strategy container: the runner
+            # always wires a connected gateway_client, so ``intents/compiler._get_chain_rpc_url``
+            # returns None and ``pendle/compiler._resolve_pendle_adapter_inputs`` forces
+            # ``rpc_url=None`` → the gateway branch above is taken and no HTTPProvider is
+            # built. Proven by ``tests/reports/pendle_egress_trace_vib5305.md`` and the
+            # ``TestHostedStrategyContainerNoHttpProvider`` regression guards (which also
+            # pin the compiler decision that yields ``rpc_url=None``).
+            #
+            # Final removal of BOTH consumers' direct path is tracked by VIB-5348
+            # (debt origin: VIB-2986).
             from web3 import Web3
 
             self.web3 = Web3(
                 Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": request_timeout_seconds})
-            )  # vib-2986-exempt: gateway-internal fallback
+            )  # vib-2986-exempt: gateway-internal + local-dev fallback, removal tracked by VIB-5348
             self.pt_oracle = self.web3.eth.contract(
                 address=self.web3.to_checksum_address(self.pt_oracle_address),
                 abi=PT_ORACLE_ABI,

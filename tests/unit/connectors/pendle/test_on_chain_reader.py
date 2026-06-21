@@ -625,3 +625,131 @@ class TestGatewayGetDaysToMaturity:
 
         days = gw_reader.get_days_to_maturity("0x1234567890abcdef1234567890abcdef12345678")
         assert days is None
+
+
+# =========================================================================
+# VIB-5305 — connected-gateway egress-unreachability guards
+# =========================================================================
+
+
+class TestConnectedGatewayForcesRpcUrlNone:
+    """Pin the LOAD-BEARING link: a connected gateway forces ``rpc_url=None``.
+
+    The two Pendle ``# vib-2986-exempt`` HTTPProvider fallbacks (this reader and
+    ``sdk.py``) fire only when ``gateway_client is None``. The hosted-container
+    safety claim therefore reduces to a code invariant: when a connected gateway
+    client is present, the compiler resolves ``rpc_url`` to ``None`` so the gateway
+    branch (not HTTPProvider) is taken.
+
+    (Premise, asserted only as documentation: a hosted runner ALWAYS wires a
+    connected gateway client — strategy containers hold no RPC credentials, see
+    blueprint 20 §Gateway boundary. These tests prove the *code link* downstream of
+    that premise; a future edit that makes ``_get_chain_rpc_url`` return a URL while
+    a gateway is connected — re-enabling egress — fails here.)
+    """
+
+    def test_framework_compiler_get_chain_rpc_url_is_none_when_gateway_connected(self):
+        """``IntentCompiler._get_chain_rpc_url`` returns None when a gateway is connected.
+
+        Even with a non-empty ``self.rpc_url`` set, a connected gateway must win.
+        """
+        from almanak.framework.intents.compiler import IntentCompiler
+
+        compiler = IntentCompiler.__new__(IntentCompiler)
+        compiler._gateway_client = MagicMock(is_connected=True)
+        compiler.rpc_url = "http://should-not-be-used:8545"
+        compiler.chain = "ethereum"
+
+        assert compiler._get_chain_rpc_url() is None
+
+    def test_pendle_compiler_forces_rpc_url_none_when_gateway_connected(self):
+        """``_resolve_pendle_adapter_inputs`` forces ``rpc_url=None`` with a connected gateway.
+
+        Even if ``_get_chain_rpc_url`` were to (wrongly) return a URL, the connected
+        gateway path must zero it so the adapter/SDK take the gateway branch.
+        """
+        from almanak.connectors.pendle.compiler import _resolve_pendle_adapter_inputs
+
+        compiler = MagicMock()
+        compiler._gateway_client = MagicMock(is_connected=True)
+        compiler._get_chain_rpc_url.return_value = "http://should-not-be-used:8545"
+
+        result = _resolve_pendle_adapter_inputs(compiler, "intent-1")
+        assert isinstance(result, tuple), f"expected (gateway_client, rpc_url), got {result!r}"
+        gateway_client, rpc_url = result
+        assert rpc_url is None
+        assert gateway_client is compiler._gateway_client
+
+
+class TestConnectedGatewayBuildsNoHttpProvider:
+    """Lock in that the connected-gateway build path never opens a direct socket.
+
+    Downstream of the ``rpc_url=None`` decision above: the reader, the adapter, and
+    the PT-health registry must all build in gateway mode (``GatewayWeb3Provider`` /
+    gateway-mode reader) without ever instantiating an HTTPProvider. Companion
+    evidence: ``tests/reports/pendle_egress_trace_vib5305.md``.
+    """
+
+    def test_gateway_mode_reader_instantiates_no_httpprovider(self, gateway_client, monkeypatch):
+        """Gateway-mode reader build + PT read must never construct an HTTPProvider."""
+        import web3
+
+        def _boom(*_args, **_kwargs):  # pragma: no cover - only runs on regression
+            raise AssertionError("Web3.HTTPProvider instantiated on the gateway read path")
+
+        monkeypatch.setattr(web3.Web3, "HTTPProvider", _boom)
+
+        reader = PendleOnChainReader(gateway_client=gateway_client, chain="ethereum")
+        assert reader.web3 is None  # gateway mode holds no web3 instance
+
+        gateway_client.rpc.Call.side_effect = [
+            _mock_rpc_response(_oracle_state_hex(False, 901, True)),
+            _mock_rpc_response(hex(950000000000000000)),
+        ]
+        rate = reader.get_pt_to_asset_rate("0x1234567890abcdef1234567890abcdef12345678")
+        assert rate == Decimal("0.95")
+
+    def test_adapter_with_connected_gateway_builds_gateway_mode_reader(self, gateway_client, monkeypatch):
+        """The adapter, built as the compiler builds it with a connected gateway, is gateway-mode.
+
+        Mirrors ``pendle/compiler._resolve_pendle_adapter_inputs``: a connected
+        gateway_client forces ``rpc_url=None``. The adapter must then build BOTH
+        its SDK (``GatewayWeb3Provider``) and its on-chain reader (gateway mode)
+        without ever instantiating an HTTPProvider.
+        """
+        import web3
+
+        from almanak.connectors.pendle.adapter import PendleAdapter
+
+        def _boom(*_args, **_kwargs):  # pragma: no cover - only runs on regression
+            raise AssertionError("Web3.HTTPProvider instantiated on the strategy-container path")
+
+        monkeypatch.setattr(web3.Web3, "HTTPProvider", _boom)
+
+        adapter = PendleAdapter(rpc_url=None, chain="ethereum", gateway_client=gateway_client)
+        reader = adapter._get_on_chain_reader()
+        assert reader.web3 is None  # gateway mode
+        assert type(adapter.sdk.web3.provider).__name__ == "GatewayWeb3Provider"
+
+    def test_position_health_registry_builds_gateway_mode_reader(self, gateway_client, monkeypatch):
+        """PT-health reader build (``position_health`` path) is gateway-mode with a connected gateway.
+
+        ``position_health`` builds via ``PRINCIPAL_TOKEN_MARKET_READ_REGISTRY.build_reader``
+        passing ``gateway_client`` when present (else ``rpc_url``). With a connected
+        gateway it must yield a gateway-mode reader and never an HTTPProvider.
+        """
+        import web3
+
+        from almanak.connectors._strategy_principal_token_market_reader_registry import (
+            PRINCIPAL_TOKEN_MARKET_READ_REGISTRY,
+        )
+
+        def _boom(*_args, **_kwargs):  # pragma: no cover - only runs on regression
+            raise AssertionError("Web3.HTTPProvider instantiated on the PT-health path")
+
+        monkeypatch.setattr(web3.Web3, "HTTPProvider", _boom)
+
+        reader = PRINCIPAL_TOKEN_MARKET_READ_REGISTRY.build_reader(
+            "pendle", chain="ethereum", gateway_client=gateway_client
+        )
+        assert reader.web3 is None  # gateway mode

@@ -39,6 +39,12 @@ from .addresses import PENDLE_TOKENS as _PENDLE_TOKENS
 
 logger = logging.getLogger(__name__)
 
+# Bound on each blocking web3 RPC request in the direct/HTTPProvider fallback (the
+# local-dev / no-gateway compile path). Without it web3 defaults to no timeout, so a
+# slow or unresponsive RPC wedges the caller indefinitely. Mirrors on_chain_reader's
+# ``request_timeout_seconds`` default (30s) and the gateway's own eth_call timeout.
+_PENDLE_SDK_RPC_TIMEOUT_SECONDS = 30.0
+
 
 class PendleActionType(Enum):
     """Pendle action types."""
@@ -430,7 +436,25 @@ class PendleSDK:
 
             self.web3 = Web3(GatewayWeb3Provider(gateway_client, chain=chain))
         else:
-            self.web3 = Web3(Web3.HTTPProvider(rpc_url))  # vib-2986-exempt: gateway-internal fallback
+            # Direct-RPC web3 for the local-dev / no-gateway compile path only. The
+            # provider is consumed for ABI encoding + ``to_checksum_address`` and, via
+            # the compiler's ``_resolve_pt_from_yt``, a single ``eth_call`` — all of
+            # which route through ``GatewayWeb3Provider`` when a gateway is wired.
+            #
+            # UNREACHABLE from a hosted strategy container: the runner always wires a
+            # connected gateway_client, so ``intents/compiler._get_chain_rpc_url`` returns
+            # None and ``pendle/compiler._resolve_pendle_adapter_inputs`` forces
+            # ``rpc_url=None`` → the gateway branch above is taken. Proven by
+            # ``tests/reports/pendle_egress_trace_vib5305.md`` and the
+            # ``TestHostedStrategyContainerNoHttpProvider`` regression guards (which
+            # also pin the compiler decision that yields ``rpc_url=None``).
+            #
+            # NOT removable in M0: deleting it regresses the explicitly-supported
+            # local-dev-without-gateway path (see ``_get_chain_rpc_url`` docstring).
+            # Full removal is tracked by VIB-5348 (debt origin: VIB-2986).
+            self.web3 = Web3(
+                Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": _PENDLE_SDK_RPC_TIMEOUT_SECONDS})
+            )  # vib-2986-exempt: local-dev fallback, removal tracked by VIB-5348
         self.chain = chain
         self.addresses = PENDLE_ADDRESSES[chain]
         self.router_address = self.addresses["ROUTER"]
